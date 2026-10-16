@@ -1,70 +1,53 @@
-"""Supervisor: the Tier-1 availability process (phase 11f).
+"""Supervisor: the Tier-1 availability process.
 
-Normative spec: docs/runner-design.md ss6a (Tier 1) + docs/supervisor-protocol.md
-ss5 (the socket protocol this module freezes) + DL-41a/DL-42/DL-48. STDLIB ONLY:
-this module imports nothing from dsl41 and nothing third-party -- the same
-enforced extraction boundary as runner_wrapper.py (DL-42; import-graph test in
-tests/test_runner_supervisor.py), its only non-stdlib imports being three sibling
-stdlib-only modules under the same by-path rule (DL-72): runner_procid, which
-the wrapper shares; canon, which is the one implementation of the ss3.2
-canonical form the ss11a tombstone files are written in; and state_machine, the
-shared core whose executor runs the process and lease statecharts below. The engine runs it BY
-FILE PATH (``sys.executable <this file> --run-root <root>``), never ``-m``:
-``-m`` would import the dsl41 package __init__ and drag third-party imports
-into the supervisor's runtime.
+Spec: docs/runner-design.md ss6a (Tier 1), docs/supervisor-protocol.md ss5 (DL-41a,
+DL-42, DL-48). STDLIB ONLY: it imports nothing third-party and nothing from dsl41,
+the extraction boundary it shares with runner_wrapper.py (DL-42; the import-graph
+test is in tests/test_runner_supervisor.py). The only non-stdlib imports are three
+sibling stdlib-only modules loaded by file path (DL-72): runner_procid, canon (the
+ss3.2 canonical form of the ss11a tombstone files) and state_machine (the executor
+that runs the process and lease statecharts). The engine runs it BY FILE PATH
+(``sys.executable <this file> --run-root <root>``), never ``-m``, which would import
+the dsl41 package __init__ and its third-party imports.
 
-Why this process exists (ss6a Tier 1): the wrapper (Tier 0) makes exit status
-survive engine downtime, but a tethered engine still KILLS its jobs when it
-dies (the wrapper's lifeline EOFs). Long-running estates need the opposite:
-an engine restart (upgrade) must NOT kill active work. The supervisor owns the
-wrappers' lifelines, so it -- not the engine -- is what the jobs are tethered
-to. The engine connects, ACQUIREs a lease, SPAWNs through the supervisor, and
-on restart REATTACHES: the E4 orphan-adoption problem dissolves because the
-jobs' parent never died (DL-41a item 8).
+Purpose (ss6a Tier 1): a tethered engine kills its jobs when it dies, because the
+wrappers' lifelines EOF. The supervisor owns the lifelines, so an engine restart
+does not kill active work. The engine ACQUIREs a lease, SPAWNs through the
+supervisor and REATTACHes on restart; the E4 orphan-adoption problem does not arise
+because the jobs' parent never died (DL-41a item 8).
 
-It is deliberately DUMB (postmaster / s6-supervise philosophy): SPAWN, SIGNAL,
-LIST, SHUTDOWN, PING, and the lease verbs -- fork wrappers, reap them, forward
-exit notifications. No scheduling timers, no conditions, no policy; its only time bounds are
-lifecycle bounds (supervisor-protocol preamble, DL-150). The oracle decides kills; the
-supervisor relays one signal per SIGNAL call. Near-zero own-bug crash surface. Surviving ITS
-OWN death is Tier 2's job (init system) -- the supervisor never restarts itself.
+It is deliberately DUMB: it forks wrappers, reaps them, forwards exit notifications
+and relays one signal per SIGNAL call. It has no scheduling timers, conditions or
+policy, and its only time bounds are lifecycle bounds (supervisor-protocol preamble,
+DL-150). The oracle decides kills. Tier 2 (the init system) restarts it; it never
+restarts itself.
 
-Protocol (frozen in docs/supervisor-protocol.md ss5): JSON lines over a named
-SOCK_STREAM unix socket (0600 + same-uid peer-cred check on every accept).
-One request line -> one response line, except async exit PUSHES to the
-lease-holding connection. Read-only verbs (LIST/PING) need no lease; mutating
-verbs (SPAWN/SIGNAL/SHUTDOWN) carry a monotonic fencing token from ACQUIRE.
+Protocol (docs/supervisor-protocol.md ss5): JSON lines over a named SOCK_STREAM unix
+socket, 0600, with a same-uid peer-cred check on every accept. One request line gets
+one response line, except async exit PUSHES to the lease-holding connection.
+Read-only verbs (LIST/PING) need no lease; mutating verbs (SPAWN/SIGNAL/SHUTDOWN)
+carry the monotonic fencing token from ACQUIRE.
 
-Linux hardening: PR_SET_CHILD_SUBREAPER (prctl 36) so a killed wrapper's
-command reparents to the supervisor for reaping rather than to init.
+Linux hardening: PR_SET_CHILD_SUBREAPER (prctl 36) reparents a killed wrapper's
+command to the supervisor, not to init.
 
-SPAWN IDEMPOTENCY IS DIRECTORY-BACKED (period-model ss11a, DL-129). The key
-is `run_id`, and the store is the run directory rather than `self.runs`: a
-never-rolling estate needs LIST to stay bounded, and the moment a completed
-entry leaves memory an in-memory dedup turns a delayed duplicate SPAWN into a
-second execution. So a DETACHED run's directory is created HERE, on receipt,
-and three files make the tombstone: the `runs/.by_run_id/<run_id>` index (the
-first durable thing that names the run), `receipt.json` (written BEFORE the
-wrapper is forked), and `reply.json` (the answer as first given). A replay
-resolves through the index and answers from the directory, not from memory; the
-incoming path is read in one case only: no index entry (DL-150, DL-151).
+SPAWN IDEMPOTENCY IS DIRECTORY-BACKED (period-model ss11a, DL-129). The key is
+`run_id` and the store is the run directory, not `self.runs`: LIST stays bounded
+and a delayed duplicate SPAWN cannot become a second execution once a completed
+entry leaves memory. A DETACHED run's directory is created on receipt. Three files
+make the tombstone: the `runs/.by_run_id/<run_id>` index, `receipt.json` (written
+BEFORE the wrapper is forked) and `reply.json` (the answer as first given). A replay
+answers from the directory; the incoming path is read only when there is no index
+entry (DL-150, DL-151).
 
-The DEADMAN (stage S5b, DL-95; docs/concurrency-model.md ss8) is the one
-thing here that is not purely reactive, and it is deliberately the smallest
-possible addition: one interval, one exit. With `--deadman-seconds N`, a
-supervisor that has had no LIVE leaseholder for N seconds stops its loop and
-returns -- and its death EOFs every lifeline it owns, which is the kill path
-ss5 already relies on, not a new one: each wrapper survives it, takes EOF,
-kills its group and records in its own time (DL-205). It adds no policy: the supervisor still decides nothing about
-what should run, only that nobody is watching it any more.
-
-It exists because ss8's `evict` -- the only state that lets another host run
-work bound to this one -- must be PROVABLE rather than assumed, and nothing
-else in this tier bounds when a controller-less supervisor's wrappers die.
-It is opt-in per run root because it costs something real: tolerating an
-absent controller indefinitely is exactly what lets an engine crash and
-resume with its runs intact (DL-79). A run root without it is never
-reroutable except by force.
+The DEADMAN (S5b, DL-95; docs/concurrency-model.md ss8) is opt-in per run root. With
+`--deadman-seconds N`, a supervisor with no LIVE leaseholder for N seconds stops its
+loop. Its death EOFs every lifeline, the existing kill path of ss5: each wrapper
+takes EOF, kills its group and records in its own time (DL-205). It decides nothing
+about what runs. It makes ss8's `evict` PROVABLE, since nothing else in this tier
+bounds when a controller-less supervisor's wrappers die. It is opt-in because
+tolerating an absent controller is what lets an engine crash and resume with its
+runs intact (DL-79); a run root without it is reroutable only by force.
 """
 
 from __future__ import annotations
@@ -90,32 +73,19 @@ from collections import deque
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-# DL-72: the durability liturgy and the (pid, start-time) PID-reuse guard live
-# in the sibling stdlib-only runner_procid -- one copy, shared with the wrapper
-# (they were duplicated here, and had drifted). sys.path[0] is this file's
-# directory when we are run by file path, except under PYTHONSAFEPATH=1 which
-# strips it; prepend it ourselves so the plain top-level import resolves either
-# way (importing dsl41.runner_procid would drag the package __init__, and with
-# it third-party imports, into the supervisor's runtime). Prepend only when it
-# is missing and take it back off again -- the engine also imports this file as
-# an ordinary package module, and a library must not leave its own package
-# directory on the importing process's sys.path, where it would shadow
-# top-level names for the whole process. Same guard as the wrapper's.
+# DL-72: the durability helpers and the (pid, start-time) PID-reuse guard live in the
+# sibling stdlib-only runner_procid, shared with the wrapper. sys.path[0] is this
+# file's directory under file-path execution, except with PYTHONSAFEPATH=1, so the
+# directory is prepended when missing and removed again: the engine also imports this
+# file as a package module, and a library must not leave its directory on sys.path.
 #
-# Two module OBJECTS come of this, not one: an engine process that imports
-# dsl41.canon and this file's `canon` holds both, so `dsl41.canon.CanonError`
-# does not catch the `CanonError` raised in here. Nothing crosses that line
-# today (the supervisor answers its own canon errors), and a future in-process
-# caller must catch by the name it imported. The same holds for `state_machine`:
-# the machines declared here are instances of the top-level module's classes,
-# and the `StatechartError` they raise is that module's.
+# That gives two module OBJECTS per shared module: `dsl41.canon.CanonError` does not
+# catch the `CanonError` raised here, and the same holds for `StatechartError` from
+# `state_machine`. A future in-process caller must catch by the name it imported.
 #
-# The TYPE_CHECKING branch names the same file under the name mypy maps it to
-# (it cannot see one file under two names), which is what keeps verify_alive
-# and killpg_quiet statically typed at their call sites here -- a PID-reuse
-# guard and a group kill are the last calls that should be Any. It is erased
-# before the process starts, so the stdlib-only boundary is untouched: the
-# else branch is what runs, and the import-graph test reads runtime imports.
+# The TYPE_CHECKING branch names the same file under the name mypy maps it to, so
+# verify_alive and killpg_quiet stay typed. The else branch is what runs, and the
+# import-graph test reads runtime imports.
 _PROCID_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROCID_DIR_ADDED = _PROCID_DIR not in sys.path
 if _PROCID_DIR_ADDED:
@@ -214,36 +184,27 @@ def _test_limit(name: str, default: int) -> int:
     return value
 
 
-#: the Tier-0 wrapper, a sibling module run by file path (never -m). Resolved
-#: relative to THIS file so the supervisor never imports dsl41 to find it.
+#: the Tier-0 wrapper, run by file path (never -m), resolved relative to THIS file.
 _WRAPPER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runner_wrapper.py")
 
-#: period-model ss11a: `run_id` is filename-safe by GRAMMAR, checked at the
-#: wire, because it names a directory entry here. The same pattern lives in
-#: runner_effects.RUN_ID_RE, which this tier may not import (DL-42): the two
-#: copies are one grammar, and a change to either is a protocol change.
+#: period-model ss11a: `run_id` is filename-safe by GRAMMAR, checked at the wire. The
+#: same pattern is runner_effects.RUN_ID_RE, which this tier may not import (DL-42);
+#: the two are one grammar and a change to either is a protocol change.
 _RUN_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 
-#: the run_id -> (job, run_number) index, under runs/. One entry per run, and
-#: it is the FIRST durable thing a SPAWN writes: "no index entry" means "first
-#: application", so deleting one authorizes a spawn (ss11a retention floor).
+#: the run_id -> (job, run_number) index under runs/. It is the FIRST durable write of
+#: a SPAWN; "no index entry" means "first application" (ss11a retention floor).
 _INDEX_DIR = ".by_run_id"
 
-#: how many COMPLETED runs stay in `self.runs` for LIST. The idempotency store
-#: is the directory, so memory is bookkeeping: lifelines, exit pushes, and a
-#: bounded window of recent completions for a controller that reconnects. An
-#: estate whose root never rolls would otherwise grow this without limit
-#: (ss11a). Older completions are read from the spool, which is the truth.
+#: how many COMPLETED runs stay in `self.runs` for LIST (ss11a). The directory is the
+#: idempotency store; older completions are read from the spool.
 _LIST_COMPLETED_WINDOW = 256
 
 
 def _is_wire_int_equal(value: object, expected: int) -> bool:
     """Integer identity on the wire, which Python's `==` is not (DL-151).
 
-    `True == 1` and `1.0 == 1`, so a bare comparison let a JSON `true` or
-    `1.0` stand in for protocol version 1 or fencing token 1. A version and
-    a fencing token are integers, and nothing else may pass as one: the
-    token is the fence that keeps a superseded controller out."""
+    A JSON `true` or `1.0` must not pass as protocol version 1 or fencing token 1."""
     return is_wire_int(value) and value == expected
 
 
@@ -251,13 +212,10 @@ def _is_wire_int_equal(value: object, expected: int) -> bool:
 
 
 def _fingerprint_form(value: object) -> object:
-    """`value` with every float replaced by its exact hexadecimal form.
+    """`value` with every float written as its exact hexadecimal form.
 
-    ss3.2's grammar has no floats, and the frozen wrapper input spec (ss2)
-    carries one -- `grace_seconds`. The fingerprint has to cover the whole
-    spec, so the one type the canonical form cannot hold is written as the
-    exact bits it has, tagged so no plausible string field can collide with
-    it. Nothing but this fingerprint reads the result."""
+    ss3.2's grammar has no floats and the wrapper input spec (ss2) carries
+    `grace_seconds`. Only the fingerprint reads the result."""
     if isinstance(value, float):
         return "float:" + value.hex()
     if isinstance(value, dict):
@@ -268,22 +226,17 @@ def _fingerprint_form(value: object) -> object:
 
 
 def spec_fingerprint(spec: dict[str, Any]) -> str:
-    """`receipt.json`'s `spec_fingerprint` (ss11a): sha256 over the ss3.2
-    canonical form of the wrapper input spec with `lifeline_fd` removed --
-    the fd is ours to fill, so a retry that carried one would otherwise
-    fingerprint differently from the receipt we wrote.
+    """`receipt.json`'s `spec_fingerprint` (ss11a): sha256 over the ss3.2 canonical form
+    of the wrapper input spec without `lifeline_fd`, which the supervisor fills.
 
-    Hashed over the WHOLE body, not through `canon.digest`: that helper
-    strips a top-level `digest` key by design, so two specs differing only
-    in a field of that name would share a fingerprint and a replay would
-    answer duplicate for a spec it never received."""
+    It hashes the WHOLE body, not `canon.digest`, which strips a top-level `digest`
+    key; two specs differing only there would share a fingerprint."""
     body = {key: item for key, item in spec.items() if key != "lifeline_fd"}
     return "sha256:" + hashlib.sha256(canonical_bytes(_fingerprint_form(body))).hexdigest()
 
 
 def _write_canonical(path: str, record: dict[str, Any]) -> None:
-    """One ss11a artifact, ss3.2-canonical, by the liturgy (same-directory
-    temp file, fsync(file), rename, fsync(directory))."""
+    """Write one ss11a artifact in ss3.2 canonical form by `durable_write`."""
     durable_write(path, canonical_bytes(record))
 
 
@@ -291,9 +244,8 @@ def _write_canonical(path: str, record: dict[str, Any]) -> None:
 
 
 def peer_uid(sock: socket.socket) -> int | None:
-    """Same-uid gate input: the connecting peer's uid, or None where the
-    platform exposes no credential. Linux SO_PEERCRED (struct ucred); macOS
-    LOCAL_PEERCRED (struct xucred, cr_uid at offset 4)."""
+    """The connecting peer's uid for the same-uid gate, or None where the platform has
+    no credential (Linux SO_PEERCRED, macOS LOCAL_PEERCRED)."""
     if hasattr(socket, "SO_PEERCRED"):  # Linux
         data = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("iII"))
         _pid, uid, _gid = struct.unpack("iII", data)
@@ -378,12 +330,10 @@ class _Conn:
 
 # --------------------------------------------------------- state machines
 #
-# Two machines live in this process, both statecharts (docs/statechart-engine.md)
-# declared with the shared core (state_machine.py, reached by path like canon)
-# and run by the one executor each Supervisor owns: `supervisor_lease`, one
-# instance for the lease, and `supervisor_process`, one instance for the
-# process's own lifecycle. The fence of the mutating verbs is the lease chart's
-# guards, registered in both charts, so the rule has one copy.
+# Two statecharts (docs/statechart-engine.md) built on the shared core (state_machine.py,
+# reached by path like canon) run in each Supervisor's one executor: `supervisor_lease`
+# for the lease and `supervisor_process` for the process lifecycle. The lease chart's
+# guards, registered in both charts, are the one fence of the mutating verbs.
 
 #: The process lifecycle: the leaf states of SUPERVISOR_PROCESS.
 type ProcessState = Literal[
@@ -394,39 +344,32 @@ _SP5 = "supervisor-protocol ss5"
 
 # ---------------------------------------------------------- the lease statechart
 #
-# `supervisor_lease` is a statechart (docs/statechart-engine.md), run by the
-# executor each Supervisor owns. Its rows pick every move of the lease, and the
-# guards and actions below are the only code that reads a lease verb's request
-# or writes the record's holder, token, deadline, expiry or connection. The
-# dropped-push notice on the record (`pushes_dropped`, `drops`) is written by
-# `_push_exit` and `_writable` as well. The supervisor posts three kinds of
-# event: a lease verb under its own name, `disconnect` for every connection it
-# drops while it is not closed, and `expire`, the time event it produces by
-# sampling the record's monotonic deadline at each point where it reads the
-# lease, once per deadline.
+# The lease rows pick every move of the lease. Their guards and actions are the only
+# code that reads a lease verb's request or writes the holder, token, deadline, expiry
+# or connection; `_push_exit` and `_writable` also write the dropped-push notice
+# (`pushes_dropped`, `drops`). The supervisor posts a lease verb under its own name,
+# `disconnect` for every connection it drops while open, and `expire`, produced by
+# sampling the monotonic deadline wherever it reads the lease, once per deadline.
 #
-# Ties. The supervisor samples the deadline before it posts anything else at
-# that instant, and the deadline instant itself is due. So an expiry and a
-# RENEW or RELEASE at the same instant resolve as the expiry first: the verb
-# meets an expired lease and is refused stale_token, and an ACQUIRE meets a
-# lease it may grant.
+# Ties: the deadline is sampled before anything else at that instant, and the
+# deadline instant is due. An expiry and a RENEW or RELEASE at the same instant
+# resolve expiry first: the verb is refused stale_token, and an ACQUIRE may be granted.
 
-#: The lease's instance key in the supervisor's executor: one lease per process.
+#: the lease's instance key in the supervisor's executor: one lease per process.
 _LEASE = "lease"
-#: The time event of a lease whose deadline has passed. It has no generation: the
-#: supervisor samples the current deadline synchronously and posts the event only
-#: while the lease is held, so an expiry can never be stale.
+#: the time event of a lease whose deadline has passed. It has no generation: the
+#: supervisor samples the deadline synchronously and posts it only while the lease is
+#: held, so an expiry is never stale.
 EXPIRE = "expire"
-#: The event of a connection the supervisor drops, whoever held it.
+#: the event of a connection the supervisor drops, whoever held it.
 DISCONNECT = "disconnect"
-#: The lease's phases: the leaf states of SUPERVISOR_LEASE.
+#: the leaf states of SUPERVISOR_LEASE.
 _PHASES = frozenset({"free", "expired", "live", "orphaned"})
 
 
 class _Request:
-    """A verb's request as a chart sees it: the payload of SPAWN, SIGNAL and
-    SHUTDOWN in SUPERVISOR_PROCESS, and the base of a lease verb's. The fence
-    guards read `incarnation` and `token` off it."""
+    """A verb's request as a chart sees it: the payload of SPAWN, SIGNAL and SHUTDOWN,
+    and the base of a lease verb's. The fence guards read `incarnation` and `token`."""
 
     __slots__ = ("req",)
 
@@ -440,13 +383,11 @@ class _Request:
 
 
 class _LeaseRequest(_Request):
-    """A lease verb as the chart sees it: the request, its connection, and the
-    instants the supervisor sampled for it, `now` on the monotonic clock and
-    `wall` on the wall clock.
+    """A lease verb as the chart sees it: the request, its connection, and the monotonic
+    `now` and wall-clock `wall` instants the supervisor sampled.
 
-    `ttl_s` and the expiry it gives are computed on first use. An error in that
-    computation is kept, not raised: the guards read it, and for an `internal`
-    refusal the supervisor raises it, so the dispatch belt answers it as before
+    An error computing `ttl_s` or the expiry is kept, not raised: the guards read it,
+    and for an `internal` refusal the supervisor raises it so the dispatch belt answers
     and nothing is written (DL-300)."""
 
     __slots__ = ("conn", "now", "wall", "_ttl", "_expiry")
@@ -469,9 +410,8 @@ class _LeaseRequest(_Request):
         return self._ttl
 
     def expiry(self) -> tuple[float, str] | Exception:
-        """The monotonic deadline and the `expires_at` that ttl_s gives, or the
-        error computing them raised. A zero or negative ttl_s gives a deadline
-        that is already due (ss5)."""
+        """The monotonic deadline and `expires_at` that ttl_s gives, or the error computing
+        them. A zero or negative ttl_s gives a deadline that is already due (ss5)."""
         if self._expiry is None:
             ttl_s = self.ttl()
             if isinstance(ttl_s, Exception):
@@ -485,8 +425,7 @@ class _LeaseRequest(_Request):
         return self._expiry
 
     def error(self) -> Exception:
-        """The error that computing the expiry raised. Only an `internal` refusal
-        asks, and its guard saw the error."""
+        """The error computing the expiry raised; only an `internal` refusal asks."""
         expiry = self.expiry()
         assert isinstance(expiry, Exception)
         return expiry
@@ -510,23 +449,21 @@ def _this_incarnation(ctx: Context) -> bool:
 
 
 def _foreign(ctx: Context) -> bool:
-    """The request names no incarnation, or another one: the supervisor it knew is
-    gone, so it must re-acquire and reconcile (DL-80)."""
+    """The request names no incarnation or another one: the supervisor it knew is gone,
+    so it must re-acquire and reconcile (DL-80)."""
     return not _this_incarnation(ctx)
 
 
 def _held(ctx: Context) -> bool:
-    """`held` is active in the lease chart: the lease is live or orphaned, not
-    expired and not free. Both charts read the lease instance's configuration in
-    the supervisor's executor, a pure read. No clock is read: the supervisor
-    posts a due `expire` before the verb."""
+    """`held` is active in the lease chart: the lease is live or orphaned. A pure read of
+    the lease instance; the supervisor posts a due `expire` before the verb."""
     return "held" in ctx.data._machines.active(_LEASE)
 
 
 def _credentials(ctx: Context) -> bool:
-    """This incarnation, then the current token of an unexpired lease, an integer
-    on the wire (DL-151). ss5 checks nothing else: any connection may present
-    them. The one fence of RENEW, RELEASE, SPAWN, SIGNAL and SHUTDOWN."""
+    """This incarnation and the current token of an unexpired lease, an integer on the
+    wire (DL-151). Any connection may present them. The one fence of RENEW, RELEASE,
+    SPAWN, SIGNAL and SHUTDOWN (ss5)."""
     lease = ctx.data.lease
     return (
         _this_incarnation(ctx)
@@ -537,31 +474,31 @@ def _credentials(ctx: Context) -> bool:
 
 
 def _stale(ctx: Context) -> bool:
-    """This incarnation without credentials: the token is not the current one, or
-    the lease is not held. The request is refused stale_token (ss5). With `foreign`
-    and `credentials` this partitions every request."""
+    """This incarnation without credentials: the token is stale or the lease is not held,
+    so the request is refused stale_token (ss5). With `foreign` and `credentials` this
+    partitions every request."""
     return _this_incarnation(ctx) and not _credentials(ctx)
 
 
 def _grantable(ctx: Context) -> bool:
-    """controller_id is a non-empty string, and ttl_s gives a representable expiry.
-    A zero or negative ttl_s gives one too: the lease it grants is due at once,
-    and the next sample expires it (ss5)."""
+    """controller_id is a non-empty string and ttl_s gives a representable expiry. A zero
+    or negative ttl_s is grantable: the lease is due at once and the next sample
+    expires it (ss5)."""
     return _named(ctx) and _timed(ctx)
 
 
 def _incumbent(ctx: Context) -> bool:
-    """Grantable, with this incarnation and the current token: the incumbent
-    re-keys, and its old token dies (DL-79, DL-80). controller_id is a label, not
-    a credential. The token proves incumbency, not authenticity. Authentication
-    is the same-uid peer-cred gate on accept (supervisor-protocol ss5)."""
+    """Grantable, with this incarnation and the current token: the incumbent re-keys and
+    its old token dies (DL-79, DL-80). controller_id is a label and the token proves
+    incumbency, not authenticity; the same-uid peer-cred gate on accept authenticates
+    (supervisor-protocol ss5)."""
     return _grantable(ctx) and _credentials(ctx)
 
 
 def _challenger(ctx: Context) -> bool:
-    """controller_id is a non-empty string and ttl_s is a number, without this
-    incarnation and the current token: a live lease yields only to its incumbent
-    (DL-79). The expiry is not computed."""
+    """controller_id is a non-empty string and ttl_s is a number, without the current
+    token: a live lease yields only to its incumbent (DL-79). The expiry is not
+    computed."""
     return (
         _named(ctx)
         and not isinstance(ctx.event.payload.ttl(), Exception)
@@ -570,27 +507,26 @@ def _challenger(ctx: Context) -> bool:
 
 
 def _unnamed(ctx: Context) -> bool:
-    """controller_id is not a non-empty string, checked before ttl_s and before any
-    lease state (DL-150)."""
+    """controller_id is not a non-empty string; checked before ttl_s and any lease state
+    (DL-150)."""
     return not _named(ctx)
 
 
 def _untimed(ctx: Context) -> bool:
-    """controller_id is a non-empty string, and ttl_s gives no representable expiry
-    (not a number, inf, nan, 1e20). Nothing changes, not even the token counter
-    (DL-300)."""
+    """controller_id is a non-empty string and ttl_s gives no representable expiry (not a
+    number, inf, nan, 1e20). Nothing changes, not even the token counter (DL-300)."""
     return _named(ctx) and not _timed(ctx)
 
 
 def _renewable(ctx: Context) -> bool:
-    """This incarnation and the current token, and ttl_s gives a representable
-    expiry (DL-150, DL-300)."""
+    """This incarnation and the current token, and ttl_s gives a representable expiry
+    (DL-150, DL-300)."""
     return _credentials(ctx) and _timed(ctx)
 
 
 def _renewal_untimed(ctx: Context) -> bool:
-    """This incarnation and the current token, and ttl_s gives no representable
-    expiry. Nothing changes (DL-300)."""
+    """This incarnation and the current token, and ttl_s gives no representable expiry;
+    nothing changes (DL-300)."""
     return _credentials(ctx) and not _timed(ctx)
 
 
@@ -604,10 +540,9 @@ def _holder(ctx: Context) -> bool:
 
 
 def _grant(ctx: Context) -> Effects:
-    """Mint the next token and write a new record, held on the claimant's
-    connection, with the request's deadline. A re-grant to the same
-    controller_id keeps the dropped-push notice (DL-210). Answer the token, the
-    expiry and the incarnation (DL-80)."""
+    """Mint the next token and write a new record held on the claimant's connection with
+    the request's deadline. A re-grant to the same controller_id keeps the dropped-push
+    notice (DL-210). Answer the token, expiry and incarnation (DL-80)."""
     sup: Supervisor = ctx.data
     request: _LeaseRequest = ctx.event.payload
     expiry = request.expiry()
@@ -626,9 +561,8 @@ def _grant(ctx: Context) -> Effects:
 
 
 def _extend(ctx: Context) -> Effects:
-    """Move the deadline and expires_at to the request's. The connection is not
-    adopted, so an orphaned lease stays orphaned and its pushes keep dropping
-    until an ACQUIRE. Answer the expiry."""
+    """Move the deadline and expires_at to the request's. The connection is not adopted,
+    so an orphaned lease stays orphaned and its pushes keep dropping until an ACQUIRE."""
     sup: Supervisor = ctx.data
     expiry = ctx.event.payload.expiry()
     assert sup.lease is not None and not isinstance(expiry, Exception)  # the guard held
@@ -637,28 +571,25 @@ def _extend(ctx: Context) -> Effects:
 
 
 def _release(ctx: Context) -> Effects:
-    """Drop the record, and answer ok."""
+    """Drop the record and answer ok."""
     ctx.data.lease = None
     return Effects(intents=({"ok": True},))
 
 
 def _forget(ctx: Context) -> None:
-    """Forget the holder's connection: pushes drop until the holder re-ACQUIREs,
-    and any controller may ACQUIRE an orphaned lease. That lets a crashed
-    engine's resume re-acquire without waiting out the TTL. It is sound because
-    the kernel closes this AF_UNIX fd only when the holder process is gone, kill
-    -9 included, or when the holder closes it itself. A non-local transport would
-    break that (ss5)."""
+    """Forget the holder's connection: pushes drop until the holder re-ACQUIREs, and any
+    controller may ACQUIRE an orphaned lease, so a crashed engine's resume need not wait
+    out the TTL. This is sound because the kernel closes the AF_UNIX fd only when the
+    holder is gone or closes it; a non-local transport would break that (ss5)."""
     ctx.data.lease.conn = None
 
 
 _LEASE_CITE = f"{_SP5} lease verbs"
 
-#: A lease verb is answered by the one row it takes: an external or internal
-#: row's action answers, and a refusal row's code is the answer, with the
-#: incarnation for wrong_incarnation and the holder for lease_held. An
-#: `internal` refusal is the dispatch belt's `internal:` answer. SPAWN, SIGNAL
-#: and SHUTDOWN read the lease and never write it.
+#: a lease verb is answered by the one row it takes: an action answers, or a refusal
+#: row's code is the answer (with the incarnation for wrong_incarnation and the holder
+#: for lease_held). An `internal` refusal is the dispatch belt's `internal:` answer.
+#: SPAWN, SIGNAL and SHUTDOWN read the lease and never write it.
 SUPERVISOR_LEASE = Statechart(
     name="supervisor_lease",
     root=State(
@@ -842,44 +773,38 @@ SUPERVISOR_LEASE = Statechart(
 
 # -------------------------------------------------------- the process statechart
 #
-# `supervisor_process` is the supervisor's own lifecycle, one instance for the
-# process's lifetime in the executor that runs the lease. The supervisor runs
-# its procedures (the startup probes and the bind, the orderly shutdown with its
-# bounds, the teardown) and posts a fact at each point where the next step
-# depends on what happened. The row it takes decides the move, and an action
-# reports an intent the supervisor carries out: exit 1, or run the wait.
-# Actions never raise and do no I/O.
+# `supervisor_process` is the supervisor's own lifecycle, one instance in the executor
+# that runs the lease. The supervisor runs its procedures (startup probes and bind,
+# orderly shutdown with its bounds, teardown) and posts a fact wherever the next step
+# depends on the outcome. The row taken decides the move; an action reports an intent
+# the supervisor carries out (exit 1, or run the wait). Actions never raise and do no
+# I/O.
 #
 # The supervisor posts:
-#   - `start`, once, from `_bind`: the lock held, an owner live, or the root free
-#     and the private socket bound;
+#   - `start`, once, from `_bind`: the lock held, an owner live, or the root free and
+#     the private socket bound;
 #   - `publish`, once, after the socket is renamed into place (DL-275);
-#   - SPAWN, SIGNAL and SHUTDOWN under their own names, from the dispatch belt,
-#     which runs only while `serving`: the fence, with a due `expire` posted to
-#     the lease first;
+#   - SPAWN, SIGNAL and SHUTDOWN from the dispatch belt, which runs only while
+#     `serving`: the fence, after a due `expire` is posted to the lease;
 #   - `term`, when the loop consumes a latched SIGTERM or SIGINT;
-#   - `drained`, when the shutdown's wait ends: every wrapper reaped, or the
-#     bound passed;
-#   - `pass_ended`, at the end of a loop pass that an errored SHUTDOWN wait
-#     left in `shutting_down`, with no signal latched;
-#   - `deadman`, the time event it produces by sampling the deadman's deadline
-#     at the end of each loop pass while `serving`, posted only when due;
+#   - `drained`, when the shutdown's wait ends: every wrapper reaped, or the bound passed;
+#   - `pass_ended`, at the end of a loop pass that an errored SHUTDOWN wait left in
+#     `shutting_down`, with no signal latched;
+#   - `deadman`, produced by sampling the deadman's deadline at the end of each loop
+#     pass while `serving`, posted only when due;
 #   - `teardown`, once, from `_teardown`, unless the process is closed.
 #
-# Ties. Nothing is concurrent: the loop is single-threaded, every wait blocks
-# it, and a signal handler only latches. Within a pass, the latch is read
-# before the end-of-pass `pass_ended` and before the deadman is sampled.
+# Ties: nothing is concurrent, since the loop is single-threaded, every wait blocks it
+# and a signal handler only latches. Within a pass the latch is read before the
+# end-of-pass `pass_ended` and before the deadman is sampled.
 #
-# Unreachable cells. A mutating verb is posted only while `serving`, and every
-# lifecycle fact only from the states named above. The fence rows sit on
-# `serving` with the verbs' own rows, so a verb resolves only there; the other
-# facts resolve only where they are posted. Each event has an ignored row on
-# the root, guarded by `closed`, which makes the declaration complete (ss10):
-# in `closed` the event is ignored, and anywhere else the guard is false. Every
-# other cell is an exclusion of the declaration, and an out-of-order post
-# raises `UnhandledEvent`, which stops the supervisor with exit 7.
+# Unreachable cells: a mutating verb is posted only while `serving`, and each
+# lifecycle fact only from the states above. Each event has an ignored row on the root
+# guarded by `closed`, which completes the declaration (ss10). Every other cell is an
+# exclusion, and an out-of-order post raises `UnhandledEvent`, which stops the
+# supervisor with exit 7.
 
-#: The process's instance key in the supervisor's executor.
+#: the process's instance key in the supervisor's executor.
 _PROCESS = "process"
 START = "start"
 PUBLISH = "publish"
@@ -898,7 +823,7 @@ PAST_BOUND = "past_bound"
 #: the intents of the process chart's actions
 REFUSE = "refuse"
 DRAIN = "drain"
-#: The process's phases: the leaf states of SUPERVISOR_PROCESS.
+#: the leaf states of SUPERVISOR_PROCESS.
 _PROCESS_PHASES = frozenset(
     {"starting", "bound", "serving", "shutting_down", "stopped", "refused", "closed"}
 )
@@ -914,23 +839,20 @@ def _lock_held(ctx: Context) -> bool:
 
 
 def _owner_live(ctx: Context) -> bool:
-    """The lock is taken, but the published socket answers PING within one of
-    three attempts across a second, or the pid record does not prove its owner
-    absent (DL-210)."""
+    """The lock is taken, and the published socket answers PING within one of three
+    attempts across a second or the pid record does not prove its owner absent (DL-210)."""
     return bool(ctx.event.payload == OWNER_LIVE)
 
 
 def _free(ctx: Context) -> bool:
-    """The lock is taken and no other owner is proven present: private sockets
-    are swept, the published path is reclaimed, and the private socket is bound
-    (DL-210)."""
+    """The lock is taken and no other owner is proven present: private sockets are swept,
+    the published path is reclaimed and the private socket is bound (DL-210)."""
     return bool(ctx.event.payload == FREE)
 
 
 def _closed(ctx: Context) -> bool:
-    """The process is closed. Nothing posts to it then: `_teardown` returns at
-    once and a dropped connection posts nothing. In any other state a fact
-    posted out of order finds no row and raises `UnhandledEvent`."""
+    """The process is closed. Nothing posts then; elsewhere an out-of-order fact finds no
+    row and raises `UnhandledEvent`."""
     return "closed" in ctx.active
 
 
@@ -938,16 +860,14 @@ def _closed(ctx: Context) -> bool:
 
 
 def _refuse(_ctx: Context) -> Effects:
-    """Exit 1: another supervisor owns this root. Teardown then releases only
-    what this process took."""
+    """Exit 1: another supervisor owns this root; teardown releases only what this process took."""
     return Effects(intents=(REFUSE,))
 
 
 def _drain(_ctx: Context) -> Effects:
-    """Run the shutdown's wait: up to 5 s for missing spawn records, TERM each
-    live command group, KILL each after its grace, and KILL every survivor once
-    the longest grace plus 2 s has passed. Lifelines stay open until each
-    wrapper exits (DL-48, DL-150)."""
+    """Run the shutdown's wait: up to 5 s for missing spawn records, TERM each live
+    command group, KILL each after its grace, and KILL every survivor after the longest
+    grace plus 2 s. Lifelines stay open until each wrapper exits (DL-48, DL-150)."""
     return Effects(intents=(DRAIN,))
 
 
@@ -981,13 +901,11 @@ _PROCESS_UNREACHABLE: dict[str, tuple[tuple[str, ...], str]] = {
     **{verb: (("starting", "bound", "shutting_down", "ended"), _VERBS) for verb in _MUTATING},
 }
 
-#: The supervisor's own lifecycle (ss5, DL-210). Rows 01 to 12 keep the ids and
-#: the meanings of the transition table they replace (DL-289); 13 to 20 are the
-#: fence, which was `_check_token`; 21 to 30 are the events ignored once closed. A fence
-#: refusal is answered with its code, and with the incarnation for
-#: wrong_incarnation, as the lease verbs' are. SIGKILL ends the process in any
-#: state and runs no code, so no row is taken for it: each wrapper takes
-#: lifeline EOF and records in its own time (ss5, DL-205).
+#: the supervisor's own lifecycle (ss5, DL-210, DL-289). Rows 01 to 12 are the
+#: lifecycle, 13 to 20 the fence, 21 to 30 the events ignored once closed. A fence
+#: refusal is answered with its code, and with the incarnation for wrong_incarnation.
+#: SIGKILL ends the process in any state and runs no code, so no row is taken for it:
+#: each wrapper takes lifeline EOF and records in its own time (ss5, DL-205).
 SUPERVISOR_PROCESS = Statechart(
     name="supervisor_process",
     root=State(
@@ -1316,23 +1234,17 @@ SUPERVISOR_PROCESS = Statechart(
 
 
 class Supervisor:
-    """One supervisor per run_root; owns the socket, the wrapper lifelines, and
-    the single-controller lease. Single-threaded selectors loop (SIGCHLD
-    self-pipe, listen socket, client sockets) -- the same select+self-pipe
-    shape the wrapper uses, so no thread-safety surface."""
+    """One supervisor per run_root: owns the socket, the wrapper lifelines and the
+    single-controller lease. A single-threaded selectors loop (SIGCHLD self-pipe, listen
+    socket, client sockets), as in the wrapper."""
 
     def __init__(self, run_root: str, *, deadman_s: float | None = None) -> None:
         self.run_root = run_root
-        #: ss8's T_deadman, in seconds. None = no deadman: this supervisor
-        #: tolerates an absent controller forever, which is what lets an
-        #: engine crash and resume with its runs intact (DL-79), and is why
-        #: the run root it serves is never reroutable except by force.
+        #: ss8's T_deadman in seconds. None: this supervisor tolerates an absent
+        #: controller forever (DL-79), so its run root is reroutable only by force.
         self.deadman_s = deadman_s
-        #: monotonic instant since which there has been no LIVE leaseholder,
-        #: or None while one is live. Armed at bind rather than at the first
-        #: lease, so a supervisor nobody ever leases dies too -- otherwise the
-        #: one case with no controller at all would be the one case the
-        #: deadman missed.
+        #: monotonic instant since which there has been no LIVE leaseholder, or None while
+        #: one is live. It is armed at bind, so a supervisor nobody leases also dies.
         self._unleased_since: float | None = None
         self.sock_path = os.path.join(run_root, "supervisor.sock")
         self.pid_path = os.path.join(run_root, "supervisor.pid")
@@ -1340,27 +1252,21 @@ class Supervisor:
         self._private_path = os.path.join(run_root, f".s.{os.getpid()}")
         self._socket_inode: int | None = None
         self.boot_id = current_boot_id()
-        #: DL-80: identity of THIS supervisor process, minted per start. The
-        #: fencing counter below is in-memory (spec ss5), so a restart mints
-        #: token 1 again; once DL-79 made the token the credential, that reuse
-        #: let a controller holding a token from the PREVIOUS incarnation match
-        #: the new one by coincidence. Every mutating verb carries this, and a
-        #: mismatch is `wrong_incarnation` -- deliberately NOT `stale_token`,
-        #: because the two demand opposite client behaviour (re-acquire and
-        #: reconcile vs do not re-acquire, someone else holds it).
+        #: DL-80: the identity of THIS process, minted per start. The fencing counter is
+        #: in memory (ss5), so a restart mints token 1 again; every mutating verb carries
+        #: the incarnation, and a mismatch is `wrong_incarnation`, not `stale_token`,
+        #: because the two demand opposite client behaviour (re-acquire and reconcile,
+        #: versus someone else holds it).
         self.incarnation = uuid.uuid4().hex
-        #: LIVE bookkeeping only (ss11a): lifelines, exit pushes and LIST.
-        #: The idempotency store is the run directory, so a completed entry
-        #: may leave -- and must, or a root that never rolls grows this
-        #: without bound.
+        #: LIVE bookkeeping only (ss11a): lifelines, exit pushes and LIST. The run
+        #: directory is the idempotency store, so a completed entry leaves this map.
         self.runs: dict[str, _Run] = {}
-        #: completion order, for the bounded LIST window above
+        #: completion order, for the bounded LIST window
         self._completed: deque[str] = deque()
         self.lease: _Lease | None = None
         self._next_token = 1  # monotonic fencing counter (in-memory; ss5)
-        #: the supervisor's executor (statechart-engine ss11). It runs
-        #: SUPERVISOR_LEASE, whose state is the lease's phase and whose actions
-        #: write `self.lease`, and SUPERVISOR_PROCESS, whose state is `state`.
+        #: the supervisor's executor (statechart-engine ss11): it runs SUPERVISOR_LEASE,
+        #: whose actions write `self.lease`, and SUPERVISOR_PROCESS, whose state is `state`.
         self._machines = Executor()
         self._machines.start(_LEASE, SUPERVISOR_LEASE, self)
         self._machines.start(_PROCESS, SUPERVISOR_PROCESS, self)
@@ -1371,12 +1277,10 @@ class Supervisor:
         self._chld_r, self._chld_w = os.pipe()
         os.set_blocking(self._chld_r, False)
         os.set_blocking(self._chld_w, False)
-        #: the wakeup fd `_install_signals` replaced (-1: none), or None while
-        #: this supervisor has not installed its own
+        #: the wakeup fd `_install_signals` replaced (-1: none); None before it installs one
         self._prior_wakeup_fd: int | None = None
-        #: SIGTERM or SIGINT arrived. The handler sets only this; the loop takes
-        #: the transition. A handler that wrote `state` could interrupt another
-        #: write of it, and a signal during startup must wait for `serving`.
+        #: SIGTERM or SIGINT arrived. The handler sets only this and the loop takes the
+        #: transition: a handler writing `state` could interrupt another write of it.
         self._shutdown_requested = False
         self._backlog_bytes = _test_limit("DSL41_SUPERVISOR_TEST_BACKLOG_BYTES", BACKLOG_BYTES)
         self._request_line_limit = _test_limit(
@@ -1386,15 +1290,13 @@ class Supervisor:
 
     @property
     def state(self) -> ProcessState:
-        """The process lifecycle: the active leaf of SUPERVISOR_PROCESS. Teardown
-        reads what to unlink off it: `bound` owns the private socket path, and
-        every state from `serving` on owns the published one."""
+        """The active leaf of SUPERVISOR_PROCESS. Teardown unlinks by it: `bound` owns the
+        private socket path and every state from `serving` on owns the published one."""
         (phase,) = self._machines.active(_PROCESS) & _PROCESS_PHASES
         return cast(ProcessState, phase)
 
     def _process(self, name: str, payload: Any = None) -> Outcome:
-        """Post one event to SUPERVISOR_PROCESS and give the outcome of its row.
-        No action of the chart raises an event, so there is one."""
+        """Post one event to SUPERVISOR_PROCESS and give its row's outcome."""
         (outcome,) = self._machines.dispatch(_PROCESS, Event(name, payload))
         return outcome
 
@@ -1405,17 +1307,15 @@ class Supervisor:
 
     @property
     def _running(self) -> bool:
-        """Requests are read and dispatched only while serving. From
-        `shutting_down` on nothing more is dispatched, SPAWN included, even
-        when an error ended a SHUTDOWN's wait and the loop pass goes on."""
+        """Requests are dispatched only while serving; from `shutting_down` on nothing is,
+        SPAWN included, even if an error ended a SHUTDOWN's wait."""
         return self.state == "serving"
 
     # -- startup ------------------------------------------------------------
 
     def _set_subreaper(self) -> None:
-        """Linux PR_SET_CHILD_SUBREAPER (prctl 36, 1): a killed wrapper's
-        command reparents to us for reaping, not to init. Best-effort; a
-        no-op everywhere else (ss6a)."""
+        """Linux PR_SET_CHILD_SUBREAPER (prctl 36, 1): a killed wrapper's command reparents
+        to us, not to init. Best-effort; a no-op elsewhere (ss6a)."""
         if not sys.platform.startswith("linux"):
             return
         try:
@@ -1450,19 +1350,16 @@ class Supervisor:
                 return False
 
     def _pid_owner_absent(self) -> bool:
-        """Only positive absence or PID reuse can clear a recorded owner.
+        """True only on positive absence or PID reuse.
 
-        Old supervisors have no start_time field. A live legacy pid is
-        therefore enough to refuse. A failed token lookup is not absence:
-        kill(pid, 0) must confirm ESRCH before reclamation.
-        """
+        Old supervisors record no start_time, so a live legacy pid refuses. A failed token
+        lookup is not absence: kill(pid, 0) must confirm ESRCH."""
         try:
             record = _load_json(self.pid_path)
         except RecursionError:
             return False
         if record is None:
-            # A missing record names no owner. A present but unreadable one
-            # cannot authorize reclamation, even after unanswered probes.
+            # a missing record names no owner; an unreadable one never authorizes reclamation
             return not os.path.lexists(self.pid_path)
         pid = record.get("pid")
         if not is_wire_int(pid) or pid <= 0:
@@ -1472,9 +1369,8 @@ class Supervisor:
             if self.boot_id != "unknown":
                 return True
         if proc_is_zombie(pid):
-            # exited and unreaped: no descriptors, no lock, no socket. Its
-            # /proc entry and start token survive until the parent waits,
-            # which is exactly how a killed supervisor read as live (DL-210).
+            # exited and unreaped: no descriptors, lock or socket, yet /proc and the
+            # start token survive until the parent waits (DL-210)
             return True
         current = proc_start_token(pid)
         recorded = record.get("start_time")
@@ -1494,8 +1390,8 @@ class Supervisor:
 
     def _refuse_if_live(self) -> None:
         if os.path.lexists(self.sock_path):
-            # Three attempts across one second. macOS can refuse a full
-            # listen backlog, so the first refusal never authorizes unlink.
+            # three attempts across one second: macOS can refuse a full listen
+            # backlog, so one refusal never authorizes unlink
             started = time.monotonic()
             for attempt in range(3):
                 deadline = started + (attempt + 1) / 3
@@ -1512,8 +1408,7 @@ class Supervisor:
             self._lock_fd = flock_exclusive(os.path.join(self.run_root, "supervisor.lock"))
         except LockHeld as exc:
             self._start(LOCK_HELD, exc)  # supervisor_process.01 exits 1
-        # Sweep private sockets only, under the exclusion lock. Ordinary
-        # files or symlinks with this prefix are not ours to remove.
+        # sweep private sockets only, under the lock; other files with this prefix are not ours
         with os.scandir(self.run_root) as entries:
             for entry in entries:
                 if entry.name.startswith(".s."):
@@ -1549,18 +1444,15 @@ class Supervisor:
 
     def _install_signals(self) -> None:
         signal.signal(signal.SIGCHLD, self._on_chld_signal)
-        # init (Tier 2) or `supervise shutdown` fallback may TERM us: shut down
-        # orderly so wrappers record signaled/exited, never parent-lost. Only
-        # SIGKILL (unhandleable) leaves wrappers to their own lifeline EOF.
+        # init (Tier 2) or `supervise shutdown` may TERM us: shut down orderly so wrappers
+        # record signaled/exited, never parent-lost. Only SIGKILL leaves them to lifeline EOF.
         signal.signal(signal.SIGTERM, self._on_term_signal)
         signal.signal(signal.SIGINT, self._on_term_signal)
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
-        # The handlers above run between bytecodes, not at delivery. A signal
-        # that lands just before the select() syscall would wait for the
-        # one-second tick. The wakeup fd makes the C-level handler write the
-        # signal number into the same pipe at delivery, so the select wakes at
-        # once. This process runs no asyncio loop, so nothing else owns the
-        # wakeup fd; `_teardown` gives back the one it found.
+        # Python handlers run between bytecodes, so a signal landing just before select()
+        # would wait for the one-second tick. The wakeup fd writes the signal number into
+        # the same pipe at delivery. No asyncio loop owns it; `_teardown` restores the
+        # prior one.
         self._prior_wakeup_fd = signal.set_wakeup_fd(self._chld_w, warn_on_full_buffer=False)
 
     def _on_chld_signal(self, _signum: int, _frame: object) -> None:
@@ -1581,8 +1473,8 @@ class Supervisor:
     def run(self) -> int:
         try:
             self._set_subreaper()
-            # handlers first: supervisor.pid and supervisor.sock are published
-            # by _bind, and a peer that sees either must not meet a default action
+            # handlers first: _bind publishes supervisor.pid and supervisor.sock, and a
+            # peer that sees either must not meet a default action
             self._install_signals()
             self._bind()
             assert self._listen is not None
@@ -1610,15 +1502,14 @@ class Supervisor:
                             self._writable(payload)
                         if mask & selectors.EVENT_READ and self._connected(payload):
                             self._readable(payload)
-                # a stray SIGCHLD can be coalesced away by the self-pipe under
-                # load; the select timeout gives an unconditional reap tick
+                # the self-pipe can coalesce a SIGCHLD under load; the select timeout is the
+                # unconditional reap tick
                 self._reap()
                 if self._shutdown_requested:
                     self._orderly_shutdown(TERM)
                 elif self.state == "shutting_down":
-                    # an error ended a SHUTDOWN's wait and the dispatch answered
-                    # it: run the wait once more rather than leave the wrappers
-                    # to lifeline EOF; a second error ends the loop and main exits 1
+                    # an error ended a SHUTDOWN's wait: run it once more rather than leave
+                    # wrappers to lifeline EOF; a second error ends the loop, exit 1
                     self._orderly_shutdown(PASS_ENDED)
                 elif self.state == "serving" and self._deadman_expired():
                     self._process(DEADMAN)
@@ -1631,23 +1522,17 @@ class Supervisor:
     def _live_leaseholder(self) -> bool:
         """ss5's LIVE lease: unexpired AND its holder's connection still open.
 
-        Both halves, because either alone asks the wrong question. An
-        unexpired lease whose connection died means a controller that is
-        GONE -- the kernel closes this AF_UNIX fd only when the holder
-        process is, kill -9 included. An expired lease whose connection is
-        open means a controller that stopped renewing, which is a controller
-        that has stopped watching."""
+        Either half alone misleads. An unexpired lease on a dead connection is a GONE
+        controller (the kernel closes this AF_UNIX fd only when the holder is gone). An
+        expired lease on an open connection is a controller that stopped watching."""
         return self._lease_phase() == "live"
 
     def _deadman_expired(self) -> bool:
-        """Has this supervisor been unwatched for T_deadman (ss8)? The sampler of
-        SUPERVISOR_PROCESS's time event `deadman`: the loop posts it when this
-        is true, once per pass while serving, and logs the reason here first.
+        """Has this supervisor been unwatched for T_deadman (ss8)? The sampler of the
+        `deadman` time event, called once per serving pass, logging the reason first.
 
-        The clock RESTARTS whenever a live leaseholder appears, so a
-        reconnecting engine reprieves it. That is the point: the deadman
-        bounds how long an UNREACHABLE host keeps running work, and a host
-        the leader can still reach is not that."""
+        The clock restarts whenever a live leaseholder appears: the deadman bounds how
+        long an UNREACHABLE host keeps running work."""
         if self.deadman_s is None:
             return False
         if self._live_leaseholder():
@@ -1659,8 +1544,7 @@ class Supervisor:
             return False
         if now - self._unleased_since < self.deadman_s:
             return False
-        # loud, in the one log this process has: an operator reading it after
-        # the fact must find the reason its jobs died, not infer it
+        # loud, in the one log this process has, so the reason jobs died is findable
         print(
             f"supervisor: deadman fired -- no live leaseholder for {self.deadman_s}s;"
             f" exiting, which EOFs {len(self.runs)} lifeline(s) (concurrency-model ss8)",
@@ -1763,8 +1647,7 @@ class Supervisor:
             self._sel.unregister(conn.sock)
         self._conns.pop(conn.sock.fileno(), None)
         if self.state != "closed":
-            # teardown drops every connection after the loop ended, perhaps on
-            # an error; nothing reads the lease after it, so it is left alone
+            # teardown drops connections after the loop ended; nothing reads the lease then
             self._expire_due(time.monotonic())
             self._machines.dispatch(_LEASE, Event(DISCONNECT, conn))
         conn.sock.close()
@@ -1816,8 +1699,7 @@ class Supervisor:
         was_paused = conn.paused
         conn.paused = conn.backlog >= self._backlog_bytes
         if was_paused and not conn.paused and resume and self._running:
-            # Kernel readability may be false: pipelined requests already
-            # in our buffer still go first when the output pause clears.
+            # pipelined requests already buffered go first when the output pause clears
             self._readable(conn)
         if self._connected(conn):
             self._interest(conn)
@@ -1841,9 +1723,8 @@ class Supervisor:
 
     def _answer(self, conn: _Conn, line: bytes) -> dict[str, Any]:
         try:
-            # strict UTF-8 first: `json.loads` on bytes would detect and
-            # accept UTF-16 and UTF-32 (DL-229); a UnicodeDecodeError is a
-            # ValueError, so it answers `malformed_json` like any other
+            # strict UTF-8 first: json.loads on bytes would accept UTF-16 and UTF-32
+            # (DL-229); a UnicodeDecodeError is a ValueError, so it answers malformed_json
             req = json.loads(line.decode("utf-8"))
             if not isinstance(req, dict):
                 raise ValueError("request must be a JSON object")
@@ -1867,22 +1748,18 @@ class Supervisor:
         try:
             answer = handler(conn, req)
         except StatechartError:
-            # not one request's problem: a declared machine is wrong, and the
-            # supervisor stops on it, as every tier does (statechart-engine ss5)
+            # a declared machine is wrong, not one request: the supervisor stops, as every
+            # tier does (statechart-engine ss5)
             raise
         except Exception as exc:  # noqa: BLE001 -- the belt under every verb
-            # a handler that raises would end this process, and its death
-            # EOFs the lifeline of every wrapper on the host. Whatever went
-            # wrong is ONE request's problem; it is answered, and the tier
-            # that must outlive the engine keeps running.
+            # a raising handler would end this process and EOF every wrapper's lifeline, so
+            # one request's failure is answered and the tier keeps running
             answer = {"ok": False, "error": f"internal: {type(exc).__name__}: {exc}"}
         return answer
 
     def _h_ping(self, _conn: _Conn, _req: dict[str, Any]) -> dict[str, Any]:
-        # `deadman_s` rides the two READ verbs (S5b): the leader records what
-        # this host ACTUALLY runs, not what some engine once asked it to run.
-        # A reattaching engine meets a supervisor it did not start, and a
-        # bound derived from its own flag would then describe nothing.
+        # `deadman_s` rides the two READ verbs (S5b, DL-95): the leader records what this host
+        # ACTUALLY runs, and a reattaching engine did not start this supervisor.
         return {
             "ok": True,
             "version": PROTOCOL_VERSION,
@@ -1921,10 +1798,9 @@ class Supervisor:
     # -- lease --------------------------------------------------------------
 
     def _expire_due(self, now: float) -> None:
-        """Produce the lease's time event (SUPERVISOR_LEASE): post `expire` when
-        the record's deadline is not after `now` and the lease is still held, so
-        once per deadline. The deadline instant itself is due, and so is a NaN
-        deadline."""
+        """Produce the lease's time event: post `expire` once per deadline when the record's
+        deadline is not after `now` and the lease is still held. The deadline instant
+        itself is due, and so is a NaN deadline."""
         if (
             self.lease is not None
             and not now < self.lease.deadline
@@ -1933,21 +1809,19 @@ class Supervisor:
             self._machines.dispatch(_LEASE, Event(EXPIRE))
 
     def _lease_phase(self) -> str:
-        """The lease's phase now: free, live, orphaned or expired. A due expiry
-        is taken first."""
+        """The lease's phase now (free, live, orphaned or expired), taking a due expiry first."""
         self._expire_due(time.monotonic())
         (phase,) = self._machines.active(_LEASE) & _PHASES
         return phase
 
     def _lease_active(self) -> bool:
-        """Unexpired: live or orphaned, which is `held` in SUPERVISOR_LEASE.
-        LIST reports such a lease, and an exit push goes only to its holder."""
+        """Unexpired (live or orphaned, `held` in SUPERVISOR_LEASE): LIST reports such a
+        lease and an exit push goes only to its holder."""
         return self._lease_phase() in ("live", "orphaned")
 
     def _refusal(self, code: str) -> dict[str, Any]:
-        """The answer of a lease refusal (ss5): its code, with the current
-        incarnation for wrong_incarnation, and the holder and its expiry for
-        lease_held."""
+        """The answer of a lease refusal (ss5): its code, plus the incarnation for
+        wrong_incarnation and the holder and expiry for lease_held."""
         answer: dict[str, Any] = {"ok": False, "error": code}
         if code == "wrong_incarnation":
             answer["incarnation"] = self.incarnation
@@ -1957,15 +1831,13 @@ class Supervisor:
         return answer
 
     def _fence(self, verb: str, req: dict[str, Any]) -> dict[str, Any] | None:
-        """SPAWN, SIGNAL and SHUTDOWN: post the verb to SUPERVISOR_PROCESS at one
-        sampled instant, after a due expiry of the lease, and give its refusal's
-        answer, or None when the verb's work runs. The guards are the lease
-        chart's, so RENEW, RELEASE and these three meet one fence: this
-        incarnation first, then the token of an unexpired lease. A token from a
-        dead supervisor is not a lost election but a vanished world: that
-        controller's wrappers lost their lifeline and record in their own time
-        (DL-205), so it must re-acquire AND reconcile from the spool, which is
-        the opposite of what stale_token asks for."""
+        """SPAWN, SIGNAL and SHUTDOWN: post the verb to SUPERVISOR_PROCESS at one sampled
+        instant after a due lease expiry, and give the refusal's answer, or None when the
+        verb's work runs. The guards are the lease chart's, so RENEW, RELEASE and these
+        three meet one fence: this incarnation, then the token of an unexpired lease.
+        A token from a dead supervisor means the wrappers lost their lifeline and record
+        on their own (DL-205): the controller must re-acquire AND reconcile from the
+        spool, the opposite of what stale_token asks."""
         self._expire_due(time.monotonic())
         outcome = self._process(verb, _Request(req))
         if outcome.refusals:
@@ -1983,10 +1855,9 @@ class Supervisor:
         return self._lease_verb(conn, "RELEASE", req)
 
     def _lease_verb(self, conn: _Conn, verb: str, req: dict[str, Any]) -> dict[str, Any]:
-        """Post a lease verb to SUPERVISOR_LEASE at one sampled instant, and give
-        the answer of the row it took: the action's answer, or the refusal's. An
-        `internal` refusal raises the error computing the expiry, so the dispatch
-        belt answers it and nothing has changed (DL-300)."""
+        """Post a lease verb to SUPERVISOR_LEASE at one sampled instant and give the answer
+        of the row taken. An `internal` refusal raises the error computing the expiry, so
+        the dispatch belt answers it with nothing changed (DL-300)."""
         now = time.monotonic()
         self._expire_due(now)
         request = _LeaseRequest(req, conn, now, time.time())
@@ -2012,35 +1883,27 @@ class Supervisor:
     # -- ss11a: directory-backed SPAWN idempotency ---------------------------
 
     def _crash_point(self, _stage: str) -> None:
-        """The PR-36 crash matrix's seam, and nothing else.
-
-        Every write in `spawn_run` is followed by one of these, so a test can
-        stop the process exactly between two durable acts and then ask a
-        FRESH supervisor what the directory says. A no-op in production; the
-        alternative was a test that kills a real supervisor and hopes it
-        died in the window it meant."""
+        """The PR-36 crash matrix's seam. Each `spawn_run` write is followed by one, so a
+        test can stop between two durable acts and ask a FRESH supervisor what the
+        directory says. A no-op in production."""
 
     def index_path(self, run_id: str) -> str:
         return os.path.join(self.run_root, "runs", _INDEX_DIR, run_id)
 
     def run_dir_for(self, job: str, run_number: int) -> str:
-        """ss11a's one-to-one ownership, as a path: one run_id maps to one
-        (job, run_number), and one (job, run_number) maps to one directory.
-        The index entry carries the pair, not the path, so this is how a
-        replay gets from the index back to the tombstone."""
+        """ss11a's one-to-one ownership as a path: one run_id maps to one (job, run_number)
+        and that to one directory. The index entry carries the pair, not the path."""
         return os.path.join(self.run_root, "runs", f"{job}.{run_number}")
 
     def spawn_run(self, spec: dict[str, Any]) -> dict[str, Any]:
-        """SPAWN, minus the lease gate: validate, resolve a replay through the
-        index, or apply for the first time (ss11a). Public to the crash
-        matrix, which drives it directly rather than over the socket."""
+        """SPAWN minus the lease gate: validate, resolve a replay through the index, or apply
+        for the first time (ss11a). Public so the crash matrix can drive it directly."""
         run_id = spec.get("run_id")
         if not isinstance(run_id, str):
             return {"ok": False, "error": "bad_spec", "detail": "spec.run_id is missing"}
         if _RUN_ID_RE.fullmatch(run_id) is None:
-            # ss11a: the id names a directory entry here, so the grammar is a
-            # wire check, not a convention. It is refused BEFORE anything is
-            # created -- a freehand id would otherwise reach mkdir/open.
+            # ss11a: the id names a directory entry, so the grammar is a wire check,
+            # refused BEFORE anything is created
             return {"ok": False, "error": "bad_run_id", "detail": f"run_id {run_id!r}"}
         job = spec.get("job")
         run_number = spec.get("run_number")
@@ -2053,42 +1916,34 @@ class Supervisor:
             or not is_wire_int(run_number)
         ):
             return {"ok": False, "error": "bad_spec", "detail": "spec.job / spec.run_number"}
-        # NUL is checked HERE, ahead of the two realpath calls below, because
-        # os.path takes a NUL as a ValueError and not an OSError: an embedded
-        # null in `job` or `run_dir` used to reach realpath and answer
-        # `internal:` from the dispatcher's belt instead of `bad_spec`
-        # (DL-151). `_spec_schema_error` scans every other string field.
+        # NUL is checked before the realpath calls because os.path raises ValueError, not
+        # OSError, on it; the answer is `bad_spec`, not `internal:` (DL-151).
+        # `_spec_schema_error` scans every other string field.
         incoming = spec.get("run_dir")
         if not isinstance(incoming, str) or "\x00" in incoming:
             return {"ok": False, "error": "bad_spec", "detail": "spec.run_dir is not a path"}
         run_dir = self.run_dir_for(job, run_number)
         if os.path.realpath(incoming) != os.path.realpath(run_dir):
-            # the supervisor OWNS this directory now, so it insists on the one
-            # it owns: index -> (job, run_number) -> directory is the only way
-            # a replay finds the tombstone again. REALPATH, not normpath: the
-            # engine and this process are told the run root separately, so one
-            # may hold `./r` where the other holds `/abs/r`, or `/tmp/r` where
-            # the other holds `/private/tmp/r`. Two spellings of one directory
-            # must not refuse every spawn on the host.
+            # the supervisor OWNS this directory, and index -> (job, run_number) -> directory
+            # is how a replay finds the tombstone. REALPATH, not normpath: the engine and
+            # this process are told the run root separately, and two spellings of one
+            # directory (`./r` and `/abs/r`, `/tmp/r` and `/private/tmp/r`) must not
+            # refuse every spawn
             return {"ok": False, "error": "bad_spec", "detail": f"run_dir must be {run_dir}"}
         bad = _spec_schema_error(spec)
         if bad is not None:
-            # the WHOLE frozen ss2 schema, before anything durable and before
-            # any replay resolution. Two reasons. A field of the wrong type
-            # that only explodes after the fork (grace_seconds: "x" reaching
-            # float()) would kill this process and EOF every wrapper on the
-            # host. And the fingerprint's "float:"+hex tag is only
-            # collision-free while every key's type is pinned: with unknown
-            # keys refused and grace_seconds the one number, no VALID spec
-            # can hold a string where another holds the float that encodes
-            # to it.
+            # the WHOLE frozen ss2 schema, before anything durable or any replay. A
+            # wrong-typed field that explodes after the fork (grace_seconds: "x" reaching
+            # float()) would kill this process and EOF every wrapper. The fingerprint's
+            # "float:"+hex tag is collision-free only while every key's type is pinned:
+            # with unknown keys refused and grace_seconds the one number, no VALID spec
+            # holds a string where another holds the float that encodes to it.
             return {"ok": False, "error": "bad_spec", "detail": bad}
         try:
             fingerprint = spec_fingerprint(spec)
         except CanonError as exc:
-            # a value ss3.2 cannot hold -- a lone surrogate, say. The receipt
-            # could not be written for it either, and this tier answers rather
-            # than dies: every wrapper it holds is tethered to this process.
+            # a value ss3.2 cannot hold (a lone surrogate): the receipt could not be written
+            # either, and every wrapper is tethered to this process, so answer
             return {"ok": False, "error": "bad_spec", "detail": f"unfingerprintable spec: {exc}"}
         replay = self._resolve_replay(run_id, job, run_number, run_dir, fingerprint)
         if replay is not None:
@@ -2100,19 +1955,15 @@ class Supervisor:
     ) -> dict[str, Any] | None:
         """The ss11a answer table, or None for "first application".
 
-        Resolution goes through the INDEX first: it is the first durable thing that names a
-        run_id. With no index entry, the incoming path's receipt is read (DL-151): one for
-        another run_id is a collision; one for this run_id means the index was lost under a
-        live receipt, so the directory answers, never a first application."""
+        Resolution goes through the INDEX first. With no index entry, the incoming path's
+        receipt is read (DL-151): one for another run_id is a collision; one for this
+        run_id means the index was lost under a live receipt, so the directory answers."""
         index = _load_tombstone(self.index_path(run_id), "index")
         if index is _INVALID:
-            # corruption is not absence: "no index entry" AUTHORIZES a spawn,
-            # so an unreadable one must never read as one (ss11a)
+            # corruption is not absence: "no index entry" AUTHORIZES a spawn (ss11a)
             return self._indeterminate(f"the index entry for {run_id} is unreadable")
         if index is not None and index.get("run_id") != run_id:
-            # the entry disagrees with its own name: tampered or misfiled.
-            # Believing either half would answer for a run the other half
-            # disowns.
+            # the entry disagrees with its own name: tampered or misfiled
             return self._indeterminate(
                 f"the index entry for {run_id} names run_id {index.get('run_id')!r}"
             )
@@ -2124,29 +1975,24 @@ class Supervisor:
                 )
             indexed = self.run_dir_for(str(index.get("job")), int(index.get("run_number", 0)))
             if not os.path.isdir(indexed):
-                # impossible by write order (mkdir precedes the index); if it
-                # is ever seen, nothing may re-spawn
+                # impossible by write order (mkdir precedes the index); nothing may re-spawn
                 return self._indeterminate(f"the index names {indexed}, which does not exist")
             return self._answer_from_directory(run_id, job, run_number, indexed, fingerprint)
         receipt = _load_tombstone(os.path.join(run_dir, "receipt.json"), "receipt")
         if receipt is _INVALID:
             return self._indeterminate(f"{run_dir}/receipt.json is unreadable")
         if receipt is not None:
-            # no index for this run_id, but the path is somebody's tombstone:
-            # a different run_id is a collision, and our own id here means the
-            # index was lost under a live tombstone -- either way, never a
-            # first application (deleting an index authorizes a spawn, ss11a)
+            # no index for this run_id but the path is a tombstone: another run_id is a
+            # collision and our own means the index was lost; never a first application
+            # (deleting an index authorizes a spawn, ss11a)
             if receipt.get("run_id") != run_id:
                 return self._collision(
                     f"{run_dir} already holds a receipt for run_id {receipt.get('run_id')!r}"
                 )
             return self._answer_from_directory(run_id, job, run_number, run_dir, fingerprint)
         if os.path.isdir(run_dir):
-            # an orphan directory: a crash between mkdir and the index. It is
-            # REUSED, because nothing durable names its run -- unless another
-            # run_id's index does, which is the same crash under a different
-            # id and is the one case worth an O(n) scan of the index (it runs
-            # only here, after a crash, never on a healthy spawn)
+            # an orphan directory (a crash between mkdir and the index) is REUSED unless
+            # another run_id's index names it; that O(n) scan runs only here, after a crash
             owner = self._indexed_owner(job, run_number)
             if owner is _UNREADABLE:
                 return self._indeterminate(f"the {_INDEX_DIR} directory cannot be listed")
@@ -2154,10 +2000,8 @@ class Supervisor:
                 return self._collision(f"{run_dir} is already indexed under run_id {owner!r}")
             for name in ("spawn.json", "status.json"):
                 if os.path.exists(os.path.join(run_dir, name)):
-                    # a directory made under the OLD rule, where the engine
-                    # created it and no receipt was ever written. It holds a
-                    # run's evidence, and forking into it would overwrite that
-                    # run's records with a second one's.
+                    # a directory the engine created before receipts existed holds a
+                    # run's evidence, and forking into it would overwrite it
                     return self._indeterminate(
                         f"{run_dir} holds a wrapper's {name} and no receipt:"
                         " a run predating this protocol, never reused"
@@ -2167,10 +2011,8 @@ class Supervisor:
     def _answer_from_directory(
         self, run_id: str, job: str, run_number: int, directory: str, fingerprint: str
     ) -> dict[str, Any]:
-        """ss11a: a replay answers from the DIRECTORY, not from memory -- the
-        original reply if it survived, the wrapper's own record if it did
-        not, and a refusal when the crash landed somewhere no answer can be
-        reconstructed from."""
+        """ss11a: a replay answers from the DIRECTORY: the original reply if it survived,
+        the wrapper's own record if not, and a refusal where no answer can be rebuilt."""
         receipt = _load_tombstone(os.path.join(directory, "receipt.json"), "receipt")
         if receipt is _INVALID:
             return self._indeterminate(f"{directory}/receipt.json is unreadable")
@@ -2182,10 +2024,8 @@ class Supervisor:
             )
         if receipt.get("spec_fingerprint") != fingerprint:
             return self._collision(f"{directory} was received under a different spec fingerprint")
-        # reply/spawn records: _INVALID falls through _duplicate_from's
-        # run_id gate to the next table row -- for these two the next row is
-        # always SAFER (reconstruct, then in-progress/indeterminate), so
-        # unreadable never invents an answer
+        # an _INVALID reply or spawn record falls to the next table row, which is always
+        # SAFER (reconstruct, then in-progress/indeterminate), so it never invents an answer
         reply = _load_tombstone(os.path.join(directory, "reply.json"), "reply")
         answer = _duplicate_from(run_id, reply, "wrapper_pid", "spawned_at")
         if answer is not None:
@@ -2198,22 +2038,18 @@ class Supervisor:
             spawned.get("job"),
             spawned.get("run_number"),
         ) != (run_id, job, run_number):
-            # the same rule _signal_command applies to this file: a record that
-            # does not name this run is spoofed, stale or foreign, and an
-            # answer built from it would hand the engine another run's pid
+            # the rule _signal_command applies to this file: a record that does not name this
+            # run is spoofed, stale or foreign, and would hand the engine another run's pid
             spawned = None
-        # equivalent, and the protocol says so rather than promising bytes it
-        # did not keep: the wrapper's own record carries the same two facts
+        # equivalent, not byte-identical: the wrapper's own record carries the same two facts
         answer = _duplicate_from(run_id, spawned, "wrapper_pid", "started_at")
         if answer is not None:
             return answer
         run = self.runs.get(run_id)
         if run is not None and run.wrapper_rc is None:
-            # the receipt is durable, the fork happened, and this incarnation
-            # still holds the lifeline: no second spawn, and no answer yet.
-            # Liveness is the one thing memory is authoritative for -- a
-            # wrapper from a previous incarnation cannot be alive (its
-            # lifeline EOF'd when that supervisor died)
+            # the receipt is durable, the fork happened and this incarnation holds the
+            # lifeline: no second spawn, no answer yet. Memory is authoritative only for
+            # liveness; a previous incarnation's wrapper cannot be alive (its lifeline EOF'd)
             return {
                 "ok": False,
                 "error": "in_progress",
@@ -2225,9 +2061,9 @@ class Supervisor:
         )
 
     def _indexed_owner(self, job: str, run_number: int) -> str | None:
-        """The run_id whose index entry claims (job, run_number), if any --
-        or `_UNREADABLE` when the directory cannot be listed: "no owner"
-        AUTHORIZES reuse, and an EACCES must never spell it."""
+        """The run_id whose index entry claims (job, run_number), if any, or `_UNREADABLE`
+        when the directory cannot be listed: "no owner" AUTHORIZES reuse, so an EACCES
+        must never spell it."""
         index_dir = os.path.join(self.run_root, "runs", _INDEX_DIR)
         try:
             names = os.listdir(index_dir)
@@ -2237,15 +2073,14 @@ class Supervisor:
             return _UNREADABLE
         for name in sorted(names):
             if _RUN_ID_RE.fullmatch(name) is None:
-                # `durable_write` leaves `.<name>.<pid>.tmp` behind if it dies
-                # between fsync and rename: a complete record that was never
-                # durable, and reading it would refuse a spawn that §11a says
-                # is a first application
+                # `durable_write` leaves `.<name>.<pid>.tmp` if it dies between fsync and
+                # rename; that record was never durable and reading it would refuse a spawn
+                # that ss11a calls a first application
                 continue
             entry = _load_tombstone(os.path.join(index_dir, name), "index")
             if entry is _INVALID:
-                # an unreadable entry MIGHT claim this run: reuse under it
-                # would be the double spawn ss11a exists to prevent
+                # an unreadable entry MIGHT claim this run; reuse would be the double spawn
+                # ss11a prevents
                 return name
             if entry is not None and entry.get("run_id") != name:
                 return _UNREADABLE  # an entry disowning its name blocks reuse
@@ -2258,14 +2093,14 @@ class Supervisor:
 
     @staticmethod
     def _collision(detail: str) -> dict[str, Any]:
-        """ss11a: never reused, never given a second index. There is no
-        correct pick between two identities for one directory."""
+        """ss11a: never reused, never given a second index; there is no correct pick
+        between two identities for one directory."""
         return {"ok": False, "error": "collision", "detail": detail}
 
     @staticmethod
     def _indeterminate(detail: str) -> dict[str, Any]:
-        """ss11a: the crash landed where nothing may re-spawn. The engine's
-        E7 policy decides the run; this tier states the fact."""
+        """ss11a: the crash landed where nothing may re-spawn. The engine's E7 policy
+        decides the run; this tier states the fact."""
         return {"ok": False, "error": "indeterminate", "detail": detail}
 
     def _first_application(
@@ -2277,17 +2112,13 @@ class Supervisor:
         run_dir: str,
         fingerprint: str,
     ) -> dict[str, Any]:
-        """ss11a's write order, exactly: mkdir, index, receipt, spawn, reply,
-        answer. Index before receipt, because the frozen idempotency key is
-        `run_id` and every later lookup goes through the index -- so the first
-        durable thing that names the run must be the index. Receipt before the
-        fork, because the failure mode of that direction is a run that never
-        happened being reported unknown (which E7 handles), and the failure
-        mode of the other is a retry that spawns twice (which nothing does)."""
-        # Every write below is answered, never raised: an unhandled error here
-        # would end this process, and its death EOFs the lifeline of every
-        # wrapper it holds. A tier whose job is to outlive the engine does not
-        # die of ENOSPC on one run's tombstone.
+        """ss11a's write order: mkdir, index, receipt, spawn, reply, answer. The index comes
+        first because every later lookup goes through it, so the first durable thing that
+        names the run is the index. The receipt precedes the fork because the opposite
+        failure is a never-happened run reported unknown (E7 handles it), where the
+        other is a retry that spawns twice."""
+        # every write below is answered, never raised: an error here would end this process
+        # and EOF every wrapper's lifeline
         try:
             os.makedirs(os.path.join(self.run_root, "runs", _INDEX_DIR), exist_ok=True)
             try:
@@ -2317,10 +2148,8 @@ class Supervisor:
                 },
             )
         except (OSError, CanonError) as exc:
-            # nothing has forked yet, so this is a spawn that did not happen.
-            # Whatever half-written tombstone it leaves reads `indeterminate`
-            # on a retry, which is the truthful answer to a receipt this
-            # supervisor could not finish writing.
+            # nothing has forked, so this spawn did not happen; a half-written tombstone
+            # reads `indeterminate` on a retry, the truthful answer
             return {"ok": False, "error": f"spawn_failed: {exc}"}
         self._crash_point("after_receipt")
         try:
@@ -2350,10 +2179,8 @@ class Supervisor:
                 },
             )
         except (OSError, CanonError) as exc:
-            # the wrapper is ALREADY running: the answer stands, and a replay
-            # reconstructs it from the wrapper's own spawn.json (ss11a's second
-            # row). Losing the run over its receipt copy would be the one
-            # mistake this order exists to avoid.
+            # the wrapper is ALREADY running: the answer stands and a replay rebuilds it from
+            # the wrapper's own spawn.json (ss11a's second row)
             print(
                 f"supervisor: reply.json for {run_id} not written ({exc});"
                 " a replay will answer from spawn.json",
@@ -2364,10 +2191,9 @@ class Supervisor:
         return {"ok": True, "run_id": run_id, "wrapper_pid": wrapper_pid, "spawned_at": spawned_at}
 
     def _spawn_wrapper(self, spec: dict[str, Any]) -> tuple[int, int]:
-        """Fork the wrapper by file path with the lifeline WRITE END kept here
-        only (the ss6a fd-hygiene invariant, now anchored in the supervisor).
-        posix_spawn -- not subprocess.Popen -- so the global waitpid(-1) reaper
-        never fights Popen's own bookkeeping."""
+        """Fork the wrapper by file path with the lifeline WRITE END kept here only (the ss6a
+        fd-hygiene invariant). posix_spawn, not subprocess.Popen, so the global
+        waitpid(-1) reaper never fights Popen's bookkeeping."""
         lifeline_r, lifeline_w = os.pipe()
         stdin_r = stdin_w = -1
         try:
@@ -2392,9 +2218,8 @@ class Supervisor:
                 os.close(stdin_w)  # EOF: the wrapper repoints stdin at /dev/null after
                 stdin_w = -1
         except BaseException:
-            # no caller owns the lifeline yet, so every way out closes all four
-            # ends. A wrapper forked before the failure sees EOF on its
-            # lifeline and on a spec that stops short, and ends itself.
+            # no caller owns the lifeline yet, so every way out closes all four ends; a
+            # wrapper forked before the failure sees EOF and ends itself
             for fd in (lifeline_r, lifeline_w, stdin_r, stdin_w):
                 if fd >= 0:
                     os.close(fd)
@@ -2420,41 +2245,32 @@ class Supervisor:
         if outcome == "sent":
             return {"ok": True}
         if outcome == "not_ready":
-            # DL-83: SPAWN returns once the wrapper is FORKED, and the wrapper
-            # writes spawn.json a few syscalls later. A signal landing in that
-            # window used to answer noop -- indistinguishable from "the group
-            # is already gone" -- so a KILLJOB decided milliseconds after a
-            # start was silently dropped and the engine recorded TERMINATED
-            # for a job that ran to completion. The wrapper being ALIVE with
-            # no record yet is the discriminator, and it means retry, not
-            # nothing-to-do.
+            # DL-83: SPAWN returns once the wrapper is FORKED; spawn.json lands a few
+            # syscalls later. A live wrapper with no record yet means retry, not
+            # noop, so an early KILLJOB is never dropped.
             return {"ok": False, "error": "not_ready"}
         return {"ok": True, "noop": True}  # already-dead / unverifiable group
 
     def _signal_command(self, run: _Run, sig: int) -> str:
-        """Signal the recorded command PGID -- never the wrapper (the recorder
-        is untouchable) -- after the (pid, start-time) PID-reuse guard.
+        """Signal the recorded command PGID, never the wrapper, after the (pid, start-time)
+        PID-reuse guard.
 
-        Returns "sent", "noop" (nothing there to signal), or "not_ready"
-        (DL-83: the wrapper is alive but has not written spawn.json yet, so
-        the command may exist and simply not be addressable -- the caller must
-        retry rather than treat the kill as done). Collapsing those last two
-        into one answer is how a kill decided in the spawn window vanished."""
+        Returns "sent", "noop" (nothing to signal) or "not_ready" (DL-83: the wrapper is
+        alive but has not written spawn.json, so the caller must retry, not treat the
+        kill as done)."""
         spawn = _load_json(os.path.join(run.run_dir, "spawn.json"))
         if spawn is None:
-            # wrapper_rc is None while the wrapper lives (set by _reap). A live
-            # wrapper with no record is mid-spawn; a dead one never recorded,
-            # and there is nothing this tier can still address.
+            # wrapper_rc is None while the wrapper lives (set by _reap): a live wrapper with
+            # no record is mid-spawn; a dead one never recorded, so nothing is addressable
             return "not_ready" if run.wrapper_rc is None else "noop"
         if (spawn.get("job"), spawn.get("run_number"), spawn.get("run_id")) != (
             run.job,
             run.run_number,
             run.run_id,
         ):
-            # spoofed/corrupt spawn record: never trust, never signal. The
-            # run_id is part of the check (DL-118/DL-129): the tuple alone
-            # plus a live foreign pid token would aim the signal at a
-            # stranger's process group.
+            # spoofed or corrupt spawn record: never signal. run_id is part of the check
+            # (DL-118/DL-129); the tuple alone plus a live foreign pid token could aim the
+            # signal at a stranger's process group
             return "noop"
         pid = spawn.get("command_pid")
         pgid = spawn.get("command_pgid")
@@ -2471,18 +2287,17 @@ class Supervisor:
     def _h_shutdown(self, conn: _Conn, req: dict[str, Any]) -> dict[str, Any]:
         if (err := self._fence("SHUTDOWN", req)) is not None:
             return err
-        # supervisor_process.05 moved to shutting_down. A signal latched before
-        # now is this shutdown's; one latched during the wait finds it stopped.
+        # supervisor_process.05 moved to shutting_down: a signal latched before now is this
+        # shutdown's; one latched during the wait finds it stopped
         self._shutdown_requested = False
-        # ss5 order: wait for wrappers FIRST, reply {ok}, exit, unlink -- the
-        # earlier reply-then-teardown also double-sent {ok} (review fix, DL-48)
+        # ss5 order: wait for wrappers FIRST, reply {ok}, exit, unlink (DL-48)
         try:
             self._shutdown_wait()
         except StatechartError:
             raise  # the supervisor stops on it; the wait does not run again
         except Exception as exc:
-            # the dispatch answers it `internal:` and the wait runs again at
-            # the end of this loop pass (row 06 or 12); the log keeps the cause
+            # the dispatch answers `internal:` and the wait runs again at the end of this loop
+            # pass (row 06 or 12); the log keeps the cause
             print(
                 f"supervisor: the shutdown wait failed ({type(exc).__name__}: {exc});"
                 " running it once more",
@@ -2493,32 +2308,26 @@ class Supervisor:
         return {"ok": True}
 
     def _orderly_shutdown(self, trigger: str) -> None:
-        """The loop's shutdown: `trigger` is TERM, a latched signal the loop
-        consumes, or PASS_ENDED, the end of a loop pass in which an error ended
-        a SHUTDOWN's wait. The row it takes says whether the wait runs: a
-        signal latched while a shutdown ran is consumed after the stop, finds
-        the process stopped, and does nothing more (supervisor_process.09). No
-        request is dispatched once the process is shutting down."""
+        """The loop's shutdown. `trigger` is TERM, a latched signal the loop consumes, or
+        PASS_ENDED, the end of a pass in which an error ended a SHUTDOWN's wait. The row
+        taken says whether the wait runs: a signal latched during a shutdown finds the
+        process stopped and does nothing (supervisor_process.09)."""
         self._shutdown_requested = False
         if self.state == "shutting_down":
-            # the wait runs again after an error: the errored SHUTDOWN's
-            # answer goes out now, not after this second wait
+            # after an error the errored SHUTDOWN's answer goes out before the second wait
             for conn in list(self._conns.values()):
                 self._writable(conn, resume=False)
         if DRAIN in self._process(trigger).intents:
             self._shutdown_wait()
 
     def _shutdown_wait(self) -> None:
-        """The one place the supervisor escalates TERM->KILL (the engine may be
-        gone). Lifelines stay OPEN until each wrapper exits, so wrappers observe
-        the command deaths and record signaled/exited -- never parent-lost. It
-        ends by posting `drained`: every wrapper reaped, or the bound passed."""
+        """The one place the supervisor escalates TERM->KILL (the engine may be gone).
+        Lifelines stay OPEN until each wrapper exits, so wrappers record signaled/exited,
+        never parent-lost. It ends by posting `drained`."""
         live = [r for r in self.runs.values() if r.wrapper_rc is None]
-        # a JUST-spawned wrapper may not have written spawn.json yet, and
-        # _signal_command is a silent no-op without it -- the wrapper would
-        # then die only by lifeline EOF at our exit and record "parent lost".
-        # Wait briefly for the missing records first (review fix, DL-48; a
-        # bounded wait, not policy -- same shape as the engine-side spawn wait).
+        # a JUST-spawned wrapper may not have written spawn.json, and _signal_command is a
+        # no-op without it, so the wrapper would die only by lifeline EOF and record
+        # "parent lost"; wait up to 5 s for the records first (DL-48)
         spawn_deadline = time.monotonic() + 5.0
         while time.monotonic() < spawn_deadline:
             self._reap()
@@ -2564,8 +2373,8 @@ class Supervisor:
             pass
 
     def _reap(self) -> None:
-        """Reap every exited wrapper, close its lifeline, and push the exit to
-        the lease-holding connection (a notification only -- droppable)."""
+        """Reap every exited wrapper, close its lifeline and push the exit to the
+        lease-holding connection (a droppable notification)."""
         by_pid = {r.wrapper_pid: r for r in self.runs.values() if r.wrapper_rc is None}
         while True:
             try:
@@ -2601,14 +2410,10 @@ class Supervisor:
         )
 
     def _evict_completed(self, run: _Run) -> None:
-        """Bound LIST (ss11a). The exit is recorded and pushed, so this entry
-        is history; the newest `_LIST_COMPLETED_WINDOW` of them stay for a
-        controller that reconnects and reads LIST, and older ones are read
-        from the spool, which was the truth all along. Idempotency does not
-        notice: it resolves through the run directory, which outlives both
-        this dict and this process. A SIGNAL for an evicted run answers
-        `unknown_run`, exactly as it does for any run of an incarnation that
-        has ended."""
+        """Bound LIST (ss11a). The newest `_LIST_COMPLETED_WINDOW` completed runs stay for a
+        reconnecting controller; older ones are read from the spool. Idempotency resolves
+        through the run directory, so eviction does not affect it. A SIGNAL for an evicted
+        run answers `unknown_run`."""
         self._completed.append(run.run_id)
         while len(self._completed) > _LIST_COMPLETED_WINDOW:
             self.runs.pop(self._completed.popleft(), None)
@@ -2616,13 +2421,12 @@ class Supervisor:
     def _teardown(self) -> None:
         if self.state == "closed":
             return  # closed is final: a second teardown has nothing to release
-        # What this incarnation owns is read off the state it ends from.
+        # what this incarnation owns is read off the state it ends from
         entered = self.state
         published = entered in ("serving", "shutting_down", "stopped")
         private_bound = entered == "bound"
-        # Closed first, so no request is dispatched while replies flush, even
-        # if reads are ready. One deadline for all clients, including a
-        # SHUTDOWN reply.
+        # closed first, so no request is dispatched while replies flush; one deadline for
+        # all clients, a SHUTDOWN reply included
         self._process(TEARDOWN)  # supervisor_process.10 or 11
         deadline = time.monotonic() + 2.0
         while any(conn.out for conn in self._conns.values()):
@@ -2655,8 +2459,8 @@ class Supervisor:
                 with contextlib.suppress(OSError):
                     os.close(run.lifeline_w)
         if self._prior_wakeup_fd is not None:
-            # before the pipe closes: a wakeup fd left on a closed descriptor
-            # would write signal numbers into whatever reuses the number
+            # before the pipe closes: a wakeup fd on a closed descriptor would write signal
+            # numbers into whatever reuses the number
             signal.set_wakeup_fd(self._prior_wakeup_fd)
             self._prior_wakeup_fd = None
         for fd in (self._chld_r, self._chld_w):
@@ -2670,8 +2474,8 @@ class Supervisor:
 
 
 def _is_grace_seconds(value: object) -> bool:
-    """A finite number of zero or more. An integer past float range (10**400)
-    is refused as a bad value, as the wrapper's own check does, not raised."""
+    """A finite number of zero or more; an integer past float range (10**400) is refused,
+    as the wrapper's own check does, not raised."""
     if not isinstance(value, int | float) or isinstance(value, bool):
         return False
     try:
@@ -2681,14 +2485,11 @@ def _is_grace_seconds(value: object) -> bool:
     return math.isfinite(grace_s) and grace_s >= 0.0
 
 
-#: the frozen ss2 wrapper-input schema, as (key, predicate) -- the whole of
-#: it, because a fingerprint over a spec with an unpinned key type is not
-#: collision-free, and an unvalidated field that only explodes after the
-#: fork kills the one process whose death EOFs every wrapper on the host.
-#: `grace_seconds` must be FINITE (DL-151): an `Infinity` passed the old
-#: `>= 0.0` test, and SHUTDOWN escalates TERM->KILL after that many seconds,
-#: so one such spec made the whole shutdown unbounded -- a supervisor that
-#: never exits and a run root that can never be rerouted.
+#: the frozen ss2 wrapper-input schema as (key, predicate), the whole of it: a
+#: fingerprint over an unpinned key type is not collision-free, and a field that
+#: explodes after the fork kills the process whose death EOFs every wrapper.
+#: `grace_seconds` must be FINITE (DL-151): SHUTDOWN escalates TERM->KILL after that
+#: many seconds, so `Infinity` would make the shutdown unbounded.
 _SPEC_SCHEMA: dict[str, Any] = {
     "version": is_wire_int,
     "run_id": lambda v: isinstance(v, str),
@@ -2703,24 +2504,19 @@ _SPEC_SCHEMA: dict[str, Any] = {
     "lifeline_fd": is_wire_int,
 }
 
-#: lifeline_fd is the supervisor's to fill; a retry may carry a stale one
-#: (the fingerprint strips it), but nothing else may be missing
+#: lifeline_fd is the supervisor's to fill (the fingerprint strips a stale one); nothing
+#: else may be missing
 _SPEC_OPTIONAL = frozenset({"lifeline_fd"})
 
 
 def _spec_schema_error(spec: dict[str, Any]) -> str | None:
-    """The frozen ss2 shape, or the first reason it is not. Unknown keys
-    REFUSE: the protocol is frozen, so a key this schema does not pin is a
-    key whose type is not pinned either -- and the fingerprint's typed float
-    encoding is only injective over pinned types.
+    """The frozen ss2 shape, or the first reason it is not.
 
-    A NUL in any string field refuses too (DL-151). It is not a type error,
-    so the predicates above cannot see it, and nothing downstream can either:
-    `os.open`, `subprocess.Popen` and `os.path` all raise ValueError for an
-    embedded null, which is not the OSError the wrapper guards with. A NUL in
-    `command` or a path therefore killed the wrapper AFTER the fork, with no
-    `status.json` written -- the E7 case the wrapper is built never to
-    produce."""
+    Unknown keys REFUSE: an unpinned key has an unpinned type, and the fingerprint's
+    float encoding is injective only over pinned types. A NUL in any string field
+    refuses too (DL-151): `os.open`, `subprocess.Popen` and `os.path` raise ValueError
+    on it, not the OSError the wrapper guards with, so it would kill the wrapper after
+    the fork with no `status.json` (the E7 case)."""
     for key in spec:
         if key not in _SPEC_SCHEMA:
             return f"unknown spec key {key!r}"
@@ -2740,11 +2536,9 @@ def _spec_schema_error(spec: dict[str, Any]) -> str | None:
 def _duplicate_from(
     run_id: str, doc: dict[str, Any] | None, pid_key: str, at_key: str
 ) -> dict[str, Any] | None:
-    """The frozen ss11a duplicate envelope, built from `doc` -- or None when
-    that record cannot carry it or the record does not NAME this run. An
-    unreadable, half-written or foreign record is not an answer, so the
-    caller falls to the next row of the table rather than inventing a pid
-    (or handing back a stranger's)."""
+    """The frozen ss11a duplicate envelope built from `doc`, or None when the record
+    cannot carry it or does not NAME this run. An unreadable, half-written or foreign
+    record is no answer: the caller falls to the next table row."""
     if doc is None or doc.get("run_id") != run_id:
         return None
     pid = doc.get(pid_key)
@@ -2760,26 +2554,21 @@ def _duplicate_from(
     }
 
 
-#: `_load_json`'s "present but unreadable" answer. Distinct from None
-#: (absent), because ss11a's table keys on ABSENCE -- "no index entry" means
-#: "first application" -- and reading corruption as absence would turn a
-#: damaged index entry into an authorization to spawn a second process.
+#: `_load_json`'s "present but unreadable" answer, distinct from None (absent): ss11a's
+#: table keys on ABSENCE, and reading corruption as absence would authorize a second spawn.
 _INVALID: dict[str, Any] = {"__invalid__": True}
 
-#: `_indexed_owner`'s "the directory cannot be listed" answer -- outside the
-#: run_id grammar, so it can never equal a real owner
+#: `_indexed_owner`'s "cannot be listed" answer; outside the run_id grammar, so it never
+#: equals a real owner
 _UNREADABLE = "__unreadable__"
 
 
 def _load_json(path: str) -> dict[str, Any] | None:
-    """A wrapper-written spool record: plain JSON. ABSENT means exactly
-    ENOENT -- an EACCES or EIO is a file that EXISTS and cannot be read,
-    and reading that as absence would erase evidence (ss11a).
-
-    Bytes that are not UTF-8 are the same kind of unreadable and take the
-    same answer (DL-151). The bytes are decoded as strict UTF-8 before they
-    are parsed: `json.load` on a binary handle detects UTF-16 and UTF-32 and
-    accepts them, so only the explicit decode refuses them (DL-229)."""
+    """A wrapper-written spool record: plain JSON. ABSENT means exactly ENOENT; an EACCES
+    or EIO file exists and is unreadable, and reading that as absence would erase
+    evidence (ss11a). Bytes that are not UTF-8 are unreadable too (DL-151): they are
+    decoded as strict UTF-8 first because `json.load` on a binary handle accepts UTF-16
+    and UTF-32 (DL-229)."""
     try:
         with open(path, "rb") as f:
             raw = f.read()
@@ -2796,13 +2585,11 @@ def _load_json(path: str) -> dict[str, Any] | None:
     return loaded
 
 
-#: the ss11a tombstone schemas: required keys and their type checks, per
-#: file. A record answering a replay is EVIDENCE, and evidence with a
-#: missing or mistyped field is refused, not partially believed.
-#: required on EVERY tombstone: `canon.decode` refuses a version it does not
-#: implement but passes an ABSENT one (whether a version is required is the
-#: reader's call -- canon.check_artifact_version), and this reader requires
-#: it: an unversioned record is unsupported evidence.
+#: the ss11a tombstone schemas: required keys and type checks per file. A record that
+#: answers a replay is EVIDENCE, refused when a field is missing or mistyped.
+#: Every tombstone requires its version: `canon.decode` passes an ABSENT one
+#: (canon.check_artifact_version leaves that to the reader), and an unversioned record
+#: is unsupported evidence.
 _VERSIONED = {"artifact_format_version": lambda v: is_wire_int(v) and v == ARTIFACT_FORMAT_VERSION}
 
 _TOMBSTONE_SCHEMAS: dict[str, dict[str, Any]] = {
@@ -2828,12 +2615,9 @@ _TOMBSTONE_SCHEMAS: dict[str, dict[str, Any]] = {
 
 
 def _load_tombstone(path: str, kind: str) -> dict[str, Any] | None:
-    """A supervisor-written ss11a record, read through the ss3.2 ingress:
-    duplicate keys, floats, non-scalar strings and an artifact_format_version
-    this binary does not implement all refuse (PR-08d/PR-12), and so do bytes
-    that are not UTF-8 and a record missing a required field -- `json.load`
-    would accept all of them and let a replay answer from unsupported
-    evidence."""
+    """A supervisor-written ss11a record read through the ss3.2 ingress. Duplicate keys,
+    floats, non-scalar strings, an unimplemented artifact_format_version (PR-08d/PR-12),
+    non-UTF-8 bytes and a missing required field all refuse."""
     try:
         with open(path, "rb") as f:
             raw = f.read()
@@ -2868,11 +2652,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.deadman_seconds is not None and not (
         math.isfinite(args.deadman_seconds) and args.deadman_seconds > 0
     ):
-        # FINITE and positive, in that order (DL-151). `nan` fails every
-        # comparison, so `<= 0` let it through and the interval then fired on
-        # the first tick -- a supervisor that exits at once and takes every
-        # wrapper with it. `inf` passed the same gate and never fired, which
-        # is `--deadman-seconds` spelled as no deadman at all.
+        # FINITE and positive, in that order (DL-151): `nan` fails every comparison and
+        # would fire on the first tick; `inf` never fires, which is no deadman at all
         print("supervisor: --deadman-seconds must be a finite positive number", file=sys.stderr)
         return 2
     # ENOENT on the run_root is a caller bug (the engine makes it first)
