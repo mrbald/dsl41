@@ -1,11 +1,9 @@
-"""The cascade's payloads and intents (docs/statechart-engine.md ss5, ss8,
-ss11; DL-350).
+"""The cascade's payloads and intents (docs/statechart-engine.md ss5, ss8, ss11; DL-350).
 
-A row of the `job` chart that sends beyond its own move carries one of these
-payloads, and an item the hook cannot derive from its row and its payload
-reports an intent, which the hook applies after the row's writes
-(`oracle.Oracle._perform`). `Move` is one status move's record, shared by its
-box rules, its settlement and its wakes. `Program`, `Once` and `Settle` are a
+A row of the `job` chart that sends beyond its own move carries one of these payloads, and an
+item the hook cannot derive from its row and its payload reports an intent, which the hook
+applies after the row's writes (`oracle.Oracle._perform`). `Move` is one status move's record,
+shared by its box rules, its settlement and its wakes. `Program`, `Once` and `Settle` are a
 moment's payload: a self-event whose next step the oracle reads when it pops
 (`oracle_cascade`).
 """
@@ -39,18 +37,16 @@ class Intent(Protocol):
 
 
 class Move:
-    """One status move's record (DL-350): the job, the status it leaves
-    and its run, which the row's action reads before the write; the status it
-    reaches (`new`), which the hook fills after the write; whether the run's
-    units settled early (`done`, job.401) and whether a settlement released
-    any (`released`). Its box rules, its settlement and its wakes share it.
+    """One status move's record (DL-350): the job, the status it leaves and its run (read before
+    the write), the status it reaches (`new`, filled after the write), whether the run's units
+    settled early (`done`, job.401) and whether a settlement released any (`released`).
 
-    As an intent it is the move's bookkeeping after the write. A move on its
-    own (`OracleCascade._after`): a box leaving RUNNING owes the admit-only
-    scan, and a move that leaves STARTING or RUNNING registers its late
-    settlement for its box rules (DL-340). A row of a batch
-    (`OracleCascade._on_cascades`, `batch`): its rank drops now, a box leaving
-    RUNNING owes the scan, and the batch's second phase reads it."""
+    As an intent it is the move's bookkeeping after the write. A move on its own
+    (`OracleCascade._after`): a box leaving RUNNING owes the admit-only scan, and a move that
+    leaves STARTING or RUNNING registers its late settlement for its box rules (DL-340). A row
+    of a batch (`OracleCascade._on_cascades`, `batch`): its rank drops now, a box leaving
+    RUNNING owes the scan, and the batch's second phase reads it.
+    """
 
     __slots__ = ("job", "old", "run", "new", "done", "released", "batch")
 
@@ -82,11 +78,10 @@ class Move:
 
 @dataclass(eq=False)
 class Batch:
-    """One batch INACTIVE path (DL-242): the box it begins at, the rows its
-    first phase wrote and settled, in order, and how they are written: a box
-    start's reset (`starting`, the box's own move to STARTING between the
-    phases) or a box set INACTIVE (`clear`, its exit codes; `code`, the
-    first row's)."""
+    """One batch INACTIVE path (DL-242): the box it begins at, the rows its first phase wrote
+    and settled, in order, and how they are written: a box start's reset (`starting`, the box's
+    own move to STARTING between the phases) or a box set INACTIVE (`clear`, its exit codes;
+    `code`, the first row's)."""
 
     box: str
     starting: Starting | None = None
@@ -187,8 +182,8 @@ class ClearCodes:
 
 @dataclass(frozen=True)
 class DeferToOpening:
-    """A tickless waiter that failed the day check waits for its next eligible
-    day's opening (DL-257)."""
+    """A tickless waiter that failed the day check waits for its next eligible day's opening
+    (DL-257)."""
 
     job_ir: JobIR
     cause: str
@@ -264,11 +259,10 @@ class Step:
 
 
 class Program:
-    """A moment of several steps (DL-350). Each pop takes one step of
-    `steps`, a generator of the oracle's that reads the store when it resumes
-    and never writes: the step's items, then the moment again, so its next
-    step reads the state their whole cascade left. A pop that finds the
-    generator done sends nothing."""
+    """A moment of several steps (DL-350). Each pop takes one step of `steps`, a generator that
+    reads the store when it resumes and never writes: the step's items, then the moment again,
+    so its next step reads the state their whole cascade left. A pop that finds the generator
+    done sends nothing."""
 
     __slots__ = ("_name", "_steps")
 

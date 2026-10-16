@@ -1,49 +1,23 @@
-"""The oracle's state, and the vocabulary of the events that move it.
+"""The oracle's state and the vocabulary of the events that move it (DL-91).
 
-Split out of oracle.py by DL-91. The seam is not "extract the state owner"
--- `RuntimeState`'s timer heap holds `Event`s, so `Event` comes with it and
-brings `EventKind` -- it is the pair the interpreter always was: the MODEL
-and the machine that moves it. `oracle.py` imports this; nothing here
-imports `oracle.py`, and that direction is the whole point.
+`oracle.py` imports this module; nothing here imports `oracle.py`.
 
-The import table said it from outside before the split did: ten modules
-import from `oracle`, eight of them want `Event` and six want `Oracle`, so
-`runner_scheduler` was dragging an 854-line interpreter in to name a
-timestamped event.
+- The vocabulary: `JobStatus`, `TERMINAL`, `EventKind`, `Event`, `TraceEntry`. `Event` is the
+  oracle's input alphabet and, with `source`, its provenance (DL-68).
+- The rows: `JobRuntime`, `GlobalRuntime` and `HostRuntime`, all frozen (DL-86, DL-94), and the
+  semantic projection that decides when a revision moves.
+- The owner: `RuntimeState` holds private maps, typed verbs, the timer heap with its ordering
+  token, and the input transaction that gives one committed input one revision per changed
+  entity (concurrency-model ss3).
+- `OracleError`, defined here because it has no dependencies.
+- The machines the owner holds: `runtime_assembly` declares assembly and the open input, `host`
+  declares one host's routing state (docs/state-machines.md), and the `job` chart (`job_chart`)
+  declares every move of a job row. The oracle drives the chart and writes what it reached
+  through the verbs here.
 
-What is here:
-
-- **The vocabulary.** `JobStatus`, `TERMINAL`, `EventKind`, `Event`,
-  `TraceEntry`. `Event` is the oracle's input alphabet and, with `source`,
-  its provenance (DL-68).
-- **The rows.** `JobRuntime`, `GlobalRuntime` and `HostRuntime`, all FROZEN
-  (DL-86, DL-94), and the semantic projection that decides when a revision
-  moves.
-- **The owner.** `RuntimeState`: private maps, typed verbs, the timer heap
-  with its ordering token, and the input transaction that gives one
-  committed input exactly one revision per changed entity
-  (concurrency-model ss3).
-
-- **`OracleError`**, raised on both sides of the split, so it is defined on
-  the side that has no dependencies.
-- **The machines the owner holds.** `runtime_assembly` declares how a
-  state is assembled and when an input is open, and `host` declares one
-  host's routing state (docs/state-machines.md). The `job` chart
-  (`job_chart`) declares every move of a job row; the oracle drives it and
-  writes what it reached through the verbs here.
-
-`HostRuntime` is here and NOT in `oracle.py` for a reason the split makes
-enforceable (DL-93): a job's condition truth cannot depend on where its
-machine routes, so the interpreter must never read a host row. It lives
-under the same owner because it is published state with a `state_rev` that
-an `expect` names -- a routing table with a revision counter of its own
-would be the same concept spelled a second way.
-
-`InputBatch` stayed with `Oracle`: it drives the interpreter's clock and
-drain, which is the interpreter's business, not the state's.
-
-What is NOT here: `_N_FALSE_STATUSES` (SEM-02's n() rule is interpretation,
-not state) and every SEM rule that reads or writes these rows.
+`HostRuntime` lives here, not in `oracle.py`: a job's condition truth cannot depend on where
+its machine routes, so the interpreter never reads a host row (DL-93). `InputBatch` stays with
+`Oracle`. `_N_FALSE_STATUSES` (SEM-02's n() rule) is interpretation, not state.
 """
 
 from __future__ import annotations
@@ -82,15 +56,11 @@ class OracleError(ValueError):
 class CascadeDepthError(OracleError, RecursionError):
     """An instant cascade that did not end.
 
-    The oracle's cascade is the executor's worklist, so a cascade that
-    never ends takes items, not frames: the hook counts a root dispatch's
-    items and stops it at the item cap for the estate's job count
-    (`jobs` given, DL-351). The message names the cap, the job count
-    and the root item. A fact's own recursion, such as a deep condition, can
-    still pass the interpreter's recursion limit (`jobs` None); the message
-    then names the RecursionError and the root's job. Either way the same
-    input raises it again on every replay, so an operator can tell it from a
-    corrupt log."""
+    The hook stops a root dispatch at the item cap for the estate's job count (`jobs` given,
+    DL-351); the message names the cap, the job count and the root item. A deep condition can
+    pass the recursion limit instead (`jobs` None); the message then names the RecursionError
+    and the root's job. The same input raises it again on every replay.
+    """
 
     def __init__(self, job: str, cause: str, limit: int, *, jobs: int | None = None) -> None:
         if jobs is None:
@@ -120,25 +90,19 @@ JobStatus = Literal[
 #: Every job status: the leaves of the `job` chart's status region.
 JOB_STATUSES: frozenset[JobStatus] = frozenset(get_args(JobStatus))
 
-#: The statuses an injected STATUS event may carry: every `JobStatus` except
-#: QUE_WAIT. QUE_WAIT belongs to the capacity owner (DL-50): the queue
-#: assigns it with a waiter rank and clears it on admission, and an operator
-#: never injects it (DL-264). The oracle's STATUS handler and the control
-#: server's CHANGE_STATUS check both read this one set, so framing cannot
-#: admit a status the oracle refuses.
+#: The statuses an injected STATUS event may carry: every `JobStatus` except QUE_WAIT, which the
+#: capacity owner assigns and clears (DL-50, DL-264). The oracle's STATUS handler and the control
+#: server's CHANGE_STATUS check share this set.
 INJECTABLE_STATUSES: frozenset[JobStatus] = JOB_STATUSES - {"QUE_WAIT"}
 
 TERMINAL: frozenset[JobStatus] = frozenset({"SUCCESS", "FAILURE", "TERMINATED"})
-#: The terminal statuses that are not SUCCESS, named once: a failed vote in
-#: the SEM-11 fold and the SEM-15 recompute, the box end that cascades to
-#: job_terminator members (SEM-14), the FORCE_STARTJOB that starts on held
-#: units (DL-256), and the CLI's `is-failed` predicate.
+#: The terminal statuses that are not SUCCESS: a failed vote in the SEM-11 fold and the SEM-15
+#: recompute, the box end that cascades to job_terminator members (SEM-14), the FORCE_STARTJOB
+#: that starts on held units (DL-256), and the CLI's `is-failed` predicate.
 FAILED: frozenset[JobStatus] = frozenset({"FAILURE", "TERMINATED"})
-# A run's reservations are taken while a row is in LIVE (period-model ss5)
-# and released on leaving it, except the units a renewable's policy does not
-# free: those stay on a row that is not live (DL-256, `may_outlive_run`). The
-# release edge (DL-120), the SPAWN edge (DL-232) and the completion gate
-# (DL-235) read it.
+# A run's reservations are held while a row is in LIVE (period-model ss5) and released on
+# leaving it, except the units a renewable's policy does not free (DL-256, `may_outlive_run`).
+# The release edge (DL-120), the SPAWN edge (DL-232) and the completion gate (DL-235) read it.
 LIVE: frozenset[JobStatus] = frozenset({"STARTING", "RUNNING"})
 #: A job with a run in progress or a place in the queue.
 LIVE_OR_QUEUED: frozenset[JobStatus] = LIVE | {"QUE_WAIT"}
@@ -165,11 +129,9 @@ EventKind = Literal[
 ]
 
 
-#: The engine's ss7 input alphabet: where an externally injected event came
-#: from. Named (DL-209) because the stamps live in call keywords AND in
-#: parameter defaults -- `adapter` exists only as `Engine._enqueue`'s default
-#: -- so an AST sweep for one spelling misses the other, and `adapter` is
-#: the stamp that makes an event a COMPLETION subject to the ss4 stale gate.
+#: The engine's ss7 input alphabet: where an externally injected event came from. `adapter` is
+#: the stamp that makes an event a COMPLETION subject to the ss4 stale gate. Stamps live in call
+#: keywords and parameter defaults (DL-209).
 EventSource = Literal["scheduler", "control", "adapter", "reconcile"]
 
 
@@ -177,15 +139,10 @@ class Event(BaseModel):
     at: datetime
     kind: EventKind
     payload: dict[str, object] = {}
-    #: provenance of an externally injected event -- the engine's ss7 input
-    #: alphabet; None for oracle-internal and script events. Start causes
-    #: surface it (DL-68).
-    #: DELIBERATELY `str`, not `EventSource`: this field is persisted (WAL
-    #: attempts, scenario files) and `docs/protocol-evolution.md` holds a
-    #: long-lived artifact to its own schema. A foreign or older journal
-    #: naming a provenance this build does not know must still REPLAY; the
-    #: Literal above is what the engine annotates and what the coverage
-    #: register derives from, not a validation gate on the wire.
+    #: Provenance of an externally injected event (ss7); None for oracle-internal and script
+    #: events. Start causes surface it (DL-68). It is `str`, not `EventSource`: the field is
+    #: persisted and `docs/protocol-evolution.md` holds it to its own schema, so a journal naming
+    #: an unknown provenance still replays.
     source: str | None = None
 
     def job(self) -> str | None:
@@ -200,8 +157,7 @@ class TraceEntry(BaseModel):
     cause: str
 
 
-#: DL-50's three release policies, named once: `CapacityReservation` stores
-#: one and `capacity.py` derives it from res_type + FREE.
+#: DL-50's three release policies: `CapacityReservation` stores one, `capacity.py` derives it.
 ReleasePolicy = Literal["completion", "success", "never"]
 
 
@@ -216,13 +172,11 @@ class CapacityReservation(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    #: `m:<machine>` (max_load) or `r:<name>` (resource amount), as
-    #: `CapacityPool` keys them.
+    #: `m:<machine>` (max_load) or `r:<name>` (resource amount), as `CapacityPool` keys them.
     bucket: str
     units: int = Field(gt=0)
-    #: DL-50: when the units go back. `never` and an unmet `success` are the
-    #: two that do not free them: a depletable's are spent (SEM-16), and a
-    #: renewable's stay held by the job (DL-256).
+    #: DL-50: when the units go back. `never` and an unmet `success` do not free them: a
+    #: depletable's are spent (SEM-16), a renewable's stay held by the job (DL-256).
     release_policy: ReleasePolicy
 
 
@@ -231,13 +185,12 @@ def unreleased(
     success: bool,
     keeps_held: Callable[[str], bool] | None,
 ) -> tuple[tuple[CapacityReservation, ...], tuple[CapacityReservation, ...]]:
-    """The one rule of a run's end on its units (DL-120, DL-256): the units
-    it does not free, as (kept, spent). Every end frees a `completion`
-    unit, and a SUCCESS (`success`) a `success` unit. What is not freed
-    stays held by the job where `keeps_held(bucket)` says so, and is spent
-    otherwise; with no `keeps_held`, everything not freed is spent. The
-    store's verb (`RuntimeState.release_reservations`) applies it and the
-    payload's handle (`RowUnits.release`) reads it (DL-356)."""
+    """The units a run's end does not free, as (kept, spent) (DL-120, DL-256).
+
+    Every end frees a `completion` unit and a SUCCESS a `success` unit. The rest stays held where
+    `keeps_held(bucket)` says so and is spent otherwise; with no `keeps_held`, all of it is
+    spent. `RuntimeState.release_reservations` and `RowUnits.release` apply it (DL-356).
+    """
     kept: list[CapacityReservation] = []
     spent: list[CapacityReservation] = []
     for reservation in reservations:
@@ -257,11 +210,10 @@ RESOURCE_BUCKET = "r:"
 
 def may_outlive_run(reservation: CapacityReservation) -> bool:
     """DL-256: whether this reservation may stay on a row that is not live.
-    Only a named resource's units under a policy that does not free on every
-    completion can: the units a renewable kept after its run, held until
-    RELEASE_RESOURCE or the job's next run. A machine load and a
-    `completion` reservation are always released at the run's end. The
-    seal loader and the store's invariant check share this one rule."""
+
+    Only a named resource's units under a policy that does not free on every completion can.
+    The seal loader and the store's invariant check share this rule.
+    """
     return (
         reservation.bucket.startswith(RESOURCE_BUCKET)
         and reservation.release_policy != "completion"
@@ -290,52 +242,34 @@ class JobRuntime(BaseModel):
     on_noexec: bool = False
     armed: bool = False  # a scheduled tick latched at a releasable gate (Q3, DL-54)
     started_by: str | None = None  # trace cause of the most recent actual start (DL-68)
-    #: which PERIOD this run started in (period-model ss3.5, DL-132): set
-    #: beside run_number at the actual start, so a run that crosses a seal
-    #: -- CMD, FW, a SPAWN pending across periods, or a box, which has no
-    #: execution entry at all -- stays attributable to the period that
-    #: started it (PR-50). 1 for every row a pre-period build wrote.
+    #: The period this run started in (period-model ss3.5, DL-132), set with run_number at the
+    #: actual start (PR-50). 1 for every row a pre-period build wrote.
     start_period: int = 1
-    #: SEM-10 at-most-once bookkeeping: the members already run in THIS box's
-    #: current execution. Only a BOX row ever carries entries; it was the loose
-    #: `_box_ran` map until DL-86 moved it onto the entity it describes.
+    #: SEM-10 at-most-once bookkeeping: the members already run in this box's current execution.
+    #: Only a BOX row carries entries; `start_run` resets it.
     ran_members: frozenset[str] = frozenset()
-    #: Every resolution in THIS box execution: the members whose INACTIVE
-    #: is an explicit verdict, a run_window skip (SEM-33/DL-154) or an
-    #: operator's injected STATUS INACTIVE (SEM-11, DL-242). The SEM-11 fold
-    #: completes past a resolved member that is not live. A member that
-    #: merely waits in the run is INACTIVE too, but carries no mark. The
-    #: member's own later start voids the mark. Only a BOX row ever carries
-    #: entries; reset beside `ran_members` on box start. The name predates
-    #: DL-242 and stays: sealed periods and their attestations carry it.
+    #: Members whose INACTIVE in this box execution is an explicit verdict: a run_window skip
+    #: (SEM-33, DL-154) or an injected STATUS INACTIVE (SEM-11, DL-242). The SEM-11 fold
+    #: completes past a resolved member that is not live. The member's own start voids the mark.
+    #: Only a BOX row carries entries; `start_run` resets it. The name is carried by sealed
+    #: periods and their attestations.
     window_skipped_members: frozenset[str] = frozenset()
-    #: The members taken off ice during THIS box execution before they ran
-    #: in it, under `off-ice-in-running-box=next-run` (SEM-20). They sit
-    #: the run out: the SEM-11 fold skips them while they are not live or
-    #: queued, and a plain start of one is refused until the box's next
-    #: run. Unlike a resolution mark, the mark keeps a plain start out.
-    #: FORCE_STARTJOB starts the member anyway: the start voids the mark,
-    #: and a forced attempt that queues keeps the box waiting. An attempt
-    #: that leaves the queue unstarted keeps the mark: the force was a
-    #: one-shot override. Only a BOX row ever carries entries; reset
-    #: beside `ran_members` on box start.
+    #: Members taken off ice in this box execution before they ran in it, under
+    #: `off-ice-in-running-box=next-run` (SEM-20). The SEM-11 fold skips them while they are not
+    #: live or queued, and a plain start is refused until the box's next run. FORCE_STARTJOB
+    #: starts the member anyway and voids the mark; an attempt that leaves the queue unstarted
+    #: keeps it. Only a BOX row carries entries; `start_run` resets it.
     iced_out_members: frozenset[str] = frozenset()
-    #: DL-120: the capacity vector THIS run acquired, held while STARTING or
-    #: RUNNING. After the run, the row keeps only a renewable's units its
-    #: policy did not free (DL-256, `may_outlive_run`), until RELEASE_RESOURCE
-    #: or the job's next run takes them over. It belongs on the row rather
-    #: than in a map beside it -- which is also what makes it reconstructible
-    #: from the rows a seal carries (period-model ss5).
+    #: DL-120: the capacity vector this run acquired, held while STARTING or RUNNING. After the
+    #: run the row keeps only a renewable's units its policy did not free (DL-256,
+    #: `may_outlive_run`), until RELEASE_RESOURCE or the job's next run (period-model ss5).
     reservations: tuple[CapacityReservation, ...] = ()
-    #: DL-120: this job's rank in the QUE_WAIT queue, non-null iff QUE_WAIT.
-    #: The rank is allocated from `RuntimeState.enqueue_counter` and rides on
-    #: the row so that admission ORDER survives a boundary (PR-21).
+    #: DL-120: this job's rank in the QUE_WAIT queue, non-null iff QUE_WAIT. Allocated from
+    #: `RuntimeState.enqueue_counter`; it keeps admission order across a boundary (PR-21).
     waiter_seq: int | None = None
-    #: DL-87: this entity's optimistic-locking revision. Incremented at most
-    #: once per committed input, and only when the SEMANTIC projection below
-    #: changed. Deliberately last, and deliberately excluded from that
-    #: projection -- a revision that counted itself would justify its own
-    #: next increment (concurrency-model ss3).
+    #: DL-87: this entity's optimistic-locking revision. Incremented at most once per committed
+    #: input, and only when the semantic projection changed. It is excluded from that projection
+    #: (concurrency-model ss3).
     state_rev: int = 0
 
 
@@ -350,8 +284,7 @@ class GlobalRuntime(BaseModel):
     state_rev: int = 0
 
 
-#: concurrency-model ss8's four routing states, in the order that table
-#: lists them. `quarantined` is the leader's own, set automatically on
+#: concurrency-model ss8's four routing states. `quarantined` is the leader's own, set on
 #: unreachability (ss7); the other three are the operator's.
 HostState = Literal["active", "passive", "quarantined", "evicted"]
 
@@ -376,69 +309,36 @@ class HostRuntime(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     state: HostState = "active"
-    #: ss8's eviction fence. Eviction bumps it; a returning relay presenting
-    #: a stale one is refused registration and must self-fence before it may
-    #: re-register (CM-12, stage S5d).
+    #: ss8's eviction fence. Eviction bumps it; a returning relay presenting a stale one is
+    #: refused registration and must self-fence first (CM-12, stage S5d).
     generation: int = 0
-    #: ss8's deadman interval, in seconds. OPT-IN PER RUN ROOT, because it
-    #: costs something real: a supervisor tolerating an absent controller
-    #: indefinitely is what lets an engine crash and resume with its runs
-    #: intact (DL-79). None = this host runs no deadman, so nothing bounds
-    #: when its wrappers die and it is never reroutable except by force.
-    #: S5b supplies the mechanism; the refusal it justifies is checkable the
-    #: day this field exists.
+    #: ss8's deadman interval, in seconds, opt-in per run root so that a supervisor can tolerate
+    #: an absent controller (DL-79). None means no deadman: the host is reroutable only by force.
     deadman_s: float | None = None
-    #: when the leader last had positive contact with this host. Stamped at
-    #: registration and kept fresh by the S5b deadman's own traffic. It is
-    #: the only clock in ss8's eviction bound, so a host that never reports
-    #: is never evictable on time -- which is the correct direction.
+    #: When the leader last had positive contact with this host: stamped at registration and
+    #: kept fresh by the S5b deadman's traffic. It is the only clock in ss8's eviction bound.
     last_contact: datetime | None = None
-    #: non-null iff the CURRENT `evicted` state was reached by `--force`,
-    #: carrying the actor that claimed it. Not a copy of the log's actor
-    #: field: the log records who sent every command, this records the one
-    #: fact that changes how the whole estate must be read -- work was
-    #: rerouted without proof the old executor was dead. ss8 promises that
-    #: is "loud, durable and attributable", and a fact you have to grep a
-    #: WAL for is not loud.
+    #: Non-null iff the current `evicted` state was reached by `--force`; carries the actor.
+    #: ss8 requires such a reroute to be loud, durable and attributable.
     forced_by: str | None = None
-    #: what quarantine interrupted, so that clearing it restores the
-    #: OPERATOR's intent rather than overriding it (DL-97). ss8 gives
-    #: `quarantined` to the leader and the other states to the operator, and
-    #: a host that was drained before it stopped answering must still be
-    #: drained when it answers again -- otherwise a network blip silently
-    #: undoes a maintenance window. Non-null only while `state` is
-    #: `quarantined`.
+    #: What quarantine interrupted, so that clearing it restores the operator's intent (DL-97):
+    #: a drained host stays drained. Non-null only while `state` is `quarantined`.
     state_before_quarantine: HostState | None = None
     #: DL-94: this entity's revision, on the same rule as the rows above.
     state_rev: int = 0
 
 
-#: The fields whose change makes an entity's revision move. DERIVED as
-#: "everything on the model except these", not enumerated, so a field added
-#: later is projected by DEFAULT -- over-approximating the projection costs a
-#: spurious revision, under-approximating loses a conflict (concurrency-model
-#: ss3, and the DL-83 discipline that a gate must not silently narrow).
+#: The fields whose change moves an entity's revision: every model field except these, so a
+#: field added later is projected by default (concurrency-model ss3, DL-83).
 #:
-#: `state_rev` is the only exclusion the models carry today. The others ss3
-#: names -- `watching`, log locations, catalog metadata, `spec_drift` -- are
-#: effect or disk state that lives runner-side and never entered these rows;
-#: if one ever does, its name belongs here with a reason.
+#: `state_rev` is the only exclusion the models carry. Effect and disk state (`watching`, log
+#: locations, catalog metadata, `spec_drift`) lives runner-side.
 _UNPROJECTED: frozenset[str] = frozenset({"state_rev"})
-#: ss3's other exclusion class, reaching the host row (DL-95): `last_contact`
-#: is liveness that moves with relay traffic and no committed input -- the
-#: same category ss3 names `watching` for. Projecting it would put a revision
-#: on every lease renewal, which makes an operator's `expect` on a host
-#: unholdable and the WAL a heartbeat log. Excluding it is safe in the
-#: direction that matters: a fresher contact only ever DELAYS an eviction,
-#: and a replay re-seeds it at resume time, which is fresher still.
-#: and DL-133's other half (period-model ss3.3, PR-24b): `deadman_s` is the
-#: OBSERVED liveness configuration, read back from the host and never
-#: declared by the leader. `register_host` moves it, startup registers with
-#: no journal record, and a projected `deadman_s` therefore moves a revision
-#: audit cannot derive -- replaying from a seal that says revision 5, audit
-#: could not produce the 6 the next seal carries. Nothing an operator holds
-#: an `expect` against depends on it, and the eviction gate reads the
-#: current row value regardless of revision.
+#: `last_contact` is liveness that
+#: moves with relay traffic and no committed input; projecting it would put a revision on every
+#: lease renewal (DL-95). `deadman_s` is observed liveness configuration that `register_host`
+#: moves with no journal record, so projecting it would move a revision audit cannot derive
+#: (DL-133, period-model ss3.3, PR-24b).
 _UNPROJECTED_HOST: frozenset[str] = _UNPROJECTED | {"last_contact", "deadman_s"}
 _PROJECTED_JOB_FIELDS: tuple[str, ...] = tuple(
     name for name in JobRuntime.model_fields if name not in _UNPROJECTED
@@ -450,14 +350,7 @@ _DEFAULT_JOB = JobRuntime()
 
 
 def _timer_order(entry: tuple[datetime, int, Event] | tuple[datetime, int]) -> tuple[datetime, int]:
-    """ss3.2's timer order, spelled ONCE (DL-145): `(due, token)` and
-    nothing after it.
-
-    The heap, the carry's install and both timer readers used to spell it
-    three ways -- an explicit key, a bare `sorted` over the whole triple,
-    and a projection sorted as a pair. The bare one reached the EVENT on a
-    tie, which the token makes impossible today and which no reader should
-    have to prove again to change a field on `Event` (DL-143's area)."""
+    """ss3.2's timer order, spelled once (DL-145, DL-143): `(due, token)` and nothing after it."""
     return (entry[0], entry[1])
 
 
@@ -477,23 +370,22 @@ class CarriedRows(BaseModel):
     jobs: dict[str, JobRuntime] = {}
     globals_: dict[str, GlobalRuntime] = {}
     hosts: dict[str, HostRuntime] = {}
-    #: ss3.2's order: `(due, token)`, never heap-array layout
+    #: ss3.2's order: `(due, token)`, never heap-array layout.
     timers: tuple[tuple[datetime, int, Event], ...] = ()
     timer_seq: int = 0
     consumed: dict[str, int] = {}
     enqueue_counter: int = 0
     period_id: int = 1
-    #: T. Feed times must be non-decreasing across the boundary, so the
-    #: opened interpreter starts from the instant the seal was taken at
+    #: T, the instant the seal was taken at. Feed times are non-decreasing across the boundary,
+    #: so the opened interpreter starts from T.
     now: datetime | None = None
 
 
 # ------------------------------------------------------------- the job's flags
 #
-# A job row's flags are four orthogonal regions of the `job` chart
-# (`job_chart`): ice, hold, noexec and the scheduled-tick arm, each off or on.
-# The chart decides every move; `RuntimeState.move_flag` writes the region
-# value the chart reached.
+# A job row's flags are four orthogonal regions of the `job` chart (`job_chart`): ice, hold,
+# noexec and the scheduled-tick arm. The chart decides every move; `RuntimeState.move_flag`
+# writes the region value it reached.
 
 #: One flag region's value, as the `job` chart names it.
 type FlagState = Literal[
@@ -515,21 +407,15 @@ FLAG_FIELDS: Final[Mapping[FlagState, tuple[str, bool]]] = MappingProxyType(
 
 # --------------------------------------------------------------- assembly
 #
-# How a `RuntimeState` is put together before it runs, and the open input.
-# `RUNTIME_ASSEMBLY` is a statechart (docs/statechart-engine.md). The state
-# owner holds its one instance, `ASSEMBLY_KEY`, on `RuntimeState.machines`
-# from construction: the configuration IS the assembly phase, and `_phase`
-# reads its leaf. The rows have no actions: the tier's work follows the
-# microstep (install's row assignment, commit's capacity check and revision
-# bump, seed_period's id).
+# `RUNTIME_ASSEMBLY` is a statechart (docs/statechart-engine.md). The state owner holds its one
+# instance, `ASSEMBLY_KEY`, on `RuntimeState.machines`; its configuration is the assembly phase
+# and `_phase` reads its leaf. The rows have no actions: the tier's work follows the microstep.
 #
-# A verb the phase does not allow is a refusal row, and the row's code names
-# why. These moves are not inputs, so a refusal has no channel to ride and
-# the verb raises (`_ASSEMBLY_REFUSALS`), as an anchor move does (DL-224). A
-# phase-dependent refusal is read before any tier work. The one rule that
-# reads a fact of the call, a period below one, is the verb's own check. A
-# cell the chart has no row for is a gap: a `StatechartError`, which stops
-# the tier (statechart-engine ss5).
+# A verb the phase does not allow is a refusal row naming why. These moves are not inputs, so
+# the verb raises (`_ASSEMBLY_REFUSALS`), as an anchor move does (DL-224). A phase-dependent
+# refusal is read before any tier work; the one rule that reads a fact of the call, a period
+# below one, is the verb's own check. A cell with no row is a gap: a `StatechartError`, which
+# stops the tier (statechart-engine ss5).
 
 type AssemblyPhase = Literal[
     "fresh", "installed", "genesis_input", "genesis", "constructed", "seeded", "input", "live"
@@ -546,9 +432,8 @@ COMMIT_INPUT: Final = "commit_input"
 FINISH_GENESIS: Final = "finish_genesis"
 SEED_PERIOD: Final = "seed_period"
 
-#: What the tier raises for each refusal code: the class and the text.
-#: `{phase}` is the phase the verb met. A code with no entry here is a
-#: disagreement between the chart and the tier, never a borrowed sentence.
+#: What the tier raises for each refusal code: the class and the text. `{phase}` is the phase
+#: the verb met. A code with no entry is a disagreement between chart and tier.
 _ASSEMBLY_REFUSALS: Final[dict[str, tuple[type[ValueError], str]]] = {
     "install_on_used_state": (
         ValueError,
@@ -577,10 +462,8 @@ _ASSEMBLY_REFUSALS: Final[dict[str, tuple[type[ValueError], str]]] = {
     ),
 }
 
-#: A row has one source, so a move from several phases is one row per phase:
-#: the first phase keeps the old table's id and the others follow (.08-.15).
-#: Every phase by verb has a row: the rest are refusals (.16-.40), so a
-#: missing row is a gap, never a silent refusal.
+#: A row has one source, so a move from several phases is one row per phase (.08-.15). Every
+#: phase by verb has a row; the rest are refusals (.16-.40), so a missing row is a gap.
 RUNTIME_ASSEMBLY: Final = Statechart(
     name="runtime_assembly",
     root=State(
@@ -955,27 +838,21 @@ RUNTIME_ASSEMBLY: Final = Statechart(
 
 # ---- one host's routing state as a statechart (concurrency-model ss8)
 #
-# `HOST` is the declaration (docs/statechart-engine.md). The store owns an
-# executor, `RuntimeState.machines`, and holds one instance per host row
-# there, keyed by `host_key(host_id)`. The instance's configuration is the
-# host's state; `HostRuntime.state` is its projection into the row, which
-# the tier writes from the active leaf after the microstep. The rows are
-# enough to rebuild the executor, so every place that rebuilds the rows
-# rebuilds it from them (`rebuild_machines`): an install, the gate's scratch
-# read of the chart, and a test's witness (`witness_host`). A fork copies the
-# executor instead (`Executor.fork`, DL-339) and binds each host instance's
-# data to the fork's store. A state
-# write that no microstep made raises a `StatechartError`.
+# `HOST` is the declaration (docs/statechart-engine.md). The store's executor,
+# `RuntimeState.machines`, holds one instance per host row under `host_key(host_id)`. The
+# instance's configuration is the host's state; `HostRuntime.state` is its projection, written
+# by the tier from the active leaf after the microstep. Everything that rebuilds the rows
+# rebuilds the executor from them (`rebuild_machines`): an install, the gate's scratch read and
+# a test's witness (`witness_host`). A fork copies the executor (`Executor.fork`, DL-339) and
+# binds each host instance's data to the fork's store. A state write that no microstep made
+# raises a `StatechartError`.
 #
-# The chart is dispatched only for an APPLIED host command: the gate in
-# `runner_hosts` reads it first on a scratch executor. A refusal row is a
-# cell with no move, and it carries the gate's code. The gate keeps the
-# rules that read the input's own facts (the deadman, the bound, the
-# attribution of a force), because a rejection is a decision replayed as
-# stored and `last_contact` is re-seeded at resume (DL-94). Rows .01, .04,
-# .06, .08 and .09 are internal: the apply writes nothing and no revision
-# moves. A gap in the chart is a `StatechartError`, which stops the tier
-# (statechart-engine ss5).
+# The chart is dispatched only for an applied host command: the gate in `runner_hosts` reads it
+# first on a scratch executor, and a refusal row carries the gate's code. The gate keeps the
+# rules that read the input's own facts (the deadman, the bound, the attribution of a force),
+# because a rejection is replayed as stored and `last_contact` is re-seeded at resume (DL-94).
+# Rows .01, .04, .06, .08 and .09 are internal: the apply writes nothing and no revision
+# moves. A gap in the chart is a `StatechartError`, which stops the tier (statechart-engine ss5).
 
 #: The cite of the routing table's rows.
 _SS8 = "concurrency-model ss8"
@@ -989,8 +866,8 @@ REGISTER: Final = "register"
 @dataclass(frozen=True)
 class HostData:
     """A host instance's data: the store that holds its row and the row's id.
-    A write replaces the row, so the instance reads it through the store,
-    never through a copy; a fork's instances read the fork's store."""
+
+    A write replaces the row, so the instance reads it through the store."""
 
     store: RuntimeState
     host_id: str
@@ -1001,32 +878,27 @@ class HostData:
 
 
 def host_configuration(state: HostState) -> frozenset[str]:
-    """The configuration a host row's state projects from: its leaf and the
-    states above it. What `rebuild_machines` restores an instance into."""
+    """The configuration a host row's state projects from: its leaf and the states above it."""
     if state in ("active", "passive"):
         return frozenset({"host", "routed", state})
     return frozenset({"host", state})
 
 
 def _not_evicted(ctx: Context) -> bool:
-    """The host is not evicted. `evicted` refuses a forced eviction with its
-    own row, so the walk reaches the root only from a routed or a quarantined
-    host (ss8: force skips the proof, not the state)."""
+    """The host is not evicted (ss8: force skips the proof, not the state)."""
     return "evicted" not in ctx.active
 
 
 def _remembered_passive(ctx: Context) -> bool:
-    """Quarantine interrupted `passive`: the row remembers it, and a drained
-    host that answers again stays drained (DL-97)."""
+    """Quarantine interrupted `passive`: a drained host that answers again stays drained (DL-97)."""
     data: HostData = ctx.data
     return data.row.state_before_quarantine == "passive"
 
 
-#: concurrency-model ss8's routing table, one instance per host row. A new
-#: row starts the instance in `active` (`register_host`); re-registration
-#: starts nothing and keeps the state. `touch_host` is not an event:
-#: `last_contact` is outside the semantic projection. Generation and
-#: `forced_by` are the row's data, written by the tier after an eviction.
+#: concurrency-model ss8's routing table, one instance per host row. A new row starts in
+#: `active` (`register_host`); re-registration starts nothing. `touch_host` is not an event:
+#: `last_contact` is outside the semantic projection. Generation and `forced_by` are the row's
+#: data, written by the tier after an eviction.
 HOST: Final = Statechart(
     name="host",
     root=State(
@@ -1265,9 +1137,8 @@ HOST: Final = Statechart(
 )
 
 
-#: What the job instances' tier gives the state owner for one job row
-#: (DL-341): the chart, the configuration the row projects, and the
-#: instance's data.
+#: What the job instances' tier gives the state owner for one job row (DL-341): the chart, the
+#: configuration the row projects, and the instance's data.
 type JobInstance = Callable[[str, JobRuntime], tuple[Statechart, frozenset[str], object]]
 
 
@@ -1277,112 +1148,77 @@ def _restore_job(machines: Executor, instance: JobInstance, job: str, row: JobRu
 
 
 class RuntimeState:
-    """The authoritative state of one Oracle: job rows, global rows, and the
-    timer heap. SEM-01 latching applies throughout -- a recorded status is
-    current regardless of age.
+    """The authoritative state of one Oracle: job rows, global rows, and the timer heap.
 
-    DL-82 made this the single write path; DL-86 makes escape IMPOSSIBLE
-    rather than merely detected. The rows are frozen, the maps are private
-    and published only as read-only views, and every write goes through a
-    verb that names what changed (`transition`, `start_run`, `move_flag`,
-    `set_global`, `enqueue_timer`, and the capacity verbs: DL-120's
-    `reserve`, `release_reservations`, `enqueue_waiter`, `dequeue_waiter`,
-    `seed_consumed`, and DL-256's `take_over_held` and `release_held`). No
-    caller assembles a field dict, so no caller can invent a field
-    combination the verbs do not. The verbs that move a job's status, flags
-    or held capacity write what the `job` chart reached; the chart decides
-    the move. `install` and `seed_job` install rows.
+    SEM-01 latching applies throughout. The rows are frozen, the maps are private and published
+    as read-only views, and every write goes through a verb that names what changed
+    (DL-82, DL-86): `transition`, `start_run`, `move_flag`, `set_global`, `enqueue_timer`, and
+    the capacity verbs `reserve`, `release_reservations`, `enqueue_waiter`, `dequeue_waiter`,
+    `seed_consumed` (DL-120), `take_over_held` and `release_held` (DL-256). The verbs that move
+    a job's status, flags or held capacity write what the `job` chart reached. `install` and
+    `seed_job` install rows. Optimistic locking needs one place where "this entity changed" is
+    observable once per applied input (concurrency-model ss3).
 
-    The reason is the concurrency model, not tidiness. Optimistic locking
-    needs one place where "this entity changed" is observable exactly once
-    per applied input; assignment sites scattered across the interpreter are
-    not that place, and a before/after property test cannot substitute for
-    it -- a start writes armed, run_number and started_by and then sets
-    status twice, so a single missed site stays invisible to any check that
-    observes whole feeds rather than writes.
+    The timer heap lives here (concurrency-model ss3): an armed must_start deadline on a refused
+    start changes no job row, so a projection over rows alone would replay a different schedule.
+    The heap is ordered by `(due, insertion token)`, and every job's timers carry that token.
 
-    **The timer heap lives here too** (concurrency-model ss3). It is
-    authoritative state that a status projection does not cover: an armed
-    must_start deadline on a REFUSED start changes no job row at all, so a
-    projection over rows alone would replay a different schedule. The heap
-    is ordered globally by `(due, insertion token)` and every job's own
-    timers carry that token, so the cross-job order of equal-time timers --
-    which decides resource release, box cascades and which job starts -- is
-    recoverable per entity rather than only in aggregate.
-
-    **The capacity state lives here too** (DL-120, period-model ss5). The
-    held half is on the rows as `reservations`; the spent half is `consumed`,
-    which belongs to a bucket rather than to any completed job; the waiter
-    rank is on the row and its allocator is `enqueue_counter`. What is NOT
-    here is any sum of the two: `CapacityPool` computes usage from these, so
-    the number a seal carries is one nobody has to explain."""
+    The capacity state lives here (DL-120, period-model ss5): the held half is `reservations`
+    on the rows, the spent half is `consumed` (per bucket), and the waiter rank allocator is
+    `enqueue_counter`. No sum of the two is stored; `CapacityPool` computes usage.
+    """
 
     def __init__(self) -> None:
         self._jobs: dict[str, JobRuntime] = {}
         self._globals: dict[str, GlobalRuntime] = {}
-        #: DL-94: the ss8 routing table. Under this owner rather than beside
-        #: it because durability, replay, the one-increment-per-input rule,
-        #: the ss0 precondition check and the read verbs are all machinery
-        #: that already exists here and works on namespaced keys.
+        #: DL-94: the ss8 routing table. It lives under this owner because durability, replay,
+        #: the one-increment-per-input rule, the ss0 precondition check and the read verbs
+        #: already work on namespaced keys.
         self._hosts: dict[str, HostRuntime] = {}
-        #: the state owner's own executor (statechart-engine ss11): the
-        #: `RUNTIME_ASSEMBLY` instance, and one `HOST` instance per host row.
-        #: A fork copies it (DL-339); an install and a test's witness rebuild
-        #: it from the phase and the rows (`rebuild_machines`). The engine's
-        #: executor is the engine tier's.
+        #: The state owner's executor (statechart-engine ss11): the `RUNTIME_ASSEMBLY` instance
+        #: and one `HOST` instance per host row. A fork copies it (DL-339); an install and a
+        #: test's witness rebuild it (`rebuild_machines`). The engine's executor is separate.
         self.machines = Executor()
         self.machines.start(ASSEMBLY_KEY, RUNTIME_ASSEMBLY)
         self.machines.run()
-        #: the job instances (DL-341). None keeps none, as a bare store does.
-        #: The oracle sets it: every job row then has a `job` instance on
-        #: `machines` under its `job_key`, which each input's commit checks
-        #: against its row (`commit_input`, DL-350).
+        #: The job instances (DL-341). None keeps none. The oracle sets it: every job row then
+        #: has a `job` instance under its `job_key`, which each input's commit checks against
+        #: its row (`commit_input`, DL-350).
         self.job_instance: JobInstance | None = None
         self._timers: list[tuple[datetime, int, Event]] = []  # heap of (due, token, ev)
         self._timer_seq = 0
-        #: which period this state machine is running (period-model ss3.5,
-        #: DL-132). PRIVATE, set only by `seed_period` -- 1 until a seal
-        #: exists to open a later one -- and stamped onto every row's
-        #: `start_period` at its actual start. Not per-input state: a period
-        #: opens in a new state built over the carried rows (`Oracle`).
+        #: The period this state runs in (period-model ss3.5, DL-132). Set only by
+        #: `seed_period`, 1 until then, and stamped onto every row's `start_period` at its
+        #: actual start. A period opens in a new state over the carried rows (`Oracle`).
         self._period_id: int = 1
-        #: DL-120: bucket key -> units PERMANENTLY spent (SEM-16 depletion,
-        #: and `never`/unmet-`success` holds a terminal transition kept). The
-        #: held half lives on the rows; this half belongs to no row, which is
-        #: exactly why a seal that recomputed usage from holders refunded it.
-        #: Keys survive their resource: a bucket the catalog no longer sizes
-        #: keeps its entry and still counts if the resource returns (PR-19a).
+        #: DL-120: bucket key -> units permanently spent (SEM-16 depletion, and `never` or
+        #: unmet-`success` holds a terminal transition kept). It belongs to no row. Keys survive
+        #: their resource: a bucket the catalog does not size keeps its entry (PR-19a).
         self._consumed: dict[str, int] = {}
-        #: DL-120: the waiter-rank allocator's high-water mark. Carried, never
-        #: renormalised -- redefining the rank as `1 + max(active)` would buy
-        #: one integer in exchange for proving that renormalisation equals
-        #: genesis replay (period-model ss5).
+        #: DL-120: the waiter-rank allocator's high-water mark. Carried, never renormalised
+        #: (period-model ss5).
         self._enqueue_counter = 0
-        #: DL-87 input transaction: entity key -> its projection at FIRST
-        #: touch within the open input. Empty and inert outside one.
+        #: DL-87 input transaction: entity key -> its projection at first touch within the open
+        #: input. Empty outside one.
         self._snapshots: dict[str, object] = {}
 
     @property
     def _phase(self) -> AssemblyPhase:
-        """The `runtime_assembly` phase: how far assembly has come, and
-        whether an input is open. It is the leaf of the assembly instance's
-        configuration, so nothing else holds it. Seed-versus-advance is
-        EXPLICIT, never inferred from the rows: `seed_period` is legal exactly
-        once, before any committed input."""
+        """The `runtime_assembly` phase: the leaf of the assembly instance's configuration.
+
+        Seed-versus-advance is explicit: `seed_period` is legal once, before any committed input.
+        """
         (leaf,) = self.machines.active(ASSEMBLY_KEY) - {RUNTIME_ASSEMBLY.root.name}
         return cast(AssemblyPhase, leaf)
 
     def fork(self) -> RuntimeState:
-        """An independent copy to dry-apply one input on (concurrency-model
-        ss4). Shallow: rows are frozen and a write replaces a row, so copying
-        each map and the heap list keeps every write on the copy. Heap events
-        are shared; no verb changes one in place. The
-        twin's executor is a copy of this one's (`Executor.fork`, DL-339): it
-        shares the instance records until it writes one, so a dispatch on the
-        fork never reaches this one's instances. Each host instance's data is
-        bound to the twin, so its guards read the twin's rows. Job instances
-        hold value data and share it, and `job_instance` is shared for the
-        oracle's fork to rebind (DL-341)."""
+        """An independent copy to dry-apply one input on (concurrency-model ss4).
+
+        Shallow: rows are frozen and a write replaces a row, so copying each map and the heap list
+        keeps every write on the copy. The twin's executor is `Executor.fork` of this one's
+        (DL-339); each host instance's data is bound to the twin. Job instances share their value
+        data, and `job_instance` is shared for the oracle's fork to rebind (DL-341).
+        """
         twin = copy.copy(self)
         twin._jobs = dict(self._jobs)
         twin._globals = dict(self._globals)
@@ -1399,9 +1235,7 @@ class RuntimeState:
 
     @staticmethod
     def job_key(job: str) -> str:
-        """`expect` addresses entities by namespaced key (concurrency-model
-        ss6). The transaction uses the same key space, so S3's precondition
-        check is a dict lookup rather than a translation layer."""
+        """The namespaced key `expect` addresses an entity by (concurrency-model ss6)."""
         return f"job:{job}"
 
     @staticmethod
@@ -1410,17 +1244,14 @@ class RuntimeState:
 
     @staticmethod
     def host_key(host_id: str) -> str:
-        """The third ss6 namespace (DL-93). A drain is an externally
-        requested mutation of published state like any other, so it names
-        the revision it was composed against in the same key space."""
+        """The third ss6 namespace (DL-93): a host names its revision in the same key space."""
         return f"host:{host_id}"
 
     def revision(self, key: str) -> int:
-        """The revision an `expect` must name for `key`. An entity that does
-        not exist reads 0 -- which is what makes a conditional create
-        expressible: `expect {"global:X": 0}` means "still absent", because
-        anything that exists has been through an input and is at 1 or more
-        (the catalog seed is itself one input, see Oracle.__init__)."""
+        """The revision an `expect` must name for `key`; an entity that does not exist reads 0.
+
+        That makes S3's conditional create expressible: `expect {"global:X": 0}` means still absent.
+        """
         namespace, _, name = key.partition(":")
         if namespace == "job":
             row = self._jobs.get(name)
@@ -1435,8 +1266,7 @@ class RuntimeState:
 
     @property
     def job(self) -> Mapping[str, JobRuntime]:
-        """Read-only view of the job rows. A proxy, not the map: an attempt
-        to write through it raises rather than diverging silently."""
+        """Read-only view of the job rows; a write through it raises."""
         return MappingProxyType(self._jobs)
 
     @property
@@ -1448,17 +1278,13 @@ class RuntimeState:
         return MappingProxyType(self._hosts)
 
     def host(self, host_id: str) -> HostRuntime | None:
-        """Read one routing row, or None. Deliberately NOT create-on-demand,
-        unlike `runtime()`: the oracle addresses job entities that no catalog
-        declares, but a host the table does not know is a host the ss7
-        takeover barrier would never reconcile, so it must read as absent
-        rather than spring into existence at its default `active`."""
+        """Read one routing row, or None. A host the table does not know reads as absent, because
+        the ss7 takeover barrier would never reconcile it (DL-93)."""
         return self._hosts.get(host_id)
 
     def runtime(self, job: str) -> JobRuntime:
-        """Read access. Creates the row on demand -- the oracle addresses
-        entities with no catalog entry (pseudo-entries `name^INST`, and
-        whatever a CHANGE_STATUS invents)."""
+        """Read access. Creates the row on demand: the oracle addresses entities with no catalog
+        entry (pseudo-entries `name^INST`, whatever a CHANGE_STATUS invents)."""
         if job not in self._jobs:
             row = self._jobs[job] = JobRuntime()
             if self.job_instance is not None:
@@ -1471,38 +1297,32 @@ class RuntimeState:
 
     @property
     def consumed(self) -> Mapping[str, int]:
-        """Read-only view of the permanently spent units per bucket (DL-120).
-        A proxy for `job`'s reason: `CapacityPool` reads it on every admission
-        test and must not be able to write it."""
+        """Read-only view of the permanently spent units per bucket (DL-120)."""
         return MappingProxyType(self._consumed)
 
     @property
     def enqueue_counter(self) -> int:
-        """The last waiter rank allocated (DL-120). Read-only: a rank is
-        allocated by `enqueue_waiter` and by nothing else."""
+        """The last waiter rank allocated (DL-120); only `enqueue_waiter` allocates."""
         return self._enqueue_counter
 
     @property
     def timer_seq(self) -> int:
-        """The last timer token allocated (period-model ss3.1). Read-only,
-        for `enqueue_counter`'s reason -- a token is allocated by
-        `enqueue_timer` and by nothing else -- and readable because a seal
-        carries the high-water mark: the heap can be empty while the
-        allocator stands at 41, and an opener that restarted from 0 would
-        re-issue tokens the carried firing order was written in."""
+        """The last timer token allocated (period-model ss3.1); only `enqueue_timer` allocates.
+
+        A seal carries it: an opener restarting from 0 would re-issue tokens the carried firing
+        order was written in.
+        """
         return self._timer_seq
 
     # ------------------------------------------------ the input transaction (DL-87)
 
     def _projection(self, key: str) -> object:
-        """An entity's SEMANTIC value: what a revision is a revision OF.
+        """An entity's semantic value: what a revision is a revision of.
 
-        A job's is its projected fields plus its own timers WITH their
-        ordering tokens -- an armed deadline is state that no status field
-        records (concurrency-model ss3). A missing job projects as the
-        default row, so merely reading an entity into existence is not a
-        change; a missing global or host projects as None, so first-set IS
-        one and `revision() == 0` can mean "absent"."""
+        A job's is its projected fields plus its own timers with their ordering tokens
+        (concurrency-model ss3). A missing job projects as the default row; a missing global or
+        host projects as None, so first-set is a change and `revision() == 0` means absent.
+        """
         namespace, _, name = key.partition(":")
         if namespace == "job":
             row = self._jobs.get(name) or _DEFAULT_JOB
@@ -1519,33 +1339,29 @@ class RuntimeState:
         return None if grow is None else grow.value
 
     def _touch(self, key: str) -> None:
-        """Record an entity's pre-input projection the first time an open
-        input reaches it. Snapshot-on-first-touch rather than snapshot-all:
-        the projection is a function of the rows and the heap, both of which
-        only move through the mutators below, so the touched set cannot be
-        under-approximated by construction -- which is the direction ss3
-        says must not be got wrong."""
+        """Record an entity's pre-input projection the first time an open input reaches it.
+
+        The projection is a function of the rows and the heap, which only move through the
+        mutators below, so the touched set is never under-approximated (ss3).
+        """
         if self._phase in _OPEN and key not in self._snapshots:
             self._snapshots[key] = self._projection(key)
 
     def begin_input(self) -> None:
-        """Open one input's transaction. Inputs do not nest: the oracle's
-        cascade, its fired timers and its box folds are all consequences of
-        ONE input and share its revision, which is what makes `expect`
-        checkable -- a client that read revision 12 must be invalidated by
-        the whole of the next input, not by its first transition."""
+        """Open one input's transaction. Inputs do not nest: the cascade, fired timers and box
+        folds of one input share its revision, so `expect` is checkable."""
         self._assemble(BEGIN_INPUT)
         self._snapshots = {}
 
     def commit_input(self) -> list[str]:
-        """Close the transaction and increment each CHANGED entity exactly
-        once. Returns the changed keys in a stable order -- S2's outbox and
-        `ApplyResult` need the list, not just the effect. Committing with no
-        input open is refused: the chart has no such move. Where job instances
-        are kept, each job the input touched that has a row must have its
-        row project to its instance's configuration, or the commit raises a
-        `StatechartError`: a hook that skipped a write, or wrote the wrong job
-        (DL-350). The commit creates no row."""
+        """Close the transaction and increment each changed entity once; return the changed keys.
+
+        S2's outbox and `ApplyResult` read the list.
+
+        Committing with no input open is refused: the chart has no such move. Where job instances
+        are kept, each touched job that has a row must project to its instance's configuration,
+        or the commit raises a `StatechartError` (DL-350). The commit creates no row.
+        """
         self._assemble(COMMIT_INPUT)
         snapshots, self._snapshots = self._snapshots, {}
         self._check_capacity(snapshots)
@@ -1580,16 +1396,11 @@ class RuntimeState:
             )
 
     def _check_capacity(self, snapshots: Mapping[str, object]) -> None:
-        """The DL-120 capacity invariants, checked at the CLOSE of an input.
+        """The DL-120 capacity invariants, checked at the close of an input.
 
-        Not inside the verbs: one input legitimately passes through states
-        that break them -- a terminal transition lands the status before the
-        release that follows it, an enqueue allocates the rank before the
-        QUE_WAIT transition -- and only the boundary between inputs is a state
-        anything else observes.
-
-        Only the touched rows are checked. A row this input did not touch was
-        checked when it was, and the counter only grows."""
+        Not inside the verbs: one input passes through states that break them, and only the
+        boundary between inputs is observable. Only touched rows are checked.
+        """
         for key in snapshots:
             namespace, _, name = key.partition(":")
             if namespace != "job":
@@ -1617,12 +1428,8 @@ class RuntimeState:
     # ------------------------------------------------------------------ writes
 
     def _replace(self, job: str, **fields: object) -> None:
-        """The single write. `model_copy(update=)` does NOT validate -- it
-        would happily store a str in `run_number` and leave the corruption
-        to surface somewhere else entirely -- so the row is rebuilt through
-        the model's own constructor. Pydantic refuses an undeclared field
-        name, so a typo is loud rather than a silently created attribute
-        nothing reads."""
+        """The single write. `model_copy(update=)` does not validate, so the row is rebuilt
+        through the model's constructor; an undeclared field name raises."""
         self._touch(self.job_key(job))
         self._jobs[job] = JobRuntime.model_validate({**dict(self.runtime(job)), **fields})
 
@@ -1635,14 +1442,12 @@ class RuntimeState:
         *,
         clear_exit_code: bool = False,
     ) -> None:
-        """Record a status change: the status the `job` chart reached. Every
-        status write is one of these, except an install (`install`,
-        `seed_job`).
+        """Record a status change: the status the `job` chart reached.
 
-        `last_end_at` latches on every terminal transition -- the Q2 anchor
-        is the job's OWN last end (DL-54) -- and an exit code is written
-        only when one was reported. A box-start reset clears it instead
-        (`clear_exit_code`, SEM-10, DL-242)."""
+        Every status write is one of these, except an install. `last_end_at` latches on every
+        terminal transition (Q2, DL-54); an exit code is written only when one was reported. A
+        box-start reset clears it instead (`clear_exit_code`, SEM-10, DL-242).
+        """
         fields: dict[str, object] = {"status": status, "status_at": at}
         if status in TERMINAL:
             fields["last_end_at"] = at
@@ -1653,13 +1458,12 @@ class RuntimeState:
         self._replace(job, **fields)
 
     def start_run(self, job: str, *, cause: str, box: str | None, is_box: bool) -> None:
-        """Everything one actual start changes, in one act: the run_number
-        bump, the arm it consumes (Q3/DL-54 -- the ACTUAL start consumes it,
-        FORCE included), the provenance of THIS run (DL-68), and the SEM-10
-        box bookkeeping on both sides -- the member joins its box's ran set,
-        and a box starting resets its own.
+        """Everything one actual start changes: the run_number bump, the arm it consumes (Q3,
+        DL-54, FORCE included), the run's provenance (DL-68), and the SEM-10 box bookkeeping.
 
-        A box that is itself a member does both, to two different rows."""
+        The member joins its box's ran set and a box starting resets its own; a box that is
+        itself a member does both, to two different rows.
+        """
         self.move_flag(job, "arm_off")
         self._replace(
             job,
@@ -1668,8 +1472,8 @@ class RuntimeState:
             start_period=self._period_id,
         )
         if box is not None:
-            # the member's own start voids its resolution mark (DL-242) and
-            # its off-ice mark (SEM-20): a forced run votes in the fold
+            # the member's own start voids its resolution mark (DL-242) and its off-ice mark
+            # (SEM-20): a forced run votes in the fold
             box_rt = self.runtime(box)
             self._replace(
                 box,
@@ -1678,11 +1482,9 @@ class RuntimeState:
                 iced_out_members=box_rt.iced_out_members - {job},
             )
         if is_box:
-            # Reset BEFORE the caller's RUNNING transition: that transition's
-            # own re-evaluation may already start members, and they must land
-            # in the fresh per-run set (SEM-10 at-most-once bookkeeping).
-            # The resolution and off-ice marks are per-execution too (DL-154,
-            # DL-242, SEM-20).
+            # Reset before the caller's RUNNING transition: its re-evaluation may start members,
+            # and they must land in the fresh per-run set (SEM-10). The resolution and off-ice
+            # marks are per-execution too (DL-154, DL-242, SEM-20).
             self._replace(
                 job,
                 ran_members=frozenset(),
@@ -1691,40 +1493,34 @@ class RuntimeState:
             )
 
     def clear_exit_code(self, job: str) -> None:
-        """SEM-10 (DL-242): a box-start reset drops the previous cycle's exit
-        code from a row that is already INACTIVE. Not a transition: the
-        status and its time stay."""
+        """SEM-10 (DL-242): a box-start reset drops the previous cycle's exit code from an
+        INACTIVE row. Not a transition: the status and its time stay."""
         self._replace(job, exit_code=None)
 
     def record_resolution(self, box: str, member: str) -> None:
-        """Mark `member` resolved for this box execution: its INACTIVE is an
-        explicit verdict, a run_window skip (SEM-33/DL-154) or an injected
-        STATUS INACTIVE (SEM-11, DL-242), so the SEM-11 fold completes past
-        it. `start_run` on the box resets the marks; the member's own start
-        voids its mark."""
+        """Mark `member` resolved for this box execution: its INACTIVE is an explicit verdict, a
+        run_window skip (SEM-33, DL-154) or an injected STATUS INACTIVE (SEM-11, DL-242), so the
+        SEM-11 fold completes past it. The box's start and the member's own start void the mark."""
         self._replace(
             box, window_skipped_members=self.runtime(box).window_skipped_members | {member}
         )
 
     def record_iced_out(self, box: str, member: str) -> None:
-        """Mark `member` out of this box execution: it was taken off ice
-        while `box` ran and before it ran there (SEM-20,
-        `off-ice-in-running-box=next-run`). `start_run` on the box resets
-        the marks; the member's own forced start voids its mark."""
+        """Mark `member` out of this box execution: taken off ice while `box` ran, before it ran
+        there (SEM-20, `off-ice-in-running-box=next-run`). The box's start and the member's own
+        forced start void the mark."""
         self._replace(box, iced_out_members=self.runtime(box).iced_out_members | {member})
 
     def void_resolution(self, box: str, member: str) -> None:
-        """Drop `member`'s resolution mark in `box`: a fresh attempt by the
-        member that ends unresolved must not inherit an earlier verdict of
-        the same box run (DL-257)."""
+        """Drop `member`'s resolution mark in `box`: a fresh attempt that ends unresolved must not
+        inherit an earlier verdict of the same box run (DL-257)."""
         marks = self.runtime(box).window_skipped_members
         if member in marks:
             self._replace(box, window_skipped_members=marks - {member})
 
     def move_flag(self, job: str, target: FlagState) -> None:
-        """Set one SEM-20/21/22 flag, or the SEM-32 arm (DL-54), to the flag
-        state the `job` chart reached. The state names the flag and its
-        value, so a caller cannot touch another flag."""
+        """Set one SEM-20/21/22 flag, or the SEM-32 arm (DL-54), to the state the `job` chart
+        reached. The state names the flag, so a caller cannot touch another."""
         field, value = FLAG_FIELDS[target]
         self._replace(job, **{field: value})
 
@@ -1741,12 +1537,11 @@ class RuntimeState:
         on_noexec: bool = False,
         armed: bool = False,
     ) -> None:
-        """Install a row's lifecycle fields as given: an install, like
-        `install`, not a move, so no machine is taken. Two callers seed
-        rows: the Oracle's genesis seed sets the SEM-24 definition-time
-        flags of a new job, and classify's throwaway interpreter rebuilds
-        carried rows to read condition truth. A QUE_WAIT row gets a waiter
-        rank, so the input's commit finds the rank it requires."""
+        """Install a row's lifecycle fields as given; not a move, so no machine is taken.
+
+        Callers: the Oracle's genesis seed (SEM-24 definition-time flags) and classify's
+        interpreter rebuild of carried rows. A QUE_WAIT row gets a waiter rank.
+        """
         self._replace(
             job,
             status=status,
@@ -1762,9 +1557,8 @@ class RuntimeState:
             self.enqueue_waiter(job)
 
     def set_global(self, name: str, value: str) -> None:
-        """Latch a global's value (SEM-06). The revision carries over: only
-        commit_input() moves it, and only if the value actually changed --
-        AutoSys's same-value SET_GLOBAL is a real and common input."""
+        """Latch a global's value (SEM-06). Only commit_input() moves the revision, and only if
+        the value changed; a same-value SET_GLOBAL is a real input."""
         self._touch(self.global_key(name))
         row = self._globals.get(name)
         self._globals[name] = GlobalRuntime(
@@ -1773,35 +1567,28 @@ class RuntimeState:
 
     # --------------------------------------------------------- capacity (DL-120)
     #
-    # `consumed` and `enqueue_counter` are authoritative state under this owner
-    # with no key space of their own, and they do not need one: each changes
-    # only inside an input that ALSO replaces the row of the job whose units or
-    # rank moved -- a terminal transition for the first, a QUE_WAIT transition
-    # for the second -- so the touched entity that carries the revision is that
-    # job. They gain an `expect` namespace on the day an operator has a reason
-    # to address them, which for `consumed` is SEM-16 replenishment
-    # (period-model ss5).
+    # `consumed` and `enqueue_counter` have no key space of their own: each changes only inside
+    # an input that also replaces the row of the job whose units or rank moved, so that job
+    # carries the revision. They gain an `expect` namespace when an operator needs to address
+    # them (for `consumed`, SEM-16 replenishment, period-model ss5).
 
     def reserve(self, job: str, reservations: Sequence[CapacityReservation]) -> None:
         """Record the capacity vector a start acquired (period-model ss5).
 
-        Refuses a row that already holds one. The Oracle releases before it
-        wakes anything, so a live record here at a start means a release was
-        missed, and the old pool's forgiving `extend` turned that into a
-        permanently stranded unit nobody could account for. A start of a job
-        that still holds units from an earlier run goes through
-        `take_over_held` instead (DL-256)."""
+        Refuses a row that already holds one: the Oracle releases before it wakes anything, so a
+        live record at a start means a missed release. A start of a job that still holds units
+        from an earlier run goes through `take_over_held` (DL-256).
+        """
         if self.runtime(job).reservations:
             raise OracleError(f"{job!r} already holds reservations: a start may not overwrite")
         self._replace(job, reservations=tuple(reservations))
 
     def take_over_held(self, job: str, reservations: Sequence[CapacityReservation]) -> None:
-        """DL-256: a job that is not live and still holds a renewable's units
-        from an earlier run starts on them. Its admission credited those
-        units to it, so the new run's vector REPLACES them rather than adding
-        to them, and nothing is counted twice. A live row is refused: its
-        reservations are its own run's. Two rows take it: an admitted start,
-        and a FORCE_STARTJOB on the held units."""
+        """DL-256: a job that is not live and holds a renewable's units starts on them.
+
+        The new vector replaces the held units, so nothing is counted twice. A live row is
+        refused. Callers: an admitted start and a FORCE_STARTJOB on the held units.
+        """
         row = self.runtime(job)
         if row.status in LIVE:
             raise OracleError(f"{job!r} is {row.status}: a start may not overwrite its run")
@@ -1813,22 +1600,15 @@ class RuntimeState:
         new_status: str,
         keeps_held: Callable[[str], bool] | None = None,
     ) -> None:
-        """Settle a run's vector on the edge that leaves STARTING/RUNNING
-        (DL-120). What the policy frees goes back to the pool. What it does
-        not free is spent into `consumed`, or, when `keeps_held(bucket)` says
-        so, stays on the row as units the job still holds (DL-256: a
-        renewable resource's unreleased units belong to the job until
-        RELEASE_RESOURCE or its next run).
+        """Settle a run's vector on the edge that leaves STARTING/RUNNING (DL-120).
 
-        `new_status` is whatever the row is moving to -- a terminal status for
-        every ordinary run, and INACTIVE for an injected STATUS on a live
-        holder, which used to strand the units. The halves are one act
-        within the input: the row write and the spend happen in the same
-        input transaction, and replay re-applies the whole input, so a crash
-        between them cannot leave units both held and spent or neither. `never`
-        and an unmet `success` are the policies that do not free (SEM-16
-        depletion, hold-on-failure); what is spent never comes back. With no
-        `keeps_held`, nothing stays held: everything not freed is spent."""
+        What the policy frees goes back to the pool. What it does not free (`never` and an unmet
+        `success`: SEM-16 depletion, hold-on-failure) is spent into `consumed`, or stays on the
+        row when `keeps_held(bucket)` says so (DL-256); with no `keeps_held`, all of it is
+        spent. `new_status` is the status the row moves to, INACTIVE for an injected STATUS on a
+        live holder. The row write and the spend are one act in one input, so a crash between
+        them cannot leave units both held and spent or neither.
+        """
         row = self.runtime(job)
         if not row.reservations:
             return
@@ -1839,12 +1619,9 @@ class RuntimeState:
             self._consumed[bucket] = self._consumed.get(bucket, 0) + reservation.units
 
     def release_held(self, job: str) -> tuple[CapacityReservation, ...]:
-        """RELEASE_RESOURCE (DL-256): give back every unit a job that is not
-        live still holds, and return what was given back. A live row's
-        reservations belong to its run and are released at its end, so it
-        is refused here; the Oracle records that case as a no-op. Two rows
-        take it: the operator's verb, and a period opening that gives back a
-        removed job's units."""
+        """RELEASE_RESOURCE (DL-256): give back every unit a job that is not live still holds,
+        and return them. A live row is refused; the Oracle records that case as a no-op. Callers:
+        the operator's verb and a period opening that gives back a removed job's units."""
         row = self.runtime(job)
         if row.status in LIVE:
             raise OracleError(f"{job!r} is {row.status}: its run's units release at its end")
@@ -1852,9 +1629,7 @@ class RuntimeState:
         return row.reservations
 
     def enqueue_waiter(self, job: str) -> None:
-        """Allocate this job's QUE_WAIT rank. Idempotent: a job already queued
-        keeps the rank it was given, because its position was decided when it
-        first failed admission."""
+        """Allocate this job's QUE_WAIT rank. Idempotent: a queued job keeps its rank."""
         if self.runtime(job).waiter_seq is not None:
             return
         rank = self._enqueue_counter + 1
@@ -1862,14 +1637,12 @@ class RuntimeState:
         self._enqueue_counter = rank
 
     def dequeue_waiter(self, job: str) -> None:
-        """Drop a job out of the queue -- admitted, killed, iced or cancelled.
-        The counter does not go back: it is a high-water allocator, not a
-        length."""
+        """Drop a job out of the queue (admitted, killed, iced or cancelled). The counter is a
+        high-water allocator and does not go back."""
         self._replace(job, waiter_seq=None)
 
     def seed_consumed(self, consumed: Mapping[str, int]) -> None:
-        """Open the map from a carried seal (period-model ss3.3). A negative
-        value would open the period with invented capacity, so it is refused
+        """Open the map from a carried seal (period-model ss3.3). A negative value is refused
         here as well as by the loader (PR-22)."""
         for bucket, units in consumed.items():
             if units < 0:
@@ -1879,17 +1652,12 @@ class RuntimeState:
     # ------------------------------------------------------------------- hosts
 
     def _replace_host(self, host_id: str, **fields: object) -> None:
-        """The single host write, on `_replace`'s rule and for its reason:
-        rebuilt through the model's own constructor, because
-        `model_copy(update=)` does not validate and an undeclared field name
-        must be loud.
+        """The single host write, on `_replace`'s rule: rebuilt through the model's constructor.
 
-        A write of `state` keeps the row the projection of its instance: the
-        tier writes the leaf after the microstep that moved the instance. A
-        state the instance is not in is a write no microstep made, a bug, so
-        it raises a `StatechartError` before anything is written, and the
-        tier stops (statechart-engine ss5). A test's witness writes through
-        `witness_host` instead."""
+        A write of `state` must be the projection of the instance: the tier writes the leaf after
+        the microstep. A state the instance is not in raises a `StatechartError` before anything
+        is written (statechart-engine ss5). A test's witness writes through `witness_host`.
+        """
         key = self.host_key(host_id)
         current = self._hosts.get(host_id) or HostRuntime()
         row = HostRuntime.model_validate({**dict(current), **fields})
@@ -1905,10 +1673,8 @@ class RuntimeState:
         self._hosts[host_id] = row
 
     def witness_host(self, host_id: str, **fields: object) -> None:
-        """A test's witness (DL-293): write a host row's fields with no
-        microstep, then rebuild the executor from the rows (`rebuild_machines`).
-        No tier calls it. The write takes the open input's revision like any
-        other."""
+        """A test's witness (DL-293): write a host row's fields with no microstep, then rebuild
+        the executor from the rows. No tier calls it."""
         key = self.host_key(host_id)
         current = self._require_host(host_id)
         self._touch(key)
@@ -1916,15 +1682,14 @@ class RuntimeState:
         self.machines = self.rebuild_machines()
 
     def rebuild_machines(self, *, jobs: bool = True) -> Executor:
-        """A new executor holding the assembly instance in the phase the store
-        is in, one `HOST` instance per host row, each in the configuration its
-        row's state projects (statechart-engine ss11), and, with `job_instance`
-        set, one `job` instance per job row (DL-341). The phase and the
-        rows are enough to rebuild it: an install, a test's witness and the
-        gate's scratch read of the chart build theirs here, and no action runs.
-        A fork copies the executor instead (`fork`, DL-339). `jobs=False`
-        leaves the job instances out, for a read of the other charts whose cost
-        must not grow with the job count (the gate's `host_move`)."""
+        """A new executor holding the assembly instance in the store's phase, one `HOST` instance
+        per host row in the configuration its state projects (statechart-engine ss11), and, with
+        `job_instance` set, one `job` instance per job row (DL-341).
+
+        An install, a test's witness and the gate's scratch read build theirs here; no action
+        runs. `jobs=False` leaves the job instances out, for a read of the other charts whose
+        cost must not grow with the job count (the gate's `host_move`).
+        """
         machines = Executor()
         machines.restore(ASSEMBLY_KEY, RUNTIME_ASSEMBLY, self.machines.active(ASSEMBLY_KEY))
         for host_id, row in self._hosts.items():
@@ -1936,16 +1701,14 @@ class RuntimeState:
         return machines
 
     def keep_job_instances(self, instance: JobInstance) -> None:
-        """From now on keep one `job` instance per job row, as `instance`
-        gives it (DL-341): the executor is rebuilt with one for every row
-        there is, and a row created later gets its own as it is created."""
+        """Keep one `job` instance per job row, as `instance` gives it (DL-341): the executor is
+        rebuilt with one for every row, and a row created later gets its own."""
         self.job_instance = instance
         self.machines = self.rebuild_machines()
 
     def restore_instances(self) -> None:
-        """Rebuild the executor from the phase and the rows (`rebuild_machines`):
-        after a macrostep that raised, no write is undone, and every instance
-        is its row's again (DL-350)."""
+        """Rebuild the executor from the phase and the rows (`rebuild_machines`): after a
+        macrostep that raised, every instance is its row's again (DL-350)."""
         self.machines = self.rebuild_machines()
 
     def _require_host(self, host_id: str) -> HostRuntime:
@@ -1957,19 +1720,12 @@ class RuntimeState:
     def register_host(
         self, host_id: str, *, deadman_s: float | None = None, at: datetime | None = None
     ) -> None:
-        """Put a host in the routing table, or refresh the identity of one
-        already in it (concurrency-model ss8).
+        """Put a host in the routing table, or refresh the identity of one already in it (ss8).
 
-        A NEW host lands `active` -- ss8's table says registration is one of
-        the two things that sets that state. An EXISTING one keeps its
-        routing state: ss8 makes the state durable precisely so that a
-        failover does not undo a drain, and a relay that could undo one by
-        re-registering would give back with one hand what that sentence
-        takes with the other. What re-registration does refresh is identity
-        -- the deadman it now runs, and the contact it just made.
-
-        A new row's `HOST` instance starts here, in `active`; a
-        re-registration starts nothing."""
+        A new host lands `active`, and its `HOST` instance starts here. An existing one keeps its
+        routing state, so a relay cannot undo a drain by re-registering; the deadman and the
+        contact are refreshed.
+        """
         row = self._hosts.get(host_id)
         self._replace_host(
             host_id,
@@ -1985,32 +1741,23 @@ class RuntimeState:
         return self._period_id
 
     def finish_genesis(self) -> None:
-        """Mark the constructor's own seeding as NOT-an-input for the
-        seed-versus-advance latch. Genesis seeding (catalog rows, the local
-        executor) is identical on every replay and deliberately unjournaled
-        (`runner_hosts`), so a state that has only been constructed is a
-        fresh one -- and without this, `seed_period` would refuse every
-        assembly on a store the Oracle just built.
+        """Mark the constructor's own seeding as not an input for the seed-versus-advance latch.
 
-        ONE-SHOT: a second call after real inputs would launder a used
-        state back to fresh and let `seed_period` skip a live lineage --
-        the exact bypass the latch exists to close. Inside the genesis
-        input it is refused too: construction ends after that input
-        commits."""
+        Genesis seeding is identical on every replay and unjournaled (`runner_hosts`), so a
+        constructed state is fresh. One-shot: a second call after real inputs would launder a
+        used state back to fresh. Refused inside the genesis input too.
+        """
         self._assemble(FINISH_GENESIS)
 
     def _assemble(self, event: str) -> None:
-        """Move the assembly instance by one verb. A phase the chart refuses
-        it in raises before the phase changes: assembly is not an input, so
-        the refusal raises (concurrency-model ss4)."""
+        """Move the assembly instance by one verb. A phase the chart refuses it in raises before
+        the phase changes: assembly is not an input (concurrency-model ss4)."""
         (outcome,) = self.machines.dispatch(ASSEMBLY_KEY, ChartEvent(event))
         self._refuse(event, outcome)
 
     def _read_assembly(self, event: str) -> None:
-        """The chart's answer to a verb, read with `Executor.resolve`: it
-        moves nothing. A verb with work of its own that can fail, or that must
-        not run on a refusal, reads first, so the work waits for the answer and
-        the phase moves after it."""
+        """The chart's answer to a verb, read with `Executor.resolve`; it moves nothing. A verb
+        with work that can fail reads first and moves the phase after."""
         self._refuse(event, self.machines.resolve(ASSEMBLY_KEY, ChartEvent(event)))
 
     def _refuse(self, event: str, outcome: Outcome) -> None:
@@ -2031,22 +1778,15 @@ class RuntimeState:
         raise raised(text.format(phase=self._phase))
 
     def install(self, carried: CarriedRows) -> None:
-        """Install carried rows VERBATIM -- revisions included -- as the
-        FIRST act of an assembly (period-model ss7 phase 3 step 3).
+        """Install carried rows verbatim, revisions included, as the first act of an assembly
+        (period-model ss7 phase 3 step 3).
 
-        Not an input, and deliberately not expressible as one: the rows
-        arrive with the revisions the closing seal published, and an
-        operator holding an `expect` against one of those revisions must
-        find it unmoved. A "construct C2 then overwrite" opener seeds
-        carried entities through ordinary verbs, moves every revision it
-        touches, and makes every published revision unholdable.
-
-        The period is NOT seeded here: `finish_genesis` refuses a state
-        that has already been seeded, and the constructor's own catalog
-        seed still has to run over these rows. The assembler calls
-        `seed_period` after it (ss3.5's latch, DL-132). The executor is
-        rebuilt from the phase and the carried rows, so a carried drain is the
-        configuration the next period opens in."""
+        Not an input: the rows keep the revisions the closing seal published, so an operator's
+        `expect` against one stays unmoved; a construct-C2-then-overwrite opener would move every
+        revision it touches. The period is not seeded here, because the
+        constructor's catalog seed still runs over these rows; the assembler calls `seed_period`
+        after (ss3.5, DL-132). The executor is rebuilt from the phase and the carried rows.
+        """
         self._assemble(INSTALL)
         self._jobs = dict(carried.jobs)
         self._globals = dict(carried.globals_)
@@ -2059,14 +1799,12 @@ class RuntimeState:
         self._enqueue_counter = carried.enqueue_counter
 
     def seed_period(self, period_id: int) -> None:
-        """Set the period a FRESH state is being assembled into (period-model
-        ss3.5, DL-132): the loader's first act, before any input. Explicit,
-        never inferred -- a state whose only mutations were globals, timers
-        or host rows would look untouched to any job-row inference and let
-        a live lineage skip. Legal exactly once, and never after a
-        committed input; the seal's own I2 and lineage bounds hold the
-        seeded number to the lineage. A period opens in a new state over
-        the carried rows, so a live state never moves its period."""
+        """Set the period a fresh state is being assembled into (period-model ss3.5, DL-132).
+
+        The loader's first act, before any input. Explicit, never inferred from the rows. Legal
+        once, and never after a committed input; the seal's I2 and lineage bounds hold the number
+        to the lineage.
+        """
         self._read_assembly(SEED_PERIOD)  # a refusal comes before the period is checked
         if period_id < 1:
             raise ValueError(f"seed_period({period_id}): periods count from 1 (I2)")
@@ -2076,50 +1814,36 @@ class RuntimeState:
     def touch_host(self, host_id: str, at: datetime) -> None:
         """Record positive contact with a host (concurrency-model ss8, S5b).
 
-        Deliberately NOT an admitted input: `last_contact` is outside the
-        semantic projection, so this moves no revision and leaves no log
-        record, and a lease heartbeat every twenty seconds costs neither. A
-        host the table does not know is ignored rather than created -- the
-        table is an inventory, and contact with something not in it is not a
-        registration."""
+        Not an admitted input: `last_contact` is outside the semantic projection, so this moves
+        no revision and writes no log record. An unknown host is ignored, not created.
+        """
         if host_id in self._hosts:
             self._replace_host(host_id, last_contact=at)
 
     def set_host_state(self, host_id: str, state: HostState) -> None:
-        """Write a routed state, `active` or `passive`: a drain, an activate,
-        or the state a reinstatement put back, which the row then forgets
-        (`HOST`'s choice picked it). Eviction is NOT this verb: it carries a
-        fence and an attribution, which is exactly what makes it the one
-        state that can cause a double run."""
+        """Write a routed state, `active` or `passive`: a drain, an activate, or the state a
+        reinstatement put back. Eviction is a separate verb: it carries a fence and an
+        attribution."""
         self._require_host(host_id)
         self._replace_host(host_id, state=state, state_before_quarantine=None)
 
     def quarantine_host(self, host_id: str) -> None:
-        """ss8: the leader's own state, set when a host stops answering
-        (host.05, from a routed state).
+        """ss8: the leader's own state, set when a host stops answering (host.05).
 
-        Remembers what it interrupted. A drained host that goes unreachable
-        and comes back must still be drained -- the operator's intent is not
-        the leader's to revoke, and a blip that silently ended a maintenance
-        window would be the worst kind of automation."""
+        Remembers what it interrupted: a drained host that comes back must still be drained.
+        """
         row = self._require_host(host_id)
         if row.state == "quarantined":
             return  # idempotent: repeated unreachability is one fact
         self._replace_host(host_id, state="quarantined", state_before_quarantine=row.state)
 
     def evict_host(self, host_id: str, *, forced_by: str | None) -> None:
-        """ss8: declare a host's work rerouteable. The only state that lets
-        ANOTHER host run what was bound to this one, so it does two things
-        no other transition does -- bump the `generation` a returning relay
-        is fenced on, and record the actor of a `--force` that skipped the
-        proof (None when the ss8 preconditions were met).
+        """ss8: declare a host's work rerouteable.
 
-        It also CLEARS what quarantine interrupted. A gated eviction can only
-        start from `quarantined` (ss8 precondition 1), so leaving that field
-        set would make every gated eviction violate the invariant this row
-        documents -- non-null only while quarantined -- and would leave a
-        state to "put back" for a host whose whole point is that it is not
-        coming back at this generation (DL-111)."""
+        It bumps the `generation` a returning relay is fenced on and records the actor of a
+        `--force` that skipped the proof (None when the ss8 preconditions were met). It clears
+        what quarantine interrupted, which is non-null only while quarantined (DL-111).
+        """
         row = self._require_host(host_id)
         self._replace_host(
             host_id,
@@ -2132,10 +1856,8 @@ class RuntimeState:
     # ------------------------------------------------------------------ timers
 
     def enqueue_timer(self, due: datetime, ev: Event) -> int:
-        """Arm a timer and return its ordering token. The token is a single
-        global counter, so equal-due timers keep their arming order ACROSS
-        jobs -- which is what decides who starts when two deadlines land on
-        the same instant."""
+        """Arm a timer and return its ordering token. The token is one global counter, so
+        equal-due timers keep their arming order across jobs."""
         job = ev.payload.get("job")
         if isinstance(job, str):
             self._touch(self.job_key(job))  # the heap IS part of the projection
@@ -2161,10 +1883,9 @@ class RuntimeState:
         return sorted(self._timers, key=_timer_order)
 
     def timers_for(self, job: str) -> list[tuple[datetime, int]]:
-        """One job's armed timers as (due, token), in firing order: the
-        entity-local half of the global ordering (concurrency-model ss3).
-        Sorting the union of these across jobs reproduces the heap's firing
-        order exactly, which a per-job set digest cannot do."""
+        """One job's armed timers as (due, token), in firing order: the entity-local half of the
+        global ordering (concurrency-model ss3)."""
+
         return [
             (due, token)
             for due, token, ev in sorted(self._timers, key=_timer_order)
