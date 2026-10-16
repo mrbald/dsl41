@@ -8993,7 +8993,7 @@ def test_an_event_with_no_effect_is_an_internal_transition_of_the_job(
 def test_dl54_killjob_on_a_queued_job_consumes_its_latched_arm() -> None:
     """A scheduled tick blocked by ON_HOLD arms the job; OFF_HOLD starts it
     into QUE_WAIT, which keeps the arm; KILLJOB dequeues it, terminates it
-    and consumes the arm (job.217 from arm_on)."""
+    and consumes the arm (job.436)."""
     o = oracle(
         "insert_resource: L17\nres_type: R\namount: 1\n\n"
         "insert_job: h17\njob_type: c\ncommand: h\nmachine: m1\nresources: (L17, QUANTITY=1)\n\n"

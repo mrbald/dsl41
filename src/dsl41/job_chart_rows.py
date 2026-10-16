@@ -62,7 +62,9 @@ _STATUS_PATH: Final[dict[str, tuple[str, ...]]] = {
     "STARTING": ("lifecycle", "LIVE"),
     "RUNNING": ("lifecycle", "LIVE"),
 }
-_FLAGS: Final = ("ice", "hold", "noexec", "arm")
+#: The flag regions. The scheduled tick's arm is no region: it is a fact of the payloads whose
+#: rows read it (DL-365).
+_FLAGS: Final = ("ice", "hold", "noexec")
 
 
 def configuration(
@@ -71,13 +73,10 @@ def configuration(
     ice: bool = False,
     hold: bool = False,
     noexec: bool = False,
-    armed: bool = False,
     holding: HoldingState = "none",
 ) -> frozenset[str]:
     """The active states of an instance with this status, these flags and this holding."""
-    flags = {
-        f"{name}_{'on' if on else 'off'}" for name, on in zip(_FLAGS, (ice, hold, noexec, armed))
-    }
+    flags = {f"{name}_{'on' if on else 'off'}" for name, on in zip(_FLAGS, (ice, hold, noexec))}
     return frozenset({"job", *_STATUS_PATH[status], status, "flags", *flags, holding})
 
 
@@ -95,17 +94,16 @@ def row_configuration(row: JobRuntime) -> frozenset[str]:
         ice=row.on_ice,
         hold=row.on_hold,
         noexec=row.on_noexec,
-        armed=row.armed,
         holding=row_holding(row),
     )
 
 
-def projection(active: frozenset[str]) -> tuple[str, bool, bool, bool, bool, str]:
-    """The row fields a configuration stands for: status, the four flags, holding."""
+def projection(active: frozenset[str]) -> tuple[str, bool, bool, bool, str]:
+    """The row fields a configuration stands for: status, the three flag regions, holding."""
     status = next(s for s in _STATUS_PATH if s in active)
     holding = next(h for h in ("none", "reserved", "held") if h in active)
-    ice, hold, noexec, armed = (f"{name}_on" in active for name in _FLAGS)
-    return status, ice, hold, noexec, armed, holding
+    ice, hold, noexec = (f"{name}_on" in active for name in _FLAGS)
+    return status, ice, hold, noexec, holding
 
 
 # ---- the chart
@@ -225,16 +223,6 @@ _STATUS_ROWS: Final = (
         "readmit_cancels",
         "cancelled",
         cite="DL-50, DL-247",
-    ),
-    Row("job.110", "QUE_WAIT", FLAG_MOVED, "INACTIVE", "left_waiter", "left_queue", cite="DL-257"),
-    Row(
-        "job.111",
-        "QUE_WAIT",
-        FLAG_MOVED,
-        "TERMINATED",
-        "killed_waiter",
-        "moved",
-        cite="DL-50, DL-54",
     ),
     Row(
         "job.112", "QUE_WAIT", FLAG_MOVED, "INACTIVE", "iced_waiter", "moved", cite="DL-50, DL-285"
@@ -430,8 +418,8 @@ _STATUS_ROWS: Final = (
         START,
         guard="start_moves_nothing",
         kind="ignored",
-        cite="SEM-20, SEM-21, SEM-32, SEM-33",
-        note="A gate holds the attempt silently, a tick arms, or a postponed start waits.",
+        cite="SEM-20, SEM-21, SEM-33",
+        note="A gate holds the attempt silently, or a postponed start waits.",
         false_unreachable="the catch-all of `start`: an attempt that moves the status takes an"
         " inner row, and no row is a gap (§10)",
     ),
@@ -556,15 +544,15 @@ _STATUS_ROWS: Final = (
         "job.199",
         "lifecycle",
         FLAG_MOVED,
-        "Only a waiter's kill or failed recheck reports it; an ignored ON_NOEXEC moves no flag.",
+        "An ice or an applied ON_NOEXEC reports it; an ignored ON_NOEXEC moves no flag.",
         "flag_move_unposted",
     ),
 )
 
 #: The further status rows, `job.4NN`: an attempt's owed settlement (DL-340), the extent of an
 #: admitted start, its move to STARTING, a window skip of an inactive member, the cascade's
-#: moments, and the cells no input reaches (DL-350). Ids are stable: a retired id is never
-#: reused (DL-364).
+#: moments, the cells no input reaches (DL-350), and the rows that read or move the arm
+#: (DL-365). Ids are stable: a retired id is never reused (DL-364).
 _MOMENT_ROWS: Final = (
     Row(
         "job.401",
@@ -672,7 +660,86 @@ _MOMENT_ROWS: Final = (
     ),
 )
 
-#: The flag rows, `job.2NN`: 201 to 217 are the flag moves.
+#: The arm's rows, `job.4NN` too (SEM-32, DL-54). The arm is a fact of the payloads whose rows
+#: read it, not a region: each row is its status's, guarded on the arm where its value parts two
+#: effects (DL-365); the hook writes the arm.
+_ARM_ROWS: Final = (
+    Row(
+        "job.429", "IDLE", START, guard="start_arms", kind="internal", cite="SEM-32, DL-54, DL-365"
+    ),
+    Row("job.430", "lifecycle", ACTUAL_START, guard="armed", kind="internal", cite="DL-54"),
+    Row(
+        "job.431",
+        "lifecycle",
+        ACTUAL_START,
+        guard="unarmed",
+        kind="internal",
+        cite="DL-54",
+        note="as job.430",
+    ),
+    Row("job.432", "lifecycle", DISARM, guard="armed", kind="internal", cite="DL-158"),
+    Row(
+        "job.433",
+        "lifecycle",
+        DISARM,
+        guard="unarmed",
+        kind="internal",
+        cite="DL-158",
+        note="As job.432; its line says there was no latch.",
+    ),
+    Row(
+        "job.434",
+        "lifecycle",
+        BOX_RUN_ENDS,
+        guard="armed",
+        kind="internal",
+        cite="DL-54",
+        note="SCHED_DISARM",
+    ),
+    Row(
+        "job.435",
+        "lifecycle",
+        BOX_RUN_ENDS,
+        guard="unarmed",
+        kind="ignored",
+        cite="DL-54",
+        note="Only an armed member disarms.",
+    ),
+    Row(
+        "job.436",
+        "QUE_WAIT",
+        KILLJOB,
+        "TERMINATED",
+        "armed",
+        "moved",
+        cite="DL-50, DL-54",
+        note="The kill drops the arm, then terminates the waiter.",
+    ),
+    Row("job.437", "QUE_WAIT", KILLJOB, "TERMINATED", "unarmed", "moved", cite="DL-50, DL-54"),
+    Row(
+        "job.438",
+        "QUE_WAIT",
+        READMIT,
+        "INACTIVE",
+        "readmit_leaves_armed",
+        "left_queue",
+        cite="DL-257",
+        note="The failed recheck drops the arm (SCHED_DISARM), then the waiter leaves the queue.",
+    ),
+    Row(
+        "job.439",
+        "QUE_WAIT",
+        READMIT,
+        "INACTIVE",
+        "readmit_leaves_unarmed",
+        "left_queue",
+        cite="DL-257",
+        note="No arm to drop: the waiter leaves the queue.",
+    ),
+)
+
+#: The flag rows, `job.2NN`: 201 to 211 are the flag moves. Ids are stable: a retired id is never
+#: reused (DL-364).
 _FLAG_ROWS: Final = (
     Row(
         "job.201",
@@ -703,13 +770,7 @@ _FLAG_ROWS: Final = (
     ),
     Row("job.210", "noexec_on", OFF_NOEXEC, "noexec_off", action="cleared_noexec", cite="DL-243"),
     Row("job.211", "noexec_on", BOX_OFF_NOEXEC, "noexec_off", cite=_DL254),
-    Row("job.212", "arm_off", START, "arm_on", "start_arms", cite="SEM-32, DL-54"),
-    Row("job.213", "arm_on", ACTUAL_START, "arm_off", cite="DL-54"),
-    Row("job.214", "arm_on", DISARM, "arm_off", cite="DL-158"),
-    Row("job.215", "arm_on", BOX_RUN_ENDS, "arm_off", cite="DL-54", note="SCHED_DISARM"),
-    Row("job.216", "arm_on", READMIT, "arm_off", "readmit_leaves", "waiter_left", cite="DL-257"),
-    Row("job.217", "arm_on", KILLJOB, "arm_off", "queued", "report_flag_move", cite="DL-54"),
-    # a split source: the second source of job.201, .202, .204, .205, .209, .210, .213, .214, .217
+    # a split source: the second source of job.201, .202, .204, .205, .209 and .210
     Row("job.218", "ice_on", ON_ICE, "ice_on", "not_live", "iced_again", cite="SEM-20"),
     Row("job.219", "ice_off", OFF_ICE, "ice_off", cite="SEM-20", note="as job.202"),
     Row("job.220", "hold_on", ON_HOLD, "hold_on", "not_live_or_queued", cite="SEM-21"),
@@ -724,23 +785,9 @@ _FLAG_ROWS: Final = (
         cite="SEM-22, DL-254",
     ),
     Row("job.223", "noexec_off", OFF_NOEXEC, "noexec_off", action="cleared_noexec", cite="DL-243"),
-    Row("job.224", "arm_off", ACTUAL_START, "arm_off", cite="DL-54", note="as job.213"),
-    Row("job.225", "arm_off", DISARM, "arm_off", cite="DL-158", note="as job.214"),
-    Row("job.226", "arm_off", KILLJOB, "arm_off", "queued", "report_flag_move", cite="DL-54"),
     # cells the rules move nothing in
     Row("job.227", "flags", BOX_RUNNING, kind="ignored", note="Not auto_hold, or already held."),
-    Row("job.228", "arm_off", BOX_RUN_ENDS, kind="ignored", note="Only an armed member disarms."),
     Row("job.229", "noexec_off", BOX_OFF_NOEXEC, kind="ignored", note="Only a flagged job clears."),
-    Row(
-        "job.230",
-        "arm_off",
-        READMIT,
-        guard="readmit_leaves",
-        action="waiter_left",
-        kind="internal",
-        cite="DL-257",
-        note="No arm to drop: the status move follows.",
-    ),
     # a box's ON_NOEXEC on each job it contains: the flag on, from either value as job.209 and
     # job.222, and the hold it supersedes off (job.207); the hold region of a job not held
     # takes no part (statechart-engine §3)
@@ -862,7 +909,23 @@ _HOLDING_ROWS: Final = (
     ),
 )
 
-ROWS: Final = (*_STATUS_ROWS, *_FLAG_ROWS, *_HOLDING_ROWS, *_MOMENT_ROWS)
+ROWS: Final = (*_STATUS_ROWS, *_FLAG_ROWS, *_HOLDING_ROWS, *_MOMENT_ROWS, *_ARM_ROWS)
+#: The row whose writes latch the arm, and the rows after whose writes it is off: the hook
+#: checks the row's `armed` against them, since the arm is no state of the chart and the
+#: projection check cannot see it (DL-365). Together they are the arm's rows.
+ARM_LATCHES: Final = ("job.429",)
+ARM_CLEARS: Final = (
+    "job.430",
+    "job.431",
+    "job.432",
+    "job.433",
+    "job.434",
+    "job.435",
+    "job.436",
+    "job.437",
+    "job.438",
+    "job.439",
+)
 #: The choices: job.119's injected status and job.302's take-over.
 CHOICES: Final = (
     Choice(

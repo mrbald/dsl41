@@ -23632,3 +23632,78 @@ relitigate an entry; append a new one.
   wording, fixed and confirmed by it at high; none found on the nested-start bound, the STARTING
   boundary, the ADMITTED cells and the carried facts, each checked on a constructed input
   sequence.
+- DL-365 A flag that nothing fires on is a fact, not a region: the scheduled tick's arm leaves the
+  job chart's `flags` region and is a fact of the payloads whose rows read it; each row that moved
+  the arm is its status's, with one row for each value of the arm where the value parts two effects
+  (2026-10-16; src/dsl41/job_chart.py, src/dsl41/job_chart_rows.py, src/dsl41/job_chart_events.py,
+  src/dsl41/oracle.py, src/dsl41/oracle_cascade.py, src/dsl41/oracle_facts.py,
+  src/dsl41/oracle_intents.py, src/dsl41/oracle_writers.py, src/dsl41/oracle_state.py;
+  tests/test_job_chart.py, tests/test_oracle_chart.py, tests/test_oracle_chart_cascade.py,
+  tests/test_job_machines.py, tests/test_exhaustive_engine.py, tests/test_oracle.py,
+  tests/oracle_inputs.py; docs/statechart-engine.md §11; docs/blocks/job-lifecycle.md;
+  docs/state-machines.md; docs/decision-index.md)
+  THE AIM. Step 8 of the job chart simplification. The arm (SEM-32, DL-54) is data the start rule
+  consults: two lines of `start_verdict`'s gates read it (`_gated`, `_latched`), and no row fires
+  on its value. No outcome of the oracle changes: no golden, no trace line.
+  THE RULE. A flag that nothing fires on is a fact of the payloads that read it, not a region.
+  DL-344's rule, that whether a flag was already set is the row's source state, now holds for the
+  three flags ice, hold and noexec. The arm is read from the job's row when a guard reads it:
+  `StartAttempt.armed` and `Readmission.armed` are lazy facts of `StartFacts` and `ReadmitFacts`,
+  kept on first read; DISARM's, KILLJOB's, `actual start`'s and a box rule's payloads are `Armed`,
+  whose `armed` reads the row through the handle (`RowUnits.armed`). The store's `armed` field and
+  `move_flag`'s arm states are unchanged, and the hook still writes every arm move.
+  THE ROWS. The `arm` region and its rows job.212 to job.217, job.224 to job.226, job.228 and
+  job.230 retire, with the status rows job.110 and job.111 that their `flag moved` fired. Ids are
+  not reused (DL-364). The new rows are status rows, job.429 to job.439: a tick that latches
+  (job.429, IDLE, `start_arms`, internal); `actual start` (job.430 armed, job.431 unarmed), DISARM
+  (job.432, job.433) and `box run ends` (job.434 internal, job.435 ignored), on `lifecycle`; a
+  waiter's KILLJOB to TERMINATED (job.436 armed, job.437 unarmed, action `moved`) and a waiter's
+  failed recheck to INACTIVE (job.438 `readmit_leaves_armed`, job.439 `readmit_leaves_unarmed`,
+  action `left_queue`), on QUE_WAIT. Each kill row's writer dequeues the waiter, clears the arm,
+  then writes the TERMINATED line; job.438's writes the SCHED_DISARM line before the INACTIVE line,
+  in DL-54's order. `start_moves_nothing` (job.180) now holds for `ignored` alone, since job.429
+  takes the latch. Guards added: `armed`, `unarmed`, `readmit_leaves_armed`,
+  `readmit_leaves_unarmed`; removed: `readmit_leaves`, `killed_waiter`, `left_waiter`. Actions
+  removed: `report_flag_move`, `waiter_left`, and its handler. `flag moved` loses its causes
+  KILLJOB and `readmit`, and `FlagFacts` leaves. `left_queue` reports the scan's `Readmitted` as
+  `cancelled` does.
+  THE CONDITION. Codex Astra (R2): old-value distinctions stay declared. Each pair of rows that
+  parted the arm's old value keeps two rows guarded `armed` and `unarmed`: DISARM job.214 and
+  job.225 as job.432 and job.433; `actual start` job.213 and job.224 as job.430 and job.431;
+  KILLJOB job.217 and job.226 as job.436 and job.437; `readmit` job.216 and job.230 as job.438 and
+  job.439; `box run ends` job.215 and job.228 as job.434 and job.435. No distinction moved into an
+  action or a writer; DISARM's writer still names its line by the row that fired.
+  ITEMS. A waiter's kill and a waiter's failed recheck each pop one item fewer: the `flag moved`
+  that carried the status move is gone. The cascade cap counts items (DL-351), so a cascade within
+  that many items of the cap now completes where it raised `CascadeDepthError` before. No golden
+  reaches the cap.
+  THE CHECK. The macrostep's check that each row projects to its instance no longer sees the
+  arm, since the arm is no state. The hook checks it instead, after each microstep's writes and
+  before the next item (`_check_arm`): the row's `armed` is read before the writes; after them,
+  if the fired rows include job.429 the row is armed, if they include any of job.430 to job.439
+  it is not, and otherwise it is unchanged. Any other value is a `StatechartError` naming the job
+  and the rows. The two sets, `ARM_LATCHES` and `ARM_CLEARS`, name the rows by id in
+  `job_chart_rows`, and a test holds them to every row guarded on the arm. §11 states the three
+  checks.
+  The test that planted a skipped arm write for the projection check plants a skipped hold write;
+  two new tests plant a skipped latch (job.429) and a spurious clear on OFF_HOLD (job.205), and
+  each raises. Codex Astra raised the gap (P2, ruling R7).
+  CHECKS. The job chart has 175 rows, 177 before; the transition gate holds 386 of 386 required
+  items of `job`, every new row and both outcomes of each new guard hit by the oracle's own tests.
+  The completeness table pins each new row from both values of the arm. A new test pins the
+  armed waiter's kill and leave as one row each, the arm cleared and its line before the status
+  line. The golden replay: 4,060 runs, 152,213 entries, 0 differing.
+  THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235): no accepted input derives differently, and
+  the goldens replay equal. The job instances are rebuilt from the rows, so no persisted
+  configuration names the arm's states.
+  REVIEW. Semantic class (§11 of a frozen contract, DL-344 narrowed). One Codex Astra pass
+  (gpt-6-astra, xhigh): one P2, the check given up, with the postcondition above as its proposed
+  replacement, fixed and confirmed by it at high; none found on the five old-value pairs, the lazy
+  arm read against a chained arm move in the same macrostep, and the cells of job.180 and job.429,
+  each checked on a constructed input sequence. One Opus reviewer: no blocker, no behaviour defect;
+  a differential run of HEAD against the tree over 1,620 runs and 186,872 entries, on 500 seeded
+  estates and every directed catalog under two recheck settings, showed no difference, each old
+  row or pair firing as often as its new row; its recommendation on the check matched Codex's (a
+  missed arm write lands in the sealed row, so no stated limit covers it); one medium and two lows
+  fixed and confirmed by it (§11 states the three checks; the arm rows' writers and sets are bound
+  by id and a test pins the sets; this entry's file list).

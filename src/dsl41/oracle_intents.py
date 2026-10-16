@@ -16,8 +16,8 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 from dsl41.capacity import DemandEntry
 from dsl41.ir import JobIR
-from dsl41.job_chart_events import SETTLE, Admission, FlagMoved, Injection, Payload, Terminator
-from dsl41.oracle_facts import ReadmitFacts
+from dsl41.job_chart_events import SETTLE, Admission, Injection, Payload, Terminator
+from dsl41.oracle_facts import RowUnits
 from dsl41.oracle_state import LIVE
 from dsl41.state_machine import Context, Effects
 from dsl41.state_machine import Event as ChartEvent
@@ -211,7 +211,19 @@ class MemberEnd(Terminator):
 
 
 @dataclass(frozen=True)
-class Rule(Payload):
+class Armed(Payload):
+    """A payload whose rows read the job's arm (`Arm`, DL-365): DISARM's and KILLJOB's, and the
+    base of `actual start`'s and a box rule's. `armed` is the row's arm, read from the handle
+    (`RowUnits.armed`) when a guard reads it."""
+
+    @property
+    def armed(self) -> bool:
+        """A scheduled tick latched the job (SEM-32, DL-54)."""
+        return cast(RowUnits, self.units).armed
+
+
+@dataclass(frozen=True)
+class Rule(Armed):
     """A box's moment on a job it contains: the box, which the job's lines
     name, and the batch its reset or its INACTIVE belongs to."""
 
@@ -236,19 +248,13 @@ class AdmissionFacts(Admission):
 
 
 @dataclass(frozen=True)
-class RunStart(Payload):
+class RunStart(Armed):
     """`actual start`'s payload: the run's cause (`start_run`), and whether the
-    run arms its term_run_time first (a bypass does not)."""
+    run arms its term_run_time first (`arm`; a bypass does not). `armed` is the job's latch,
+    which the start consumes (DL-54)."""
 
     cause: str = field(default="", compare=False)
     arm: bool = field(default=True, compare=False)
-
-
-@dataclass(frozen=True)
-class FlagFacts(FlagMoved):
-    """`flag moved` after a waiter's failed recheck, with the scan's facts."""
-
-    facts: ReadmitFacts | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)

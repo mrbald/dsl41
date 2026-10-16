@@ -383,11 +383,11 @@ class CarriedRows(BaseModel):
 
 # ------------------------------------------------------------- the job's flags
 #
-# A job row's flags are four orthogonal regions of the `job` chart (`job_chart`): ice, hold,
-# noexec and the scheduled-tick arm. The chart decides every move; `RuntimeState.move_flag`
-# writes the region value it reached.
+# A job row has four flags. Ice, hold and noexec are orthogonal regions of the `job` chart
+# (`job_chart`); the scheduled-tick arm is a fact its rows read (DL-365). The chart decides every
+# move; `RuntimeState.move_flag` writes the value it reached.
 
-#: One flag region's value, as the `job` chart names it.
+#: One flag's value, as the `job` chart names it.
 type FlagState = Literal[
     "ice_off", "ice_on", "hold_off", "hold_on", "noexec_off", "noexec_on", "arm_off", "arm_on"
 ]

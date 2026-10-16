@@ -43,12 +43,13 @@ class StartFacts:
 
     `force`, `explicit`, `scheduled`, `stale`, `rescan`, `decided` and `dated` are eager: who
     asks, the window timer's own facts (DL-343), which are read before any gate, and an
-    attribute of the job. `box`, `condition`, `window`, `settlement_owed`, `box_noexec`,
-    `admissible` and `demand` are lazy. `cause` is the attempt's cause text, which its writes
-    name; `refusal` is the text a stale window timer's refusal writes in place of the rule's
-    reason (DL-343). The guards read the lazy facts in `start_verdict`'s order, so an iced job's
-    condition is never evaluated, nor the window of a job whose condition is false. Every fact
-    is a read (`_window_side` fills the zone cache). `units` is the job's handle (`RowUnits`).
+    attribute of the job. `armed`, `box`, `condition`, `window`, `settlement_owed`,
+    `box_noexec`, `admissible` and `demand` are lazy. `cause` is the attempt's cause text,
+    which its writes name; `refusal` is the text a stale window timer's refusal writes in place
+    of the rule's reason (DL-343). The guards read the lazy facts in `start_verdict`'s order, so
+    an iced job's condition is never evaluated, nor the window of a job whose condition is
+    false. Every fact is a read (`_window_side` fills the zone cache). `units` is the job's
+    handle (`RowUnits`).
     """
 
     __slots__ = (
@@ -137,6 +138,13 @@ class StartFacts:
         return self._job_ir
 
     @property
+    def armed(self) -> bool:
+        """A scheduled tick latched the job (SEM-32, DL-54): the row's arm (DL-365)."""
+        if "armed" not in self._known:
+            self._known["armed"] = self.units.armed
+        return cast(bool, self._known["armed"])
+
+    @property
     def box(self) -> BoxGate:
         """The member's gate on its box's run (SEM-10, SEM-20)."""
         if "box" not in self._known:
@@ -220,7 +228,8 @@ class RowUnits:
     applies (`unreleased`, with the pool's `keeps_held`): one kept unit makes the end keep, else
     one spent unit makes it spend, else it frees. A row that holds nothing frees nothing
     (DL-349). `consequences` reads what a row of the job sends beyond its own move
-    (`OracleCascade._consequences`, DL-350). Both are reads.
+    (`OracleCascade._consequences`, DL-350). `armed` reads the row's arm, the fact a payload's
+    `armed` stands for (DL-365). All three are reads.
     """
 
     __slots__ = ("_oracle", "_job")
@@ -241,6 +250,11 @@ class RowUnits:
     def consequences(self, ctx: Context, action: str) -> Effects | None:
         """What a row of the job whose action is `action` sends and reports beyond its move."""
         return self._oracle._consequences(self._job, ctx, action)
+
+    @property
+    def armed(self) -> bool:
+        """A scheduled tick latched the job: the row's arm now (SEM-32, DL-54)."""
+        return self._oracle._runtime(self._job).armed
 
 
 def job_data(oracle: OracleCascade, job: str) -> JobData:
@@ -311,13 +325,14 @@ class ReadmitFacts:
     """A `readmit` payload (`Readmission`): one queue scan's attempt for a waiter (DL-345), each
     fact computed when a guard first reads it.
 
-    `keep_stopped` is eager: it is the scan's own mode. `box`, `admissible`, `recheck_fails` and
-    `demand` are lazy. `readmit_verdict` reads them in the rule's order: the box's status for a
-    member only, the demand vector and `_admissible` only for a waiter that is not held and
-    whose box runs, `_queued_recheck` only for one that fits, and the reservations only for one
-    admitted. Every fact is a read (`_queued_recheck` fills the calendar and zone caches). The
-    order of the waiters is not a fact: the scan reads it off the rows
-    (`CapacityPool.sorted_waiters`), and each waiter gets its own `readmit`. `admission` is the
+    `keep_stopped` is eager: it is the scan's own mode. `box`, `admissible`, `recheck_fails`,
+    `demand` and `armed` are lazy. `readmit_verdict` reads them in the rule's order: the box's
+    status for a member only, the demand vector and `_admissible` only for a waiter that is not
+    held and whose box runs, `_queued_recheck` only for one that fits, the reservations only for
+    one admitted, and the arm only for one whose recheck failed. Every fact is a read
+    (`_queued_recheck` fills the calendar and zone caches). The order of the waiters is not a
+    fact: the scan reads it off the rows (`CapacityPool.sorted_waiters`), and each waiter gets
+    its own `readmit`. `admission` is the
     readmission's units and its run's facts, built on its first read and kept, so ADMITTED's
     entry and its completion read one record (DL-364).
     """
@@ -373,6 +388,13 @@ class ReadmitFacts:
     def demand(self) -> bool:
         """The demand vector reserves units (`to_reservations`)."""
         return bool(to_reservations(self.vector()))
+
+    @property
+    def armed(self) -> bool:
+        """A scheduled tick latched the waiter (SEM-32, DL-54): the row's arm (DL-365)."""
+        if "armed" not in self._known:
+            self._known["armed"] = self.units.armed
+        return cast(bool, self._known["armed"])
 
     def vector(self) -> list[DemandEntry]:
         """The pool's `demand_vector`, which the readmission reads."""

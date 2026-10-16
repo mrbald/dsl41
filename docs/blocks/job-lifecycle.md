@@ -28,7 +28,7 @@ Its per-input [state_rev](../glossary.md#state_rev) is what a store's conditiona
 One job row is one instance of the composite statechart [job](../state-machines.md#job), `src/dsl41/job_chart.py` (DL-337), with three orthogonal regions:
 
 - `status`: the status and its moves.
-- `flags`: ON_ICE, ON_HOLD and ON_NOEXEC, and the schedule arm.
+- `flags`: ON_ICE, ON_HOLD and ON_NOEXEC. The schedule arm is no region: it is a fact of the payloads whose rows read it (DL-365).
 - `holding`: the units a job reserves or keeps; the [capacity](capacity.md) card explains it.
 
 The oracle (`Oracle` in `src/dsl41/oracle.py`) drives it for the STATUS input (DL-341), for every start attempt (DL-342), for KILLJOB and the TIMER input (DL-343), for the flag inputs (DL-344), for RELEASE_RESOURCE and each waiter's readmission out of the queue (DL-345), and for the box rules between a box and its members and the period opening's release (DL-346), and for a box's ON_NOEXEC on the jobs it contains (DL-347). The chart is the one declaration of a job's moves; the store's verbs write what it reached (DL-353). Its whole cascade runs on the executor's worklist: each consequence of a move is a chained item, and the oracle's hook writes each item's moves before the next one pops (DL-350). A box's end FAILURE or TERMINATED kills its live job_terminator members only while the run that ended is still the box's run (DL-348) and the box was not reset since (DL-360).

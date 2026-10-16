@@ -321,9 +321,10 @@ The chart has no send list of its own: such a row that meets a payload with no h
 statechart error (DL-356). The oracle's hook (§5 step 5) writes what each microstep's fired rows
 reached, with the store's verbs, in the order the rows fired (`oracle_writers`). The status written
 is the one the chart reached; the golden digests judge a wrong row (§16). A fired row the hook has
-no write for is a statechart error. Two checks are statechart errors: the job type behind a row that
-takes a job's or a box's path, checked before the write; and, at each macrostep's end and at the
-input's commit, every job the input reached has its row project to its instance's configuration. The
+no write for is a statechart error. Three checks are statechart errors: the job type behind a row
+that takes a job's or a box's path, checked before the write; at each macrostep's end and at the
+input's commit, every job the input reached has its row project to its instance's configuration;
+and, after each microstep's writes, the job's arm is the one its fired rows declare (below). The
 store's verb decides a settlement's holding move from the units; a settlement row that holds another
 state than the verb wrote fails the second check. No code outside the chart moves a job row, so no
 instance is brought back to its row.
@@ -361,19 +362,31 @@ sample raises (DL-348).
 KILLJOB and the TIMER input are dispatched to the job's instance too (DL-343), and the input passes
 its own relay to the attempt, so no cause text is read. A live job's kill (`job.114`) and a
 term_run_time on the running run it was armed for (`job.115`) terminate the job; a box's terminator
-cascade is the chart's `box ends step`. A waiter's kill drops its arm (`job.217`, `job.226`) and
-the flag move terminates it (`job.111`); a kill on any other status is ignored with a trace line,
-and a stale term_run_time writes nothing (`job.184`). The deadline alarms move no state and stay
-code. A window timer reads its own facts before any gate: whether the postponed start still belongs
-to its box run, and whether a scan continuation is superseded. They are real facts of its relayed
-`start`: a stale one is refused with its refusal line, a live continuation resumes the scan, and
-any other is the attempt. Timers stay armed by code; the chart declares moves, not timer writes.
+cascade is the chart's `box ends step`. A waiter's kill drops its arm and terminates it, one row
+for each value of the arm (`job.436`, `job.437`); a kill on any other status is ignored with a
+trace line, and a stale term_run_time writes nothing (`job.184`). The deadline alarms move no
+state and stay code. A window timer reads its own facts before any gate: whether the postponed
+start still belongs to its box run, and whether a scan continuation is superseded. They are real
+facts of its relayed `start`: a stale one is refused with its refusal line, a live continuation
+resumes the scan, and any other is the attempt. Timers stay armed by code; the chart declares
+moves, not timer writes.
 
 The flag inputs are dispatched to the job's instance too (DL-344). The fired rows decide each
-dimension a rule reads from the row or the catalog. Whether the flag was already set is the row's
-source state. An input the job ignores takes one of the status region's internal rows `job.148`
-to `job.158` and writes the EVENT_IGNORED line with the rule's reason (`_oob_ignored`); a row the
-chart ignores where no rule gives a reason is a statechart error. A flag row is written by the flag
+dimension a rule reads from the row or the catalog. The `flags` region holds three regions, `ice`,
+`hold` and `noexec`, and whether one of these flags was already set is the row's source state.
+The scheduled tick's arm is no region, since no row fires on it: it is a fact of the payloads
+whose rows read it, read from the job's row (DL-365). A start's gates read it
+(`StartAttempt.armed`). The rows that set it or clear it are their status's: a tick that
+latches (`job.429`), and the rows of `actual start`, DISARM, `box run ends`, a waiter's KILLJOB
+and a waiter's failed recheck, one row for each value of the arm where the value parts two
+effects. Their writes set or clear the arm; a row that also moves the status writes the arm
+first, and its line, where it has one, before the status line (DL-54). The arm is no state, so
+the projection check cannot see it. After each microstep's writes, before the next item, the row
+is armed if `job.429` fired, not armed if any of `job.430` to `job.439` fired, and otherwise as
+it was before the writes; any other value is a statechart error. An input the job ignores
+takes one of the status region's internal rows `job.148` to `job.158` and writes the
+EVENT_IGNORED line with the rule's reason (`_oob_ignored`); a row the chart ignores where no
+rule gives a reason is a statechart error. A flag row is written by the flag
 move, with its marker and line. A status that the `flag moved` fires is a status move: an iced
 waiter leaves the queue (`job.112`), and ON_NOEXEC settles a waiter, a FAILED job or a box
 (`job.113`, `job.121`, `job.136`, `job.169`, `job.170`). ON_NOEXEC's payload reads a box's
@@ -396,7 +409,7 @@ nothing; an admit-only one asks the pass for a full pass next. The scan an admis
 excess's scan. Each waiter the scan reaches gets one `readmit`, whose payload computes each fact
 where the scan's rule reads it. An admission (`job.108`) sends the start's extent; a member of a
 box that stopped running is cancelled (`job.109`); a waiter that fails the queued recheck drops its
-arm (`job.216`, or `job.230` with none) and its `flag moved` leaves the queue (`job.110`), with the
+arm and leaves the queue, one row for each value of the arm (`job.438`, `job.439`), with the
 window or day disposition after it in `after leave`; any other waiter stays queued (`job.181`).
 
 The box rules are dispatched to the instance each one moves (DL-346). A status move's row sends, in
