@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import itertools
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any, Literal
 
@@ -50,7 +50,6 @@ from dsl41.job_chart_events import (
     BOX_RUNNING,
     BOX_SET_INACTIVE,
     BOX_START,
-    COMPLETION_MOMENT,
     DISARM,
     FORCE_STARTJOB,
     ICE_MOVED,
@@ -180,6 +179,10 @@ STARTINGS = {
     "job.427": ("admitted_by_start", "starting_admitted"),
     "job.428": ("admitted_by_readmit", "starting_readmitted"),
 }
+#: A RUNNING box's completion door (DL-371): the rows that enter a phase from `settled`, and
+#: each phase's completion rows.
+DOOR_ENTRIES = ("job.454", "job.455")
+DOOR_COMPLETIONS = ("job.126", "job.127", "job.456", "job.457", "job.128", "job.129", "job.458")
 SKIP_IN_BOX = "job.404"
 SETTLE_LIVE = "job.418"
 #: The rows that admit a start: each sends `start admitted` first.
@@ -241,10 +244,28 @@ class Noexec(Payload):
 
 
 @dataclass(frozen=True)
-class Verdict(Payload):
-    """A step of a RUNNING box's completion door (`job_chart_events.Verdict`)."""
+class Verdict:
+    """The facts one phase of a RUNNING box's completion door reads (`job_chart_events.Verdict`)."""
 
     target: Literal["SUCCESS", "FAILURE"] | None = None
+
+
+@dataclass(frozen=True)
+class Door(Payload):
+    """A visit of a RUNNING box's completion door (`job_chart_events.Door`): its phases, and
+    each phase's facts, given. `begun` records the phases whose entry ran, in order."""
+
+    overrides: bool = True
+    folds: bool = True
+    override: Verdict = Verdict()
+    fold: Verdict = Verdict()
+    begun: list[str] = field(default_factory=list, compare=False, repr=False)
+
+    def begin_override(self) -> None:
+        self.begun.append("override")
+
+    def begin_fold(self) -> None:
+        self.begun.append("fold")
 
 
 @dataclass(frozen=True)
@@ -285,7 +306,8 @@ class Still:
 
 
 def _tree() -> tuple[dict[str, tuple[str, ...]], dict[str, str]]:
-    """Each state's leaves, and each leaf's region: `status`, a flag, or `holding`."""
+    """Each state's leaves, and each leaf's region: `status`, a flag, `holding`, or `door`.
+    RUNNING is a leaf of `status`: its completion door is a region of its own (DL-371)."""
     leaves: dict[str, tuple[str, ...]] = {}
     region: dict[str, str] = {}
 
@@ -294,8 +316,8 @@ def _tree() -> tuple[dict[str, tuple[str, ...]], dict[str, str]]:
         for sub in state.regions:
             name = where or sub.name
             for child in sub.states:
-                found += walk(child, name if state.name != "flags" else sub.name)
-        if not state.regions:
+                found += walk(child, sub.name if state.name in ("flags", "RUNNING") else name)
+        if not state.regions or state.name == "RUNNING":
             found = (state.name,)
             region[state.name] = where
         leaves[state.name] = found
@@ -348,7 +370,7 @@ def test_the_chart_is_well_formed_draws_no_warning_and_is_registered() -> None:
     assert chart_warnings(CHART) == []
     assert CHART.clock == "logical"
     assert CHART in MACHINES
-    assert len(CHART.rows) == 147
+    assert len(CHART.rows) == 151
     assert [b.id for c in CHART.choices for b in c.branches] == [
         *(f"job.{n}" for n in range(171, 177)),
         "job.309",
@@ -359,10 +381,10 @@ def test_the_chart_is_well_formed_draws_no_warning_and_is_registered() -> None:
         [
             STATUS, STARTJOB, FORCE_STARTJOB, KILLJOB, ON_ICE, OFF_ICE, ON_HOLD, OFF_HOLD,
             ON_NOEXEC, OFF_NOEXEC, DISARM, RELEASE_RESOURCE, TERM_RUN_TIME, RUN_WINDOW, START,
-            STARTED, READMIT, ACTUAL_START, ADMITTED_START, LEAVE_LIVE, MEMBER_MOVES,
-            COMPLETION_MOMENT, MEMBER_ENDS, BOX_RECOMPUTE, BOX_START, BOX_RUNNING,
-            BOX_SET_INACTIVE, BOX_RUN_ENDS, BOX_ENDS, BOX_OFF_NOEXEC, BOX_ON_NOEXEC, PERIOD_OPENING,
-            ICE_MOVED, NOEXEC_MOVED, START_ADMITTED, *MOMENTS,
+            STARTED, READMIT, ACTUAL_START, ADMITTED_START, LEAVE_LIVE, MEMBER_MOVES, MEMBER_ENDS,
+            BOX_RECOMPUTE, BOX_START, BOX_RUNNING, BOX_SET_INACTIVE, BOX_RUN_ENDS, BOX_ENDS,
+            BOX_OFF_NOEXEC, BOX_ON_NOEXEC, PERIOD_OPENING, ICE_MOVED, NOEXEC_MOVED, START_ADMITTED,
+            *MOMENTS,
         ]
     )  # fmt: skip
 
@@ -378,8 +400,14 @@ def test_every_guard_and_action_says_what_it_reads() -> None:
     named = {row.guard for row in CHART.rows} | {b.guard for c in CHART.choices for b in c.branches}
     assert named - {""} == set(CHART.guards)
     entries = {state.name: state.entry for state in _states(CHART.root) if state.entry}
-    # each status leaf's entry reports its status write; ADMITTED's sends what precedes STARTING
-    assert entries == {"ADMITTED": "starts_run", **dict.fromkeys(STATUSES, "writes_status")}
+    # each status's entry reports its status write; ADMITTED's sends what precedes STARTING; each
+    # phase of a RUNNING box's door builds the facts its completion reads (DL-371)
+    assert entries == {
+        "ADMITTED": "starts_run",
+        **dict.fromkeys(STATUSES, "writes_status"),
+        "overriding": "reads_overrides",
+        "folding": "reads_fold",
+    }
     assert not any(state.exit for state in _states(CHART.root))
     actions = {row.action for row in CHART.rows} | {
         b.action for c in CHART.choices for b in c.branches
@@ -409,7 +437,8 @@ def test_every_marked_row_is_unreachable_with_its_reason() -> None:
     previous end, since job.401 settles first."""
     marked = [row for row in CHART.rows if row.mark]
     assert [row.id for row in marked] == [
-        "job.182", "job.186", "job.188", "job.190", "job.192", "job.450", "job.199", "job.453",
+        "job.182", "job.186", "job.190", "job.192", "job.450", "job.199", "job.453",
+        "job.459", "job.460",
         "job.312",
         "job.314", "job.317", "job.318", "job.320", "job.321",
         "job.420", "job.421", "job.422", "job.423",
@@ -467,13 +496,14 @@ def test_the_arm_s_rows_are_its_latch_and_its_clears() -> None:
 def _moves() -> set[str]:
     """The status, flag and holding moves: each cell's row and its siblings."""
     primaries = (*CELLS, *WAITER_CELLS)
-    return {ident for primary in primaries for ident in (primary, *SIBLINGS.get(primary, ()))}
+    found = {ident for primary in primaries for ident in (primary, *SIBLINGS.get(primary, ()))}
+    return found | {*DOOR_ENTRIES, *DOOR_COMPLETIONS}
 
 
 def test_every_other_row_moves_nothing_relays_an_attempt_or_settles_held_units() -> None:
     moves = _moves()
     others = [row for row in CHART.rows if row.id not in moves]
-    assert len(moves) == 62 + 6 + 5 and len(others) == 74
+    assert len(moves) == 58 + 6 + 5 + 9 and len(others) == 73
     moments = {f"job.{405 + i}": event for i, event in enumerate(MOMENTS)}
     for row in others:
         if row.id in RELAYS:
@@ -579,6 +609,13 @@ def _buildable() -> Iterator[frozenset[str]]:
                 yield configuration(status, ice=ice, hold=hold, noexec=noexec, holding=holding)
 
 
+def _phase(phase: str, holding: str = "none") -> frozenset[str]:
+    """A RUNNING box with its completion door in `phase`, between a visit's entry and its
+    completion (DL-371); no row projects to it."""
+    running = configuration("RUNNING", holding=holding)  # type: ignore[arg-type]
+    return running - {"settled"} | {phase}
+
+
 def _admitted(holding: str = "none") -> frozenset[str]:
     """An admitted start's transient configuration, between its admission and
     its STARTING (DL-350); no row projects to it."""
@@ -640,7 +677,18 @@ def _attempts() -> list[Attempt]:
 
 
 _NOEXECS = [Noexec(busy, change) for busy in (False, True) for change in (True, False)]
-_STEPS = [Verdict(None), Verdict("SUCCESS"), Verdict("FAILURE")]
+_TARGETS: tuple[Literal["SUCCESS", "FAILURE"] | None, ...] = (None, "SUCCESS", "FAILURE")
+#: The three visits of a RUNNING box's completion door (DL-371): the overrides then the fold,
+#: the fold alone, the overrides alone; each with every verdict its phases can read.
+_VISITS = [
+    *(
+        Door(override=Verdict(over), fold=Verdict(fold))
+        for over in _TARGETS
+        for fold in (_TARGETS if over is None else (None,))
+    ),
+    *(Door(overrides=False, fold=Verdict(fold)) for fold in _TARGETS),
+    *(Door(folds=False, override=Verdict(over)) for over in _TARGETS),
+]
 #: The payload partitions of each event whose guards read one (§13). A door
 #: step and an idle recompute have their own payload types, so no payload an
 #: event cannot carry selects a marked row.
@@ -663,8 +711,7 @@ PARTITIONS: dict[str, list[Any]] = {
     NOEXEC_MOVED: _NOEXECS,
     **{event: [Arm(False), Arm(True)] for event in (ACTUAL_START, DISARM, BOX_RUN_ENDS, KILLJOB)},
     TERM_RUN_TIME: [Deadline(True), Deadline(False)],
-    MEMBER_MOVES: _STEPS,
-    COMPLETION_MOMENT: _STEPS,
+    MEMBER_MOVES: _VISITS,
     BOX_RECOMPUTE: [BoxVerdict(t, o) for t in (None, "SUCCESS", "FAILURE") for o in (False, True)],
     MEMBER_ENDS: [Terminator(True), Terminator(False)],
     ADMITTED_START: [Admission(held, demand) for held in (False, True) for demand in (True, False)],
@@ -701,7 +748,12 @@ def test_the_sweep_of_every_buildable_cell_raises_no_selection_error_and_selects
     cells = 0
     kinds = (("job", JOB_DATA), ("box", BOX_DATA), ("member", MEMBER_DATA), ("none", NO_CATALOG))
     admitted = [_admitted(holding) for holding in _HOLDINGS["INACTIVE"]]
-    for index, active in enumerate([*_buildable(), *admitted]):
+    phases = [
+        _phase(phase, holding)
+        for phase in ("overriding", "folding")
+        for holding in _HOLDINGS["RUNNING"]
+    ]
+    for index, active in enumerate([*_buildable(), *admitted, *phases]):
         for kind, data in kinds:
             key = (index, kind)
             executor.restore(key, CHART, active, data)
@@ -717,8 +769,8 @@ def test_the_sweep_of_every_buildable_cell_raises_no_selection_error_and_selects
                     cells += 1
     # the bound reads the item's ancestry, which a read never has: the
     # ancestry test reaches it; a completion is no event a read selects, and
-    # the cells of the admissions reach ADMITTED's
-    assert selected == set(ROWS) - {START_BOUND, *STARTINGS}
+    # the cells of the admissions reach ADMITTED's, the door's visits the door's
+    assert selected == set(ROWS) - {START_BOUND, *STARTINGS, *DOOR_COMPLETIONS}
     assert acting == []
     assert cells > 250_000
 
@@ -816,6 +868,8 @@ def _witnesses() -> dict[str, sc.Builder]:
     found["no catalog FAILURE held"] = _witness(
         configuration("FAILURE", holding="held"), NO_CATALOG
     )
+    found["box RUNNING overriding"] = _witness(_phase("overriding"), BOX_DATA)
+    found["box RUNNING folding"] = _witness(_phase("folding", "reserved"), BOX_DATA)
     found["job ADMITTED"] = _witness(_admitted(), JOB_DATA)
     found["box ADMITTED reserved"] = _witness(_admitted("reserved"), BOX_DATA)
     return found
@@ -964,6 +1018,17 @@ def test_the_completeness_table_matches_the_declaration_in_every_cell() -> None:
     assert table[("job INACTIVE hold", BOX_ON_NOEXEC, sc.ANY)] == "job.231 + job.232"
     assert table[("job FAILURE every flag held", BOX_ON_NOEXEC, sc.ANY)] == "job.232 + job.233"
     assert table[("job INACTIVE", BOX_RUNNING, sc.ANY)] == "ignored job.227"
+    # a RUNNING box's completion door: each visit enters its first phase from `settled`; a
+    # second visit while a phase is open is a marked cell (DL-371)
+    full, fold_only = Door(), Door(overrides=False)
+    assert table[("box RUNNING", MEMBER_MOVES, repr(full))] == "job.454"
+    assert table[("box RUNNING", MEMBER_MOVES, repr(Door(folds=False)))] == "job.454"
+    assert table[("box RUNNING", MEMBER_MOVES, repr(fold_only))] == "job.455"
+    assert table[("job RUNNING", MEMBER_MOVES, repr(full))] == "ignored job.186"
+    assert table[("box RUNNING overriding", MEMBER_MOVES, repr(full))] == "ignored job.459"
+    assert table[("box RUNNING folding", MEMBER_MOVES, repr(fold_only))] == "ignored job.460"
+    assert table[("box RUNNING overriding", KILLJOB, repr(Arm(False)))] == "job.114"
+    assert table[("box RUNNING folding", MEMBER_ENDS, repr(Terminator(True)))] == "job.130"
 
 
 # ---- one cell per move and source
@@ -1009,10 +1074,6 @@ def _box(target: str | None, override: bool) -> BoxVerdict:
     return BoxVerdict(target, override)  # type: ignore[arg-type]
 
 
-def _step(target: str | None) -> Verdict:
-    return Verdict(target)  # type: ignore[arg-type]
-
-
 def _noexec_moved() -> ChartEvent:
     """ON_NOEXEC's flag move, which the status rule reads: the tier sends it
     once the flag is on, with ON_NOEXEC's payload (`OracleCascade._on_noexec`)."""
@@ -1043,10 +1104,6 @@ CELLS: dict[str, Cell] = {
     "job.445": _status(ChartEvent(BOX_SET_INACTIVE)),
     "job.124": _status(_start(), BOX_DATA),
     "job.125": _status(ChartEvent(STARTED, Still()), BOX_DATA),
-    "job.126": _status(ChartEvent(MEMBER_MOVES, _step("SUCCESS")), BOX_DATA),
-    "job.127": _status(ChartEvent(MEMBER_MOVES, _step("FAILURE")), BOX_DATA),
-    "job.128": _status(ChartEvent(COMPLETION_MOMENT, _step("SUCCESS")), BOX_DATA),
-    "job.129": _status(ChartEvent(COMPLETION_MOMENT, _step("FAILURE")), BOX_DATA),
     "job.130": _status(ChartEvent(MEMBER_ENDS, Terminator()), BOX_DATA),
     "job.446": _status(ChartEvent(BOX_RECOMPUTE, _box("SUCCESS", True)), BOX_DATA),
     "job.447": _status(ChartEvent(BOX_RECOMPUTE, _box("FAILURE", True)), BOX_DATA),
@@ -1109,7 +1166,7 @@ def test_every_move_from_every_source_ends_in_its_target() -> None:
     guard parts a waiter from any other job has a waiter's twin with its own cell
     (`WAITER_CELLS`). A rule written once at a superstate fires at each of its leaves but those
     where another row takes its cell (`ELSEWHERE`), and that row fires there."""
-    assert len(CELLS) == 62
+    assert len(CELLS) == 58
     checked = elsewhere = 0
     for primary, cell in (*CELLS.items(), *WAITER_CELLS.items()):
         for ident in (primary, *SIBLINGS.get(primary, ())):
@@ -1130,7 +1187,7 @@ def test_every_move_from_every_source_ends_in_its_target() -> None:
                 after = _leaf(executor.active("j"), REGION[source])
                 assert after in _targets(row), (ident, source, after)
                 checked += 1
-    assert (checked, elsewhere) == (160, 18)
+    assert (checked, elsewhere) == (156, 18)
 
 
 def _advance(executor: Executor, job: str, event: ChartEvent) -> list[Any]:
@@ -1142,6 +1199,99 @@ def _advance(executor: Executor, job: str, event: ChartEvent) -> list[Any]:
         admitted = _handled(Admitted(verdict))  # type: ignore[arg-type]
         outcomes += executor.dispatch(job, ChartEvent(START_ADMITTED, admitted))
     return outcomes
+
+
+# ---- a RUNNING box's completion door (DL-371)
+
+_SUCCESS, _FAILURE = Verdict("SUCCESS"), Verdict("FAILURE")
+#: Each visit from `settled`: the rows it fires in order, where the box's status region ends (a
+#: status, or `settled` in RUNNING), and the phases whose entry ran.
+_DOOR_RUNS: dict[str, tuple[Door, tuple[str, ...], str, list[str]]] = {
+    "box_success holds": (Door(override=_SUCCESS), ("job.454", "job.126"), "SUCCESS", ["override"]),
+    "box_failure holds": (Door(override=_FAILURE), ("job.454", "job.127"), "FAILURE", ["override"]),
+    "no override, the fold decides SUCCESS": (
+        Door(fold=_SUCCESS),
+        ("job.454", "job.456", "job.128"),
+        "SUCCESS",
+        ["override", "fold"],
+    ),
+    "no override, the fold decides FAILURE": (
+        Door(fold=_FAILURE),
+        ("job.454", "job.456", "job.129"),
+        "FAILURE",
+        ["override", "fold"],
+    ),
+    "no override, the fold decides nothing": (
+        Door(),
+        ("job.454", "job.456", "job.458"),
+        "settled",
+        ["override", "fold"],
+    ),
+    "the walk up meets box_success": (
+        Door(folds=False, override=_SUCCESS),
+        ("job.454", "job.126"),
+        "SUCCESS",
+        ["override"],
+    ),
+    "the walk up meets no override and never folds": (
+        Door(folds=False, fold=_SUCCESS),
+        ("job.454", "job.457"),
+        "settled",
+        ["override"],
+    ),
+    "the fold alone decides SUCCESS": (
+        Door(overrides=False, override=_FAILURE, fold=_SUCCESS),
+        ("job.455", "job.128"),
+        "SUCCESS",
+        ["fold"],
+    ),
+    "the fold alone decides FAILURE": (
+        Door(overrides=False, fold=_FAILURE),
+        ("job.455", "job.129"),
+        "FAILURE",
+        ["fold"],
+    ),
+    "the fold alone decides nothing": (
+        Door(overrides=False),
+        ("job.455", "job.458"),
+        "settled",
+        ["fold"],
+    ),
+}
+
+
+@dataclass(frozen=True)
+class _Asked(Policy):
+    """A handle that records the actions that ask it what their row sends."""
+
+    asked: list[str] = field(default_factory=list)
+
+    def consequences(self, ctx: Context, action: str) -> None:
+        self.asked.append(action)
+
+
+@pytest.mark.parametrize("case", sorted(_DOOR_RUNS))
+def test_a_door_visit_runs_its_phases_inside_running(case: str) -> None:
+    """Each visit enters its first phase from `settled` (job.454, job.455); each phase's entry
+    builds the facts it reads, and its completion, which carries the visit's payload (DL-364),
+    decides: a status, the next phase, or `settled`. The walk up's visit never folds, and the
+    fold alone reads no override. RUNNING is not left and entered again inside a visit, so its
+    entry writes no status unless the door ends the box (DL-366, DL-371)."""
+    door, rows, end, begun = _DOOR_RUNS[case]
+    units = _Asked()
+    payload = replace(door, units=units, begun=[])
+    executor = Executor()
+    executor.restore("b", CHART, configuration("RUNNING", holding="reserved"), BOX_DATA)
+    outcomes = executor.dispatch("b", ChartEvent(MEMBER_MOVES, payload))
+    assert tuple(row for outcome in outcomes for row in outcome.rows) == rows
+    assert [o.event.name for o in outcomes] == [MEMBER_MOVES, *[COMPLETION] * (len(rows) - 1)]
+    assert all(o.event.payload is payload for o in outcomes)
+    assert payload.begun == begun
+    active = executor.active("b")
+    if end == "settled":
+        assert active == configuration("RUNNING", holding="reserved") and units.asked == []
+    else:
+        assert projection(active)[0] == end and units.asked == ["completed", "writes_status"]
 
 
 # ---- the projection

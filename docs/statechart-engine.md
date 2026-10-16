@@ -225,7 +225,9 @@ carried by that tier's protocol. The executor queues them (§5 step 3).
 
 A step that must continue after the items it raises have run is a transient state whose completion
 transition is the continuation. Its guard reads the state after the chained items ran, because the
-completion is queued behind them.
+completion is queued behind them. So a phase of a cascade whose decision is a chart row is a state
+with an entry action and a completion row, not a suspended step of the tier's; a tier step that only
+sequences its sends stays a moment (DL-371).
 
 A machine that bounds re-triggering declares the bound as a row guarded on an item's ancestry depth,
 or on the count of one step in it, which a guard reads in constant time (`Context.count`). Items of
@@ -242,7 +244,8 @@ change is a moment that sends its next item and then itself again; the gate is r
 A row whose own write must follow its chained items targets a transient state. An admitted start
 enters `ADMITTED` from its `start admitted`, and a readmission from its own row. The state's entry
 action sends the units, the run's start and a box's resets; its completion moves the job to
-STARTING after their cascades and sends the rest of the start (DL-364). Each status leaf's entry
+STARTING after their cascades and sends the rest of the start (DL-364). A RUNNING box's completion
+door is a region of RUNNING whose phases are transient states (§11, DL-371). Each status's entry
 action reports the status write, which the hook performs with the entering row's line (§11). The
 per-job start bound (DL-304) is `job.100`, guarded on the count of the job's own `start admitted`
 items in the item's ancestry. The completion descends from `start admitted`, so every later step of
@@ -320,7 +323,7 @@ tier's handle on its payload (`Units.consequences`), as a guard takes its facts:
 which rows send and when, and the oracle computes each send list and its audience as the row runs.
 The chart has no send list of its own: such a row that meets a payload with no handle is a
 statechart error (DL-356). The oracle's hook (§5 step 5) writes what each microstep reached, with
-the store's verbs (`oracle_writers`). The status write is the status leaf's entry action
+the store's verbs (`oracle_writers`). The status write is the status state's entry action
 (`writes_status`): it reports the status it is, and the initial entry reports nothing, since an
 instance starts in the status its row holds. The row's writer holds the row's own writes. The hook
 runs the fired rows' writers in the order the rows fired. A row that enters a status gives the line
@@ -425,12 +428,8 @@ window or day disposition after it in `after leave`; any other waiter stays queu
 The box rules are dispatched to the instance each one moves (DL-346). A status move's row sends, in
 order, its `box rules` (the moment that reaches the job's box and the boxes above), its `settle`
 and its `wake` (the referencers' starts, then a scan where the move freed units or lifts a block).
-A member that ends FAILURE or TERMINATED meets the box's terminator (`job.130`). A RUNNING box's
-completion door reads its overrides (`member moves`), then the default fold (`completion moment`),
-sent on every move of a member of a RUNNING box and after the overrides only when none fired. An
-idle box re-derives its status (`box recompute`). The walk up to the boxes above (`walk up`) reads
-their overrides through `member moves`, and an ice that takes a member out of its box's run is a
-completion moment there (`holders may leave`). A box's start, run and end reach its members: the
+A member that ends FAILURE or TERMINATED meets the box's terminator (`job.130`). An idle box
+re-derives its status (`box recompute`). A box's start, run and end reach its members: the
 reset (`box start`), auto_hold (`box running`), the end of the run's arms (`box run ends`), the
 job_terminators (`box ends FAILURE or TERMINATED`, one member per `box ends step`), the batch
 INACTIVE cascade (`box set INACTIVE`, then `notify step` per row), ON_NOEXEC's flag and hold
@@ -441,13 +440,30 @@ decides them all. The parent's recompute after an operator's INACTIVE is `after 
 period's first input gives a removed job's held units back (`job.308`). Each payload computes its
 facts where the rule reads them. A box rule's target is the chart's choice.
 
+A RUNNING box's completion door is RUNNING's region `door` (DL-371): `settled` between items, and
+two phases, `overriding` and `folding`. A visit is one `member moves`, whose payload names the
+phases it runs. A member's terminal, RUNNING or resolving move at its RUNNING box reads the
+overrides, then folds; any other move folds alone. The walk up to the boxes above (`walk up`) reads
+their overrides alone and never folds. An ice that takes a member out of its box's run is a
+completion moment there (`holders may leave`), and reads the overrides, then folds, as a box start's
+`window pass` does. A visit enters its first phase from `settled`: `job.454` for the overrides,
+`job.455` for the fold alone. A phase's entry action builds the facts it reads, and its completion,
+which carries the visit's payload (§4), decides. In `overriding`, an override that holds ends the
+box (`job.126`, `job.127`); with none, the visit folds (`job.456`) or settles (`job.457`). In
+`folding`, the fold ends the box (`job.128`, `job.129`) or settles (`job.458`). The rows that enter
+a phase are the region's own, so a visit never leaves RUNNING and never repeats its status write. An
+entry only reads, and the row that enters a phase sends nothing, so the phase's completion pops
+next. A second visit therefore never meets an open phase, and its cells (`job.459`, `job.460`) are
+marked unreachable. No item pops between a phase's entry and its completion, so no completion row
+reads the box's run; the exit of RUNNING would discard a completion still queued (§4).
+
 The chart decides each box rule's row; the oracle decides when a rule is sent, and to which
 instances. `box running`, `box run ends` and `box ends FAILURE or TERMINATED` reach the box's direct
 members; `box start`, `box set INACTIVE`, `ON_NOEXEC on its box` and `OFF_NOEXEC on its box` reach
 every job it contains. Six gates choose an audience the chart does not see: `box start` skips
 a live subbox's subtree (`_contained(skip_live=True)`, which also skips a live or queued job);
-`member moves` is sent by the completion door on the moves it sees, not on a non-terminal move (a
-terminal, RUNNING or resolving move only); `box recompute` is sent by its callers' gates, run
+a visit of the completion door reads the overrides only on a member's terminal, RUNNING or
+resolving move, and the walk up visits only then; `box recompute` is sent by its callers' gates, run
 numbers and the cascaded-subbox case, LIVE and TERMINATED excluded (a member's terminal move, or the
 direct target of an operator's INACTIVE, never a row the cascade took INACTIVE); the walk up skips
 an ancestor whose run number moved; the parent recompute after an operator's INACTIVE needs the

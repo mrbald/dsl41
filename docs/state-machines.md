@@ -8,11 +8,11 @@ Clock: logical.
 
 ```mermaid
 stateDiagram-v2
-    state "job" as s18
-    state s18 {
-        [*] --> s19
-        state "lifecycle" as s19
-        state s19 {
+    state "job" as s19
+    state s19 {
+        [*] --> s20
+        state "lifecycle" as s20
+        state s20 {
             [*] --> s3
             state "IDLE" as s3
             state s3 {
@@ -36,6 +36,12 @@ stateDiagram-v2
                 [*] --> s8
                 state "STARTING" as s8
                 state "RUNNING" as s7
+                state s7 {
+                    [*] --> s26
+                    state "settled" as s26
+                    state "overriding" as s24
+                    state "folding" as s13
+                }
             }
             state "ADMITTED" as s0
         }
@@ -43,23 +49,23 @@ stateDiagram-v2
         [*] --> s12
         state "flags" as s12
         state s12 {
-            [*] --> s16
-            state "ice_off" as s16
-            state "ice_on" as s17
+            [*] --> s17
+            state "ice_off" as s17
+            state "ice_on" as s18
             --
-            [*] --> s14
-            state "hold_off" as s14
-            state "hold_on" as s15
+            [*] --> s15
+            state "hold_off" as s15
+            state "hold_on" as s16
             --
-            [*] --> s20
-            state "noexec_off" as s20
-            state "noexec_on" as s21
+            [*] --> s21
+            state "noexec_off" as s21
+            state "noexec_on" as s22
         }
         --
-        [*] --> s22
-        state "none" as s22
-        state "reserved" as s23
-        state "held" as s13
+        [*] --> s23
+        state "none" as s23
+        state "reserved" as s25
+        state "held" as s14
     }
     state c0 <<choice>>
     state c1 <<choice>>
@@ -75,61 +81,66 @@ stateDiagram-v2
     s5 --> s11 : job.114 KILLJOB / terminated
     s7 --> s11 : job.115 TIMER term_run_time [current_run] / terminated
     s5 --> s11 : job.116 box ends FAILURE or TERMINATED [is_terminator] / terminated
-    s19 --> s9 : job.117 STATUS [exit_success] / moved
-    s19 --> s2 : job.118 STATUS [exit_failure] / moved
-    s19 --> c0 : job.119 STATUS [injects]
-    s19 --> s4 : job.120 STATUS [injects_inactive_job] / injected
+    s20 --> s9 : job.117 STATUS [exit_success] / moved
+    s20 --> s2 : job.118 STATUS [exit_failure] / moved
+    s20 --> c0 : job.119 STATUS [injects]
+    s20 --> s4 : job.120 STATUS [injects_inactive_job] / injected
     s1 --> s4 : job.121 noexec moved [noexec_settles_job] / injected
     s10 --> s4 : job.122 box start / batched
-    s19 --> s4 : job.445 box set INACTIVE / batched
+    s20 --> s4 : job.445 box set INACTIVE / batched
     s8 --> s7 : job.125 started [started_box] / runs_box
-    s7 --> s9 : job.126 member moves [verdict_success] / completed
-    s7 --> s2 : job.127 member moves [verdict_failure] / completed
-    s7 --> s9 : job.128 completion moment [verdict_success] / completed
-    s7 --> s2 : job.129 completion moment [verdict_failure] / completed
     s7 --> s11 : job.130 member ends FAILURE or TERMINATED [terminator_fires] / terminated
-    s19 --> s9 : job.446 box recompute [overrides_success] / moved
-    s19 --> s2 : job.447 box recompute [overrides_failure] / moved
-    s19 --> s9 : job.448 box recompute [derives_success] / moved
-    s19 --> s2 : job.449 box recompute [derives_failure] / moved
-    s19 --> s4 : job.135 STATUS [injects_inactive_box] / cascades
-    s19 --> s4 : job.452 noexec moved [noexec_settles_box] / cascades
-    s16 --> s17 : job.201 ON_ICE [not_live_or_queued] / iced
-    s17 --> s16 : job.202 OFF_ICE
-    s17 --> s16 : job.203 FORCE_STARTJOB [force_clears]
-    s14 --> s15 : job.204 ON_HOLD [not_live_or_queued]
-    s15 --> s14 : job.205 OFF_HOLD [not_queued] / released_hold
-    s15 --> s14 : job.206 FORCE_STARTJOB [force_clears]
-    s15 --> s14 : job.207 ON_NOEXEC [noexec_applies]
-    s14 --> s15 : job.208 box running [has_auto_hold]
-    s20 --> s21 : job.209 ON_NOEXEC [noexec_applies] / noexec
-    s21 --> s20 : job.210 OFF_NOEXEC / cleared_noexec
-    s21 --> s20 : job.211 OFF_NOEXEC on its box
-    s17 --> s17 : job.218 ON_ICE [not_live] / iced_again
-    s16 --> s16 : job.219 OFF_ICE
-    s15 --> s15 : job.220 ON_HOLD [not_live_or_queued]
-    s14 --> s14 : job.221 OFF_HOLD [not_queued] / released_hold
-    s21 --> s21 : job.222 ON_NOEXEC [noexec_applies] / noexec
-    s20 --> s20 : job.223 OFF_NOEXEC / cleared_noexec
-    s20 --> s21 : job.231 ON_NOEXEC on its box
-    s15 --> s14 : job.232 ON_NOEXEC on its box
-    s21 --> s21 : job.233 ON_NOEXEC on its box
-    s16 --> s17 : job.234 ON_ICE [queued] / report_ice
-    s14 --> s15 : job.235 ON_HOLD [queued] / held
-    s15 --> s15 : job.236 ON_HOLD [queued] / held
-    s15 --> s14 : job.237 OFF_HOLD [queued] / released_waiter
-    s14 --> s14 : job.238 OFF_HOLD [queued] / released_waiter
-    s22 --> s23 : job.301 admitted start [has_demand]
-    s13 --> c1 : job.302 admitted start [takes_over]
-    s13 --> s23 : job.303 admitted start [on_held_units]
-    s23 --> s22 : job.304 leave STARTING or RUNNING [frees_all]
-    s23 --> s13 : job.305 leave STARTING or RUNNING [keeps_held]
-    s23 --> s22 : job.306 leave STARTING or RUNNING [spends]
-    s13 --> s22 : job.307 RELEASE_RESOURCE / released_held
-    s13 --> s22 : job.308 first input of a period [left_catalog]
-    s13 --> s23 : job.319 STATUS [injects_live]
-    s19 --> s0 : job.402 start admitted [admitted_admit]
-    s19 --> s0 : job.426 start admitted [admitted_on_held]
+    s20 --> s9 : job.446 box recompute [overrides_success] / moved
+    s20 --> s2 : job.447 box recompute [overrides_failure] / moved
+    s20 --> s9 : job.448 box recompute [derives_success] / moved
+    s20 --> s2 : job.449 box recompute [derives_failure] / moved
+    s20 --> s4 : job.135 STATUS [injects_inactive_box] / cascades
+    s20 --> s4 : job.452 noexec moved [noexec_settles_box] / cascades
+    s26 --> s24 : job.454 member moves [door_reads_overrides]
+    s26 --> s13 : job.455 member moves [door_folds_only]
+    s24 --> s9 : job.126 [override_success] / completed
+    s24 --> s2 : job.127 [override_failure] / completed
+    s24 --> s13 : job.456 [override_unmet_folds]
+    s24 --> s26 : job.457 [override_unmet_settles]
+    s13 --> s9 : job.128 [fold_success] / completed
+    s13 --> s2 : job.129 [fold_failure] / completed
+    s13 --> s26 : job.458 [fold_decides_nothing]
+    s17 --> s18 : job.201 ON_ICE [not_live_or_queued] / iced
+    s18 --> s17 : job.202 OFF_ICE
+    s18 --> s17 : job.203 FORCE_STARTJOB [force_clears]
+    s15 --> s16 : job.204 ON_HOLD [not_live_or_queued]
+    s16 --> s15 : job.205 OFF_HOLD [not_queued] / released_hold
+    s16 --> s15 : job.206 FORCE_STARTJOB [force_clears]
+    s16 --> s15 : job.207 ON_NOEXEC [noexec_applies]
+    s15 --> s16 : job.208 box running [has_auto_hold]
+    s21 --> s22 : job.209 ON_NOEXEC [noexec_applies] / noexec
+    s22 --> s21 : job.210 OFF_NOEXEC / cleared_noexec
+    s22 --> s21 : job.211 OFF_NOEXEC on its box
+    s18 --> s18 : job.218 ON_ICE [not_live] / iced_again
+    s17 --> s17 : job.219 OFF_ICE
+    s16 --> s16 : job.220 ON_HOLD [not_live_or_queued]
+    s15 --> s15 : job.221 OFF_HOLD [not_queued] / released_hold
+    s22 --> s22 : job.222 ON_NOEXEC [noexec_applies] / noexec
+    s21 --> s21 : job.223 OFF_NOEXEC / cleared_noexec
+    s21 --> s22 : job.231 ON_NOEXEC on its box
+    s16 --> s15 : job.232 ON_NOEXEC on its box
+    s22 --> s22 : job.233 ON_NOEXEC on its box
+    s17 --> s18 : job.234 ON_ICE [queued] / report_ice
+    s15 --> s16 : job.235 ON_HOLD [queued] / held
+    s16 --> s16 : job.236 ON_HOLD [queued] / held
+    s16 --> s15 : job.237 OFF_HOLD [queued] / released_waiter
+    s15 --> s15 : job.238 OFF_HOLD [queued] / released_waiter
+    s23 --> s25 : job.301 admitted start [has_demand]
+    s14 --> c1 : job.302 admitted start [takes_over]
+    s14 --> s25 : job.303 admitted start [on_held_units]
+    s25 --> s23 : job.304 leave STARTING or RUNNING [frees_all]
+    s25 --> s14 : job.305 leave STARTING or RUNNING [keeps_held]
+    s25 --> s23 : job.306 leave STARTING or RUNNING [spends]
+    s14 --> s23 : job.307 RELEASE_RESOURCE / released_held
+    s14 --> s23 : job.308 first input of a period [left_catalog]
+    s14 --> s25 : job.319 STATUS [injects_live]
+    s20 --> s0 : job.402 start admitted [admitted_admit]
+    s20 --> s0 : job.426 start admitted [admitted_on_held]
     s0 --> s8 : job.427 [admitted_by_start] / starting_admitted
     s0 --> s8 : job.428 [admitted_by_readmit] / starting_readmitted
     s6 --> s11 : job.436 KILLJOB [armed] / moved
@@ -142,8 +153,8 @@ stateDiagram-v2
     c0 --> s9 : job.174 [injected_success] / moved
     c0 --> s2 : job.175 [injected_failure] / moved
     c0 --> s11 : job.176 [else] / moved
-    c1 --> s23 : job.309 [has_demand]
-    c1 --> s22 : job.310 [else]
+    c1 --> s25 : job.309 [has_demand]
+    c1 --> s23 : job.310 [else]
 ```
 
 | Id | Source | Event | Guard | Action | Target | Kind | Cite |
@@ -172,10 +183,6 @@ stateDiagram-v2
 | job.445 | lifecycle | box set INACTIVE |  | batched | INACTIVE | external | SEM-18, DL-242 |
 | job.124 | IDLE | start | start_admits_box | extent_admit |  | internal | SEM-10, DL-242, DL-364 |
 | job.125 | STARTING | started | started_box | runs_box | RUNNING | external | SEM-10, SEM-33, DL-246 |
-| job.126 | RUNNING | member moves | verdict_success | completed | SUCCESS | external | SEM-12 |
-| job.127 | RUNNING | member moves | verdict_failure | completed | FAILURE | external | SEM-12, SEM-14 |
-| job.128 | RUNNING | completion moment | verdict_success | completed | SUCCESS | external | SEM-11 |
-| job.129 | RUNNING | completion moment | verdict_failure | completed | FAILURE | external | SEM-11, SEM-14 |
 | job.130 | RUNNING | member ends FAILURE or TERMINATED | terminator_fires | terminated | TERMINATED | external | SEM-14 |
 | job.446 | lifecycle | box recompute | overrides_success | moved | SUCCESS | external | SEM-15 |
 | job.447 | lifecycle | box recompute | overrides_failure | moved | FAILURE | external | SEM-15 |
@@ -196,10 +203,7 @@ stateDiagram-v2
 | job.182 | lifecycle | readmit | not_queued | A queue scan addresses a waiter. |  | ignored (unreachable) |  |
 | job.183 | lifecycle | started |  | The admitted run is no longer STARTING: a wake of its STARTING ended it, or started the job again (`Started.current`). |  | ignored | SEM-10, DL-350 |
 | job.184 | lifecycle | TIMER term_run_time |  | The deadline is an earlier run's, or the run is no longer RUNNING. |  | ignored | SEM-14 |
-| job.185 | RUNNING | member moves | decides_nothing | No override holds, the default fold may follow. |  | ignored | SEM-11, SEM-12 |
 | job.186 | lifecycle | member moves |  | Only a RUNNING box's completion door reads its overrides. |  | ignored (unreachable) |  |
-| job.187 | RUNNING | completion moment | decides_nothing | A member is not done, or an unmet override suppresses the default. |  | ignored | SEM-11, SEM-12 |
-| job.188 | lifecycle | completion moment |  | Only a RUNNING box folds. |  | ignored (unreachable) |  |
 | job.189 | lifecycle | member ends FAILURE or TERMINATED | is_box | A terminator ends only a RUNNING box, the door or the recompute follows. |  | ignored | SEM-13, SEM-14 |
 | job.190 | lifecycle | member ends FAILURE or TERMINATED | is_job | Only a box has members. |  | ignored (unreachable) |  |
 | job.191 | lifecycle | box recompute | recomputes_nothing | No verdict, the box already has it, or it is ADMITTED. |  | ignored | SEM-13, SEM-15 |
@@ -212,6 +216,17 @@ stateDiagram-v2
 | job.198 | lifecycle | noexec moved | noexec_moves_nothing | Applied, and no box settles: the released jobs' start retries follow. |  | ignored | DL-254 |
 | job.199 | lifecycle | noexec moved | noexec_ignored | An applied ON_NOEXEC reports it, an ignored ON_NOEXEC moves no flag. |  | ignored (unreachable) |  |
 | job.453 | ADMITTED | noexec moved |  | ON_NOEXEC at ADMITTED is itself a marked cell (job.423), so its flag move never pops there. |  | ignored (unreachable) |  |
+| job.454 | settled | member moves | door_reads_overrides |  | overriding | external | SEM-12, DL-371 |
+| job.455 | settled | member moves | door_folds_only |  | folding | external | SEM-11, DL-371 |
+| job.126 | overriding | (completion) | override_success | completed | SUCCESS | external | SEM-12 |
+| job.127 | overriding | (completion) | override_failure | completed | FAILURE | external | SEM-12, SEM-14 |
+| job.456 | overriding | (completion) | override_unmet_folds | No override holds: the default fold follows. | folding | external | SEM-11, SEM-12 |
+| job.457 | overriding | (completion) | override_unmet_settles | No override holds, and the walk up reads no fold. | settled | external | SEM-12 |
+| job.128 | folding | (completion) | fold_success | completed | SUCCESS | external | SEM-11 |
+| job.129 | folding | (completion) | fold_failure | completed | FAILURE | external | SEM-11, SEM-14 |
+| job.458 | folding | (completion) | fold_decides_nothing | A member is not done, or an unmet override suppresses the default. | settled | external | SEM-11, SEM-12 |
+| job.459 | overriding | member moves |  | A second visit while a phase is open: the phase's entry only reads and the row that enters it sends nothing, so its completion pops before any other item. |  | ignored (unreachable) |  |
+| job.460 | folding | member moves |  | A second visit while a phase is open: the phase's entry only reads and the row that enters it sends nothing, so its completion pops before any other item. |  | ignored (unreachable) |  |
 | job.201 | ice_off | ON_ICE | not_live_or_queued | iced | ice_on | external | SEM-20, DL-254, DL-285 |
 | job.202 | ice_on | OFF_ICE |  | no re-evaluation | ice_off | external | SEM-20 |
 | job.203 | ice_on | FORCE_STARTJOB | force_clears |  | ice_off | external | SEM-23, DL-243 |
@@ -322,6 +337,9 @@ stateDiagram-v2
 | LIVE | lifecycle/status |  |  |  |  |
 | STARTING | LIVE/live | writes_status |  |  |  |
 | RUNNING | LIVE/live | writes_status |  |  |  |
+| settled | RUNNING/door |  |  |  |  |
+| overriding | RUNNING/door | reads_overrides |  |  |  |
+| folding | RUNNING/door | reads_fold |  |  |  |
 | ADMITTED | lifecycle/status | starts_run |  |  |  |
 | flags | job/flags |  |  |  |  |
 | ice_off | flags/ice |  |  |  |  |
@@ -392,9 +410,15 @@ stateDiagram-v2
 | current_run | guard | The payload: the deadline's run is the row's run. |
 | started_job | guard | The data: not a box, the payload: the admitted run is the row's run (`Started`). |
 | started_box | guard | The data: a box, the payload: the admitted run is the row's run (`Started`). |
-| verdict_success | guard | The data: a box, the payload's step decides SUCCESS: box_success holds (SEM-12), or the default fold with no box_success (SEM-11). |
-| verdict_failure | guard | The data: a box, the payload's step decides FAILURE: box_failure holds (SEM-12), or the default fold over a failed vote with no box_failure. |
-| decides_nothing | guard | The data: a box, the payload's step decides nothing. |
+| door_reads_overrides | guard | The data: a box, the payload's visit reads the overrides (SEM-12): a member's terminal, RUNNING or resolving move, an ice's completion moment, a box start's, or the walk up. |
+| door_folds_only | guard | The data: a box, the payload's visit does not read the overrides: a member's move they do not read, which the default fold alone follows (SEM-11). |
+| override_success | guard | The payload's overrides decide SUCCESS: box_success holds (SEM-12). |
+| override_failure | guard | The payload's overrides decide FAILURE: box_failure holds (SEM-12). |
+| override_unmet_folds | guard | No override holds, and the payload's visit folds (SEM-11). |
+| override_unmet_settles | guard | No override holds, and the payload's visit does not fold: the walk up (SEM-12). |
+| fold_success | guard | The payload's fold decides SUCCESS: every member is done, none failed, and no box_success is declared (SEM-11). |
+| fold_failure | guard | The payload's fold decides FAILURE: every member is done, one failed, and no box_failure is declared (SEM-11). |
+| fold_decides_nothing | guard | The payload's fold decides nothing: a member is not done, or an unmet override suppresses the default (SEM-11). |
 | overrides_success | guard | `_recomputes`, the payload: box_success decides SUCCESS (SEM-15). |
 | overrides_failure | guard | `_recomputes`, the payload: box_failure decides FAILURE (SEM-15). |
 | recomputes_nothing | guard | The data: a box, not `_recomputes` and not `live_or_terminated_box`: the payload names no verdict, the box already has it, or its status is the transient ADMITTED (SEM-15). |
@@ -422,7 +446,9 @@ stateDiagram-v2
 | admit | action | A readmitted waiter (job.108) enters ADMITTED with its `readmit`, whose entry sends its extent: no `start admitted`, since a readmission is no start the bound counts (DL-350). The scan's pass hears that the waiter moved, as the tier's handle says. |
 | settle_ended_run | action | A start meets the units of a run whose settlement is still owed (`OracleCascade._on_settles_first`): that run settles first, by the end it made, then the start is admitted again against what the settlement left. The settlement's policy is read from the admission's handle (DL-349). Its row, job.312, is marked unreachable: job.401 settles the run before the start is admitted, so the oracle's admission carries no previous end. |
 | settles_first | action | An attempt whose run's settlement is owed (job.401, DL-340): that run settles by the end it made, and the same attempt is made again, so it reads the admission the settlement leaves, as the tier's handle says. |
-| writes_status | action | A status leaf's entry: the status it is, which the hook writes with the line of the row that entered it, as the tier's handle says. The initial entry writes nothing: an instance starts in the status its row holds. |
+| writes_status | action | A status state's entry: the status it is, which the hook writes with the line of the row that entered it, as the tier's handle says. The initial entry writes nothing: an instance starts in the status its row holds. |
+| reads_overrides | action | `overriding`'s entry: the visit's overrides' facts are built now, from the payload that entered the phase (`Door.begin_override`), it sends nothing (DL-371). |
+| reads_fold | action | `folding`'s entry: the visit's fold's facts are built now, after the overrides' phase when the visit read them (`Door.begin_fold`), it sends nothing (DL-371). |
 | moved | action | A status move on its own (`OracleCascade._after`): the move's box rules, then its settlement, then its wakes, as the tier's handle says (DL-350). |
 | terminated | action | A kill: as `moved`, then a box's job_terminators, for the run read before the move (DL-348). |
 | completed | action | A RUNNING box's end by an override or the default fold: as `moved`, then its job_terminators if it ended FAILURE, for the run it has then (`OracleCascade._box_ends`, DL-348). |

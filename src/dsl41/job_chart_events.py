@@ -2,7 +2,7 @@
 (DL-337). The chart, its contract and its guards are in `job_chart`.
 
 A payload whose facts the oracle computes on a guard's first read is a `Protocol`
-(`StartAttempt`, `Readmission`, `Noexec`, `Verdict`, `BoxVerdict`, `Arm`) implemented by
+(`StartAttempt`, `Readmission`, `Noexec`, `Door`, `Verdict`, `BoxVerdict`, `Arm`) implemented by
 `oracle_facts` and `oracle_intents`; a payload the tier builds whole is a dataclass (DL-356)."""
 
 from __future__ import annotations
@@ -45,8 +45,8 @@ LEAVE_LIVE: Final = "leave STARTING or RUNNING"
 #: a job not live (job.201, job.234), ON_NOEXEC's where it applies (job.209, job.222).
 ICE_MOVED: Final = "ice moved"
 NOEXEC_MOVED: Final = "noexec moved"
+#: A visit of a RUNNING box's completion door (`Door`): it enters the box's `door` region.
 MEMBER_MOVES: Final = "member moves"
-COMPLETION_MOMENT: Final = "completion moment"
 MEMBER_ENDS: Final = "member ends FAILURE or TERMINATED"
 BOX_RECOMPUTE: Final = "box recompute"
 BOX_START: Final = "box start"
@@ -289,14 +289,43 @@ class Deadline(Payload):
 
 
 class Verdict(Protocol):
-    """One step of a RUNNING box's completion door: `target`, the status it decides, or none.
-    `member moves` reads the overrides (`oracle_facts.OverrideFacts`), `completion moment` the
-    default fold (`_all_members_done`, `oracle_facts.FoldFacts`)."""
+    """The facts one phase of a RUNNING box's completion door reads: `target`, the status it
+    decides, or none. The overrides' are `oracle_facts.OverrideFacts`, the default fold's
+    `oracle_facts.FoldFacts` (`_all_members_done`)."""
 
     @property
     def target(self) -> Literal["SUCCESS", "FAILURE"] | None: ...
+
+
+class Door(Protocol):
+    """`member moves`' payload: one visit of a RUNNING box's completion door (SEM-11, SEM-12),
+    which the completions of its phases carry (DL-364; `oracle_facts.DoorFacts`).
+
+    `overrides`: the visit reads the overrides, in `overriding`; `folds`: after no override
+    holds, it folds, in `folding`. A member's move at its box reads both, or the fold alone on a
+    move the overrides do not read; the walk up reads the overrides alone (SEM-12). `override`
+    and `fold`: each phase's facts (`Verdict`), built by the phase's entry action
+    (`begin_override`, `begin_fold`) and read by its completion's guards; a read before its
+    phase began is a statechart error."""
+
+    @property
+    def overrides(self) -> bool: ...
+    @property
+    def folds(self) -> bool: ...
+    @property
+    def override(self) -> Verdict: ...
+    @property
+    def fold(self) -> Verdict: ...
     @property
     def units(self) -> Units: ...
+
+    def begin_override(self) -> None:
+        """`overriding`'s entry: the overrides' facts are built now."""
+        ...
+
+    def begin_fold(self) -> None:
+        """`folding`'s entry: the fold's facts are built now."""
+        ...
 
 
 class BoxVerdict(Protocol):

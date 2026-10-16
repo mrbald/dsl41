@@ -30,7 +30,7 @@ from dsl41.job_chart_events import JobData, Release
 from dsl41.job_chart_rows import configuration, row_configuration
 from dsl41.oracle import Oracle
 from dsl41.oracle_cascade import OracleCascade
-from dsl41.oracle_facts import RowUnits, StartFacts, job_data
+from dsl41.oracle_facts import DoorFacts, RowUnits, StartFacts, job_data
 from dsl41.oracle_schedule import OracleSchedule
 from dsl41.oracle_state import (
     CapacityReservation,
@@ -2668,7 +2668,6 @@ def test_dl50_a_readmission_computes_only_the_facts_the_scan_reads() -> None:
 _BOX_ITEMS = (
     "member ends FAILURE or TERMINATED",
     "member moves",
-    "completion moment",
     "box recompute",
     "box start",
     "box running",
@@ -2679,6 +2678,14 @@ _BOX_ITEMS = (
     "ON_NOEXEC on its box",
     "first input of a period",
 )
+
+
+def _box_item(outcome: Outcome) -> bool:
+    """A box rule's item: one of `_BOX_ITEMS`, or a completion of a phase of a RUNNING box's
+    completion door, which carries the visit's payload (DL-371)."""
+    return outcome.event.name in _BOX_ITEMS or (
+        outcome.event.name == COMPLETION and isinstance(outcome.event.payload, DoorFacts)
+    )
 
 
 def _job(name: str, box: str | None = None, extra: str = "") -> str:
@@ -2817,63 +2824,63 @@ _BOX_OUTCOMES: dict[str, tuple[str, list[Event], str, list[tuple[str, ...]], str
         _BOX_JIL,
         _FOLD_FAILURE[:2],
         "fb",
-        [("job.189",), ("job.185",), ("job.187",)],
+        [("job.189",), ("job.454",), ("job.456",), ("job.458",)],
         "",
     ),
     "the default fold ends a box FAILURE": (
         _BOX_JIL,
         _FOLD_FAILURE,
         "fb",
-        [("job.185",), ("job.129",)],
+        [("job.454",), ("job.456",), ("job.129",)],
         "RUNNING->FAILURE",
     ),
     "the default fold ends a box SUCCESS": (
         _BOX_JIL,
         [_box_ev(0, "FORCE_STARTJOB", "sb"), _box_ev(1, "STATUS", "sm", status="SUCCESS")],
         "sb",
-        [("job.185",), ("job.128",)],
+        [("job.454",), ("job.456",), ("job.128",)],
         "RUNNING->SUCCESS",
     ),
     "an unmet box_success holds the default SUCCESS": (
         _BOX_JIL,
         [_box_ev(0, "FORCE_STARTJOB", "ux"), _box_ev(1, "STATUS", "uxm", status="SUCCESS")],
         "ux",
-        [("job.185",), ("job.187",)],
+        [("job.454",), ("job.456",), ("job.458",)],
         "",
     ),
     "an unmet box_failure holds the default FAILURE": (
         _BOX_JIL,
         [_box_ev(0, "FORCE_STARTJOB", "uy"), _box_ev(1, "STATUS", "uym", status="FAILURE")],
         "uy",
-        [("job.189",), ("job.185",), ("job.187",)],
+        [("job.189",), ("job.454",), ("job.456",), ("job.458",)],
         "",
     ),
     "box_success ends a running box": (
         _BOX_JIL,
         [_box_ev(0, "FORCE_STARTJOB", "osb"), _box_ev(1, "STATUS", "osm", status="SUCCESS")],
         "osb",
-        [("job.126",)],
+        [("job.454",), ("job.126",)],
         "RUNNING->SUCCESS",
     ),
     "box_failure ends a running box": (
         _BOX_JIL,
         [_box_ev(0, "FORCE_STARTJOB", "ofb"), _box_ev(1, "STATUS", "ofm", status="FAILURE")],
         "ofb",
-        [("job.189",), ("job.127",)],
+        [("job.189",), ("job.454",), ("job.127",)],
         "RUNNING->FAILURE",
     ),
     "a grandparent's box_success ends it when a member of its subbox ends": (
         oracle_inputs.BOX_JIL,
         _box_steps("a grandparent's box_success names a member of its subbox", 2),
         "bx_g",
-        [("job.126",)],
+        [("job.454",), ("job.126",)],
         "RUNNING->SUCCESS",
     ),
     "the subbox whose member ended stays running": (
         oracle_inputs.BOX_JIL,
         _box_steps("a grandparent's box_success names a member of its subbox", 2),
         "bx_c",
-        [("job.185",), ("job.187",), ("job.435",)],
+        [("job.454",), ("job.456",), ("job.458",), ("job.435",)],
         "",
     ),
     "an idle box's box_success": (
@@ -3134,7 +3141,7 @@ def test_each_box_rule_outcome_fires_its_rows_and_writes_its_line(
     paired.feed(steps[-1])
     _agrees(paired)
     key = RuntimeState.job_key(job)
-    mine = [o for o in seen if o.key == key and o.event.name in _BOX_ITEMS and o.rows]
+    mine = [o for o in seen if o.key == key and _box_item(o) and o.rows]
     assert [o.rows for o in mine] == rows
     lines = [t.transition for t in paired.trace()[traced:] if t.job == job]
     assert (line in lines) if line else lines == []
@@ -3172,9 +3179,7 @@ def test_dl256_the_period_opening_gives_a_removed_jobs_units_back_through_the_ch
     seen = _spied(paired)
     paired.feed(ev("STARTJOB", 3, job="j"))
     _agrees(paired)
-    assert [o.rows for o in seen if o.key == "job:k" and o.event.name in _BOX_ITEMS] == [
-        ("job.308",)
-    ]
+    assert [o.rows for o in seen if o.key == "job:k" and _box_item(o)] == [("job.308",)]
     [line] = [t for t in paired.trace() if t.job == "k"]
     assert line.transition == "RELEASE_RESOURCE"
     assert line.cause.startswith("job removed from the catalog")
@@ -3247,12 +3252,15 @@ def test_sem12_a_box_rule_computes_only_the_facts_the_rule_reads(
     seen = _spied(oracle)
     oracle.feed(_box_ev(0, "FORCE_STARTJOB", "lz"))
     assert "lz" not in reads
-    doors = [o.event.payload for o in seen if o.key == "job:lz" and o.event.name in _BOX_ITEMS]
-    assert [(type(p).__name__, p.known("done")) for p in doors] == [
-        ("FoldFacts", False),
-        ("OverrideFacts", None),
-        ("FoldFacts", False),
-    ]
+    visits = [o.event.payload for o in seen if o.key == "job:lz" and o.event.name == "member moves"]
+    # the member's STARTING folds alone; its RUNNING reads the overrides, then folds
+    assert [(d.overrides, d.folds) for d in visits] == [(False, True), (True, True)]
+    with pytest.raises(StatechartError, match="overrides read before their phase"):
+        _ = visits[0].override
+    assert repr(visits[1].override) == "OverrideFacts('lz', target=None)"
+    # each visit's fold is its own, built at its phase's entry
+    assert visits[0].fold is not visits[1].fold
+    assert [d.fold.known("done") for d in visits] == [False, False]
     oracle.feed(_box_ev(1, "STATUS", "lzm", status="SUCCESS"))
     assert reads.count("lz") == 1
     assert oracle.store.job["lz"].status == "RUNNING"

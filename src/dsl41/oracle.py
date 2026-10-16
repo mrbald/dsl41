@@ -350,9 +350,9 @@ class InputBatch:
 #: estate's job count, within `ITEM_FLOOR` and `ITEM_CEILING` (the floor binds up to 158 jobs,
 #: the square up to 316, the ceiling above). A finite cascade moves each job a bounded number of
 #: times and each move wakes at most the other jobs, so its items grow with the square. The
-#: largest legitimate dispatches measured at 41 to 1,000 jobs are a fan-in (33,799 items at 200
+#: largest legitimate dispatches measured at 41 to 1,000 jobs are a fan-in (33,699 items at 200
 #: jobs, 127,599 at 400), a queue scan readmitting blocked waiters (81,991 at 400), DL-304's box
-#: ring (108 per job) and its nested terminator chain (7,632 at the lowering's 64 levels). The
+#: ring (about 103 per job) and its nested terminator chain (9,585 at the lowering's 64 levels). The
 #: margin over the worst is 23x at 41 jobs, 4.7x at 200 and 3.1x at 400.
 ITEMS_PER_JOB_SQUARED: Final = 4
 

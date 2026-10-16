@@ -23969,3 +23969,97 @@ relitigate an entry; append a new one.
   back into the parametrised helpers (the file grew by the named conditions alone); the private
   predicates took an underscore and two near-identical names were parted; one docstring order;
   one reflowed line of §11.
+- DL-371 A phase of a cascade that decides after a wait is a state with an entry action and a
+  completion row: a RUNNING box's completion door becomes RUNNING's region `door`, with
+  `settled`, `overriding` and `folding`, and the generator `_door` and the event `completion
+  moment` leave (2026-10-16; src/dsl41/job_chart.py, src/dsl41/job_chart_rows.py,
+  src/dsl41/job_chart_events.py, src/dsl41/oracle_cascade.py, src/dsl41/oracle_facts.py,
+  src/dsl41/oracle_writers.py, src/dsl41/oracle_intents.py; scripts/render_job_lifecycle.py;
+  tests/test_job_chart.py, tests/test_oracle_chart.py, tests/test_oracle_chart_cascade.py;
+  docs/statechart-engine.md §8, §11; docs/state-machines.md; docs/job-chart-lifecycle.md)
+  THE AIM. Step 6a of the job chart simplification (review 1.1 and 2.3, ruling R11). The door's
+  phases were the suspended positions of a generator, invisible to the chart: send `member
+  moves`, wait for its cascade, check the box still runs the same run, send `completion moment`.
+  They are declared now. No outcome of the oracle changes: no golden, no trace line.
+  THE RULE. A phase of a cascade whose decision is a chart row is a transient state: its entry
+  action reads or sends what the phase needs, and its completion row decides, with the payload of
+  the microstep that entered it (§4, DL-364). The generator that held such a phase between pops
+  was its hidden form (§8). A tier step that only sequences its sends, such as `_walk_up`,
+  `_ice_resolves`, `_box_ends` and `_window_pass`, stays a moment.
+  THE REGION. RUNNING holds one region, `door`: `settled` (initial), `overriding` (entry
+  `reads_overrides`) and `folding` (entry `reads_fold`). A job that is not a box rests in
+  `settled`, and a RUNNING row projects to RUNNING with `settled` (`configuration`). RUNNING keeps
+  `writes_status`; its status line and write are unchanged.
+  THE ROWS. A visit is one `member moves` from `settled`: job.454 (`door_reads_overrides`) enters
+  `overriding`, job.455 (`door_folds_only`) enters `folding`. `overriding`'s completion: job.126
+  (`override_success`) and job.127 (`override_failure`) end the box with `completed`, job.456
+  (`override_unmet_folds`) enters `folding`, job.457 (`override_unmet_settles`) returns to
+  `settled`. `folding`'s completion: job.128 (`fold_success`) and job.129 (`fold_failure`) end
+  the box, job.458 (`fold_decides_nothing`) returns to `settled`. job.459 and job.460 are
+  `member moves` at `overriding` and `folding`, marked unreachable. job.126 to job.129 keep
+  their ids, writers and lines: the same decision, its trigger the phase's completion. job.185,
+  job.187 and job.188 retire, with the event `completion moment`; ids are not reused (DL-364).
+  job.186 stays: only a box's door reads its overrides. Guards removed: `verdict_success`,
+  `verdict_failure`, `decides_nothing`. Writers: job.454 to job.458 write nothing.
+  THE THREE VISITS (R11 condition 1). The payload (`DoorFacts`, protocol `Door`) names the phases:
+  `overrides` and `folds`. A member's terminal, RUNNING or resolving move at its RUNNING box, an
+  ice's completion moment and a box start's window pass read the overrides, then fold. Any other
+  move of a member folds alone. The walk up reads an ancestor's overrides alone, and its
+  completion returns to `settled` when none holds; it never folds. A new test pins R11's
+  counter-example: H > G > I > M, G a job_terminator of H, I iced with a box_success that never
+  holds, H failing on `s(M)`; M's SUCCESS visits G (job.454, job.457), then H (job.454,
+  job.127), and G ends TERMINATED. A mutant whose walk up folds ends G SUCCESS and diverges.
+  THE PAYLOAD (condition 2). The completions carry the visit's `DoorFacts` (DL-364). Its phases'
+  facts are separate lazy objects built by the phase's entry: `OverrideFacts` at `overriding`'s,
+  `FoldFacts` at `folding`'s, each read by its completion's guards; a read before its phase
+  began is a statechart error. The fold reads the members after the overrides' phase: the
+  completion of `overriding` pops behind the items its microstep reported (§5). The payload
+  carries the box's handle and `at_start`; it carries no run. `_door`'s run check read true
+  exactly when no override fired, since job.185 sent nothing, and an override that fires now ends
+  the box in the completion that read it.
+  NO RE-ENTRY (condition 3). The rows that enter a phase have `settled` as their source, inside
+  the region, so a visit never exits RUNNING and `writes_status` does not run again. job.130
+  stays at RUNNING, inherited by the phases. A cell test pins that a visit asks the handle for
+  nothing but `completed` and the status write of the end it makes.
+  THE BUSY CELL (condition 4). The phases' entries only read and the row that enters a phase sends
+  nothing, so the phase's completion pops next and no second visit meets an open phase: job.459
+  and job.460 are marked unreachable.
+  THE RUN GUARD (condition 5). No item pops between a phase's entry and its completion. If one did
+  and left RUNNING, the completion would be discarded: `_occurrence_gone`
+  (src/dsl41/state_machine.py) at the completion's pop (`Executor._step`), by its entry serial.
+  No settling row is declared.
+  ITEMS. A full visit with no override pops as many items as before: the moment's pop, `member
+  moves`, the moment's resumption and `completion moment` become the moment's pop, `member moves`
+  and two completions. Every other visit pops one item more: a fired override, the fold alone and
+  the walk up each decide in a completion behind `member moves`. The cascade cap counts items
+  (DL-351), so a cascade within that many items of the cap now raises `CascadeDepthError` where it
+  completed before. No golden reaches the cap. The worst shape this change moves, the terminator
+  chain at the lowering's 64 levels, rises from 7,569 to 9,585 items, against a cap of at least
+  100,000 (cap over peak 13.2 to 10.4); the override-and-fold shape at 100 jobs rises from 762 to
+  811, and the box ring, the fan-in and the box chains are unchanged. A decision row and its cascade
+  are one link deeper; after a full visit with no override, the moment's later steps are one link
+  shallower. No guard reads depth.
+  CHECKS. The job chart has 151 rows, 147 before; 79 guards, 73 before; 36 actions, 34 before.
+  The transition gate holds 326 of 326 required items of `job`, 317 before; 19 marked rows, 18
+  before. The completeness abstraction gains the witnesses `box RUNNING overriding` and `box
+  RUNNING folding` and the visits as `member moves`' partitions; the sweep adds the phases'
+  configurations. A cell test runs each visit from `settled` and pins its rows, its end, the
+  phases whose entry ran and the payload its completions carry. The golden replay: 4,060 runs,
+  152,213 entries, 0 differing. Line and branch coverage 100.
+  THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235): no accepted input derives differently, and
+  the goldens replay equal. The added items move no input of the sample or of the measured shapes
+  across the cap, which stays ten times the peak of every shape the change moves (ITEMS), as DL-364
+  and DL-365 ruled for the opposite direction. Job instances are rebuilt from the rows, so no
+  persisted
+  configuration names the door's states.
+  REVIEW. Semantic class (the door's phases move from a generator to declared states; §8 and
+  §11). One Codex Astra pass (gpt-6-astra, xhigh): none found in five probes (the dropped run
+  check, with the stronger argument that no item pops between a phase's entry and its completion;
+  the three visits against each sender; fact timing; the busy cells; the widened exit set with a
+  kill while overriding), each on a constructed input. One Opus reviewer: no blocker, no major; a
+  differential run of HEAD against the tree over 12,000 box-heavy runs and 484,932 inputs under
+  three switch rows showed no difference in outcome, trace, store, timers or emissions, with items
+  equal to HEAD's plus the two entering rows minus the chaining one in every run and the retired
+  rows' counts equal to their new rows'; three minors and three nits fixed and confirmed by it
+  (the rule narrowed to decisions that are chart rows; the item margin stated; a doc block; two
+  wordings; a stale count; a wrapped line).

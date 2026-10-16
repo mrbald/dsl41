@@ -49,16 +49,19 @@ STATUS = "status"
 FLAGS = "flags"
 HOLDING = "holding"
 
-#: The order a reader meets the statuses: the way into a job, the wait, the start, the run, then
-#: the ends. The declaration's order is the status tree's, which this is not; the reading order
-#: is the lifecycle's and is written here. A target the tuple does not name follows in
-#: declaration order.
+#: The order a reader meets the statuses: the way into a job, the wait, the start, the run and
+#: its box's completion door, then the ends. The declaration's order is the status tree's, which
+#: this is not; the reading order is the lifecycle's and is written here. A target the tuple
+#: does not name follows in declaration order.
 READING_ORDER = (
     "INACTIVE",
     "QUE_WAIT",
     "ADMITTED",
     "STARTING",
     "RUNNING",
+    "overriding",
+    "folding",
+    "settled",
     "SUCCESS",
     "FAILURE",
     "TERMINATED",

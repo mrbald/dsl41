@@ -9,8 +9,9 @@ the store, the trace, the timers or the resolutions.
 - `StartFacts`: a `start` attempt's payload, `StartAttempt`'s fields (DL-342).
 - `NoexecFacts`: ON_NOEXEC's payload, `Noexec`'s fields (DL-344).
 - `ReadmitFacts`: a `readmit` payload, `Readmission`'s fields (DL-345).
-- `OverrideFacts`, `FoldFacts` and `RecomputeFacts`: the box rules' payloads, `Verdict`'s and
-  `BoxVerdict`'s fields (DL-346).
+- `DoorFacts`: `member moves`' payload, one visit of a RUNNING box's completion door (`Door`),
+  with `OverrideFacts` and `FoldFacts`, the facts each phase reads (`Verdict`, DL-371).
+- `RecomputeFacts`: `box recompute`'s payload, `BoxVerdict`'s fields (DL-346).
 - `Started`: `started`'s payload, whether the admitted run is still the row's run (DL-350).
 - `RowUnits`: the tier's handle on a job (`Units`) that a payload carries. A settlement reads
   its policy from it when it pops (DL-349), and a row's action reads from it what the row
@@ -27,7 +28,7 @@ from dsl41.conditions import Cond, GlobalAtom, iter_atoms
 from dsl41.ir import JobIR
 from dsl41.job_chart_events import BoxGate, JobData, Release, WindowSide
 from dsl41.oracle_state import FAILED, TERMINAL, JobStatus, unreleased
-from dsl41.state_machine import Context, Effects
+from dsl41.state_machine import Context, Effects, StatechartError
 
 if TYPE_CHECKING:
     from dsl41.oracle_cascade import OracleCascade
@@ -422,16 +423,17 @@ def _named_jobs(cond: Cond) -> set[str]:
 
 
 class OverrideFacts:
-    """`member moves`' payload (`Verdict`): the step of a RUNNING box's completion door that
-    reads its overrides, for the direct parent and for each box above it (SEM-12).
+    """The overrides' facts of a visit of a RUNNING box's completion door (`Verdict`), for the
+    direct parent and for each box above it (SEM-12), built at `overriding`'s entry
+    (`DoorFacts.begin_override`).
 
     `target` is computed on the guards' first read, in the rule's order: box_success, then
     box_failure, each only when the box declares it and the moment evaluates it (the condition
     names the member, or the moment completes the member), the second only when the first does
-    not hold. `units` is the box's handle (`RowUnits`).
+    not hold.
     """
 
-    __slots__ = ("units", "_oracle", "_box_ir", "_member", "_completed", "_known")
+    __slots__ = ("_oracle", "_box_ir", "_member", "_completed", "_known")
 
     def __init__(
         self,
@@ -442,7 +444,6 @@ class OverrideFacts:
         *,
         completion_moment: bool,
     ) -> None:
-        self.units = RowUnits(oracle, box_ir.name)
         self._oracle = oracle
         self._box_ir = box_ir
         self._member = member
@@ -452,10 +453,6 @@ class OverrideFacts:
     def __repr__(self) -> str:
         known = (f"{name}={value!r}" for name, value in self._known.items())
         return f"OverrideFacts({', '.join((repr(self._box_ir.name), *known))})"
-
-    def known(self, name: str) -> Any:
-        """A fact if it was computed, else None."""
-        return self._known.get(name)
 
     @property
     def target(self) -> Target:
@@ -479,20 +476,19 @@ class OverrideFacts:
 
 
 class FoldFacts:
-    """`completion moment`'s payload (`Verdict`): the default fold of a RUNNING box's completion
-    door (SEM-11), after no override fired.
+    """The default fold's facts of a visit of a RUNNING box's completion door (`Verdict`,
+    SEM-11), built at `folding`'s entry (`DoorFacts.begin_fold`), after no override held.
 
     `target` is computed on the guards' first read, in the rule's order: whether every member
     is done (`_all_members_done`), and only then the vote of the members that ran: SUCCESS when
     none failed and no box_success is declared, FAILURE when one failed and no box_failure is
     declared, else None (an unmet override suppresses the default). `at_start`: the box start
-    left no member in the run, which the fold's cause names. `units` is the box's handle.
+    left no member in the run, which the fold's cause names.
     """
 
-    __slots__ = ("units", "at_start", "_oracle", "_box_ir", "_known")
+    __slots__ = ("at_start", "_oracle", "_box_ir", "_known")
 
     def __init__(self, oracle: OracleCascade, box_ir: JobIR, *, at_start: bool = False) -> None:
-        self.units = RowUnits(oracle, box_ir.name)
         self.at_start = at_start
         self._oracle = oracle
         self._box_ir = box_ir
@@ -529,6 +525,85 @@ class FoldFacts:
                     target = "FAILURE"
             self._known["target"] = target
         return cast(Target, self._known["target"])
+
+
+class DoorFacts:
+    """`member moves`' payload (`Door`): one visit of a RUNNING box's completion door, which
+    the completions of its phases carry (DL-364, DL-371).
+
+    `overrides` and `folds` name the visit's phases (SEM-11, SEM-12). Each phase's facts are
+    built at its entry and kept: `override` (`OverrideFacts`) at `overriding`'s, `fold`
+    (`FoldFacts`) at `folding`'s, so the fold reads the members when its own phase begins and
+    never a verdict the overrides' phase read. A read of a phase's facts before its entry is a
+    `StatechartError`. `units` is the box's handle (`RowUnits`).
+    """
+
+    __slots__ = (
+        "overrides",
+        "folds",
+        "units",
+        "_oracle",
+        "_box_ir",
+        "_member",
+        "_new",
+        "_completion",
+        "_at_start",
+        "_override",
+        "_fold",
+    )
+
+    def __init__(
+        self,
+        oracle: OracleCascade,
+        box_ir: JobIR,
+        member: str | None,
+        new: str | None,
+        *,
+        overrides: bool,
+        folds: bool,
+        completion: bool,
+        at_start: bool = False,
+    ) -> None:
+        self.overrides = overrides
+        self.folds = folds
+        self.units = RowUnits(oracle, box_ir.name)
+        self._oracle = oracle
+        self._box_ir = box_ir
+        self._member = member
+        self._new = new
+        self._completion = completion
+        self._at_start = at_start
+        self._override: OverrideFacts | None = None
+        self._fold: FoldFacts | None = None
+
+    def __repr__(self) -> str:
+        built = (("override", self._override), ("fold", self._fold))
+        phases = (f"{name}={facts!r}" for name, facts in built if facts is not None)
+        return f"DoorFacts({', '.join((repr(self._box_ir.name), *phases))})"
+
+    def begin_override(self) -> None:
+        """`overriding`'s entry: the overrides' facts for the member's move."""
+        self._override = OverrideFacts(
+            self._oracle, self._box_ir, self._member, self._new, completion_moment=self._completion
+        )
+
+    def begin_fold(self) -> None:
+        """`folding`'s entry: the fold's facts."""
+        self._fold = FoldFacts(self._oracle, self._box_ir, at_start=self._at_start)
+
+    @property
+    def override(self) -> OverrideFacts:
+        """The overrides' facts, built at `overriding`'s entry."""
+        if self._override is None:
+            raise StatechartError(f"box {self._box_ir.name!r}: overrides read before their phase")
+        return self._override
+
+    @property
+    def fold(self) -> FoldFacts:
+        """The fold's facts, built at `folding`'s entry."""
+        if self._fold is None:
+            raise StatechartError(f"box {self._box_ir.name!r}: the fold read before its phase")
+        return self._fold
 
 
 class RecomputeFacts:

@@ -38,19 +38,24 @@ STARTING = lifecycle + STATUS [injects; injected_starting]
 RUNNING = lifecycle + STATUS [injects; injected_running]
        || STARTING + started [started_box]
        || STARTING + started [started_job]
+overriding = settled + member moves [door_reads_overrides]
+folding = settled + member moves [door_folds_only]
+       || overriding + (completion) [override_unmet_folds]
+settled = overriding + (completion) [override_unmet_settles]
+       || folding + (completion) [fold_decides_nothing]
 SUCCESS = lifecycle + STATUS [exit_success]
        || lifecycle + STATUS [injects; injected_success]
        || lifecycle + box recompute [derives_success]
        || lifecycle + box recompute [overrides_success]
        || IDLE + start [start_bypasses]
-       || RUNNING + completion moment [verdict_success]
-       || RUNNING + member moves [verdict_success]
+       || overriding + (completion) [override_success]
+       || folding + (completion) [fold_success]
 FAILURE = lifecycle + STATUS [exit_failure]
        || lifecycle + STATUS [injects; injected_failure]
        || lifecycle + box recompute [derives_failure]
        || lifecycle + box recompute [overrides_failure]
-       || RUNNING + completion moment [verdict_failure]
-       || RUNNING + member moves [verdict_failure]
+       || overriding + (completion) [override_failure]
+       || folding + (completion) [fold_failure]
 TERMINATED = lifecycle + STATUS [injects; else]
           || QUE_WAIT + KILLJOB [armed] // The kill drops the arm, then terminates the waiter
           || QUE_WAIT + KILLJOB [unarmed]
@@ -114,9 +119,9 @@ held = reserved + leave STARTING or RUNNING [keeps_held]
 
 ## Folded away
 
-- Ignored rows: 20. The event is consumed and nothing moves.
-- Rows marked unreachable: 18. No input reaches the cell.
+- Ignored rows: 18. The event is consumed and nothing moves.
+- Rows marked unreachable: 19. No input reaches the cell.
 - Internal rows: 36. The configuration does not move: relays, moments and the arm's writes.
 - Self-transitions: 9. A state is left and entered again.
 
-Shown: 64. Folded: 83. Rows in the chart: 147.
+Shown: 69. Folded: 82. Rows in the chart: 151.

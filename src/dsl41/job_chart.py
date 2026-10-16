@@ -2,7 +2,7 @@
 (docs/statechart-engine.md §11, DL-337), registered in `machines.MACHINES`.
 
 The oracle (`oracle`, DL-341) drives it for every input and its whole cascade (DL-350) and
-writes what each fired row reached. Each status leaf's entry action (`writes_status`) reports
+writes what each fired row reached. Each status state's entry action (`writes_status`) reports
 the status it is; the oracle's hook writes it with the line of the row that entered it.
 
 Shape. The root `job` has three orthogonal regions: `status`, `flags` and `holding`. `status`
@@ -21,7 +21,11 @@ waiter's failed recheck are guarded on it where its value parts two effects, and
 writes the arm they set or clear.
 
 A box is an instance of this chart whose data says so (`JobData.box`); the box rules are rows
-guarded by it.
+guarded by it. RUNNING holds one region, `door`: a RUNNING box's completion door (SEM-11,
+SEM-12, DL-371). It rests in `settled`; a visit (`member moves`) enters `overriding`, whose entry
+builds the overrides' facts, or `folding`, whose entry builds the fold's, and each phase's
+completion decides with the visit's payload: a status, the fold, or `settled`. A job that is not
+a box rests in `settled`.
 
 Ids carry the chart's name, and the hundred names the region: `job.1NN` and `job.4NN` are
 status rows, `job.2NN` flag rows, `job.3NN` holding rows (DL-337, DL-349). A box's ON_NOEXEC on
@@ -104,6 +108,7 @@ from dsl41.job_chart_events import (
     Arm,
     BoxVerdict,
     Deadline,
+    Door,
     Injection,
     JobData,
     Moment,
@@ -114,7 +119,6 @@ from dsl41.job_chart_events import (
     Settlement,
     Terminator,
     Units,
-    Verdict,
 )
 from dsl41.job_chart_rows import CHOICES, ROOT, ROWS
 from dsl41.oracle_state import LIVE, LIVE_OR_QUEUED
@@ -733,26 +737,64 @@ def live_or_terminated_box(ctx: Context) -> bool:
     return is_box(ctx) and bool(ctx.active & {"LIVE", "TERMINATED"})
 
 
-def _door(ctx: Context, target: str | None) -> bool:
-    verdict: Verdict = ctx.event.payload
-    return is_box(ctx) and verdict.target == target
+def _door(ctx: Context) -> Door:
+    door: Door = ctx.event.payload
+    return door
 
 
-def verdict_success(ctx: Context) -> bool:
-    """The data: a box; the payload's step decides SUCCESS: box_success holds
-    (SEM-12), or the default fold with no box_success (SEM-11)."""
-    return _door(ctx, "SUCCESS")
+def door_reads_overrides(ctx: Context) -> bool:
+    """The data: a box; the payload's visit reads the overrides (SEM-12): a member's terminal,
+    RUNNING or resolving move, an ice's completion moment, a box start's, or the walk up."""
+    return is_box(ctx) and _door(ctx).overrides
 
 
-def verdict_failure(ctx: Context) -> bool:
-    """The data: a box; the payload's step decides FAILURE: box_failure holds
-    (SEM-12), or the default fold over a failed vote with no box_failure."""
-    return _door(ctx, "FAILURE")
+def door_folds_only(ctx: Context) -> bool:
+    """The data: a box; the payload's visit does not read the overrides: a member's move they
+    do not read, which the default fold alone follows (SEM-11)."""
+    return is_box(ctx) and not _door(ctx).overrides
 
 
-def decides_nothing(ctx: Context) -> bool:
-    """The data: a box; the payload's step decides nothing."""
-    return _door(ctx, None)
+def override_success(ctx: Context) -> bool:
+    """The payload's overrides decide SUCCESS: box_success holds (SEM-12)."""
+    return _door(ctx).override.target == "SUCCESS"
+
+
+def override_failure(ctx: Context) -> bool:
+    """The payload's overrides decide FAILURE: box_failure holds (SEM-12)."""
+    return _door(ctx).override.target == "FAILURE"
+
+
+def _override_unmet(ctx: Context) -> bool:
+    """No override of the payload's holds."""
+    return _door(ctx).override.target is None
+
+
+def override_unmet_folds(ctx: Context) -> bool:
+    """No override holds, and the payload's visit folds (SEM-11)."""
+    return _override_unmet(ctx) and _door(ctx).folds
+
+
+def override_unmet_settles(ctx: Context) -> bool:
+    """No override holds, and the payload's visit does not fold: the walk up (SEM-12)."""
+    return _override_unmet(ctx) and not _door(ctx).folds
+
+
+def fold_success(ctx: Context) -> bool:
+    """The payload's fold decides SUCCESS: every member is done, none failed, and no
+    box_success is declared (SEM-11)."""
+    return _door(ctx).fold.target == "SUCCESS"
+
+
+def fold_failure(ctx: Context) -> bool:
+    """The payload's fold decides FAILURE: every member is done, one failed, and no
+    box_failure is declared (SEM-11)."""
+    return _door(ctx).fold.target == "FAILURE"
+
+
+def fold_decides_nothing(ctx: Context) -> bool:
+    """The payload's fold decides nothing: a member is not done, or an unmet override
+    suppresses the default (SEM-11)."""
+    return _door(ctx).fold.target is None
 
 
 def derives_success(ctx: Context) -> bool:
@@ -878,9 +920,15 @@ GUARDS: Final = {
         current_run,
         started_job,
         started_box,
-        verdict_success,
-        verdict_failure,
-        decides_nothing,
+        door_reads_overrides,
+        door_folds_only,
+        override_success,
+        override_failure,
+        override_unmet_folds,
+        override_unmet_settles,
+        fold_success,
+        fold_failure,
+        fold_decides_nothing,
         overrides_success,
         overrides_failure,
         recomputes_nothing,
@@ -1003,12 +1051,24 @@ def settles_first(ctx: Context) -> Effects | None:
 
 
 def writes_status(ctx: Context) -> Effects | None:
-    """A status leaf's entry: the status it is, which the hook writes with the line of the row
+    """A status state's entry: the status it is, which the hook writes with the line of the row
     that entered it, as the tier's handle says. The initial entry writes nothing: an instance
     starts in the status its row holds."""
     if ctx.event.name == INITIAL:
         return None
     return _consequences(ctx, "writes_status")
+
+
+def reads_overrides(ctx: Context) -> None:
+    """`overriding`'s entry: the visit's overrides' facts are built now, from the payload that
+    entered the phase (`Door.begin_override`); it sends nothing (DL-371)."""
+    _door(ctx).begin_override()
+
+
+def reads_fold(ctx: Context) -> None:
+    """`folding`'s entry: the visit's fold's facts are built now, after the overrides' phase
+    when the visit read them (`Door.begin_fold`); it sends nothing (DL-371)."""
+    _door(ctx).begin_fold()
 
 
 def moved(ctx: Context) -> Effects | None:
@@ -1155,6 +1215,8 @@ ACTIONS: Final = {
         settle_ended_run,
         settles_first,
         writes_status,
+        reads_overrides,
+        reads_fold,
         moved,
         terminated,
         completed,
