@@ -776,6 +776,9 @@ CLI and scripts:
 - `scripts/render_state_machines.py`: writes `docs/state-machines.md`, a
   diagram with regions, choices and deferrals, and the row, branch and state
   tables, per registered statechart.
+- `scripts/render_job_lifecycle.py`: writes `docs/job-chart-lifecycle.md`, the job
+  chart's lifecycle, flags and holding as one line per transition, with the
+  folded rows counted (`--full` prints them too).
 - `scripts/transition_coverage.py`: the gate that fails when a statechart's
   unmarked row, branch, guard outcome, deferral or release has no recorded
   hit.
