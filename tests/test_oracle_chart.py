@@ -44,7 +44,14 @@ from dsl41.oracle_state import (
 )
 from dsl41.runner_hosts import HostCommand, host_move
 from dsl41.semantics import resolve
-from dsl41.state_machine import HITS_ENV, Executor, Outcome, Statechart, StatechartError
+from dsl41.state_machine import (
+    COMPLETION,
+    HITS_ENV,
+    Executor,
+    Outcome,
+    Statechart,
+    StatechartError,
+)
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -1209,28 +1216,36 @@ def test_dl256_a_settlement_reads_its_policy_from_the_row_when_it_pops(
 _MOVED = [("box rules", ("job.405",)), ("settle", ("job.406",)), ("wake", ("job.407",))]
 #: The admitting verdicts and, after the attempt's `start` item, the items
 #: its `start admitted` sends to the job itself, its children: (event, rows).
-#: A box's resets go to its members, and its `notify step` sends `starting`.
+#: An admission's row enters ADMITTED, whose entry sends the units and the
+#: run's start, and a box's resets to its members; ADMITTED's completion
+#: (job.427) follows them (DL-364).
 _EXTENTS: dict[str, list[tuple[str, tuple[str, ...]]]] = {
     "admit a job": [
         ("admitted start", ("job.311",)),
         ("actual start", ("job.224",)),
-        ("starting", ("job.403",)),
-        ("started", ("job.105",)),
+        (COMPLETION, ("job.427",)),
     ],
     "admit a box": [
         ("admitted start", ("job.311",)),
         ("actual start", ("job.224",)),
-        ("notify step", ("job.413",)),
-        ("started", ("job.125",)),
+        (COMPLETION, ("job.427",)),
     ],
     "queue": _MOVED,
     "bypass": [("actual start", ("job.224",)), *_MOVED],
     "forced on held units": [
         ("admitted start", ("job.303",)),
         ("actual start", ("job.224",)),
-        ("starting", ("job.403",)),
-        ("started", ("job.105",)),
+        (COMPLETION, ("job.427",)),
     ],
+}
+#: What ADMITTED's completion sends to the job itself, its children: the
+#: STARTING move's box rules, settlement (the LIVE cell, job.418) and wakes,
+#: a box's reset notices, then `started`.
+_STARTING = [("box rules", ("job.405",)), ("settle", ("job.418",)), ("wake", ("job.407",))]
+_STARTINGS: dict[str, list[tuple[str, tuple[str, ...]]]] = {
+    "admit a job": [*_STARTING, ("started", ("job.105",))],
+    "admit a box": [*_STARTING, ("notify step", ("job.413",)), ("started", ("job.125",))],
+    "forced on held units": [*_STARTING, ("started", ("job.105",))],
 }
 _VERDICTS = {
     "job.101": "bypass",
@@ -1250,10 +1265,10 @@ def test_dl304_start_admitted_precedes_the_admissions_moves_for_every_admitting_
     """DL-349, DL-350: each admitting row (job.101 to job.104,
     job.124) sends `start admitted` first; its verdict's row (job.402,
     job.424 to job.426) sends what the admission does, so the admission's
-    moves are its descendants and pop after it: the units, the arm, the move
-    to STARTING and `started`; a bypass's and a queue's status move, written
-    at the attempt, has its box rules, its settlement and its wakes sent from
-    there."""
+    moves are its descendants and pop after it: the units, the arm, then
+    ADMITTED's completion, which moves to STARTING and sends `started`
+    (DL-364); a bypass's and a queue's status move, written at the attempt,
+    has its box rules, its settlement and its wakes sent from there."""
     script, job, _relay, starts, _line = _OUTCOMES[case]
     paired = Oracle(lower_source(_START_JIL))
     for event in script[:-1]:
@@ -1269,6 +1284,11 @@ def test_dl304_start_admitted_precedes_the_admissions_moves_for_every_admitting_
     assert admitted.event.payload.verdict == verdict
     children = [o for o in mine[at + 2 :] if o.depth == admitted.depth + 1]
     assert [(o.event.name, o.rows) for o in children] == _EXTENTS[case]
+    if case in _STARTINGS:
+        after = mine[mine.index(children[-1]) + 1 :]
+        end = next((i for i, o in enumerate(after) if o.depth <= admitted.depth + 1), len(after))
+        grandchildren = [o for o in after[:end] if o.depth == admitted.depth + 2]
+        assert [(o.event.name, o.rows) for o in grandchildren] == _STARTINGS[case]
 
 
 #: An empty box under `condition: d(RB)` that holds R, queued behind `rh`,
@@ -1316,6 +1336,112 @@ def test_dl304_a_readmitted_run_is_not_a_frame_of_the_start_bound(
     assert readmits == ([("job.108",)] if runs == 3 else [])
     admitted = [o.rows for o in mine if o.event.name == "start admitted"]
     assert len(admitted) == 2
+
+
+def test_a_readmission_enters_admitted_and_its_completion_carries_the_readmit() -> None:
+    """DL-364: a readmitted waiter enters ADMITTED with its `readmit`
+    (job.108). The state's entry sends the units and the run's start; its
+    completion carries the readmission's payload, so it takes the
+    readmission's row (job.428), and moves the waiter to STARTING with the
+    readmission's cause, then sends the move's moments and `started`."""
+    jil = (
+        "insert_resource: R\nres_type: R\namount: 1\n\n"
+        "insert_job: rh\njob_type: c\ncommand: x\nmachine: m1\n"
+        "resources: (R, QUANTITY=1, FREE=N)\n\n"
+        "insert_job: w\njob_type: c\ncommand: y\nmachine: m1\nresources: (R, QUANTITY=1)\n"
+    )
+    setup = [
+        ev("STARTJOB", 1, job="rh"),
+        ev("STATUS", 2, job="rh", status="SUCCESS"),
+        ev("STARTJOB", 3, job="w"),
+    ]
+    paired = _driven(jil, setup)
+    assert paired.store.job["w"].status == "QUE_WAIT"
+    seen = _spied(paired)
+    paired.feed(ev("RELEASE_RESOURCE", 4, job="rh"))
+    mine = [o for o in seen if o.key == RuntimeState.job_key("w")]
+    at = next(i for i, o in enumerate(mine) if o.event.name == "readmit" and o.rows)
+    readmit = mine[at]
+    assert readmit.rows == ("job.108",)
+    children = [o for o in mine[at + 1 :] if o.depth == readmit.depth + 1]
+    assert [(o.event.name, o.rows) for o in children[:3]] == [
+        ("admitted start", ("job.301",)),
+        ("actual start", ("job.224",)),
+        (COMPLETION, ("job.428",)),
+    ]
+    completion = children[2]
+    assert completion.event.payload is readmit.event.payload
+    after = mine[mine.index(completion) + 1 :]
+    end = next((i for i, o in enumerate(after) if o.depth <= completion.depth), len(after))
+    assert [(o.event.name, o.rows) for o in after[:end] if o.depth == completion.depth + 1] == [
+        *_STARTING,
+        ("started", ("job.105",)),
+    ]
+    starting = [t for t in paired.trace() if t.job == "w" and t.transition == "QUE_WAIT->STARTING"]
+    assert [t.cause for t in starting] == ["resources freed (QUE_WAIT admitted, DL-50)"]
+
+
+def _below(seen: list[Outcome], item: Outcome) -> list[tuple[str, str, tuple[str, ...]]]:
+    """(job, event, rows) of the items `item` sent, in pop order."""
+    after = seen[seen.index(item) + 1 :]
+    end = next((i for i, o in enumerate(after) if o.depth <= item.depth), len(after))
+    return [
+        (str(o.key).partition(":")[2], o.event.name, o.rows)
+        for o in after[:end]
+        if o.depth == item.depth + 1
+    ]
+
+
+def test_a_readmitted_box_s_completion_sends_its_reset_notices() -> None:
+    """DL-364: a box readmitted from QUE_WAIT (job.108) enters ADMITTED, whose
+    entry resets its member m (job.122). Its completion takes the
+    readmission's row (job.428): the move's moments, then the reset notices
+    (`notify step`, m's box rules and wake), then `started` (job.125)."""
+    jil = (
+        "insert_resource: R\nres_type: R\namount: 1\n\n"
+        "insert_job: rh\njob_type: c\ncommand: x\nmachine: m1\n"
+        "resources: (R, QUANTITY=1, FREE=N)\n\n"
+        "insert_job: W\njob_type: b\nresources: (R, QUANTITY=1)\n\n"
+        "insert_job: m\njob_type: c\ncommand: y\nmachine: m1\nbox_name: W\n"
+    )
+    setup = [
+        ev("STATUS", 0, job="m", status="SUCCESS"),
+        ev("STARTJOB", 1, job="rh"),
+        ev("STATUS", 2, job="rh", status="SUCCESS"),
+        ev("STARTJOB", 3, job="W"),
+    ]
+    paired = _driven(jil, setup)
+    assert (paired.store.job["W"].status, paired.store.job["m"].status) == ("QUE_WAIT", "SUCCESS")
+    seen = _spied(paired)
+    paired.feed(ev("RELEASE_RESOURCE", 4, job="rh"))
+    readmit = next(o for o in seen if o.event.name == "readmit" and o.rows == ("job.108",))
+    assert _below(seen, readmit) == [
+        ("W", "admitted start", ("job.301",)),
+        ("W", "actual start", ("job.224",)),
+        ("m", "box start", ("job.122",)),
+        ("W", COMPLETION, ("job.428",)),
+    ]
+    completion = next(o for o in seen if o.rows == ("job.428",))
+    assert _below(seen, completion) == [
+        ("W", "box rules", ("job.405",)),
+        ("W", "settle", ("job.418",)),
+        ("W", "wake", ("job.407",)),
+        ("W", "notify step", ("job.413",)),
+        ("W", "started", ("job.125",)),
+    ]
+    notices = next(o for o in seen if o.event.name == "notify step")
+    assert _below(seen, notices)[:2] == [
+        ("m", "box rules", ("job.405",)),
+        ("m", "wake", ("job.407",)),
+    ]
+    moved = [(t.job, t.transition) for t in paired.trace() if "->" in t.transition]
+    assert moved[-5:] == [
+        ("m", "SUCCESS->INACTIVE"),
+        ("W", "QUE_WAIT->STARTING"),
+        ("W", "STARTING->RUNNING"),
+        ("m", "INACTIVE->STARTING"),
+        ("m", "STARTING->RUNNING"),
+    ]
 
 
 # ---- KILLJOB and the TIMER input (DL-343)

@@ -375,3 +375,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-361 | The architecture review at 236c34d lands: one cancel helper, one refusal shape, a named seal exit, the box-run test in one place; the fold's single pass and the... |  |
 | DL-362 | The comment and docstring diet: a comment states the rule and cites its entry, never what changed; two deterministic gates hold the line | [docs/agent-workflow.md](agent-workflow.md) |
 | DL-363 | Four handler decisions of the job chart become rows: `start admitted` takes one row per admitting verdict, the flag rows of a waiter take their own rows, the... |  |
+| DL-364 | A completion item carries the payload of the microstep that completed its state, and the job chart's ADMITTED is a transient state left by its completion: its... | [docs/state-machines.md](state-machines.md), [docs/statechart-engine.md](statechart-engine.md) |

@@ -23546,3 +23546,89 @@ relitigate an entry; append a new one.
   difference in trace, rows or errors. One Codex Astra pass (gpt-6-astra, xhigh): none found in
   four probes; 16,896 selection cells matched after the row-id mapping, four oracle sequences of
   28 inputs matched rows, trace text, events and microstep order.
+- DL-364 A completion item carries the payload of the microstep that completed its state, and the
+  job chart's ADMITTED is a transient state left by its completion: its entry action sends what
+  precedes STARTING, and its completion moves to STARTING and sends the rest of the start
+  (2026-10-16; src/dsl41/state_machine.py, src/dsl41/job_chart.py, src/dsl41/job_chart_rows.py,
+  src/dsl41/job_chart_events.py, src/dsl41/oracle_cascade.py, src/dsl41/oracle_intents.py,
+  src/dsl41/oracle_facts.py, src/dsl41/oracle_writers.py; tests/test_statechart.py,
+  tests/test_job_chart.py, tests/test_oracle_chart.py, tests/test_oracle_chart_cascade.py;
+  docs/statechart-engine.md §4, §5, §8, §11, §17; docs/state-machines.md)
+  THE AIM. Step 2 of the job chart simplification. ADMITTED is declared as what it is: a
+  transient state that runs an entry action and leaves by a completion transition, not by the
+  self-event `starting`. No outcome of the oracle changes: no golden, no trace line.
+  THE ENGINE RULE. A completion item carries the payload of the microstep that completed its state
+  (§4): for a simple state, the event that entered it; for a composite, the event that put its last
+  region at rest. The completion's guards and actions read it. The completing state stays readable
+  on the item (`_Item.name`) and on the context (`Context.completing`, empty for any other item).
+  Before, the payload was the state's name; one test read it there and reads `Context.completing`
+  now. The reason: this engine's only mutable carrier is the payload, since an instance's data is
+  its catalog entry (§11) and a fork shares data it does not rebind (§5). So a simple state's data
+  is the data of the event that put it there. Without the rule, a completion row's action cannot
+  reach the tier's handle (`Units.consequences`, DL-356), and its writer cannot name the cause. §5
+  step 3 says the completion item carries that payload beside its ancestry.
+  THE CHART. The admitting rows job.102, job.104 and job.124 are internal: each sends `start
+  admitted` and moves nothing. The rows of `start admitted` for an admission (job.402) and a
+  start on held units (job.426) are external rows from `lifecycle` to ADMITTED, with no action.
+  The readmission (job.108) still enters ADMITTED from QUE_WAIT. ADMITTED's entry action
+  `starts_run` sends the units (`admitted start`), the run's start (`actual start`) and a box's
+  `box start` to its reset audience. ADMITTED has two completion rows to STARTING, guarded on the
+  kind of the payload that entered it: job.427 (`admitted_by_start`, an `Admitted`, action
+  `starting_admitted`) and job.428 (`admitted_by_readmit`, any other, the readmission's `readmit`,
+  action `starting_readmitted`). Each action has one handler with no branch on the payload's
+  type. Both send the STARTING move's box rules, settlement and wakes, a box's reset notices
+  (`notify step` over `_notices`), then `started`; job.427 then sends a freed excess's scan and
+  the load mark. The writer of both is `_w_starting`. The bypass (job.424) and the queue
+  (job.425) stay internal. job.403 and the event `starting` retire, with its ignored row job.419;
+  ids are not reused, so job.403 and job.419 name no row. The actions `admit_extent` and
+  `on_held_extent` and the payload `Starting` leave. `Batch.starting` leaves too: a box start's
+  second phase is `_notices`, sent by the completion, and `_notify` is the box set INACTIVE's.
+  THE TWO CONDITIONS. Ancestry: a completion item takes the ancestry of the microstep that
+  entered its state (`_completions`, `step.chained()`). The rows that enter ADMITTED for a start
+  run on `start admitted`, so the completion and everything it sends descend from it. job.100's
+  count (`_nested_starts`) and DL-349's sentence hold unchanged. Order: a microstep queues what
+  its actions reported, then its continuations, then its completions (`_queue_order`). So the
+  entry's items and their cascades, a box's member resets among them, run before the
+  completion. The completion reads each reset row's ancestors' runs before the STARTING write,
+  where `notify step`'s first pop read them. The STARTING move's moments, the reset notices,
+  `started`, the scan and the load mark then run in the order the extent and `starting` sent
+  them.
+  THE FACTS. The extent's facts read before its units are written are carried on the payload:
+  the run's cause, whether its RUNNING line names a demand, whether held units taken over exceed
+  the demand (DL-256), and a box start's batch. They are new fields of `AdmissionFacts`. An
+  admission builds them at job.102 or job.124, and a start on held units at job.104; nothing
+  writes between that row and its `start admitted`. A readmission's are built on the first read
+  of `ReadmitFacts.admission`, at ADMITTED's entry, and kept. The run number is read again at the
+  completion, from the STARTING move's record (`Move.run`): the entry's `actual start` began it,
+  and no cascade reaches ADMITTED (job.420 to job.423).
+  ITEMS. A job's start pops as many items as before. A box start pops one fewer: the completion
+  replaces both `starting` and the first `notify step` pop, which only sent it. The cascade cap
+  counts items (DL-351), so a cascade within that many items of the cap now completes where it
+  raised `CascadeDepthError` before. No golden reaches the cap. `started` and the items after it
+  are one link deeper; no guard reads depth.
+  CHECKS. The job chart has 177 rows; the transition gate holds 380 of 380 required items of
+  `job`, both completion rows and both outcomes of each new guard hit by the oracle's own tests.
+  Two new section tests pin the engine rule, for a simple state and for a composite. The extent
+  test pins ADMITTED's children and the completion's for each admitting verdict. Two new tests
+  pin the readmission's completion (job.428): a job's, with its payload and its STARTING line,
+  and a box's, whose completion sends the reset notices. The golden digests replay equal.
+  THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235): no accepted input derives differently,
+  and the goldens replay equal.
+  THE RULING. The engineer stopped at the brief's STOP: a completion's payload was the state's
+  name, so a completion row's action had no tier handle (DL-356) and could not send what follows
+  STARTING. The top level ruled the engine rule above rather than keep the `starting` self-event:
+  the payload is this engine's only mutable carrier, since an instance's data is its catalog
+  entry (§11), so a state's data is the data of the event that put it there; and every automatic
+  state to come, the box door first, needs the same. The rule changes no chart: none read a
+  completion's payload as the state name.
+  REVIEW. Semantic class (§4, §5, §8, §11 and §17 of a frozen contract). One Opus reviewer: no
+  blocker, no major; a differential run of HEAD against the tree over 40,000 seeded sequences on an
+  estate with held units, a load limit, nested boxes and box readmission showed no difference, with
+  every changed row fired equally on both sides; two minors and two nits fixed and confirmed by it
+  (the composite wording of §4; the item-cap sentence of this entry; two comments that stated a
+  change; a named test for a readmitted box's completion), one nit declined (an isinstance against
+  the readmission protocol would evaluate its lazy facts, and the oracle's concrete class does not
+  belong in the chart). One Codex Astra pass (gpt-6-astra, xhigh): one P2, the same composite
+  wording, fixed and confirmed by it at high; none found on the nested-start bound, the STARTING
+  boundary, the ADMITTED cells and the carried facts, each checked on a constructed input
+  sequence.

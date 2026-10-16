@@ -40,13 +40,12 @@ from dsl41.job_chart_events import (
     START,
     START_ADMITTED,
     STARTED,
-    STARTING,
     STARTJOB,
     STATUS,
     TERM_RUN_TIME,
 )
 from dsl41.oracle_state import LIVE, JobRuntime, JobStatus
-from dsl41.state_machine import Branch, Choice, Region, Row, State
+from dsl41.state_machine import COMPLETION, Branch, Choice, Region, Row, State
 
 # ---- configuration
 
@@ -141,9 +140,10 @@ _LIVE: Final = State(
     "LIVE",
     regions=(Region("live", "STARTING", (State("STARTING"), State("RUNNING"))),),
 )
-#: An admitted start between its admission and its STARTING (DL-350): transient, left by
-#: `starting` once its units, arm and a box's resets are written. No row projects to it.
-_ADMITTED: Final = State("ADMITTED")
+#: An admitted start between its admission and its STARTING (DL-350, DL-364): transient. Its
+#: entry action sends the units, the run's start and a box's resets; its completion moves to
+#: STARTING after their cascades. No row projects to it.
+_ADMITTED: Final = State("ADMITTED", entry="starts_run")
 #: Every status; the source of the rows that apply to all of them.
 _LIFECYCLE: Final = State(
     "lifecycle", regions=(Region("status", "IDLE", (_IDLE, State("QUE_WAIT"), _LIVE, _ADMITTED)),)
@@ -180,10 +180,10 @@ _STATUS_ROWS: Final = (
         "job.102",
         "IDLE",
         START,
-        "ADMITTED",
-        "start_admits_job",
-        "extent_admit",
-        cite="SEM-10, DL-120",
+        guard="start_admits_job",
+        action="extent_admit",
+        kind="internal",
+        cite="SEM-10, DL-120, DL-364",
     ),
     Row(
         "job.103",
@@ -194,7 +194,15 @@ _STATUS_ROWS: Final = (
         "extent_queue",
         cite="DL-50, DL-247, DL-255",
     ),
-    Row("job.104", "FAILED", START, "ADMITTED", "start_on_held", "extent_on_held", cite=_DL256),
+    Row(
+        "job.104",
+        "FAILED",
+        START,
+        guard="start_on_held",
+        action="extent_on_held",
+        kind="internal",
+        cite="DL-256, DL-364",
+    ),
     Row("job.105", "STARTING", STARTED, "RUNNING", "started_job", "moved", cite=_SEM10),
     Row("job.106", "TERMINAL", START, "INACTIVE", "start_skips", "moved", cite="SEM-33, DL-246"),
     Row(
@@ -272,10 +280,10 @@ _STATUS_ROWS: Final = (
         "job.124",
         "IDLE",
         START,
-        "ADMITTED",
-        "start_admits_box",
-        "extent_admit",
-        cite="SEM-10, DL-242",
+        guard="start_admits_box",
+        action="extent_admit",
+        kind="internal",
+        cite="SEM-10, DL-242, DL-364",
     ),
     Row(
         "job.125",
@@ -555,7 +563,8 @@ _STATUS_ROWS: Final = (
 
 #: The further status rows, `job.4NN`: an attempt's owed settlement (DL-340), the extent of an
 #: admitted start, its move to STARTING, a window skip of an inactive member, the cascade's
-#: moments, and the cells no input reaches (DL-350).
+#: moments, and the cells no input reaches (DL-350). Ids are stable: a retired id is never
+#: reused (DL-364).
 _MOMENT_ROWS: Final = (
     Row(
         "job.401",
@@ -575,18 +584,10 @@ _MOMENT_ROWS: Final = (
         "job.402",
         "lifecycle",
         START_ADMITTED,
-        guard="admitted_admit",
-        action="admit_extent",
-        kind="internal",
-        cite="DL-304, DL-349",
-    ),
-    Row(
-        "job.403",
         "ADMITTED",
-        STARTING,
-        "STARTING",
-        action="moved",
-        cite="SEM-10, DL-242, DL-350",
+        "admitted_admit",
+        cite="DL-304, DL-349, DL-364",
+        note="An admission enters ADMITTED, whose entry sends its extent.",
     ),
     Row(
         "job.404",
@@ -612,12 +613,6 @@ _MOMENT_ROWS: Final = (
             " RUNNING, or the job started again inside its move's cascade (DL-340). Nothing"
             " settles; a rank the move left still drops."
         ),
-    ),
-    _never(
-        f"job.{406 + len(MOMENTS)}",
-        "lifecycle",
-        STARTING,
-        "Only an admitted start sends it, to its own job, which is ADMITTED until it pops.",
     ),
     *(
         _never(
@@ -651,10 +646,29 @@ _MOMENT_ROWS: Final = (
         "job.426",
         "lifecycle",
         START_ADMITTED,
-        guard="admitted_on_held",
-        action="on_held_extent",
-        kind="internal",
-        cite="DL-256, DL-349",
+        "ADMITTED",
+        "admitted_on_held",
+        cite="DL-256, DL-349, DL-364",
+        note="A forced start on held units enters ADMITTED, whose entry sends its extent.",
+    ),
+    # ADMITTED's completion, one row per kind of the payload that entered it (DL-364)
+    Row(
+        "job.427",
+        "ADMITTED",
+        COMPLETION,
+        "STARTING",
+        "admitted_by_start",
+        "starting_admitted",
+        cite="SEM-10, DL-242, DL-364",
+    ),
+    Row(
+        "job.428",
+        "ADMITTED",
+        COMPLETION,
+        "STARTING",
+        "admitted_by_readmit",
+        "starting_readmitted",
+        cite="DL-50, DL-242, DL-364",
     ),
 )
 

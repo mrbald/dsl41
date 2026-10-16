@@ -6,8 +6,8 @@ writes what each fired row reached. These tests read the chart:
 - the declaration is well formed, draws no warning, and is registered; its
   marked rows are unreachable cells, each with its reason;
 - the rows the cascade and the admission add beside the status, flag and
-  holding moves relay an attempt, are moments of the cascade, move an
-  admission to STARTING, or settle;
+  holding moves relay an attempt, are moments of the cascade, enter an
+  admission into ADMITTED or move it on to STARTING, or settle;
 - the generated completeness test (§13) over a declared abstraction;
 - a sweep of every configuration the rules can build, every event and the
   payload partitions, read with `Executor.resolve`: no cell falls through or
@@ -73,7 +73,6 @@ from dsl41.job_chart_events import (
     START,
     START_ADMITTED,
     STARTED,
-    STARTING,
     STARTJOB,
     STATUS,
     TERM_RUN_TIME,
@@ -100,6 +99,7 @@ from dsl41.oracle_state import (
     JobRuntime,
 )
 from dsl41.state_machine import (
+    COMPLETION,
     HITS_ENV,
     Context,
     Executor,
@@ -150,14 +150,20 @@ START_BOUND = "job.100"
 BOX_NOEXEC = {"job.231": "job.209", "job.232": "job.207", "job.233": "job.209"}
 #: An attempt whose run's settlement is owed, and an admitted start's moves (DL-349).
 SETTLE_FIRST = "job.401"
-#: The rows of `start admitted`, one per admitting verdict: its guard and its action.
+#: The rows of `start admitted`, one per admitting verdict: its guard, and its action or the
+#: state it enters. An admission and a start on held units enter ADMITTED (DL-364).
 EXTENTS = {
-    "job.402": ("admitted_admit", "admit_extent"),
+    "job.402": ("admitted_admit", "ADMITTED"),
     "job.424": ("admitted_bypass", "bypass_extent"),
     "job.425": ("admitted_queue", "queue_extent"),
-    "job.426": ("admitted_on_held", "on_held_extent"),
+    "job.426": ("admitted_on_held", "ADMITTED"),
 }
-STARTING_ROW = "job.403"
+#: ADMITTED's completion, one row per kind of the payload that entered it: its guard and its
+#: action (DL-364).
+STARTINGS = {
+    "job.427": ("admitted_by_start", "starting_admitted"),
+    "job.428": ("admitted_by_readmit", "starting_readmitted"),
+}
 SKIP_IN_BOX = "job.404"
 SETTLE_LIVE = "job.418"
 #: The rows that admit a start: each sends `start admitted` first.
@@ -283,15 +289,15 @@ def _leaf(active: frozenset[str], region: str) -> str:
     return next(s for s in active if REGION.get(s) == region)
 
 
-#: The admitting rows that end in the transient `ADMITTED`, which `starting`
-#: (job.403) leaves for STARTING once the admission's units and arm are written.
-ADMISSIONS = ("job.102", "job.104", "job.108", "job.124")
+#: The admitting rows whose `start admitted` enters the transient `ADMITTED`, and the verdict
+#: each sends; ADMITTED's completion leaves it for STARTING (DL-364).
+ADMISSIONS = {"job.102": "admit", "job.104": "on_held", "job.124": "admit"}
 
 
 def _targets(row: Row) -> set[str]:
     """The leaves a row may end in; a row with no target stays where it is. An
-    admission's is STARTING, which it reaches through `ADMITTED` (job.403)."""
-    if row.target == "ADMITTED":
+    admission's is STARTING, which it reaches through `ADMITTED`."""
+    if row.target == "ADMITTED" or row.id in ADMISSIONS:
         return {"STARTING"}
     choice = {c.name: c for c in CHART.choices}.get(row.target)
     if choice is not None:
@@ -331,7 +337,7 @@ def test_the_chart_is_well_formed_draws_no_warning_and_is_registered() -> None:
             STARTED, READMIT, ACTUAL_START, ADMITTED_START, LEAVE_LIVE, MEMBER_MOVES,
             COMPLETION_MOMENT, MEMBER_ENDS, BOX_RECOMPUTE, BOX_START, BOX_RUNNING,
             BOX_SET_INACTIVE, BOX_RUN_ENDS, BOX_ENDS, BOX_OFF_NOEXEC, BOX_ON_NOEXEC, PERIOD_OPENING,
-            FLAG_MOVED, START_ADMITTED, STARTING, *MOMENTS,
+            FLAG_MOVED, START_ADMITTED, *MOMENTS,
         ]
     )  # fmt: skip
 
@@ -346,11 +352,13 @@ def _states(state: Any) -> Iterator[Any]:
 def test_every_guard_and_action_says_what_it_reads() -> None:
     named = {row.guard for row in CHART.rows} | {b.guard for c in CHART.choices for b in c.branches}
     assert named - {""} == set(CHART.guards)
+    entries = {state.name: state.entry for state in _states(CHART.root) if state.entry}
+    assert entries == {"ADMITTED": "starts_run"}
+    assert not any(state.exit for state in _states(CHART.root))
     actions = {row.action for row in CHART.rows} | {
         b.action for c in CHART.choices for b in c.branches
     }
-    assert actions - {""} == set(CHART.actions)
-    assert not any(state.entry or state.exit for state in _states(CHART.root))
+    assert (actions | set(entries.values())) - {""} == set(CHART.actions)
     for name, function in (*CHART.guards.items(), *CHART.actions.items()):
         assert function.__doc__, name
 
@@ -366,7 +374,7 @@ def test_every_marked_row_is_unreachable_with_its_reason() -> None:
     assert [row.id for row in marked] == [
         "job.182", "job.186", "job.188", "job.190", "job.192", "job.193",
         "job.194", "job.199", "job.312", "job.314", "job.317", "job.318", "job.320", "job.321",
-        "job.419", "job.420", "job.421", "job.422", "job.423",
+        "job.420", "job.421", "job.422", "job.423",
     ]  # fmt: skip
     cells = [row for row in marked if row.id != LATE_SETTLEMENT]
     assert all(row.mark == "unreachable" and row.kind == "ignored" and row.note for row in cells)
@@ -394,9 +402,9 @@ def test_every_other_row_moves_nothing_relays_an_attempt_or_settles_held_units()
             assert row.kind == "internal" and row.action == "relay_start"
         elif row.id == FLAG_REPORT:
             assert row.kind == "internal" and row.action == "waiter_left"
-        elif row.id == STARTING_ROW:
-            assert (row.source, row.event, row.target) == ("ADMITTED", STARTING, "STARTING")
-            assert row.action == "moved" and not row.guard
+        elif row.id in STARTINGS:
+            assert (row.source, row.event, row.target) == ("ADMITTED", COMPLETION, "STARTING")
+            assert (row.guard, row.action) == STARTINGS[row.id]
         elif row.id == SKIP_IN_BOX:
             assert (row.source, row.event, row.kind) == ("INACTIVE", START, "internal")
             assert row.guard == "start_skips_inactive_member" and row.action == "skips_in_box"
@@ -418,8 +426,13 @@ def test_every_other_row_moves_nothing_relays_an_attempt_or_settles_held_units()
             assert (row.source, row.event, row.kind) == ("IDLE", START, "internal")
             assert row.guard == "start_settles_first" and row.action == "settles_first"
         elif row.id in EXTENTS:
-            assert (row.source, row.event, row.kind) == ("lifecycle", START_ADMITTED, "internal")
-            assert (row.guard, row.action) == EXTENTS[row.id]
+            assert (row.source, row.event) == ("lifecycle", START_ADMITTED)
+            guard, then = EXTENTS[row.id]
+            assert row.guard == guard
+            if then == "ADMITTED":
+                assert (row.kind, row.target, row.action) == ("external", "ADMITTED", "")
+            else:
+                assert (row.kind, row.action) == ("internal", then)
         elif row.id in BOX_NOEXEC:
             own = [ROWS[i] for i in (BOX_NOEXEC[row.id], *SIBLINGS.get(BOX_NOEXEC[row.id], ()))]
             assert (row.event, row.kind) == (BOX_ON_NOEXEC, "external")
@@ -573,7 +586,6 @@ PARTITIONS: dict[str, list[Any]] = {
     ],
     START_ADMITTED: [Admitted(verdict) for verdict in ("bypass", "queue", "admit", "on_held")],
     STARTED: [Still(True), Still(False)],
-    STARTING: [Still()],
     **{moment: [Still()] for moment in MOMENTS},
 }
 
@@ -621,8 +633,9 @@ def test_the_sweep_of_every_buildable_cell_raises_no_selection_error_and_selects
                         acting.append((event, rows))
                     cells += 1
     # the bound reads the item's ancestry, which a read never has: the
-    # ancestry test reaches it
-    assert selected == set(ROWS) - {START_BOUND}
+    # ancestry test reaches it; a completion is no event a read selects, and
+    # the cells of the admissions reach ADMITTED's
+    assert selected == set(ROWS) - {START_BOUND, *STARTINGS}
     assert acting == []
     assert cells > 250_000
 
@@ -803,8 +816,6 @@ def test_the_completeness_table_matches_the_declaration_in_every_cell() -> None:
     assert table[("box STARTING", STARTED, repr(Still(True)))] == "job.125"
     assert table[("job STARTING", STARTED, repr(Still(True)))] == "job.105"
     assert table[("job STARTING", STARTED, repr(Still(False)))] == "ignored job.183"
-    assert table[("job ADMITTED", STARTING, repr(Still()))] == "job.403"
-    assert table[("job INACTIVE", STARTING, repr(Still()))] == "ignored job.419"
     # a job started again inside its move's cascade settles nothing (DL-340)
     assert table[("job RUNNING", SETTLE, repr(Still()))] == "job.418"
     assert table[("job TERMINATED reserved", SETTLE, repr(Still()))] == "job.406"
@@ -1011,12 +1022,13 @@ def test_every_move_from_every_source_ends_in_its_target() -> None:
 
 
 def _advance(executor: Executor, job: str, event: ChartEvent) -> list[Any]:
-    """Dispatch `event`; an admission then leaves `ADMITTED` for STARTING
-    (job.403), as the tier's extent sends `starting` once the admission's
-    units and arm are written."""
+    """Dispatch `event`; an admitting row's `start admitted` follows, as the
+    tier's handle sends it, and its row enters ADMITTED, whose completion
+    moves to STARTING within the dispatch (DL-364)."""
     outcomes = executor.dispatch(job, ChartEvent(event.name, _handled(event.payload)))
-    if "ADMITTED" in executor.active(job):
-        outcomes += executor.dispatch(job, ChartEvent(STARTING, Still()))
+    for verdict in [ADMISSIONS[row] for o in outcomes for row in o.rows if row in ADMISSIONS]:
+        admitted = _handled(Admitted(verdict))  # type: ignore[arg-type]
+        outcomes += executor.dispatch(job, ChartEvent(START_ADMITTED, admitted))
     return outcomes
 
 

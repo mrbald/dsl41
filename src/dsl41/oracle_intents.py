@@ -79,12 +79,11 @@ class Move:
 @dataclass(eq=False)
 class Batch:
     """One batch INACTIVE path (DL-242): the box it begins at, the rows its first phase wrote
-    and settled, in order, and how they are written: a box start's reset (`starting`, the box's
-    own move to STARTING between the phases) or a box set INACTIVE (`clear`, its exit codes;
-    `code`, the first row's)."""
+    and settled, in order, and how they are written: a box start's reset, whose second phase
+    follows the box's own move to STARTING (DL-364), or a box set INACTIVE (`clear`, its exit
+    codes; `code`, the first row's)."""
 
     box: str
-    starting: Starting | None = None
     clear: bool = False
     code: int | None = None
     rows: list[Move] = field(default_factory=list)
@@ -222,9 +221,18 @@ class Rule(Payload):
 
 @dataclass(frozen=True)
 class AdmissionFacts(Admission):
-    """An admitted start's units: the demand vector it reserves or takes over."""
+    """An admitted start's units: the demand vector it reserves or takes over. The other fields
+    are what its extent reads before its units are written, kept on the payload that enters
+    ADMITTED, so the state's entry and its completion read them (DL-364): the run's `cause`,
+    which its start and its STARTING name; `had_demand`, which its RUNNING line names;
+    `frees`, the held units it takes over exceed its demand, so the queue is owed a scan
+    (DL-256); and a box start's `batch` (DL-242)."""
 
     vector: tuple[DemandEntry, ...] = field(default=(), compare=False)
+    cause: str = field(default="", compare=False)
+    had_demand: bool = field(default=False, compare=False)
+    frees: bool = field(default=False, compare=False)
+    batch: Batch | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -234,13 +242,6 @@ class RunStart(Payload):
 
     cause: str = field(default="", compare=False)
     arm: bool = field(default=True, compare=False)
-
-
-@dataclass(frozen=True)
-class Starting(Payload):
-    """`starting`'s payload: the cause of the move into STARTING."""
-
-    cause: str = field(default="", compare=False)
 
 
 @dataclass(frozen=True)
