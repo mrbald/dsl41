@@ -1,17 +1,13 @@
-"""Runner time domains (ss9): the engine's clocks.
+"""Runner time domains (ss9): the engine's clocks, and `EngineError`.
 
-Split out of runner.py by DL-74, with the paragraph it owns, verbatim.
+The engine time basis is NAIVE UTC in the real domain (RealClock.now()), so DST
+never runs the oracle's non-decreasing feed discipline backwards (ss6-ss7;
+DL-41a and DL-42 pin the lifecycle semantics). The scheduler converts per-job
+zoneinfo ticks to UTC instants.
 
-Phase 11b (ss6-ss7; DL-41a/DL-42 pin the lifecycle semantics):
-
-- Engine time basis is NAIVE UTC in the real domain (RealClock.now()):
-  DST never runs the oracle's non-decreasing feed discipline backwards.
-  The 11c scheduler converts per-job zoneinfo ticks to UTC instants.
-
-EngineError lives here too: it is the shell's one refusal type, every module
-above raises it, and this module is the bottom of the runner import DAG
-(DL-74). Below it sits only `runner_codes`, the registry an EngineError
-takes its optional code from.
+`EngineError` is the shell's one refusal type. This module is the bottom of
+the runner import DAG (DL-74); only `runner_codes` sits below it, as the
+registry an EngineError takes its optional code from.
 """
 
 from __future__ import annotations
@@ -26,13 +22,11 @@ from dsl41.runner_codes import Code
 
 
 class EngineError(RuntimeError):
-    """A shell-level refusal (never a semantics verdict): the engine detected
-    it cannot make progress -- e.g. the zero-delay-cycle guard in
-    run_until_quiescent. Loud by design (CLAUDE.md: no silent loss).
+    """A shell-level refusal, never a semantics verdict: the engine cannot make progress.
 
-    `code` is the stable control code of the reason, when the raise site
-    names one (control-protocol §2). A control catch site answers a
-    code-less one as `engine_error`; it never reads the prose."""
+    `code` is the stable control code of the reason, when the raise site names
+    one (control-protocol §2). A control catch site answers a code-less one as
+    `engine_error` and never reads the prose."""
 
     def __init__(self, *args: object, code: Code | None = None) -> None:
         super().__init__(*args)
@@ -40,11 +34,10 @@ class EngineError(RuntimeError):
 
 
 class ZeroDelayCycleError(EngineError):
-    """The instant-budget guard, typed (DL-184): a zero-delay condition
-    cycle generated unbounded work at one frozen virtual instant. Carries
-    the instant and the jobs that started there so `rehearse
-    --check-cadence` can convert exactly this refusal -- and no other
-    EngineError -- into an unbounded-multi-fire finding."""
+    """A zero-delay condition cycle generated unbounded work at one virtual instant (DL-184).
+
+    It carries the instant and the jobs that started there; `rehearse --check-cadence`
+    converts exactly this refusal into an unbounded-multi-fire finding."""
 
     def __init__(self, message: str, *, instant: datetime, jobs: tuple[str, ...]) -> None:
         super().__init__(message)
@@ -62,20 +55,17 @@ class Clock(Protocol):
     def now(self) -> datetime: ...
 
     def next_sleeper_due(self) -> datetime | None:
-        """Earliest pending adapter sleep, or None. RealClock (11b) returns
-        None -- real sleeps wake themselves; only the virtual domain needs
-        the engine to drive them forward."""
+        """Earliest pending adapter sleep, or None. RealClock returns None: real sleeps wake
+        themselves."""
         ...
 
     def pending_sleepers(self) -> int:
-        """Count of pending adapter sleeps. Virtual-domain bookkeeping for
-        Engine._settle; RealClock (11b) returns 0 and its loop blocks on
-        real IO instead of settling."""
+        """Count of pending adapter sleeps, for Engine._settle. RealClock returns 0."""
         ...
 
     async def wait_until(self, t: datetime, interrupt: asyncio.Event | None = None) -> None:
-        """Engine-side wait (ss9): real -- sleep until `t`, waking early when
-        `interrupt` fires (queue activity); virtual -- jump instantly."""
+        """Engine-side wait (ss9). Real: sleep until `t`, waking early when `interrupt` fires.
+        Virtual: jump instantly."""
         ...
 
     async def sleep_until(self, t: datetime) -> None:
@@ -84,11 +74,10 @@ class Clock(Protocol):
 
 
 class VirtualClock:
-    """ss9: jumps to the next wake instantly -- enabled by the oracle taking
-    explicit timestamps everywhere. The engine owns time: wait_until() moves
-    `now` forward and resolves due sleeps; sleep_until() parks the calling
-    adapter task until the engine's clock reaches its deadline. `interrupt`
-    is ignored: jumps are instantaneous, there is nothing to interrupt."""
+    """ss9: jumps to the next wake instantly, because the oracle takes explicit timestamps.
+
+    wait_until() moves `now` forward and resolves due sleeps; sleep_until() parks the
+    calling adapter task until the clock reaches its deadline. `interrupt` is ignored."""
 
     virtual = True
 
@@ -109,8 +98,7 @@ class VirtualClock:
         return len(self._sleepers)
 
     def _prune(self) -> None:
-        # a cancelled adapter task (engine cancel on terminal status) leaves
-        # a dead future behind; drop them so due/pending reads see live work
+        # a cancelled adapter task leaves a dead future; due/pending reads see live work only
         if any(fut.done() for _, _, fut in self._sleepers):
             self._sleepers = [entry for entry in self._sleepers if not entry[2].done()]
             heapq.heapify(self._sleepers)
@@ -121,7 +109,7 @@ class VirtualClock:
         self._prune()
         while self._sleepers and self._sleepers[0][0] <= self._now:
             _, _, fut = heapq.heappop(self._sleepers)
-            if not fut.done():  # pragma: no branch -- _prune above left only live futures
+            if not fut.done():  # pragma: no branch -- _prune left only live futures
                 fut.set_result(None)
 
     async def sleep_until(self, t: datetime) -> None:
@@ -134,17 +122,15 @@ class VirtualClock:
 
 
 class RealClock:
-    """ss9 wall-clock domain. now() is NAIVE UTC (module docstring: DST must
-    never run the oracle's non-decreasing feed discipline backwards; the 11c
-    scheduler converts zoneinfo ticks to UTC instants). wait_until() sleeps
-    in bounded chunks, waking early when `interrupt` fires (queue activity);
-    sleep_until() is a plain sleep -- real sleeps wake themselves, so the
-    engine never drives them (next_sleeper_due()/pending_sleepers() are the
-    virtual domain's bookkeeping and stay empty here, DL-43 item 5)."""
+    """ss9 wall-clock domain. now() is NAIVE UTC (see the module docstring).
+
+    wait_until() sleeps in bounded slices, waking early when `interrupt` fires.
+    sleep_until() is a plain sleep; the engine never drives it, so
+    next_sleeper_due() and pending_sleepers() stay empty (DL-43 item 5)."""
 
     virtual = False
 
-    #: cap one wait slice; re-checking hourly costs nothing and bounds drift
+    #: one wait slice is capped, which bounds drift
     _MAX_SLICE_S = 3600.0
 
     def now(self) -> datetime:

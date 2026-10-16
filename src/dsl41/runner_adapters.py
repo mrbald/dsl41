@@ -1,32 +1,23 @@
-"""Runner adapters (ss6/ss6a): the dispatch half of the sans-IO shell --
-the adapter protocol, the CMD wrapper paths, and the supervisor client.
+"""Runner adapters (ss6/ss6a): the adapter protocol, the CMD wrapper paths and the supervisor client.
 
-Split out of runner.py by DL-74, with the paragraphs it owns, verbatim.
+This module belongs to the runner split of DL-74.
 
-Adapter contract (ss6): ``async run(job_ir, run_number, ctx) -> AdapterResult``
-where an ``int`` is the RAW exit code (SEM-09/DL-33 classification stays
-oracle-side), ``Terminated`` reports a kill the wrapper actually observed
-(-> STATUS TERMINATED), and ``Failed`` reports a completion with no raw exit
-code (spawn failure, or the E7 unobservable case -> STATUS FAILURE with its
-cause). Adapters never retry (n_retrys is unmodeled v1, DL-53 scope: a
-shell-side retry would fork semantics from the simulator) and never time
-out (term_run_time is the oracle's timer). Under VirtualClock an adapter
-may block ONLY through
-ctx.clock.sleep_until; that restriction is what makes quiescence decidable
-(Engine._settle counts live tasks against pending sleeps). Real adapters
-(11b) run under RealClock, where the loop blocks on real IO -- _settle is a
-single reaping pass and the loop waits on the queue-activity event instead
-of settling (DL-43 item 5).
+Adapter contract (ss6): ``async run(job_ir, run_number, ctx) -> AdapterResult``. An ``int`` is the
+RAW exit code (SEM-09/DL-33 classification stays oracle-side), ``Terminated`` reports a kill the
+wrapper observed (-> STATUS TERMINATED), and ``Failed`` reports a completion with no raw exit code
+(spawn failure, or the E7 unobservable case -> STATUS FAILURE with its cause). Adapters never retry
+(n_retrys is unmodeled, DL-53 scope: a shell-side retry would fork semantics from the simulator)
+and never time out (term_run_time is the oracle's timer). Under VirtualClock an adapter blocks ONLY
+through ctx.clock.sleep_until, which makes quiescence decidable (Engine._settle counts live tasks
+against pending sleeps). Real adapters run under RealClock, where the loop blocks on real IO and
+_settle is a single reaping pass (DL-43 item 5).
 
-Phase 11b (ss6-ss7; DL-41a/DL-42 pin the lifecycle semantics):
-
-- LocalCommandAdapter runs every command under the ss6a Tier-0 wrapper
-  (runner_wrapper.py, spawned BY FILE PATH -- see its docstring), and the
-  wrapper's status.json is the sole outcome channel; the wrapper's exit
-  only notifies the engine to read it. Cancel (the oracle said terminal) =
-  verify the recorded (pid, start-time), signal the command pgid SIGTERM,
-  grace, SIGKILL; the wrapper observes and records; the cancelled adapter
-  never reports.
+Lifecycle (ss6-ss7; DL-41a and DL-42 pin the semantics): LocalCommandAdapter runs every command
+under the ss6a Tier-0 wrapper (runner_wrapper.py, spawned BY FILE PATH), and the wrapper's
+status.json is the sole outcome channel; the wrapper's exit only notifies the engine to read it.
+Cancel (the oracle said terminal) verifies the recorded (pid, start-time), signals the command
+pgid SIGTERM, waits the grace, then SIGKILLs; the wrapper observes and records; the cancelled
+adapter never reports.
 """
 
 from __future__ import annotations
@@ -87,20 +78,18 @@ if TYPE_CHECKING:  # annotation only: the Journal object is the engine's, not an
     from dsl41.runner_journal import Journal
 
 
-#: the ss6a Tier-0 shim, executed by file path (never -m; see its docstring)
+#: the ss6a Tier-0 shim, executed by file path, never -m (see its docstring)
 _WRAPPER_PATH = Path(_wrapper.__file__)
 #: the ss6a Tier-1 supervisor, likewise run by file path (stdlib-only boundary)
 _SUPERVISOR_PATH = Path(_supervisor.__file__)
 
 
 def supervisor_argv(run_root: Path, deadman_s: float | None = None) -> list[str]:
-    """The launch rule for a Tier-1 supervisor: by file path, never `-m`
-    (DL-42), with the optional deadman.
+    """The launch rule for a Tier-1 supervisor: by file path, never `-m` (DL-42), with the
+    optional deadman.
 
-    DL-210 has two spawners -- this module's engine-side one and `supervise
-    start` -- and that is the ruling; two copies of the rule were not, and the
-    file was located two different ways (DL-75 review 2026-09-19). The caller
-    decides what `run_root` spells; `supervise start` resolves it first."""
+    DL-210 has two spawners, this module's engine-side one and `supervise start`, and one rule
+    (DL-75). The caller decides what `run_root` spells; `supervise start` resolves it first."""
     argv = [sys.executable, str(_SUPERVISOR_PATH), "--run-root", str(run_root)]
     if deadman_s is not None:
         argv += ["--deadman-seconds", str(deadman_s)]
@@ -108,31 +97,28 @@ def supervisor_argv(run_root: Path, deadman_s: float | None = None) -> list[str]
 
 
 def supervisor_log_path(run_root: Path) -> Path:
-    """Where a spawner points the supervisor's stderr: the supervisor itself
-    opens no log file (docs/supervisor-protocol.md ss5)."""
+    """Where a spawner points the supervisor's stderr; the supervisor opens no log file
+    (docs/supervisor-protocol.md ss5)."""
     return run_root / "supervisor.log"
 
 
-# JSON-lines buffer cap for every asyncio stream endpoint (control socket
-# both sides, supervisor client). One `status` response is one line covering
-# EVERY job (~220 bytes each), so asyncio's 64 KiB default readline() limit
-# overruns at ~300 jobs; 16 MiB clears any plausible estate while still
-# bounding a runaway peer. Public since DL-78: three modules need it
-# (this one, runner_control's server AND client) and a shared constant
-# imported through a private name is a boundary that was never real.
+# JSON-lines buffer cap for every asyncio stream endpoint (control socket both sides, supervisor
+# client). One `status` response is one line covering EVERY job (~220 bytes each), so asyncio's
+# 64 KiB default readline() limit overruns at ~300 jobs; 16 MiB clears any plausible estate and
+# still bounds a runaway peer. Public because three modules need it (this one, runner_control's
+# server AND client) (DL-78).
 LINE_LIMIT: int = 2**24
-#: spawns `ensure_running` makes inside its 10 s window when a fresh
-#: supervisor exits before publishing its socket (DL-210: exit 1 is retryable)
+#: spawns `ensure_running` makes inside its 10 s window when a fresh supervisor exits before
+#: publishing its socket (DL-210: exit 1 is retryable)
 _SPAWN_ATTEMPTS = 3
 
 
 @dataclass
 class DetachSignal:
-    """Set by the engine BEFORE it cancels adapter tasks for a detach-stop
-    (operator SIGINT/SIGTERM of a --detached run, or shutdown-for-resume).
-    The SupervisedCommandAdapter's CancelledError path branches on it: when
-    stopping, it abandons the await and signals NOTHING -- jobs keep running
-    under the supervisor (spec ss3 case b). Tethered adapters ignore it."""
+    """Set by the engine BEFORE it cancels adapter tasks for a detach-stop (operator SIGINT/SIGTERM
+    of a --detached run, or shutdown-for-resume). The SupervisedCommandAdapter's CancelledError
+    path branches on it: when stopping, it abandons the await and signals NOTHING, so jobs keep
+    running under the supervisor (spec ss3 case b). Tethered adapters ignore it."""
 
     stopping: bool = False
 
@@ -141,21 +127,16 @@ class DetachSignal:
 class SealBarrier:
     """ss6 step 2's park, seen from an adapter (period-model ss3.5, DL-133).
 
-    `parked` is the one record of the freeze: the engine's admission reads
-    it as `Engine.sealing`. The engine sets it before it chooses T; every
-    FW task checks it at its POLL BOUNDARY -- after the sleep and before
-    the observation -- and waits there. Nothing else is needed to "await any poll in flight":
-    a poll's observation, its `watch.jsonl` append and its progress update
-    contain no `await`, so a poll cannot be in flight across a yield, and a
-    task still asleep cannot append before it wakes into this check.
+    `parked` is the one record of the freeze: the engine's admission reads it as `Engine.sealing`.
+    The engine sets it before it chooses T; every FW task checks it at its POLL BOUNDARY, after
+    the sleep and before the observation, and waits there. A poll's observation, its `watch.jsonl`
+    append and its progress update contain no `await`, so no poll is in flight across a yield, and
+    a task still asleep cannot append before it wakes into this check. Without the park a second
+    qualifying poll would land after the snapshot, its completion would never be admitted, and
+    audit would derive a completed watch where the seal carries a live one.
 
-    Without the park a second qualifying poll lands after the snapshot, its
-    completion is never admitted because the engine exits, and audit
-    derives a completed watch where the seal carries a live one.
-
-    `parked_tasks` is how the engine's virtual-domain settle knows a task
-    that is neither running nor asleep on the clock is nonetheless going
-    nowhere."""
+    `parked_tasks` tells the engine's virtual-domain settle that a task neither running nor asleep
+    on the clock is going nowhere."""
 
     parked: bool = False
     parked_tasks: int = 0
@@ -166,9 +147,8 @@ class SealBarrier:
         self._released = None
 
     def release(self) -> None:
-        """`abort_boundary`'s half: the interval is reversible until the
-        `seal` append begins, and after an abort an FW poll proceeds
-        (PR-28b)."""
+        """`abort_boundary`'s half: the interval is reversible until the `seal` append begins, and
+        after an abort an FW poll proceeds (PR-28b)."""
         self.parked = False
         if self._released is not None:
             self._released.set()
@@ -187,52 +167,46 @@ class SealBarrier:
 
 @dataclass
 class AdapterContext:
-    """What an adapter may touch (ss6): the clock, and in the real domain
-    the run-root layout (runs/, logs/) plus the WAL for dispatch records.
-    `detach` distinguishes a detach-stop from an oracle-decided kill in the
-    detached CMD path (ss3 case b vs a). `run_id` is the identity the
-    decision minted for this spawn (DL-118, PR-36a): the wrapper spec
-    carries it onward, so the WAL, the spool and every later reader name
-    ONE key. None on the paths with no effect behind them -- FW
-    re-dispatch, detached reattach -- and for a SPAWN re-driven from a
-    pre-DL-118 journal, where the adapter minting its own is the old
-    behaviour kept."""
+    """What an adapter may touch (ss6): the clock, and in the real domain the run-root layout
+    (runs/, logs/) plus the WAL for dispatch records. `detach` distinguishes a detach-stop from an
+    oracle-decided kill in the detached CMD path (ss3 case b vs a). `run_id` is the identity the
+    decision minted for this spawn (DL-118, PR-36a); the wrapper spec carries it onward, so the
+    WAL, the spool and every later reader name ONE key. It is None on the paths with no effect
+    behind them (FW re-dispatch, detached reattach) and for a SPAWN re-driven from a pre-DL-118
+    journal, where the adapter mints its own."""
 
     clock: Clock
     run_root: Path | None = None
     journal: Journal | None = None
     detach: DetachSignal | None = None
     run_id: str | None = None
-    #: ss6 step 2's park. None for the adapters that own no durable
-    #: position -- a boundary has nothing to hold them at.
+    #: ss6 step 2's park; None for adapters that own no durable position
     barrier: SealBarrier | None = None
-    #: period-model ss1.3: the fence lives in the journal writer, and the
-    #: FW adapter appends to a spool the journal never sees. An append
-    #: after leadership was lost is evidence written by a non-leader, so
-    #: this adapter re-proves before every line (PR-03).
+    #: period-model ss1.3: the fence lives in the journal writer, and the FW adapter appends to a
+    #: spool the journal never sees. An append after leadership was lost is evidence written by a
+    #: non-leader, so this adapter re-proves before every line (PR-03).
     fence: Proof | None = None
 
 
 @dataclass(frozen=True)
 class Terminated:
-    """The command was killed and the kill was OBSERVED (wrapper status.json:
-    signaled / terminated). The engine injects STATUS TERMINATED -- reserved
-    for kills that actually happened (DL-41a item 7)."""
+    """The command was killed and the kill was OBSERVED (wrapper status.json: signaled /
+    terminated). The engine injects STATUS TERMINATED, reserved for kills that happened
+    (DL-41a item 7)."""
 
     cause: str
 
 
 @dataclass(frozen=True)
 class Failed:
-    """A completion with no raw exit code: spawn failure, or the E7
-    unobservable case. The engine injects STATUS FAILURE with the cause --
-    never anything that could satisfy a success-dependent downstream."""
+    """A completion with no raw exit code: spawn failure, or the E7 unobservable case. The engine
+    injects STATUS FAILURE with the cause, never anything that could satisfy a success-dependent
+    downstream."""
 
     cause: str
 
 
-#: Every `status.json` outcome the wrapper can write, derived from its own
-#: Literal so the adapter cannot drift from the writer.
+#: every `status.json` outcome the wrapper can write, derived from its own Literal
 WRAPPER_OUTCOMES: Final[frozenset[str]] = frozenset(get_args(WrapperOutcome))
 
 #: int = RAW exit code (SEM-09/DL-33 verdict stays oracle-side)
@@ -240,26 +214,23 @@ AdapterResult = int | Terminated | Failed
 
 
 class JobAdapter(Protocol):
-    """ss6 adapter protocol; see the module docstring for the contract."""
+    """ss6 adapter protocol; the module docstring carries the contract."""
 
     async def run(self, job_ir: JobIR, run_number: int, ctx: AdapterContext) -> AdapterResult: ...
 
 
 class FakeAdapter:
-    """ss6: scripted ``(job, run_number) -> (duration_s, exit_code)``;
-    default instant success. A ``None`` entry -- per run in the script, per
-    job via ``park``, or estate-wide via ``default=None`` -- makes the run
-    INERT: the task parks on a sleep at datetime.max, which no real horizon
-    ever reaches, so the SCRIPT drives completions via injected STATUS --
-    exactly the role the oracle trace tests already play. The bisimulation
-    harness runs the estate-wide mode; rehearse scenarios use scripted
-    entries and ``park`` for jobs -- file watchers above all -- that must
-    not fire. ``job_default`` is a per-job completion used when no script
-    entry matches and the job is not parked: the cadence check synthesizes
-    each job's exit from its own SEM-09 boundary there, because the global
-    exit-0 default is a FAILURE under a ``fail_codes`` that lists 0
-    (DL-184). Precedence: script entry, then park, then job_default, then
-    default."""
+    """ss6: scripted ``(job, run_number) -> (duration_s, exit_code)``; default instant success.
+
+    A ``None`` entry (per run in the script, per job via ``park``, or estate-wide via
+    ``default=None``) makes the run INERT: the task parks on a sleep at datetime.max, which no
+    real horizon reaches, so the SCRIPT drives completions via injected STATUS. The bisimulation
+    harness runs the estate-wide mode; rehearse scenarios use scripted entries and ``park`` for
+    jobs, file watchers above all, that must not fire. ``job_default`` is a per-job completion
+    used when no script entry matches and the job is not parked: the cadence check synthesizes
+    each job's exit from its own SEM-09 boundary there, because the global exit-0 default is a
+    FAILURE under a ``fail_codes`` that lists 0 (DL-184). Precedence: script entry, park,
+    job_default, default."""
 
     def __init__(
         self,
@@ -293,22 +264,18 @@ class FakeAdapter:
 
 
 def load_json(path: Path) -> dict[str, Any] | None:
-    """Tolerant spool read: missing or unparseable -> None (an unreadable
-    record can never be trusted for signaling; the ladder falls through).
+    """Tolerant spool read: missing or unparseable -> None (an unreadable record is never trusted
+    for signaling; the ladder falls through).
 
-    A record carrying an unpaired surrogate is unreadable in the same sense
-    (PR-10a): it decodes, but nothing downstream can canonicalize it, so it
-    takes the same path rather than a new one. Bytes that are not UTF-8 at
-    all join them (DL-151). They are decoded as strict UTF-8 before they are
-    parsed: `json.load` on a binary handle detects UTF-16 and UTF-32 and
-    accepts them, so only the explicit decode refuses them (DL-229).
+    A record carrying an unpaired surrogate is unreadable (PR-10a): it decodes, but nothing
+    downstream can canonicalize it. So are bytes that are not UTF-8 (DL-151); they are decoded as
+    strict UTF-8 before parsing, because `json.load` on a binary handle accepts UTF-16 and UTF-32
+    (DL-229).
 
-    A `version` this binary does not implement is unreadable too -- the
-    `Wrapper-owned spool files` row of docs/protocol-evolution.md is
-    tolerant on fields and STRICT on versions. None is this reader's whole
-    refusal vocabulary, and every caller's next step for a missing record is
-    safe by construction: an unread `status.json` becomes
-    `exit_status_unobservable`, never a success, and an unread `spawn.json`
+    A `version` this binary does not implement is unreadable too: the `Wrapper-owned spool files`
+    row of docs/protocol-evolution.md is tolerant on fields and STRICT on versions. None is this
+    reader's whole refusal vocabulary, and every caller's next step is safe: an unread
+    `status.json` becomes `exit_status_unobservable`, never a success, and an unread `spawn.json`
     is a group this engine will not signal."""
     try:
         with path.open("rb") as f:
@@ -323,20 +290,15 @@ def load_json(path: Path) -> dict[str, Any] | None:
 
 
 def outcome_from_status(status: dict[str, Any]) -> AdapterResult:
-    """Map a wrapper status.json record (docs/supervisor-protocol.md ss3) to
-    an adapter result. Shared by the live adapter path and reconciliation so
-    live and resumed runs can never diverge on the same record. A malformed
-    record maps to FAILURE with a truthful cause -- never to anything that
-    could satisfy a success-dependent downstream."""
+    """Map a wrapper status.json record (docs/supervisor-protocol.md ss3) to an adapter result.
+    Shared by the live adapter path and reconciliation, so live and resumed runs agree on the same
+    record. A malformed record maps to FAILURE with a truthful cause, never to anything that could
+    satisfy a success-dependent downstream."""
     outcome = status.get("outcome")
     if not isinstance(outcome, str) or outcome not in WRAPPER_OUTCOMES:
-        # the vocabulary is the wrapper's (DL-209); an outcome outside it is
-        # refused here rather than falling through four `==` comparisons.
-        # The isinstance guard is load-bearing: `outcome` comes out of a
-        # decoded status.json, where it can be a list or a dict, and a set
-        # membership test on an unhashable value raises instead of refusing
-        # -- which would crash the reader this function exists to keep
-        # truthful.
+        # the vocabulary is the wrapper's (DL-209); an outcome outside it is refused. The
+        # isinstance guard is load-bearing: `outcome` comes from a decoded status.json, where it
+        # can be a list or a dict, and a set membership test on an unhashable value raises
         return Failed(f"unrecognized status record outcome {outcome!r}")
     if outcome == "exited":
         exit_code = status.get("exit_code")
@@ -348,13 +310,11 @@ def outcome_from_status(status: dict[str, Any]) -> AdapterResult:
         cause = (
             f"killed by signal {sig}" if isinstance(sig, int) else "killed by signal (unrecorded)"
         )
-        # PENDING: E8 -- an EXTERNAL signal death (engine alive, no oracle
-        # kill decision) maps to TERMINATED per the DL-41a recorded-signal
-        # reading. The vendor's status definition names the UNIX kill
-        # command among what makes a job TERMINATED (DL-226), so the
-        # operator-kill case is documented; open: recorded intent versus
-        # wait status (the trap-TERM live test), and the signal deaths no
-        # operator sent (segfault, OOM kill).
+        # PENDING: E8 -- an EXTERNAL signal death (engine alive, no oracle kill decision) maps
+        # to TERMINATED per the DL-41a recorded-signal reading. The vendor's status definition
+        # names the UNIX kill command among what makes a job TERMINATED (DL-226). Open: recorded
+        # intent versus wait status (the trap-TERM live test), and signal deaths no operator
+        # sent (segfault, OOM kill).
         return Terminated(cause)
     if outcome == "terminated":
         return Terminated(str(status.get("cause", "terminated")))
@@ -364,17 +324,12 @@ def outcome_from_status(status: dict[str, Any]) -> AdapterResult:
 def status_payload(result: AdapterResult, *, where: str) -> dict[str, object]:
     """One adapter result as the STATUS input's payload fields (ss4).
 
-    The live path and the resume ladder both turn a result into these
-    three shapes, and they used to do it in two bodies. They agreed on
-    the two named statuses and NOT on the fourth case: the engine refused
-    an unrecognised result and the startup copy fell through to FAILURE,
-    which fabricates a fate for a run nobody read. One body, so an
-    addition to `AdapterResult` reaches both surfaces or neither
-    (DL-145).
+    The live path and the resume ladder share this one body, so an addition to `AdapterResult`
+    reaches both surfaces or neither (DL-145): an unrecognised result is refused, never turned
+    into a FAILURE that fabricates a fate for a run nobody read.
 
-    `where` is what the caller puts before "returned": a refusal has to
-    name the run it could not report on, and the two callers name it
-    differently because they hold different halves of it."""
+    `where` is what the caller puts before "returned"; the two callers hold different halves of
+    the run's name."""
     if isinstance(result, Terminated):
         # a kill that was observed to happen (DL-41a item 7)
         return {"status": "TERMINATED", "cause": result.cause}
@@ -394,19 +349,17 @@ def _build_run_spec(
     grace_seconds: float,
     create_run_dir: bool = True,
 ) -> tuple[Path, dict[str, Any]]:
-    """The run_dir/log-path/wrapper-spec construction shared by the tethered
-    (LocalCommandAdapter) and detached (SupervisedCommandAdapter) CMD paths --
-    everything the wrapper input spec needs EXCEPT lifeline_fd, which each
-    caller fills from the end that owns the pipe's write side (engine tethered,
-    supervisor detached). Kept as one function so the two paths can never
-    diverge on run-dir layout, profile composition, or log targets (ss6a).
+    """The run_dir, log-path and wrapper-spec construction shared by the tethered
+    (LocalCommandAdapter) and detached (SupervisedCommandAdapter) CMD paths: everything the wrapper
+    input spec needs EXCEPT lifeline_fd, which each caller fills from the end that owns the pipe's
+    write side. One function keeps the run-dir layout, profile composition and log targets of the
+    two paths identical (ss6a).
 
-    `create_run_dir=False` is the DETACHED path (period-model ss11a, DL-129):
-    the run directory is the SPAWN tombstone, and the supervisor creates it on
-    receipt. An engine that made it first could create it, die before sending,
-    and leave the retry's supervisor reading "directory exists, no receipt" --
-    indeterminate -- for a run that provably never reached the host. The
-    tethered path keeps engine ownership: there is no supervisor in it."""
+    `create_run_dir=False` is the DETACHED path (period-model ss11a, DL-129): the run directory is
+    the SPAWN tombstone, and the supervisor creates it on receipt. An engine that created it
+    first could die before sending and leave the retry's supervisor reading "directory exists, no
+    receipt" (indeterminate) for a run that never reached the host. The tethered path keeps
+    engine ownership, since no supervisor is in it."""
     if ctx.run_root is None:
         raise EngineError("command dispatch needs a run_root (real domain only)")
     spec_ir = job_ir.exec_
@@ -421,16 +374,14 @@ def _build_run_spec(
     if create_run_dir:
         run_dir.mkdir(parents=True)  # a collision is a bug: run_numbers never repeat
         fsync_dir(run_dir)
-        fsync_dir(run_dir.parent)  # liturgy: the runs dir fsync'd at creation
+        fsync_dir(run_dir.parent)  # the runs dir is fsync'd at creation
     (ctx.run_root / "logs").mkdir(parents=True, exist_ok=True)
     stdout_path, stderr_path = job_log_paths(job_ir, run_number, ctx.run_root)
     spec = {
         "version": SPOOL_VERSION,
-        # the decision's mint when there is one (PR-36a); the local fallback
-        # covers only the effect-less and pre-DL-118 paths (AdapterContext).
-        # `is None`, never falsy: an empty-string id (which the journal
-        # gates refuse anyway) must fail loudly downstream rather than
-        # silently become a second, minted identity
+        # the decision's mint when there is one (PR-36a); the local fallback covers only the
+        # effect-less and pre-DL-118 paths (AdapterContext). `is None`, not falsy: an empty-string
+        # id, which the journal gates refuse, must fail loudly downstream
         "run_id": ctx.run_id if ctx.run_id is not None else str(uuid.uuid4()),
         "job": job_ir.name,
         "run_number": run_number,
@@ -445,24 +396,22 @@ def _build_run_spec(
 
 
 class LocalCommandAdapter:
-    """ss6 CMD adapter: spawn the ss6a Tier-0 wrapper, await it, read
-    status.json -- the sole outcome channel. No retries (n_retrys unmodeled,
-    DL-53 scope), no timeouts (term_run_time is the oracle's timer), no
-    classification.
-    stdout/stderr APPEND to std_out_file/std_err_file when set (vendor
-    appends), else to <run_root>/logs/<job>.<run_number>.{out,err};
-    std_in_file when set, else /dev/null. `profile` sources first:
-    ``. <profile> && <command>`` -- a failing profile fails the job with
-    sh's exit code (PENDING: E5). DL-39 [?] verbatim carry applies: the
-    command string is passed to /bin/sh exactly as the IR holds it.
+    """ss6 CMD adapter: spawn the ss6a Tier-0 wrapper, await it, read status.json, the sole
+    outcome channel. No retries (n_retrys unmodeled, DL-53 scope), no timeouts (term_run_time is
+    the oracle's timer), no classification.
 
-    Cancellation (the oracle said terminal): verify the recorded command
-    (pid, start-time), SIGTERM the command pgid, grace, SIGKILL; the
-    wrapper observes the deaths and records the outcome durably; the
-    cancelled adapter never reports. A cancel before the spec reaches the
-    wrapper SIGKILLs the wrapper instead: it has launched nothing yet. The
-    lifeline write end lives in this process ONLY and is closed in a
-    finally: engine death EOFs every wrapper (tethered semantics, ss6a)."""
+    stdout/stderr APPEND to std_out_file/std_err_file when set (vendor appends), else to
+    <run_root>/logs/<job>.<run_number>.{out,err}; std_in_file when set, else /dev/null. `profile`
+    sources first: ``. <profile> && <command>``, and a failing profile fails the job with sh's
+    exit code (PENDING: E5). DL-39 [?] verbatim carry applies: the command string is passed to
+    /bin/sh exactly as the IR holds it.
+
+    Cancellation (the oracle said terminal): verify the recorded command (pid, start-time),
+    SIGTERM the command pgid, grace, SIGKILL; the wrapper observes the deaths and records the
+    outcome durably; the cancelled adapter never reports. A cancel before the spec reaches the
+    wrapper SIGKILLs the wrapper, which has launched nothing. The lifeline write end lives in this
+    process ONLY and is closed in a finally: engine death EOFs every wrapper (tethered semantics,
+    ss6a)."""
 
     def __init__(self, *, grace_seconds: float = CMD_GRACE_S) -> None:
         self.grace_seconds = grace_seconds
@@ -480,8 +429,8 @@ class LocalCommandAdapter:
                     pass_fds=(lifeline_r,),
                 )
             except OSError as exc:
-                # EMFILE/ENOMEM-class glitch: fail THIS job, not the engine
-                # (symmetric with the wrapper's own spawn_failed)
+                # EMFILE/ENOMEM-class glitch: fail THIS job, not the engine (as the wrapper's own
+                # spawn_failed does)
                 return Failed(f"wrapper spawn failed: {exc}")
             finally:
                 os.close(lifeline_r)  # our copy; the wrapper holds its own now
@@ -491,8 +440,8 @@ class LocalCommandAdapter:
                 await proc.stdin.drain()
                 proc.stdin.close()
             except OSError as exc:
-                # the wrapper died while reading its spec (pre-spawn by
-                # construction: it spawns only after the full spec parses)
+                # the wrapper died while reading its spec, pre-spawn by construction: it spawns
+                # only after the full spec parses
                 await proc.wait()
                 return Failed(f"wrapper spawn failed: {exc}")
             except asyncio.CancelledError:
@@ -513,44 +462,40 @@ class LocalCommandAdapter:
                 raise
             status = load_json(run_dir / "status.json")
             if status is None:
-                # the recorder exited without a record (rc 2/3: spec error,
-                # ENOSPC): observability is gone -- report it, never guess
+                # the recorder exited without a record (rc 2/3: spec error, ENOSPC): report that
+                # observability is gone, never guess
                 return Failed(  # PENDING: E7
                     f"exit_status_unobservable (wrapper exited rc={proc.returncode}"
                     " without a status record)"
                 )
-            # the exclusive mkdir owned the directory at CREATION; the fate
-            # file is written later, so it is held to the run's identity like
-            # every other status consumption (DL-118)
+            # the exclusive mkdir owned the directory at CREATION; the fate file is written
+            # later, so it is held to the run's identity like every other status consumption
+            # (DL-118)
             return outcome_from_status(_named(status, str(spec["run_id"]), job_ir.name, run_number))
         finally:
             os.close(lifeline_w)
 
     @staticmethod
     async def _stop_unlaunched(proc: asyncio.subprocess.Process) -> None:
-        """A kill that lands before the spec reached the wrapper (DL-359):
-        SIGKILL the wrapper so it never launches the command. It launches
-        only after reading its spec to EOF, and EOF needs the stdin close
-        this path has not reached, so the wrapper has launched nothing and
-        has nothing to record. Left alone, it would wait on stdin past the
-        cancelled start and launch whenever this end of the pipe closed.
-        A cancel inside `create_subprocess_exec` gets the same treatment
-        from asyncio itself, and one before the task's first step spawns
-        nothing."""
+        """A kill that lands before the spec reached the wrapper (DL-359): SIGKILL the wrapper so
+        it never launches the command.
+
+        The wrapper launches only after reading its spec to EOF, and EOF needs the stdin close this
+        path has not reached, so it has launched nothing and has nothing to record. A cancel inside
+        `create_subprocess_exec` gets the same treatment from asyncio, and one before the task's
+        first step spawns nothing."""
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
         await proc.wait()
 
     async def _kill(self, run_dir: Path, proc: asyncio.subprocess.Process, run_id: str) -> None:
-        """The oracle decided terminal: signal the command pgid (never the
-        wrapper -- the recorder is untouchable), escalate after grace, then
-        wait for the wrapper to record and exit.
+        """The oracle decided terminal: signal the command pgid (never the wrapper, the recorder
+        is untouchable), escalate after grace, then wait for the wrapper to record and exit.
 
-        The record that NAMES the group to signal is held to this run's
-        identity first (DL-118): the pid-reuse token proves the process the
-        record describes is alive, not that it is OURS, and a spoofed
-        record with a live foreign token would otherwise aim the kill at a
-        stranger's process group."""
+        The record that NAMES the group to signal is held to this run's identity first (DL-118):
+        the pid-reuse token proves the process the record describes is alive, not that it is
+        OURS, and a spoofed record with a live foreign token would aim the kill at a stranger's
+        process group."""
         if proc.stdin is not None:
             proc.stdin.close()  # a wrapper still reading its spec must not hang
         spawn = None
@@ -567,9 +512,8 @@ class LocalCommandAdapter:
                 " group (DL-118)"
             )
         if spawn is None:
-            # only reachable when the wrapper died or is frozen pre-record
-            # (test pauses); the lifeline tether covers the residue -- wait
-            # bounded, then leave the wrapper to its own record
+            # reachable when the wrapper died or is frozen pre-record (test pauses); the lifeline
+            # tether covers the residue, so wait bounded, then leave the wrapper to its own record
             try:
                 await asyncio.wait_for(proc.wait(), timeout=2 * self.grace_seconds)
             except TimeoutError:
@@ -596,20 +540,16 @@ def default_log_paths(job: str, run_number: int, run_root: Path) -> tuple[Path, 
     """Where a CMD run's output goes when the job names no file of its own:
     `<run_root>/logs/<job>.<run_number>.{out,err}`.
 
-    Split out of `job_log_paths` because a second reader needs the
-    CONVENTION without a `JobIR` to resolve it from -- `retention.py` walks
-    the spool of an estate whose catalog it never loads. Two spellings of
-    one filename is how the two would come to disagree (DL-135)."""
+    It is separate from `job_log_paths` because `retention.py` needs the CONVENTION without a
+    `JobIR`, and one spelling keeps the two readers agreeing (DL-135)."""
     logs_dir = run_root / "logs"
     return (logs_dir / f"{job}.{run_number}.out", logs_dir / f"{job}.{run_number}.err")
 
 
 def job_log_paths(job_ir: JobIR, run_number: int, run_root: Path) -> tuple[str, str]:
-    """ss6 append targets for a CMD run: std_out_file/std_err_file when set
-    (vendor appends), else <run_root>/logs/<job>.<run_number>.{out,err}. One
-    resolver shared by the adapter's wrapper spec and the ss10 status
-    response (the ss11 log tail reads what the wrapper writes -- the two
-    must never diverge)."""
+    """ss6 append targets for a CMD run: std_out_file/std_err_file when set (vendor appends), else
+    <run_root>/logs/<job>.<run_number>.{out,err}. One resolver serves the adapter's wrapper spec
+    and the ss10 status response, because the ss11 log tail reads what the wrapper writes."""
     out = err = None
     if isinstance(job_ir.exec_, ExecSpec):
         out, err = job_ir.exec_.std_out_file, job_ir.exec_.std_err_file
@@ -620,22 +560,20 @@ def job_log_paths(job_ir: JobIR, run_number: int, run_root: Path) -> tuple[str, 
 #: the FW adapter's append-only spool, one line per poll (period-model ss3.5)
 WATCH_LOG = "watch.jsonl"
 
-#: ss6's steady-size rule as a number: two consecutive qualifying polls at the
-#: same size complete the watch (`fw-existence=stable`, DL-258). The spool
-#: records the count, so the rule is read the same way live and at resume.
+#: ss6's steady-size rule as a number: two consecutive qualifying polls at the same size complete
+#: the watch (`fw-existence=stable`, DL-258). The spool records the count, so live and resume read
+#: the rule the same way.
 FW_STABLE_POLLS = 2
 
 
 @dataclass(frozen=True)
 class WatchLog:
-    """`watch.jsonl` folded (period-model ss3.5): what a watch has observed,
-    derived from the log rather than from a live adapter's memory.
+    """`watch.jsonl` folded (period-model ss3.5): what a watch has observed, derived from the log,
+    not from a live adapter's memory.
 
-    Draft 4 carried the same progress in a local variable fed by unjournaled
-    `os.stat` calls, and an audit replaying the START input could not tell
-    whether the seal should say `previous_size=10`, `null`, or a completed
-    watch. The fold is a pure function of a PREFIX of the log, and
-    `watch_seq` names the prefix -- `at <= T` is not a unique log position."""
+    The fold is a pure function of a PREFIX of the log, and `watch_seq` names the prefix; `at <= T`
+    is not a unique log position, so an audit replaying the START input reads the same progress
+    (`previous_size=10`, `null`, or a completed watch) the seal carries."""
 
     run_id: str | None
     start_at: datetime
@@ -649,46 +587,41 @@ class WatchLog:
 
     @property
     def complete(self) -> bool:
-        """The last durable line is a COMPLETING observation: the watch is
-        over, whether or not the engine lived to say so (PR-34a)."""
+        """The last durable line is a COMPLETING observation: the watch is over, whether or not the
+        engine lived to say so (PR-34a)."""
         return self.stable_polls >= FW_STABLE_POLLS
 
     def next_poll_at(self, interval_s: int) -> datetime:
-        """period-model ss3.5, exactly: after `start` and no poll line, `start.at` (the
-        first poll is immediate); after a poll line, `poll.at + interval`."""
+        """period-model ss3.5: after `start` and no poll line, `start.at` (the first poll is
+        immediate); after a poll line, `poll.at + interval`."""
         if self.last_at is None:
             return self.start_at
         return self.last_at + timedelta(seconds=interval_s)
 
 
 def read_watch_log(run_dir: Path, *, prefix: int | None = None) -> WatchLog | None:
-    """Fold a run directory's `watch.jsonl`, or None when the watch has not
-    been dispatched (no file, or no `start` line yet).
+    """Fold a run directory's `watch.jsonl`, or None when the watch has not been dispatched (no
+    file, or no `start` line yet).
 
-    A torn FINAL line is dropped, exactly as `read_journal` drops one: the
-    append is write-ahead, so the progress it would have recorded never
-    happened. A torn INTERIOR line is corruption and raises.
+    A torn FINAL line is dropped, as `read_journal` drops one: the append is write-ahead, so the
+    progress it would have recorded never happened. A torn INTERIOR line is corruption and raises.
 
-    `prefix` folds only the first that many durable lines: audit
-    re-derives a CLOSED period whose live watch carried across the
-    boundary, and the successor's later polls in the same file are ITS
-    evidence, not the closed period's. POSITIONAL, not a wall-time cut:
-    ss3.5 says an instant is not a unique log position, and a successor
-    unparked at the boundary can poll at exactly T. The count's authority
-    is audit's business (attest.py: the successor segment's
-    `opens_from_seal` pins the sidecar the count is read from). Lines past
-    the prefix are not read at all -- the successor's evidence, an
-    unsupported version a future binary wrote included, must not make a
-    closed period unauditable. A prefix the log cannot supply refuses: the
-    claimed evidence does not exist."""
+    `prefix` folds only the first that many durable lines: audit re-derives a CLOSED period whose
+    live watch carried across the boundary, and the successor's later polls in the same file are
+    ITS evidence. The cut is POSITIONAL, not wall-time: ss3.5 says an instant is not a unique log
+    position, and a successor unparked at the boundary can poll at exactly T. audit owns the
+    count's authority (attest.py: the successor segment's `opens_from_seal` pins the sidecar the
+    count is read from). Lines past the prefix are not read at all, so the successor's evidence,
+    an unsupported version a future binary wrote included, cannot make a closed period
+    unauditable. A prefix the log cannot supply refuses: the claimed evidence does not exist."""
     path = run_dir / WATCH_LOG
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
         return None
     except OSError as exc:
-        # EACCES/EIO is a log that EXISTS and cannot be read. "Undispatched"
-        # here would re-dispatch a live watch over unreadable evidence.
+        # EACCES/EIO is a log that EXISTS and cannot be read; "undispatched" would re-dispatch a
+        # live watch over unreadable evidence
         raise EngineError(f"{path}: unreadable: {exc}") from exc
     lines = raw.split(b"\n")
     trailing = lines.pop() if lines and lines[-1] == b"" else None
@@ -703,10 +636,9 @@ def read_watch_log(run_dir: Path, *, prefix: int | None = None) -> WatchLog | No
         try:
             record = decode(line)
         except CanonError as exc:
-            # a COMPLETE line the ss3.2 ingress refuses -- an unimplemented
-            # artifact_format_version (PR-08d), a lone surrogate -- is not a
-            # torn one. Dropping it would delete evidence a future binary
-            # wrote; it refuses loudly instead, wherever it sits.
+            # a COMPLETE line the ss3.2 ingress refuses (an unimplemented artifact_format_version
+            # (PR-08d), a lone surrogate) is not a torn one; dropping it would delete evidence a
+            # future binary wrote, so it refuses loudly wherever it sits
             raise EngineError(f"{path}: line {index + 1}: {exc}") from exc
         if not isinstance(record, dict):
             raise EngineError(f"{path}: line {index + 1} is not an object")
@@ -719,8 +651,7 @@ def read_watch_log(run_dir: Path, *, prefix: int | None = None) -> WatchLog | No
             f" {len(records)} -- the claimed evidence does not exist (period-model ss3.5)"
         )
     for position, record in enumerate(records, start=1):
-        # required, not merely implemented-if-present: `decode` refuses a
-        # version it does not implement but passes an absent one, and an
+        # required, not implemented-if-present: `decode` passes an absent version, and an
         # unversioned line is unsupported evidence (PR-08d)
         if record.get("artifact_format_version") != ARTIFACT_FORMAT_VERSION:
             raise EngineError(
@@ -729,11 +660,10 @@ def read_watch_log(run_dir: Path, *, prefix: int | None = None) -> WatchLog | No
             )
     start = records[0]
     if start.get("kind") != "start":
-        # a log whose first line is not `start` was not written by this
-        # adapter: the period-model ss3.5 contract says a dispatched watch's first durable
-        # act is the start line, so anything else is corruption or a foreign
-        # writer -- loud, not None (None means "not dispatched", which would
-        # re-dispatch over a stranger's log)
+        # a log whose first line is not `start` was not written by this adapter: period-model
+        # ss3.5 makes the start line a dispatched watch's first durable act, so anything else is
+        # corruption or a foreign writer. It raises, since None means "not dispatched" and would
+        # re-dispatch over a stranger's log
         raise EngineError(f"{path}: first line is {start.get('kind')!r}, not 'start'")
     run_id = start.get("run_id")
     if run_id is not None and not isinstance(run_id, str):
@@ -742,10 +672,9 @@ def read_watch_log(run_dir: Path, *, prefix: int | None = None) -> WatchLog | No
     derived_stable = 0
     previous_size: int | None = None
     for position, record in enumerate(records[1:], start=2):
-        # every later line is a poll of THIS watch, in full: a line of an
-        # unknown kind, a foreign run_id, or a malformed field is evidence
-        # the fold cannot hold -- and a poll naming another run must never
-        # complete this one (DL-118)
+        # every later line is a poll of THIS watch, in full: a line of an unknown kind, a foreign
+        # run_id or a malformed field is evidence the fold cannot hold, and a poll naming another
+        # run never completes this one (DL-118)
         if record.get("kind") != "poll":
             raise EngineError(f"{path}: line {position} kind {record.get('kind')!r}")
         if record.get("run_id") != run_id:
@@ -762,21 +691,18 @@ def read_watch_log(run_dir: Path, *, prefix: int | None = None) -> WatchLog | No
         exists = record.get("exists")
         if not isinstance(exists, bool):
             raise EngineError(f"{path}: line {position} exists is not a boolean")
-        # the writer's own invariants, enforced on read: an observation
-        # cannot have a size without a file or qualify without a size --
-        # and without this, two `qualifying: true, size: null` lines derive
-        # a stable pair (None == None) and inject a SUCCESS for a file that
-        # was never there
+        # the writer's own invariants, enforced on read: an observation has no size without a
+        # file and does not qualify without a size; otherwise two `qualifying: true, size: null`
+        # lines derive a stable pair (None == None) and inject a SUCCESS for a file never there
         if (size is None) != (not exists):
             raise EngineError(f"{path}: line {position}: exists {exists!r} with size {size!r}")
         if qualifying and size is None:
             raise EngineError(f"{path}: line {position}: qualifying with no size")
-        # the completion state is DERIVED from the observations, and the
-        # recorded count is checked against it: a forged line saying
-        # `qualifying: false, stable_polls: 2` would otherwise inject a
-        # SUCCESS from an observation that observed nothing (period-model ss3.5 -- the
-        # fold is a pure function of the log, so a count the observations
-        # cannot produce is a log that disagrees with itself)
+        # the completion state is DERIVED from the observations and the recorded count is checked
+        # against it: a forged `qualifying: false, stable_polls: 2` line would otherwise inject a
+        # SUCCESS from an observation that observed nothing (period-model ss3.5: the fold is a
+        # pure function of the log, so a count the observations cannot produce is a log that
+        # disagrees with itself)
         derived_stable = (
             (derived_stable + 1) if qualifying and size == previous_size else int(qualifying)
         )
@@ -800,9 +726,8 @@ def read_watch_log(run_dir: Path, *, prefix: int | None = None) -> WatchLog | No
 
 
 def _is_json(line: bytes) -> bool:
-    """Whether `line` is syntactically complete. Tornness is a SYNTAX
-    question: a line the ss3.2 ingress refuses for its content is a whole
-    line, and treating it as torn would truncate it away."""
+    """Whether `line` is syntactically complete. Tornness is a SYNTAX question: a line the ss3.2
+    ingress refuses for its content is a whole line, and treating it as torn would truncate it."""
     try:
         json.loads(line)
     except ValueError:
@@ -811,12 +736,9 @@ def _is_json(line: bytes) -> bool:
 
 
 def _watch_at(path: Path, record: dict[str, Any]) -> datetime:
-    # No naive_utc normalization here (unlike _parse_timestamp/_naive_utc's
-    # siblings): every "at" this reads was written by append_watch_line
-    # below from ctx.clock.now(), which is already naive in both time
-    # domains (RealClock.now()'s own docstring, VirtualClock's default
-    # datetime.min) -- this is the one reader of the three that never
-    # crosses the wire's aware-UTC ISO, so there is nothing to normalize.
+    # No naive_utc normalization: every "at" this reads was written by append_watch_line from
+    # ctx.clock.now(), which is naive in both time domains; this is the one reader of the three
+    # that never crosses the wire's aware-UTC ISO.
     at = record.get("at")
     if not isinstance(at, str):
         raise EngineError(f"{path}: a {record.get('kind')!r} line has no timestamp")
@@ -824,10 +746,9 @@ def _watch_at(path: Path, record: dict[str, Any]) -> datetime:
 
 
 def append_watch_line(path: Path, record: dict[str, Any]) -> None:
-    """One ss3.2-canonical line, fsynced (period-model ss3.5). Append-only,
-    so there is no rename to make it atomic; a torn tail is truncated on the
-    next open instead. 0600 at creation, like every other spool file
-    (DL-66)."""
+    """One ss3.2-canonical line, fsynced (period-model ss3.5). Append-only, so a torn tail is
+    truncated on the next open instead of made atomic by rename. 0600 at creation, like every
+    other spool file (DL-66)."""
     data = canonical_bytes(record) + b"\n"
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
@@ -846,17 +767,16 @@ class FileWatcherAdapter:
     for a steady size, as under `stable`. A job with a minimum size always needs the
     steady-size rule, whatever the switch says. Completes with exit 0. Clock-driven
     (ctx.clock.sleep_until), so the same code runs in both time domains; polling is an
-    idempotent read, which is why resume may re-dispatch an incomplete watch (module docstring).
+    idempotent read, which is why resume may re-dispatch an incomplete watch.
 
-    Its progress is EVIDENCE, not memory (period-model ss3.5, DL-129). The first durable
-    record on dispatch is a `start` line in `runs/<job>.<run_number>/watch.jsonl`, then one
-    line per poll, fsynced, INCLUDING polls that changed nothing -- appended before progress
-    is updated or completion is emitted, so an observation that moved the watch is never one
-    an audit cannot see. A resumed watch reconstructs from the log and appends no second
-    `start`. The run directory is made and its parent fsynced before the `start` line; a
-    crash between the two leaves no `start` line, and resume dispatches the watch again
-    under its bound run_id. Without a run_root there is no spool and the watch is
-    memory-only: that is the virtual-domain harness, which has no run-root layout."""
+    Its progress is EVIDENCE, not memory (period-model ss3.5, DL-129). The first durable record
+    on dispatch is a `start` line in `runs/<job>.<run_number>/watch.jsonl`, then one fsynced line
+    per poll, INCLUDING polls that changed nothing. Each line is appended before progress is
+    updated or completion is emitted, so an audit sees every observation that moved the watch. A
+    resumed watch reconstructs from the log and appends no second `start`. The run directory is
+    made and its parent fsynced before the `start` line; a crash between the two leaves no
+    `start` line, and resume dispatches the watch again under its bound run_id. Without a
+    run_root there is no spool and the watch is memory-only (the virtual-domain harness)."""
 
     def __init__(
         self,
@@ -873,14 +793,11 @@ class FileWatcherAdapter:
             raise EngineError(f"{job_ir.name!r}: FW dispatch without an FwSpec")
         interval = spec_ir.watch_interval or self.default_interval_s
         min_size = spec_ir.watch_file_min_size or 0
-        # DL-258: with no minimum size, `immediate` completes when the
-        # RUN'S FIRST poll already qualifies -- the vendor's narrow carve-out
-        # ("the file already exists when the job runs"), not any later poll
-        # that happens to qualify. Once the first poll has passed without
-        # qualifying, the general rule applies even under `immediate`: the
-        # size must reach the minimum (0 here) and stay steady, the same
-        # FW_STABLE_POLLS rule `stable` always uses. A job with a minimum
-        # size always needs that rule regardless of the switch.
+        # DL-258: with no minimum size, `immediate` completes when the RUN'S FIRST poll already
+        # qualifies (the vendor's narrow carve-out: "the file already exists when the job
+        # runs"). Once the first poll has passed without qualifying, the general rule applies
+        # even under `immediate`: the size must reach the minimum and stay steady, the
+        # FW_STABLE_POLLS rule `stable` uses. A job with a minimum size always needs that rule.
         immediate = fw_existence_immediate(job_ir, self.existence)
         first_poll_pending = True
         previous: int | None = None
@@ -911,18 +828,15 @@ class FileWatcherAdapter:
                 )
                 fsync_dir(run_dir)  # the log's own directory entry is a record
             else:
-                # RESUMED: the log is the watch. Its `start` line is the
-                # dispatch (ss11's ladder resolves the SPAWN by it), so no
-                # second one is ever appended and the run keeps the identity
-                # it was dispatched under -- which must BE the identity this
-                # launch carries (DL-118): a log that appeared in the window
-                # since the preflight and names another run is a stranger's,
-                # and adopting it would poll a watch the WAL never dispatched.
+                # RESUMED: the log is the watch. Its `start` line is the dispatch (ss11's ladder
+                # resolves the SPAWN by it), so no second one is appended and the run keeps the
+                # identity it was dispatched under, which must BE this launch's (DL-118): a log
+                # that appeared since the preflight and names another run is a stranger's, and
+                # adopting it would poll a watch the WAL never dispatched.
                 if run_id is not None and log.run_id != run_id:
-                    # exact, None included: a bound launch met a log, so the
-                    # log was written under this protocol and must name the
-                    # run -- an idless one is foreign either way, and adopting
-                    # it consumes a fate the WAL never dispatched
+                    # exact, None included: a bound launch met a log, so the log was written
+                    # under this protocol and must name the run; an idless one is foreign and
+                    # adopting it consumes a fate the WAL never dispatched
                     raise EngineError(
                         f"{job_ir.name}.{run_number}: watch.jsonl names run_id"
                         f" {log.run_id!r} but this run is {run_id!r} -- refusing to"
@@ -932,30 +846,22 @@ class FileWatcherAdapter:
                 previous = log.size if log.qualifying else None
                 stable = log.stable_polls
                 next_at = log.next_poll_at(interval)
-                # `watch_seq` counts the start line plus every poll line, so
-                # `== 2` is "exactly one poll recorded" -- the run's first,
-                # and the only one `immediate` may complete from without
-                # a second observation (DL-258).
+                # `watch_seq` counts the start line plus every poll line, so `== 2` is exactly one
+                # poll recorded: the run's first, from which `immediate` may complete (DL-258)
                 first_poll_pending = log.watch_seq == 1
                 if log.complete or (immediate and log.watch_seq == 2 and log.qualifying):
-                    # PR-34a, and the FALLBACK reading of it. The PRIMARY
-                    # reader is the resume ladder
-                    # (`runner_startup._resume_watch`), which meets the
-                    # same log one step earlier and INJECTS the completion
-                    # from it without launching anything. This branch
-                    # answers when a launch happened anyway -- an
-                    # embedder's re-dispatch, or a watch the ladder handed
-                    # to the adapter -- and it must read completeness the
-                    # same way (DL-258 included), because re-polling would
-                    # decide the watch again against a world that has
-                    # moved on.
+                    # PR-34a, the FALLBACK reading: the PRIMARY reader is the resume ladder
+                    # (`runner_startup._resume_watch`), which meets the same log earlier and
+                    # INJECTS the completion without launching anything. This branch answers
+                    # when a launch happened anyway (an embedder's re-dispatch, or a watch the
+                    # ladder handed to the adapter) and reads completeness the same way (DL-258
+                    # included), because re-polling would decide the watch against a moved world.
                     return 0
         while True:
             await ctx.clock.sleep_until(next_at)
             if ctx.barrier is not None:
-                # THE poll boundary (ss6 step 2). Before the observation, so
-                # a parked watch owes the log nothing and resumes in C2 from
-                # exactly the line the seal counted.
+                # THE poll boundary (ss6 step 2), before the observation: a parked watch owes the
+                # log nothing and resumes in C2 from exactly the line the seal counted.
                 await ctx.barrier.wait()
             at = ctx.clock.now()
             try:
@@ -965,11 +871,10 @@ class FileWatcherAdapter:
             qualifying = size is not None and size >= min_size
             stable = (stable + 1) if qualifying and size == previous else int(qualifying)
             if log_path is not None:
-                # observe -> RE-CHECK THE FENCE -> append -> then move
-                # progress. Write-ahead per poll: an observation that changed
-                # the watch before it was durable is one audit cannot see;
-                # and a line appended after leadership was lost is evidence
-                # written by a non-leader (period-model ss3.5, PR-03).
+                # observe -> RE-CHECK THE FENCE -> append -> move progress. Write-ahead per poll:
+                # an observation that changed the watch before it was durable is one audit cannot
+                # see, and a line appended after leadership was lost is evidence written by a
+                # non-leader (period-model ss3.5, PR-03).
                 if ctx.fence is not None:
                     ctx.fence.check()
                 append_watch_line(
@@ -992,64 +897,53 @@ class FileWatcherAdapter:
             next_at = at + timedelta(seconds=interval)
 
 
-#: SECONDS between LIST re-checks, in both nets and in no other unit. The
-#: per-wait net counted it as ITERATIONS of the poll below, so the two
-#: readings agreed only while that poll was 1.0 s: shortening the poll would
-#: have moved one net's cadence and not the other's (DL-75 review
-#: 2026-09-19). The per-wait net now spends a budget of seconds.
+#: SECONDS between LIST re-checks, in both nets and in no other unit: the per-wait net spends a
+#: budget of seconds, so a change to its poll cadence leaves the other net's cadence unmoved
+#: (DL-75).
 _LIST_RECHECK_EVERY = 5
 
-#: How long `_await_outcome` waits on one pass before re-reading status.json
-#: (a push missed at reattach). Named so a test can shorten it and see that
-#: `_LIST_RECHECK_EVERY` above still means seconds.
+#: how long `_await_outcome` waits on one pass before re-reading status.json (a push missed at
+#: reattach); a test shortens it to check that `_LIST_RECHECK_EVERY` still means seconds
 _OUTCOME_POLL_S = 1.0
 
 
 class SupervisorUnavailable(RuntimeError):
-    """The supervisor socket is gone (never came up, refused, or died
-    mid-run). The engine survives it: pending runs resolve from the spool
-    ladder (spec ss3), the tethered fallback for the detached path."""
+    """The supervisor socket is gone (never came up, refused, or died mid-run). The engine
+    survives it: pending runs resolve from the spool ladder (spec ss3), the tethered fallback for
+    the detached path."""
 
 
 class SpawnInProgress(SupervisorUnavailable):
-    """ss11a's `in_progress`: this SPAWN's wrapper is already forked and has
-    not recorded yet, so the supervisor gives no answer -- and NOT a failure.
-    The run is alive; failing it here would report a completion for a process
-    still running, which is the one thing the outcome channel may never do.
-    A subclass, so every existing `except SupervisorUnavailable` still covers
-    it, and only the caller that can wait treats it differently."""
+    """ss11a's `in_progress`: this SPAWN's wrapper is forked and has not recorded yet, so the
+    supervisor gives no answer. It is NOT a failure: the run is alive, and reporting a completion
+    for a running process is what the outcome channel may never do. A subclass of
+    SupervisorUnavailable, so every `except SupervisorUnavailable` covers it and only a caller
+    that can wait treats it differently."""
 
 
 class SupervisorConn:
-    """Blocking one-shot client of the same ss6a socket, for callers with no
-    event loop -- the `dsl41 supervise` verb. Async exit PUSHes are skipped:
-    this end is not a data-channel consumer (supervisor-protocol ss5 makes
-    them droppable notifications).
+    """Blocking one-shot client of the same ss6a socket, for callers with no event loop (the
+    `dsl41 supervise` verb). Async exit PUSHes are skipped: this end is not a data-channel
+    consumer (supervisor-protocol ss5 makes them droppable notifications).
 
-    It lives beside `SupervisorClient` for the reason `roundtrip` lives
-    beside `ControlClient` (DL-78, DL-91): two transports for ONE protocol,
-    not two protocols. The framing rule below -- stamp `"v": 1` AND the
-    incarnation, read newline-delimited JSON, drop pushes -- was written once
-    here and once in cli.py, which is one place too many for a rule a frozen
-    document owns."""
+    It sits beside `SupervisorClient` as `roundtrip` sits beside `ControlClient` (DL-78, DL-91):
+    two transports for ONE protocol. The framing rule is stamp `"v": 1` AND the incarnation, read
+    newline-delimited JSON, drop pushes; a frozen document owns it."""
 
     def __init__(self, sock_path: Path, *, timeout_s: float = 60.0) -> None:
         self.conn = socket.socket(socket.AF_UNIX)
         try:
-            # SHUTDOWN replies only AFTER waiting for wrappers (frozen ss5 order),
-            # which spans the spawn-record wait plus per-run grace windows
+            # SHUTDOWN replies only AFTER waiting for wrappers (frozen ss5 order), which spans the
+            # spawn-record wait plus per-run grace windows
             self.conn.settimeout(timeout_s)
             self.conn.connect(str(sock_path))
         except BaseException:
             self.conn.close()  # the caller never gets an object to close
             raise
         self.buf = b""
-        #: DL-80: the incarnation rides every mutating verb beside the token
-        #: (supervisor-protocol ss5). It is part of the envelope, not of the
-        #: caller's request, so it is stamped here rather than remembered by
-        #: each verb -- `SupervisorClient._request` stamps it the same way.
-        #: An unstamped SHUTDOWN answers `wrong_incarnation` and stops
-        #: nothing, which is what this transport did until DL-151.
+        #: DL-80: the incarnation rides every mutating verb beside the token (supervisor-protocol
+        #: ss5). It is part of the envelope, stamped here as `SupervisorClient._request` stamps
+        #: it; an unstamped SHUTDOWN answers `wrong_incarnation` and stops nothing (DL-151).
         self.incarnation: str | None = None
 
     def send(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -1069,22 +963,18 @@ class SupervisorConn:
             if isinstance(obj, dict):
                 self._learn_incarnation(obj)
                 return obj
-            # supervisor-protocol ss5 sends only JSON objects; this is the
-            # contract's own "cannot happen" made loud rather than
-            # silently degraded into an empty, misleading success-shaped
-            # reply (DL-220 rework).
+            # supervisor-protocol ss5 sends only JSON objects; the contract's "cannot happen" is
+            # loud, not degraded into an empty success-shaped reply (DL-220)
             raise EngineError(
                 f"the supervisor sent a non-object reply: {obj!r} (supervisor-protocol ss5)"
             )
 
     def _learn_incarnation(self, reply: dict[str, Any]) -> None:
-        """The supervisor names its own incarnation in every reply that
-        carries one (PING, LIST, ACQUIRE). The client never invents it: it
-        reads it back, exactly as `SupervisorClient` reads it off ACQUIRE.
-        A REFUSAL is not a source -- its `incarnation` field tells a stale
-        client what the world is now, and adopting it would let a client
-        retry a verb the supervisor just refused with a token from a
-        vanished world."""
+        """The supervisor names its own incarnation in every reply that carries one (PING, LIST,
+        ACQUIRE); the client reads it back, as `SupervisorClient` does off ACQUIRE. A REFUSAL is
+        not a source: its `incarnation` field tells a stale client what the world is now, and
+        adopting it would let the client retry a refused verb with a token from a vanished
+        world."""
         value = reply.get("incarnation")
         if isinstance(value, str) and reply.get("error") is None:
             self.incarnation = value
@@ -1093,21 +983,18 @@ class SupervisorConn:
         self.conn.close()
 
 
-#: How long a physical roll waits for a supervisor already serving its
-#: target to answer one PING. A PING answers at once, so a supervisor that
-#: has not answered in this time is stopped or wedged.
+#: how long a physical roll waits for a supervisor already serving its target to answer one
+#: PING; a PING answers at once, so a supervisor silent this long is stopped or wedged
 PING_TIMEOUT_S = 5.0
 
 
 def running_supervisor_deadman(run_root: Path) -> tuple[bool, float | None]:
-    """Whether a supervisor already serves `run_root`, and the deadman it
-    reports. Read-only: one PING, no lease, never a spawn. `(False, None)`
-    when nothing listens on the socket.
+    """Whether a supervisor already serves `run_root`, and the deadman it reports. Read-only: one
+    PING, no lease, never a spawn. `(False, None)` when nothing listens on the socket.
 
-    A physical roll asks this before it writes, because a supervisor that
-    is already up keeps its own interval (period-model PR-22b). One that
-    accepts and does not answer within `PING_TIMEOUT_S` refuses the roll:
-    its deadman is unknown, and so is the one the run would keep."""
+    A physical roll asks this before it writes, because a supervisor already up keeps its own
+    interval (period-model PR-22b). One that accepts and does not answer within `PING_TIMEOUT_S`
+    refuses the roll: its deadman is unknown, and so is the one the run would keep."""
     sock_path = run_root / "supervisor.sock"
     try:
         conn = SupervisorConn(sock_path, timeout_s=PING_TIMEOUT_S)
@@ -1132,31 +1019,13 @@ def running_supervisor_deadman(run_root: Path) -> tuple[bool, float | None]:
 
 
 class SupervisorRunRow(BaseModel):
-    """One row of a LIST reply's `runs` array (supervisor-protocol ss5:
-    `run_id, job, run_number, run_dir, wrapper_pid, wrapper_alive,
-    spawned_at, wrapper_rc`). DL-137 deferred slice: this row used to be
-    decoded four times over -- `SupervisedCommandAdapter._listed_alive`
-    here, `Engine._supervisor_proof` (runner.py, the ss8 seal-time proof,
-    PR-27) and `runner_startup`'s reconcile/kill ladder -- three of them
-    lenient (`.get(...)`, defaulting past a missing field) and one strict
-    (`_supervisor_proof`'s identity checks, which already refuse a row that
-    does not name the run it claims to). This model is parsed ONCE, inside
-    `SupervisorClient.list_runs`, at the bar the strict reader set: every
-    field the wire always sends is required, and `strict=True` blocks the
-    numeric-string/float coercions lax pydantic would otherwise wave
-    through (a `run_number` of `"1"` or a `wrapper_alive` of `1` now refuse
-    here instead of reaching a reader that trusted them).
+    """One row of a LIST reply's `runs` array (supervisor-protocol ss5).
 
-    Tolerant of unknown fields, per the wire's own rule (docs/supervisor-
-    protocol.md ss5's "ignores unknown fields", pinned as the "Supervisor
-    socket" row of docs/protocol-evolution.md's table).
-
-    DL-220 finished the migration DL-137 deferred: every reader now reads
-    a row by attribute, `SupervisorClient.list_runs` returns the typed
-    `SupervisorListSuccess`/`SupervisorRefusal` reply instead of a raw
-    dict, and the `.get`/`__getitem__` shim that let readers keep their
-    dict-style access is gone -- a wrong attribute name is a static error
-    instead of a silent `None`/`KeyError` at runtime."""
+    Parsed ONCE, inside `SupervisorClient.list_runs`, for every reader (DL-137, DL-220), at the
+    bar `Engine._supervisor_proof` sets (PR-27): every field the wire always sends is required,
+    and `strict=True` blocks numeric-string and float coercions. Unknown fields are ignored, per
+    the wire's rule (supervisor-protocol ss5; "Supervisor socket" row of
+    docs/protocol-evolution.md)."""
 
     model_config = ConfigDict(extra="ignore", strict=True, frozen=True)
 
@@ -1217,31 +1086,24 @@ class SupervisorRefusal(BaseModel):
     error: str
 
 
-#: `SupervisorClient.list_runs`'s return: the two reply shapes modeled
-#: separately (DL-220) rather than one model with optional success fields,
-#: so a caller that reads `.runs`/`.incarnation` off a refusal is a static
-#: error, not a silently-None success-shaped read.
+#: `SupervisorClient.list_runs`'s return: the two reply shapes modeled separately (DL-220), so a
+#: caller reading `.runs`/`.incarnation` off a refusal is a static error
 SupervisorListReply = SupervisorListSuccess | SupervisorRefusal
 
 
 def _parse_list_reply(raw: dict[str, Any]) -> SupervisorListReply:
-    """The one parse of a LIST reply (DL-220), success or refusal. An
-    otherwise-`ok: true` reply validates whole, in one pass: a malformed
-    row (nested under `runs`) and a malformed or mistyped HEADER field
-    (`version`, `supervisor_pid`, `boot_id`, `incarnation`, `deadman_s`,
-    `lease`) both refuse as `EngineError`, naming what was wrong -- a raw
-    `ValidationError` there would otherwise escape `list_runs`'s three
-    callers (`_list_recheck_loop`, `_listed_alive`, `_reconcile`), none of
-    which expect anything but `SupervisorUnavailable` or `EngineError`.
+    """The one parse of a LIST reply (DL-220), success or refusal.
 
-    Anything that is not the exact `{"ok": true, ...}` success shape
-    parses as a refusal, tolerantly: a non-object reply is already an
-    `EngineError` at the transport (`SupervisorConn.send`), and the shared
-    LIST net's own reconnect-and-retry loop (DL-210) requires that a
-    malformed or garbage reply be readable as ONE unconfirmed answer,
-    never an exception the loop does not expect. Garbage in a header and
-    garbage in a row are both `EngineError`; a refusal is the one
-    exception to that -- the ONE shape this parse never raises on."""
+    An `ok: true` reply validates whole, in one pass: a malformed row (under `runs`) and a
+    malformed or mistyped HEADER field (`version`, `supervisor_pid`, `boot_id`, `incarnation`,
+    `deadman_s`, `lease`) both refuse as `EngineError`, naming what was wrong; a raw
+    `ValidationError` would escape `list_runs`'s three callers (`_list_recheck_loop`,
+    `_listed_alive`, `_reconcile`), which expect only `SupervisorUnavailable` or `EngineError`.
+
+    Anything that is not the exact `{"ok": true, ...}` success shape parses as a refusal: a
+    non-object reply is already an `EngineError` at the transport (`SupervisorConn.send`), and
+    the LIST net's reconnect-and-retry loop (DL-210) needs a garbage reply to read as ONE
+    unconfirmed answer. A refusal is the one shape this parse never raises on."""
     if raw.get("ok") is True:
         try:
             return SupervisorListSuccess.model_validate(raw)
@@ -1263,41 +1125,36 @@ def _parse_list_reply(raw: dict[str, Any]) -> SupervisorListReply:
 
 # ---- the engine side's connection to the supervisor, as a statechart
 #
-# `SUPERVISOR_CLIENT` is the declaration (docs/statechart-engine.md). Its
-# configuration is the connection's state: `SupervisorClient.phase` reads the
-# active leaf. The instance is keyed by the client and lives in the process's
-# one executor, which the wiring hands to the client and to the engine; a
-# client built without one makes its own (statechart-engine ss11).
+# `SUPERVISOR_CLIENT` is the declaration (docs/statechart-engine.md). Its configuration is the
+# connection's state: `SupervisorClient.phase` reads the active leaf. The instance is keyed by
+# the client and lives in the process's one executor, which the wiring hands to the client and
+# the engine; a client built without one makes its own (statechart-engine ss11).
 #
-# The tier posts four facts: the socket accepted a connection (`connect`), EOF
-# or a read error on this epoch's connection (`eof`), a request cancelled
-# mid-flight (`cancel`), and `close`. The rows decide the configuration. The
-# transport work of each fact is the tier's, in the order it always had: EOF
-# sets the epoch's `lost` event and fails the pending request, and a cancel
-# also closes the writer, before the post; a connect retires what the last
-# epoch left and installs the new one, and a close tears down, after it. That
-# work is the same from every state the tier posts in, and it is needed in
-# `closed` too, where the tier posts nothing: closing cancels the reader and a
-# renewal in flight. So no row has an action; each row's note says what the
-# tier does around it.
+# The tier posts four facts: the socket accepted a connection (`connect`), EOF or a read error on
+# this epoch's connection (`eof`), a request cancelled mid-flight (`cancel`), and `close`. The
+# rows decide the configuration. The transport work of each fact is the tier's: EOF sets the
+# epoch's `lost` event and fails the pending request, and a cancel also closes the writer, before
+# the post; a connect retires what the last epoch left and installs the new one, and a close
+# tears down, after it. That work is the same from every state the tier posts in, and it is
+# needed in `closed` too, where the tier posts nothing: closing cancels the reader and a renewal
+# in flight. So no row has an action; each row's note says what the tier does around it.
 #
-# Nothing posts to a closed client. The root's ignored rows, guarded by
-# `closed`, exist because the completeness check is syntactic (statechart-
-# engine ss10). The lease token, the renewal loop and its five-failures rule,
-# pushes and the LIST net are extended state and tier procedures, not states.
-# A gap in the chart is a `StatechartError`: in a run it stops the engine with
-# exit 7, and outside one the client keeps it and raises it (`_fail`).
+# Nothing posts to a closed client. The root's ignored rows, guarded by `closed`, exist because
+# the completeness check is syntactic (statechart-engine ss10). The lease token, the renewal loop
+# and its five-failures rule, pushes and the LIST net are extended state and tier procedures, not
+# states. A gap in the chart is a `StatechartError`: in a run it stops the engine with exit 7,
+# and outside one the client keeps it and raises it (`_fail`).
 
-#: The socket accepted a connection: a new epoch.
+#: the socket accepted a connection: a new epoch
 CONNECT: Final = "connect"
-#: EOF or a read error on this epoch's connection.
+#: EOF or a read error on this epoch's connection
 EOF: Final = "eof"
-#: A request was cancelled between its write and its reply (DL-48 item 9).
+#: a request was cancelled between its write and its reply (DL-48 item 9)
 CANCEL: Final = "cancel"
-#: `close` began.
+#: `close` began
 CLOSE: Final = "close"
 
-#: Where the connection can be: the leaf states of `SUPERVISOR_CLIENT`.
+#: where the connection can be: the leaf states of `SUPERVISOR_CLIENT`
 CLIENT_PHASES: Final = frozenset({"disconnected", "connected", "lost", "closed"})
 
 
@@ -1305,24 +1162,22 @@ CLIENT_PHASES: Final = frozenset({"disconnected", "connected", "lost", "closed"}
 
 
 def _down(ctx: Context) -> bool:
-    """No connection is live: the client is disconnected, before its first
-    connect, or lost. A connected client takes `supervisor_client.02`
-    instead, and a closed one posts nothing."""
+    """No connection is live: the client is disconnected, before its first connect, or lost. A
+    connected client takes `supervisor_client.02`, and a closed one posts nothing."""
     return bool(ctx.active & {"disconnected", "lost"})
 
 
 def _open(ctx: Context) -> bool:
-    """The client is not closed yet: from disconnected, connected or lost,
-    close cancels the renewal, reader and LIST tasks, then closes the writer."""
+    """The client is not closed yet: from disconnected, connected or lost, close cancels the
+    renewal, reader and LIST tasks, then closes the writer."""
     return "closed" not in ctx.active
 
 
 def _over(ctx: Context) -> bool:
-    """The client is closed. Nothing posts to it then: a second close posts
-    nothing, a connection that completes after the close is closed unposted,
-    and the EOF and the cancel that the close itself causes do their
-    transport work with no post. Before the first connect, an EOF or a cancel
-    finds no row and raises `UnhandledEvent`."""
+    """The client is closed. Nothing posts to it: a second close posts nothing, a connection that
+    completes after the close is closed unposted, and the EOF and cancel the close itself causes
+    do their transport work with no post. Before the first connect, an EOF or a cancel finds no
+    row and raises `UnhandledEvent`."""
     return "closed" in ctx.active
 
 
@@ -1336,8 +1191,8 @@ _NO_REQUEST = (
     " raises UnhandledEvent"
 )
 
-#: The engine side's connection to the supervisor (supervisor-protocol ss5),
-#: one instance per client.
+#: the engine side's connection to the supervisor (supervisor-protocol ss5), one instance per
+#: client
 SUPERVISOR_CLIENT: Final = Statechart(
     name="supervisor_client",
     root=State(
@@ -1481,31 +1336,28 @@ _UNREACHABLE_AFTER = 5
 
 
 class SupervisorClient:
-    """Engine-side client of the ss6a Tier-1 supervisor (this side may import
-    dsl41 freely). Ensures a supervisor is running (spawning one DETACHED if
-    the socket is dead/absent -- a live socket is reused, which is exactly
-    reattachment), holds the single-controller lease (ACQUIRE + a background
-    RENEW task), serializes one request/response at a time, and demuxes async
-    exit PUSHes into per-run_id futures. Socket loss sets `lost`; adapters
-    awaiting a run watch it, try `reconnect()` once, and only then fall back
-    to the spool (supervisor-protocol ss5: pushes are notifications, the
-    spool is the truth).
+    """Engine-side client of the ss6a Tier-1 supervisor (this side may import dsl41 freely).
 
-    Cancellation POISONS the connection (review fix, DL-48): the frozen ss5
-    protocol has no correlation ids, so a request cancelled between write
-    and reply leaves the stream state unknowable -- the reply in flight
-    would be delivered to the NEXT request's future. On CancelledError
-    mid-request the client fails the pending future, closes the socket, and
-    re-raises; later calls lazily reconnect (connect-only, never spawning a
-    supervisor) and re-ACQUIRE presenting the CURRENT token (DL-79), whose fresh
-    fencing token fences anything the poisoned connection had in flight.
+    It ensures a supervisor is running (spawning one DETACHED if the socket is dead or absent; a
+    live socket is reused, which IS reattachment), holds the single-controller lease (ACQUIRE plus
+    a background RENEW task), serializes one request/response at a time, and demuxes async exit
+    PUSHes into per-run_id futures. Socket loss sets `lost`; adapters awaiting a run watch it, try
+    `reconnect()` once, and only then fall back to the spool (supervisor-protocol ss5: pushes are
+    notifications, the spool is the truth).
 
-    The connection's state is a `SUPERVISOR_CLIENT` instance in `machines`,
-    the process's executor; `phase` reads its leaf. A `StatechartError` that a
-    background task meets (the reader, the renewal, the LIST net) goes to
-    `_fail`: in a run, to the run's stop (`on_statechart_error`), which
-    ends the engine with exit 7; outside one, the client keeps it until the
-    next request or `close` raises it."""
+    Cancellation POISONS the connection (DL-48): the frozen ss5 protocol has no correlation ids,
+    so a request cancelled between write and reply leaves the stream state unknowable and the
+    reply in flight would reach the NEXT request's future. On CancelledError mid-request the
+    client fails the pending future, closes the socket, and re-raises; later calls lazily
+    reconnect (connect-only, never spawning a supervisor) and re-ACQUIRE presenting the CURRENT
+    token (DL-79), whose fresh fencing token fences anything the poisoned connection had in
+    flight.
+
+    The connection's state is a `SUPERVISOR_CLIENT` instance in `machines`, the process's
+    executor; `phase` reads its leaf. A `StatechartError` that a background task meets (the
+    reader, the renewal, the LIST net) goes to `_fail`: in a run, to the run's stop
+    (`on_statechart_error`), which ends the engine with exit 7; outside one, the client keeps it
+    until the next request or `close` raises it."""
 
     #: engine defaults (spec ss2): 60s lease, renewed every 20s
     _TTL_S = 60.0
@@ -1522,58 +1374,40 @@ class SupervisorClient:
         machines: Executor | None = None,
     ) -> None:
         self.run_root = run_root
-        #: S5b (concurrency-model ss8): the deadman a supervisor WE spawn is
-        #: started with. It is not what gets recorded -- `supervisor_deadman_s`
-        #: below is, read back from the supervisor -- because a reattaching
-        #: engine meets a supervisor it did not start, and a bound derived
-        #: from this engine's own flag would then describe nothing.
+        #: S5b (concurrency-model ss8): the deadman a supervisor WE spawn is started with. What gets
+        #: recorded is `supervisor_deadman_s`, read back from the supervisor, because a
+        #: reattaching engine meets a supervisor it did not start.
         self.deadman_s = deadman_s
-        #: what the supervisor we are talking to says it runs. None until the
-        #: first PING/ACQUIRE answers, and None afterwards if it runs none.
+        #: what the supervisor we are talking to says it runs; None until the first PING/ACQUIRE
+        #: answers, and afterwards if it runs none
         self.supervisor_deadman_s: float | None = None
-        #: called after every confirmed lease exchange -- ss8's "positive
-        #: contact with this host". A callback rather than a store write here,
-        #: because this module is the transport and the routing table is the
-        #: engine's state; what it stamps is deliberately UNPROJECTED, so a
-        #: heartbeat costs no revision and no log record.
+        #: called after every confirmed lease exchange (ss8's "positive contact with this host").
+        #: A callback, because this module is the transport and the routing table is the engine's
+        #: state; what it stamps is UNPROJECTED, so a heartbeat costs no revision and no log
+        #: record.
         self.on_contact = on_contact
-        #: called once per outage, at the fifth consecutive failed renewal --
-        #: ss8's unreachability, which the leader turns into a quarantine.
-        #: Deliberately not per-failure: see the renewal loop, which keeps
-        #: retrying and reports contact again when the supervisor answers.
+        #: called once per outage, at the fifth consecutive failed renewal (ss8's unreachability,
+        #: which the leader turns into a quarantine); the renewal loop keeps retrying and reports
+        #: contact again when the supervisor answers
         self.on_unreachable: Callable[[], None] | None = None
         self.sock_path = run_root / "supervisor.sock"
-        # Per-INCARNATION since DL-79, and deliberately not stable: the old
-        # value said "one run_root has one logical engine controller", which
-        # the ss10 control-socket bind enforces on THIS machine only, and the
-        # supervisor used that equality to hand a live lease to a second
-        # claimant. It no longer authorizes anything -- incumbency is proved
-        # with the current token -- so this string is now for humans: LIST and
-        # the lease_held refusal name WHICH engine holds it. Fast resume after
-        # a crash comes from the holder's connection dying, not from a
+        # per-INCARNATION (DL-79): it authorizes nothing, since incumbency is proved with the
+        # current token. LIST and the lease_held refusal use it to name WHICH engine holds the
+        # lease. Fast resume after a crash comes from the holder's connection dying, not from a
         # matching label (supervisor _h_acquire).
         self.controller_id = f"engine:{run_root.resolve()}#{uuid.uuid4().hex[:8]}"
-        #: DL-79: presented on re-ACQUIRE to prove incumbency (a free lease
-        #: needs none; the reply then teaches a fresh one -- see `acquire`,
-        #: `reconnect` and `_renew_loop`). DL-173: that presentation used to
-        #: be hand-spelled at each of those three ACQUIRE call sites plus
-        #: RENEW/SPAWN/SIGNAL/SHUTDOWN/RELEASE -- eight copies of the same
-        #: field. It is now folded into `_request`'s universal stamp below,
-        #: beside `incarnation`, for the same reason DL-80 gave that one: a
-        #: fencing credential that a new verb can forget to carry is not a
-        #: credential.
+        #: DL-79: presented on re-ACQUIRE to prove incumbency (a free lease needs none; the reply
+        #: then teaches a fresh one; see `acquire`, `reconnect`, `_renew_loop`). DL-173: it rides
+        #: `_request`'s universal stamp beside `incarnation`, for DL-80's reason: a fencing
+        #: credential that a new verb can forget to carry is not a credential.
         self.token: int | None = None
-        #: DL-80: the supervisor incarnation our token belongs to. _request
-        #: pairs it with EVERY request rather than each mutating verb naming
-        #: it -- a fencing credential that a new verb can forget to carry is
-        #: not a credential. A `wrong_incarnation` refusal means the
-        #: supervisor we knew is gone and our runs died with it (re-acquire
-        #: AND reconcile), which is the opposite of `stale_token`.
+        #: DL-80: the supervisor incarnation our token belongs to; _request pairs it with EVERY
+        #: request. A `wrong_incarnation` refusal means the supervisor we knew is gone and our runs
+        #: died with it (re-acquire AND reconcile), the opposite of `stale_token`.
         self.incarnation: str | None = None
-        #: the current epoch: one event per connection, set when it is lost or
-        #: poisoned. A reader keeps its own epoch's event, so a superseded
-        #: reader neither delivers into nor reports on its successor, and the
-        #: adapters wait on it. It is a transport fact; `phase` is the state.
+        #: the current epoch: one event per connection, set when it is lost or poisoned. A reader
+        #: keeps its own epoch's event, so a stale reader neither delivers into nor reports on
+        #: its successor, and the adapters wait on it. It is a transport fact; `phase` is the state.
         self.lost = asyncio.Event()
         #: the epoch's writer: None before the first connect, after a poison
         #: and after close; an EOF keeps it until the next connect closes it
@@ -1584,9 +1418,8 @@ class SupervisorClient:
         self._renew_ttl_s = self._TTL_S
         self._lock = asyncio.Lock()
         self._reconnect_lock = asyncio.Lock()
-        #: set by `close` before anything else: the lazy reconnect, a connect
-        #: that completes late, the renewal loop and the LIST net read it, so
-        #: a closing client is never connected again
+        #: set by `close` before anything else; the lazy reconnect, a late connect, the renewal loop
+        #: and the LIST net read it, so a closing client is never connected again
         self._closed = False
         self._pending: asyncio.Future[dict[str, Any]] | None = None
         self._exit_futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
@@ -1601,9 +1434,8 @@ class SupervisorClient:
         #: outside a run, the first `StatechartError` a background task met,
         #: until the next request or `close` raises it
         self._fatal: StatechartError | None = None
-        #: set when a post raised a `StatechartError`: the instance is then
-        #: discarded, and nothing more is posted to it, so the teardown that
-        #: follows the stop meets no second error on the chart
+        #: set when a post raised a `StatechartError`: the instance is discarded and nothing more is
+        #: posted to it, so the teardown after the stop meets no second error on the chart
         self._discarded = False
         #: the process's executor, which holds this client's instance
         self._machines = machines if machines is not None else Executor()
@@ -1615,20 +1447,17 @@ class SupervisorClient:
         return f"SupervisorClient({str(self.run_root)!r})"
 
     def phase(self) -> str:
-        """The connection's phase: the active leaf of this client's
-        `SUPERVISOR_CLIENT` instance. After a discarded post it is the leaf
-        the failed post found."""
+        """The connection's phase: the active leaf of this client's `SUPERVISOR_CLIENT` instance;
+        after a discarded post, the leaf the failed post found."""
         (leaf,) = self._machines.active(self) & CLIENT_PHASES
         return leaf
 
     def _post(self, name: str) -> None:
-        """Post one fact to this client's instance. The rows have no actions,
-        so the tier needs nothing back. A gap raises `StatechartError`, and
-        the instance is discarded: its leaf stays readable but is no longer
-        the connection's state, and later facts go unposted. Whether a
-        request can be written is the transport's question (`_writer` held
-        and `lost` clear), so the teardown still reconnects, releases the
-        lease and closes."""
+        """Post one fact to this client's instance. The rows have no actions. A gap raises
+        `StatechartError` and the instance is discarded: its leaf stays readable but is not
+        the connection's state, and later facts go unposted. Whether a request can be written is
+        the transport's question (`_writer` held and `lost` clear), so the teardown still
+        reconnects, releases the lease and closes."""
         if self._discarded:
             return
         try:
@@ -1639,10 +1468,9 @@ class SupervisorClient:
 
     @property
     def on_statechart_error(self) -> Callable[[StatechartError], object] | None:
-        """In a run, the run's stop: every `StatechartError` a background task
-        meets goes to it, and it stops the engine with exit 7 (statechart-
-        engine ss5). `_serve_run` sets it beside `on_contact` and
-        `on_unreachable`; one met before then is handed over as it is set."""
+        """In a run, the run's stop: every `StatechartError` a background task meets goes to it, and
+        it stops the engine with exit 7 (statechart-engine ss5). `_serve_run` sets it beside
+        `on_contact` and `on_unreachable`; one met before then is handed over as it is set."""
         return self._stop
 
     @on_statechart_error.setter
@@ -1653,11 +1481,9 @@ class SupervisorClient:
             stop(fatal)
 
     def _fail(self, error: StatechartError) -> None:
-        """A background task met `error`: an assertion failure, never a fault
-        to retry. In a run it stops the engine; outside one the client keeps
-        the first until the next request or `close` raises it, once: the
-        caller that meets it reports it, and a second raise from the teardown
-        would report it twice."""
+        """A background task met `error`: an assertion failure, never a fault to retry. In a run it
+        stops the engine; outside one the client keeps the first until the next request or `close`
+        raises it, once, since the caller that meets it reports it."""
         if self._stop is not None:
             self._stop(error)
         elif self._fatal is None:
@@ -1666,9 +1492,9 @@ class SupervisorClient:
     # -- connection ---------------------------------------------------------
 
     async def ensure_running(self) -> None:
-        """Connect to a live supervisor, or spawn a fresh one DETACHED
-        (setsid, stdio to supervisor.log) and connect-with-retry. A live
-        socket is reused -- that reuse IS reattachment (spec ss1)."""
+        """Connect to a live supervisor, or spawn a fresh one DETACHED (setsid, stdio to
+        supervisor.log) and connect-with-retry. A live socket is reused; that reuse IS reattachment
+        (spec ss1)."""
         if await self._try_connect():
             return
         child = self._spawn_supervisor()
@@ -1679,9 +1505,9 @@ class SupervisorClient:
             if await self._try_connect():
                 return
             if child.poll() is not None and not self.sock_path.exists():
-                # the supervisor exited before publishing: exit 1 is the
-                # retryable "another supervisor owns this root" (an old one
-                # still tearing down, DL-210), so try again within the window
+                # the supervisor exited before publishing: exit 1 is the retryable "another
+                # supervisor owns this root" (an old one still tearing down, DL-210), so try again
+                # within the window
                 if spawns >= _SPAWN_ATTEMPTS:
                     break
                 child = self._spawn_supervisor()
@@ -1698,8 +1524,8 @@ class SupervisorClient:
                 str(self.sock_path), limit=LINE_LIMIT
             )
         except OSError:
-            # Only the supervisor owns this pathname. A refusal can race its
-            # bind/listen window; unlinking here would hide a live successor.
+            # only the supervisor owns this pathname; a refusal can race its bind/listen window,
+            # and unlinking here would hide a live successor
             return False
         if self._closed:
             writer.close()  # nothing posts to a closing client
@@ -1714,10 +1540,9 @@ class SupervisorClient:
         return bool(resp.get("ok"))
 
     def _new_epoch(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        """Post `connect`, then retire the previous connection's remains and
-        install this one (supervisor_client.01, .02). The remains go BEFORE
-        the identity swaps: the epoch guard (each reader carries its own
-        `lost` event) keeps a stale reader from poisoning or delivering into
+        """Post `connect`, then retire the previous connection's remains and install this one
+        (supervisor_client.01, .02). The remains go BEFORE the identity swaps: the epoch guard (each
+        reader carries its own `lost` event) keeps a stale reader from poisoning or delivering into
         its successor. A connection the chart does not take is closed."""
         try:
             self._post(CONNECT)
@@ -1746,20 +1571,16 @@ class SupervisorClient:
             )
         finally:
             logf.close()  # the child dup'd it; our copy is done
-        # The supervisor outlives this call and often this engine, so nobody
-        # else waits for it. A daemon thread reaps it whenever it ends and
-        # keeps its handle alive until then, so the handle is never dropped
-        # while the child runs (that drop is a ResourceWarning, and a zombie
-        # until some later spawn collects it).
+        # the supervisor outlives this call and often this engine, so a daemon thread reaps it and
+        # keeps its handle alive until then; dropping the handle while the child runs is a
+        # ResourceWarning and a zombie
         threading.Thread(target=child.wait, name="supervisor-reaper", daemon=True).start()
         return child
 
     # -- request / response / push demux ------------------------------------
 
     async def _ensure_connected(self) -> None:
-        """Lazy reconnect (review fix, DL-48): a poisoned or lost connection
-        heals on the next call rather than failing every caller until the
-        engine restarts."""
+        """Lazy reconnect (DL-48): a poisoned or lost connection heals on the next call."""
         if self._closed:
             raise SupervisorUnavailable("client closed")
         if self._writer is not None and not self.lost.is_set():
@@ -1768,13 +1589,12 @@ class SupervisorClient:
             raise SupervisorUnavailable("not connected")
 
     async def reconnect(self) -> bool:
-        """Re-entry after a lost or poisoned connection: connect-only (never
-        spawns a supervisor) + re-ACQUIRE when a lease was held -- the stable
-        controller_id mints a fresh fencing token, which fences anything the
-        old connection had in flight. False = the supervisor itself is
-        unreachable (callers fall back to the ss7 spool ladder). Everything
-        under the reconnect lock uses _connect=False: re-entering the lazy
-        path from inside it would deadlock on this non-reentrant lock."""
+        """Re-entry after a lost or poisoned connection: connect-only (never spawns a supervisor)
+        plus re-ACQUIRE when a lease was held; the controller_id mints a fresh fencing token, which
+        fences anything the old connection had in flight. False = the supervisor itself is
+        unreachable (callers fall back to the ss7 spool ladder). Everything under the reconnect
+        lock uses _connect=False, because re-entering the lazy path would deadlock on this
+        non-reentrant lock."""
         async with self._reconnect_lock:
             if self._closed:
                 return False
@@ -1803,14 +1623,12 @@ class SupervisorClient:
             return True
 
     async def _request(self, obj: dict[str, Any], *, _connect: bool = True) -> dict[str, Any]:
-        """One request and its reply. A statechart error that a background
-        task met and kept (`_fail`) is raised once, in place of the request,
-        or in place of the `SupervisorUnavailable` the request met. The
-        reader fails the pending request before it posts the EOF that meets
-        the gap, so the requester wakes to a transport failure while the kept
-        error is already there; a caller that takes `SupervisorUnavailable`
-        for a fallback, such as the seal's supervisor proof, must not take it
-        then."""
+        """One request and its reply. A statechart error that a background task met and kept
+        (`_fail`) is raised once, in place of the request or of the `SupervisorUnavailable` the
+        request met: the reader fails the pending request before it posts the EOF that meets the
+        gap, so the requester wakes to a transport failure while the kept error is already there,
+        and a caller that falls back on `SupervisorUnavailable`, such as the seal's supervisor
+        proof, must not take it then."""
         if (fatal := self._fatal) is not None:
             self._fatal = None  # raised once: its caller reports it
             raise fatal
@@ -1833,13 +1651,10 @@ class SupervisorClient:
             try:
                 self._writer.write(
                     json.dumps(
-                        # DL-173: `token` joins `incarnation` here -- one
-                        # credential object, stamped in one place, on EVERY
-                        # request including the read-only ones (PING/LIST).
-                        # supervisor-protocol.md ss5 makes this wire-safe:
-                        # "the supervisor ignores unknown fields" is a
-                        # request-side rule, not a per-verb one, and a
-                        # read-only handler already never inspects `_req`.
+                        # DL-173: `token` joins `incarnation` here, one credential object stamped
+                        # in one place on EVERY request including the read-only ones (PING/LIST).
+                        # supervisor-protocol.md ss5 makes this wire-safe: "the supervisor ignores
+                        # unknown fields" is a request-side rule, not a per-verb one.
                         {**obj, "v": 1, "incarnation": self.incarnation, "token": self.token},
                         sort_keys=True,
                     ).encode("utf-8")
@@ -1851,21 +1666,18 @@ class SupervisorClient:
                 self._pending = None
                 raise SupervisorUnavailable(str(exc)) from exc
             except asyncio.CancelledError:
-                # poison-on-cancel (review MAJOR, DL-48): the reply may be in
-                # flight (or the request only partially written pre-drain);
-                # with no correlation ids the stream is unknowable, so tear
-                # the connection down -- the orphan reply can then never be
-                # delivered to the NEXT request -- and re-raise. Later calls
-                # heal via _ensure_connected.
+                # poison-on-cancel (DL-48): the reply may be in flight, or the request only
+                # partially written; with no correlation ids the stream is unknowable, so the
+                # connection is torn down, the orphan reply never reaches the NEXT request, and
+                # later calls heal via _ensure_connected
                 self._poison()
                 raise
 
     def _poison(self) -> None:
-        """A request was cancelled mid-flight (supervisor_client.04, .06). The
-        transport work comes first and in every state, a closed client's
-        included: `close` cancels a renewal in flight, and a request waiting
-        on the lock must find the stream poisoned when the lock passes to it.
-        Then the fact is posted, unless the client is closed."""
+        """A request was cancelled mid-flight (supervisor_client.04, .06). The transport work comes
+        first and in every state, a closed client's included: `close` cancels a renewal in flight,
+        and a request waiting on the lock must find the stream poisoned when the lock passes to
+        it. Then the fact is posted, unless the client is closed."""
         self.lost.set()
         if self._pending is not None and not self._pending.done():
             self._pending.set_exception(
@@ -1879,10 +1691,9 @@ class SupervisorClient:
             self._post(CANCEL)
 
     async def _reader(self, stream: asyncio.StreamReader, lost: asyncio.Event) -> None:
-        """One reader per connection; `lost` is that connection's epoch. A
-        reader superseded by a poison+reconnect must neither deliver into nor
-        poison its successor -- hence the `lost is self.lost` guards. A
-        statechart error in its report of the loss goes to `_fail`: nothing
+        """One reader per connection; `lost` is that connection's epoch. A stale reader after a
+        poison and reconnect neither delivers into nor poisons its successor (the `lost is
+        self.lost` guards). A statechart error in its report of the loss goes to `_fail`: nothing
         awaits this task until `close`."""
         try:
             try:
@@ -1916,11 +1727,10 @@ class SupervisorClient:
             fut.set_result(obj)
 
     def _on_lost(self, lost: asyncio.Event) -> None:
-        """EOF or a read error on epoch `lost` (supervisor_client.03, .07). A
-        superseded connection's reader reports nothing: its successor is
-        fine. The transport work comes first and in every state: `close`
-        cancels the reader, and the request it was waiting for must fail.
-        Then the fact is posted, unless the client is closed."""
+        """EOF or a read error on epoch `lost` (supervisor_client.03, .07). A stale
+        connection's reader reports nothing. The transport work comes first and in every state:
+        `close` cancels the reader, and the request it was waiting for must fail. Then the fact is
+        posted, unless the client is closed."""
         if lost is not self.lost:
             return
         lost.set()
@@ -1944,16 +1754,15 @@ class SupervisorClient:
     def watch_exit(self, run_id: str) -> asyncio.Event:
         """Make a wait LIST-eligible only after its SPAWN reply, or at reattach.
 
-        Registering the exit future before SPAWN does not prove that the
-        supervisor has seen the run. A successful empty LIST in that window
-        must never send the run to the spool ladder.
+        Registering the exit future before SPAWN does not prove the supervisor has seen the run,
+        and a successful empty LIST in that window must never send the run to the spool ladder.
         """
         if self._list_task is not None and self._list_task.done():
             try:
                 self._list_task.result()  # a malformed LIST must fail the adapter loudly
             finally:
                 self._list_task = None
-                self._arm_list_recheck()  # later waits must not inherit the failed task
+                self._arm_list_recheck()  # later waits do not inherit the failed task
         dead = self._listed_dead.setdefault(run_id, asyncio.Event())
         if self._list_task is not None:
             self._list_wakeup.set()
@@ -1969,9 +1778,8 @@ class SupervisorClient:
             self._list_wakeup.set()
 
     async def _list_recheck_loop(self) -> None:
-        """The shared LIST net's task. A statechart error it meets on its
-        request's path goes to `_fail`: nothing awaits this task but
-        `watch_exit` and `close`."""
+        """The shared LIST net's task. A statechart error it meets on its request's path goes to
+        `_fail`: nothing awaits this task but `watch_exit` and `close`."""
         try:
             while not self._closed:
                 if not self._listed_dead:
@@ -1980,8 +1788,8 @@ class SupervisorClient:
                 await asyncio.sleep(_LIST_RECHECK_EVERY)
                 if self._closed:
                     return
-                # Snapshot BEFORE the request: waits accepted while this LIST is
-                # in flight cannot be judged against its older view of the runs.
+                # snapshot BEFORE the request: waits accepted while this LIST is in flight cannot be
+                # judged against its older view of the runs
                 eligible = dict(self._listed_dead)
                 if not eligible:
                     continue
@@ -2022,11 +1830,10 @@ class SupervisorClient:
         return self.token
 
     def _keep_renewing(self) -> None:
-        """Start the renewal loop unless one is running or the client is
-        closed (supervisor-protocol ss5: the engine renews while it holds the
-        lease). A lease nobody renews lapses one TTL later, every mutating
-        verb then answers `stale_token`, and a supervisor with a deadman
-        exits. A loop started after `close` would never be cancelled."""
+        """Start the renewal loop unless one is running or the client is closed
+        (supervisor-protocol ss5: the engine renews while it holds the lease). A lease nobody
+        renews lapses one TTL later, every mutating verb then answers `stale_token`, and a
+        supervisor with a deadman exits. A loop started after `close` would never be cancelled."""
         if self._closed:
             return
         if self._renew_task is not None and not self._renew_task.done():
@@ -2034,10 +1841,9 @@ class SupervisorClient:
         self._renew_task = asyncio.ensure_future(self._renew_loop(self._renew_ttl_s))
 
     def _note_contact(self, resp: Mapping[str, Any]) -> None:
-        """One confirmed lease exchange: ss8's "positive contact with this
-        host". `deadman_s` is only carried by the two read verbs and by
-        ACQUIRE, so a RENEW's answer refreshes the contact and leaves the
-        interval alone -- it cannot change without a new incarnation."""
+        """One confirmed lease exchange: ss8's "positive contact with this host". `deadman_s` is
+        carried only by the two read verbs and by ACQUIRE, so a RENEW's answer refreshes the contact
+        and leaves the interval alone; it cannot change without a new incarnation."""
         reported = resp.get("deadman_s")
         if isinstance(reported, int | float) and not isinstance(reported, bool):
             self.supervisor_deadman_s = float(reported)
@@ -2045,29 +1851,26 @@ class SupervisorClient:
             self.on_contact()
 
     async def _renew_loop(self, ttl_s: float) -> None:
-        """Keep the lease alive (spec ss2: renew every 20s). Review fix
-        (DL-48): a transient failure must not silently lapse a live engine's
-        lease -- pushes would stop with only the adapters' status.json
-        re-poll saving outcomes. Failed RENEWs retry on a short backoff; a
-        stale/lapsed token re-ACQUIREs presenting the current token (DL-79:
-        incumbency, not a label -- a lapsed lease is free, but one another
-        engine now holds refuses us, which is the fencing working); a fresh
-        token comes back; connection loss heals via _request's lazy reconnect.
+        """Keep the lease alive (spec ss2: renew every 20s).
 
-        Five consecutive failures report the host unreachable, loudly and once
-        per outage (concurrency-model ss8). The loop does not end there. It
-        is the one thing that renews the lease, so it keeps retrying on the
-        short backoff, and its first success reports contact again, which is
-        what reinstates the host. A loop that returned at the fifth failure
-        left a later reconnect's lease unrenewed: it lapsed one TTL later.
+        A transient failure must not lapse a live engine's lease (DL-48): pushes would stop, with
+        only the adapters' status.json re-poll saving outcomes. Failed RENEWs retry on a short
+        backoff; a stale or lapsed token re-ACQUIREs presenting the current token (DL-79:
+        incumbency, not a label; a lapsed lease is free, but one another engine now holds refuses
+        us, which is the fencing working); connection loss heals via _request's lazy reconnect.
 
-        The loop ends only when it is cancelled, the client is closed, or it
-        meets a `StatechartError`. An unexpected error in one renewal is logged
-        and counted as a failed renewal, and an error in the unreachable report
-        is logged; neither ends the loop. A statechart error is neither: it is
-        an assertion failure (statechart-engine ss5), so it ends the loop and
-        goes to `_fail`, whether the renewal's own path met it or a callback
-        into the engine did."""
+        Five consecutive failures report the host unreachable, loudly and once per outage
+        (concurrency-model ss8). The loop continues: it is the one thing that renews the lease,
+        so it keeps retrying on the short backoff, and its first success reports contact again,
+        which reinstates the host. A loop that ended at the fifth failure would leave a later
+        reconnect's lease unrenewed, to lapse one TTL later.
+
+        The loop ends only when it is cancelled, the client is closed, or it meets a
+        `StatechartError`. An unexpected error in one renewal is logged and counted as a failed
+        renewal, and an error in the unreachable report is logged; neither ends the loop. A
+        statechart error is an assertion failure (statechart-engine ss5): it ends the loop and
+        goes to `_fail`, whether the renewal's own path met it or a callback into the engine
+        did."""
         failures = 0
         try:
             while not self._closed:
@@ -2091,10 +1894,8 @@ class SupervisorClient:
                     print(f"dsl41: supervisor lease renewal failed on {exc!r}", file=sys.stderr)
                 failures += 1
                 if failures == _UNREACHABLE_AFTER:
-                    # ss8: the leader has lost contact with this host. Signalled
-                    # HERE and not on the first failure -- one refused
-                    # connection is a blip, and a quarantine per blip would
-                    # hold work for no reason
+                    # ss8: the leader has lost contact with this host. Signalled at the fifth
+                    # failure, not the first: one refused connection is a blip
                     print(
                         f"dsl41: supervisor lease renewal failed {_UNREACHABLE_AFTER} times;"
                         " the host is reported unreachable and renewal keeps retrying"
@@ -2117,21 +1918,20 @@ class SupervisorClient:
             self._fail(error)
 
     async def _renew_once(self, ttl_s: float) -> dict[str, Any]:
-        """One RENEW, and a re-ACQUIRE when it is refused. The reply that
-        decides the renewal is returned."""
+        """One RENEW, and a re-ACQUIRE when it is refused; returns the reply that decides the
+        renewal."""
         resp = await self._request({"cmd": "RENEW", "ttl_s": ttl_s})
         if resp.get("ok"):
             return resp
         if resp.get("error") == "wrong_incarnation":
-            # DL-80: the supervisor restarted under us. Our token belongs to a
-            # world that no longer exists, and every wrapper it held lost its
-            # lifeline: each kills its group and records in its own time
-            # (DL-205). Drop the pair so the re-ACQUIRE below takes the free
-            # path instead of replaying a credential that can now COLLIDE with
-            # the new incarnation's counter.
+            # DL-80: the supervisor restarted under us. Our token belongs to a world that is
+            # gone, and every wrapper it held lost its lifeline: each kills its group and
+            # records in its own time (DL-205). Drop the pair so the re-ACQUIRE below takes the
+            # free path, since a replayed credential can COLLIDE with the new incarnation's
+            # counter.
             self.token, self.incarnation = None, None
-        # stale_token (fenced by a reconnect's own re-ACQUIRE, or lapsed): the
-        # same controller re-acquires, and a fresh token comes back
+        # stale_token (fenced by a reconnect's own re-ACQUIRE, or lapsed): the same controller
+        # re-acquires, and a fresh token comes back
         resp = await self._request(
             {"cmd": "ACQUIRE", "controller_id": self.controller_id, "ttl_s": ttl_s}
         )
@@ -2143,9 +1943,8 @@ class SupervisorClient:
     async def spawn(self, spec: dict[str, Any]) -> dict[str, Any]:
         resp = await self._request({"cmd": "SPAWN", "spec": spec})
         if not resp.get("ok"):
-            # ss11a gave SPAWN refusals of its own -- collision, in_progress,
-            # indeterminate -- and an operator reading the job's cause must
-            # find which one, not a transport story that did not happen
+            # ss11a gives SPAWN refusals of its own (collision, in_progress, indeterminate); an
+            # operator reading the job's cause finds which one, not a transport story
             refusal = f"SPAWN refused: {resp.get('error')} ({resp.get('detail')})"
             if resp.get("error") == "in_progress":
                 raise SpawnInProgress(refusal)
@@ -2168,12 +1967,10 @@ class SupervisorClient:
                 await self._request({"cmd": "RELEASE"})
 
     async def close(self) -> None:
-        """Post `close` (supervisor_client.05), unless the client is already
-        closed, then tear down: cancel the renewal, reader and LIST tasks and
-        close the writer. A second close posts nothing and finds nothing left
-        to tear down. The teardown runs even when the post raises. Outside a
-        run, a statechart error a background task met and no request raised
-        is raised after it."""
+        """Post `close` (supervisor_client.05), unless the client is already closed, then tear down:
+        cancel the renewal, reader and LIST tasks and close the writer. A second close posts nothing
+        and finds nothing left to tear down. The teardown runs even when the post raises. Outside a
+        run, a statechart error a background task met and no request raised is raised after it."""
         self._closed = True  # no lazy reconnect may resurrect a closing client
         try:
             if self.phase() != "closed":  # nothing posts to a closed client
@@ -2185,8 +1982,8 @@ class SupervisorClient:
             raise fatal
 
     async def _tear_down(self) -> None:
-        # Each task hands a statechart error to `_fail` itself, so none ends
-        # with one, and these suppressions cannot swallow it.
+        # each task hands a statechart error to `_fail` itself, so none ends with one and these
+        # suppressions cannot swallow it
         for task in (self._renew_task, self._reader_task):
             if task is not None:
                 task.cancel()
@@ -2194,10 +1991,10 @@ class SupervisorClient:
                     await task
         self._renew_task = self._reader_task = None
         if self._list_task is not None:
-            # Reader shutdown fails any pending LIST. Wait for its request to
-            # unwind before cancelling: cancellation in _request poisons the
-            # uncorrelated stream. Bound this wait in case LIST is queued behind
-            # a stuck writer. Ordinary forget_exit never cancels this task.
+            # reader shutdown fails any pending LIST; wait for its request to unwind before
+            # cancelling, because cancellation in _request poisons the uncorrelated stream. The
+            # wait is bounded in case LIST is queued behind a stuck writer. Ordinary forget_exit
+            # never cancels this task.
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._list_idle.wait(), timeout=5.0)
             self._list_task.cancel()
@@ -2212,19 +2009,18 @@ class SupervisorClient:
 
 
 class SupervisedCommandAdapter:
-    """ss6 CMD adapter, detached variant: SPAWN through the supervisor (which
-    owns the wrapper lifeline), await the exit push, read status.json --
-    the same outcome channel and `outcome_from_status` mapping as
-    LocalCommandAdapter, so tethered and detached runs never diverge. Shares
-    run_dir/log/spec construction via `_build_run_spec` (no duplication).
+    """ss6 CMD adapter, detached variant: SPAWN through the supervisor (which owns the wrapper
+    lifeline), await the exit push, read status.json. The outcome channel and
+    `outcome_from_status` mapping are LocalCommandAdapter's, so tethered and detached runs never
+    diverge; run_dir, log and spec construction are shared via `_build_run_spec`.
 
-    Cancellation is the subtle part (spec ss3), two distinct cases:
-    (a) oracle-decided terminal (KILLJOB / term_run_time / run_window): SIGNAL
-        TERM via the supervisor, grace_seconds, SIGNAL KILL, await the exit
-        push -- identical outcome shape to the tethered kill.
-    (b) engine detach-stop (operator SIGINT/SIGTERM of a --detached run, or
-        shutdown for resume): abandon the await, signal NOTHING -- the jobs
-        keep running under the supervisor. Branches on ctx.detach.stopping."""
+    Cancellation has two cases (spec ss3):
+    (a) oracle-decided terminal (KILLJOB / term_run_time / run_window): SIGNAL TERM via the
+        supervisor, grace_seconds, SIGNAL KILL, await the exit push; the outcome shape is the
+        tethered kill's.
+    (b) engine detach-stop (operator SIGINT/SIGTERM of a --detached run, or shutdown for resume):
+        abandon the await and signal NOTHING; the jobs keep running under the supervisor. It
+        branches on ctx.detach.stopping."""
 
     def __init__(
         self,
@@ -2236,26 +2032,24 @@ class SupervisedCommandAdapter:
         self.client = client
         self.grace_seconds = grace_seconds
         self.settle_seconds = settle_seconds
-        #: (job, run_number) -> run_id for runs to REATTACH at resume, not
-        #: respawn (spec ss3); populated by resume before _launch
+        #: (job, run_number) -> run_id for runs to REATTACH at resume, not respawn (spec ss3);
+        #: populated by resume before _launch
         self.reattach: dict[tuple[str, int], str] = {}
 
     async def run(self, job_ir: JobIR, run_number: int, ctx: AdapterContext) -> AdapterResult:
         if ctx.run_root is None:
             raise EngineError("SupervisedCommandAdapter needs a run_root (real domain only)")
         key = (job_ir.name, run_number)
-        # a wait whose push is NOT promised re-asks LIST periodically
-        # (_await_outcome): a duplicate's run may predate this incarnation,
-        # and a reattach's wrapper can die in the window between the startup
-        # LIST and the future registration below -- its push then lands on
-        # no consumer and is dropped (pushes are droppable notifications,
-        # ss5). Fresh spawns use the shared client net after a dropped-push
-        # hint or reconnect; their futures are registered BEFORE the fork.
+        # a wait whose push is NOT promised re-asks LIST periodically (_await_outcome): a
+        # duplicate's run may predate this incarnation, and a reattach's wrapper can die between
+        # the startup LIST and the future registration below, so its push lands on no consumer and
+        # is dropped (pushes are droppable notifications, ss5). Fresh spawns use the shared client
+        # net after a dropped-push hint or reconnect; their futures are registered BEFORE the fork.
         recheck = False
         reattach_id = self.reattach.pop(key, None)
         if reattach_id is not None:
-            # the run never stopped (its parent is the supervisor); just await
-            # its outcome -- no reconciliation injection (E4 dissolved, ss3)
+            # the run never stopped (its parent is the supervisor): await its outcome, with no
+            # reconciliation injection (E4, ss3)
             run_dir = ctx.run_root / "runs" / f"{job_ir.name}.{run_number}"
             run_id = reattach_id
             recheck = True
@@ -2276,30 +2070,26 @@ class SupervisedCommandAdapter:
                 recheck = bool(reply.get("duplicate"))
                 listed_dead = recheck and not await self._listed_alive(run_id)
             except SpawnInProgress:
-                # ss11a: the wrapper for THIS run_id is already forked. There is
-                # nothing to spawn and nothing to fail -- await its outcome like
-                # any other run of ours, with no wrapper_pid to journal yet.
+                # ss11a: the wrapper for THIS run_id is already forked; there is nothing to spawn
+                # or fail, so await its outcome like any other run of ours, with no wrapper_pid to
+                # journal yet
                 pass
             except SupervisorUnavailable as exc:
                 self.client.forget_exit(run_id)
                 return Failed(f"wrapper spawn failed: {exc}")
             except asyncio.CancelledError:
-                # DL-359: the supervisor may have forked the wrapper, with its
-                # reply still in flight or a duplicate's LIST pending. It holds
-                # the lifeline, so no EOF stops the command: the kill must go
-                # out, or the command outlives the row. Case b (detach-stop)
-                # continues whatever was spawned.
+                # DL-359: the supervisor may have forked the wrapper, with its reply still in
+                # flight or a duplicate's LIST pending. It holds the lifeline, so no EOF stops the
+                # command and the kill must go out, or the command outlives the row. Case b
+                # (detach-stop) continues whatever was spawned.
                 await self._on_cancel(run_id, ctx, forget_exit=True)
                 raise
             if listed_dead:
-                # ss11a answered from the DIRECTORY, and nothing is alive to
-                # push an exit or write a record: awaiting would poll forever
-                # for a file no process will produce (the reply survived a
-                # crash its wrapper did not). Dead evidence is the spool
-                # ladder's to judge, exactly as on the supervisor-lost path.
-                # A TRANSIENT list failure lands in the await below instead,
-                # which re-asks (`recheck_listing`) rather than deciding on
-                # an answer it never got.
+                # ss11a answered from the DIRECTORY, and nothing is alive to push an exit or write
+                # a record (the reply survived a crash its wrapper did not): awaiting would poll
+                # forever. Dead evidence is the spool ladder's to judge, as on the supervisor-lost
+                # path. A TRANSIENT list failure lands in the await below, which re-asks
+                # (`recheck_listing`) instead of deciding on an answer it never got.
                 self.client.forget_exit(run_id)
                 result, _ended = await resolve_spool(
                     job_ir.name,
@@ -2319,12 +2109,8 @@ class SupervisedCommandAdapter:
                     run_dir=str(run_dir),
                     started_at=ctx.clock.now(),
                 )
-        # ONE await-and-cancel path for both (DL-96). The reattach branch used
-        # to return directly, outside this handler, so a cancellation never
-        # reached the kill ladder: KILLJOB against a REATTACHED detached run
-        # stopped the adapter task and left the process running. A kill is the
-        # one side effect resume is allowed to have, and it was the one the
-        # reattached run could not receive.
+        # ONE await-and-cancel path for both (DL-96): a cancellation of a REATTACHED run must reach
+        # the kill ladder, since a kill is the one side effect resume may have
         try:
             return await self._await_outcome(
                 run_id, run_dir, job_ir.name, run_number, recheck_listing=recheck
@@ -2334,12 +2120,11 @@ class SupervisedCommandAdapter:
             raise
 
     async def _on_cancel(self, run_id: str, ctx: AdapterContext, *, forget_exit: bool) -> None:
-        """The ss3 cancel split, written once (DL-96). Case b (detach-stop):
-        the job continues under the supervisor and nothing is killed. Case a
-        (the oracle decided terminal): kill the run. The caller re-raises.
-        `forget_exit` is the one difference: the spawn phase registered the
-        run's exit future itself, so on case b it drops that future; the
-        await phase leaves it to `_await_outcome`."""
+        """The ss3 cancel split (DL-96). Case b (detach-stop): the job continues under the
+        supervisor and nothing is killed. Case a (the oracle decided terminal): kill the run. The
+        caller re-raises. `forget_exit` is the one difference: the spawn phase registered the run's
+        exit future itself, so on case b it drops that future; the await phase leaves it to
+        `_await_outcome`."""
         if ctx.detach is not None and ctx.detach.stopping:
             if forget_exit:
                 self.client.forget_exit(run_id)
@@ -2347,11 +2132,9 @@ class SupervisedCommandAdapter:
         await self.kill(run_id)
 
     async def _listed_alive(self, run_id: str) -> bool:
-        """Whether the supervisor currently LISTs this run's wrapper as
-        alive. Conservative on failure: an unreachable supervisor answers
-        True, because `_await_outcome` already handles that path (lost ->
-        reconnect -> spool) and a false "dead" would skip a live run's
-        push."""
+        """Whether the supervisor currently LISTs this run's wrapper as alive. Conservative on
+        failure: an unreachable supervisor answers True, because `_await_outcome` handles that path
+        (lost -> reconnect -> spool) and a false "dead" would skip a live run's push."""
         try:
             listing = await self.client.list_runs()
         except SupervisorUnavailable:
@@ -2371,29 +2154,24 @@ class SupervisedCommandAdapter:
     ) -> AdapterResult:
         fut = self.client.exit_future(run_id)
         status_path = run_dir / "status.json"
-        # `recheck_listing` is any wait whose push is not promised -- a
-        # duplicate-born one (the run may predate this incarnation) or a
-        # reattach (the wrapper can die before the future above existed, and
-        # a push with no consumer is dropped). The LIST is re-asked
-        # periodically and a definitive "not alive" falls to the spool
-        # ladder. Fresh spawns are also covered by the shared client net
-        # after a dropped-push hint or reconnect.
+        # `recheck_listing` is any wait whose push is not promised: a duplicate-born one (the run
+        # may predate this incarnation) or a reattach (the wrapper can die before the future above
+        # existed, and a push with no consumer is dropped). The LIST is re-asked periodically and a
+        # definitive "not alive" falls to the spool ladder. Fresh spawns are covered by the shared
+        # client net after a dropped-push hint or reconnect.
         #
-        # A BUDGET of seconds, spent on the loop's own clock -- the clock the
-        # poll below is measured against. It used to be a count of polls,
-        # which made `_LIST_RECHECK_EVERY` seconds in the shared net and
-        # iterations here. Only CONNECTED time is spent: a lost connection
-        # skipped the countdown, and the reconnect at the top of the loop
-        # owns that window, so an outage must not consume the interval.
+        # The re-ask is a BUDGET of seconds, spent on the loop's own clock, the clock the poll
+        # below is measured against, so `_LIST_RECHECK_EVERY` means seconds here as in the shared
+        # net. Only CONNECTED time is spent: the reconnect at the top of the loop owns a lost
+        # connection's window, so an outage does not consume the interval.
         loop = asyncio.get_running_loop()
         recheck_left = float(_LIST_RECHECK_EVERY)
         try:
             while True:
                 listed_dead = self.client.watch_exit(run_id)
-                # post-poison a lost connection no longer implies a dead
-                # supervisor (review fix, DL-48): try to reconnect first --
-                # falling straight to the spool ladder would kill a healthy
-                # detached run whose wrapper is simply still running
+                # after a poison a lost connection does not imply a dead supervisor (DL-48):
+                # reconnect first, since falling straight to the spool ladder would kill a healthy
+                # detached run whose wrapper is still running
                 if self.client.lost.is_set() and not await self.client.reconnect():
                     break  # the supervisor itself is unreachable -> spool below
                 status = load_json(status_path)
@@ -2428,18 +2206,16 @@ class SupervisedCommandAdapter:
                     if recheck_left <= 0:
                         recheck_left = float(_LIST_RECHECK_EVERY)
                         if not await self._listed_alive(run_id):
-                            # definitive: the supervisor answered and the run
-                            # is not alive anywhere. Dead evidence is the
-                            # spool ladder's; waiting on would be forever.
-                            # (_listed_alive answers True on a TRANSIENT
-                            # LIST failure, so this never fires on one.)
+                            # definitive: the supervisor answered and the run is not alive
+                            # anywhere. Dead evidence is the spool ladder's; waiting on would be
+                            # forever. (_listed_alive answers True on a TRANSIENT LIST failure,
+                            # so this never fires on one.)
                             break
         finally:
             self.client.forget_exit(run_id)
-        # the supervisor connection was lost AND could not be re-established
-        # (kill -9 of the supervisor): the wrappers EOF'd and are killing+
-        # recording -- resolve via the ss7 spool ladder, the same reading the
-        # tethered resume path uses (spec ss3)
+        # the supervisor connection was lost AND could not be re-established (kill -9 of the
+        # supervisor): the wrappers EOF'd and are killing and recording, so resolve via the ss7
+        # spool ladder, the reading the tethered resume path uses (spec ss3)
         result, _ended = await resolve_spool(
             job,
             run_number,
@@ -2451,23 +2227,19 @@ class SupervisedCommandAdapter:
         )
         return result
 
-    #: DL-83: the spawn window. SPAWN returns once the wrapper is FORKED and
-    #: the wrapper writes spawn.json a few syscalls later, so a kill decided in
-    #: between is not addressable yet. The supervisor now says `not_ready`
-    #: instead of reporting a no-op, and we retry until it becomes addressable,
-    #: the run ends, or this bound elapses. Matches the supervisor's own
-    #: shutdown wait (DL-48), which fixed this hazard for SHUTDOWN and left the
-    #: per-run signal path exposed.
+    #: DL-83: the spawn window. SPAWN returns once the wrapper is FORKED and the wrapper writes
+    #: spawn.json a few syscalls later, so a kill decided in between is not addressable yet. The
+    #: supervisor answers `not_ready`, and we retry until the run is addressable, the run ends, or
+    #: this bound elapses. It matches the supervisor's own shutdown wait (DL-48).
     _SPAWN_WINDOW_S = SPAWN_WINDOW_S
     _SPAWN_POLL_S = 0.02
 
     async def _signal_when_addressable(
         self, run_id: str, sig: str, fut: "asyncio.Future[dict[str, Any]]"
     ) -> dict[str, Any]:
-        """SIGNAL, retrying while the supervisor answers `not_ready`. Gives up
-        the moment the run reports its exit -- a completed run needs no
-        signal -- and after the spawn window, which is loud rather than a
-        silent drop. Returns the last answer."""
+        """SIGNAL, retrying while the supervisor answers `not_ready`. Gives up the moment the run
+        reports its exit (a completed run needs no signal) and after the spawn window, loudly.
+        Returns the last answer."""
         deadline = time.monotonic() + self._SPAWN_WINDOW_S
         while True:
             resp = await self.client.signal(run_id, sig)
@@ -2484,21 +2256,18 @@ class SupervisedCommandAdapter:
             await asyncio.sleep(self._SPAWN_POLL_S)
 
     async def kill(self, run_id: str) -> None:
-        """ss3 case a: the oracle said terminal. TERM the command group via the
-        supervisor, grace, KILL, await the exit push so the wrapper records --
-        the cancelled adapter itself never reports (the oracle already emitted
-        the terminal).
+        """ss3 case a: the oracle said terminal. TERM the command group via the supervisor, grace,
+        KILL, await the exit push so the wrapper records; the cancelled adapter never reports (the
+        oracle already emitted the terminal).
 
-        An `unknown_run` answer to TERM ends the ladder: the supervisor holds
-        no such run, so no push can come. It is final even in the SPAWN
-        window. A SPAWN cancelled mid-request poisoned its connection, and the
-        reconnect's re-ACQUIRE minted a new token before this SIGNAL went out,
-        so a late SPAWN is refused `stale_token` (DL-359).
+        An `unknown_run` answer to TERM ends the ladder: the supervisor holds no such run, so no
+        push can come. It is final even in the SPAWN window. A SPAWN cancelled mid-request poisoned
+        its connection, and the reconnect's re-ACQUIRE minted a new token before this SIGNAL went
+        out, so a late SPAWN is refused `stale_token` (DL-359).
 
-        Public because resume drives it directly (DL-96): a recorded kill met
-        at resume has a live wrapper but no adapter task to cancel, and
-        creating one only to cancel it would not work -- a task cancelled
-        before its first step never enters the handler that calls this."""
+        Public because resume drives it directly (DL-96): a recorded kill met at resume has a live
+        wrapper but no adapter task, and a task cancelled before its first step never enters the
+        handler that calls this."""
         fut = self.client.exit_future(run_id)
         try:
             try:
@@ -2515,8 +2284,8 @@ class SupervisedCommandAdapter:
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(asyncio.shield(fut), timeout=self.grace_seconds)
         finally:
-            # every way out forgets the future registered above, the early
-            # return and a cancellation of the first signal included
+            # every way out forgets the future registered above, the early return and a
+            # cancellation of the first signal included
             self.client.forget_exit(run_id)
 
 
@@ -2527,21 +2296,15 @@ def spool_names_run(
     run_number: int | None = None,
     run_id: str | None = None,
 ) -> bool:
-    """DL-118's identity gate, one owner (DL-178y): does this spool document
-    (`spawn.json`, `status.json`, `watch.jsonl`'s start line -- anything
-    dict-shaped) name this run? False on an absent document, a `job` or
-    `run_number` mismatch, or a `run_id` mismatch -- each dimension checked
-    only when the caller supplies it, so a caller with less to check does
-    not gain a new refusal by adopting this function. Callers keep their own
-    posture on a False: raise loudly (a live path, corruption/spoof) or
-    degrade silently (offline reporting, one corrupt directory costs one
-    row, not the whole report) -- this predicate answers only "does it
-    name the run", never what to do about a no.
+    """DL-118's identity gate, one owner (DL-178y): does this spool document (`spawn.json`,
+    `status.json`, `watch.jsonl`'s start line, anything dict-shaped) name this run? False on an
+    absent document or a `job`, `run_number` or `run_id` mismatch, each checked only when the
+    caller supplies it. Callers keep their own posture on a False: raise loudly (a live path,
+    corruption or spoof) or degrade silently (offline reporting); this predicate answers only
+    "does it name the run".
 
-    `job`/`run_number`/`run_id` are keyword-only: a positional
-    `spool_names_run(doc, run_id)` would otherwise silently bind to `job`,
-    which is exactly the kind of identity-check mistake this function
-    exists to prevent, not commit."""
+    `job`, `run_number` and `run_id` are keyword-only: a positional `spool_names_run(doc, run_id)`
+    would bind to `job`, the identity-check mistake this function exists to prevent."""
     if doc is None:
         return False
     if job is not None and doc.get("job") != job:
@@ -2554,10 +2317,9 @@ def spool_names_run(
 
 
 def _named(status: dict[str, Any], run_id: str, job: str, run_number: int) -> dict[str, Any]:
-    """A status record is consumed as a run's FATE, so it must name the run
-    (DL-118): the detached path awaits an outcome by `run_id`, and a record
-    carrying a different one is a stranger's -- corruption or a spoof --
-    refused before `outcome_from_status` turns it into this job's verdict."""
+    """A status record is consumed as a run's FATE, so it must name the run (DL-118): a record
+    carrying a different `run_id` is a stranger's (corruption or a spoof) and is refused before
+    `outcome_from_status` turns it into this job's verdict."""
     if not spool_names_run(status, run_id=run_id):
         raise EngineError(
             f"{job}.{run_number}: status.json reports run_id {status.get('run_id')!r}"
@@ -2577,25 +2339,22 @@ async def resolve_spool(
     grace_seconds: float,
     expected_run_id: str | None = None,
 ) -> tuple[AdapterResult, datetime | None]:
-    """Resolve one incomplete CMD run from its spool directory, walking the
-    ss7 ladder top to bottom. Returns (outcome, true ended_at if known).
+    """Resolve one incomplete CMD run from its spool directory, walking the ss7 ladder top to
+    bottom. Returns (outcome, true ended_at if known).
 
-    `expected_run_id` is the identity the durable effect bound (DL-118):
-    when given, a spool record naming a DIFFERENT run_id refuses loudly
-    before its fate is consumed. Loud, not dropped like the (job,
-    run_number) spoof below: dropping would read the stranger's presence as
-    this run's absence and fabricate "dispatch lost". None means no bound
-    identity exists to check -- a pre-DL-118 chain, or a caller (tests, the
-    ladder for a legacy run) with nothing to expect."""
+    `expected_run_id` is the identity the durable effect bound (DL-118): a spool record naming a
+    DIFFERENT run_id refuses loudly before its fate is consumed. It raises, where the (job,
+    run_number) spoof below is dropped, because dropping would read the stranger's presence as
+    this run's absence and fabricate "dispatch lost". None means no bound identity exists to check
+    (a caller with nothing to expect)."""
     if run_dir is None or not run_dir.is_dir():
         return Failed("dispatch lost to engine crash (run directory missing)"), None
     status_path = run_dir / "status.json"
 
     def _checked(name: str, doc: dict[str, Any] | None) -> dict[str, Any] | None:
-        """The run_id gate, applied to the RAW document at every load --
-        before the tuple filter (a wrong-tuple wrong-id record must refuse,
-        not be cleared into a fabricated absence) and on every settle-window
-        reload (the first load being absent must not exempt the last)."""
+        """The run_id gate, applied to the RAW document at every load: before the tuple filter (a
+        wrong-tuple wrong-id record must refuse, not be cleared into a fabricated absence) and on
+        every settle-window reload (an absent first load does not exempt the last)."""
         if (
             expected_run_id is not None
             and doc is not None
@@ -2610,13 +2369,10 @@ async def resolve_spool(
         return doc
 
     def _tuple_checked(doc: dict[str, Any] | None) -> dict[str, Any] | None:
-        """DL-178y: a spool document naming a DIFFERENT (job, run_number) is
-        a stranger's -- dropped, not trusted, same rule as `_checked` above
-        but silent (existence under the right name is not identity, and this
-        mismatch degrades rather than refuses: the caller can still resolve
-        this run's fate honestly from whatever remains). Applied to every
-        doc load, spawn.json and status.json alike -- previously spawn.json
-        only, which let a wrong-tuple status.json slip through unchecked."""
+        """DL-178y: a spool document naming a DIFFERENT (job, run_number) is a stranger's: dropped,
+        not trusted. Like `_checked` but silent, since existence under the right name is not
+        identity and the mismatch degrades rather than refuses; the caller resolves this run's fate
+        from whatever remains. Applied to every doc load, spawn.json and status.json alike."""
         return doc if spool_names_run(doc, job=job, run_number=run_number) else None
 
     def _load_status() -> dict[str, Any] | None:
@@ -2633,8 +2389,8 @@ async def resolve_spool(
             and isinstance(wrapper_token, str)
             and _procid.verify_alive(wrapper_pid, wrapper_token)
         ):
-            # the wrapper is mid-grace (its own parent-loss kill is running):
-            # give its status.json a settle window
+            # the wrapper is mid-grace (its own parent-loss kill is running): give its status.json
+            # a settle window
             deadline = time.monotonic() + settle_seconds + grace_seconds
             while time.monotonic() < deadline:
                 status = _load_status()
@@ -2645,8 +2401,8 @@ async def resolve_spool(
                     break
                 await asyncio.sleep(0.1)
         else:
-            # one last read after death here too: a wrapper that recorded and
-            # exited after the first read is dead now, a zombie included
+            # one last read after death here too: a wrapper that recorded and exited after the
+            # first read is dead now, a zombie included
             status = _load_status()
         if status is None:
             command_pid = spawn.get("command_pid")
@@ -2658,10 +2414,9 @@ async def resolve_spool(
                 and isinstance(command_token, str)
                 and _procid.verify_alive(command_pid, command_token)
             ):
-                # command group survived its recorder: kill the verified
-                # leader's group -- TERMINATED is truthful (a kill happened).
-                # SIGKILL follows once the leader has died or the grace has
-                # passed, whichever is first: a member that ignores SIGTERM
+                # command group survived its recorder: kill the verified leader's group
+                # (TERMINATED is truthful, a kill happened). SIGKILL follows once the leader has
+                # died or the grace has passed, whichever is first: a member that ignores SIGTERM
                 # must not outlive the record (DL-226).
                 _procid.killpg_quiet(command_pgid, signal.SIGTERM)
                 deadline = time.monotonic() + grace_seconds
