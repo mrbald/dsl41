@@ -23475,3 +23475,74 @@ relitigate an entry; append a new one.
   ("superseded" is the concurrency model's own word, ss7 and DL-234, so it left the phrase list
   and returned at its five sites, a reversal of the stage 0 ruling that kept it on the list),
   eight minors and nits fixed, all confirmed by the reviewer that raised them.
+- DL-363 Four handler decisions of the job chart become rows: `start admitted` takes one row per
+  admitting verdict, the flag rows of a waiter take their own rows, the ON_NOEXEC ignore rule has
+  one home, and §16 states the marked rows without a count
+  (2026-10-16; src/dsl41/job_chart.py, src/dsl41/job_chart_rows.py, src/dsl41/oracle_cascade.py,
+  src/dsl41/oracle_reads.py, src/dsl41/oracle_facts.py, src/dsl41/oracle_writers.py;
+  tests/test_job_chart.py, tests/test_oracle_chart.py, tests/test_oracle_chart_cascade.py;
+  docs/statechart-engine.md §11, §16; docs/state-machines.md)
+  THE AIM. Step 1 of the job chart simplification. A decision the cascade made in a Python branch
+  of a consequence handler is a row's guard. No outcome of the oracle changes: no golden, no
+  trace line.
+  THE EXTENT. `start admitted` had one row, job.402, whose handler branched four ways on the
+  payload's verdict. It has one row per verdict, each on `lifecycle`, internal, guarded on the
+  verdict the payload carries: job.402 keeps the admission (guard `admitted_admit`, action
+  `admit_extent`); job.424 is the bypass (`admitted_bypass`, `bypass_extent`), job.425 the queue
+  (`admitted_queue`, `queue_extent`) and job.426 the forced start on held units
+  (`admitted_on_held`, `on_held_extent`). The guards are mutually exclusive, since the payload
+  carries one verdict. The action `start_extent` and its handler leave; each new action has one
+  handler, `_on_<action>`, with no branch on the verdict. Their writer is `_w_nothing`, as
+  job.402's was. job.402
+  keeps its id for the admission rather than retire with a mark: a marked row on the same cell
+  would need a guard that is never true.
+  THE WAITERS. Three handlers tested `QUE_WAIT` in the configuration. ON_ICE, ON_HOLD and
+  OFF_HOLD now split each flag row by the status: job.201, job.204, job.220, job.205 and job.221
+  keep the job that is not a waiter, and a waiter takes job.234 (ON_ICE, `report_ice`), job.235
+  and job.236 (ON_HOLD, `held`), job.237 and job.238 (OFF_HOLD, `released_waiter`), each guarded
+  `queued`. The rows that are not a waiter's are guarded `not_live_or_queued` on ON_ICE and
+  ON_HOLD, in place of `not_live`, and `not_queued` on OFF_HOLD. `not_live_or_queued` is "neither
+  live nor QUE_WAIT"; it holds on the transient ADMITTED as `not_live` did, so no declared cell
+  changes. A held job that is not a
+  waiter has no action on ON_HOLD: its handler sent nothing. `report_ice` is the chart's own
+  action, as `report_flag_move` is for KILLJOB: it sends `flag moved`, and job.112 takes the
+  waiter out of the queue. job.218 (ON_ICE on an iced job) stays whole: its handler does not
+  branch, and an iced job is never a waiter.
+  THE IGNORE RULE. ON_NOEXEC's ignore for the job's own ice and status is the chart's
+  `noexec_own_reason`; the guard `noexec_ignored` and the oracle's ignored line
+  (`_oob_ignored`, on `row_configuration` of the store's row) both read it. A box's contained
+  jobs are `_busy_contained`'s, read by `NoexecFacts.tree_busy` and by `_oob_ignored`. The
+  writer's check that a row the chart ignores has a reason (§11) stays. The trace text is
+  unchanged.
+  §16. The sentence that counted two marked rows states the rule: each marked row states its
+  reason, and docs/state-machines.md lists them all. §11 names the four rows of `start
+  admitted`.
+  CHECKS. The job chart has 177 rows; the transition gate holds 375 of 375 required items of
+  `job`, every new row and both outcomes of every new guard hit by the oracle's own tests. The
+  completeness table pins the bypass at job.424 and the admission at job.402; the cell test
+  dispatches each waiter's twin at QUE_WAIT. The golden replay: 4,060 runs, 152,213 entries, 0
+  differing.
+  THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235): no accepted input derives differently,
+  and the goldens replay equal.
+  THE PROJECT. The job chart's design review (owner-driven, 2026-10-16) found the chart
+  under-declared where the cascade lives (thirteen moment rows run nineteen generators) and
+  over-declared in rows that move nothing (92 of 169), with the start rule's precedence written
+  twice (the rows' sources and `start_verdict`). The ranked steps: this entry; ADMITTED as a
+  completion state, under two conditions a Codex Astra probe raised (a completion item is a
+  sibling of `start admitted` in the ancestry, so the bound must count another item; STARTING is
+  sent before the reset notifications, so the entry action reports only what precedes it); the
+  status writes as entry actions; ordered row selection within one source and event in place of
+  the verdict-label guards (a choice resolves after the exits, so it is not the form); the per-leaf
+  copies collapsed; one hidden sequence declared, the box door first; `flag moved` as four events;
+  `arm` as a payload fact with its old-value cases kept as guards; named compound conditions.
+  Two rulings the probe reversed: the holding region stays, since a terminal job is `reserved`
+  between its status write and its settlement, an interval the projection `row_holding` does not
+  show; and the missing engine feature is ordered rows, not a choice branch that stays.
+  REVIEW. One Opus reviewer: no blocker, no major; three lows fixed and confirmed by it (a pin for
+  each of job.204, job.220, job.221 and job.238, two on local scripts since no harness script
+  reaches job.220 or job.238 and the goldens' sample does not change; §11's sentence names
+  `start admitted`; the draft says "no branch on the verdict"), one wrap nit in round two fixed.
+  A differential run of HEAD against the tree over 20,000 seeded input sequences showed no
+  difference in trace, rows or errors. One Codex Astra pass (gpt-6-astra, xhigh): none found in
+  four probes; 16,896 selection cells matched after the row-id mapping, four oracle sequences of
+  28 inputs matched rows, trace text, events and microstep order.

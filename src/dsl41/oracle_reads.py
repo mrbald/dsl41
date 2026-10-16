@@ -31,6 +31,8 @@ from dsl41.conditions import (
     compare_value,
 )
 from dsl41.ir import CatalogIR, JobIR
+from dsl41.job_chart import noexec_own_reason
+from dsl41.job_chart_rows import row_configuration
 from dsl41.oracle_state import (
     LIVE,
     LIVE_OR_QUEUED,
@@ -275,6 +277,9 @@ class OracleReads:
         following status: ON_HOLD, ON_NOEXEC, INACTIVE, SUCCESS, FAILURE, ACTIVATED, or
         TERMINATED", here a contained job that is iced, STARTING, RUNNING or QUE_WAIT. QUE_WAIT
         is not named for the job itself, so a queued job keeps the handling that applies it.
+        The job's own reason is the chart's (`job_chart.noexec_own_reason`), read on the row's
+        configuration; a box's contained jobs are `_busy_contained`'s, which ON_NOEXEC's payload
+        reads too (`NoexecFacts.tree_busy`).
         """
         rt = self._runtime(job)
         if kind in ("ON_ICE", "ON_HOLD"):
@@ -283,21 +288,20 @@ class OracleReads:
             return None
         job_ir = self.catalog.jobs.get(job)
         is_box = job_ir is not None and job_ir.job_type == "BOX"
-        if rt.on_ice:
-            return "sendevent ON_NOEXEC ignored: the job is ON_ICE (DL-254)"
-        if rt.status == "RUNNING" or (not is_box and rt.status == "STARTING"):
-            return f"sendevent ON_NOEXEC ignored: the job is {rt.status} (DL-254)"
-        if not is_box:
-            return None
-        for member in self._contained(job, skip_live=False):
+        why = noexec_own_reason(row_configuration(rt), is_box)
+        if why is None and is_box:
+            why = self._busy_contained(self._contained(job, skip_live=False))
+        return None if why is None else f"sendevent ON_NOEXEC ignored: {why} (DL-254)"
+
+    def _busy_contained(self, contained: list[str]) -> str | None:
+        """Why a box's contained jobs make its ON_NOEXEC ignored, or None (DL-254): the first,
+        in `_contained`'s order, that is iced, STARTING, RUNNING or QUE_WAIT."""
+        for member in contained:
             mrt = self._runtime(member)
             if mrt.on_ice:
-                return f"sendevent ON_NOEXEC ignored: contained job {member!r} is ON_ICE (DL-254)"
+                return f"contained job {member!r} is ON_ICE"
             if mrt.status in LIVE_OR_QUEUED:
-                return (
-                    f"sendevent ON_NOEXEC ignored: contained job {member!r} is"
-                    f" {mrt.status} (DL-254)"
-                )
+                return f"contained job {member!r} is {mrt.status}"
         return None
 
     def _atom_true(self, atom: StatusAtom | ExitCodeAtom, evaluator: str) -> bool:

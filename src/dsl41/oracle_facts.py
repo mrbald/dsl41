@@ -26,7 +26,7 @@ from dsl41.capacity import DemandEntry, to_reservations
 from dsl41.conditions import Cond, GlobalAtom, iter_atoms
 from dsl41.ir import JobIR
 from dsl41.job_chart_events import BoxGate, JobData, Release, WindowSide
-from dsl41.oracle_state import FAILED, LIVE_OR_QUEUED, TERMINAL, JobStatus, unreleased
+from dsl41.oracle_state import FAILED, TERMINAL, JobStatus, unreleased
 from dsl41.state_machine import Context, Effects
 
 if TYPE_CHECKING:
@@ -259,11 +259,11 @@ class NoexecFacts:
     """ON_NOEXEC's payload (`Noexec`), each fact computed when a guard first reads it (DL-344).
 
     `tree_busy`: a job the box contains, at any depth, is on ice, STARTING, RUNNING or QUE_WAIT,
-    as `_oob_ignored` reads it; the guard reads it only for a box that is neither on ice nor
-    RUNNING. `change`: the box's parent is RUNNING, or a job the box contains is not INACTIVE,
-    as `noexec_settles_box` decides whether the box's INACTIVE runs; the guard reads it only for
-    a box that is INACTIVE itself. Neither is read for a job that is not a box. `units` is the
-    box's or the job's handle (`RowUnits`).
+    as `_oob_ignored` reads it (`_busy_contained`); the guard reads it only for a box that is
+    neither on ice nor RUNNING. `change`: the box's parent is RUNNING, or a job the box contains
+    is not INACTIVE, as `noexec_settles_box` decides whether the box's INACTIVE runs; the guard
+    reads it only for a box that is INACTIVE itself. Neither is read for a job that is not a
+    box. `units` is the box's or the job's handle (`RowUnits`).
     """
 
     __slots__ = ("units", "_oracle", "_job", "_known", "_tree")
@@ -289,10 +289,8 @@ class NoexecFacts:
     def tree_busy(self) -> bool:
         """A contained job is on ice, live or queued."""
         if "tree_busy" not in self._known:
-            rows = (self._oracle._runtime(member) for member in self._contained())
-            self._known["tree_busy"] = any(
-                row.on_ice or row.status in LIVE_OR_QUEUED for row in rows
-            )
+            busy = self._oracle._busy_contained(self._contained())
+            self._known["tree_busy"] = busy is not None
         return cast(bool, self._known["tree_busy"])
 
     @property

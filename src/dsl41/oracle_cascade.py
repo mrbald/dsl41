@@ -150,13 +150,17 @@ _HANDLERS: Final[Mapping[str, str]] = {
     "extent_queue": "_on_extent_queue",
     "extent_admit": "_on_extent_admit",
     "extent_on_held": "_on_extent_on_held",
-    "start_extent": "_on_start_extent",
+    "bypass_extent": "_on_bypass_extent",
+    "queue_extent": "_on_queue_extent",
+    "on_held_extent": "_on_on_held_extent",
+    "admit_extent": "_on_admit_extent",
     "admit": "_on_admit",
     "settles_first": "_on_settles_first",
     "skips_in_box": "_on_skips_in_box",
     "cascades": "_on_cascades",
     "batched": "_on_batched",
     "held": "_on_held",
+    "released_waiter": "_on_released_waiter",
     "released_hold": "_on_released_hold",
     "released_held": "_on_released_held",
     "waiter_left": "_on_waiter_left",
@@ -367,31 +371,54 @@ class OracleCascade(OracleSchedule):
         admission = AdmissionFacts(on_held=True, vector=vector, units=self._units(job))
         return self._admitted(job, ctx, "on_held", admission)
 
-    def _on_start_extent(self, job: str, ctx: Context) -> Effects:
-        """`start admitted` (job.402): the admitted start's extent, each step an item and a
-        descendant of this one."""
+    # an admitted start's extent, one handler per admitting verdict: each step is an item and a
+    # descendant of the `start admitted` its row (job.402, job.424 to job.426) runs (DL-350)
+
+    def _on_bypass_extent(self, job: str, ctx: Context) -> Effects:
+        """job.424: a bypass's run starts, then its move's box rules, settlement and wakes."""
+        admitted = cast(Admitted, ctx.event.payload)
+        cause = cast(StartFacts, admitted.attempt).cause
+        run = RunStart(cause=f"ON_NOEXEC bypass ({cause})", arm=False, units=self._units(job))
+        move = cast(Move, admitted.move)
+        return Effects(send=(self._to(job, ACTUAL_START, run), *self._move_sends(move)))
+
+    def _on_queue_extent(self, job: str, ctx: Context) -> Effects:
+        """job.425: a queue's move's box rules, settlement and wakes, then the load mark."""
         admitted = cast(Admitted, ctx.event.payload)
         attempt = cast(StartFacts, admitted.attempt)
-        cause = attempt.cause
-        if admitted.verdict == "bypass":
-            run = RunStart(cause=f"ON_NOEXEC bypass ({cause})", arm=False, units=self._units(job))
-            move = cast(Move, admitted.move)
-            return Effects(send=(self._to(job, ACTUAL_START, run), *self._move_sends(move)))
-        vector = attempt.vector()
-        load = (
-            (self._once(job, LOAD_TAKEN, self._load_taken()),) if takes_machine_load(vector) else ()
+        load = self._load_mark(job, attempt.vector())
+        return Effects(send=(*self._move_sends(cast(Move, admitted.move)), *load))
+
+    def _on_on_held_extent(self, job: str, ctx: Context) -> Effects:
+        """job.426: a forced start's extent on its held units, then the load mark (DL-256)."""
+        admitted = cast(Admitted, ctx.event.payload)
+        attempt = cast(StartFacts, admitted.attempt)
+        load = self._load_mark(job, attempt.vector())
+        cause = (
+            f"{attempt.cause}; starts on its held units, other resources not re-evaluated (DL-256)"
         )
-        if admitted.verdict == "queue":
-            return Effects(send=(*self._move_sends(cast(Move, admitted.move)), *load))
         admission = cast(AdmissionFacts, admitted.admission)
-        if admitted.verdict == "on_held":
-            cause = f"{cause}; starts on its held units, other resources not re-evaluated (DL-256)"
-            sends = self._extent(job, admission, cause, had_demand=True)
-            return Effects(send=(*sends, *load))
-        sends = self._extent(job, admission, cause, bool(vector))
+        sends = self._extent(job, admission, cause, had_demand=True)
+        return Effects(send=(*sends, *load))
+
+    def _on_admit_extent(self, job: str, ctx: Context) -> Effects:
+        """job.402: an admission's extent, then the queue's scan when the held units it took
+        over exceed its demand, then the load mark."""
+        admitted = cast(Admitted, ctx.event.payload)
+        attempt = cast(StartFacts, admitted.attempt)
+        vector = attempt.vector()
+        load = self._load_mark(job, vector)
+        admission = cast(AdmissionFacts, admitted.admission)
+        sends = self._extent(job, admission, attempt.cause, bool(vector))
         freed = self._frees_excess(job, list(vector))
         scan = (self._program(job, SCAN, self._scan(keep_stopped=False)),) if freed else ()
         return Effects(send=(*sends, *scan, *load))
+
+    def _load_mark(self, job: str, vector: list[DemandEntry]) -> tuple[Send, ...]:
+        """DL-255: an admitted start that takes a machine's load marks the input's owed scan."""
+        if not takes_machine_load(vector):
+            return ()
+        return (self._once(job, LOAD_TAKEN, self._load_taken()),)
 
     def _frees_excess(self, job: str, vector: list[DemandEntry]) -> bool:
         """Read before the units are written: held units exceed the new
@@ -814,17 +841,16 @@ class OracleCascade(OracleSchedule):
                 break
         yield Step(intents=(ScanState(in_wake=False),))
 
-    def _on_held(self, job: str, ctx: Context) -> Effects | None:
+    def _on_held(self, job: str, ctx: Context) -> Effects:
         """ON_HOLD on a waiter: a held waiter blocks no one (DL-247)."""
-        if "QUE_WAIT" not in ctx.active:
-            return None
+        return Effects(send=(self._program(job, SCAN, self._scan(keep_stopped=False)),))
+
+    def _on_released_waiter(self, job: str, ctx: Context) -> Effects:
+        """OFF_HOLD on a waiter: its queue is scanned (DL-50)."""
         return Effects(send=(self._program(job, SCAN, self._scan(keep_stopped=False)),))
 
     def _on_released_hold(self, job: str, ctx: Context) -> Effects:
-        """OFF_HOLD: a waiter's queue is scanned (DL-50); another job attempts
-        its start (SEM-21)."""
-        if "QUE_WAIT" in ctx.active:
-            return Effects(send=(self._program(job, SCAN, self._scan(keep_stopped=False)),))
+        """OFF_HOLD on a job that is not a waiter: it attempts its start (SEM-21)."""
         return Effects(send=(self._to(job, START, self._attempt(job, "OFF_HOLD")),))
 
     def _on_released_held(self, job: str, ctx: Context) -> Effects:
@@ -841,11 +867,9 @@ class OracleCascade(OracleSchedule):
     # ---- the flags
 
     def _on_iced(self, job: str, ctx: Context) -> Effects:
-        """ON_ICE (SEM-20, DL-285): the status rule follows the flag; a job that
-        is not queued then runs its completion moment and wakes its referencers."""
+        """ON_ICE on a job that is not a waiter (SEM-20, DL-285): the status rule follows the
+        flag, then the job runs its completion moment and wakes its referencers."""
         moved = self._to(job, FLAG_MOVED, FlagMoved("ON_ICE", units=self._units(job)))
-        if "QUE_WAIT" in ctx.active:
-            return Effects(send=(moved,))
         status = self._runtime(job).status
         runs = self._ancestor_runs(job)
         resolves = self._program(job, HOLDERS, self._ice_resolves(job, status, runs))

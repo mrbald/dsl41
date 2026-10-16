@@ -585,6 +585,11 @@ _WRITERS: Final[dict[str, str]] = {
     "job.231": "_w_box_noexec_flag",
     "job.232": "_w_noexec_hold",
     "job.233": "_w_box_noexec_flag",
+    "job.234": "_w_ice_on",
+    "job.235": "_w_hold_on",
+    "job.236": "_w_hold_on",
+    "job.237": "_w_hold_off",
+    "job.238": "_w_hold_off",
     "job.301": "_w_reserve",
     "job.302": "_w_take_over",
     "job.303": "_w_on_held",
@@ -604,4 +609,5 @@ _WRITERS: Final[dict[str, str]] = {
     **{f"job.{n}": "_w_nothing" for n in range(405, 418)},
     "job.406": "_w_settle",
     "job.418": "_w_settle",
+    **{f"job.{n}": "_w_nothing" for n in (424, 425, 426)},
 }
