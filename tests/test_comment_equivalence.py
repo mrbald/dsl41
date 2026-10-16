@@ -55,8 +55,10 @@ def _check(root: Path) -> list[str]:
     return findings
 
 
-def _edit(root: Path, text: str) -> None:
-    (root / "src" / "m.py").write_text(text, encoding="utf-8")
+def _edit(root: Path, text: str, rel: str = "src/m.py") -> None:
+    path = root / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
 
 
 def test_comment_only_change_passes(tmp_path: Path) -> None:
@@ -216,16 +218,20 @@ class Plain:
 '''
 
 
-def _model_repo(tmp_path: Path) -> Path:
+SCHEMA_REL = "src/dsl41/ir.py"
+
+
+def _model_repo(tmp_path: Path, rel: str = SCHEMA_REL) -> Path:
     root = _repo(tmp_path)
-    _edit(root, MODEL_TEXT)
-    subprocess.run(["git", "commit", "-qam", "models"], cwd=root, check=True)
+    _edit(root, MODEL_TEXT, rel)
+    subprocess.run(["git", "add", rel], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "models"], cwd=root, check=True)
     return root
 
 
 def test_basemodel_docstring_change_trips(tmp_path: Path) -> None:
     root = _model_repo(tmp_path)
-    _edit(root, MODEL_TEXT.replace("Schema text", "Other text"))
+    _edit(root, MODEL_TEXT.replace("Schema text", "Other text"), SCHEMA_REL)
     findings = _check(root)
     assert len(findings) == 1
     assert "schema-bearing docstring changed on class Base" in findings[0]
@@ -233,7 +239,7 @@ def test_basemodel_docstring_change_trips(tmp_path: Path) -> None:
 
 def test_subclass_of_local_model_docstring_change_trips(tmp_path: Path) -> None:
     root = _model_repo(tmp_path)
-    _edit(root, MODEL_TEXT.replace("Child text", "Other text"))
+    _edit(root, MODEL_TEXT.replace("Child text", "Other text"), SCHEMA_REL)
     findings = _check(root)
     assert len(findings) == 1
     assert "class Child" in findings[0]
@@ -241,5 +247,11 @@ def test_subclass_of_local_model_docstring_change_trips(tmp_path: Path) -> None:
 
 def test_plain_class_docstring_change_is_silent(tmp_path: Path) -> None:
     root = _model_repo(tmp_path)
-    _edit(root, MODEL_TEXT.replace("Plain text", "Other text"))
+    _edit(root, MODEL_TEXT.replace("Plain text", "Other text"), SCHEMA_REL)
+    assert _check(root) == []
+
+
+def test_model_docstring_change_outside_schema_modules_passes(tmp_path: Path) -> None:
+    root = _model_repo(tmp_path, "src/m.py")
+    _edit(root, MODEL_TEXT.replace("Schema text", "Other text"))
     assert _check(root) == []
