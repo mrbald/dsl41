@@ -1,91 +1,74 @@
-"""Per-run wrapper shim: the Tier-0 process-lifecycle recorder (phase 11b).
+"""Per-run wrapper shim: the Tier-0 process-lifecycle recorder.
 
-Normative spec: docs/runner-design.md ss6a (DL-41a) + docs/supervisor-protocol.md
-(the spool format this module writes is the tier's frozen public contract,
-DL-42). STDLIB ONLY: this module imports nothing from dsl41 and nothing
-third-party -- its dumbness is a correctness property and the enforced
-extraction boundary (DL-42; import-graph test in tests/test_runner_lifecycle.py).
-Its one non-stdlib import is the sibling stdlib-only ``runner_procid``, which
-carries the durability/identity helpers the supervisor needs too (DL-72).
-The engine runs it BY FILE PATH (``sys.executable <this file>``), never
-``-m dsl41.runner_wrapper``: ``-m`` would import the dsl41 package __init__
-and drag third-party imports into the recorder's runtime.
+Spec: docs/runner-design.md ss6a (DL-41a), docs/supervisor-protocol.md (the spool format
+this module writes is the tier's frozen public contract, DL-42). STDLIB ONLY: it imports
+nothing from dsl41 and nothing third-party. Its dumbness is a correctness property and
+the extraction boundary (DL-42; import-graph test in tests/test_runner_lifecycle.py).
+Its one non-stdlib import is the sibling stdlib-only ``runner_procid``, which holds the
+durability and identity helpers the supervisor shares (DL-72). The engine runs it BY FILE
+PATH (``sys.executable <this file>``), never ``-m dsl41.runner_wrapper``, which would
+import the dsl41 package __init__ and its third-party imports.
 
-Why this process exists: Unix gives exactly one wait() observation of a
-child's exit status; if the observer is down when the child dies, init reaps
-it and the status is gone forever. So the one process that cannot miss the
-observation -- the direct parent -- writes it durably. Prior art:
-containerd-shim, slurmstepd, HTCondor's starter.
+Purpose: Unix gives one wait() observation of a child's exit status, and if the observer
+is down when the child dies, init reaps it and the status is gone. The direct parent, the
+one process that cannot miss the observation, writes it durably.
 
 Duties, in order (ss6a Tier 0):
 
-1. Own session via setsid() (tolerated if the spawner already made us a
-   leader). The command child is placed in its OWN pgid, separate from the
-   wrapper's, via ``process_group=0`` at spawn: kill(-pgid) must never kill
-   the recorder before it records (the DL-41a review-found bug).
-2. Durably write ``spawn.json`` (run_dir): run/job identity, wrapper and
-   command (pid, start-time) tokens, command pgid, boot_id, started_at.
-   Durability liturgy for every record: temp file in the same directory,
-   fsync(file), rename, fsync(directory). The run dir must be on a local
-   filesystem (rename-over-NFS has ambiguous crash semantics).
-3. Spawn ``/bin/sh -c <command>`` with the DSL41_RUN env tag (base64url
-   JSON: run_id, job, run_number, boot_id). The tag is FORENSICS ONLY --
-   macOS KERN_PROCARGS2 omits env for restricted binaries like /bin/sh and
-   Linux /proc/pid/environ is ptrace-gated (DL-41a, probed empirically).
-   Identity verification uses the (pid, start-time) tuple instead:
-   ``proc_start_token`` / ``start_tokens_match`` (runner_procid), +/-2s
-   tolerance on macOS's 1-second ``ps -o lstart=`` resolution, tick-exact
-   on Linux.
-4. Portable event loop: SIGCHLD self-pipe + select over {self-pipe,
-   lifeline}. The pipe is also the interpreter's wakeup fd, so a SIGCHLD
-   delivered just before the select still wakes it.
-   On EVERY wakeup check child-exit BEFORE lifeline EOF -- a job
-   completing at the instant its parent dies must be recorded as a
-   completion, not as "parent lost".
-5. On child exit: observe with waitid(WNOWAIT) (observe-before-reap narrows
-   the observe-to-record hole to a few syscalls), durably write
-   ``status.json``, then reap.
-6. On lifeline EOF (the parent died -- including kill -9; the kernel closes
-   fds regardless): re-check child exit, then SIGTERM the command pgid,
-   grace, SIGKILL, write ``status.json`` outcome=terminated cause="parent
-   lost", exit. This makes "engine death => jobs terminate AND are recorded"
-   hold with no polling and no Linux-only mechanism.
+1. Own session via setsid() (tolerated if the spawner already made us a leader). The
+   command child gets its OWN pgid via ``process_group=0`` at spawn, so kill(-pgid)
+   never kills the recorder before it records (DL-41a).
+2. Durably write ``spawn.json`` (run_dir): run/job identity, wrapper and command (pid,
+   start-time) tokens, command pgid, boot_id, started_at. Every record uses the same
+   liturgy: temp file in the same directory, fsync(file), rename, fsync(directory). The
+   run dir must be on a local filesystem (rename-over-NFS has ambiguous crash semantics).
+3. Spawn ``/bin/sh -c <command>`` with the DSL41_RUN env tag (base64url JSON: run_id,
+   job, run_number, boot_id). The tag is FORENSICS ONLY: macOS KERN_PROCARGS2 omits env
+   for restricted binaries like /bin/sh and Linux /proc/pid/environ is ptrace-gated
+   (DL-41a). Identity verification uses the (pid, start-time) tuple, ``proc_start_token``
+   / ``start_tokens_match`` (runner_procid), +/-2s on macOS's 1-second ``ps -o lstart=``,
+   tick-exact on Linux.
+4. Portable event loop: SIGCHLD self-pipe + select over {self-pipe, lifeline}. The pipe is
+   also the interpreter's wakeup fd, so a SIGCHLD delivered just before the select still
+   wakes it. On EVERY wakeup check child-exit BEFORE lifeline EOF, so a job completing
+   as its parent dies is recorded as a completion, not "parent lost".
+5. On child exit: observe with waitid(WNOWAIT), which narrows the observe-to-record hole
+   to a few syscalls, durably write ``status.json``, then reap.
+6. On lifeline EOF (the parent died, kill -9 included, since the kernel closes fds):
+   re-check child exit, then SIGTERM the command pgid, grace, SIGKILL, write
+   ``status.json`` outcome=terminated cause="parent lost", exit. Engine death thus
+   terminates AND records the jobs with no polling and no Linux-only mechanism.
 
 status.json outcomes (frozen in docs/supervisor-protocol.md):
   exited(exit_code) | signaled(signal) -- how the command itself ended;
   terminated(cause="parent lost")      -- the wrapper killed it on EOF;
-  spawn_failed(error)                  -- the command's stdin, stdout or
-                                          stderr could not be opened, or
-                                          /bin/sh could not be spawned (DL-150).
-The engine maps: exited -> raw exit_code through SEM-09 oracle-side;
-signaled/terminated -> STATUS TERMINATED (a kill that actually happened);
-spawn_failed -> STATUS FAILURE. A missing status.json is the one thing this
-process can never produce -- that absence IS the E7 unobservable case.
+  spawn_failed(error)                  -- the command's stdin, stdout or stderr could
+                                          not be opened, or /bin/sh could not be spawned
+                                          (DL-150).
+The engine maps exited -> raw exit_code through SEM-09 oracle-side; signaled/terminated
+-> STATUS TERMINATED (a kill that happened); spawn_failed -> STATUS FAILURE. A missing
+status.json is the one thing this process never produces: that absence IS the E7
+unobservable case.
 
-The wrapper ignores the signals `_RECORDER_IGNORED` lists: SIGTERM, SIGINT,
-SIGHUP, SIGQUIT and the two user signals (DL-229). SIGKILL, SIGABRT, any
-other signal whose default action terminates and that the wrapper does not
-ignore, or machine death silences the recorder; E7 then reports the run.
-The DL-41a accepted cases (-9 of the wrapper alone, or of the whole tree
-at once) are detected at reconciliation and reported truthfully.
+The wrapper ignores the signals `_RECORDER_IGNORED` lists: SIGTERM, SIGINT, SIGHUP,
+SIGQUIT and the two user signals (DL-229). SIGKILL, SIGABRT, any other terminating signal
+the wrapper does not ignore, or machine death silences the recorder, and E7 reports the
+run. The DL-41a accepted cases (-9 of the wrapper alone, or of the whole tree at once)
+are detected at reconciliation.
 
-Test scaffolding: the DSL41_WRAPPER_TEST_PAUSE env var names comma-separated
-pause points ({pre_spawn, post_spawn_pre_record, post_record,
-post_wait_pre_status, post_status_pre_reap}); the wrapper SIGSTOPs itself at
-each named point so the kill-matrix tests (DL-42 item 8) can freeze it at a
-phase boundary. Absent the env var (production) the hook is inert. The
-DL-42 "post-fork pre-exec" boundary is not portably hookable from Python;
-post_spawn_pre_record covers it -- from the recorder's point of view both
-mean "command pid exists, spawn.json does not", and recovery semantics
-depend only on that.
+Test scaffolding: the DSL41_WRAPPER_TEST_PAUSE env var names comma-separated pause points
+({pre_spawn, post_spawn_pre_record, post_record, post_wait_pre_status,
+post_status_pre_reap}); the wrapper SIGSTOPs itself at each so the kill-matrix tests
+(DL-42 item 8) can freeze it at a phase boundary. Absent the variable the hook is inert.
+The DL-42 "post-fork pre-exec" boundary is not portably hookable from Python;
+post_spawn_pre_record covers it, since both mean "command pid exists, spawn.json does
+not".
 
-Wrapper input: a JSON spec on stdin (see docs/supervisor-protocol.md).
-The wrapper is parent-agnostic: engine (11b) and supervisor (11f) spawn it
-identically. Its own exit code is only a notification: 0 = a status record
-was written; 1 = an unreadable spec or a missing required key; 2 = the spec
-refusal (supervisor-protocol ss4 step 6, DL-229 item 8); 3 = a record write
-failed, e.g. ENOSPC.
-status.json is the sole data channel for the command's outcome.
+Wrapper input: a JSON spec on stdin (docs/supervisor-protocol.md). The wrapper is
+parent-agnostic: the engine and the supervisor spawn it identically. Its own exit code is
+a notification only: 0 = a status record was written; 1 = an unreadable spec or a missing
+required key; 2 = the spec refusal (supervisor-protocol ss4 step 6, DL-229 item 8); 3 = a
+record write failed, e.g. ENOSPC. status.json is the sole data channel for the outcome.
 """
 
 from __future__ import annotations
@@ -101,24 +84,17 @@ import sys
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
-# DL-72: the shared process-identity helpers live in a sibling stdlib-only
-# module. sys.path[0] is this file's directory when we are run by file path --
-# except under PYTHONSAFEPATH=1, which strips it; prepend it ourselves so the
-# plain top-level import resolves either way (importing dsl41.runner_procid
-# would drag the package __init__, and with it third-party imports, in).
-# Prepend only when it is missing and take it back off again: this file is ALSO
-# imported as an ordinary package module (the engine reads __file__ off it),
-# and a library must not leave its own package directory on the importing
-# process's sys.path -- there it would shadow top-level names
-# (ir, cli, viz, ...) for the whole process. sys.path ends exactly as CPython
-# handed it to us, in both invocation modes.
+# DL-72: the shared process-identity helpers live in a sibling stdlib-only module.
+# sys.path[0] is this file's directory under file-path execution, except with
+# PYTHONSAFEPATH=1, so the directory is prepended when missing and removed again: this
+# file is ALSO imported as a package module (the engine reads __file__ off it), and a
+# library must not leave its directory on sys.path, where it would shadow top-level names
+# (ir, cli, viz, ...). sys.path ends as CPython handed it, in both modes.
 #
-# mypy maps this file's sibling as dsl41.runner_procid and cannot also see it
-# under its top-level name, so the by-path import alone left every helper call
-# below Any-typed -- in a file that kills processes. The TYPE_CHECKING branch
-# names the module mypy already knows; it is erased before the process starts,
-# so the stdlib-only boundary is untouched (the import-graph test reads runtime
-# imports only, and the else branch is what runs).
+# mypy maps the sibling as dsl41.runner_procid and cannot also see it under its top-level
+# name, so the TYPE_CHECKING branch names the module mypy knows and keeps the helper calls
+# typed in a file that kills processes. The else branch is what runs; the import-graph
+# test reads runtime imports only.
 _PROCID_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROCID_DIR_ADDED = _PROCID_DIR not in sys.path
 if _PROCID_DIR_ADDED:
@@ -145,17 +121,14 @@ else:
 if _PROCID_DIR_ADDED:
     sys.path.remove(_PROCID_DIR)
 
-#: how a spawn or a durable record write is allowed to fail (DL-151). OSError
-#: is the expected half. ValueError is the half that got away: an embedded
-#: NUL in a path or in the command makes `os.open`, `subprocess.Popen` and
-#: every `os.path` call raise ValueError, not OSError, so such a spec killed
-#: this process with no `status.json` at all -- the E7 absence this module
-#: exists never to produce. The supervisor now refuses a NUL at the ss2 gate;
-#: this is the recorder's own belt, because the absence of a record is the
-#: one thing it may not answer with.
+#: how a spawn or a durable record write may fail (DL-151). An embedded NUL in a
+#: path or the command makes `os.open`, `subprocess.Popen` and `os.path` raise
+#: ValueError, not OSError; either must still leave a `status.json`, because the
+#: E7 absence is what this module exists never to produce. The supervisor refuses
+#: a NUL at the ss2 gate; this is the recorder's own guard.
 _IO_FAILURE = (OSError, ValueError)
 
-#: pause-point env var; see module docstring (test scaffolding, inert in prod)
+#: pause-point env var (test scaffolding, inert in production)
 PAUSE_ENV = "DSL41_WRAPPER_TEST_PAUSE"
 
 #: the signals the recorder ignores (supervisor-protocol ss4 duty 2, DL-229):
@@ -174,11 +147,9 @@ _RECORDER_IGNORED = (
 # ------------------------------------------------------------------- the shim
 
 
-#: The `status.json` `outcome` vocabulary, frozen in
-#: docs/supervisor-protocol.md ss3 and listed in this module's docstring.
-#: This process WRITES these strings; `runner_adapters.outcome_from_status`
-#: reads the same name rather than repeating the four literals, so a fifth
-#: outcome cannot reach the engine unannounced (DL-209).
+#: the `status.json` `outcome` vocabulary (docs/supervisor-protocol.md ss3). This process
+#: WRITES these strings; `runner_adapters.outcome_from_status` reads the same name, so a
+#: fifth outcome cannot reach the engine unannounced (DL-209).
 WrapperOutcome = Literal["exited", "signaled", "terminated", "spawn_failed"]
 
 
@@ -189,13 +160,11 @@ def _test_pause(point: str) -> None:
 
 
 def _observe_exit(child: subprocess.Popen[bytes]) -> dict[str, Any] | None:
-    """Observe the child's exit WITHOUT reaping (waitid WNOWAIT + WNOHANG);
-    None while it still runs, stopped or continued included. Falling back
-    to waitpid (reap-on-observe) only where waitid is missing -- the
-    observe-to-record hole widens there.
-    Either way ``_reap`` stays safe afterwards: the waitid path leaves a
-    reapable zombie for child.wait(); the waitpid path sets child.returncode
-    so child.wait() returns immediately."""
+    """Observe the child's exit WITHOUT reaping (waitid WNOWAIT + WNOHANG); None while it
+    runs, stopped or continued included. Without waitid it falls back to waitpid
+    (reap-on-observe), where the observe-to-record hole widens. `_reap` is safe
+    afterwards either way: the waitid path leaves a reapable zombie, and the waitpid path
+    sets child.returncode."""
     if hasattr(os, "waitid"):
         try:
             info = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
@@ -204,8 +173,8 @@ def _observe_exit(child: subprocess.Popen[bytes]) -> dict[str, Any] | None:
         if info is None or info.si_pid == 0:
             return None
         if info.si_code in (os.CLD_STOPPED, os.CLD_CONTINUED, os.CLD_TRAPPED):
-            # macOS reports a stopped child here despite WEXITED, with the
-            # stop signal in si_status: the command is alive, not signaled
+            # macOS reports a stopped child here despite WEXITED, with the stop signal in
+            # si_status: the command is alive, not signaled
             return None
         if info.si_code == os.CLD_EXITED:
             return {"outcome": "exited", "exit_code": info.si_status}
@@ -235,11 +204,9 @@ def _drain(fd: int) -> None:
 
 
 def _restore_default_signals() -> None:
-    """Child-side (post-fork pre-exec) reset. The wrapper ignores
-    `_RECORDER_IGNORED` to protect the recorder, but SIG_IGN dispositions are
-    inherited ACROSS exec (and non-interactive sh keeps them for its own
-    children) -- without this reset the command silently ignores the graceful
-    SIGTERM and every kill escalates to SIGKILL (found by the 11b smoke)."""
+    """Child-side (post-fork pre-exec) reset. SIG_IGN dispositions are inherited ACROSS
+    exec (non-interactive sh keeps them for its children), so without this the command
+    would ignore the graceful SIGTERM and every kill would escalate to SIGKILL."""
     for sig in _RECORDER_IGNORED:
         signal.signal(sig, signal.SIG_DFL)
 
@@ -247,9 +214,9 @@ def _restore_default_signals() -> None:
 def _await_exit_after_kill(
     child: subprocess.Popen[bytes], self_pipe_r: int, grace_s: float
 ) -> dict[str, Any]:
-    """SIGTERM the command pgid, wait up to grace_s (waking on SIGCHLD via
-    the self-pipe), then SIGKILL and wait unconditionally (an unkillable
-    zombie-to-be still exits on SIGKILL; D-state is the machine's problem)."""
+    """SIGTERM the command pgid, wait up to grace_s (waking on SIGCHLD via the self-pipe),
+    then SIGKILL and wait unconditionally (an unkillable process still exits on SIGKILL;
+    D-state is the machine's problem)."""
     killpg_quiet(child.pid, signal.SIGTERM)
     deadline = time.monotonic() + grace_s
     while True:
@@ -279,12 +246,11 @@ def _is_wire_int(value: object) -> bool:
 def _spec_refusal(spec: dict[str, Any]) -> str | None:
     """The ss4 step 6 refusal (exit 2, before anything spawns), or None.
 
-    `version` must be the integer 1, so `true` and `1.0` are refused. A
-    present `lifeline_fd` must be an integer, and a present `grace_seconds`
-    a finite number of zero or more; a boolean is neither (DL-229). An
-    integer too large for a float is out of range and refused too. A
-    mistyped value fails here, before `spawn.json` exists, not after it. An
-    absent `lifeline_fd` stays the exit-1 missing key of ss4 step 6."""
+    `version` must be the integer 1 (`true` and `1.0` are refused). A present
+    `lifeline_fd` must be an integer and a present `grace_seconds` a finite number of zero
+    or more; a boolean is neither, and an integer too large for a float is out of range
+    (DL-229). A mistyped value fails before `spawn.json` exists. An absent `lifeline_fd`
+    stays the exit-1 missing key of ss4 step 6."""
     version = spec.get("version")
     if not (_is_wire_int(version) and version == SPOOL_VERSION):
         return f"unsupported spec version {version!r}"
@@ -344,13 +310,11 @@ def main() -> int:
             pass
 
     signal.signal(signal.SIGCHLD, _on_chld)
-    # The handler above runs between bytecodes, not at delivery. A SIGCHLD that
-    # lands after the last check and before the select() syscall starts would
-    # leave the pipe empty and the select asleep while the lifeline stays open.
-    # The wakeup fd makes the C-level handler write the signal number into the
-    # same pipe at delivery, which closes that window. It fires only for a
-    # signal with a Python handler, so `_on_chld` stays; the select loops drain
-    # whatever bytes arrive and never read them.
+    # the handler runs between bytecodes, so a SIGCHLD landing before select() starts
+    # would leave the pipe empty and the select asleep with the lifeline open. The wakeup
+    # fd writes the signal number into the same pipe at delivery, closing that window. It
+    # fires only for a signal with a Python handler, so `_on_chld` stays; the select loops
+    # drain the bytes and never read them.
     signal.set_wakeup_fd(self_pipe_w, warn_on_full_buffer=False)
 
     env = dict(os.environ)
@@ -359,8 +323,7 @@ def main() -> int:
     ).decode("ascii")
 
     def _open_append_0600(path: str):
-        # vendor APPENDS; 0600 at create (job output may carry anything the
-        # command prints -- owner-only by default)
+        # vendor APPENDS; 0600 at create, since job output may carry anything
         return os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "ab")
 
     _test_pause("pre_spawn")
@@ -412,8 +375,8 @@ def main() -> int:
     try:
         durable_write_json(os.path.join(run_dir, "spawn.json"), spawn_record)
     except _IO_FAILURE as exc:
-        # cannot promise observability without the spawn record: kill what we
-        # started, still try to record the outcome, and exit loudly
+        # cannot promise observability without the spawn record: kill what we started,
+        # still try to record the outcome, and exit loudly
         print(f"runner_wrapper: spawn.json write failed: {exc}", file=sys.stderr)
         kill_observed = _await_exit_after_kill(
             child, self_pipe_r, float(spec.get("grace_seconds", 10.0))
