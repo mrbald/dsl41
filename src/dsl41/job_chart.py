@@ -186,71 +186,149 @@ def start_verdict(ctx: Context) -> StartVerdict:
     Reads the payload (`StartAttempt`), the data (`box`, `catalog`), the configuration and the
     item's ancestry (`MAX_NESTED_STARTS`, DL-304). A forced attempt arrives with ice and hold
     cleared by FORCE_STARTJOB's own rows, so it reads neither gate. A decided attempt reads the
-    window alone (`_window_side`).
+    window alone (`_window_side`). Each test is a named condition below; the order of the tests
+    is the precedence, and the lazy facts they read are read in that order (DL-370).
     """
     attempt: StartAttempt = ctx.event.payload
     data: JobData = ctx.data
     active = ctx.active
     if attempt.decided:
-        if attempt.window == "inside" or active & LIVE_OR_QUEUED:
+        if _inside_window(attempt) or _live_or_queued(active):
             return "ignored"
         return _skipped(attempt, active)
-    if attempt.stale or (attempt.rescan and "INACTIVE" not in active):
+    if _superseded(attempt, active):
         return "refused"
     if attempt.rescan or not data.catalog:
         return "ignored"
-    if active & LIVE_OR_QUEUED:
+    if _live_or_queued(active):
         return "refused" if attempt.explicit else "ignored"
     if not attempt.force:
         gated = _gated(attempt, active)
         if gated is not None:
             return gated
-    if attempt.window != "inside":
+    if not _inside_window(attempt):
         return _skipped(attempt, active)
     if _nested_starts(ctx) >= MAX_NESTED_STARTS:
         return "bounded"
     if attempt.settlement_owed:
         return "settle_first"
-    if not data.box and ("noexec_on" in active or attempt.box_noexec):
+    if _bypasses_on_noexec(attempt, active, data.box):
         return "bypass"
-    if attempt.force and "held" in active and "FAILED" in active:
+    if _forced_on_held_units(attempt, active):
         return "on_held"
     return "admit" if attempt.admissible else "queue"
 
 
+def _superseded(attempt: StartAttempt, active: frozenset[str]) -> bool:
+    """A postponed start whose box run has moved on, a scan continuation that a newer one
+    replaced (`stale`), or a scan's timer for a job no longer INACTIVE (`rescan`)."""
+    return attempt.stale or (attempt.rescan and "INACTIVE" not in active)
+
+
+def _live_or_queued(active: frozenset[str]) -> bool:
+    """The configuration's status is STARTING, RUNNING or QUE_WAIT: no start meets it."""
+    return bool(active & LIVE_OR_QUEUED)
+
+
+def _inside_window(attempt: StartAttempt) -> bool:
+    """The job's run window is open now (SEM-33)."""
+    return attempt.window == "inside"
+
+
+def _gate_iced(active: frozenset[str]) -> bool:
+    """The job is ON_ICE (SEM-20)."""
+    return "ice_on" in active
+
+
+def _gate_held(active: frozenset[str]) -> bool:
+    """The job is ON_HOLD (SEM-21)."""
+    return "hold_on" in active
+
+
+def _gate_unarmed_tick(attempt: StartAttempt) -> bool:
+    """A dated job is asked to start by anything but its scheduled tick, with no arm latched
+    (SEM-32, DL-54)."""
+    return attempt.dated and not attempt.scheduled and not attempt.armed
+
+
+def _gate_box_closed(attempt: StartAttempt) -> bool:
+    """The job's box is not RUNNING, or the job already ran in it or was iced out of it
+    (SEM-10, SEM-20)."""
+    return attempt.box in ("idle", "ran", "iced_out")
+
+
+def _gate_condition_false(attempt: StartAttempt) -> bool:
+    """The job has a condition and it does not hold."""
+    return not attempt.condition
+
+
 def _gated(attempt: StartAttempt, active: frozenset[str]) -> StartVerdict | None:
-    """The gates a plain attempt meets, in order; None when all hold."""
-    if "ice_on" in active:
+    """The gates a plain attempt meets, in order, each read only when the ones before it hold;
+    None when all hold."""
+    if _gate_iced(active):
         return "ignored"
-    if "hold_on" in active:
+    if _gate_held(active):
         return _latched(attempt)
-    if attempt.dated and not attempt.scheduled and not attempt.armed:
+    if _gate_unarmed_tick(attempt):
         return "ignored"
-    if attempt.box in ("idle", "ran", "iced_out"):
+    if _gate_box_closed(attempt):
         return "refused" if attempt.explicit else "ignored"
-    if not attempt.condition:
+    if _gate_condition_false(attempt):
         return _latched(attempt)
     return None
 
 
+def _tick_latches(attempt: StartAttempt) -> bool:
+    """A scheduled tick of a dated job latches the arm, unless it is armed already or its
+    box is not RUNNING (`_w_arm`)."""
+    return attempt.scheduled and attempt.dated and not attempt.armed and attempt.box != "idle"
+
+
 def _latched(attempt: StartAttempt) -> StartVerdict:
-    """A releasable gate blocks the attempt: a scheduled tick of a dated job arms, unless
-    armed already or its box is not RUNNING (`_w_arm`)."""
-    if attempt.scheduled and attempt.dated and not attempt.armed and attempt.box != "idle":
-        return "arm"
-    return "ignored"
+    """A releasable gate blocks the attempt: the tick arms, or nothing moves."""
+    return "arm" if _tick_latches(attempt) else "ignored"
+
+
+def _window_postponed(attempt: StartAttempt) -> bool:
+    """The window is not open yet: the start is postponed and moves nothing (DL-246)."""
+    return attempt.window == "defer"
+
+
+def _member_of_running_box(attempt: StartAttempt) -> bool:
+    """The job is a member of a RUNNING box it has not run in, or was iced out of (DL-154)."""
+    return attempt.box in ("running", "iced_out")
+
+
+def _inactive(active: frozenset[str]) -> bool:
+    """The configuration's status is INACTIVE."""
+    return "INACTIVE" in active
+
+
+def _in_no_box(attempt: StartAttempt) -> bool:
+    """The job is a member of no box."""
+    return attempt.box == "none"
+
+
+def _bypasses_on_noexec(attempt: StartAttempt, active: frozenset[str], box: bool) -> bool:
+    """A job that is not a box is ON_NOEXEC, or a box above it is (SEM-22)."""
+    return not box and ("noexec_on" in active or attempt.box_noexec)
+
+
+def _forced_on_held_units(attempt: StartAttempt, active: frozenset[str]) -> bool:
+    """A forced start of a FAILED job whose units are `held` (DL-256)."""
+    return attempt.force and "held" in active and "FAILED" in active
 
 
 def _skipped(attempt: StartAttempt, active: frozenset[str]) -> StartVerdict:
     """Outside the run window: a postponed start moves nothing; a skip moves a completed job
     to INACTIVE, and a member only in a RUNNING box it has not run in (job.107); an INACTIVE
     member of such a box has no move to ride, and its box rules run without one."""
-    if attempt.window == "defer":
+    if _window_postponed(attempt):
         return "ignored"
-    in_run = attempt.box in ("running", "iced_out")
-    if "INACTIVE" in active:
+    in_run = _member_of_running_box(attempt)
+    if _inactive(active):
         return "skip_inactive_member" if in_run else "ignored"
-    if attempt.box == "none":
+    if _in_no_box(attempt):
         return "skip"
     return "skip_member" if in_run else "ignored"
 
@@ -291,12 +369,12 @@ def start_bypasses(ctx: Context) -> bool:
 
 def start_admits_job(ctx: Context) -> bool:
     """`start_verdict` is `admit`, and the data says the job is not a box."""
-    return start_verdict(ctx) == "admit" and not _data(ctx).box
+    return start_verdict(ctx) == "admit" and is_job(ctx)
 
 
 def start_admits_box(ctx: Context) -> bool:
     """`start_verdict` is `admit`, and the data says the job is a box."""
-    return start_verdict(ctx) == "admit" and _data(ctx).box
+    return start_verdict(ctx) == "admit" and is_box(ctx)
 
 
 def start_queues(ctx: Context) -> bool:
@@ -358,14 +436,12 @@ def readmit_cancels(ctx: Context) -> bool:
 def readmit_leaves_armed(ctx: Context) -> bool:
     """`readmit_verdict` is `leave`: the queued recheck failed (DL-257); the payload: the
     waiter is armed."""
-    scan: Readmission = ctx.event.payload
-    return readmit_verdict(ctx) == "leave" and scan.armed
+    return readmit_verdict(ctx) == "leave" and armed(ctx)
 
 
 def readmit_leaves_unarmed(ctx: Context) -> bool:
     """`readmit_verdict` is `leave`; the payload: the waiter is not armed."""
-    scan: Readmission = ctx.event.payload
-    return readmit_verdict(ctx) == "leave" and not scan.armed
+    return readmit_verdict(ctx) == "leave" and unarmed(ctx)
 
 
 def readmit_keeps(ctx: Context) -> bool:
@@ -409,7 +485,7 @@ def admitted_by_start(ctx: Context) -> bool:
 def admitted_by_readmit(ctx: Context) -> bool:
     """The payload that entered ADMITTED is a waiter's `readmit` (job.108), the one other row
     that enters it."""
-    return not isinstance(ctx.event.payload, Admitted)
+    return not admitted_by_start(ctx)
 
 
 # ---- STATUS (SEM-09, DL-13, DL-242, DL-264)
@@ -440,12 +516,12 @@ def injects(ctx: Context) -> bool:
 
 def injects_inactive_job(ctx: Context) -> bool:
     """The payload's status is INACTIVE; the data: a catalog job, not a box."""
-    return _injected(ctx) == "INACTIVE" and _data(ctx).catalog and not _data(ctx).box
+    return injected_inactive(ctx) and in_catalog(ctx) and is_job(ctx)
 
 
 def injects_inactive_box(ctx: Context) -> bool:
     """The payload's status is INACTIVE; the data: a box."""
-    return _injected(ctx) == "INACTIVE" and _data(ctx).box
+    return injected_inactive(ctx) and is_box(ctx)
 
 
 def injects_live(ctx: Context) -> bool:
@@ -489,7 +565,7 @@ def not_live(ctx: Context) -> bool:
 def force_clears(ctx: Context) -> bool:
     """The data: a catalog job; the configuration's status is not live or
     queued (`start_verdict` refuses those first)."""
-    return _data(ctx).catalog and not (ctx.active & LIVE_OR_QUEUED)
+    return in_catalog(ctx) and not_live_or_queued(ctx)
 
 
 def queued(ctx: Context) -> bool:
@@ -500,12 +576,12 @@ def queued(ctx: Context) -> bool:
 def not_live_or_queued(ctx: Context) -> bool:
     """The configuration's status is neither live nor QUE_WAIT: an IDLE status, or the
     transient ADMITTED, which no operator's input meets."""
-    return not (ctx.active & LIVE_OR_QUEUED)
+    return not _live_or_queued(ctx.active)
 
 
 def not_queued(ctx: Context) -> bool:
     """The configuration's status is not QUE_WAIT."""
-    return "QUE_WAIT" not in ctx.active
+    return not queued(ctx)
 
 
 def armed(ctx: Context) -> bool:
@@ -516,8 +592,7 @@ def armed(ctx: Context) -> bool:
 
 def unarmed(ctx: Context) -> bool:
     """The payload: the job's arm is not latched."""
-    arm: Arm = ctx.event.payload
-    return not arm.armed
+    return not armed(ctx)
 
 
 def noexec_own_reason(active: frozenset[str], box: bool) -> str | None:
@@ -551,14 +626,13 @@ def noexec_applies(ctx: Context) -> bool:
 
 def noexec_settles_job(ctx: Context) -> bool:
     """Not `noexec_ignored`; the data: a catalog job, not a box."""
-    data = _data(ctx)
-    return noexec_applies(ctx) and data.catalog and not data.box
+    return noexec_applies(ctx) and in_catalog(ctx) and is_job(ctx)
 
 
 def noexec_settles_box(ctx: Context) -> bool:
     """Not `noexec_ignored`; the data: a box; the configuration's status is not INACTIVE, or
     the payload's `change` holds (`NoexecFacts.change`)."""
-    if not noexec_applies(ctx) or not _data(ctx).box:
+    if not noexec_applies(ctx) or not is_box(ctx):
         return False
     noexec: Noexec = ctx.event.payload
     return "INACTIVE" not in ctx.active or noexec.change
@@ -580,7 +654,7 @@ def is_box(ctx: Context) -> bool:
 
 def is_job(ctx: Context) -> bool:
     """The data says the job is not a box."""
-    return not _data(ctx).box
+    return not is_box(ctx)
 
 
 def is_terminator(ctx: Context) -> bool:
@@ -600,7 +674,7 @@ def in_catalog(ctx: Context) -> bool:
 
 def left_catalog(ctx: Context) -> bool:
     """The data: the job left the catalog (DL-256)."""
-    return not _data(ctx).catalog
+    return not in_catalog(ctx)
 
 
 def current_run(ctx: Context) -> bool:
@@ -627,7 +701,7 @@ _RECOMPUTED: Final = frozenset({"INACTIVE", "QUE_WAIT", "SUCCESS", "FAILURE"})
 def _recomputes(ctx: Context) -> bool:
     """The data: a box; the configuration's status is one the recompute moves from
     (`_RECOMPUTED`); the payload names a verdict that is not that status."""
-    if not (_data(ctx).box and ctx.active & _RECOMPUTED):
+    if not (is_box(ctx) and ctx.active & _RECOMPUTED):
         return False
     verdict: BoxVerdict = ctx.event.payload
     return verdict.target is not None and verdict.target not in ctx.active
@@ -651,17 +725,17 @@ def overrides_failure(ctx: Context) -> bool:
 def recomputes_nothing(ctx: Context) -> bool:
     """The data: a box; not `_recomputes` and not `live_or_terminated_box`: the payload names
     no verdict, the box already has it, or its status is the transient ADMITTED (SEM-15)."""
-    return _data(ctx).box and not _recomputes(ctx) and not live_or_terminated_box(ctx)
+    return is_box(ctx) and not _recomputes(ctx) and not live_or_terminated_box(ctx)
 
 
 def live_or_terminated_box(ctx: Context) -> bool:
     """The data: a box; the configuration's status is STARTING, RUNNING or TERMINATED."""
-    return _data(ctx).box and bool(ctx.active & {"LIVE", "TERMINATED"})
+    return is_box(ctx) and bool(ctx.active & {"LIVE", "TERMINATED"})
 
 
 def _door(ctx: Context, target: str | None) -> bool:
     verdict: Verdict = ctx.event.payload
-    return _data(ctx).box and verdict.target == target
+    return is_box(ctx) and verdict.target == target
 
 
 def verdict_success(ctx: Context) -> bool:
@@ -696,7 +770,7 @@ def derives_failure(ctx: Context) -> bool:
 def terminator_fires(ctx: Context) -> bool:
     """The data: a box; the payload's `fires` (SEM-14)."""
     terminator: Terminator = ctx.event.payload
-    return _data(ctx).box and terminator.fires
+    return is_box(ctx) and terminator.fires
 
 
 # ---- the units (DL-50, DL-120, DL-256)
@@ -710,14 +784,12 @@ def has_demand(ctx: Context) -> bool:
 
 def no_demand(ctx: Context) -> bool:
     """The payload's demand vector reserves nothing: reserving nothing is no move."""
-    admission: Admission = ctx.event.payload
-    return not admission.demand
+    return not has_demand(ctx)
 
 
 def takes_over(ctx: Context) -> bool:
     """The payload: an admitted start that is not on held units."""
-    admission: Admission = ctx.event.payload
-    return not admission.on_held
+    return not on_held_units(ctx)
 
 
 def on_held_units(ctx: Context) -> bool:

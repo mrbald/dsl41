@@ -380,3 +380,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-366 | The status write is the status leaf's entry action: each status leaf of the job chart reports the status it is on entry, the hook writes it with the line the... |  |
 | DL-368 | A rule is written once, at the source the hierarchy gives it: the job chart's per-leaf copies of one rule become one row at the superstate of the statuses it... |  |
 | DL-369 | A chained item names its cause: the job chart's `flag moved` and its `cause` field become two events, `ice moved` and `noexec moved`, each status row that read... |  |
+| DL-370 | A condition the rule reads has a name, and a guard that is another's negation or conjunction is written from it: the job chart's start rule names its gates and... | [docs/statechart-engine.md](statechart-engine.md) |

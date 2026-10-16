@@ -341,9 +341,10 @@ Every attempt to start a job is one `start` on its instance (DL-342): a wake, a 
 retry send it, and STARTJOB, FORCE_STARTJOB and the window timer's replay relay it, through
 `job.177` to `job.179`, FORCE_STARTJOB after its clears. Its payload computes each oracle fact on
 the guards' first read, in the order `start_verdict` tests them, so an attempt computes only the
-facts its verdict reads. The per-job start bound is the internal row `job.100`, guarded on the
-job's own `start admitted` items in the attempt's ancestry (§8); it refuses the start with a
-START_REFUSED line. An attempt whose run's settlement is owed,
+facts its verdict reads. The start rule's precedence is the order of `start_verdict`'s named tests,
+and the lazy facts they read are read in that order (DL-370). The per-job start bound is the
+internal row `job.100`, guarded on the job's own `start admitted` items in the attempt's ancestry
+(§8); it refuses the start with a START_REFUSED line. An attempt whose run's settlement is owed,
 because the box rules held it back, takes the internal row `job.401` past the bound (DL-340): its
 action sends the ended run's `leave STARTING or RUNNING`, then the same attempt again, which reads
 the admission the settlement left (DL-349). An attempt whose window or leave already decided it
