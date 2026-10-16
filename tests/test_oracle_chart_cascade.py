@@ -33,6 +33,7 @@ from dsl41.job_chart_rows import configuration
 from dsl41.oracle import Oracle
 from dsl41.oracle_cascade import OracleCascade
 from dsl41.oracle_facts import RowUnits
+from dsl41.oracle_intents import StatusLine
 from dsl41.oracle_state import CascadeDepthError, Event, EventKind, OracleError
 from dsl41.state_machine import (
     COMPLETION,
@@ -130,6 +131,36 @@ def test_a_fired_row_the_oracle_has_no_write_for_is_a_statechart_error(
     with pytest.raises(StatechartError, match="'j': STATUS fired job.117, and no row") as raised:
         oracle.feed(ev("STATUS", 1, job="j", exit_code=0))
     assert ("instance", "'job:j'") in raised.value.facts
+    assert oracle.store.job["j"].status == "INACTIVE"
+
+
+def test_a_status_entered_with_no_line_or_a_line_with_no_status_is_a_statechart_error() -> None:
+    """A status leaf's entry reports its status, which the hook writes with the line the
+    entering row's writer gives: a status row whose writer gives none, or a writer that gives
+    one for a row that enters no status, raises at its microstep."""
+
+    class Lineless(Oracle):
+        def _w_kill(self, job: str, outcome: Outcome) -> None:
+            """Planted: the kill's TERMINATED has no line."""
+
+    class Stray(Oracle):
+        def _w_hold_on(self, job: str, outcome: Outcome) -> StatusLine:
+            """Planted: a hold gives a status line."""
+            super()._w_hold_on(job, outcome)
+            return StatusLine("stray")
+
+    oracle: Oracle = Lineless(lower_source(_cmd("j")))
+    oracle.feed(ev("STARTJOB", 1, job="j"))
+    lineless = "KILLJOB fired job.114, which entered TERMINATED and whose writers gave 0 status"
+    lineless += " lines"
+    with pytest.raises(StatechartError, match=lineless):
+        oracle.feed(ev("KILLJOB", 2, job="j"))
+    assert oracle.store.job["j"].status == "RUNNING"
+    oracle = Stray(lower_source(_cmd("j")))
+    stray = "ON_HOLD fired job.204, which entered no status and whose writers gave 1 status"
+    stray += " line(?!s)"
+    with pytest.raises(StatechartError, match=stray):
+        oracle.feed(ev("ON_HOLD", 1, job="j"))
     assert oracle.store.job["j"].status == "INACTIVE"
 
 

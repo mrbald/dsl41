@@ -373,7 +373,8 @@ def test_every_guard_and_action_says_what_it_reads() -> None:
     named = {row.guard for row in CHART.rows} | {b.guard for c in CHART.choices for b in c.branches}
     assert named - {""} == set(CHART.guards)
     entries = {state.name: state.entry for state in _states(CHART.root) if state.entry}
-    assert entries == {"ADMITTED": "starts_run"}
+    # each status leaf's entry reports its status write; ADMITTED's sends what precedes STARTING
+    assert entries == {"ADMITTED": "starts_run", **dict.fromkeys(STATUSES, "writes_status")}
     assert not any(state.exit for state in _states(CHART.root))
     actions = {row.action for row in CHART.rows} | {
         b.action for c in CHART.choices for b in c.branches
@@ -381,6 +382,17 @@ def test_every_guard_and_action_says_what_it_reads() -> None:
     assert (actions | set(entries.values())) - {""} == set(CHART.actions)
     for name, function in (*CHART.guards.items(), *CHART.actions.items()):
         assert function.__doc__, name
+
+
+def test_the_initial_entry_writes_no_status() -> None:
+    """An instance started, not restored, enters INACTIVE by the initial entry, whose payload
+    has no handle on the job's units: the status leaf's entry reports nothing then, since the
+    instance starts in the status its row holds."""
+    executor = Executor()
+    executor.start("job:j", CHART, JobData())
+    [outcome] = executor.run()
+    assert (outcome.kind, outcome.intents) == ("started", ())
+    assert executor.active("job:j") == configuration("INACTIVE")
 
 
 def test_every_marked_row_is_unreachable_with_its_reason() -> None:

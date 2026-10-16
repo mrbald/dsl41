@@ -53,7 +53,7 @@ from dsl41.state_machine import COMPLETION, Branch, Choice, Region, Row, State
 type HoldingState = Literal["none", "reserved", "held"]
 
 #: Each status's ancestors inside the `status` region, outermost first.
-_STATUS_PATH: Final[dict[str, tuple[str, ...]]] = {
+_STATUS_PATH: Final[dict[JobStatus, tuple[str, ...]]] = {
     "INACTIVE": ("lifecycle", "IDLE"),
     "SUCCESS": ("lifecycle", "IDLE", "TERMINAL"),
     "FAILURE": ("lifecycle", "IDLE", "TERMINAL", "FAILED"),
@@ -98,12 +98,16 @@ def row_configuration(row: JobRuntime) -> frozenset[str]:
     )
 
 
+def status_of(active: frozenset[str]) -> JobStatus:
+    """The status a configuration stands for: its leaf in the `status` region."""
+    return next(s for s in _STATUS_PATH if s in active)
+
+
 def projection(active: frozenset[str]) -> tuple[str, bool, bool, bool, str]:
     """The row fields a configuration stands for: status, the three flag regions, holding."""
-    status = next(s for s in _STATUS_PATH if s in active)
     holding = next(h for h in ("none", "reserved", "held") if h in active)
     ice, hold, noexec = (f"{name}_on" in active for name in _FLAGS)
-    return status, ice, hold, noexec, holding
+    return status_of(active), ice, hold, noexec, holding
 
 
 # ---- the chart
@@ -127,16 +131,24 @@ def _flag(name: str) -> Region:
     return Region(name, f"{name}_off", (State(f"{name}_off"), State(f"{name}_on")))
 
 
+def _status(name: JobStatus) -> State:
+    """A status leaf. Its entry action reports the status, which the hook writes with the line
+    of the row that entered it (statechart-engine §11)."""
+    return State(name, entry="writes_status")
+
+
 _FAILED: Final = State(
-    "FAILED", regions=(Region("failed", "FAILURE", (State("FAILURE"), State("TERMINATED"))),)
+    "FAILED", regions=(Region("failed", "FAILURE", (_status("FAILURE"), _status("TERMINATED"))),)
 )
 _TERMINAL: Final = State(
-    "TERMINAL", regions=(Region("terminal", "SUCCESS", (State("SUCCESS"), _FAILED)),)
+    "TERMINAL", regions=(Region("terminal", "SUCCESS", (_status("SUCCESS"), _FAILED)),)
 )
-_IDLE: Final = State("IDLE", regions=(Region("idle", "INACTIVE", (State("INACTIVE"), _TERMINAL)),))
+_IDLE: Final = State(
+    "IDLE", regions=(Region("idle", "INACTIVE", (_status("INACTIVE"), _TERMINAL)),)
+)
 _LIVE: Final = State(
     "LIVE",
-    regions=(Region("live", "STARTING", (State("STARTING"), State("RUNNING"))),),
+    regions=(Region("live", "STARTING", (_status("STARTING"), _status("RUNNING"))),),
 )
 #: An admitted start between its admission and its STARTING (DL-350, DL-364): transient. Its
 #: entry action sends the units, the run's start and a box's resets; its completion moves to
@@ -144,7 +156,8 @@ _LIVE: Final = State(
 _ADMITTED: Final = State("ADMITTED", entry="starts_run")
 #: Every status; the source of the rows that apply to all of them.
 _LIFECYCLE: Final = State(
-    "lifecycle", regions=(Region("status", "IDLE", (_IDLE, State("QUE_WAIT"), _LIVE, _ADMITTED)),)
+    "lifecycle",
+    regions=(Region("status", "IDLE", (_IDLE, _status("QUE_WAIT"), _LIVE, _ADMITTED)),),
 )
 ROOT: Final = State(
     "job",

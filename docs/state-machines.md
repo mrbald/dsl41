@@ -352,16 +352,16 @@ stateDiagram-v2
 | job |  |  |  |  |  |
 | lifecycle | job/status |  |  |  |  |
 | IDLE | lifecycle/status |  |  |  |  |
-| INACTIVE | IDLE/idle |  |  |  |  |
+| INACTIVE | IDLE/idle | writes_status |  |  |  |
 | TERMINAL | IDLE/idle |  |  |  |  |
-| SUCCESS | TERMINAL/terminal |  |  |  |  |
+| SUCCESS | TERMINAL/terminal | writes_status |  |  |  |
 | FAILED | TERMINAL/terminal |  |  |  |  |
-| FAILURE | FAILED/failed |  |  |  |  |
-| TERMINATED | FAILED/failed |  |  |  |  |
-| QUE_WAIT | lifecycle/status |  |  |  |  |
+| FAILURE | FAILED/failed | writes_status |  |  |  |
+| TERMINATED | FAILED/failed | writes_status |  |  |  |
+| QUE_WAIT | lifecycle/status | writes_status |  |  |  |
 | LIVE | lifecycle/status |  |  |  |  |
-| STARTING | LIVE/live |  |  |  |  |
-| RUNNING | LIVE/live |  |  |  |  |
+| STARTING | LIVE/live | writes_status |  |  |  |
+| RUNNING | LIVE/live | writes_status |  |  |  |
 | ADMITTED | lifecycle/status | starts_run |  |  |  |
 | flags | job/flags |  |  |  |  |
 | ice_off | flags/ice |  |  |  |  |
@@ -462,6 +462,7 @@ stateDiagram-v2
 | admit | action | A readmitted waiter (job.108) enters ADMITTED with its `readmit`, whose entry sends its extent: no `start admitted`, since a readmission is no start the bound counts (DL-350). The scan's pass hears that the waiter moved, as the tier's handle says. |
 | settle_ended_run | action | A start meets the units of a run whose settlement is still owed (`OracleCascade._on_settles_first`): that run settles first, by the end it made, then the start is admitted again against what the settlement left. The settlement's policy is read from the admission's handle (DL-349). Its row, job.312, is marked unreachable: job.401 settles the run before the start is admitted, so the oracle's admission carries no previous end. |
 | settles_first | action | An attempt whose run's settlement is owed (job.401, DL-340): that run settles by the end it made, and the same attempt is made again, so it reads the admission the settlement leaves, as the tier's handle says. |
+| writes_status | action | A status leaf's entry: the status it is, which the hook writes with the line of the row that entered it, as the tier's handle says. The initial entry writes nothing: an instance starts in the status its row holds. |
 | moved | action | A status move on its own (`OracleCascade._after`): the move's box rules, then its settlement, then its wakes, as the tier's handle says (DL-350). |
 | terminated | action | A kill: as `moved`, then a box's job_terminators, for the run read before the move (DL-348). |
 | completed | action | A RUNNING box's end by an override or the default fold: as `moved`, then its job_terminators if it ended FAILURE, for the run it has then (`OracleCascade._box_ends`, DL-348). |
