@@ -978,7 +978,7 @@ Dedicated venv, pinned version, `[ui]` extra only where humans look.
 Set the pin and the profile first:
 
 ```sh
-ver=1.9.0
+ver=1.10.0
 profile=ui                                            # headless host: profile=base
 ```
 
