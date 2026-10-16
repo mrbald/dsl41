@@ -23921,3 +23921,51 @@ relitigate an entry; append a new one.
   to their new rows' (job.136, job.169 and job.170 to job.452: 2,357; job.198's ice cases to
   job.451: 34,642); four lows fixed and confirmed by it (`change` kept on first read, a mutant
   test's docstring, a cell test for the job.453 tripwire, a wrapped comment).
+- DL-370 A condition the rule reads has a name, and a guard that is another's negation or
+  conjunction is written from it: the job chart's start rule names its gates and its window
+  cases, and each pair and each box or job conjunct of the guards has one body
+  (2026-10-16; src/dsl41/job_chart.py; docs/statechart-engine.md §11)
+  THE AIM. Step 9 of the job chart simplification (R9: what survives of the declined step 4).
+  The start rule stays one ordered function. No row, event, action, writer or engine changes, no
+  guard name changes, no golden and no trace line.
+  THE RULE. A condition the rule code reads has a name and a docstring. A guard that is the
+  negation of another is `not` of it; a guard that is a conjunction of two calls them, in the
+  order the code tested them, so a lazy fact the second reads is read only when the first holds
+  (the tree's short-circuit is observable). A box clause or a job clause is written once, in
+  `is_box` and `is_job`. The guard column still names one function (no expression language).
+  The start rule's precedence is the order of `start_verdict`'s named tests, and the lazy facts
+  they read are read in that order (docs/statechart-engine.md §11).
+  WHAT WAS NAMED. In `start_verdict`: `_superseded`, `_live_or_queued`, `_inside_window`,
+  `_bypasses_on_noexec`, `_forced_on_held_units`. The gates of a plain attempt, one predicate
+  each, tested in order by the one function `_gated`: `_gate_iced`, `_gate_held`,
+  `_gate_unarmed_tick` (a dated job asked by anything but its tick, with no arm),
+  `_gate_box_closed`, `_gate_condition_false`. `_tick_latches` is the test of `_latched`. The
+  window cases of `_skipped`: `_window_postponed`, `_member_of_running_box`, `_inactive`,
+  `_in_no_box`. The predicates on the attempt and the configuration are private; the guards of
+  the registry take a context.
+  THE PAIRS. Each negation is written from its pair: `is_job`, `left_catalog`, `not_queued`,
+  `unarmed`, `no_demand`, `takes_over`, `admitted_by_readmit`, `not_live_or_queued` (with
+  `noexec_applies`, which already was). Each one-line body calls the pair's predicate.
+  THE CONJUNCTS. A guard whose body was `_data(ctx).box and X` calls `is_box(ctx) and X`, and
+  one that was `not _data(ctx).box` or a catalog test calls `is_job` or `in_catalog`:
+  `start_admits_job`, `start_admits_box`, `injects_inactive_job`, `injects_inactive_box`,
+  `force_clears`, `noexec_settles_job`, `noexec_settles_box`, `recomputes_nothing`,
+  `live_or_terminated_box`, `terminator_fires`, `readmit_leaves_armed`,
+  `readmit_leaves_unarmed`, and the box tests of `_recomputes` and `_door`. No guard is built by
+  a helper: each is a function with its own name in a traceback.
+  CHECKS. The registry has 73 guards, as before. The job chart has 147 rows, as before; the
+  transition gate holds 317 of 317 required items of `job` and forbids 28, as before. The golden
+  replay: 4,060 runs, 152,213 entries, 0 differing. Line and branch coverage 100. No test
+  changes; docs/state-machines.md renders equal.
+  THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235): no accepted input derives differently,
+  and the goldens replay equal.
+  REVIEW. Multi-file, no behaviour change: one Opus reviewer. No blocker, no major; a
+  differential over all 73 guards and the two verdict functions on 90,000 random fact vectors
+  each matched HEAD in every result and in the order of first fact reads; the golden replay
+  re-run by the reviewer, 0 differing. Three minors and three nits, each fixed and confirmed by
+  it: the gate order was written twice (now one `_gated` built from the named gates); two guard
+  combinators that set function names and docstrings by hand were replaced by one-line
+  definitions that call the shared predicate, and the single-use predicates they forced folded
+  back into the parametrised helpers (the file grew by the named conditions alone); the private
+  predicates took an underscore and two near-identical names were parted; one docstring order;
+  one reflowed line of §11.
