@@ -2,10 +2,11 @@
 
 A row of the `job` chart that sends beyond its own move carries one of these payloads, and an
 item the hook cannot derive from its row and its payload reports an intent, which the hook
-applies after the row's writes (`oracle.Oracle._perform`). `Move` is one status move's record,
-shared by its box rules, its settlement and its wakes. `Program`, `Once` and `Settle` are a
-moment's payload: a self-event whose next step the oracle reads when it pops
-(`oracle_cascade`).
+applies after the row's writes (`oracle.Oracle._perform`). A status leaf's entry reports
+`Entered`, which the hook writes with its row's `StatusLine` before the other intents. `Move`
+is one status move's record, shared by its box rules, its settlement and its wakes. `Program`,
+`Once` and `Settle` are a moment's payload: a self-event whose next step the oracle reads when
+it pops (`oracle_cascade`).
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from dsl41.capacity import DemandEntry
 from dsl41.ir import JobIR
 from dsl41.job_chart_events import SETTLE, Admission, Injection, Payload, Terminator
 from dsl41.oracle_facts import RowUnits
-from dsl41.oracle_state import LIVE
+from dsl41.oracle_state import LIVE, JobStatus
 from dsl41.state_machine import Context, Effects
 from dsl41.state_machine import Event as ChartEvent
 
@@ -31,9 +32,28 @@ type Send = tuple[Hashable, ChartEvent]
 
 
 class Intent(Protocol):
-    """A write the hook performs after the microstep's row writes."""
+    """A write the hook performs after the microstep's row writes and its status write."""
 
     def apply(self, oracle: OracleCascade) -> None: ...
+
+
+@dataclass(frozen=True)
+class Entered:
+    """The status a status leaf's entry reports (`writes_status`): the hook writes it, with the
+    line of the row that entered it, after the rows' writes and before the intents
+    (`OracleWriters._write_rows`), so a move's record reads the status written."""
+
+    status: JobStatus
+
+
+@dataclass(frozen=True)
+class StatusLine:
+    """What the writer of a row that enters a status gives its status write: the trace line's
+    cause, the exit code the write records, and whether the write clears the exit code."""
+
+    cause: str
+    code: int | None = None
+    clear: bool = False
 
 
 class Move:

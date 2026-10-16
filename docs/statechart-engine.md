@@ -242,11 +242,12 @@ change is a moment that sends its next item and then itself again; the gate is r
 A row whose own write must follow its chained items targets a transient state. An admitted start
 enters `ADMITTED` from its `start admitted`, and a readmission from its own row. The state's entry
 action sends the units, the run's start and a box's resets; its completion moves the job to
-STARTING after their cascades and sends the rest of the start (DL-364). The per-job start bound
-(DL-304) is `job.100`, guarded on the count of the job's own `start admitted` items in the item's
-ancestry. The completion descends from `start admitted`, so every later step of the start counts
-it. A readmission enters `ADMITTED` without `start admitted`, so the bound does not count it. The
-cascade takes no Python frame per nested start, so it fits no recursion
+STARTING after their cascades and sends the rest of the start (DL-364). Each status leaf's entry
+action reports the status write, which the hook performs with the entering row's line (§11). The
+per-job start bound (DL-304) is `job.100`, guarded on the count of the job's own `start admitted`
+items in the item's ancestry. The completion descends from `start admitted`, so every later step of
+the start counts it. A readmission enters `ADMITTED` without `start admitted`, so the bound does not
+count it. The cascade takes no Python frame per nested start, so it fits no recursion
 limit to the job count: only a fact's own recursion, such as a deep condition, needs the stack, and
 each construction raises the process's limit to a fixed 3,000, so the deepest condition the
 lowering accepts evaluates. A cascade that does not end takes items instead. The oracle's hook
@@ -318,16 +319,23 @@ The chart decides every move. A row's action takes the items it sends beyond its
 tier's handle on its payload (`Units.consequences`), as a guard takes its facts: the chart declares
 which rows send and when, and the oracle computes each send list and its audience as the row runs.
 The chart has no send list of its own: such a row that meets a payload with no handle is a
-statechart error (DL-356). The oracle's hook (§5 step 5) writes what each microstep's fired rows
-reached, with the store's verbs, in the order the rows fired (`oracle_writers`). The status written
-is the one the chart reached; the golden digests judge a wrong row (§16). A fired row the hook has
-no write for is a statechart error. Three checks are statechart errors: the job type behind a row
-that takes a job's or a box's path, checked before the write; at each macrostep's end and at the
-input's commit, every job the input reached has its row project to its instance's configuration;
-and, after each microstep's writes, the job's arm is the one its fired rows declare (below). The
-store's verb decides a settlement's holding move from the units; a settlement row that holds another
-state than the verb wrote fails the second check. No code outside the chart moves a job row, so no
-instance is brought back to its row.
+statechart error (DL-356). The oracle's hook (§5 step 5) writes what each microstep reached, with
+the store's verbs (`oracle_writers`). The status write is the status leaf's entry action
+(`writes_status`): it reports the status it is, and the initial entry reports nothing, since an
+instance starts in the status its row holds. The row's writer holds the row's own writes. The hook
+runs the fired rows' writers in the order the rows fired. A row that enters a status gives the line
+of its status write: the cause, the exit code the write records, and whether it clears the exit
+code. The hook then writes the status the entry reported with that line, then applies the intents
+the actions reported, which read the status written. A row's extras, such as a dequeue or an arm's
+line, precede its status line. The status written is the one the chart reached; the golden digests
+judge a wrong row (§16). A fired row the hook has no write for is a statechart error, and so is a
+status entered with no line or a line with no status entered. Three checks are statechart errors:
+the job type behind a row that takes a job's or a box's path, checked before the write; at each
+macrostep's end and at the input's commit, every job the input reached has its row project to its
+instance's configuration; and, after each microstep's writes, the job's arm is the one its fired
+rows declare (below). The store's verb decides a settlement's holding move from the units; a
+settlement row that holds another state than the verb wrote fails the second check. No code outside
+the chart moves a job row, so no instance is brought back to its row.
 
 Every attempt to start a job is one `start` on its instance (DL-342): a wake, a box start and a
 retry send it, and STARTJOB, FORCE_STARTJOB and the window timer's replay relay it, through
@@ -620,9 +628,9 @@ on the jobs it contains (DL-347), and the cascade itself, on the executor's work
 `Oracle` in `src/dsl41/oracle.py` is the one oracle, built in layers, one module each:
 `oracle_reads.py` (the store, the trace and the reads), `oracle_schedule.py` (the clock's reads and
 the timers), `oracle_cascade.py` (the cascade's moments), `oracle_writers.py` (each fired row's
-writes) and `oracle.py` (the inputs, the hook and the checks), with the payloads in
-`oracle_facts.py` and `oracle_intents.py`. The engine, every replay, preflight and equiv build it
-(DL-351). The golden digests (`tests/oracle_goldens.py`, over the inputs in
+writes and the status writes) and `oracle.py` (the inputs, the hook and the checks), with the
+payloads in `oracle_facts.py` and `oracle_intents.py`. The engine, every replay, preflight and
+equiv build it (DL-351). The golden digests (`tests/oracle_goldens.py`, over the inputs in
 `tests/oracle_inputs.py`) hold the answers of the decision code the chart replaced, over the sample
 of the old-versus-new harness (DL-338). The code and the harness are deleted (DL-352). The oracle
 reproduces the digests; a golden that changes is a DL-235 decision. The job has no transition table,

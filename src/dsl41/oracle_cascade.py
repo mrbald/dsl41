@@ -97,6 +97,7 @@ from dsl41.job_chart_events import (
     JobData,
     Settlement,
 )
+from dsl41.job_chart_rows import status_of
 from dsl41.oracle_facts import (
     FoldFacts,
     OverrideFacts,
@@ -112,6 +113,7 @@ from dsl41.oracle_intents import (
     ClearCodes,
     ClosePass,
     DeferToOpening,
+    Entered,
     Intent,
     MemberEnd,
     Move,
@@ -157,6 +159,7 @@ _HANDLERS: Final[Mapping[str, str]] = {
     "starting_readmitted": "_on_starting_readmitted",
     "admit": "_on_admit",
     "settles_first": "_on_settles_first",
+    "writes_status": "_on_writes_status",
     "skips_in_box": "_on_skips_in_box",
     "cascades": "_on_cascades",
     "batched": "_on_batched",
@@ -509,6 +512,10 @@ class OracleCascade(OracleSchedule):
             send=(self._to(job, LEAVE_LIVE, settlement), self._to(job, START, attempt.settled())),
             intents=(SettledEarly(late),),
         )
+
+    def _on_writes_status(self, job: str, ctx: Context) -> Effects:
+        """A status leaf's entry: the status the job entered, which the hook writes."""
+        return Effects(intents=(Entered(status_of(ctx.active)),))
 
     def _on_skips_in_box(self, job: str, ctx: Context) -> Effects:
         """job.404: a window skip of a member already INACTIVE: its box

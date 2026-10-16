@@ -248,7 +248,7 @@ from dsl41.job_chart_events import (
 )
 from dsl41.job_chart_rows import row_configuration
 from dsl41.oracle_facts import NoexecFacts, RowUnits, StartFacts, job_data
-from dsl41.oracle_intents import Armed, Intent, Program, StatusInput
+from dsl41.oracle_intents import Armed, Entered, Intent, Program, StatusInput
 from dsl41.oracle_schedule import DEFERRED_RESCAN_KEY, DEFERRED_TIMER_KEY
 from dsl41.oracle_state import (
     INJECTABLE_STATUSES,
@@ -680,8 +680,9 @@ class Oracle(OracleWriters):
 
     def _perform(self, outcome: Outcome) -> None:
         """The executor's hook (statechart-engine section 5): each fired row's writes in firing
-        order within the microstep, then the intents its actions reported. A fired row with no
-        write here is a statechart error. The item that reaches the cap ends the dispatch."""
+        order within the microstep, the status its entry reported, then the other intents its
+        actions reported. A fired row with no write here is a statechart error. The item that
+        reaches the cap ends the dispatch."""
 
         self._items += 1
         if self._items >= self._cap:
@@ -692,4 +693,5 @@ class Oracle(OracleWriters):
         self._reached.add(key)
         self._write_rows(key.partition(":")[2], outcome)
         for intent in outcome.intents:
-            cast(Intent, intent).apply(self)
+            if not isinstance(intent, Entered):
+                cast(Intent, intent).apply(self)

@@ -23708,3 +23708,71 @@ relitigate an entry; append a new one.
   missed arm write lands in the sealed row, so no stated limit covers it); one medium and two lows
   fixed and confirmed by it (§11 states the three checks; the arm rows' writers and sets are bound
   by id and a test pins the sets; this entry's file list).
+- DL-366 The status write is the status leaf's entry action: each status leaf of the job chart
+  reports the status it is on entry, the hook writes it with the line the entering row's writer
+  gives, and the row's writer keeps the row's own writes (2026-10-16; src/dsl41/job_chart.py,
+  src/dsl41/job_chart_rows.py, src/dsl41/oracle.py, src/dsl41/oracle_cascade.py,
+  src/dsl41/oracle_intents.py, src/dsl41/oracle_writers.py; tests/test_job_chart.py,
+  tests/test_oracle_chart_cascade.py; docs/statechart-engine.md §8, §11, §16;
+  docs/state-machines.md; docs/decision-index.md)
+  THE AIM. Step 3 of the job chart simplification. "On entering STARTING, write STARTING" is the
+  state's, not a table's keyed by row id. No outcome of the oracle changes: no golden, no trace
+  line, no STATUS emission, no order.
+  THE RULE. A status is written by its leaf's entry action. The seven status leaves, INACTIVE,
+  SUCCESS, FAILURE, TERMINATED, QUE_WAIT, STARTING and RUNNING, declare one entry action,
+  `writes_status`. It asks the tier's handle (`Units.consequences`, DL-356), whose handler
+  `_on_writes_status` reports `Entered`, the status the leaf is, read from the configuration
+  (`status_of`). One action for all seven, not one per leaf: the declaration then says once what
+  every status leaf does, and the status is the leaf's own name in the configuration, so a
+  per-leaf action would only repeat it. The initial entry reports nothing: an instance starts in
+  the status its row holds, and its payload has no handle. A restored instance runs no action.
+  ADMITTED keeps `starts_run` (DL-364); it is no status, so nothing writes it.
+  THE LINE. The status line's facts are the row's, not the payload's. The row's writer gives them
+  as a `StatusLine`: the cause, the exit code the write records (the injected STATUS rows,
+  job.117 to job.120, job.135, and job.119's branches job.171 to job.176), and whether the write
+  clears the exit code (ON_NOEXEC's settlements, a box start's reset, a box set INACTIVE). A
+  protocol on every payload that enters a status cannot carry them: job.113 and job.121 share
+  the event `flag moved`, its payload, the guard `noexec_settles_job`, the action `injected` and
+  the target INACTIVE, and name different causes ("ON_NOEXEC takes a queued job out of the queue
+  (DL-254)", "ON_NOEXEC settles a completed job to INACTIVE (DL-243)"). Only their source tells
+  them apart, and it has exited when the entry runs. KILLJOB on LIVE (job.114) and on QUE_WAIT
+  (job.436, job.437) is the same case. A payload that carried the line would need the oracle to
+  predict the row the chart takes.
+  THE ORDER. The hook runs the fired rows' writers in firing order, ON_NOEXEC's hold rows after
+  its flag's as before. Then it writes the status the entry reported, with the line its row
+  gave: the store's `transition`, the `old->new` trace line and the STATUS emission. Then it
+  applies the other intents, so a move's record (`Move`) reads the status written, as before.
+  Each writer's extras, a dequeue, an enqueue, a rank's drop, a resolution mark, the arm and
+  its SCHED_DISARM line, a skip line, preceded its status line before and still do. No
+  microstep fires a row that enters a status beside a row of another region whose writer
+  writes: the only such sibling is job.319 on STATUS, which writes nothing. So every trace
+  line keeps its position. The arm check (DL-365) runs after the status write, as it ran after
+  every write.
+  THE WRITERS. `_WRITERS` keeps its 157 entries over 59 writer methods, none removed, renamed
+  or added. 26 writers return their row's line instead of writing the status, `_w_left_armed`
+  among them with `_w_left`'s. No row's writer became `_w_nothing`, since every row that enters a
+  status names its own cause. `_write` takes the status from the entry and the facts from the
+  line; `_status_reached` stays for the override's line, which names the status reached. The
+  table is still keyed by row id because the cause is the row's: the next step puts the cause on
+  the row itself, in the declaration, and leaves the table the per-row extras alone.
+  THE CHECK. A microstep whose entries report a status with no line from its writers, or whose
+  writers give a line with no status entered, is a statechart error naming the job, the event,
+  the rows, the statuses entered and the lines given. Two planted writers raise it: a kill's
+  writer that gives no line (job.114) and a hold's writer that gives one (job.204).
+  ITEMS. None changes: the entry action reports an intent, not an item.
+  CHECKS. The job chart's rows are unchanged (175); the transition gate holds 386 of 386
+  required items of `job`. A test pins the entry action on the seven leaves beside ADMITTED's,
+  and a test pins that the initial entry reports nothing. The golden replay: 4,060 runs,
+  152,213 entries, 0 differing. Branch coverage 100.
+  THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235): no accepted input derives differently,
+  and the goldens replay equal.
+  REVIEW. Semantic class (§8 and §11 of a frozen contract, the writer binding of DL-353). One
+  Codex Astra pass (gpt-6-astra, xhigh): none found in five probes (the order of a writer's
+  extras, the status line, the STATUS emission and the move's record; the initial, restored,
+  forked and period-rebuilt paths; the two checks against internal, ignored and choice rows; a
+  payload with no handle), each on a constructed input; a static audit found 48 rows that enter
+  a status, each with a line. One Opus reviewer: no finding above nit; a differential run of HEAD
+  against the tree over 790 runs and 83,820 entries outside the goldens' sample showed no
+  difference; four nits fixed and confirmed by it (two wrapped lines, a plural in the check's
+  message, this entry's file list). Both named the seam for the next step: the line's cause
+  moves beside the row, the destination stays the leaf's.

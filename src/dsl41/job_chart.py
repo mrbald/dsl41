@@ -2,7 +2,8 @@
 (docs/statechart-engine.md §11, DL-337), registered in `machines.MACHINES`.
 
 The oracle (`oracle`, DL-341) drives it for every input and its whole cascade (DL-350) and
-writes what each fired row reached.
+writes what each fired row reached. Each status leaf's entry action (`writes_status`) reports
+the status it is; the oracle's hook writes it with the line of the row that entered it.
 
 Shape. The root `job` has three orthogonal regions: `status`, `flags` and `holding`. `status`
 holds `lifecycle`, the superstate of every status, and inside it the sets the rules name:
@@ -117,7 +118,7 @@ from dsl41.job_chart_events import (
 )
 from dsl41.job_chart_rows import CHOICES, ROOT, ROWS
 from dsl41.oracle_state import LIVE, LIVE_OR_QUEUED
-from dsl41.state_machine import Context, Effects, Event, Statechart, StatechartError
+from dsl41.state_machine import INITIAL, Context, Effects, Event, Statechart, StatechartError
 
 #: DL-304: how many admitted starts of a job the ancestry of an attempt of it may hold
 #: (job.100). A start's own cascade may start the job once more: a box start's window pass can
@@ -932,6 +933,15 @@ def settles_first(ctx: Context) -> Effects | None:
     return _consequences(ctx, "settles_first")
 
 
+def writes_status(ctx: Context) -> Effects | None:
+    """A status leaf's entry: the status it is, which the hook writes with the line of the row
+    that entered it, as the tier's handle says. The initial entry writes nothing: an instance
+    starts in the status its row holds."""
+    if ctx.event.name == INITIAL:
+        return None
+    return _consequences(ctx, "writes_status")
+
+
 def moved(ctx: Context) -> Effects | None:
     """A status move on its own (`OracleCascade._after`): the
     move's box rules, then its settlement, then its wakes, as the tier's
@@ -1075,6 +1085,7 @@ ACTIONS: Final = {
         admit,
         settle_ended_run,
         settles_first,
+        writes_status,
         moved,
         terminated,
         completed,
