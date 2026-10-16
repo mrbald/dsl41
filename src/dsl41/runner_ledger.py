@@ -1,39 +1,23 @@
 """Leadership over one run root (concurrency-model ss1/ss7, stage S6a).
 
-Three of ss1's five ledger capabilities live here: monotone epoch
-allocation, the linearizable read of the leader record that allocation
-depends on, and the mutex both rest on. The other two landed with S2 --
-decision lookup by `request_id` is the `DecisionIndex`, and atomic
-multi-record commit is the one-line attempt record.
+Three of ss1's five ledger capabilities live here: monotone epoch allocation, the
+linearizable read of the leader record, and the mutex both rest on. The other two landed with S2: decision lookup by
+`request_id` is the `DecisionIndex`; atomic multi-record commit is the one-line attempt record.
 
-**The mutex is an `flock` held for the process lifetime.** Not a lease: it
-has no expiry to renew, because the kernel releases it when the holder
-dies, `kill -9` included. That is what the control socket's connect probe
-was approximating and getting wrong in both directions -- an engine wedged
-past its 200ms timeout loses its socket to a second engine, and a socket
-left behind by a crash has to be unlinked on a guess. Nothing here has to
-decide whether the previous holder is alive.
+The mutex is an `flock` held for the process lifetime. It is not a lease: the kernel releases
+it when the holder dies, `kill -9` included, so nothing decides whether the previous holder is
+alive. It is taken before the log is read and before the first side effect (`resume_run`
+replays, reconciles, re-drives recorded kills and appends), because a mutex taken after an act
+on the estate is not a mutex (DL-99).
 
-**It is taken before the log is read, not after.** Reading first would let
-another process append between the read and the acquire, so the epoch this
-one allocates would be one the log already used. More importantly it is
-taken before the first side effect: `resume_run` replays, reconciles,
-re-drives recorded kills and appends, and every one of those is an act on
-the estate. A mutex taken after them is not a mutex (DL-99).
+The leader record lives in the ledger: the epoch is allocated by appending it, so the
+allocation and the log's account of it cannot disagree. The lock file carries the holder's
+identity so a refusal can name it; the note is diagnostic, never the fence, because a note can
+be stale and a held lock cannot.
 
-**The leader record lives in the ledger,** for ss1's own reason about the
-outbox: the epoch is allocated BY appending it, so the allocation and the
-log's account of it cannot disagree, and no crash leaves one without the
-other. The lock file carries the holder's identity so a refusal can name
-who holds it -- diagnostics, never the fence, because a note can be stale
-and a held lock cannot.
-
-**Where this stops.** ss1 asks for a Postgres-class store and says
-"whatever provides it": a flock'd file with fsync provides all three rows
-for ONE host and none of them across hosts. It is not a linearizable
-leader record for a second machine, and on NFS it is not one at all. The
-relay DL-97 deferred still waits on that store; what it gets from here is
-a fencing token that moves.
+Limit: a flock'd file with fsync provides the three rows for one host and none across hosts,
+and on NFS it provides none. The relay DL-97 defers waits on a Postgres-class store; this module
+gives it a fencing token that moves.
 """
 
 from __future__ import annotations
@@ -54,136 +38,85 @@ from dsl41.period import catalog_hash_for
 from dsl41.runner_procid import LockHeld, flock_exclusive, mkdir_durable
 from dsl41.runner_clock import EngineError
 
-#: ss7 ledger header, the half `catalog_hash` does not cover: the version of
-#: the state machine that derives oracle state from inputs. Leader
-#: eligibility requires an exact match, because mixed builds derive
-#: different revisions from identical inputs and nothing downstream can
-#: detect the disagreement -- a SPAWN spec is a resolved literal command
-#: string and the supervisor holds no job definitions.
+#: ss7 ledger header, the half `catalog_hash` does not cover: the version of the state
+#: machine that derives oracle state from inputs. Leader eligibility requires an exact match,
+#: because mixed builds derive different revisions from identical inputs and nothing
+#: downstream detects it: a SPAWN spec is a resolved literal command and the supervisor holds
+#: no job definitions.
 #:
-#: BUMP IT when a change makes this build derive different state from an
-#: identical log: oracle transitions, condition evaluation, timer ordering,
-#: the ss3 projection. Do NOT bump it for anything a replay cannot see. It
-#: is deliberately not `dsl41_version`, which moves for a docs typo --
-#: refusing to resume a live estate after a patch release would be an outage
-#: manufactured by bookkeeping.
-#: 2 since DL-235: the ss4 stale-completion gate rejects a non-live row, so
-#: an undecided crash-window completion recovers differently from v1.
-#: 3 since DL-241: term_run_time 0 arms no timer, so a replay with such a
-#: job keeps the run live where v2 terminated it.
-#: 4 since DL-242: box start resets member statuses, operator INACTIVE
-#: resolves and cascades, so a replay with a second box run or an injected
-#: INACTIVE derives different state.
-#: 5 since DL-243: ON_ICE/ON_NOEXEC condition reads and FORCE_STARTJOB on a
-#: non-live ON_ICE/ON_HOLD job derive different state from an identical log.
-#: 6 since DL-244: a holcal weekday date now reaches the non_workday
-#: action, and WORKDAYS now excludes it, so autocal's compiled day sets
-#: (which `classify`/`semantic_key` feed) can differ -- `attest` re-derives
-#: a boundary's classification from the sealed catalogs, so a v5 boundary
-#: can carry/refuse/assume a job differently under v6.
-#: 7 since DL-246: a box start decides a run_window member's disposition and
-#: a standalone window skip moves a prior result to INACTIVE.
-#: 8 since DL-247: an unset or zero priority and a forced start skip the
-#: machine-load check but hold their load, a load waiter blocks lower
-#: priorities on its machine, and more transitions wake the queue, so a
-#: replay with load demand or with queued jobs can derive different state.
-#: 9 since DL-248: the schedule tick arms the relative must_complete deadline
-#: and its timer carries the tick's run, so a replay alarms differently.
-#: 10 since DL-249: run_window endpoints follow the vendor's DST rules, so a
-#: replay with a window check near a DST change can decide differently.
-#: 11 since DL-253: absolute must times arm alarms, and must_start arms one
-#: deadline at a time, so a replay alarms differently.
-#: 12 since DL-254: ON_ICE, ON_HOLD and ON_NOEXEC sent to a live (or, for
-#: ON_NOEXEC, iced) job are ignored, so a replay with such an event sets no
-#: flag where v11 set one.
-#: 13 since DL-255: a job waiting on a named resource blocks lower
-#: priorities that name it, and a start or enqueue that takes machine load
-#: owes a queue scan, so a replay with resource waiters admits differently.
-#: 14 since DL-256: a renewable request with no FREE frees its units on
-#: SUCCESS only, held units outlive the run until RELEASE_RESOURCE or the
-#: job's next run, and FORCE_STARTJOB of a holder starts on them, so a
-#: replay with resource demand can derive different state.
-#: 15 since DL-259: a WEKR token selects a week of the year, not a day of
-#: the week, and the wekr-first-week switch places week 1, so autocal's
-#: compiled day sets and the boundary classification `attest` re-derives
-#: from them can differ from v14.
-#: 16 since DL-260: start times follow the vendor's DST rules by default and
-#: the oracle names a tick's slot by instant, so ticks move on a DST change
-#: day and a replay names slots and arms must times differently.
-#: 17 since DL-285: an ON_ICE on a member that has not run in a RUNNING box
-#: runs the box's completion check, so a replay with such an event can
-#: complete a box that v16 left RUNNING.
-#: 18 since DL-301 (SEM-14 and SEM-20's box clauses): a member taken off
-#: ice while its box runs sits that run out, and a box_terminator member that ends
-#: TERMINATED terminates its box (both by default, each behind a switch),
-#: so a replay with such an event can complete or terminate a box that v17
-#: left RUNNING.
-#: 19 since DL-304 (SEM-11's box-start completion moment): a box whose
-#: start leaves no member in the run (every direct member on ice, or none)
-#: completes at its start under `box-start-all-members-out=complete`, the
-#: default; an iced member still running, or holding a running or queued
-#: job, keeps its box waiting; and a start nested inside two starts of
-#: the same job is refused. A replay with such an input can derive a box status
-#: or a start that v18 did not.
-#: 20 since DL-309 (SEM-15 and SEM-12's run binding): under
-#: `idle-box-iced-member=ignore`, the default, an idle box's recompute drops
-#: an iced member that is out of the run, so a completed box no longer
-#: flips through it; and the walk from a job's transition up to its
-#: ancestors skips an ancestor that the same cascade completed and started
-#: again. A replay with such an input can derive a box status that v19 did
-#: not.
-#: 21 since DL-340: a member whose box restarts on its own completion
-#: settles the run that ended when it starts again, by that run's policy
-#: (frees, keeps or spends its units), and then reserves or queues as any
-#: start does; v20 handed the old run's unsettled units to the new run and
-#: freed them at the late settlement, and spent a depletable's never. A member
-#: that the restart queues keeps its rank. A scan continuation of a job the
-#: catalog no longer defines is dead, not pending, which the classifier reads
-#: as no timer. A replay with such an input can derive a job's reservations,
-#: spent units or queue that v20 did not.
-#: 22 since DL-345: the queue's scan addresses only a row in QUE_WAIT. A
-#: scan in a job's box rules, woken by a release, could meet a job that left
-#: QUE_WAIT without dropping its rank (an injected STATUS, or a queued box's
-#: idle-box recompute); v21 cancelled or admitted it again with a transition
-#: violation. A control input with it was refused under the default policy
-#: and logged under `continue`; an engine-made input, such as a job
-#: completion, was admitted and logged under any policy. A replay with such
-#: an input can derive a status, and so wakes and launches, that v21 did not.
-#: Where the box rules queue the job again (a box restarted by its own
-#: completion), the rank it keeps is the same under both versions.
-#: 23 since DL-348 (SEM-14's job_terminator): a box's end FAILURE or
-#: TERMINATED kills its live job_terminator members only while the run that
-#: ended is still the box's run. The kill reads the box's run number
-#: before the status write, and the cascade compares it before each member:
-#: once the write's wakes, or an earlier member's kill, started the box
-#: again, the cascade reaches no further member: not the members the new run
-#: started, and not a member carried live into it from the run that ended, as
-#: the fold and the overrides already leave them when the box's own run
-#: moves. v22 killed the members of the new run and the members carried into
-#: it. Where such a member carries box_terminator and a TERMINATED end
-#: terminates its box (the default), its kill ended the new run, which
-#: started again, without end, and the input raised a recursion error: a
-#: control input was refused, an engine-made one quarantined. A replay with
-#: such an input can derive a status, and so wakes and launches, that v22 did
-#: not.
-#: 24 since DL-360: a job that enters QUE_WAIT takes a new rank. A queued
-#: member taken out of the queue by an injected STATUS keeps its rank until
-#: its settlement, after its box rules; where those rules restart its box and
-#: the new run queues it again, v23 kept the old rank, and the member was
-#: admitted ahead of a waiter that queued between the two. And a box's end
-#: kills its job_terminator members only while the box was not reset since:
-#: an ancestor's restart resets a subbox to INACTIVE without moving its run,
-#: and v23 then killed a live member that the fold path left running. And
-#: the default fold reads statuses: a member that has not run in the box's
-#: run but holds a terminal status is done and votes with it, where v23 kept
-#: the box RUNNING. The status comes from a member carried live into the run
-#: that then ended; an operator's SUCCESS, FAILURE or TERMINATED on a member
-#: that waits; a KILLJOB on a member queued in the run, or made live by an
-#: injected STARTING; or the idle recompute of a never-run subbox from
-#: statuses given to its members (SEM-15). A resolution or off-ice mark
-#: decides only while the member reads INACTIVE. A replay with such an input
-#: can derive an admission order, or a status and so wakes and launches, that
-#: v23 did not.
+#: Bump it when a change makes this build derive different state from an identical log:
+#: oracle transitions, condition evaluation, timer ordering, the ss3 projection. A change a
+#: replay cannot see does not bump it. It is not `dsl41_version`: refusing to resume a live
+#: estate after a patch release would be an outage made by bookkeeping.
+#: Each version below names the derivation it introduced.
+#: 2 (DL-235): the ss4 stale-completion gate rejects a non-live row.
+#: 3 (DL-241): term_run_time 0 arms no timer.
+#: 4 (DL-242): box start resets member statuses; operator INACTIVE resolves and cascades.
+#: 5 (DL-243): ON_ICE/ON_NOEXEC condition reads; FORCE_STARTJOB on a non-live ON_ICE or
+#: ON_HOLD job.
+#: 6 (DL-244): a holcal weekday date reaches the non_workday action and WORKDAYS excludes it.
+#: `attest` re-derives a boundary's classification from the sealed catalogs, so a boundary
+#: carries, refuses or assumes a job per the version that classified it.
+#: 7 (DL-246): a box start decides a run_window member's disposition; a standalone window skip
+#: moves a prior result to INACTIVE.
+#: 8 (DL-247): an unset or zero priority and a forced start skip the machine-load check but
+#: hold their load; a load waiter blocks lower priorities on its machine; more transitions
+#: wake the queue.
+#: 9 (DL-248): the schedule tick arms the relative must_complete deadline and its timer
+#: carries the tick's run.
+#: 10 (DL-249): run_window endpoints follow the vendor's DST rules.
+#: 11 (DL-253): absolute must times arm alarms; must_start arms one deadline at a time.
+#: 12 (DL-254): ON_ICE, ON_HOLD and ON_NOEXEC sent to a live (for ON_NOEXEC, iced) job are
+#: ignored.
+#: 13 (DL-255): a job waiting on a named resource blocks lower priorities that name it; a
+#: start or enqueue that takes machine load owes a queue scan.
+#: 14 (DL-256): a renewable request with no FREE frees its units on SUCCESS only; held units
+#: outlive the run until RELEASE_RESOURCE or the job's next run; FORCE_STARTJOB of a holder
+#: starts on them.
+#: 15 (DL-259): a WEKR token selects a week of the year, and the wekr-first-week switch places
+#: week 1. Autocal's day sets and the classification `attest` re-derives from them follow.
+#: 16 (DL-260): start times follow the vendor's DST rules by default and the oracle names a
+#: tick's slot by instant.
+#: 17 (DL-285): an ON_ICE on a member that has not run in a RUNNING box runs the box's
+#: completion check.
+#: 18 (DL-301, SEM-14 and SEM-20's box clauses): a member taken off ice while its box runs
+#: sits that run out; a box_terminator member that ends TERMINATED terminates its box. Each
+#: is a default behind a switch.
+#: 19 (DL-304, SEM-11's box-start completion moment): a box whose start leaves no member in
+#: the run (every direct member on ice, or none) completes at its start under
+#: `box-start-all-members-out=complete`, the default; an iced member still running, or
+#: holding a running or queued job, keeps its box waiting; a start nested inside two starts of
+#: the same job is refused.
+#: 20 (DL-309, SEM-15 and SEM-12's run binding): under `idle-box-iced-member=ignore`, the
+#: default, an idle box's recompute drops an iced member that is out of the run; the walk
+#: from a job's transition up to its ancestors skips an ancestor that the same cascade
+#: completed and started again.
+#: 21 (DL-340): a member whose box restarts on its own completion settles the run that ended
+#: when it starts again, by that run's policy (frees, keeps or spends its units), then
+#: reserves or queues as any start does. A member the restart queues keeps its rank. A scan
+#: continuation of a job the catalog does not define is dead, not pending, which the
+#: classifier reads as no timer.
+#: 22 (DL-345): the queue's scan addresses only a row in QUE_WAIT. A job that left QUE_WAIT
+#: without dropping its rank (an injected STATUS, or a queued box's idle-box recompute) is
+#: not cancelled or admitted by a scan. Where the box rules queue the job again (a box
+#: restarted by its own completion), the rank it keeps is the same.
+#: 23 (DL-348, SEM-14's job_terminator): a box's end FAILURE or TERMINATED kills its live
+#: job_terminator members only while the run that ended is still the box's run. The kill
+#: reads the box's run number before the status write, and the cascade compares it before
+#: each member: once the write's wakes, or an earlier member's kill, started the box again,
+#: the cascade reaches no further member, neither the new run's members nor a member carried
+#: live into it, as the fold and the overrides leave them when the box's own run moves. The
+#: bound ends the loop where such a member carries box_terminator and a TERMINATED end
+#: terminates its box (the default).
+#: 24 (DL-360): a job that enters QUE_WAIT takes a new rank. A box's end kills its
+#: job_terminator members only while the box was not reset since: an ancestor's restart resets
+#: a subbox to INACTIVE without moving its run, and the kill does not reach a live member that
+#: the fold path leaves running. The default fold reads statuses: a member that has not run in the box's
+#: run but holds a terminal status is done and votes with it. The status comes from a member
+#: carried live into the run that then ended; an operator's SUCCESS, FAILURE or TERMINATED on
+#: a member that waits; a KILLJOB on a member queued in the run, or made live by an injected
+#: STARTING; or the idle recompute of a never-run subbox from statuses given to its members
+#: (SEM-15). A resolution or off-ice mark decides only while the member reads INACTIVE.
 STATE_MACHINE_VERSION = 24
 
 LOCK_NAME = "leader.lock"
@@ -192,10 +125,8 @@ LOCK_NAME = "leader.lock"
 class Proof(Protocol):
     """What an appender re-proves before it writes, and drops when it stops.
 
-    `Journal` and the adapters hold one of these, never a `LeaderLock`
-    directly: since period-model ss1.3 an appender must prove TWO things --
-    that it leads this run root and that it still leads the lineage -- and
-    a writer typed to the single lock could only ever check one of them."""
+    `Journal` and the adapters hold a `Proof`, never a `LeaderLock`: an appender proves two
+    things (period-model ss1.3), that it leads this run root and that it leads the lineage."""
 
     def check(self) -> None: ...
 
@@ -205,20 +136,14 @@ class Proof(Protocol):
 class LeaderLock:
     """One directory's mutex, held for the process lifetime.
 
-    `acquire` is ss7's ACQUIRE on this substrate: exclusive, non-blocking,
-    and either held or refused with the holder named. `check` is the
-    positive proof re-read (S6b) -- ss7's "losing proof stops dispatch"
-    needs a way to notice, and on a filesystem the way to lose it is for
-    the lock file to be replaced under us, leaving this process holding an
-    exclusive lock on an unlinked inode while another holds one on the
-    name.
+    `acquire` is ss7's ACQUIRE: exclusive, non-blocking, held or refused with the holder named.
+    `check` re-reads the proof (S6b): a replaced lock file leaves this process holding a lock
+    on an unlinked inode while another holds the name, and ss7's "losing proof stops dispatch"
+    needs that noticed.
 
-    **Generalized to the anchor by DL-133** (period-model ss15's row): the
-    lineage lock is this pattern on the anchor directory, because that
-    pattern already solves what a bare `O_EXCL` does not -- replacement and
-    lifetime. Only the file name and the noun in the refusal move; the
-    run-root spelling is the default, so a run root's `leader.lock` is
-    byte-identical to what every earlier build wrote."""
+    The lineage lock is this pattern on the anchor directory (DL-133, period-model ss15's
+    row), because a bare `O_EXCL` does not solve replacement and lifetime. Only the file name
+    and the noun in the refusal differ; the run-root spelling is the default."""
 
     def __init__(
         self,
@@ -254,13 +179,11 @@ class LeaderLock:
         self._fd, self._ino = fd, os.fstat(fd).st_ino
 
     def note(self, *, epoch: int, at: datetime) -> None:
-        """Record who holds this term, for the refusal another process will
-        print. Written under the lock, after the epoch is allocated."""
+        """Record who holds this term, for another process's refusal text."""
         if self._fd is None:
             raise EngineError(f"{self.path}: not held")
-        # Plain json.dumps(sort_keys=True), not canon.canonical_bytes: this
-        # blob is only ever read back by `_holder()` for a refusal message,
-        # never digested, so canon's guarantees buy nothing here either.
+        # plain json.dumps, not canon.canonical_bytes: the blob feeds `_holder()` only and is
+        # never digested
         blob = json.dumps(
             {
                 "pid": os.getpid(),
@@ -275,8 +198,7 @@ class LeaderLock:
         os.fsync(self._fd)
 
     def check(self) -> None:
-        """Re-prove leadership (S6b). Cheap by design -- one `stat`, against
-        the `fsync` every real-domain append already pays."""
+        """Re-prove leadership (S6b) with one `stat`."""
         if self._fd is None:
             raise EngineError(f"{self.path}: leadership was never acquired")
         try:
@@ -294,10 +216,8 @@ class LeaderLock:
             )
 
     def release(self) -> None:
-        """Idempotent. The file is NOT unlinked: unlinking is the one thing
-        `check` exists to catch, and a lock file left behind excludes
-        nobody -- the kernel released the lock when this fd closed, and the
-        stale note is only ever read when a live holder refuses someone."""
+        """Idempotent. The file stays: unlinking is what `check` exists to catch, and the kernel
+        drops the lock when the fd closes."""
         if self._fd is None:
             return
         fd, self._fd, self._ino = self._fd, None, None
@@ -318,15 +238,10 @@ class LeaderLock:
 def acquire_run_root(run_root: Path) -> LeaderLock:
     """Take leadership of `run_root` before touching anything in it.
 
-    For a caller whose first act is not opening the log: `dsl41 run
-    --detached` STARTS a supervisor and takes its lease, and a process that
-    does that and is then refused has already acted on the estate it does
-    not lead. The engine's own entry points acquire for themselves when no
-    caller has."""
-    # every entry down to the run root is a record: without the fsyncs a
-    # power cut can lose the directory every later durable write lives in.
-    # Unconditional, so a retry after a failed fsync repairs it rather than
-    # skipping it (mkdir_durable's contract).
+    For a caller whose first act is not opening the log, such as `dsl41 run --detached`, which
+    starts a supervisor. The engine's own entry points acquire when no caller has."""
+    # every entry down to the run root is durable, so a power cut cannot lose the directory;
+    # unconditional, so a retry after a failed fsync repairs it (mkdir_durable's contract)
     mkdir_durable(str(run_root))
     lock = LeaderLock(run_root)
     lock.acquire()
@@ -334,17 +249,11 @@ def acquire_run_root(run_root: Path) -> LeaderLock:
 
 
 class Fence:
-    """Every proof this process holds, re-proved together (period-model
-    ss1.3).
+    """Every proof this process holds, re-proved together (period-model ss1.3).
 
-    One appender, two things to prove: it leads this run root, and it still
-    leads the lineage the anchor names. Delete or replace either directory
-    and the incumbent stops on its next act -- DL-101's bargain, which does
-    not claim to un-run what already happened and does turn a divergence
-    into a recorded stop. Composing them here rather than at each call site
-    is what stops a writer from proving one and forgetting the other; a
-    root with no anchor holds a fence of one lock and behaves exactly as it
-    did before."""
+    An appender leads this run root and the lineage the anchor names. Deleting or replacing
+    either directory stops the incumbent on its next act (DL-101); that records a divergence
+    and does not un-run what happened. A root with no anchor holds a fence of one lock."""
 
     def __init__(self, *locks: LeaderLock) -> None:
         self.locks = locks
@@ -354,10 +263,8 @@ class Fence:
             lock.check()
 
     def intact(self) -> bool:
-        """The same proof as a boolean, for the one caller that must DECIDE
-        rather than fail: a fence loss inside the boundary's reversible
-        interval fail-stops instead of reopening admission (period-model
-        ss7, DL-101's rule)."""
+        """The same proof as a boolean: a fence loss inside the boundary's reversible interval
+        fail-stops instead of reopening admission (period-model ss7, DL-101)."""
         try:
             self.check()
         except EngineError:
@@ -370,12 +277,9 @@ class Fence:
 
 
 def next_epoch(records: list[dict[str, Any]]) -> int:
-    """ss1's monotone allocation, read from the ledger under the lock.
+    """ss1's monotone allocation: one past the highest term the log records, read under the lock.
 
-    One past the highest term the log records. A journal with no `leader`
-    record was written before S6a and its inputs carry the inert epoch, so
-    the first real term over it is 1 -- the same number a fresh run root
-    gets, and for the same reason: no term has been held here yet."""
+    A journal with no `leader` record (S6a) gets term 1, as a fresh run root does."""
     terms = [int(r["epoch"]) for r in records if r.get("rec") == "leader" and "epoch" in r]
     return max(terms, default=0) + 1
 
@@ -393,32 +297,15 @@ def check_state_machine_version(
 def check_state_machine_version(
     opening: Mapping[str, Any], *, mode: Literal["lead", "replay"], where: str = ""
 ) -> None:
-    """period-model ss2.1 / concurrency-model ss7: one executable implements
-    exactly one `STATE_MACHINE_VERSION`, so a foreign build can neither
-    LEAD nor REPLAY a log it did not derive. `mode` names which half is
-    asking -- `check_leader_eligibility` at resume, `check_replay_version`
-    in every offline reader -- and selects that half's refusal text; the
-    policy is one.
+    """Refuse a log whose version this build does not implement (period-model ss2.1,
+    concurrency-model ss7): a foreign build neither leads nor replays it.
 
-    An ABSENT field refuses in both modes. `period.check_segment_record`
-    has required the field, typed, on every record `read_journal` returns
-    since DL-138, so an opening with none is hand-built and names no
-    semantics at all -- neither half guesses. Until DL-189 the lead half
-    read an absent field as v1, the courtesy S2 gave a journal written
-    before S6a (DL-165); no on-disk log could reach it, because
-    `read_journal` refuses an unversioned segment before eligibility is
-    asked (`runner_startup` reads first, then gates), so DL-189 removed
-    the courtesy rather than carry a policy split no artifact can exercise.
-
-    Read EXACTLY in both modes: `True == 1` and `1.0 == 1` in Python, so a
-    bare comparison would let a JSON `true` stand in for version 1 and a
-    tampered segment lead or replay a build that does not implement its
-    semantics (DL-151). `is_wire_int` narrows to a real `int`, never
-    `bool`.
-
-    `where` names the segment in the replay message. The lead half never
-    had one, and the overloads above make passing it in lead mode a type
-    error rather than a value that is silently dropped."""
+    `mode` selects the refusal text: "lead" at resume (`check_leader_eligibility`), "replay" in
+    every offline reader (`check_replay_version`). An absent field refuses in both modes
+    (DL-138, DL-189; `read_journal` already refuses an unversioned segment, DL-165). The
+    version is read exactly: `is_wire_int` rejects `bool`, so a JSON `true` cannot stand in for
+    version 1 (DL-151). `where` names the segment in the replay message; the overloads make it
+    a type error in lead mode."""
     pinned = opening.get("state_machine_version")
     if is_wire_int(pinned) and pinned == STATE_MACHINE_VERSION:
         return
@@ -439,21 +326,12 @@ def check_state_machine_version(
 
 
 def check_leader_eligibility(opening: dict[str, Any], *, catalog: CatalogIR) -> None:
-    """ss7: eligibility requires an exact match on the log's two opening
-    pins. Both checks live here rather than one here and one at the resume
-    site -- they answer one question ("may this build lead this log?") and
-    splitting them is how the second one goes missing.
+    """ss7: leading requires an exact match on the log's two opening pins, checked together.
 
-    The catalog hash is recomputed under the recipe the log's own `segment`
-    names (period-model ss1.1), never under the one this build happens to
-    write: comparing across recipes is how a gate refuses an estate that
-    did not change, which is the outage DL-100 named.
-
-    The version half is `check_state_machine_version`, mode="lead" --
-    see there for why an absent field refuses in both halves (DL-189). It
-    runs FIRST, and `catalog_hash_for` checks the hash recipe's version
-    before it recomputes: a log an older build wrote is refused for its
-    version, never reported as an estate that changed. The catalog hash
+    The catalog hash is recomputed under the recipe the log's own `segment` names
+    (period-model ss1.1), so a gate never refuses an estate that did not change (DL-100).
+    The version half runs first (`check_state_machine_version`, DL-189), so a log an older
+    build wrote is refused for its version, not reported as a changed estate. The catalog hash
     covers `ir_version`, so an IR bump alone moves it (DL-253)."""
     check_state_machine_version(opening, mode="lead")
     if opening.get("catalog_hash") != catalog_hash_for(opening, catalog):

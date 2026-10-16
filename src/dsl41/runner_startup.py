@@ -1,47 +1,32 @@
-"""Taking possession of a run root (ss7): genesis, resume, and the barrier.
+"""Taking possession of a run root (ss7): genesis, resume, and the barrier (DL-74, DL-106).
 
-Split out of runner.py by DL-106, with the paragraph it owns, verbatim.
-That module's own docstring has said "the engine loop and the run
-lifecycle" since DL-74; this is the half after the "and". The Engine is the
-single-writer loop over a live estate. What lives here runs ONCE per
-incarnation, before that loop exists: it creates or claims a run root,
-takes leadership of it, replays the log, reconciles the estate against the
-world, and hands back an Engine ready to run. The two halves share exactly
-one object, and it is the one this half constructs.
+The Engine is the single-writer loop over a live estate. What lives here runs once per
+incarnation, before that loop exists: it creates or claims a run root, takes leadership of it,
+replays the log, reconciles the estate against the world, and hands back an Engine ready to run.
+The two halves share exactly one object, the one this half constructs. The name avoids
+"lifecycle", which DL-42 gives to the wrapper and supervisor tier.
 
-Not "lifecycle" in the name: DL-42 spent that word on the wrapper and
-supervisor tier, and two meanings of it in one codebase is how a reader
-learns to check which one is meant.
+- Resume (ss7): refuse on catalog-hash or clock-domain mismatch, replay inputs through a fresh
+  Oracle, seed the ghost-run gate so replayed starts never respawn, then reconcile from the
+  spool ladder: live wrapper -> settle window; status.json -> inject the real completion at
+  max(ended_at, last journal at) with the true ended_at in the payload; verified command group
+  orphaned by a dead wrapper -> kill it, TERMINATED "wrapper lost; killed at resume" (a kill
+  that happened); nothing -> FAILURE exit_status_unobservable (PENDING: E7). First, an attempt
+  the previous engine admitted and never decided gets its decision record, with the effects it
+  implies (DL-315). A start with no trace anywhere is then decided by its own SPAWN (DL-102): a
+  PENDING one is an intent the previous leader never delivered and is re-driven; a RETIRED one,
+  or none, means the live engine launched nothing for the run, and the row is left as it is; an
+  APPLIED one that left no trace is FAILURE "dispatch lost to engine crash", because a run
+  provably never started is never silently re-executed. FW watchers differ: polling is an
+  idempotent read, so an applied watch with no trace is re-dispatched, and a supervised start
+  with a bound id is replayed. A pending one is re-driven like any other start, so a held watch
+  stays held. Reconciliation completions go through the ss4 stale gate like any adapter
+  completion: if replay already reached a terminal state (say a term_run_time TERMINATED), the
+  late real record is dropped and journaled, never silently overwritten.
 
-- Resume (ss7): refuse on catalog-hash or clock-domain mismatch, replay
-  inputs through a fresh Oracle, seed the ghost-run gate so replayed starts
-  never respawn, then reconcile from the spool ladder: live wrapper ->
-  settle window; status.json -> inject the real completion at
-  max(ended_at, last journal at) with the true ended_at in the payload;
-  verified command group orphaned by a dead wrapper -> kill it, TERMINATED
-  "wrapper lost; killed at resume" (a kill that happened); nothing ->
-  FAILURE exit_status_unobservable (PENDING: E7). Before any of that, an
-  attempt the previous engine admitted and never decided gets its decision
-  record, with the effects it implies (DL-315). A start with no
-  trace anywhere is then decided by its own SPAWN (DL-102): a PENDING one
-  is an intent the previous leader never delivered and is re-driven; a
-  RETIRED one, or none, means the live engine launched nothing for the run,
-  and the row is left as it is; an APPLIED one that left no trace is FAILURE
-  "dispatch lost to engine crash" -- provably-never-ran is still never
-  re-executed silently. FW watchers are the exception to the last: polling
-  is an idempotent read, so an applied watch with no trace is re-dispatched,
-  and a supervised start with a bound id is replayed. A pending one is
-  re-driven like any other start, so a held watch stays held.
-  Reconciliation completions go through the ss4 stale gate like any
-  adapter completion: if replay already reached a terminal state (say a
-  term_run_time TERMINATED), the late real record is dropped AND journaled
-  -- never a silent overwrite.
-
-The whole sequence IS concurrency-model ss7's takeover barrier -- ACQUIRE,
-reconcile every execution host, retire superseded and re-drive pending,
-dispatch -- and `start_run` is its degenerate case: an empty log has
-nothing to replay, nothing to reconcile and nothing to re-drive, so all
-that survives of the barrier is the acquire.
+The whole sequence is concurrency-model ss7's takeover barrier (ACQUIRE, reconcile every
+execution host, retire stale effects, re-drive pending, dispatch). `start_run` is its degenerate
+case: an empty log has nothing to replay, reconcile or re-drive, so only the acquire remains.
 """
 
 from __future__ import annotations
@@ -146,12 +131,11 @@ from dsl41.runner_scheduler import Scheduler
 from dsl41.semantics import ADAPTER_SWITCHES, SCHEDULER_SWITCHES, check_overrides
 
 
-#: Profile fields NO wired object can report: they act in preflight or over
-#: the catalog, and never on an adapter or a scheduler. They inherit the pin
-#: unless the launcher DECLARES them -- see `_derive_runtime_profile`.
-#: `semantics` is wired: the scheduler reports the switches it compiles
-#: under and a wired adapter the switches it reads; the rest are declared or
-#: inherited the same way (DL-252, DL-258, DL-259, DL-260).
+#: Profile fields no wired object can report: they act in preflight or over the catalog, never on
+#: an adapter or a scheduler. They inherit the pin unless the launcher declares them
+#: (`_derive_runtime_profile`). `semantics` is wired: the scheduler reports the switches it
+#: compiles under and a wired adapter the switches it reads; the rest are declared or inherited
+#: the same way (DL-252, DL-258, DL-259, DL-260).
 _UNWIRED_FIELDS: tuple[str, ...] = ("as_machine", "machine_policy")
 
 
@@ -162,31 +146,24 @@ def _derive_runtime_profile(
     base: RuntimeProfile | None,
     declared: RuntimeProfile | None = None,
 ) -> RuntimeProfile:
-    """The runtime profile the engine is ACTUALLY wired with (period-model
-    ss2.1, DL-130).
+    """The runtime profile the engine is actually wired with (period-model ss2.1, DL-130).
 
-    The pin has to describe the machine that runs, not the flags somebody
-    typed: an embedder that builds a Europe/Zurich scheduler and stages
-    nothing would otherwise open a period whose hash says UTC while every
-    tick is shifted. So the wired components are read back -- the
-    scheduler's timezone, the adapters' modes and windows, the deadman --
-    over `base` for the fields the engine cannot see.
+    The pin describes the machine that runs, not the flags somebody typed: an embedder that builds
+    a Europe/Zurich scheduler and stages nothing would otherwise open a period whose hash says UTC
+    while every tick is shifted. So the wired components are read back (the scheduler's timezone,
+    the adapters' modes and windows, the deadman) over `base` for the fields the engine cannot
+    see.
 
-    `declared` is what the LAUNCHER was invoked with, and it supplies
-    exactly `_UNWIRED_FIELDS`. Without it those fields inherit the pin and can
-    therefore never disagree with it -- so a boundary that staged a new
-    machine identity opened SILENTLY under the old one, this process still
-    answering to the machine names it was started with while the manifest
-    pinned others (DL-151). A caller that declares nothing keeps the old
-    inheritance, because it has said nothing to hold to the pin.
+    `declared` is what the launcher was invoked with, and supplies exactly `_UNWIRED_FIELDS`.
+    Without it those fields inherit the pin and cannot disagree with it, so a boundary that
+    staged a new machine identity would open under the old one while this process answers to the
+    names it started with (DL-151). A caller that declares nothing keeps the inheritance.
 
-    The semantic switches start from `declared`, else `base` (DL-252). The
-    ones a wired component acts on are read back over that: the switches the
-    scheduler compiled under, its calendar switches (DL-259) and
-    `dst-start-times` (DL-260), and the switches a wired adapter reads,
-    `fw-existence` from a `FileWatcherAdapter` (DL-258, DL-280). So wiring
-    that disagrees with its own declaration, or with the pin, is refused by
-    the drift gate."""
+    The semantic switches start from `declared`, else `base` (DL-252). The ones a wired component
+    acts on are read back over that: the scheduler's compiled switches, its calendar switches
+    (DL-259) and `dst-start-times` (DL-260), and a wired adapter's, `fw-existence` from a
+    `FileWatcherAdapter` (DL-258, DL-280). Wiring that disagrees with its declaration or the pin
+    is refused by the drift gate."""
     from dsl41.period import RuntimeProfile, to_us
     from dsl41.runner_adapters import FileWatcherAdapter, LocalCommandAdapter
 
@@ -197,9 +174,8 @@ def _derive_runtime_profile(
     if scheduler is not None:
         values["default_tz"] = scheduler.default_tz or "UTC"
         values["tz_aliases"] = dict(scheduler.tz_aliases)
-    # the semantic switches: declared or inherited like the machine
-    # identity (DL-252), with the switches the scheduler compiled under read
-    # back like its timezone (DL-259, DL-260)
+    # the semantic switches: declared or inherited like the machine identity (DL-252), with the
+    # scheduler's compiled switches read back like its timezone (DL-259, DL-260)
     switches = dict((declared or base or RuntimeProfile()).semantics)
     if scheduler is not None:
         for name in SCHEDULER_SWITCHES:
@@ -216,35 +192,30 @@ def _derive_runtime_profile(
     fw = adapters.get("FW")
     if isinstance(fw, FileWatcherAdapter):
         values["fw_default_interval_us"] = to_us(float(fw.default_interval_s))
-    # the adapter decides FW completeness, not the profile (DL-258): the
-    # switches a wired adapter reads are read back like the scheduler's
+    # the adapter decides FW completeness, not the profile (DL-258): a wired adapter's switches
+    # are read back like the scheduler's
     for name in ADAPTER_SWITCHES:
         wired = adapter_switch(adapters, name)
         if wired is not None:
             switches[name] = wired
     values["semantics"] = check_overrides(switches)
-    # the spawn window is a module constant, not an adapter knob: derive it
-    # from the value the machine actually runs, so a staged 0 cannot pin a
-    # fiction over the real five seconds
+    # the spawn window is a module constant, not an adapter knob: derive it from the value the
+    # machine runs, so a staged 0 cannot pin a fiction over the real five seconds
     values["spawn_window_us"] = to_us(SupervisedCommandAdapter._SPAWN_WINDOW_S)
     return RuntimeProfile.model_validate(values)
 
 
 async def _return_lease(client: "SupervisorClient | None") -> None:
-    """Give the supervisor lease back and close the transport -- EACH step
-    guaranteed, whatever the one before it did (DL-145).
+    """Give the supervisor lease back and close the transport, each step guaranteed whatever the
+    one before it did (DL-145).
 
-    The two are separate obligations to two different things. `release`
-    speaks to the SUPERVISOR and ends the single-controller lease; `close`
-    ends this process's socket and cancels the renew and reader tasks. A
-    `release` that raises -- the transport died mid-request, the renew task
-    lost the socket -- used to take the transport close with it, leaving a
-    live reader task and an open writer on a client nobody holds. The first
-    exception still propagates: this makes the teardown total, not silent.
+    `release` speaks to the supervisor and ends the single-controller lease; `close` ends this
+    process's socket and cancels the renew and reader tasks. A `release` that raises (the
+    transport died mid-request, the renew task lost the socket) must not skip the close, which
+    would leave a live reader task and an open writer on a client nobody holds. The first
+    exception still propagates: the teardown is total, not silent.
 
-    One spelling, so the sequence cannot be half-written in a second
-    place: `Wiring.close` and the wiring builder's own rollback both call
-    it."""
+    One spelling: `Wiring.close` and the wiring builder's rollback both call it."""
     if client is None:
         return
     try:
@@ -257,19 +228,17 @@ async def _return_lease(client: "SupervisorClient | None") -> None:
 class Wiring:
     """The components a `RuntimeProfile` says an incarnation runs with.
 
-    A profile, not a set of flags, because the profile is what a period is
-    IDENTIFIED by (ss2.1): an offline sealer meets an estate that already
-    decided and reads the manifest's, and a process that wired from its own
-    defaults would refuse the estate it was asked to close."""
+    A profile, not a set of flags, because a period is identified by its profile (ss2.1): an
+    offline sealer meets an estate that already decided and reads the manifest's, and a process
+    that wired from its own defaults would refuse the estate it was asked to close."""
 
     adapters: dict[str, JobAdapter]
     scheduler: Scheduler
     client: SupervisorClient | None
     deadman_s: float | None
-    #: the process's statechart executor (statechart-engine ss11). The client
-    #: is built here, before any engine, and its instance lives in this
-    #: executor; the caller hands the same one to `start_run` or `resume_run`,
-    #: so a process with an engine has one executor
+    #: the process's statechart executor (statechart-engine ss11). The client is built here,
+    #: before any engine, and its instance lives in this executor; the caller hands the same one
+    #: to `start_run` or `resume_run`, so a process with an engine has one executor
     machines: Executor = field(default_factory=Executor)
 
     async def close(self) -> None:
@@ -279,33 +248,26 @@ class Wiring:
 async def wire_from_profile(
     run_root: Path, catalog: CatalogIR, profile: RuntimeProfile, *, start: datetime
 ) -> Wiring:
-    """Build adapters, scheduler and (when the profile says detached) the
-    supervisor client from `profile`, with the scheduler started at
-    `start`.
+    """Build adapters, scheduler and (when the profile says detached) the supervisor client from
+    `profile`, with the scheduler started at `start`.
 
-    `start` is the CALLER's (DL-145). This function reads no clock of its
-    own: the instant a scheduler's plans are computed from is a launch
-    fact, the callers already hold one, and a builder that took `now()`
-    behind their backs could put a scheduler on a different instant from
-    the engine it is wired into.
+    `start` is the caller's (DL-145). This function reads no clock: a builder that took `now()`
+    could put a scheduler on a different instant from the engine it is wired into.
 
-    The inverse of `_derive_runtime_profile`, and since DL-137 the ONE
-    place a real run's components are constructed: `dsl41 run`, its resume
-    and the offline sealer all come through here, so a window that moves in
-    the profile moves in the components. It does NOT make the profile agree
-    with the period's pin -- `run` passes the profile the LAUNCHER built and
-    `_manifest_profile_drift` on the resume ladder is still what holds it to
-    the pin; what this removes is a second construction of the same
-    components whose values merely happened to agree."""
+    The inverse of `_derive_runtime_profile`, and the one place a real run's components are
+    constructed (DL-137): `dsl41 run`, its resume and the offline sealer all come through here,
+    so a window that moves in the profile moves in the components. It does not make the profile
+    agree with the period's pin: `run` passes the profile the launcher built and
+    `_manifest_profile_drift` on the resume ladder holds it to the pin."""
     from dsl41.runner_adapters import FileWatcherAdapter, LocalCommandAdapter
 
     deadman_s = None if profile.deadman_us is None else profile.deadman_us / 1_000_000
     machines = Executor()
     client = None
     try:
-        # detached (ss6a Tier 1, spec ss3): the CMD adapter SPAWNs through a
-        # supervisor that owns the wrapper lifelines, so an engine restart does
-        # not kill the jobs. FW stays in-engine (no process to survive).
+        # detached (ss6a Tier 1, spec ss3): the CMD adapter SPAWNs through a supervisor that owns
+        # the wrapper lifelines, so an engine restart does not kill the jobs. FW stays in-engine
+        # (no process to survive).
         if profile.execution_mode == "detached":
             client = SupervisorClient(run_root, deadman_s=deadman_s, machines=machines)
             try:
@@ -331,25 +293,20 @@ async def wire_from_profile(
             catalog,
             start=start,
             default_tz=profile.default_tz,
-            # the profile cannot spell "no map" -- an absent `--timezone-map`
-            # is an EMPTY table on it -- and passing that empty dict on would
-            # retire SEM-35's unique-city default for every per-job zone. That
-            # is `tz_aliases_of`'s whole subject, so read it from there rather
-            # than re-deciding here (DL-163); the offline sealer closing an
-            # estate opened that way was the bug (DL-151).
+            # the profile cannot spell "no map": an absent `--timezone-map` is an empty table on
+            # it, and passing that dict on would drop SEM-35's unique-city default for every
+            # per-job zone. `tz_aliases_of` owns that question (DL-163, DL-151)
             tz_aliases=tz_aliases_of(profile),
-            # the extended calendars and the start instants compile under
-            # the period's switches, the ones its engine runs (DL-259, DL-260)
+            # the extended calendars and the start instants compile under the period's switches,
+            # the ones its engine runs (DL-259, DL-260)
             semantics=switches_of(profile),
         )
     except BaseException:
-        # the LEASE is this function's until it hands back a `Wiring`, and
-        # only then does it become the caller's to close (DL-145). The
-        # supervisor is up and leased BEFORE the scheduler is built, and a
-        # `Scheduler` refuses an unknown calendar or an unresolvable
-        # per-job zone -- so a catalog the caller never preflighted (the
-        # offline sealer reads the ROOT's) used to leave a live lease
-        # nobody held a handle to, for a whole deadman interval.
+        # the lease is this function's until it hands back a `Wiring`, then the caller's to close
+        # (DL-145). The supervisor is up and leased before the scheduler is built, and a
+        # `Scheduler` refuses an unknown calendar or an unresolvable per-job zone, so a catalog
+        # the caller never preflighted (the offline sealer reads the root's) must not leave a
+        # live lease with no handle.
         await _return_lease(client)
         raise
     return Wiring(
@@ -362,17 +319,15 @@ async def wire_from_profile(
 
 
 def _require_scheduler(catalog: CatalogIR, scheduler: Scheduler | None, where: str) -> None:
-    """A catalog that schedules jobs needs a scheduler wired -- and the
-    RIGHT one (DL-130). The profile cannot see a scheduler's absence
-    (default_tz inherits the pin and reports no drift), and one built over
-    a DIFFERENT catalog carries another estate's plans with a matching
-    timezone -- either way scheduled execution silently stops or fires
-    wrong. Run at genesis and at resume."""
+    """A catalog that schedules jobs needs a scheduler wired, and the right one (DL-130). The
+    profile cannot see a scheduler's absence (default_tz inherits the pin and reports no drift),
+    and one built over a different catalog carries another estate's plans with a matching
+    timezone; either way scheduled execution stops or fires wrong. Run at genesis and at
+    resume."""
     if scheduler is not None:
-        # EVERY supplied scheduler is held to its compile-time hash --
-        # before the scheduled-jobs check, because a catalog whose last
-        # trigger was removed after the compile would otherwise skip the
-        # comparison while the stale plans still fire the removed jobs
+        # every supplied scheduler is held to its compile-time hash, before the scheduled-jobs
+        # check: a catalog whose last trigger is removed after the compile would otherwise skip
+        # the comparison while the stale plans fire the removed jobs
         from dsl41.period import catalog_hash_v2
 
         if scheduler.catalog_hash != catalog_hash_v2(catalog):
@@ -400,13 +355,10 @@ def _require_scheduler(catalog: CatalogIR, scheduler: Scheduler | None, where: s
 
 
 def _require_adapters(catalog: CatalogIR, adapters: Mapping[str, JobAdapter], where: str) -> None:
-    """Every executable job type must have an adapter wired (DL-130). The
-    profile inherits pinned values for wiring it cannot see, so a missing
-    adapter drifts nothing -- and a job of that type then reaches RUNNING
-    with no process behind it (`plan_effects` suppresses the SPAWN for a
-    type with no dispatch row). Run at GENESIS and at resume: an estate
-    that opens unable to dispatch its own catalog is the same silent hole
-    one gate later."""
+    """Every executable job type must have an adapter wired (DL-130). The profile inherits pinned
+    values for wiring it cannot see, so a missing adapter drifts nothing, and a job of that type
+    reaches RUNNING with no process behind it (`plan_effects` suppresses the SPAWN for a type
+    with no dispatch row). Run at genesis and at resume."""
     required = sorted(
         {job.job_type for job in catalog.jobs.values() if job.job_type != "BOX"} - set(adapters)
     )
@@ -419,11 +371,10 @@ def _require_adapters(catalog: CatalogIR, adapters: Mapping[str, JobAdapter], wh
 
 
 def profile_drift(derived: RuntimeProfile, pinned: RuntimeProfile) -> list[str]:
-    """Which profile fields moved -- names only, because the caller reports
-    the drift rather than the values. The walk is `period.disagreements`
-    (DL-137), the same one every artifact comparison uses. The one walk for
-    the core's gates here and the CLI's (`cli_run._profile_mismatch`); each
-    keeps its own refusal sentence (DL-152)."""
+    """Which profile fields moved, by name; the caller reports the drift, not the values. The walk
+    is `period.disagreements` (DL-137), shared by every artifact comparison, the core's gates
+    here and the CLI's (`cli_run._profile_mismatch`); each keeps its own refusal sentence
+    (DL-152)."""
     return sorted(name for name, _, _ in disagreements(derived, pinned, type(derived).model_fields))
 
 
@@ -434,17 +385,13 @@ def _manifest_profile_drift(
     deadman_s: float | None,
     declared: RuntimeProfile | None,
 ) -> list[str]:
-    """Which profile fields this wiring moves off `manifest`'s pin -- the
-    ONE runtime gate against an installed manifest (DL-152).
+    """Which profile fields this wiring moves off `manifest`'s pin: the one runtime gate against
+    an installed manifest (DL-152), used by the resume ladder and the commit-a-staged-boundary
+    path. Their refusals stay separate; each names why its period may not move, which tells an
+    operator which launch to fix.
 
-    Two sites ran it: the resume ladder and the commit-a-staged-boundary
-    path. They were the same derive-then-compare with two wordings, so a
-    change to what the engine reads back had to be made twice. The refusals
-    stay separate -- each names why ITS period may not move -- because that
-    sentence is what tells an operator which launch to fix.
-
-    The staged-manifest gate in `start_run` is deliberately NOT this: it
-    compares against a manifest that is not installed yet."""
+    The staged-manifest gate in `start_run` is not this: it compares against a manifest that is
+    not installed yet."""
     derived = _derive_runtime_profile(
         scheduler, adapters, deadman_s, base=manifest.runtime_profile, declared=declared
     )
@@ -466,50 +413,39 @@ def start_run(
     launched: RuntimeProfile | None = None,
     machines: Executor | None = None,
 ) -> Engine:
-    """ss1.1's GENESIS TRANSACTION, in its order, plus an Engine wired to
-    what it created.
+    """ss1.1's genesis transaction, in its order, plus an Engine wired to what it created.
 
-    Six ordered steps, and the order is the recovery argument:
+    Six ordered steps; the order is the recovery argument:
 
-    1. `flock` `leader.lock` -- before the refusal, not after: the refusal
-       reads the estate's state, and one leader per run root is the rule
-       under which any such read is meaningful (DL-99);
-    2. the `period_root` SENTINEL, create-only under ss1.1's ownership
-       rule. It is the first durable act, so there is no instant at which
-       this root looks unused to an old binary -- which would start a fresh
-       genesis beside the lineage and admit work while detached C1
-       executions were still alive;
+    1. `flock` `leader.lock`, before the refusal: the refusal reads the estate's state, and one
+       leader per run root is the rule under which that read is meaningful (DL-99);
+    2. the `period_root` sentinel, create-only under ss1.1's ownership rule. It is the first
+       durable act, so no instant exists at which this root looks unused to an old binary, which
+       would start a fresh genesis beside the lineage and admit work while detached C1
+       executions were alive;
     3. `anchor.lock` and the create-only CAS `absent -> open(1, root)`;
     4. the bundle and `periods/000001/manifest.json`;
     5. `wal/000001.jsonl` with its `segment` record;
     6. the finalize CAS setting `periods[1].segment_durable = true`.
 
-    A crash after step 2 and before step 5 leaves a root no old binary can
-    use and that a RE-RUN of genesis completes idempotently, reading
-    `estate_id` back from the sentinel rather than minting a second
-    (PR-01a). Once a segment exists, ordinary `--resume` owns recovery and
-    this refuses -- that is what `--resume` is for, and no silent
+    A crash after step 2 and before step 5 leaves a root no old binary can use, which a re-run of
+    genesis completes idempotently, reading `estate_id` back from the sentinel (PR-01a). Once a
+    segment exists, ordinary `--resume` owns recovery and this refuses; there is no silent
     re-baselining.
 
-    The manifest is installed before the log opens, and both are derived
-    from ONE object so the two cannot disagree (PR-22). `staged` is what
-    the launcher pinned -- catalog hash, bundle address, runtime profile; a
-    caller with none gets `launched` (the launch options, the default
-    profile when absent) over the empty bundle, with the wired fields read
-    back as always. Without it an unstaged genesis pinned the default
-    semantic switches whatever the launcher asked (DL-259).
-    `anchor_dir` defaults to the root's sibling (`boundary.default_anchor_dir`),
-    which is outside every archivable root, as ss1.1 requires. A failure
-    here releases both locks, because a caller that got this far and was
-    refused is on its way out. `machines` is the process's statechart
-    executor, the wiring's; with none the engine makes its own."""
-    # the root is CREATED by acquire_run_root (mkdir_durable: every new
-    # entry fsynced), never pre-created here -- a plain mkdir first would
-    # make the durability helper see an existing directory and prove
-    # nothing about its dirent
+    The manifest is installed before the log opens, and both derive from one object (PR-22).
+    `staged` is what the launcher pinned: catalog hash, bundle address, runtime profile. A caller
+    with none gets `launched` (the launch options, the default profile when absent) over the
+    empty bundle, with the wired fields read back; the semantic switches follow the launcher
+    (DL-259). `anchor_dir` defaults to the root's sibling (`boundary.default_anchor_dir`), outside
+    every archivable root as ss1.1 requires. A failure here releases both locks. `machines` is
+    the process's statechart executor, the wiring's; with none the engine makes its own."""
+    # the root is created by acquire_run_root (mkdir_durable fsyncs every new entry), not
+    # pre-created here: a plain mkdir first would make the helper see an existing directory and
+    # prove nothing about its dirent
     lock = lock or acquire_run_root(run_root)
-    # the run root holds the journal (global values, every control input),
-    # job output, and data -- owner-only, loudly, not umask-hopefully
+    # the run root holds the journal (global values, every control input), job output, and
+    # data: owner-only by explicit mode, not by umask
     os.chmod(run_root, 0o700)
     anchor = EstateAnchor(anchor_dir or default_anchor_dir(run_root))
     try:
@@ -544,9 +480,8 @@ def start_run(
             machines=machines,
         )
     except BaseException:
-        # a refused genesis holds nothing (same rule as the claim above):
-        # both raw-fd locks conflict with a retry in this same process, so
-        # leaving them held wedges every embedder and test that retries
+        # a refused genesis holds nothing (as the claim above): both raw-fd locks conflict with a
+        # retry in this process, so holding them would wedge every embedder and test that retries
         anchor.release()
         lock.release()
         raise
@@ -569,9 +504,9 @@ def _finish_genesis(
     launched: RuntimeProfile | None,
     machines: Executor | None,
 ) -> Engine:
-    """ss1.1 steps 4-6 plus the Engine, split out so `start_run` can pair
-    the acquire with a release on every failure path. The engine runs on
-    `machines`, the process's executor, when the caller has one."""
+    """ss1.1 steps 4-6 plus the Engine, split out so `start_run` pairs the acquire with a release
+    on every failure path. The engine runs on `machines`, the process's executor, when the caller
+    has one."""
     (run_root / "runs").mkdir(exist_ok=True)
     (run_root / "logs").mkdir(exist_ok=True)
     at = clock.now()
@@ -582,18 +517,17 @@ def _finish_genesis(
     )
     if staged is not None:
         if staged.state_machine_version != STATE_MACHINE_VERSION:
-            # one executable implements exactly one state-machine version
-            # (period-model ss2.1): committing a different pin would leave
-            # this engine running beneath a manifest it can never satisfy
+            # one executable implements one state-machine version (period-model ss2.1):
+            # committing a different pin would leave this engine beneath a manifest it can never
+            # satisfy
             raise EngineError(
                 f"staged state_machine_version {staged.state_machine_version}: this"
                 f" build runs {STATE_MACHINE_VERSION}"
             )
         drift = profile_drift(derived, staged.runtime_profile)
         if drift:
-            # the pin must describe the machine that runs: a staged profile
-            # the wiring disagrees with is a fiction, refused before it is
-            # made durable
+            # the pin must describe the machine that runs: a staged profile the wiring disagrees
+            # with is refused before it is made durable
             raise EngineError(
                 f"staged runtime profile disagrees with the engine's wiring on"
                 f" {', '.join(drift)} (period-model ss2.1)"
@@ -631,9 +565,8 @@ def _finish_genesis(
         fsync_dir(run_root)
         anchor.finalize(GENESIS_PERIOD_ID)  # step 6
     except BaseException:
-        # no engine will own the segment: close it, as a refused genesis
-        # releases both locks (a statechart error stops here too, DL-336).
-        # A failing close never masks the error that got us here
+        # no engine will own the segment: close it, as a refused genesis releases both locks (a
+        # statechart error stops here too, DL-336). A failing close never masks the original error
         with contextlib.suppress(OSError, ValueError):
             journal.close()
         raise
@@ -676,48 +609,41 @@ async def resume_run(
     declared: RuntimeProfile | None = None,
     machines: Executor | None = None,
 ) -> Engine:
-    """ss7 resume: hash-gate, replay, reconcile. Returns an Engine with the
-    reconciliation completions queued (source=reconcile); the caller runs
-    the loop to process them and continue the run.
+    """ss7 resume: hash-gate, replay, reconcile. Returns an Engine with the reconciliation
+    completions queued (source=reconcile); the caller runs the loop to process them and continue
+    the run.
 
-    A `scheduler` is re-anchored at the last journal instant INCLUSIVE and
-    deduped against the journal's own scheduler ticks (a crash between
-    same-instant siblings' appends must lose none of them silently); the
-    unjournaled remainder of the window up to wall-now was missed
-    across downtime and is dropped AND journaled -- reported on
-    Engine.drops, never fired late (PENDING: E9; a live-but-stalled engine
-    fires its backlog, downtime never does).
+    A `scheduler` is re-anchored at the last journal instant inclusive and deduped against the
+    journal's own scheduler ticks (a crash between same-instant siblings' appends must lose none
+    silently); the unjournaled remainder of the window up to wall-now was missed across downtime
+    and is dropped and journaled, reported on Engine.drops, never fired late (PENDING: E9; a
+    live-but-stalled engine fires its backlog, downtime never does).
 
-    `machines` is the process's statechart executor, the wiring's, which
-    already holds the supervisor client's instance; the engine runs on it.
-    With none the engine makes its own, as `start_run`'s does."""
+    `machines` is the process's statechart executor, the wiring's, which already holds the
+    supervisor client's instance; the engine runs on it. With none the engine makes its own, as
+    `start_run`'s does."""
     os.chmod(run_root, 0o700)  # tighten a pre-existing looser root (same reason as create)
-    # ACQUIRE first (S6a, concurrency-model ss7): everything below this line
-    # reads or acts -- the log is replayed, the estate is reconciled,
-    # recorded kills are re-driven -- and a mutex taken after the first side
-    # effect is not a mutex. It also has to precede the READ, or another
-    # engine could append between the read and the acquire and this one would
-    # allocate an epoch the log already used.
+    # acquire first (S6a, concurrency-model ss7): everything below reads or acts (the log is
+    # replayed, the estate reconciled, recorded kills re-driven), and a mutex taken after the
+    # first side effect is not a mutex. It also precedes the read, or another engine could append
+    # between the read and the acquire and this one would allocate an epoch the log already used.
     lock = lock or acquire_run_root(run_root)
-    # ss11 steps 1-2, here rather than below, so the acquire/release pairing
-    # of BOTH proofs is one readable block: a refused resume must hold
-    # neither, or the next engine cannot lead a lineage this one could not.
+    # ss11 steps 1-2, here so the acquire/release pairing of both proofs is one block: a refused
+    # resume holds neither, or the next engine cannot lead a lineage this one could not.
     anchor: EstateAnchor | None = None
     #: the WAL the ladder opened, closed again if it refuses
     journals: list[Journal] = []
     try:
         sentinel = read_sentinel(run_root)
-        # a root whose `journal.jsonl` is not a sentinel gets its refusal
-        # from the reader that owns the question: `read_journal`'s record
-        # tombstone below, or `claim_root`'s (D1/D5, DL-138). This resume
-        # kept a second copy of that judgement and no longer needs one.
+        # a root whose `journal.jsonl` is not a sentinel gets its refusal from the reader that
+        # owns the question: `read_journal`'s record tombstone below, or `claim_root`'s (D1/D5,
+        # DL-138)
         if sentinel is not None:
             anchor = EstateAnchor(anchor_dir or default_anchor_dir(run_root))
             anchor.acquire()
-            # ss1.3's resume rule (DL-224), after `require` and before
-            # `_resume_under_lock` repairs anything: a root this anchor does
-            # not name, or that does not own its newest period, is refused
-            # while the only writes behind it are the two locks
+            # ss1.3's resume rule (DL-224), after `require` and before `_resume_under_lock`
+            # repairs anything: a root this anchor does not name, or that does not own its newest
+            # period, is refused while the only writes behind it are the two locks
             require_resume_root(
                 anchor.require(sentinel.estate_id), anchor_path=anchor.path, run_root=run_root
             )
@@ -740,11 +666,11 @@ async def resume_run(
             machines=machines,
         )
     except BaseException:
-        # a refused resume holds nothing: the next engine may lead. The WAL
-        # it opened is closed too; the locks are released below
+        # a refused resume holds nothing, so the next engine may lead; the WAL it opened is
+        # closed too, and the locks are released below
         for journal in journals:
-            # never mask the refusal with a second error: a WAL already
-            # closed, or a flush that fails on the way out
+            # never mask the refusal with a second error: a WAL already closed, or a flush that
+            # fails on the way out
             with contextlib.suppress(OSError, ValueError):
                 journal.detach()
         if anchor is not None:
@@ -773,20 +699,16 @@ async def _resume_under_lock(
     journals: list[Journal],
     machines: Executor | None = None,
 ) -> Engine:
-    """The ss7 resume ladder proper, with leadership already held (S6a).
-    Split from `resume_run` so the acquire/release pairing is one readable
-    block rather than a `finally` wrapped around a hundred lines.
+    """The ss7 resume ladder proper, with leadership already held (S6a). Split from `resume_run`
+    so the acquire/release pairing is one block.
 
-    ss11 steps 1-4 run first, and in their order: the sentinel (ss1.1's
-    ownership rule applies to resume as to creation), the anchor and its
-    `estate_id`, the SEAL selected by lineage from what this root holds --
-    and the half of ss3.5's join that needs C2, which sits between 3 and 4
-    so a sidecar this catalog refuses moves nothing -- and then the head
-    action that repairs whatever window the last process died in. Only then does the ladder this function had before begin --
-    over the segment the lineage selected, which on a committed boundary is
-    the one this resume just opened. Steps 1 and 2 -- the sentinel and the
-    anchor -- are the CALLER's, because they are the other half of the
-    acquire/release pairing."""
+    ss11 steps 1-4 run first, in order: the sentinel (ss1.1's ownership rule applies to resume as
+    to creation), the anchor and its `estate_id`, the SEAL selected by lineage from what this
+    root holds (and the half of ss3.5's join that needs C2, between 3 and 4, so a sidecar this
+    catalog refuses moves nothing), then the head action that repairs whatever window the last
+    process died in. Then the ladder runs over the segment the lineage selected, on a committed
+    boundary the one this resume just opened. Steps 1 and 2 are the caller's, as the other half of
+    the acquire/release pairing."""
     fence = Fence(lock, anchor.lock) if anchor is not None else Fence(lock)
     records, lineage = _select_lineage(run_root, catalog)
     if anchor is not None and sentinel is not None:
@@ -799,9 +721,8 @@ async def _resume_under_lock(
     opened_period: OpenedPeriod | None = None
     journal: Journal | None = None
     if lineage.opens_next:
-        # anchor is None only with no sentinel, a caller-wiring fact the
-        # seal knows nothing of. seal is not None is structural now
-        # (`Lineage.__post_init__`, DL-171); asserted only for mypy's sake.
+        # anchor is None only with no sentinel, a caller-wiring fact the seal knows nothing of;
+        # seal is not None is structural (`Lineage.__post_init__`, DL-171) and asserted for mypy
         assert anchor is not None
         assert lineage.seal is not None
         opened_period = _open_from_seal(
@@ -819,14 +740,11 @@ async def _resume_under_lock(
         journals.append(journal)
         records = read_journal(journal.path)
     opening = records[0]
-    # ss7 phase 3, at EVERY resume of a period that opened from a seal --
-    # not only at the resume that opened it. The segment is written once
-    # and resumed many times, and an opener that seeded the carry only on
-    # the opening pass rebuilt every later incarnation from the CATALOG:
-    # globals gone, holds gone, revisions moved, and an `effect_result`
-    # for a carried effect refused as an outcome for an unknown effect.
-    # The seal is the same one either way, and phase 3 is a pure function
-    # of it, so there is one code path and it runs unconditionally.
+    # ss7 phase 3, at every resume of a period that opened from a seal, not only the one that
+    # opened it: the segment is written once and resumed many times, and rebuilding a later
+    # incarnation from the catalog would lose globals and holds, move revisions, and refuse an
+    # `effect_result` for a carried effect. Phase 3 is a pure function of the seal, so one code
+    # path runs unconditionally.
     opened = (
         opened_period.opened
         if opened_period is not None
@@ -837,9 +755,8 @@ async def _resume_under_lock(
         run_root, opening, catalog, scheduler, adapters, deadman_s, declared
     )
     settle_seconds, grace_seconds = _reconcile_windows(manifest, settle_seconds, grace_seconds)
-    # unconditional (DL-137): the guard's docstring always said "run at
-    # genesis and at resume", and a manifest-less root never reaches this
-    # line -- the condition was a dead fork of the stated rule
+    # unconditional (DL-137): the guard runs at genesis and at resume, and a manifest-less root
+    # never reaches this line
     _require_adapters(catalog, adapters, "resume")
     _require_scheduler(catalog, scheduler, "resume")
     last_at = _check_resume_clock(opening, records, clock)
@@ -851,10 +768,9 @@ async def _resume_under_lock(
             lock=fence,
         )
         journals.append(journal)
-    # the term is allocated by being appended (ss1), before the first input
-    # this incarnation admits, so every record after it names its author.
-    # I2 makes the epoch estate-monotone, so a new period's first term is
-    # `seal.epoch + 1` and never 1 again (ss2.4)
+    # the term is allocated by being appended (ss1), before the first input this incarnation
+    # admits, so every record after it names its author. I2 makes the epoch estate-monotone, so
+    # a new period's first term is `seal.epoch + 1`, never 1 (ss2.4)
     epoch = max(next_epoch(records), lineage.seal.epoch + 1 if lineage.seal is not None else 1)
     journal.leader(epoch=epoch, at=clock.now())
     lock.note(epoch=epoch, at=clock.now())
@@ -871,35 +787,29 @@ async def _resume_under_lock(
         carried=carried,
         estate=_estate_home(run_root, anchor, sentinel, manifest, lineage),
         fence=fence,
-        # the pin even with no estate home, so the oracle reads what replay
-        # reads (DL-252); with one, the engine checks the two agree
+        # the pin even with no estate home, so the oracle reads what replay reads (DL-252); with
+        # one, the engine checks the two agree
         semantics=switches_of(manifest.runtime_profile),
         machines=machines,
     )
     evidence = await _replay_into_engine(engine, records, opened, opening, run_root, supervisor)
-    # seed the ghost-run gate: replayed starts are reconciliation's business,
-    # never a fresh dispatch
+    # seed the ghost-run gate: replayed starts are reconciliation's business, not a fresh
+    # dispatch
     for job, rt in engine.oracle.store.job.items():
         if rt.run_number:
             engine._dispatched[job] = rt.run_number
-    # DL-256: units of a job the opening catalog removed go back in the
-    # period's first input; a fresh opening admits one for it
+    # DL-256: units of a job the opening catalog removed go back in the period's first input; a
+    # fresh opening admits one for it
     engine.observe_opening()
     if scheduler is not None:
-        # the ticks THIS segment's journal has already ADJUDICATED: admitted
-        # as a scheduler `input` (`Engine._enqueue` -> `Journal.admit`, replay
-        # already fed them) or already dropped-and-journaled by an earlier
-        # resume's own sweep below (`journal.drop`, the one call site).
-        # Both are a durable verdict on the tick; re-deriving either a
-        # second time must read it, not act on it again (DL-166's finding,
-        # paid by DL-174). `advance` records are DL-44's bare time
-        # observation -- they carry neither `kind` nor a job, and no path
-        # ever folds a tick's fate into one -- so there is no "advance's
-        # tick" to re-derive and they stay out of this set. The leading
-        # `kind == "STARTJOB"` filter is what actually excludes them; it is
-        # sound today because `pop_due` is the only source of both an
-        # admitted and a dropped tick, and every one it yields is STARTJOB
-        # -- a future non-STARTJOB drop would need this filter widened too.
+        # the ticks this segment's journal has already adjudicated: admitted as a scheduler
+        # `input` (`Engine._enqueue` -> `Journal.admit`, replay already fed them) or dropped and
+        # journaled by an earlier resume's sweep below (`journal.drop`, the one call site). Each is
+        # a durable verdict, which re-deriving must read and not act on again (DL-166, DL-174).
+        # `advance` records (DL-44) carry neither `kind` nor a job and never hold a tick's fate,
+        # so they stay out of this set; the `kind == "STARTJOB"` filter excludes them. It is
+        # sound because `pop_due` is the only source of an admitted or dropped tick and yields
+        # only STARTJOB; a non-STARTJOB drop would need the filter widened.
         replayed_ticks = {
             (record["payload"].get("job"), record["at"])
             for record in records
@@ -909,34 +819,27 @@ async def _resume_under_lock(
                 or record.get("rec") == "drop"
             )
         }
-        # the PREVIOUS segment's cutoff T, read off the OPENING rather than
-        # off `lineage.seal`: the boundary writes the opening with
-        # `started_at=seal.closed_at`, and `closed_at ==
-        # scheduler_admitted_through == T` is proved at the seal and
-        # re-proved at the boundary. The seal would be a second authority
-        # for a number the opening already carries (DL-138's rule).
+        # the previous segment's cutoff T, read off the opening and not `lineage.seal`: the
+        # boundary writes the opening with `started_at=seal.closed_at`, and `closed_at ==
+        # scheduler_admitted_through == T` is proved at the seal and re-proved at the boundary.
+        # The seal would be a second authority for a number the opening carries (DL-138)
         admitted_through = (
             opening_at(opening) if opening.get("opens_from_seal") is not None else None
         )
         frontier = scheduler_frontier(records)
-        # ALWAYS inclusive of the frontier: with several jobs scheduled at
-        # one instant, a crash between the siblings' input appends leaves
-        # the frontier AT the tick with a sibling unjournaled, and an
-        # exclusive anchor would lose it silently, with no record (DL-45).
+        # always inclusive of the frontier: with several jobs at one instant, a crash between the
+        # siblings' input appends leaves the frontier at the tick with a sibling unjournaled, and
+        # an exclusive anchor would lose it with no record (DL-45)
         scheduler.reset(frontier)
         sweep_upto = max(clock.now(), frontier)  # virtual resume: now < the frontier
         for tick_ev in scheduler.pop_due(sweep_upto):
-            # one question, two sources, either enough: this segment already
-            # adjudicated the tick (admitted it, or an earlier resume of
-            # this same segment already dropped it), or C1's cutoff owned it
-            # (ss6 step 9 -- C1 admitted every tick due at or before T). The
-            # second clause is what keeps the inclusive anchor at T from
-            # journaling a `drop` for the tick C1 just ran, a durable false
-            # record (DL-166). The first clause's `drop` half is what keeps
-            # a drop-set frontier from being re-derived and re-dropped on
-            # every later resume, a durable DUPLICATE record (DL-166's own
-            # deferred finding, paid by DL-174). What neither claims is
-            # dropped AND journaled, once, never fired late.
+            # one question, two sources, either enough: this segment adjudicated the tick
+            # (admitted it, or an earlier resume of it dropped it), or C1's cutoff owned it (ss6
+            # step 9: C1 admitted every tick due at or before T). The second clause keeps the
+            # inclusive anchor at T from journaling a `drop` for the tick C1 ran, a durable false
+            # record (DL-166). The first clause's `drop` half keeps a drop-set frontier from being
+            # re-dropped on every later resume, a durable duplicate (DL-166, DL-174). What neither
+            # claims is dropped and journaled once, never fired late.
             already_admitted = (tick_ev.job(), tick_ev.at.isoformat()) in replayed_ticks or (
                 admitted_through is not None and tick_ev.at <= admitted_through
             )
@@ -945,9 +848,8 @@ async def _resume_under_lock(
             reason = "scheduler tick missed while the engine was down; not fired late"
             engine.drops.append((tick_ev, reason))  # PENDING: E9
             journal.drop(tick_ev, reason)
-    # ss8's supervisor proof needs the CLIENT on the engine, and an
-    # embedder that resumes with one must not depend on the CLI's wiring
-    # for the seal to prove anything (PR-27)
+    # ss8's supervisor proof needs the client on the engine, and an embedder that resumes with
+    # one must not depend on the CLI's wiring for the seal to prove anything (PR-27)
     engine.supervisor = supervisor
     await _reconcile(
         engine,
@@ -962,22 +864,19 @@ async def _resume_under_lock(
 
 
 def _select_lineage(run_root: Path, catalog: CatalogIR) -> tuple[list[dict[str, Any]], Lineage]:
-    """The records of the estate WAL and the lineage ss11 step 3 selects from
-    them, with the opening-version and dispatchability gates that follow it."""
+    """The records of the estate WAL and the lineage ss11 step 3 selects from them, with the
+    opening-version and dispatchability gates that follow it."""
     _drop_never_opened_segment(run_root)
     records = read_journal(estate_wal(run_root))
     lineage = select_seal(run_root, records)  # step 3
     if lineage.seal is not None:
-        # the version FIRST (DL-253): the head action and the opening below
-        # write, and an older build's boundary must be refused for its
-        # version before either, not as a catalog that does not match
+        # the version first (DL-253): the head action and the opening below write, and an older
+        # build's boundary is refused for its version before either, not as a catalog mismatch
         check_opening_version(lineage.seal.next_period, where=str(run_root))
-        # ss3.5's CMD-or-FW half, at the loader that holds C2 (DL-151). The
-        # sidecar half ran inside `select_seal`; this is the half that needs
-        # the OPENING catalog. Ahead of step 4, so a sidecar this catalog
-        # refuses moves no head and writes no segment -- and it runs at
-        # every resume of a period that opened from a seal, not only at the
-        # one that opened it.
+        # ss3.5's CMD-or-FW half, at the loader that holds C2 (DL-151). The sidecar half ran in
+        # `select_seal`; this half needs the opening catalog. It precedes step 4, so a sidecar
+        # this catalog refuses moves no head and writes no segment, and it runs at every resume of
+        # a period that opened from a seal.
         check_executions_dispatchable(lineage.seal, catalog)
     return records, lineage
 
@@ -991,20 +890,15 @@ def _pinned_manifest(
     deadman_s: float | None,
     declared: RuntimeProfile | None,
 ) -> Manifest:
-    """The segment's committed manifest, once the leader-eligibility, segment
-    and runtime-profile gates have passed over it."""
+    """The segment's committed manifest, once the leader-eligibility, segment and runtime-profile
+    gates have passed over it."""
     check_leader_eligibility(opening, catalog=catalog)
-    # PR-22's U4 half: the committed manifest is the engine's own output,
-    # and a manifest that is not this segment's refuses rather than being
-    # read past. A MISSING artifact degrades where a WRONG one refuses
-    # (DL-113 decision 5) -- but not here: genesis installs the manifest
-    # BEFORE the log opens, so a root without one is a root that LOST it,
-    # pruned or damaged, and degrading would skip every profile gate below.
-    # The `header` root that once degraded here is a retired dialect and
-    # `read_journal` refuses it in `_select_lineage` (DL-138).
-    # `read_journal` has run ss2.1's schema over the opening, so `period_id`
-    # is present and an int -- a fallback here would be a second authority
-    # for a field the reader already proved (DL-138)
+    # PR-22's U4 half: the committed manifest is the engine's own output, and one that is not
+    # this segment's refuses. A missing artifact degrades and a wrong one refuses (DL-113
+    # decision 5), but not here: genesis installs the manifest before the log opens, so a root
+    # without one lost it, and degrading would skip every profile gate below. `read_journal`
+    # refuses a `header` root in `_select_lineage` (DL-138). It has run ss2.1's schema over the
+    # opening, so `period_id` is an int and a fallback would be a second authority (DL-138)
     manifest = read_period_manifest(run_root, int(opening["period_id"]))
     if manifest is None:
         raise EngineError(
@@ -1012,12 +906,11 @@ def _pinned_manifest(
             " the period's pin is missing (period-model ss2.1)"
         )
     check_manifest_against_segment(manifest, opening)
-    # the runtime half of the same gate, in CORE: the wired components
-    # must be what the period pinned, or shifted ticks and different
-    # kill windows run under an unchanged hash. Fields no wiring can report
-    # inherit the pin unless the launcher DECLARED them (`declared`), so a
-    # process that says nothing about its machine identity is held to the
-    # rest and one that does is held to all of it.
+    # the runtime half of the same gate, in core: the wired components must be what the period
+    # pinned, or shifted ticks and different kill windows run under an unchanged hash. Fields no
+    # wiring can report inherit the pin unless the launcher declared them (`declared`): a process
+    # that says nothing about its machine identity is held to the rest, and one that does is held
+    # to all of it.
     drift = _manifest_profile_drift(manifest, scheduler, adapters, deadman_s, declared)
     if drift:
         raise EngineError(
@@ -1032,10 +925,9 @@ def _reconcile_windows(
     manifest: Manifest, settle_seconds: float | None, grace_seconds: float | None
 ) -> tuple[float, float]:
     """The settle and grace windows: the caller's, else the pin's."""
-    # the reconciliation windows have no wire flag, so the PIN is their
-    # default: a None param resolves from the manifest, and an explicit
-    # one is a caller's deliberate override (a harness affordance, like
-    # wiring a different adapter object)
+    # the reconciliation windows have no wire flag, so the pin is their default: a None param
+    # resolves from the manifest, and an explicit one is a caller's deliberate override (a
+    # harness affordance, like wiring a different adapter object)
     if settle_seconds is None:
         settle_seconds = manifest.runtime_profile.reconcile_settle_us / 1_000_000
     if grace_seconds is None:
@@ -1046,8 +938,8 @@ def _reconcile_windows(
 def _check_resume_clock(
     opening: Mapping[str, Any], records: list[dict[str, Any]], clock: Clock
 ) -> datetime:
-    """Refuse a resume clock of the wrong domain or behind the journal; answer
-    the journal's last instant."""
+    """Refuse a resume clock of the wrong domain or behind the journal; answer the journal's last
+    instant."""
     domain = "virtual" if clock.virtual else "real"
     if opening.get("clock_domain") != domain:
         raise EngineError(
@@ -1085,8 +977,8 @@ def _estate_home(
     )
 
 
-#: What the ss7 sweep reconciles against: each run's spool directory, and the
-#: runs the supervisor LISTs alive, both keyed by (job, run number).
+#: What the ss7 sweep reconciles against: each run's spool directory, and the runs the
+#: supervisor LISTs alive, both keyed by (job, run number).
 type ResumeEvidence = tuple[
     dict[tuple[str, int], Path | None], dict[tuple[str, int], SupervisorRunRow]
 ]
@@ -1100,17 +992,13 @@ async def _replay_into_engine(
     run_root: Path,
     supervisor: SupervisorClient | None,
 ) -> ResumeEvidence:
-    """Replay the segment into `engine`, installing the log's position (frontiers
-    and decisions) and the outbox on it, and answer the evidence the recovered
-    attempts leave."""
-    # ss3.5: the carry is what this segment OPENED holding -- C1's
-    # undelivered intents and its applied bindings -- and it is seeded
-    # BEFORE the segment's own records are read, never patched in
-    # afterwards: an `effect_result` here for an effect born in C1 is an
-    # outcome the replay has to attach, and `Outbox.resolve` refuses an
-    # outcome for an effect it never saw. It runs its effects, and the
-    # rebuilt decision index its request ids in flight, on the engine's
-    # executor, the process's one (statechart-engine ss11).
+    """Replay the segment into `engine`, installing the log's position (frontiers and decisions)
+    and the outbox on it, and answer the evidence the recovered attempts leave."""
+    # ss3.5: the carry is what this segment opened holding (C1's undelivered intents and applied
+    # bindings), seeded before the segment's own records are read: an `effect_result` for an
+    # effect born in C1 is an outcome the replay attaches, and `Outbox.resolve` refuses an outcome
+    # for an effect it never saw. Its effects, and the rebuilt decision index's request ids in
+    # flight, run on the engine's executor, the process's one (statechart-engine ss11).
     try:
         replay = replay_inputs(
             engine.oracle,
@@ -1119,24 +1007,22 @@ async def _replay_into_engine(
             machines=engine.machines,
         )
     except ReplayFault as exc:
-        # period-model ss11: refuse, don't degrade. The same build raises at
-        # the same input on every resume, so the estate stays down until a
-        # build that replays it runs here (deployment runbook ss7)
+        # period-model ss11: refuse, don't degrade. The same build raises at the same input on
+        # every resume, so the estate stays down until a build that replays it runs here
+        # (deployment runbook ss7)
         raise EngineError(
             f"{run_root}: resume stopped: {exc}. Deploy a build that fixes the"
             " fault, or roll back to the release that wrote this log",
             code=exc.code,
         ) from exc
-    # the log's position comes back with its contents (concurrency-model
-    # ss2): the next admission continues the index, and a retry of anything
-    # this log already decided is still answered from that decision rather
-    # than applied a second time
+    # the log's position comes back with its contents (concurrency-model ss2): the next admission
+    # continues the index, and a retry of anything this log decided is answered from that
+    # decision, not applied again
     engine.frontiers = replay.frontiers
     engine.decisions = replay.decisions
-    # ss5: the effects the previous engine intended, and what became of them.
-    # An engine that forgot a kill it had decided would leave a detached run
-    # orphaned for the rest of its life -- its job is already TERMINAL, so
-    # reconciliation skips it, and nothing else would ever look again.
+    # ss5: the effects the previous engine intended, and what became of them. An engine that
+    # forgot a kill it had decided would leave a detached run orphaned: its job is already
+    # TERMINAL, so reconciliation skips it and nothing else would look again.
     engine.outbox = replay.outbox
     evidence = await _commit_recovered_after_identity_check(
         engine, replay.recovered_attempts, records, supervisor
@@ -1145,27 +1031,21 @@ async def _replay_into_engine(
 
 
 def _drop_never_opened_segment(run_root: Path) -> None:
-    """ss11's matrix row: a torn or empty FIRST line means the segment
-    never opened -- re-open it from the boundary.
+    """ss11's matrix row: a torn or empty first line means the segment never opened; re-open it
+    from the boundary.
 
-    Such a file holds nothing a reader can use and nothing a writer may
-    append to: appending would put a second `segment` record in one file,
-    which is exactly the two-candidate state I1 exists to make impossible.
-    Removing it is safe because the opening is a pure function of the seal,
-    so what replaces it is byte-identical (PR-07). Only ever the NEWEST
-    segment, and only when an earlier one exists.
+    Such a file holds nothing a reader can use or a writer may append to: appending would put a
+    second `segment` record in one file, the two-candidate state I1 forbids. Removing it is safe
+    because the opening is a pure function of the seal, so its replacement is byte-identical
+    (PR-07). Only the newest segment, and only when an earlier one exists.
 
-    "An earlier one exists" is load-bearing and is not a proxy for "not
-    period 1", though it reads like one. What re-opens the period after
-    the file goes is `select_seal` over `estate_wal`, which falls back to
-    the PREVIOUS segment and finds the `seal` record there. A root holding
-    exactly one segment -- a rolled root, or an archived one -- has no
-    previous segment to fall back to, and deleting its only file leaves
-    `active_wal` naming a genesis segment that is not there. Such a root
-    REFUSES the torn opening instead ("missing segment record"), which is a
-    refusal and not damage. Lifting that would mean teaching `select_seal`
-    to open from the anchor head, which is a different unit (noted by
-    DL-144, not built by it)."""
+    "An earlier one exists" is not a proxy for "not period 1". What re-opens the period is
+    `select_seal` over `estate_wal`, which falls back to the previous segment and finds the
+    `seal` there. A root with exactly one segment (rolled or archived) has none to fall back to,
+    and deleting its only file would leave `active_wal` naming a genesis segment that is not
+    there. Such a root refuses the torn opening ("missing segment record"), a refusal and not
+    damage. Opening from the anchor head instead would need `select_seal` taught to do so; that
+    is not built (DL-144)."""
     segments = wal_segments(run_root)
     if len(segments) < 2:
         return
@@ -1189,21 +1069,19 @@ def _open_from_seal(
     deadman_s: float | None = None,
     declared: RuntimeProfile | None = None,
 ) -> OpenedPeriod:
-    """ss11 step 5's opening half, in place: claim the successor and write
-    the opening segment from the seal this root closed with.
+    """ss11 step 5's opening half, in place: claim the successor and write the opening segment
+    from the seal this root closed with.
 
-    The committed manifest must already be installed -- the boundary
-    renamed it into `periods/N+1/` BEFORE the record that names it -- so a
-    missing one is a boundary whose artifacts were pruned under the head,
-    which the retention floor forbids and which recovery cannot invent.
+    The committed manifest must already be installed: the boundary renamed it into
+    `periods/N+1/` before the record that names it, so a missing one is a boundary whose
+    artifacts were pruned under the head, which the retention floor forbids and recovery cannot
+    invent.
 
-    The runtime gate runs HERE, against that manifest, BEFORE the segment
-    is written. The gate at the end of the resume ladder is too late: it
-    refuses the process, but the segment for period N+1 is already on the
-    disk and the head has already moved, so the SECOND try -- with the same
-    wrong wiring -- meets an ordinary open period and succeeds. A boundary
-    that changes the profile must refuse while it is still a boundary
-    (DL-151)."""
+    The runtime gate runs here, against that manifest, before the segment is written. A gate
+    only at the end of the resume ladder refuses the process after the segment for period N+1 is
+    on disk and the head has moved, so a second try with the same wrong wiring would meet an
+    ordinary open period and succeed. A boundary that changes the profile refuses while it is
+    still a boundary (DL-151)."""
     opening = seal.next_period
     manifest = read_period_manifest(run_root, opening.period_id)
     if manifest is None:
@@ -1233,14 +1111,12 @@ def _open_from_seal(
 def _reopened(
     run_root: Path, opening: Mapping[str, Any], seal: Seal | None
 ) -> OpenedRuntime | None:
-    """ss7 phase 3 over a segment that is ALREADY open: the carry this
-    period was seeded from the first time it opened.
+    """ss7 phase 3 over a segment that is already open: the carry this period was seeded from
+    when it opened.
 
-    None for a genesis segment -- it opened from no seal, so it has no
-    carry. `select_seal` has already verified the sidecar against the digest
-    the segment names, and this re-runs the pure load over it, because the
-    load is what turns a sidecar into rows and it is the same load either
-    way."""
+    None for a genesis segment, which opened from no seal. `select_seal` has verified the sidecar
+    against the digest the segment names; this re-runs the pure load, which turns a sidecar into
+    rows."""
     link = opening.get("opens_from_seal")
     if seal is None or not isinstance(link, Mapping):
         return None
@@ -1256,10 +1132,9 @@ def _reopened(
 
 
 def _carried_rows(opened: OpenedRuntime) -> CarriedRows:
-    """The sidecar's carried half -- `OpenedRuntime.carried_rows`, the ONE
-    derivation (DL-137): a carried field added to `CarriedRows` is spelled
-    once, or the engine and the auditor open the same period holding
-    different state."""
+    """The sidecar's carried half, `OpenedRuntime.carried_rows`, the one derivation (DL-137): a
+    field added to `CarriedRows` is spelled once, or the engine and the auditor open the same
+    period holding different state."""
     return opened.carried_rows
 
 
@@ -1269,18 +1144,16 @@ async def _commit_recovered_after_identity_check(
     records: list[dict[str, Any]],
     supervisor: SupervisorClient | None,
 ) -> ResumeEvidence:
-    """ss4 step 7 for each attempt the previous engine admitted and never
-    decided (DL-315): plan, check, then write.
+    """ss4 step 7 for each attempt the previous engine admitted and never decided (DL-315): plan,
+    check, then write.
 
-    Every recovered attempt is planned first; with no live run a plan holds
-    SPAWNs only, so no plan reads another's. Then what the spool and the
-    host hold is read and checked against the WAL's SPAWNs and the planned
-    ones (DL-118). Only then are the decisions written, so a refused resume
-    has written no decision and minted no id, and the build that wrote the
-    log can still open it. The decisions land before anything after this
-    reads the outbox: a recovered start is then a pending SPAWN like any
-    other, which the barrier's dispatch applies or a held host holds.
-    Returns the evidence read, for the reconciliation ladder."""
+    Every recovered attempt is planned first; with no live run a plan holds SPAWNs only, so no
+    plan reads another's. What the spool and the host hold is then read and checked against the
+    WAL's SPAWNs and the planned ones (DL-118). Only then are the decisions written, so a refused
+    resume has written no decision and minted no id, and the build that wrote the log can still
+    open it. The decisions land before anything after this reads the outbox: a recovered start is
+    then a pending SPAWN like any other, which the barrier's dispatch applies or a held host
+    holds. Returns the evidence read, for the reconciliation ladder."""
     planned = [(attempt, engine.plan_recovered(attempt)) for attempt in recovered]
     candidates, supervised_live = await _resume_evidence(engine, records, supervisor)
     _preflight_identities(
@@ -1304,7 +1177,7 @@ async def _resume_evidence(
     #: `SupervisorClient.list_runs` boundary; every reader below reads it by
     #: attribute, so this dict-of-rows is the one decode the whole resume
     #: ladder shares. A refusal (or no supervisor) leaves this empty --
-    #: same degrade `.get("runs", [])` gave before DL-220 typed the reply.
+    #: the same degrade as an empty reply (DL-220 typed it).
     supervised_live: dict[tuple[str, int], SupervisorRunRow] = {}
     if supervisor is not None:
         with contextlib.suppress(SupervisorUnavailable):
@@ -1324,16 +1197,14 @@ async def _resume_evidence(
         for entry in sorted(runs_dir.iterdir()):
             run = split_run_dir(entry.name)
             if entry.is_dir() and run is not None:
-                # the CANONICAL parser (DL-137): the inline rpartition it
-                # replaces accepted `b.01` as run 1, and setdefault over the
-                # sorted listing then let a directory this estate never
-                # wrote answer the ss7 ladder for a real run's fate
+                # the canonical parser (DL-137): an inline rpartition accepts `b.01` as run 1, and
+                # setdefault over the sorted listing would let a directory this estate never wrote
+                # answer the ss7 ladder for a real run's fate
                 candidates.setdefault(run, entry)
-    # ...and what the HOST says it is running (S6c). ss7 reconciles every
-    # execution host, not every local directory: the sweep below concludes
-    # "never spawned" from absence here, and absence that only means "the
-    # run directory is gone" would let it re-drive a start the supervisor is
-    # still running -- the double run the whole model exists to prevent.
+    # ...and what the host says it is running (S6c). ss7 reconciles every execution host, not
+    # every local directory: the sweep below concludes "never spawned" from absence here, and
+    # absence that only means "the run directory is gone" would let it re-drive a start the
+    # supervisor is still running, the double run the model exists to prevent.
     for key in supervised_live:
         candidates.setdefault(key, None)
     return candidates, supervised_live
@@ -1349,21 +1220,18 @@ async def _reconcile(
     supervisor: SupervisorClient | None = None,
     evidence: ResumeEvidence | None = None,
 ) -> None:
-    """The ss6a/ss7 reconciliation ladder (module docstring). Tethered
-    semantics did the killing already (wrappers EOF'd when the engine
-    died), so this is mostly READING; signals are for the residual crash
-    matrix only, and only ever at a (pid, start-time)-verified target.
+    """The ss6a/ss7 reconciliation ladder (module docstring). Tethered semantics did the killing
+    already (wrappers EOF'd when the engine died), so this mostly reads; signals are for the
+    residual crash matrix, and only at a (pid, start-time)-verified target.
 
-    `evidence` is `_resume_evidence`'s reading when the caller has taken it
-    already: resume reads it, and checks it against the WAL and the planned
-    SPAWNs, before it writes the recovered decisions. The preflight below re-checks it
-    against the outbox as it now stands.
+    `evidence` is `_resume_evidence`'s reading when the caller has taken it: resume reads it and
+    checks it against the WAL and the planned SPAWNs before it writes the recovered decisions.
+    The preflight below re-checks it against the outbox as it now stands.
 
-    Detached resume (spec ss3): with a `supervisor`, an in-flight run the
-    supervisor still LISTs as wrapper_alive is REATTACHED -- the adapter task
-    just awaits its exit push, no reconciliation injection (the run never
-    stopped, E4 dissolved). Runs listed dead or unlisted fall through to the
-    spool ladder unchanged (the supervisor died, or the run predates it)."""
+    Detached resume (spec ss3): with a `supervisor`, an in-flight run the supervisor still LISTs
+    as wrapper_alive is reattached: the adapter task awaits its exit push, with no reconciliation
+    injection (the run never stopped, E4). Runs listed dead or unlisted fall through to the
+    spool ladder (the supervisor died, or the run predates it)."""
     assert engine.run_root is not None
     boot_now = _procid.current_boot_id()
     if evidence is None:
@@ -1375,25 +1243,22 @@ async def _reconcile(
     for (job, run_number), run_dir in sorted(candidates.items()):
         rt = engine.oracle.store.job.get(job)
         if rt is None or rt.run_number != run_number or rt.status in TERMINAL:
-            continue  # superseded run, or its completion already replayed
+            continue  # an earlier run, or its completion already replayed
         job_ir = engine.oracle.catalog.jobs.get(job)
         if job_ir is None:
             continue
-        # DL-242: only a LIVE row is relaunched. A row an operator set
-        # INACTIVE, a SEM-18 cascade or a box-start reset moved off its run
-        # at the SAME run number is DL-235's orphan: its evidence is still
-        # reconciled below -- the stale-completion gate rejects it -- but
-        # nothing starts the run again (a killed, held watch restarted by
-        # its box's reset was relaunched from its incomplete log)
+        # DL-242: only a live row is relaunched. A row an operator set INACTIVE, a SEM-18 cascade
+        # or a box-start reset moved off its run at the same run number is DL-235's orphan: its
+        # evidence is still reconciled below (the stale-completion gate rejects it), but nothing
+        # starts the run again
         live = rt.status in LIVE
         reattach = supervised_live.get((job, run_number))
         if reattach is not None and reattach.wrapper_alive:
             cmd_adapter = engine.adapters.get(job_ir.job_type)
             if isinstance(cmd_adapter, SupervisedCommandAdapter):
-                # REATTACH: the run's parent (the supervisor) never died, so it
-                # never stopped -- the adapter task just awaits its exit push,
-                # NO reconciliation injection (spec ss3). The LIST row's
-                # identity was checked against the WAL by the preflight.
+                # reattach: the run's parent (the supervisor) never died, so the adapter task
+                # awaits its exit push with no reconciliation injection (spec ss3). The preflight
+                # checked the LIST row's identity against the WAL.
                 cmd_adapter.reattach[(job, run_number)] = reattach.run_id
                 engine._launch(job_ir, run_number, cmd_adapter)
                 continue
@@ -1409,23 +1274,18 @@ async def _reconcile(
             and bound.run_id is not None
             and not _spool_has_evidence(run_dir)
         ):
-            # PR-36a: the intent is durable and bound, the host holds NO
-            # evidence a wrapper ever ran (no spawn.json, no status.json --
-            # the supervisor may have died between its mkdir and the fork),
-            # and SPAWN is idempotent now (ss11a). So the effect is REPLAYED
-            # rather than guessed at: the supervisor answers first-application
-            # (the run happens, once), duplicate (we await the run that
-            # already did), in-progress (likewise), or indeterminate/collision
-            # (the run fails naming the reason -- E7's policy, with the
-            # supervisor's own words). The FAILURE verdict this branch used
-            # to reach fabricated a fate for a run the host could still
-            # answer for.
+            # PR-36a: the intent is durable and bound, the host holds no evidence a wrapper ever
+            # ran (no spawn.json, no status.json; the supervisor may have died between its mkdir
+            # and the fork), and SPAWN is idempotent (ss11a). So the effect is replayed, and the
+            # supervisor answers first-application (the run happens, once), duplicate (we await
+            # the run that already did), in-progress (likewise), or indeterminate/collision (the
+            # run fails naming the reason, E7's policy with the supervisor's own words). A FAILURE
+            # verdict here would fabricate a fate for a run the host can still answer for.
             engine._launch(job_ir, run_number, cmd_adapter, run_id=bound.run_id)
             continue
-        # the ladder resolves this run's fate from its directory; the
-        # directory's claim to BE this run's was checked by the preflight,
-        # and the bound id rides along so a record that appears BETWEEN the
-        # preflight and this read is held to the same identity
+        # the ladder resolves this run's fate from its directory; the preflight checked the
+        # directory's claim to be this run's, and the bound id rides along so a record that
+        # appears between the preflight and this read is held to the same identity
         result, ended_at = await resolve_spool(
             job,
             run_number,
@@ -1435,10 +1295,8 @@ async def _reconcile(
             grace_seconds=grace_seconds,
             expected_run_id=bound.run_id if bound is not None else None,
         )
-        # the OWNER's reading (DL-145): this used to fall through to
-        # FAILURE for anything that was not an int or a `Terminated`,
-        # while the live path refused the same value -- so a result the
-        # engine would not report on became a fabricated fate at resume
+        # the owner's reading (DL-145): a value that is not an int or a `Terminated` is refused,
+        # as on the live path, and does not become a fabricated fate at resume
         extras = status_payload(result, where=f"the spool ladder for {job}.{run_number}")
         if ended_at is not None:
             extras["ended_at"] = ended_at.isoformat()  # true end time (ss7)
@@ -1446,23 +1304,20 @@ async def _reconcile(
 
     _resume_untraced_starts(engine, candidates, last_at)
     await _redrive_recorded_kills(engine, supervised_live)
-    # ss7's barrier ends where it says it does: ACQUIRE -> reconcile -> retire
-    # superseded, re-drive pending -> DISPATCH. Without this the outbox is
-    # drained only after the next admitted input (the loop dispatches on the
-    # way out of `_admit_and_apply`), so a re-driven start would wait on
-    # unrelated traffic to arrive -- hours, on a quiet estate, and never on
-    # one whose only remaining work is the run that was lost. Everything
-    # still pending here is a SPAWN nothing applied: the kills above are
-    # resolved, and a SPAWN whose run reached the host was reconciled from
-    # its trace. Superseded ones retire on the way through, and a drained or
-    # quarantined host holds its own, in the one gate that owns that call.
+    # ss7's barrier ends where it says: ACQUIRE -> reconcile -> retire stale effects,
+    # re-drive pending -> DISPATCH. Otherwise the outbox drains only after the next admitted input (the
+    # loop dispatches on the way out of `_admit_and_apply`), so a re-driven start would wait on
+    # unrelated traffic: hours on a quiet estate, forever where the only remaining work is the
+    # run that was lost. Everything pending here is a SPAWN nothing applied: the kills above are
+    # resolved, and a SPAWN whose run reached the host was reconciled from its trace. Stale
+    # ones retire on the way through, and a drained or quarantined host holds its own, in the one
+    # gate that owns that call.
     engine._dispatch()
 
 
 def _spool_has_evidence(run_dir: Path | None) -> bool:
-    """Whether a wrapper left any trace in this directory. The PR-36a replay
-    is only for runs the host provably never recorded: the moment either
-    record exists, the spool ladder owns the verdict."""
+    """Whether a wrapper left any trace in this directory. The PR-36a replay is only for runs the
+    host provably never recorded: once either record exists, the spool ladder owns the verdict."""
     if run_dir is None:
         return False
     return (run_dir / "spawn.json").exists() or (run_dir / "status.json").exists()
@@ -1479,61 +1334,52 @@ def _resume_watch(
 ) -> None:
     """One incomplete FW run, from its spool (period-model ss2.2).
 
-    A dispatched watch leaves a run directory now, so this is where a resumed
-    watch lands: the sweep finds the directory, and the log says whether the
-    watch is over. `relaunch=False` is a row that is no longer live (DL-242):
-    a completed log is still injected, for the gate to judge, and an
-    incomplete one is left alone."""
+    A dispatched watch leaves a run directory, so a resumed watch lands here: the sweep finds the
+    directory, and the log says whether the watch is over. `relaunch=False` is a row that is not
+    live (DL-242): a completed log is still injected, for the gate to judge, and an incomplete
+    one is left alone."""
     from dsl41.runner_adapters import FileWatcherAdapter
     from dsl41.semantics import fw_existence_immediate
 
     job = job_ir.name
     if run_dir is None and engine.run_root is not None:
-        # the same fallback the preflight makes: a candidate that came from a
-        # dispatch record without a run_dir still has one, and without it the
-        # inject-from-log branch below would never be reached
+        # the preflight's fallback: a candidate that came from a dispatch record without a
+        # run_dir still has one, and without it the inject-from-log branch below is unreachable
         run_dir = engine.run_root / "runs" / f"{job}.{run_number}"
     watch = read_watch_log(run_dir) if run_dir is not None else None
     bound = _spawn_effect_for(engine, job, run_number)
     if watch is not None and bound is not None:
-        # re-checked at THIS read, not only at the preflight: a log that
-        # appeared in the window between the two is held to the same
-        # identity, or its fate would be injected as this run's
+        # re-checked at this read, not only at the preflight: a log that appeared in the window
+        # between them is held to the same identity, or its fate would be injected as this run's
         _refuse_identity_split(bound, watch.run_id, "the spool's watch.jsonl")
     adapter = engine.adapters.get("FW")
     if adapter is None:
-        # _require_adapters runs at both genesis and resume, before
-        # reconciliation ever reaches here, and refuses a catalog that runs
-        # an FW job with no FW adapter wired. This function is reached only
-        # for job_ir.job_type == "FW", so that adapter cannot be absent here.
+        # _require_adapters runs at genesis and at resume, before reconciliation, and refuses a
+        # catalog that runs an FW job with no FW adapter wired. This function is reached only for
+        # job_ir.job_type == "FW", so that adapter is present.
         raise AssertionError(
             "_require_adapters already refuses a resume with an FW job and no FW"
             " adapter wired, so adapter cannot be None here"
         )
-    # DL-258: an `immediate` watch with no minimum size is complete when the
-    # RUN'S FIRST poll already qualifies, not at FW_STABLE_POLLS -- but only
-    # the first: `watch_seq == 2` is exactly one poll line recorded (the
-    # start line plus that one), so a later poll that happens to qualify
-    # does not get the carve-out. The same reading `FileWatcherAdapter.run`
-    # applies live, so a crash between that first poll and the live return
-    # must resolve the same way.
+    # DL-258: an `immediate` watch with no minimum size is complete when the run's first poll
+    # qualifies, not at FW_STABLE_POLLS, and only the first: `watch_seq == 2` is exactly one poll
+    # line (the start line plus that one), so a later qualifying poll gets no carve-out. This is
+    # `FileWatcherAdapter.run`'s live reading, so a crash between that first poll and the live
+    # return resolves the same way.
     immediate = isinstance(adapter, FileWatcherAdapter) and fw_existence_immediate(
         job_ir, adapter.existence
     )
     immediate_first_poll = immediate and watch is not None and watch.watch_seq == 2
     if watch is not None and (watch.complete or (immediate_first_poll and watch.qualifying)):
-        # PR-34a: the last durable line is a completing observation and the row
-        # is still RUNNING -- the engine died between the poll and the STATUS
-        # input. Inject the completion FROM THE LOG, exactly as a CMD's is
-        # injected from status.json; re-polling would decide the watch again
+        # PR-34a: the last durable line is a completing observation and the row is still RUNNING:
+        # the engine died between the poll and the STATUS input. Inject the completion from the
+        # log, as a CMD's is injected from status.json; re-polling would decide the watch again
         # against a world that has moved on.
         extras: dict[str, object] = {"exit_code": 0}
         if watch.last_at is None:
-            # A complete watch (WatchLog.complete, stable_polls >=
-            # FW_STABLE_POLLS) has at least one poll line by construction;
-            # an immediate completion (`watch.qualifying`) defaults False
-            # with no poll line too (read_watch_log). Either way last_at
-            # (set from that line) cannot be None here.
+            # a complete watch (WatchLog.complete, stable_polls >= FW_STABLE_POLLS) has at least
+            # one poll line, and an immediate completion (`watch.qualifying`) defaults False with
+            # no poll line (read_watch_log); either way last_at, set from that line, is not None
             raise AssertionError(
                 "a complete or immediately-qualifying watch has at least one poll"
                 " line, so last_at cannot be None (WatchLog invariant)"
@@ -1544,15 +1390,13 @@ def _resume_watch(
     if not relaunch:
         return
     if bound is None or engine.outbox.state_of(bound.effect_id) == "retired":
-        # the live engine planned no launch for this run, or retired the one
-        # it planned: the sweep's rule for an untraced start holds for a
-        # traced one too, and a watch is relaunched only under the identity
-        # of a SPAWN that was applied (DL-315)
+        # the live engine planned no launch for this run, or retired the one it planned: the
+        # sweep's rule for an untraced start holds for a traced one, and a watch is relaunched
+        # only under the identity of a SPAWN that was applied (DL-315)
         return
-    # idempotent read: the adapter reconstructs progress from the log and
-    # appends no second `start` line. The bound id rides along for the one
-    # case with no log to reconstruct from -- a run directory made and then
-    # crashed on, before the `start` line -- where a watch dispatched with no
+    # idempotent read: the adapter reconstructs progress from the log and appends no second
+    # `start` line. The bound id rides along for the case with no log to reconstruct from (a run
+    # directory made, then a crash before the `start` line), where a watch dispatched with no
     # identity would write `run_id: null` and split from the WAL (DL-118).
     engine._launch(job_ir, run_number, adapter, run_id=bound.run_id)
 
@@ -1566,9 +1410,8 @@ def _inject_completion(
     at: datetime,
     last_at: datetime,
 ) -> None:
-    """One reconciliation verdict, as an input. `source="reconcile"` is what
-    makes it a COMPLETION and therefore subject to the ss4 stale gate -- a
-    verdict this engine reached about a run the log may already know the end
+    """One reconciliation verdict, as an input. `source="reconcile"` makes it a completion, and so
+    subject to the ss4 stale gate: it is a verdict about a run the log may already know the end
     of."""
     engine._enqueue(
         Event(
@@ -1583,17 +1426,14 @@ def _inject_completion(
 def _resume_untraced_starts(
     engine: Engine, candidates: dict[tuple[str, int], Path | None], last_at: datetime
 ) -> None:
-    """Starts with no trace anywhere -- no run directory, no dispatch record,
-    and nothing the host admits to running (S6c).
+    """Starts with no trace anywhere: no run directory, no dispatch record, and nothing the host
+    admits to running (S6c).
 
-    ss7's barrier says "retire superseded, re-drive pending", and this is
-    where those words meet a row. It is a separate question from the ladder
-    above, which asks how runs that DID leave a trace ended; this one asks
-    what to do about a decision that left none. The answer is the state of
-    the row's own SPAWN (DL-315). Resume has already committed
-    every attempt whose decision never landed, so a dispatchable row at run
-    N reached it through a decision, and that decision's plan is the
-    record of what the live engine meant to do for run N."""
+    This is where ss7's "re-drive pending" step meets a row. The ladder above asks
+    how runs that left a trace ended; this asks what to do about a decision that left none. The
+    answer is the state of the row's own SPAWN (DL-315). Resume has committed every attempt whose
+    decision never landed, so a dispatchable row at run N reached it through a decision, and that
+    decision's plan records what the live engine meant to do for run N."""
     for job, rt in engine.oracle.store.job.items():
         if rt.status not in LIVE or (job, rt.run_number) in candidates:
             continue
@@ -1603,47 +1443,36 @@ def _resume_untraced_starts(
         bound = _spawn_effect_for(engine, job, rt.run_number)
         state = engine.outbox.state_of(bound.effect_id) if bound is not None else None
         if state == "pending":
-            # RE-DRIVEN. The log holds this run's intent to spawn, never
-            # resolved, and nothing anywhere ran: the previous leader died in
-            # the window between recording what it meant to do and doing it.
-            # Left pending, which is all re-driving takes -- `_dispatch`
-            # drains the outbox the moment the loop runs, through the same
-            # gates a fresh effect passes, so a drained or quarantined host
-            # still HOLDS it (ss8) and this sweep does not need to know that.
-            # An FW start too: its watch waits for the same SPAWN, so a
-            # held watch stays held across the restart (DL-96, DL-102).
-            # Only THIS run's SPAWN counts: a pending SPAWN of an earlier
-            # run says nothing about run N, and dispatch retires it.
+            # re-driven. The log holds this run's intent to spawn, never resolved, and nothing ran:
+            # the previous leader died between recording what it meant to do and doing it. It stays
+            # pending, which is all re-driving takes: `_dispatch` drains the outbox when the loop
+            # runs, through the gates a fresh effect passes, so a drained or quarantined host
+            # still holds it (ss8). An FW start too: its watch waits for the same SPAWN, so a held
+            # watch stays held across the restart (DL-96, DL-102). Only this run's SPAWN counts: a
+            # pending SPAWN of an earlier run says nothing about run N, and dispatch retires it.
             continue
         if bound is None or state == "retired":
-            # LEFT AS THE LIVE ENGINE LEFT IT. Run N's SPAWN was retired at
-            # dispatch -- a retired effect stays retired (DL-232) -- or the
-            # decision that put the row at run N planned none: a STARTING
-            # overwrite at the same run number, or a row carried across a
-            # boundary whose SPAWN the previous period retired. Either way
-            # the live engine launched nothing for this run and never would,
-            # so neither does resume. The row stays live at run N with
-            # nothing running and nothing held, exactly as before the restart,
-            # for the operator to end or restart. A tethered command is not
-            # failed either: nothing was lost (DL-315).
+            # left as the live engine left it. Run N's SPAWN was retired at dispatch (a retired
+            # effect stays retired, DL-232), or the decision that put the row at run N planned none:
+            # a STARTING overwrite at the same run number, or a row carried across a boundary whose
+            # SPAWN the previous period retired. Either way the live engine launched nothing for
+            # this run and never would, so neither does resume. The row stays live at run N with
+            # nothing running or held, for the operator to end or restart. A tethered command is
+            # not failed: nothing was lost (DL-315).
             continue
-        # TRIED, AND NO TRACE. The SPAWN resolved `applied`: dispatch reached
-        # the adapter, and the crash took whatever it left before anything
-        # durable named the run. `indeterminate` takes the same ladder; no
-        # path resolves a SPAWN so today, and the ladder lets the host decide
-        # where it can, which is what the state means (concurrency-model ss5)
+        # tried, and no trace. The SPAWN resolved `applied`: dispatch reached the adapter, and the
+        # crash took whatever it left before anything durable named the run. `indeterminate` takes
+        # the same ladder; the ladder lets the host decide where it can, which is what the state
+        # means (concurrency-model ss5)
         if job_ir.job_type == "FW":
-            # the watch is an idempotent re-read, so it is re-dispatched
-            # rather than failed (DL-44 item 7, DL-102), under its bound id.
-            # The routing gate passed at the live dispatch, and a running
-            # watch continues on a host that routes nothing new (ss8)
+            # the watch is an idempotent re-read, so it is re-dispatched and not failed (DL-44
+            # item 7, DL-102), under its bound id. The routing gate passed at the live dispatch,
+            # and a running watch continues on a host that routes nothing new (ss8)
             adapter = engine.adapters.get("FW")
             if adapter is None:
-                # _require_adapters runs at both genesis and resume, before
-                # reconciliation ever reaches here, and refuses a catalog
-                # that runs an FW job with no FW adapter wired. This branch
-                # is reached only for job_ir.job_type == "FW", so that
-                # adapter cannot be absent here.
+                # _require_adapters runs at genesis and at resume, before reconciliation, and
+                # refuses a catalog that runs an FW job with no FW adapter wired. This branch is
+                # reached only for job_ir.job_type == "FW", so that adapter is present.
                 raise AssertionError(
                     "_require_adapters already refuses a resume with an FW job and no"
                     " FW adapter wired, so adapter cannot be None here"
@@ -1652,19 +1481,15 @@ def _resume_untraced_starts(
             continue
         adapter = engine.adapters.get(job_ir.job_type)
         if isinstance(adapter, SupervisedCommandAdapter) and bound.run_id is not None:
-            # PR-36a again, with even less on disk: the intent is durable and
-            # bound but nothing anywhere names a wrapper. Replaying through
-            # the idempotent SPAWN is strictly safer than the FAILURE verdict
-            # -- the supervisor's directory, not this engine's guess, says
-            # whether the run already exists.
+            # PR-36a, with even less on disk: the intent is durable and bound but nothing names a
+            # wrapper. Replaying through the idempotent SPAWN is safer than a FAILURE verdict: the
+            # supervisor's directory, not this engine's guess, says whether the run exists.
             engine._launch(job_ir, rt.run_number, adapter, run_id=bound.run_id)
             continue
-        # FAILED. A tethered wrapper died with the engine and left no trace,
-        # or a supervised run has no bound identity to replay against. That
-        # is the case runner-design ss7 was reasoning about when it chose to
-        # fail a start rather than silently re-run it, and for these chains
-        # it still does. An indeterminate SPAWN may have run, so its cause
-        # is E7's, not "never spawned"
+        # failed. A tethered wrapper died with the engine and left no trace, or a supervised run
+        # has no bound identity to replay against. runner-design ss7 fails such a start rather
+        # than silently re-run it. An indeterminate SPAWN may have run, so its cause is E7's, not
+        # "never spawned"
         cause = (
             "exit_status_unobservable"  # PENDING: E7
             if state == "indeterminate"
@@ -1681,10 +1506,9 @@ def _resume_untraced_starts(
 
 
 def _spawn_effect_for(engine: Engine, job: str, run_number: int) -> Effect | None:
-    """The durable SPAWN that bound this run's identity, in any state --
-    resolved included, because the split to refuse is between the WAL and
-    what a spool or a supervisor claims NOW, and resolution does not expire
-    the binding."""
+    """The durable SPAWN that bound this run's identity, in any state, resolved included: the
+    split to refuse is between the WAL and what a spool or a supervisor claims now, and
+    resolution does not expire the binding."""
     return next(
         (
             e
@@ -1696,16 +1520,13 @@ def _spawn_effect_for(engine: Engine, job: str, run_number: int) -> Effect | Non
 
 
 def _refuse_identity_split(effect: Effect, observed: object, source: str) -> None:
-    """One key runs through the WAL and the spool (DL-118, PR-36a): the
-    durable effect bound this run's `run_id` at birth, so PRESENT evidence
-    about the run must name that id. A different id -- or none, where a
-    new-writer wrapper always records one -- is a WAL/spool split:
-    corruption, a spoofed record, or a directory from another estate, and
-    reattaching to, resolving, or killing that process would act on a run
-    the log never spawned. Refused loudly rather than reconciled: there is
-    no correct pick between two identities for one run. Callers pass only
-    evidence that EXISTS -- an absent file is the ladder's business, not a
-    split. A pre-DL-118 effect has no bound id and checks nothing."""
+    """One key runs through the WAL and the spool (DL-118, PR-36a): the durable effect bound this
+    run's `run_id` at birth, so present evidence about the run must name that id. A different id,
+    or none where a new-writer wrapper always records one, is a WAL/spool split: corruption, a
+    spoofed record, or a directory from another estate, and reattaching to, resolving, or killing
+    that process would act on a run the log never spawned. It refuses loudly; there is no correct
+    pick between two identities for one run. Callers pass only evidence that exists: an absent
+    file is the ladder's business. A pre-DL-118 effect has no bound id and checks nothing."""
     if effect.run_id is None:
         return
     observed_id = str(observed) if observed is not None else None
@@ -1724,22 +1545,18 @@ def _preflight_identities(
     *,
     planned: Sequence[Effect] = (),
 ) -> None:
-    """Check EVERY candidate's observed identities against the WAL before
-    the barrier mutates anything (DL-118). One sweep, up front, because the
-    branch-by-branch alternative had ordering holes by construction: a
-    reconciliation that durably recorded `applied` before a later branch
-    refused the same run left the refusal half-taken, and a dead LIST row
-    with no local directory reached `resolve_spool` through a branch no
-    guard covered.
+    """Check every candidate's observed identities against the WAL before the barrier mutates
+    anything (DL-118). One sweep up front: branch-by-branch checks leave ordering holes (a
+    reconciliation that durably recorded `applied` before a later branch refused the same run
+    leaves the refusal half-taken, and a dead LIST row with no local directory reached
+    `resolve_spool` through an unguarded branch).
 
-    `planned` holds the SPAWNs of the recovered decisions resume is about
-    to write (DL-315); a run's id is bound by its durable SPAWN or
-    by one of these. Resume runs it first, before it writes the recovered
-    decisions, so a refusal there has written no decision and launched
-    nothing -- the run root holds only this incarnation's `leader` record
-    beyond what the crash left. The barrier runs it again over the same
-    evidence once the recovered decisions are written, and it passes unless
-    the spool changed in between."""
+    `planned` holds the SPAWNs of the recovered decisions resume is about to write (DL-315); a
+    run's id is bound by its durable SPAWN or by one of these. Resume runs this first, before it
+    writes the recovered decisions, so a refusal there has written no decision and launched
+    nothing: the run root holds only this incarnation's `leader` record beyond what the crash
+    left. The barrier runs it again over the same evidence once the decisions are written, and it
+    passes unless the spool changed in between."""
     for (job, run_number), run_dir in sorted(candidates.items()):
         effect = _spawn_effect_for(engine, job, run_number) or next(
             (
@@ -1759,8 +1576,8 @@ def _preflight_identities(
                 doc = load_json(directory / name)
                 if doc is not None:
                     _refuse_identity_split(effect, doc.get("run_id"), f"the spool's {name}")
-            # an FW watch spawns no process; its `start` line is the record
-            # that names the run, and it is present evidence like any other
+            # an FW watch spawns no process; its `start` line names the run and is present
+            # evidence like any other
             watch = read_watch_log(directory)
             if watch is not None:
                 _refuse_identity_split(effect, watch.run_id, "the spool's watch.jsonl")
@@ -1772,35 +1589,31 @@ def _preflight_identities(
 def _reconcile_applied_spawns(
     engine: Engine, candidates: dict[tuple[str, int], Path | None]
 ) -> None:
-    """Resolve the pending SPAWNs whose runs DID reach the host (ss5).
+    """Resolve the pending SPAWNs whose runs did reach the host (ss5).
 
-    The classic outbox window: `_apply_spawn` launches and THEN records the
-    outcome, so an engine that died between the two left a pending effect
-    for a run that may well have started. The spool is the record (DL-93) --
-    a run directory means it reached the host -- so the effect is reconciled
-    from it rather than re-driven. Without this the next dispatch would drain
-    a pending SPAWN into a second `mkdir()` of a directory that exists."""
+    `_apply_spawn` launches and then records the outcome, so an engine that died between the two
+    leaves a pending effect for a run that may have started. The spool is the record (DL-93): a
+    run directory means it reached the host, so the effect is reconciled from it and not
+    re-driven, or the next dispatch would drain a pending SPAWN into a second `mkdir()` of a
+    directory that exists."""
     for effect in [e for e in engine.outbox.pending() if e.kind == "SPAWN"]:
         spool = candidates.get((effect.job, effect.run_number))
         if (effect.job, effect.run_number) not in candidates:
             continue
         spawned = load_json(spool / "spawn.json") if spool is not None else None
         if spawned is not None:
-            # re-checked at THIS read, not only at the preflight (DL-118):
-            # evidence that appeared in the window between them is held to
-            # the bound identity BEFORE anything durable is recorded --
-            # including present-but-idless evidence, which the strict gate
-            # refuses. Without this, the applied outcome lands first and the
-            # later gates refuse only after the WAL has moved.
+            # re-checked at this read, not only at the preflight (DL-118): evidence that appeared
+            # between them is held to the bound identity before anything durable is recorded,
+            # including present-but-idless evidence, which the strict gate refuses. Otherwise the
+            # applied outcome lands first and the later gates refuse after the WAL has moved.
             _refuse_identity_split(effect, spawned.get("run_id"), "the spool's spawn.json")
         run_id = (spawned or {}).get("run_id")
         detail = "reconciled from the spool: the run reached the host"
         if spawned is None and spool is not None:
-            # ss11's FW rule (PR-34): a watch writes no spawn.json, and its
-            # `start` line is what says the dispatch happened. Without this the
-            # ladder treats the pending SPAWN as an applied-SPAWN candidate,
-            # finds no spawn.json, and re-launches the watch as an untraced
-            # start -- two `start` lines and a fold nothing can reproduce.
+            # ss11's FW rule (PR-34): a watch writes no spawn.json, and its `start` line says the
+            # dispatch happened. Otherwise the ladder treats the pending SPAWN as an applied-SPAWN
+            # candidate, finds no spawn.json, and re-launches the watch as an untraced start: two
+            # `start` lines and a fold nothing can reproduce.
             watch = read_watch_log(spool)
             if watch is not None:
                 _refuse_identity_split(effect, watch.run_id, "the spool's watch.jsonl")
@@ -1819,39 +1632,28 @@ def _reconcile_applied_spawns(
 async def _redrive_recorded_kills(
     engine: Engine, supervised_live: dict[tuple[str, int], SupervisorRunRow]
 ) -> None:
-    """Deliver the kills the previous engine decided and did not get to
-    (concurrency-model ss5; S5c).
+    """Deliver the kills the previous engine decided and did not get to (concurrency-model ss5;
+    S5c).
 
-    This closes a real leak. A kill used to be a `task.cancel()` with no id
-    and no record: an engine that decided TERMINATED and died before
-    cancelling left a DETACHED run whose parent is the supervisor, and
-    reconciliation skipped it on the way past -- its job is already TERMINAL,
-    which reads as "its completion was already replayed". Nothing looked
-    again, and the process ran on orphaned.
+    An engine that decided TERMINATED and died before cancelling would leave a detached run whose
+    parent is the supervisor; reconciliation skips it because its job is already TERMINAL, which
+    reads as "its completion was already replayed", and the process runs on orphaned.
 
-    Re-driving is not a new licence: runner-design ss7 already permits
-    exactly this side effect at resume, and only this one ("no side effects
-    on resume beyond recorded kills").
+    Re-driving is not a new licence: runner-design ss7 permits exactly this side effect at resume
+    and only this one ("no side effects on resume beyond recorded kills").
 
-    A kill whose run is NOT alive is resolved from the spool, three ways --
-    which is where ss5's third state earns its keep. `status.json` saying the
-    command was signalled means the kill landed; saying it exited means it
-    finished first and the kill is retired, superseded by the truth. No
-    status record at all and no live wrapper means nobody can say whether the
-    signal landed, and `indeterminate` is the only honest answer: reporting
-    it either way would invent a fact about a process nothing observed
-    (E7).
+    A kill whose run is not alive is resolved from the spool, three ways (ss5's third state).
+    `status.json` saying the command was signalled means the kill landed; saying it exited means
+    it finished first and the kill is retired in favour of the truth. No status record and no
+    live wrapper means nobody can say whether the signal landed, and `indeterminate` is the only
+    honest answer: either other report would invent a fact about a process nothing observed (E7).
 
-    *(Amended by DL-133, at build of period-model ss3.5 -- PR-33.)* **A live
-    wrapper under a TERMINAL row is re-driven regardless of the KILL
-    effect's recorded state**, and regardless of whether a KILL effect
-    exists at all. `_apply_kill` records `applied` when the cancellation is
-    delivered and the TERM/grace/KILL ladder runs on the way out of the
-    task, so an engine that dies mid-ladder leaves a live wrapper under a
-    terminal row -- and re-driving only PENDING kills read that state and
-    walked past it. The row being terminal is what makes the process an
-    orphan: reconciliation skips it as "already replayed", and nothing else
-    ever looks again."""
+    A live wrapper under a terminal row is re-driven regardless of the KILL effect's recorded
+    state, and whether a KILL effect exists at all (DL-133, PR-33). `_apply_kill` records
+    `applied` when the cancellation is delivered and the TERM/grace/KILL ladder runs on the way
+    out of the task, so an engine that dies mid-ladder leaves a live wrapper under a terminal
+    row. The terminal row makes the process an orphan: reconciliation skips it as "already
+    replayed", and nothing else looks again."""
     assert engine.run_root is not None
     redriven: set[str] = set()
     for effect in [e for e in engine.outbox.pending() if e.kind == "KILL"]:
@@ -1864,14 +1666,11 @@ async def _redrive_recorded_kills(
             and listing.wrapper_alive
             and isinstance(adapter, SupervisedCommandAdapter)
         ):
-            # the adapter's own TERM/grace/KILL ladder, driven directly. Not
-            # through a reattached task and a cancel: a task cancelled before
-            # its first step never enters the handler that runs the ladder, so
-            # that route would resolve the effect while stopping nothing.
-            # `_live` is empty here anyway -- the supervisor's LIST is what
-            # says this run is alive, which is why `_apply_effect`'s
-            # supersession check (which reads `_live`) is not the right gate
-            # at resume.
+            # the adapter's own TERM/grace/KILL ladder, driven directly: a task cancelled before
+            # its first step never enters the handler that runs the ladder, so a reattached task
+            # and a cancel would resolve the effect while stopping nothing. `_live` is empty here;
+            # the supervisor's LIST says the run is alive, so `_apply_effect`'s check on `_live`
+            # is not the right gate at resume.
             run_id = listing.run_id
             redriven.add(run_id)
             await adapter.kill(run_id)
@@ -1893,14 +1692,13 @@ async def _redrive_orphans(
     supervised_live: dict[tuple[str, int], SupervisorRunRow],
     redriven: set[str],
 ) -> None:
-    """PR-33: every live wrapper whose row is TERMINAL, killed at resume --
-    whatever the KILL effect says, and whether or not one exists.
+    """PR-33: every live wrapper whose row is TERMINAL, killed at resume, whatever the KILL effect
+    says and whether or not one exists.
 
-    Keyed the other way round from the loop above, deliberately. That loop
-    asks "which kills did the previous engine intend?"; this asks "which
-    processes are alive that nothing intends to be", which is the question
-    an `applied`, `retired` or absent KILL effect cannot answer. A run this
-    resume already killed is skipped rather than signalled twice."""
+    It is keyed the other way round from the loop above. That loop asks which kills the previous
+    engine intended; this asks which processes are alive that nothing intends to be, which an
+    `applied`, `retired` or absent KILL effect cannot answer. A run this resume already killed
+    is skipped, not signalled twice."""
     for (job, run_number), listing in sorted(supervised_live.items()):
         run_id = listing.run_id
         if not listing.wrapper_alive or not run_id or run_id in redriven:
@@ -1918,12 +1716,9 @@ async def _redrive_orphans(
 def _kill_outcome_from_spool(run_root: Path, effect: Effect) -> EffectOutcome:
     """What the spool can say about an undelivered kill (ss5's three states).
 
-    The record is read through `outcome_from_status`, the one mapping the
-    live adapter path and reconciliation already share, rather than by
-    reaching into the record here. Its `Terminated` IS "this run ended by a
-    kill", which is the question -- and the first draft of this function
-    asked a different one, reading `observed`, which the wrapper writes as
-    FORENSICS about how the group died rather than as its verdict."""
+    The record is read through `outcome_from_status`, the mapping the live adapter path and
+    reconciliation share. Its `Terminated` means "this run ended by a kill"; `observed` is the
+    wrapper's forensics about how the group died, not its verdict."""
     run_dir = run_root / "runs" / f"{effect.job}.{effect.run_number}"
     status = load_json(run_dir / "status.json")
     if status is not None:

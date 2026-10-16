@@ -1,18 +1,15 @@
 """The engine's seal boundary as a statechart (period-model ss6-7, DL-327).
 
-Normative spec: docs/period-model.md ss6 (the cutoff barrier) and ss7 (the
-seal operation), and docs/statechart-engine.md for how the executor reads
-the declaration. `ssN` in this module names period-model unless the
-sentence names another document.
+Spec: docs/period-model.md ss6 (the cutoff barrier) and ss7 (the seal operation), and
+docs/statechart-engine.md for how the executor reads the declaration. `ssN` here names
+period-model unless the sentence names another document.
 
-`SEAL_BOUNDARY` is the declaration. The engine owns one `Executor` and runs
-one instance per seal request, keyed by the request, from `submit_seal`
-until the boundary rests in `sealed` or `aborted`; `stopped` ends the
-engine. The engine runs the boundary's steps (`Engine._run_boundary`). At
-each decision point it posts what happened, with the facts the rows read
-computed into the payload first. The row it takes reports one `SealExit`,
-and the engine carries it out: answer and raise `PeriodSealed`, abort and
-answer, or re-raise. Actions never raise and do no I/O.
+`SEAL_BOUNDARY` is the declaration. The engine owns one `Executor` and runs one instance per
+seal request, keyed by the request, from `submit_seal` until the boundary rests in `sealed` or
+`aborted`; `stopped` ends the engine. `Engine._run_boundary` runs the steps and, at each
+decision point, posts what happened with the facts the rows read computed into the payload.
+The row taken reports one `SealExit`, which the engine carries out: answer and raise
+`PeriodSealed`, abort and answer, or re-raise. Actions never raise and do no I/O.
 
 The seal defers nothing. An input stamped after T refuses the boundary
 (ss6 step 7, `seal_input_after_cutoff`); inputs are not events of this
@@ -53,12 +50,10 @@ def seal_phase(active: frozenset[str]) -> str:
 class SealFault:
     """An exception inside a seal, with the facts the exception rows read.
 
-    The engine reads them once, before the post. `fence_lost` is read only
-    for an exception that is not `BoundaryFailStop`, as before: the row that
-    classifies that stop does not read it. The other three are DL-274's flags: the index of an
-    attempt admitted during the seal and not fully applied, the kind of an
-    engine-made input the drain could not admit, and an unfinished WAL
-    append."""
+    The engine reads them once, before the post. `fence_lost` is read only for an exception
+    that is not `BoundaryFailStop`. The other three are DL-274's flags: the index of an attempt
+    admitted during the seal and not fully applied, the kind of an engine-made input the drain
+    could not admit, and an unfinished WAL append."""
 
     error: Exception
     fence_lost: bool = False
@@ -107,7 +102,7 @@ def _past_ponr(ctx: Context) -> bool:
 
 def _fence_lost(ctx: Context) -> bool:
     """Not `BoundaryFailStop`, and the fence is lost: a leader that cannot prove it
-    leads does not reopen admission (DL-101, PR-28b). Checked before DL-274's
+    leads does not reopen admission (DL-101, PR-28b). It takes precedence over DL-274's
     flags."""
     fault: SealFault = ctx.event.payload
     return not stops_by_type(fault.error) and fault.fence_lost
@@ -194,8 +189,8 @@ _OUT_OF_ORDER = (
 #: while another boundary is in flight is refused `seal_in_flight`
 #: (`SealInFlight`) and never becomes an instance. The four exception rows
 #: partition every exception in this order of precedence: `BoundaryFailStop`,
-#: then the fence, then DL-274's flags, else the abort. Row .08, the stop of
-#: `--on-transition-violation stop`, left with that policy (DL-353).
+#: then the fence, then DL-274's flags, else the abort. No row stops on a transition
+#: violation (DL-353).
 SEAL_BOUNDARY: Final = Statechart(
     name="seal_boundary",
     root=State(
