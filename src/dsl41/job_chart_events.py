@@ -41,8 +41,10 @@ ADMITTED_START: Final = "admitted start"
 #: A start past the gates and the bound: its extent (`OracleCascade._extent`).
 START_ADMITTED: Final = "start admitted"
 LEAVE_LIVE: Final = "leave STARTING or RUNNING"
-#: A flag move whose status rule reads the flag: it follows the move.
-FLAG_MOVED: Final = "flag moved"
+#: A flag move whose status rule reads the flag follows the move as its own item: ON_ICE's on
+#: a job not live (job.201, job.234), ON_NOEXEC's where it applies (job.209, job.222).
+ICE_MOVED: Final = "ice moved"
+NOEXEC_MOVED: Final = "noexec moved"
 MEMBER_MOVES: Final = "member moves"
 COMPLETION_MOMENT: Final = "completion moment"
 MEMBER_ENDS: Final = "member ends FAILURE or TERMINATED"
@@ -257,9 +259,10 @@ class Injection(Payload):
 
 
 class Noexec(Protocol):
-    """ON_NOEXEC on a box (DL-254, `oracle_facts.NoexecFacts`): `tree_busy`, a job it contains
-    is on ice, live or queued (`_oob_ignored`); `change`, its parent is RUNNING or a job it
-    contains is not INACTIVE. `noexec_settles_box` also counts the box's own status."""
+    """ON_NOEXEC's payload, which `noexec moved` carries on (DL-254, `oracle_facts.NoexecFacts`).
+    On a box: `tree_busy`, a job it contains is on ice, live or queued (`_oob_ignored`);
+    `change`, its parent is RUNNING or a job it contains is not INACTIVE. `noexec_settles_box`
+    also counts the box's own status."""
 
     @property
     def tree_busy(self) -> bool: ...
@@ -306,15 +309,6 @@ class BoxVerdict(Protocol):
     def override(self) -> bool: ...
     @property
     def units(self) -> Units: ...
-
-
-@dataclass(frozen=True)
-class FlagMoved(Payload):
-    """The flag move a status rule follows: `cause` is the input that moved it; `noexec` is
-    ON_NOEXEC's payload, passed on with its `units`, and None for any other cause."""
-
-    cause: Literal["ON_ICE", "ON_NOEXEC"]
-    noexec: Noexec | None = None
 
 
 @dataclass(frozen=True)

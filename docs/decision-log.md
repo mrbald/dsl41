@@ -23846,3 +23846,78 @@ relitigate an entry; append a new one.
   the test JILs and 60 corpus files under three switch sets, no run differing, every retired row's
   count equal to its new row's; its own completeness table over 4,710 cells identical under the id
   mapping except the 60 cells of job.193 and job.194, which end on a marked row as before.
+- DL-369 A chained item names its cause: the job chart's `flag moved` and its `cause` field
+  become two events, `ice moved` and `noexec moved`, each status row that read the cause is a
+  row of the one event it was for, and a box's ON_NOEXEC settlement is one row at `lifecycle`
+  (2026-10-16; src/dsl41/job_chart.py, src/dsl41/job_chart_events.py,
+  src/dsl41/job_chart_rows.py, src/dsl41/oracle_cascade.py, src/dsl41/oracle_writers.py;
+  tests/test_job_chart.py, tests/test_oracle_chart.py, tests/test_job_lifecycle_doc.py;
+  docs/statechart-engine.md §11; docs/state-machines.md; docs/job-chart-lifecycle.md)
+  THE AIM. Step 7 of the job chart simplification. A row reads `QUE_WAIT + ice moved ->
+  INACTIVE`, not `QUE_WAIT + flag moved [iced_waiter] -> INACTIVE`. No outcome of the oracle
+  changes: no golden, no trace line.
+  THE RULE. An event says what happened; a guard does not switch on a field that names the
+  sender. Where one event carried two causes and guards tested the cause, each cause is its own
+  event. The `injected status` choice stays: its guards match the status the input names, a
+  fact of the payload, not the sender.
+  THE EVENTS. `ice moved` is sent by ON_ICE's flag rows: job.234's `report_ice` on a waiter, and
+  job.201's `iced` on any other job. Its rows read no fact, so it carries a bare `Payload` with
+  the handle. `noexec moved` is sent by `_on_noexec`, the consequence of the ON_NOEXEC flag rows
+  job.209 and job.222, and carries ON_NOEXEC's own payload (`NoexecFacts`). The facts it read
+  at the flag row stay read: `tree_busy` is kept on first read, as before, and `change` is read
+  when `noexec_settles_box` first needs it. The payload's handle is the job's, as `FlagMoved`'s
+  was. `FLAG_MOVED`, `FlagMoved` and the helpers `_noexec` and `_cause` leave. So does the
+  statechart error for a flag move of ON_ICE read for ON_NOEXEC's payload, and its test: no
+  event now carries both.
+  THE ROWS. A row that stays one row with the same cells keeps its id: job.112 is
+  `QUE_WAIT + ice moved -> INACTIVE`, unguarded; job.113 and job.121 (`noexec_settles_job`)
+  are inner rows of `noexec moved`. job.198 splits per event, as its note did: job.198 keeps
+  ON_NOEXEC's half, and job.451 takes ON_ICE's, unguarded at `lifecycle`, shadowed by job.112
+  at QUE_WAIT (§3). job.199 is `noexec moved`'s alone (`noexec_ignored`): an ice move has no
+  unposted case. job.136, job.169 and job.170 (`noexec_settles_box` at IDLE, QUE_WAIT and
+  STARTING) retire into job.452 at `lifecycle`, the rule written once (DL-368); ids are not
+  reused (DL-364). A box at RUNNING ignores ON_NOEXEC, so job.452's guard is false there and
+  job.199 takes the cell. job.452's writer is `_w_noexec_box`, as each copy's was; job.451's
+  is `_w_nothing`, as job.198's.
+  THE COMPLEMENT. job.452 sits beside job.198 at one source, and `noexec_settles_box` implies
+  `noexec_applies`, so job.198's guard becomes `noexec_moves_nothing`: `noexec_applies` and not
+  `noexec_settles_box`, as job.191's `recomputes_nothing` excludes the recompute's rows. The
+  three rows of `noexec moved` at `lifecycle`, job.198, job.199 and job.452, are exclusive on
+  every cell. job.198's false outcome is now reached where job.452 fires, so its
+  `false_unreachable` goes; job.170's goes with the row.
+  ADMITTED. `lifecycle` contains ADMITTED, which the three retired rows did not, so job.452
+  would take a box's applied ON_NOEXEC there, where HEAD took job.198. No input reaches that
+  cell: ON_NOEXEC at ADMITTED is itself the marked job.423, so its flag move never pops there.
+  job.453 is a marked row at ADMITTED on `noexec moved`, with no guard and no writer. As the
+  inner row it shadows job.198, job.199 and job.452 at ADMITTED, so a hit raises in the hook
+  and the gate forbids it: the tripwire form of job.450, stricter than HEAD's silent job.198.
+  THE GUARDS. Removed: `iced_waiter`, which tested the cause only; `flag_moves_nothing` and
+  `flag_move_unposted`. Added: `noexec_moves_nothing`. Kept, with the cause clause gone:
+  `noexec_settles_job` (`noexec_applies`, a catalog job, not a box) and `noexec_settles_box`
+  (`noexec_applies`, a box, not INACTIVE or `change`).
+  ITEMS. None changes: each flag move still sends one item.
+  CHECKS. The job chart has 147 rows, as before (three retired, three added); 73 guards, 75
+  before. The transition gate holds 317 of 317 required items of `job`, 322 before; it forbids
+  28, 29 before. A cell table of HEAD against the tree, every status and ADMITTED, every flag
+  and holding, all sixteen `JobData` values, the ice move and the four ON_NOEXEC payloads
+  (15,360 cells), is equal under the id mapping (job.198's ice cells to job.451, job.136,
+  job.169 and job.170 to job.452) outside ADMITTED. All 1,536 ADMITTED cells of `noexec moved`
+  end on job.453, from job.198 or the marked job.199 at HEAD. The cell test checks job.452 from
+  every leaf, and job.199 at RUNNING. The mutant that swaps the job's and the box's settlement
+  guards now raises AmbiguousTransition on a waiter, job.452 beside its complement job.198,
+  before any write; on a FAILED box it still names job.121. The golden replay: 4,060 runs,
+  152,213 entries, 0 differing. Line and branch coverage 100.
+  THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235): no accepted input derives differently,
+  and the goldens replay equal. No oracle machine defers (§12), so no stored queue names the
+  old event.
+  REVIEW. Semantic class (chart events and rows; §11). One Codex Astra pass (gpt-6-astra,
+  xhigh): none found in five probes (2,880 selector cells compared, ten sequences of 29 inputs
+  matched in microstep order, intents, events, records and traces; no production route delivers
+  `noexec moved` to an ADMITTED job; `change` read twice at the same moment; job.452 and job.198
+  exclusive with real facts; no required item lost). One Opus reviewer: no blocker, no material
+  finding; a differential run of HEAD against the tree over 5,730 runs and 573,000 steps, half of
+  them ice and noexec commands, on the fixtures, 31 corpus files, 300 generated estates and a box
+  and resource estate under three switch sets, no step differing, the retired rows' counts equal
+  to their new rows' (job.136, job.169 and job.170 to job.452: 2,357; job.198's ice cases to
+  job.451: 34,642); four lows fixed and confirmed by it (`change` kept on first read, a mutant
+  test's docstring, a cell test for the job.453 tripwire, a wrapped comment).

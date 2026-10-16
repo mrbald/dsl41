@@ -74,12 +74,13 @@ from dsl41.job_chart_events import (
     BOX_SET_INACTIVE,
     BOX_START,
     COMPLETION_MOMENT,
-    FLAG_MOVED,
     HOLDERS,
+    ICE_MOVED,
     LEAVE_LIVE,
     LOAD_TAKEN,
     MEMBER_ENDS,
     MEMBER_MOVES,
+    NOEXEC_MOVED,
     NOTIFY_STEP,
     READMIT,
     RETRY_STEP,
@@ -93,8 +94,8 @@ from dsl41.job_chart_events import (
     WINDOW_PASS,
     Admission,
     Admitted,
-    FlagMoved,
     JobData,
+    Payload,
     Settlement,
 )
 from dsl41.job_chart_rows import status_of
@@ -529,7 +530,7 @@ class OracleCascade(OracleSchedule):
         """A box set INACTIVE by an operator or by ON_NOEXEC (the batch INACTIVE path, SEM-18):
         its own row first, its settlement, every job it contains, the second phase, then the
         idle parent's recompute."""
-        noexec = ctx.event.name == FLAG_MOVED
+        noexec = ctx.event.name == NOEXEC_MOVED
         if noexec:
             batch = Batch(job, clear=True)
         else:
@@ -893,7 +894,7 @@ class OracleCascade(OracleSchedule):
     def _on_iced(self, job: str, ctx: Context) -> Effects:
         """ON_ICE on a job that is not a waiter (SEM-20, DL-285): the status rule follows the
         flag, then the job runs its completion moment and wakes its referencers."""
-        moved = self._to(job, FLAG_MOVED, FlagMoved("ON_ICE", units=self._units(job)))
+        moved = self._to(job, ICE_MOVED, Payload(units=self._units(job)))
         status = self._runtime(job).status
         runs = self._ancestor_runs(job)
         resolves = self._program(job, HOLDERS, self._ice_resolves(job, status, runs))
@@ -912,9 +913,7 @@ class OracleCascade(OracleSchedule):
         from a hold or the queue retry their start, each unless its run moved
         since the input, read now."""
         data = cast(JobData, ctx.data)
-        moved = self._to(
-            job, FLAG_MOVED, FlagMoved("ON_NOEXEC", ctx.event.payload, units=self._units(job))
-        )
+        moved = self._to(job, NOEXEC_MOVED, ctx.event.payload)
         row = self._runtime(job)
         if not data.box:
             released = [job] if data.catalog and (row.on_hold or row.status == "QUE_WAIT") else []

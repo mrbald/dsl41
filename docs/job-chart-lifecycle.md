@@ -18,18 +18,16 @@ INACTIVE = lifecycle + STATUS [injects; injected_inactive]
         || lifecycle + STATUS [injects_inactive_box]
         || lifecycle + STATUS [injects_inactive_job]
         || lifecycle + box set INACTIVE
-        || IDLE + flag moved [noexec_settles_box]
+        || lifecycle + noexec moved [noexec_settles_box]
         || TERMINAL + box start
         || TERMINAL + start [start_skips]
         || TERMINAL + start [start_skips_member]
-        || FAILED + flag moved [noexec_settles_job]
-        || QUE_WAIT + flag moved [iced_waiter]
-        || QUE_WAIT + flag moved [noexec_settles_box]
-        || QUE_WAIT + flag moved [noexec_settles_job]
+        || FAILED + noexec moved [noexec_settles_job]
+        || QUE_WAIT + ice moved
+        || QUE_WAIT + noexec moved [noexec_settles_job]
         || QUE_WAIT + readmit [readmit_cancels]
         || QUE_WAIT + readmit [readmit_leaves_armed]
         || QUE_WAIT + readmit [readmit_leaves_unarmed]
-        || STARTING + flag moved [noexec_settles_box]
 QUE_WAIT = IDLE + start [start_queues]
 ADMITTED = lifecycle + start admitted [admitted_admit]
         || lifecycle + start admitted [admitted_on_held]
@@ -116,9 +114,9 @@ held = reserved + leave STARTING or RUNNING [keeps_held]
 
 ## Folded away
 
-- Ignored rows: 19. The event is consumed and nothing moves.
-- Rows marked unreachable: 17. No input reaches the cell.
+- Ignored rows: 20. The event is consumed and nothing moves.
+- Rows marked unreachable: 18. No input reaches the cell.
 - Internal rows: 36. The configuration does not move: relays, moments and the arm's writes.
 - Self-transitions: 9. A state is left and entered again.
 
-Shown: 66. Folded: 81. Rows in the chart: 147.
+Shown: 64. Folded: 83. Rows in the chart: 147.

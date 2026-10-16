@@ -23,10 +23,11 @@ from __future__ import annotations
 import sys
 from collections.abc import Callable
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
-from oracle_inputs import observations
+from oracle_inputs import FLAG_JIL, observations
 
 from dsl41.ir import lower_source
 from dsl41.job_chart_rows import configuration
@@ -37,11 +38,13 @@ from dsl41.oracle_intents import StatusLine
 from dsl41.oracle_state import CascadeDepthError, Event, EventKind, OracleError
 from dsl41.state_machine import (
     COMPLETION,
+    HITS_ENV,
     Executor,
     Outcome,
     ReentrantDispatch,
     StatechartError,
 )
+from dsl41.state_machine import Event as ChartEvent
 from dsl41.semantics import resolve
 
 T0 = datetime(2026, 7, 1, 8, 0)
@@ -230,6 +233,32 @@ def test_job_312_is_no_row_the_oracle_writes() -> None:
     assert "job.312" not in oracle_writers._WRITERS
     unmarked = {"job.420", "job.421", "job.422", "job.423"}
     assert unmarked.isdisjoint(oracle_writers._WRITERS)
+
+
+def test_noexec_moved_at_admitted_is_the_tripwire_job_453(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A box at ADMITTED meets `noexec moved` only if ON_NOEXEC reached it there, itself the
+    marked job.423. The marked job.453 takes the cell, ahead of job.452 and job.198 at
+    `lifecycle`, and the hook has no write for it, so the oracle raises before any write. The
+    planted fire's hits stay out of the session."""
+    from dsl41.job_chart_events import NOEXEC_MOVED
+    from dsl41.oracle_facts import NoexecFacts
+
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+    oracle = Oracle(lower_source(FLAG_JIL))
+    key = oracle.store.job_key("fl_box")
+    chart, _, data = oracle._job_instance("fl_box", oracle._runtime("fl_box"))
+    admitted = frozenset(
+        {"job", "lifecycle", "ADMITTED", "flags", "ice_off", "hold_off", "noexec_on", "none"}
+    )
+    executor = Executor()  # ADMITTED is transient: no row projects to it, so it is planted
+    executor.restore(key, chart, admitted, data)
+    event = ChartEvent(NOEXEC_MOVED, NoexecFacts(oracle, "fl_box"))
+    assert executor.resolve(key, event).rows == ("job.453",)
+    with pytest.raises(StatechartError, match="noexec moved fired job.453, and no row the oracle"):
+        executor.dispatch(key, event, oracle._perform)
+    assert oracle.store.job["fl_box"].status == "INACTIVE"
 
 
 def test_every_row_the_chart_can_fire_has_a_writer_on_the_oracle() -> None:

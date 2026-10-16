@@ -51,9 +51,7 @@ _BOX_ROWS: Final[dict[str, bool]] = {
     "job.120": False,
     "job.121": False,
     "job.135": True,
-    "job.136": True,
-    "job.169": True,
-    "job.170": True,
+    "job.452": True,
 }
 
 #: A skip's rows, and whether each is a member's (SEM-33, DL-154).
@@ -582,15 +580,13 @@ _WRITERS: Final[dict[str, str]] = {
     "job.130": "_w_box_terminator",
     **{f"job.{n}": "_w_recompute" for n in range(446, 450)},
     "job.135": "_w_injected_box",
-    "job.136": "_w_noexec_box",
+    "job.452": "_w_noexec_box",
     "job.440": "_w_kill_ignored",
     "job.441": "_w_refused",
     **{f"job.{n}": "_w_flag_ignored" for n in (442, 443, 444)},
-    "job.169": "_w_noexec_box",
-    "job.170": "_w_noexec_box",
     **{f"job.{n}": "_w_nothing" for n in (177, 178, 179, 181, 183, 184, 185, 187)},
     "job.180": "_w_start_ignored",
-    **{f"job.{n}": "_w_nothing" for n in (189, 191, 196, 197, 198)},
+    **{f"job.{n}": "_w_nothing" for n in (189, 191, 196, 197, 198, 451)},
     "job.195": "_w_reset_inactive",
     "job.201": "_w_ice_on",
     "job.202": "_w_ice_off",

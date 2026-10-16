@@ -19,13 +19,14 @@ from dsl41.job_chart_events import (
     BOX_START,
     COMPLETION_MOMENT,
     DISARM,
-    FLAG_MOVED,
     FORCE_STARTJOB,
+    ICE_MOVED,
     KILLJOB,
     LEAVE_LIVE,
     MEMBER_ENDS,
     MEMBER_MOVES,
     MOMENTS,
+    NOEXEC_MOVED,
     OFF_HOLD,
     OFF_ICE,
     OFF_NOEXEC,
@@ -168,11 +169,13 @@ ROOT: Final = State(
     ),
 )
 
-#: The status rows, `job.1NN`: 100 is the start bound (DL-304), 101 to 136 are the status
-#: moves, 169 and 170 a split source's further rows, 177 and above the relays and the cells the
-#: rules move nothing in. job.440 to job.449 are status rules each written once, at the source
-#: the hierarchy gives it, and job.450 the cell beside the recompute's rows no input reaches
-#: (DL-368). Ids are stable: a retired id is never reused (DL-364).
+#: The status rows, `job.1NN`: 100 is the start bound (DL-304), 101 to 135 are the status
+#: moves, 177 and above the relays and the cells the rules move nothing in. job.440 to job.449
+#: are status rules each written once, at the source the hierarchy gives it, and job.450 the
+#: cell beside the recompute's rows no input reaches (DL-368); job.451 is `ice moved`'s cell
+#: beside job.112, job.452 a box's ON_NOEXEC settlement, written once, and job.453 the cell of
+#: `noexec moved` at ADMITTED no input reaches. Ids are stable: a retired id is never reused
+#: (DL-364).
 _STATUS_ROWS: Final = (
     Row(
         "job.100",
@@ -240,13 +243,11 @@ _STATUS_ROWS: Final = (
         "cancelled",
         cite="DL-50, DL-247",
     ),
-    Row(
-        "job.112", "QUE_WAIT", FLAG_MOVED, "INACTIVE", "iced_waiter", "moved", cite="DL-50, DL-285"
-    ),
+    Row("job.112", "QUE_WAIT", ICE_MOVED, "INACTIVE", action="moved", cite="DL-50, DL-285"),
     Row(
         "job.113",
         "QUE_WAIT",
-        FLAG_MOVED,
+        NOEXEC_MOVED,
         "INACTIVE",
         "noexec_settles_job",
         "injected",
@@ -270,7 +271,7 @@ _STATUS_ROWS: Final = (
     Row(
         "job.121",
         "FAILED",
-        FLAG_MOVED,
+        NOEXEC_MOVED,
         "INACTIVE",
         "noexec_settles_job",
         "injected",
@@ -367,7 +368,6 @@ _STATUS_ROWS: Final = (
         "cascades",
         cite="SEM-18",
     ),
-    Row("job.136", "IDLE", FLAG_MOVED, "INACTIVE", "noexec_settles_box", "cascades", cite=_DL254),
     Row("job.440", "IDLE", KILLJOB, kind="internal", cite="DL-64, DL-81", note="EVENT_IGNORED"),
     Row(
         "job.441", "lifecycle", START, guard="start_refused", kind="internal", cite="DL-81, DL-246"
@@ -375,23 +375,15 @@ _STATUS_ROWS: Final = (
     Row("job.442", "LIVE", ON_ICE, kind="internal", cite=_DL254, note="EVENT_IGNORED"),
     Row("job.443", "LIVE", ON_HOLD, kind="internal", cite=_DL254, note="EVENT_IGNORED"),
     Row("job.444", "lifecycle", ON_NOEXEC, guard="noexec_ignored", kind="internal", cite=_DL254),
-    # a split source: the other sources of job.136. `flag moved` has no row at `lifecycle` beside
-    # job.198, which is enabled wherever `noexec_settles_box` is (statechart-engine §3).
     Row(
-        "job.169", "QUE_WAIT", FLAG_MOVED, "INACTIVE", "noexec_settles_box", "cascades", cite=_DL254
-    ),
-    Row(
-        "job.170",
-        "STARTING",
-        FLAG_MOVED,
+        "job.452",
+        "lifecycle",
+        NOEXEC_MOVED,
         "INACTIVE",
         "noexec_settles_box",
         "cascades",
         cite=_DL254,
-        false_unreachable=(
-            "at STARTING only a box's applied ON_NOEXEC reports a flag move, and the box is not"
-            " INACTIVE"
-        ),
+        note="A job's settlement is job.113's and job.121's; job.198 takes the cells it leaves.",
     ),
     # 171 to 176 are job.119's choice branches
     # the inputs that relay a start attempt (statechart-engine §8)
@@ -517,21 +509,35 @@ _STATUS_ROWS: Final = (
         note="Not live, or no job_terminator: nothing to terminate.",
     ),
     Row(
+        "job.451",
+        "lifecycle",
+        ICE_MOVED,
+        kind="ignored",
+        cite="SEM-20",
+        note="Not queued: the member's completion moment and the wakes follow.",
+    ),
+    Row(
         "job.198",
         "lifecycle",
-        FLAG_MOVED,
-        guard="flag_moves_nothing",
+        NOEXEC_MOVED,
+        guard="noexec_moves_nothing",
         kind="ignored",
-        cite="SEM-20, DL-254",
-        note="Not queued, or no status move: the member's completion moment and the wakes follow.",
-        false_unreachable="its complement is job.199's, a marked row",
+        cite=_DL254,
+        note="Applied, and no box settles: the released jobs' start retries follow.",
     ),
     _never(
         "job.199",
         "lifecycle",
-        FLAG_MOVED,
-        "An ice or an applied ON_NOEXEC reports it; an ignored ON_NOEXEC moves no flag.",
-        "flag_move_unposted",
+        NOEXEC_MOVED,
+        "An applied ON_NOEXEC reports it; an ignored ON_NOEXEC moves no flag.",
+        "noexec_ignored",
+    ),
+    _never(
+        "job.453",
+        "ADMITTED",
+        NOEXEC_MOVED,
+        "ON_NOEXEC at ADMITTED is itself a marked cell (job.423), so its flag move never pops"
+        " there.",
     ),
 )
 
