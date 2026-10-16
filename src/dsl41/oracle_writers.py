@@ -4,7 +4,7 @@
 The executor calls the oracle's hook with each microstep's outcome, before the next item pops
 (`oracle.Oracle._perform`). The hook runs each fired row's writer, the method `_WRITERS` names,
 in firing order within the microstep: the store's verbs and trace lines the row writes beyond
-its status. A status leaf's entry reports the status it is (`Entered`); the hook writes it next,
+its status. A status state's entry reports the status it is (`Entered`); the hook writes it next,
 with the line the entering row's writer gives (`StatusLine`): the store's verb, the status's
 trace line and its STATUS emission. Then come the intents the row's actions reported. A row's
 type is checked against the catalog before it writes (`_check_type`). A fired row with no write,
@@ -20,7 +20,7 @@ from dsl41.capacity import machine_load, to_reservations
 from dsl41.job_chart_events import RELEASE_RESOURCE, Settlement
 from dsl41.job_chart_rows import ARM_CLEARS, ARM_LATCHES, status_of
 from dsl41.oracle_cascade import OracleCascade
-from dsl41.oracle_facts import FoldFacts, ReadmitFacts, RecomputeFacts, StartFacts, Started
+from dsl41.oracle_facts import DoorFacts, ReadmitFacts, RecomputeFacts, StartFacts, Started
 from dsl41.oracle_intents import (
     AdmissionFacts,
     Batch,
@@ -126,7 +126,8 @@ class OracleWriters(OracleCascade):
             raise StatechartError(f"job {job!r}: {row} fired for a job in box {parent!r}")
 
     def _write(self, job: str, new: JobStatus, line: StatusLine) -> None:
-        """A status write: the status a leaf's entry reported, its trace line and its emission."""
+        """A status write: the status a status state's entry reported, its trace line and its
+        emission."""
         old = self._runtime(job).status
         self.store.transition(job, new, self._now, line.code, clear_exit_code=line.clear)
         self._record(job, f"{old}->{new}", line.cause)
@@ -424,7 +425,7 @@ class OracleWriters(OracleCascade):
         return StatusLine(f"box_{target.lower()} override met (SEM-12)")
 
     def _w_fold(self, job: str, outcome: Outcome) -> StatusLine:
-        fold = cast(FoldFacts, outcome.event.payload)
+        fold = cast(DoorFacts, outcome.event.payload).fold
         if outcome.rows[0] == "job.129":
             return StatusLine("default box fold: a member failed (SEM-11)")
         if fold.at_start:
@@ -584,7 +585,7 @@ _WRITERS: Final[dict[str, str]] = {
     "job.440": "_w_kill_ignored",
     "job.441": "_w_refused",
     **{f"job.{n}": "_w_flag_ignored" for n in (442, 443, 444)},
-    **{f"job.{n}": "_w_nothing" for n in (177, 178, 179, 181, 183, 184, 185, 187)},
+    **{f"job.{n}": "_w_nothing" for n in (177, 178, 179, 181, 183, 184)},
     "job.180": "_w_start_ignored",
     **{f"job.{n}": "_w_nothing" for n in (189, 191, 196, 197, 198, 451)},
     "job.195": "_w_reset_inactive",
@@ -646,4 +647,5 @@ _WRITERS: Final[dict[str, str]] = {
     "job.437": "_w_kill_waiter",
     "job.438": "_w_left_armed",
     "job.439": "_w_left",
+    **{f"job.{n}": "_w_nothing" for n in range(454, 459)},
 }

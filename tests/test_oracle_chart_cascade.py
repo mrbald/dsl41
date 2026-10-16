@@ -33,7 +33,7 @@ from dsl41.ir import lower_source
 from dsl41.job_chart_rows import configuration
 from dsl41.oracle import Oracle
 from dsl41.oracle_cascade import OracleCascade
-from dsl41.oracle_facts import RowUnits
+from dsl41.oracle_facts import DoorFacts, RowUnits
 from dsl41.oracle_intents import StatusLine
 from dsl41.oracle_state import CascadeDepthError, Event, EventKind, OracleError
 from dsl41.state_machine import (
@@ -171,11 +171,12 @@ def test_a_status_entered_with_no_line_or_a_line_with_no_status_is_a_statechart_
     ("event", "payload"),
     [
         ("box rules", "<box rules of m>"),
-        ("member moves", "OverrideFacts"),
-        ("completion moment", "FoldFacts"),
+        ("member moves", "DoorFacts('b'"),
+        (COMPLETION, "DoorFacts('b'"),
         ("wake", "<wake of m>"),
         ("box recompute", "RecomputeFact"),
     ],
+    ids=["box rules", "member moves", "a door phase's completion", "wake", "box recompute"],
 )
 def test_an_error_inside_the_cascade_names_the_item_s_payload(event: str, payload: str) -> None:
     """A statechart error out of an item's write carries the item's facts,
@@ -295,7 +296,14 @@ def test_every_action_that_asks_the_tier_names_itself_and_has_a_handler() -> Non
         def consequences(self, ctx: Context, action: str) -> None:
             asked.append(action)
 
-    own = {"relay_start", "settle_ended_run", "report_ice", "moment"}
+    own = {
+        "relay_start",
+        "settle_ended_run",
+        "report_ice",
+        "moment",
+        "reads_overrides",
+        "reads_fold",
+    }
     for name, action in JOB.actions.items():
         if name in own:
             continue
@@ -812,31 +820,37 @@ def test_a_freed_excess_s_scan_comes_before_the_load_mark_and_the_owed_scan_runs
     assert (rows["wa"].status, rows["wl"].status) == ("RUNNING", "QUE_WAIT")
 
 
+def _door(seen: list[Outcome], *jobs: str) -> list[tuple[str, tuple[str, ...]]]:
+    """(box, rows) of each visit of a box's completion door and of its phases' completions,
+    which carry the visit's payload (DL-371), in pop order."""
+    return [
+        (str(o.key).partition(":")[2], o.rows)
+        for o in seen
+        if isinstance(o.event.payload, DoorFacts) and str(o.key).partition(":")[2] in jobs
+    ]
+
+
 @pytest.mark.parametrize(
     ("first", "door"),
     [
-        (
-            "SUCCESS",
-            [("B", "completion moment"), ("B", "member moves")],
-        ),
-        (
-            "FAILURE",
-            [("B", "completion moment"), ("B", "member moves"), ("B", "completion moment")],
-        ),
+        ("SUCCESS", ["job.455", "job.458", "job.454", "job.126"]),
+        ("FAILURE", ["job.455", "job.458", "job.454", "job.456", "job.458"]),
     ],
     ids=["an override fires", "no override fires"],
 )
 def test_the_fold_follows_a_member_s_every_move_unless_an_override_ended_the_box(
-    first: str, door: list[tuple[str, str]]
+    first: str, door: list[str]
 ) -> None:
     """The completion door: m's STARTING is no move the overrides
-    read, so the fold alone follows it; m's RUNNING reads the box_success,
-    which names m, and the fold follows only if it did not end the box."""
+    read, so the fold alone follows it (job.455); m's RUNNING reads the
+    box_success, which names m (job.454), and the fold follows only if it
+    did not end the box (job.456)."""
     jil = _cmd("x") + _box("B", "box_success: s(m) | s(x)\n") + _cmd("m", "box_name: B\n")
     paired = _paired(jil, [ev("STATUS", 1, job="x", status=first)])
     seen = _spied(paired)
     paired.feed(ev("FORCE_STARTJOB", 2, job="B"))
-    assert _children(seen, "box rules", "m") == door
+    assert _children(seen, "box rules", "m") == [("B", "member moves"), ("B", "member moves")]
+    assert [row for _box_name, rows in _door(seen, "B") for row in rows] == door
     assert paired.store.job["B"].status == ("SUCCESS" if first == "SUCCESS" else "RUNNING")
 
 
@@ -888,12 +902,72 @@ def test_an_ice_in_a_subbox_walks_up_while_the_subbox_still_runs() -> None:
     paired = _paired(jil, [ev("STARTJOB", 1, job="O"), ev("STATUS", 2, job="m1", exit_code=0)])
     seen = _spied(paired)
     paired.feed(ev("ON_ICE", 3, job="m2"))
-    boxes = [item[:2] for item in _items(seen, "member moves", "completion moment")]
-    assert boxes == [("I", "member moves"), ("I", "completion moment"), ("O", "member moves")]
+    # I's visit reads its overrides, then folds; the walk up reads O's overrides alone
+    assert _door(seen, "I", "O") == [
+        ("I", ("job.454",)),
+        ("I", ("job.456",)),
+        ("I", ("job.458",)),
+        ("O", ("job.454",)),
+        ("O", ("job.457",)),
+    ]
     assert (paired.store.job["I"].status, paired.store.job["O"].status) == (
         "RUNNING",
         "RUNNING",
     )
+
+
+#: H > G > I > M: G is a job_terminator of H, I is iced with a box_success that never holds,
+#: and H fails on `s(M)`; M runs, started before H, which keeps it live.
+_VISITS = (
+    _box("H", "box_failure: s(M)\n")
+    + _box("G", "box_name: H\njob_terminator: 1\n")
+    + _box("I", "box_name: G\nbox_success: s(N)\n")
+    + _cmd("M", "box_name: I\n")
+    + _cmd("N", "condition: s(N)\n")
+)
+_VISITS_SETUP = [
+    ev("ON_ICE", 1, job="I"),
+    ev("FORCE_STARTJOB", 2, job="M"),
+    ev("FORCE_STARTJOB", 3, job="H"),
+]
+_VISITS_LAST = ev("STATUS", 4, job="M", status="SUCCESS")
+
+
+def test_the_walk_up_reads_an_ancestor_s_overrides_and_never_folds_it() -> None:
+    """The three visits stay distinct (DL-371): H > G > I > M, G a job_terminator of H, I iced
+    with a box_success that never holds, H failing on `s(M)`. M's SUCCESS cannot recompute
+    idle I, whose unmet override suppresses the default. The walk up visits G for its
+    overrides alone (job.454, job.457), then H, whose box_failure ends it and terminates G. A
+    fold at G's visit would find iced I out of the run and end G SUCCESS first, so H's
+    terminator would meet a terminal G."""
+    paired = _paired(_VISITS, _VISITS_SETUP)
+    statuses = {job: paired.store.job[job].status for job in "HGIM"}
+    assert statuses == {"H": "RUNNING", "G": "RUNNING", "I": "INACTIVE", "M": "RUNNING"}
+    seen = _spied(paired)
+    paired.feed(_VISITS_LAST)
+    assert _door(seen, "G", "H") == [
+        ("G", ("job.454",)),
+        ("G", ("job.457",)),
+        ("H", ("job.454",)),
+        ("H", ("job.127",)),
+    ]
+    [visit] = [o.event.payload for o in seen if o.event.name == "member moves" and o.key == "job:G"]
+    with pytest.raises(StatechartError, match="the fold read before its phase"):
+        _ = visit.fold
+    statuses = {job: paired.store.job[job].status for job in "HGIM"}
+    assert statuses == {"H": "FAILURE", "G": "TERMINATED", "I": "INACTIVE", "M": "SUCCESS"}
+
+
+def test_a_walk_up_that_folds_diverges() -> None:
+    """Mutant: the walk up's visit folds after the overrides, as the full door does. G ends
+    SUCCESS in the counter-example above, where the oracle terminates it."""
+
+    def folding(self: Oracle, box: str, *args: Any, **kw: Any) -> Any:
+        return OracleCascade._door(self, box, *args, **{**kw, "folds": True})
+
+    mutant = _paired(_VISITS, [*_VISITS_SETUP, _VISITS_LAST], factory=_with(_door=folding))
+    assert mutant.store.job["G"].status == "SUCCESS"
+    _diverges(_with(_door=folding), _VISITS, _VISITS_SETUP, _VISITS_LAST)
 
 
 _LEAVING = "insert_resource: Q\nres_type: R\namount: 1\n\n" + _cmd(
@@ -1066,11 +1140,12 @@ _QUEUED = (
 
 def test_a_queue_move_reads_no_override_of_its_box() -> None:
     """q queues in B's run: QUE_WAIT is no move the door reads overrides on,
-    so `n(q)` is not read and B keeps running; the fold alone follows."""
+    so `n(q)` is not read and B keeps running; the fold alone follows (job.455)."""
     paired = _paired(_QUEUED, [ev("STARTJOB", 1, job="h")])
     seen = _spied(paired)
     paired.feed(ev("FORCE_STARTJOB", 2, job="B"))
-    assert ("B", "member moves") not in _children(seen, "box rules", "q")
+    assert _children(seen, "box rules", "q") == [("B", "member moves")]
+    assert _door(seen, "B") == [("B", ("job.455",)), ("B", ("job.458",))]
     assert paired.store.job["B"].status == "RUNNING"
 
 

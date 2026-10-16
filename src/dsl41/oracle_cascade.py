@@ -15,8 +15,8 @@ whole cascade. A step that follows a sibling's whole cascade is a later-reported
 moments:
 
 - `box rules` (`_box_rules`): a member's moves at its box (`member ends FAILURE or TERMINATED`,
-  the door's `member moves` and `completion moment`, `box recompute`), then `walk up` and
-  `holders may leave`, then a box's `box run ends` to its members;
+  the door's `member moves`, `box recompute`), then `walk up` and `holders may leave`, then a
+  box's `box run ends` to its members;
 - `settle` (`_settle`, late): the move's own `leave STARTING or RUNNING`, unless the run
   settled early (job.401) or the job started again (the LIVE cell);
 - `wake` (`_wake`): each referencer's `start`, then the queue's `scan` when the settlement
@@ -73,7 +73,6 @@ from dsl41.job_chart_events import (
     BOX_RUNNING,
     BOX_SET_INACTIVE,
     BOX_START,
-    COMPLETION_MOMENT,
     HOLDERS,
     ICE_MOVED,
     LEAVE_LIVE,
@@ -100,8 +99,7 @@ from dsl41.job_chart_events import (
 )
 from dsl41.job_chart_rows import status_of
 from dsl41.oracle_facts import (
-    FoldFacts,
-    OverrideFacts,
+    DoorFacts,
     ReadmitFacts,
     RecomputeFacts,
     RowUnits,
@@ -515,7 +513,7 @@ class OracleCascade(OracleSchedule):
         )
 
     def _on_writes_status(self, job: str, ctx: Context) -> Effects:
-        """A status leaf's entry: the status the job entered, which the hook writes."""
+        """A status state's entry: the status the job entered, which the hook writes."""
         return Effects(intents=(Entered(status_of(ctx.active)),))
 
     def _on_skips_in_box(self, job: str, ctx: Context) -> Effects:
@@ -666,9 +664,9 @@ class OracleCascade(OracleSchedule):
     def _member_rules(self, box: str, member: str, old: str, new: str) -> Iterator[Step]:
         """A member's move at its box: a member that ends FAILURE or TERMINATED
         meets the box's terminator (SEM-14), which ends a RUNNING box and the
-        rules; a TERMINATED box is sticky (SEM-13); a RUNNING box runs its door
-        on a terminal, RUNNING or resolving move, and its fold on any move; an
-        idle box re-derives its status on a terminal move (SEM-15)."""
+        rules; a TERMINATED box is sticky (SEM-13); a RUNNING box's door reads
+        its overrides on a terminal, RUNNING or resolving move, and folds on any
+        move; an idle box re-derives its status on a terminal move (SEM-15)."""
         status = self._runtime(box).status
         if new in FAILED:
             fires = self._box_terminator_fires(member, new)
@@ -681,7 +679,10 @@ class OracleCascade(OracleSchedule):
         resolved = self._resolves(box, member, old, new)
         if status == "RUNNING":
             overrides = self._reads_overrides(new, resolved)
-            yield from self._door(box, member, new, completion=resolved, overrides=overrides)
+            door = self._door(
+                box, member, new, overrides=overrides, folds=True, completion=resolved
+            )
+            yield Step(send=(door,))
         elif self._recomputes(status, new):
             facts = RecomputeFacts(
                 self, self.catalog.jobs[box], member, f"member {member!r} changed"
@@ -694,37 +695,41 @@ class OracleCascade(OracleSchedule):
         member: str | None,
         new: str | None,
         *,
-        completion: bool,
         overrides: bool,
+        folds: bool,
+        completion: bool,
         at_start: bool = False,
-    ) -> Iterator[Step]:
-        """The completion door of a RUNNING box: its overrides, then, unless one
-        ended the box, its default fold (SEM-11, SEM-12)."""
-        box_ir = self.catalog.jobs[box]
-        if overrides:
-            run = self._runtime(box).run_number
-            facts = OverrideFacts(self, box_ir, member, new, completion_moment=completion)
-            yield Step(send=(self._to(box, MEMBER_MOVES, facts),))
-            if not self._in_run(box, run):
-                return
-        fold = FoldFacts(self, box_ir, at_start=at_start)
-        yield Step(send=(self._to(box, COMPLETION_MOMENT, fold),))
+    ) -> Send:
+        """A visit of a RUNNING box's completion door (SEM-11, SEM-12, DL-371): its overrides,
+        its default fold, or the overrides and then, unless one ended the box, the fold. The
+        box's `door` region runs the phases, and each phase's completion decides."""
+        facts = DoorFacts(
+            self,
+            self.catalog.jobs[box],
+            member,
+            new,
+            overrides=overrides,
+            folds=folds,
+            completion=completion,
+            at_start=at_start,
+        )
+        return self._to(box, MEMBER_MOVES, facts)
 
     def _walk_up(
         self, member: str, new: str, resolved: bool, runs: Mapping[str, int]
     ) -> Iterator[Step]:
         """The walk up: each box above the parent still in the run it was in before the moment
-        reads its overrides on a terminal, RUNNING or resolving move; it ends at one that ended
-        (SEM-12)."""
+        reads its overrides on a terminal, RUNNING or resolving move, and never folds; it ends
+        at one that ended (SEM-12)."""
         for box in self._ancestor_boxes(member)[1:]:
             row = self._runtime(box)
             if not self._in_run(box, runs[box]):
                 continue
             if self._reads_overrides(new, resolved):
-                facts = OverrideFacts(
-                    self, self.catalog.jobs[box], member, new, completion_moment=resolved
+                door = self._door(
+                    box, member, new, overrides=True, folds=False, completion=resolved
                 )
-                yield Step(send=(self._to(box, MEMBER_MOVES, facts),))
+                yield Step(send=(door,))
                 if not self._in_run(box, row.run_number):
                     return
 
@@ -752,7 +757,9 @@ class OracleCascade(OracleSchedule):
             or not self._out_of_the_run(job)
         ):
             return
-        yield from self._door(box, job, status, completion=True, overrides=True)
+        yield Step(
+            send=(self._door(box, job, status, overrides=True, folds=True, completion=True),)
+        )
         if self._in_run(box, runs[box]):
             yield from self._walk_up(job, status, True, runs)
 
@@ -993,6 +1000,7 @@ class OracleCascade(OracleSchedule):
             if not self._in_run(each, each_run):
                 continue
             if all(self._out_of_the_run(member) for member in self._members(each)):
-                yield from self._door(
-                    each, None, None, completion=True, overrides=True, at_start=True
+                door = self._door(
+                    each, None, None, overrides=True, folds=True, completion=True, at_start=True
                 )
+                yield Step(send=(door,))

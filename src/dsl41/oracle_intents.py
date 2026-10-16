@@ -2,7 +2,7 @@
 
 A row of the `job` chart that sends beyond its own move carries one of these payloads, and an
 item the hook cannot derive from its row and its payload reports an intent, which the hook
-applies after the row's writes (`oracle.Oracle._perform`). A status leaf's entry reports
+applies after the row's writes (`oracle.Oracle._perform`). A status state's entry reports
 `Entered`, which the hook writes with its row's `StatusLine` before the other intents. `Move`
 is one status move's record, shared by its box rules, its settlement and its wakes. `Program`,
 `Once` and `Settle` are a moment's payload: a self-event whose next step the oracle reads when
@@ -39,7 +39,7 @@ class Intent(Protocol):
 
 @dataclass(frozen=True)
 class Entered:
-    """The status a status leaf's entry reports (`writes_status`): the hook writes it, with the
+    """The status a status state's entry reports (`writes_status`): the hook writes it, with the
     line of the row that entered it, after the rows' writes and before the intents
     (`OracleWriters._write_rows`), so a move's record reads the status written."""
 

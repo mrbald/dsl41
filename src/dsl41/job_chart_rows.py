@@ -17,7 +17,6 @@ from dsl41.job_chart_events import (
     BOX_RUN_ENDS,
     BOX_SET_INACTIVE,
     BOX_START,
-    COMPLETION_MOMENT,
     DISARM,
     FORCE_STARTJOB,
     ICE_MOVED,
@@ -63,6 +62,8 @@ _STATUS_PATH: Final[dict[JobStatus, tuple[str, ...]]] = {
     "STARTING": ("lifecycle", "LIVE"),
     "RUNNING": ("lifecycle", "LIVE"),
 }
+#: The states a status holds between items: a RUNNING's door is `settled` (DL-371).
+_STATUS_REST: Final[dict[JobStatus, tuple[str, ...]]] = {"RUNNING": ("settled",)}
 #: The flag regions. The scheduled tick's arm is no region: it is a fact of the payloads whose
 #: rows read it (DL-365).
 _FLAGS: Final = ("ice", "hold", "noexec")
@@ -78,7 +79,8 @@ def configuration(
 ) -> frozenset[str]:
     """The active states of an instance with this status, these flags and this holding."""
     flags = {f"{name}_{'on' if on else 'off'}" for name, on in zip(_FLAGS, (ice, hold, noexec))}
-    return frozenset({"job", *_STATUS_PATH[status], status, "flags", *flags, holding})
+    rest = _STATUS_REST.get(status, ())
+    return frozenset({"job", *_STATUS_PATH[status], status, *rest, "flags", *flags, holding})
 
 
 def row_holding(row: JobRuntime) -> HoldingState:
@@ -147,9 +149,24 @@ _TERMINAL: Final = State(
 _IDLE: Final = State(
     "IDLE", regions=(Region("idle", "INACTIVE", (_status("INACTIVE"), _TERMINAL)),)
 )
+#: A RUNNING box's completion door (SEM-11, SEM-12; DL-371): `settled` between items; a visit
+#: enters `overriding`, whose entry builds the overrides' facts, or `folding`, whose entry builds
+#: the fold's; each phase's completion decides. A job that is not a box rests in `settled`.
+_DOOR: Final = Region(
+    "door",
+    "settled",
+    (
+        State("settled"),
+        State("overriding", entry="reads_overrides"),
+        State("folding", entry="reads_fold"),
+    ),
+)
+#: RUNNING's entry is a status leaf's (DL-366). No door row re-enters RUNNING: a row that stays
+#: in it moves inside the region, and a deciding row leaves it for SUCCESS or FAILURE (DL-371).
+_RUNNING: Final = State("RUNNING", regions=(_DOOR,), entry="writes_status")
 _LIVE: Final = State(
     "LIVE",
-    regions=(Region("live", "STARTING", (_status("STARTING"), _status("RUNNING"))),),
+    regions=(Region("live", "STARTING", (_status("STARTING"), _RUNNING)),),
 )
 #: An admitted start between its admission and its STARTING (DL-350, DL-364): transient. Its
 #: entry action sends the units, the run's start and a box's resets; its completion moves to
@@ -174,7 +191,8 @@ ROOT: Final = State(
 #: are status rules each written once, at the source the hierarchy gives it, and job.450 the
 #: cell beside the recompute's rows no input reaches (DL-368); job.451 is `ice moved`'s cell
 #: beside job.112, job.452 a box's ON_NOEXEC settlement, written once, and job.453 the cell of
-#: `noexec moved` at ADMITTED no input reaches. Ids are stable: a retired id is never reused
+#: `noexec moved` at ADMITTED no input reaches. job.454 to job.460 and job.126 to job.129 are a
+#: RUNNING box's completion door (DL-371). Ids are stable: a retired id is never reused
 #: (DL-364).
 _STATUS_ROWS: Final = (
     Row(
@@ -306,42 +324,6 @@ _STATUS_ROWS: Final = (
         cite="SEM-10, SEM-33, DL-246",
     ),
     Row(
-        "job.126",
-        "RUNNING",
-        MEMBER_MOVES,
-        "SUCCESS",
-        "verdict_success",
-        "completed",
-        cite="SEM-12",
-    ),
-    Row(
-        "job.127",
-        "RUNNING",
-        MEMBER_MOVES,
-        "FAILURE",
-        "verdict_failure",
-        "completed",
-        cite="SEM-12, SEM-14",
-    ),
-    Row(
-        "job.128",
-        "RUNNING",
-        COMPLETION_MOMENT,
-        "SUCCESS",
-        "verdict_success",
-        "completed",
-        cite="SEM-11",
-    ),
-    Row(
-        "job.129",
-        "RUNNING",
-        COMPLETION_MOMENT,
-        "FAILURE",
-        "verdict_failure",
-        "completed",
-        cite="SEM-11, SEM-14",
-    ),
-    Row(
         "job.130",
         "RUNNING",
         MEMBER_ENDS,
@@ -431,31 +413,12 @@ _STATUS_ROWS: Final = (
         cite="SEM-14",
         note="The deadline is an earlier run's, or the run is no longer RUNNING.",
     ),
-    Row(
-        "job.185",
-        "RUNNING",
-        MEMBER_MOVES,
-        guard="decides_nothing",
-        kind="ignored",
-        cite="SEM-11, SEM-12",
-        note="No override holds; the default fold may follow.",
-    ),
     _never(
         "job.186",
         "lifecycle",
         MEMBER_MOVES,
         "Only a RUNNING box's completion door reads its overrides.",
     ),
-    Row(
-        "job.187",
-        "RUNNING",
-        COMPLETION_MOMENT,
-        guard="decides_nothing",
-        kind="ignored",
-        cite="SEM-11, SEM-12",
-        note="A member is not done, or an unmet override suppresses the default.",
-    ),
-    _never("job.188", "lifecycle", COMPLETION_MOMENT, "Only a RUNNING box folds."),
     Row(
         "job.189",
         "lifecycle",
@@ -538,6 +501,82 @@ _STATUS_ROWS: Final = (
         NOEXEC_MOVED,
         "ON_NOEXEC at ADMITTED is itself a marked cell (job.423), so its flag move never pops"
         " there.",
+    ),
+    # a RUNNING box's completion door (DL-371): a visit enters a phase from `settled`, and each
+    # phase's completion decides, with the payload of the visit (DL-364)
+    Row(
+        "job.454",
+        "settled",
+        MEMBER_MOVES,
+        "overriding",
+        "door_reads_overrides",
+        cite="SEM-12, DL-371",
+    ),
+    Row("job.455", "settled", MEMBER_MOVES, "folding", "door_folds_only", cite="SEM-11, DL-371"),
+    Row(
+        "job.126",
+        "overriding",
+        COMPLETION,
+        "SUCCESS",
+        "override_success",
+        "completed",
+        cite="SEM-12",
+    ),
+    Row(
+        "job.127",
+        "overriding",
+        COMPLETION,
+        "FAILURE",
+        "override_failure",
+        "completed",
+        cite="SEM-12, SEM-14",
+    ),
+    Row(
+        "job.456",
+        "overriding",
+        COMPLETION,
+        "folding",
+        "override_unmet_folds",
+        cite="SEM-11, SEM-12",
+        note="No override holds: the default fold follows.",
+    ),
+    Row(
+        "job.457",
+        "overriding",
+        COMPLETION,
+        "settled",
+        "override_unmet_settles",
+        cite="SEM-12",
+        note="No override holds, and the walk up reads no fold.",
+    ),
+    Row("job.128", "folding", COMPLETION, "SUCCESS", "fold_success", "completed", cite="SEM-11"),
+    Row(
+        "job.129",
+        "folding",
+        COMPLETION,
+        "FAILURE",
+        "fold_failure",
+        "completed",
+        cite="SEM-11, SEM-14",
+    ),
+    Row(
+        "job.458",
+        "folding",
+        COMPLETION,
+        "settled",
+        "fold_decides_nothing",
+        cite="SEM-11, SEM-12",
+        note="A member is not done, or an unmet override suppresses the default.",
+    ),
+    *(
+        _never(
+            ident,
+            phase,
+            MEMBER_MOVES,
+            "A second visit while a phase is open: the phase's entry only reads and the row"
+            " that enters it sends nothing, so its completion pops before any other item.",
+        )
+        for ident, phase in (("job.459", "overriding"), ("job.460", "folding"))
     ),
 )
 
