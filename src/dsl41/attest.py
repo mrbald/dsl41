@@ -1,45 +1,33 @@
 """The attestation: what `audit` produces and `verify` consumes.
 
-Normative spec: `docs/period-model.md` ss1.3 (the successor fence's
-attestation rules) and ss11 ("verified means re-derived, not
-self-consistent"). Built by DL-134 as U7. Obligations PR-02a, PR-02d,
-PR-02e, PR-47a in ss13.
+Normative spec: `docs/period-model.md` ss1.3 (the successor fence's attestation rules) and ss11
+("verified means re-derived, not self-consistent"). Obligations PR-02a, PR-02d, PR-02e, PR-47a in
+ss13 (DL-134; U7).
 
-**An attestation is a chain checkpoint, by induction and not by
-assertion**, and producing one is not the same act as consuming one:
+**An attestation is a chain checkpoint, by induction and not by assertion.** Producing one is not
+the same act as consuming one:
 
-- *Producing* N (`audit`) re-derives the seal from the period's own
-  evidence and requires the PREDECESSOR attestation **present and
-  verified**. Period 1
-  is the base case, with `prev_attestation_digest: null`. There is
-  deliberately no "or re-derive everything below" alternative: it left
-  `prev_attestation_digest` undefined when no predecessor artifact
-  existed, and a wrong implementation then checks only its own digest and
-  seal binding, emits a "checkpoint" over an unaudited opening seal, and
-  earlier roots get deleted on a chain that was never established.
-- *Consuming* N (`verify`) accepts N **alone** -- its own digest, its
-  binding to the seal it names, and its `chain_through_period` -- because
-  the producing audit already established the induction, and a physical
-  roll imports only the current seal and attestation. Draft 8 wrote one
-  rule for both and made a second roll impossible.
+- *Producing* N (`audit`) re-derives the seal from the period's own evidence and requires the
+  predecessor attestation **present and verified**. Period 1 is the base case, with
+  `prev_attestation_digest: null`. There is no "or re-derive everything below" alternative: it
+  leaves `prev_attestation_digest` undefined when no predecessor artifact exists, and a wrong
+  implementation would emit a "checkpoint" over an unaudited opening seal and let earlier roots
+  be deleted on a chain never established.
+- *Consuming* N (`verify`) accepts N **alone**: its own digest, its binding to the seal it
+  names, and its `chain_through_period`. The producing audit already established the induction,
+  and a physical roll imports only the current seal and attestation, so one rule for both would
+  make a second roll impossible.
 
-So a root that imported seal 2 and attestation 2 while its predecessors
-are gone verifies the chain below seal 2 *because attestation 2 proves
-it*, and `audit` there refuses: full re-derivation needs the period's WAL,
-spool and manifests, and a rolled root holds none of its predecessor's
-(PR-02a, PR-02e).
+So a root that imported seal 2 and attestation 2 verifies the chain below seal 2 because
+attestation 2 proves it, and `audit` there refuses: full re-derivation needs the period's WAL,
+spool and manifests, and a rolled root holds none of its predecessor's (PR-02a, PR-02e).
 
-**"Verified" means re-derived.** A sidecar whose digest matches its own
-canonical form proves integrity, not derivation. `rederive_seal` rebuilds
-the sidecar from the four inputs ss11 names -- the opening seal, the
-complete ordered WAL of the period, the immutable spool evidence, and the
-C1/C2 manifests. The sentinel is NOT one of them since DL-138: it was read
-for a single derivation (`boundary_request.source`) over a two-value domain,
-and the second value went with the estate-adoption path. The
-`boundary_request` input scalars are the
-one exception the spec states: they originate in a request no WAL record
-independently holds, so audit checks them record-against-sidecar and
-carries them.
+**"Verified" means re-derived.** A sidecar whose digest matches its own canonical form proves
+integrity, not derivation. `rederive_seal` rebuilds the sidecar from the four inputs ss11 names:
+the opening seal, the complete ordered WAL of the period, the immutable spool evidence, and the
+C1/C2 manifests. The sentinel is not one of them (DL-138). The `boundary_request` input scalars
+are the one exception the spec states: they originate in a request no WAL record independently
+holds, so audit checks them record-against-sidecar and carries them.
 """
 
 from __future__ import annotations
@@ -112,24 +100,18 @@ from dsl41.seal import (
     open_from_seal,
 )
 
-#: ss11's word for what `audit` proves. One value today, and a FIELD
-#: rather than a constant because the whole point of writing it down is
-#: that a later, narrower proof must not be readable as this one.
+#: ss11's word for what `audit` proves. A field, not a constant, so a later narrower proof cannot
+#: be read as this one.
 FULL: Final[str] = "full"
 
-#: ss11's two NAMED tiers of "verified" (DL-144). They are two different
-#: proofs of two different strengths, and they are spelled differently on
-#: purpose: a reader that printed one word for both would let an estate
-#: whose inputs are gone read exactly like an estate that still holds them.
+#: ss11's two named tiers of "verified" (DL-144), spelled differently so an estate whose inputs
+#: are gone cannot read like one that still holds them.
 #:
-#: - `derivation-verified`: the period's own inputs are present and the
-#:   seal was re-derived from them (ss11's four inputs).
-#: - `attestation-verified`: seal-only. The inputs were archived under a
-#:   named retention class, and what stands for the period is the
-#:   attestation, accepted by PR-02e's CONSUMER rule -- its own digest, its
-#:   binding to the seal it names, and its `chain_through_period`. NOT a
-#:   recursive walk: the induction was established when the checkpoint was
-#:   produced.
+#: - `derivation-verified`: the period's own inputs are present and the seal was re-derived from
+#:   them (ss11's four inputs).
+#: - `attestation-verified`: seal-only. The inputs were archived under a named retention class,
+#:   and the attestation stands for the period, accepted by PR-02e's consumer rule (own digest,
+#:   binding to the seal it names, `chain_through_period`), not a recursive walk.
 DERIVATION_VERIFIED: Final[str] = "derivation-verified"
 ATTESTATION_VERIFIED: Final[str] = "attestation-verified"
 
@@ -137,36 +119,25 @@ ATTESTATION_VERIFIED: Final[str] = "attestation-verified"
 def verify_archive_receipt(
     run_root: Path, period_id: int, *, licensing: Path | None = None
 ) -> ArchiveReceipt | None:
-    """ss12a's receipt, PROVED -- the one door for every reader that treats
-    a receipt as authority (DL-144).
+    """ss12a's receipt, proved: the one door for every reader that treats a receipt as authority
+    (DL-144).
 
-    None means there is no receipt, which is a fact about most periods. A
-    receipt that is there and does not prove out is not a fact and
-    REFUSES: a reader that fell back to "no receipt" over a broken one
-    would read a real archive as accidental loss, and one that fell back
-    the other way would read loss as an archive.
+    None means there is no receipt. A receipt that is there and does not prove out refuses:
+    falling back to "no receipt" would read an archive as loss, and the other way would read
+    loss as an archive.
 
-    SIX bindings, and they are the reason this is one function rather than
-    a check each caller writes for itself. Round one of DL-144 had five
-    consumers agreeing on none of them, so a receipt with a forged
-    attestation digest shortened `runs` output while the planner refused
-    it:
+    Six bindings, in one function so every consumer agrees on them:
 
-    1. the receipt's own bytes and digest, its `retention_class` and its
-       filename-vs-`period_id` -- `read_archive_receipt`'s door;
-    2. the ESTATE: the receipt's `estate_id` is this root's SENTINEL's, so
-       a stranger's receipt copied in excuses nothing here;
-    3. the SEAL: `seal_digest` is the sidecar this root holds. The sidecar
-       is a permanent floor, so it is always there to be asked;
-    4. the ATTESTATION, by PR-02e's CONSUMER rule and not by a recursive
-       walk -- `verify_attestation` exactly, because a seal-only period is
-       the case that rule was written for;
-    5. `attestation_digest` and `chain_through_period` are that
-       checkpoint's. The receipt names the proof that LICENSED the
-       deletion, and a different one beside it is a swapped proof;
-    6. `licensing`, when the caller is excusing a specific absent file:
-       the receipt has to name THAT path. A receipt whose list covers only
-       a candidate pair does not excuse a missing WAL.
+    1. the receipt's own bytes and digest, its `retention_class` and its filename-vs-`period_id`
+       (`read_archive_receipt`'s door);
+    2. the estate: the receipt's `estate_id` is this root's sentinel's;
+    3. the seal: `seal_digest` is the sidecar this root holds (a permanent floor, so always
+       there to ask);
+    4. the attestation, by PR-02e's consumer rule: `verify_attestation` exactly;
+    5. `attestation_digest` and `chain_through_period` are that checkpoint's; a different proof
+       beside the receipt is a swapped proof;
+    6. `licensing`, when the caller excuses a specific absent file: the receipt must name that
+       path. A receipt covering only a candidate pair does not excuse a missing WAL.
     """
     receipt = read_archive_receipt(run_root, period_id)
     if receipt is None:
@@ -193,13 +164,9 @@ def verify_archive_receipt(
         )
     seal = read_seal(run_root, period_id)
     if seal.estate_id != receipt.estate_id or seal.period_id != period_id:
-        # `read_seal` parses a sidecar; it does not ask WHOSE. Without this
-        # the whole chain below is self-consistent about the wrong estate:
-        # drop a foreign seal and its matching attestation into this root,
-        # restamp the receipt onto them, and every other binding here
-        # agrees -- the receipt names that seal, that seal carries that
-        # checkpoint, the checkpoint chains through this period. The one
-        # thing none of them says is that the pair belongs to this lineage
+        # `read_seal` parses a sidecar and does not ask whose. A foreign seal and its matching
+        # attestation dropped into this root, with the receipt restamped onto them, would satisfy
+        # every other binding; none of them says the pair belongs to this lineage
         raise EngineError(
             f"{seal_path(run_root, period_id)}: attests period {seal.period_id} of"
             f" estate {seal.estate_id} where this receipt claims period {period_id} of"
@@ -215,11 +182,9 @@ def verify_archive_receipt(
     try:
         attestation = verify_attestation(run_root, period_id)
     except EngineError as exc:
-        # PR-02e's consumer rule is what stands in for the deleted inputs,
-        # so its refusal is re-raised naming the ARCHIVE. "period N is not
-        # attested" is true and sends an operator to `dsl41 audit`, which
-        # for an archived period can never succeed -- the message has to
-        # say that the period's only remaining proof is gone or broken
+        # PR-02e's consumer rule stands in for the deleted inputs, so its refusal is re-raised
+        # naming the archive: "period N is not attested" would send an operator to `dsl41 audit`,
+        # which cannot succeed for an archived period
         raise EngineError(
             f"{where.name} archived period {period_id} and its attestation is gone or"
             f" does not hold together ({exc}) -- what stands in for the deleted inputs"
@@ -252,17 +217,10 @@ def verify_archive_receipt(
 def verified_tier(run_root: Path, period_id: int) -> str:
     """Which of ss11's two tiers this period stands at (DL-144).
 
-    THE RECEIPT DECIDES, not the disk. An archive is irreversible: files
-    restored beside a receipt do not move a period back to
-    `derivation-verified`, because the estate has already published the
-    weaker claim and a tier that flickered with what happens to be on disk
-    would be no claim at all. The restored inputs may still be READ -- a
-    reader is free to look at them -- but the tier this function reports
-    stays the receipt's.
-
-    And the receipt has to PROVE OUT before it decides anything: reporting
-    the weaker tier on the word of an artifact nobody checked would be the
-    one place this design takes a claim on trust."""
+    The receipt decides, not the disk. An archive is irreversible: files restored beside a
+    receipt do not move a period back to `derivation-verified`, and a tier that flickered with
+    what is on disk would be no claim. Restored inputs may still be read. The receipt must prove
+    out before it decides anything."""
     return (
         ATTESTATION_VERIFIED
         if verify_archive_receipt(run_root, period_id) is not None
@@ -273,11 +231,9 @@ def verified_tier(run_root: Path, period_id: int) -> str:
 class Unattested(EngineError):
     """The checkpoint is written and durable; the registry row is not.
 
-    Raised when `audit` cannot take the lineage lock -- which a live
-    engine holds for its process lifetime. The `attestation` rides on the
-    exception because it EXISTS: `verify` and `run --open-from` read the
-    artifact, not the row, so the caller has a real checkpoint and one
-    piece of bookkeeping left to do (ss1.3)."""
+    Raised when `audit` cannot take the lineage lock, which a live engine holds for its process
+    lifetime. The `attestation` rides on the exception because `verify` and `run --open-from`
+    read the artifact, not the row (ss1.3)."""
 
     def __init__(self, attestation: Attestation, reason: str) -> None:
         super().__init__(
@@ -292,25 +248,22 @@ class Unattested(EngineError):
 class Attestation(BaseModel):
     """ss11's durable proof: `seals/<period_id>.audit.json`.
 
-    The `digest` key is not a field, on `Seal`'s rule and for its reason:
-    it is a pure function of everything else, and a stored copy would be a
-    second authority the artifact could disagree with itself about."""
+    The `digest` key is not a field, on `Seal`'s rule: a stored copy would be a second
+    authority."""
 
     model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
 
     artifact_format_version: int = ARTIFACT_FORMAT_VERSION
     seal_digest: str
     period_id: int = Field(ge=1)
-    #: how far the induction reaches. Derived as `prev.chain_through_period
-    #: + 1`, and equal to `period_id` on a chain with no gap -- which is
-    #: what a consumer reads it to check (ss1.3)
+    #: how far the induction reaches: `prev.chain_through_period + 1`, equal to `period_id` on a
+    #: chain with no gap, which a consumer reads it to check (ss1.3)
     chain_through_period: int = Field(ge=1)
     #: null only on period 1, the base case of the induction
     prev_attestation_digest: str | None = None
     state_machine_version: int
-    #: the interpreter that produced the proof. Diagnostic for the seal's
-    #: identity and load-bearing for ss11's "auditing an old period runs
-    #: the interpreter that produced it"
+    #: the interpreter that produced the proof: load-bearing for ss11's "auditing an old period
+    #: runs the interpreter that produced it"
     dsl41_version: str
     #: ss3.2's spelling: naive UTC with exactly six fractional digits
     audited_at: str
@@ -343,8 +296,8 @@ class Attestation(BaseModel):
 
     @property
     def digest(self) -> str:
-        """`"sha256:" + hexdigest` over the canonical bytes with only the
-        top-level `digest` key removed (ss3.2, PR-08b)."""
+        """`"sha256:" + hexdigest` over the canonical bytes minus the top-level `digest` key
+        (ss3.2, PR-08b)."""
         return digest_over(self.model_dump(mode="json"))
 
     def to_bytes(self) -> bytes:
@@ -352,12 +305,8 @@ class Attestation(BaseModel):
 
     @classmethod
     def from_bytes(cls, data: bytes | str, *, where: str) -> Attestation:
-        """Parse and CHECK: the canonical form, the version, and the
-        artifact's own digest, in that order.
-
-        A stamped digest that does not match the bytes it stamps is the
-        one thing an attestation must never be read past -- the whole
-        artifact exists to be a checkpoint somebody trusts."""
+        """Parse and check the canonical form, the version, and the artifact's own digest, in that
+        order. A stamped digest that does not match the bytes it stamps is never read past."""
         payload, stamped = parse_sealed_preamble(data, where=where)
         try:
             attestation = cls.model_validate(payload)
@@ -370,11 +319,9 @@ class Attestation(BaseModel):
                 " proves nothing (period-model ss11)"
             )
         if not is_canonical_file(data, attestation.to_bytes()):
-            # a payload that omits a defaulted key (or otherwise differs
-            # from the canonical serialization) still model-validates and
-            # still digests right, because the digest is computed over the
-            # FILLED model -- so the equality is what forbids a second
-            # byte form for one logical artifact (ss3.2, Seal's own rule)
+            # a payload that omits a defaulted key still model-validates and digests right,
+            # because the digest is over the filled model; the equality forbids a second byte
+            # form for one artifact (ss3.2)
             raise EngineError(
                 f"{where}: the file's bytes are not the attestation's canonical"
                 " serialization -- one artifact has one byte form (period-model ss3.2)"
@@ -394,15 +341,12 @@ def read_attestation(run_root: Path, period_id: int) -> Attestation | None:
 
 
 def verify_attestation(run_root: Path, period_id: int) -> Attestation:
-    """ss1.3's CONSUMER rule: accept attestation N alone.
+    """ss1.3's consumer rule: accept attestation N alone.
 
-    Three checks and no more: the artifact's own digest (in
-    `from_bytes`), its binding to the seal it names, and the
-    `chain_through_period` the producing audit established. Nothing here
-    walks the chain -- the induction was proved when the attestation was
-    produced, and a physical roll imports only the current seal and its
-    attestation, so a consumer that re-walked would make a second roll
-    impossible (PR-02e)."""
+    Three checks: the artifact's own digest (in `from_bytes`), its binding to the seal it names,
+    and the `chain_through_period` the producing audit established. Nothing walks the chain: a
+    physical roll imports only the current seal and attestation, so a re-walking consumer would
+    make a second roll impossible (PR-02e)."""
     attestation = read_attestation(run_root, period_id)
     if attestation is None:
         raise EngineError(
@@ -432,26 +376,20 @@ def verify_attestation(run_root: Path, period_id: int) -> Attestation:
 
 
 def prove_derived(run_root: Path, period_id: int, *, stored: Seal | None = None) -> Seal:
-    """ss11's "verified means re-derived", as a GATE rather than as a step
-    of one verb.
+    """ss11's "verified means re-derived", as a gate.
 
-    A sidecar whose digest matches its own canonical form proves INTEGRITY,
-    never DERIVATION: rewrite the artifact canonically, recompute its
-    digest, and copy that digest into the `seal` record and the successor's
-    opening, and every binding check in the tree still passes. The only
-    thing that does not is the period's own evidence, and this is where it
-    is asked.
+    A sidecar whose digest matches its own canonical form proves integrity, never derivation:
+    rewrite the artifact canonically, recompute its digest, copy it into the `seal` record and
+    the successor's opening, and every binding check still passes. Only the period's own evidence
+    refutes it, and this is where it is asked.
 
-    ONE implementation and ONE refusal, because it is one question (DL-139,
-    DL-142). `audit` asks it before it writes a checkpoint; `dsl41
-    journal`'s cross-period replay asks it before it crosses a boundary,
-    for the reason a diagnosis surface has to: a narrated continuation over
-    a correlated forgery reads exactly like a true one.
+    One implementation and one refusal (DL-139, DL-142): `audit` asks it before writing a
+    checkpoint, and `dsl41 journal`'s cross-period replay asks it before crossing a boundary,
+    since a narrated continuation over a correlated forgery reads like a true one.
 
     `rederive_seal` does the work and the record/sidecar agreement check
-    (`check_record_names_sidecar`) on the way -- so a rewritten `seal`
-    RECORD over an honest sidecar refuses here too, and earlier, naming the
-    fields."""
+    (`check_record_names_sidecar`), so a rewritten `seal` record over an honest sidecar refuses
+    here too, naming the fields."""
     if stored is None:
         stored = read_seal(run_root, period_id)
     rederived = rederive_seal(run_root, period_id, stored=stored)
@@ -468,36 +406,26 @@ def prove_derived(run_root: Path, period_id: int, *, stored: Seal | None = None)
 def audit_period(
     run_root: Path, period_id: int, *, anchor: EstateAnchor | None = None
 ) -> Attestation:
-    """ss1.3's PRODUCER rule: re-derive period N and write its checkpoint.
+    """ss1.3's producer rule: re-derive period N and write its checkpoint.
 
-    Producing N requires the PREDECESSOR attestation **present and
-    verified**; period 1
-    is the base case with `prev_attestation_digest: null`. The absence of
-    an "or re-derive everything below" alternative is the rule, not an
-    omission -- without it a wrong implementation checks only its own
-    digest and seal binding, emits a checkpoint over an unaudited opening
-    seal, and earlier roots get deleted on a chain that was never
-    established (PR-02e).
+    Producing N requires the predecessor attestation **present and verified**; period 1 is the
+    base case with `prev_attestation_digest: null`. There is no "or re-derive everything below"
+    alternative, or a checkpoint could be emitted over an unaudited opening seal and earlier
+    roots deleted on a chain never established (PR-02e).
 
-    The `attested` transition is this verb's: `audit.json` lands by the
-    liturgy first, and only then does the anchor row flip, so no state has
-    an `attested` row without the artifact that justifies it."""
+    The `attested` transition is this verb's: `audit.json` lands by the liturgy first, then the
+    anchor row flips, so no `attested` row exists without the artifact that justifies it."""
     stored = read_seal(run_root, period_id)
-    # PROVED, not read: this receipt decides whether the loss branch below
-    # is skipped and an attestation returned, so `audit` may least of all
-    # take one on trust. `verified_tier` refusing first in the CLI is not
-    # a guard -- it is another caller, and a library function that is only
-    # safe behind one of its callers is not safe (DL-144)
+    # proved, not read: this receipt decides whether the loss branch below is skipped, and a
+    # library function safe only behind one of its callers is not safe (DL-144)
     segment = wal_path(run_root, period_id)
     receipt = verify_archive_receipt(
         run_root, period_id, licensing=None if segment.exists() else segment
     )
     if receipt is None and not segment.exists():
-        # NOT re-derivable, and this is decided BEFORE the idempotent
-        # early-return below: a stored attestation over inputs that are
-        # gone would otherwise be reported as derivation-verified by a run
-        # that derived nothing. Which absence it is depends on who wrote
-        # the period, and only one of the two is a fault (DL-144)
+        # not re-derivable, decided before the idempotent early-return below: a stored
+        # attestation over gone inputs would otherwise be reported derivation-verified by a run
+        # that derived nothing. Only one of the two absences is a fault (DL-144)
         if wrote_period(run_root, period_id):
             raise EngineError(
                 f"{wal_path(run_root, period_id)}: this root ran period {period_id}"
@@ -514,9 +442,8 @@ def audit_period(
             " in the root the registry names (period-model ss1.3, ss11)"
         )
     if stored.state_machine_version != STATE_MACHINE_VERSION:
-        # ss11: auditing an old period runs the interpreter that produced
-        # it. Cross-version audit inside one binary is a non-goal, and the
-        # refusal names what to install (PR-47a)
+        # ss11: auditing an old period runs the interpreter that produced it; cross-version
+        # audit inside one binary is a non-goal, and the refusal names what to install (PR-47a)
         raise EngineError(
             f"period {period_id} ran state_machine_version"
             f" {stored.state_machine_version} and this binary implements"
@@ -526,18 +453,13 @@ def audit_period(
         )
     existing = read_attestation(run_root, period_id)
     if existing is not None:
-        # IDEMPOTENT, not re-produced: a later attestation records this
-        # one's digest as `prev_attestation_digest`, and a rewrite with a
-        # fresh `audited_at` would silently re-digest the checkpoint that
-        # link names. A stored attestation that verifies IS the checkpoint;
-        # one that does not verify refuses loudly inside verify rather
-        # than being papered over by a rewrite. The ANCHOR transition still
-        # runs: a crash between the durable artifact and the `attested` CAS
-        # leaves the row unflipped, and a retry that returned early would
-        # leave it unflipped forever (ss1.3)
-        # the checkpoint may be another process's crash window -- linked,
-        # not yet fsynced -- and a durable `attested` row over an
-        # undurable file survives a power cut the file does not
+        # idempotent, not re-produced: a later attestation records this one's digest as
+        # `prev_attestation_digest`, and a rewrite with a fresh `audited_at` would re-digest that
+        # link. A stored attestation that verifies is the checkpoint; one that does not refuses
+        # inside verify. The anchor transition still runs: a crash between the durable artifact
+        # and the `attested` CAS leaves the row unflipped (ss1.3).
+        # the checkpoint may be another process's crash window (linked, not yet fsynced), and a
+        # durable `attested` row over an undurable file survives a power cut the file does not
         make_durable(str(attestation_path(run_root, period_id)))
         verified = verify_attestation(run_root, period_id)
         _flip_attested(run_root, period_id, anchor, verified)
@@ -546,11 +468,9 @@ def audit_period(
     if period_id > 1:
         previous = verify_attestation(run_root, period_id - 1)
     prove_derived(run_root, period_id, stored=stored)
-    # the induction, WRITTEN DOWN: one more than the predecessor reaches,
-    # and 1 at the base case. It is `period_id` on a chain with no gap, and
-    # `verify_attestation` above is what proved the predecessor had none --
-    # so this is derived here and CHECKED there, in the one place a
-    # consumer reads it (ss1.3)
+    # the induction, written down: one more than the predecessor reaches, 1 at the base case;
+    # `verify_attestation` above proved the predecessor had no gap, and a consumer checks it
+    # here (ss1.3)
     chain_through = 1 if previous is None else previous.chain_through_period + 1
     attestation = Attestation(
         seal_digest=stored.digest,
@@ -564,11 +484,9 @@ def audit_period(
     try:
         durable_create(str(attestation_path(run_root, period_id)), attestation.to_bytes())
     except FileExistsError:
-        # a concurrent audit won the create: two racers would otherwise
-        # publish two digests for one period (`audited_at` differs), and a
-        # physical roll could import one while the closing root keeps the
-        # other -- a forked attestation chain. The winner IS the
-        # checkpoint; the loser verifies it and finishes the CAS over it.
+        # a concurrent audit won the create: two racers would publish two digests for one period
+        # (`audited_at` differs) and fork the attestation chain across a physical roll. The
+        # winner is the checkpoint; the loser verifies it and finishes the CAS over it.
         winner = verify_attestation(run_root, period_id)
         _flip_attested(run_root, period_id, anchor, winner)
         return winner
@@ -581,17 +499,13 @@ def _flip_attested(
 ) -> None:
     """The `attested` CAS, after the artifact is durable (ss1.3).
 
-    The artifact is durable BEFORE the row that points at it: a crash
-    between the two leaves a re-runnable audit, and the reverse leaves an
-    `attested` period with no proof. The lock is taken HERE and for this
-    one write, not around the re-derivation: the lineage lock is held for
-    the process lifetime of whoever leads the lineage, so an audit that
-    held it for the whole verb could never run while a later period was
-    live -- and auditing a CLOSED period while a later one runs is exactly
-    what retention needs. The ARTIFACT is the proof that `verify` and
-    `run --open-from` read; the registry row is bookkeeping, and a caller
-    that could not take the lock is told so rather than losing the
-    checkpoint."""
+    The artifact is durable before the row that points at it: a crash between the two leaves a
+    re-runnable audit, and the reverse leaves an `attested` period with no proof. The lock is
+    taken here, for this one write, not around the re-derivation: the lineage lock is held for
+    the process lifetime of whoever leads, so an audit holding it for the whole verb could never
+    run while a later period is live, which retention needs. The artifact is the proof `verify`
+    and `run --open-from` read; the row is bookkeeping, and a caller that cannot take the lock is
+    told so (`Unattested`) rather than losing the checkpoint."""
     if anchor is None:
         return
     try:
@@ -611,9 +525,8 @@ def _flip_attested(
 
 
 def _producing_version(run_root: Path, period_id: int) -> str:
-    """The `dsl41_version` that produced this period, for the PR-47a
-    refusal: the attestation's if there is one, else the newest `leader`
-    record's. Diagnostic only -- nothing decides on it."""
+    """The `dsl41_version` that produced this period, for the PR-47a refusal: the attestation's,
+    else the newest `leader` record's. Diagnostic only."""
     existing = None
     try:
         existing = read_attestation(run_root, period_id)
@@ -637,28 +550,22 @@ def _producing_version(run_root: Path, period_id: int) -> str:
 
 
 def rederive_seal(run_root: Path, period_id: int, *, stored: Seal | None = None) -> Seal:
-    """ss11's "verified means re-derived": rebuild period N's sidecar from
-    the period's own evidence.
+    """ss11's "verified means re-derived": rebuild period N's sidecar from the period's own
+    evidence.
 
-    The inputs are exactly ss11's: the opening seal, the complete ordered
-    WAL of the period, the immutable spool evidence, and the C1 and C2
-    manifests. FOUR, not five: the sentinel left with DL-138, which reduced
-    `boundary_request.source` to one derived value. Nothing is copied out of the stored
-    sidecar except the three `boundary_request` input scalars the spec
-    exempts, and those are read from the `seal` RECORD and checked against
-    the sidecar, never taken from one alone."""
+    The inputs are exactly ss11's four: the opening seal, the complete ordered WAL of the period,
+    the immutable spool evidence, and the C1 and C2 manifests (DL-138 removed the sentinel).
+    Nothing is copied out of the stored sidecar except the three `boundary_request` input scalars
+    the spec exempts; those are read from the `seal` record and checked against the sidecar."""
     path = wal_path(run_root, period_id)
     if not path.exists():
-        # a ROLLED root holds the seal it opened from and none of that
-        # period's evidence, by design: re-deriving C1 there would need
-        # C1's whole proof set, and importing that on every roll is
-        # retention policy rather than a boundary mechanism. What the root
-        # CAN do with an imported checkpoint is `verify` it (ss1.3)
+        # a rolled root holds the seal it opened from and none of that period's evidence:
+        # importing C1's whole proof set on every roll is retention policy, not a boundary
+        # mechanism. The root can `verify` an imported checkpoint (ss1.3)
         if verify_archive_receipt(run_root, period_id, licensing=path) is not None:
-            # ARCHIVED, not absent: the inputs went under a named retention
-            # class and the receipt says so. Two different facts about one
-            # missing file, and an operator meeting the roll's wording here
-            # would go looking for a root that does not exist (DL-144)
+            # archived, not absent: the inputs went under a named retention class and the receipt
+            # says so; the roll's wording here would send an operator looking for a root that
+            # does not exist (DL-144)
             raise EngineError(
                 f"{path}: period {period_id}'s inputs were ARCHIVED"
                 f" ({archive_receipt_path(run_root, period_id).name}) -- what stands"
@@ -676,15 +583,11 @@ def rederive_seal(run_root: Path, period_id: int, *, stored: Seal | None = None)
         )
     records = read_journal(path)
     opening = records[0]
-    # `read_journal` runs ss2.1's segment schema over the opening record,
-    # so every field indexed below is present and of its exact type -- and
-    # since DL-138 it also guarantees the opening IS a `segment`: a retired
-    # `header` is refused BY NAME one frame earlier, by the reader that owns
-    # the record registry. A second check here could only say "not a
-    # segment", which merges the retired case with the unknown one and is
-    # exactly what the tombstone rule forbids. The `seal` record gets the
-    # same treatment where it is selected, and both refuse as `EngineError`
-    # -- a KeyError traceback out of a CLI verb that catches refusals is a
+    # `read_journal` runs ss2.1's segment schema over the opening record, so every field indexed
+    # below is present and exact, and it guarantees the opening is a `segment` (DL-138): a retired
+    # `header` is refused by name there, since a second check here could only say "not a segment"
+    # and merge the retired case with the unknown one. The `seal` record gets the same treatment
+    # where it is selected; both refuse as `EngineError`, since a KeyError out of a CLI verb is a
     # defect, not a diagnosis
     committed = [record for record in records if record.get("rec") == "seal"]
     if not committed:
@@ -696,10 +599,9 @@ def rederive_seal(run_root: Path, period_id: int, *, stored: Seal | None = None)
     record = committed[-1]
     check_seal_record(record)
     if stored is not None:
-        # the WAL's `seal` record and the stored sidecar must name each
-        # other BEFORE re-derivation: a rewritten record over an untouched
-        # sidecar would otherwise be ignored, and audit would attest a
-        # seal the WAL does not name (ss2.2/ss11)
+        # the WAL's `seal` record and the stored sidecar must name each other before
+        # re-derivation: a rewritten record over an untouched sidecar would otherwise be ignored
+        # and audit would attest a seal the WAL does not name (ss2.2/ss11)
         check_record_names_sidecar(stored, record, run_root)
     closing = read_period_manifest(run_root, period_id)
     if closing is None:
@@ -708,9 +610,8 @@ def rederive_seal(run_root: Path, period_id: int, *, stored: Seal | None = None)
             " re-derives from the C1 and C2 manifests and cannot invent one"
             " (period-model ss11)"
         )
-    # the manifest and the segment are ONE object written twice (PR-22):
-    # a closed segment whose pins were rewritten under a self-consistent
-    # manifest must refuse before either is used as evidence
+    # the manifest and the segment are one object written twice (PR-22): a closed segment whose
+    # pins were rewritten under a self-consistent manifest must refuse
     check_manifest_against_segment(closing, opening)
     watch_prefix: dict[tuple[str, int], int] | None = None
     successor_wal = wal_path(run_root, period_id + 1)
@@ -722,9 +623,8 @@ def rederive_seal(run_root: Path, period_id: int, *, stored: Seal | None = None)
                 and link.get("period_id") == period_id
                 and link.get("digest") == stored.digest
             ):
-                # the successor's opening is the INDEPENDENT artifact that
-                # pins the sidecar: a re-forged sidecar under an honest
-                # successor disagrees here, before any evidence is folded
+                # the successor's opening is the independent artifact that pins the sidecar: a
+                # re-forged sidecar under an honest successor disagrees here
                 raise EngineError(
                     f"{successor_wal}: opens from {link!r}, not from"
                     f" {stored.digest} -- the sidecar being audited is not the one"
@@ -737,8 +637,8 @@ def rederive_seal(run_root: Path, period_id: int, *, stored: Seal | None = None)
             }
     c1 = load_bundle_catalog(run_root, closing.source_bundle_hash)
     carried = carried_from_opening(run_root, opening, closing)
-    # SEM-35: the period's own alias table, or a job whose `timezone:` only
-    # that table resolves refuses the log this estate really wrote (DL-151)
+    # SEM-35: the period's own alias table, so a job whose `timezone:` only that table resolves
+    # does not refuse the log this estate wrote (DL-151)
     oracle = Oracle(c1, carried=carried, **oracle_reading(closing.runtime_profile))
     replay = replay_period(
         oracle,
@@ -753,15 +653,12 @@ def rederive_seal(run_root: Path, period_id: int, *, stored: Seal | None = None)
             " (period-model ss6)"
         )
     boundary_request = _boundary_request(record)
-    # C2's own committed manifest is where the staged half of the opening
-    # comes back from: the `seal` RECORD carries only `next_period_id` and
-    # `next_baseline_id`, and ss11 names the C2 manifest as an audit input
-    # for exactly this. The five engine-derived fields are re-derived below
-    # by `staged.commit`, never read.
+    # C2's committed manifest is where the staged half of the opening comes back from: the `seal`
+    # record carries only `next_period_id` and `next_baseline_id`, and ss11 names the C2 manifest
+    # as an audit input. `staged.commit` re-derives the five engine fields.
     opening_manifest = _opening_manifest(run_root, period_id + 1)
-    # ONE projection (DL-137, DL-145): `Manifest` IS a `StagedManifest`, so
-    # the owner's derivation reads the staged half back off it and a field
-    # added to `StagedNextPeriod` crosses by default
+    # one projection (DL-137, DL-145): `Manifest` is a `StagedManifest`, so a field added to
+    # `StagedNextPeriod` crosses by default
     staged = staged_next_from(opening_manifest)
     fingerprint = seal_fingerprint(
         source=boundary_request.source,
@@ -806,13 +703,10 @@ def rederive_seal(run_root: Path, period_id: int, *, stored: Seal | None = None)
             interval_default=max(
                 1, round(closing.runtime_profile.fw_default_interval_us / 1_000_000)
             ),
-            # a live watch that crossed the boundary keeps appending to
-            # the SAME file in the next period; the closed period's
-            # evidence is the positional prefix its sidecar names, and the
-            # sidecar was pinned above by the successor segment's
-            # `opens_from_seal` -- an artifact INDEPENDENT of the one being
-            # re-derived. No successor segment means no successor ever
-            # opened, so the whole log is this period's.
+            # a live watch that crossed the boundary keeps appending to the same file in the next
+            # period; the closed period's evidence is the positional prefix its sidecar names,
+            # pinned by the successor segment's `opens_from_seal`, an artifact independent of the
+            # one being re-derived. No successor segment means the whole log is this period's.
             watch_prefix=watch_prefix,
         ),
         classification=classify(
@@ -843,10 +737,9 @@ def _opens_from(opening: Mapping[str, Any]) -> str | None:
 def _opening_manifest(run_root: Path, next_period_id: int) -> Manifest:
     """C2's committed manifest -- ss11's fourth audit input.
 
-    The staged identity the boundary committed and the runtime profile the
-    committed classification was taken against both live here, and a
-    boundary whose opening manifest was pruned cannot be re-derived: the
-    retention floor forbids pruning it, and audit does not invent one."""
+    It holds the staged identity the boundary committed and the runtime profile its
+    classification was taken against; the retention floor forbids pruning it and audit does not
+    invent one."""
     manifest = read_period_manifest(run_root, next_period_id)
     if manifest is None:
         raise EngineError(
@@ -860,14 +753,13 @@ def _opening_manifest(run_root: Path, next_period_id: int) -> Manifest:
 def carried_from_opening(
     run_root: Path, opening: Mapping[str, Any], closing: Manifest
 ) -> CarriedRows | None:
-    """The rows period N opened with: the predecessor seal's, installed
-    verbatim, or None for period 1, which opened from a catalog.
+    """The rows period N opened with: the predecessor seal's, installed verbatim, or None for
+    period 1, which opened from a catalog.
 
-    Public because `runner_history` needs the same rows for the same
-    reason: a replay of period N from an EMPTY oracle derives revisions and
-    run numbers the log never recorded, and refuses on the first admitted
-    input that touches a carried entity (DL-136). One derivation, so audit
-    and run history cannot disagree about what a period opened with."""
+    Public because `runner_history` needs the same rows: a replay from an empty oracle derives
+    revisions and run numbers the log never recorded and refuses on the first input touching a
+    carried entity (DL-136). One derivation, so audit and run history agree on what a period
+    opened with."""
     opened = _opened_runtime(run_root, opening, closing)
     if opened is None:
         return None
@@ -890,12 +782,9 @@ def _opened_runtime(
 def _boundary_request(record: Mapping[str, Any]) -> BoundaryRequest:
     """The boundary's three carried scalars, and its one derived one.
 
-    `source` is DERIVED, never read (PR-47b). Since DL-138 it derives to
-    `request` for every boundary this estate can hold -- `adopt` went with
-    the estate-adoption path -- and the comparison STAYS: deriving over a
-    one-value domain is still what catches a `seal` record whose `source`
-    was rewritten, and the day a second value returns the check is already
-    where it belongs."""
+    `source` is derived, never read (PR-47b). It derives to `request` for every boundary this
+    estate can hold (DL-138), and the comparison stays: it catches a `seal` record whose `source`
+    was rewritten."""
     source: Literal["request"] = "request"
     if record.get("source") != source:
         raise EngineError(
@@ -912,11 +801,8 @@ def _boundary_request(record: Mapping[str, Any]) -> BoundaryRequest:
 
 
 def _diff(rederived: Seal, stored: Seal) -> list[str]:
-    """Which top-level fields disagree -- the refusal's whole value.
-
-    "The digests differ" tells an operator nothing they can act on; the
-    field names tell them whether they are looking at a pruned spool, a
-    tampered artifact or a version skew."""
+    """Which top-level fields disagree, the refusal's whole value: the names tell an operator
+    whether the cause is a pruned spool, a tampered artifact or a version skew."""
     left, right = rederived.to_payload(), stored.to_payload()
     return [
         f"{field}: re-derived {mine!r} vs stored {theirs!r}"

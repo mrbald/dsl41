@@ -1,72 +1,53 @@
-"""Retention floors, and the verb that prunes what is left (period-model
-ss11a, ss12; DL-135).
+"""Retention floors, and the verb that prunes what is left (period-model ss11a, ss12; DL-135).
 
-A retention **policy** is a non-goal (ss12): which periods, spools and
-tombstones an estate keeps, and for how long, is a business decision and
-lives in `deployment-runbook.md` ss2a as operator flags. What may never be
-pruned is the spec's, it is itemized, and this module computes it.
+Retention policy (which periods, spools and tombstones to keep, and for how long) is a non-goal
+(ss12); it lives in `deployment-runbook.md` ss2a as operator flags. This module computes what may
+never be pruned.
 
-The floor is **everything reachable from the lineage head**: the sentinel;
-the anchor and any active claim; the seal sidecar the current period opened
-from and the one it will close with; the current and committed-next period
-manifests; an installed-but-uncommitted candidate's `staged_manifest.json`
-and `candidate.json`; their catalog bundles and `sources.json`; the latest
-attestation checkpoint and every attestation after it; the WAL and spool of
-any unattested period; the spool of any live or carried execution; and any
-SPAWN tombstone whose effect can still be replayed. Recovery refuses
-without a sidecar or a catalog directory, so a rule that could delete them
-while obeying the tombstone floor was a rule that could delete the only
-artifacts able to open the head (PR-36c).
+The floor is everything reachable from the lineage head: the sentinel; the anchor and any active
+claim; the seal sidecar the current period opened from and the one it will close with; the
+current and committed-next period manifests; an installed-but-uncommitted candidate's
+`staged_manifest.json` and `candidate.json`; their catalog bundles and `sources.json`; the latest
+attestation checkpoint and every attestation after it; the WAL and spool of any unattested
+period; the spool of any live or carried execution; and any SPAWN tombstone whose effect can
+still be replayed. Recovery refuses without a sidecar or a catalog directory, so those are
+floored too (PR-36c).
 
-Three verdicts, not two, because ss12 leaves a middle:
+Three verdicts:
 
 - **floored** -- ss12 or ss11a forbids it. `prune` cannot reach it.
-- **held** -- the floor has lifted (the head moved past it and a later
-  checkpoint covers it) and no retention class licenses the deletion. Held
-  is not a refusal and not a permission: it is the honest middle, and
-  after DL-144 it is where the artifacts sit that this version deliberately
-  does not offer -- a sidecar or a manifest a later period's re-derivation
-  still reads, a superseded checkpoint, a content-addressed bundle, and
-  anything whose archive is blocked by an itemized dependency below.
-- **prunable** -- a rule licenses deletion by name: a SPAWN tombstone whose
-  period is attested and whose run is terminal (PR-36b, ss11a), a
-  quarantined candidate no recovery references (ss12), and -- since DL-144
-  -- the INPUTS of an archived period under the `archive-inputs` class.
+- **held** -- the floor has lifted (the head moved past it and a later checkpoint covers it) and
+  no retention class licenses the deletion. Held is neither a refusal nor a permission. It
+  covers what this version does not offer to delete (DL-144): a sidecar or manifest a later
+  period's re-derivation reads, an earlier checkpoint, a content-addressed bundle, and
+  anything whose archive an itemized dependency blocks.
+- **prunable** -- a rule licenses deletion by name: a SPAWN tombstone whose period is attested
+  and whose run is terminal (PR-36b, ss11a), a quarantined candidate no recovery references
+  (ss12), and the inputs of an archived period under the `archive-inputs` class (DL-144).
 
-The one asymmetry is deliberate and is the spec's. ss12 floors "the WAL and
-spool of any unattested period", which would hold an attested period's
-spool too; PR-36b then says of a run directory and its index entry, in as
-many words, "after the period is attested and the run terminal, it may go".
-The itemized obligation wins for the spool.
+The itemized obligation wins for the spool: ss12 floors the WAL and spool of any unattested
+period, and PR-36b releases an attested period's run directory and index entry once the run is
+terminal.
 
-**The archive (ss12, DL-144).** PR-Q3 asked whether a seal-only archive may
-stand in for pruned inputs. The answer is YES, CONDITIONALLY, BY EXPLICIT
-POLICY, and this module is where the conditions live:
+**The archive (ss12, DL-144).** PR-Q3 asks whether a seal-only archive may stand in for pruned
+inputs. It may, conditionally and by explicit policy:
 
-- **The receipt is the point of no return.** `seals/<period>.archive.json`
-  is written DURABLY BEFORE the first deletion and names the estate, the
-  period, the seal digest, the attestation it stands on, the class, and the
-  EXACT licensed artifact list. A retry after a partial sweep re-reads it
-  and completes. Missing evidence with NO receipt is loss and REFUSES --
-  accidental loss must never read as archiving.
-- **The receipt, the period's attestation and its sidecar are a PERMANENT
-  floor.** Deleting any of them would leave a period with neither inputs
-  nor proof, so `_remove` cannot reach them and never will.
-- **Eligibility is itemized, not "everything held".** Exactly two artifact
-  kinds are in the class -- the WAL of a covered period, and a COMMITTED
-  candidate's `staged_manifest.json` and `candidate.json` under the same
-  cover -- and the WAL carries four dependencies of its own (below).
-  Content-addressed bundles are ruled OUT in v1: a bundle is shared by
-  reference and deciding its reachability across an archived period is a
-  race this class does not take.
-- **The act is per period and all-or-nothing.** A receipt exists exactly
-  when a period's inputs were archived, so "archived" is one crisp state a
-  reader can report a TIER from (`attest.verified_tier`).
+- **The receipt is the point of no return.** `seals/<period>.archive.json` is written durably
+  before the first deletion and names the estate, the period, the seal digest, the attestation it
+  stands on, the class, and the exact licensed artifact list. A retry after a partial sweep
+  re-reads it and completes. Missing evidence with no receipt is loss and refuses.
+- **The receipt, the period's attestation and its sidecar are a permanent floor.** `_remove`
+  cannot reach them.
+- **Eligibility is itemized.** Two artifact kinds are in the class: the WAL of a covered period,
+  and a committed candidate's `staged_manifest.json` and `candidate.json` under the same cover.
+  The WAL carries four dependencies of its own. Content-addressed bundles are out in v1: a bundle
+  is shared by reference, and deciding its reachability across an archived period is a race this
+  class does not take.
+- **The act is per period and all-or-nothing.** A receipt exists exactly when a period's inputs
+  were archived, so a reader reports a tier from it (`attest.verified_tier`).
 
-Deleting a floored artifact is structurally impossible through this module:
-`prune` iterates the plan's `prunable` items alone, and `_remove` refuses a
-path that is not one, that is not under the run root, or that CONTAINS a
-floored or held artifact.
+`prune` iterates the plan's `prunable` items alone, and `_remove` refuses a path that is not one,
+that is not under the run root, or that contains a floored or held artifact.
 """
 
 from __future__ import annotations
@@ -125,39 +106,31 @@ from dsl41.runner_clock import EngineError
 from dsl41.runner_journal import dsl41_version, opens_with_rec, read_journal
 from dsl41.seal import Seal
 
-#: the run_id -> (job, run_number) index the supervisor writes FIRST
-#: (ss11a). The same name lives in `runner_supervisor._INDEX_DIR`, which
-#: this module may not import: that tier imports no dsl41 at all (DL-42).
+#: the run_id -> (job, run_number) index the supervisor writes first (ss11a). The supervisor
+#: tier imports no dsl41 (DL-42), so this duplicates `runner_supervisor._INDEX_DIR`.
 INDEX_DIR: Final[str] = ".by_run_id"
 
 Verdict = Literal["floored", "held", "prunable"]
 
-#: what an operator's flags select, and the kinds each one covers. The
-#: classes exist so a `--dry-run` and a real run report the same items;
-#: which of them to remove is the operator's call and never this module's.
+#: what an operator's flags select, and the kinds each covers. The same classes serve `--dry-run`
+#: and a real run; which to remove is the operator's call.
 CLASSES: Final[dict[str, tuple[str, ...]]] = {
     "tombstones": ("run", "run_index", "run_log"),
     "quarantine": ("quarantine",),
-    #: DL-144's archive. Two kinds and no more, and every eligibility
-    #: condition is itemized in `_archive_eligibility` -- "everything the
-    #: head has moved past" was the rule this class was NOT given
+    #: the archive (DL-144): two kinds, with every eligibility condition itemized in
+    #: `_archive_eligibility`
     ARCHIVE_CLASS: ("wal", "candidate"),
 }
 
 
 class ArtifactChanged(EngineError):
-    """The disk no longer holds the artifact the plan verified -- a rename
-    or replacement since planning. A DISK fact, not a plan defect: the
-    sweep records it and continues, exactly as it does an OS refusal,
-    because aborting would leave the operator a traceback and no list."""
+    """The disk does not hold the artifact the plan verified. The sweep records it and continues,
+    as it does an OS refusal."""
 
 
 @dataclass(frozen=True)
 class Artifact:
-    """One thing on disk, and what retention says about it.
-
-    `rule` is the citation that decided the verdict, so a report tells an
-    operator which sentence to argue with rather than only what happened."""
+    """One thing on disk and the retention verdict on it; `rule` cites what decided the verdict."""
 
     path: Path
     kind: str
@@ -166,15 +139,11 @@ class Artifact:
     why: str
     period_id: int | None = None
     run: tuple[str, int] | None = None
-    #: (st_dev, st_ino) at PLAN time, stamped on prunable artifacts only:
-    #: removal verifies it through the held descriptor, so a floored
-    #: artifact renamed onto a prunable name after planning is refused
-    #: rather than deleted
+    #: (st_dev, st_ino) at plan time, on prunable artifacts only. Removal verifies it through the
+    #: held descriptor and refuses a floored artifact renamed onto a prunable name.
     ident: tuple[int, int] | None = None
-    #: the snapshot identities observed AT AND BENEATH this artifact --
-    #: the only inodes its removal is licensed to delete. Per artifact,
-    #: not estate-wide: an observed inode from a class the operator did
-    #: NOT select, moved inside this tree after planning, must refuse
+    #: the snapshot identities at and beneath this artifact: the only inodes its removal may
+    #: delete. Per artifact, so an inode moved inside this tree after planning refuses.
     licensed: frozenset[tuple[int, int]] | None = None
 
     def render(self) -> str:
@@ -184,30 +153,23 @@ class Artifact:
 
 @dataclass(frozen=True)
 class RetentionPlan:
-    """What `prune` may do to one run root, decided before it does any of
-    it. Pure: nothing here writes, unlinks or takes a lock."""
+    """What `prune` may do to one run root. Pure: nothing here writes, unlinks or takes a lock."""
 
     run_root: Path
     anchor_dir: Path
     estate_id: str
-    #: (st_dev, st_ino) of the RESOLVED root at plan time: a run-root
-    #: symlink retargeted between the plan and the prune would satisfy
-    #: every path-string containment check inside the replacement estate
+    #: (st_dev, st_ino) of the resolved root at plan time; a retargeted run-root symlink would
+    #: otherwise pass every path-string containment check
     root_ident: tuple[int, int]
-    #: the identities of every floored and held artifact at plan time: the
-    #: recursive removal refuses any of them found BENEATH a deletion
-    #: target, so a retained artifact moved inside a prunable directory
-    #: after planning is never swept away with it
+    #: identities of every floored and held artifact at plan time; recursive removal refuses any
+    #: found beneath a deletion target
     retained_idents: frozenset[tuple[int, int]]
-    #: the newest period this root holds a segment for (I1: segment N is
-    #: period N), which is the period the head is at or just past
+    #: the newest period this root holds a segment for (I1: segment N is period N)
     current_period: int
     #: every period whose attestation this root holds AND which verifies
     attested: frozenset[int]
-    #: every period this root holds a BOUND archive receipt for (ss12,
-    #: DL-144): its inputs are gone by policy and its attestation stands
-    #: in for them. Kept on the plan so a sweep can tell "the point of no
-    #: return is behind this period" from "it is in front of it"
+    #: every period this root holds a bound archive receipt for (ss12, DL-144): its inputs are
+    #: gone by policy and its attestation stands in for them
     archived: frozenset[int]
     artifacts: tuple[Artifact, ...]
 
@@ -221,12 +183,9 @@ class RetentionPlan:
         return tuple(item for item in self.artifacts if item.verdict == "prunable")
 
     def retained_over(self, path: Path) -> Artifact | None:
-        """The retained artifact `path` would take with it: itself, or one
-        BENEATH it.
+        """The retained artifact `path` would take with it: itself or one beneath it.
 
-        Removing a directory removes what is inside it, so a guard that
-        compared paths for equality alone would let `runs/` go while every
-        floored tombstone under it was named in this very plan."""
+        Comparing paths for equality alone would let `runs/` go with floored tombstones under it."""
         target = _resolved(path)
         for item in self.artifacts:
             if item.verdict == "prunable":
@@ -239,22 +198,17 @@ class RetentionPlan:
 
 @dataclass(frozen=True)
 class PruneReport:
-    """What one `prune` call did, and what it did not do to everything
-    else. `kept` is prunable and outside the flags given; the other two are
-    the plan's own verdicts, reported so a run says why each survivor
-    survived."""
+    """What one `prune` call did. `kept` is prunable but outside the flags given; the other
+    verdict fields say why each survivor survived."""
 
     removed: tuple[Artifact, ...]
     kept: tuple[Artifact, ...]
     floored: tuple[Artifact, ...]
     held: tuple[Artifact, ...]
-    #: selected, licensed, and refused by the OPERATING SYSTEM, with the
-    #: reason. A partial sweep has to be reportable
+    #: selected, licensed, and refused by the operating system, with the reason
     failed: tuple[tuple[Artifact, str], ...]
-    #: selected and NOT licensed: the archive class asked for, and an
-    #: itemized dependency in the way (ss12, DL-144). A different fact
-    #: from `failed` -- nothing was attempted and nothing is broken; the
-    #: operator has an order to follow, and the reason names it
+    #: selected and not licensed: the archive class was asked for and an itemized dependency is in
+    #: the way (ss12, DL-144). Nothing was attempted; the reason names the order to follow.
     refused: tuple[tuple[Artifact, str], ...]
     bytes_removed: int
     dry_run: bool
@@ -266,32 +220,21 @@ class PruneReport:
 def plan_retention(run_root: Path, *, anchor_dir: Path | None = None) -> RetentionPlan:
     """Read one estate root and decide every artifact's verdict (ss12).
 
-    The anchor is READ and never locked. A live engine holds the lineage
-    lock for its process lifetime, and a prune that needed the lock could
-    only ever run against a stopped estate. Reading is enough because
-    attestation is monotone: a period this call sees as attested cannot
-    become unattested under it, and everything a live engine can newly
-    create belongs to the OPEN period, which is unattested and therefore
-    floored."""
+    The anchor is read and never locked: a live engine holds the lineage lock, and attestation is
+    monotone, so a period seen as attested stays attested and anything newly created belongs to
+    the open period, which is floored."""
     run_root = Path(run_root)
     resolved_root = run_root.resolve()
     root_stat = os.stat(resolved_root)
-    # the OBSERVATION SNAPSHOT, taken before any scan read and covering
-    # the anchor's tree too: identity is captured when the estate is
-    # first observed, so an original moved into a prunable tree during
-    # the scan KEEPS its pinned identity and the removal walk refuses it
-    # -- a pin taken after the scan would pin whatever replaced it instead
+    # the observation snapshot is taken before any scan read and covers the anchor's tree, so an
+    # original moved into a prunable tree during the scan keeps its pinned identity and removal
+    # refuses it
     anchor_dir = Path(anchor_dir) if anchor_dir is not None else default_anchor_dir(run_root)
     observed = _snapshot_idents(run_root, anchor_dir)
     sentinel = read_sentinel(run_root)
     if sentinel is None:
-        # D5, DL-138: this reader does NOT route through `read_journal`, so
-        # it carries its own tombstone. A retired OPENING is named; anything
-        # else at that path is unknown residue and refuses generically --
-        # one says the root predates a retirement, the other says nothing
-        # here is an estate. `header` is the only recognised opening there
-        # ever was besides `segment`, so a file opening with a retired
-        # `result` or `effect` record is residue like any other.
+        # D5, DL-138: this reader does not route through `read_journal`, so it names a retired
+        # `header` opening itself; any other content at that path is unknown residue.
         if opens_with_rec(sentinel_path(run_root)) == "header":
             raise EngineError(
                 f"{sentinel_path(run_root)}: opens with `header`, a RETIRED record"
@@ -328,11 +271,8 @@ def plan_retention(run_root: Path, *, anchor_dir: Path | None = None) -> Retenti
             " prune (period-model ss1.1)"
         )
     if not segments:
-        # every segment this root ever held was ARCHIVED, receipts and all
-        # -- an old root of a rolled lineage, swept after its periods were
-        # attested. There is still a plan to compute here (its sidecars,
-        # attestations and receipts are a permanent floor), and refusing
-        # would make one archived root refuse the estate-wide sweep
+        # every segment was archived: an old root of a rolled lineage. Its sidecars,
+        # attestations and receipts are a permanent floor, so the plan is still computed.
         current = max(periods)
     else:
         current = segments[-1]
@@ -376,10 +316,8 @@ def plan_retention(run_root: Path, *, anchor_dir: Path | None = None) -> Retenti
         if item.verdict != "prunable"
         for ident in _observed_under(observed, run_root, item.path)
     )
-    # the BRACKET: every retained top-level path must still hold the inode
-    # the snapshot observed -- a byte-identical substitution during the
-    # scan would otherwise pin the replacement while the original drifted
-    # into a prunable tree unprotected
+    # the bracket: every retained top-level path must still hold the inode the snapshot
+    # observed, or a substitution during the scan would pin the replacement
     for item in artifacts:
         if item.verdict == "prunable":
             continue
@@ -405,13 +343,11 @@ def plan_retention(run_root: Path, *, anchor_dir: Path | None = None) -> Retenti
 
 
 def _snapshot_idents(*roots: Path) -> dict[Path, tuple[int, int]]:
-    """Every path under `roots` and its inode, captured FROM the directory
-    enumeration itself: `scandir` on an opened descriptor yields each
-    entry's d_ino at read time, so there is no separate pathname lookup a
-    swap can slip between. Descending re-proves the child: it is opened
-    under the parent's fd with O_NOFOLLOW and its fstat must equal the
-    (device, d_ino) the listing reported -- a mismatch (a swap, a mount
-    placed mid-tree) refuses. Fail-closed on every error."""
+    """Every path under `roots` with its inode, taken from the directory enumeration itself
+    (`scandir` on an open descriptor), so no pathname lookup can be swapped.
+
+    Descent opens each child with O_NOFOLLOW and requires its fstat to equal the listed (device,
+    d_ino). Fail-closed on every error."""
     out: dict[Path, tuple[int, int]] = {}
 
     def _refuse(where: Path, error: Exception) -> None:
@@ -477,15 +413,11 @@ def _observed_under(
 ) -> list[tuple[int, int]]:
     """The snapshot's identities at and beneath `path`.
 
-    A retained path OUTSIDE the run root (the anchor, a claim) is not in
-    the snapshot walk and pins through the live traversal instead; a
-    retained path inside the root that the snapshot never saw appeared
-    MID-SCAN, and pinning it live is exactly right -- it cannot have been
-    the target of a pre-scan swap."""
+    A retained path the snapshot never saw was born mid-scan and is pinned through the live
+    traversal."""
     if path not in observed:
-        # born mid-scan, or on a layout the snapshot legitimately lacks
-        # (a not-yet-created anchor): it cannot have been the target of a
-        # pre-scan swap, and the live fail-closed traversal pins it
+        # born mid-scan or on a layout the snapshot lacks (an anchor not yet created): no
+        # pre-scan swap could target it
         return _idents_under(path)
     prefix = str(path)
     return [
@@ -496,23 +428,16 @@ def _observed_under(
 
 
 def _idents_under(path: Path) -> list[tuple[int, int]]:
-    """Every inode at and beneath `path`, links never followed: a retained
-    DIRECTORY's protection extends to each file inside it, or a single
-    file moved out of it into a prunable tree would be swept away while
-    the directory's own inode stayed safely pinned.
+    """Every inode at and beneath `path`, links never followed.
 
-    FAIL-CLOSED: an unreadable subdirectory or entry inside a retained
-    tree refuses the whole plan -- silently skipping it would leave its
-    children unpinned, and restoring access later would let them be moved
-    into a prunable tree and swept."""
+    Fail-closed: an unreadable entry inside a retained tree refuses the plan, since skipping it
+    would leave its children unpinned."""
     out: list[tuple[int, int]] = []
     try:
         top = os.lstat(path)
     except OSError as exc:
-        # ENOENT included, and at the TOP level too: every artifact on
-        # this list was observed on disk by the scan moments earlier, so
-        # an absence here is concurrent mutation -- and a rename into a
-        # prunable tree is indistinguishable from an unlink
+        # the scan observed this artifact moments earlier, so absence, at the top level too, is
+        # concurrent mutation; a rename into a prunable tree looks like an unlink
         raise EngineError(
             f"{path}: retained artifact unreadable ({exc}) -- retention refuses to"
             " plan over a tree it cannot fully pin (period-model ss12)"
@@ -532,11 +457,8 @@ def _idents_under(path: Path) -> list[tuple[int, int]]:
             try:
                 st = os.lstat(Path(base) / name)
             except OSError as exc:
-                # ENOENT included: the walk LISTED this entry, and a
-                # vanish between the listing and the lstat cannot be told
-                # apart from a rename into a prunable tree -- an unlinked
-                # inode is harmless, a renamed one is live and unpinned,
-                # and fail-closed is the only answer that covers both
+                # a vanish between listing and lstat cannot be told from a rename into a
+                # prunable tree, so fail closed
                 _refuse(exc)
                 raise AssertionError("unreachable") from exc
             out.append((st.st_dev, st.st_ino))
@@ -544,12 +466,9 @@ def _idents_under(path: Path) -> list[tuple[int, int]]:
 
 
 def _snapshot_stamp(observed: Mapping[Path, tuple[int, int]], path: Path) -> tuple[int, int] | None:
-    """A PRUNABLE artifact's identity, from the observation snapshot and
-    only when the disk still agrees with it: a foreign directory swapped
-    in during the scan would otherwise be stamped by a late lstat and
-    deleted under a verdict computed for something else. None refuses the
-    removal (the existing gate), so one changed artifact never blocks the
-    rest of the sweep."""
+    """A prunable artifact's identity from the snapshot, only while the disk still agrees.
+
+    None refuses the removal, so one changed artifact does not block the sweep."""
     pinned = observed.get(path)
     if pinned is None:
         return None  # never observed: nothing licensed ITS deletion
@@ -557,8 +476,7 @@ def _snapshot_stamp(observed: Mapping[Path, tuple[int, int]], path: Path) -> tup
 
 
 def _lstat_ident(path: Path) -> tuple[int, int] | None:
-    """The artifact's own (st_dev, st_ino), never following a symlink --
-    or None when it cannot be read, which removal refuses."""
+    """The artifact's own (st_dev, st_ino), never following a symlink; None when unreadable."""
     try:
         st = os.lstat(path)
     except OSError:
@@ -568,56 +486,43 @@ def _lstat_ident(path: Path) -> tuple[int, int] | None:
 
 @dataclass(frozen=True)
 class _Scan:
-    """What every rule below reads, gathered once. A private aggregate, so
-    a rule cannot quietly re-read the disk and disagree with its
-    neighbour about which periods this root holds."""
+    """What every rule reads, gathered once, so no rule re-reads the disk and disagrees with
+    another about which periods this root holds."""
 
     run_root: Path
     anchor_dir: Path
-    #: the periods this root holds a WAL for
     segments: list[int]
-    #: every period this root holds ANYTHING for -- segments plus the
-    #: `periods/<N>/` a committed seal installed before its segment exists
+    #: every period this root holds anything for: segments plus `periods/<N>/` installed by a
+    #: committed seal before its segment exists
     periods: list[int]
     current: int
     attested: set[int]
     seals: dict[int, Seal]
-    #: the period the CURRENT segment opened from, off its own
-    #: `opens_from_seal` -- null on a root whose current period is 1
+    #: the period the current segment opened from (its `opens_from_seal`); null when the current
+    #: period is 1
     opening: int | None
-    #: `(job, run_number) -> (birth period, run_id)`, read once: the
-    #: archive's spool-order dependency and the tombstone floor ask the
-    #: same question of it, and two reads could disagree
+    #: `(job, run_number) -> (birth period, run_id)`, read once so the archive's spool-order
+    #: dependency and the tombstone floor agree
     born: dict[tuple[str, int], tuple[int, Any]]
-    #: every period this root holds an archive RECEIPT for (ss12, DL-144)
+    #: every period this root holds an archive receipt for (ss12, DL-144)
     archived: dict[int, ArchiveReceipt]
-    #: `period -> None when its inputs may be archived, else WHY NOT`.
-    #: A string here is what the `held` verdict says out loud, so an
-    #: operator reads the blocking dependency rather than a silence
+    #: `period -> None when its inputs may be archived, else why not`; `held` reports the string
     archive: dict[int, str | None]
-    #: the highest period ss1.3's registry names, whatever root holds it:
-    #: the estate's head period, which is NOT this root's newest segment
-    #: once a lineage has rolled
+    #: the estate's head period: the highest period ss1.3's registry names, whatever root holds
+    #: it; not this root's newest segment once a lineage has rolled
     head: int
-    #: the highest period whose attestation verifies ANYWHERE in the
-    #: estate, or None. The chain is an induction, so that one checkpoint
-    #: covers every period below it -- and it is an ESTATE fact, because a
-    #: rolled root's successor holds the checkpoint that covers its last
-    #: period and a per-root answer would floor that period forever
+    #: the highest period whose attestation verifies anywhere in the estate, or None. One
+    #: checkpoint covers every period below it by induction; a per-root answer would floor a
+    #: rolled root's last period forever.
     covered_through: int | None
 
 
 def _periods_held(run_root: Path, segments: Sequence[int]) -> list[int]:
     """Every period number this root holds an artifact for.
 
-    Segments are not the answer on their own, in two directions. A
-    committed seal installs `periods/N+1/manifest.json` BEFORE the
-    successor segment exists, and ss12 floors that manifest by name. And a
-    ROLLED root holds the seal it opened from and its attestation and NONE
-    of that period's WAL, by design (ss1.3) -- the two artifacts a second
-    roll imports. A walk over segments alone would have no opinion about
-    either, and an artifact with no verdict is one the guard cannot
-    protect."""
+    Segments alone miss two cases: a committed seal installs `periods/N+1/manifest.json` before
+    the successor segment exists (ss12 floors it), and a rolled root holds the seal it opened
+    from and its attestation but none of that period's WAL (ss1.3)."""
     held = set(segments)
     for directory in (run_root / "periods", seal_dir(run_root)):
         if not directory.is_dir():
@@ -634,27 +539,19 @@ def _periods_held(run_root: Path, segments: Sequence[int]) -> list[int]:
 def _archive_receipts(
     run_root: Path, periods: Sequence[int], stored: Anchor
 ) -> dict[int, ArchiveReceipt]:
-    """Every archive receipt this root holds, PROVED before it is believed
-    (ss12, DL-144).
+    """Every archive receipt this root holds, proved before it is believed (ss12, DL-144).
 
-    `attest.verify_archive_receipt` is the one door, shared with the walk,
-    the tier, `journal` and `runs`: a receipt these five agreed on
-    differently is a receipt one of them honours and another refuses, and
-    round one of DL-144 shipped exactly that. What this adds is the ANCHOR:
-    the verifier binds the receipt to the root's SENTINEL, and a plan is
-    computed under an anchor that must be the same estate."""
+    `attest.verify_archive_receipt` is the one door, shared with the walk, the tier, `journal` and
+    `runs`. This adds the anchor: the verifier binds a receipt to the root's sentinel, and the
+    plan's anchor must name the same estate."""
     out: dict[int, ArchiveReceipt] = {}
     for period_id in periods:
         receipt = verify_archive_receipt(run_root, period_id)
         if receipt is None:
             continue
-        # unreachable on one assumption: `plan_retention` read the sentinel
-        # ONCE and refused an anchor of another estate, and
-        # `verify_archive_receipt` bound the receipt to the sentinel it read
-        # from disk, so receipt and anchor name one estate if both reads
-        # agree. The two reads are separate; only a concurrent in-place
-        # rewrite of the sentinel between them breaks that, and no dsl41
-        # writer rewrites a sentinel. It also fires if either gate is removed
+        # unreachable unless the sentinel is rewritten in place between `plan_retention`'s read
+        # and the verifier's read; no dsl41 writer does that. It also guards the removal of
+        # either gate
         if receipt.estate_id != stored.estate_id:  # pragma: no cover -- see above
             raise EngineError(
                 f"{archive_receipt_path(run_root, period_id)}: estate"
@@ -666,20 +563,12 @@ def _archive_receipts(
 
 
 def _registry_periods(stored: Anchor, anchor_dir: Path) -> list[tuple[int, PeriodRow]]:
-    """ss1.3's archive registry as `(period, ROW)`, ascending, provisional
-    rows dropped.
+    """ss1.3's archive registry as `(period, row)`, ascending, provisional rows dropped.
 
-    The whole row, not the root: `seal_digest` is what the lineage
-    COMMITTED for that period, and a cover that read only the path could
-    be sent to a same-estate root holding a different branch's seal and
-    checkpoint (DL-144). A projection that throws the digest away is
-    how that field stopped being load-bearing.
-
-    `boundary.registry_rows` is the OWNER of the read and refuses the two
-    ways a registry can be wrong (DL-145). This module used to apply the
-    canonical-key rule by dropping the row instead: a dropped row never
-    reached `_check_no_silent_loss`, so an edited anchor refused the walk
-    and quietly planned deletions over a smaller estate."""
+    The whole row is kept: `seal_digest` is what the lineage committed for the period, and a
+    cover that read only the path could be sent to a same-estate root holding another branch's
+    seal (DL-144). `boundary.registry_rows` owns the read and refuses the two ways a registry can
+    be wrong (DL-145)."""
     return [
         (period_id, row)
         for period_id, row in registry_rows(stored, anchor_dir=anchor_dir)
@@ -688,43 +577,27 @@ def _registry_periods(stored: Anchor, anchor_dir: Path) -> list[tuple[int, Perio
 
 
 def _covered_through(estate_id: str, registry: Sequence[tuple[int, PeriodRow]]) -> int | None:
-    """The highest period whose attestation VERIFIES **on a root this
-    estate proves**, or None (ss1.3's induction, DL-144).
+    """The highest period whose attestation verifies on a root this estate proves, or None
+    (ss1.3's induction, DL-144).
 
-    An ESTATE question, deliberately, and the one place this module reads
-    outside the root it plans. A rolled root's last period is covered by a
-    checkpoint the SUCCESSOR root holds, so a per-root answer would floor
-    that period forever -- which is the "held for a reason nobody can name"
-    the archive class exists to end.
+    An estate question, and the one place this module reads outside the root it plans: a rolled
+    root's last period is covered by a checkpoint the successor root holds, so a per-root answer
+    would floor it forever.
 
-    **The row says where to look AND which seal is the lineage's.** Round
-    one of DL-144 verified the checkpoint and not the ROOT it came from, so
-    a row edited to point at another estate's directory could supply an
-    internally-valid later attestation and RELEASE this estate's WAL. Round
-    two closed the root and left the row's `seal_digest` unread, so a row
-    pointed at a SAME-ESTATE, same-period root holding a different BRANCH's
-    seal and checkpoint could release WAL the lineage never committed. Both
-    are one unproved artifact authorizing a deletion, which is the one
-    thing the whole floor exists to prevent. Four bindings now stand
-    between a row and a cover:
+    The row says where to look and which seal is the lineage's. One unproved artifact must never
+    authorize a deletion, so four bindings stand between a row and a cover:
 
-    1. the root carries a `period_root` sentinel of THIS estate;
-    2. the sidecar under that period's number is this estate's and that
-       period's -- `read_seal` parses a sidecar and never asks whose;
-    3. its digest is the one ss1.3's ROW committed for that period, which
-       is what makes the branch the lineage's and not merely a branch;
-    4. `verify_attestation` binds the checkpoint to that sidecar and to its
-       own `chain_through_period`.
+    1. the root carries a `period_root` sentinel of this estate;
+    2. the sidecar under that period's number is this estate's and that period's (`read_seal`
+       parses a sidecar and never asks whose);
+    3. its digest is the one ss1.3's row committed for that period, which makes the branch the
+       lineage's;
+    4. `verify_attestation` binds the checkpoint to that sidecar and to its own
+       `chain_through_period`.
 
-    A root that is MISSING or unreadable is skipped, not refused: a rolled
-    lineage's old directory may legitimately be off-line, and "I cannot
-    prove a cover from here" only ever holds MORE. A row whose root is
-    PRESENT and fails any of the four REFUSES -- that is an edited row, and
-    it is exactly the attack above.
-
-    Read DESCENDING and stopped at the first checkpoint that verifies,
-    because that one covers every period below it by induction -- so the
-    ordinary estate pays one open period's missing file and one read."""
+    A missing or unreadable root is skipped (an off-line root only ever holds more). A present
+    root that fails a binding refuses: that is an edited row. Rows are read descending and
+    stopped at the first verifying checkpoint, which covers every period below it."""
     for period_id, row in reversed(registry):
         root = Path(row.root)
         if not root.is_dir():
@@ -739,8 +612,7 @@ def _covered_through(estate_id: str, registry: Sequence[tuple[int, PeriodRow]]) 
                 " (period-model ss1.2, ss1.3, ss12)"
             )
         if row.seal_digest is None or not attestation_path(root, period_id).exists():
-            # an unsealed period covers nothing, and neither does one this
-            # root holds no checkpoint for: keep looking further down
+            # an unsealed period, or one this root holds no checkpoint for, covers nothing
             continue
         try:
             seal = read_seal(root, period_id)
@@ -765,8 +637,7 @@ def _covered_through(estate_id: str, registry: Sequence[tuple[int, PeriodRow]]) 
         try:
             verify_attestation(root, period_id)
         except (OSError, EngineError):
-            # a checkpoint that proves nothing unlocks nothing: keep
-            # looking further down rather than releasing on it
+            # a checkpoint that proves nothing unlocks nothing: keep looking down
             continue
         return period_id
     return None
@@ -778,18 +649,12 @@ def _check_no_silent_loss(
     segments: Sequence[int],
     archived: Mapping[int, ArchiveReceipt],
 ) -> None:
-    """ss12's refuse-don't-degrade half: a period this root OWNS whose WAL
-    is gone with no receipt licensing its absence (DL-144).
+    """ss12's refuse-don't-degrade half: a period this root owns whose WAL is gone with no receipt
+    licensing its absence (DL-144).
 
-    Ownership comes from ss1.3's archive registry and from nowhere else. A
-    ROLLED root legitimately holds a predecessor's sidecar and attestation
-    and none of that period's WAL -- that pair is exactly what a roll
-    imports -- so "this root has no segment for period N" is only a fact
-    about loss when the registry says period N lives HERE.
-
-    Refusing rather than shrugging is the whole point: a plan computed over
-    an estate that quietly lost a segment would compute the tombstone floor
-    for effects it can no longer see, and release a replayable SPAWN."""
+    Ownership comes from ss1.3's registry alone, since a rolled root legitimately holds a
+    predecessor's sidecar and attestation without its WAL. Refusing keeps the tombstone floor
+    from being computed over an estate that lost a segment and releasing a replayable SPAWN."""
     resolved = _resolved(run_root)
     held = set(segments)
     for period_id, row in registry:
@@ -809,45 +674,27 @@ def _check_no_silent_loss(
 
 
 def _archive_eligibility(scan: _Scan) -> dict[int, str | None]:
-    """DL-144's ITEMIZED eligibility, per period: None when the inputs may
-    be archived, else the dependency that says not yet.
+    """DL-144's itemized eligibility, per period: None when the inputs may be archived, else the
+    dependency that says not yet.
 
-    Four conditions, each a real dependency of a real reader, and each
-    named in the verdict so an operator reads what to do next:
+    1. **behind the head.** The current period's inputs are what every recovery opens from.
+    2. **covered by a later chain checkpoint.** ss12 floors the latest checkpoint and everything
+       after it; a period is archivable once a checkpoint above it carries the induction past it.
+    3. **the spool went first** (PR-36b). The tombstone floor resolves a run directory to a
+       period through the SPAWN effect in that period's WAL, so archiving the WAL first would
+       floor those tombstones forever. Archiving refuses while any run directory, index entry or
+       default log of a run born in the period survives, and names them.
+    4. **the archived periods are a prefix of what the root retains.** Segment-spanning readers
+       (the subscriber backfill's contiguity proof and adjacency chain, ss11's gap marker at the
+       oldest retained record) cannot cross a hole. The sweep deletes ascending.
 
-    1. **behind the head.** The current period's own inputs are the ones
-       every recovery path opens from.
-    2. **covered by a LATER chain checkpoint.** ss12 floors the latest
-       checkpoint and everything after it; a period is archivable only once
-       a checkpoint above it carries the induction past it, which is the
-       same condition that lets its own superseded checkpoint be `held`.
-    3. **the spool went first** (PR-36b's order). The
-       tombstone floor resolves a run directory to a period THROUGH the
-       SPAWN effect in that period's WAL. Archive the WAL first and every
-       tombstone it explains becomes provenance-unknown and floored
-       forever, which is a floor nothing can ever lift. So archiving
-       refuses while any run directory, index entry or default log of a run
-       born in this period survives, and the refusal names them.
-    4. **the archived periods are a PREFIX of what the root retains.** A
-       hole in the middle of the retained segments is a hole every
-       segment-spanning reader would have to be taught to cross -- the
-       subscriber backfill's contiguity proof, its adjacency chain, and
-       ss11's gap marker, which is defined at the OLDEST retained record
-       and nowhere else. Archiving oldest-first keeps every one of those
-       contracts word for word, and the sweep deletes ascending so no
-       crash window opens a hole either.
-
-    An ARCHIVED period gets no entry at all: `_licensed_artifacts` answers
-    for it from the receipt, which is the recovery authority, and a second
-    opinion here is a second authority. It leaves the prefix satisfied for
-    the periods above it, because the point of no return is behind it."""
+    An archived period gets no entry: `_licensed_artifacts` answers for it from the receipt."""
     out: dict[int, str | None] = {}
     prefix_ok = True
     for period_id in scan.segments:
         if period_id in scan.archived:
-            # no verdict is owed: `_licensed_artifacts` answers for an
-            # archived period, off the receipt. The prefix stays satisfied,
-            # because the point of no return is behind this one
+            # an archived period's verdict comes from `_licensed_artifacts`, off the receipt; the
+            # prefix stays satisfied
             continue
         why = _archive_blocker(scan, period_id)
         if why is None and not prefix_ok:
@@ -865,13 +712,9 @@ def _archive_blocker(scan: _Scan, period_id: int) -> str | None:
     """Conditions 1-3 of `_archive_eligibility`, for one period."""
     if period_id >= scan.head:
         return "the estate's head period: its inputs are what every recovery opens from"
-    # the period the current segment OPENED FROM is deliberately not
-    # excluded here: ss12 floors the seal SIDECAR a period opened from, and
-    # a sidecar is not a WAL. Resume, the carry and history all fold from
-    # the sidecar (ss11 step 3), and none of them reads the predecessor's
-    # segment -- so an `opening` guard would have floored an in-place
-    # lineage's every period forever, which is the "held for a reason
-    # nobody can name" this class exists to end
+    # the period the current segment opened from is not excluded: ss12 floors its seal sidecar,
+    # not a WAL, and resume, the carry and history fold from the sidecar (ss11 step 3). An
+    # `opening` guard would floor an in-place lineage's every period forever.
     if period_id not in scan.attested:
         return "unattested: nothing stands in for inputs that were never proved"
     if scan.covered_through is None or scan.covered_through <= period_id:
@@ -889,18 +732,11 @@ def _archive_blocker(scan: _Scan, period_id: int) -> str | None:
 def _remaining_spool(
     run_root: Path, born: Mapping[tuple[str, int], tuple[int, Any]], period_id: int
 ) -> list[Path]:
-    """Every tombstone artifact of a run BORN in this period that is still
-    on disk, sorted.
+    """Every tombstone artifact of a run born in this period that is still on disk, sorted.
 
-    Read from the WAL's own SPAWN effects, which is the join the tombstone
-    floor uses -- so what this lists is exactly what stops being explicable
-    the moment the WAL goes.
-
-    ONE walk (DL-145), for the plan's archive blocker and for the TOCTOU
-    re-check that runs again at the receipt. The re-check still re-reads
-    the estate -- it passes a FRESH `born`, because a spool that came back
-    between the plan and the sweep is the thing it exists to catch -- but
-    the two may not differ in what they call a remaining spool."""
+    Read from the WAL's own SPAWN effects, the join the tombstone floor uses. One walk (DL-145)
+    serves the plan's archive blocker and the receipt-time re-check, which passes a fresh `born`
+    to catch a spool that returned after planning."""
     return sorted(
         path
         for (job, run_number), (birth, run_id) in born.items()
@@ -911,13 +747,11 @@ def _remaining_spool(
 
 
 def _attested_periods(run_root: Path, periods: Sequence[int]) -> set[int]:
-    """Every period this root holds a checkpoint for that VERIFIES.
+    """Every period this root holds a checkpoint for that verifies.
 
-    The artifact is the authority and the registry row is not: `audit`
-    publishes the checkpoint before it sets the row, and a run that could
-    not take the lineage lock leaves a durable checkpoint with no row
-    (`attest.Unattested`). A checkpoint that does not verify counts as
-    absent, which floors more rather than less."""
+    The artifact is the authority, not the registry row: `audit` publishes the checkpoint before
+    it sets the row, and a run that could not take the lineage lock leaves a checkpoint with no
+    row (`attest.Unattested`). A checkpoint that does not verify counts as absent."""
     attested: set[int] = set()
     for period_id in periods:
         if not attestation_path(run_root, period_id).exists():
@@ -931,16 +765,12 @@ def _attested_periods(run_root: Path, periods: Sequence[int]) -> set[int]:
 
 
 def _seals_held(run_root: Path, periods: Sequence[int], *, estate_id: str) -> dict[int, Seal]:
-    """Every sidecar this root holds, parsed AND BOUND. A period with a
-    segment and no sidecar is simply still open.
+    """Every sidecar this root holds, parsed and bound; a period with a segment and no sidecar is
+    still open.
 
-    Bound, because these seals AUTHORIZE deletion (their `executions` are
-    what proves a run terminal): a valid sidecar-and-attestation pair
-    swapped in from another estate verifies internally and names none of
-    this estate's live runs. Four bindings, the same spine audit uses:
-    the sentinel's estate, the period the filename claims, the WAL's own
-    `seal` record, and -- where a successor segment exists -- its
-    `opens_from_seal` link."""
+    These seals authorize deletion (their `executions` prove a run terminal), so four bindings
+    apply, as in audit: the sentinel's estate, the period the filename claims, the WAL's own
+    `seal` record, and where a successor segment exists its `opens_from_seal` link."""
     seals: dict[int, Seal] = {}
     for period_id in periods:
         if not seal_path(run_root, period_id).exists():
@@ -961,10 +791,9 @@ def _seals_held(run_root: Path, periods: Sequence[int], *, estate_id: str) -> di
         if wal.exists():
             committed = [record for record in read_journal(wal) if record.get("rec") == "seal"]
             if len(committed) != 1:
-                # a sidecar with a LOCAL WAL that lacks its naming record
-                # (or holds two) is not a committed boundary this lineage
-                # wrote -- and an unbound sidecar must not authorize a
-                # deletion (period-model ss2.2, ss12)
+                # a sidecar with a local WAL lacking its naming record (or holding two) is not a
+                # committed boundary, and an unbound sidecar must not authorize a deletion
+                # (period-model ss2.2, ss12)
                 raise EngineError(
                     f"{seal_path(run_root, period_id)}: the local WAL holds"
                     f" {len(committed)} `seal` record(s) -- a sealed period's WAL ends"
@@ -973,9 +802,8 @@ def _seals_held(run_root: Path, periods: Sequence[int], *, estate_id: str) -> di
                 )
             check_seal_record(committed[-1])  # the FULL ss2.2 schema first
             check_record_names_sidecar(seal, committed[-1], run_root)
-        # a ROLLED root holds the seal it opened from and none of that
-        # period's WAL, by design: its binding is the successor link below
-        # -- the first local segment's `opens_from_seal` names it
+        # a rolled root holds the seal it opened from and none of that period's WAL; its binding
+        # is the successor link, the first local segment's `opens_from_seal`
         successor = wal_path(run_root, period_id + 1)
         if successor.exists():
             link = read_journal(successor)[0].get("opens_from_seal")
@@ -990,16 +818,13 @@ def _seals_held(run_root: Path, periods: Sequence[int], *, estate_id: str) -> di
 
 
 def _opening_period(run_root: Path, current: int) -> int | None:
-    """The period the current segment opened from, read off the segment's
-    own `opens_from_seal` rather than computed as `current - 1`: the
-    record is the authority for which seal this period stands on."""
+    """The period the current segment opened from, read off its own `opens_from_seal` rather than
+    computed as `current - 1`."""
     opening = read_journal(wal_path(run_root, current))[0].get("opens_from_seal")
     if isinstance(opening, Mapping):
         period_id = opening.get("period_id")
-        # the false arm is unreachable: `read_journal` runs `check_segment_record`
-        # on the first record unconditionally (DL-138), and its schema makes a
-        # present `opens_from_seal` exactly `{period_id: wire int, digest}`. It
-        # opens only if that check stops covering the opening record
+        # the false arm is unreachable: `read_journal` checks the first record's schema (DL-138),
+        # which makes a present `opens_from_seal` exactly `{period_id: wire int, digest}`
         if is_wire_int(period_id):  # pragma: no branch -- see above
             return period_id
     return None
@@ -1011,9 +836,8 @@ def _opening_period(run_root: Path, current: int) -> int | None:
 def _lineage_artifacts(scan: _Scan, head: Head) -> list[Artifact]:
     """The sentinel, the anchor and the active claim (ss12).
 
-    The anchor is outside every archivable root by design, so these three
-    are reported and never reachable: `_remove` refuses a path that is not
-    under the run root at all."""
+    The anchor lies outside every archivable root; `_remove` refuses a path not under the run
+    root."""
     out = [
         Artifact(
             path=scan.run_root / SENTINEL_NAME,
@@ -1051,8 +875,7 @@ def _lineage_artifacts(scan: _Scan, head: Head) -> list[Artifact]:
 
 
 def _period_artifacts(scan: _Scan) -> list[Artifact]:
-    """Per-period sidecars, attestations, manifests, candidates, bundles
-    and WAL segments (ss12, PR-36c)."""
+    """Per-period sidecars, attestations, manifests, candidates, bundles and WALs (ss12, PR-36c)."""
     out: list[Artifact] = []
     latest_attested = max(scan.attested) if scan.attested else None
     floored_bundles: set[str] = set()
@@ -1062,9 +885,8 @@ def _period_artifacts(scan: _Scan) -> list[Artifact]:
         out += _receipt_artifact(scan, period_id)
         out += _manifest_artifacts(scan, period_id, floored_bundles)
         if period_id in scan.archived:
-            # ARCHIVED: the RECEIPT is the recovery authority, so the list
-            # comes from it and not from what the disk still happens to
-            # look like. That is what the point of no return means
+            # archived: the receipt is the recovery authority, so the list comes from it and
+            # not from what the disk still looks like
             out += _licensed_artifacts(scan, period_id)
             continue
         out += _candidate_artifacts(scan, period_id, floored_bundles)
@@ -1075,10 +897,8 @@ def _period_artifacts(scan: _Scan) -> list[Artifact]:
 
 
 def _reachable_seal(scan: _Scan, period_id: int) -> str | None:
-    """Why the head still reaches this sidecar, or None when it does not.
-
-    Two sidecars are reachable: the one the current period OPENED from,
-    and the one it will CLOSE with. Everything older is behind the head."""
+    """Why the head still reaches this sidecar, or None: the one the current period opened from
+    and the one it will close with."""
     if period_id == scan.opening:
         return "the seal the current period opened from"
     if period_id == scan.current and period_id in scan.seals:
@@ -1175,21 +995,12 @@ def _attestation_artifact(
 
 
 def _licensed_artifacts(scan: _Scan, period_id: int) -> list[Artifact]:
-    """Every path an archived period's receipt LICENSED that is still on
-    disk (ss12a, DL-144).
+    """Every path an archived period's receipt licensed that is still on disk (ss12a, DL-144).
 
-    Enumerated from the receipt and from nothing else, because the receipt
-    is the recovery authority: a sweep that crashed between deleting
-    `candidate.json` and `staged_manifest.json` leaves a disk on which the
-    ordinary derivation says there is no candidate here at all -- and the
-    staged file would then be listed by no later plan, held by no floor,
-    and reachable by no verb. That is an artifact the estate can neither
-    keep on purpose nor finish removing.
-
-    The verdict is `prunable` unconditionally: the point of no return is
-    behind this period, and what is left is the deletion a retry
-    completes. Eligibility is not re-litigated -- `_archive_eligibility`
-    says the same thing for the same reason."""
+    Enumerated from the receipt alone: after a crash between deleting `candidate.json` and
+    `staged_manifest.json` the ordinary derivation sees no candidate, and no plan would list the
+    staged file. The verdict is `prunable` unconditionally, since the point of no return is
+    behind the period; eligibility is not re-litigated."""
     receipt = scan.archived[period_id]
     out: list[Artifact] = []
     for relative in receipt.archived:
@@ -1210,12 +1021,10 @@ def _licensed_artifacts(scan: _Scan, period_id: int) -> list[Artifact]:
 
 
 def _receipt_artifact(scan: _Scan, period_id: int) -> list[Artifact]:
-    """`seals/<period>.archive.json` -- a PERMANENT floor (ss12, DL-144).
+    """`seals/<period>.archive.json` -- a permanent floor (ss12, DL-144).
 
-    The receipt is what tells a reader that this period's missing inputs
-    were archived and not lost. Delete it and the same disk reads as
-    accidental loss, which every reader here refuses -- so the archive
-    would have made the estate unreadable rather than smaller."""
+    The receipt tells a reader that this period's missing inputs were archived and not lost;
+    without it the same disk reads as loss, which every reader refuses."""
     path = archive_receipt_path(scan.run_root, period_id)
     if period_id not in scan.archived:
         return []
@@ -1232,9 +1041,8 @@ def _receipt_artifact(scan: _Scan, period_id: int) -> list[Artifact]:
 
 
 def _committed_next(scan: _Scan) -> int | None:
-    """The period the current seal committed the opening of, if it
-    committed one. That manifest is installed and authoritative before any
-    segment exists for it, so the head reaches it (ss12)."""
+    """The period the current seal committed the opening of, if any. That manifest is installed
+    and authoritative before any segment exists for it, so the head reaches it (ss12)."""
     seal = scan.seals.get(scan.current)
     return None if seal is None else seal.next_period.period_id
 
@@ -1268,13 +1076,11 @@ def _manifest_artifacts(scan: _Scan, period_id: int, bundles: set[str]) -> list[
 
 
 def _candidate_artifacts(scan: _Scan, period_id: int, bundles: set[str]) -> list[Artifact]:
-    """`staged_manifest.json` and `candidate.json` beside an installed
-    period manifest (ss7, ss12).
+    """`staged_manifest.json` and `candidate.json` beside an installed period manifest (ss7, ss12).
 
-    They stay until the seal that installed them COMMITS, because recovery
-    after an install-before-seal crash is decided by exactly those two
-    files. `candidate.json` carries the stage digest the rename dropped
-    from the path, so the retry can tell its own staging from a stale
+    They stay until the seal that installed them commits, because recovery after an
+    install-before-seal crash is decided by those two files. `candidate.json` carries the stage
+    digest the rename dropped from the path, so a retry tells its own staging from a stale
     install (PR-30d)."""
     directory = period_dir(scan.run_root, period_id)
     if read_candidate(directory) is None:
@@ -1296,13 +1102,9 @@ def _candidate_artifacts(scan: _Scan, period_id: int, bundles: set[str]) -> list
             )
             for name in (STAGED_MANIFEST_NAME, CANDIDATE_NAME)
         ]
-    # committed, so recovery no longer reads them: DL-144 puts them in the
-    # archive class UNDER THE SAME COVER as this period's WAL, because the
-    # archive is one act per period and a receipt that licensed half of a
-    # period's inputs would make "archived" a state a reader cannot report
-    # an ARCHIVED period never reaches here: `_licensed_artifacts` answers
-    # for it, off the receipt, so the two can never disagree about what
-    # was licensed
+    # committed: recovery does not read them. DL-144 puts them in the archive class under the
+    # same cover as this period's WAL, because the archive is one act per period. An archived
+    # period never reaches here: `_licensed_artifacts` answers for it, off the receipt.
     blocked = scan.archive.get(period_id, "this root retains no segment for this period")
     if blocked is None:
         return [
@@ -1332,14 +1134,11 @@ def _candidate_artifacts(scan: _Scan, period_id: int, bundles: set[str]) -> list
 def _wal_artifact(scan: _Scan, period_id: int) -> Artifact:
     """One segment (I1: segment N is period N).
 
-    Unattested, ss12 floors it. Attested, DL-144's `archive-inputs` class
-    may license it -- but only against every itemized dependency in
-    `_archive_eligibility`, and the `held` verdict names the one that is
-    not met rather than saying nothing."""
+    Unattested, ss12 floors it. Attested, DL-144's `archive-inputs` class may license it against
+    every dependency in `_archive_eligibility`; `held` names the one that is not met."""
     path = wal_path(scan.run_root, period_id)
-    # an ARCHIVED period is always in `attested`: `_archive_receipts`
-    # refuses a plan whose receipt has no checkpoint that holds together,
-    # so there is no second case to spell here
+    # an archived period is always in `attested`: `_archive_receipts` refuses a receipt with no
+    # checkpoint that holds together
     if period_id not in scan.attested:
         return Artifact(
             path=path,
@@ -1376,9 +1175,8 @@ def _wal_artifact(scan: _Scan, period_id: int) -> Artifact:
 def _bundle_artifacts(scan: _Scan, floored: set[str]) -> list[Artifact]:
     """One entry per content-addressed catalog bundle (ss12).
 
-    A bundle is shared: a period that reverts to earlier bytes references
-    the directory already there. So the floor is by REFERENCE -- a bundle
-    a floored manifest names is floored, whatever its period number says."""
+    A bundle is shared by reference, so the floor is too: a bundle a floored manifest names is
+    floored, whatever its period number says."""
     directory = scan.run_root / "catalogs"
     if not directory.is_dir():
         return []
@@ -1407,15 +1205,11 @@ def _bundle_artifacts(scan: _Scan, floored: set[str]) -> list[Artifact]:
 
 
 def _staging_artifacts(scan: _Scan) -> list[Artifact]:
-    """`periods/.staging/` is floored and `periods/.quarantine/` is not
-    (ss7, ss12).
+    """`periods/.staging/` is floored and `periods/.quarantine/` is not (ss7, ss12).
 
-    Staging holds the bytes a boundary in flight is about to install, and
-    the install refuses when they are gone -- `_prepare_install` names a
-    retention sweep as the thing that could remove them. A QUARANTINED
-    candidate is the opposite case: it was superseded by a retry under a
-    different digest, and ss12 releases it the moment no recovery
-    references it, which is what being quarantined means."""
+    Staging holds the bytes a boundary in flight installs, and the install refuses when they are
+    gone. A quarantined candidate was displaced by a retry under a different digest, and ss12
+    releases it once no recovery references it."""
     out: list[Artifact] = []
     staging = scan.run_root / "periods" / ".staging"
     if staging.is_dir():
@@ -1448,14 +1242,12 @@ def _staging_artifacts(scan: _Scan) -> list[Artifact]:
 
 
 def _spool_artifacts(scan: _Scan) -> list[Artifact]:
-    """Run directories, their `.by_run_id` index entries and their default
-    logs (ss11a, ss12, PR-36b).
+    """Run directories, their `.by_run_id` index entries and their default logs (ss11a, ss12,
+    PR-36b).
 
-    The store's retention floor is a SAFETY rule and not housekeeping: "no
-    index entry" means "first application", so deleting an index entry or a
-    run directory authorizes a spawn. The floor lifts only where PR-36b
-    lifts it -- the period holding the effect is attested and the run is
-    terminal."""
+    The floor is a safety rule: "no index entry" means "first application", so deleting an index
+    entry or a run directory authorizes a spawn. It lifts only where PR-36b lifts it: the period
+    holding the effect is attested and the run is terminal."""
     runs = scan.run_root / "runs"
     if not runs.is_dir():
         return []
@@ -1497,9 +1289,8 @@ def _spool_artifacts(scan: _Scan) -> list[Artifact]:
 
 @dataclass(frozen=True)
 class RunVerdict:
-    """One run's retention verdict: `Artifact`'s four verdict fields,
-    decided once by `_run_verdict` and threaded to every artifact the
-    run's identity touches -- the spool entry, its index entry, its logs."""
+    """One run's retention verdict, decided once by `_run_verdict` and shared by the spool entry,
+    its index entry and its logs."""
 
     verdict: Verdict
     rule: str
@@ -1513,23 +1304,18 @@ def _run_verdict(
     born: Mapping[tuple[str, int], tuple[int, Any]],
     carried: Mapping[tuple[str, int], int],
 ) -> RunVerdict:
-    """PR-36b's two conditions as one answer: the period holding the SPAWN
-    effect is attested, and the run is terminal.
+    """PR-36b's two conditions as one answer: the period holding the SPAWN effect is attested and
+    the run is terminal.
 
-    Terminality is read from the seals, not from the spool. A run live at
-    boundary L is named in seal L's `executions`; it ENDED in period L+1,
-    and the seal of L+1 is the artifact that proves it is not still
-    running. A run no seal names ended inside the period that spawned it.
-    Either way one period is the last that can reference the run, and its
-    attestation is the whole gate: producing a checkpoint requires the
-    predecessor's, so every period below it is covered by induction."""
+    Terminality is read from the seals, not the spool. A run live at boundary L is named in seal
+    L's `executions` and ended in period L+1, whose seal proves it is not still running; a run no
+    seal names ended in the period that spawned it. That period's attestation is the whole gate:
+    a checkpoint requires the predecessor's, so every period below it is covered by induction."""
     bound = born.get(run)
     birth = bound[0] if bound is not None else None
     if bound is not None and bound[1] is None:
-        # the ss11 fold permits a null run_id only for a run that provably
-        # never reached an adapter -- and whatever left THIS one both
-        # unbound and with a tombstone on disk, deleting the tombstone
-        # would sever the only identity evidence there is
+        # the ss11 fold permits a null run_id only for a run that never reached an adapter; a
+        # tombstone on disk for an unbound run is the only identity evidence there is
         return RunVerdict(
             "floored",
             "ss11a",
@@ -1546,9 +1332,8 @@ def _run_verdict(
     last = carried.get(run)
     ended = birth if last is None else last + 1
     if ended not in scan.seals:
-        # open here, or closed in a root this one is not: a rolled root
-        # holds no successor seal by design, and "I cannot prove it ended"
-        # is the same answer as "it has not" for a floor
+        # open here, or closed in a root this one is not: a rolled root holds no successor
+        # seal, and "cannot prove it ended" floors like "has not ended"
         return RunVerdict(
             "floored",
             "ss12",
@@ -1573,12 +1358,10 @@ def _run_verdict(
 def _spawn_periods(
     run_root: Path, segments: Sequence[int]
 ) -> dict[tuple[str, int], tuple[int, Any]]:
-    """`(job, run_number) -> (the period whose WAL holds its SPAWN effect,
-    the run_id that effect bound)`.
+    """`(job, run_number) -> (the period whose WAL holds its SPAWN effect, the run_id it bound)`.
 
-    I1 makes the segment number the period number, so the file the effect
-    was read out of IS the answer; the run_id rides along because it is
-    the join the index entries are held to (ss11a's one-to-one pair)."""
+    I1 makes the segment number the period number; the run_id is the join the index entries are
+    held to (ss11a's one-to-one pair)."""
     born: dict[tuple[str, int], tuple[int, Any]] = {}
     for period_id in segments:
         for record in read_journal(wal_path(run_root, period_id)):
@@ -1599,10 +1382,8 @@ def _spawn_periods(
                     )
                 )
                 if malformed:
-                    # a `true` run_number aliases run 1; a non-grammar
-                    # run_id is not an identity. Malformed evidence
-                    # authorizes nothing and the plan refuses to be
-                    # computed over it (period-model ss11a, ss12)
+                    # a `true` run_number aliases run 1 and a non-grammar run_id is not an
+                    # identity; malformed evidence authorizes nothing (period-model ss11a, ss12)
                     raise EngineError(
                         f"{wal_path(run_root, period_id)}: SPAWN with job"
                         f" {job!r}, run_number {run_number!r}, run_id {run_id!r} --"
@@ -1613,11 +1394,8 @@ def _spawn_periods(
                 key = (job, run_number)
                 seen = born.get(key)
                 if seen is not None and (seen[1] != run_id or seen[0] != period_id):
-                    # I2: one (job, run_number) is one run, born once. A
-                    # second SPAWN for it -- another period, another
-                    # run_id -- is a corrupt estate, and a planner that
-                    # silently kept the FIRST would compute the tombstone
-                    # floor for the wrong effect and prune a replayable one
+                    # I2: one (job, run_number) is one run, born once. Keeping the first of
+                    # two SPAWNs would compute the tombstone floor for the wrong effect
                     raise EngineError(
                         f"{wal_path(run_root, period_id)}: a second SPAWN for"
                         f" {job}.{run_number} (run_id {run_id!r}; period {seen[0]}"
@@ -1629,8 +1407,8 @@ def _spawn_periods(
 
 
 def _last_carrier(scan: _Scan) -> dict[tuple[str, int], int]:
-    """`(job, run_number) -> the highest period whose seal carried it as a
-    live execution`. A run named by no seal never crossed a boundary."""
+    """`(job, run_number) -> the highest period whose seal carried it as a live execution`; a run
+    no seal names never crossed a boundary."""
     carried: dict[tuple[str, int], int] = {}
     for period_id, seal in scan.seals.items():
         for execution in seal.executions:
@@ -1646,9 +1424,8 @@ def _index_artifacts(
 ) -> list[Artifact]:
     """`runs/.by_run_id/<run_id>` (ss11a).
 
-    Each entry names the `(job, run_number)` it belongs to, so it takes
-    that run's verdict. An entry this binary cannot read is floored: it
-    still names a `run_id`, and deleting it authorizes a spawn."""
+    Each entry names the `(job, run_number)` it belongs to and takes that run's verdict. An entry
+    this binary cannot read is floored: it still names a `run_id`."""
     directory = scan.run_root / "runs" / INDEX_DIR
     if not directory.is_dir():
         return []
@@ -1668,9 +1445,8 @@ def _index_artifacts(
             continue
         run = (parsed[0], parsed[1])
         if parsed[2] != entry.name:
-            # the body's own run_id must BE the filename: a rewritten body
-            # that keeps the tuple would take the tuple's verdict while
-            # the entry's identity evidence says something else entirely
+            # the body's own run_id must be the filename, or a rewritten body that keeps the
+            # tuple would take the tuple's verdict under another identity
             raise EngineError(
                 f"{entry}: body says run_id {parsed[2]!r} under filename"
                 f" {entry.name} -- the ss11a entry disagrees with itself and"
@@ -1678,10 +1454,8 @@ def _index_artifacts(
             )
         bound = born.get(run)
         if bound is not None and bound[1] is not None and bound[1] != entry.name:
-            # ss11a's pair is one-to-one BOTH ways: an index body rewritten
-            # to name a terminal run would take that run's prunable verdict
-            # while the filename still binds a LIVE run's identity -- the
-            # join is the WAL's own effect, not the body's claim
+            # ss11a's pair is one-to-one both ways: the join is the WAL's own effect, not the
+            # body's claim
             raise EngineError(
                 f"{entry}: names {run[0]}.{run[1]}, whose SPAWN effect bound run_id"
                 f" {bound[1]!r}, not this filename -- the ss11a pair is broken and"
@@ -1723,18 +1497,12 @@ def _index_run(path: Path) -> tuple[str, int, str] | None:
 
 
 def _log_artifacts(scan: _Scan, run: tuple[str, int], outcome: RunVerdict) -> list[Artifact]:
-    """`logs/<job>.<run_number>.out` and `.err`, when they are where the
-    default resolver puts them.
+    """`logs/<job>.<run_number>.out` and `.err`, when they are where the default resolver puts
+    them.
 
-    A job that set `std_out_file` appends to a file of its own choosing,
-    outside this root as often as not, and nothing here touches it. The
-    logs take the run's verdict, so a spool and its output go together
-    rather than leaving a directory of orphans.
-
-    The names come from `runner_adapters.default_log_paths`, which is
-    where the convention lives. This module never loads the catalog, so it
-    cannot ask `job_log_paths`; what it can do is not spell the filename a
-    second time."""
+    A job that set `std_out_file` logs to a file of its own, which nothing here touches. The logs
+    take the run's verdict. Names come from `runner_adapters.default_log_paths`, since this
+    module never loads the catalog."""
     from dsl41.runner_adapters import default_log_paths
 
     out: list[Artifact] = []
@@ -1755,15 +1523,10 @@ def _log_artifacts(scan: _Scan, run: tuple[str, int], outcome: RunVerdict) -> li
 
 
 def _not_a_spool(entry: Path, run: tuple[str, int] | None) -> str | None:
-    """Why this entry under `runs/` is not a spool this estate wrote, or
-    None when it is one.
+    """Why this entry under `runs/` is not a spool this estate wrote, or None when it is one.
 
-    Three ways to fail, and they are told apart because a report that
-    says the wrong thing about WHY is a report an operator argues with.
-    A SYMLINK is refused whatever it points at: the plan reads a name and
-    the removal follows a link, so a spool that is a link is one where
-    those two are not the same object -- and `rmtree` refuses it anyway,
-    which would be an error at deletion time rather than a verdict."""
+    A symlink is refused whatever it points at: the plan reads a name and the removal follows a
+    link, so the two would not be the same object."""
     if entry.is_symlink():
         return "a symlink, not a spool directory this estate wrote"
     if run is None:
@@ -1788,21 +1551,15 @@ def prune(
     older_than_days: float | None = None,
     keep_runs: int = 0,
 ) -> PruneReport:
-    """Remove the plan's prunable artifacts that the operator's flags
-    select, and report everything else.
+    """Remove the plan's prunable artifacts that the operator's flags select, and report the rest.
 
-    Policy is the caller's: `classes`, `older_than_days` and `keep_runs`
-    are how an operator states which of the licensed deletions to perform.
-    Floors are not policy and cannot be reached from here.
+    Policy is the caller's: `classes`, `older_than_days` and `keep_runs` state which licensed
+    deletions to perform. Floors cannot be reached from here.
 
-    A removal that the OPERATING SYSTEM refuses -- a permission, a
-    vanished directory, a name that is not what the plan read -- is
-    recorded and the sweep continues. Deletion is irreversible and
-    partial, so the report has to say which artifacts went and which did
-    not; stopping at the first error would leave an operator with a
-    traceback and no list. A removal the PLAN refuses is different and
-    still raises: that is a floor being reached, which is a defect here
-    rather than a fact about the disk."""
+    A removal the operating system refuses (a permission, a vanished directory, a name that is
+    not what the plan read) is recorded and the sweep continues, so the report says which
+    artifacts went and which did not. A removal the plan refuses still raises: that is a floor
+    being reached."""
     unknown = sorted(set(classes) - set(CLASSES))
     if unknown:
         raise EngineError(
@@ -1814,24 +1571,18 @@ def prune(
     )
     refused: list[tuple[Artifact, str]] = []
     if ARCHIVE_CLASS in set(classes):
-        # the POINT OF NO RETURN, and the eligibility RE-CHECK in front of
-        # it. Both happen here rather than in the plan because the plan is
-        # pure and this writes: a receipt is durable before the first
-        # deletion of the period it licenses, and what it licenses is
-        # re-proved against the live disk one moment earlier
+        # the point of no return and the eligibility re-check in front of it live here, not in
+        # the plan: the plan is pure and this writes. A receipt is durable before the first
+        # deletion of the period it licenses, and the re-check runs against the live disk
         selected, refused = _archive_receipts_first(plan, selected, dry_run=dry_run)
-    # the refused ones count as CHOSEN: the operator named their class, so
-    # they are not "prunable, outside the flags given" -- reporting them in
-    # both buckets said the sweep both skipped them and was never asked
+    # the refused ones count as chosen: the operator named their class, so they are not
+    # "prunable, outside the flags given"
     chosen = {(str(item.path), item.kind) for item in [*selected, *(i for i, _ in refused)]}
     removed: list[Artifact] = []
     failed: list[tuple[Artifact, str]] = []
     wedged: set[tuple[str, int]] = set()
-    #: the lowest period whose archived WAL could NOT be removed. Every
-    #: later one then stays too: the archive's whole ordering promise is
-    #: that the retained segments are a contiguous suffix at every
-    #: instant, and deleting period N+1's segment over a period N that
-    #: refused is exactly the hole that promise exists to prevent
+    #: the lowest period whose archived WAL could not be removed. Every later one stays too, so
+    #: the retained segments stay a contiguous suffix at every instant
     stuck: int | None = None
     bytes_removed = 0
     for item in selected:
@@ -1849,10 +1600,9 @@ def prune(
             )
             continue
         if item.run is not None and item.run in wedged:
-            # one artifact of this run already refused, so the rest of it
-            # stays too: a directory kept while its index entry went would
-            # leave the pair ss11a keeps one-to-one broken in the one
-            # direction that authorizes a spawn
+            # one artifact of this run already refused, so the rest stays too: a directory kept
+            # while its index entry went would break the ss11a pair in the direction that
+            # authorizes a spawn
             failed.append((item, f"{item.run[0]}.{item.run[1]} could not be removed whole"))
             continue
         try:
@@ -1881,29 +1631,19 @@ def prune(
 def _archive_receipts_first(
     plan: RetentionPlan, selected: list[Artifact], *, dry_run: bool
 ) -> tuple[list[Artifact], list[tuple[Artifact, str]]]:
-    """DL-144's point of no return: for every period whose inputs this
-    sweep would delete, RE-CHECK eligibility and write the receipt --
-    durably, before the first deletion of that period.
+    """DL-144's point of no return: for every period whose inputs this sweep would delete,
+    re-check eligibility and write the receipt durably, before the first deletion of that period.
 
-    Periods are handled ASCENDING, and so is the deletion that follows,
-    because that is what keeps the retained segments a contiguous suffix
-    at every instant: delete the oldest first and no crash window ever
-    leaves a hole in the middle for a segment-spanning reader to meet.
+    Periods are handled ascending, as is the deletion that follows, so the retained segments are
+    a contiguous suffix at every instant and no crash window leaves a hole.
 
-    The re-check is INDEPENDENT of the plan and reads the live disk: the
-    attestation of the period, the attestation of the checkpoint that
-    covers it, the spool of every run born in the period, and the archived
-    prefix. A period whose cover was questioned between the plan and this
-    moment REFUSES -- it is dropped from the sweep and its reason is
-    reported. Every period BELOW it still goes and every period ABOVE it
-    refuses too, naming the one below rather than repeating its reason:
-    that is the prefix rule doing its job, and a sweep that skipped the
-    refusal and archived the periods above it would open the hole the rule
-    exists to prevent.
+    The re-check is independent of the plan and reads the live disk: the period's attestation,
+    the covering checkpoint's attestation, the spool of every run born in the period, and the
+    archived prefix. A period whose cover was questioned since the plan refuses and is dropped
+    from the sweep with its reason. Periods below it still go; periods above it refuse too,
+    naming the one below, since archiving them would open the hole the prefix rule prevents.
 
-    A period that ALREADY has a receipt writes nothing: the point of no
-    return is behind it, and what is left is the deletion a retry
-    completes."""
+    A period that already has a receipt writes nothing; a retry completes its deletion."""
     kept: list[Artifact] = []
     refused: list[tuple[Artifact, str]] = []
     by_period: dict[int, list[Artifact]] = {}
@@ -1912,20 +1652,15 @@ def _archive_receipts_first(
             by_period.setdefault(item.period_id, []).append(item)
         else:
             kept.append(item)
-    # "archived" means THE RECEIPT IS DURABLE, not "the file is gone", and
-    # that is what the prefix condition is asked against as the sweep
-    # walks up. A re-check that looked for absent FILES would refuse every
-    # period after the first in one call, because every deletion still
-    # lies ahead of every receipt
+    # "archived" means the receipt is durable, not that the file is gone: the prefix condition is
+    # asked against receipts as the sweep walks up, since every deletion still lies ahead of
+    # every receipt
     done = set(plan.archived)
     for period_id in sorted(by_period):
         items = by_period[period_id]
-        # the receipt is re-read from DISK, not taken from the plan: a
-        # sweep whose plan predates another sweep's receipt is the loser
-        # of a lock-free race, and what governs it is the stored list.
-        # PROVED through the same door as every other consumer -- this
-        # path decides that DELETIONS may proceed, so of all of them it is
-        # the one that may least take a receipt on trust
+        # the receipt is re-read from disk and proved through the same door as every other
+        # consumer: a sweep whose plan predates another sweep's receipt loses a lock-free race,
+        # and this path decides that deletions may proceed
         stored = verify_archive_receipt(plan.run_root, period_id)
         if stored is not None:
             done.add(period_id)
@@ -1964,17 +1699,13 @@ def _archive_receipts_first(
 
 
 def _recheck_archive(plan: RetentionPlan, period_id: int, done: set[int]) -> str | None:
-    """`_archive_eligibility`'s conditions, asked again of the LIVE disk
-    one moment before the receipt is written (DL-144).
+    """`_archive_eligibility`'s conditions, asked again of the live disk one moment before the
+    receipt is written (DL-144).
 
-    Written against the disk rather than against the plan on purpose: a
-    re-check that re-read the plan would prove only that the plan had not
-    changed, which it cannot."""
+    It reads the disk, not the plan: re-reading the plan would only prove the plan is unchanged."""
     if not wal_path(plan.run_root, period_id).exists():
-        # gone since the plan, and no receipt licensed it (the caller
-        # reads one first). Not this sweep's to archive, and certainly not
-        # its to receipt: the estate has to be re-planned, where the
-        # absence is met as LOSS by name
+        # gone since the plan, and no receipt licensed it (the caller reads one first): not this
+        # sweep's to archive; a re-plan meets the absence as loss
         return (
             f"{wal_path(plan.run_root, period_id)} is gone since the plan was computed"
             " and no receipt licenses its absence -- re-plan (period-model ss12)"
@@ -1983,10 +1714,9 @@ def _recheck_archive(plan: RetentionPlan, period_id: int, done: set[int]) -> str
         verify_attestation(plan.run_root, period_id)
     except (OSError, EngineError) as exc:
         return f"period {period_id}'s own attestation no longer verifies ({exc})"
-    # the SAME estate-spine check as the plan's, over the LIVE anchor and
-    # never over a snapshot the plan carried: a row redirected between the
-    # two would otherwise supply the cover that licenses this very
-    # deletion, which is the whole reason a re-check exists (DL-144)
+    # the same estate-spine check as the plan's, over the live anchor and not a snapshot: a row
+    # redirected since the plan would otherwise supply the cover that licenses this deletion
+    # (DL-144)
     stored = EstateAnchor(plan.anchor_dir).read()
     if stored is None or stored.estate_id != plan.estate_id:
         return (
@@ -2023,9 +1753,9 @@ def _recheck_archive(plan: RetentionPlan, period_id: int, done: set[int]) -> str
 
 
 def _spool_paths(run_root: Path, job: str, run_number: int, run_id: Any) -> list[Path]:
-    """Every tombstone path one run owns: the directory, the index entry
-    and the default logs. ONE spelling, read by the plan's blocker and by
-    the re-check, so the two can never disagree about what "pruned" means."""
+    """Every tombstone path one run owns: the directory, the index entry and the default logs.
+
+    One spelling, read by the plan's blocker and the re-check, so both agree on "pruned"."""
     from dsl41.runner_adapters import default_log_paths
 
     runs = run_root / "runs"
@@ -2036,15 +1766,13 @@ def _spool_paths(run_root: Path, job: str, run_number: int, run_id: Any) -> list
 
 
 def _write_receipt(plan: RetentionPlan, period_id: int, items: Sequence[Artifact]) -> None:
-    """The receipt for one period, durable before anything of that period
-    is deleted (ss12, DL-144).
+    """The receipt for one period, durable before anything of that period is deleted (ss12,
+    DL-144).
 
-    `durable_create` and not a write: a receipt already at the name is a
-    previous archive of this period, and overwriting it would replace the
-    list a retry completes from. The caller has already read the stored
-    receipt and acted on it, so reaching a `FileExistsError` here means two
-    sweeps wrote in the same instant -- which the caller reports as a
-    refusal for the loser, because its own plan is now stale."""
+    `durable_create`, not a write: a receipt already at the name is a previous archive of this
+    period, and overwriting it would replace the list a retry completes from. The caller has read
+    the stored receipt, so a `FileExistsError` here means two sweeps wrote at once and the loser
+    refuses."""
     from datetime import UTC, datetime
 
     attestation = verify_attestation(plan.run_root, period_id)
@@ -2071,21 +1799,14 @@ def _selected(
 ) -> list[Artifact]:
     """The prunable artifacts the flags choose, thresholds applied.
 
-    Both thresholds filter RUNS and then carry their index entries and
-    logs with them: a run directory removed while its index entry stayed
-    would leave the pair ss11a spends its whole protocol keeping
-    one-to-one.
+    Both thresholds filter runs and carry their index entries and logs with them, so the ss11a
+    pair stays one-to-one.
 
-    `keep_runs` is per JOB, because `run_number` is per job (I2). Ranking
-    every run of every job on one list by run number is comparing numbers
-    from different series: a busy job's fifth run would outrank a quiet
-    job's first, and one `--keep-runs 3` would delete the quiet job's
-    whole history while keeping three of the busy one's.
+    `keep_runs` is per job, because `run_number` is per job (I2); one list ranked across jobs
+    would compare numbers from different series.
 
-    `older_than_days` reads the run's own artifacts, whichever survive. An
-    orphaned index entry beside a hand-deleted directory is still that
-    run's, and a threshold that only looked at the directory would sweep
-    it while the same threshold protected the pair a moment earlier."""
+    `older_than_days` reads the run's own artifacts, whichever survive, so an orphaned index
+    entry beside a hand-deleted directory is judged as that run's."""
     kinds = {kind for name in classes for kind in CLASSES[name]}
     candidates = [item for item in plan.prunable() if item.kind in kinds]
     dropped: set[tuple[str, int]] = set()
@@ -2108,11 +1829,10 @@ def _selected(
 
 
 def _mtime(path: Path) -> float:
-    """The path's modification time, or `inf` when it cannot be read.
+    """The path's modification time, or `inf` when unreadable.
 
-    `inf` and not 0: this feeds a DELETION filter, where an unreadable
-    stat has to read as "too new to touch" rather than as "older than
-    anything"."""
+    `inf`, not 0: this feeds a deletion filter, where an unreadable stat reads as too new to
+    touch."""
     try:
         return path.stat().st_mtime
     except OSError:
@@ -2120,15 +1840,11 @@ def _mtime(path: Path) -> float:
 
 
 def _remove(plan: RetentionPlan, item: Artifact) -> None:
-    """Delete one artifact, after proving the plan allows it (PR-36b,
-    PR-36c).
+    """Delete one artifact, after proving the plan allows it (PR-36b, PR-36c).
 
-    Three proofs, because one is not enough. The verdict says the SPEC
-    licenses it; the run-root containment says this verb cannot reach the
-    anchor, another estate or anything the operator merely pointed at; and
-    `retained_over` says the path holds no floored or held artifact
-    beneath it. Deleting a floored artifact is impossible here, rather than
-    merely not done."""
+    Three proofs: the verdict says the spec licenses it; run-root containment says this verb
+    cannot reach the anchor, another estate or anything merely pointed at; `retained_over` says
+    the path holds no floored or held artifact beneath it."""
     if item.verdict != "prunable":
         raise EngineError(
             f"{item.path}: verdict {item.verdict} ({item.rule}) -- {item.why}:"
@@ -2145,8 +1861,7 @@ def _remove(plan: RetentionPlan, item: Artifact) -> None:
     if not relative.parts:
         raise EngineError(f"{item.path}: is the run root itself (period-model ss1.1)")
     if any(part in ("..", ".") for part in relative.parts):
-        # `relative_to` is lexical: a crafted path could smuggle a `..`
-        # that the descriptor walk would then follow OUT of the proven root
+        # `relative_to` is lexical: a `..` would let the descriptor walk leave the proven root
         raise EngineError(
             f"{item.path}: path traverses outside the run root -- refused (period-model ss1.1)"
         )
@@ -2162,11 +1877,9 @@ def _remove(plan: RetentionPlan, item: Artifact) -> None:
             " changed at observation) -- nothing unverifiable is removed"
             " (period-model ss12)"
         )
-    # DESCRIPTOR-relative from here: the root fd is verified against the
-    # plan's inode ONCE, and every step to the artifact walks openat with
-    # O_NOFOLLOW from that fd -- a rename or retarget of any component
-    # after the verification cannot redirect the deletion into another
-    # estate, because no path is ever resolved again
+    # descriptor-relative from here: the root fd is verified against the plan's inode once, and
+    # every step walks openat with O_NOFOLLOW from it, so no later rename or retarget can
+    # redirect the deletion
     root_fd = os.open(plan.run_root, os.O_RDONLY | os.O_DIRECTORY)
     try:
         live = os.fstat(root_fd)
@@ -2185,14 +1898,11 @@ def _remove(plan: RetentionPlan, item: Artifact) -> None:
                 )
                 opened.append(parent_fd)
             name = relative.parts[-1]
-            # ISOLATE first, atomically: whatever the name holds is moved
-            # to a scratch name in the same directory, so no rename can
-            # swap it between the identity proof and the deletion. The
-            # scratch name is UNPREDICTABLE (uuid4) and checked free
-            # first: Python exposes no portable RENAME_NOREPLACE, and a
-            # deterministic name could be pre-seeded with a retained
-            # artifact for the rename to destroy -- guessing a fresh uuid
-            # inside the check-to-rename window is not a practical attack
+            # isolate first, atomically: the name's content moves to a scratch name in the same
+            # directory, so no rename can swap it between the identity proof and the deletion.
+            # The scratch name is an unpredictable uuid4 checked free first: Python has no
+            # portable RENAME_NOREPLACE, and a deterministic name could be pre-seeded with a
+            # retained artifact for the rename to destroy
             scratch = f".pruning-{uuid.uuid4().hex}"
             try:
                 os.lstat(scratch, dir_fd=parent_fd)
@@ -2208,11 +1918,9 @@ def _remove(plan: RetentionPlan, item: Artifact) -> None:
                 ) from exc
             st = os.lstat(scratch, dir_fd=parent_fd)
             if (st.st_dev, st.st_ino) != item.ident:
-                # not the artifact the plan verified. It is NOT renamed
-                # back: without a no-replace rename primitive, any restore
-                # can overwrite an entry that appeared at the name in the
-                # meantime -- so the isolated entry stays under its scratch
-                # name and the refusal reports exactly where it is
+                # not the artifact the plan verified. It is not renamed back, since without a
+                # no-replace rename a restore can overwrite an entry that appeared at the name;
+                # the refusal reports where it stays
                 raise ArtifactChanged(
                     f"{item.path}: not the artifact the plan was computed over"
                     " (renamed or replaced since) -- re-plan before pruning; the"
@@ -2243,15 +1951,12 @@ def _remove_at(
     licensed: frozenset[tuple[int, int]],
     shown: Path,
 ) -> None:
-    """Delete `name` relative to an already-verified directory fd, never
-    following a symlink and never resolving a path string.
+    """Delete `name` relative to a verified directory fd, never following a symlink or resolving a
+    path string.
 
-    Every entry's identity is checked against the plan's RETAINED set
-    before it is touched: a floored artifact moved inside a prunable
-    directory after planning refuses rather than being swept away. The
-    refusal leaves the partially-removed tree under its scratch name --
-    the prunable content around it was licensed to go, and the retained
-    artifact itself is untouched."""
+    Every entry's identity is checked against the plan's retained set first, so a floored
+    artifact moved inside a prunable directory refuses. The refusal leaves the partly removed
+    tree under its scratch name; the retained artifact is untouched."""
     st = os.lstat(name, dir_fd=dir_fd)
     ident = (st.st_dev, st.st_ino)
     if ident in retained:
@@ -2260,10 +1965,8 @@ def _remove_at(
             " since the plan was computed -- refusing (period-model ss12, PR-36c)"
         )
     if ident not in licensed:
-        # the inverse licence, PER ARTIFACT: the verdict covered what the
-        # snapshot saw at and beneath THIS artifact, and anything else --
-        # unobserved, or observed under a class the operator did not
-        # select -- was never licensed for deletion here
+        # the inverse licence, per artifact: only what the snapshot saw at and beneath this
+        # artifact is licensed
         raise ArtifactChanged(
             f"{shown}: an artifact the plan did not license beneath this deletion"
             " target -- refusing (period-model ss12)"
@@ -2281,10 +1984,7 @@ def _remove_at(
 
 
 def _resolved(path: Path) -> Path:
-    """`normalized_root` as a `Path` -- ONE spelling of "the same root"
-    (DL-145). The `os.path.realpath` this called by hand was the owner's
-    rule copied, and a copy is what lets two readers disagree about which
-    directory a registry row names."""
+    """`normalized_root` as a `Path`: one spelling of "the same root" (DL-145)."""
     return Path(normalized_root(path))
 
 
