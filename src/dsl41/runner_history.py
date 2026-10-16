@@ -166,8 +166,8 @@ class _TraceWindow:
 
 
 def definition_change(previous: RunRow, row: RunRow) -> Literal["definition", "catalog"] | None:
-    """Whether two consecutive rows of one job cross a change, and which signal says so (decision 4);
-    None when nothing changed.
+    """Whether two consecutive rows of one job cross a change, and which signal says so
+    (decision 4); None when nothing changed.
 
     `"definition"` is this job's `job_hash` moving. `"catalog"` is the estate-wide fallback,
     returned only when a row has no fingerprint (`fidelity="records_only"`), so a caller reports
@@ -833,10 +833,11 @@ def pinned_profile(run_root: Path, opening: Mapping[str, Any]) -> "RuntimeProfil
 
 @dataclass(frozen=True)
 class SegmentReplay:
-    """What one segment's offline replay yields (DL-156): the trace (decision 2) and the verdicts the
-    ss4 gate re-derived for attempts with no decision record (`Replay.recovered`). They are the
-    engine's own gate over its own records, behind `check_replay_version`, and a resume derives
-    the same ones; taking them adds no fold authority."""
+    """What one segment's offline replay yields (DL-156): the trace (decision 2) and the
+    verdicts the ss4 gate re-derived for attempts with no decision record
+    (`Replay.recovered`). They are the engine's own gate over its own records, behind
+    `check_replay_version`, and a resume derives the same ones; taking them adds no fold
+    authority."""
 
     trace: list[TraceEntry]
     recovered: list[ApplyResult]
@@ -862,7 +863,7 @@ def replay_trace(
     the first admitted input that touches a carried entity (DL-136)."""
     check_replay_version(records[0], where=str(run_root))
     # SEM-35: this period's alias table, read from its pin; without it a replay refuses a log
-    # the engine wrote (DL-151). A root without the manifest uses none. The semantic switches
+    # the engine wrote (DL-151). A missing or foreign manifest refuses. The semantic switches
     # come from the same pin (DL-252): other switches would narrate conditions the engine never
     # read
     profile = pinned_profile(run_root, records[0])

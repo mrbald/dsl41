@@ -156,7 +156,7 @@ def load_tz_aliases(path: "Path | None") -> "dict[str, str] | None":
 
 
 def check_base_tz(timezone: str | None, tz_aliases: "dict[str, str] | None" = None) -> None:
-    """Preflight the run-level base zone (per-job zones gate in ss8) so --timezone exits 2 (DL-45)."""
+    """Preflight the run-level base zone (per-job zones gate in ss8): --timezone exits 2 (DL-45)."""
     if timezone is None:
         return
     if resolve_timezone(timezone, tz_aliases) is None:

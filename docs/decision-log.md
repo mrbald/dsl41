@@ -23454,7 +23454,7 @@ relitigate an entry; append a new one.
   and an added, deleted or non-Python changed file is a finding. The check is a set, not a
   multiset: three citations of one entry may fold into one. `scripts/arch_check.py` gains an
   advisory over comments and docstrings in src/dsl41 for the changelog phrases ("no longer",
-  "used to", "formerly", "previously", "since DL-", "before DL-", "after DL-", "superseded",
+  "used to", "formerly", "previously", "since DL-", "before DL-", "after DL-",
   "retired by", "was renamed", "was removed", "moved from", "replaced by"; whole words, never
   string literals), ratcheted per module against scripts/arch_baseline.json, which pins zero;
   `--changelog-phrases` lists every hit. A comment-only change needs gate 1 and one full suite

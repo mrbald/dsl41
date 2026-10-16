@@ -17,9 +17,6 @@ secure keys.
   a second substitution.
 - Table cells follow viz's content policy: full text for assumptions, a 60-char ellipsis
   for command/path cells (viz.truncate_cell); html.escape here, pipe-escaping there.
-- Table cells mirror viz's content policy: full text for assumptions,
-  60-char ellipsis for command/path cells (viz.truncate_cell, shared with
-  _code_cell); escaping is html.escape here, pipe-escaping there.
 """
 
 from __future__ import annotations

@@ -1,10 +1,11 @@
 """UC backend: edge classification, migration report and base record emission (DL-03).
 
-U3 is split on the U6/Q2 pattern (DL-55): U3a, the create-only whole-record shape for workflows whose edges carry
-the base tokens Success / Failure / Success/Failure, is frozen in docs/uc-edge-schema.md, and
-compile_to_uc() emits exactly that subset. U3b stays open (# PENDING: U3b below): rich
-condition forms, the live OpenAPI pull and write-path verification. The API client is
-generated from OpenAPI, never hand-written; this module emits records, not calls (DL-08).
+U3 is split on the U6/Q2 pattern (DL-55): U3a, the create-only whole-record shape for
+workflows whose edges carry the base tokens Success / Failure / Success/Failure, is frozen in
+docs/uc-edge-schema.md, and compile_to_uc() emits exactly that subset. U3b stays open
+(# PENDING: U3b below): rich condition forms, the live OpenAPI pull and write-path
+verification. The API client is generated from OpenAPI, never hand-written; this module
+emits records, not calls (DL-08).
 
 Contracts (stonebranch-semantics Part II; DL-15, DL-55):
 1. Every Layer-G edge carries its M-row, supplied by derive.
@@ -45,7 +46,8 @@ from dsl41.ir import CatalogIR, InitialStatus, JobIR, render_code_ranges, tool_v
 
 
 class CompilePlan(BaseModel):
-    """Edge partition (Part II): compiles silently (E), with an assumption record (A), refused (R)."""
+    """Edge partition (Part II): compiles silently (E), with an assumption record (A), or is
+    refused (R)."""
 
     exact: list[DerivedEdge] = []
     assumed: list[DerivedEdge] = []

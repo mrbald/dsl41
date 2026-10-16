@@ -225,7 +225,8 @@ class Context:
         return len(self.ancestry)
 
     def count(self, step: Step) -> int:
-        """How many links of the item's ancestry are `step` (§8); constant time under the executor."""
+        """How many links of the item's ancestry are `step` (§8); constant time under the
+        executor."""
         return self.ancestry.count(step) if self.counter is None else self.counter(step)
 
 
@@ -903,7 +904,8 @@ def _completions(ix: _Index, inst: _Instance, step: _Microstep) -> list[_Item]:
 
 
 def _occurrence_gone(inst: _Instance, item: _Item) -> bool:
-    """True when a completion's state was left, or left and re-entered, since it was queued (§4)."""
+    """True when a completion's state was left, or left and re-entered, since it was queued
+    (§4)."""
     return item.name not in inst.active or inst.entered.get(item.name, 0) != item.serial
 
 
@@ -1423,7 +1425,8 @@ def well_formed(chart: Statechart) -> list[str]:
     """The problems with a statechart's declaration; an empty list means well formed.
 
     The machine name matches `[a-z][a-z_]*`; every row and branch id is `<machine
-    name>.<two or three digits>`, such as `host.05`. The checks that walk the tree run only on a sound one.
+    name>.<two or three digits>`, such as `host.05`. The checks that walk the tree run only on a
+    sound one.
     """
     ix = _index(chart)
     ids = [r.id for r in chart.rows] + [b.id for c in chart.choices for b in c.branches]
