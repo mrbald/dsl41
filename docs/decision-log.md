@@ -23471,4 +23471,7 @@ relitigate an entry; append a new one.
   added then narrowed to the schema modules, word boundaries on the phrases, non-Python files
   compared, the hits listed), one new minor (the PENDING shape) fixed inline. The passes:
   gate 1 proves the code equal, so no semantic review; one Opus reviewer over the integrated
-  diff hunting a cut comment that carried a rule stated nowhere else.
+  diff hunting a cut comment that carried a rule stated nowhere else: none lost; one major
+  ("superseded" is the concurrency model's own word, ss7 and DL-234, so it left the phrase list
+  and returned at its five sites, a reversal of the stage 0 ruling that kept it on the list),
+  eight minors and nits fixed, all confirmed by the reviewer that raised them.
