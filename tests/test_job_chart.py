@@ -676,6 +676,23 @@ def test_the_sweep_of_every_buildable_cell_raises_no_selection_error_and_selects
 
 
 @pytest.mark.parametrize(
+    ("keep_stopped", "verdict"),
+    [(False, "cancel"), (True, "keep")],
+    ids=["a stopped box's member", "kept by an admit-only scan"],
+)
+def test_the_readmit_verdict_of_a_stopped_box_s_member(keep_stopped: bool, verdict: str) -> None:
+    """A waiter that is a member of a box that stopped running is cancelled (job.109), unless an
+    admit-only scan keeps it (job.181, DL-247)."""
+    ctx = Context(
+        key="j",
+        event=ChartEvent(READMIT, Readmission(box="idle", keep_stopped=keep_stopped)),
+        active=configuration("QUE_WAIT"),
+        data=MEMBER_DATA,
+    )
+    assert job_chart.readmit_verdict(ctx) == verdict
+
+
+@pytest.mark.parametrize(
     ("ancestry", "verdict"),
     [
         ((), "admit"),
