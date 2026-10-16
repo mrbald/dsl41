@@ -1,14 +1,12 @@
 """The oracle's writes: what each fired row of the `job` chart reached
 (docs/statechart-engine.md ss5, ss11; DL-350).
 
-The executor calls the oracle's hook with each microstep's outcome, before
-the next item pops (`oracle.Oracle._perform`). The hook writes each fired
-row with the method `_WRITERS` names: the store's verb with what the row reached, the
-status's trace line and its STATUS emission, in the order the rows
-fired within the microstep, then the intents the row's actions reported. A
-row's type is checked against the catalog before it writes (`_check_type`).
-A fired row with no write, or whose write needs a fact the payload does not
-carry, is a statechart error (`_unwritten`).
+The executor calls the oracle's hook with each microstep's outcome, before the next item pops
+(`oracle.Oracle._perform`). The hook writes each fired row with the method `_WRITERS` names: the
+store's verb with what the row reached, the status's trace line and its STATUS emission, in
+firing order within the microstep, then the intents the row's actions reported. A row's type is
+checked against the catalog before it writes (`_check_type`). A fired row with no write, or
+whose write needs a fact the payload does not carry, is a statechart error (`_unwritten`).
 """
 
 from __future__ import annotations
@@ -35,12 +33,12 @@ from dsl41.oracle_intents import (
 from dsl41.oracle_state import LIVE, LIVE_OR_QUEUED, EventKind, FlagState, JobStatus
 from dsl41.state_machine import Outcome, StatechartError
 
-#: The hold rows ON_NOEXEC fires beside its flag's: the flag and its line are
-#: written first, where the region order puts the hold (DL-254).
+#: The hold rows ON_NOEXEC fires beside its flag's: the flag and its line are written first,
+#: where the region order puts the hold (DL-254).
 _NOEXEC_HOLDS: Final = frozenset({"job.207", "job.232"})
 
-#: The rows whose path the job type decides, and whether each is a box's
-#: (6.3c F1): a catalog that disagrees with the fired row is a statechart error.
+#: The rows whose path the job type decides, and whether each is a box's (6.3c F1): a catalog
+#: that disagrees with the fired row is a statechart error.
 _BOX_ROWS: Final[dict[str, bool]] = {
     "job.102": False,
     "job.124": True,
@@ -63,9 +61,8 @@ class OracleWriters(OracleCascade):
     """`OracleCascade` with a write for each row the chart can fire."""
 
     def _write_rows(self, job: str, outcome: Outcome) -> None:
-        """Each fired row's write, in the order the rows fired within the
-        microstep, ON_NOEXEC's hold rows after its flag's; a fired row with no
-        write here is a statechart error."""
+        """Each fired row's write, in firing order within the microstep, ON_NOEXEC's hold rows
+        after its flag's; a fired row with no write here is a statechart error."""
         rows = outcome.rows
         if len(rows) > 1 and any(row in _NOEXEC_HOLDS for row in rows):
             rows = tuple(sorted(rows, key=lambda row: row in _NOEXEC_HOLDS))
@@ -77,8 +74,8 @@ class OracleWriters(OracleCascade):
             getattr(self, writer)(job, outcome)
 
     def _unwritten(self, job: str, outcome: Outcome, what: str) -> StatechartError:
-        """The chart fired rows the oracle has no write for. Raised from the
-        hook, the executor gives it the item's facts."""
+        """The chart fired rows the oracle has no write for; the executor gives the hook's raise
+        the item's facts."""
         rows = ", ".join(outcome.rows) or "no row"
         return StatechartError(
             f"job {job!r}: {outcome.event.name} fired {rows}, and no {what} the oracle writes"
@@ -97,8 +94,7 @@ class OracleWriters(OracleCascade):
             raise StatechartError(f"job {job!r}: {row} fired for a job in box {parent!r}")
 
     def _write(self, job: str, cause: str, *, code: int | None = None, clear: bool = False) -> None:
-        """A status write: the status the chart reached, its trace line and its
-        emission."""
+        """A status write: the status the chart reached, its trace line and its emission."""
         old = self._runtime(job).status
         new = self._status_reached(job)
         self.store.transition(job, new, self._now, code, clear_exit_code=clear)
@@ -128,8 +124,8 @@ class OracleWriters(OracleCascade):
         )
 
     def _refusal(self, job: str, attempt: StartFacts) -> str:
-        """The START_REFUSED reason for a refused attempt: the job is live
-        or queued, or its box gate refuses it (SEM-10, SEM-20)."""
+        """The START_REFUSED reason for a refused attempt: the job is live or queued, or its box
+        gate refuses it (SEM-10, SEM-20)."""
         status = self._runtime(job).status
         if status in LIVE_OR_QUEUED:
             return f"already {status} -- concurrent or repeated start request, no effect"
@@ -161,10 +157,9 @@ class OracleWriters(OracleCascade):
         self._write(job, f"ON_NOEXEC bypass ({attempt.cause})")
 
     def _w_queue(self, job: str, outcome: Outcome) -> None:
-        """job.103: an idle job enters QUE_WAIT with a new rank. A rank the row
-        still carries is an earlier QUE_WAIT's, whose settlement has not run
-        yet (DL-345); it drops first, since the rank goes with the status that
-        owns it (DL-120)."""
+        """job.103: an idle job enters QUE_WAIT with a new rank. A rank the row still carries is
+        an earlier QUE_WAIT's, whose settlement has not run yet (DL-345); it drops first, since
+        the rank goes with the status that owns it (DL-120)."""
         attempt = cast(StartFacts, outcome.event.payload)
         self._drop_rank(job)
         self.store.enqueue_waiter(job)
@@ -189,15 +184,15 @@ class OracleWriters(OracleCascade):
 
     def _w_refused(self, job: str, outcome: Outcome) -> None:
         attempt = cast(StartFacts, outcome.event.payload)
-        # a refused attempt is an input's own: `start_verdict` ignores a
-        # wake's or a retry's where an input's is refused (DL-81)
+        # a refused attempt is an input's own: `start_verdict` ignores a wake's or a retry's
+        # where an input's is refused (DL-81)
         reason = attempt.refusal or f"{self._refusal(job, attempt)} ({attempt.cause})"
         self._record(job, "START_REFUSED", reason)
 
     def _w_start_ignored(self, job: str, outcome: Outcome) -> None:
-        """job.180: a gate holds the attempt silently; a scan continuation
-        resumes; outside the window, a postponed start is queued, or a skip
-        that moves nothing writes its line (`_window_side`)."""
+        """job.180: a gate holds the attempt silently; a scan continuation resumes; outside the
+        window, a postponed start is queued, or a skip that moves nothing writes its line
+        (`_window_side`)."""
         attempt = cast(StartFacts, outcome.event.payload)
         if attempt.rescan:
             self._defer_to_next_opening(self.catalog.jobs[job], attempt.cause)
@@ -417,9 +412,8 @@ class OracleWriters(OracleCascade):
         self._flag(job, "hold_on", "ON_HOLD", "auto_hold on box start (dossier ss5)")
 
     def _w_box_disarms(self, job: str, outcome: Outcome) -> None:
-        """A member's arm is scoped to the box run that armed it (DL-54
-        review MAJOR): an unconsumed arm dies with the run, before any wake
-        can ride it."""
+        """A member's arm is scoped to the box run that armed it (DL-54): an unconsumed arm dies
+        with the run, before any wake can ride it."""
         # PENDING: Q3c -- one field aside (DL-58) hints the vendor latch may
         # instead survive into the NEXT box run; the scoped pin stands until
         # a live test.
@@ -511,10 +505,10 @@ class OracleWriters(OracleCascade):
 #: The rows whose idle recompute an override decided (SEM-15).
 _OVERRIDE_RECOMPUTES: Final = frozenset(f"job.{n}" for n in (131, 132, 161, 162, 163, 164))
 
-#: The hook's write for each row the chart can fire, by its method's name,
-#: so a subclass's method is the one called. A row missing here is one the
-#: chart marks unreachable, job.312 among them (a start on a run's unsettled
-#: units, which job.401 settles first).
+#: The hook's write for each row the chart can fire, by its method's name, so a subclass's
+#: method is the one called. A row missing here is one the chart marks unreachable, job.312
+#: among them (a start on a run's unsettled units, which job.401 settles first).
+
 _WRITERS: Final[dict[str, str]] = {
     "job.100": "_w_bounded",
     "job.101": "_w_bypass",

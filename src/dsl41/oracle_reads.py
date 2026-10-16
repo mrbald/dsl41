@@ -1,15 +1,12 @@
-"""The oracle's reads of its store and its catalog (ir-design ss7;
-docs/statechart-engine.md ss11).
+"""The oracle's reads of its store and its catalog (ir-design ss7; docs/statechart-engine.md ss11).
 
-`OracleReads` is the base of `oracle.Oracle`. It builds the store from the
-catalog and the carried rows, and it keeps the trace, the emitted events,
-the referencer index and the capacity pool. Its methods answer what the job
-chart's guards and the cascade's moments ask: a condition's truth (SEM-01 to
-SEM-07), a box's members and ancestors, whether a member is out of its box's
-run, a box's terminator and resolution rules, an admission against the pool
-(DL-50), and why an operator's flag input is ignored (DL-254). A read writes
-nothing but the zone and calendar caches; `_record` and `_emit` write the
-trace and the emitted events.
+`OracleReads` is the base of `oracle.Oracle`. It builds the store from the catalog and the
+carried rows, and keeps the trace, the emitted events, the referencer index and the capacity
+pool. Its methods answer what the job chart's guards and the cascade's moments ask: a
+condition's truth (SEM-01 to SEM-07), a box's members and ancestors, whether a member is out of
+its box's run, a box's terminator and resolution rules, an admission against the pool (DL-50),
+and why an operator's flag input is ignored (DL-254). A read writes nothing but the zone and
+calendar caches; `_record` and `_emit` write the trace and the emitted events.
 """
 
 from __future__ import annotations
@@ -49,10 +46,10 @@ from dsl41.oracle_state import (
 from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES
 from dsl41.semantics import SemanticSwitches, iced_atom_truth
 
-#: SEM-02: n() is true unless the job is in one of these (WAIT_REPLY/RESTART/
-#: SUSPENDED are out-of-scope states the oracle never produces). QUE_WAIT is
-#: DELIBERATELY absent (DL-50): a resource-queued job is not running, so n() is
-#: TRUE for it -- and every status/exitcode atom reads false (it never ran).
+#: SEM-02: n() is true unless the job is in one of these (WAIT_REPLY/RESTART/SUSPENDED are
+#: out-of-scope states the oracle never produces). QUE_WAIT is absent on purpose (DL-50): a
+#: resource-queued job is not running, so n() is true for it, and every status/exitcode atom
+#: reads false (it never ran).
 _N_FALSE_STATUSES: frozenset[str] = frozenset({"STARTING", "RUNNING"})
 
 
@@ -69,24 +66,20 @@ class OracleReads:
         semantics: SemanticSwitches | None = None,
     ) -> None:
         self.catalog = catalog
-        #: the semantic switches (runner-design ss8a, DL-252): a caller with
-        #: a runtime profile passes the period's own (`period.switches_of`);
-        #: a static tool with no profile gets the registry defaults
+        #: The semantic switches (runner-design ss8a, DL-252): a caller with a runtime profile
+        #: passes the period's own (`period.switches_of`); a static tool gets the registry
+        #: defaults.
         self.semantics: SemanticSwitches = semantics or DEFAULT_SWITCHES
         self.store = RuntimeState()
         if carried is not None:
-            # period-model ss7 phase 3 step 3: carried rows install VERBATIM
-            # and BEFORE the genesis seed, so the seed below can skip them
-            # instead of overwriting them. A "construct then overwrite"
-            # opener moves every carried revision, and an operator's
-            # `expect` against a revision the seal published is then
-            # unholdable.
+            # period-model ss7 phase 3 step 3: carried rows install verbatim and before the
+            # genesis seed, which skips them. A "construct then overwrite" opener would move
+            # every carried revision and leave an operator's `expect` against a published
+            # revision unholdable.
             self.store.install(carried)
-        # DL-87: the catalog seed IS an input -- the genesis one. Not
-        # ceremony: it is what makes `revision(key) == 0` mean "absent" for a
-        # global, and therefore what makes a conditional create expressible.
-        # A declared global lands at revision 1 like anything else that has
-        # been through an input; a never-declared name stays at 0.
+        # DL-87: the catalog seed is an input, the genesis one. It makes `revision(key) == 0`
+        # mean "absent" for a global, so a conditional create is expressible. A declared global
+        # lands at revision 1; a never-declared name stays at 0.
         self.store.begin_input()
         for name, job_ir in catalog.jobs.items():
             if carried is not None and name in carried.jobs:
@@ -110,11 +103,11 @@ class OracleReads:
             self.store.seed_period(carried.period_id)
         self._trace: list[TraceEntry] = []
         self._emitted: list[Event] = []
-        #: ss3.3: feed times must be non-decreasing across the boundary, so
-        #: an opened interpreter starts from the instant the seal was taken
+        #: ss3.3: feed times are non-decreasing across the boundary, so an opened interpreter
+        #: starts from the instant the seal was taken.
         self._now: datetime | None = carried.now if carried is not None else None
-        #: edge-trigger index (DL-13): entity key -> jobs whose `condition`
-        #: references it. Keys: job names (incl. "name^INST"), "g:NAME".
+        #: Edge-trigger index (DL-13): entity key -> jobs whose `condition` references it. Keys:
+        #: job names (incl. "name^INST"), "g:NAME".
         self._referencers: dict[str, list[str]] = {}
         for name, job_ir in catalog.jobs.items():
             attr = job_ir.sem.condition
@@ -122,61 +115,48 @@ class OracleReads:
                 continue
             for key in _entity_keys(attr.cond):
                 self._referencers.setdefault(key, []).append(name)
-        #: box -> the jobs it holds directly, in catalog order (`_members`)
+        #: box -> the jobs it holds directly, in catalog order (`_members`).
         members: dict[str, list[str]] = {}
         for name, job_ir in catalog.jobs.items():
             if job_ir.box.box_name is not None:
                 members.setdefault(job_ir.box.box_name, []).append(name)
         self._members_of = {box: tuple(names) for box, names in members.items()}
-        #: DL-50 capacity buckets + the QUE_WAIT queue (DL-74): it decides
-        #: admission and its order, the transitions below are this class's.
-        #: Since DL-120 it holds no state -- the reservations and the ranks are
-        #: on the rows, the spent units are under the owner, and the pool is
-        #: given all three.
+        #: DL-50 capacity buckets and the QUE_WAIT queue (DL-74): it decides admission and its
+        #: order; the transitions are this class's. It holds no state (DL-120): the reservations
+        #: and ranks are on the rows, the spent units are under the owner, and the pool is given
+        #: all three.
         self._pool = CapacityPool(catalog, self.semantics)
-        #: SEM-35 name -> zone, resolved once per name (the ladder walks
-        #: the whole zoneinfo database for a city default)
+        #: SEM-35 name -> zone, resolved once per name (the ladder walks the whole zoneinfo
+        #: database for a city default).
         self._tz_cache: dict[str, tzinfo] = {}
-        #: calendar name -> its days, built on first use by `queued-recheck`
-        #: (DL-257): a standard calendar's day set, or a compiled extended one
+        #: calendar name -> its days, built on first use by `queued-recheck` (DL-257): a standard
+        #: calendar's day set, or a compiled extended one.
         self._calendars: dict[str, frozenset[date] | CompiledCalendar] = {}
-        #: SEM-35's `ujo_timezones` table, as `--timezone-map` supplies it to
-        #: the scheduler (DL-62). None means no map, which is a DIFFERENT
-        #: resolution than an empty one: the ladder's unique-city default
-        #: applies only when the estate supplied no table, so a run with a
-        #: map gets the map's answer and nothing else (`timezones`'
-        #: `resolve_timezone`). Wired from the scheduler at engine build:
-        #: an oracle that resolved without it refused a map-only name at the
-        #: first start although preflight had passed (DL-151).
+        #: SEM-35's `ujo_timezones` table, as `--timezone-map` supplies it to the scheduler
+        #: (DL-62). None means no map, which differs from an empty one: the ladder's unique-city
+        #: default applies only when the estate supplied no table (`timezones`'
+        #: `resolve_timezone`). The scheduler wires it at engine build, so a map-only name that
+        #: preflight passed resolves at the first start (DL-151).
         self._tz_aliases: dict[str, str] | None = None if tz_aliases is None else dict(tz_aliases)
-        #: E10's no-timezone half, closed by citation (DL-155): the vendor
-        #: schedules a job that declares no `timezone:` "based on the time
-        #: zone under which the scheduler is running". `default_tz` IS that
-        #: zone for a directly built oracle; None keeps the engine clock as
-        #: the basis -- the same rule with the simulation's own frame as the
-        #: scheduler's zone. The name resolves lazily in _job_tz through the
-        #: SAME ladder and alias table as a job's own `timezone:` (DL-151).
-        #: The runner passes nothing here: `--timezone` stays on the
-        #: scheduler.
+        #: E10's no-timezone half, closed by citation (DL-155): the vendor schedules a job that
+        #: declares no `timezone:` "based on the time zone under which the scheduler is
+        #: running". `default_tz` is that zone for a directly built oracle; None keeps the engine
+        #: clock as the basis. The name resolves lazily in `_job_tz` through the same ladder and
+        #: alias table as a job's own `timezone:` (DL-151). The runner passes nothing here:
+        #: `--timezone` stays on the scheduler.
         self._default_tz: str | None = default_tz
 
     def fork(self) -> OracleReads:
-        """An independent copy to dry-apply one input on (concurrency-model
-        ss4): the engine refuses a control input whose apply raises or breaks
-        a declared transition before the input is logged, and quarantines or
-        stops on an engine-made one.
+        """An independent copy to dry-apply one input on (concurrency-model ss4).
 
-        Not `deepcopy`, which would copy the catalog. The store forks itself;
-        every other mutable container is copied, here and by each layer
-        above, the memo caches included, so nothing a dry apply does reaches
-        this oracle. The catalog, the switches, the capacity pool, the
-        referencer index and the members index are shared: they are fixed
-        once the constructor returns. The trace and the emitted log start empty, so a fork costs
-        nothing in the period's length: both are append-only, and an apply
-        reads them only by slicing from a length it saved itself. A fork's
-        trace therefore holds only what was applied on the fork. A new
-        attribute must be added to a fork, and the fork test pins the
-        attribute set so it cannot be forgotten."""
+        Not `deepcopy`, which would copy the catalog. The store forks itself; every other
+        mutable container is copied, here and by each layer above, the memo caches included. The
+        catalog, the switches, the capacity pool, the referencer index and the members index
+        are shared: they are fixed once the constructor returns. The trace and the emitted log
+        start empty, so a fork costs nothing in the period's length: both are append-only and an
+        apply reads them only by slicing from a length it saved. A new attribute must be added
+        to a fork; the fork test pins the attribute set.
+        """
         twin = copy.copy(self)
         twin.store = self.store.fork()
         twin._trace = []
@@ -193,15 +173,14 @@ class OracleReads:
         return [entry.model_copy() for entry in self._trace]  # no aliasing out
 
     def trace_since(self, since: int) -> tuple[int, list[TraceEntry]]:
-        """The trace length and a copy of the entries after the first `since`.
-        Only the slice is copied, so a poll that is up to date costs nothing
-        in the trace's length."""
+        """The trace length and a copy of the entries after the first `since`; only the slice is
+        copied."""
         return len(self._trace), [e.model_copy() for e in self._trace[max(since, 0) :]]
 
     def next_timer_due(self) -> datetime | None:
-        """Read-only peek at the timer heap (runner-design ss3): the earliest
-        scheduled TIMER's due time, or None. Timers fire lazily inside feed()/
-        advance(); a wall-clock shell uses this to know when to wake."""
+        """Read-only peek at the timer heap (runner-design ss3): the earliest scheduled TIMER's
+        due time, or None. Timers fire inside feed()/advance(); a wall-clock shell uses this to
+        know when to wake."""
         return self.store.next_timer_due()
 
     def _emit(self, kind: EventKind, **payload: object) -> None:
@@ -225,18 +204,18 @@ class OracleReads:
         return job
 
     def _ancestor_runs(self, job: str) -> dict[str, int]:
-        """Each box above `job` with its run number, read before a moment's
-        first box rule runs. A rule of that moment that completes a box can
-        start it again in the same cascade; the walk up (SEM-12) and the
-        holders' check (SEM-20) then leave the new run alone: "Jobs in a box
-        run only once for each box execution" (Basic Box Job Concepts,
-        AutoSys 12.0 and 24.2), so an end in the earlier run is no moment of
-        the later one."""
+        """Each box above `job` with its run number, read before a moment's first box rule runs.
+
+        A rule of that moment that completes a box can start it again in the same cascade; the
+        walk up (SEM-12) and the holders' check (SEM-20) then leave the new run alone: "Jobs in
+        a box run only once for each box execution" (Basic Box Job Concepts, AutoSys 12.0 and
+        24.2).
+        """
         return {box: self._runtime(box).run_number for box in self._ancestor_boxes(job)}
 
     def _ancestor_boxes(self, job: str) -> list[str]:
-        """Containing boxes, innermost first (SEM-17). Lowering rejects
-        containment cycles; the seen-set keeps a hand-built IR finite."""
+        """Containing boxes, innermost first (SEM-17). Lowering rejects containment cycles; the
+        seen-set keeps a hand-built IR finite."""
         chain: list[str] = []
         seen = {job}
         job_ir = self.catalog.jobs.get(job)
@@ -249,19 +228,19 @@ class OracleReads:
         return chain
 
     def _contained(self, box: str, *, skip_live: bool) -> list[str]:
-        """Every job `box` contains, transitively, top-down: a subbox comes
-        before its own members. With `skip_live`, a job that is STARTING,
-        RUNNING or QUE_WAIT is left out, and so is everything inside a live
-        subbox. Lowering rejects containment cycles; the seen-set keeps a
-        hand-built IR finite."""
+        """Every job `box` contains, transitively, top-down: a subbox comes before its members.
+
+        With `skip_live`, a job that is STARTING, RUNNING or QUE_WAIT is left out, and so is
+        everything inside a live subbox. The seen-set keeps a hand-built IR finite.
+        """
         out: list[str] = []
         seen = {box}
         pending = deque([box])
         while pending:
             for member in self._members(pending.popleft()):
                 if member in seen:  # pragma: no cover -- see below
-                    # Unreachable: the CatalogIR validator refuses a containment
-                    # cycle, and each job has one box, so no member repeats.
+                    # Unreachable: the CatalogIR validator refuses a containment cycle, and each
+                    # job has one box, so no member repeats.
                     continue
                 seen.add(member)
                 if skip_live and self._runtime(member).status in LIVE_OR_QUEUED:
@@ -273,33 +252,30 @@ class OracleReads:
 
     @staticmethod
     def _lifts_a_block(old: str, new: str) -> bool:
-        """DL-247: a job leaving QUE_WAIT can lift a priority block without
-        freeing capacity, so it wakes the queue. QUE_WAIT -> STARTING is an
-        admission, made by the scan that is already running; that scan's
-        next pass sees the change, so it requests nothing."""
+        """DL-247: a job leaving QUE_WAIT can lift a priority block without freeing capacity, so
+        it wakes the queue. QUE_WAIT -> STARTING is an admission, made by the scan already
+        running, whose next pass sees the change; it requests nothing."""
         return old == "QUE_WAIT" and new not in ("QUE_WAIT", "STARTING")
 
     def _box_stopped(self, job: str, old: str, new: str) -> bool:
-        """DL-247: a box leaving RUNNING. Its queued members stop blocking at
-        once, so a job they blocked may now start."""
+        """DL-247: a box leaving RUNNING. Its queued members stop blocking at once, so a job they
+        blocked may now start."""
         job_ir = self.catalog.jobs.get(job)
         return old == "RUNNING" != new and job_ir is not None and job_ir.job_type == "BOX"
 
     def _oob_ignored(self, kind: EventKind, job: str) -> str | None:
-        """Why the scheduler ignores this ON_ICE, ON_HOLD or ON_NOEXEC, which
-        the chart ignored, or None where no rule ignores it (DL-254). "Change
-        the Executable Status of a Job" (AutoSys 24.2): ON_HOLD and ON_ICE
-        have "no effect on jobs with a status of STARTING or RUNNING", box or
-        not, and the chart ignores them there only (job.148 to job.151);
-        on any other status no rule ignores them.
-        ON_NOEXEC is ignored for a non-box job that is STARTING, RUNNING or
-        ON_ICE, for a box that is ON_ICE or RUNNING, and for "A box job with
-        jobs (including the jobs contained in lower level boxes) in a status
-        other than the following status: ON_HOLD, ON_NOEXEC, INACTIVE,
-        SUCCESS, FAILURE, ACTIVATED, or TERMINATED". In this model that is a
-        contained job that is iced, STARTING, RUNNING or QUE_WAIT. QUE_WAIT is
-        not named for the job itself, so a queued job keeps the handling
-        that applies it."""
+        """Why the scheduler ignores this ON_ICE, ON_HOLD or ON_NOEXEC which the chart ignored,
+        or None (DL-254).
+
+        "Change the Executable Status of a Job" (AutoSys 24.2): ON_HOLD and ON_ICE have "no
+        effect on jobs with a status of STARTING or RUNNING", box or not; the chart ignores them
+        there only (job.148 to job.151). ON_NOEXEC is ignored for a non-box job that is
+        STARTING, RUNNING or ON_ICE, for a box that is ON_ICE or RUNNING, and for "A box job with
+        jobs (including the jobs contained in lower level boxes) in a status other than the
+        following status: ON_HOLD, ON_NOEXEC, INACTIVE, SUCCESS, FAILURE, ACTIVATED, or
+        TERMINATED", here a contained job that is iced, STARTING, RUNNING or QUE_WAIT. QUE_WAIT
+        is not named for the job itself, so a queued job keeps the handling that applies it.
+        """
         rt = self._runtime(job)
         if kind in ("ON_ICE", "ON_HOLD"):
             if rt.status in LIVE:
@@ -330,10 +306,9 @@ class OracleReads:
         if rt is None:
             return False  # SEM-06: undefined -> permanently, silently false
         if rt.on_ice:
-            # The flag reads the same whatever the stored status: ON_ICE on
-            # a STARTING/RUNNING job is ignored (DL-254) and a plain start
-            # refuses an iced job, so only an injected STATUS can make an
-            # iced row live. The row and its open Q10 split live in
+            # The flag reads the same whatever the stored status: ON_ICE on a STARTING/RUNNING
+            # job is ignored (DL-254) and a plain start refuses an iced job, so only an injected
+            # STATUS can make an iced row live. The row and its open Q10 split live in
             # `iced_atom_truth`; the oracle passes its switch (DL-252).
             return iced_atom_truth(atom, self.semantics.ice_lookback)
         if isinstance(atom, ExitCodeAtom):
@@ -358,25 +333,22 @@ class OracleReads:
         if lookback is None or lookback.kind == "indefinite":
             return True
         if rt.status_at is None:  # pragma: no cover -- see below
-            # Unreachable: `store.transition` stamps status_at on every status write.
-            # A row never written is INACTIVE with no exit code, which no status atom
-            # matches except n(), answered above, and an exit-code atom needs an exit
-            # code. Every row that gets here has transitioned.
+            # Unreachable: `store.transition` stamps status_at on every status write. A row never
+            # written is INACTIVE with no exit code, which no status atom matches except n(),
+            # answered above, and an exit-code atom needs an exit code.
             return False
         assert self._now is not None
         if lookback.kind == "zero":
-            # Q2a (DL-54): the predecessor qualifies iff its own LAST END is
-            # at-or-after the evaluating job's last end -- both sides of the
-            # cited doc reading are end times ("examines the last end time of
-            # the job first. It then examines the last end time of the
-            # condition job"), so an n() predecessor bounced to INACTIVE does
-            # not read its non-end transition as a fresh run (review MINOR).
+            # Q2a (DL-54): the predecessor qualifies iff its own last end is at or after the
+            # evaluating job's last end. Both sides are end times ("examines the last end time
+            # of the job first. It then examines the last end time of the condition job"), so an
+            # n() predecessor bounced to INACTIVE does not read its non-end transition as a
+            # fresh run.
             anchor_rt = self.store.job.get(evaluator)
             anchor = None if anchor_rt is None else anchor_rt.last_end_at
             if anchor is None:
-                # Q2b RESOLVED (DL-58): a never-ended evaluator has no
-                # anchor and the atom is satisfied -- CA support: a newly
-                # inserted job "has no initial/previous end time".
+                # Q2b resolved (DL-58): a never-ended evaluator has no anchor and the atom is
+                # satisfied; a newly inserted job "has no initial/previous end time".
                 return True
             if rt.last_end_at is None:
                 return False  # the predecessor never ended: nothing ran "since"
@@ -399,35 +371,33 @@ class OracleReads:
         return self._atom_true(cond, evaluator)
 
     def _noexec_above(self, job_ir: JobIR) -> bool:
-        """SEM-22: a box that contains the job is ON_NOEXEC, so a member that
-        is not a box and has no ON_NOEXEC of its own bypasses to SUCCESS
-        instead of running (`start_verdict` reads its own flag and its type
-        first). No vendor text states that inheritance (SEM-22 [?]). DL-254's
-        cascade flags every job in the tree when a box is put ON_NOEXEC, so
-        the inheritance decides only corners where a member lacks the flag
-        under a flagged box: a box flagged at definition time, whose members
-        do not take the flag (SEM-24); a member taken OFF_NOEXEC alone under a
-        flagged box; and a job that a later period's catalog adds to, or moves
-        under, a flagged box. A BOX never bypasses: an ON_NOEXEC box "goes
-        RUNNING, members are bypassed to SUCCESS as their conditions are
-        met", so the rule is applied once per box level and a member box walks
-        its own members too."""
+        """SEM-22: a box that contains the job is ON_NOEXEC, so a member that is not a box and has
+        no ON_NOEXEC of its own bypasses to SUCCESS instead of running.
+
+        `start_verdict` reads its own flag and its type first. No vendor text states the
+        inheritance (SEM-22 [?]). DL-254's cascade flags every job in the tree when a box is put
+        ON_NOEXEC, so it decides only corners where a member lacks the flag under a flagged box:
+        a box flagged at definition time whose members do not take the flag (SEM-24); a member
+        taken OFF_NOEXEC alone under a flagged box; and a job that a later period's catalog adds
+        to, or moves under, a flagged box. A box never bypasses: an ON_NOEXEC box "goes RUNNING,
+        members are bypassed to SUCCESS as their conditions are met", so the rule is applied once
+        per box level.
+        """
         return any(self._runtime(box).on_noexec for box in self._ancestor_boxes(job_ir.name))
 
     def _admissible(self, job_ir: JobIR, vector: list[DemandEntry], *, force: bool) -> bool:
         """The admission test of a start, fresh or out of the queue (DL-247).
-        A job with a positive priority must not be blocked by a
-        higher-priority waiter on a named resource it names (DL-255); force
-        does not lift that block, since the vendor's force rule is a load
-        rule. A FORCE_STARTJOB then checks the named resources only: the
-        forced job "runs even if its load exceeds the machine's max_load
-        value", and so no load waiter blocks it either. A job whose priority
-        is unset or 0 does the same: the scheduler "ignores any load unit
-        values" for it. Both still hold their load. Otherwise the job must
-        not be blocked by a higher-priority load waiter on its machine, and
-        every bucket must fit. Force lives on the event, not the row: a
-        forced job that queues on a named resource is readmitted like any
-        other."""
+
+        A job with a positive priority must not be blocked by a higher-priority waiter on a
+        named resource it names (DL-255); force does not lift that block, since the vendor's
+        force rule is a load rule. A FORCE_STARTJOB checks the named resources only: the forced
+        job "runs even if its load exceeds the machine's max_load value", so no load waiter
+        blocks it. A job whose priority is unset or 0 does the same: the scheduler "ignores any
+        load unit values" for it. Both still hold their load. Otherwise the job must not be
+        blocked by a higher-priority load waiter on its machine, and every bucket must fit.
+        Force lives on the event, not the row: a forced job that queues on a named resource is
+        readmitted like any other.
+        """
         rows, consumed = self.store.job, self.store.consumed
         # DL-256: a job's own held units are available to it, and only to it
         own = job_ir.name
@@ -440,10 +410,9 @@ class OracleReads:
         return self._pool.can_admit(vector, rows, consumed, own=own)
 
     def _counts_as_waiter(self, waiter: str) -> bool:
-        """A queued job that counts toward priority blocking (DL-247,
-        DL-255): not held, and not a member whose box has stopped running.
-        The readmission scan cancels the latter and keeps the former queued
-        without trying it, so neither is waiting for load or a resource."""
+        """A queued job that counts toward priority blocking (DL-247, DL-255): not held, and not a
+        member whose box has stopped running. The readmission scan cancels the latter and keeps
+        the former queued without trying it, so neither waits for load or a resource."""
         rt = self._runtime(waiter)
         job_ir = self.catalog.jobs.get(waiter)
         if rt.on_hold or job_ir is None:
@@ -452,18 +421,17 @@ class OracleReads:
         return box is None or self._runtime(box).status == "RUNNING"
 
     def _out_of_the_run(self, job: str) -> bool:
-        """SEM-11, SEM-20: whether an iced member is out of its box's run. It
-        is when it is on ice, its own status is not live or QUE_WAIT, and no
-        job it contains, transitively, is live or QUE_WAIT. Basic Box Job
-        Concepts (AutoSys 12.0, 24.2) keeps a box RUNNING "as long as there
-        are jobs in it with ACTIVATED or RUNNING status", so an ice does not
-        take out a member that still runs or holds a running job. Three
-        readers share it, under both `box-start-all-members-out` values: the
-        box-start trigger, the fold's ice skip, and the ON_ICE completion
-        moment (DL-285). A member that is not out falls through to the
-        fold's "not yet run" rule, so the box waits; the member's own
-        terminal transition, or its subbox's idle recompute (SEM-15), runs
-        the door again once the job inside ends."""
+        """SEM-11, SEM-20: whether an iced member is out of its box's run.
+
+        It is when it is on ice, its own status is not live or QUE_WAIT, and no job it contains,
+        transitively, is live or QUE_WAIT. Basic Box Job Concepts (AutoSys 12.0, 24.2) keeps a
+        box RUNNING "as long as there are jobs in it with ACTIVATED or RUNNING status". Three
+        readers share it under both `box-start-all-members-out` values: the box-start trigger,
+        the fold's ice skip, and the ON_ICE completion moment (DL-285). A member that is not out
+        falls through to the fold's "not yet run" rule, so the box waits; the member's own
+        terminal transition, or its subbox's idle recompute (SEM-15), runs the door again once
+        the job inside ends.
+        """
         rt = self._runtime(job)
         if not rt.on_ice or rt.status in LIVE_OR_QUEUED:
             return False
@@ -474,10 +442,11 @@ class OracleReads:
 
     def _box_terminator_fires(self, member: str, new: str) -> bool:
         """SEM-14: whether `member` ending `new` triggers its box_terminator.
-        "Force the Job or the Box to Stop Running" (AutoSys 12.1, 24.2):
-        "if the job completes with a FAILURE or TERMINATED status, the box
-        terminates." TERMINATED counts under the default
-        `box-terminator-on-terminated=true`; `false` keeps FAILURE only."""
+
+        "Force the Job or the Box to Stop Running" (AutoSys 12.1, 24.2): "if the job completes
+        with a FAILURE or TERMINATED status, the box terminates." TERMINATED counts under the
+        default `box-terminator-on-terminated=true`; `false` keeps FAILURE only.
+        """
         if not self.catalog.jobs[member].box.box_terminator:
             return False
         if new == "TERMINATED":
@@ -485,11 +454,10 @@ class OracleReads:
         return new == "FAILURE"
 
     def _resolves(self, box: str, member: str, old: str, new: str) -> bool:
-        """Whether an INACTIVE transition resolves `member` in a RUNNING run
-        of its parent `box` (SEM-11's carve-outs): a window skip (DL-154) or
-        an operator's INACTIVE (DL-242), both marked on the box row, or an
-        ON_ICE that takes a queued member that has not run out of the queue
-        (DL-285). Only that ice moves an iced row from QUE_WAIT."""
+        """Whether an INACTIVE transition resolves `member` in a RUNNING run of its parent `box`
+        (SEM-11's carve-outs): a window skip (DL-154) or an operator's INACTIVE (DL-242), both
+        marked on the box row, or an ON_ICE that takes a queued member that has not run out of
+        the queue (DL-285). Only that ice moves an iced row from QUE_WAIT."""
         box_rt = self._runtime(box)
         return (
             new == "INACTIVE"
@@ -505,18 +473,17 @@ class OracleReads:
         )
 
     def _off_ice_in_running_box(self, job: str) -> str | None:
-        """SEM-20 under `off-ice-in-running-box=next-run`: a member taken
-        off ice while its direct box is RUNNING, before it ran there, sits
-        that run out. "Start Conditions" (AutoSys 24.2, 12.0): "If a job is
-        contained in a running box when it is taken off ice, the scheduler
-        does not restart the job until the following run of the box, even
-        if its starting conditions recur during the existing run of the
-        box." The ice already took it out of the fold (DL-285); the mark
-        keeps it out, so the box completes without it, and refuses a plain
-        start of it in this run. A member that ran keeps its vote and needs
-        no mark. The caller runs this only for a job that was on ice.
-        `same-run` sets no mark: the member re-enters the fold and
-        may start in this run. Returns the box it marked, or None."""
+        """SEM-20 under `off-ice-in-running-box=next-run`: a member taken off ice while its direct
+        box is RUNNING, before it ran there, sits that run out.
+
+        "Start Conditions" (AutoSys 24.2, 12.0): "If a job is contained in a running box when it
+        is taken off ice, the scheduler does not restart the job until the following run of the
+        box, even if its starting conditions recur during the existing run of the box." The ice
+        already took it out of the fold (DL-285); the mark keeps it out and refuses a plain
+        start of it in this run. A member that ran keeps its vote and needs no mark. The caller
+        runs this only for a job that was on ice. `same-run` sets no mark. Returns the box it
+        marked, or None.
+        """
         if self.semantics.off_ice_in_running_box != "next-run":
             return None
         job_ir = self.catalog.jobs.get(job)
@@ -530,17 +497,16 @@ class OracleReads:
         return box
 
     def _votes_as_it_stands(self, box: str, member: str) -> bool:
-        """SEM-11 (DL-360): a direct member that has not run in this box
-        run but holds a terminal status votes with it, unless it is out of
-        the run on ice. Four sources give such a status: a member carried
-        live from the run that ended and then ended; an operator's SUCCESS,
-        FAILURE or TERMINATED on a member that waits; a KILLJOB on a member
-        queued in this run, or on one an injected STARTING made live, which
-        ends it TERMINATED; and a never-run subbox that the idle recompute
-        (SEM-15) re-derived from statuses given to its members, a [C]
-        reading, since SEM-15's table has no ACTIVATED or ON_HOLD row. A
-        resolution or off-ice mark decides only while the member reads
-        INACTIVE: a terminal status votes as it stands."""
+        """SEM-11 (DL-360): a direct member that has not run in this box run but holds a terminal
+        status votes with it, unless it is out of the run on ice.
+
+        Four sources give such a status: a member carried live from the run that ended and then
+        ended; an operator's SUCCESS, FAILURE or TERMINATED on a member that waits; a KILLJOB on
+        a member queued in this run, or on one an injected STARTING made live, which ends it
+        TERMINATED; and a never-run subbox that the idle recompute (SEM-15) re-derived from
+        statuses given to its members, a [C] reading, since SEM-15's table has no ACTIVATED or
+        ON_HOLD row. A resolution or off-ice mark decides only while the member reads INACTIVE.
+        """
         return (
             member not in self._runtime(box).ran_members
             and self._runtime(member).status in TERMINAL
@@ -548,51 +514,45 @@ class OracleReads:
         )
 
     def _all_members_done(self, box: str) -> bool:
-        """SEM-11, literal (DL-13): the box cannot complete until every
-        member is terminal or has been bypassed (iced, or resolved to
-        INACTIVE by a window skip, DL-154, or by an injected STATUS
-        INACTIVE, DL-242). A member that has not run in this box run is
-        done when its status is terminal (DL-360). A member whose
-        condition never fires inside the run -- or whose run_window
-        deferred it -- reads INACTIVE and keeps the box RUNNING: the
-        hung-box pattern is real behavior, not a defect to smooth over.
+        """SEM-11, literal (DL-13): the box cannot complete until every member is terminal or has
+        been bypassed (iced, or resolved to INACTIVE by a window skip, DL-154, or by an injected
+        STATUS INACTIVE, DL-242).
 
-        An ON_NOEXEC member is NOT skipped here: SEM-22 bypasses it to
-        SUCCESS "as [its] conditions are met", and that bypass joins the
-        ran set like any start, so the fold waits for it exactly as it
-        waits for a real run."""
+        A member that has not run in this box run is done when its status is terminal (DL-360).
+        A member whose condition never fires inside the run, or whose run_window deferred it,
+        reads INACTIVE and keeps the box RUNNING. An ON_NOEXEC member is not skipped: SEM-22
+        bypasses it to SUCCESS "as [its] conditions are met", and that bypass joins the ran set
+        like any start, so the fold waits for it.
+        """
         box_rt = self._runtime(box)
         resolved = box_rt.window_skipped_members
         for member in self._members(box):
             rt = self._runtime(member)
             if self._out_of_the_run(member):
-                # SEM-20: an iced member is out of the logic entirely, once
-                # nothing in it is live or queued; until then it is not yet
-                # run, below, and the box waits
+                # SEM-20: an iced member is out of the logic entirely, once nothing in it is
+                # live or queued; until then it is not yet run (below) and the box waits
                 continue
             if member in box_rt.iced_out_members and rt.status not in LIVE_OR_QUEUED:
-                # SEM-20: taken off ice during this run, it sits the run
-                # out. A forced attempt that queued still keeps the box
-                # waiting, as for a resolved member below.
+                # SEM-20: taken off ice during this run, it sits the run out. A forced attempt
+                # that queued still keeps the box waiting, as for a resolved member below.
                 continue
             if member in resolved and rt.status not in LIVE_OR_QUEUED:
-                # an explicit INACTIVE verdict this execution: a run_window
-                # skip (DL-154) or an operator's (DL-242), which counts "as
-                # if the INACTIVE job returned a status of SUCCESS". A later
-                # terminal status on it is done too, and votes as it stands
+                # an explicit INACTIVE verdict this execution: a run_window skip (DL-154) or an
+                # operator's (DL-242), which counts "as if the INACTIVE job returned a status of
+                # SUCCESS". A later terminal status on it is done too, and votes as it stands
                 # (DL-360). The member's own later start voids the mark.
                 continue
             if rt.status not in TERMINAL:
-                # live or queued, or INACTIVE: not yet run this box
-                # execution (incl. held); a terminal member is done, ran or
-                # not (DL-360)
+                # live or queued, or INACTIVE: not yet run this box execution (incl. held); a
+                # terminal member is done, ran or not (DL-360)
                 return False
         return True
 
 
 def _entity_keys(cond: Cond) -> set[str]:
-    """Edge-trigger keys of a condition: local and instance-qualified job
-    names plus "g:NAME" for globals (see Oracle._referencers)."""
+    """Edge-trigger keys of a condition: local and instance-qualified job names plus "g:NAME" for
+    globals (see Oracle._referencers)."""
+
     from dsl41.conditions import iter_atoms
 
     keys: set[str] = set()
