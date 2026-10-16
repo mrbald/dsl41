@@ -4,12 +4,12 @@ Every row is a plain mapping validated into `simulation_register.Behaviour`
 at import. The members are LITERAL here on purpose: deriving them from the
 inventories would make the register agree with the code by construction and
 catch nothing. The test derives the domains instead and fails on a member
-with no row -- and on a row whose member the code no longer has.
+with no row, and on a row whose member the code lacks.
 
 Fixture strings are interpreted by `tests/test_simulation_register.py`
 according to the surface's fixture kind (jil, cond, scenario, profile,
 outcome) -- one kind per surface, the test's own table. A row does not say
-its kind (DL-75 review 2026-09-19).
+its kind (DL-75).
 
 This module imports nothing from `simulation_register`: the data is plain,
 so the dependency runs one way and the two files never form a cycle.

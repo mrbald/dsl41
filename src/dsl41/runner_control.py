@@ -237,7 +237,7 @@ class ControlServer:
         self.spec_texts: Mapping[str, str] = spec_texts or {}
         #: input-file path -> sha256 of the bytes the run LOADED. Source of the `spec_drift`
         #: status flag (DL-65): there is no reload, and the hint tells the operator the
-        #: catalog no longer matches the files on disk.
+        #: catalog differs from the files on disk.
         self.estate_fingerprint: Mapping[str, str] = estate_fingerprint or {}
         self._drift: bool = False
         self._drift_checked_at: float | None = None
@@ -711,7 +711,7 @@ class ControlServer:
             result = await asyncio.wait_for(submitted, timeout=self.DECISION_TIMEOUT_S)
         except RequestCollision as exc:
             # a refusal of THIS request, whole: the id's earlier decision rides nested beside
-            # it, so a caller whose retry no longer matches learns what the first command did
+            # it, so a caller whose retry does not match learns what the first command did
             # without it reading as this request's own (DL-217)
             refusal = _failure(exc.code, str(exc), refused=True)
             if exc.original is not None:
