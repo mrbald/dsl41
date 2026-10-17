@@ -11,9 +11,9 @@ does not undo a drain (DL-93).
   job's condition truth cannot depend on where its machine routes.
 - `HOST` is ss8's routing table as a statechart, one instance per host on the store's executor,
   declared beside the row it projects into (`oracle_state`). The chart decides every move; a cell
-  with no move is a refusal row with its code. The gate (`host_rejection_reason`) reads it on a
-  scratch executor (`host_move`) and adds the rules that read the input's own facts: the
-  eviction bound and the attribution of a force. `apply_host_command` dispatches an applied
+  with no move is a refusal row with its code. The gate (`host_rejection_reason`) reads it with
+  the engine's selection read (`host_move`) and adds the rules that read the input's own facts:
+  the eviction bound and the attribution of a force. `apply_host_command` dispatches an applied
   command and writes the row from the leaf. Both halves are pure functions of the row and the
   input's own facts, because replay has no live host to probe.
 - `routes_new_effects` is ss8's "new effects routed" column as one predicate.
@@ -161,11 +161,16 @@ def host_event(cmd: HostCommand) -> ChartEvent:
 def host_move(store: RuntimeState, cmd: HostCommand) -> Outcome:
     """What `cmd` would do to its host's instance, with nothing moved. The host must have a row.
 
-    It dispatches on a scratch executor rebuilt from the rows, because the gate also runs where
-    no dry apply precedes it. The scratch executor holds no job instance (DL-341), so the cost
-    does not grow with the job count."""
-    (outcome,) = store.rebuild_machines(jobs=False).dispatch(cmd.key, host_event(cmd))
-    return outcome
+    It is `Executor.resolve` on the store's instance: selection with no action and no move
+    (statechart-engine ss5, DL-335), because the gate also runs where no dry apply precedes it.
+    The read names the rows and refusals a dispatch would fire, and no choice branch (DL-375).
+
+    It reads the instance, not the row, so it agrees with a dispatch only while every dispatch
+    is projected into the row: the apply writes the leaf, and `_replace_host` refuses a state
+    the instance is not in. A call from inside a macrostep of the store's executor raises
+    `ReentrantDispatch`, and a host with no instance raises a `StatechartError`; the gate
+    answers `unknown_host` for a host with no row before it reads."""
+    return store.machines.resolve(cmd.key, host_event(cmd))
 
 
 def _refused(code: str, row: HostRuntime, cmd: HostCommand) -> Rejection:

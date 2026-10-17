@@ -538,14 +538,13 @@ def test_a_witness_rebuild_keeps_the_phase(phase: str) -> None:
 
 @pytest.mark.parametrize("phase", PHASES)
 def test_a_fork_and_a_rebuild_carry_the_phase_with_its_group(phase: str) -> None:
-    """The configuration carries the group; a fork, a rebuild and one without the job
-    instances restore the same configuration, and the phase is its leaf."""
+    """The configuration carries the group; a fork and a rebuild restore the same
+    configuration, and the phase is its leaf."""
     store = _built(phase)
     configuration = store.machines.active(ASSEMBLY_KEY)
     assert configuration == {"runtime_assembly", GROUP[phase], phase}
     assert store.fork().machines.active(ASSEMBLY_KEY) == configuration
     assert store.rebuild_machines().active(ASSEMBLY_KEY) == configuration
-    assert store.rebuild_machines(jobs=False).active(ASSEMBLY_KEY) == configuration
 
 
 # ---- the alphabet: every verb the state owner dispatches is in the chart

@@ -742,17 +742,18 @@ RUNTIME_ASSEMBLY: Final = Statechart(
 # `RuntimeState.machines`, holds one instance per host row under `host_key(host_id)`. The
 # instance's configuration is the host's state; `HostRuntime.state` is its projection, written
 # by the tier from the active leaf after the microstep. Everything that rebuilds the rows
-# rebuilds the executor from them (`rebuild_machines`): an install, the gate's scratch read and
-# a test's witness (`witness_host`). A fork copies the executor (`Executor.fork`, DL-339) and
-# binds each host instance's data to the fork's store. A state write that no microstep made
-# raises a `StatechartError`.
+# rebuilds the executor from them (`rebuild_machines`): an install, a test's witness
+# (`witness_host`), `restore_instances` and `keep_job_instances`. A fork copies the executor
+# (`Executor.fork`, DL-339) and binds each host instance's data to the fork's store. A state
+# write that no microstep made raises a `StatechartError`.
 #
 # The chart is dispatched only for an applied host command: the gate in `runner_hosts` reads it
-# first on a scratch executor, and a refusal row carries the gate's code. The gate keeps the
-# rules that read the input's own facts (the deadman, the bound, the attribution of a force),
-# because a rejection is replayed as stored and `last_contact` is re-seeded at resume (DL-94).
-# Rows .01, .04, .06, .08 and .09 are internal: the apply writes nothing and no revision
-# moves. A gap in the chart is a `StatechartError`, which stops the tier (statechart-engine ss5).
+# first with `Executor.resolve`, which moves nothing, and a refusal row carries the gate's code.
+# The gate keeps the rules that read the input's own facts (the deadman, the bound, the
+# attribution of a force), because a rejection is replayed as stored and `last_contact` is
+# re-seeded at resume (DL-94). Rows .01, .04, .06 and .25 are internal: the apply writes nothing
+# and no revision moves. A gap in the chart is a `StatechartError`, which stops the tier
+# (statechart-engine ss5).
 
 #: The cite of the routing table's rows.
 _SS8 = "concurrency-model ss8"
@@ -785,7 +786,10 @@ def host_configuration(state: HostState) -> frozenset[str]:
 
 
 def _not_evicted(ctx: Context) -> bool:
-    """The host is not evicted (ss8: force skips the proof, not the state)."""
+    """The host is not evicted (ss8: force skips the proof, not the state).
+
+    At `evicted` host.21 takes the event first (statechart-engine ss3). The guard makes a
+    missing host.21 a gap, not a forced eviction of an evicted host (DL-375)."""
     return "evicted" not in ctx.active
 
 
@@ -879,16 +883,8 @@ HOST: Final = Statechart(
             note="The host answered again: put back the state quarantine interrupted, and forget it.",
         ),
         Row(
-            "host.08",
-            "active",
-            "reinstate",
-            kind="internal",
-            cite=f"{_SS8}, DL-111",
-            note="none: nothing to put back",
-        ),
-        Row(
-            "host.09",
-            "passive",
+            "host.25",
+            "routed",
             "reinstate",
             kind="internal",
             cite=f"{_SS8}, DL-111",
@@ -1581,22 +1577,21 @@ class RuntimeState:
         self._hosts[host_id] = HostRuntime.model_validate({**dict(current), **fields})
         self.machines = self.rebuild_machines()
 
-    def rebuild_machines(self, *, jobs: bool = True) -> Executor:
+    def rebuild_machines(self) -> Executor:
         """A new executor holding the assembly instance in the store's phase, one `HOST` instance
         per host row in the configuration its state projects (statechart-engine ss11), and, with
         `job_instance` set, one `job` instance per job row (DL-341) and the queue scan's
         coordinator, idle between inputs (DL-372).
 
-        An install, a test's witness and the gate's scratch read build theirs here; no action
-        runs. `jobs=False` leaves the job instances out, for a read of the other charts whose
-        cost must not grow with the job count (the gate's `host_move`).
+        An install, a test's witness, `restore_instances` and `keep_job_instances` build
+        theirs here; no action runs.
         """
         machines = Executor()
         machines.restore(ASSEMBLY_KEY, RUNTIME_ASSEMBLY, self.machines.active(ASSEMBLY_KEY))
         for host_id, row in self._hosts.items():
             data = HostData(self, host_id)
             machines.restore(self.host_key(host_id), HOST, host_configuration(row.state), data)
-        if jobs and self.job_instance is not None:
+        if self.job_instance is not None:
             machines.restore(SCAN_KEY, QUEUE_SCAN, SCAN_IDLE)
             for job, jrow in self._jobs.items():
                 _restore_job(machines, self.job_instance, job, jrow)

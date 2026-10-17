@@ -987,8 +987,7 @@ stateDiagram-v2
 | host.05 | routed | quarantine |  | The leader's renewal failed five times in a row. The row remembers the state it interrupts. | quarantined | external | concurrency-model ss7, ss8, DL-97, DL-291 |
 | host.06 | quarantined | quarantine |  | none: repeated unreachability is one fact |  | internal | DL-97 |
 | host.07 | quarantined | reinstate |  | The host answered again: put back the state quarantine interrupted, and forget it. | remembered | external | concurrency-model ss8, DL-97 |
-| host.08 | active | reinstate |  | none: nothing to put back |  | internal | concurrency-model ss8, DL-111 |
-| host.09 | passive | reinstate |  | none: nothing to put back |  | internal | concurrency-model ss8, DL-111 |
+| host.25 | routed | reinstate |  | none: nothing to put back |  | internal | concurrency-model ss8, DL-111 |
 | host.10 | quarantined | evict |  | The gate has proved the bound: a deadman, a contact, and silence past deadman + kill + skew. generation += 1, forced_by = none, forget the interrupted state. | evicted | external | concurrency-model ss8 preconditions 1-3, DL-151 |
 | host.11 | host | force_evict | not_evicted | The gate has the attribution: claimed_actor names who asks. generation += 1, forced_by = the actor, forget the interrupted state. | evicted | external | concurrency-model ss8, DL-111, DL-151 |
 | host.12 | evicted | register |  | The relay presents the current generation and has self-fenced. Its held jobs run as new runs with new effect ids. No code posts it. | active | external (spec-only) | concurrency-model ss8 (eviction is fenced on return), period-model ss3.3 |
@@ -1019,7 +1018,7 @@ stateDiagram-v2
 
 | Name | Kind | Prose |
 | --- | --- | --- |
-| not_evicted | guard | The host is not evicted (ss8: force skips the proof, not the state). |
+| not_evicted | guard | The host is not evicted (ss8: force skips the proof, not the state). At `evicted` host.21 takes the event first (statechart-engine ss3). The guard makes a missing host.21 a gap, not a forced eviction of an evicted host (DL-375). |
 | remembered_passive | guard | Quarantine interrupted `passive`: a drained host that answers again stays drained (DL-97). |
 
 ## admission

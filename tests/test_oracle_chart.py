@@ -649,33 +649,28 @@ def test_row_units_read_the_policy_of_each_unit_for_both_ends(
     assert data(("r:D", "never"), ("r:R", "never")) == ("keep", "keep")
 
 
-def test_the_host_gates_scratch_executor_holds_no_job_instance(
+def test_the_host_gate_reads_the_store_s_instance_and_moves_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The gate reads the host chart on a scratch executor rebuilt from the
-    rows (DL-333); it leaves the job instances out, so a
+    """The gate reads the host chart with `Executor.resolve` on the store's
+    own instance (DL-375): it builds no executor and moves nothing, so a
     host command's cost does not grow with the job count."""
     oracle = Oracle(lower_source(_JIL))
     store = oracle.store
     store.begin_input()
     store.register_host("h")
     store.commit_input()
-    scratch: list[Executor] = []
-    rebuild = store.rebuild_machines
+    machines = store.machines
 
-    def spy(*, jobs: bool = True) -> Executor:
-        scratch.append(rebuild(jobs=jobs))
-        return scratch[-1]
+    def rebuild() -> Executor:
+        raise AssertionError("the gate rebuilt an executor")
 
-    monkeypatch.setattr(store, "rebuild_machines", spy)
+    monkeypatch.setattr(store, "rebuild_machines", rebuild)
     outcome = host_move(store, HostCommand(verb="drain", host_id="h"))
-    assert outcome.rows
-    (machines,) = scratch
-    assert machines.active("host:h") == {"host", "routed", "passive"}  # the read's own move
-    assert store.machines.active("host:h") == {"host", "routed", "active"}
-    with pytest.raises(StatechartError, match="no instance 'job:j'"):
-        machines.active("job:j")
-    assert store.machines.active("job:j") == configuration("INACTIVE")
+    assert (outcome.kind, outcome.rows) == ("fired", ("host.02",))
+    assert store.machines is machines
+    assert machines.active("host:h") == {"host", "routed", "active"}
+    assert machines.active("job:j") == configuration("INACTIVE")
 
 
 # ---- the start family (STARTJOB, FORCE_STARTJOB, every attempt)

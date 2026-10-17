@@ -24340,3 +24340,72 @@ relitigate an entry; append a new one.
   removed), L4 (the lease test's docstring claimed every ttl_s shape and a read order it cannot
   see: narrowed); L1 (the number cited from the tests before the entry landed) is moot, since
   the entry lands with the slice.
+- DL-375 A rule of `host` is written once at the source the hierarchy gives it, and the gate
+  reads the chart with the engine's selection read: host.08 and host.09 are one internal row,
+  host.25, on `routed`; `host_move` is `Executor.resolve` on the store's instance, and the
+  scratch executor and `rebuild_machines(jobs=False)` are gone; host.11's guard stays
+  (2026-10-17; src/dsl41/oracle_state.py, src/dsl41/runner_hosts.py; tests/test_host_chart.py,
+  tests/test_engine_machines.py, tests/test_oracle_chart.py, tests/test_assembly_chart.py,
+  tests/test_runtime_state.py; docs/statechart-engine.md §16; docs/blocks/host-routing.md;
+  docs/state-machines.md (generated), docs/chart-lifecycles.md (generated))
+  THE AIM. Step 5 of the chart simplification on `host` and H2's `resolve` point (charts ruling,
+  slice S4a; explorer 1 H2, H3, H5; explorer 2 F7). No outcome changes: every cell selects the
+  row it selected, with the two reinstate cells of a routed host under the new id, and no
+  decision, code, revision, row write or wire text moves.
+  THE RULE. DL-373's: a rule every member of a group takes is one row on the group, and only
+  where no member has its own row for the event (§3: the inner row wins). `active` and
+  `passive` have no reinstate row, so host.25 is the only candidate at both. Its note and cite
+  are those of the two copies. host.08 and host.09 retire for good (DL-364); a test keeps them
+  out, as rows and as choice branches. 22 rows become 21.
+  THE GATE'S READ. `host_move` dispatched on a scratch executor rebuilt from the rows so that
+  the gate's read moved nothing. DL-335's `resolve` is that read: selection for one instance
+  and one event, with no action, no move, no history and no hit. The gate now reads the
+  store's own instance with it. The read has three boundaries. It reads the instance, not
+  the row, so it agrees with a dispatch only while every dispatch is projected into the row:
+  the apply writes the leaf, and `_replace_host` refuses a state the instance is not in. A
+  call from inside a macrostep of the store's executor raises `ReentrantDispatch`; the gate
+  runs in the batch after the time half has drained. A host with no instance raises; the
+  gate answers `unknown_host` for a host with no row before it reads. The host chart defers
+  nothing, so the read's refusal of a deferred instance cannot fire. `host_move`'s docstring
+  states the three. No executor is built per host command, so the `jobs=False` form of
+  `rebuild_machines` lost its only caller and is gone. The read names no choice branch, which
+  the gate never read. The row ids the gate keys on, host.10 and host.11, stay (DL-94).
+  HOST.11'S GUARD. `not_evicted` never decides: at `evicted` host.21 wins. It stays, because
+  without it a deleted host.21 would fire host.11 and evict an evicted host again; with it the
+  cell is a gap. Its docstring says so, and a test deletes host.21 and meets the gap.
+  NOT TAKEN. H3 (`note_executor_reachable` tests the state before it injects `reinstate`, which
+  saves a WAL record per renewal) stays. H4 (`quarantine_host`'s early return) goes with S4b.
+  RETIRED IDS. No row id of `host` is stored or sent: the store, the seal and the LIST answer
+  carry `HostState` names, which are unchanged, and `host_configuration` rebuilds from them.
+  tests/host_revisions.json records decision, code, revisions and row, not row ids, and passes
+  unchanged.
+  CHECKS. A differential of the tree against f10dd26 over 100 gate reads (five leaves, two
+  deadman settings, five verbs, with and without force) finds every kind, ignored set and
+  refusal equal, and the rows equal under host.08 and host.09 to host.25 (eight cells). A
+  test pins f10dd26's gate as a table of its 30 distinct cells (kind, row and refusal per
+  leaf and event), recorded once, and compares the 100 reads with it under that mapping,
+  with the instance and the row unmoved. The completeness table (34 cells) names
+  host.25 at both reinstate cells by value. The per-input revision table (1,120 inputs) is
+  unchanged. A rejected host command now records no hit, since the read records none; the test
+  of the rejected verbs reads the row through `host_move` and checks the hit on a fork's
+  dispatch. So the refusal rows .13 to .21 are reached by the completeness table and the
+  exhaustive walk, and by the apply's refusal of a decided input, not by rejected commands. The
+  transition gate holds `host` at 25 of 25. A gap the gate meets now raises on the store's
+  executor, so its error lists the store's recent host microsteps where the scratch
+  executor's listed none; the text goes to stderr and is not stored.
+  THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235). The constant covers the derivation of
+  oracle state from an identical log. The merged row is internal: as before, the apply writes
+  nothing and no revision moves. The gate's verdict is the same for every input, and no stored
+  `HostState` changes.
+  REVIEW. Semantic class (rows of a §16 machine and a frozen sentence of §16): one Opus
+  reviewer and one Codex Astra pass. Codex found no production-path defect and named the
+  read's boundaries above (an unprojected dispatch, a reentrant call, a removed instance) and
+  the coverage consequence, which CHECKS states. Opus, over 6,720 gate reads against f10dd26,
+  found rows differing only where host.08 and host.09 became host.25, and no blocker or major;
+  its small items: R1 (the boundaries unstated: stated in the docstring and above), R2 (the
+  read's test compared the engine with itself: it now pins f10dd26's gate as a table), R3 (the
+  gap error's text: stated), R4 (the retired-id test skipped branch ids: covered), R5 (two
+  docstrings named two of four rebuilders: all four), R6 (host-routing.md's test list: the new
+  tests named). Opus confirmed R1 to R6; its two nits (a comment line over 100 columns, and a
+  CHECKS sentence that credited the fork dispatch's hits, which go to a private directory) are
+  fixed at landing.

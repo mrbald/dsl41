@@ -160,7 +160,7 @@ closed = alive + close
 
 ## host
 
-Shown: 7. Folded: 15 (ignored 1, refusals 9, internal 5). Rows in the chart: 22.
+Shown: 7. Folded: 14 (ignored 1, refusals 9, internal 4). Rows in the chart: 21.
 
 ### routing
 

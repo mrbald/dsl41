@@ -91,14 +91,46 @@ def test_the_chart_is_well_formed_and_draws_no_warning() -> None:
     assert [(row.id, row.mark) for row in CHART.rows if row.mark] == [("host.12", "spec-only")]
 
 
+def test_reinstate_at_a_routed_host_is_one_internal_row_and_its_old_ids_stay_retired() -> None:
+    """A routed host has nothing to put back: one internal row on `routed`,
+    and no row on `active` or `passive` overrides it (DL-375). The ids of the
+    two per-leaf copies it replaced stay out of use, as rows and as choice
+    branches (DL-364)."""
+    reinstate = [(row.id, row.source, row.kind) for row in CHART.rows if row.event == "reinstate"]
+    assert reinstate == [
+        ("host.07", "quarantined", "external"),
+        ("host.25", "routed", "internal"),
+        ("host.19", "evicted", "refusal"),
+    ]
+    branches = {branch.id for choice in CHART.choices for branch in choice.branches}
+    assert not {"host.08", "host.09"} & ({row.id for row in CHART.rows} | branches)
+
+
+def test_without_host_21_a_forced_eviction_of_an_evicted_host_is_a_gap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """host.11's guard never decides at `evicted`, where host.21 wins; with
+    host.21 gone it makes the cell a gap, not a second eviction (DL-375).
+    The copy's hits go to a private directory: the false outcome it reaches
+    is marked unreachable in the chart."""
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+    store = _store("evict")
+    chart = replace(CHART, rows=tuple(row for row in CHART.rows if row.id != "host.21"))
+    machines = Executor()
+    machines.restore(KEY, chart, {"host", "evicted"}, HostData(store, "h"))
+    with pytest.raises(UnhandledEvent, match="no row and no deferral for force_evict"):
+        machines.dispatch(KEY, ChartEvent(FORCE_EVICT))
+    assert machines.active(KEY) == {"host", "evicted"}
+
+
 # ---- the abstraction (§13)
 
 
-def _store(*verbs: str) -> RuntimeState:
+def _store(*verbs: str, deadman_s: float | None = 60.0) -> RuntimeState:
     """A store holding host `h`, moved by `verbs` through the tier's apply."""
     store = RuntimeState()
     store.begin_input()
-    store.register_host("h", deadman_s=60.0, at=T0)
+    store.register_host("h", deadman_s=deadman_s, at=T0)
     store.commit_input()
     for verb in verbs:
         store.begin_input()
@@ -159,8 +191,8 @@ def _section_8(witness: str, event: str) -> str:
         ("active", "drain"): "host.02",
         ("passive", "activate"): "host.03",
         ("passive", "drain"): "host.04",
-        ("active", "reinstate"): "host.08",
-        ("passive", "reinstate"): "host.09",
+        ("active", "reinstate"): "host.25",
+        ("passive", "reinstate"): "host.25",
     }[(state, event)]
 
 
@@ -178,6 +210,67 @@ def test_the_completeness_table_is_section_8() -> None:
     assert len(table) == 34
 
 
+#: The gate's read at f10dd26, the scratch dispatch DL-375 replaced, recorded once by
+#: (witness, event): kind, row and refusal code. A deadman and a force on a verb other than
+#: evict do not change the event, so these 30 cells answer the 100 reads below.
+_GATE_AT_BASE: dict[tuple[str, str], tuple[str, str, str | None]] = {
+    ("active", "activate"): ("fired", "host.01", None),
+    ("active", "drain"): ("fired", "host.02", None),
+    ("active", "evict"): ("fired", "host.15", "host_not_quarantined"),
+    ("active", FORCE_EVICT): ("fired", "host.11", None),
+    ("active", "quarantine"): ("fired", "host.05", None),
+    ("active", "reinstate"): ("fired", "host.08", None),
+    ("passive", "activate"): ("fired", "host.03", None),
+    ("passive", "drain"): ("fired", "host.04", None),
+    ("passive", "evict"): ("fired", "host.15", "host_not_quarantined"),
+    ("passive", FORCE_EVICT): ("fired", "host.11", None),
+    ("passive", "quarantine"): ("fired", "host.05", None),
+    ("passive", "reinstate"): ("fired", "host.09", None),
+    ("quarantined from active", "activate"): ("fired", "host.13", "host_quarantined"),
+    ("quarantined from active", "drain"): ("fired", "host.14", "host_quarantined"),
+    ("quarantined from active", "evict"): ("fired", "host.10", None),
+    ("quarantined from active", FORCE_EVICT): ("fired", "host.11", None),
+    ("quarantined from active", "quarantine"): ("fired", "host.06", None),
+    ("quarantined from active", "reinstate"): ("fired", "host.07", None),
+    ("quarantined from passive", "activate"): ("fired", "host.13", "host_quarantined"),
+    ("quarantined from passive", "drain"): ("fired", "host.14", "host_quarantined"),
+    ("quarantined from passive", "evict"): ("fired", "host.10", None),
+    ("quarantined from passive", FORCE_EVICT): ("fired", "host.11", None),
+    ("quarantined from passive", "quarantine"): ("fired", "host.06", None),
+    ("quarantined from passive", "reinstate"): ("fired", "host.07", None),
+    ("evicted", "activate"): ("fired", "host.16", "host_evicted"),
+    ("evicted", "drain"): ("fired", "host.17", "host_evicted"),
+    ("evicted", "evict"): ("fired", "host.20", "host_already_evicted"),
+    ("evicted", FORCE_EVICT): ("fired", "host.21", "host_already_evicted"),
+    ("evicted", "quarantine"): ("fired", "host.18", "host_evicted"),
+    ("evicted", "reinstate"): ("fired", "host.19", "host_evicted"),
+}
+#: The ids DL-375 retired, as the read names their cells now.
+_MERGED = {"host.08": "host.25", "host.09": "host.25"}
+
+
+@pytest.mark.parametrize("deadman_s", [None, 60.0])
+@pytest.mark.parametrize("witness", WITNESSES)
+def test_the_gate_s_read_is_the_one_it_was(witness: str, deadman_s: float | None) -> None:
+    """At every leaf, for every verb with and without force, with and without
+    a deadman, the gate's read selects what the scratch dispatch selected,
+    under the merged ids, and moves neither the instance nor the row (DL-375)."""
+    store = _store(*WITNESSES[witness], deadman_s=deadman_s)
+    active, row = store.machines.active(KEY), store.hosts["h"]
+    for verb in ("activate", "drain", "evict", "quarantine", "reinstate"):
+        for force in (False, True):
+            cmd = HostCommand(verb=verb, host_id="h", force=force)  # type: ignore[arg-type]
+            read = host_move(store, cmd)
+            kind, taken, code = _GATE_AT_BASE[(witness, host_event(cmd).name)]
+            refusals = () if code is None else (code,)
+            assert (read.kind, read.rows, read.refusals) == (
+                kind,
+                (_MERGED.get(taken, taken),),
+                refusals,
+            ), (verb, force)
+            assert (store.machines.active(KEY), store.hosts["h"]) == (active, row)
+
+
 @pytest.mark.parametrize(
     ("witness", "branch", "leaf"),
     [
@@ -187,11 +280,15 @@ def test_the_completeness_table_is_section_8() -> None:
 )
 def test_reinstating_puts_back_the_remembered_state(witness: str, branch: str, leaf: str) -> None:
     """host.07's choice reads what quarantine interrupted; the apply writes
-    that leaf, the row forgets the remembered state, and the revision moves."""
+    that leaf, the row forgets the remembered state, and the revision moves.
+    The gate's read names the row and no branch; a dispatch on a fork names
+    the branch."""
     store = _store(*WITNESSES[witness])
     cmd = HostCommand(verb="reinstate", host_id="h")
     read = host_move(store, cmd)
-    assert (read.rows, read.branches) == (("host.07",), (branch,))
+    assert (read.rows, read.branches) == (("host.07",), ())
+    (moved,) = store.machines.fork().dispatch(KEY, host_event(cmd))
+    assert (moved.rows, moved.branches) == (("host.07",), (branch,))
     before = store.revision(KEY)
     store.begin_input()
     apply_host_command(store, cmd, actor=None)
@@ -368,17 +465,24 @@ def test_every_event_a_poster_sends_is_in_the_alphabet(
 ) -> None:
     """The operator's `submit_host`, the leader's `inject_host` from the
     renewal callbacks, and replay at resume all post through the real paths;
-    the gate's scratch reading posts the same names. A carried install posts
+    the gate's read resolves the same names. A carried install posts
     nothing: it restores."""
     posted: list[str] = []
     real = Executor.dispatch
+    real_resolve = Executor.resolve
 
     def spy(self: Executor, key: Any, event: ChartEvent) -> Any:
         if isinstance(key, str) and key.startswith("host:"):
             posted.append(event.name)
         return real(self, key, event)
 
+    def read_spy(self: Executor, key: Any, event: ChartEvent) -> Any:
+        if isinstance(key, str) and key.startswith("host:"):
+            posted.append(event.name)
+        return real_resolve(self, key, event)
+
     monkeypatch.setattr(Executor, "dispatch", spy)
+    monkeypatch.setattr(Executor, "resolve", read_spy)
     run_root = tmp_path / "run"
     engine = start_run(
         lower_source(_JIL),

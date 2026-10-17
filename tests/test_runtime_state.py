@@ -813,7 +813,7 @@ def test_quarantine_and_reinstate_are_each_idempotent() -> None:
     revision would make a host's `expect` unholdable exactly while an
     operator is trying to use it. Reinstating a host that was never
     quarantined is the same no-op from the other side. Both are internal
-    rows of the host chart (host.06, host.08), so the apply writes nothing
+    rows of the host chart (host.06, host.25), so the apply writes nothing
     (DL-333)."""
     store = RuntimeState()
     store.begin_input()
