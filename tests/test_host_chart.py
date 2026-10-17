@@ -25,7 +25,7 @@ import json
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import statechart_completeness as sc
@@ -36,7 +36,17 @@ from test_exhaustive_engine import _ACTOR, _HOST_BUILDS, _HOST_JIL, _host_attemp
 from dsl41.ir import lower_source
 from dsl41.machines import MACHINES
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import FORCE_EVICT, HOST, REGISTER, HostData, OracleError, RuntimeState
+from dsl41.oracle_state import (
+    FORCE_EVICT,
+    HOST,
+    REGISTER,
+    HostData,
+    HostEntered,
+    HostEvicted,
+    HostRemembered,
+    OracleError,
+    RuntimeState,
+)
 from dsl41.period import estate_wal, wal_path
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
@@ -57,8 +67,10 @@ from dsl41.state_machine import (
     HITS_ENV,
     STATECHART_LOG_PREFIX,
     Context,
+    Effects,
     Executor,
     Row,
+    State,
     StatechartError,
     UnhandledEvent,
     alphabet,
@@ -81,7 +93,17 @@ def test_the_chart_is_well_formed_and_draws_no_warning() -> None:
     assert alphabet(CHART) == sorted(
         ["activate", "drain", "evict", FORCE_EVICT, "quarantine", "reinstate", REGISTER]
     )
-    assert not CHART.actions  # the tier writes the row from the leaf after the microstep
+    entries = {name: state.entry for name, state in _states(CHART.root).items() if state.entry}
+    assert entries == {
+        leaf: "writes_state" for leaf in ("active", "passive", "quarantined", "evicted")
+    }
+    assert {row.id: row.action for row in CHART.rows if row.action} == {
+        "host.05": "remembers",
+        "host.10": "evicts",
+        "host.11": "evicts_forced",
+    }
+    assert not [b.id for choice in CHART.choices for b in choice.branches if b.action]
+    assert set(CHART.actions) == {"writes_state", "remembers", "evicts", "evicts_forced"}
     assert {row.code for row in CHART.rows if row.kind == "refusal"} == {
         "host_quarantined",
         "host_not_quarantined",
@@ -89,6 +111,14 @@ def test_the_chart_is_well_formed_and_draws_no_warning() -> None:
         "host_already_evicted",
     }
     assert [(row.id, row.mark) for row in CHART.rows if row.mark] == [("host.12", "spec-only")]
+
+
+def _states(state: State) -> dict[str, State]:
+    found = {state.name: state}
+    for region in state.regions:
+        for child in region.states:
+            found |= _states(child)
+    return found
 
 
 def test_reinstate_at_a_routed_host_is_one_internal_row_and_its_old_ids_stay_retired() -> None:
@@ -261,7 +291,7 @@ def test_the_gate_s_read_is_the_one_it_was(witness: str, deadman_s: float | None
         for force in (False, True):
             cmd = HostCommand(verb=verb, host_id="h", force=force)  # type: ignore[arg-type]
             read = host_move(store, cmd)
-            kind, taken, code = _GATE_AT_BASE[(witness, host_event(cmd).name)]
+            kind, taken, code = _GATE_AT_BASE[(witness, host_event(cmd, actor=None).name)]
             refusals = () if code is None else (code,)
             assert (read.kind, read.rows, read.refusals) == (
                 kind,
@@ -287,7 +317,7 @@ def test_reinstating_puts_back_the_remembered_state(witness: str, branch: str, l
     cmd = HostCommand(verb="reinstate", host_id="h")
     read = host_move(store, cmd)
     assert (read.rows, read.branches) == (("host.07",), ())
-    (moved,) = store.machines.fork().dispatch(KEY, host_event(cmd))
+    (moved,) = store.machines.fork().dispatch(KEY, host_event(cmd, actor=None))
     assert (moved.rows, moved.branches) == (("host.07",), (branch,))
     before = store.revision(KEY)
     store.begin_input()
@@ -300,13 +330,13 @@ def test_reinstating_puts_back_the_remembered_state(witness: str, branch: str, l
 
 
 def test_a_second_quarantine_keeps_what_the_first_interrupted() -> None:
-    """The verb is idempotent on its own: a second call on a quarantined row
-    keeps the remembered state and moves no revision, so a reinstatement
-    still lands where the first quarantine interrupted."""
+    """A second quarantine of a quarantined host is host.06, internal: it
+    reports nothing, so the remembered state stays and no revision moves, and
+    a reinstatement still lands where the first quarantine interrupted."""
     store = _store("drain", "quarantine")
     before = store.revision(KEY)
     store.begin_input()
-    store.quarantine_host("h")
+    apply_host_command(store, HostCommand(verb="quarantine", host_id="h"), actor=None)
     assert store.commit_input() == []
     assert store.revision(KEY) == before
     assert store.hosts["h"].state_before_quarantine == "passive"
@@ -314,6 +344,25 @@ def test_a_second_quarantine_keeps_what_the_first_interrupted() -> None:
     apply_host_command(store, HostCommand(verb="reinstate", host_id="h"), actor=None)
     store.commit_input()
     assert store.hosts["h"].state == "passive"
+
+
+def test_an_intent_the_apply_has_no_verb_for_raises_and_writes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The apply names every intent; one it lacks is a disagreement between
+    the chart and the tier, raised before any write of the row. The copy's
+    hits go to a private directory."""
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+    actions = {**CHART.actions, "writes_state": lambda ctx: Effects(intents=("stray",))}
+    monkeypatch.setattr("dsl41.oracle_state.HOST", replace(CHART, actions=actions))
+    store = _store()
+    row, revision = store.hosts["h"], store.revision(KEY)
+    store.begin_input()
+    with pytest.raises(StatechartError) as raised:
+        apply_host_command(store, HostCommand(verb="drain", host_id="h"), actor=None)
+    assert str(raised.value) == "host: the intent 'stray' has no verb in the apply"
+    assert store.commit_input() == []
+    assert (store.hosts["h"], store.revision(KEY)) == (row, revision)
 
 
 def test_a_refusal_code_the_gate_has_no_sentence_for_raises(
@@ -330,6 +379,93 @@ def test_a_refusal_code_the_gate_has_no_sentence_for_raises(
     store = _store()
     with pytest.raises(StatechartError, match="the refusal code 'host_draining' has no sentence"):
         host_rejection_reason(store, HostCommand(verb="evict", host_id="h"), T0, grace_s=10.0)
+
+
+#: Each moving cell's intents, in the order the outcome reports them: the row's action, then the
+#: entry of the leaf it reaches (statechart-engine ss4). The event carries the actor.
+_EVICTED = HostEntered("evicted")
+_INTENTS: dict[tuple[str, str], tuple[Any, ...]] = {
+    ("active", "drain"): (HostEntered("passive"),),
+    ("passive", "activate"): (HostEntered("active"),),
+    ("active", "quarantine"): (HostRemembered("active"), HostEntered("quarantined")),
+    ("passive", "quarantine"): (HostRemembered("passive"), HostEntered("quarantined")),
+    ("quarantined from active", "reinstate"): (HostEntered("active"),),
+    ("quarantined from passive", "reinstate"): (HostEntered("passive"),),
+    ("quarantined from active", "evict"): (HostEvicted(None), _EVICTED),
+    ("quarantined from passive", "evict"): (HostEvicted(None), _EVICTED),
+    **{
+        (witness, FORCE_EVICT): (HostEvicted(_ACTOR), _EVICTED)
+        for witness in ("active", "passive", "quarantined from active", "quarantined from passive")
+    },
+}
+
+
+@pytest.mark.parametrize("witness", WITNESSES)
+def test_each_cell_s_outcome_carries_its_row_s_intents_then_its_entry_s(witness: str) -> None:
+    """On a bare executor restored at each leaf, every event's one outcome
+    carries the intents its row reports, then those of the entry of the leaf
+    it reaches; a cell with no move reports none, and nothing sends. Nothing
+    reaches the row: only the tier writes it."""
+    store = _store(*WITNESSES[witness])
+    row = store.hosts["h"]
+    for event in alphabet(CHART):
+        if (witness, event) == ("evicted", REGISTER):
+            continue
+        machines = Executor()
+        machines.restore(KEY, CHART, store.machines.active(KEY), HostData(store, "h"))
+        (outcome,) = machines.dispatch(KEY, ChartEvent(event, _ACTOR))
+        assert outcome.intents == _INTENTS.get((witness, event), ()), event
+        assert store.hosts["h"] == row
+
+
+def test_the_initial_entry_reports_nothing() -> None:
+    """A new row is written before its instance starts, so the entry of
+    `active` that the start runs reports no intent."""
+    store = _store()
+    machines = Executor()
+    machines.start(KEY, CHART, HostData(store, "h"))
+    (started,) = machines.run()
+    assert (started.kind, started.intents) == ("started", ())
+    assert machines.active(KEY) == {"host", "routed", "active"}
+
+
+@pytest.mark.parametrize("witness", WITNESSES)
+def test_the_gate_s_read_reports_no_intent_and_applies_nothing(witness: str) -> None:
+    """The gate's read runs no action and no entry, so no command it reads,
+    a rejected one among them, writes the row or moves a revision; the apply
+    of an admitted one moves the revision exactly where its cell has intents."""
+    for verb in ("activate", "drain", "evict", "quarantine", "reinstate"):
+        for force in (False, True):
+            store = _store(*WITNESSES[witness])
+            cmd = HostCommand(verb=verb, host_id="h", force=force)  # type: ignore[arg-type]
+            row, revision = store.hosts["h"], store.revision(KEY)
+            store.begin_input()
+            reason = host_rejection_reason(store, cmd, T0, grace_s=10.0, actor=_ACTOR)
+            assert host_move(store, cmd).intents == ()
+            assert store.commit_input() == []
+            assert (store.hosts["h"], store.revision(KEY)) == (row, revision)
+            if reason is None:
+                store.begin_input()
+                apply_host_command(store, cmd, actor=_ACTOR)
+                moved = (witness, host_event(cmd, actor=None).name) in _INTENTS
+                assert store.commit_input() == ([KEY] if moved else []), (verb, force)
+
+
+def test_an_eviction_bumps_the_generation_once_and_a_forced_one_records_its_actor() -> None:
+    """host.11 reports the actor its event carries, host.10 reports none; each
+    moves the generation by one and forgets the interrupted state."""
+    store = _store("drain", "quarantine")
+    twin = store.fork()
+    store.begin_input()
+    apply_host_command(store, HostCommand(verb="evict", host_id="h", force=True), actor=_ACTOR)
+    store.commit_input()
+    twin.begin_input()
+    apply_host_command(twin, HostCommand(verb="evict", host_id="h"), actor=_ACTOR)
+    twin.commit_input()
+    fields = ("state", "generation", "forced_by", "state_before_quarantine")
+    forced, gated = store.hosts["h"], twin.hosts["h"]
+    assert [getattr(forced, name) for name in fields] == ["evicted", 1, _ACTOR, None]
+    assert [getattr(gated, name) for name in fields] == ["evicted", 1, None, None]
 
 
 def test_the_chart_s_guards_raise_nothing() -> None:
@@ -370,19 +506,14 @@ def test_a_fork_rebuilds_its_own_executor_from_its_rows() -> None:
     apply_host_command(twin, HostCommand(verb="reinstate", host_id="h"), actor=None)
     twin.commit_input()
     assert twin.machines.active(KEY) == {"host", "routed", "active"}
+    assert twin.hosts["h"].state_before_quarantine is None
     assert store.machines.active(KEY) == {"host", "quarantined"}
     assert store.hosts["h"].state == "quarantined"
+    assert store.hosts["h"].state_before_quarantine == "active"
 
 
-@pytest.mark.parametrize(
-    ("write", "state"),
-    [
-        (lambda store: store.set_host_state("h", "passive"), "passive"),
-        (lambda store: store.quarantine_host("h"), "quarantined"),
-        (lambda store: store.evict_host("h", forced_by=None), "evicted"),
-    ],
-)
-def test_a_state_write_no_microstep_made_raises_and_writes_nothing(write: Any, state: str) -> None:
+@pytest.mark.parametrize("state", ["passive", "quarantined", "evicted"])
+def test_a_state_write_no_microstep_made_raises_and_writes_nothing(state: Any) -> None:
     """Only the tier writes a state, from the leaf a microstep reached. A
     write the instance is not in is a bug: it raises before anything is
     written, and the executor does not follow it."""
@@ -390,7 +521,7 @@ def test_a_state_write_no_microstep_made_raises_and_writes_nothing(write: Any, s
     machines, before = store.machines, store.hosts["h"]
     store.begin_input()
     with pytest.raises(StatechartError) as raised:
-        write(store)
+        store.set_host_state("h", state)
     assert store.commit_input() == []
     assert str(raised.value) == (
         f"host 'h': a write of state {state} while its instance is in active, host, routed;"
@@ -451,7 +582,7 @@ def test_a_carried_drain_is_the_configuration_the_next_period_opens_in(tmp_path:
     assert store.machines.active(key) == {"host", "routed", "passive"}
     store.begin_input()
     cmd = HostCommand(verb="activate", host_id=opened.executor_id)
-    (outcome,) = store.machines.dispatch(key, host_event(cmd))
+    (outcome,) = store.machines.dispatch(key, host_event(cmd, actor=None))
     store.commit_input()
     assert outcome.rows == ("host.03",)
     _close(opened)
@@ -495,7 +626,7 @@ def test_every_event_a_poster_sends_is_in_the_alphabet(
     async def operator(
         verb: str, request_id: str, force: bool = False, decision: str = "applied"
     ) -> None:
-        cmd = HostCommand(verb=verb, host_id=LOCAL_EXECUTOR_ID, force=force)  # type: ignore[arg-type]
+        cmd = HostCommand(verb=cast(Any, verb), host_id=LOCAL_EXECUTOR_ID, force=force)
         revision = engine.oracle.store.revision("host:local")
         envelope = Envelope(
             request_id=request_id,
@@ -605,6 +736,52 @@ def test_every_host_input_moves_the_revisions_the_table_implementation_moved() -
     table = _revision_table()
     assert [key for key in recorded if table.get(key) != recorded[key]] == []
     assert table.keys() == recorded.keys()
+
+
+def _keeps_the_memory(store: RuntimeState, host_id: str, state: Any) -> None:
+    store._replace_host(host_id, state=state)
+
+
+#: A wrong action or leaf write each, planted in turn: the recorded table must catch it.
+_PLANTS: dict[str, tuple[dict[str, Any], Any]] = {
+    "remembers active always": (
+        {"remembers": lambda ctx: Effects(intents=(HostRemembered("active"),))},
+        None,
+    ),
+    "remembers nothing": ({"remembers": lambda ctx: None}, None),
+    "a leaf write keeps the memory": ({}, _keeps_the_memory),
+    "a force attributed to nobody": (
+        {"evicts_forced": lambda ctx: Effects(intents=(HostEvicted(None),))},
+        None,
+    ),
+    "a gated eviction bumps twice": (
+        {"evicts": lambda ctx: Effects(intents=(HostEvicted(None), HostEvicted(None)))},
+        None,
+    ),
+    "a gated eviction attributed to the actor": (
+        {"evicts": lambda ctx: Effects(intents=(HostEvicted(ctx.event.payload),))},
+        None,
+    ),
+}
+
+
+@pytest.mark.parametrize("plant", _PLANTS)
+def test_the_recorded_table_catches_a_wrong_write(
+    plant: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each planted action, or a leaf write that keeps the memory, changes
+    records of the per-input revision table. The copy's hits go to a private
+    directory."""
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+    actions, set_host_state = _PLANTS[plant]
+    monkeypatch.setattr(
+        "dsl41.oracle_state.HOST", replace(CHART, actions={**CHART.actions, **actions})
+    )
+    if set_host_state is not None:
+        monkeypatch.setattr(RuntimeState, "set_host_state", set_host_state)
+    recorded = json.loads(_RECORDED.read_text())
+    table = _revision_table()
+    assert [key for key in recorded if table.get(key) != recorded[key]] != []
 
 
 # ---- a statechart error stops the tier (statechart-engine §5)

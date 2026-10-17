@@ -24409,3 +24409,95 @@ relitigate an entry; append a new one.
   tests named). Opus confirmed R1 to R6; its two nits (a comment line over 100 columns, and a
   CHECKS sentence that credited the fork dispatch's hits, which go to a private directory) are
   fixed at landing.
+- DL-376 Every write of `host` is an intent the chart reports: each leaf's entry action reports
+  the state write, the moving rows' actions report the row's other writes, and the apply carries
+  out the outcome's intents in order after the dispatch; the leaf ladder of `apply_host_command`
+  and `quarantine_host`'s early return are gone
+  (2026-10-17; src/dsl41/oracle_state.py, src/dsl41/runner_hosts.py; tests/test_host_chart.py,
+  tests/test_engine_machines.py, tests/test_runner_leadership.py; docs/statechart-engine.md §16;
+  docs/blocks/host-routing.md; docs/state-machines.md (generated))
+  THE AIM. Steps 4 and 1 of the chart simplification on `host` (charts ruling, slice S4b;
+  explorer 1 H1, H4; explorer 3's "4 is available with work"). After the dispatch the apply read
+  the active leaf and picked the write: an unchanged leaf returned, `quarantined` called
+  `quarantine_host`, `evicted` called `evict_host` with `forced_by` from `cmd.force`, anything
+  else called `set_host_state`. The row notes of host.05, .07, .10 and .11 described these
+  writes, but only that ladder connected a row to its write. No outcome changes: no decision,
+  code, revision, row or wire text moves.
+  THE RULE. A state's write is its entry action (DL-366); a row's own writes are its action.
+  Every action reports and nothing writes inside the chart (§5 step 5). This reopens DL-333's
+  apply, which read the leaf after the microstep and wrote the row through the store's verbs:
+  the chart now names each write, and the apply only carries out what the outcome reports.
+  THE INTENTS. Three frozen dataclasses beside the chart: `HostEntered(state)`,
+  `HostRemembered(state)` and `HostEvicted(forced_by)`. The leaves `active`, `passive`,
+  `quarantined` and `evicted` declare one entry action, `writes_state`, which reports
+  `HostEntered` with the leaf it enters, read from the configuration. The initial entry reports
+  nothing: `register_host` writes the row before the instance starts, and a restored instance
+  runs no action. The memory of an interrupted state is quarantine's own (DL-97), so the write of
+  every leaf but `quarantined` clears it, as the old `set_host_state` and `evict_host` did.
+  host.05 (`remembers`) reports `HostRemembered` with the row's state; no write of the command
+  has reached the row, so a drained host's `passive` is what it remembers, and the row action
+  comes before the entry's write, so the quarantined leaf keeps it. host.07 carries no action:
+  its choice reads the remembered state, and the entry of the leaf it reaches clears it.
+  host.10 (`evicts`) reports `HostEvicted(None)`; host.11 (`evicts_forced`) reports
+  `HostEvicted` with the actor its event carries. One `HostEvicted` per eviction, so one
+  generation bump. The choice reads the remembered state before anything is applied, since
+  nothing is applied inside the dispatch. The internal rows .01, .04, .06 and .25 report nothing.
+  THE PAYLOAD. `host_event(cmd, actor=...)` puts the input's `claimed_actor` on every
+  dispatched host event; the actor is keyword-only with no default, and the gate's read passes
+  None. The force is the event's name, `force_evict`, not a payload field: host.11 fires only on
+  it. `forced_by` was `actor if cmd.force else None`; it is now the actor on host.11's event and
+  None on host.10's, which is the same value on every input.
+  THE APPLY. `apply_host_command` dispatches and takes the one outcome, as before. It carries
+  out the outcome's intents in the order the engine reports them, the row's action first and
+  then the entry (§4), each through one store verb: `set_host_state` (the state, and the memory
+  cleared for every leaf but `quarantined`), `remember_host_state` and `evict_host` (the
+  generation bump and the attribution). An intent with no verb is a `StatechartError`. The state
+  is written after the dispatch, so `_replace_host`'s check that a written state is the
+  instance's leaf stays and holds. `quarantine_host` is gone, and with it its early return on a
+  quarantined row (H4): host.06 is internal and reports nothing. `HOST_STATES` lost its only
+  reader and is gone.
+  THE GATE. The gate's read is `resolve`, which runs no action and no entry, so a read reports
+  no intent and nothing reaches the row through a rejected command.
+  CHECKS. The chart keeps its 21 rows, two branches and two guards and gains four actions;
+  `well_formed` and `chart_warnings` pass; the transition gate holds `host` at 25 of 25.
+  tests/host_revisions.json is unchanged and every one of its 1,120 records is equal; it pins a
+  repeated quarantine as revision-neutral and a reinstatement as `passive` with the memory
+  cleared. A differential of the tree against HEAD over 1,600 cells (every state, a memory of
+  none or any of the four states, `forced_by` set or not, two generations, by every verb with
+  and without force and actor) compares the whole row, the commit list, the revision delta, the
+  configuration and the error class: 0 differ, 1,280 of them on a row with a memory, 640 raise
+  on both sides. A parametrized test plants six wrong writes and requires each to break the
+  revision table: remembering `active` always, remembering nothing, a leaf write that keeps the
+  memory, a force attributed to nobody, a second bump on host.10, and host.10 attributed to the
+  event's actor. New tests: on a bare executor restored at each of the five witnesses, every
+  event's one outcome carries its row's intents, then its entry's, and a cell with no move
+  carries none, with the row unwritten; the initial entry reports nothing; the gate's read
+  reports no intent and moves no row or revision for every verb with and without force at every
+  witness, and an admitted command's apply moves the revision exactly where its cell has
+  intents; a forced eviction records its actor, a gated one none, each bumping the generation
+  once. The repeated-quarantine and state-write tests drive the apply and `set_host_state`,
+  since `quarantine_host` is gone. A fork binds each host instance's data to the twin's rows
+  (DL-339), so the actions read the twin's row; the fork test checks that a reinstatement on the
+  twin clears the twin's memory and leaves the source's.
+  THE CONTRACTS. statechart-engine §16's host paragraph said the row's state is written from
+  its leaf; it now says the leaf's entry reports the state write, the rows' actions the other
+  writes, the initial entry nothing, and the apply carries out the intents in order. §4 and §5
+  are applied, not changed. The host-routing card says the same.
+  THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235): no accepted input derives
+  differently, and the revision table is equal. No stored or wired name moves: the store, the
+  seal and the LIST answer carry `HostState` values (protocol-evolution §6), which are
+  unchanged; the intents and the event's payload are never stored, and the actor was already
+  journaled with the input.
+  REVIEW. Semantic class (the effects of a §16 machine's rows move into its actions and
+  entries; DL-333 reopened): one Opus reviewer and one Codex Astra pass, two rounds. Round 1
+  found the same difference from both: a routed row holding a stale quarantine memory kept it
+  under drain or activate where HEAD's write cleared it; no command sequence makes such a row,
+  but a seal carries the field (Codex item 1; Opus O2, 128 of 1,600 cells). Ruled: the memory
+  is quarantine's own, so every leaf's write but `quarantined`'s clears it, and the separate
+  forget intent went. Opus's other items: O1 (two lines over 100 columns: wrapped), O3 (the
+  planted-wrong-action probe was a report: it is a test of six plants), O4 (the actor had a
+  default: keyword-only, none), O5 (a sentence said every host event where the gate's read
+  carries none: "every dispatched host event"). Codex's other probes (the intent order, the
+  revision count under two or three field writes, the initial entry on every path, a replayed
+  forced eviction with no actor, an action on a row that forbids one) found nothing. Round 2:
+  Opus and Codex each re-ran their comparisons against HEAD and confirmed the fixes.

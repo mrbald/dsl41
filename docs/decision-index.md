@@ -386,3 +386,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-373 | A rule of `runtime_assembly` is written once at the source the hierarchy gives it: the phases group as `unbuilt`, `open` and `built`, a rule every member of a... |  |
 | DL-374 | A rule of `supervisor_client` is written once at the source the hierarchy gives it: `alive` holds every state but `closed` and `down` the two with no live... |  |
 | DL-375 | A rule of `host` is written once at the source the hierarchy gives it, and the gate reads the chart with the engine's selection read: host.08 and host.09 are... | [docs/state-machines.md](state-machines.md) |
+| DL-376 | Every write of `host` is an intent the chart reports: each leaf's entry action reports the state write, the moving rows' actions report the row's other writes,... | [docs/blocks/host-routing.md](blocks/host-routing.md), [docs/statechart-engine.md](statechart-engine.md) |

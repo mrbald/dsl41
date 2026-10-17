@@ -14,8 +14,8 @@ does not undo a drain (DL-93).
   with no move is a refusal row with its code. The gate (`host_rejection_reason`) reads it with
   the engine's selection read (`host_move`) and adds the rules that read the input's own facts:
   the eviction bound and the attribution of a force. `apply_host_command` dispatches an applied
-  command and writes the row from the leaf. Both halves are pure functions of the row and the
-  input's own facts, because replay has no live host to probe.
+  command and carries out the intents its rows and entries report. Both halves are pure
+  functions of the row and the input's own facts, because replay has no live host to probe.
 - `routes_new_effects` is ss8's "new effects routed" column as one predicate.
 - What a host is running is the outbox's (S5c), keyed by `effect_id` bound to `executor_id`; a
   second record of "did this run start" would be the parallel model DL-91 exists to catch.
@@ -40,7 +40,14 @@ from typing import Any, Final, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict
 
-from dsl41.oracle_state import FORCE_EVICT, HostRuntime, HostState, RuntimeState
+from dsl41.oracle_state import (
+    FORCE_EVICT,
+    HostEntered,
+    HostEvicted,
+    HostRemembered,
+    HostRuntime,
+    RuntimeState,
+)
 from dsl41.runner_codes import Rejection
 from dsl41.state_machine import Event as ChartEvent
 from dsl41.state_machine import Outcome, StatechartError
@@ -59,8 +66,6 @@ HOST_VERBS: frozenset[str] = frozenset(("activate", "drain", "evict"))
 #: Derived from the verb type (DL-98): a verb added to the type and not to `HOST_VERBS` is a
 #: leader verb, unreachable from the wire until it is listed.
 LEADER_VERBS: frozenset[str] = frozenset(get_args(HostVerb)) - HOST_VERBS
-#: ss8's four routing states: the leaves of a host instance's configuration.
-HOST_STATES: Final[tuple[HostState, ...]] = get_args(HostState)
 
 #: What `kill_allowance` adds to the two graces: the supervisor's own exit after its last wrapper.
 #: Generous on purpose: the wait can be skipped with `--force`, and a short one costs a double run.
@@ -152,10 +157,11 @@ GATED_EVICTION: Final = "host.10"
 FORCED_EVICTION: Final = "host.11"
 
 
-def host_event(cmd: HostCommand) -> ChartEvent:
-    """The chart's event for a host command: its verb, or `force_evict` for
-    `evict --force`."""
-    return ChartEvent(FORCE_EVICT if cmd.verb == "evict" and cmd.force else cmd.verb)
+def host_event(cmd: HostCommand, *, actor: str | None) -> ChartEvent:
+    """The chart's event for a host command: its verb, or `force_evict` for `evict --force`.
+    Its payload is the input's `claimed_actor`, which a forced eviction records (host.11); the
+    gate's read runs no action and passes None."""
+    return ChartEvent(FORCE_EVICT if cmd.verb == "evict" and cmd.force else cmd.verb, actor)
 
 
 def host_move(store: RuntimeState, cmd: HostCommand) -> Outcome:
@@ -164,13 +170,14 @@ def host_move(store: RuntimeState, cmd: HostCommand) -> Outcome:
     It is `Executor.resolve` on the store's instance: selection with no action and no move
     (statechart-engine ss5, DL-335), because the gate also runs where no dry apply precedes it.
     The read names the rows and refusals a dispatch would fire, and no choice branch (DL-375).
+    It runs no action, so it reports no intent and nothing reaches the row.
 
     It reads the instance, not the row, so it agrees with a dispatch only while every dispatch
-    is projected into the row: the apply writes the leaf, and `_replace_host` refuses a state
-    the instance is not in. A call from inside a macrostep of the store's executor raises
-    `ReentrantDispatch`, and a host with no instance raises a `StatechartError`; the gate
-    answers `unknown_host` for a host with no row before it reads."""
-    return store.machines.resolve(cmd.key, host_event(cmd))
+    is projected into the row: the apply carries out the leaf's write, and `_replace_host`
+    refuses a state the instance is not in. A call from inside a macrostep of the store's
+    executor raises `ReentrantDispatch`, and a host with no instance raises a
+    `StatechartError`; the gate answers `unknown_host` for a host with no row before it reads."""
+    return store.machines.resolve(cmd.key, host_event(cmd, actor=None))
 
 
 def _refused(code: str, row: HostRuntime, cmd: HostCommand) -> Rejection:
@@ -296,15 +303,16 @@ def host_rejection_reason(
 
 
 def apply_host_command(store: RuntimeState, cmd: HostCommand, *, actor: str | None) -> None:
-    """Apply one decided host command: dispatch its event, then write the row from the active
-    leaf through the store's verbs (DL-86), inside the input's batch (ss3).
+    """Apply one decided host command: dispatch its event, then carry out the intents of its
+    outcome in the order the outcome reports them, through the store's verbs (DL-86), inside the
+    input's batch (ss3). The intents follow the dispatch, so the instance has its new leaf when
+    the row's state is written, and every guard and action read the row before any write.
 
     A refusal here or a host with no instance means this build is not the chart that decided it:
     a `StatechartError` that stops the tier and names the input on replay (statechart-engine ss5).
     """
     key = cmd.key
-    row = store.host(cmd.host_id)
-    if row is None:
+    if store.host(cmd.host_id) is None:
         error = StatechartError(
             f"host {cmd.verb} on {cmd.host_id!r} is decided applied, but no host instance"
             " holds it: this build is not the state machine that decided it"
@@ -312,7 +320,7 @@ def apply_host_command(store: RuntimeState, cmd: HostCommand, *, actor: str | No
         )
         error.facts = [("machine", "host"), ("instance", repr(key)), ("active", "no instance")]
         raise error
-    event = host_event(cmd)
+    event = host_event(cmd, actor=actor)
     (outcome,) = store.machines.dispatch(key, event)
     if outcome.refusals:
         error = StatechartError(
@@ -322,14 +330,13 @@ def apply_host_command(store: RuntimeState, cmd: HostCommand, *, actor: str | No
             candidates=outcome.rows,
         )
         raise store.machines.explain(error, key, event)
-    active = store.machines.active(key)
-    (leaf,) = [state for state in HOST_STATES if state in active]
-    if leaf == row.state:
-        return
-    if leaf == "quarantined":
-        store.quarantine_host(cmd.host_id)
-    elif leaf == "evicted":
-        # only a forced eviction records an actor; the gated path rests on its preconditions
-        store.evict_host(cmd.host_id, forced_by=actor if cmd.force else None)
-    else:
-        store.set_host_state(cmd.host_id, leaf)
+    for intent in outcome.intents:
+        match intent:
+            case HostEntered(state):
+                store.set_host_state(cmd.host_id, state)
+            case HostRemembered(state):
+                store.remember_host_state(cmd.host_id, state)
+            case HostEvicted(forced_by):
+                store.evict_host(cmd.host_id, forced_by=forced_by)
+            case _:
+                raise StatechartError(f"host: the intent {intent!r} has no verb in the apply")

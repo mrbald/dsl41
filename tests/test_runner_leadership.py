@@ -415,7 +415,7 @@ def test_cm09_five_failed_renewals_quarantine_the_host_and_new_work_is_held(
     eviction bound computed from what those real processes reported.
 
     Every other test of this path calls `note_executor_unreachable` or
-    `quarantine_host` directly, which assumes the three things worth
+    injects `quarantine` directly, which assumes the three things worth
     checking: that a supervisor dying makes the renewal loop report the host
     unreachable, that the report is what reaches the routing table, and that a SPAWN planned
     afterwards is HELD rather than failed against a socket that is not

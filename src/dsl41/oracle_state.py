@@ -36,9 +36,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from dsl41.scan_chart import IDLE as SCAN_IDLE
 from dsl41.scan_chart import QUEUE_SCAN, SCAN_KEY
 from dsl41.state_machine import (
+    INITIAL,
     Branch,
     Choice,
     Context,
+    Effects,
     Exclusion,
     Executor,
     Outcome,
@@ -740,20 +742,21 @@ RUNTIME_ASSEMBLY: Final = Statechart(
 #
 # `HOST` is the declaration (docs/statechart-engine.md). The store's executor,
 # `RuntimeState.machines`, holds one instance per host row under `host_key(host_id)`. The
-# instance's configuration is the host's state; `HostRuntime.state` is its projection, written
-# by the tier from the active leaf after the microstep. Everything that rebuilds the rows
-# rebuilds the executor from them (`rebuild_machines`): an install, a test's witness
-# (`witness_host`), `restore_instances` and `keep_job_instances`. A fork copies the executor
-# (`Executor.fork`, DL-339) and binds each host instance's data to the fork's store. A state
-# write that no microstep made raises a `StatechartError`.
+# instance's configuration is the host's state; `HostRuntime.state` is its projection. Every write
+# of a host command is an intent a row's action or a leaf's entry reports, and the tier carries
+# the outcome's intents out after the dispatch (statechart-engine ss4, ss5). Everything that
+# rebuilds the rows rebuilds the executor from them (`rebuild_machines`): an install, a test's
+# witness (`witness_host`), `restore_instances` and `keep_job_instances`. A fork copies the
+# executor (`Executor.fork`, DL-339) and binds each host instance's data to the fork's store. A
+# state write that no microstep made raises a `StatechartError`.
 #
 # The chart is dispatched only for an applied host command: the gate in `runner_hosts` reads it
 # first with `Executor.resolve`, which moves nothing, and a refusal row carries the gate's code.
 # The gate keeps the rules that read the input's own facts (the deadman, the bound, the
 # attribution of a force), because a rejection is replayed as stored and `last_contact` is
-# re-seeded at resume (DL-94). Rows .01, .04, .06 and .25 are internal: the apply writes nothing
-# and no revision moves. A gap in the chart is a `StatechartError`, which stops the tier
-# (statechart-engine ss5).
+# re-seeded at resume (DL-94). The read runs no action, so it reports no intent. Rows .01, .04,
+# .06 and .25 are internal: they report nothing, the apply writes nothing and no revision moves.
+# A gap in the chart is a `StatechartError`, which stops the tier (statechart-engine ss5).
 
 #: The cite of the routing table's rows.
 _SS8 = "concurrency-model ss8"
@@ -762,6 +765,29 @@ _SS8 = "concurrency-model ss8"
 FORCE_EVICT: Final = "force_evict"
 #: The event of a relay's re-registration. No code posts it (host.12 is spec-only).
 REGISTER: Final = "register"
+
+
+@dataclass(frozen=True)
+class HostEntered:
+    """An intent: write the row's state as the leaf the instance entered. The memory of an
+    interrupted state is quarantine's own, so every other leaf clears it (DL-97, DL-111)."""
+
+    state: HostState
+
+
+@dataclass(frozen=True)
+class HostRemembered:
+    """An intent: remember the state quarantine interrupts (DL-97)."""
+
+    state: HostState
+
+
+@dataclass(frozen=True)
+class HostEvicted:
+    """An intent: bump the generation a returning relay is fenced on, and record the actor of a
+    forced eviction, or None for a gated one (ss8)."""
+
+    forced_by: str | None
 
 
 @dataclass(frozen=True)
@@ -799,10 +825,39 @@ def _remembered_passive(ctx: Context) -> bool:
     return data.row.state_before_quarantine == "passive"
 
 
+def _writes_state(ctx: Context) -> Effects | None:
+    """A leaf's entry reports the row's state, the leaf entered. The initial entry reports
+    nothing: `register_host` writes the row before the instance starts."""
+    if ctx.event.name == INITIAL:
+        return None
+    (leaf,) = [state for state in get_args(HostState) if state in ctx.active]
+    return Effects(intents=(HostEntered(leaf),))
+
+
+def _remembers(ctx: Context) -> Effects:
+    """host.05 reports the state quarantine interrupts, read from the row, which the tier writes
+    only after the dispatch (DL-97)."""
+    data: HostData = ctx.data
+    return Effects(intents=(HostRemembered(data.row.state),))
+
+
+def _evicts(ctx: Context) -> Effects:
+    """host.10 reports an eviction on the gate's proof of the bound, attributed to nobody
+    (ss8, DL-151)."""
+    return Effects(intents=(HostEvicted(forced_by=None),))
+
+
+def _evicts_forced(ctx: Context) -> Effects:
+    """host.11 reports an eviction by force, attributed to the actor the event carries: the
+    input's `claimed_actor`, which the gate requires (ss8, DL-151)."""
+    actor: str | None = ctx.event.payload
+    return Effects(intents=(HostEvicted(forced_by=actor),))
+
+
 #: concurrency-model ss8's routing table, one instance per host row. A new row starts in
 #: `active` (`register_host`); re-registration starts nothing. `touch_host` is not an event:
-#: `last_contact` is outside the semantic projection. Generation and `forced_by` are the row's
-#: data, written by the tier after an eviction.
+#: `last_contact` is outside the semantic projection. A leaf's entry reports the row's state; the
+#: moving rows' actions report the row's other writes. Nothing writes inside the chart.
 HOST: Final = Statechart(
     name="host",
     root=State(
@@ -814,10 +869,19 @@ HOST: Final = Statechart(
                 (
                     State(
                         "routed",
-                        regions=(Region("routing", "active", (State("active"), State("passive"))),),
+                        regions=(
+                            Region(
+                                "routing",
+                                "active",
+                                (
+                                    State("active", entry="writes_state"),
+                                    State("passive", entry="writes_state"),
+                                ),
+                            ),
+                        ),
                     ),
-                    State("quarantined"),
-                    State("evicted"),
+                    State("quarantined", entry="writes_state"),
+                    State("evicted", entry="writes_state"),
                 ),
             ),
         ),
@@ -860,6 +924,7 @@ HOST: Final = Statechart(
             "routed",
             "quarantine",
             "quarantined",
+            action="remembers",
             cite="concurrency-model ss7, ss8, DL-97, DL-291",
             note=(
                 "The leader's renewal failed five times in a row. The row remembers the"
@@ -895,6 +960,7 @@ HOST: Final = Statechart(
             "quarantined",
             "evict",
             "evicted",
+            action="evicts",
             cite=f"{_SS8} preconditions 1-3, DL-151",
             note=(
                 "The gate has proved the bound: a deadman, a contact, and silence past"
@@ -908,6 +974,7 @@ HOST: Final = Statechart(
             FORCE_EVICT,
             "evicted",
             guard="not_evicted",
+            action="evicts_forced",
             cite=f"{_SS8}, DL-111, DL-151",
             false_unreachable="`evicted` refuses a forced eviction with its own row",
             note=(
@@ -1021,6 +1088,12 @@ HOST: Final = Statechart(
         ),
     ),
     guards={"not_evicted": _not_evicted, "remembered_passive": _remembered_passive},
+    actions={
+        "writes_state": _writes_state,
+        "remembers": _remembers,
+        "evicts": _evicts,
+        "evicts_forced": _evicts_forced,
+    },
     clock="logical",
     exclusions=(
         Exclusion(
@@ -1550,9 +1623,10 @@ class RuntimeState:
     def _replace_host(self, host_id: str, **fields: object) -> None:
         """The single host write, on `_replace`'s rule: rebuilt through the model's constructor.
 
-        A write of `state` must be the projection of the instance: the tier writes the leaf after
-        the microstep. A state the instance is not in raises a `StatechartError` before anything
-        is written (statechart-engine ss5). A test's witness writes through `witness_host`.
+        A write of `state` must be the projection of the instance: the tier writes the leaf a
+        microstep entered after the dispatch. A state the instance is not in raises a
+        `StatechartError` before anything is written (statechart-engine ss5). A test's witness
+        writes through `witness_host`.
         """
         key = self.host_key(host_id)
         current = self._hosts.get(host_id) or HostRuntime()
@@ -1718,37 +1792,27 @@ class RuntimeState:
             self._replace_host(host_id, last_contact=at)
 
     def set_host_state(self, host_id: str, state: HostState) -> None:
-        """Write a routed state, `active` or `passive`: a drain, an activate, or the state a
-        reinstatement put back. Eviction is a separate verb: it carries a fence and an
-        attribution."""
+        """Write the leaf a host command's microstep entered (`HostEntered`). Every leaf but
+        `quarantined` clears what quarantine interrupted: the memory is quarantine's own
+        (DL-97, DL-111)."""
         self._require_host(host_id)
-        self._replace_host(host_id, state=state, state_before_quarantine=None)
+        if state == "quarantined":
+            self._replace_host(host_id, state=state)
+        else:
+            self._replace_host(host_id, state=state, state_before_quarantine=None)
 
-    def quarantine_host(self, host_id: str) -> None:
-        """ss8: the leader's own state, set when a host stops answering (host.05).
-
-        Remembers what it interrupted: a drained host that comes back must still be drained.
-        """
-        row = self._require_host(host_id)
-        if row.state == "quarantined":
-            return  # idempotent: repeated unreachability is one fact
-        self._replace_host(host_id, state="quarantined", state_before_quarantine=row.state)
+    def remember_host_state(self, host_id: str, state: HostState) -> None:
+        """ss8: record what quarantine interrupts, so a drained host that comes back is still
+        drained (`HostRemembered`, DL-97)."""
+        self._require_host(host_id)
+        self._replace_host(host_id, state_before_quarantine=state)
 
     def evict_host(self, host_id: str, *, forced_by: str | None) -> None:
-        """ss8: declare a host's work rerouteable.
-
-        It bumps the `generation` a returning relay is fenced on and records the actor of a
-        `--force` that skipped the proof (None when the ss8 preconditions were met). It clears
-        what quarantine interrupted, which is non-null only while quarantined (DL-111).
-        """
+        """ss8: bump the `generation` a returning relay is fenced on and record the actor of a
+        `--force` that skipped the proof, None when the ss8 preconditions were met
+        (`HostEvicted`)."""
         row = self._require_host(host_id)
-        self._replace_host(
-            host_id,
-            state="evicted",
-            generation=row.generation + 1,
-            forced_by=forced_by,
-            state_before_quarantine=None,
-        )
+        self._replace_host(host_id, generation=row.generation + 1, forced_by=forced_by)
 
     # ------------------------------------------------------------------ timers
 
