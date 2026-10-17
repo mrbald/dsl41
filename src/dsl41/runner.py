@@ -733,10 +733,11 @@ class Engine:
         return seal_phase(self._machines.active(pending))
 
     def _seal_exit(self, pending: _PendingSeal, name: str, payload: object = None) -> SealExit:
-        """Post a `committed` or `exception` exit of the boundary; return the `SealExit` its row
-        reports."""
+        """Post a `committed` or `exception` exit of the boundary; return the `SealExit` that the
+        final state's entry reports. An entry's intents join the outcome of the row that entered
+        it (statechart-engine ss4), so the post's one outcome carries it."""
         (exit_,) = self._machines.dispatch(pending, ChartEvent(name, payload))[0].intents
-        assert isinstance(exit_, SealExit)  # every row on an exit event reports one
+        assert isinstance(exit_, SealExit)  # every final state's entry reports one
         return exit_
 
     def abort_boundary(self) -> None:
@@ -771,7 +772,7 @@ class Engine:
             self._seal = None
 
     async def _boundary_exits(self, pending: _PendingSeal) -> None:
-        """Post the boundary's exit to `SEAL_BOUNDARY` and carry out the `SealExit` its row reports.
+        """Post the boundary's exit to `SEAL_BOUNDARY` and carry out the `SealExit` it reports.
 
         An exception is posted with the facts its rows read (`_seal_fault`). It is not only
         EngineError: an OSError from a pre-PONR write, fsync or rename is as reversible, and

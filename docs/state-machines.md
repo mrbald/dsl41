@@ -1189,22 +1189,20 @@ stateDiagram-v2
     }
     s5 --> s3 : seal_boundary.01 parked
     s3 --> s2 : seal_boundary.02 quiesced
-    s2 --> s6 : seal_boundary.03 committed / answer
-    s4 --> s0 : seal_boundary.04 exception [reversible] / abort
-    s4 --> s7 : seal_boundary.05 exception [fence_lost] / stop
-    s4 --> s7 : seal_boundary.06 exception [in_doubt] / stop_in_doubt
-    s4 --> s7 : seal_boundary.07 exception [past_ponr] / stop
+    s2 --> s6 : seal_boundary.03 committed
+    s4 --> s0 : seal_boundary.04 exception [reversible]
+    s4 --> s7 : seal_boundary.13 exception [stops]
+    s4 --> s7 : seal_boundary.06 exception [in_doubt]
 ```
 
 | Id | Source | Event | Guard | Action | Target | Kind | Cite |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | seal_boundary.01 | requested | parked |  | The barrier parked: admission is frozen and FW polls are parked (ss6 step 2). | frozen | external | period-model ss6 step 2, ss8, PR-28c |
 | seal_boundary.02 | frozen | quiesced |  | The cutoff is chosen, drained and quiescent, and the supervisor proof holds (ss6 steps 3-7, ss8). `commit_boundary` runs next (step 8). | committing | external | period-model ss6 steps 3-8, PR-27 |
-| seal_boundary.03 | committing | committed |  | answer | sealed | external | period-model ss7 |
-| seal_boundary.04 | in_flight | exception | reversible | abort | aborted | external | period-model ss7, PR-28b |
-| seal_boundary.05 | in_flight | exception | fence_lost | stop | stopped | external | period-model ss7, DL-101, PR-28b |
-| seal_boundary.06 | in_flight | exception | in_doubt | stop_in_doubt | stopped | external | DL-274 |
-| seal_boundary.07 | in_flight | exception | past_ponr | stop | stopped | external | period-model ss7 |
+| seal_boundary.03 | committing | committed |  |  | sealed | external | period-model ss7 |
+| seal_boundary.04 | in_flight | exception | reversible |  | aborted | external | period-model ss7, PR-28b |
+| seal_boundary.13 | in_flight | exception | stops |  | stopped | external | period-model ss7, DL-101, PR-28b |
+| seal_boundary.06 | in_flight | exception | in_doubt |  | stopped | external | DL-274 |
 | seal_boundary.09 | boundary | parked | over |  |  | ignored | statechart-engine ss10 |
 | seal_boundary.10 | boundary | quiesced | over |  |  | ignored | statechart-engine ss10 |
 | seal_boundary.11 | boundary | committed | over |  |  | ignored | statechart-engine ss10 |
@@ -1214,21 +1212,19 @@ stateDiagram-v2
 | --- | --- | --- | --- | --- | --- |
 | boundary |  |  |  |  |  |
 | in_flight | boundary/phase |  |  |  |  |
-| requested | in_flight/phase |  |  |  |  |
-| frozen | in_flight/phase |  |  |  |  |
-| committing | in_flight/phase |  |  |  |  |
-| sealed (final) | boundary/phase |  |  |  |  |
-| aborted (final) | boundary/phase |  |  |  |  |
-| stopped (final) | boundary/phase |  |  |  |  |
+| requested | in_flight/progress |  |  |  |  |
+| frozen | in_flight/progress |  |  |  |  |
+| committing | in_flight/progress |  |  |  |  |
+| sealed (final) | boundary/phase | answer |  |  |  |
+| aborted (final) | boundary/phase | abort |  |  |  |
+| stopped (final) | boundary/phase | stop |  |  |  |
 
 | Name | Kind | Prose |
 | --- | --- | --- |
-| past_ponr | guard | The exception is `BoundaryFailStop`: the `seal` append may have begun, so the outcome is unknown and recovery decides (PR-28d). The engine exits 4. Checked first. |
-| fence_lost | guard | Not `BoundaryFailStop`, and the fence is lost: a leader that cannot prove it leads does not reopen admission (DL-101, PR-28b). It takes precedence over DL-274's flags. |
+| stops | guard | Past the point of no return, or the fence lost. Past it, the `seal` append may have begun, so the outcome is unknown and recovery decides (PR-28d): the engine exits 4. A leader that cannot prove it leads does not reopen admission (DL-101, PR-28b). Either stops with no abort and no note, and takes precedence over DL-274's flags. |
 | in_doubt | guard | Not `BoundaryFailStop`, the fence intact, and memory or the WAL in doubt: an attempt admitted during the seal is not fully applied, an engine-made input the drain could not admit would be lost, or a WAL append is unfinished (DL-274). |
 | reversible | guard | Not `BoundaryFailStop`, the fence intact, and nothing in doubt: every other exception before the `seal` append. A refusal before the freeze, a phase-2 refusal, the drain's timeout, a late input (`seal_input_after_cutoff`) and a failed sidecar write are among them (PR-28b). |
 | over | guard | The boundary rests in a final state. Nothing posts to it then: an aborted boundary is forgotten at once, a sealed one once the answer has had its turns, and a stop ends the engine. In flight, an event out of order finds no row and raises `UnhandledEvent`. |
-| answer | action | Answer the request with the committed boundary, then raise `PeriodSealed`: the engine exits 3 (PR-30b). |
-| abort | action | Run `abort_boundary` and fail the request with the exception. The abort clears the sealing flag, reopens control admission, restarts scheduler admission and unparks FW polls. It touches no row, and C1 carries on (PR-28b). |
-| stop | action | Re-raise without an abort. The request is not answered. |
-| stop_in_doubt | action | Note which fact stopped the seal, then re-raise without an abort. Neither the request nor an attempt whose answer was owed is answered. Resume repairs the WAL tail and rebuilds from the WAL (DL-274). |
+| answer | action | `sealed`: answer the request with the committed boundary, then raise `PeriodSealed`: the engine exits 3 (PR-30b). |
+| abort | action | `aborted`: run `abort_boundary` and fail the request with the exception. The abort clears the sealing flag, reopens control admission, restarts scheduler admission and unparks FW polls. It touches no row, and C1 carries on (PR-28b). |
+| stop | action | `stopped`: re-raise without an abort. The request is not answered. In doubt, a note names the first of DL-274's flags that is set. An attempt whose answer was owed is not answered either, and resume repairs the WAL tail and rebuilds from the WAL. Past the point of no return, or with the fence lost, there is no note. |
