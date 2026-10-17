@@ -160,6 +160,38 @@ def test_the_completeness_table_is_section_5() -> None:
     assert len(table) == len(PHASES) * per_witness
 
 
+def test_the_challenger_reads_ttl_alone_and_never_computes_the_expiry() -> None:
+    """`challenger` reads ttl_s through its named test and never computes the expiry: an
+    unnamed request reads no ttl_s, and a named one leaves the expiry uncomputed over the
+    ttl_s shapes below, an unrepresentable one included."""
+    challenger = CHART.guards["challenger"]
+    active = frozenset({"lease", "held", "live"})
+    lease = runner_supervisor._Lease("h", TOKEN, NOW + 60, "then", HOLDER)
+    executor = runner_supervisor.Executor()
+    data = SimpleNamespace(
+        lease=lease, incarnation=INCARNATION, _next_token=TOKEN + 1, _machines=executor
+    )
+    executor.restore("lease", CHART, set(active), data)
+
+    def held(request: runner_supervisor._LeaseRequest) -> bool:
+        event = runner_supervisor.Event("ACQUIRE", request)
+        return bool(challenger(runner_supervisor.Context("lease", event, active, data)))
+
+    seen = {}
+    for ttl, value in _TTLS.items():
+        for creds, fields in _CREDENTIALS.items():
+            request = _request({"controller_id": "c", "ttl_s": value, **fields})
+            seen[(ttl, creds)] = held(request)
+            assert request._expiry is None, (ttl, creds)
+    assert seen == {
+        (ttl, creds): ttl != "unparsed" and creds != "current"
+        for ttl in _TTLS
+        for creds in _CREDENTIALS
+    }
+    unnamed = _request({"controller_id": "", "ttl_s": 60})
+    assert held(unnamed) is False and unnamed._ttl is None and unnamed._expiry is None
+
+
 # ---- the alphabet (DL-325)
 
 

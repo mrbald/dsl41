@@ -8,6 +8,8 @@ in the chart's alphabet, and the chart declares no action. A statechart error
 on the client's path stops `dsl41 run` with exit 7 and the report, from the
 renewal task, the reader task and the teardown's close alike; outside a run
 the client keeps one a background task met, and the offline sealer exits 7.
+A rule is one row on the group whose leaves all take it (DL-374): every cell
+answers as DL-330's flat chart did, and a row deleted leaves a gap.
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ from dsl41.period import runtime_profile_from_cli, wal_path
 from dsl41.runner import Engine
 from dsl41.runner_adapters import (
     CANCEL,
+    CLIENT_PHASES,
     CLOSE,
     CONNECT,
     EOF,
@@ -51,6 +54,7 @@ from dsl41.state_machine import (
     STATECHART_LOG_PREFIX,
     Context,
     Executor,
+    State,
     StatechartError,
     UnhandledEvent,
     alphabet,
@@ -61,6 +65,18 @@ from dsl41.state_machine import Event as ChartEvent
 
 CHART = SUPERVISOR_CLIENT
 _LEAVES = ("disconnected", "connected", "lost", "closed")
+#: each leaf's configuration: the leaf and the groups above it
+_CONFIGURATION: dict[str, frozenset[str]] = {
+    "disconnected": frozenset({"client", "alive", "down", "disconnected"}),
+    "connected": frozenset({"client", "alive", "connected"}),
+    "lost": frozenset({"client", "alive", "down", "lost"}),
+    "closed": frozenset({"client", "closed"}),
+}
+#: each group row and the leaves it is the rule of
+_GROUP_ROWS: dict[str, tuple[str, frozenset[str]]] = {
+    "supervisor_client.01": ("down", frozenset({"disconnected", "lost"})),
+    "supervisor_client.05": ("alive", frozenset({"disconnected", "connected", "lost"})),
+}
 
 
 def _row(number: str) -> str:
@@ -73,6 +89,154 @@ def test_the_chart_is_well_formed_and_draws_no_warning() -> None:
     assert CHART.clock == "logical"
     assert CHART.time_events == () and CHART.defer_bound == 0
     assert CHART in MACHINES
+
+
+def _parents(state: State) -> dict[str, str]:
+    """Each state below `state` to its parent."""
+    found: dict[str, str] = {}
+    for region in state.regions:
+        for child in region.states:
+            found[child.name] = state.name
+            found |= _parents(child)
+    return found
+
+
+def _regions(state: State) -> list[str]:
+    """The name of every region below `state`, nested ones included."""
+    return [
+        name
+        for region in state.regions
+        for name in (region.name, *(n for child in region.states for n in _regions(child)))
+    ]
+
+
+def test_the_leaves_are_the_phases_under_their_groups() -> None:
+    """`alive` holds every state but `closed`, and `down` the two with no live connection
+    (DL-374). `phase()` reads the leaf alone, so the groups are invisible to it; each
+    region has its own name."""
+    parents = _parents(CHART.root)
+    leaves = {name for name in parents if name not in parents.values()}
+    assert leaves == set(_LEAVES) == CLIENT_PHASES
+    assert parents == {
+        "alive": "client",
+        "closed": "client",
+        "down": "alive",
+        "connected": "alive",
+        "disconnected": "down",
+        "lost": "down",
+    }
+    names = _regions(CHART.root)
+    assert names == ["phase", "connection", "epoch"]
+    assert set(names) & set(parents) == set()  # no region shares a state's name
+    for leaf, configuration in _CONFIGURATION.items():
+        assert {leaf} | {parents[name] for name in configuration if name in parents} == (
+            configuration
+        )
+
+
+def test_the_group_rows_are_unguarded_and_sourced_at_their_groups() -> None:
+    """Rows .01 and .05 are the rules of `down` and `alive`; no member has its own row for
+    connect or close, and only `over`, the root's test for `closed`, is left (DL-374)."""
+    rows = {row.id: row for row in CHART.rows}
+    for row_id, (group, _members) in _GROUP_ROWS.items():
+        assert rows[row_id].source == group and rows[row_id].guard == ""
+    for row_id, (group, members) in _GROUP_ROWS.items():
+        event = rows[row_id].event
+        inner = {row.id for row in CHART.rows if row.event == event and row.source in members}
+        assert inner == set(), row_id
+        assert {leaf for leaf in _LEAVES if group in _CONFIGURATION[leaf]} == members
+    assert set(CHART.guards) == {"over"}
+    # the group rows take every connect and close in `alive`: `over` is never false there
+    assert {row.id for row in CHART.rows if row.false_unreachable} == {_row("08"), _row("11")}
+    assert {row.id for row in CHART.rows if row.guard} == {_row(f"{n:02}") for n in range(8, 12)}
+
+
+#: Each cell as the flat chart of DL-330 answered it: the fired row and the leaf after, or
+#: `UnhandledEvent` for the two excluded cells. Generated once from that declaration's
+#: executor; the groups (DL-374) must answer every cell the same.
+FLAT: dict[tuple[str, str], tuple[str, str] | None] = {
+    ("disconnected", CANCEL): None,
+    ("disconnected", CLOSE): ("05", "closed"),
+    ("disconnected", CONNECT): ("01", "connected"),
+    ("disconnected", EOF): None,
+    ("connected", CANCEL): ("04", "lost"),
+    ("connected", CLOSE): ("05", "closed"),
+    ("connected", CONNECT): ("02", "connected"),
+    ("connected", EOF): ("03", "lost"),
+    ("lost", CANCEL): ("06", "lost"),
+    ("lost", CLOSE): ("05", "closed"),
+    ("lost", CONNECT): ("01", "connected"),
+    ("lost", EOF): ("07", "lost"),
+    ("closed", CANCEL): ("10", "closed"),
+    ("closed", CLOSE): ("11", "closed"),
+    ("closed", CONNECT): ("08", "closed"),
+    ("closed", EOF): ("09", "closed"),
+}
+
+
+def _restored(leaf: str, chart: Any = CHART) -> Executor:
+    executor = Executor()
+    executor.restore("client", chart, set(_CONFIGURATION[leaf]))
+    return executor
+
+
+def test_every_cell_answers_as_the_flat_chart_did() -> None:
+    """16 of 16 cells: the same row fires and the same leaf is reached, with its groups;
+    the two excluded cells still find no row."""
+    for (leaf, event), answer in FLAT.items():
+        executor = _restored(leaf)
+        if answer is None:
+            with pytest.raises(UnhandledEvent, match=f"no row and no deferral for {event}"):
+                executor.dispatch("client", ChartEvent(event))
+            continue
+        (outcome,) = executor.dispatch("client", ChartEvent(event))
+        assert (outcome.kind, outcome.rows, outcome.refusals) == ("fired", (_row(answer[0]),), ())
+        assert executor.active("client") == _CONFIGURATION[answer[1]], (leaf, event)
+    assert len(FLAT) == len(_LEAVES) * len(alphabet(CHART))
+
+
+@pytest.fixture
+def private_hits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A chart copy with a row deleted reaches the root's `over` rows from `alive`; its hits
+    go to a private directory so the gate, which forbids `over` false on .08 and .11, does
+    not count them."""
+    directory = tmp_path / "hits"
+    directory.mkdir()
+    monkeypatch.setenv(HITS_ENV, str(directory))
+
+
+@pytest.mark.usefixtures("private_hits")
+@pytest.mark.parametrize("row_id", sorted(_GROUP_ROWS))
+def test_a_group_row_deleted_leaves_a_gap_at_every_member(row_id: str) -> None:
+    """No member has its own row for the group row's event, so a chart copy without it
+    raises `UnhandledEvent` at each leaf it was the rule of, with the leaf unmoved, and
+    never falls into the root's `over` rows."""
+    (rule,) = (row for row in CHART.rows if row.id == row_id)
+    _group, members = _GROUP_ROWS[row_id]
+    gapped = replace(CHART, rows=tuple(row for row in CHART.rows if row.id != row_id))
+    for leaf in sorted(members):
+        executor = _restored(leaf, gapped)
+        with pytest.raises(UnhandledEvent, match=f"no row and no deferral for {rule.event}"):
+            executor.dispatch("client", ChartEvent(rule.event))
+        assert executor.active("client") == _CONFIGURATION[leaf]
+
+
+@pytest.mark.usefixtures("private_hits")
+def test_no_row_deleted_falls_into_another_row() -> None:
+    """Every row of the chart: without it, each cell it took is a gap and every other cell
+    answers as before."""
+    for row in CHART.rows:
+        gapped = replace(CHART, rows=tuple(r for r in CHART.rows if r.id != row.id))
+        for (leaf, event), answer in FLAT.items():
+            if answer is None:
+                continue
+            took = _row(answer[0])
+            if took == row.id:
+                with pytest.raises(UnhandledEvent):
+                    _restored(leaf, gapped).dispatch("client", ChartEvent(event))
+                continue
+            (other,) = _restored(leaf, gapped).dispatch("client", ChartEvent(event))
+            assert other.rows == (took,), (row.id, leaf, event)
 
 
 # ---- the abstraction (§13)
@@ -509,13 +673,13 @@ def test_every_event_the_client_posts_is_in_the_alphabet(short_root: Path, peers
 
 def test_the_chart_declares_no_action_and_its_guards_raise_nothing() -> None:
     """Every transport effect is the tier's (see the module's comment), so no
-    row has an action. The guards read the configuration only."""
+    row has an action. The guard reads the configuration only."""
     assert CHART.actions == {}
     for leaf in _LEAVES:
         for event in alphabet(CHART):
-            ctx = Context(None, ChartEvent(event), frozenset({"client", leaf}), None)
+            ctx = Context(None, ChartEvent(event), _CONFIGURATION[leaf], None)
             outcomes = {name: guard(ctx) for name, guard in CHART.guards.items()}
-            assert all(isinstance(held, bool) for held in outcomes.values())
+            assert outcomes == {"over": leaf == "closed"}
 
 
 # ---- a statechart error on the client's path (statechart-engine ss5)
@@ -534,12 +698,12 @@ def _without(*numbers: str) -> dict[str, Any]:
     return {"rows": tuple(row for row in CHART.rows if row.id not in {_row(n) for n in numbers})}
 
 
-def _first_connect_only(ctx: Context) -> bool:
-    """A gap: the first connect is taken, a reconnect from lost is not."""
-    return "disconnected" in ctx.active
-
-
-_RECONNECT_GAP = {"guards": {**CHART.guards, "down": _first_connect_only}}
+#: a gap: the first connect is taken, a reconnect from lost is not
+_RECONNECT_GAP = {
+    "rows": tuple(
+        replace(row, source="disconnected") if row.id == _row("01") else row for row in CHART.rows
+    )
+}
 _JIL = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
 
 
@@ -634,10 +798,10 @@ def test_a_statechart_error_in_a_background_task_stops_the_run_with_exit_7(
     reconnects on the transport's word, gives the lease back and closes."""
     if task == "renewal":
         _gapped(monkeypatch, tmp_path, **_RECONNECT_GAP)
-        first = "no row and no deferral for connect in ['client', 'lost']"
+        first = "no row and no deferral for connect in ['alive', 'client', 'down', 'lost']"
     else:
         _gapped(monkeypatch, tmp_path, **_without("03"))
-        first = "no row and no deferral for eof in ['client', 'connected']"
+        first = "no row and no deferral for eof in ['alive', 'client', 'connected']"
     run_root = short_root / "root"
     code, steps_after = _serve_detached(run_root, monkeypatch, peers, _drop)
     assert code == 7 and steps_after == []
@@ -686,7 +850,7 @@ def test_a_statechart_error_during_the_lease_s_return_exits_7(
     )
     assert code == 7
     report = _report(capsys.readouterr().err)
-    gap = "no row and no deferral for eof in ['client', 'connected']"
+    gap = "no row and no deferral for eof in ['alive', 'client', 'connected']"
     assert gap in report[0] and sum(gap in line for line in report) == 1, report[:3]
     assert peers[0].seen[-1] == "RELEASE"
     acquire_run_root(run_root).release()
@@ -733,7 +897,7 @@ def test_a_statechart_error_at_the_teardown_s_close_exits_7(
         stops_on_statechart_error(verb)()
     assert stopped.value.exit_code == 7
     report = _report(capsys.readouterr().err)
-    gap = "no row and no deferral for close in ['client', 'connected']"
+    gap = "no row and no deferral for close in ['alive', 'client', 'connected']"
     assert gap in report[0] and sum(gap in line for line in report) == 1, report[:3]
     (client,) = clients
     assert client._writer is None and client._reader_task is None
@@ -787,7 +951,7 @@ def test_a_lease_return_that_raises_still_judges_the_run_and_names_the_next_step
     assert stopped.value.exit_code == 7
     out, err = capsys.readouterr()
     report = _report(err)
-    gap = "no row and no deferral for close in ['client', 'connected']"
+    gap = "no row and no deferral for close in ['alive', 'client', 'connected']"
     assert report[0] == f"{STATECHART_LOG_PREFIX}: met while the server closed", report[:3]
     assert sum(gap in line for line in report) == 1
     assert any(line.startswith("detached: reattach") for line in out.splitlines()), out
@@ -845,7 +1009,7 @@ def test_the_offline_sealer_exits_7_when_the_client_meets_a_gap(
     assert result.exit_code == 7, result.output
     lines = result.output.splitlines()
     assert f"{STATECHART_LOG_PREFIX}: machine: supervisor_client" in lines
-    gap = "no row and no deferral for eof in ['client', 'connected']"
+    gap = "no row and no deferral for eof in ['alive', 'client', 'connected']"
     assert sum(gap in line for line in lines) == 1  # reported once, not again at close
     (peer,) = peers
     assert peer.seen.count("LIST") == {"resume": 1, "proof": 2}[where]

@@ -150,10 +150,12 @@ Shown: 4. Folded: 7 (ignored 5, internal 2). Rows in the chart: 11.
 
 ```text
 disconnected <- initial
-connected = client + connect [down]
+alive = {down, connected}
+down = {disconnected, lost}
 lost = connected + cancel
     || connected + eof
-closed = client + close [open]
+connected = down + connect
+closed = alive + close
 ```
 
 ## host

@@ -584,8 +584,7 @@ def _same(ctx: Context) -> bool:
 
 def _other(ctx: Context) -> bool:
     """The input carries another fingerprint than the attempt's."""
-    attempt: Attempt = ctx.data
-    return bool(ctx.event.payload != attempt.fingerprint)
+    return not _same(ctx)
 
 
 def _decided(ctx: Context) -> bool:

@@ -1159,19 +1159,7 @@ CLOSE: Final = "close"
 CLIENT_PHASES: Final = frozenset({"disconnected", "connected", "lost", "closed"})
 
 
-# -- the guards. Each docstring is its rows' prose.
-
-
-def _down(ctx: Context) -> bool:
-    """No connection is live: the client is disconnected, before its first connect, or lost. A
-    connected client takes `supervisor_client.02`, and a closed one posts nothing."""
-    return bool(ctx.active & {"disconnected", "lost"})
-
-
-def _open(ctx: Context) -> bool:
-    """The client is not closed yet: from disconnected, connected or lost, close cancels the
-    renewal, reader and LIST tasks, then closes the writer."""
-    return "closed" not in ctx.active
+# -- the guard. Its docstring is its rows' prose.
 
 
 def _over(ctx: Context) -> bool:
@@ -1193,7 +1181,9 @@ _NO_REQUEST = (
 )
 
 #: the engine side's connection to the supervisor (supervisor-protocol ss5), one instance per
-#: client
+#: client. `alive` holds every state but the final `closed`, and `down` the two with no live
+#: connection, before the first connect and after a loss; each group is the source of the one
+#: rule all its members take, and no member has its own row for that event.
 SUPERVISOR_CLIENT: Final = Statechart(
     name="supervisor_client",
     root=State(
@@ -1201,11 +1191,30 @@ SUPERVISOR_CLIENT: Final = Statechart(
         regions=(
             Region(
                 "phase",
-                "disconnected",
+                "alive",
                 (
-                    State("disconnected"),
-                    State("connected"),
-                    State("lost"),
+                    State(
+                        "alive",
+                        regions=(
+                            Region(
+                                "connection",
+                                "down",
+                                (
+                                    State(
+                                        "down",
+                                        regions=(
+                                            Region(
+                                                "epoch",
+                                                "disconnected",
+                                                (State("disconnected"), State("lost")),
+                                            ),
+                                        ),
+                                    ),
+                                    State("connected"),
+                                ),
+                            ),
+                        ),
+                    ),
                     State("closed", final=True),
                 ),
             ),
@@ -1214,10 +1223,9 @@ SUPERVISOR_CLIENT: Final = Statechart(
     rows=(
         Row(
             "supervisor_client.01",
-            "client",
+            "down",
             CONNECT,
             "connected",
-            guard="down",
             cite="supervisor-protocol ss5, DL-48, DL-79",
             note=(
                 "A new epoch: the tier closes a writer the lost connection kept and"
@@ -1262,11 +1270,14 @@ SUPERVISOR_CLIENT: Final = Statechart(
         ),
         Row(
             "supervisor_client.05",
-            "client",
+            "alive",
             CLOSE,
             "closed",
-            guard="open",
             cite="DL-48",
+            note=(
+                "From disconnected, connected or lost, the tier cancels the renewal, reader"
+                " and LIST tasks, then closes the writer."
+            ),
         ),
         Row(
             "supervisor_client.06",
@@ -1298,6 +1309,10 @@ SUPERVISOR_CLIENT: Final = Statechart(
             guard="over",
             kind="ignored",
             cite="statechart-engine ss10",
+            false_unreachable=(
+                "rows .01 and .02 take every connect in `alive`, so the walk reaches the root"
+                " only from `closed`"
+            ),
         ),
         Row(
             "supervisor_client.09",
@@ -1322,9 +1337,13 @@ SUPERVISOR_CLIENT: Final = Statechart(
             guard="over",
             kind="ignored",
             cite="statechart-engine ss10",
+            false_unreachable=(
+                "row .05 takes every close in `alive`, so the walk reaches the root only from"
+                " `closed`"
+            ),
         ),
     ),
-    guards={"down": _down, "open": _open, "over": _over},
+    guards={"over": _over},
     clock="logical",
     exclusions=(
         Exclusion("disconnected", EOF, _NO_READER),
