@@ -218,7 +218,7 @@ closed = open + stream_ends
 
 ## seal_boundary
 
-Shown: 7. Folded: 4 (ignored 4). Rows in the chart: 11.
+Shown: 6. Folded: 4 (ignored 4). Rows in the chart: 10.
 
 ### phase
 
@@ -229,7 +229,6 @@ frozen = requested + parked
 committing = frozen + quiesced
 sealed = committing + committed
 aborted = in_flight + exception [reversible]
-stopped = in_flight + exception [fence_lost]
-       || in_flight + exception [in_doubt]
-       || in_flight + exception [past_ponr]
+stopped = in_flight + exception [in_doubt]
+       || in_flight + exception [stops]
 ```

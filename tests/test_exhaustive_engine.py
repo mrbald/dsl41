@@ -1439,19 +1439,19 @@ _FROZEN = ("seal_boundary.01",)
 _COMMITTING = ("seal_boundary.01", "seal_boundary.02")
 _SEAL_CELLS: dict[str, tuple[tuple[str, ...], str, str]] = {
     "requested: refused": (("seal_boundary.04",), "aborted", ""),
-    "requested: fence lost": (("seal_boundary.05",), "stopped", ""),
+    "requested: fence lost": (("seal_boundary.13",), "stopped", ""),
     "requested: cancelled": ((), "requested", ""),
     "frozen: refused": ((*_FROZEN, "seal_boundary.04"), "aborted", ""),
-    "frozen: fence lost": ((*_FROZEN, "seal_boundary.05"), "stopped", ""),
+    "frozen: fence lost": ((*_FROZEN, "seal_boundary.13"), "stopped", ""),
     "frozen: an attempt applying": ((*_FROZEN, "seal_boundary.06"), "stopped", "not fully applied"),
     "frozen: an input unadmitted": ((*_FROZEN, "seal_boundary.06"), "stopped", "unadmitted"),
     "frozen: a WAL append unfinished": ((*_FROZEN, "seal_boundary.06"), "stopped", "WAL append"),
     "frozen: cancelled": (_FROZEN, "frozen", ""),
     "committing: the commit returns": ((*_COMMITTING, "seal_boundary.03"), "sealed", ""),
     "committing: refused": ((*_COMMITTING, "seal_boundary.04"), "aborted", ""),
-    "committing: fence lost": ((*_COMMITTING, "seal_boundary.05"), "stopped", ""),
+    "committing: fence lost": ((*_COMMITTING, "seal_boundary.13"), "stopped", ""),
     "committing: past the point of no return": (
-        (*_COMMITTING, "seal_boundary.07"),
+        (*_COMMITTING, "seal_boundary.13"),
         "stopped",
         "",
     ),

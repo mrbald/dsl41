@@ -18,7 +18,7 @@ It needs atomic multi-record commit too: the `seal` record is one line, and the 
 ## Interface
 
 - Wire: the `seal` verb ([control-protocol §3, `seal`](../control-protocol.md#seal-dl-133-period-model-22)). `Engine.submit_seal` holds one request, and a second is refused with `seal_in_flight`.
-- Engine: `Engine._seal_boundary` runs one seal inside the loop. The engine's `Executor` runs `SEAL_BOUNDARY` for it, one instance per request: the engine posts what happened, and the row it takes reports what the engine does next. `Engine.sealing` reads `SealBarrier.parked`.
+- Engine: `Engine._seal_boundary` runs one seal inside the loop. The engine's `Executor` runs `SEAL_BOUNDARY` for it, one instance per request: the engine posts what happened, and the entry of the final state the boundary rests in reports what the engine does next. `Engine.sealing` reads `SealBarrier.parked`.
 - Operation: `commit_boundary` in `boundary.py` performs the seal's writes in [period-model §7](../period-model.md#7-the-seal-operation)'s order. `Engine.abort_boundary` releases the freeze, and the period stays open. It touches no row.
 - Anchor: `EstateAnchor` with `create_open`, `close_period`, `claim_successor`, `open_claimed`, `finalize`, `attest` and `reclaim`. `row_tag` derives a registry row's state from its flags.
 - Resume: `act_on_head` repairs the one crash window each head state can leave, before anything is replayed ([period-model §11](../period-model.md#11-resume-replay-and-recovery)).

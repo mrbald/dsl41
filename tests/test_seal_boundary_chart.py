@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import json
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime
@@ -40,6 +41,7 @@ from dsl41.runner_seal import (
     SEAL_BOUNDARY,
     SealExit,
     SealFault,
+    seal_phase,
 )
 from dsl41.state_machine import (
     HITS_ENV,
@@ -140,9 +142,9 @@ def _section_7(phase: str, event: str, label: str) -> str:
         return _row({PARKED: "01", QUIESCED: "02", COMMITTED: "03"}[event])
     error, fence, flags = label.split("/")
     if error == "past_ponr":
-        return _row("07")
+        return _row("13")
     if fence == "lost":
-        return _row("05")
+        return _row("13")
     if flags != "none":
         return _row("06")
     return _row("04")
@@ -195,12 +197,139 @@ def test_the_in_doubt_note_names_the_first_flag(flags: tuple[str, ...], named: s
     assert exit_.verdict == "stop" and exit_.note.startswith("DL-274: ") and named in exit_.note
 
 
+def _labelled(label: str) -> SealFault:
+    error, fence, flags = label.split("/")
+    return _fault(error, fence, () if flags == "none" else tuple(flags.split("+")))
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "past_ponr/intact/applying+unadmitted+unfinished",
+        "past_ponr/lost/applying",
+        "oserror/lost/applying+unadmitted+unfinished",
+        "refused/lost/unfinished",
+        "past_ponr/intact/none",
+        "oserror/lost/none",
+    ],
+)
+def test_past_the_point_of_no_return_or_with_the_fence_lost_the_stop_has_no_note(
+    label: str,
+) -> None:
+    """`stopped`'s entry notes DL-274's flags only in doubt: past the point of
+    no return, and with the fence lost, the flags may be set and the note is
+    empty."""
+    executor, key = _witness("frozen")()
+    (outcome,) = executor.dispatch(key, ChartEvent(EXCEPTION, _labelled(label)))
+    assert outcome.rows == (_row("13"),)
+    assert outcome.intents == (SealExit("stop"),)
+
+
+# ---- the exit is the final state's entry
+
+
+#: the ids out of use: .05 and .07 are row .13 (DL-377), and .08 went with DL-353
+RETIRED = {_row("05"), _row("07"), _row("08")}
+
+
+def test_three_rows_take_the_exception_and_the_retired_ids_stay_out() -> None:
+    """No row carries an action: each final state's entry reports the exit."""
+    exceptions = [
+        (row.id, row.guard, row.target)
+        for row in CHART.rows
+        if row.event == EXCEPTION and row.kind == "external"
+    ]
+    assert exceptions == [
+        (_row("04"), "reversible", "aborted"),
+        (_row("13"), "stops", "stopped"),
+        (_row("06"), "in_doubt", "stopped"),
+    ]
+    assert len(CHART.rows) == 10
+    assert {row.id for row in CHART.rows} & RETIRED == set()  # a retired id stays out (DL-364)
+    assert [row.id for row in CHART.rows if row.action] == []
+    (phase,) = CHART.root.regions
+    entries = {state.name: state.entry for state in phase.states if state.final}
+    assert entries == {"sealed": "answer", "aborted": "abort", "stopped": "stop"}
+
+
+@pytest.mark.parametrize(
+    ("phase", "event", "label", "row", "exit_"),
+    [
+        ("committing", COMMITTED, "", "03", SealExit("sealed")),
+        ("requested", EXCEPTION, "refused/intact/none", "04", SealExit("abort")),
+        ("committing", EXCEPTION, "past_ponr/intact/none", "13", SealExit("stop")),
+        ("frozen", EXCEPTION, "oserror/lost/none", "13", SealExit("stop")),
+        ("frozen", EXCEPTION, "oserror/intact/unfinished", "06", None),
+    ],
+)
+def test_the_entry_s_exit_joins_the_entering_row_s_one_outcome(
+    phase: str, event: str, label: str, row: str, exit_: SealExit | None
+) -> None:
+    """On a bare executor, the post that enters a final state answers one
+    outcome: its row, with the entry's one `SealExit` as its only intent. The
+    engine's `_seal_exit` unpacks exactly that."""
+    executor, key = _witness(phase)()
+    payload = _labelled(label) if label else None
+    outcomes = executor.dispatch(key, ChartEvent(event, payload))
+    (outcome,) = outcomes
+    assert outcome.rows == (_row(row),) and outcome.depth == 0
+    (reported,) = outcomes[0].intents
+    assert isinstance(reported, SealExit)
+    if exit_ is None:
+        assert reported.verdict == "stop" and "unfinished WAL append" in reported.note
+    else:
+        assert reported == exit_
+
+
+#: Every cell of the chart at 395baba, before the final states' entries reported the exits,
+#: recorded once by "phase|event|partition": the outcome count, kind, rows, intents
+#: (verdict, note) and leaf, or the error class it raised.
+_AT_BASE: dict[str, dict[str, Any]] = json.loads(
+    (Path(__file__).parent / "seal_boundary_cells.json").read_text()
+)
+#: the ids DL-377 merged, as the chart names their cells now
+_MERGED = {_row("05"): _row("13"), _row("07"): _row("13")}
+
+
+def _cell(phase: str, event: str, payload: SealFault | None) -> dict[str, Any]:
+    executor, key = _witness(phase)()
+    try:
+        outcomes = executor.dispatch(key, ChartEvent(event, payload))
+    except StatechartError as error:
+        return {"raises": type(error).__name__}
+    return {
+        "outcomes": len(outcomes),
+        "kind": outcomes[0].kind,
+        "rows": list(outcomes[0].rows),
+        "intents": [[i.verdict, i.note] for outcome in outcomes for i in outcome.intents],
+        "leaf": seal_phase(executor.active(key)),
+    }
+
+
+def test_every_cell_answers_as_it_did_before_the_exits_moved_to_the_entries() -> None:
+    """All 306 cells, 153 of them in flight: the same outcome count, kind,
+    intents and leaf, the same error where one was raised, and the same row
+    under the merged ids. Each stop cause took 48 cells, so the table holds
+    both causes of `stops`."""
+    faults = _partitions()[EXCEPTION]
+    assert len(_AT_BASE) == 306
+    assert sum(1 for cell in _AT_BASE if cell.split("|")[0] in IN_FLIGHT) == 153
+    for cell, recorded in _AT_BASE.items():
+        phase, event, label = cell.split("|")
+        expected = dict(recorded)
+        if "rows" in expected:
+            expected["rows"] = [_MERGED.get(row, row) for row in expected["rows"]]
+        assert _cell(phase, event, faults[label] if label else None) == expected, cell
+    for retired in _MERGED:
+        assert sum(1 for cell in _AT_BASE.values() if cell.get("rows") == [retired]) == 48
+
+
 # ---- the alphabet (DL-325)
 
 
 def _spy(engine: Engine, posted: list[str]) -> None:
     """Record every event the engine posts to a seal boundary, and check that
-    each post is one microstep at depth 0 whose row reports at most one
+    each post is one microstep at depth 0 whose outcome carries at most one
     `SealExit`. The outbox's effects run on the same executor; their posts
     are not the seal's."""
     dispatch = engine._machines.dispatch
@@ -210,6 +339,7 @@ def _spy(engine: Engine, posted: list[str]) -> None:
         if not isinstance(key, _PendingSeal):
             return outcomes
         assert [outcome.depth for outcome in outcomes] == [0], outcomes
+        assert len(outcomes[0].intents) <= 1, outcomes
         assert all(isinstance(intent, SealExit) for intent in outcomes[0].intents)
         posted.append(event.name)
         return outcomes
@@ -243,8 +373,8 @@ def test_a_seal_fault_s_repr_leads_with_the_error() -> None:
 
 
 def test_the_chart_s_actions_raise_nothing() -> None:
-    """No action raises an event or requests a continuation: each reports one
-    exit, for the engine to carry out."""
+    """No action, each a final state's entry, raises an event or requests a
+    continuation: each reports one exit, for the engine to carry out."""
     fault = _fault("oserror", "intact", ("applying",))
     for name, action in CHART.actions.items():
         effects = action(Context("seal", ChartEvent(EXCEPTION, fault), frozenset(), None))

@@ -8,8 +8,9 @@ period-model unless the sentence names another document.
 seal request, keyed by the request, from `submit_seal` until the boundary rests in `sealed` or
 `aborted`; `stopped` ends the engine. `Engine._run_boundary` runs the steps and, at each
 decision point, posts what happened with the facts the rows read computed into the payload.
-The row taken reports one `SealExit`, which the engine carries out: answer and raise
-`PeriodSealed`, abort and answer, or re-raise. Actions never raise and do no I/O.
+The final state the boundary rests in reports one `SealExit` from its entry action, which the
+engine carries out: answer and raise `PeriodSealed`, abort and answer, or re-raise. Actions
+never raise and do no I/O.
 
 The seal defers nothing. An input stamped after T refuses the boundary
 (ss6 step 7, `seal_input_after_cutoff`); inputs are not events of this
@@ -72,10 +73,10 @@ class SealFault:
 
 @dataclass(frozen=True)
 class SealExit:
-    """What the engine does after the row a boundary took: `sealed` answers the
-    request and raises `PeriodSealed`; `abort` runs `abort_boundary` and fails
-    the request with the exception; `stop` re-raises it, with `note` added
-    when there is one."""
+    """What the engine does once a boundary rests in a final state: `sealed`
+    answers the request and raises `PeriodSealed`; `abort` runs
+    `abort_boundary` and fails the request with the exception; `stop`
+    re-raises it, with `note` added when there is one."""
 
     verdict: Literal["sealed", "abort", "stop"]
     note: str = ""
@@ -90,22 +91,29 @@ def _flagged(fault: SealFault) -> bool:
     return fault.applying is not None or fault.unadmitted is not None or fault.append_unfinished
 
 
-# -- the guards. Each docstring is its rows' prose.
+# -- the guards and the predicates they call. A registered guard's docstring is its rows' prose.
+# Every fact they read is in the `SealFault` the engine built before the post, so no guard reads
+# a lazy fact.
 
 
 def _past_ponr(ctx: Context) -> bool:
-    """The exception is `BoundaryFailStop`: the `seal` append may have begun,
-    so the outcome is unknown and recovery decides (PR-28d). The engine exits
-    4. Checked first."""
-    return isinstance(ctx.event.payload.error, BoundaryFailStop)
+    """The exception is `BoundaryFailStop`."""
+    return stops_by_type(ctx.event.payload.error)
 
 
 def _fence_lost(ctx: Context) -> bool:
-    """Not `BoundaryFailStop`, and the fence is lost: a leader that cannot prove it
-    leads does not reopen admission (DL-101, PR-28b). It takes precedence over DL-274's
-    flags."""
+    """Not `BoundaryFailStop`, and the fence is lost."""
     fault: SealFault = ctx.event.payload
     return not stops_by_type(fault.error) and fault.fence_lost
+
+
+def _stops(ctx: Context) -> bool:
+    """Past the point of no return, or the fence lost. Past it, the `seal`
+    append may have begun, so the outcome is unknown and recovery decides
+    (PR-28d): the engine exits 4. A leader that cannot prove it leads does not
+    reopen admission (DL-101, PR-28b). Either stops with no abort and no note,
+    and takes precedence over DL-274's flags."""
+    return _past_ponr(ctx) or _fence_lost(ctx)
 
 
 def _in_doubt(ctx: Context) -> bool:
@@ -134,49 +142,51 @@ def _over(ctx: Context) -> bool:
     return bool(ctx.active & _FINALS)
 
 
-# -- the actions
+# -- the entry actions of the finals: each reports the one `SealExit` of its state. Its intent
+# joins the outcome of the row that entered the state (statechart-engine ss4).
 
 
 def _answer(_ctx: Context) -> Effects:
-    """Answer the request with the committed boundary, then raise
+    """`sealed`: answer the request with the committed boundary, then raise
     `PeriodSealed`: the engine exits 3 (PR-30b)."""
     return Effects(intents=(SealExit("sealed"),))
 
 
 def _abort(_ctx: Context) -> Effects:
-    """Run `abort_boundary` and fail the request with the exception. The abort
-    clears the sealing flag, reopens control admission, restarts scheduler
-    admission and unparks FW polls. It touches no row, and C1 carries on
-    (PR-28b)."""
+    """`aborted`: run `abort_boundary` and fail the request with the exception.
+    The abort clears the sealing flag, reopens control admission, restarts
+    scheduler admission and unparks FW polls. It touches no row, and C1 carries
+    on (PR-28b)."""
     return Effects(intents=(SealExit("abort"),))
 
 
-def _stop(_ctx: Context) -> Effects:
-    """Re-raise without an abort. The request is not answered."""
-    return Effects(intents=(SealExit("stop"),))
+def _stop(ctx: Context) -> Effects:
+    """`stopped`: re-raise without an abort. The request is not answered.
+
+    In doubt, a note names the first of DL-274's flags that is set. An attempt
+    whose answer was owed is not answered either, and resume repairs the WAL
+    tail and rebuilds from the WAL. Past the point of no return, or with the
+    fence lost, there is no note."""
+    return Effects(intents=(SealExit("stop", _note(ctx) if _in_doubt(ctx) else ""),))
 
 
-def _stop_in_doubt(ctx: Context) -> Effects:
-    """Note which fact stopped the seal, then re-raise without an abort.
-    Neither the request nor an attempt whose answer was owed is answered.
-    Resume repairs the WAL tail and rebuilds from the WAL (DL-274)."""
+def _note(ctx: Context) -> str:
+    """Which of DL-274's flags stopped the seal, in this order: the attempt
+    applying, the unadmitted input, the unfinished append."""
     fault: SealFault = ctx.event.payload
     if fault.applying is not None:
-        note = (
+        return (
             f"DL-274: the seal stopped the engine with attempt {fault.applying}"
             " admitted and not fully applied; resume rebuilds it from the WAL"
         )
-    elif fault.unadmitted is not None:
-        note = (
+    if fault.unadmitted is not None:
+        return (
             f"DL-274: the seal stopped the engine rather than lose an unadmitted"
             f" {fault.unadmitted} input; resume observes it again"
         )
-    else:
-        note = (
-            "DL-274: the seal stopped the engine on an unfinished WAL append;"
-            " resume repairs the tail"
-        )
-    return Effects(intents=(SealExit("stop", note),))
+    return (
+        "DL-274: the seal stopped the engine on an unfinished WAL append; resume repairs the tail"
+    )
 
 
 _OUT_OF_ORDER = (
@@ -187,10 +197,13 @@ _OUT_OF_ORDER = (
 
 #: The engine's seal boundary (ss6-7), one instance per seal request. A request
 #: while another boundary is in flight is refused `seal_in_flight`
-#: (`SealInFlight`) and never becomes an instance. The four exception rows
-#: partition every exception in this order of precedence: `BoundaryFailStop`,
-#: then the fence, then DL-274's flags, else the abort. No row stops on a transition
-#: violation (DL-353).
+#: (`SealInFlight`) and never becomes an instance. The three exception rows
+#: partition every exception in this order of precedence: `BoundaryFailStop`
+#: or the fence (`stops`), then DL-274's flags, else the abort. `stops` is the
+#: disjunction of two predicates, and `in_doubt` and `reversible` each exclude
+#: both of them, so the partition is total and exclusive, not ordered (DL-327).
+#: Each final state's entry reports the boundary's exit. No row stops on a
+#: transition violation (DL-353).
 SEAL_BOUNDARY: Final = Statechart(
     name="seal_boundary",
     root=State(
@@ -204,7 +217,7 @@ SEAL_BOUNDARY: Final = Statechart(
                         "in_flight",
                         regions=(
                             Region(
-                                "phase",
+                                "progress",
                                 "requested",
                                 (
                                     State("requested"),
@@ -214,9 +227,9 @@ SEAL_BOUNDARY: Final = Statechart(
                             ),
                         ),
                     ),
-                    State("sealed", final=True),
-                    State("aborted", final=True),
-                    State("stopped", final=True),
+                    State("sealed", entry="answer", final=True),
+                    State("aborted", entry="abort", final=True),
+                    State("stopped", entry="stop", final=True),
                 ),
             ),
         ),
@@ -246,7 +259,6 @@ SEAL_BOUNDARY: Final = Statechart(
             "committing",
             COMMITTED,
             "sealed",
-            action="answer",
             cite="period-model ss7",
         ),
         Row(
@@ -255,16 +267,14 @@ SEAL_BOUNDARY: Final = Statechart(
             EXCEPTION,
             "aborted",
             guard="reversible",
-            action="abort",
             cite="period-model ss7, PR-28b",
         ),
         Row(
-            "seal_boundary.05",
+            "seal_boundary.13",
             "in_flight",
             EXCEPTION,
             "stopped",
-            guard="fence_lost",
-            action="stop",
+            guard="stops",
             cite="period-model ss7, DL-101, PR-28b",
         ),
         Row(
@@ -273,17 +283,7 @@ SEAL_BOUNDARY: Final = Statechart(
             EXCEPTION,
             "stopped",
             guard="in_doubt",
-            action="stop_in_doubt",
             cite="DL-274",
-        ),
-        Row(
-            "seal_boundary.07",
-            "in_flight",
-            EXCEPTION,
-            "stopped",
-            guard="past_ponr",
-            action="stop",
-            cite="period-model ss7",
         ),
         Row(
             "seal_boundary.09",
@@ -317,14 +317,13 @@ SEAL_BOUNDARY: Final = Statechart(
             kind="ignored",
             cite="statechart-engine ss10",
             false_unreachable=(
-                "rows .04 to .07 partition every exception, so the walk reaches"
-                " the root only from a final state"
+                "rows .04, .06 and .13 partition every exception, so the walk"
+                " reaches the root only from a final state"
             ),
         ),
     ),
     guards={
-        "past_ponr": _past_ponr,
-        "fence_lost": _fence_lost,
+        "stops": _stops,
         "in_doubt": _in_doubt,
         "reversible": _reversible,
         "over": _over,
@@ -333,7 +332,6 @@ SEAL_BOUNDARY: Final = Statechart(
         "answer": _answer,
         "abort": _abort,
         "stop": _stop,
-        "stop_in_doubt": _stop_in_doubt,
     },
     clock="logical",
     exclusions=(

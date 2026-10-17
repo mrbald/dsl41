@@ -24501,3 +24501,88 @@ relitigate an entry; append a new one.
   revision count under two or three field writes, the initial entry on every path, a replayed
   forced eviction with no actor, an action on a row that forbids one) found nothing. Round 2:
   Opus and Codex each re-ran their comparisons against HEAD and confirmed the fixes.
+- DL-377 The seal boundary's exit is its final state's entry action: `sealed`, `aborted` and
+  `stopped` each report the one `SealExit` of their state, and `stopped` notes DL-274's flag
+  only in doubt; seal_boundary.05 and .07 are one row, .13, under `stops`; `_past_ponr` calls
+  `stops_by_type`
+  (2026-10-17; src/dsl41/runner_seal.py, src/dsl41/runner.py; tests/test_seal_boundary_chart.py,
+  tests/seal_boundary_cells.json (new), tests/test_exhaustive_engine.py;
+  docs/blocks/seal-and-lineage.md; docs/state-machines.md (generated),
+  docs/chart-lifecycles.md (generated))
+  THE AIM. Steps 4, 5 and 7 of the chart simplification on `seal_boundary` (charts ruling,
+  slice S5; explorer 2 F6, F9 and F12; explorer 3's probe of 153 in-flight cells). Each exit
+  row's action reported the verdict of the state the row entered, so three rows to `stopped`
+  carried two copies of one verdict and a third with a note. .05 and .07 made the same move
+  with the same action under two guards. No outcome changes: every cell reaches the leaf it
+  reached and carries the intents it carried, and no reply, code, exit code or wire text moves.
+  THE RULE. A state's verdict is its entry action (DL-366); a rule is written once (DL-368);
+  a condition the rule reads has a name (DL-370). This reopens one sentence of DL-327, which
+  says of an action that "it reports one exit intent": the final state's entry reports it,
+  and the exception rows' partition stays total and exclusive. DL-327's stated limit, "an
+  identity key, no entry action", still holds where it applies: the initial entry runs no
+  action, and only the finals have entries.
+  THE CHART. `sealed` enters with `answer`, `aborted` with `abort` and `stopped` with `stop`;
+  no row carries an action. `stop` reports `SealExit("stop", note)`, where the note is
+  DL-274's only when `_in_doubt` holds, read from the `SealFault` on the entering event, and
+  names the first flag set: the attempt applying, then the unadmitted input, then the
+  unfinished append. Past the point of no return, and with the fence lost, the note is empty,
+  as `stop` gave before. No separate note intent. The exception rows are .04 `reversible`,
+  .13 `stops` and .06 `in_doubt`; .13 takes .05's cite, which includes .07's. 11 rows become
+  10, 5 guards 4, 4 actions 3. The region inside `in_flight` is `progress`, so the two regions
+  no longer share the name `phase` (F12).
+  THE GUARDS. `stops` is `_past_ponr(ctx) or _fence_lost(ctx)`, a one-line definition in the
+  code's test order. `_past_ponr` calls `stops_by_type` in place of its own `isinstance`.
+  Every fact the guards read is in the `SealFault` the engine builds before the post, so
+  boolean equivalence suffices here: no guard reads a lazy fact. `_past_ponr` and
+  `_fence_lost` are predicates `stops` calls and leave the registry; their docstrings state
+  their own fact, and `stops`'s holds the prose its rows render. The four exception
+  predicates keep the conjunction form. `stops` is the disjunction of two of them, and
+  `in_doubt` and `reversible` each exclude both of its disjuncts, so the three guards
+  partition every exception: total and exclusive, not ordered (DL-327).
+  NOT TAKEN. Merging .06 into .13 too would give 9 rows. The note rule lives in the entry in
+  both forms, but the merge would turn DL-274's case, with its own cite and its own guard
+  outcomes in the transition gate, into a branch of the entry the gate does not count, and
+  the completeness table would name one row for three cases. .06 stays.
+  THE TIER. `_seal_exit` still unpacks exactly one intent from `dispatch(...)[0]`: an entry's
+  intents join the outcome of the row that entered the state (statechart-engine §4), and
+  the entry runs inside the post's one microstep. `_boundary_exits` carries out the verdict as
+  before; the stop on a `StatechartError` (exit 7) is unchanged.
+  RETIRED IDS. .05 and .07 retire for good (DL-364) and .13 is the next id; .08 stays retired
+  (DL-353). Nothing of the seal chart is stored or sent: it is never replayed (DL-327), and
+  the only wire text, `SealInFlight`'s, names the leaf the boundary is in: `requested`,
+  `frozen`, `committing` or `sealed`, which the tests pin and which are unchanged. Region
+  names are stored nowhere.
+  CHECKS. `well_formed` and `chart_warnings` pass. A table of all 306 cells (six leaves by
+  three lifecycle events and 48 exception partitions), recorded once from 395baba's
+  declaration as tests/seal_boundary_cells.json, is compared cell by cell: 0 differ in outcome
+  count, kind, intents (verdict and note) or leaf, the six out-of-order cells still raise
+  `UnhandledEvent`, and the rows are equal under .05 and .07 to .13. Of the 306, 153 are in
+  flight. New tests: on a bare
+  executor the post that enters each final state answers one outcome whose only intent is the
+  entry's `SealExit`; the stop past the point of no return and with the fence lost carries no
+  note over six fault shapes; the exception rows, the entries and the retired ids are pinned. The
+  completeness table names .13 for both stop cases, each still its own case. The exhaustive
+  walk's 13 cells keep their phases and notes, with .13 in place of .05 and .07. The
+  transition gate holds `seal_boundary` at 23 of 23 items, three fewer than HEAD's 26: one
+  row and its two guard outcomes. So the gate no longer counts each stop cause's truth
+  separately: a lost fence alone can make `stops` true. The pinned cell table holds both
+  causes, 48 cells each (.05's and .07's at 395baba), and a mutant of `stops` that drops
+  `BoundaryFailStop` fails it, as one that drops the fence does.
+  THE CONTRACTS. statechart-engine §16's seal paragraph is unchanged; §4 is applied, not
+  changed. The seal-and-lineage card says the final state's entry reports what the engine does
+  next.
+  THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235). The constant covers the derivation of
+  oracle state from an identical log; the seal chart derives nothing from the log, and its
+  configuration is never persisted.
+  REVIEW. Semantic class (rows and actions of a §16 runner machine; one sentence of DL-327
+  reopened): one Opus reviewer and one Codex Astra pass. Codex found no correctness defect on
+  five probes (the note rule over all 32 flag combinations against the old actions, the entry's
+  payload and lifetime, `_seal_exit`'s single outcome and intent, the pinned table's content,
+  the gate's items) and named the coverage limit CHECKS states. Opus ran its own differential,
+  1,314 cells with 0 differing, regenerated the pinned table from the base and found it equal,
+  killed three mutants, and found no blocker or major; its items: O1 (a comment called `stops`
+  a conjunction: reworded), O2 (DL-327 misquoted: quoted), O3 (a leaf of the socket text
+  omitted: named), O4 (a spy's docstring claimed a check it did not make: the check made), O5
+  (a vacuous assertion and a doubled cell run: removed), O6 (the predicates' docstrings repeated
+  `stops`'s prose: their own fact only), O7 and O8 (the gate's lost items and "six flag sets":
+  stated as they are). Opus confirmed O1 to O8.
