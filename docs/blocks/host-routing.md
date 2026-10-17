@@ -19,9 +19,9 @@ Replay does not run the gate again. It applies the stored decision: the chart is
 - Wire: the `host` verb with `activate`, `drain` and `evict`, and `--force` on `evict` ([control-protocol §3, `host`](../control-protocol.md#host-s5a-dl-94)). The read is `hosts [ids]` ([§4](../control-protocol.md#hosts-ids)).
 - Verbs: `HOST_VERBS` are the operator's and reach the wire. `LEADER_VERBS`, `quarantine` and `reinstate`, are the leader's and enter through `Engine.inject_host` with no `expect`.
 - `HostCommand` is the input. `Engine.submit_host` admits an operator's command and returns its decision.
-- `HOST` is a statechart ([statechart-engine](../statechart-engine.md), DL-333), declared in `oracle_state.py`. The store owns its executor, `RuntimeState.machines`, with one instance per host row under the key `host:<id>`. The instance's configuration is the host's state, and `HostRuntime.state` is its projection, written from the leaf after the microstep. A new row starts its instance in `active`. A fork copies the executor and binds each host instance's data to the fork's rows (`Executor.fork`, DL-339); an install rebuilds it from the rows (`rebuild_machines`). A state write that no microstep made raises a `StatechartError`; a test's witness writes through `witness_host`, which rebuilds the executor.
+- `HOST` is a statechart ([statechart-engine](../statechart-engine.md), DL-333), declared in `oracle_state.py`. The store owns its executor, `RuntimeState.machines`, with one instance per host row under the key `host:<id>`. The instance's configuration is the host's state, and `HostRuntime.state` is its projection. Each leaf's entry action reports the state write as an intent; the moving rows' actions report the rest: host.05 remembers the interrupted state, and host.10 and host.11 evict, unforced or forced by the actor the event carries. Every leaf but `quarantined` clears the memory as it writes the state (DL-376). A new row starts its instance in `active`. A fork copies the executor and binds each host instance's data to the fork's rows (`Executor.fork`, DL-339); an install rebuilds it from the rows (`rebuild_machines`). A state write that no microstep made raises a `StatechartError`; a test's witness writes through `witness_host`, which rebuilds the executor.
 - `host_rejection_reason` is the gate. It reads the chart through `host_move`, which is `Executor.resolve` on the store's instance, so nothing moves. A refusal row's code is the rejection. On the gated eviction (host.10) and the forced one (host.11) the gate adds the checks that read the input's own facts: the bound, and the attribution.
-- `apply_host_command` dispatches an applied command to the store's instance and writes the row from the leaf through the store's verbs. An internal row writes nothing.
+- `apply_host_command` dispatches an applied command to the store's instance and carries out the outcome's intents in order, through the store's verbs. An internal row reports nothing and writes nothing.
 - `routes_new_effects(row)` is the routing column as one predicate. Dispatch holds a SPAWN on a host it is false for ([effect outbox](effect-outbox.md)).
 - `seed_local_executor` puts this engine's own executor in the table at genesis, without a log index.
 - `kill_allowance` and `skew_allowance` derive the eviction bound's two allowances.
@@ -89,6 +89,10 @@ A rejection moves nothing: the gate reads the chart with `Executor.resolve`, and
 - `test_a_fork_rebuilds_its_own_executor_from_its_rows`
 - `test_a_state_write_no_microstep_made_raises_and_writes_nothing`
 - `test_a_second_quarantine_keeps_what_the_first_interrupted`
+- `test_each_cell_s_outcome_carries_its_row_s_intents_then_its_entry_s`
+- `test_the_initial_entry_reports_nothing`
+- `test_the_gate_s_read_reports_no_intent_and_applies_nothing`
+- `test_an_eviction_bumps_the_generation_once_and_a_forced_one_records_its_actor`
 - `test_a_refusal_code_the_gate_has_no_sentence_for_raises`
 - `test_a_dry_host_command_leaves_the_rows_revisions_and_instance_alone`
 - `test_a_carried_drain_is_the_configuration_the_next_period_opens_in`

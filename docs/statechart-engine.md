@@ -619,11 +619,13 @@ record or an outcome stops the engine as one from the loop does, and in replay n
 record.
 
 `host` (DL-333) is an oracle-tier machine. It runs on the state owner's executor, one
-instance per host row; the row's state is the instance's configuration, written from its leaf. The
-gate reads the chart with `resolve` (§5) on the store's instance and keeps only the checks that
-read the input's own facts. The chart is dispatched on the store's executor only for an applied
-decision; the gate's read moves nothing. A durable `applied` the chart refuses is a statechart
-error that names the WAL input.
+instance per host row; the row's state is the instance's configuration. Each leaf's entry action
+reports the state write, and the moving rows' actions report the row's other writes; the initial
+entry reports nothing. The apply carries out the outcome's intents in order after the dispatch
+(DL-376). The gate reads the chart with `resolve` (§5) on the store's instance and keeps only the
+checks that read the input's own facts. The chart is dispatched on the store's executor only for
+an applied decision; the gate's read runs no action and moves nothing. A durable `applied` the
+chart refuses is a statechart error that names the WAL input.
 
 `admission` (DL-334) runs on the engine's executor, one instance per request id from its durable
 attempt to its durable decision; the decided state is final and forgotten, and the stored decision

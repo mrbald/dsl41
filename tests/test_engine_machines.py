@@ -223,7 +223,7 @@ def test_a_rejected_verb_takes_no_transition_and_moves_nothing(
 
     assert [r for r in recorded() if r["machine"] == "host"] == []
     # the hits are recorded: a dispatch on a fork records the row the read named
-    oracle.store.machines.fork().dispatch("host:local", host_event(cmd))
+    oracle.store.machines.fork().dispatch("host:local", host_event(cmd, actor=None))
     assert [r["id"] for r in recorded() if r["machine"] == "host" and r["kind"] == "row"] == [read]
 
 

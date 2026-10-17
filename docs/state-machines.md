@@ -969,10 +969,10 @@ stateDiagram-v2
     state c0 <<choice>>
     s0 --> s3 : host.02 drain
     s3 --> s0 : host.03 activate
-    s5 --> s4 : host.05 quarantine
+    s5 --> s4 : host.05 quarantine / remembers
     s4 --> c0 : host.07 reinstate
-    s4 --> s1 : host.10 evict
-    s2 --> s1 : host.11 force_evict [not_evicted]
+    s4 --> s1 : host.10 evict / evicts
+    s2 --> s1 : host.11 force_evict [not_evicted] / evicts_forced
     s1 --> s0 : host.12 register
     c0 --> s3 : host.23 [remembered_passive]
     c0 --> s0 : host.24 [else]
@@ -984,12 +984,12 @@ stateDiagram-v2
 | host.02 | active | drain |  | new effects are held, running work continues | passive | external | concurrency-model ss8, CM-13 |
 | host.03 | passive | activate |  | held starts dispatch again | active | external | concurrency-model ss8 |
 | host.04 | passive | drain |  | none: the row does not move and no revision moves |  | internal | concurrency-model ss8 |
-| host.05 | routed | quarantine |  | The leader's renewal failed five times in a row. The row remembers the state it interrupts. | quarantined | external | concurrency-model ss7, ss8, DL-97, DL-291 |
+| host.05 | routed | quarantine |  | remembers | quarantined | external | concurrency-model ss7, ss8, DL-97, DL-291 |
 | host.06 | quarantined | quarantine |  | none: repeated unreachability is one fact |  | internal | DL-97 |
 | host.07 | quarantined | reinstate |  | The host answered again: put back the state quarantine interrupted, and forget it. | remembered | external | concurrency-model ss8, DL-97 |
 | host.25 | routed | reinstate |  | none: nothing to put back |  | internal | concurrency-model ss8, DL-111 |
-| host.10 | quarantined | evict |  | The gate has proved the bound: a deadman, a contact, and silence past deadman + kill + skew. generation += 1, forced_by = none, forget the interrupted state. | evicted | external | concurrency-model ss8 preconditions 1-3, DL-151 |
-| host.11 | host | force_evict | not_evicted | The gate has the attribution: claimed_actor names who asks. generation += 1, forced_by = the actor, forget the interrupted state. | evicted | external | concurrency-model ss8, DL-111, DL-151 |
+| host.10 | quarantined | evict |  | evicts | evicted | external | concurrency-model ss8 preconditions 1-3, DL-151 |
+| host.11 | host | force_evict | not_evicted | evicts_forced | evicted | external | concurrency-model ss8, DL-111, DL-151 |
 | host.12 | evicted | register |  | The relay presents the current generation and has self-fenced. Its held jobs run as new runs with new effect ids. No code posts it. | active | external (spec-only) | concurrency-model ss8 (eviction is fenced on return), period-model ss3.3 |
 | host.13 | quarantined | activate |  |  |  | refusal host_quarantined | concurrency-model ss8, concurrency-model ss7 |
 | host.14 | quarantined | drain |  |  |  | refusal host_quarantined | concurrency-model ss8, concurrency-model ss7 |
@@ -1011,15 +1011,19 @@ stateDiagram-v2
 | --- | --- | --- | --- | --- | --- |
 | host |  |  |  |  |  |
 | routed | host/routing |  |  |  |  |
-| active | routed/routing |  |  |  |  |
-| passive | routed/routing |  |  |  |  |
-| quarantined | host/routing |  |  |  |  |
-| evicted | host/routing |  |  |  |  |
+| active | routed/routing | writes_state |  |  |  |
+| passive | routed/routing | writes_state |  |  |  |
+| quarantined | host/routing | writes_state |  |  |  |
+| evicted | host/routing | writes_state |  |  |  |
 
 | Name | Kind | Prose |
 | --- | --- | --- |
 | not_evicted | guard | The host is not evicted (ss8: force skips the proof, not the state). At `evicted` host.21 takes the event first (statechart-engine ss3). The guard makes a missing host.21 a gap, not a forced eviction of an evicted host (DL-375). |
 | remembered_passive | guard | Quarantine interrupted `passive`: a drained host that answers again stays drained (DL-97). |
+| writes_state | action | A leaf's entry reports the row's state, the leaf entered. The initial entry reports nothing: `register_host` writes the row before the instance starts. |
+| remembers | action | host.05 reports the state quarantine interrupts, read from the row, which the tier writes only after the dispatch (DL-97). |
+| evicts | action | host.10 reports an eviction on the gate's proof of the bound, attributed to nobody (ss8, DL-151). |
+| evicts_forced | action | host.11 reports an eviction by force, attributed to the actor the event carries: the input's `claimed_actor`, which the gate requires (ss8, DL-151). |
 
 ## admission
 
