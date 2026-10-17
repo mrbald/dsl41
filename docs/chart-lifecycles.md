@@ -104,7 +104,7 @@ attested = durable + attest
 
 ## supervisor_process
 
-Shown: 10. Folded: 20 (ignored 10, refusals 6, internal 3, self-transitions 1). Rows in the chart: 30.
+Shown: 13. Folded: 21 (ignored 10, refusals 6, internal 5). Rows in the chart: 34.
 
 ### phase
 
@@ -115,14 +115,17 @@ up = {serving, shutting_down}
 ended = {stopped, refused}
 bound = starting + start [free]
 serving = bound + publish
-shutting_down = up + term
-             || serving + SHUTDOWN [credentials]
+shutting_down = serving + SHUTDOWN [credentials]
+             || serving + term
 stopped = serving + deadman
        || shutting_down + drained
 refused = starting + start [lock_held]
        || starting + start [owner_live]
-closed = open + teardown
-      || ended + teardown
+closed = starting + teardown
+      || bound + teardown
+      || up + teardown
+      || stopped + teardown
+      || refused + teardown
 ```
 
 ## supervisor_lease

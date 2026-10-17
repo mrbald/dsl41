@@ -388,3 +388,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-375 | A rule of `host` is written once at the source the hierarchy gives it, and the gate reads the chart with the engine's selection read: host.08 and host.09 are... | [docs/state-machines.md](state-machines.md) |
 | DL-376 | Every write of `host` is an intent the chart reports: each leaf's entry action reports the state write, the moving rows' actions report the row's other writes,... | [docs/blocks/host-routing.md](blocks/host-routing.md), [docs/statechart-engine.md](statechart-engine.md) |
 | DL-377 | The seal boundary's exit is its final state's entry action: `sealed`, `aborted` and `stopped` each report the one `SealExit` of their state, and `stopped` notes... |  |
+| DL-378 | Teardown's ownership is the chart's: a teardown row per source state, in three ownership classes, each row reporting its class's unlink; the start verdict is... |  |
