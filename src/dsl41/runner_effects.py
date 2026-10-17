@@ -57,7 +57,7 @@ import re
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import datetime
 from types import MappingProxyType
-from typing import Final, Literal, get_args
+from typing import Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -157,15 +157,13 @@ def effect_id_for(index: int, kind: EffectKind, job: str, run_number: int) -> st
 # the three rows' guards read. The rows have no actions: after the microstep the outbox writes
 # the outcome and forgets the instance. The outcome record is the memory that `state_of`,
 # `result_for` and `pending` read. The outbox refuses a second outcome before any post (DL-295).
-# A pending SPAWN held by a host that routes nothing posts nothing and stays pending. The root's
-# ignored row exists because the completeness check is syntactic (statechart-engine ss10); no
-# tier path posts it. A gap in the chart is a `StatechartError`, which stops the engine with
-# exit 7 (statechart-engine ss5).
+# A pending SPAWN held by a host that routes nothing posts nothing and stays pending. A final
+# state ignores every event (statechart-engine ss10, DL-380); no tier path posts one there. A gap
+# in the chart is a `StatechartError`, which stops the engine with exit 7 (statechart-engine
+# ss5).
 
 #: the one event: what became of an attempt; its payload is an `EffectOutcome`
 RESOLVE: Final = "resolve"
-#: the states an effect rests in once it has an outcome
-_FINALS: Final = frozenset(get_args(Outcome))
 
 
 # -- the guards. Each docstring is its rows' prose.
@@ -187,13 +185,6 @@ def _indeterminate(ctx: Context) -> bool:
     """The outcome's state is `indeterminate`."""
     outcome: EffectOutcome = ctx.event.payload
     return outcome.state == "indeterminate"
-
-
-def _over(ctx: Context) -> bool:
-    """The effect rests in a final state. The outbox forgets the instance in the call that made
-    it final and refuses a second outcome before any post (DL-295). In `pending` an outcome
-    that no row's guard takes raises `UnhandledEvent`."""
-    return bool(ctx.active & _FINALS)
 
 
 #: One effect's lifecycle (ss5), one instance per open effect.
@@ -248,29 +239,11 @@ EFFECT: Final = Statechart(
                 " answers outcome_unavailable."
             ),
         ),
-        Row(
-            "effect.05",
-            "effect",
-            RESOLVE,
-            guard="over",
-            kind="ignored",
-            cite="statechart-engine ss10",
-            false_unreachable=(
-                "rows .02 to .04 partition every outcome in `pending`, so the walk"
-                " reaches the root only from a final state"
-            ),
-            note=(
-                "An outcome is final: the outbox refuses a second one with an EngineError"
-                " before any post, and forgets the instance in the call that made it final"
-                " (DL-295). No tier path posts this row."
-            ),
-        ),
     ),
     guards={
         "applied": _applied,
         "retired": _retired,
         "indeterminate": _indeterminate,
-        "over": _over,
     },
     clock="logical",
 )

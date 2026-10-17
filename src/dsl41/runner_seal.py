@@ -38,7 +38,6 @@ EXCEPTION: Final = "exception"
 
 #: Where a boundary can be: the leaf states of `SEAL_BOUNDARY`.
 PHASES: Final = frozenset({"requested", "frozen", "committing", "sealed", "aborted", "stopped"})
-_FINALS: Final = frozenset({"sealed", "aborted", "stopped"})
 
 
 def seal_phase(active: frozenset[str]) -> str:
@@ -132,14 +131,6 @@ def _reversible(ctx: Context) -> bool:
     a failed sidecar write are among them (PR-28b)."""
     fault: SealFault = ctx.event.payload
     return not stops_by_type(fault.error) and not fault.fence_lost and not _flagged(fault)
-
-
-def _over(ctx: Context) -> bool:
-    """The boundary rests in a final state. Nothing posts to it then: an
-    aborted boundary is forgotten at once, a sealed one once the answer has
-    had its turns, and a stop ends the engine. In flight, an event out of
-    order finds no row and raises `UnhandledEvent`."""
-    return bool(ctx.active & _FINALS)
 
 
 # -- the entry actions of the finals: each reports the one `SealExit` of its state. Its intent
@@ -285,48 +276,11 @@ SEAL_BOUNDARY: Final = Statechart(
             guard="in_doubt",
             cite="DL-274",
         ),
-        Row(
-            "seal_boundary.09",
-            "boundary",
-            PARKED,
-            guard="over",
-            kind="ignored",
-            cite="statechart-engine ss10",
-        ),
-        Row(
-            "seal_boundary.10",
-            "boundary",
-            QUIESCED,
-            guard="over",
-            kind="ignored",
-            cite="statechart-engine ss10",
-        ),
-        Row(
-            "seal_boundary.11",
-            "boundary",
-            COMMITTED,
-            guard="over",
-            kind="ignored",
-            cite="statechart-engine ss10",
-        ),
-        Row(
-            "seal_boundary.12",
-            "boundary",
-            EXCEPTION,
-            guard="over",
-            kind="ignored",
-            cite="statechart-engine ss10",
-            false_unreachable=(
-                "rows .04, .06 and .13 partition every exception, so the walk"
-                " reaches the root only from a final state"
-            ),
-        ),
     ),
     guards={
         "stops": _stops,
         "in_doubt": _in_doubt,
         "reversible": _reversible,
-        "over": _over,
     },
     actions={
         "answer": _answer,

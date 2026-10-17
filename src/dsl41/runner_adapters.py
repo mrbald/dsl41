@@ -64,7 +64,6 @@ from dsl41.runner_journal import repair_tail
 from dsl41.runner_ledger import Proof
 from dsl41.semantics import FwExistence, fw_existence_immediate
 from dsl41.state_machine import (
-    Context,
     Executor,
     Exclusion,
     Region,
@@ -1140,8 +1139,8 @@ def _parse_list_reply(raw: dict[str, Any]) -> SupervisorListReply:
 # needed in `closed` too, where the tier posts nothing: closing cancels the reader and a renewal
 # in flight. So no row has an action; each row's note says what the tier does around it.
 #
-# Nothing posts to a closed client. The root's ignored rows, guarded by `closed`, exist because
-# the completeness check is syntactic (statechart-engine ss10). The lease token, the renewal loop
+# Nothing posts to a closed client, and the final `closed` ignores every event
+# (statechart-engine ss10, DL-380). The lease token, the renewal loop
 # and its five-failures rule, pushes and the LIST net are extended state and tier procedures, not
 # states. A gap in the chart is a `StatechartError`: in a run it stops the engine with exit 7,
 # and outside one the client keeps it and raises it (`_fail`).
@@ -1157,17 +1156,6 @@ CLOSE: Final = "close"
 
 #: where the connection can be: the leaf states of `SUPERVISOR_CLIENT`
 CLIENT_PHASES: Final = frozenset({"disconnected", "connected", "lost", "closed"})
-
-
-# -- the guard. Its docstring is its rows' prose.
-
-
-def _over(ctx: Context) -> bool:
-    """The client is closed. Nothing posts to it: a second close posts nothing, a connection that
-    completes after the close is closed unposted, and the EOF and cancel the close itself causes
-    do their transport work with no post. Before the first connect, an EOF or a cancel finds no
-    row and raises `UnhandledEvent`."""
-    return "closed" in ctx.active
 
 
 _NO_READER = (
@@ -1302,48 +1290,7 @@ SUPERVISOR_CLIENT: Final = Statechart(
                 " the epoch is already lost."
             ),
         ),
-        Row(
-            "supervisor_client.08",
-            "client",
-            CONNECT,
-            guard="over",
-            kind="ignored",
-            cite="statechart-engine ss10",
-            false_unreachable=(
-                "rows .01 and .02 take every connect in `alive`, so the walk reaches the root"
-                " only from `closed`"
-            ),
-        ),
-        Row(
-            "supervisor_client.09",
-            "client",
-            EOF,
-            guard="over",
-            kind="ignored",
-            cite="statechart-engine ss10",
-        ),
-        Row(
-            "supervisor_client.10",
-            "client",
-            CANCEL,
-            guard="over",
-            kind="ignored",
-            cite="statechart-engine ss10",
-        ),
-        Row(
-            "supervisor_client.11",
-            "client",
-            CLOSE,
-            guard="over",
-            kind="ignored",
-            cite="statechart-engine ss10",
-            false_unreachable=(
-                "row .05 takes every close in `alive`, so the walk reaches the root only from"
-                " `closed`"
-            ),
-        ),
     ),
-    guards={"over": _over},
     clock="logical",
     exclusions=(
         Exclusion("disconnected", EOF, _NO_READER),

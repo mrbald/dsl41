@@ -124,9 +124,9 @@ if TYPE_CHECKING:  # annotation only: the WAL stays a leaf of the DL-74 DAG
 # the same rows in `backfill` and `live`, and nothing is deferred.
 #
 # `removed` and `closed` are final, and the tier forgets the instance in the call that made it
-# final, so nothing posts to it there. The root's ignore rows exist because the completeness
-# check is syntactic (statechart-engine ss10). A gap in the chart is a `StatechartError`, which
-# stops the engine with exit 7 (statechart-engine ss5).
+# final, so nothing posts to it there; a final state ignores every event (statechart-engine
+# ss10, DL-380). A gap in the chart is a `StatechartError`, which stops the engine with exit 7
+# (statechart-engine ss5).
 
 #: A record was appended and fanned out. Its payload is an `Offer`.
 APPEND: Final = "append"
@@ -168,13 +168,6 @@ def _overflows(ctx: Context) -> bool:
     """The record does not fit: the backlog holds a record, and the backlog
     plus this one would pass the budget (DL-267)."""
     return not _fits(ctx)
-
-
-def _over(ctx: Context) -> bool:
-    """The feed rests in `removed` or `closed`. Nothing posts to it then: the
-    journal forgets the instance in the call that made it final. In `live`, a
-    second `backfill_sent` finds no row and raises `UnhandledEvent`."""
-    return bool(ctx.active & _FEED_FINALS)
 
 
 # -- the actions
@@ -268,34 +261,8 @@ SUBSCRIPTION: Final = Statechart(
             kind="internal",
             cite="control-protocol ss5, DL-267",
         ),
-        Row(
-            "subscription.06",
-            "feed",
-            APPEND,
-            guard="over",
-            kind="ignored",
-            cite="statechart-engine ss10",
-            false_unreachable="rows .03 and .05 partition every append in `open`",
-        ),
-        Row(
-            "subscription.07",
-            "feed",
-            BACKFILL_SENT,
-            guard="over",
-            kind="ignored",
-            cite="statechart-engine ss10",
-        ),
-        Row(
-            "subscription.08",
-            "feed",
-            STREAM_ENDS,
-            guard="over",
-            kind="ignored",
-            cite="statechart-engine ss10",
-            false_unreachable="row .04 takes every stream end in `open`",
-        ),
     ),
-    guards={"fits": _fits, "overflows": _overflows, "over": _over},
+    guards={"fits": _fits, "overflows": _overflows},
     actions={"enqueue": _enqueue, "drop_backlog": _drop_backlog},
     clock="logical",
     exclusions=(

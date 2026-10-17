@@ -136,8 +136,7 @@ def _section_7(phase: str, event: str, label: str) -> str:
     could not admit or an unfinished append stops; anything else aborts and
     refuses. A finished boundary takes nothing."""
     if phase in FINALS:
-        number = {PARKED: "09", QUIESCED: "10", COMMITTED: "11", EXCEPTION: "12"}[event]
-        return f"ignored {_row(number)}"
+        return f"ignored in {phase}"
     if event != EXCEPTION:
         return _row({PARKED: "01", QUIESCED: "02", COMMITTED: "03"}[event])
     error, fence, flags = label.split("/")
@@ -165,7 +164,7 @@ def test_the_completeness_table_is_section_7() -> None:
 
 def test_an_event_out_of_order_raises_rather_than_being_ignored() -> None:
     """The excluded cells: in flight, a lifecycle event out of its order finds
-    no row, and the root's ignore rows hold only for a finished boundary."""
+    no row, and only a finished boundary's final state ignores the event."""
     out_of_order = {exclusion.state: set() for exclusion in CHART.exclusions}
     for exclusion in CHART.exclusions:
         out_of_order[exclusion.state].add(exclusion.event)
@@ -228,8 +227,9 @@ def test_past_the_point_of_no_return_or_with_the_fence_lost_the_stop_has_no_note
 # ---- the exit is the final state's entry
 
 
-#: the ids out of use: .05 and .07 are row .13 (DL-377), and .08 went with DL-353
-RETIRED = {_row("05"), _row("07"), _row("08")}
+#: the ids out of use: .05 and .07 are row .13 (DL-377), .08 went with DL-353, and .09 to .12
+#: are the final states' implicit ignore (DL-380)
+RETIRED = {_row("05"), _row("07"), _row("08"), _row("09"), _row("10"), _row("11"), _row("12")}
 
 
 def test_three_rows_take_the_exception_and_the_retired_ids_stay_out() -> None:
@@ -244,7 +244,7 @@ def test_three_rows_take_the_exception_and_the_retired_ids_stay_out() -> None:
         (_row("13"), "stops", "stopped"),
         (_row("06"), "in_doubt", "stopped"),
     ]
-    assert len(CHART.rows) == 10
+    assert len(CHART.rows) == 6
     assert {row.id for row in CHART.rows} & RETIRED == set()  # a retired id stays out (DL-364)
     assert [row.id for row in CHART.rows if row.action] == []
     (phase,) = CHART.root.regions
@@ -310,14 +310,19 @@ def test_every_cell_answers_as_it_did_before_the_exits_moved_to_the_entries() ->
     """All 306 cells, 153 of them in flight: the same outcome count, kind,
     intents and leaf, the same error where one was raised, and the same row
     under the merged ids. Each stop cause took 48 cells, so the table holds
-    both causes of `stops`."""
+    both causes of `stops`. The 153 cells of the finals, each recorded with a
+    retired root row, keep everything but the row: the final state ignores
+    the event with no row (DL-380)."""
     faults = _partitions()[EXCEPTION]
     assert len(_AT_BASE) == 306
     assert sum(1 for cell in _AT_BASE if cell.split("|")[0] in IN_FLIGHT) == 153
     for cell, recorded in _AT_BASE.items():
         phase, event, label = cell.split("|")
         expected = dict(recorded)
-        if "rows" in expected:
+        if phase in FINALS:
+            assert len(recorded["rows"]) == 1 and set(recorded["rows"]) <= RETIRED
+            expected["rows"] = []
+        elif "rows" in expected:
             expected["rows"] = [_MERGED.get(row, row) for row in expected["rows"]]
         assert _cell(phase, event, faults[label] if label else None) == expected, cell
     for retired in _MERGED:

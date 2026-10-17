@@ -151,7 +151,7 @@ def _section_5(witness: str, event: str, label: str) -> str:
     be complete, and it ignores the event."""
     assert event == RESOLVE
     if witness in OUTCOMES:
-        return "ignored effect.05"
+        return f"ignored in {witness}"
     return {"applied": "effect.02", "retired": "effect.03", "indeterminate": "effect.04"}[label]
 
 
@@ -165,7 +165,19 @@ def test_the_completeness_table_is_section_5() -> None:
         for state in OUTCOMES
     }
     assert len(table) == 15
-    assert "DL-295" in next(row.note for row in CHART.rows if row.id == "effect.05")
+
+
+#: the id out of use: .05 is the final states' implicit ignore (DL-380)
+RETIRED = {"effect.05"}
+
+
+def test_no_row_is_sourced_at_the_root_and_the_retired_id_stays_out() -> None:
+    """A resolved effect's cells take no row: the engine ignores the event in
+    a final state (statechart-engine §10)."""
+    assert [row.id for row in CHART.rows] == [f"effect.0{n}" for n in (2, 3, 4)]
+    assert [row.id for row in CHART.rows if row.source == CHART.root.name] == []
+    assert {row.id for row in CHART.rows} & RETIRED == set()  # a retired id stays out (DL-364)
+    assert set(CHART.guards) == set(OUTCOMES)
 
 
 @pytest.mark.parametrize("first", OUTCOMES)

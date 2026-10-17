@@ -149,7 +149,7 @@ def _section_4(witness: str, event: str, label: str) -> str:
     (DL-217, CM-05), so a final's declaration only has to be complete, and it
     ignores the event."""
     if witness in DECISIONS:
-        return f"ignored admission.{11 if event == DECIDE else 12}"
+        return f"ignored in {witness}"
     if event == DECIDE:
         return {"applied": "admission.02", "rejected": "admission.03"}[label]
     return {"other fingerprint": "refused request_id_reused", "same fingerprint": "admission.10"}[
@@ -168,9 +168,20 @@ def test_the_completeness_table_is_section_4() -> None:
         for label in labels
     }
     assert len(table) == 12
-    for ident in ("admission.11", "admission.12"):
-        note = next(row.note for row in CHART.rows if row.id == ident)
-        assert "DL-217, CM-05" in note
+
+
+#: the ids out of use: .11 and .12 are the final states' implicit ignore (DL-380)
+RETIRED = {"admission.11", "admission.12"}
+
+
+def test_no_row_is_sourced_at_the_root_and_the_retired_ids_stay_out() -> None:
+    """A decided instance's cells take no row: the engine ignores the event in
+    a final state (statechart-engine §10)."""
+    ids = ("02", "03", "09", "10")
+    assert [row.id for row in CHART.rows] == [f"admission.{n}" for n in ids]
+    assert [row.id for row in CHART.rows if row.source == CHART.root.name] == []
+    assert {row.id for row in CHART.rows} & RETIRED == set()  # a retired id stays out (DL-364)
+    assert set(CHART.guards) == {"applied", "rejected", "same", "other"}
 
 
 def _spied_dispatch(posts: list[tuple[str, tuple[str, ...]]]) -> Executor:
@@ -522,8 +533,8 @@ def test_every_event_a_poster_sends_is_in_the_alphabet(tmp_path: Path) -> None:
     refuses a command whose id is in flight, and stops on the same command
     in flight; resume replays the decided attempts and decides the one a
     crash left open; the seal's readiness lookup refuses an id in flight.
-    Every post is `decide` or `input`, and every row but the ignored ones
-    fires. An id is in flight here as a second writer would leave it."""
+    Every post is `decide` or `input`, and every row fires. An id is in
+    flight here as a second writer would leave it."""
     run_root = tmp_path / "run"
     live: list[tuple[str, tuple[str, ...]]] = []
     engine = start_run(
@@ -611,7 +622,7 @@ def test_every_event_a_poster_sends_is_in_the_alphabet(tmp_path: Path) -> None:
     posted = live + resumed + sealing + stopped
     assert {name for name, _ in posted} - {"<start>"} <= set(alphabet(CHART))
     rows = {row for _, fired in posted for row in fired}
-    assert rows == {row.id for row in CHART.rows if row.kind != "ignored"}
+    assert rows == {row.id for row in CHART.rows}
 
 
 # ---- a statechart error stops the tier (statechart-engine §5)
