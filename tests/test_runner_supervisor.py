@@ -2626,7 +2626,7 @@ def test_dl210_probe_retries_refusals_before_pid_guard(queued_supervisor, monkey
         sup, "_probe_answered", lambda deadline: deadlines.append(deadline) or False
     )
     monkeypatch.setattr(sup, "_pid_owner_absent", lambda: checked.append(len(deadlines)) or True)
-    sup._refuse_if_live()
+    assert sup._owner_present() is False
     assert deadlines == pytest.approx([10 + 1 / 3, 10 + 2 / 3, 11])
     assert checked == [3] and now[0] == pytest.approx(11)
     assert Path(sup.sock_path).exists()  # the gate itself never reclaims
@@ -2639,9 +2639,14 @@ def test_dl210_a_later_ping_answer_still_refuses_ownership(queued_supervisor, mo
     replies = iter([False, False, True])
     monkeypatch.setattr(sup, "_probe_answered", lambda _deadline: next(replies))
     monkeypatch.setattr(runner_supervisor.time, "sleep", lambda _delay: None)
-    with pytest.raises(SystemExit, match="another supervisor owns this root"):
-        sup._refuse_if_live()
-    assert Path(sup.sock_path).exists()
+    try:
+        with pytest.raises(SystemExit, match="another supervisor owns this root"):
+            sup._bind()  # `_start_fact` gives OWNER_LIVE and .02 exits 1
+    finally:
+        assert sup._lock_fd is not None
+        os.close(sup._lock_fd)
+    assert sup.state == "refused"
+    assert Path(sup.sock_path).exists() and sup._listen is None  # nothing bound
 
 
 def test_dl210_lock_loser_exits_one_and_can_retry(short_root: Path):
@@ -3386,9 +3391,9 @@ def test_a_second_shutdown_request_in_one_loop_pass_does_nothing_more(
 def test_an_error_during_shutdown_still_unlinks_what_was_published(
     short_root: Path, monkeypatch
 ) -> None:
-    """supervisor_process.11 from shutting_down. Teardown reads what this
-    incarnation owns off the state it ends from: from shutting_down that is
-    the published socket and the pid record."""
+    """supervisor_process.31 from shutting_down. The teardown row of the
+    state it ends from reports what this incarnation owns: from shutting_down
+    that is the published socket and the pid record."""
     sup = runner_supervisor.Supervisor(str(short_root))
 
     def broken_reap() -> None:
@@ -3408,7 +3413,8 @@ def test_an_error_during_shutdown_still_unlinks_what_was_published(
 class _ErroredShutdown:
     """An in-process `Supervisor.run()` whose shutdown wait raises at its
     first `failures` reaps; the loop's own reap never raises. With `signal`,
-    a SIGTERM is latched just before each raise. When the loop starts
+    a SIGTERM is latched just before each raise; with `signal_before`, just
+    before the SHUTDOWN reaches the process chart. When the loop starts
     serving, a client sends in one write an ACQUIRE, a SHUTDOWN and then
     `extra`; each line carries the lease's credentials. The signal handlers
     and the subreaper are left out, and `_reap` is stubbed: an in-process
@@ -3419,7 +3425,12 @@ class _ErroredShutdown:
     it takes but a fence refusal."""
 
     def __init__(
-        self, root: Path, failures: int, extra: tuple[dict, ...] = (), signal: bool = False
+        self,
+        root: Path,
+        failures: int,
+        extra: tuple[dict, ...] = (),
+        signal: bool = False,
+        signal_before: bool = False,
     ) -> None:
         root.mkdir()
         self.sup = sup = runner_supervisor.Supervisor(str(root))
@@ -3434,6 +3445,8 @@ class _ErroredShutdown:
         dispatch = sup._machines.dispatch
 
         def moved(key: object, event: state_machine.Event) -> list[state_machine.Outcome]:
+            if signal_before and key == "process" and event.name == "SHUTDOWN":
+                sup._on_term_signal(runner_supervisor.signal.SIGTERM, None)
             outcomes = dispatch(key, event)
             if key == "process":
                 self.taken += [row for o in outcomes if not o.refusals for row in o.rows]
@@ -3520,17 +3533,17 @@ def test_an_error_in_a_shutdown_wait_runs_the_wait_once_more(
 ) -> None:
     """supervisor_process.12. With no signal latched, the end of the pass runs
     the wait again, instead of tearing down with the wrappers still on their
-    lifelines (supervisor_process.11). The failed wait is logged with its
+    lifelines (supervisor_process.31). The failed wait is logged with its
     cause, and its `internal:` answer reaches the client before the second
     wait, not after it. The process then stops in order and returns 0, as a
     SHUTDOWN does. A wait with no error is the non-triggering case: 05, 07
-    and 10, no line, and no answer before the wait ends."""
+    and 32, no line, and no answer before the wait ends."""
     plain = _ErroredShutdown(short_root / "plain", failures=0)
     assert plain.sup.run() == 0
     assert plain.taken[-3:] == [
         "supervisor_process.05",
         "supervisor_process.07",
-        "supervisor_process.10",
+        "supervisor_process.32",
     ]
     assert plain.seen_in_wait == []
     assert [r["ok"] for r in plain.replies()] == [True, True]
@@ -3542,7 +3555,7 @@ def test_an_error_in_a_shutdown_wait_runs_the_wait_once_more(
         "supervisor_process.05",
         "supervisor_process.12",
         "supervisor_process.07",
-        "supervisor_process.10",
+        "supervisor_process.32",
     ]
     assert rig.seen_in_wait is not None and len(rig.seen_in_wait) == 2
     assert rig.seen_in_wait[1] == {"ok": False, "error": _SYNTHETIC}  # sent before the rerun
@@ -3554,19 +3567,45 @@ def test_an_error_in_a_shutdown_wait_runs_the_wait_once_more(
 def test_an_error_in_a_shutdown_wait_with_a_signal_latched_is_logged_too(
     short_root: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    """supervisor_process.06 from shutting_down. A SIGTERM latched in the pass
-    whose SHUTDOWN wait failed runs the wait again in place of row 12. The
-    failure is logged the same way and the answer is sent first."""
+    """supervisor_process.36. A SIGTERM latched during the SHUTDOWN wait that
+    failed runs the wait again in place of row 12, with the same ordered
+    intents: the queued answer is sent first, then the wait. The failure is
+    logged the same way."""
     rig = _ErroredShutdown(short_root / "sig", failures=1, signal=True)
     assert rig.sup.run() == 0
     assert rig.taken[-4:] == [
         "supervisor_process.05",
-        "supervisor_process.06",
+        "supervisor_process.36",
         "supervisor_process.07",
-        "supervisor_process.10",
+        "supervisor_process.32",
     ]
     assert "supervisor_process.12" not in rig.taken
     assert rig.seen_in_wait is not None and rig.seen_in_wait[1]["error"] == _SYNTHETIC
+    assert capfd.readouterr().err.count(_FAILED_LINE) == 1
+    rig.close()
+
+
+def test_a_signal_latched_before_a_shutdown_whose_wait_fails_is_that_shutdowns(
+    short_root: Path, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A SIGTERM latched just before the SHUTDOWN is the SHUTDOWN's: its
+    handler clears the latch once the fence passes. When the wait fails, the
+    end of the pass retries it with no signal latched (.12), sending the
+    queued answer first, and the wait runs twice, not three times."""
+    rig = _ErroredShutdown(short_root / "before", failures=1, signal_before=True)
+    assert rig.sup.run() == 0
+    assert rig.taken[-4:] == [
+        "supervisor_process.05",
+        "supervisor_process.12",
+        "supervisor_process.07",
+        "supervisor_process.32",
+    ]
+    assert "supervisor_process.06" not in rig.taken and "supervisor_process.36" not in rig.taken
+    assert rig.failures == 0 and not rig.sup._shutdown_requested
+    assert rig.seen_in_wait is not None and rig.seen_in_wait[1] == {
+        "ok": False,
+        "error": _SYNTHETIC,
+    }
     assert capfd.readouterr().err.count(_FAILED_LINE) == 1
     rig.close()
 
@@ -3575,7 +3614,7 @@ def test_a_second_error_in_a_shutdown_wait_ends_the_loop_with_the_error(
     short_root: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
     """The wait runs once more, and only once. When that run fails too, the
-    error leaves `run()` through supervisor_process.11, so the process does
+    error leaves `run()` through supervisor_process.31, so the process does
     not exit 0 with its wrappers left to lifeline EOF: main exits 1 (the
     process test below). Before, the first error was the last word and
     `run()` returned 0."""
@@ -3585,7 +3624,7 @@ def test_a_second_error_in_a_shutdown_wait_ends_the_loop_with_the_error(
     assert rig.taken[-3:] == [
         "supervisor_process.05",
         "supervisor_process.12",
-        "supervisor_process.11",
+        "supervisor_process.31",
     ]
     assert rig.failures == 1  # two waits, not three
     assert rig.replies()[1] == {"ok": False, "error": _SYNTHETIC}
@@ -3594,7 +3633,7 @@ def test_a_second_error_in_a_shutdown_wait_ends_the_loop_with_the_error(
 
 
 def test_a_shutdown_wait_that_fails_twice_exits_1(short_root: Path) -> None:
-    """The process path behind supervisor_process.12 and .11. A spawn record
+    """The process path behind supervisor_process.12 and .31. A spawn record
     nested past the parser's depth limit makes the shutdown wait raise
     RecursionError (a same-uid file, inside the trust boundary). The
     SHUTDOWN is answered `internal:` before the wait runs once more, which

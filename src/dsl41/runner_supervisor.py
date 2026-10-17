@@ -778,12 +778,12 @@ SUPERVISOR_LEASE = Statechart(
 # that runs the lease. The supervisor runs its procedures (startup probes and bind,
 # orderly shutdown with its bounds, teardown) and posts a fact wherever the next step
 # depends on the outcome. The row taken decides the move; an action reports an intent
-# the supervisor carries out (exit 1, or run the wait). Actions never raise and do no
-# I/O.
+# the supervisor carries out after the post (exit 1; send the queued replies; run the
+# wait; unlink what the state owns). Actions never raise and do no I/O.
 #
 # The supervisor posts:
-#   - `start`, once, from `_bind`: the lock held, an owner live, or the root free and
-#     the private socket bound;
+#   - `start`, once, from `_bind`, with the fact `_start_fact` decides: the lock held,
+#     an owner live, or the root free and the private socket bound;
 #   - `publish`, once, after the socket is renamed into place (DL-275);
 #   - SPAWN, SIGNAL and SHUTDOWN from the dispatch belt, which runs only while
 #     `serving`: the fence, after a due `expire` is posted to the lease;
@@ -793,7 +793,15 @@ SUPERVISOR_LEASE = Statechart(
 #     `shutting_down`, with no signal latched;
 #   - `deadman`, produced by sampling the deadman's deadline at the end of each loop
 #     pass while `serving`, posted only when due;
-#   - `teardown`, once, from `_teardown`, unless the process is closed.
+#   - `teardown`, once, from `_teardown`, unless the process is closed. Teardown then
+#     sends replies for up to 2 s, drops every connection, carries out the row's unlink,
+#     and closes the open lifelines and the lock. After an error that ended startup or
+#     the loop, main exits 1, or 7 for a statechart error.
+#
+# SHUTDOWN's handler clears a latched signal once the fence passes (.05), before the
+# wait, so a refused SHUTDOWN leaves the signal latched. A signal latched during a wait
+# that ends finds the process stopped (.09); one latched during a wait that errs runs
+# it once more (.36), as the end of that pass does with none latched (.12).
 #
 # Ties: nothing is concurrent, since the loop is single-threaded, every wait blocks it
 # and a signal handler only latches. Within a pass the latch is read before the
@@ -814,7 +822,7 @@ DRAINED = "drained"
 PASS_ENDED = "pass_ended"
 DEADMAN = "deadman"
 TEARDOWN = "teardown"
-#: `start`'s facts, from `_bind`
+#: `start`'s facts, from `_start_fact`
 LOCK_HELD = "lock_held"
 OWNER_LIVE = "owner_live"
 FREE = "free"
@@ -823,7 +831,10 @@ REAPED = "reaped"
 PAST_BOUND = "past_bound"
 #: the intents of the process chart's actions
 REFUSE = "refuse"
+FLUSH = "flush"
 DRAIN = "drain"
+UNLINK_PUBLISHED = "unlink_published"
+UNLINK_PRIVATE = "unlink_private"
 #: the leaf states of SUPERVISOR_PROCESS.
 _PROCESS_PHASES = frozenset(
     {"starting", "bound", "serving", "shutting_down", "stopped", "refused", "closed"}
@@ -872,6 +883,29 @@ def _drain(_ctx: Context) -> Effects:
     return Effects(intents=(DRAIN,))
 
 
+def _retry(_ctx: Context) -> Effects:
+    """An error ended the SHUTDOWN's wait: send the queued replies first, that SHUTDOWN's
+    `internal:` answer among them, then run the wait once more (DL-300)."""
+    return Effects(intents=(FLUSH, DRAIN))
+
+
+def _unlink_published(_ctx: Context) -> Effects:
+    """This incarnation published supervisor.sock. Teardown sends the queued replies for
+    up to 2 s, drops every connection and closes the listener; it unlinks supervisor.sock
+    if its inode is still the one renamed into place and supervisor.pid if it names this
+    incarnation, then closes the open lifelines and the lock. From `up` an error ended
+    the loop, and main exits 1, or 7 for a statechart error (DL-210)."""
+    return Effects(intents=(UNLINK_PUBLISHED,))
+
+
+def _unlink_private(_ctx: Context) -> Effects:
+    """This incarnation bound its private socket and an error ended startup before the
+    publish. Teardown closes the listener, unlinks supervisor.pid if it names this
+    incarnation and the private socket, then closes the lock; main exits 1, or 7 for a
+    statechart error (DL-210)."""
+    return Effects(intents=(UNLINK_PRIVATE,))
+
+
 _ONLY = "the supervisor posts {event} only {where}"
 _VERBS = (
     "a mutating verb is dispatched only while serving: no request is read before"
@@ -902,9 +936,11 @@ _PROCESS_UNREACHABLE: dict[str, tuple[tuple[str, ...], str]] = {
     **{verb: (("starting", "bound", "shutting_down", "ended"), _VERBS) for verb in _MUTATING},
 }
 
-#: the supervisor's own lifecycle (ss5, DL-210, DL-289). Rows 01 to 12 are the
-#: lifecycle, 13 to 20 the fence, 21 to 30 the events ignored once closed. A fence
-#: refusal is answered with its code, and with the incarnation for wrong_incarnation.
+#: the supervisor's own lifecycle (ss5, DL-210, DL-289). Rows 01 to 12 and 36 are the
+#: lifecycle, 13 to 20 the fence, 21 to 30 the events ignored once closed, and 31 to 35
+#: teardown, a row per source state in three ownership classes; 10 and 11 are out of use
+#: (DL-378). A fence refusal is answered with its code, and with the incarnation for
+#: wrong_incarnation.
 #: SIGKILL ends the process in any state and runs no code, so no row is taken for it:
 #: each wrapper takes lifeline EOF and records in its own time (ss5, DL-205).
 SUPERVISOR_PROCESS = Statechart(
@@ -920,7 +956,7 @@ SUPERVISOR_PROCESS = Statechart(
                         "open",
                         regions=(
                             Region(
-                                "phase",
+                                "stage",
                                 "starting",
                                 (
                                     State("starting"),
@@ -929,7 +965,7 @@ SUPERVISOR_PROCESS = Statechart(
                                         "up",
                                         regions=(
                                             Region(
-                                                "phase",
+                                                "service",
                                                 "serving",
                                                 (State("serving"), State("shutting_down")),
                                             ),
@@ -941,7 +977,9 @@ SUPERVISOR_PROCESS = Statechart(
                     ),
                     State(
                         "ended",
-                        regions=(Region("phase", "stopped", (State("stopped"), State("refused"))),),
+                        regions=(
+                            Region("outcome", "stopped", (State("stopped"), State("refused"))),
+                        ),
                     ),
                     State("closed", final=True),
                 ),
@@ -996,7 +1034,7 @@ SUPERVISOR_PROCESS = Statechart(
         ),
         Row(
             "supervisor_process.06",
-            "up",
+            "serving",
             TERM,
             "shutting_down",
             action="drain",
@@ -1033,30 +1071,11 @@ SUPERVISOR_PROCESS = Statechart(
             note="A signal latched during a shutdown that already ran in this loop pass. Nothing runs.",
         ),
         Row(
-            "supervisor_process.10",
-            "ended",
-            TEARDOWN,
-            "closed",
-            cite=f"{_SP5}, DL-210",
-            note=(
-                "Flush replies for up to 2 s, drop every connection, unlink what this"
-                " incarnation published, close the open lifelines and the lock."
-            ),
-        ),
-        Row(
-            "supervisor_process.11",
-            "open",
-            TEARDOWN,
-            "closed",
-            cite=f"{_SP5}, DL-210",
-            note="An error ended startup or the loop: the cleanup of .10, and main exits 1.",
-        ),
-        Row(
             "supervisor_process.12",
             "shutting_down",
             PASS_ENDED,
-            "shutting_down",
-            action="drain",
+            action="retry",
+            kind="internal",
             cite=f"{_SP5} SHUTDOWN, DL-300",
         ),
         Row(
@@ -1185,7 +1204,7 @@ SUPERVISOR_PROCESS = Statechart(
             kind="ignored",
             cite="statechart-engine ss10",
             false_unreachable=(
-                "rows .10 and .11 take a teardown in every state but closed, so the"
+                "rows .31 to .35 take a teardown in every state but closed, so the"
                 " walk reaches the root only from closed"
             ),
         ),
@@ -1213,6 +1232,60 @@ SUPERVISOR_PROCESS = Statechart(
             kind="ignored",
             cite="statechart-engine ss10",
         ),
+        Row(
+            "supervisor_process.31",
+            "up",
+            TEARDOWN,
+            "closed",
+            action="unlink_published",
+            cite=f"{_SP5}, DL-210",
+        ),
+        Row(
+            "supervisor_process.32",
+            "stopped",
+            TEARDOWN,
+            "closed",
+            action="unlink_published",
+            cite=f"{_SP5}, DL-210",
+        ),
+        Row(
+            "supervisor_process.33",
+            "bound",
+            TEARDOWN,
+            "closed",
+            action="unlink_private",
+            cite=f"{_SP5}, DL-210",
+        ),
+        Row(
+            "supervisor_process.34",
+            "starting",
+            TEARDOWN,
+            "closed",
+            cite=f"{_SP5}, DL-210",
+            note=(
+                "An error ended startup before the bind: teardown closes the lock if it was"
+                " taken and unlinks nothing; main exits 1, or 7 for a statechart error."
+            ),
+        ),
+        Row(
+            "supervisor_process.35",
+            "refused",
+            TEARDOWN,
+            "closed",
+            cite=f"{_SP5}, DL-210",
+            note=(
+                "Another supervisor owns the root: teardown closes the lock if it was taken"
+                " and unlinks nothing; main exits 1."
+            ),
+        ),
+        Row(
+            "supervisor_process.36",
+            "shutting_down",
+            TERM,
+            action="retry",
+            kind="internal",
+            cite=f"{_SP5} SHUTDOWN, DL-300",
+        ),
     ),
     guards={
         "lock_held": _lock_held,
@@ -1223,7 +1296,13 @@ SUPERVISOR_PROCESS = Statechart(
         "stale": _stale,
         "closed": _closed,
     },
-    actions={"refuse": _refuse, "drain": _drain},
+    actions={
+        "refuse": _refuse,
+        "drain": _drain,
+        "retry": _retry,
+        "unlink_published": _unlink_published,
+        "unlink_private": _unlink_private,
+    },
     time_events=(TimeEvent(DEADMAN),),
     clock="monotonic",
     exclusions=tuple(
@@ -1291,8 +1370,7 @@ class Supervisor:
 
     @property
     def state(self) -> ProcessState:
-        """The active leaf of SUPERVISOR_PROCESS. Teardown unlinks by it: `bound` owns the
-        private socket path and every state from `serving` on owns the published one."""
+        """The active leaf of SUPERVISOR_PROCESS."""
         (phase,) = self._machines.active(_PROCESS) & _PROCESS_PHASES
         return cast(ProcessState, phase)
 
@@ -1300,11 +1378,6 @@ class Supervisor:
         """Post one event to SUPERVISOR_PROCESS and give its row's outcome."""
         (outcome,) = self._machines.dispatch(_PROCESS, Event(name, payload))
         return outcome
-
-    def _start(self, fact: str, cause: BaseException | None = None) -> None:
-        """Post the startup fact. A refusal row's intent exits 1."""
-        if REFUSE in self._process(START, fact).intents:
-            raise SystemExit("another supervisor owns this root") from cause
 
     @property
     def _running(self) -> bool:
@@ -1389,7 +1462,9 @@ class Supervisor:
             pass
         return False
 
-    def _refuse_if_live(self) -> None:
+    def _owner_present(self) -> bool:
+        """The published socket answers PING within one of three attempts across a
+        second, or the pid record does not prove its owner absent (DL-210)."""
         if os.path.lexists(self.sock_path):
             # three attempts across one second: macOS can refuse a full listen
             # backlog, so one refusal never authorizes unlink
@@ -1397,18 +1472,22 @@ class Supervisor:
             for attempt in range(3):
                 deadline = started + (attempt + 1) / 3
                 if self._probe_answered(deadline):
-                    self._start(OWNER_LIVE)  # supervisor_process.02 exits 1
+                    return True
                 delay = deadline - time.monotonic()
                 if delay > 0:
                     time.sleep(delay)
-        if not self._pid_owner_absent():
-            self._start(OWNER_LIVE)  # supervisor_process.02 exits 1
+        return not self._pid_owner_absent()
 
-    def _bind(self) -> None:
+    def _start_fact(self) -> tuple[str, LockHeld | None]:
+        """`start`'s fact, from the first test that decides it (DL-210): LOCK_HELD when
+        supervisor.lock is held, OWNER_LIVE when an owner is present, and otherwise FREE
+        once private sockets are swept, the published path is reclaimed and the private
+        socket is bound. The tests are I/O with sleeps, so they run here and the guards
+        compare the fact. With LOCK_HELD comes the `LockHeld`, the refusal's cause."""
         try:
             self._lock_fd = flock_exclusive(os.path.join(self.run_root, "supervisor.lock"))
         except LockHeld as exc:
-            self._start(LOCK_HELD, exc)  # supervisor_process.01 exits 1
+            return LOCK_HELD, exc
         # sweep private sockets only, under the lock; other files with this prefix are not ours
         with os.scandir(self.run_root) as entries:
             for entry in entries:
@@ -1416,17 +1495,26 @@ class Supervisor:
                     with contextlib.suppress(FileNotFoundError):
                         if stat.S_ISSOCK(entry.stat(follow_symlinks=False).st_mode):
                             os.unlink(entry.path)
-        self._refuse_if_live()
+        if self._owner_present():
+            return OWNER_LIVE, None
         with contextlib.suppress(FileNotFoundError):
             os.unlink(self.sock_path)
         old_umask = os.umask(0o177)
         try:
             self._listen = socket.socket(socket.AF_UNIX)
             self._listen.bind(self._private_path)
-            self._start(FREE)
-            self._listen.listen(64)
         finally:
             os.umask(old_umask)
+        return FREE, None
+
+    def _bind(self) -> None:
+        # FREE is posted right after the private bind, so a listen failure tears down
+        # from `bound` and unlinks the private socket (supervisor_process.33)
+        fact, cause = self._start_fact()
+        if REFUSE in self._process(START, fact).intents:
+            raise SystemExit("another supervisor owns this root") from cause  # .01 or .02
+        assert self._listen is not None
+        self._listen.listen(64)
         os.chmod(self._private_path, 0o600)
         self._socket_inode = os.stat(self._private_path).st_ino
         durable_write_json(
@@ -2289,7 +2377,8 @@ class Supervisor:
         if (err := self._fence("SHUTDOWN", req)) is not None:
             return err
         # supervisor_process.05 moved to shutting_down: a signal latched before now is this
-        # shutdown's; one latched during the wait finds it stopped
+        # shutdown's; one latched during the wait finds it stopped (.09), or retries a wait
+        # that errs (.36)
         self._shutdown_requested = False
         # ss5 order: wait for wrappers FIRST, reply {ok}, exit, unlink (DL-48)
         try:
@@ -2298,7 +2387,7 @@ class Supervisor:
             raise  # the supervisor stops on it; the wait does not run again
         except Exception as exc:
             # the dispatch answers `internal:` and the wait runs again at the end of this loop
-            # pass (row 06 or 12); the log keeps the cause
+            # pass (row 12, or 36 with a signal latched); the log keeps the cause
             print(
                 f"supervisor: the shutdown wait failed ({type(exc).__name__}: {exc});"
                 " running it once more",
@@ -2311,14 +2400,15 @@ class Supervisor:
     def _orderly_shutdown(self, trigger: str) -> None:
         """The loop's shutdown. `trigger` is TERM, a latched signal the loop consumes, or
         PASS_ENDED, the end of a pass in which an error ended a SHUTDOWN's wait. The row
-        taken says whether the wait runs: a signal latched during a shutdown finds the
-        process stopped and does nothing (supervisor_process.09)."""
+        taken reports what runs, in order: the wait from serving (supervisor_process.06);
+        the queued replies and then the wait once more from shutting_down (.12, .36);
+        nothing from stopped (.09)."""
         self._shutdown_requested = False
-        if self.state == "shutting_down":
-            # after an error the errored SHUTDOWN's answer goes out before the second wait
+        intents = self._process(trigger).intents
+        if FLUSH in intents:
             for conn in list(self._conns.values()):
                 self._writable(conn, resume=False)
-        if DRAIN in self._process(trigger).intents:
+        if DRAIN in intents:
             self._shutdown_wait()
 
     def _shutdown_wait(self) -> None:
@@ -2420,15 +2510,15 @@ class Supervisor:
             self.runs.pop(self._completed.popleft(), None)
 
     def _teardown(self) -> None:
+        """Close the process. The teardown row of the state it ends from reports what
+        this incarnation owns (supervisor_process.31 to .35). The intent authorises a
+        checked unlink: the published socket only while its inode is the one renamed
+        into place, the pid record only while it names this incarnation."""
         if self.state == "closed":
             return  # closed is final: a second teardown has nothing to release
-        # what this incarnation owns is read off the state it ends from
-        entered = self.state
-        published = entered in ("serving", "shutting_down", "stopped")
-        private_bound = entered == "bound"
         # closed first, so no request is dispatched while replies flush; one deadline for
         # all clients, a SHUTDOWN reply included
-        self._process(TEARDOWN)  # supervisor_process.10 or 11
+        unlinks = self._process(TEARDOWN).intents
         deadline = time.monotonic() + 2.0
         while any(conn.out for conn in self._conns.values()):
             remaining = deadline - time.monotonic()
@@ -2442,17 +2532,18 @@ class Supervisor:
         if self._listen is not None:
             with contextlib.suppress(Exception):
                 self._listen.close()
-        if published:
+        if UNLINK_PUBLISHED in unlinks:
             with contextlib.suppress(OSError):
                 if os.stat(self.sock_path).st_ino == self._socket_inode:
                     os.unlink(self.sock_path)
-        if published or private_bound:
+        if UNLINK_PUBLISHED in unlinks or UNLINK_PRIVATE in unlinks:
+            # `bound` writes supervisor.pid before the rename, so either class may own it
             with contextlib.suppress(RecursionError):
                 record = _load_json(self.pid_path)
                 if record is not None and record.get("incarnation") == self.incarnation:
                     with contextlib.suppress(OSError):
                         os.unlink(self.pid_path)
-        if private_bound:
+        if UNLINK_PRIVATE in unlinks:
             with contextlib.suppress(OSError):
                 os.unlink(self._private_path)
         for run in self.runs.values():

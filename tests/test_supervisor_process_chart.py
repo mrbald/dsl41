@@ -138,6 +138,16 @@ def _row(number: str) -> str:
     return f"supervisor_process.{number}"
 
 
+#: the teardown row of each phase but closed, by what the phase owns
+_TEARDOWN = {
+    "serving": "31",
+    "shutting_down": "31",
+    "stopped": "32",
+    "bound": "33",
+    "starting": "34",
+    "refused": "35",
+}
+
 _IGNORED_ONCE_CLOSED = {
     runner_supervisor.START: "21",
     runner_supervisor.PUBLISH: "22",
@@ -162,9 +172,10 @@ def _section_5(witness: str, event: str, label: str) -> str:
     signal shuts down a serving process, runs the wait again after an
     errored SHUTDOWN, and does nothing once stopped; the end of that pass runs
     the wait again too. The wait's end stops the process, whichever way it
-    ended. The deadman stops a serving process. Teardown closes, by the
-    ordinary row from stopped or refused and by the abort row from anything
-    else. A closed process takes nothing."""
+    ended. The deadman stops a serving process. Teardown closes, by one row
+    per class of what the state owns: the published socket from serving,
+    shutting_down and stopped, the private one from bound, and nothing from
+    starting and refused. A closed process takes nothing."""
     phase, _, lease = witness.partition("/")
     if phase == "closed":
         return f"ignored {_row(_IGNORED_ONCE_CLOSED[event])}"
@@ -177,9 +188,9 @@ def _section_5(witness: str, event: str, label: str) -> str:
             return "refused stale_token"
         return _row({"SPAWN": "13", "SIGNAL": "14", "SHUTDOWN": "05"}[event])
     if event == runner_supervisor.TERM:
-        return _row("09" if phase == "stopped" else "06")
+        return _row({"stopped": "09", "shutting_down": "36"}.get(phase, "06"))
     if event == runner_supervisor.TEARDOWN:
-        return _row("10" if phase in ("stopped", "refused") else "11")
+        return _row(_TEARDOWN[phase])
     rows = {
         runner_supervisor.PUBLISH: "04",
         runner_supervisor.DRAINED: "07",
@@ -231,7 +242,7 @@ _OUT_OF_ORDER = {
 def test_a_fact_posted_out_of_order_stops_the_supervisor(event: str) -> None:
     """The exclusions are not rows: a fact posted where the supervisor never
     posts it finds none and raises, which stops the supervisor with exit 7.
-    teardown has no such cell: rows 10 and 11 take it in every state but
+    teardown has no such cell: rows 31 to 35 take it in every state but
     closed."""
     executor, key = _witness(_OUT_OF_ORDER[event])()
     payload = "free" if event == runner_supervisor.START else None
@@ -450,7 +461,7 @@ def test_a_statechart_error_in_teardown_exits_7_with_the_report(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A start that loses the lock refuses with exit 1, then tears down. With a
-    chart that lacks row 10, the teardown post finds no row: the statechart
+    chart that lacks row 35, the teardown post finds no row: the statechart
     error replaces the refusal, and main prints the report under one prefix
     and exits 7, not 1 and not a traceback. Teardown stops at the post, so
     the process exit releases the rest. The run without the gap is the
@@ -473,7 +484,7 @@ def test_a_statechart_error_in_teardown_exits_7_with_the_report(
         directory = tmp_path / "hits"
         directory.mkdir()
         monkeypatch.setenv(HITS_ENV, str(directory))
-        rows = tuple(row for row in CHART.rows if row.id != _row("10"))
+        rows = tuple(row for row in CHART.rows if row.id != _row("35"))
         monkeypatch.setattr(runner_supervisor, "SUPERVISOR_PROCESS", replace(CHART, rows=rows))
         capsys.readouterr()
         assert runner_supervisor.main(["--run-root", str(short_root)]) == 7
@@ -492,3 +503,274 @@ def test_a_statechart_error_in_teardown_exits_7_with_the_report(
     assert all(line.startswith(STATECHART_LOG_PREFIX) for line in report)
     assert f"{STATECHART_LOG_PREFIX}: machine: supervisor_process" in report
     assert "another supervisor owns this root" not in "\n".join(report)
+
+
+# ---- teardown by what the state owns; the retry of an errored wait
+
+
+#: the ids out of use: .10 and .11 are the teardown rows .31 to .35 (DL-378)
+RETIRED = {_row("10"), _row("11")}
+
+
+def test_teardown_is_a_row_per_source_state_in_three_ownership_classes() -> None:
+    """Five teardown rows, one per source state, in three classes: the
+    published class (up, stopped) and the private class (bound) each report
+    their unlink; the third class (starting, refused) reports nothing. The two retry
+    cells are internal rows with the same action. A retired id stays out."""
+    teardown = [
+        (row.id, row.source, row.action)
+        for row in CHART.rows
+        if row.event == runner_supervisor.TEARDOWN and row.kind == "external"
+    ]
+    assert teardown == [
+        (_row("31"), "up", "unlink_published"),
+        (_row("32"), "stopped", "unlink_published"),
+        (_row("33"), "bound", "unlink_private"),
+        (_row("34"), "starting", ""),
+        (_row("35"), "refused", ""),
+    ]
+    retries = [
+        (row.id, row.source, row.event, row.kind) for row in CHART.rows if row.action == "retry"
+    ]
+    assert retries == [
+        (_row("12"), "shutting_down", runner_supervisor.PASS_ENDED, "internal"),
+        (_row("36"), "shutting_down", runner_supervisor.TERM, "internal"),
+    ]
+    assert len(CHART.rows) == 34
+    assert {row.id for row in CHART.rows} & RETIRED == set()  # a retired id stays out (DL-364)
+    ctx = runner_supervisor.Context("process", runner_supervisor.Event("x"), frozenset(), None)
+    intents = {name: action(ctx).intents for name, action in CHART.actions.items()}
+    assert intents == {
+        "refuse": (runner_supervisor.REFUSE,),
+        "drain": (runner_supervisor.DRAIN,),
+        "retry": (runner_supervisor.FLUSH, runner_supervisor.DRAIN),
+        "unlink_published": (runner_supervisor.UNLINK_PUBLISHED,),
+        "unlink_private": (runner_supervisor.UNLINK_PRIVATE,),
+    }
+
+
+#: Every cell of the chart at ec4ecbd, before teardown's rows reported what they unlink,
+#: recorded once by "witness|event|partition": the outcome count, kind, rows, ignored
+#: rows, refusal codes, intents and configuration, or the error class it raised.
+_AT_BASE: dict[str, dict[str, Any]] = json.loads(
+    (Path(__file__).parent / "supervisor_process_cells.json").read_text()
+)
+_PUBLISHED = [runner_supervisor.UNLINK_PUBLISHED]
+_RETRY = [runner_supervisor.FLUSH, runner_supervisor.DRAIN]
+#: the declared differences, cell by cell: the row the cell takes now and its intents
+_DECLARED: dict[str, tuple[str, list[str]]] = {
+    **{f"serving/{lease}|teardown|": (_row("31"), _PUBLISHED) for lease in LEASE_PHASES},
+    "shutting_down|teardown|": (_row("31"), _PUBLISHED),
+    "stopped|teardown|": (_row("32"), _PUBLISHED),
+    "bound|teardown|": (_row("33"), [runner_supervisor.UNLINK_PRIVATE]),
+    "starting|teardown|": (_row("34"), []),
+    "refused|teardown|": (_row("35"), []),
+    "shutting_down|term|": (_row("36"), _RETRY),
+    "shutting_down|pass_ended|": (_row("12"), _RETRY),
+}
+
+
+def _cell(witness: str, event: str, payload: Any) -> dict[str, Any]:
+    executor, key = WITNESSES[witness]()
+    try:
+        outcomes = executor.dispatch(key, runner_supervisor.Event(event, payload))
+    except Exception as error:
+        assert sc.is_statechart_error(error), error
+        return {"raises": type(error).__name__}
+    return {
+        "outcomes": len(outcomes),
+        "kind": outcomes[0].kind,
+        "rows": list(outcomes[0].rows),
+        "ignored": list(outcomes[0].ignored),
+        "refusals": list(outcomes[0].refusals),
+        "intents": [str(i) for o in outcomes for i in o.intents],
+        "active": sorted(executor.active(key)),
+    }
+
+
+def test_every_cell_answers_as_before_but_the_declared_eleven() -> None:
+    """All 220 cells, ten witnesses by every event and partition: 124 raise
+    as before, and every other cell keeps its outcome count, kind, ignored
+    rows, refusal codes, intents and configuration. The eleven declared
+    cells keep their kind and configuration and take the new row with its
+    intents: the teardown cells report what the state owns, and both retry
+    cells report the flush before the drain."""
+    partitions = _partitions()
+    assert len(_AT_BASE) == 220
+    assert sum(1 for cell in _AT_BASE.values() if "raises" in cell) == 124
+    assert set(_DECLARED) <= set(_AT_BASE) and len(_DECLARED) == 11
+    for cell, recorded in _AT_BASE.items():
+        witness, event, label = cell.split("|")
+        expected = dict(recorded)
+        if cell in _DECLARED:
+            row, expected["intents"] = _DECLARED[cell]
+            expected["rows"] = [row]
+        payload = partitions[event][label] if label else None
+        assert _cell(witness, event, payload) == expected, cell
+
+
+@pytest.mark.parametrize("phase", ["serving", "shutting_down", "stopped"])
+def test_teardown_from_a_published_state_unlinks_the_published_socket_and_pid_only(
+    short_root: Path, phase: str
+) -> None:
+    """supervisor_process.31 and .32. supervisor.sock and supervisor.pid are
+    this incarnation's and go; a file at the private path stays, since the
+    published class does not unlink it."""
+    sup = runner_supervisor.Supervisor(str(short_root))
+    sup._bind()
+    if phase != "serving":
+        sup._process(runner_supervisor.TERM)  # .06; the wait is not run here
+    if phase == "stopped":
+        sup._process(runner_supervisor.DRAINED, runner_supervisor.REAPED)
+    assert sup.state == phase
+    decoy = Path(sup._private_path)
+    decoy.write_text("a file at the private path")
+    sup._teardown()
+    assert sup.state == "closed"
+    assert not Path(sup.sock_path).exists() and not Path(sup.pid_path).exists()
+    assert decoy.read_text() == "a file at the private path"
+
+
+def test_teardown_from_bound_unlinks_the_private_socket_and_pid_only(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """supervisor_process.33. The rename fails after the pid record is
+    written: the private socket and supervisor.pid are this incarnation's
+    and go. A hard link to the private socket at the published path passes
+    the published unlink's inode check, so only the class keeps it: a .33
+    that reported the published unlink would remove it."""
+    sup = runner_supervisor.Supervisor(str(short_root))
+    rename = runner_supervisor.os.rename
+
+    def fail(source: str, destination: str) -> None:
+        if destination == sup.sock_path:
+            runner_supervisor.os.link(source, destination)
+            raise OSError("synthetic publication failure")
+        rename(source, destination)
+
+    monkeypatch.setattr(runner_supervisor.os, "rename", fail)
+    with pytest.raises(OSError, match="synthetic"):
+        sup._bind()
+    assert sup.state == "bound" and Path(sup._private_path).exists()
+    assert json.loads(Path(sup.pid_path).read_text())["incarnation"] == sup.incarnation
+    sup._teardown()
+    assert sup.state == "closed"
+    assert not Path(sup._private_path).exists() and not Path(sup.pid_path).exists()
+    assert Path(sup.sock_path).stat().st_ino == sup._socket_inode  # the link stays
+    Path(sup.sock_path).unlink()
+
+
+@pytest.mark.parametrize("phase", ["starting", "refused"])
+def test_teardown_from_starting_or_refused_unlinks_nothing(short_root: Path, phase: str) -> None:
+    """supervisor_process.34 and .35. Nothing is this incarnation's: a pid
+    record that names it, a file at the private path and one at the
+    published path all stay."""
+    sup = runner_supervisor.Supervisor(str(short_root))
+    held = None
+    if phase == "refused":
+        held = runner_supervisor.flock_exclusive(short_root / "supervisor.lock")
+        with pytest.raises(SystemExit) as refusal:
+            sup._bind()  # .01
+        assert isinstance(refusal.value.__cause__, runner_supervisor.LockHeld)
+    try:
+        assert sup.state == phase
+        runner_supervisor.durable_write_json(sup.pid_path, {"incarnation": sup.incarnation})
+        for path in (sup._private_path, sup.sock_path):
+            Path(path).write_text("a decoy")
+        sup._teardown()
+    finally:
+        if held is not None:
+            runner_supervisor.os.close(held)
+    assert sup.state == "closed"
+    assert json.loads(Path(sup.pid_path).read_text()) == {"incarnation": sup.incarnation}
+    assert Path(sup._private_path).exists() and Path(sup.sock_path).exists()
+    Path(sup._private_path).unlink()
+
+
+# ---- the signal latch
+
+
+def test_a_refused_shutdown_keeps_a_latched_signal(
+    queued_supervisor: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A SIGTERM latched before a SHUTDOWN with a stale token: the refusal
+    leaves the latch set, so the loop's TERM still shuts down from serving
+    (.06) and the wait ends it (.07)."""
+    fence = _Fence(queued_supervisor, monkeypatch, "SHUTDOWN")
+    fence.sup._on_term_signal(runner_supervisor.signal.SIGTERM, None)
+    assert fence.ask(incarnation=fence.sup.incarnation, token=fence.token + 1) == _STALE
+    assert fence.sup._shutdown_requested and fence.sup.state == "serving"
+    fence.sup._orderly_shutdown(runner_supervisor.TERM)
+    assert fence.rows == [fence.stale_row, _row("06"), _row("07")]
+    assert fence.sup.state == "stopped" and not fence.sup._shutdown_requested
+
+
+def test_a_signal_during_a_successful_shutdown_wait_is_a_no_op_at_stopped(
+    queued_supervisor: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A SIGTERM latched while a SHUTDOWN's wait runs: the wait ends the
+    process (.07), and the loop's TERM finds it stopped, where .09 reports
+    nothing and no second wait runs. A latch set before the SHUTDOWN is the
+    non-triggering case: the SHUTDOWN's handler clears it."""
+    fence = _Fence(queued_supervisor, monkeypatch, "SHUTDOWN")
+    fence.sup._on_term_signal(runner_supervisor.signal.SIGTERM, None)
+    waits: list[str] = []
+    wait = fence.sup._shutdown_wait
+
+    def latching_wait() -> None:
+        assert not fence.sup._shutdown_requested  # cleared before the wait
+        waits.append(fence.sup.state)
+        fence.sup._on_term_signal(runner_supervisor.signal.SIGTERM, None)
+        wait()
+
+    monkeypatch.setattr(fence.sup, "_shutdown_wait", latching_wait)
+    assert fence.current() == {"ok": True}
+    assert fence.sup.state == "stopped" and fence.sup._shutdown_requested
+    fence.sup._orderly_shutdown(runner_supervisor.TERM)
+    assert fence.rows == [fence.passing_row, _row("07"), _row("09")]
+    assert waits == ["shutting_down"] and not fence.sup._shutdown_requested
+
+
+def test_a_signal_between_the_retry_s_flush_and_its_wait_stays_latched_for_stopped(
+    queued_supervisor: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A SIGTERM latched while .12 sends the queued replies: the latch was
+    cleared before the post, so the signal stays latched and does not stop
+    the wait. The wait runs once and ends the process (.07). In `run()` the
+    loop then exits and teardown runs from stopped, so the loop posts no
+    TERM; the test posts the latched TERM by hand, and .09 runs nothing."""
+    sup, connect = queued_supervisor
+    connect()
+    monkeypatch.setattr(sup, "_reap", lambda: None)
+    sup._process(runner_supervisor.TERM)  # .06: the wait that errs is not run here
+    assert sup.state == "shutting_down"
+    rows: list[str] = []
+    dispatch = sup._machines.dispatch
+
+    def spy(key: Any, event: Any) -> Any:
+        outcomes = dispatch(key, event)
+        if key == "process":
+            rows.extend(row for o in outcomes for row in o.rows)
+        return outcomes
+
+    sup._machines.dispatch = spy
+    writable = sup._writable
+
+    def latching(conn: Any, *, resume: bool = True) -> None:
+        sup._on_term_signal(runner_supervisor.signal.SIGTERM, None)
+        writable(conn, resume=resume)
+
+    waits: list[str] = []
+    wait = sup._shutdown_wait
+
+    def counted() -> None:
+        waits.append(sup.state)
+        wait()
+
+    monkeypatch.setattr(sup, "_writable", latching)
+    monkeypatch.setattr(sup, "_shutdown_wait", counted)
+    sup._orderly_shutdown(runner_supervisor.PASS_ENDED)
+    assert sup._shutdown_requested and sup.state == "stopped"
+    sup._orderly_shutdown(runner_supervisor.TERM)
+    assert rows == [_row("12"), _row("07"), _row("09")]
+    assert waits == ["shutting_down"] and not sup._shutdown_requested

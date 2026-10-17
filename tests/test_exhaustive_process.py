@@ -377,22 +377,24 @@ _STOPPERS = ("signal", "shutdown", "pipelined_shutdowns", "deadman")
 
 
 #: the seventeen (source, row) pairs of the table the chart replaced, which the
-#: walk took each of. A row of a grouping state (06, 10, 11) is judged by the
-#: leaf state it left, so each old source stays a pair.
+#: walk took each of. A row of a grouping state (31) is judged by the leaf
+#: state it left, so each old source stays a pair. Teardown is one row per
+#: class of what the state owns (31 to 35), and a signal in shutting_down is 36.
 _PROCESS_PAIRS = frozenset(
     {
         *(("starting", f"supervisor_process.{n}") for n in ("01", "02", "03")),
         ("bound", "supervisor_process.04"),
         ("serving", "supervisor_process.05"),
         ("serving", "supervisor_process.06"),
-        ("shutting_down", "supervisor_process.06"),
+        ("shutting_down", "supervisor_process.36"),
         ("shutting_down", "supervisor_process.07"),
         ("serving", "supervisor_process.08"),
         ("stopped", "supervisor_process.09"),
-        ("stopped", "supervisor_process.10"),
-        ("refused", "supervisor_process.10"),
-        *((state, "supervisor_process.11") for state in ("starting", "bound", "serving")),
-        ("shutting_down", "supervisor_process.11"),
+        ("stopped", "supervisor_process.32"),
+        ("refused", "supervisor_process.35"),
+        ("starting", "supervisor_process.34"),
+        ("bound", "supervisor_process.33"),
+        *((state, "supervisor_process.31") for state in ("serving", "shutting_down")),
         ("shutting_down", "supervisor_process.12"),
     }
 )
@@ -570,7 +572,7 @@ def test_every_process_event_at_every_reached_point_takes_a_declared_transition(
     is reached right after the process chart takes a row that is not a fence
     refusal, as it was after each `_move` of the table. An error
     in a SHUTDOWN's wait is answered by the dispatch, and the end of that
-    loop pass runs the wait again (12), or the latched SIGTERM does (06).
+    loop pass runs the wait again (12), or the latched SIGTERM does (36).
 
     Left out: SIGKILL, which runs no code; a second error in the wait that
     runs again (each case raises once; test_runner_supervisor.py raises

@@ -746,12 +746,14 @@ stateDiagram-v2
     s8 --> s0 : supervisor_process.03 start [free]
     s0 --> s6 : supervisor_process.04 publish
     s6 --> s7 : supervisor_process.05 SHUTDOWN [credentials]
-    s10 --> s7 : supervisor_process.06 term / drain
+    s6 --> s7 : supervisor_process.06 term / drain
     s7 --> s9 : supervisor_process.07 drained
     s6 --> s9 : supervisor_process.08 deadman
-    s2 --> s1 : supervisor_process.10 teardown
-    s3 --> s1 : supervisor_process.11 teardown
-    s7 --> s7 : supervisor_process.12 pass_ended / drain
+    s10 --> s1 : supervisor_process.31 teardown / unlink_published
+    s9 --> s1 : supervisor_process.32 teardown / unlink_published
+    s0 --> s1 : supervisor_process.33 teardown / unlink_private
+    s8 --> s1 : supervisor_process.34 teardown
+    s5 --> s1 : supervisor_process.35 teardown
 ```
 
 | Id | Source | Event | Guard | Action | Target | Kind | Cite |
@@ -761,13 +763,11 @@ stateDiagram-v2
 | supervisor_process.03 | starting | start | free |  | bound | external | supervisor-protocol ss5, DL-210 |
 | supervisor_process.04 | bound | publish |  | The private socket listens with mode 0600, supervisor.pid is written, and the socket is renamed to supervisor.sock. | serving | external | supervisor-protocol ss5, DL-210, DL-275 |
 | supervisor_process.05 | serving | SHUTDOWN | credentials |  | shutting_down | external | supervisor-protocol ss5 SHUTDOWN, DL-80 |
-| supervisor_process.06 | up | term |  | drain | shutting_down | external | supervisor-protocol ss5 SHUTDOWN, DL-275, DL-300 |
+| supervisor_process.06 | serving | term |  | drain | shutting_down | external | supervisor-protocol ss5 SHUTDOWN, DL-275, DL-300 |
 | supervisor_process.07 | shutting_down | drained |  | The shutdown's wait ended: every wrapper reaped, or the last-resort bound passed and every survivor's group was killed. | stopped | external | supervisor-protocol ss5 SHUTDOWN, DL-48, DL-150 |
 | supervisor_process.08 | serving | deadman |  | A deadman is set and no live leaseholder for that many seconds, the supervisor logs the reason first. | stopped | external | supervisor-protocol ss5 The deadman, DL-95 |
 | supervisor_process.09 | stopped | term |  | A signal latched during a shutdown that already ran in this loop pass. Nothing runs. |  | internal | supervisor-protocol ss5 SHUTDOWN |
-| supervisor_process.10 | ended | teardown |  | Flush replies for up to 2 s, drop every connection, unlink what this incarnation published, close the open lifelines and the lock. | closed | external | supervisor-protocol ss5, DL-210 |
-| supervisor_process.11 | open | teardown |  | An error ended startup or the loop: the cleanup of .10, and main exits 1. | closed | external | supervisor-protocol ss5, DL-210 |
-| supervisor_process.12 | shutting_down | pass_ended |  | drain | shutting_down | external | supervisor-protocol ss5 SHUTDOWN, DL-300 |
+| supervisor_process.12 | shutting_down | pass_ended |  | retry |  | internal | supervisor-protocol ss5 SHUTDOWN, DL-300 |
 | supervisor_process.13 | serving | SPAWN | credentials |  |  | internal | supervisor-protocol ss5 mutating verbs, DL-80 |
 | supervisor_process.14 | serving | SIGNAL | credentials |  |  | internal | supervisor-protocol ss5 mutating verbs, DL-80 |
 | supervisor_process.15 | serving | SPAWN | foreign |  |  | refusal wrong_incarnation | supervisor-protocol ss5 mutating verbs, DL-80, DL-229 |
@@ -786,19 +786,25 @@ stateDiagram-v2
 | supervisor_process.28 | process | SPAWN | closed |  |  | ignored | statechart-engine ss10 |
 | supervisor_process.29 | process | SIGNAL | closed |  |  | ignored | statechart-engine ss10 |
 | supervisor_process.30 | process | SHUTDOWN | closed |  |  | ignored | statechart-engine ss10 |
+| supervisor_process.31 | up | teardown |  | unlink_published | closed | external | supervisor-protocol ss5, DL-210 |
+| supervisor_process.32 | stopped | teardown |  | unlink_published | closed | external | supervisor-protocol ss5, DL-210 |
+| supervisor_process.33 | bound | teardown |  | unlink_private | closed | external | supervisor-protocol ss5, DL-210 |
+| supervisor_process.34 | starting | teardown |  | An error ended startup before the bind: teardown closes the lock if it was taken and unlinks nothing, main exits 1, or 7 for a statechart error. | closed | external | supervisor-protocol ss5, DL-210 |
+| supervisor_process.35 | refused | teardown |  | Another supervisor owns the root: teardown closes the lock if it was taken and unlinks nothing, main exits 1. | closed | external | supervisor-protocol ss5, DL-210 |
+| supervisor_process.36 | shutting_down | term |  | retry |  | internal | supervisor-protocol ss5 SHUTDOWN, DL-300 |
 
 | State | In | Entry | Exit | Defers | Waits |
 | --- | --- | --- | --- | --- | --- |
 | process |  |  |  |  |  |
 | open | process/phase |  |  |  |  |
-| starting | open/phase |  |  |  |  |
-| bound | open/phase |  |  |  |  |
-| up | open/phase |  |  |  |  |
-| serving | up/phase |  |  |  |  |
-| shutting_down | up/phase |  |  |  |  |
+| starting | open/stage |  |  |  |  |
+| bound | open/stage |  |  |  |  |
+| up | open/stage |  |  |  |  |
+| serving | up/service |  |  |  |  |
+| shutting_down | up/service |  |  |  |  |
 | ended | process/phase |  |  |  |  |
-| stopped | ended/phase |  |  |  |  |
-| refused | ended/phase |  |  |  |  |
+| stopped | ended/outcome |  |  |  |  |
+| refused | ended/outcome |  |  |  |  |
 | closed (final) | process/phase |  |  |  |  |
 
 | Name | Kind | Prose |
@@ -812,6 +818,9 @@ stateDiagram-v2
 | closed | guard | The process is closed. Nothing posts then, elsewhere an out-of-order fact finds no row and raises `UnhandledEvent`. |
 | refuse | action | Exit 1: another supervisor owns this root, teardown releases only what this process took. |
 | drain | action | Run the shutdown's wait: up to 5 s for missing spawn records, TERM each live command group, KILL each after its grace, and KILL every survivor after the longest grace plus 2 s. Lifelines stay open until each wrapper exits (DL-48, DL-150). |
+| retry | action | An error ended the SHUTDOWN's wait: send the queued replies first, that SHUTDOWN's `internal:` answer among them, then run the wait once more (DL-300). |
+| unlink_published | action | This incarnation published supervisor.sock. Teardown sends the queued replies for up to 2 s, drops every connection and closes the listener, it unlinks supervisor.sock if its inode is still the one renamed into place and supervisor.pid if it names this incarnation, then closes the open lifelines and the lock. From `up` an error ended the loop, and main exits 1, or 7 for a statechart error (DL-210). |
+| unlink_private | action | This incarnation bound its private socket and an error ended startup before the publish. Teardown closes the listener, unlinks supervisor.pid if it names this incarnation and the private socket, then closes the lock, main exits 1, or 7 for a statechart error (DL-210). |
 
 ## supervisor_lease
 

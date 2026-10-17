@@ -24586,3 +24586,105 @@ relitigate an entry; append a new one.
   (a vacuous assertion and a doubled cell run: removed), O6 (the predicates' docstrings repeated
   `stops`'s prose: their own fact only), O7 and O8 (the gate's lost items and "six flag sets":
   stated as they are). Opus confirmed O1 to O8.
+- DL-378 Teardown's ownership is the chart's: a teardown row per source state, in three ownership
+  classes, each row reporting its class's unlink; the start verdict is one named function posted
+  once; the retry of an errored SHUTDOWN wait is two internal rows that report the flush before the
+  drain
+  (2026-10-17; src/dsl41/runner_supervisor.py; tests/test_supervisor_process_chart.py,
+  tests/supervisor_process_cells.json (new), tests/test_exhaustive_process.py,
+  tests/test_runner_supervisor.py; docs/state-machines.md (generated),
+  docs/chart-lifecycles.md (generated))
+  THE AIM. Steps 1 and 7 of the chart simplification on `supervisor_process` (charts ruling, slice
+  S6; explorer 1 P1, P3 and P4; explorer 2 F8 and F12; the Codex probe's item on S6). `_teardown`
+  read the leaf to decide which paths it unlinked, and rows .10 and .11 carried notes only. The
+  start verdict was a tree posted from three sites. The flush before a retried wait was a state
+  test, and .12 was an external self-transition with no entry or exit. No reply, code, exit code,
+  timing or wire text moves.
+  THE RULE. A decision in a handler is a row (step 1); a condition the rule reads has a name (step
+  7, R9: the verdict tree stays one function and the guards compare its label). This supersedes five
+  sentences of DL-328: "`term` moves `up` to `shutting_down`"; "`teardown` moves `ended` and `open`
+  to `closed`"; "the flush of an errored SHUTDOWN answer stays tier code keyed on the state before
+  the post"; "three grouping states keep the old multi-source rows single", since of `up`, `ended`
+  and `open` only `up` stays a source (.31); and "it returns the intent the tier carries out, a
+  refusal that ends the process with exit 1 or the drain", since the intents are now five: refuse,
+  flush, drain and the two unlinks. A row whose source is the leaf can say what the leaf owns, which
+  DL-328's grouped rows could not.
+  THE CHART. Teardown is five rows to `closed`, one per source state in three ownership classes: .31
+  `up` and .32 `stopped` report `unlink_published`, .33 `bound` reports `unlink_private`, and .34
+  `starting` and .35 `refused` report nothing. The teardown procedure is in the prose the docs
+  render: the two unlink actions' docstrings name the bounded flush, the dropped connections, the
+  closed listener, the checked unlinks, the lifelines and the lock, and exit 1 after an error (7
+  for a statechart error, which tears down through .31, .33 or .34 and then returns 7); the notes
+  of .34 and .35 name the lock and the exit. `.12` (`shutting_down + pass_ended`) is internal,
+  and .36 (`shutting_down + term`) is a new internal row; both take the action `retry`, which
+  reports FLUSH then DRAIN. .06 keeps its id and narrows its source from `up` to `serving`, the one
+  cell it still takes, so no inner row overrides it. .01 and .02 stay two rows (R-F8). 30 rows
+  become 34, 2 actions 5, 7 guards unchanged. The nested regions are `stage` (in `open`), `service`
+  (in `up`) and `outcome` (in `ended`), so no two share the name `phase` (F12).
+  THE START. `_start_fact` holds the tree in its order: the lock, the private-socket sweep, the
+  owner's presence, the reclaim of the published path, the private bind; it returns LOCK_HELD,
+  OWNER_LIVE or FREE. `_owner_present` is its named test: three PING attempts across a second, then
+  the pid record. `_bind` posts `start` once with the fact. FREE is posted right after the private
+  bind, so a listen failure tears down from `bound` (.33); LOCK_HELD and OWNER_LIVE are posted with
+  nothing bound. FREE still means "the private socket is bound". With LOCK_HELD the function also
+  returns the `LockHeld`, and the refusal's `SystemExit` chains it as its cause, as before.
+  THE TIER. `_orderly_shutdown` posts the trigger and carries out the row's intents in order: the
+  queued replies, then the wait. The retry's post now precedes the flush, where the flush preceded
+  the post; the post is pure (an internal row, no entry or exit, no guard), so the external effects
+  keep their order: the queued replies, then the wait. `_teardown` keeps the post first and the
+  order of its steps; it carries out the unlink after the flush, the dropped connections and the
+  closed listener. The intent authorises a checked unlink, not an unconditional one: the published
+  socket only while its inode is the one renamed into place, the pid record only while it names this
+  incarnation, as before. The early return at `closed` stays: a second teardown must not close
+  descriptors twice. The loop's end-of-pass posts stay (R-P2).
+  THE LATCH. `_h_shutdown` clears the latch where it did: after a passed fence, before the wait. A
+  refused SHUTDOWN keeps a latched TERM, which then shuts down from `serving` (.06). A TERM latched
+  before the SHUTDOWN is that SHUTDOWN's; if its wait errs, .12 retries it. A TERM latched during a
+  wait that errs takes .36, with the same flush; one latched during a wait that ends finds
+  `stopped`, where .09 runs nothing.
+  RETIRED IDS. .10 and .11 retire for good (DL-364); .31 to .36 are the next ids. Nothing of the
+  process chart is stored or sent: its configuration lives in memory, and the wire carries verbs,
+  codes and answers, all unchanged. Region names are stored nowhere.
+  CHECKS. `well_formed` and `chart_warnings` pass. A table of all 220 cells (ten witnesses by every
+  event and partition), recorded once from ec4ecbd's declaration as
+  tests/supervisor_process_cells.json, is compared cell by cell: the 124 that raised still raise,
+  and every other cell keeps its outcome count, kind, ignored rows, refusal codes, intents and
+  configuration, except eleven declared cells: the nine teardown cells take their class's row and
+  intent, and the two retry cells report FLUSH and DRAIN. New tests: the teardown and retry rows and
+  the retired ids are pinned; one test per ownership class shows the right paths unlinked and a
+  decoy at the other path kept. In the `bound` test the decoy is a hard link to the private socket,
+  so it passes the published unlink's inode check and only the class keeps it: a mutant .33 that
+  also reported the published unlink was run once and failed the test. A refused start's
+  `SystemExit` has the `LockHeld` as its cause. A refused SHUTDOWN keeps the latch; a TERM during a
+  successful wait is a no-op at `stopped`; a TERM latched before a SHUTDOWN whose wait fails is
+  retried by .12 with the answer sent first, and the wait runs twice, not three times; a TERM
+  between the retry's flush and its wait stays latched and the wait runs once and ends the process;
+  in `run()` the loop then exits and teardown runs from `stopped`, so the loop posts no TERM, and
+  the test posts the latched TERM by hand to show .09 runs nothing. The §5 completeness table names
+  the new rows. The exhaustive walk keeps its enumeration and its seventeen state-and-row pairs
+  under the new ids. The transition gate holds `supervisor_process` at 77 of 77 items, four more
+  than HEAD's 73: six unguarded rows in, two out.
+  THE CONTRACTS. supervisor-protocol §5 and statechart-engine §16 are unchanged; §5 of the engine is
+  applied: the intents are carried out after the run.
+  THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235). The constant covers the derivation of oracle
+  state from an identical log; the supervisor's process chart derives nothing from the log, and its
+  configuration is never persisted.
+  REVIEW. Semantic class (rows and actions of a §16 runner machine; five sentences of DL-328
+  superseded; the supervisor protocol's wire unchanged): one Opus reviewer and one Codex Astra
+  pass. Codex found no blocker: the teardown's paths, checks and order equal from every leaf,
+  the start's order and one post unchanged, the wire unchanged, the 220-cell table reproduced
+  from the base with exactly the eleven declared cells differing; it asked for the lock-held
+  cause chain back (the engineer had dropped it with the start tree: restored, with a test;
+  the `SystemExit`'s `__context__` is None where the handler's raise set it to the `LockHeld`,
+  a difference no reader has and the suppressed context hides, a stated limit) and
+  for the entry to state that the retry's post now precedes the flush. Opus, over a 576-cell
+  differential and nine start and teardown scenarios on real supervisors, found no blocker or
+  major; its items: O1 (the bound teardown test's decoy survived by the inode check, not by its
+  class: the decoy is a hard link, and the mutant row fails the test), O2 (two more DL-328
+  sentences superseded: named), O3 ("one row per class" over-claimed: a row per source state
+  in three classes; the post right after the bind is FREE's), O4 (the teardown procedure's
+  prose had left the rendered docs: in the actions' docstrings and the notes), O5 (the post
+  before the flush: stated), O7 (a TERM between the flush and the drain untested: tested).
+  Round 2: Opus confirmed O1 to O7 and re-ran the mutant, and found two wording items (an exit
+  code stated for the wrong case; a test docstring that credited the loop with a post it does
+  not make), fixed and confirmed in round 3; Codex confirmed its two items.
