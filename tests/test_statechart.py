@@ -1613,6 +1613,168 @@ def test_s10_a_refusal_row_reports_its_code_and_consumes_the_event() -> None:
     )
 
 
+def _rest(
+    *rows: Row,
+    defer: frozenset[str] = frozenset(),
+    guards: dict[str, Callable[[Context], bool]] | None = None,
+) -> Statechart:
+    """`rest` holds `work` (`busy` and the final `done`) beside the final `gone`; `busy`
+    finishes or quits, and `poke` has a row on `busy` only."""
+    return chart(
+        "rest",
+        composite(
+            "rest",
+            region(
+                "main",
+                "work",
+                composite(
+                    "work",
+                    region("step", "busy", leaf("busy"), leaf("done", final=True)),
+                    defer=defer,
+                ),
+                leaf("gone", final=True),
+            ),
+        ),
+        [
+            Row("rest.01", "busy", "finish", "done"),
+            Row("rest.02", "busy", "quit", "gone"),
+            Row("rest.03", "busy", "poke", kind="internal", action="log"),
+            *rows,
+        ],
+        actions=logging("log", "moved"),
+        guards=guards or {},
+        **({"defer_bound": 1, "overflow": "stop"} if defer else {}),
+    )
+
+
+def _resting(machine: Statechart, *active: str) -> Executor:
+    assert well_formed(machine) == []
+    executor = Executor()
+    executor.restore("r", machine, {"rest", *active}, data=[])
+    return executor
+
+
+def test_s10_a_final_state_ignores_an_event_no_walk_has_a_row_for() -> None:
+    """In `gone` and in `done`, `poke`, `quit` and `finish` find no row. An instance whose
+    leaves are all final ignores the event: no row, no intent, no refusal, and the
+    configuration stays."""
+    for active in (("gone",), ("work", "done")):
+        executor = _resting(_rest(), *active)
+        for name in ("poke", "quit", "finish"):
+            (outcome,) = executor.dispatch("r", Event(name))
+            assert (outcome.kind, outcome.rows, outcome.ignored) == ("fired", (), ())
+            assert (outcome.refusals, outcome.intents) == ((), ())
+            assert executor.active("r") == {"rest", *active}
+        assert executor.data("r") == []
+
+
+def test_s10_a_row_on_an_ancestor_of_a_final_state_fires() -> None:
+    """The implicit ignore stands only where the whole walk finds nothing: `work`'s row for
+    `poke` fires from `done`, and a guard that is false there leaves the ignore."""
+    held: list[bool] = [True]
+    machine = _rest(
+        Row("rest.04", "work", "poke", "gone", guard="held", action="moved"),
+        guards={"held": lambda ctx: held[0]},
+    )
+    executor = _resting(machine, "work", "done")
+    (outcome,) = executor.dispatch("r", Event("poke"))
+    assert (outcome.rows, executor.active("r")) == (("rest.04",), {"rest", "gone"})
+    held[0] = False
+    executor = _resting(machine, "work", "done")
+    (outcome,) = executor.dispatch("r", Event("poke"))
+    assert (outcome.kind, outcome.rows, executor.active("r")) == (
+        "fired",
+        (),
+        {"rest", "work", "done"},
+    )
+
+
+def test_s10_an_ancestor_deferral_of_a_final_state_defers() -> None:
+    executor = _resting(_rest(defer=frozenset({"quit"})), "work", "done")
+    assert kinds(executor.dispatch("r", Event("quit"))) == [("quit", "deferred", ())]
+    assert executor.deferred("r") == (Event("quit"),)
+
+
+def test_s10_a_leaf_that_is_not_final_raises_where_no_walk_has_a_row() -> None:
+    executor = _resting(_rest(), "work", "busy")
+    with pytest.raises(UnhandledEvent, match="no row and no deferral for ping"):
+        executor.dispatch("r", Event("ping"))
+    assert executor.active("r") == {"rest", "work", "busy"}
+
+
+def test_s10_the_completion_of_a_composite_that_rests_in_a_final_state_fires() -> None:
+    """Entering `done` completes `work`, whose completion row leaves for `gone`: the
+    implicit ignore takes no part in completion."""
+    executor = _resting(_rest(Row("rest.04", "work", COMPLETION, "gone")), "work", "busy")
+    assert kinds(executor.dispatch("r", Event("finish"))) == [
+        ("finish", "fired", ("rest.01",)),
+        (COMPLETION, "fired", ("rest.04",)),
+    ]
+    assert executor.active("r") == {"rest", "gone"}
+
+
+def test_s10_an_instance_ignored_in_a_final_state_can_be_forgotten() -> None:
+    executor = _resting(_rest(), "work", "busy")
+    executor.dispatch("r", Event("quit"))
+    executor.dispatch("r", Event("quit"))  # ignored in `gone`
+    executor.forget("r")
+    with pytest.raises(StatechartError, match="no instance 'r'"):
+        executor.active("r")
+    executor = _resting(_rest(), "work", "done")
+    executor.dispatch("r", Event("poke"))  # ignored in `done`, a final state below `work`
+    with pytest.raises(StatechartError, match="not in a final configuration"):
+        executor.forget("r")
+
+
+def test_s10_a_read_resolves_the_implicit_ignore_as_a_dispatch_does() -> None:
+    executor = _resting(_rest(), "gone")
+    read = executor.resolve("r", Event("poke"))
+    assert (read.kind, read.rows, read.ignored, read.refusals) == ("fired", (), (), ())
+
+
+def test_s10_a_final_leaf_beside_a_leaf_that_is_not_final_ignores_nothing() -> None:
+    """Only an instance whose leaves are all final ignores an event. `done` rests in one
+    region and `busy` in the other; neither has a row for `tick`, so the cell is a gap."""
+    machine = chart(
+        "mixed",
+        composite(
+            "mixed",
+            region("left", "done", leaf("done", final=True)),
+            region("right", "busy", leaf("busy")),
+        ),
+        [],
+        time_events=(TimeEvent("tick"),),
+    )
+    assert well_formed(machine) == ["event tick falls through in configuration {done, busy}"]
+    executor = Executor()
+    executor.restore("m", machine, {"mixed", "done", "busy"})
+    with pytest.raises(UnhandledEvent, match="no row and no deferral for tick"):
+        executor.dispatch("m", Event("tick"))
+
+
+def test_s10_a_released_event_meets_the_implicit_ignore_of_a_finished_instance() -> None:
+    """A deferred event released into an instance whose leaves are all final is ignored as
+    a posted one is, and the finished instance can be forgotten."""
+    machine = chart(
+        "late",
+        composite(
+            "late",
+            region("main", "a", leaf("a", defer=frozenset({"job"})), leaf("fin", final=True)),
+        ),
+        [Row("late.01", "a", "go", "fin")],
+        defer_bound=1,
+        overflow="stop",
+    )
+    assert well_formed(machine) == []
+    executor = Executor()
+    executor.restore("l", machine, {"late", "a"})
+    assert kinds(executor.dispatch("l", Event("job"))) == [("job", "deferred", ())]
+    outcomes = executor.dispatch("l", Event("go"))
+    assert kinds(outcomes) == [("go", "fired", ("late.01",)), ("job", "fired", ())]
+    assert outcomes[1].released and executor.deferred("l") == ()
+    executor.forget("l")
+
+
 # ---- §11 instances and boundaries
 
 
@@ -2200,6 +2362,8 @@ MUTANTS: dict[str, tuple[str, Any]] = {
     "no_conflicts": ("_without_conflicts", lambda chart, ix, active, rows: rows),
     # a completion is never queued
     "no_completion": ("_completions", lambda ix, active, step: []),
+    # a final state ignores nothing: an event no walk has a row for raises there too
+    "no_final_ignore": ("_final_leaves", lambda ix, active: []),
     # the first enabled row is taken without checking the others
     "first_row_wins": (
         "_enabled",

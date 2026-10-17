@@ -24726,3 +24726,61 @@ relitigate an entry; append a new one.
   DL-282's "old entries are never edited"; DL-193's "the log is append-only") becomes: never
   edit, renumber or delete an old entry, except a superseded-by mark and a compression tranche
   under this entry, which may reword and shorten one. Append-only for decisions stands.
+- DL-380 An instance whose active leaves are all final ignores an event for which no region's
+  walk ends in a row or a deferral: the outcome is `fired` with no row, intent or refusal, and
+  the configuration stays; a cell that an exclusion with no partition names is declared
+  (2026-10-17)
+  THE RULING. The rule replaces only an `UnhandledEvent`, so no selection among declared rows
+  changes. The rows of a final state are no longer declared on the root. Six charts lose 24 root
+  ignored rows and six guards: supervisor_process .21-.30 and `closed`, seal_boundary .09-.12 and
+  `over`, supervisor_client .08-.11 and `over`, subscription .06-.08 and `over`, admission
+  .11/.12 and `decided`, effect .05 and `over`. The ids stay retired (DL-364). A deferred event
+  released into an instance whose leaves are all final is ignored the same way: a finished
+  instance ignores what it is sent.
+  WHY. Each root row's source was not the state it belonged to, and its guard re-read
+  `ctx.active` to stand in for the missing source. In admission, effect and subscription the tier
+  forgets the instance in the call that made it final, so only the completeness test reached
+  those rows. The rows also covered, by syntax alone, every out-of-order cell in flight, where
+  their guard was false and the post raised. Those cells are the charts' exclusions. An
+  exclusion with no partition covers every partition of its cell, and §10 reads it as the
+  cell's declaration. An exclusion with a partition declares nothing. An exclusion of a final
+  state, or of an ancestor of one, is a well-formedness error: such a cell is ignored, not
+  raised. Every cell's outcome kind, intents, refusals and leaf are as before.
+  REJECTED. Any active final leaf, rather than every leaf: a leaf that is not final beside it in
+  another region would lose its gap, at run time and in `well_formed`. A row on a final state
+  (`well_formed` keeps refusing it): it would beat an ancestor's row in the walk. An implicit
+  ignore that is a candidate in §3's walk: the same objection, and it would consume an event
+  another region defers. A released event that raises: a finished instance would then stop the
+  tier for work it can no longer do. One shared "rests in a final state" guard (chart-simplify
+  step 7): the 24 rows stay. A new outcome kind `ignored`: no tier reads `kind`, and an ignored
+  row's outcome is `fired`. A coverage item per final state alone: it leaves the final state's
+  other events unexercised. The item is per final state and event, `ignored <state> <event>`, as
+  `defer` and `release` are. It is required exactly when no ancestor has a row or a deferral
+  for the event and every sibling region of each composite on its path can rest quietly for it:
+  the region holds a final state, or a composite that declares neither for the event and each of
+  whose regions rests quietly. Marked unreachable rows for the out-of-order cells: one row per
+  cell, more than the 24 removed.
+  SUPERSEDES. DL-327's sentence "Four ignored rows on the root, guarded by a final state being
+  active, make the declaration complete over the finals"; DL-328's "Ten ignored rows on the root,
+  guarded by `closed`, make the declaration complete over the final state, since the syntactic
+  check wants a row for every event in every state"; DL-329's "Three ignored rows on the root,
+  guarded by a final state being active, make the declaration complete over the finals"; DL-330's
+  "four ignored rows in `closed` (.08 to .11), which exist because completeness is syntactic";
+  DL-331's "A root row (.05) ignores an outcome while a final is active"; DL-334's "Two ignored
+  root rows absorb a decision or an input met while a final is active"; and DL-374's "`over`
+  stays: a final state has no rows (`well_formed`, §10), so .08 to .11 stay on the root", with
+  its next sentence on their guard's `false_unreachable`.
+  NOT THIS CASE. period_row's unguarded root refusals .08, .10 and .12 refuse from `attested`;
+  they do not ignore, and they stay. DL-335 rejects a default refusal on the root because a
+  deleted inner row would fall into it as the wrong refusal; DL-336 placed the anchors' refusals
+  on the root; the two hold together where every inner cell is pinned by a cell table that would
+  show the deletion, which is the anchors' case (tests/test_anchor_machines.py); a chart without
+  such a table keeps DL-335's rule.
+  BINDS. state_machine.py (`Executor._decide`, `_final_leaves`, `_fall_through`, `well_formed`,
+  `coverage_items`); the completeness harness's resolution; the six charts' modules;
+  statechart-engine §6, §10 and §13. `forget`, completion (§4) and §3's walk are unchanged.
+  THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235). The constant covers the derivation of
+  oracle state from an identical log. This engine rule changes no derivation: the job chart has
+  no final state, and every outcome a tier reads is as before.
+  LIMIT. An exclusion asserts a cell unreachable without proof, as it always did at run time.
+  Completeness now relies on that assertion where the root rows' false guards covered the cell.

@@ -177,6 +177,10 @@ def render(machines: Iterable[Statechart]) -> str:
         "# State machines",
         "",
         f"This file is generated from `dsl41.machines`; regenerate it with `{REGENERATE}`.",
+        "",
+        "A state marked final declares no row. An instance whose active leaves are all final",
+        "ignores every event that no walk finds a row or a deferral for",
+        "([statechart-engine §10](statechart-engine.md)).",
     ]
     declared = list(machines)
     if not declared:

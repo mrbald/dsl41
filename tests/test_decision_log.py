@@ -16,7 +16,7 @@ COLUMNS = 100
 #: DL-379: the entries granted the wide ceiling, by full identifier (a lettered entry needs its
 #: own), each for changing the engine or freezing a rule of docs/; an entry joins this set in the
 #: PR that lands it.
-WIDE: frozenset[str] = frozenset()
+WIDE: frozenset[str] = frozenset({"DL-380"})
 #: DL-379: the lines of the log up to the end of DL-379. A compression tranche lowers this in
 #: the same PR; only a superseded-by mark raises it, by the lines it adds.
 PREFIX_LINES = 24728

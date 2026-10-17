@@ -846,7 +846,7 @@ def test_every_feed_event_in_every_subscription_state_takes_a_declared_transitio
     feed: an append, and the stream's end (`unsubscribe`). In `backfill`
     also the backfill sent (`go_live`). Each post is one microstep of the
     executor that fires the declared row; a removed or closed feed gets no
-    post at all, so the root's ignore rows are never taken.
+    post at all, so no final state's implicit ignore is met.
 
     Left out: `go_live` in `live`, `removed` and `closed`. The handler
     (`ControlServer._subscribe`) calls it once, after the ack and the

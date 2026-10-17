@@ -639,17 +639,17 @@ def test_every_process_event_at_every_reached_point_takes_a_declared_transition(
     missed = [item for item in required if item not in hits]
     # The walk's requests are SHUTDOWNs that name this incarnation, and nothing
     # posts once closed. So SPAWN and SIGNAL (13, 14 and their refusals 15 to
-    # 18), the true outcome of a foreign SHUTDOWN's refusal (19) and the events
-    # ignored once closed (21 to 30) are left to test_supervisor_process_chart.py.
-    # Its row 27 has no false outcome to reach. A SHUTDOWN in `serving` weighs
-    # all of 05, 19 and 20, so the false outcome of 19 is reached here.
+    # 18), the true outcome of a foreign SHUTDOWN's refusal (19) and every event
+    # the final `closed` ignores are left to test_supervisor_process_chart.py.
+    # A SHUTDOWN in `serving` weighs all of 05, 19 and 20, so the false outcome
+    # of 19 is reached here.
     fence = {f"supervisor_process.{n}" for n in range(13, 20)}
-    closed = {f"supervisor_process.{n}" for n in range(21, 31)}
-    left = {("row", row, "") for row in fence | closed}
-    left |= {("guard", row, outcome) for row in fence | closed for outcome in ("true", "false")}
-    left -= {
-        ("guard", "supervisor_process.19", "false"),
-        ("guard", "supervisor_process.27", "false"),
+    left = {("row", row, "") for row in fence}
+    left |= {("guard", row, outcome) for row in fence for outcome in ("true", "false")}
+    left -= {("guard", "supervisor_process.19", "false")}
+    left |= {
+        ("ignored", "closed", event)
+        for event in state_machine.alphabet(runner_supervisor.SUPERVISOR_PROCESS)
     }
     assert set(missed) == left
     assert [item for item in forbidden if item in hits] == []
@@ -839,15 +839,11 @@ def test_every_client_event_in_every_reached_client_state_takes_a_declared_trans
     required, forbidden = state_machine.coverage_items(SUPERVISOR_CLIENT)
     # Left to other tests: a request failed by EOF and cancelled before it
     # resumes, a race this walk does not build (06; test_runner_adapters builds
-    # it by hand); every cell of `closed`, where the tier posts nothing: the
-    # ignored rows (08 to 11), which test_supervisor_client_chart.py's
-    # completeness test pins; and the false outcomes of 09 and 10, an EOF or a
-    # cancel before the first connect, which only that file's post into the
-    # excluded cells reaches.
-    ignored = {f"supervisor_client.{n:02}" for n in range(8, 12)}
-    left = {("row", "supervisor_client.06", "")} | {("row", row, "") for row in ignored}
-    left |= {("guard", row, "true") for row in ignored}
-    left |= {("guard", f"supervisor_client.{n}", "false") for n in ("09", "10")}
+    # it by hand); and every cell of `closed`, where the tier posts nothing and
+    # the final state ignores the event, which test_supervisor_client_chart.py's
+    # completeness test pins.
+    left = {("row", "supervisor_client.06", "")}
+    left |= {("ignored", "closed", event) for event in state_machine.alphabet(SUPERVISOR_CLIENT)}
     assert {item for item in required if item not in hits} == left
     assert [item for item in forbidden if item in hits] == []
 

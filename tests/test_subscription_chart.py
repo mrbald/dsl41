@@ -136,7 +136,7 @@ def _section_5(witness: str, event: str, label: str) -> str:
     The backfill sent moves the feed live, and its stream's end closes it. A
     removed or closed feed takes nothing."""
     if witness in ("removed", "closed"):
-        return f"ignored {_row({APPEND: '06', BACKFILL_SENT: '07', STREAM_ENDS: '08'}[event])}"
+        return f"ignored in {witness}"
     if event == BACKFILL_SENT:
         return _row("02")
     if event == STREAM_ENDS:
@@ -163,12 +163,25 @@ def test_the_completeness_table_is_section_5() -> None:
 
 
 def test_a_second_backfill_sent_raises_rather_than_being_ignored() -> None:
-    """The excluded cell: in `live`, `backfill_sent` finds no row, and the
-    root's ignore row holds only for a feed at rest."""
+    """The excluded cell: in `live`, `backfill_sent` finds no row, and only a
+    feed at rest in a final state ignores the event."""
     assert [(x.state, x.event) for x in CHART.exclusions] == [("live", BACKFILL_SENT)]
     machines, feed = _open_witness("live", "empty")()
     with pytest.raises(UnhandledEvent, match="no row and no deferral for backfill_sent"):
         feed.go_live()
+
+
+#: the ids out of use: .06 to .08 are the final states' implicit ignore (DL-380)
+RETIRED = {_row("06"), _row("07"), _row("08")}
+
+
+def test_no_row_is_sourced_at_the_root_and_the_retired_ids_stay_out() -> None:
+    """A final state's cells take no row: the engine ignores the event there
+    (statechart-engine §10)."""
+    assert [row.id for row in CHART.rows] == [_row(n) for n in ("02", "03", "04", "05")]
+    assert [row.id for row in CHART.rows if row.source == CHART.root.name] == []
+    assert {row.id for row in CHART.rows} & RETIRED == set()  # a retired id stays out (DL-364)
+    assert set(CHART.guards) == {"fits", "overflows"}
 
 
 def test_the_overflow_drops_the_backlog_and_reports_the_removal() -> None:

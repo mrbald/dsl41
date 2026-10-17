@@ -52,7 +52,6 @@ from dsl41.runner_ledger import acquire_run_root
 from dsl41.state_machine import (
     HITS_ENV,
     STATECHART_LOG_PREFIX,
-    Context,
     Executor,
     State,
     StatechartError,
@@ -136,7 +135,8 @@ def test_the_leaves_are_the_phases_under_their_groups() -> None:
 
 def test_the_group_rows_are_unguarded_and_sourced_at_their_groups() -> None:
     """Rows .01 and .05 are the rules of `down` and `alive`; no member has its own row for
-    connect or close, and only `over`, the root's test for `closed`, is left (DL-374)."""
+    connect or close (DL-374). No row has a guard: the final `closed` ignores every event
+    with no row (DL-380), and its ids .08 to .11 stay out."""
     rows = {row.id: row for row in CHART.rows}
     for row_id, (group, _members) in _GROUP_ROWS.items():
         assert rows[row_id].source == group and rows[row_id].guard == ""
@@ -145,15 +145,16 @@ def test_the_group_rows_are_unguarded_and_sourced_at_their_groups() -> None:
         inner = {row.id for row in CHART.rows if row.event == event and row.source in members}
         assert inner == set(), row_id
         assert {leaf for leaf in _LEAVES if group in _CONFIGURATION[leaf]} == members
-    assert set(CHART.guards) == {"over"}
-    # the group rows take every connect and close in `alive`: `over` is never false there
-    assert {row.id for row in CHART.rows if row.false_unreachable} == {_row("08"), _row("11")}
-    assert {row.id for row in CHART.rows if row.guard} == {_row(f"{n:02}") for n in range(8, 12)}
+    assert dict(CHART.guards) == {}
+    assert [row.id for row in CHART.rows if row.guard or row.source == "closed"] == []
+    assert set(rows) == {_row(f"{n:02}") for n in range(1, 8)}  # a retired id stays out (DL-364)
 
 
 #: Each cell as the flat chart of DL-330 answered it: the fired row and the leaf after, or
 #: `UnhandledEvent` for the two excluded cells. Generated once from that declaration's
-#: executor; the groups (DL-374) must answer every cell the same.
+#: executor; the groups (DL-374) must answer every cell the same. In the four cells of
+#: `closed` the final state ignores the event with no row (DL-380); an empty row number
+#: stands for that.
 FLAT: dict[tuple[str, str], tuple[str, str] | None] = {
     ("disconnected", CANCEL): None,
     ("disconnected", CLOSE): ("05", "closed"),
@@ -167,10 +168,10 @@ FLAT: dict[tuple[str, str], tuple[str, str] | None] = {
     ("lost", CLOSE): ("05", "closed"),
     ("lost", CONNECT): ("01", "connected"),
     ("lost", EOF): ("07", "lost"),
-    ("closed", CANCEL): ("10", "closed"),
-    ("closed", CLOSE): ("11", "closed"),
-    ("closed", CONNECT): ("08", "closed"),
-    ("closed", EOF): ("09", "closed"),
+    ("closed", CANCEL): ("", "closed"),
+    ("closed", CLOSE): ("", "closed"),
+    ("closed", CONNECT): ("", "closed"),
+    ("closed", EOF): ("", "closed"),
 }
 
 
@@ -190,16 +191,16 @@ def test_every_cell_answers_as_the_flat_chart_did() -> None:
                 executor.dispatch("client", ChartEvent(event))
             continue
         (outcome,) = executor.dispatch("client", ChartEvent(event))
-        assert (outcome.kind, outcome.rows, outcome.refusals) == ("fired", (_row(answer[0]),), ())
+        rows = (_row(answer[0]),) if answer[0] else ()
+        assert (outcome.kind, outcome.rows, outcome.refusals) == ("fired", rows, ())
         assert executor.active("client") == _CONFIGURATION[answer[1]], (leaf, event)
     assert len(FLAT) == len(_LEAVES) * len(alphabet(CHART))
 
 
 @pytest.fixture
 def private_hits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A chart copy with a row deleted reaches the root's `over` rows from `alive`; its hits
-    go to a private directory so the gate, which forbids `over` false on .08 and .11, does
-    not count them."""
+    """A chart copy with a row deleted bears the chart's name; its hits go to a private
+    directory so the gate does not count them."""
     directory = tmp_path / "hits"
     directory.mkdir()
     monkeypatch.setenv(HITS_ENV, str(directory))
@@ -209,8 +210,8 @@ def private_hits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize("row_id", sorted(_GROUP_ROWS))
 def test_a_group_row_deleted_leaves_a_gap_at_every_member(row_id: str) -> None:
     """No member has its own row for the group row's event, so a chart copy without it
-    raises `UnhandledEvent` at each leaf it was the rule of, with the leaf unmoved, and
-    never falls into the root's `over` rows."""
+    raises `UnhandledEvent` at each leaf it was the rule of, with the leaf unmoved: no
+    leaf it was the rule of is final, so no implicit ignore takes the event."""
     (rule,) = (row for row in CHART.rows if row.id == row_id)
     _group, members = _GROUP_ROWS[row_id]
     gapped = replace(CHART, rows=tuple(row for row in CHART.rows if row.id != row_id))
@@ -230,13 +231,13 @@ def test_no_row_deleted_falls_into_another_row() -> None:
         for (leaf, event), answer in FLAT.items():
             if answer is None:
                 continue
-            took = _row(answer[0])
-            if took == row.id:
+            took = (_row(answer[0]),) if answer[0] else ()
+            if took == (row.id,):
                 with pytest.raises(UnhandledEvent):
                     _restored(leaf, gapped).dispatch("client", ChartEvent(event))
                 continue
             (other,) = _restored(leaf, gapped).dispatch("client", ChartEvent(event))
-            assert other.rows == (took,), (row.id, leaf, event)
+            assert other.rows == took, (row.id, leaf, event)
 
 
 # ---- the abstraction (§13)
@@ -359,10 +360,10 @@ def _section_5(witness: str, event: str) -> str:
     nothing on a lost one. A request cancelled mid-flight poisons the
     connection: a connected client is lost, and a lost one stays lost. Close
     closes any client that is not closed. A closed client takes nothing:
-    the tier posts nothing to it, and the root's ignore rows answer."""
+    the tier posts nothing to it, and the final state ignores the event."""
     state = witness.split("/")[0]
     if state == "closed":
-        return f"ignored {_row({CONNECT: '08', EOF: '09', CANCEL: '10', CLOSE: '11'}[event])}"
+        return "ignored in closed"
     if event == CLOSE:
         return _row("05")
     if event == CONNECT:
@@ -671,15 +672,12 @@ def test_every_event_the_client_posts_is_in_the_alphabet(short_root: Path, peers
     assert [leaf for leaf, _ in machines.posted if leaf == "closed"] == []
 
 
-def test_the_chart_declares_no_action_and_its_guards_raise_nothing() -> None:
+def test_the_chart_declares_no_action_and_no_guard() -> None:
     """Every transport effect is the tier's (see the module's comment), so no
-    row has an action. The guard reads the configuration only."""
+    row has an action; the hierarchy and the final state decide every cell,
+    so no row has a guard."""
     assert CHART.actions == {}
-    for leaf in _LEAVES:
-        for event in alphabet(CHART):
-            ctx = Context(None, ChartEvent(event), _CONFIGURATION[leaf], None)
-            outcomes = {name: guard(ctx) for name, guard in CHART.guards.items()}
-            assert outcomes == {"over": leaf == "closed"}
+    assert dict(CHART.guards) == {}
 
 
 # ---- a statechart error on the client's path (statechart-engine ss5)

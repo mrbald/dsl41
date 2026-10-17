@@ -545,17 +545,15 @@ def report_quarantine(result: ApplyResult) -> None:
 # the attempt's, the instance's data. An input that names a decided id never reaches the chart:
 # the index answers an exact retry from the stored decision and refuses a reused id carrying it
 # (DL-217, CM-05). A resting instance per decided id would hold a whole period's inputs in
-# memory. The rows have no actions: the index writes its maps after the microstep. The root's
-# ignored rows exist because completeness is syntactic (statechart-engine ss10); no tier path
-# posts them. A gap in the chart is a `StatechartError`, which stops the engine with exit 7
+# memory. The rows have no actions: the index writes its maps after the microstep. A final
+# state ignores every event (statechart-engine ss10, DL-380); no tier path posts one there. A
+# gap in the chart is a `StatechartError`, which stops the engine with exit 7
 # (statechart-engine ss5).
 
 #: The decision of an admitted input; its payload is the `ApplyResult`.
 DECIDE: Final = "decide"
 #: An input that names an open request id; its payload is the input's fingerprint.
 INPUT: Final = "input"
-#: The states an instance rests in once its decision is made.
-_FINALS: Final = frozenset({"applied", "rejected"})
 
 
 # -- the guards. Each docstring is its rows' prose.
@@ -586,21 +584,6 @@ def _other(ctx: Context) -> bool:
     """The input carries another fingerprint than the attempt's."""
     return not _same(ctx)
 
-
-def _decided(ctx: Context) -> bool:
-    """The instance rests in a final state. Nothing posts to it then: the index
-    forgets the instance in the call that made it final, and answers an input
-    for a decided id from the stored decision before any post (DL-217,
-    CM-05)."""
-    return bool(ctx.active & _FINALS)
-
-
-_DECIDED_NOTE: Final = (
-    "A decision is final: the index answers an exact retry from the stored decision,"
-    " and refuses a reused id with request_id_reused carrying it, before any post"
-    " (DL-217, CM-05). It forgets the instance in the call that made it final. No tier"
-    " path posts this row."
-)
 
 #: One request id from its durable attempt to its durable decision
 #: (concurrency-model ss4), one instance per id in flight. A seal request
@@ -664,39 +647,12 @@ ADMISSION: Final = Statechart(
                 " steps 5-7 yielded. The engine stops."
             ),
         ),
-        Row(
-            "admission.11",
-            "admission",
-            DECIDE,
-            guard="decided",
-            kind="ignored",
-            cite="statechart-engine ss10",
-            false_unreachable=(
-                "rows .02 and .03 partition every decision in `admitted`, so the walk"
-                " reaches the root only from a final state"
-            ),
-            note=_DECIDED_NOTE,
-        ),
-        Row(
-            "admission.12",
-            "admission",
-            INPUT,
-            guard="decided",
-            kind="ignored",
-            cite="statechart-engine ss10",
-            false_unreachable=(
-                "rows .09 and .10 partition every fingerprint in `admitted`, so the walk"
-                " reaches the root only from a final state"
-            ),
-            note=_DECIDED_NOTE,
-        ),
     ),
     guards={
         "applied": _applied,
         "rejected": _rejected,
         "same": _same,
         "other": _other,
-        "decided": _decided,
     },
     clock="logical",
 )

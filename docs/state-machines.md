@@ -2,6 +2,10 @@
 
 This file is generated from `dsl41.machines`; regenerate it with `uv run python scripts/render_state_machines.py`.
 
+A state marked final declares no row. An instance whose active leaves are all final
+ignores every event that no walk finds a row or a deferral for
+([statechart-engine §10](statechart-engine.md)).
+
 ## job
 
 Clock: logical.
@@ -776,16 +780,6 @@ stateDiagram-v2
 | supervisor_process.18 | serving | SIGNAL | stale |  |  | refusal stale_token | supervisor-protocol ss5 mutating verbs, DL-80, DL-229 |
 | supervisor_process.19 | serving | SHUTDOWN | foreign |  |  | refusal wrong_incarnation | supervisor-protocol ss5 mutating verbs, DL-80, DL-229 |
 | supervisor_process.20 | serving | SHUTDOWN | stale |  |  | refusal stale_token | supervisor-protocol ss5 mutating verbs, DL-80, DL-229 |
-| supervisor_process.21 | process | start | closed |  |  | ignored | statechart-engine ss10 |
-| supervisor_process.22 | process | publish | closed |  |  | ignored | statechart-engine ss10 |
-| supervisor_process.23 | process | term | closed |  |  | ignored | statechart-engine ss10 |
-| supervisor_process.24 | process | drained | closed |  |  | ignored | statechart-engine ss10 |
-| supervisor_process.25 | process | pass_ended | closed |  |  | ignored | statechart-engine ss10 |
-| supervisor_process.26 | process | deadman | closed |  |  | ignored | statechart-engine ss10 |
-| supervisor_process.27 | process | teardown | closed |  |  | ignored | statechart-engine ss10 |
-| supervisor_process.28 | process | SPAWN | closed |  |  | ignored | statechart-engine ss10 |
-| supervisor_process.29 | process | SIGNAL | closed |  |  | ignored | statechart-engine ss10 |
-| supervisor_process.30 | process | SHUTDOWN | closed |  |  | ignored | statechart-engine ss10 |
 | supervisor_process.31 | up | teardown |  | unlink_published | closed | external | supervisor-protocol ss5, DL-210 |
 | supervisor_process.32 | stopped | teardown |  | unlink_published | closed | external | supervisor-protocol ss5, DL-210 |
 | supervisor_process.33 | bound | teardown |  | unlink_private | closed | external | supervisor-protocol ss5, DL-210 |
@@ -815,7 +809,6 @@ stateDiagram-v2
 | credentials | guard | This incarnation and the current token of an unexpired lease, an integer on the wire (DL-151). Any connection may present them. The one fence of RENEW, RELEASE, SPAWN, SIGNAL and SHUTDOWN (ss5). |
 | foreign | guard | The request names no incarnation or another one: the supervisor it knew is gone, so it must re-acquire and reconcile (DL-80). |
 | stale | guard | This incarnation without credentials: the token is stale or the lease is not held, so the request is refused stale_token (ss5). With `foreign` and `credentials` this partitions every request. |
-| closed | guard | The process is closed. Nothing posts then, elsewhere an out-of-order fact finds no row and raises `UnhandledEvent`. |
 | refuse | action | Exit 1: another supervisor owns this root, teardown releases only what this process took. |
 | drain | action | Run the shutdown's wait: up to 5 s for missing spawn records, TERM each live command group, KILL each after its grace, and KILL every survivor after the longest grace plus 2 s. Lifelines stay open until each wrapper exits (DL-48, DL-150). |
 | retry | action | An error ended the SHUTDOWN's wait: send the queued replies first, that SHUTDOWN's `internal:` answer among them, then run the wait once more (DL-300). |
@@ -938,10 +931,6 @@ stateDiagram-v2
 | supervisor_client.05 | alive | close |  | From disconnected, connected or lost, the tier cancels the renewal, reader and LIST tasks, then closes the writer. | closed | external | DL-48 |
 | supervisor_client.06 | lost | cancel |  | Poisoned after the loss: EOF failed the pending request before the cancelled request resumed. The tier closes the writer the loss kept, so nothing more is written to that stream. |  | internal | DL-48 |
 | supervisor_client.07 | lost | eof |  | The reader of a poisoned epoch meets the EOF its own poison caused: the epoch is already lost. |  | ignored | statechart-engine ss10 |
-| supervisor_client.08 | client | connect | over |  |  | ignored | statechart-engine ss10 |
-| supervisor_client.09 | client | eof | over |  |  | ignored | statechart-engine ss10 |
-| supervisor_client.10 | client | cancel | over |  |  | ignored | statechart-engine ss10 |
-| supervisor_client.11 | client | close | over |  |  | ignored | statechart-engine ss10 |
 
 | State | In | Entry | Exit | Defers | Waits |
 | --- | --- | --- | --- | --- | --- |
@@ -952,10 +941,6 @@ stateDiagram-v2
 | lost | down/epoch |  |  |  |  |
 | connected | alive/connection |  |  |  |  |
 | closed (final) | client/phase |  |  |  |  |
-
-| Name | Kind | Prose |
-| --- | --- | --- |
-| over | guard | The client is closed. Nothing posts to it: a second close posts nothing, a connection that completes after the close is closed unposted, and the EOF and cancel the close itself causes do their transport work with no post. Before the first connect, an EOF or a cancel finds no row and raises `UnhandledEvent`. |
 
 ## host
 
@@ -1059,8 +1044,6 @@ stateDiagram-v2
 | admission.03 | admitted | decide | rejected | The decision line, with its stored code. | rejected | external | concurrency-model ss4, DL-235, DL-272, DL-320 |
 | admission.09 | admitted | input | other | Refuse request_id_reused, with no decision to carry. |  | refusal request_id_reused | concurrency-model ss4 step 2, DL-217 |
 | admission.10 | admitted | input | same | The index raises an EngineError: a second writer is applying inputs, or steps 5-7 yielded. The engine stops. |  | internal | concurrency-model ss4 step 2 |
-| admission.11 | admission | decide | decided | A decision is final: the index answers an exact retry from the stored decision, and refuses a reused id with request_id_reused carrying it, before any post (DL-217, CM-05). It forgets the instance in the call that made it final. No tier path posts this row. |  | ignored | statechart-engine ss10 |
-| admission.12 | admission | input | decided | A decision is final: the index answers an exact retry from the stored decision, and refuses a reused id with request_id_reused carrying it, before any post (DL-217, CM-05). It forgets the instance in the call that made it final. No tier path posts this row. |  | ignored | statechart-engine ss10 |
 
 | State | In | Entry | Exit | Defers | Waits |
 | --- | --- | --- | --- | --- | --- |
@@ -1075,7 +1058,6 @@ stateDiagram-v2
 | rejected | guard | The decision is `rejected`: a precondition, the stale-completion gate or a host guard rejected the input, the input was quarantined, or a replayed durable decision says rejected. |
 | same | guard | The input carries the fingerprint the attempt was admitted under. |
 | other | guard | The input carries another fingerprint than the attempt's. |
-| decided | guard | The instance rests in a final state. Nothing posts to it then: the index forgets the instance in the call that made it final, and answers an input for a decided id from the stored decision before any post (DL-217, CM-05). |
 
 ## effect
 
@@ -1104,7 +1086,6 @@ stateDiagram-v2
 | effect.02 | pending | resolve | applied | Dispatched, or resume found the run on the host, or a kill landed, or a replayed effect_result, or a carried execution. | applied | external | concurrency-model ss5, DL-96, period-model ss3.5 |
 | effect.03 | pending | resolve | retired | Superseded at dispatch, or resume finds that the run it would kill has exited. | retired | external | concurrency-model ss5, DL-111, DL-232 |
 | effect.04 | pending | resolve | indeterminate | Resume finds no status and no live wrapper for a kill. An exact retry answers outcome_unavailable. | indeterminate | external | concurrency-model ss5, CM-06, DL-111 |
-| effect.05 | effect | resolve | over | An outcome is final: the outbox refuses a second one with an EngineError before any post, and forgets the instance in the call that made it final (DL-295). No tier path posts this row. |  | ignored | statechart-engine ss10 |
 
 | State | In | Entry | Exit | Defers | Waits |
 | --- | --- | --- | --- | --- | --- |
@@ -1119,7 +1100,6 @@ stateDiagram-v2
 | applied | guard | The outcome's state is `applied`. |
 | retired | guard | The outcome's state is `retired`. |
 | indeterminate | guard | The outcome's state is `indeterminate`. |
-| over | guard | The effect rests in a final state. The outbox forgets the instance in the call that made it final and refuses a second outcome before any post (DL-295). In `pending` an outcome that no row's guard takes raises `UnhandledEvent`. |
 
 ## subscription
 
@@ -1152,9 +1132,6 @@ stateDiagram-v2
 | subscription.03 | open | append | overflows | drop_backlog | removed | external | control-protocol ss5, DL-267 |
 | subscription.04 | open | stream_ends |  | The client is gone, a refusal went on the stream, the lineage was lost, or the handler was cancelled. The journal has already taken the feed out of its fan-out. | closed | external | control-protocol ss5, PR-03, period-model ss11 |
 | subscription.05 | open | append | fits | enqueue |  | internal | control-protocol ss5, DL-267 |
-| subscription.06 | feed | append | over |  |  | ignored | statechart-engine ss10 |
-| subscription.07 | feed | backfill_sent | over |  |  | ignored | statechart-engine ss10 |
-| subscription.08 | feed | stream_ends | over |  |  | ignored | statechart-engine ss10 |
 
 | State | In | Entry | Exit | Defers | Waits |
 | --- | --- | --- | --- | --- | --- |
@@ -1169,7 +1146,6 @@ stateDiagram-v2
 | --- | --- | --- |
 | fits | guard | The record fits: the backlog is empty, or the backlog plus the record stays within the budget. An empty backlog takes one record of any size, so one record larger than the budget delays the feed and does not remove it (DL-267). |
 | overflows | guard | The record does not fit: the backlog holds a record, and the backlog plus this one would pass the budget (DL-267). |
-| over | guard | The feed rests in `removed` or `closed`. Nothing posts to it then: the journal forgets the instance in the call that made it final. In `live`, a second `backfill_sent` finds no row and raises `UnhandledEvent`. |
 | enqueue | action | Queue the record and count its bytes against the budget. Memory only: the queue has no count limit, so this never blocks. |
 | drop_backlog | action | Record why, and drop the backlog. The journal then takes the feed out of its fan-out and, once every other feed has the record, tells the owner, which ends the stream (DL-267). |
 
@@ -1212,10 +1188,6 @@ stateDiagram-v2
 | seal_boundary.04 | in_flight | exception | reversible |  | aborted | external | period-model ss7, PR-28b |
 | seal_boundary.13 | in_flight | exception | stops |  | stopped | external | period-model ss7, DL-101, PR-28b |
 | seal_boundary.06 | in_flight | exception | in_doubt |  | stopped | external | DL-274 |
-| seal_boundary.09 | boundary | parked | over |  |  | ignored | statechart-engine ss10 |
-| seal_boundary.10 | boundary | quiesced | over |  |  | ignored | statechart-engine ss10 |
-| seal_boundary.11 | boundary | committed | over |  |  | ignored | statechart-engine ss10 |
-| seal_boundary.12 | boundary | exception | over |  |  | ignored | statechart-engine ss10 |
 
 | State | In | Entry | Exit | Defers | Waits |
 | --- | --- | --- | --- | --- | --- |
@@ -1233,7 +1205,6 @@ stateDiagram-v2
 | stops | guard | Past the point of no return, or the fence lost. Past it, the `seal` append may have begun, so the outcome is unknown and recovery decides (PR-28d): the engine exits 4. A leader that cannot prove it leads does not reopen admission (DL-101, PR-28b). Either stops with no abort and no note, and takes precedence over DL-274's flags. |
 | in_doubt | guard | Not `BoundaryFailStop`, the fence intact, and memory or the WAL in doubt: an attempt admitted during the seal is not fully applied, an engine-made input the drain could not admit would be lost, or a WAL append is unfinished (DL-274). |
 | reversible | guard | Not `BoundaryFailStop`, the fence intact, and nothing in doubt: every other exception before the `seal` append. A refusal before the freeze, a phase-2 refusal, the drain's timeout, a late input (`seal_input_after_cutoff`) and a failed sidecar write are among them (PR-28b). |
-| over | guard | The boundary rests in a final state. Nothing posts to it then: an aborted boundary is forgotten at once, a sealed one once the answer has had its turns, and a stop ends the engine. In flight, an event out of order finds no row and raises `UnhandledEvent`. |
 | answer | action | `sealed`: answer the request with the committed boundary, then raise `PeriodSealed`: the engine exits 3 (PR-30b). |
 | abort | action | `aborted`: run `abort_boundary` and fail the request with the exception. The abort clears the sealing flag, reopens control admission, restarts scheduler admission and unparks FW polls. It touches no row, and C1 carries on (PR-28b). |
 | stop | action | `stopped`: re-raise without an abort. The request is not answered. In doubt, a note names the first of DL-274's flags that is set. An attempt whose answer was owed is not answered either, and resume repairs the WAL tail and rebuilds from the WAL. Past the point of no return, or with the fence lost, there is no note. |

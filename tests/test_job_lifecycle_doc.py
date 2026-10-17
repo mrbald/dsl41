@@ -322,7 +322,7 @@ def test_the_effect_view_is_pinned() -> None:
     assert rjl.section(EFFECT) == [
         "## effect",
         "",
-        "Shown: 3. Folded: 1 (ignored 1). Rows in the chart: 4.",
+        "Shown: 3. Folded: 0. Rows in the chart: 3.",
         "",
         "### outcome",
         "",
@@ -463,6 +463,6 @@ def test_a_spec_only_mark_is_printed_when_the_note_does_not_fit() -> None:
 def test_the_chart_option_prints_one_view(capsys: pytest.CaptureFixture[str]) -> None:
     assert rjl.main(["--chart", "effect"]) == 0
     assert capsys.readouterr().out == "\n".join(rjl.section(EFFECT)) + "\n"
-    assert rjl.main(["--chart", "effect", "--full"]) == 0
+    assert rjl.main(["--chart", "supervisor_client", "--full"]) == 0
     full = capsys.readouterr().out
     assert "### Ignored" in full and "### Refusals" not in full

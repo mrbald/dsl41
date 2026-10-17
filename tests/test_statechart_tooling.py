@@ -224,6 +224,198 @@ def test_completeness_is_judged_over_every_region_together() -> None:
     )
 
 
+ENDED = Statechart(
+    "ended",
+    State("ended", regions=(Region("main", "run", (State("run"), State("end", final=True))),)),
+    (Row("ended.01", "run", "stop", "end"), Row("ended.02", "run", "ping", kind="internal")),
+    clock="logical",
+)
+
+
+def test_a_final_state_needs_no_row_and_may_not_declare_one() -> None:
+    """A configuration whose leaves are all final ignores an event no walk has a row for
+    (§10), so a final state wants no row; `well_formed` refuses a row on one."""
+    assert well_formed(ENDED) == []
+    row = Row("ended.03", "end", "ping", kind="ignored")
+    assert "ended.03: final state end has a row" in well_formed(
+        replace(ENDED, rows=(*ENDED.rows, row))
+    )
+
+
+def test_an_exclusion_with_no_partition_declares_its_cell() -> None:
+    """`tick`, a time event with no row, falls through in `run` and not in `end`. An
+    exclusion with no partition covers every partition of its cell and declares it; the
+    cell raises at run time. An exclusion of one partition leaves the others to rows."""
+    gapped = replace(ENDED, time_events=(TimeEvent("tick"),))
+    assert well_formed(gapped) == ["event tick falls through in configuration {run}"]
+    every = replace(gapped, exclusions=(Exclusion("run", "tick", "never armed in run"),))
+    assert well_formed(every) == []
+    executor = Executor()
+    executor.restore("e", every, {"ended", "run"})
+    with pytest.raises(UnhandledEvent, match="no row and no deferral for tick"):
+        executor.dispatch("e", Event("tick"))
+    one = replace(gapped, exclusions=(Exclusion("run", "tick", "why", partition="late"),))
+    assert well_formed(one) == ["event tick falls through in configuration {run}"]
+
+
+@pytest.mark.parametrize("state", ["end", "ended"])
+def test_an_exclusion_may_not_name_a_cell_of_a_final_state(state: str) -> None:
+    """A final state's cell is ignored, never raised, so an exclusion of it, or of an
+    ancestor of it, is a well-formedness error."""
+    chart = replace(ENDED, exclusions=(Exclusion(state, "ping", "why"),))
+    assert well_formed(chart) == [
+        f"exclusion {chart.exclusions[0]}: names a cell of the final state end,"
+        " which ignores the event (§10)"
+    ]
+
+
+def test_a_final_state_requires_its_implicit_ignore_where_no_ancestor_decides() -> None:
+    """One item per final state and event, where a configuration whose leaves are all final
+    holds the state and no ancestor has a row or a deferral for the event (§13); a root row
+    takes the cell."""
+    required, forbidden = coverage_items(ENDED)
+    assert [item for item in required if item[0] == "ignored"] == [
+        ("ignored", "end", "ping"),
+        ("ignored", "end", "stop"),
+    ]
+    assert forbidden == []
+    rooted = replace(ENDED, rows=(*ENDED.rows, Row("ended.03", "ended", "ping", kind="ignored")))
+    required, _ = coverage_items(rooted)
+    assert [item for item in required if item[0] == "ignored"] == [("ignored", "end", "stop")]
+
+
+def _mixed(*rows: Row) -> Statechart:
+    """`done`, final, rests in one region beside `busy` in the other."""
+    root = State(
+        "mixed",
+        regions=(
+            Region("left", "done", (State("done", final=True),)),
+            Region("right", "busy", (State("busy"),)),
+        ),
+    )
+    return Statechart("mixed", root, rows, time_events=(TimeEvent("tick"),), clock="logical")
+
+
+def test_a_final_state_beside_a_region_with_no_final_state_requires_no_item() -> None:
+    """The right region holds no final state, so no configuration has every leaf final and
+    `done` never ignores `tick`: no item is required, whatever `busy` declares."""
+    assert well_formed(_mixed()) == ["event tick falls through in configuration {done, busy}"]
+    covered = _mixed(Row("mixed.01", "busy", "tick", kind="internal"))
+    assert well_formed(covered) == []
+    required, _ = coverage_items(covered)
+    assert [item for item in required if item[0] == "ignored"] == []
+
+
+def test_an_excluded_sibling_region_with_no_final_state_requires_no_item() -> None:
+    """Region `b` holds no final state and excludes `poke` in both its states. The chart is
+    well formed, and `afin` can never ignore `poke`, so the item is not required."""
+    root = State(
+        "p",
+        regions=(
+            Region("a", "a1", (State("a1"), State("afin", final=True))),
+            Region("b", "b1", (State("b1"), State("b2"))),
+        ),
+    )
+    chart = Statechart(
+        "p",
+        root,
+        (
+            Row("p.01", "a1", "go", "afin"),
+            Row("p.02", "a1", "poke", kind="internal"),
+            Row("p.03", "b1", "go", "b2"),
+            Row("p.04", "b2", "go", kind="internal"),
+        ),
+        clock="logical",
+        exclusions=(Exclusion("b1", "poke", "why"), Exclusion("b2", "poke", "why")),
+    )
+    assert well_formed(chart) == []
+    required, _ = coverage_items(chart)
+    assert [item for item in required if item[0] == "ignored"] == []
+
+
+def _nested(*extra: Row) -> Statechart:
+    """The composite `c` (`c1`, final `cfin`) in one region beside `b1` and final `bfin` in
+    the other; `c1` and `b1` take `end` and `ping`."""
+    root = State(
+        "p",
+        regions=(
+            Region(
+                "a",
+                "c",
+                (
+                    State(
+                        "c", regions=(Region("cr", "c1", (State("c1"), State("cfin", final=True))),)
+                    ),
+                ),
+            ),
+            Region("b", "b1", (State("b1"), State("bfin", final=True))),
+        ),
+    )
+    rows = (
+        Row("p.01", "c1", "end", "cfin"),
+        Row("p.02", "c1", "ping", kind="internal"),
+        Row("p.03", "b1", "end", "bfin"),
+        Row("p.04", "b1", "ping", kind="internal"),
+        *extra,
+    )
+    return Statechart("p", root, rows, clock="logical")
+
+
+def test_finals_in_both_regions_of_a_nested_composite_require_and_hit_the_item(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`cfin` sits in the composite `c` in one region and `bfin` in the other, so the
+    configuration {cfin, bfin} has every leaf final. The rows for `ping` are on `c1` and
+    `b1`, not on an ancestor, so each final requires its item, and a post hits both."""
+    chart = _nested()
+    assert well_formed(chart) == []
+    required, _ = coverage_items(chart)
+    assert [item for item in required if item[0] == "ignored"] == [
+        ("ignored", "cfin", "end"),
+        ("ignored", "cfin", "ping"),
+        ("ignored", "bfin", "end"),
+        ("ignored", "bfin", "ping"),
+    ]
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+    executor = Executor()
+    executor.restore("q", chart, {"p", "c", "cfin", "bfin"})
+    (outcome,) = executor.dispatch("q", Event("ping"))
+    assert (outcome.kind, outcome.rows) == ("fired", ())
+    assert _hits(tmp_path) == {("p", "ignored", "cfin", "ping"), ("p", "ignored", "bfin", "ping")}
+
+
+def test_the_implicit_ignore_records_its_hit_and_a_read_records_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(HITS_ENV, str(tmp_path))
+    executor = Executor()
+    executor.restore("e", ENDED, {"ended", "end"})
+    executor.resolve("e", Event("stop"))
+    assert _hits(tmp_path) == set()
+    executor.dispatch("e", Event("ping"))
+    assert _hits(tmp_path) == {("ended", "ignored", "end", "ping")}
+
+
+def test_the_completeness_table_renders_the_implicit_ignore() -> None:
+    def witness(state: str) -> sc.Builder:
+        def build() -> tuple[Executor, str]:
+            executor = Executor()
+            executor.restore("e", ENDED, {"ended", state})
+            return executor, "e"
+
+        return build
+
+    table = sc.completeness_table(
+        ENDED, sc.Abstraction({state: witness(state) for state in ("run", "end")})
+    )
+    assert table == {
+        ("run", "ping", sc.ANY): "ended.02",
+        ("run", "stop", sc.ANY): "ended.01",
+        ("end", "ping", sc.ANY): "ignored in end",
+        ("end", "stop", sc.ANY): "ignored in end",
+    }
+
+
 def test_the_warning_names_the_second_row_when_only_it_leaves() -> None:
     root = State(
         "w",
@@ -840,3 +1032,16 @@ def test_a_configuration_needs_each_active_parent() -> None:
     )
     with pytest.raises(StatechartError, match="i is active and its parent o is not"):
         Executor().restore("n", nested, {"nest", "i"})
+
+
+def test_a_row_on_a_sibling_composite_decides_the_event_and_removes_the_item() -> None:
+    """`c` is active in {cfin, bfin}, so its unconditional row takes `ping` there: `bfin`
+    never ignores `ping`, and its item is not required. `cfin`'s item is not required either,
+    since `c` is its ancestor."""
+    chart = _nested(Row("p.05", "c", "ping", kind="internal"))
+    assert well_formed(chart) == []
+    required, _ = coverage_items(chart)
+    assert [item for item in required if item[0] == "ignored"] == [
+        ("ignored", "cfin", "end"),
+        ("ignored", "bfin", "end"),
+    ]

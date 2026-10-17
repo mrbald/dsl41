@@ -375,7 +375,8 @@ class Outcome:
 
     `kind` is `started`, `fired`, `deferred`, `overflowed`, `discarded` or `continued`.
     `rows` lists the rows run in order; `ignored` and `refusals` pick out its ignored rows and
-    refusal codes. `action` names the continuation of a `continued` item.
+    refusal codes. A final state's implicit ignore is `fired` with no rows (§10). `action`
+    names the continuation of a `continued` item.
     """
 
     key: Hashable
@@ -534,6 +535,13 @@ def _leaves(ix: _Index, active: Iterable[str]) -> list[str]:
     return sorted((s for s in active if not ix.states[s].regions), key=ix.order.__getitem__)
 
 
+def _final_leaves(ix: _Index, active: Iterable[str]) -> list[str]:
+    """The active leaves when every one of them is final, else none. An instance whose leaves
+    are all final ignores an event no walk found a row or a deferral for (§10, DL-380)."""
+    leaves = _leaves(ix, active)
+    return leaves if all(ix.states[s].final for s in leaves) else []
+
+
 def _exit_order(ix: _Index, active: frozenset[str], top: str) -> list[str]:
     """The active subtree of `top`, inner to outer, regions in declaration order."""
     order: list[str] = []
@@ -632,10 +640,12 @@ def coverage_items(
 ) -> tuple[list[tuple[str, str, str]], list[tuple[str, str, str]]]:
     """The (kind, id, detail) items the gate requires of `chart`, and the ones it forbids.
 
-    Required: every row and branch, both outcomes of every guard, and a defer and a release
-    for every deferred state and event. Forbidden: a false outcome declared unreachable, and
-    a marked row with its guard's true outcome. A marked row's false outcome is neither
-    (DL-353).
+    Required: every row and branch, both outcomes of every guard, a defer and a release
+    for every deferred state and event, and the implicit ignore of a final state and an event
+    where no ancestor of the state has a row or a deferral for the event and every sibling
+    region of each composite on its path can rest quietly for it (§10, §13). Forbidden: a
+    false outcome declared unreachable, and a marked row with its guard's true outcome. A
+    marked row's false outcome is neither (DL-353).
     """
     required: list[tuple[str, str, str]] = []
     forbidden: list[tuple[str, str, str]] = []
@@ -654,10 +664,48 @@ def coverage_items(
         if guard:
             required.append(("guard", ident, "true"))
             (forbidden if unreachable else required).append(("guard", ident, "false"))
+    ix = _index(chart)
     for state in _all_states(chart.root):
         for event in sorted(state.defer):
             required += [("defer", state.name, event), ("release", state.name, event)]
+        if state.final:
+            required += [
+                ("ignored", state.name, event)
+                for event in alphabet(chart)
+                if _ignores(ix, state.name, event)
+            ]
     return required, forbidden
+
+
+def _decides(ix: _Index, state: str, event: str) -> bool:
+    return (state, event) in ix.rows or event in ix.states[state].defer
+
+
+def _ignores(ix: _Index, state: str, event: str) -> bool:
+    """True when the final `state` can ignore `event`: no ancestor decides the event, and
+    every sibling region of each composite on its path can rest quietly for it."""
+    path = _path(ix, state)
+    return not any(_decides(ix, s, event) for s in path[1:]) and all(
+        _rests_quietly(ix, region, event)
+        for below, owner in zip(path, path[1:], strict=False)
+        for slot, region in enumerate(ix.states[owner].regions)
+        if slot != ix.slot[below]
+    )
+
+
+def _rests_quietly(ix: _Index, region: Region, event: str) -> bool:
+    """True when the region can be active with every leaf final and no active state of it
+    deciding `event`: it holds a final state, or a composite that declares no row and no
+    deferral for the event and each of whose regions can rest quietly for it."""
+    return any(
+        s.final
+        or (
+            bool(s.regions)
+            and not _decides(ix, s.name, event)
+            and all(_rests_quietly(ix, r, event) for r in s.regions)
+        )
+        for s in region.states
+    )
 
 
 # -- selection (§3)
@@ -1245,14 +1293,22 @@ class Executor:
         self, inst: _Instance, item: _Item, ctx: Context
     ) -> tuple[str, list[Row], list[str]]:
         """What an event item comes to: `discarded`, `fired` with its firing set, or `deferred`
-        with the states that defer it; an unhandled event raises. Changes nothing (§3, §5)."""
+        with the states that defer it; an unhandled event raises. A final state's implicit
+        ignore is `fired` with no row (§10). Changes nothing (§3, §5)."""
         if self._stale(inst, item.event):
             return "discarded", [], []
-        firing, deferring = _select(inst.chart, _index(inst.chart), inst.active, ctx)
+        ix = _index(inst.chart)
+        firing, deferring = _select(inst.chart, ix, inst.active, ctx)
         if firing:
             return "fired", firing, deferring
         if deferring:
             return "deferred", [], deferring
+        finals = _final_leaves(ix, inst.active)
+        if finals:
+            if not ctx.quiet:
+                for state in finals:
+                    _hit(inst.chart, "ignored", state, item.event.name)
+            return "fired", [], []
         raise UnhandledEvent(
             f"{inst.chart.name} {item.key!r}: no row and no deferral for {item.event.name}"
             f" in {sorted(inst.active)}"
@@ -1452,13 +1508,21 @@ def well_formed(chart: Statechart) -> list[str]:
     problems += _defer_problems(chart, ix)
     problems += _wait_problems(chart, ix)
     problems += _reach_problems(chart, ix)
+    excluded = {(x.state, x.event) for x in chart.exclusions if not x.partition}
     for event in alphabet(chart):
-        hole = _fall_through(ix, ix.root, event)
-        if hole is not None:
+        hole = _fall_through(ix, ix.root, event, excluded)
+        if hole is not None and not all(ix.states[s].final for s in hole):
             problems.append(f"event {event} falls through in configuration {{{', '.join(hole)}}}")
     for exclusion in chart.exclusions:
         if not exclusion.reason or exclusion.state not in ix.states:
             problems.append(f"exclusion {exclusion}: needs a declared state and a reason")
+            continue
+        finals = [s.name for s in _all_states(ix.states[exclusion.state]) if s.final]
+        if finals:
+            problems.append(
+                f"exclusion {exclusion}: names a cell of the final state {finals[0]},"
+                " which ignores the event (§10)"
+            )
     return problems
 
 
@@ -1613,18 +1677,26 @@ def _reach_problems(chart: Statechart, ix: _Index) -> list[str]:
     return [f"state {s} is not reachable" for s in ix.states if s not in reached]
 
 
-def _fall_through(ix: _Index, state: str, event: str) -> list[str] | None:
-    """The innermost states of a configuration below `state` where no active state has a row
-    or deferral for `event`; None when there is none (§10)."""
+def _fall_through(
+    ix: _Index, state: str, event: str, excluded: set[tuple[str, str]]
+) -> list[str] | None:
+    """The innermost states of a configuration below `state` where no active state has a row,
+    a deferral or an exclusion with no partition for `event`; None when there is none. Each
+    region gives a configuration with a leaf that is not final where it has one, since a
+    configuration whose leaves are all final ignores the event (§10, DL-380)."""
     node = ix.states[state]
-    if (state, event) in ix.rows or event in node.defer:
+    if (state, event) in ix.rows or event in node.defer or (state, event) in excluded:
         return None
     hole: list[str] = [] if node.regions else [state]
     for region in node.regions:
-        holes = [h for s in region.states if (h := _fall_through(ix, s.name, event)) is not None]
+        holes = [
+            h
+            for s in region.states
+            if (h := _fall_through(ix, s.name, event, excluded)) is not None
+        ]
         if not holes:
             return None
-        hole += holes[0]
+        hole += next((h for h in holes if not all(ix.states[s].final for s in h)), holes[0])
     return hole
 
 

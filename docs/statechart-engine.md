@@ -198,7 +198,8 @@ as a chained item.
 Release is judged when a macrostep ends with the worklist empty. The deferred queue is re-offered
 in order, each released item as its own root item and macrostep, ahead of the pool. A released
 item that the new configuration defers again keeps its place at the head of the queue, and
-release stops there until a later macrostep.
+release stops there until a later macrostep. A released item meets §10's implicit ignore as a
+posted one does: an instance whose leaves are all final ignores it.
 
 Stale-identity events are refused by a guard row. They are never deferred.
 
@@ -277,14 +278,33 @@ configuration resolves to one of:
 - a row;
 - an internal `ignored` row, which writes a trace line where the tier keeps one;
 - a deferral;
-- a declared refusal.
+- a declared refusal;
+- an exclusion with no partition (§13);
+- the implicit ignore of a configuration whose leaves are all final.
 
 Absence is a well-formedness error.
 
-Completeness is judged per instance, over all its regions together (§3). At run time, an event that
-no region consumes and no active state defers raises `UnhandledEvent`, in production too: the
-guards of a state's rows for one event partition the cases by contract. Like every
-`StatechartError`, it stops the tier (§5).
+An exclusion with no partition covers every partition of its cell. It declares the cell: the
+declaration asserts that no input reaches it. At run time the cell raises `UnhandledEvent`. An
+exclusion with a partition declares nothing here. An exclusion may not name a final state or an
+ancestor of one. Where every leaf is final, such a cell is ignored, so the exclusion's claim
+that it raises would be false. `well_formed` refuses such an exclusion.
+
+A final state declares no row; `well_formed` refuses one. An instance ignores an event when two
+things hold: no region's walk ends in a row or a deferral (§3), and every active leaf is final.
+The outcome is then `fired` with no row, no intent and no refusal, and the configuration does
+not change. The rule applies only where the instance would otherwise meet `UnhandledEvent`. So
+a row or a deferral on any state of any walk decides first, an ancestor of a final state
+included. A leaf that is not final, beside a final one in another region, keeps its gap: the
+event raises there, and `well_formed` reports it. A deferred event released into an instance
+whose leaves are all final meets the same rule: a finished instance ignores what it is sent
+(§6). The implicit ignore is not a completion and takes no part in one (§4). `forget` reads the
+configuration, which the ignore leaves as it was (DL-380).
+
+Completeness is judged per instance, over all its regions together (§3). At run time, an event
+that no region consumes and no active state defers raises `UnhandledEvent`, in production too,
+unless every active leaf is final: the guards of a state's rows for one event partition the
+cases by contract. Like every `StatechartError`, it stops the tier (§5).
 
 An ignored event is declared once, on a superstate. DL-293's rule of one ignore row per state
 it occurs in does not apply.
@@ -545,7 +565,16 @@ Hits are counted for:
 - rows;
 - choice branches;
 - guard outcomes where false is reachable;
-- defer and release paths.
+- defer and release paths;
+- the implicit ignore (§10), one item per final state and event, named
+  `ignored <state> <event>`. The item is required exactly when two things hold. First, no
+  ancestor of the state has a row or a deferral for the event. Second, every sibling region of
+  each composite on its path can rest quietly for the event. A region rests quietly for an
+  event when it holds a final state, or a composite that declares no row and no deferral for
+  the event and each of whose regions rests quietly for it. A final state declares neither, so
+  only these ancestors and composites could decide the event in a configuration whose leaves
+  are all final. The rule is judged on the declaration, not on which configurations a run
+  reaches.
 
 All of them are held at 100% in the gate. A row may carry a mark, `spec-only` (a contract rule
 with no code yet) or `unreachable`. The gate lists a marked row and never counts it, and a hit on
@@ -558,14 +587,17 @@ abstraction. The abstraction has three parts:
 - payload partitions: an exit code is success or not, and a status is one of the injectable
   set;
 - configuration witnesses, which are builders, as in DL-293;
-- justified exclusions, listed in the declaration.
+- justified exclusions, listed in the declaration. An exclusion with no partition covers
+  every partition of its cell (§10).
 
 For each witness configuration, each event and each partition, the test asserts that the executor's
 outcome equals the declaration's resolution of that cell (§3, §6, §10): a row id, `ignored`,
-deferred, discarded (a stale generation, §7), or a refusal code. It is a conformance test of the
-executor against the declaration, and it proves that no cell falls through. It is not an oracle of
-what a row should do: a bare `OracleError` never passes, and the SEM trace tests and the
-bisimulation stay independent evidence of behaviour. Coverage proves "as specified".
+deferred, discarded (a stale generation, §7), a refusal code, or the implicit ignore. The test
+needs a witness for every state, a final one included, so it reaches every final state's cells.
+It is a conformance test of the executor against the declaration, and it proves that no cell
+falls through. It is not an oracle of what a row should do: a bare `OracleError` never passes,
+and the SEM trace tests and the bisimulation stay independent evidence of behaviour. Coverage
+proves "as specified".
 
 ## 14. Generated docs and anchors
 

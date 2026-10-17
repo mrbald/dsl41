@@ -11,7 +11,9 @@ returns lets a test pin the cells by hand.
 
 A cell's value is `deferred`, `discarded`, or the rows that fire, sorted and
 joined by ` + `: a row by its id, an ignored row as `ignored <id>`, a refusal
-as `refused <code>`.
+as `refused <code>`. An instance whose leaves are all final ignores an event no
+walk finds a row or a deferral for (§10); that cell is `ignored in <state>`, its
+final leaves sorted and joined by ` + `.
 """
 
 from __future__ import annotations
@@ -60,10 +62,17 @@ def _render(rows: list[Row]) -> str:
     return " + ".join(sorted(one(row) for row in rows))
 
 
-def observed(chart: Statechart, outcome: Outcome) -> str:
-    """The cell value of the executor's outcome."""
+def _ignored_in(finals: list[str]) -> str:
+    return " + ".join(f"ignored in {state}" for state in sorted(finals))
+
+
+def observed(chart: Statechart, outcome: Outcome, active: frozenset[str]) -> str:
+    """The cell value of the executor's outcome, with the configuration after it."""
     if outcome.kind in ("deferred", "discarded"):
         return outcome.kind
+    if outcome.kind == "fired" and not outcome.rows:
+        tree = _Tree(chart)
+        return _ignored_in([s for s in active if tree.states[s].final])
     by_id = {row.id: row for row in chart.rows}
     return _render([by_id[ident] for ident in outcome.rows])
 
@@ -167,7 +176,12 @@ def resolution(chart: Statechart, active: frozenset[str], ctx: Context) -> str:
     firing = [r for r in firing if not any(r.source in left[o.id] for o in firing if o is not r)]
     if firing:
         return _render(firing)
-    return "deferred" if deferrals else "unhandled"
+    if deferrals:
+        return "deferred"
+    # no walk decides: an instance whose leaves are all final ignores the event
+    if all(tree.states[s].final for s in leaves):
+        return _ignored_in(leaves)
+    return "unhandled"
 
 
 def is_statechart_error(error: BaseException) -> bool:
@@ -247,7 +261,7 @@ def _cell(
     else:
         expected = resolution(chart, active, Context(key, posted, active, executor.data(key)))
     try:
-        actual = observed(chart, executor.dispatch(key, posted)[0])
+        actual = observed(chart, executor.dispatch(key, posted)[0], executor.active(key))
     except Exception as error:  # noqa: BLE001 -- only a statechart error is a cell value
         if not is_statechart_error(error):
             raise

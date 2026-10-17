@@ -104,7 +104,7 @@ attested = durable + attest
 
 ## supervisor_process
 
-Shown: 13. Folded: 21 (ignored 10, refusals 6, internal 5). Rows in the chart: 34.
+Shown: 13. Folded: 11 (refusals 6, internal 5). Rows in the chart: 24.
 
 ### phase
 
@@ -147,7 +147,7 @@ orphaned = live + disconnect [holder]
 
 ## supervisor_client
 
-Shown: 4. Folded: 7 (ignored 5, internal 2). Rows in the chart: 11.
+Shown: 4. Folded: 3 (ignored 1, internal 2). Rows in the chart: 7.
 
 ### phase
 
@@ -182,7 +182,7 @@ evicted = host + force_evict [not_evicted]
 
 ## admission
 
-Shown: 2. Folded: 4 (ignored 2, refusals 1, internal 1). Rows in the chart: 6.
+Shown: 2. Folded: 2 (refusals 1, internal 1). Rows in the chart: 4.
 
 ### window
 
@@ -194,7 +194,7 @@ rejected = admitted + decide [rejected] // The decision line, with its stored co
 
 ## effect
 
-Shown: 3. Folded: 1 (ignored 1). Rows in the chart: 4.
+Shown: 3. Folded: 0. Rows in the chart: 3.
 
 ### outcome
 
@@ -207,7 +207,7 @@ indeterminate = pending + resolve [indeterminate]
 
 ## subscription
 
-Shown: 3. Folded: 4 (ignored 3, internal 1). Rows in the chart: 7.
+Shown: 3. Folded: 1 (internal 1). Rows in the chart: 4.
 
 ### phase
 
@@ -221,7 +221,7 @@ closed = open + stream_ends
 
 ## seal_boundary
 
-Shown: 6. Folded: 4 (ignored 4). Rows in the chart: 10.
+Shown: 6. Folded: 0. Rows in the chart: 6.
 
 ### phase
 

@@ -148,18 +148,19 @@ _TEARDOWN = {
     "refused": "35",
 }
 
-_IGNORED_ONCE_CLOSED = {
-    runner_supervisor.START: "21",
-    runner_supervisor.PUBLISH: "22",
-    runner_supervisor.TERM: "23",
-    runner_supervisor.DRAINED: "24",
-    runner_supervisor.PASS_ENDED: "25",
-    runner_supervisor.DEADMAN: "26",
-    runner_supervisor.TEARDOWN: "27",
-    "SPAWN": "28",
-    "SIGNAL": "29",
-    "SHUTDOWN": "30",
-}
+#: every event, each of which the final `closed` ignores (statechart-engine §10)
+_EVENTS = (
+    runner_supervisor.START,
+    runner_supervisor.PUBLISH,
+    runner_supervisor.TERM,
+    runner_supervisor.DRAINED,
+    runner_supervisor.PASS_ENDED,
+    runner_supervisor.DEADMAN,
+    runner_supervisor.TEARDOWN,
+    "SPAWN",
+    "SIGNAL",
+    "SHUTDOWN",
+)
 
 
 def _section_5(witness: str, event: str, label: str) -> str:
@@ -178,7 +179,7 @@ def _section_5(witness: str, event: str, label: str) -> str:
     starting and refused. A closed process takes nothing."""
     phase, _, lease = witness.partition("/")
     if phase == "closed":
-        return f"ignored {_row(_IGNORED_ONCE_CLOSED[event])}"
+        return "ignored in closed"
     if event == runner_supervisor.START:
         return _row({"lock_held": "01", "owner_live": "02", "free": "03"}[label])
     if event in ("SPAWN", "SIGNAL", "SHUTDOWN"):
@@ -217,7 +218,7 @@ def test_the_completeness_table_is_section_5() -> None:
         ("shutting_down", "pass_ended"),
         ("serving", "deadman"),
         *((phase, "teardown") for phase in PROCESS),
-        *(("closed", event) for event in _IGNORED_ONCE_CLOSED),
+        *(("closed", event) for event in _EVENTS),
         *(("serving", verb) for verb in ("SPAWN", "SIGNAL", "SHUTDOWN")),
     }
     # ten witnesses (serving by four leases); per event, the reached cells by
@@ -258,7 +259,7 @@ def test_a_credentialed_verb_outside_serving_stops_the_supervisor(phase: str, ve
     """The fence rows sit on `serving`. A verb posted anywhere else, with this
     incarnation and the current token of a live lease, finds no row: it raises
     `UnhandledEvent`, not a `stale_token` answer that would tell the holder its
-    own token is stale. In `closed` the root's ignored row takes it."""
+    own token is stale. In `closed` the final state ignores it."""
     executor, key = _witness(phase, "live")()
     request = runner_supervisor._Request({"cmd": verb, "incarnation": INCARNATION, "token": TOKEN})
     with pytest.raises(Exception) as caught:
@@ -267,12 +268,12 @@ def test_a_credentialed_verb_outside_serving_stops_the_supervisor(phase: str, ve
     assert type(caught.value).__name__ == "UnhandledEvent"
 
 
-@pytest.mark.parametrize(("verb", "row"), [("SPAWN", "28"), ("SIGNAL", "29"), ("SHUTDOWN", "30")])
-def test_a_verb_in_closed_is_ignored_by_the_root(verb: str, row: str) -> None:
+@pytest.mark.parametrize("verb", ["SPAWN", "SIGNAL", "SHUTDOWN"])
+def test_a_verb_in_closed_is_ignored_by_the_final_state(verb: str) -> None:
     executor, key = _witness("closed", "live")()
     request = runner_supervisor._Request({"cmd": verb, "incarnation": INCARNATION, "token": TOKEN})
     (outcome,) = executor.dispatch(key, runner_supervisor.Event(verb, request))
-    assert outcome.rows == (_row(row),)
+    assert (outcome.kind, outcome.rows, outcome.intents) == ("fired", (), ())
     assert executor.active(key) == PROCESS["closed"]
 
 
@@ -508,8 +509,9 @@ def test_a_statechart_error_in_teardown_exits_7_with_the_report(
 # ---- teardown by what the state owns; the retry of an errored wait
 
 
-#: the ids out of use: .10 and .11 are the teardown rows .31 to .35 (DL-378)
-RETIRED = {_row("10"), _row("11")}
+#: the ids out of use: .10 and .11 are the teardown rows .31 to .35 (DL-378), and .21 to .30
+#: are the final `closed`'s implicit ignore (DL-380)
+RETIRED = {_row("10"), _row("11"), *(_row(str(n)) for n in range(21, 31))}
 
 
 def test_teardown_is_a_row_per_source_state_in_three_ownership_classes() -> None:
@@ -536,7 +538,7 @@ def test_teardown_is_a_row_per_source_state_in_three_ownership_classes() -> None
         (_row("12"), "shutting_down", runner_supervisor.PASS_ENDED, "internal"),
         (_row("36"), "shutting_down", runner_supervisor.TERM, "internal"),
     ]
-    assert len(CHART.rows) == 34
+    assert len(CHART.rows) == 24
     assert {row.id for row in CHART.rows} & RETIRED == set()  # a retired id stays out (DL-364)
     ctx = runner_supervisor.Context("process", runner_supervisor.Event("x"), frozenset(), None)
     intents = {name: action(ctx).intents for name, action in CHART.actions.items()}
@@ -594,17 +596,24 @@ def test_every_cell_answers_as_before_but_the_declared_eleven() -> None:
     rows, refusal codes, intents and configuration. The eleven declared
     cells keep their kind and configuration and take the new row with its
     intents: the teardown cells report what the state owns, and both retry
-    cells report the flush before the drain."""
+    cells report the flush before the drain. The 22 cells of `closed`, each
+    recorded with a retired root row as its one ignored row, keep everything
+    but the row: the final state ignores the event with no row (DL-380)."""
     partitions = _partitions()
     assert len(_AT_BASE) == 220
     assert sum(1 for cell in _AT_BASE.values() if "raises" in cell) == 124
     assert set(_DECLARED) <= set(_AT_BASE) and len(_DECLARED) == 11
+    closed = [cell for cell in _AT_BASE if cell.startswith("closed|")]
+    assert len(closed) == 22
     for cell, recorded in _AT_BASE.items():
         witness, event, label = cell.split("|")
         expected = dict(recorded)
         if cell in _DECLARED:
             row, expected["intents"] = _DECLARED[cell]
             expected["rows"] = [row]
+        if cell in closed:
+            assert recorded["rows"] == recorded["ignored"] and set(recorded["rows"]) <= RETIRED
+            expected["rows"] = expected["ignored"] = []
         payload = partitions[event][label] if label else None
         assert _cell(witness, event, payload) == expected, cell
 

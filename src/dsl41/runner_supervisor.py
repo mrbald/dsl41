@@ -808,10 +808,9 @@ SUPERVISOR_LEASE = Statechart(
 # end-of-pass `pass_ended` and before the deadman is sampled.
 #
 # Unreachable cells: a mutating verb is posted only while `serving`, and each
-# lifecycle fact only from the states above. Each event has an ignored row on the root
-# guarded by `closed`, which completes the declaration (ss10). Every other cell is an
-# exclusion, and an out-of-order post raises `UnhandledEvent`, which stops the
-# supervisor with exit 7.
+# lifecycle fact only from the states above. The final `closed` ignores every event
+# (statechart-engine ss10, DL-380). Every other cell is an exclusion, and an
+# out-of-order post raises `UnhandledEvent`, which stops the supervisor with exit 7.
 
 #: the process's instance key in the supervisor's executor.
 _PROCESS = "process"
@@ -860,12 +859,6 @@ def _free(ctx: Context) -> bool:
     """The lock is taken and no other owner is proven present: private sockets are swept,
     the published path is reclaimed and the private socket is bound (DL-210)."""
     return bool(ctx.event.payload == FREE)
-
-
-def _closed(ctx: Context) -> bool:
-    """The process is closed. Nothing posts then; elsewhere an out-of-order fact finds no
-    row and raises `UnhandledEvent`."""
-    return "closed" in ctx.active
 
 
 # -- the actions
@@ -1149,90 +1142,6 @@ SUPERVISOR_PROCESS = Statechart(
             cite=f"{_SP5} mutating verbs, DL-80, DL-229",
         ),
         Row(
-            "supervisor_process.21",
-            "process",
-            START,
-            guard="closed",
-            kind="ignored",
-            cite="statechart-engine ss10",
-        ),
-        Row(
-            "supervisor_process.22",
-            "process",
-            PUBLISH,
-            guard="closed",
-            kind="ignored",
-            cite="statechart-engine ss10",
-        ),
-        Row(
-            "supervisor_process.23",
-            "process",
-            TERM,
-            guard="closed",
-            kind="ignored",
-            cite="statechart-engine ss10",
-        ),
-        Row(
-            "supervisor_process.24",
-            "process",
-            DRAINED,
-            guard="closed",
-            kind="ignored",
-            cite="statechart-engine ss10",
-        ),
-        Row(
-            "supervisor_process.25",
-            "process",
-            PASS_ENDED,
-            guard="closed",
-            kind="ignored",
-            cite="statechart-engine ss10",
-        ),
-        Row(
-            "supervisor_process.26",
-            "process",
-            DEADMAN,
-            guard="closed",
-            kind="ignored",
-            cite="statechart-engine ss10",
-        ),
-        Row(
-            "supervisor_process.27",
-            "process",
-            TEARDOWN,
-            guard="closed",
-            kind="ignored",
-            cite="statechart-engine ss10",
-            false_unreachable=(
-                "rows .31 to .35 take a teardown in every state but closed, so the"
-                " walk reaches the root only from closed"
-            ),
-        ),
-        Row(
-            "supervisor_process.28",
-            "process",
-            "SPAWN",
-            guard="closed",
-            kind="ignored",
-            cite="statechart-engine ss10",
-        ),
-        Row(
-            "supervisor_process.29",
-            "process",
-            "SIGNAL",
-            guard="closed",
-            kind="ignored",
-            cite="statechart-engine ss10",
-        ),
-        Row(
-            "supervisor_process.30",
-            "process",
-            "SHUTDOWN",
-            guard="closed",
-            kind="ignored",
-            cite="statechart-engine ss10",
-        ),
-        Row(
             "supervisor_process.31",
             "up",
             TEARDOWN,
@@ -1294,7 +1203,6 @@ SUPERVISOR_PROCESS = Statechart(
         "credentials": _credentials,
         "foreign": _foreign,
         "stale": _stale,
-        "closed": _closed,
     },
     actions={
         "refuse": _refuse,
