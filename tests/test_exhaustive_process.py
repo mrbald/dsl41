@@ -838,14 +838,14 @@ def test_every_client_event_in_every_reached_client_state_takes_a_declared_trans
     # Left to other tests: a request failed by EOF and cancelled before it
     # resumes, a race this walk does not build (06; test_runner_adapters builds
     # it by hand); every cell of `closed`, where the tier posts nothing: the
-    # ignored rows (08 to 11) and the false outcomes of 01 and 05, which
-    # test_supervisor_client_chart.py's completeness test pins; and the false
-    # outcomes of 09 and 10, an EOF or a cancel before the first connect, which
-    # only that file's post into the excluded cells reaches.
+    # ignored rows (08 to 11), which test_supervisor_client_chart.py's
+    # completeness test pins; and the false outcomes of 09 and 10, an EOF or a
+    # cancel before the first connect, which only that file's post into the
+    # excluded cells reaches.
     ignored = {f"supervisor_client.{n:02}" for n in range(8, 12)}
     left = {("row", "supervisor_client.06", "")} | {("row", row, "") for row in ignored}
     left |= {("guard", row, "true") for row in ignored}
-    left |= {("guard", f"supervisor_client.{n}", "false") for n in ("01", "05", "09", "10")}
+    left |= {("guard", f"supervisor_client.{n}", "false") for n in ("09", "10")}
     assert {item for item in required if item not in hits} == left
     assert [item for item in forbidden if item in hits] == []
 

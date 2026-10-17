@@ -24274,3 +24274,69 @@ relitigate an entry; append a new one.
   region names, re-ran its own equivalence (40 of 40, 0 hazards), and left two nits fixed at
   landing: a line of §16 reflowed, and the `open` group's region named `inputs` so no error
   text names a region and a leaf by one word.
+- DL-374 A rule of `supervisor_client` is written once at the source the hierarchy gives it:
+  `alive` holds every state but `closed` and `down` the two with no live connection, rows .01
+  and .05 are their unguarded rules, and the guards `down` and `open` are gone; admission's
+  `other` is `not same`, and the lease's `challenger` reads ttl_s through a named test
+  (2026-10-17; src/dsl41/runner_adapters.py, src/dsl41/runner_admission.py,
+  src/dsl41/runner_supervisor.py; tests/test_supervisor_client_chart.py,
+  tests/test_exhaustive_process.py, tests/test_supervisor_lease_chart.py;
+  docs/state-machines.md (generated), docs/chart-lifecycles.md (generated))
+  THE AIM. Steps 5 and 7 of the chart simplification on the eleven other charts (charts
+  ruling, slice S3; explorer 2 F3, F10, F12). In DL-330's flat chart every guard tested the
+  configuration: `down` and `open` existed only to give the root rows .01 and .05 a set of
+  sources, and `over` is the third body of one fact, closed. No outcome changes: every cell
+  fires the row it fired, no post, no refusal and no wire text moves.
+  THE RULE. DL-373's: a rule every member of a group takes is one row on the group, and only
+  where no member has its own row for the event (§3: the inner row wins). So a deleted group
+  row is an unhandled event at each member, never another row's answer.
+  THE CHART. The region `phase` holds `alive` and the final `closed`. `alive` has one region,
+  `connection`: `down` and `connected`. `down` has one region, `epoch`: `disconnected`, the
+  initial state, and `lost`. The leaves are the phases (`CLIENT_PHASES`); `phase()` reads
+  `active & CLIENT_PHASES`, so the groups are invisible to it, and nothing else in the source
+  reads the client's configuration. .01 (`down`, connect to connected) and .05 (`alive`, close
+  to closed) keep their ids and carry no guard; .05's prose, the old `open` docstring, is its
+  note (§14). `over` stays: a final state has no rows (`well_formed`, §10), so .08 to .11 stay
+  on the root. Since .01 and .02 take every connect in `alive` and .05 every close, the walk
+  reaches .08 and .11 only from `closed`: their guard's false outcome is declared
+  `false_unreachable`, and the gate forbids it, as on admission .11 and .12. Guards go from 3
+  to 1. The nested regions get distinct names: the lease's `unheld` region is `record` and its
+  `held` region `connection` (F12). Region names are stored nowhere: the engine names them only
+  in error texts and the generated tables; no stored or wired name changes.
+  THE GUARDS. Admission: `_other` is `not _same`, the same fact with no lazy read; `applied`
+  and `rejected` stay, an enum over a two-valued decision. Lease: `_challenger` is
+  `_named and _numeric_ttl and not _credentials`; `_numeric_ttl` reads `ttl()` alone and never
+  computes the expiry, so the lazy facts are read in the same order as before (R9).
+  CHECKS. `well_formed` and `chart_warnings` pass on the three charts. A pinned table of the
+  flat chart's 16 cells (four leaves by four events), generated once from DL-330's declaration,
+  is checked cell by cell: 14 fire the same row and reach the same leaf, now with its groups,
+  and the two excluded cells still raise `UnhandledEvent`. Each group row, deleted from a chart
+  copy, raises `UnhandledEvent` at every member with the leaf unmoved; every row, deleted,
+  leaves each cell it took a gap and every other cell's row unchanged. The completeness table
+  (22 cells), the alphabet test, the exhaustive client walk and the exit-7 tests keep
+  their outcomes; the reconnect gap is built by sourcing .01 at `disconnected`, and the error
+  texts name the configuration with its groups. No closed-state post: the walk and the alphabet
+  test assert it on connect, close, the cancellation and EOF cleanup after it, and a repeated
+  close. A new lease test pins that `challenger` leaves the expiry uncomputed over the ttl_s shapes
+  it lists and the credential partition, and reads no ttl_s for an unnamed request. The transition
+  gate holds 17 of 17 required items of `supervisor_client`, 23 before (the four outcomes of `down`
+  and `open` gone, and the false outcomes of .08 and .11 now forbidden), with 2 forbidden; admission
+  16 of 16 and the lease 48 of 48, as before.
+  THE CONTRACTS. statechart-engine §16's client paragraph is unchanged and holds: the client
+  posts nothing once closed. §3 and §10 are applied, not changed. DL-330's ".01 and .05 on the
+  root with a guard" is replaced by the groups; its rows, ids and exclusions stand.
+  THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235). The constant covers the derivation of
+  oracle state from an identical log. The client and lease charts derive nothing from the log:
+  they are the transport's and the supervisor's state. Admission replays from the WAL, but its
+  guards answer every input as before. No configuration of these charts is persisted.
+  REVIEW. Semantic class (rows and guards of §16 machines): one Opus reviewer and one Codex
+  Astra pass. Codex found no regression on five probes (the 16 client cells against DL-330's
+  declaration, the deletion hazard, the false-unreachable claims with the gate's count 23 to
+  17, the lease's read order, admission's `other`), and noted that an exception's text now
+  lists the groups in the configuration. Opus found no blocker or major: 0 of 16 cells and 0 of
+  3,000 random sequences differ; 480 lease cases match the old code in answer, ttl value and
+  whether the expiry was computed. Its low items: L2 (a test comment that said what changed:
+  dropped), L3 (the entry claimed a pending request at close that no test holds: the claim
+  removed), L4 (the lease test's docstring claimed every ttl_s shape and a read order it cannot
+  see: narrowed); L1 (the number cited from the tests before the entry landed) is moot, since
+  the entry lands with the slice.

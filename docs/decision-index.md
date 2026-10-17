@@ -384,3 +384,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-371 | A phase of a cascade that decides after a wait is a state with an entry action and a completion row: a RUNNING box's completion door becomes RUNNING's region... | [docs/state-machines.md](state-machines.md), [docs/statechart-engine.md](statechart-engine.md) |
 | DL-372 | The queue's scan is one declared coordinator: the `queue_scan` chart, one instance per oracle on the jobs' executor, whose states wait for each readmission's... | [docs/state-machines.md](state-machines.md), [docs/statechart-engine.md](statechart-engine.md) |
 | DL-373 | A rule of `runtime_assembly` is written once at the source the hierarchy gives it: the phases group as `unbuilt`, `open` and `built`, a rule every member of a... |  |
+| DL-374 | A rule of `supervisor_client` is written once at the source the hierarchy gives it: `alive` holds every state but `closed` and `down` the two with no live... |  |

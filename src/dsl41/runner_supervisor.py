@@ -443,6 +443,11 @@ def _timed(ctx: Context) -> bool:
     return not isinstance(ctx.event.payload.expiry(), Exception)
 
 
+def _numeric_ttl(ctx: Context) -> bool:
+    """ttl_s is a number, or absent. It reads `ttl()` alone and never computes the expiry."""
+    return not isinstance(ctx.event.payload.ttl(), Exception)
+
+
 def _this_incarnation(ctx: Context) -> bool:
     """The request names this incarnation (DL-80)."""
     return bool(ctx.event.payload.req.get("incarnation") == ctx.data.incarnation)
@@ -499,11 +504,7 @@ def _challenger(ctx: Context) -> bool:
     """controller_id is a non-empty string and ttl_s is a number, without the current
     token: a live lease yields only to its incumbent (DL-79). The expiry is not
     computed."""
-    return (
-        _named(ctx)
-        and not isinstance(ctx.event.payload.ttl(), Exception)
-        and not (_credentials(ctx))
-    )
+    return _named(ctx) and _numeric_ttl(ctx) and not _credentials(ctx)
 
 
 def _unnamed(ctx: Context) -> bool:
@@ -601,11 +602,11 @@ SUPERVISOR_LEASE = Statechart(
                 (
                     State(
                         "unheld",
-                        regions=(Region("phase", "free", (State("free"), State("expired"))),),
+                        regions=(Region("record", "free", (State("free"), State("expired"))),),
                     ),
                     State(
                         "held",
-                        regions=(Region("phase", "live", (State("live"), State("orphaned"))),),
+                        regions=(Region("connection", "live", (State("live"), State("orphaned"))),),
                         wait=frozenset({EXPIRE}),
                     ),
                 ),
