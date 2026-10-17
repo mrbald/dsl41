@@ -620,10 +620,10 @@ record.
 
 `host` (DL-333) is an oracle-tier machine. It runs on the state owner's executor, one
 instance per host row; the row's state is the instance's configuration, written from its leaf. The
-gate reads the chart on a scratch executor rebuilt from the rows and keeps only the checks that
+gate reads the chart with `resolve` (§5) on the store's instance and keeps only the checks that
 read the input's own facts. The chart is dispatched on the store's executor only for an applied
-decision; the gate's scratch read is separate and moves nothing. A durable `applied` the chart
-refuses is a statechart error that names the WAL input.
+decision; the gate's read moves nothing. A durable `applied` the chart refuses is a statechart
+error that names the WAL input.
 
 `admission` (DL-334) runs on the engine's executor, one instance per request id from its durable
 attempt to its durable decision; the decided state is final and forgotten, and the stored decision

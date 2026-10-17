@@ -20,7 +20,7 @@ Replay does not run the gate again. It applies the stored decision: the chart is
 - Verbs: `HOST_VERBS` are the operator's and reach the wire. `LEADER_VERBS`, `quarantine` and `reinstate`, are the leader's and enter through `Engine.inject_host` with no `expect`.
 - `HostCommand` is the input. `Engine.submit_host` admits an operator's command and returns its decision.
 - `HOST` is a statechart ([statechart-engine](../statechart-engine.md), DL-333), declared in `oracle_state.py`. The store owns its executor, `RuntimeState.machines`, with one instance per host row under the key `host:<id>`. The instance's configuration is the host's state, and `HostRuntime.state` is its projection, written from the leaf after the microstep. A new row starts its instance in `active`. A fork copies the executor and binds each host instance's data to the fork's rows (`Executor.fork`, DL-339); an install rebuilds it from the rows (`rebuild_machines`). A state write that no microstep made raises a `StatechartError`; a test's witness writes through `witness_host`, which rebuilds the executor.
-- `host_rejection_reason` is the gate. It reads the chart through `host_move`, which dispatches on a scratch executor rebuilt from the rows, so nothing moves. A refusal row's code is the rejection. On the gated eviction (host.10) and the forced one (host.11) the gate adds the checks that read the input's own facts: the bound, and the attribution.
+- `host_rejection_reason` is the gate. It reads the chart through `host_move`, which is `Executor.resolve` on the store's instance, so nothing moves. A refusal row's code is the rejection. On the gated eviction (host.10) and the forced one (host.11) the gate adds the checks that read the input's own facts: the bound, and the attribution.
 - `apply_host_command` dispatches an applied command to the store's instance and writes the row from the leaf through the store's verbs. An internal row writes nothing.
 - `routes_new_effects(row)` is the routing column as one predicate. Dispatch holds a SPAWN on a host it is false for ([effect outbox](effect-outbox.md)).
 - `seed_local_executor` puts this engine's own executor in the table at genesis, without a log index.
@@ -30,7 +30,7 @@ Replay does not run the gate again. It applies the stored decision: the chart is
 ## States
 
 One host row's states are [host](../state-machines.md#host). The anchor holds the generated diagram and transition table.
-A rejection moves nothing: the gate reads the chart on a scratch executor, and a refusal row is the cell with no move.
+A rejection moves nothing: the gate reads the chart with `Executor.resolve`, and a refusal row is the cell with no move.
 
 ## Invariants
 
@@ -81,6 +81,10 @@ A rejection moves nothing: the gate reads the chart on a scratch executor, and a
 - `test_a_decided_host_command_with_no_transition_stops_the_apply`
 - `test_a_replayed_host_decision_the_chart_refuses_stops_resume_naming_the_input`
 - `test_the_completeness_table_is_section_8`
+- `test_reinstate_at_a_routed_host_is_one_internal_row_and_its_old_ids_stay_retired`
+- `test_without_host_21_a_forced_eviction_of_an_evicted_host_is_a_gap`
+- `test_the_gate_s_read_is_the_one_it_was`
+- `test_the_host_gate_reads_the_store_s_instance_and_moves_nothing`
 - `test_every_event_a_poster_sends_is_in_the_alphabet`
 - `test_a_fork_rebuilds_its_own_executor_from_its_rows`
 - `test_a_state_write_no_microstep_made_raises_and_writes_nothing`

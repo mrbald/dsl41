@@ -42,6 +42,7 @@ from dsl41.runner_hosts import (
     LOCAL_EXECUTOR_ID,
     HostCommand,
     apply_host_command,
+    host_event,
     host_move,
     kill_allowance,
     seed_local_executor,
@@ -126,8 +127,8 @@ _MOVES = [
     (("quarantine",), "quarantine", False, "host.06", "quarantined"),
     (("drain", "quarantine"), "reinstate", False, "host.07", "passive"),
     (("quarantine",), "reinstate", False, "host.07", "active"),
-    ((), "reinstate", False, "host.08", "active"),
-    (("drain",), "reinstate", False, "host.09", "passive"),
+    ((), "reinstate", False, "host.25", "active"),
+    (("drain",), "reinstate", False, "host.25", "passive"),
     ((), "evict", True, "host.11", "evicted"),
     (("drain",), "evict", True, "host.11", "evicted"),
     (("quarantine",), "evict", True, "host.11", "evicted"),
@@ -193,16 +194,18 @@ def test_a_rejected_verb_takes_no_transition_and_moves_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The gate reads the chart on a scratch executor: a refusal row, or the
-    row whose facts the gate then rejects. The store's instance does not
-    move, and the row does not either."""
+    """The gate reads the chart with `Executor.resolve`: a refusal row, or the
+    row whose facts the gate then rejects. The read records no hit, the
+    store's instance does not move, and the row does not either (DL-375)."""
     oracle = _oracle()
     for index, step in enumerate(setup, start=1):
         forced = step == "evict"
         _host(oracle, index, step, force=forced, claimed_actor="alice@ops" if forced else None)
     before = oracle.store.hosts[LOCAL_EXECUTOR_ID]
     configuration = oracle.store.machines.active("host:local")
-    # only the rejected command records here: the one row the gate read
+    cmd = HostCommand(verb=verb, host_id=LOCAL_EXECUTOR_ID, force=force)  # type: ignore[arg-type]
+    assert host_move(oracle.store, cmd).rows == (read,)
+    # only the rejected command could record here, and the gate's read records nothing
     directory = tmp_path / "rejected"
     directory.mkdir()
     monkeypatch.setenv(HITS_ENV, str(directory))
@@ -210,12 +213,18 @@ def test_a_rejected_verb_takes_no_transition_and_moves_nothing(
     assert rejected.result.decision == "rejected" and rejected.result.code == code
     assert oracle.store.hosts[LOCAL_EXECUTOR_ID] == before
     assert oracle.store.machines.active("host:local") == configuration
-    recorded = [
-        json.loads(line)
-        for path in directory.glob("*.jsonl")
-        for line in path.read_text().splitlines()
-    ]
-    assert [r["id"] for r in recorded if r["machine"] == "host" and r["kind"] == "row"] == [read]
+
+    def recorded() -> list[Any]:
+        return [
+            json.loads(line)
+            for path in directory.glob("*.jsonl")
+            for line in path.read_text().splitlines()
+        ]
+
+    assert [r for r in recorded() if r["machine"] == "host"] == []
+    # the hits are recorded: a dispatch on a fork records the row the read named
+    oracle.store.machines.fork().dispatch("host:local", host_event(cmd))
+    assert [r["id"] for r in recorded() if r["machine"] == "host" and r["kind"] == "row"] == [read]
 
 
 @pytest.mark.parametrize(
