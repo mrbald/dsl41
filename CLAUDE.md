@@ -26,9 +26,10 @@ Do not re-derive settled decisions.
   (DL-59); reserve calendar errors for uninterpretable input.
 - A comment states the rule and cites its entry; it never states what changed
   (DL-362). `scripts/comment_equivalence.py <base>` proves a comment-only diff.
-- Append material decisions to `docs/decision-log.md`; never edit or renumber
-  old entries. Before adding a citation namespace, add its row to
-  `docs/citation-index.md`.
+- Append material decisions to `docs/decision-log.md`; never edit, renumber or
+  delete an old entry, except a superseded-by mark and a compression tranche
+  under DL-379, which may reword and shorten one. Before adding a citation
+  namespace, add its row to `docs/citation-index.md`.
 
 ## Read for the task
 

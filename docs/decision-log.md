@@ -24688,3 +24688,41 @@ relitigate an entry; append a new one.
   Round 2: Opus confirmed O1 to O7 and re-ran the mutant, and found two wording items (an exit
   code stated for the wrong case; a test docstring that credited the loop with a post it does
   not make), fixed and confirmed in round 3; Codex confirmed its two items.
+- DL-379 An entry holds the decision and its reasons, and the process record lives in the PR;
+  entries from DL-380 on have a line ceiling, and the entries from DL-324 on are compressed to
+  the form in tranches, each under a lost-reason review
+  (2026-10-17; the log's preamble; CLAUDE.md; docs/citation-index.md)
+  THE RULE. The preamble already says it: an entry is the ruling, the why with the alternatives
+  rejected, what it supersedes, and a pointer to the normative text; how a session got there
+  stays in git and the PRs. The entries from DL-324 on do not keep it. They carry the aim as a
+  story, the files touched, the tests by name, the counts a test pins, and the review record.
+  Fifty-four entries, DL-324 to DL-378, take 3,769 lines, seventy each; the twenty-four before
+  them take 1,096, forty-six each. An entry holds: the ruling in one sentence; the reasons,
+  with each alternative rejected and why; what it supersedes or reopens, by entry and sentence;
+  the modules and contract sections the ruling binds; the version constant's reading when a
+  machine changes (DL-235); a stated limit, when the review left one. An entry does not hold
+  the aim as a story, the files touched, the tests by name, the counts a test pins, the
+  commands run, or who reviewed what in which round. That record goes into the PR that lands
+  the entry, which git finds by the entry's number. REJECTED: a template with section labels,
+  because the labels invited the story; keeping the review record in the log in case the PR is
+  lost, because the public remote keeps it.
+  THE CEILING. An entry from DL-380 on is at most 40 lines of 100 columns, or 60 for one that
+  changes the engine or freezes a rule of `docs/`; which entries have 60 is an explicit list in
+  tests/test_decision_log.py, kept with the entry. The text up to the end of this entry has a
+  line ceiling the test holds; a tranche lowers it in the same PR, and only a superseded-by
+  mark raises it, by the lines the mark adds. An amendment is appended like any entry, so an
+  appended DL-379a is new text under the ceiling.
+  THE TRANCHES. The entries from DL-324 on are compressed to the form, newest first, two PRs
+  of about equal size. A compression keeps every ruling, reason, rejected alternative,
+  supersession and stated limit, and every name that another entry, the code or a test cites
+  (DL-361's test names, DL-193's rule that a cited name is immutable); it removes the rest, and
+  its length is what remains, not the ceiling. A compressed entry keeps its number and its
+  header sentence's meaning, and takes no text from another entry. Each tranche gets a
+  lost-reason review: a reviewer reads the old and new text of every entry side by side and
+  names any reason or alternative that went missing; a missing one goes back before the merge.
+  The entries before DL-324 are outside this decision; sixty-eight of them carry review
+  records too, and a later entry may extend the tranches to them.
+  WHAT IT NARROWS. "Never edit or renumber old entries" (CLAUDE.md; citation-index's DL row;
+  DL-282's "old entries are never edited"; DL-193's "the log is append-only") becomes: never
+  edit, renumber or delete an old entry, except a superseded-by mark and a compression tranche
+  under this entry, which may reword and shorten one. Append-only for decisions stands.
