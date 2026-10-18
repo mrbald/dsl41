@@ -20,6 +20,7 @@ dev-only dependency -- the package keeps its three runtime deps).
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from typing import Any
@@ -40,7 +41,7 @@ pytest.importorskip(
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeout
 from playwright.sync_api import sync_playwright
 from test_viz import CORPUS_DIR, corpus_catalog
-from test_viz_explore import _COND_TEXT, _NESTED_BOX_TEXT
+from test_viz_explore import S_EDGE_TEXT, _COND_TEXT, _NESTED_BOX_TEXT
 
 from dsl41.ir import lower_source
 from dsl41.viz_explore import to_explore_html
@@ -3779,6 +3780,8 @@ def test_panel_keyboard_repeat_actions_and_escape_preserve_find_and_selection(
     assert d.page.locator("#visibility-panel").is_visible(), d.engine
     d.page.keyboard.press("Shift+Tab")
     assert not d.page.locator("#visibility-panel").is_visible(), d.engine
+    assert d.page.evaluate("() => document.activeElement.id") == "snapshot-toggle", d.engine
+    d.page.keyboard.press("Shift+Tab")
     assert d.page.evaluate("() => document.activeElement.id") == "view-toggle", d.engine
 
 
@@ -4292,4 +4295,638 @@ def test_compact_caption_pixel_budget_and_native_leaf_rectangles(driven_labels: 
         assert fact["wrap"] == "none"
         assert fact["body"] == fact["actualBody"]
         assert fact["delta"] == pytest.approx([0, 0, 0, 0], abs=0.01)
+    assert d.errors == []
+
+
+# ------------------------------------------------------- DL-385 offline snapshots
+
+_SNAPSHOT_TEXT = (
+    _LABEL_TEXT
+    + "\n"
+    + S_EDGE_TEXT
+    + "\ninsert_job: __proto__\njob_type: c\ncommand: true\n"
+    + "\ninsert_job: observes_flag\njob_type: c\ncommand: true\ncondition: value(SNAPSHOT_FLAG) = 1\n"
+)
+
+
+@pytest.fixture(scope="module", params=[(e, d) for e in ENGINES for d in ("LR", "TD")])
+def _driven_snapshot(
+    request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory, _playwright: Any
+) -> Any:
+    engine, direction = request.param
+    path = tmp_path_factory.mktemp("explore-snapshot") / "snapshot.html"
+    path.write_text(
+        to_explore_html(lower_source(_SNAPSHOT_TEXT), title="snapshot", direction=direction),
+        encoding="utf-8",
+    )
+    yield from _open_driven(_playwright, engine, path.as_uri())
+
+
+@pytest.fixture
+def driven_snapshot(_driven_snapshot: Driven) -> Driven:
+    return _reset(_driven_snapshot)
+
+
+def _choose_snapshot(d: Driven, data: Any, name: str = "snapshot.json") -> None:
+    _open_control(d, "#snapshot-import")
+    text = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
+    d.page.locator("#snapshot-file").set_input_files(
+        {"name": name, "mimeType": "application/json", "buffer": text.encode()}
+    )
+
+
+def _import_snapshot(d: Driven, data: Any, name: str = "snapshot.json") -> None:
+    generation = d.page.evaluate("snapshotGeneration")
+    _choose_snapshot(d, data, name)
+    d.page.wait_for_function(
+        "generation => snapshotGeneration > generation && !snapshotPending", arg=generation
+    )
+
+
+def _snapshot_invariants(d: Driven) -> Any:
+    return d.page.evaluate(
+        "() => ({nodes:cy.nodes().union(foldedNodes()).map(n=>"
+        " [n.id(),n.data('label'),n.data('kind'),n.data('parent'),n.position(),"
+        " n.outerWidth(),n.outerHeight(),n.classes(),n.selected()]),"
+        " edges:cy.edges().map(e=>[e.id(),e.data('source'),e.data('target'),e.classes(),"
+        " e.data('originalEnds')?[endId(e.data('originalEnds').source),endId(e.data('originalEnds').target)]:null,"
+        " e.scratch('_elkRoute')?.points]),"
+        " epoch:[routeEpoch,routeLayoutEpoch,routesPresent],geometry:[...routeGeometry],"
+        " fit:cy.getFitViewport(stableBounds(cy.nodes(':visible')),40),"
+        " view:[cy.pan(),cy.zoom()],detailsClosed:document.getElementById('details').hidden,"
+        " inspected:inspectedName?.id(),hovered:hoveredName?.id()})"
+    )
+
+
+def _snapshot_marker(d: Driven, node_id: str) -> str:
+    return d.page.evaluate(
+        'id=>decodeURIComponent(nodeMarks(cy.$id(id))).match(/data-observation="([^"]+)"/)?.[1] || \'\'',
+        node_id,
+    )
+
+
+def _snapshot_filter_state(d: Driven, state: str) -> None:
+    _open_control(d, "#snapshot-filter")
+    d.page.locator("#snapshot-filter").select_option(
+        label="State " + json.dumps(state, ensure_ascii=False) + " (1)"
+    )
+
+
+def test_snapshot_minimal_file_input_raw_values_and_metadata(driven_snapshot: Driven) -> None:
+    """DL-385: native file input, arbitrary strings and metadata are text, never markup."""
+    d = driven_snapshot
+    _open_control(d, "#snapshot-import")
+    with d.page.expect_file_chooser() as chooser:
+        d.page.locator("#snapshot-import").click()
+    chooser.value.set_files(
+        {
+            "name": "minimal.json",
+            "mimeType": "application/json",
+            "buffer": b'{"nodes":{"P":{"state":"queued"}}}',
+        }
+    )
+    d.page.wait_for_function("() => snapshotLoaded && !snapshotPending")
+    assert _snapshot_marker(d, "P") == "neutral"
+    raw = {
+        "source": ["example", {"__proto__": {"retained": True}}],
+        "capture": False,
+        "__proto__": {"retained": "top-level"},
+        "nodes": {
+            "P": {"state": "", "__proto__": {"retained": "node"}},
+            "Q": {"state": " \t\n"},
+            "M": {"state": "not supplied"},
+            "N": {"state": '""'},
+            "__proto__": {"state": "<svg onload=window.snapshotXss=1>"},
+            "not-a-node": {
+                "state": "unknown",
+                "note": [None, "<img src=x onerror=window.snapshotXss=1>"],
+            },
+        },
+    }
+    _import_snapshot(d, raw)
+    assert d.page.locator("#snapshot-error").is_hidden()
+    assert (
+        json.loads(d.page.evaluate("() => JSON.stringify(Object.fromEntries(snapshotNodes))"))
+        == raw["nodes"]
+    )
+    assert json.loads(d.page.evaluate("JSON.stringify(snapshotMetadata)")) == {
+        k: v for k, v in raw.items() if k != "nodes"
+    }
+    assert "Unknown IDs: 1" in d.page.inner_text("#snapshot-buckets")
+    assert d.page.locator("#snapshot-panel img, #snapshot-panel svg").count() == 0
+    assert d.page.evaluate("() => window.snapshotXss") is None
+    for state in ("", " \t\n", "not supplied", '""'):
+        _snapshot_filter_state(d, state)
+        assert d.page.inner_text("#snapshot-find-count") == "1 eligible matches"
+        assert json.dumps(state, ensure_ascii=False) in d.page.inner_text("#snapshot-results")
+    d.page.locator("#snapshot-filter").select_option("missing")
+    assert "not supplied" in d.page.inner_text("#snapshot-results")
+    assert not any(
+        text.startswith("M ·")
+        for text in d.page.locator("#snapshot-results > details > summary").all_text_contents()
+    )
+    d.page.locator("#snapshot-metadata summary").click()
+    assert json.loads(d.page.inner_text("#snapshot-metadata pre"))["__proto__"] == {
+        "retained": "top-level"
+    }
+    assert d.errors == []
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "{",
+        "[]",
+        '{"nodes":[]}',
+        '{"nodes":{"P":{"state":7}}}',
+        '{"nodes":{"unknown":{"state":false}}}',
+        '{"nodes":{"P":{}}}',
+    ],
+)
+def test_snapshot_invalid_candidate_is_atomic(driven_snapshot: Driven, invalid: str) -> None:
+    """DL-385: malformed entries cannot partially replace a prior valid observation set."""
+    d = driven_snapshot
+    _import_snapshot(d, {"nodes": {"P": {"state": "SU"}, "Q": {"state": "RU"}}})
+    before = d.page.evaluate("() => [...snapshotNodes]")
+    _import_snapshot(d, invalid)
+    assert d.page.locator("#snapshot-error").is_visible()
+    assert d.page.evaluate("() => [...snapshotNodes]") == before
+    assert _snapshot_marker(d, "P") == "neutral"
+    assert d.page.inner_text("#snapshot-notice") == "Previous snapshot kept."
+    _import_snapshot(d, {"nodes": {"Q": {"state": ""}}})
+    assert _snapshot_marker(d, "P") == ""
+    assert _snapshot_marker(d, "Q") == "neutral"
+    _import_snapshot(d, {"nodes": {}})
+    assert d.page.inner_text("#snapshot-notice").startswith("Loaded 0 observations")
+    assert _snapshot_marker(d, "Q") == ""
+    assert d.page.locator("#snapshot-data").is_visible()
+    d.page.locator("#snapshot-filter").select_option("missing")
+    assert d.page.locator("#snapshot-select").is_enabled()
+    assert d.errors == []
+
+
+def test_snapshot_duplicate_keys_exact_external_join_and_ineligible_ids(
+    driven_snapshot: Driven,
+) -> None:
+    """DL-385: native last-key-wins and emitted identity remain explicit and independent."""
+    d = driven_snapshot
+    d.page.evaluate("() => {cy.$id('_foo^PRD').emit('tap');}")
+    assert d.page.locator("#d-rows").inner_text().count("_foo^PRD") == 1
+    assert "emitted ID" in d.page.inner_text("#d-rows")
+    edge_id = d.page.evaluate("() => cy.edges().not('.lock')[0].id()")
+    _import_snapshot(d, '{"nodes":{"P":{"state":"first"},"P":{"state":"x","state":"last"}}}')
+    assert d.page.evaluate("() => snapshotNodes.get('P').state") == "last"
+    _import_snapshot(
+        d,
+        {
+            "nodes": {
+                "foo^PRD": {"state": "SU"},
+                "_foo^PRD": {"state": "RU"},
+                "FOO^PRD": {"state": "case differs"},
+                edge_id: {"state": "edge"},
+            }
+        },
+    )
+    d.page.locator("#snapshot-preset").select_option("autosys")
+    assert _snapshot_marker(d, "foo^PRD") == "success"
+    assert _snapshot_marker(d, "_foo^PRD") == "running"
+    assert "External matches: 1 · Unknown IDs: 1 · Ineligible IDs: 1" == d.page.inner_text(
+        "#snapshot-buckets"
+    )
+    groups = d.page.locator("#snapshot-unmatched > details")
+    groups.nth(0).locator(":scope > summary").click()
+    groups.nth(0).locator("details > summary").click()
+    assert json.loads(groups.nth(0).locator("pre").inner_text()) == {"state": "case differs"}
+    groups.nth(1).locator(":scope > summary").click()
+    assert groups.locator("button").count() == 0
+    _import_snapshot(d, {"nodes": {edge_id: {"state": None}}})
+    assert d.page.locator("#snapshot-error").is_visible()
+    assert _snapshot_marker(d, "_foo^PRD") == "running"
+    assert d.errors == []
+
+
+def test_snapshot_read_generations_clear_errors_and_hidden_preference(
+    driven_snapshot: Driven,
+) -> None:
+    """DL-385: controlled File.text promises expose ordering, without timing assumptions."""
+    d = driven_snapshot
+    _import_snapshot(d, {"nodes": {"P": {"state": "prior"}}})
+    d.page.evaluate(
+        "() => {window.snapshotReads=new Map();File.prototype.text=function(){"
+        " return new Promise((resolve,reject)=>{snapshotReads.set(this.name,{resolve,reject});});};}"
+    )
+    _choose_snapshot(d, "", "old.json")
+    _choose_snapshot(d, "", "new.json")
+    d.page.evaluate(
+        '() => {snapshotReads.get(\'new.json\').resolve(\'{"nodes":{"Q":{"state":"new"}}}\');}'
+    )
+    d.page.wait_for_function("() => !snapshotPending")
+    d.page.evaluate("() => {snapshotReads.get('old.json').reject(new Error('stale error'));}")
+    assert d.page.locator("#snapshot-error").is_hidden()
+    assert d.page.evaluate("() => [...snapshotNodes.keys()]") == ["Q"]
+    _choose_snapshot(d, "", "old-success.json")
+    _choose_snapshot(d, "", "latest.json")
+    d.page.evaluate(
+        '() => {snapshotReads.get(\'latest.json\').resolve(\'{"nodes":{"Q":{"state":"latest"}}}\');}'
+    )
+    d.page.wait_for_function("() => !snapshotPending")
+    d.page.evaluate(
+        '() => {snapshotReads.get(\'old-success.json\').resolve(\'{"nodes":{"P":{"state":"stale"}}}\');}'
+    )
+    assert d.page.evaluate("() => snapshotNodes.get('Q').state") == "latest"
+    assert not d.page.evaluate("() => snapshotNodes.has('P')")
+    _choose_snapshot(d, "", "old2.json")
+    _choose_snapshot(d, "", "bad.json")
+    d.page.evaluate("() => {snapshotReads.get('bad.json').resolve('{');}")
+    d.page.wait_for_function("() => !snapshotPending")
+    error = d.page.inner_text("#snapshot-error")
+    d.page.evaluate("() => {snapshotReads.get('old2.json').resolve('{\"nodes\":{}}');}")
+    assert d.page.inner_text("#snapshot-error") == error
+    assert d.page.evaluate("() => [...snapshotNodes.keys()]") == ["Q"]
+    _choose_snapshot(d, "", "hidden.json")
+    assert d.page.locator("#snapshot-error").is_hidden()
+    d.page.locator("#snapshot-shown").uncheck()
+    d.page.locator("#snapshot-preset").select_option("autosys")
+    d.page.evaluate(
+        '() => {snapshotReads.get(\'hidden.json\').resolve(\'{"nodes":{"P":{"state":"SU"}}}\');}'
+    )
+    d.page.wait_for_function("() => !snapshotPending")
+    assert not d.page.locator("#snapshot-shown").is_checked()
+    assert _snapshot_marker(d, "P") == ""
+    for name, reject in (("cleared-success.json", False), ("cleared-error.json", True)):
+        _choose_snapshot(d, "", name)
+        d.page.locator("#snapshot-clear").click()
+        d.page.evaluate(
+            "({name,reject})=>{const r=snapshotReads.get(name);if(reject)r.reject(new Error('late'));"
+            ' else r.resolve(\'{"nodes":{"P":{"state":"late"}}}\');}',
+            {"name": name, "reject": reject},
+        )
+        assert d.page.evaluate("() => snapshotNodes.size") == 0
+        assert d.page.locator("#snapshot-error").is_hidden()
+        assert not d.page.locator("#snapshot-shown").is_checked()
+        assert d.page.locator("#snapshot-preset").input_value() == "autosys"
+    assert d.errors == []
+
+
+def test_snapshot_geometry_routes_layers_and_observation_only_details(
+    driven_snapshot: Driven,
+) -> None:
+    """DL-385: import and display changes touch neither graph state nor condition leaf hover."""
+    d = driven_snapshot
+    _edge_mode(d, "elk")
+    d.page.evaluate(
+        "(id)=>{cy.$id(id).emit('tap');highlightNodes(cy.$id('P'));cy.$id('N').addClass('hidden');"
+        " cy.$id('Q').select();cy.zoom(.85);cy.center(cy.$id('IB'));"
+        " window.snapshotLayouts=0;cy.on('layoutstart',()=>snapshotLayouts++);}",
+        _LONG_NAME_A,
+    )
+    # Restore a valid route generation after the deliberately hidden node.
+    _click(d, "#arrange")
+    d.page.wait_for_function("() => !elkRunning")
+    d.page.evaluate("() => {snapshotLayouts=0;}")
+    _open_control(d, "#snapshot-import")
+    leaf = d.page.locator("#d-tree button.leaf").first
+    leaf.evaluate(
+        "leaf=>{window.snapshotPointerLeaves=0;window.snapshotPaintCalls={};"
+        " leaf.addEventListener('mouseleave',()=>snapshotPointerLeaves++);"
+        " for(const name of ['showDetails','showNodeDetails','paintBranches','clearBranchPaint',"
+        " 'renderCondTrees']){const fn=window[name];snapshotPaintCalls[name]=0;"
+        " window[name]=function(...args){snapshotPaintCalls[name]++;return fn(...args);};}}"
+    )
+    leaf.hover()
+    leaf_rect = leaf.bounding_box()
+    condition_dom = d.page.inner_html("#d-tree")
+    before = _snapshot_invariants(d)
+
+    def assert_observation_only() -> None:
+        d.page.evaluate("() => new Promise(resolve=>requestAnimationFrame(()=>resolve()))")
+        assert _snapshot_invariants(d) == before
+        assert leaf.bounding_box() == leaf_rect
+        assert d.page.inner_html("#d-tree") == condition_dom
+        assert d.page.evaluate("snapshotPointerLeaves") == 0
+        assert d.page.evaluate("() => Object.values(snapshotPaintCalls).every(n=>n===0)")
+
+    _import_snapshot(d, {"nodes": {_LONG_NAME_A: {"state": "SU"}, "P": {"state": "arbitrary"}}})
+    assert_observation_only()
+    assert 'State: "SU"' in d.page.inner_text("#d-observation")
+    _import_snapshot(d, {"nodes": {_LONG_NAME_A: {"state": "FA"}}})
+    assert_observation_only()
+    for _ in range(2):
+        d.page.locator("#snapshot-shown").evaluate("el=>el.click()")
+        assert_observation_only()
+    for preset in ("autosys", "generic"):
+        d.page.locator("#snapshot-preset").select_option(preset)
+        assert_observation_only()
+    d.page.locator("#snapshot-clear").evaluate("el=>el.click()")
+    assert_observation_only()
+    _import_snapshot(d, {"nodes": {_LONG_NAME_A: {"state": "SU"}, "P": {"state": "arbitrary"}}})
+    assert_observation_only()
+    d.page.locator("#snapshot-preset").hover()
+    before = _snapshot_invariants(d)
+    for preset in ("autosys", "generic"):
+        d.page.locator("#snapshot-preset").select_option(preset)
+        assert _snapshot_invariants(d) == before
+    d.page.locator("#snapshot-shown").uncheck()
+    assert d.page.locator("#d-observation").is_hidden()
+    assert _snapshot_invariants(d) == before
+    d.page.locator("#snapshot-shown").check()
+    d.page.locator("#snapshot-filter").select_option("missing")
+    assert _snapshot_invariants(d) == before
+    d.page.locator("#snapshot-clear").click()
+    assert _snapshot_invariants(d) == before
+    assert d.page.inner_html("#d-tree") == condition_dom
+    assert d.page.evaluate("snapshotLayouts") == 0
+    assert d.errors == []
+
+
+def test_snapshot_folds_leaf_scopes_and_explicit_keyboard_find(driven_snapshot: Driven) -> None:
+    """DL-385: box own state is separate, nested leaf coverage is fold/hide invariant."""
+    d = driven_snapshot
+    _import_snapshot(
+        d, {"nodes": {"B": {"state": "own box"}, "M": {"state": "done"}, "IM": {"state": ""}}}
+    )
+    _click(d, "#snapshot-panel [data-close-panel]")
+    d.page.evaluate("() => {cy.$id('B').emit('tap');}")
+    assert 'State: "own box"' in d.page.inner_text("#d-observation")
+    assert "Leaf jobs: 2 of 6 supplied; 4 missing" in d.page.inner_text("#d-observation")
+    d.page.evaluate("() => {ec.collapse(cy.$id('IB'));ec.collapse(cy.$id('B'));}")
+    d.page.wait_for_function("() => foldPending === null")
+    before = _snapshot_invariants(d)
+    _import_snapshot(d, {"nodes": {"M": {"state": "done"}, "IM": {"state": ""}}})
+    assert _snapshot_invariants(d) == before
+    assert _snapshot_marker(d, "B") == ""
+    assert "State: not supplied" in d.page.inner_text("#d-observation")
+    assert "Leaf jobs: 2 of 6 supplied; 4 missing" in d.page.inner_text("#d-observation")
+    _snapshot_filter_state(d, "")
+    d.page.locator("#snapshot-select").focus()
+    d.page.keyboard.press("Enter")
+    d.page.wait_for_function("() => foldPending === null && cy.$id('IM').visible()")
+    d.page.wait_for_function(
+        "() => document.getElementById('stats').textContent.endsWith('snapshot: 1 selected')"
+    )
+    assert _selected_ids(d) == ["IM"]
+    assert not _folded(d, "B") and not _folded(d, "IB")
+    assert _snapshot_marker(d, "IM") == "neutral"
+    assert 'State: ""' in d.page.inner_text("#d-observation")
+    d.page.evaluate("() => {cy.$id('IB').emit('tap');}")
+    assert "Leaf jobs: 1 of 4 supplied; 3 missing" in d.page.inner_text("#d-observation")
+    _snapshot_filter_state(d, "done")
+    d.page.evaluate(
+        "() => {window.snapshotNavigationCount=0;window.snapshotReportCount=0;"
+        " const navigate=navigateSnapshot,report=updateStats;"
+        " navigateSnapshot=function(...args){snapshotNavigationCount++;return navigate(...args);};"
+        " updateStats=function(op){report(op);"
+        " if(typeof op==='string'&&op.startsWith('snapshot: '))snapshotReportCount++;};}"
+    )
+    for selector in ("#snapshot-select", '[data-snapshot-id="M"][data-snapshot-action="select"]'):
+        if selector != "#snapshot-select":
+            d.page.locator("#snapshot-results summary").click()
+        button = d.page.locator(selector)
+        for chord in ("Shift+Enter", "Shift+Space", "Shift+click"):
+            d.page.evaluate("() => {cy.nodes().unselect();cy.$id('IM').select();}")
+            navigation_count = d.page.evaluate("snapshotNavigationCount")
+            if chord == "Shift+click":
+                button.click(modifiers=["Shift"])
+            else:
+                button.focus()
+                d.page.keyboard.press(chord)
+            assert _selected_ids(d) == ["IM", "M"]
+            d.page.wait_for_function("() => snapshotReportCount === snapshotNavigationCount")
+            assert d.page.evaluate("snapshotNavigationCount") == navigation_count + 1
+            button.focus()
+            d.page.keyboard.press("Enter")
+            assert _selected_ids(d) == ["M"]
+            d.page.wait_for_function("() => snapshotReportCount === snapshotNavigationCount")
+            assert d.page.evaluate("snapshotNavigationCount") == navigation_count + 2
+    _snapshot_filter_state(d, "")
+    d.page.locator("#snapshot-select").focus()
+    d.page.keyboard.press("Enter")
+    d.page.wait_for_function("() => snapshotReportCount === snapshotNavigationCount")
+    assert _selected_ids(d) == ["IM"]
+    d.page.evaluate(
+        "() => {window.snapshotFitCount=0;const fit=cy.fit;"
+        " cy.fit=function(...args){snapshotFitCount++;return fit.apply(this,args);};}"
+    )
+    for edge_mode in ("taxi", "elk"):
+        _edge_mode(d, edge_mode)
+        d.page.evaluate("() => {cy.$id('M').position({x:5000,y:5000}).addClass('hidden');}")
+        d.page.wait_for_function("() => !cy.$id('M').visible()")
+        if edge_mode == "elk":
+            _arm_layout_wait(d)
+            _click(d, "#arrange")
+            _wait_layout_done(d)
+            assert d.page.evaluate("() => routeLayoutEpoch === routeEpoch && routesPresent")
+            assert d.page.evaluate("() => cy.edges().some(e => !!elkRoute(e))")
+        d.page.evaluate("() => {cy.zoom(1);cy.pan({x:0,y:0});}")
+        _snapshot_filter_state(d, "done")
+        epoch = d.page.evaluate("routeEpoch")
+        navigation_count = d.page.evaluate("snapshotNavigationCount")
+        d.page.evaluate("snapshotFitCount=0")
+        assert d.page.evaluate("() => !cy.$id('M').visible()")
+        assert d.page.evaluate("() => cy.$id('M').renderedPosition().x > cy.width()")
+        d.page.locator("#snapshot-highlight").click()
+        d.page.wait_for_function("() => snapshotReportCount === snapshotNavigationCount")
+        assert d.page.evaluate("snapshotNavigationCount") == navigation_count + 1
+        assert d.page.evaluate("snapshotFitCount") == 1
+        assert d.page.evaluate(
+            "() => {const n=cy.$id('M'),p=n.renderedPosition();"
+            " return n.visible()&&n.hasClass('hl')&&p.x>=0&&p.x<=cy.width()"
+            " &&p.y>=0&&p.y<=cy.height();}"
+        )
+        assert "not drawn" not in d.page.inner_text("#stats")
+        assert d.page.inner_text("#stats").endswith("snapshot: 1 highlighted")
+        assert _selected_ids(d) == ["IM"]
+        if edge_mode == "elk":
+            assert d.page.evaluate("routeEpoch") > epoch
+            assert d.page.evaluate("() => !cy.edges().some(e => !!elkRoute(e))")
+    assert d.errors == []
+
+
+def test_snapshot_callout_closed_edge_details_and_small_panel(driven_snapshot: Driven) -> None:
+    """DL-385: overlay text follows existing attention, chrome remains bounded and escapable."""
+    d = driven_snapshot
+    _import_snapshot(d, {"nodes": {"P": {"state": "x" * 1000}, "B": {"state": "RU"}}})
+    d.page.locator("#snapshot-panel [data-close-panel]").click()
+    assert d.page.locator("#details").is_hidden()
+    d.page.evaluate("() => {cy.zoom(1);cy.center(cy.$id('P'));}")
+    d.page.mouse.move(**_client_point(d, "P"))
+    d.page.wait_for_function(
+        "() => document.getElementById('name-callout').textContent.includes('State:')"
+    )
+    assert d.page.inner_text("#name-callout").startswith("P\nState: ")
+    assert d.page.locator("#details").is_hidden()
+    bounds = d.page.locator("#name-callout").bounding_box()
+    canvas = d.page.locator("#cy").bounding_box()
+    assert bounds and canvas and bounds["width"] <= 360
+    assert (
+        d.page.locator("#name-callout").evaluate("el=>getComputedStyle(el).pointerEvents") == "none"
+    )
+    d.page.evaluate("() => {cy.edges().not('.lock')[0].emit('tap');}")
+    edge_details = d.page.inner_html("#details")
+    _import_snapshot(d, {"nodes": {"P": {"state": "replacement"}}})
+    assert d.page.inner_html("#details") == edge_details
+    d.page.set_viewport_size({"width": 360, "height": 300})
+    bounds = d.page.locator("#snapshot-panel").bounding_box()
+    canvas = d.page.locator("#cy").bounding_box()
+    assert bounds and canvas
+    assert bounds["width"] <= canvas["width"] and bounds["height"] <= canvas["height"]
+    assert d.page.locator(".chrome-panel:visible").count() == 1
+    d.page.keyboard.press("Escape")
+    assert d.page.locator("#snapshot-panel").is_hidden()
+    assert d.page.evaluate("document.activeElement.id") == "snapshot-toggle"
+    assert d.errors == []
+
+
+@pytest.mark.parametrize("location", ("entry", "top"))
+def test_snapshot_native_display_failure_retains_prior_model_and_ui(
+    driven_snapshot: Driven,
+    location: str,
+    record_property: Any,
+) -> None:
+    """DL-385: native display capacity is checked before replacing a valid snapshot."""
+    d = driven_snapshot
+    _import_snapshot(d, {"source": "prior", "nodes": {"P": {"state": "prior"}}})
+    before = _snapshot_invariants(d)
+    coverage = d.page.inner_text("#snapshot-coverage")
+    results = d.page.inner_html("#snapshot-results")
+    value = "[" * 12000 + "0" + "]" * 12000
+    deep = (
+        '{"nodes":{"P":{"state":"new","metadata":' + value + "}}}"
+        if location == "entry"
+        else '{"new":true,"metadata":' + value + ',"nodes":{"P":{"state":"new"}}}'
+    )
+    # Separate native capacity evidence from the deterministic injected preparation failure.
+    supported = d.page.evaluate(
+        "({text,location})=>{const value=JSON.parse(text);try {"
+        "JSON.stringify(location==='entry'?value.nodes.P:{new:true,metadata:value.metadata});return true;}"
+        "catch(error){return false;}}",
+        {"text": deep, "location": location},
+    )
+    record_property("native_parse_succeeded", True)
+    record_property("native_stringify_succeeded", supported)
+    if supported:
+        # Native limits differ. A deterministic serializer failure exercises display preparation.
+        d.page.evaluate(
+            "() => {const stringify=JSON.stringify;JSON.stringify=function(value,...args){"
+            " if(value?.state==='new'||value?.new===true)throw new RangeError('injected preparation failure');"
+            " return stringify(value,...args);};}"
+        )
+    _import_snapshot(d, deep)
+    assert "text-display capacity" in d.page.inner_text("#snapshot-error")
+    assert d.page.evaluate("() => snapshotNodes.get('P').state") == "prior"
+    assert d.page.inner_text("#snapshot-coverage") == coverage
+    assert d.page.inner_html("#snapshot-results") == results
+    assert _snapshot_invariants(d) == before
+    assert d.page.inner_text("#snapshot-notice") == "Previous snapshot kept."
+    assert d.errors == []
+
+
+def test_snapshot_real_tab_order_and_long_text_stay_inside_panel(driven_snapshot: Driven) -> None:
+    """DL-385: WebKit reaches every control and unbounded input cannot widen chrome."""
+    d = driven_snapshot
+    _open_control(d, "#snapshot-import")
+    d.page.locator("#snapshot-panel [data-close-panel]").focus()
+    d.page.keyboard.press("Tab")
+    assert d.page.evaluate("document.activeElement.id") == "snapshot-import"
+    with d.page.expect_file_chooser() as chooser:
+        d.page.keyboard.press("Enter")
+    chooser.value.set_files(
+        {
+            "name": "keyboard.json",
+            "mimeType": "application/json",
+            "buffer": b'{"nodes":{"P":{"state":"known"}}}',
+        }
+    )
+    d.page.wait_for_function("() => snapshotLoaded && !snapshotPending")
+    d.page.locator("#snapshot-import").focus()
+    for expected in (
+        "snapshot-clear",
+        "snapshot-shown",
+        "snapshot-preset",
+        "snapshot-filter",
+        "snapshot-select",
+        "snapshot-highlight",
+    ):
+        d.page.keyboard.press("Tab")
+        assert d.page.evaluate("document.activeElement.id") == expected
+    d.page.keyboard.press("Tab")
+    assert d.page.evaluate("document.activeElement.tagName") == "SUMMARY"
+    d.page.keyboard.press("Enter")
+    d.page.keyboard.press("Tab")
+    assert d.page.evaluate("document.activeElement.dataset.snapshotAction") == "select"
+    d.page.keyboard.press("Tab")
+    assert d.page.evaluate("document.activeElement.dataset.snapshotAction") == "highlight"
+    d.page.set_viewport_size({"width": 360, "height": 300})
+    _import_snapshot(d, {"nodes": {"P": {"state": "W" * 1000}}}, "F" * 1000 + ".json")
+    dimensions = d.page.locator("#snapshot-panel").evaluate("el=>[el.clientWidth,el.scrollWidth]")
+    assert dimensions[1] <= dimensions[0] + 1
+    _import_snapshot(d, {"nodes": {"I" * 1000: {"state": None}}})
+    assert d.page.locator("#snapshot-error").is_visible()
+    dimensions = d.page.locator("#snapshot-panel").evaluate("el=>[el.clientWidth,el.scrollWidth]")
+    assert dimensions[1] <= dimensions[0] + 1
+    assert d.errors == []
+
+
+def test_snapshot_lock_inspection_isolation_and_ineligible_raw_entries(
+    driven_locks: Driven,
+) -> None:
+    """DL-385: neither lock hub nor lock-edge inspection is refreshed by observations."""
+    d = driven_locks
+    hub = "lock:r:R_ONE"
+    edge = d.page.evaluate("() => cy.edges('.lock')[0].id()")
+    for target in (hub, edge):
+        d.page.evaluate("id=>{cy.$id(id).emit('tap');}", target)
+        before = d.page.inner_html("#details")
+        inspected = d.page.evaluate("() => cy.edges('.inspected').map(e=>e.id())")
+        _import_snapshot(
+            d,
+            {
+                "nodes": {
+                    hub: {"state": "not a job"},
+                    edge: {"state": "not a node"},
+                    "lk_a": {"state": "SU"},
+                }
+            },
+        )
+        assert d.page.inner_html("#details") == before
+        assert d.page.evaluate("() => cy.edges('.inspected').map(e=>e.id())") == inspected
+        assert "Ineligible IDs: 2" in d.page.inner_text("#snapshot-buckets")
+        assert _snapshot_marker(d, hub) == ""
+        d.page.locator("#snapshot-shown").uncheck()
+        assert d.page.inner_html("#details") == before
+        d.page.locator("#snapshot-shown").check()
+        d.page.locator("#snapshot-clear").click()
+        assert d.page.inner_html("#details") == before
+    assert d.errors == []
+
+
+def test_snapshot_degraded_plugins_keep_native_import_and_find(driven_degraded: Driven) -> None:
+    """DL-385: optional graph plugins do not own offline observations or native actions."""
+    d = driven_degraded
+    node_id = _sample_node(d)
+    _import_snapshot(
+        d, {"nodes": {node_id: {"state": "manual vocabulary"}}, "capture": {"note": "offline"}}
+    )
+    assert _snapshot_marker(d, node_id) == "neutral"
+    assert "1 eligible matches" == d.page.inner_text("#snapshot-find-count")
+    d.page.locator("#snapshot-select").focus()
+    d.page.keyboard.press("Enter")
+    assert _selected_ids(d) == [node_id]
+    assert 'State: "manual vocabulary"' in d.page.inner_text("#d-observation")
+    assert d.errors == []
+
+
+def test_snapshot_reload_has_explicit_page_defaults(driven_snapshot: Driven) -> None:
+    """DL-385: a new page has no snapshot and does not restore hidden/preset form history."""
+    d = driven_snapshot
+    _import_snapshot(d, {"nodes": {"P": {"state": "SU"}}})
+    d.page.locator("#snapshot-shown").uncheck()
+    d.page.locator("#snapshot-preset").select_option("autosys")
+    d.page.reload()
+    _ready(d)
+    _open_control(d, "#snapshot-import")
+    assert d.page.locator("#snapshot-shown").is_checked()
+    assert d.page.locator("#snapshot-preset").input_value() == "generic"
+    assert d.page.locator("#snapshot-data").is_hidden()
+    assert _snapshot_marker(d, "P") == ""
     assert d.errors == []

@@ -1298,3 +1298,16 @@ def test_cli_viz_explore_honors_direction() -> None:
     assert 'DIRECTION = "DOWN"' in result.stdout
     page_nodes = _page_elements(result.stdout)["nodes"]
     assert len(page_nodes) == 3  # every node is emitted; the page folds, not the emitter
+
+
+def test_snapshot_surface_keeps_observations_outside_emitted_graph_facts() -> None:
+    """DL-385: the offline input is a viewer surface, with no persisted runtime state."""
+    page = to_explore_html(catalog_of(S_EDGE_TEXT))
+    elements = _page_elements(page)
+    assert [n["data"]["id"] for n in elements["nodes"]] == ["foo^PRD", "bar", "_foo^PRD"]
+    assert all("state" not in n["data"] for n in elements["nodes"])
+    assert 'id="snapshot-file" type="file"' in page
+    assert 'id="snapshot-panel" class="chrome-panel"' in page
+    assert "Native JSON.parse uses the last duplicate key at every level" in page
+    assert "Producers must emit unique keys" in page
+    assert 'id="d-observation"' in page

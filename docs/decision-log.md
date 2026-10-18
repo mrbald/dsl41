@@ -24864,3 +24864,38 @@ relitigate an entry; append a new one.
   Full names belong to HTML callouts, details and Find. They never enter layout,
   compound sizing, lock obstacles or routes. The base layout changes deliberately;
   no density or operator-speed improvement is claimed.
+- DL-385 Explore imports offline snapshots without changing graph facts (2026-10-18).
+  The only required input is {"nodes":{"ID":{"state":"arbitrary string"}}}.
+  Every own entry must have a string state, including unknown or ineligible IDs.
+  Empty and whitespace strings are supplied values. Missing is distinct.
+  All optional top-level/node metadata remains arbitrary JSON rendered as text.
+  Native JSON.parse uses the last duplicate key at every level; producers emit unique keys.
+  One observation Map is separate from copied emitted identity and hierarchy facts.
+  Catalog and EXT emitted IDs match exactly. Labels, locality guesses and prefixes never join.
+  Every edge and synthetic lock is ineligible. Unmatched raw entries remain inspectable.
+  Validation finishes before replacement. Invalid input keeps the prior snapshot.
+  Native JSON text-display preparation also finishes first; browser capacity failures reject.
+  Replacement drops omissions; empty nodes is valid. New file choices and Clear invalidate
+  pending read successes and errors. Show observations and the preset survive both.
+  Fixed trusted glyphs occupy DL-384's last 10-unit slot, only for own supplied state.
+  FW/global marks have fixed inward offsets to clear their sloping outlines; bounds stay fixed.
+  Generic is neutral. Optional AutoSys maps literal codes/names to finite glyphs and tones.
+  Unknown states are neutral. Raw imported values never become SVG, CSS, HTML markup or expressions.
+  There is no inferred readiness, elapsed time, severity or worst-child box state.
+  One existing callout keeps its name first and hover-over-inspection ownership.
+  State previews use JSON-string notation, distinguishing literal sentinel-shaped strings.
+  Full raw state and metadata remain inspectable. Box leaf coverage/counts are separate
+  from own state, exclude boxes and EXT, and remain fixed across folds and hides.
+  Nested descendant scopes overlap and must not be summed globally.
+  Snapshot shares DL-204's one-panel chrome and keyboard/focus/dismissal behavior.
+  It shows catalog coverage, external matches, unknown/ineligible IDs and raw metadata.
+  Findings use explicit filter kinds and raw-state indices, never string sentinels.
+  Select replaces, Shift adds; Highlight adds. Only these explicit actions reveal/expand/fit.
+  Explicit navigation fits and reports after visibility styles settle.
+  Import, replace, Clear, show/hide, preset and filtering run no layout or navigation.
+  Geometry, stable Fit, lock placement, panzoom, folds, visibility, selection, highlights,
+  branch paint, inspection and route caches remain unchanged. Only fixed markers and
+  observation-owned HTML refresh. Closed details stay closed; edge/lock details stay intact.
+  Observation details follow the condition tree so refresh keeps its pointer targets stationary.
+  Hiding observations suppresses marker/callout/detail additions, not Snapshot inspection.
+  No runner/compiler behavior, bridge, polling, history, topology loader or producer is added.

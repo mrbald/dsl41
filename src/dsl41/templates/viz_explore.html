@@ -84,6 +84,22 @@
              box-shadow: 0 1px 4px #0002; }
   #name-link { position: absolute; inset: 0; width: 100%; height: 100%;
              z-index: 19; pointer-events: none; }
+  .snapshot-preview { font-size: 11px; color: #4b5563; white-space: nowrap;
+             overflow: hidden; text-overflow: ellipsis; max-width: 340px; }
+  .snapshot-raw { white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0;
+             font-size: 12px; max-width: 100%; }
+  #snapshot-panel p { margin: 6px 0; overflow-wrap: anywhere; }
+  #snapshot-panel .panel-settings, #snapshot-panel .panel-settings label { min-width: 0; }
+  #snapshot-filter { box-sizing: border-box; min-width: 0; width: 100%;
+             max-width: 100%; margin-left: 0; }
+  #snapshot-panel details { margin-top: 8px; }
+  #snapshot-panel summary { cursor: pointer; overflow-wrap: anywhere; }
+  #snapshot-results { margin-top: 8px; }
+  #snapshot-results details { border-top: 1px solid #e5e7eb; padding-top: 6px; }
+  #snapshot-error { color: #9f1239; }
+  #d-observation { border-top: 1px solid #e5e7eb; margin-top: 8px; padding-top: 6px;
+             font-size: 12px; }
+  #d-observation h3 { margin: 0 0 6px; font-size: 12px; }
   /* above #chrome-backdrop (25), below .chrome-panel (30): a controls panel
      must not make the node details inert. The backdrop is what dismisses a
      panel on an outside gesture, and it covers all of #wrap -- so details
@@ -211,6 +227,7 @@
     <button tabindex="0" type="button" id="highlight-toggle" class="disclosure" aria-expanded="false" aria-controls="highlight-panel">Highlight</button>
     <button tabindex="0" type="button" id="visibility-toggle" class="disclosure" aria-expanded="false" aria-controls="visibility-panel">Visibility</button>
     <button tabindex="0" type="button" id="view-toggle" class="disclosure" aria-expanded="false" aria-controls="view-panel">View</button>
+    <button tabindex="0" type="button" id="snapshot-toggle" class="disclosure" aria-expanded="false" aria-controls="snapshot-panel">Snapshot</button>
   </div>
 </header>
 <div id="wrap">
@@ -280,6 +297,51 @@
       </select><span class="hint" id="edge-style-note">Arrange refreshes ELK routes after moving or folding nodes.</span></div>
     </div>
   </section>
+  <section id="snapshot-panel" class="chrome-panel" role="region" aria-labelledby="snapshot-heading" hidden>
+    <div class="panel-heading"><h2 id="snapshot-heading">Snapshot</h2>
+      <button tabindex="0" type="button" data-close-panel aria-label="Close snapshot">Close</button></div>
+    <div class="panel-actions">
+      <button tabindex="0" type="button" id="snapshot-import">Import JSON…</button>
+      <input id="snapshot-file" type="file" accept=".json,application/json" hidden>
+      <button tabindex="0" type="button" id="snapshot-clear" disabled>Clear</button>
+    </div>
+    <p id="snapshot-notice" role="status">Import a JSON snapshot to annotate this graph.</p>
+    <p id="snapshot-error" role="alert" hidden></p>
+    <div class="panel-settings">
+      <label><input tabindex="0" type="checkbox" id="snapshot-shown" checked> Show observations</label>
+      <label for="snapshot-preset">Display <select tabindex="0" id="snapshot-preset"><option value="generic">Generic</option><option value="autosys">AutoSys</option></select></label>
+      <span class="hint">A mark means this node has a supplied observation. No mark means not supplied.
+        Glyphs and tones are display aids. Full raw states remain in details.</span>
+    </div>
+    <div id="snapshot-data" hidden>
+      <p id="snapshot-coverage"></p>
+      <p id="snapshot-buckets"></p>
+      <div class="panel-settings">
+        <label for="snapshot-filter">Find observations <select tabindex="0" id="snapshot-filter"></select></label>
+        <div class="panel-actions">
+          <button tabindex="0" type="button" id="snapshot-select" disabled title="select matching exact IDs, replacing the selection; Shift adds">Select matches</button>
+          <button tabindex="0" type="button" id="snapshot-highlight" disabled title="add matching exact IDs to highlights">Highlight matches</button>
+        </div>
+        <p id="snapshot-find-count" role="status"></p>
+      </div>
+      <div id="snapshot-results"></div>
+      <div id="snapshot-metadata"></div>
+      <div id="snapshot-unmatched"></div>
+    </div>
+    <details><summary tabindex="0">Format</summary>
+      <pre class="snapshot-raw">{"nodes":{"ID":{"state":"arbitrary string"}}}</pre>
+      <p>IDs match emitted IDs exactly, including external IDs shown in details.
+        Catalog jobs and external nodes are eligible; locks and edges are not.</p>
+      <p>Every extra top-level or node field is optional metadata, preserved as JSON text.
+        No source, timestamp, version or state vocabulary is required.</p>
+      <p>Native JSON.parse uses the last duplicate key at every level. Producers must emit unique keys.
+        Replacement drops omitted observations. An empty nodes object is valid.</p>
+      <p>Browser JSON parsing and text-display limits apply. An input that cannot be displayed
+        is rejected before replacing the current snapshot.</p>
+      <p>Box leaf counts describe supplied observations, not completion or an inferred box state.
+        Nested box scopes overlap and must not be summed.</p>
+    </details>
+  </section>
   <section id="help-panel" class="chrome-panel" role="region" aria-labelledby="help-heading" hidden>
     <div class="panel-heading"><h2 id="help-heading">Help</h2>
       <button tabindex="0" type="button" data-close-panel aria-label="Close Help">Close</button></div>
@@ -316,6 +378,7 @@
     <h2 id="d-title"></h2>
     <table><tbody id="d-rows"></tbody></table>
     <div id="d-tree"></div>
+    <section id="d-observation" aria-label="Snapshot observation" hidden></section>
   </aside>
 </div>
 <footer id="status-bar">
@@ -635,6 +698,60 @@ function runElkLayout(layout) {
    them (DL-193). */
 var payload = JSON.parse(document.getElementById("graph-data").textContent);
 
+/* Snapshot joins and box leaf scopes use emitted facts copied before the
+   canvas or folding extension can mutate its element data (DL-385). */
+var snapshotInventory = new Map(), snapshotIneligible = new Set(), snapshotLeaves = new Map();
+payload.nodes.forEach(function (node) {
+  var d = node.data;
+  if (node.classes.split(/\s+/).indexOf("lock") !== -1) {
+    snapshotIneligible.add(d.id);
+    return;
+  }
+  snapshotInventory.set(d.id, Object.freeze({id: d.id, kind: d.kind, parent: d.parent,
+    markOffset: node.classes.split(/\s+/).indexOf("global") !== -1 ? -12 : (d.kind === "FW" ? -3 : 0)}));
+  if (d.kind === "BOX") snapshotLeaves.set(d.id, []);
+});
+payload.edges.forEach(function (edge) { snapshotIneligible.add(edge.data.id); });
+var snapshotCatalog = Array.from(snapshotInventory.values()).filter(function (n) { return n.kind !== "EXT"; });
+snapshotInventory.forEach(function (node) {
+  if (node.kind === "BOX" || node.kind === "EXT") return;
+  var parent = node.parent;
+  while (parent !== undefined) {
+    snapshotLeaves.get(parent).push(node.id);
+    parent = snapshotInventory.get(parent).parent;
+  }
+});
+snapshotLeaves.forEach(function (leaves) { Object.freeze(leaves); });
+var snapshotNodes = new Map(), snapshotMetadata = {}, snapshotLoaded = false;
+var snapshotTexts = new WeakMap(), snapshotMetadataText = "{}";
+var snapshotGeneration = 0, snapshotPending = false, snapshotStates = [];
+var snapshotShown = document.getElementById("snapshot-shown");
+var snapshotPreset = document.getElementById("snapshot-preset");
+snapshotShown.checked = true;
+snapshotPreset.value = "generic";
+
+/* Only these trusted glyph fragments enter the fixed observation slot.
+   Raw state and metadata belong to text-only HTML surfaces (DL-385). */
+var SNAPSHOT_MARKS = {
+  neutral: '<path d="M67 7l3 3-3 3-3-3z" fill="#4b5563"/>',
+  success: '<path d="M64 10l2 2 4-4" fill="none" stroke="#047857" stroke-width="1.8"/>',
+  failure: '<path d="M64 7l6 6m0-6l-6 6" stroke="#be123c" stroke-width="1.6"/>',
+  running: '<path d="M67 7l3 6h-6z" fill="#1d4ed8"/>',
+  terminated: '<path d="M64 7l6 6m0-6l-6 6" stroke="#92400e" stroke-width="1.6"/>',
+  held: '<path d="M65 7v6m4-6v6" stroke="#6b7280" stroke-width="1.8"/>'
+};
+var SNAPSHOT_AUTOSYS = new Map([
+  ["SU", "success"], ["SUCCESS", "success"], ["FA", "failure"], ["FAILURE", "failure"],
+  ["RU", "running"], ["RUNNING", "running"], ["TE", "terminated"], ["TERMINATED", "terminated"],
+  ["OH", "held"], ["ON_HOLD", "held"], ["OI", "held"], ["ON_ICE", "held"]
+]);
+function snapshotMark(id) {
+  if (!snapshotShown.checked || !snapshotNodes.has(id) || !snapshotInventory.has(id)) return "";
+  var mark = snapshotPreset.value === "autosys" ? SNAPSHOT_AUTOSYS.get(snapshotNodes.get(id).state) : null;
+  return '<g data-observation="' + (mark || "neutral") + '" transform="translate(' +
+    snapshotInventory.get(id).markOffset + ' 0)">' + SNAPSHOT_MARKS[mark || "neutral"] + '</g>';
+}
+
 /* The expand-collapse api, once the (optional, guarded) extension is up;
    null means the page runs without box folding. Declared here because the
    node label style below asks it how many members a collapsed box stands
@@ -684,8 +801,9 @@ function nodeCaption(ele) {
   return text;
 }
 
-/* Structural marks have fixed slots inside each body; the final 10 units
-   are reserved for an observation marker. Names never enter SVG (DL-384). */
+/* Structural marks have fixed slots; the final observation slot has a
+   trusted inset for sloping FW/global outlines (DL-384, DL-385).
+   Names and observations never enter SVG as text. */
 function nodeMarks(ele) {
   var badge = condBadge(ele).trim();
   var count = ele.hasClass("cy-expand-collapse-collapsed-node") ? foldedMembers(ele) : "";
@@ -694,7 +812,7 @@ function nodeMarks(ele) {
   if (ele.data("self_lock")) svg += '<g fill="none" stroke="#111827" stroke-width="1.5"><path d="M32 9V6a3 3 0 0 1 6 0v3"/><rect x="30" y="9" width="10" height="8" rx="1"/></g>';
   if (count !== "") svg += '<text x="44" y="14" font-family="sans-serif" font-size="10" fill="#111827"'
     + (String(count).length > 3 ? ' textLength="18" lengthAdjust="spacingAndGlyphs"' : '') + '>' + count + '</text>';
-  return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg + '</svg>');
+  return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg + snapshotMark(ele.id()) + '</svg>');
 }
 
 function captionOpacity(ele) {
@@ -998,6 +1116,7 @@ function refreshNameCallout() {
   var anchorX = Math.max(Math.max(0, left), Math.min(Math.min(w, right), pos.x));
   var anchorY = Math.max(0, top);
   nameCallout.textContent = node.hasClass("lock") ? lockTitle(node) : node.data("label");
+  appendSnapshotPreview(nameCallout, node.id());
   var cw = nameCallout.offsetWidth, ch = nameCallout.offsetHeight;
   var x = Math.max(8, Math.min(w - cw - 8, anchorX - cw / 2));
   var y = Math.max(8, Math.min(h - ch - 8, anchorY - ch - 12));
@@ -1615,9 +1734,14 @@ var details = document.getElementById("details");
 var dTitle = document.getElementById("d-title");
 var dRows = document.getElementById("d-rows");
 var dTree = document.getElementById("d-tree");
+var dObservation = document.getElementById("d-observation");
+var detailNodeId = null;
 
 function showDetails(title, rows) {
   inspectName(null);
+  detailNodeId = null;
+  dObservation.hidden = true;
+  dObservation.replaceChildren();
   dTitle.textContent = title;
   dRows.replaceChildren();
   dTree.replaceChildren();
@@ -1644,6 +1768,7 @@ function showDetails(title, rows) {
 
 document.getElementById("d-close").addEventListener("click", function () {
   details.hidden = true;
+  detailNodeId = null;
   inspectName(null);
 });
 
@@ -1871,6 +1996,8 @@ function showNodeDetails(n) {
   }
   showDetails(d.id, [
     ["kind", d.kind],
+    ["display name", d.label !== d.id ? d.label : null],
+    ["emitted ID", d.label !== d.id ? d.id : null],
     ["members", members],
     ["schedule", d.schedule],
     ["command / watched file", d.detail, "code"],
@@ -1881,6 +2008,8 @@ function showNodeDetails(n) {
   ]);
   renderCondTrees(n, paintBranches(n));
   inspectName(n);
+  detailNodeId = n.id();
+  refreshSnapshotDetails();
 }
 
 cy.on("tap", "node", function (evt) {
@@ -1917,11 +2046,316 @@ cy.on("tap", "edge", function (evt) {
 cy.on("tap", function (evt) {
   if (evt.target !== cy) return;
   details.hidden = true;
+  detailNodeId = null;
   inspectName(null);
   dTree.replaceChildren();
   clearBranchPaint();
   clearInspected();
 });
+
+/* -------------------------------------------------------- offline snapshots */
+
+function jsonObject(value) { return value !== null && typeof value === "object" && !Array.isArray(value); }
+function own(value, key) { return Object.prototype.hasOwnProperty.call(value, key); }
+function snapshotStateText(id) {
+  return snapshotNodes.has(id) ? JSON.stringify(snapshotNodes.get(id).state) : "not supplied";
+}
+
+function snapshotBoxSummary(id) {
+  var leaves = snapshotLeaves.get(id), counts = new Map(), supplied = 0;
+  leaves.forEach(function (leaf) {
+    if (!snapshotNodes.has(leaf)) return;
+    supplied++;
+    var state = snapshotNodes.get(leaf).state;
+    counts.set(state, (counts.get(state) || 0) + 1);
+  });
+  return {total: leaves.length, supplied: supplied, missing: leaves.length - supplied, counts: counts};
+}
+function snapshotLeafText(summary) {
+  return "Leaf jobs: " + summary.supplied + " of " + summary.total + " supplied; " + summary.missing + " missing";
+}
+
+function textElement(tag, text, className) {
+  var el = document.createElement(tag);
+  el.textContent = text;
+  if (className) el.className = className;
+  return el;
+}
+function rawDisclosure(parent, title, text) {
+  var disclosure = document.createElement("details");
+  disclosure.appendChild(textElement("summary", title));
+  disclosure.firstElementChild.tabIndex = 0;
+  disclosure.appendChild(textElement("pre", text, "snapshot-raw"));
+  parent.appendChild(disclosure);
+  return disclosure;
+}
+
+function appendSnapshotPreview(parent, id) {
+  if (!snapshotLoaded || !snapshotShown.checked || !snapshotInventory.has(id)) return;
+  parent.appendChild(textElement("div", "State: " + snapshotStateText(id), "snapshot-preview"));
+  if (snapshotLeaves.has(id)) {
+    parent.appendChild(textElement("div", snapshotLeafText(snapshotBoxSummary(id)), "snapshot-preview"));
+  }
+}
+
+/* An observation refresh owns this subsection only. It does not reopen
+   details, repaint branches, remove leaf hover, or change inspection (DL-385). */
+function refreshSnapshotDetails() {
+  dObservation.replaceChildren();
+  dObservation.hidden = !snapshotLoaded || !snapshotShown.checked || details.hidden || !snapshotInventory.has(detailNodeId);
+  if (dObservation.hidden) return;
+  var id = detailNodeId;
+  dObservation.appendChild(textElement("h3", "Snapshot observation"));
+  dObservation.appendChild(textElement("pre", "State: " + snapshotStateText(id), "snapshot-raw"));
+  if (snapshotLeaves.has(id)) {
+    var summary = snapshotBoxSummary(id);
+    dObservation.appendChild(textElement("p", snapshotLeafText(summary)));
+    dObservation.appendChild(textElement("p", "Descendant leaf jobs (nested scopes overlap):"));
+    var table = document.createElement("table");
+    var rows = [["Raw state", "Count"]];
+    summary.counts.forEach(function (count, state) { rows.push([JSON.stringify(state), String(count)]); });
+    rows.push(["Not supplied", String(summary.missing)]);
+    rows.forEach(function (row, i) {
+      var tr = document.createElement("tr");
+      row.forEach(function (cell) { tr.appendChild(textElement(i === 0 ? "th" : "td", cell)); });
+      table.appendChild(tr);
+    });
+    dObservation.appendChild(table);
+  }
+  if (snapshotNodes.has(id)) rawDisclosure(dObservation, "Observation metadata and raw entry", snapshotTexts.get(snapshotNodes.get(id)));
+}
+
+function snapshotBuckets() {
+  var buckets = {catalog: [], external: [], unknown: [], ineligible: []};
+  snapshotNodes.forEach(function (_entry, id) {
+    var node = snapshotInventory.get(id);
+    var bucket = node ? (node.kind === "EXT" ? "external" : "catalog") :
+      (snapshotIneligible.has(id) ? "ineligible" : "unknown");
+    buckets[bucket].push(id);
+  });
+  return buckets;
+}
+var snapshotFilter = document.getElementById("snapshot-filter");
+function selectedSnapshotFilter() {
+  if (snapshotFilter.value === "missing") return {kind: "missing"};
+  if (snapshotFilter.value.indexOf("state-") === 0) {
+    return {kind: "state", state: snapshotStates[Number(snapshotFilter.value.slice(6))]};
+  }
+  return {kind: "all"};
+}
+function snapshotFindIds() {
+  if (!snapshotLoaded) return [];
+  var filter = selectedSnapshotFilter();
+  if (filter.kind === "missing") {
+    return snapshotCatalog.filter(function (n) { return !snapshotNodes.has(n.id); }).map(function (n) { return n.id; });
+  }
+  return Array.from(snapshotNodes.keys()).filter(function (id) {
+    return snapshotInventory.has(id) && (filter.kind === "all" || snapshotNodes.get(id).state === filter.state);
+  });
+}
+function snapshotActionButton(parent, id, mode) {
+  var button = textElement("button", mode === "select" ? "Select" : "Highlight");
+  button.type = "button";
+  button.tabIndex = 0;
+  button.disabled = loading;
+  button.dataset.snapshotId = id;
+  button.dataset.snapshotAction = mode;
+  button.addEventListener("click", function (evt) { navigateSnapshot([id], mode, evt.shiftKey); });
+  if (mode === "select") snapshotAddKeys(button, function () { return [id]; });
+  parent.appendChild(button);
+}
+function snapshotAddKeys(button, ids) {
+  /* DL-385: read modified Select keys before native click synthesis can drop Shift. */
+  button.addEventListener("keydown", function (evt) {
+    if (evt.shiftKey && (evt.key === "Enter" || evt.key === " ")) {
+      evt.preventDefault();
+      navigateSnapshot(ids(), "select", true);
+    }
+  });
+}
+function refreshSnapshotFindings() {
+  var ids = snapshotFindIds(), results = document.getElementById("snapshot-results");
+  document.getElementById("snapshot-select").disabled = loading || ids.length === 0;
+  document.getElementById("snapshot-highlight").disabled = loading || ids.length === 0;
+  document.getElementById("snapshot-find-count").textContent = ids.length + " eligible matches";
+  results.replaceChildren();
+  ids.forEach(function (id) {
+    var row = document.createElement("details");
+    row.appendChild(textElement("summary", id + " · " + snapshotStateText(id)));
+    row.firstElementChild.tabIndex = 0;
+    var actions = document.createElement("div");
+    actions.className = "panel-actions";
+    snapshotActionButton(actions, id, "select");
+    snapshotActionButton(actions, id, "highlight");
+    row.appendChild(actions);
+    if (snapshotNodes.has(id)) row.appendChild(textElement("pre", snapshotTexts.get(snapshotNodes.get(id)), "snapshot-raw"));
+    results.appendChild(row);
+  });
+}
+
+function refreshSnapshotPanel(savedFilter) {
+  var filter = savedFilter || selectedSnapshotFilter(), buckets = snapshotBuckets(), stateCounts = new Map();
+  document.getElementById("snapshot-import").textContent = snapshotLoaded ? "Replace JSON…" : "Import JSON…";
+  document.getElementById("snapshot-clear").disabled = !snapshotLoaded && !snapshotPending;
+  document.getElementById("snapshot-data").hidden = !snapshotLoaded;
+  snapshotFilter.replaceChildren();
+  var all = textElement("option", "All supplied (" + (buckets.catalog.length + buckets.external.length) + ")");
+  all.value = "all";
+  snapshotFilter.appendChild(all);
+  buckets.catalog.concat(buckets.external).forEach(function (id) {
+    var state = snapshotNodes.get(id).state;
+    stateCounts.set(state, (stateCounts.get(state) || 0) + 1);
+  });
+  snapshotStates = Array.from(stateCounts.keys()).sort();
+  snapshotStates.forEach(function (state, index) {
+    var option = textElement("option", "State " + JSON.stringify(state) + " (" + stateCounts.get(state) + ")");
+    option.value = "state-" + index;
+    snapshotFilter.appendChild(option);
+    if (filter.kind === "state" && filter.state === state) snapshotFilter.value = option.value;
+  });
+  var missing = textElement("option", "Catalog: not supplied (" + (snapshotCatalog.length - buckets.catalog.length) + ")");
+  missing.value = "missing";
+  snapshotFilter.appendChild(missing);
+  if (filter.kind === "missing") snapshotFilter.value = "missing";
+  document.getElementById("snapshot-coverage").textContent = "Catalog: " + buckets.catalog.length + " of " + snapshotCatalog.length + " supplied";
+  document.getElementById("snapshot-buckets").textContent = "External matches: " + buckets.external.length +
+    " · Unknown IDs: " + buckets.unknown.length + " · Ineligible IDs: " + buckets.ineligible.length;
+  var metadata = document.getElementById("snapshot-metadata");
+  metadata.replaceChildren();
+  rawDisclosure(metadata, "Snapshot metadata", snapshotMetadataText);
+  var unmatched = document.getElementById("snapshot-unmatched");
+  unmatched.replaceChildren();
+  ["unknown", "ineligible"].forEach(function (kind) {
+    var group = document.createElement("details");
+    group.appendChild(textElement("summary", (kind === "unknown" ? "Unknown" : "Ineligible") + " IDs (" + buckets[kind].length + ")"));
+    group.firstElementChild.tabIndex = 0;
+    buckets[kind].forEach(function (id) { rawDisclosure(group, id + " · " + snapshotStateText(id), snapshotTexts.get(snapshotNodes.get(id))); });
+    unmatched.appendChild(group);
+  });
+  refreshSnapshotFindings();
+}
+
+function repaintSnapshot() {
+  cy.nodes().not(".lock").updateStyle();
+  refreshSnapshotDetails();
+  scheduleNameCallout();
+}
+
+function validateSnapshot(document) {
+  if (!jsonObject(document) || !own(document, "nodes") || !jsonObject(document.nodes)) {
+    throw new Error('Expected an object with a "nodes" object.');
+  }
+  var nodes = new Map();
+  Object.entries(document.nodes).forEach(function (pair) {
+    var id = pair[0], entry = pair[1];
+    if (!jsonObject(entry) || !own(entry, "state") || typeof entry.state !== "string") {
+      throw new Error("Node " + JSON.stringify(id) + " must have its own string state.");
+    }
+    nodes.set(id, entry);
+  });
+  var metadata = Object.fromEntries(Object.entries(document).filter(function (pair) { return pair[0] !== "nodes"; }));
+  var texts = new WeakMap(), metadataText;
+  try {
+    nodes.forEach(function (entry) { texts.set(entry, JSON.stringify(entry)); });
+    metadataText = JSON.stringify(metadata);
+  } catch (_error) {
+    throw new Error("Input exceeds this browser's JSON text-display capacity.");
+  }
+  return {nodes: nodes, metadata: metadata, texts: texts, metadataText: metadataText};
+}
+
+/* Each chosen file and Clear owns a new generation. Neither a stale read
+   nor its error can replace newer data or visibility preferences (DL-385). */
+async function importSnapshot(file) {
+  var generation = ++snapshotGeneration;
+  var notice = document.getElementById("snapshot-notice"), error = document.getElementById("snapshot-error");
+  snapshotPending = true;
+  error.hidden = true;
+  error.textContent = "";
+  notice.textContent = "Reading " + file.name + "…";
+  document.getElementById("snapshot-clear").disabled = false;
+  var previous = {nodes: snapshotNodes, metadata: snapshotMetadata, loaded: snapshotLoaded,
+    texts: snapshotTexts, metadataText: snapshotMetadataText, filter: selectedSnapshotFilter()};
+  try {
+    var candidate = validateSnapshot(JSON.parse(await file.text()));
+    if (generation !== snapshotGeneration) return;
+    snapshotNodes = candidate.nodes;
+    snapshotMetadata = candidate.metadata;
+    snapshotTexts = candidate.texts;
+    snapshotMetadataText = candidate.metadataText;
+    snapshotLoaded = true;
+    snapshotPending = false;
+    notice.textContent = "Loaded " + snapshotNodes.size + " observations from " + file.name + ".";
+    refreshSnapshotPanel();
+    repaintSnapshot();
+  } catch (failure) {
+    if (generation !== snapshotGeneration) return;
+    if (snapshotNodes !== previous.nodes) {
+      snapshotNodes = previous.nodes;
+      snapshotMetadata = previous.metadata;
+      snapshotTexts = previous.texts;
+      snapshotMetadataText = previous.metadataText;
+      snapshotLoaded = previous.loaded;
+      refreshSnapshotPanel(previous.filter);
+      repaintSnapshot();
+    }
+    snapshotPending = false;
+    notice.textContent = snapshotLoaded ? "Previous snapshot kept." : "No snapshot loaded.";
+    error.textContent = "Could not import: " + String(failure && failure.message ? failure.message : failure);
+    error.hidden = false;
+    document.getElementById("snapshot-clear").disabled = !snapshotLoaded;
+  }
+}
+
+function clearSnapshot() {
+  snapshotGeneration++;
+  snapshotPending = false;
+  snapshotLoaded = false;
+  snapshotNodes = new Map();
+  snapshotMetadata = {};
+  snapshotTexts = new WeakMap();
+  snapshotMetadataText = "{}";
+  var error = document.getElementById("snapshot-error");
+  error.textContent = "";
+  error.hidden = true;
+  document.getElementById("snapshot-notice").textContent = "No snapshot loaded.";
+  refreshSnapshotPanel();
+  repaintSnapshot();
+}
+
+function navigateSnapshot(ids, mode, add) {
+  if (loading) return;
+  var wanted = new Set(ids);
+  var expanded = expandToReach(function (box) {
+    return ec.getCollapsedChildrenRecursively(box).nodes().some(function (node) { return wanted.has(node.id()); });
+  });
+  var nodes = cy.nodes().filter(function (node) { return wanted.has(node.id()); });
+  if (mode === "highlight") { reveal(nodes); highlightNodes(nodes); }
+  else selectNodes(nodes, !add);
+  if (nodes.length === 1) showNodeDetails(nodes[0]);
+  reportAfterFold(expanded, function () {
+    /* DL-385: fit and report explicit findings after visibility styles settle. */
+    requestAnimationFrame(function () {
+      var live = nodes.filter(function (node) { return !node.removed() && node.visible(); });
+      if (live.nonempty()) cy.fit(stableBounds(live), 60);
+      updateStats("snapshot: " + nodes.length + (mode === "highlight" ? " highlighted" : " selected"));
+    });
+  });
+}
+
+document.getElementById("snapshot-import").addEventListener("click", function () { document.getElementById("snapshot-file").click(); });
+document.getElementById("snapshot-file").addEventListener("change", function (evt) {
+  var file = evt.target.files[0];
+  evt.target.value = "";
+  if (file) importSnapshot(file);
+});
+document.getElementById("snapshot-clear").addEventListener("click", clearSnapshot);
+snapshotShown.addEventListener("change", repaintSnapshot);
+snapshotPreset.addEventListener("change", repaintSnapshot);
+snapshotFilter.addEventListener("change", refreshSnapshotFindings);
+document.getElementById("snapshot-select").addEventListener("click", function (evt) { navigateSnapshot(snapshotFindIds(), "select", evt.shiftKey); });
+snapshotAddKeys(document.getElementById("snapshot-select"), snapshotFindIds);
+document.getElementById("snapshot-highlight").addEventListener("click", function () { navigateSnapshot(snapshotFindIds(), "highlight", true); });
 
 /* --------------------------------------------------------- compact controls */
 
@@ -2149,6 +2583,7 @@ cy.on("unselect", "node", function (evt) {
 
 function finishInitial() {
   loading = false;
+  refreshSnapshotFindings();
   /* a second ELK run started while the load path was between its two layouts
      would clear "laying out" before the folded picture exists, and the page's
      readiness signal would mean nothing (DL-190) */
@@ -2236,6 +2671,7 @@ function repairFold() {
   refreshProxies();
   classifyNesting();
   refreshEdgeLabels();
+  cy.nodes().not(".lock").updateStyle();
 }
 
 /* cytoscape-expand-collapse (DL-190): a collapsed box stays in the graph as
