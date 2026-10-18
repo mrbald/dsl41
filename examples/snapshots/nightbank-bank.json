@@ -1,0 +1,34 @@
+{
+  "nodes": {
+    "EMEA_EOD_B": {
+      "state": "SU"
+    },
+    "EMEA_EXE_B": {
+      "state": "RU"
+    },
+    "EMEA_EXE_ORDER_FREEZE_C": {
+      "state": "SU"
+    },
+    "EMEA_EXE_OPEN_ORDERS_C": {
+      "state": "FA"
+    },
+    "EMEA_ACC_GL_CLOSE_C": {
+      "state": ""
+    },
+    "EMEA_VAL_EQ_SHARD1_C": {
+      "state": "demo: review required"
+    },
+    "GROUP_TREASURY_EOD^PRD": {
+      "state": "SU"
+    },
+    "UNKNOWN_EXAMPLE_NODE": {
+      "state": "demo: not in topology"
+    },
+    "lock:r:GL_DB": {
+      "state": "FA"
+    },
+    "e0": {
+      "state": "RU"
+    }
+  }
+}

@@ -4777,6 +4777,123 @@ def test_snapshot_callout_closed_edge_details_and_small_panel(driven_snapshot: D
     assert d.errors == []
 
 
+def test_snapshot_callout_avoids_details_without_graph_changes(driven_snapshot: Driven) -> None:
+    """DL-386: feasible avoidance follows inspection, hover and native metadata toggles."""
+    d = driven_snapshot
+    observation = {"state": "review needed", "note": ["synthetic metadata"] * 30}
+    _import_snapshot(d, {"nodes": {_LONG_NAME_A: observation, _LONG_NAME_B: observation}})
+    d.page.locator("#snapshot-panel [data-close-panel]").click()
+    _edge_mode(d, "elk")
+    d.page.evaluate("(id) => {cy.zoom(.95);cy.center(cy.$id(id));}", _LONG_NAME_A)
+    d.page.mouse.click(**_client_point(d, _LONG_NAME_A))
+    d.page.mouse.move(**_canvas_point(d, 8, 8))
+    d.page.wait_for_function(
+        "() => !document.getElementById('name-callout').hidden && nameFrame === null"
+    )
+
+    def place_near_right(node_id: str, y: float) -> None:
+        d.page.evaluate(
+            "({id,y}) => {const n=cy.$id(id),z=cy.zoom();"
+            " cy.pan({x:cy.width()-75-n.position('x')*z,y:y-n.position('y')*z});}",
+            {"id": node_id, "y": y},
+        )
+
+    avoided = (
+        "() => {const c=document.getElementById('name-callout').getBoundingClientRect(),"
+        " d=document.getElementById('details').getBoundingClientRect();"
+        " return nameFrame===null && !nameCallout.hidden && c.width>0 && c.height>0"
+        " && c.right <= d.left-7.5;}"
+    )
+    place_near_right(_LONG_NAME_A, 150)
+    d.page.wait_for_function(avoided)
+    before = _snapshot_invariants(d)
+    geometry = _label_geometry(d)
+    d.page.evaluate("() => {scheduleNameCallout();}")
+    d.page.wait_for_function(avoided)
+    assert _snapshot_invariants(d) == before
+
+    # A different real hovered body lies just below details; its preview reaches into it.
+    hover_y = d.page.evaluate(
+        "() => details.getBoundingClientRect().bottom-cy.container().getBoundingClientRect().top+35"
+    )
+    place_near_right(_LONG_NAME_B, hover_y)
+    details_html = d.page.inner_html("#details")
+    attention = (_selected_ids(d), _painted(d))
+    d.page.mouse.move(**_client_point(d, _LONG_NAME_B))
+    d.page.wait_for_function(
+        "(id) => hoveredName?.id()===id && nameCallout.textContent.startsWith(id)",
+        arg=_LONG_NAME_B,
+    )
+    d.page.wait_for_function(avoided)
+    assert d.page.inner_html("#details") == details_html
+    assert (_selected_ids(d), _painted(d)) == attention
+    assert _label_geometry(d) == geometry
+    d.page.mouse.move(**_canvas_point(d, 8, 8))
+    d.page.wait_for_function("() => hoveredName===null && nameFrame===null")
+
+    # Expanding metadata alone changes the panel rectangle, with no canvas event.
+    metadata_y = d.page.evaluate(
+        "() => details.getBoundingClientRect().bottom-cy.container().getBoundingClientRect().top"
+        " + nameCallout.offsetHeight + 60"
+    )
+    place_near_right(_LONG_NAME_A, metadata_y)
+    d.page.wait_for_function(
+        "() => nameFrame===null && nameCallout.getBoundingClientRect().left"
+        " > details.getBoundingClientRect().left"
+    )
+    before = _snapshot_invariants(d)
+    d.page.locator("#d-observation summary").click()
+    d.page.wait_for_function(avoided)
+    assert d.page.locator("#d-observation details").evaluate("el=>el.open")
+    assert _snapshot_invariants(d) == before
+    d.page.locator("#d-observation summary").click()
+    d.page.wait_for_function(
+        "() => nameFrame===null && nameCallout.getBoundingClientRect().left"
+        " > details.getBoundingClientRect().left"
+    )
+
+    _import_snapshot(d, {"nodes": {_LONG_NAME_A: {"state": "replacement"}}})
+    d.page.locator("#snapshot-panel [data-close-panel]").click()
+    d.page.wait_for_function("() => nameCallout.textContent.includes('replacement')")
+    assert _snapshot_invariants(d) == before
+    _click(d, "#snapshot-clear")
+    d.page.wait_for_function("() => !nameCallout.textContent.includes('State:')")
+    assert _snapshot_invariants(d) == before
+
+    d.page.set_viewport_size({"width": 360, "height": 300})
+    d.page.wait_for_function("() => cy.width()===360")
+    place_near_right(_LONG_NAME_A, 50)
+    d.page.wait_for_function(
+        "() => nameFrame===null && !nameCallout.hidden && cy.width()===360"
+        " && nameCallout.getBoundingClientRect().right"
+        " <= cy.container().getBoundingClientRect().right-7.5"
+    )
+    bounds = d.page.locator("#name-callout").bounding_box()
+    canvas = d.page.locator("#cy").bounding_box()
+    panel = d.page.locator("#details").bounding_box()
+    assert bounds and canvas and panel
+    assert bounds["x"] + bounds["width"] > panel["x"]
+    assert panel["x"] - canvas["x"] - 8 - bounds["width"] < 8
+    assert bounds["x"] >= canvas["x"] + 8
+    assert bounds["width"] <= canvas["width"] - 16
+    assert bounds["y"] >= canvas["y"] + 8
+    assert bounds["y"] + bounds["height"] <= canvas["y"] + canvas["height"] - 8
+    assert (
+        d.page.locator("#name-callout").evaluate("el=>getComputedStyle(el).pointerEvents") == "none"
+    )
+    assert d.page.locator("#name-link").evaluate("el=>getComputedStyle(el).pointerEvents") == "none"
+    zoom = d.page.evaluate("() => cy.zoom()")
+    d.page.mouse.move(bounds["x"] + 6, bounds["y"] + 6)
+    d.page.mouse.wheel(0, -100)
+    d.page.wait_for_function("z=>cy.zoom()!==z", arg=zoom)
+    d.page.locator("#d-close").click()
+    d.page.wait_for_function("() => nameCallout.hidden")
+    d.page.set_viewport_size({"width": 1600, "height": 1000})
+    d.page.wait_for_function("() => cy.width()===1600")
+    assert _label_geometry(d) == geometry
+    assert d.errors == []
+
+
 @pytest.mark.parametrize("location", ("entry", "top"))
 def test_snapshot_native_display_failure_retains_prior_model_and_ui(
     driven_snapshot: Driven,

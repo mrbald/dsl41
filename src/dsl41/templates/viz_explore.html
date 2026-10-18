@@ -1120,6 +1120,15 @@ function refreshNameCallout() {
   var cw = nameCallout.offsetWidth, ch = nameCallout.offsetHeight;
   var x = Math.max(8, Math.min(w - cw - 8, anchorX - cw / 2));
   var y = Math.max(8, Math.min(h - ch - 8, anchorY - ch - 12));
+  if (!details.hidden) {
+    var canvasRect = cy.container().getBoundingClientRect(), detailRect = details.getBoundingClientRect();
+    var dl = detailRect.left - canvasRect.left, dt = detailRect.top - canvasRect.top;
+    var dr = detailRect.right - canvasRect.left, db = detailRect.bottom - canvasRect.top;
+    /* Avoid open details only when the complete callout still fits (DL-386). */
+    if (x < dr && x + cw > dl && y < db && y + ch > dt && dl - 8 - cw >= 8) {
+      x = dl - 8 - cw;
+    }
+  }
   nameCallout.style.left = x + "px";
   nameCallout.style.top = y + "px";
   var line = nameLink.firstElementChild;
@@ -1731,6 +1740,7 @@ function clearInspected() { cy.edges().removeClass("inspected"); }
 /* ------------------------------------------------------------ details panel */
 
 var details = document.getElementById("details");
+details.addEventListener("toggle", scheduleNameCallout, true);
 var dTitle = document.getElementById("d-title");
 var dRows = document.getElementById("d-rows");
 var dTree = document.getElementById("d-tree");

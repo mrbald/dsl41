@@ -24899,3 +24899,12 @@ relitigate an entry; append a new one.
   Observation details follow the condition tree so refresh keeps its pointer targets stationary.
   Hiding observations suppresses marker/callout/detail additions, not Snapshot inspection.
   No runner/compiler behavior, bridge, polling, history, topology loader or producer is added.
+- DL-386 Explore name callouts avoid open details when space permits (2026-10-18).
+  A measured callout overlapping open details moves left of that panel by 8 pixels
+  only when the whole callout fits the existing 8-pixel viewport margins.
+  Its preferred vertical position, body anchor, pointer transparency and layer order
+  stay fixed. The leader starts at the final callout position. Native details toggles
+  schedule the existing frame so metadata expansion refreshes placement.
+  At infeasible narrow widths, the existing viewport clamp and details priority remain.
+  Exact names and observations remain available in details and explicit Find.
+  This HTML-only avoidance changes no graph geometry, attention, navigation or routes.
