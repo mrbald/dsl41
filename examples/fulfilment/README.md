@@ -1,5 +1,7 @@
 # Fulfilment
 
+See [offline snapshot examples](../snapshots/README.md) for synthetic observations on this graph.
+
 A fixed synthetic warehouse wave runs under the real dsl41 engine.
 PostgreSQL owns inventory. A separate local HTTP process owns carrier receipts
 in SQLite. Their commits are separate.

@@ -181,6 +181,37 @@ large estates; the report stays the artifact of record. What the page does:
 
 - Click a node or an edge for its full annotations. The details panel shows
   a job's condition text and its AND/OR tree.
+- Node bodies have bounded sizes by kind. Short captions sit below nodes in
+  LR layouts and beside them in TD layouts. Expanded boxes keep their title
+  bands. View's Labels offers Adaptive (the default) and Always. Adaptive
+  hides small captions when zoomed out; selected captions stay opaque.
+  Hovering or inspecting a node shows one full name in a callout. Name
+  attention changes no layout, routes, lock placement, or Fit bounds.
+  Condition, self-lock, and folded-member marks stay on the body.
+- Snapshot imports local JSON observations. The minimum shape is
+  `{"nodes":{"ID":{"state":"arbitrary string"}}}`. Catalog jobs and external
+  nodes match their exact emitted IDs; details shows an external ID when it
+  differs from its displayed name. Locks and edges are ineligible. Optional
+  top-level and node metadata remain arbitrary JSON, shown as text.
+  Native `JSON.parse` uses the last duplicate key at every level; producers
+  must emit unique keys. Empty and whitespace states remain exact supplied
+  values, distinct from missing observations. State labels use JSON strings.
+  Replacement validates every entry before publishing, drops omitted entries,
+  and accepts an empty `nodes` object. Invalid input keeps the prior snapshot.
+  Browser JSON parsing and text-display limits apply; input that cannot be
+  displayed is rejected before replacement.
+  Clear and a new file selection invalidate pending reads and errors.
+  Generic marks supplied observations neutrally. Optional AutoSys display
+  recognizes a small set of literal codes/names with fixed glyphs and tones;
+  unknown states stay neutral. Box marks show only their own supplied state.
+  Hover and details show coverage of descendant non-box catalog jobs.
+  Details also lists raw-state counts. Nested box scopes overlap and must not be summed.
+  Snapshot finds raw states or missing catalog observations. Only its explicit
+  Select/Highlight actions reveal, expand or fit matches. Import, Clear,
+  display, visibility and filtering preserve the graph and its route cache.
+  Hiding observations suppresses their canvas/callout/details annotations
+  while keeping data inspectable in Snapshot. Unknown and ineligible IDs
+  stay inspectable there. The page performs no network access or live polling.
 - Boxes collapse to one node and expand again: double-click, the corner cue,
   the menu, or two toolbar buttons. `--collapse-threshold` folds the
   over-threshold top-level boxes after the first layout; without it nothing
@@ -192,11 +223,23 @@ large estates; the report stays the artifact of record. What the page does:
   transitive, from the right-click menu or the toolbar. The highlight is
   sticky and survives clicks, hiding, and folding. Visibility is "hide
   selected", "hide others", and "show all".
+  Multiple Find matches also appear as full-name buttons in the details
+  panel. Each button selects and inspects that exact match and fits it.
 - Shift+drag (or ctrl or cmd) on the background adds a region to the
   selection; plain drag pans. Escape closes an open menu or panel, else
   empties the find field while typing there, else clears the selection.
+- View's Edge style offers Orthogonal (the default), ELK routes, and Bezier.
+  Single Bezier connections are direct lines; parallel connections curve
+  apart. Switching styles keeps node positions, pan, and zoom.
+  ELK routes use the layout's bend points and separate connection ports.
+  Moving, hiding, revealing, or folding nodes expires those routes and
+  temporarily uses Orthogonal paths. Arrange refreshes them. Locks stay
+  straight, and ancestor/member edges stay Bezier. The bottom status shows
+  routed and fallback counts, or an Arrange action when routes expire.
+  A failed layout releases the controls and offers Arrange to retry.
 - The header keeps Find, its two match actions, Fit, and Help. Selection,
-  Highlight, Visibility, and View open panels over the canvas. A panel stays
+  Highlight, Visibility, View, and Snapshot open panels over the canvas. A
+  panel stays
   open for repeat commands; Close, Escape, or an outside click dismisses it.
   Help lists the catalog totals, the gestures, and the legend. The bottom
   status shows counts, a fit-to-selection button, and operation feedback. A

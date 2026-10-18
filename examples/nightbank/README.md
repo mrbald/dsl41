@@ -1,5 +1,7 @@
 # Nightbank — Alpenbank Global Overnight
 
+See [offline snapshot examples](../snapshots/README.md) for synthetic observations on this graph.
+
 A fake bank's overnight batch, sized and shaped like the real thing, for
 training operators on the **real dsl41 engine**: the TUI, `sendevent` /
 `query`, the supervisor, the calendar scheduler, restart/resume, the works.

@@ -894,21 +894,19 @@ def test_to_explore_html_wires_everything_essential_above_the_optional_plugin() 
     ec_registration = page.index("cy.expandCollapse({")
     assert "try {" in page[ec_registration - 60 : ec_registration]
     assert page.index('initial.on("layoutstop"') < ec_registration < registration
-    assert ec_registration < page.index("initial.run();") < registration
+    assert ec_registration < page.index("runElkLayout(initial);") < registration
 
 
 def test_to_explore_html_routes_edges_along_the_layout_axis() -> None:
-    # ELK lays the graph out in layers; a bezier between node centres throws
-    # that away and reads as a spline tangle, so edges route orthogonally
-    # along the same axis the layout used (DL-77).
+    # Orthogonal remains the default and follows ELK's layering axis (DL-77, DL-381).
     catalog = catalog_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n")
     page = to_explore_html(catalog)
-    assert '"curve-style": "taxi"' in page
+    assert '<option value="taxi" selected>Orthogonal</option>' in page
+    assert '<option value="elk">ELK routes</option>' in page
+    assert '<option value="bezier">Bezier</option>' in page
     assert '"taxi-direction": TAXI_DIRECTION' in page
     assert 'TAXI_DIRECTION = DIRECTION === "DOWN" ? "vertical" : "horizontal"' in page
-    # the one exception: taxi cannot draw an edge whose endpoints overlap, and
-    # a member pointing at its own box is exactly that -- those keep the bezier
-    # rather than silently vanishing from the picture
+    # Ancestor/member edges stay Bezier: taxi cannot draw their overlapping endpoints (DL-381).
     assert 'selector: "edge.nesting"' in page
     assert page.count('"curve-style": "bezier"') == 1
     # re-classified after every collapse/expand (DL-190): a collapse re-points
@@ -985,7 +983,7 @@ def test_to_explore_html_folds_without_a_layout_and_carries_the_arrange_button()
     ]
     assert "relayoutOrFit" not in find_body and "arrangeVisible" not in find_body
     assert "ec.expandRecursively(box, { layoutBy: null });" in page
-    assert "cy.fit(live, 60);" in page  # the matches still drawn when the report runs
+    assert "cy.fit(stableBounds(live), 60);" in page  # the matches still drawn when the report runs
     # what still follows a fold: the hubs (DL-192) and the collapsed count.
     # Read out of the two handler bodies rather than counted, so a reindent
     # or a third legitimate caller does not fail this with a bare number.
@@ -1036,7 +1034,8 @@ def test_to_explore_html_carries_the_condition_grammar() -> None:
     assert r'"cond_badge": " \u2228*"' in page  # complex: read the tree and the text
     assert r'"cond_badge": " \u2228"' in page  # an OR the canvas draws as branches
     assert 'function condBadge(ele) { return ele.data("cond_badge") || ""; }' in page
-    assert "nodeLabel(ele).length" in page
+    assert '"background-image": nodeMarks' in page
+    assert "label: nodeCaption" in page
     assert "all incoming arrows must hold (AND) unless the job" in page
     assert "a bare n() is a lock and draws no arrow" in page
     assert '{ selector: "edge.any", style: {' in page
@@ -1299,3 +1298,16 @@ def test_cli_viz_explore_honors_direction() -> None:
     assert 'DIRECTION = "DOWN"' in result.stdout
     page_nodes = _page_elements(result.stdout)["nodes"]
     assert len(page_nodes) == 3  # every node is emitted; the page folds, not the emitter
+
+
+def test_snapshot_surface_keeps_observations_outside_emitted_graph_facts() -> None:
+    """DL-385: the offline input is a viewer surface, with no persisted runtime state."""
+    page = to_explore_html(catalog_of(S_EDGE_TEXT))
+    elements = _page_elements(page)
+    assert [n["data"]["id"] for n in elements["nodes"]] == ["foo^PRD", "bar", "_foo^PRD"]
+    assert all("state" not in n["data"] for n in elements["nodes"])
+    assert 'id="snapshot-file" type="file"' in page
+    assert 'id="snapshot-panel" class="chrome-panel"' in page
+    assert "Native JSON.parse uses the last duplicate key at every level" in page
+    assert "Producers must emit unique keys" in page
+    assert 'id="d-observation"' in page

@@ -1,0 +1,16 @@
+{
+  "nodes": {
+    "FF_WAVE_B": {
+      "state": "awaiting handover"
+    },
+    "FF_RESERVE_C": {
+      "state": "stock allocated"
+    },
+    "FF_PACK_C": {
+      "state": "parcel packed"
+    },
+    "FF_LABEL_1_C": {
+      "state": "carrier label pending"
+    }
+  }
+}

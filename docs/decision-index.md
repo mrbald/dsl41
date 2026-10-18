@@ -391,3 +391,10 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-378 | Teardown's ownership is the chart's: a teardown row per source state, in three ownership classes, each row reporting its class's unlink; the start verdict is... |  |
 | DL-379 | An entry holds the decision and its reasons, and the process record lives in the PR; entries from DL-380 on have a line ceiling, and the entries from DL-324 on... | [docs/citation-index.md](citation-index.md) |
 | DL-380 | An instance whose active leaves are all final ignores an event for which no region's walk ends in a row or a deferral: the outcome is `fired` with no row,... | [docs/statechart-engine.md](statechart-engine.md) |
+| DL-381 | Explore offers Orthogonal and Bezier edge styles under View |  |
+| DL-382 | Explore can draw ELK's calculated edge routes |  |
+| DL-383 | Explore reports route freshness and recovers settled layout failures |  |
+| DL-384 | Explore separates compact node bodies from contextual names |  |
+| DL-385 | Explore imports offline snapshots without changing graph facts |  |
+| DL-386 | Explore name callouts avoid open details when space permits |  |
+| DL-387 | A standalone helper converts one bounded AutoSys summary table |  |

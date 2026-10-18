@@ -20,6 +20,7 @@ dev-only dependency -- the package keeps its three runtime deps).
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from typing import Any
@@ -40,7 +41,7 @@ pytest.importorskip(
 from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeout
 from playwright.sync_api import sync_playwright
 from test_viz import CORPUS_DIR, corpus_catalog
-from test_viz_explore import _COND_TEXT, _NESTED_BOX_TEXT
+from test_viz_explore import S_EDGE_TEXT, _COND_TEXT, _NESTED_BOX_TEXT
 
 from dsl41.ir import lower_source
 from dsl41.viz_explore import to_explore_html
@@ -881,9 +882,7 @@ def test_dbltap_collapses_box_b_and_folds_its_border_edges(driven_trace: Driven)
         )
     )
     assert meta_ends == ["B>D", "Q>B"], driven_trace.engine
-    assert driven_trace.page.evaluate("() => nodeLabel(cy.$id('B'))") == "B (4)", (
-        driven_trace.engine
-    )
+    assert driven_trace.page.evaluate("() => foldedMembers(cy.$id('B'))") == 4, driven_trace.engine
     stats = driven_trace.page.inner_text("#stats")
     assert "visible 5 / 9 nodes · 4 / 4 edges · 1 box collapsed" in stats, (
         driven_trace.engine,
@@ -1451,7 +1450,11 @@ def driven_cond(_driven_cond: Driven) -> Driven:
 
 
 def _label(d: Driven, node_id: str) -> str:
-    label: str = d.page.evaluate("(id) => nodeLabel(cy.$id(id))", node_id)
+    label: str = d.page.evaluate(
+        "(id) => { const svg = decodeURIComponent(nodeMarks(cy.$id(id)).split(',')[1]);"
+        " return new DOMParser().parseFromString(svg, 'image/svg+xml').documentElement.textContent; }",
+        node_id,
+    )
     return label
 
 
@@ -1478,11 +1481,11 @@ def test_the_badge_marks_or_shapes_and_only_those(driven_cond: Driven) -> None:
     _ready(driven_cond)
     labels = {name: _label(driven_cond, name) for name in ("AOA", "ANY", "CPX", "PLAIN", "BOX")}
     assert labels == {
-        "AOA": "AOA \u2228",
-        "ANY": "ANY \u2228",
-        "CPX": "CPX \u2228*",
-        "PLAIN": "PLAIN",
-        "BOX": "BOX \u2228",
+        "AOA": "\u2228",
+        "ANY": "\u2228",
+        "CPX": "\u2228*",
+        "PLAIN": "",
+        "BOX": "\u2228",
     }, driven_cond.engine
 
 
@@ -1649,12 +1652,18 @@ def test_search_enter_with_one_hit_selects_the_node_and_opens_its_details(
     assert driven_cond.page.inner_text("#d-title") == "AOFA"
     assert driven_cond.page.evaluate("() => cy.nodes(':selected').map(n => n.id())") == ["AOFA"]
     assert _detail_rows(driven_cond)["condition"] == "(s(A) & s(B)) | s(C)"
-    # ...and a search that hits several leaves the panel alone
+    # Multiple hits expose exact full-name choices in details (DL-384).
     driven_cond.page.evaluate("() => { cy.emit('tap'); }")
     driven_cond.page.fill("#search", "ME")
     driven_cond.page.press("#search", "Enter")
-    driven_cond.page.wait_for_timeout(_SETTLE_MS)
-    assert driven_cond.page.get_attribute("#details", "hidden") is not None, driven_cond.engine
+    driven_cond.page.get_by_role("heading", name="Find matches (2)", exact=True).wait_for(
+        state="visible"
+    )
+    for name in ("MEM", "MEM2"):
+        assert driven_cond.page.get_by_role(
+            "button", name="Select and inspect " + name, exact=True
+        ).is_visible(), driven_cond.engine
+    assert _selected_ids(driven_cond) == ["MEM", "MEM2"]
     driven_cond.page.fill("#search", "")
     driven_cond.page.press("#search", "Enter")
     _clear_selection(driven_cond)
@@ -1673,7 +1682,7 @@ def test_a_collapsed_box_keeps_its_own_badge_and_details_and_its_meta_edges_stay
     driven_cond.page.evaluate("() => { cy.$id('BOX').emit('dbltap'); }")
     driven_cond.page.wait_for_timeout(_SETTLE_MS)
 
-    assert _label(driven_cond, "BOX") == "BOX (2) \u2228", driven_cond.engine
+    assert _label(driven_cond, "BOX") == "\u22282", driven_cond.engine
     assert _painted(driven_cond) == [], driven_cond.engine
     meta = driven_cond.page.evaluate(
         "() => cy.edges('.cy-expand-collapse-meta-edge').map(e => [e.data('source')"
@@ -1702,7 +1711,7 @@ def test_a_collapsed_box_keeps_its_own_badge_and_details_and_its_meta_edges_stay
 
     driven_cond.page.evaluate("() => { cy.$id('BOX').emit('dbltap'); }")
     driven_cond.page.wait_for_timeout(_SETTLE_MS)
-    assert _label(driven_cond, "BOX") == "BOX \u2228", driven_cond.engine
+    assert _label(driven_cond, "BOX") == "\u2228", driven_cond.engine
 
 
 def test_no_uncaught_page_errors_on_the_condition_page(driven_cond: Driven) -> None:
@@ -1889,7 +1898,9 @@ def test_lock_links_are_dotted_and_the_tee_marks_the_waiter(driven_locks: Driven
     assert styles["lk_c>lk_d"] == ["dotted", "tee", "tee"], driven_locks.engine
     assert styles["lock:r:R_ONE>lk_x1"] == ["dotted", "none", "none"], driven_locks.engine
     # the self-exclusion is a badge on the job, not a node and not a link
-    assert driven_locks.page.evaluate("() => nodeLabel(cy.$id('lk_h'))") == "lk_h \U0001f512"
+    assert driven_locks.page.evaluate(
+        "() => decodeURIComponent(nodeMarks(cy.$id('lk_h'))).includes('<rect')"
+    )
 
 
 def test_lock_hub_details_name_every_member(driven_locks: Driven) -> None:
@@ -3143,6 +3154,500 @@ def test_no_uncaught_page_errors_on_the_lock_box_page(driven_lock_box: Driven) -
 # ------------------------------------------------------ DL-204 compact controls
 
 
+def test_edge_style_switch_preserves_geometry_and_graph_state(driven_locks: Driven) -> None:
+    """DL-381: routing changes through the labelled control keep graph state and lock grammar."""
+    d = driven_locks
+    _tap(d, "lk_a")
+    d.page.evaluate(
+        "() => { highlightNodes(cy.$id('lk_b')); cy.$id('lk_q').addClass('hidden');"
+        " cy.edges().not('.lock')[0].addClass('inspected');"
+        " cy.zoom(1.2); cy.pan({x: 37, y: 59});"
+        " window.routingLayouts = 0; cy.on('layoutstart', () => { routingLayouts++; }); }"
+    )
+    _open_control(d, "#edge-style")
+    control = d.page.get_by_label("Edge style", exact=True)
+    assert control.input_value() == "taxi", d.engine
+    snapshot = (
+        "() => ({nodes: cy.nodes().map(n => [n.id(), n.position(), n.selected()]),"
+        " classes: cy.elements().map(e => [e.id(), e.classes()]),"
+        " pan: cy.pan(), zoom: cy.zoom(), rules: cy.style().length,"
+        " details: document.getElementById('details').innerHTML})"
+    )
+    before = d.page.evaluate(snapshot)
+    for style in ("bezier", "taxi", "bezier", "taxi"):
+        control.select_option(style)
+        curves = d.page.evaluate(
+            "() => ({flow: [...new Set(cy.edges().not('.lock, .nesting')"
+            ".map(e => e.style('curve-style')))],"
+            " locks: [...new Set(cy.edges('.lock').map(e => e.style('curve-style')))]})"
+        )
+        assert curves == {"flow": [style], "locks": ["straight"]}, (d.engine, curves)
+        assert d.page.evaluate(snapshot) == before, (d.engine, style)
+        assert d.page.evaluate("() => routingLayouts") == 0, d.engine
+    control.focus()
+    d.page.keyboard.press("Shift+Tab")
+    d.page.keyboard.press("Tab")
+    assert d.page.evaluate("() => document.activeElement.id") == "edge-style", d.engine
+    assert d.errors == [], (d.engine, d.errors)
+
+
+def test_edge_style_follows_fold_restore_and_arrange(driven_cond: Driven) -> None:
+    """DL-381: new and restored edges follow the choice without losing branch annotations."""
+    d = driven_cond
+    _tap(d, "MEM")
+    painted = _painted(d)
+    assert painted, d.engine
+    grammar = (
+        "() => cy.edges().map(e => [e.id(), e.style('line-style'),"
+        " e.style('line-color'), e.style('target-arrow-fill'), e.style('label')])"
+    )
+    before = d.page.evaluate(grammar)
+    _open_control(d, "#edge-style")
+    control = d.page.get_by_label("Edge style", exact=True)
+    control.select_option("bezier")
+    assert _painted(d) == painted, d.engine
+    assert d.page.evaluate(grammar) == before, d.engine
+    _click(d, "#collapse-all")
+    d.page.wait_for_function("() => cy.edges('.cy-expand-collapse-meta-edge').length > 0")
+    assert d.page.evaluate(
+        "() => cy.edges('.cy-expand-collapse-meta-edge')"
+        ".every(e => e.style('curve-style') === 'bezier')"
+    ), d.engine
+    _open_control(d, "#edge-style")
+    control.select_option("taxi")
+    _click(d, "#expand-all")
+    d.page.wait_for_function("() => cy.$id('MEM').length === 1")
+    assert d.page.evaluate(
+        "() => cy.edges().not('.lock, .nesting')"
+        ".every(e => e.style('curve-style') === 'taxi')"
+        " && cy.edges('.nesting').every(e => e.style('curve-style') === 'bezier')"
+    ), d.engine
+    _open_control(d, "#edge-style")
+    control.select_option("bezier")
+    _arm_layout_wait(d)
+    _click(d, "#arrange")
+    _wait_layout_done(d)
+    assert control.input_value() == "bezier", d.engine
+    assert d.page.evaluate(
+        "() => cy.edges().not('.lock').every(e => e.style('curve-style') === 'bezier')"
+    ), d.engine
+    assert d.errors == [], (d.engine, d.errors)
+
+
+def test_edge_style_keeps_ancestor_member_edges_drawable(driven: Driven) -> None:
+    """DL-381: ancestor/member edges retain their Bezier exception in either mode."""
+    d = driven
+    assert d.page.evaluate("() => cy.edges('.nesting').length") > 0, d.engine
+    _open_control(d, "#edge-style")
+    for style in ("bezier", "taxi"):
+        d.page.get_by_label("Edge style", exact=True).select_option(style)
+        assert d.page.evaluate(
+            "() => cy.edges('.nesting').every(e => e.style('curve-style') === 'bezier')"
+        ), d.engine
+    assert d.errors == [], (d.engine, d.errors)
+
+
+def _edge_mode(d: Driven, mode: str) -> None:
+    _open_control(d, "#edge-style")
+    d.page.get_by_label("Edge style", exact=True).select_option(mode)
+    _click(d, "#view-panel [data-close-panel]")
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+@pytest.mark.parametrize("direction", ("RIGHT", "DOWN"))
+def test_elk_routes_render_nested_bends_ports_and_shapes(
+    _playwright: Any, tmp_path: Any, engine: str, direction: str
+) -> None:
+    """DL-382: actual rendered points retain ELK's bends in both layout directions."""
+    text = (
+        _NESTED_BOX_TEXT
+        + "\ninsert_job: WATCH\njob_type: f\nbox_name: IB\nwatch_file: /synthetic/in\n"
+        "machine: m1\n\n"
+        "insert_job: INNER\njob_type: c\nbox_name: IB\ncommand: x\nmachine: m1\n"
+        "condition: s(IM) & s(WATCH)\n\n"
+        "insert_job: GLOBAL_GATE\njob_type: c\nbox_name: B\ncommand: x\nmachine: m1\n"
+        "condition: s(INNER) & v(READY) = 1\n\n"
+        "insert_job: LOOP\njob_type: c\ncommand: x\nmachine: m1\ncondition: s(LOOP)\n"
+    )
+    path = tmp_path / "routes.html"
+    path.write_text(to_explore_html(lower_source(text), direction=direction), encoding="utf-8")
+    browser = getattr(_playwright, engine).launch()
+    try:
+        d = Driven(engine=engine, page=browser.new_page())
+        warnings: list[str] = []
+        d.page.on("pageerror", lambda err: d.errors.append(str(err)))
+        d.page.on(
+            "console", lambda msg: warnings.append(msg.text) if msg.type == "warning" else None
+        )
+        d.page.goto(path.as_uri())
+        _ready(d)
+        before = d.page.evaluate(_LEAF_POSITIONS)
+        _edge_mode(d, "elk")
+        result = d.page.evaluate(
+            """() => {
+              const errors = [], shapes = new Set();
+              let routed = 0, inner = 0, bends = 0;
+              cy.edges().not('.lock, .nesting').forEach(edge => {
+                if (edge.source().same(edge.target())) {
+                  if (elkRoute(edge)) errors.push('loop was routed');
+                  return;
+                }
+                const route = elkRoute(edge), raw = edge.scratch('elk');
+                if (!route) { errors.push('missing route: ' + edge.id()); return; }
+                routed++;
+                const source = edge.source(), target = edge.target();
+                shapes.add(source.style('shape')); shapes.add(target.style('shape'));
+                const actual = [edge.sourceEndpoint(), ...(edge.segmentPoints() || []),
+                  edge.targetEndpoint()];
+                let x = 0, y = 0;
+                if (raw.container !== 'root') {
+                  inner++;
+                  let container = cy.$id(raw.container);
+                  while (container.nonempty()) {
+                    x += container.scratch('elk').x; y += container.scratch('elk').y;
+                    container = container.parent();
+                  }
+                }
+                const expectedBends = raw.sections[0].bendPoints || [];
+                bends += expectedBends.length;
+                if (actual.length !== expectedBends.length + 2) errors.push(edge.id() + ': length');
+                expectedBends.forEach((point, i) => {
+                  if (Math.hypot(actual[i+1].x - point.x - x,
+                      actual[i+1].y - point.y - y) > 0.01) errors.push(edge.id() + ': bend');
+                });
+                actual.forEach((point, i) => {
+                  if (!Number.isFinite(point.x) || !Number.isFinite(point.y))
+                    errors.push(edge.id() + ': nonfinite');
+                  if (i && Math.abs(point.x - actual[i-1].x) > 0.01 &&
+                      Math.abs(point.y - actual[i-1].y) > 0.01) errors.push(edge.id() + ': diagonal');
+                });
+                [source, target].forEach((node, i) => {
+                  const point = actual[i ? actual.length-1 : 0], center = node.position();
+                  const nx = (point.x - center.x) / (node.outerWidth()/2);
+                  const ny = (point.y - center.y) / (node.outerHeight()/2);
+                  if (Math.abs(nx) > 1.001 || Math.abs(ny) > 1.001)
+                    errors.push(edge.id() + ': outside node');
+                  if (node.style('shape') === 'diamond' &&
+                      Math.abs(Math.abs(nx) + Math.abs(ny) - 1) > 0.001)
+                    errors.push(edge.id() + ': diamond outline');
+                  if (node.style('shape') === 'rhomboid' &&
+                      Math.min(Math.abs(ny+1), Math.abs(ny-1),
+                        Math.abs(nx-(-0.6665+0.3335*ny)),
+                        Math.abs(nx-(0.6665+0.3335*ny))) > 0.001)
+                    errors.push(edge.id() + ': rhomboid outline');
+                });
+              });
+              return {errors, routed, inner, bends, shapes: [...shapes].sort()};
+            }"""
+        )
+        assert result["errors"] == [], (engine, direction, result)
+        assert result["routed"] >= 8 and result["inner"] >= 2 and result["bends"] >= 2
+        assert result["shapes"] == ["diamond", "rhomboid", "round-rectangle"]
+        assert d.page.evaluate(_LEAF_POSITIONS) == before
+        assert warnings == [] and d.errors == [], (engine, direction, warnings, d.errors)
+    finally:
+        browser.close()
+
+
+def test_elk_routes_expire_on_real_drag_and_return_on_arrange(driven_trace: Driven) -> None:
+    """DL-382: moving an unconnected member expires unrelated routes without a layout."""
+    d = driven_trace
+    _edge_mode(d, "elk")
+    assert "routed" in d.page.inner_text("#routing-status"), d.engine
+    assert d.page.locator("#refresh-routes").is_hidden(), d.engine
+    assert d.page.evaluate("() => cy.edges().some(e => !!elkRoute(e))"), d.engine
+    d.page.evaluate(
+        "() => { window.routeLayouts = 0; cy.on('layoutstart', () => routeLayouts++); }"
+    )
+    point = _client_point(d, "N")
+    _drag(d, point, {"x": point["x"] + 55, "y": point["y"] + 35})
+    d.page.wait_for_function("() => !cy.edges().some(e => !!elkRoute(e))")
+    assert d.page.evaluate("() => routeLayouts") == 0, d.engine
+    assert d.page.evaluate(
+        "() => cy.edges().not('.nesting, .lock').every(e =>"
+        " e.style('curve-style') === 'taxi' && e.style('source-endpoint') === 'outside-to-node')"
+    ), d.engine
+    assert "expired" in d.page.inner_text("#routing-status"), d.engine
+    assert d.page.locator("#refresh-routes").is_visible(), d.engine
+    _arm_layout_wait(d)
+    d.page.locator("#status-scroll").focus()
+    for _ in range(3):
+        d.page.keyboard.press("Tab")
+        if d.page.evaluate("() => document.activeElement.id === 'refresh-routes'"):
+            break
+    assert d.page.evaluate("() => document.activeElement.id") == "refresh-routes", d.engine
+    d.page.keyboard.press("Enter")
+    _wait_layout_done(d)
+    assert d.page.evaluate("() => cy.edges().some(e => !!elkRoute(e)) && !elkRunning"), d.engine
+    assert "routed" in d.page.inner_text("#routing-status"), d.engine
+    assert d.page.locator("#refresh-routes").is_hidden(), d.engine
+
+
+def test_elk_routes_expire_across_folds_and_hidden_nodes(driven_trace: Driven) -> None:
+    """DL-382: removed edges cannot restore old paths, including after a collapsed layout."""
+    d = driven_trace
+    _edge_mode(d, "elk")
+    d.page.evaluate(
+        "() => { window.routeLayouts = 0; cy.on('layoutstart', () => routeLayouts++); }"
+    )
+    outside = _positions(d, ["P", "Q", "C", "D"])
+    _click(d, "#collapse-all")
+    d.page.wait_for_function("() => cy.$id('M').empty()")
+    assert not d.page.evaluate("() => cy.edges().some(e => !!elkRoute(e))"), d.engine
+    assert "expired" in d.page.inner_text("#routing-status"), d.engine
+    assert _positions(d, list(outside)) == outside
+    assert d.page.evaluate("() => routeLayouts") == 0
+    _arm_layout_wait(d)
+    _click(d, "#arrange")
+    _wait_layout_done(d)
+    assert d.page.evaluate("() => cy.edges().some(e => !!elkRoute(e))"), d.engine
+    _click(d, "#expand-all")
+    d.page.wait_for_function("() => cy.$id('IM').nonempty()")
+    assert not d.page.evaluate("() => cy.edges().some(e => !!elkRoute(e))"), d.engine
+    _arm_layout_wait(d)
+    _click(d, "#arrange")
+    _wait_layout_done(d)
+    point = _client_point(d, "N")
+    d.page.mouse.click(point["x"], point["y"])
+    d.page.wait_for_function("() => cy.$id('N').selected()")
+    _control_ready(d, "#hide-selected")
+    _click(d, "#hide-selected")
+    assert not d.page.evaluate("() => cy.edges().some(e => !!elkRoute(e))"), d.engine
+    _arm_layout_wait(d)
+    _click(d, "#arrange")
+    _wait_layout_done(d)
+    assert d.page.evaluate("() => cy.edges().some(e => !!elkRoute(e))"), d.engine
+    _click(d, "#show-all")
+    assert not d.page.evaluate("() => cy.edges().some(e => !!elkRoute(e))"), d.engine
+
+
+def test_elk_route_cache_survives_view_and_annotation_changes(driven_trace: Driven) -> None:
+    """DL-382: view-only operations preserve paths and switching restores automatic endpoints."""
+    d = driven_trace
+    _edge_mode(d, "elk")
+    epoch = d.page.evaluate("() => routeEpoch")
+    geometry = d.page.evaluate(_LEAF_POSITIONS)
+    d.page.evaluate("() => { cy.$id('N').select(); highlightNodes(cy.$id('M')); }")
+    d.page.evaluate("() => { cy.zoom(1.25); cy.pan({x: 31, y: 47}); }")
+    for mode in ("bezier", "taxi", "elk", "bezier", "elk"):
+        _edge_mode(d, mode)
+        assert d.page.evaluate("() => routeEpoch") == epoch
+        assert d.page.evaluate(_LEAF_POSITIONS) == geometry
+        assert d.page.evaluate("() => cy.$id('N').selected() && cy.$id('M').hasClass('hl')")
+        if mode != "elk":
+            assert d.page.evaluate(
+                "() => cy.edges().every(e => e.style('edge-distances') === 'intersection'"
+                " && e.style('source-endpoint') === 'outside-to-node'"
+                " && e.style('target-endpoint') === 'outside-to-node')"
+            ), d.engine
+    assert d.page.evaluate("() => cy.edges().every(e => !!elkRoute(e))"), d.engine
+
+
+def test_elk_route_rejects_unsupported_sections_without_losing_the_edge(
+    driven_trace: Driven,
+) -> None:
+    """DL-382: a bad section does not become a partial or non-finite rendered path."""
+    d = driven_trace
+    _edge_mode(d, "elk")
+    result = d.page.evaluate(
+        """() => {
+          const edge = cy.edges()[1], original = edge.scratch('elk');
+          const variants = [
+            {...original, sections: []},
+            {...original, sections: [original.sections[0], original.sections[0]]},
+            {...original, sections: [{startPoint: {x: NaN, y: 0}, endPoint: {x: 5, y: 0}}]},
+            {...original, container: 'missing-container'},
+            {...original, sections: [{startPoint: {x: 0, y: 0}, endPoint: {x: 3, y: 4}}]}
+          ];
+          const targetPosition = {...edge.target().position()};
+          try {
+            const rejected = variants.map(raw => {
+              edge.scratch('elk', raw);
+              const route = captureElkRoute(edge);
+              edge.scratch('_elkRoute', route); edge.updateStyle();
+              return route === null && edge.style('curve-style') === 'taxi' && !edge.removed();
+            });
+            const source = edge.source().position();
+            edge.target().position({x: source.x + 10, y: source.y});
+            edge.scratch('elk', {...original, container: 'root', sections: [{
+              startPoint: {x: source.x-15, y: source.y},
+              endPoint: {x: source.x+25, y: source.y}
+            }]});
+            rejected.push(captureElkRoute(edge) === null);
+            return rejected;
+          } finally {
+            edge.scratch('elk', original); edge.target().position(targetPosition);
+          }
+        }"""
+    )
+    assert result == [True] * 6, (d.engine, result)
+    assert d.errors == [], (d.engine, d.errors)
+
+
+def test_elk_arrangements_serialize_and_reject_changed_topology(driven_trace: Driven) -> None:
+    """DL-382: a queued layout cannot publish paths for an earlier visible graph."""
+    d = driven_trace
+    _edge_mode(d, "elk")
+    d.page.evaluate(
+        """() => {
+          window.routeEvents = [];
+          cy.on('layoutstart layoutstop', event => routeEvents.push(event.type));
+          arrangeVisible('first'); arrangeVisible('second'); arrangeVisible('last');
+        }"""
+    )
+    d.page.wait_for_function(
+        "() => routeEvents.filter(e => e === 'layoutstop').length === 2 && !elkRunning"
+    )
+    assert d.page.evaluate("() => routeEvents") == [
+        "layoutstart",
+        "layoutstop",
+        "layoutstart",
+        "layoutstop",
+    ], d.engine
+    assert d.page.evaluate(
+        "() => !cy.autoungrabify() && !document.getElementById('arrange').disabled"
+        " && cy.edges().some(e => !!elkRoute(e))"
+    ), d.engine
+    d.page.evaluate("() => { routeEvents = []; arrangeVisible(); cy.$id('N').addClass('hidden'); }")
+    d.page.wait_for_function("() => routeEvents.includes('layoutstop') && !elkRunning")
+    assert not d.page.evaluate("() => cy.edges().some(e => !!elkRoute(e))"), d.engine
+    assert d.errors == [], (d.engine, d.errors)
+
+
+def test_elk_rejection_releases_controls_and_preserves_the_view(driven_trace: Driven) -> None:
+    """DL-383: an actual engine rejection leaves the graph usable and retryable."""
+    d = driven_trace
+    _edge_mode(d, "elk")
+    d.page.evaluate("() => { cy.$id('M').select(); highlightNodes(cy.$id('N')); }")
+    before = (d.page.evaluate(_LEAF_POSITIONS), _viewport(d), _selected_ids(d))
+    d.page.evaluate(
+        """() => {
+          window.goodElkLayout = elkLayout;
+          elkLayout = () => {
+            const config = goodElkLayout();
+            config.elk.algorithm = 'dsl41-test-missing-algorithm';
+            return config;
+          };
+        }"""
+    )
+    _click(d, "#arrange")
+    d.page.wait_for_function("() => !!layoutError && !elkRunning")
+    assert (d.page.evaluate(_LEAF_POSITIONS), _viewport(d), _selected_ids(d)) == before
+    assert d.page.evaluate(
+        "() => !cy.autoungrabify() && !document.getElementById('arrange').disabled"
+        " && cy.$id('N').hasClass('hl') && !cy.edges().some(e => !!elkRoute(e))"
+    ), d.engine
+    assert "Layout failed" in d.page.inner_text("#routing-status"), d.engine
+    assert "dsl41-test-missing-algorithm" in d.page.get_attribute("#routing-status", "title")
+    assert d.page.locator("#refresh-routes").is_visible(), d.engine
+    d.page.evaluate("() => { elkLayout = goodElkLayout; }")
+    _arm_layout_wait(d)
+    d.page.locator("#refresh-routes").click()
+    _wait_layout_done(d)
+    assert "routed" in d.page.inner_text("#routing-status"), d.engine
+    assert d.page.evaluate("() => !layoutError && !elkRunning && !cy.autoungrabify()")
+    assert d.errors == [], (d.engine, d.errors)
+
+
+@pytest.mark.parametrize("failure", ("synchronous", "capture"))
+def test_elk_pipeline_failure_restores_the_previous_grab_setting(
+    driven_trace: Driven, failure: str
+) -> None:
+    """DL-383: run throws and rejected position/capture work share the failure boundary."""
+    d = driven_trace
+    d.page.evaluate(
+        """failure => {
+          cy.autoungrabify(failure === 'synchronous');
+          if (failure === 'synchronous') {
+            const makeLayout = routedLayout;
+            routedLayout = elements => {
+              const layout = makeLayout(elements);
+              layout.run = () => { throw new Error('synchronous test failure'); };
+              return layout;
+            };
+          } else {
+            captureElkRoutes = () => { throw new Error('capture test failure'); };
+          }
+        }""",
+        failure,
+    )
+    _click(d, "#arrange")
+    d.page.wait_for_function("() => !!layoutError && !elkRunning")
+    assert d.page.evaluate("() => cy.autoungrabify()") == (failure == "synchronous")
+    assert not d.page.locator("#arrange").is_disabled(), d.engine
+    # A layout failure is visible even with the default Orthogonal edge style.
+    assert d.page.locator("#routing-status").is_visible(), d.engine
+    assert failure in d.page.get_attribute("#routing-status", "title")
+    assert d.page.locator("#refresh-routes").is_visible(), d.engine
+    assert d.errors == [], (d.engine, d.errors)
+
+
+def test_elk_old_failure_cannot_release_a_new_arrangement(driven_trace: Driven) -> None:
+    """DL-383: a stop listener can begin the next run before the old promise settles."""
+    d = driven_trace
+    _edge_mode(d, "elk")
+    d.page.evaluate(
+        """() => {
+          window.oldLayoutRejected = false;
+          const old = routedLayout(cy.elements(':visible'));
+          old.on('layoutstop', () => {
+            arrangeVisible('new arrangement');
+            throw new Error('late old stop listener');
+          });
+          runElkLayout(old);
+          old.promise.catch(() => { oldLayoutRejected = true; });
+        }"""
+    )
+    d.page.wait_for_function(
+        "() => oldLayoutRejected && !elkRunning && lastOp === 'new arrangement'"
+    )
+    assert d.page.evaluate(
+        "() => !layoutError && !cy.autoungrabify() &&"
+        " !document.getElementById('arrange').disabled && cy.edges().some(e => !!elkRoute(e))"
+    ), d.engine
+    assert "routed" in d.page.inner_text("#routing-status"), d.engine
+    assert d.errors == [], (d.engine, d.errors)
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+@pytest.mark.parametrize("stage", ("initial", "folded"))
+def test_elk_startup_failure_finishes_loading_and_allows_retry(
+    _playwright: Any, tmp_path: Any, engine: str, stage: str
+) -> None:
+    """DL-383: either startup layout may fail without leaving the page loading forever."""
+    page = to_explore_html(lower_source(_NESTED_BOX_TEXT), collapse_threshold=1)
+    injection = (
+        "initial.options.elk.algorithm = 'dsl41-test-missing-algorithm';\n"
+        if stage == "initial"
+        else "const goodElkLayout = elkLayout;\n"
+        "elkLayout = () => { const config = goodElkLayout();\n"
+        "config.elk.algorithm = 'dsl41-test-missing-algorithm'; return config; };\n"
+    )
+    page = page.replace("runElkLayout(initial);", injection + "runElkLayout(initial);")
+    path = tmp_path / "startup-failure.html"
+    path.write_text(page, encoding="utf-8")
+    browser = getattr(_playwright, engine).launch()
+    try:
+        d = Driven(engine=engine, page=browser.new_page())
+        d.page.on("pageerror", lambda error: d.errors.append(str(error)))
+        d.page.goto(path.as_uri())
+        _ready(d)
+        assert d.page.evaluate("() => !loading && !elkRunning && !cy.autoungrabify()")
+        assert not d.page.locator("#search").is_disabled(), (engine, stage)
+        assert not d.page.locator("#arrange").is_disabled(), (engine, stage)
+        assert "Layout failed" in d.page.inner_text("#routing-status"), (engine, stage)
+        if stage == "folded":
+            d.page.evaluate("() => { elkLayout = goodElkLayout; }")
+        _arm_layout_wait(d)
+        d.page.locator("#refresh-routes").click()
+        _wait_layout_done(d)
+        assert d.page.evaluate("() => !layoutError && !elkRunning")
+        assert d.page.locator("#routing-status").is_hidden()  # default Orthogonal style
+        assert d.errors == [], (engine, stage, d.errors)
+    finally:
+        browser.close()
+
+
 def _chrome_size(d: Driven) -> dict[str, float]:
     size: dict[str, float] = d.page.evaluate(
         "() => ({header: document.querySelector('header').getBoundingClientRect().height,"
@@ -3275,6 +3780,8 @@ def test_panel_keyboard_repeat_actions_and_escape_preserve_find_and_selection(
     assert d.page.locator("#visibility-panel").is_visible(), d.engine
     d.page.keyboard.press("Shift+Tab")
     assert not d.page.locator("#visibility-panel").is_visible(), d.engine
+    assert d.page.evaluate("() => document.activeElement.id") == "snapshot-toggle", d.engine
+    d.page.keyboard.press("Shift+Tab")
     assert d.page.evaluate("() => document.activeElement.id") == "view-toggle", d.engine
 
 
@@ -3475,3 +3982,1068 @@ def test_short_narrow_graph_menu_scrolls_to_first_and_last_actions_without_zoom(
         assert not d.page.evaluate("() => cy.$id('C').visible()"), d.engine
         assert _viewport(d) == view, d.engine
     assert d.errors == [], (d.engine, d.errors)
+
+
+# ------------------------------------------------------- DL-384 compact captions
+
+_LONG_NAME_A = "REGION_ASSET_NORTH_LEDGER_PRIMARY_01_C"
+_LONG_NAME_B = "REGION_ASSET_SOUTH_LEDGER_PRIMARY_01_C"
+_EMPTY_BOX = "EMPTY_BOX_WITH_A_LONG_TITLE"
+_CJK_NAME = "東京監査_識別名を保持する_C"
+_WIDE_NAME = "WWWWWWWWWWWWWWWWWWWWWWWWW"
+_LABEL_TEXT = (
+    _NESTED_BOX_TEXT + f"\ninsert_job: {_LONG_NAME_A} job_type: c\nbox_name: IB\n"
+    "command: true\ncondition: s(P) | s(Q)\n"
+    + f"\ninsert_job: {_LONG_NAME_B} job_type: c\nbox_name: IB\n"
+    + f"command: true\ncondition: n({_LONG_NAME_B})\n"
+    + "\ninsert_job: FW_OR job_type: f\nwatch_file: /synthetic/watch\n"
+    "condition: (s(P) | s(Q)) & n(FW_OR)\n"
+    + f"\ninsert_job: {_EMPTY_BOX} job_type: b\n"
+    + f"\ninsert_job: {_CJK_NAME} job_type: c\nbox_name: IB\ncommand: true\ncondition: s(M)\n"
+    + f"\ninsert_job: {_WIDE_NAME} job_type: c\ncommand: true\ncondition: s(P)\n"
+)
+
+
+@pytest.fixture(scope="module", params=[(e, d) for e in ENGINES for d in ("LR", "TD")])
+def _driven_labels(
+    request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory, _playwright: Any
+) -> Any:
+    engine, direction = request.param
+    path = tmp_path_factory.mktemp("explore-labels") / "labels.html"
+    path.write_text(
+        to_explore_html(lower_source(_LABEL_TEXT), title="labels", direction=direction),
+        encoding="utf-8",
+    )
+    yield from _open_driven(_playwright, engine, path.as_uri())
+
+
+@pytest.fixture
+def driven_labels(_driven_labels: Driven) -> Driven:
+    return _reset(_driven_labels)
+
+
+def _label_geometry(d: Driven) -> Any:
+    return d.page.evaluate(
+        "() => ({nodes: cy.nodes().map(n => [n.id(), n.position(), n.outerWidth(),"
+        " n.outerHeight(), stableBounds(n), n.layoutDimensions({nodeDimensionsIncludeLabels:false})]),"
+        " fit: cy.getFitViewport(stableBounds(cy.nodes(':visible')),40),"
+        " epoch: [routeEpoch,routeLayoutEpoch],"
+        " routes: cy.edges().not('.lock, .nesting').map(e => [e.id(),!!elkRoute(e)])})"
+    )
+
+
+def test_compact_caption_attention_preserves_geometry_routes_and_fit(driven_labels: Driven) -> None:
+    """DL-384: paint-only attention preserves compound, layout, Fit and route bounds."""
+    d = driven_labels
+    d.page.evaluate(
+        "() => {cy.zoom(.85); cy.center(cy.$id('IB')); placeLocks();"
+        " window.labelLayouts=0;cy.on('layoutstart',()=>labelLayouts++);}"
+    )
+    before = _label_geometry(d)
+    point = _client_point(d, _LONG_NAME_A)
+    d.page.mouse.move(**point)
+    d.page.wait_for_function("() => !document.getElementById('name-callout').hidden")
+    assert d.page.inner_text("#name-callout") == _LONG_NAME_A
+    assert d.page.locator("#details").is_hidden()
+    assert _selected_ids(d) == []
+    assert _painted(d) == []
+    assert _label_geometry(d) == before
+    d.page.mouse.click(**point)
+    d.page.mouse.move(**_canvas_point(d, 8, 8))
+    assert d.page.inner_text("#d-title") == _LONG_NAME_A
+    assert _label_geometry(d) == before
+    d.page.evaluate("() => {cy.nodes().select();highlightNodes(cy.$id('P'));}")
+    assert _label_geometry(d) == before
+    _open_control(d, "#node-labels")
+    control = d.page.get_by_label("Labels", exact=True)
+    for mode in ("always", "adaptive", "always", "adaptive"):
+        control.select_option(mode)
+        assert _label_geometry(d) == before
+    d.page.evaluate("() => {cy.zoom(.3); cy.nodes().unselect();}")
+    assert d.page.evaluate("() => cy.$id('P').style('text-opacity')") == "0"
+    assert _label_geometry(d)["nodes"] == before["nodes"]
+    assert d.page.evaluate("() => cy.$id('B').style('text-opacity')") == "1"
+    d.page.evaluate("() => {cy.$id('P').select();}")
+    assert d.page.evaluate("() => cy.$id('P').style('text-opacity')") == "1"
+    assert _label_geometry(d)["nodes"] == before["nodes"]
+    assert d.page.evaluate("() => labelLayouts") == 0
+    assert d.errors == []
+
+
+def test_full_name_callout_hover_priority_and_viewport_bounds(driven_labels: Driven) -> None:
+    """DL-384: a pointer-transparent preview never replaces details or branch ownership."""
+    d = driven_labels
+    d.page.evaluate("() => {cy.zoom(.9); cy.center(cy.$id('IB'));}")
+    point = _client_point(d, _LONG_NAME_A)
+    d.page.mouse.click(**point)
+    d.page.mouse.move(**_canvas_point(d, 8, 8))
+    d.page.wait_for_function(
+        "() => document.getElementById('name-callout').textContent.includes('NORTH')"
+    )
+    details = d.page.locator("#details").inner_html()
+    painted = _painted(d)
+    d.page.mouse.move(**_client_point(d, _LONG_NAME_B))
+    d.page.wait_for_function(
+        "() => document.getElementById('name-callout').textContent.includes('SOUTH')"
+    )
+    assert d.page.locator("#details").inner_html() == details
+    assert _painted(d) == painted
+    assert _selected_ids(d) == [_LONG_NAME_A]
+    d.page.mouse.move(**_canvas_point(d, 8, 8))
+    d.page.wait_for_function(
+        "() => document.getElementById('name-callout').textContent.includes('NORTH')"
+    )
+    d.page.evaluate(
+        "(id) => {const n=cy.$id(id);cy.pan({x:12-n.position('x')*cy.zoom(),"
+        " y:12-n.position('y')*cy.zoom()});}",
+        _LONG_NAME_A,
+    )
+    d.page.wait_for_function(
+        "(id) => Math.abs(Number(document.querySelector('#name-link line').getAttribute('x2'))"
+        " - cy.$id(id).renderedPosition().x) < .01",
+        arg=_LONG_NAME_A,
+    )
+    bounds = d.page.evaluate(
+        "() => {const c=document.getElementById('name-callout'),b=c.getBoundingClientRect(),"
+        " w=document.getElementById('wrap').getBoundingClientRect();return {visible:!c.hidden,"
+        " inside:b.left>=w.left&&b.top>=w.top&&b.right<=w.right&&b.bottom<=w.bottom,"
+        " pointer:getComputedStyle(c).pointerEvents,link:getComputedStyle(document.getElementById('name-link')).pointerEvents};}"
+    )
+    assert bounds == {"visible": True, "inside": True, "pointer": "none", "link": "none"}
+    _click(d, "#d-close")
+    d.page.wait_for_function("() => document.getElementById('name-callout').hidden")
+    assert _selected_ids(d) == [_LONG_NAME_A]
+    for node_id, compound in ((_LONG_NAME_A, False), ("IB", True)):
+        d.page.evaluate(
+            "({id,compound}) => {const n=cy.$id(id),z=cy.zoom();"
+            " const x=compound?40-n.outerWidth()*z/2:-10;"
+            " cy.pan({x:x-n.position('x')*z,y:120-n.position('y')*z});}",
+            {"id": node_id, "compound": compound},
+        )
+        d.page.mouse.move(**_canvas_point(d, 35 if compound else 5, 120))
+        d.page.wait_for_function(
+            "(name) => {const c=document.getElementById('name-callout');"
+            " return !c.hidden && c.textContent===name;}",
+            arg=node_id,
+        )
+        anchor_x = d.page.evaluate(
+            "Number(document.querySelector('#name-link line').getAttribute('x2'))"
+        )
+        assert anchor_x == 0
+    d.page.evaluate("() => {cy.pan({x:-100000,y:-100000});}")
+    d.page.wait_for_function("() => document.getElementById('name-callout').hidden")
+    assert d.errors == []
+
+
+def test_ambiguous_captions_have_full_name_keyboard_choices(driven_labels: Driven) -> None:
+    """DL-384: colliding captions are disambiguated through native Find result buttons."""
+    d = driven_labels
+    captions = d.page.evaluate(
+        "(ids) => ids.map(id=>nodeCaption(cy.$id(id)))", [_LONG_NAME_A, _LONG_NAME_B]
+    )
+    assert captions[0] == captions[1]
+    assert all("\u2026" in c and c.startswith("REGION") and c.endswith("C") for c in captions)
+    search = d.page.locator("#search")
+    search.fill("REGION_ASSET")
+    search.press("Enter")
+    assert d.page.inner_text("#d-title") == "Find matches (2)"
+    matches = d.page.locator("#d-tree button")
+    assert matches.all_text_contents() == [
+        "Select and inspect " + _LONG_NAME_A,
+        "Select and inspect " + _LONG_NAME_B,
+    ]
+    assert _painted(d) == []
+    matches.nth(1).focus()
+    d.page.keyboard.press("Enter")
+    assert d.page.inner_text("#d-title") == _LONG_NAME_B
+    assert _selected_ids(d) == [_LONG_NAME_B]
+    d.page.wait_for_function(
+        "() => document.getElementById('name-callout').textContent.includes('SOUTH')"
+    )
+    assert d.errors == []
+
+
+def test_compact_marks_survive_suppressed_names_and_nested_fold(driven_labels: Driven) -> None:
+    """DL-384: OR/self-lock/member marks remain distinct from captions and fold in place."""
+    d = driven_labels
+    d.page.evaluate("() => {cy.zoom(.3);}")
+    assert _label(d, _LONG_NAME_A) == "\u2228"
+    assert _label(d, "FW_OR") == "\u2228"
+    assert d.page.evaluate("() => decodeURIComponent(nodeMarks(cy.$id('FW_OR'))).includes('<rect')")
+    assert d.page.evaluate(
+        "(id) => decodeURIComponent(nodeMarks(cy.$id(id))).includes('<rect')", _LONG_NAME_B
+    )
+    assert d.page.evaluate("(id) => cy.$id(id).style('text-opacity')", _LONG_NAME_A) == "0"
+    outside = _positions(d, ["P", "Q", "C", "D"])
+    d.page.evaluate("() => {highlightNodes(cy.$id('P')); ec.collapse(cy.$id('IB'));}")
+    d.page.wait_for_function(
+        "() => foldPending === null && cy.$id('IB').hasClass('cy-expand-collapse-collapsed-node')"
+    )
+    assert _label(d, "IB") == "4"
+    assert d.page.evaluate("() => nodeCaption(cy.$id('IB'))") == "IB"
+    assert _positions(d, ["P", "Q", "C", "D"]) == outside
+    _open_control(d, "#node-labels")
+    d.page.get_by_label("Labels", exact=True).select_option("always")
+    search = d.page.locator("#search")
+    search.fill(_LONG_NAME_B)
+    search.press("Enter")
+    assert not _folded(d, "IB")
+    assert d.page.inner_text("#d-title") == _LONG_NAME_B
+    assert d.page.evaluate("() => cy.$id('P').hasClass('hl')")
+    assert d.page.evaluate("(id) => cy.$id(id).style('text-opacity')", _LONG_NAME_A) == "1"
+    assert _positions(d, ["P", "Q", "C", "D"]) == outside
+    d.page.evaluate("() => {ec.collapse(cy.$id('IB')); cy.zoom(.3);}")
+    _open_control(d, "#node-labels")
+    d.page.get_by_label("Labels", exact=True).select_option("adaptive")
+    d.page.evaluate("() => {ec.expand(cy.$id('IB'));}")
+    assert d.page.evaluate("(id) => cy.$id(id).style('text-opacity')", _LONG_NAME_A) == "0"
+    assert d.errors == []
+
+
+def test_caption_area_does_not_steal_pan_or_selected_node_drag(driven_labels: Driven) -> None:
+    """DL-384: captions are not gesture targets; the body retains selected group drag."""
+    d = driven_labels
+    d.page.evaluate(
+        "(id) => {cy.zoom(1);const n=cy.$id(id);cy.pan({x:400-n.position('x'),"
+        " y:420-n.position('y')});}",
+        "P",
+    )
+    point = _client_point(d, "P")
+    offset = [52, 0] if d.page.evaluate("DIRECTION") == "DOWN" else [0, 23]
+    d.page.mouse.move(point["x"] + offset[0], point["y"] + offset[1])
+    pan = d.page.evaluate("() => cy.pan()")
+    d.page.mouse.down()
+    d.page.mouse.move(point["x"] + offset[0] + 35, point["y"] + offset[1] + 32, steps=8)
+    d.page.mouse.up()
+    assert d.page.evaluate("() => cy.pan()") != pan
+    assert _selected_ids(d) == []
+    d.page.evaluate(
+        "(ids) => {cy.nodes().filter(n=>ids.includes(n.id())).select();}",
+        [_LONG_NAME_A, _LONG_NAME_B],
+    )
+    before = _positions(d, [_LONG_NAME_A, _LONG_NAME_B])
+    point = _client_point(d, _LONG_NAME_A)
+    d.page.mouse.move(**point)
+    d.page.mouse.down()
+    d.page.mouse.move(point["x"] + 31, point["y"] + 29, steps=8)
+    d.page.mouse.up()
+    after = _positions(d, [_LONG_NAME_A, _LONG_NAME_B])
+    deltas = [[after[n][i] - before[n][i] for i in (0, 1)] for n in before]
+    assert deltas[0] == pytest.approx(deltas[1])
+    assert deltas[0] == pytest.approx([31, 29], abs=2)
+    assert d.errors == []
+
+
+def test_compact_caption_lock_obstacles_and_fit_ignore_attention(driven_locks: Driven) -> None:
+    """DL-384: re-placing hubs reads the same caption bounds under zoom/selection/marks."""
+    d = driven_locks
+    d.page.evaluate("() => placeLocks()")
+    before = _label_geometry(d)
+    d.page.evaluate("() => {cy.nodes().select(); highlightNodes(cy.nodes());}")
+    _open_control(d, "#node-labels")
+    control = d.page.get_by_label("Labels", exact=True)
+    for mode in ("always", "adaptive"):
+        control.select_option(mode)
+        d.page.evaluate("() => {cy.zoom(.2); placeLocks();}")
+        assert _label_geometry(d) == before
+    # Halo paint is excluded from the obstacle contract (DL-384).
+    d.page.evaluate("() => {cy.nodes().unselect(); clearHighlights();}")
+    assert _hub_overlaps(d) == []
+    assert d.errors == []
+
+
+def test_compact_caption_empty_box_keeps_top_landmark_and_native_rectangle(
+    driven_labels: Driven,
+) -> None:
+    """DL-384: an empty expanded box owns a title even though it is childless."""
+    d = driven_labels
+    facts = d.page.evaluate(
+        "(id) => {const n=cy.$id(id),k=n.scratch('elk'),l=k.labels[0],"
+        " b=n.boundingBox({includeNodes:false,includeEdges:false,includeLabels:true,"
+        " includeOverlays:false,includeUnderlays:false});return {expanded:expandedBox(n),"
+        " parent:n.isParent(),placement:k.layoutOptions['elk.nodeLabels.placement'],"
+        " delta:[b.x1-k.x-l.x,b.y1-k.y-l.y,b.w-l.width,b.h-l.height]};}",
+        _EMPTY_BOX,
+    )
+    assert facts["expanded"] and not facts["parent"]
+    assert facts["placement"] == "[OUTSIDE,H_CENTER,V_TOP]"
+    assert facts["delta"] == pytest.approx([0, 0, 0, 0], abs=0.01)
+    before = _label_geometry(d)
+    d.page.evaluate("() => {cy.zoom(.2);}")
+    assert d.page.evaluate("(id) => cy.$id(id).style('text-opacity')", _EMPTY_BOX) == "1"
+    assert _label_geometry(d)["nodes"] == before["nodes"]
+    assert d.errors == []
+
+
+def test_compact_caption_pixel_budget_and_native_leaf_rectangles(driven_labels: Driven) -> None:
+    """DL-384: wide glyphs keep both ends without a second ellipsis or port enlargement."""
+    d = driven_labels
+    facts = d.page.evaluate(
+        "(ids) => ids.map(id=>{const n=cy.$id(id),k=n.scratch('elk'),l=k.labels[0],"
+        " c=nodeCaption(n),b=n.boundingBox({includeNodes:false,includeEdges:false,"
+        " includeLabels:true,includeOverlays:false,includeUnderlays:false});"
+        " let x=k.x,y=k.y;n.ancestors().forEach(a=>{x+=a.scratch('elk').x;y+=a.scratch('elk').y;});"
+        "return {caption:c,first:c[0]===n.data('label')[0],last:c.at(-1)===n.data('label').at(-1),"
+        "width:b.w,budget:DIRECTION==='DOWN'?112:132,wrap:n.style('text-wrap'),"
+        "body:[k.width,k.height],actualBody:[n.outerWidth(),n.outerHeight()],"
+        "delta:[b.x1-x-l.x,b.y1-y-l.y,b.w-l.width,b.h-l.height]};})",
+        [_CJK_NAME, _WIDE_NAME],
+    )
+    for fact in facts:
+        assert fact["first"] and fact["last"] and "\u2026" in fact["caption"]
+        assert fact["width"] <= fact["budget"] + 0.01
+        assert fact["wrap"] == "none"
+        assert fact["body"] == fact["actualBody"]
+        assert fact["delta"] == pytest.approx([0, 0, 0, 0], abs=0.01)
+    assert d.errors == []
+
+
+# ------------------------------------------------------- DL-385 offline snapshots
+
+_SNAPSHOT_TEXT = (
+    _LABEL_TEXT
+    + "\n"
+    + S_EDGE_TEXT
+    + "\ninsert_job: __proto__\njob_type: c\ncommand: true\n"
+    + "\ninsert_job: observes_flag\njob_type: c\ncommand: true\ncondition: value(SNAPSHOT_FLAG) = 1\n"
+)
+
+
+@pytest.fixture(scope="module", params=[(e, d) for e in ENGINES for d in ("LR", "TD")])
+def _driven_snapshot(
+    request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory, _playwright: Any
+) -> Any:
+    engine, direction = request.param
+    path = tmp_path_factory.mktemp("explore-snapshot") / "snapshot.html"
+    path.write_text(
+        to_explore_html(lower_source(_SNAPSHOT_TEXT), title="snapshot", direction=direction),
+        encoding="utf-8",
+    )
+    yield from _open_driven(_playwright, engine, path.as_uri())
+
+
+@pytest.fixture
+def driven_snapshot(_driven_snapshot: Driven) -> Driven:
+    return _reset(_driven_snapshot)
+
+
+def _choose_snapshot(d: Driven, data: Any, name: str = "snapshot.json") -> None:
+    _open_control(d, "#snapshot-import")
+    text = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
+    d.page.locator("#snapshot-file").set_input_files(
+        {"name": name, "mimeType": "application/json", "buffer": text.encode()}
+    )
+
+
+def _import_snapshot(d: Driven, data: Any, name: str = "snapshot.json") -> None:
+    generation = d.page.evaluate("snapshotGeneration")
+    _choose_snapshot(d, data, name)
+    d.page.wait_for_function(
+        "generation => snapshotGeneration > generation && !snapshotPending", arg=generation
+    )
+
+
+def _snapshot_invariants(d: Driven) -> Any:
+    return d.page.evaluate(
+        "() => ({nodes:cy.nodes().union(foldedNodes()).map(n=>"
+        " [n.id(),n.data('label'),n.data('kind'),n.data('parent'),n.position(),"
+        " n.outerWidth(),n.outerHeight(),n.classes(),n.selected()]),"
+        " edges:cy.edges().map(e=>[e.id(),e.data('source'),e.data('target'),e.classes(),"
+        " e.data('originalEnds')?[endId(e.data('originalEnds').source),endId(e.data('originalEnds').target)]:null,"
+        " e.scratch('_elkRoute')?.points]),"
+        " epoch:[routeEpoch,routeLayoutEpoch,routesPresent],geometry:[...routeGeometry],"
+        " fit:cy.getFitViewport(stableBounds(cy.nodes(':visible')),40),"
+        " view:[cy.pan(),cy.zoom()],detailsClosed:document.getElementById('details').hidden,"
+        " inspected:inspectedName?.id(),hovered:hoveredName?.id()})"
+    )
+
+
+def _snapshot_marker(d: Driven, node_id: str) -> str:
+    return d.page.evaluate(
+        'id=>decodeURIComponent(nodeMarks(cy.$id(id))).match(/data-observation="([^"]+)"/)?.[1] || \'\'',
+        node_id,
+    )
+
+
+def _snapshot_filter_state(d: Driven, state: str) -> None:
+    _open_control(d, "#snapshot-filter")
+    d.page.locator("#snapshot-filter").select_option(
+        label="State " + json.dumps(state, ensure_ascii=False) + " (1)"
+    )
+
+
+def test_snapshot_minimal_file_input_raw_values_and_metadata(driven_snapshot: Driven) -> None:
+    """DL-385: native file input, arbitrary strings and metadata are text, never markup."""
+    d = driven_snapshot
+    _open_control(d, "#snapshot-import")
+    with d.page.expect_file_chooser() as chooser:
+        d.page.locator("#snapshot-import").click()
+    chooser.value.set_files(
+        {
+            "name": "minimal.json",
+            "mimeType": "application/json",
+            "buffer": b'{"nodes":{"P":{"state":"queued"}}}',
+        }
+    )
+    d.page.wait_for_function("() => snapshotLoaded && !snapshotPending")
+    assert _snapshot_marker(d, "P") == "neutral"
+    raw = {
+        "source": ["example", {"__proto__": {"retained": True}}],
+        "capture": False,
+        "__proto__": {"retained": "top-level"},
+        "nodes": {
+            "P": {"state": "", "__proto__": {"retained": "node"}},
+            "Q": {"state": " \t\n"},
+            "M": {"state": "not supplied"},
+            "N": {"state": '""'},
+            "__proto__": {"state": "<svg onload=window.snapshotXss=1>"},
+            "not-a-node": {
+                "state": "unknown",
+                "note": [None, "<img src=x onerror=window.snapshotXss=1>"],
+            },
+        },
+    }
+    _import_snapshot(d, raw)
+    assert d.page.locator("#snapshot-error").is_hidden()
+    assert (
+        json.loads(d.page.evaluate("() => JSON.stringify(Object.fromEntries(snapshotNodes))"))
+        == raw["nodes"]
+    )
+    assert json.loads(d.page.evaluate("JSON.stringify(snapshotMetadata)")) == {
+        k: v for k, v in raw.items() if k != "nodes"
+    }
+    assert "Unknown IDs: 1" in d.page.inner_text("#snapshot-buckets")
+    assert d.page.locator("#snapshot-panel img, #snapshot-panel svg").count() == 0
+    assert d.page.evaluate("() => window.snapshotXss") is None
+    for state in ("", " \t\n", "not supplied", '""'):
+        _snapshot_filter_state(d, state)
+        assert d.page.inner_text("#snapshot-find-count") == "1 eligible matches"
+        assert json.dumps(state, ensure_ascii=False) in d.page.inner_text("#snapshot-results")
+    d.page.locator("#snapshot-filter").select_option("missing")
+    assert "not supplied" in d.page.inner_text("#snapshot-results")
+    assert not any(
+        text.startswith("M ·")
+        for text in d.page.locator("#snapshot-results > details > summary").all_text_contents()
+    )
+    d.page.locator("#snapshot-metadata summary").click()
+    assert json.loads(d.page.inner_text("#snapshot-metadata pre"))["__proto__"] == {
+        "retained": "top-level"
+    }
+    assert d.errors == []
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "{",
+        "[]",
+        '{"nodes":[]}',
+        '{"nodes":{"P":{"state":7}}}',
+        '{"nodes":{"unknown":{"state":false}}}',
+        '{"nodes":{"P":{}}}',
+    ],
+)
+def test_snapshot_invalid_candidate_is_atomic(driven_snapshot: Driven, invalid: str) -> None:
+    """DL-385: malformed entries cannot partially replace a prior valid observation set."""
+    d = driven_snapshot
+    _import_snapshot(d, {"nodes": {"P": {"state": "SU"}, "Q": {"state": "RU"}}})
+    before = d.page.evaluate("() => [...snapshotNodes]")
+    _import_snapshot(d, invalid)
+    assert d.page.locator("#snapshot-error").is_visible()
+    assert d.page.evaluate("() => [...snapshotNodes]") == before
+    assert _snapshot_marker(d, "P") == "neutral"
+    assert d.page.inner_text("#snapshot-notice") == "Previous snapshot kept."
+    _import_snapshot(d, {"nodes": {"Q": {"state": ""}}})
+    assert _snapshot_marker(d, "P") == ""
+    assert _snapshot_marker(d, "Q") == "neutral"
+    _import_snapshot(d, {"nodes": {}})
+    assert d.page.inner_text("#snapshot-notice").startswith("Loaded 0 observations")
+    assert _snapshot_marker(d, "Q") == ""
+    assert d.page.locator("#snapshot-data").is_visible()
+    d.page.locator("#snapshot-filter").select_option("missing")
+    assert d.page.locator("#snapshot-select").is_enabled()
+    assert d.errors == []
+
+
+def test_snapshot_duplicate_keys_exact_external_join_and_ineligible_ids(
+    driven_snapshot: Driven,
+) -> None:
+    """DL-385: native last-key-wins and emitted identity remain explicit and independent."""
+    d = driven_snapshot
+    d.page.evaluate("() => {cy.$id('_foo^PRD').emit('tap');}")
+    assert d.page.locator("#d-rows").inner_text().count("_foo^PRD") == 1
+    assert "emitted ID" in d.page.inner_text("#d-rows")
+    edge_id = d.page.evaluate("() => cy.edges().not('.lock')[0].id()")
+    _import_snapshot(d, '{"nodes":{"P":{"state":"first"},"P":{"state":"x","state":"last"}}}')
+    assert d.page.evaluate("() => snapshotNodes.get('P').state") == "last"
+    _import_snapshot(
+        d,
+        {
+            "nodes": {
+                "foo^PRD": {"state": "SU"},
+                "_foo^PRD": {"state": "RU"},
+                "FOO^PRD": {"state": "case differs"},
+                edge_id: {"state": "edge"},
+            }
+        },
+    )
+    d.page.locator("#snapshot-preset").select_option("autosys")
+    assert _snapshot_marker(d, "foo^PRD") == "success"
+    assert _snapshot_marker(d, "_foo^PRD") == "running"
+    assert "External matches: 1 · Unknown IDs: 1 · Ineligible IDs: 1" == d.page.inner_text(
+        "#snapshot-buckets"
+    )
+    groups = d.page.locator("#snapshot-unmatched > details")
+    groups.nth(0).locator(":scope > summary").click()
+    groups.nth(0).locator("details > summary").click()
+    assert json.loads(groups.nth(0).locator("pre").inner_text()) == {"state": "case differs"}
+    groups.nth(1).locator(":scope > summary").click()
+    assert groups.locator("button").count() == 0
+    _import_snapshot(d, {"nodes": {edge_id: {"state": None}}})
+    assert d.page.locator("#snapshot-error").is_visible()
+    assert _snapshot_marker(d, "_foo^PRD") == "running"
+    assert d.errors == []
+
+
+def test_snapshot_read_generations_clear_errors_and_hidden_preference(
+    driven_snapshot: Driven,
+) -> None:
+    """DL-385: controlled File.text promises expose ordering, without timing assumptions."""
+    d = driven_snapshot
+    _import_snapshot(d, {"nodes": {"P": {"state": "prior"}}})
+    d.page.evaluate(
+        "() => {window.snapshotReads=new Map();File.prototype.text=function(){"
+        " return new Promise((resolve,reject)=>{snapshotReads.set(this.name,{resolve,reject});});};}"
+    )
+    _choose_snapshot(d, "", "old.json")
+    _choose_snapshot(d, "", "new.json")
+    d.page.evaluate(
+        '() => {snapshotReads.get(\'new.json\').resolve(\'{"nodes":{"Q":{"state":"new"}}}\');}'
+    )
+    d.page.wait_for_function("() => !snapshotPending")
+    d.page.evaluate("() => {snapshotReads.get('old.json').reject(new Error('stale error'));}")
+    assert d.page.locator("#snapshot-error").is_hidden()
+    assert d.page.evaluate("() => [...snapshotNodes.keys()]") == ["Q"]
+    _choose_snapshot(d, "", "old-success.json")
+    _choose_snapshot(d, "", "latest.json")
+    d.page.evaluate(
+        '() => {snapshotReads.get(\'latest.json\').resolve(\'{"nodes":{"Q":{"state":"latest"}}}\');}'
+    )
+    d.page.wait_for_function("() => !snapshotPending")
+    d.page.evaluate(
+        '() => {snapshotReads.get(\'old-success.json\').resolve(\'{"nodes":{"P":{"state":"stale"}}}\');}'
+    )
+    assert d.page.evaluate("() => snapshotNodes.get('Q').state") == "latest"
+    assert not d.page.evaluate("() => snapshotNodes.has('P')")
+    _choose_snapshot(d, "", "old2.json")
+    _choose_snapshot(d, "", "bad.json")
+    d.page.evaluate("() => {snapshotReads.get('bad.json').resolve('{');}")
+    d.page.wait_for_function("() => !snapshotPending")
+    error = d.page.inner_text("#snapshot-error")
+    d.page.evaluate("() => {snapshotReads.get('old2.json').resolve('{\"nodes\":{}}');}")
+    assert d.page.inner_text("#snapshot-error") == error
+    assert d.page.evaluate("() => [...snapshotNodes.keys()]") == ["Q"]
+    _choose_snapshot(d, "", "hidden.json")
+    assert d.page.locator("#snapshot-error").is_hidden()
+    d.page.locator("#snapshot-shown").uncheck()
+    d.page.locator("#snapshot-preset").select_option("autosys")
+    d.page.evaluate(
+        '() => {snapshotReads.get(\'hidden.json\').resolve(\'{"nodes":{"P":{"state":"SU"}}}\');}'
+    )
+    d.page.wait_for_function("() => !snapshotPending")
+    assert not d.page.locator("#snapshot-shown").is_checked()
+    assert _snapshot_marker(d, "P") == ""
+    for name, reject in (("cleared-success.json", False), ("cleared-error.json", True)):
+        _choose_snapshot(d, "", name)
+        d.page.locator("#snapshot-clear").click()
+        d.page.evaluate(
+            "({name,reject})=>{const r=snapshotReads.get(name);if(reject)r.reject(new Error('late'));"
+            ' else r.resolve(\'{"nodes":{"P":{"state":"late"}}}\');}',
+            {"name": name, "reject": reject},
+        )
+        assert d.page.evaluate("() => snapshotNodes.size") == 0
+        assert d.page.locator("#snapshot-error").is_hidden()
+        assert not d.page.locator("#snapshot-shown").is_checked()
+        assert d.page.locator("#snapshot-preset").input_value() == "autosys"
+    assert d.errors == []
+
+
+def test_snapshot_geometry_routes_layers_and_observation_only_details(
+    driven_snapshot: Driven,
+) -> None:
+    """DL-385: import and display changes touch neither graph state nor condition leaf hover."""
+    d = driven_snapshot
+    _edge_mode(d, "elk")
+    d.page.evaluate(
+        "(id)=>{cy.$id(id).emit('tap');highlightNodes(cy.$id('P'));cy.$id('N').addClass('hidden');"
+        " cy.$id('Q').select();cy.zoom(.85);cy.center(cy.$id('IB'));"
+        " window.snapshotLayouts=0;cy.on('layoutstart',()=>snapshotLayouts++);}",
+        _LONG_NAME_A,
+    )
+    # Restore a valid route generation after the deliberately hidden node.
+    _click(d, "#arrange")
+    d.page.wait_for_function("() => !elkRunning")
+    d.page.evaluate("() => {snapshotLayouts=0;}")
+    _open_control(d, "#snapshot-import")
+    leaf = d.page.locator("#d-tree button.leaf").first
+    leaf.evaluate(
+        "leaf=>{window.snapshotPointerLeaves=0;window.snapshotPaintCalls={};"
+        " leaf.addEventListener('mouseleave',()=>snapshotPointerLeaves++);"
+        " for(const name of ['showDetails','showNodeDetails','paintBranches','clearBranchPaint',"
+        " 'renderCondTrees']){const fn=window[name];snapshotPaintCalls[name]=0;"
+        " window[name]=function(...args){snapshotPaintCalls[name]++;return fn(...args);};}}"
+    )
+    leaf.hover()
+    leaf_rect = leaf.bounding_box()
+    condition_dom = d.page.inner_html("#d-tree")
+    before = _snapshot_invariants(d)
+
+    def assert_observation_only() -> None:
+        d.page.evaluate("() => new Promise(resolve=>requestAnimationFrame(()=>resolve()))")
+        assert _snapshot_invariants(d) == before
+        assert leaf.bounding_box() == leaf_rect
+        assert d.page.inner_html("#d-tree") == condition_dom
+        assert d.page.evaluate("snapshotPointerLeaves") == 0
+        assert d.page.evaluate("() => Object.values(snapshotPaintCalls).every(n=>n===0)")
+
+    _import_snapshot(d, {"nodes": {_LONG_NAME_A: {"state": "SU"}, "P": {"state": "arbitrary"}}})
+    assert_observation_only()
+    assert 'State: "SU"' in d.page.inner_text("#d-observation")
+    _import_snapshot(d, {"nodes": {_LONG_NAME_A: {"state": "FA"}}})
+    assert_observation_only()
+    for _ in range(2):
+        d.page.locator("#snapshot-shown").evaluate("el=>el.click()")
+        assert_observation_only()
+    for preset in ("autosys", "generic"):
+        d.page.locator("#snapshot-preset").select_option(preset)
+        assert_observation_only()
+    d.page.locator("#snapshot-clear").evaluate("el=>el.click()")
+    assert_observation_only()
+    _import_snapshot(d, {"nodes": {_LONG_NAME_A: {"state": "SU"}, "P": {"state": "arbitrary"}}})
+    assert_observation_only()
+    d.page.locator("#snapshot-preset").hover()
+    before = _snapshot_invariants(d)
+    for preset in ("autosys", "generic"):
+        d.page.locator("#snapshot-preset").select_option(preset)
+        assert _snapshot_invariants(d) == before
+    d.page.locator("#snapshot-shown").uncheck()
+    assert d.page.locator("#d-observation").is_hidden()
+    assert _snapshot_invariants(d) == before
+    d.page.locator("#snapshot-shown").check()
+    d.page.locator("#snapshot-filter").select_option("missing")
+    assert _snapshot_invariants(d) == before
+    d.page.locator("#snapshot-clear").click()
+    assert _snapshot_invariants(d) == before
+    assert d.page.inner_html("#d-tree") == condition_dom
+    assert d.page.evaluate("snapshotLayouts") == 0
+    assert d.errors == []
+
+
+def test_snapshot_folds_leaf_scopes_and_explicit_keyboard_find(driven_snapshot: Driven) -> None:
+    """DL-385: box own state is separate, nested leaf coverage is fold/hide invariant."""
+    d = driven_snapshot
+    _import_snapshot(
+        d, {"nodes": {"B": {"state": "own box"}, "M": {"state": "done"}, "IM": {"state": ""}}}
+    )
+    _click(d, "#snapshot-panel [data-close-panel]")
+    d.page.evaluate("() => {cy.$id('B').emit('tap');}")
+    assert 'State: "own box"' in d.page.inner_text("#d-observation")
+    assert "Leaf jobs: 2 of 6 supplied; 4 missing" in d.page.inner_text("#d-observation")
+    d.page.evaluate("() => {ec.collapse(cy.$id('IB'));ec.collapse(cy.$id('B'));}")
+    d.page.wait_for_function("() => foldPending === null")
+    before = _snapshot_invariants(d)
+    _import_snapshot(d, {"nodes": {"M": {"state": "done"}, "IM": {"state": ""}}})
+    assert _snapshot_invariants(d) == before
+    assert _snapshot_marker(d, "B") == ""
+    assert "State: not supplied" in d.page.inner_text("#d-observation")
+    assert "Leaf jobs: 2 of 6 supplied; 4 missing" in d.page.inner_text("#d-observation")
+    _snapshot_filter_state(d, "")
+    d.page.locator("#snapshot-select").focus()
+    d.page.keyboard.press("Enter")
+    d.page.wait_for_function("() => foldPending === null && cy.$id('IM').visible()")
+    d.page.wait_for_function(
+        "() => document.getElementById('stats').textContent.endsWith('snapshot: 1 selected')"
+    )
+    assert _selected_ids(d) == ["IM"]
+    assert not _folded(d, "B") and not _folded(d, "IB")
+    assert _snapshot_marker(d, "IM") == "neutral"
+    assert 'State: ""' in d.page.inner_text("#d-observation")
+    d.page.evaluate("() => {cy.$id('IB').emit('tap');}")
+    assert "Leaf jobs: 1 of 4 supplied; 3 missing" in d.page.inner_text("#d-observation")
+    _snapshot_filter_state(d, "done")
+    d.page.evaluate(
+        "() => {window.snapshotNavigationCount=0;window.snapshotReportCount=0;"
+        " const navigate=navigateSnapshot,report=updateStats;"
+        " navigateSnapshot=function(...args){snapshotNavigationCount++;return navigate(...args);};"
+        " updateStats=function(op){report(op);"
+        " if(typeof op==='string'&&op.startsWith('snapshot: '))snapshotReportCount++;};}"
+    )
+    for selector in ("#snapshot-select", '[data-snapshot-id="M"][data-snapshot-action="select"]'):
+        if selector != "#snapshot-select":
+            d.page.locator("#snapshot-results summary").click()
+        button = d.page.locator(selector)
+        for chord in ("Shift+Enter", "Shift+Space", "Shift+click"):
+            d.page.evaluate("() => {cy.nodes().unselect();cy.$id('IM').select();}")
+            navigation_count = d.page.evaluate("snapshotNavigationCount")
+            if chord == "Shift+click":
+                button.click(modifiers=["Shift"])
+            else:
+                button.focus()
+                d.page.keyboard.press(chord)
+            assert _selected_ids(d) == ["IM", "M"]
+            d.page.wait_for_function("() => snapshotReportCount === snapshotNavigationCount")
+            assert d.page.evaluate("snapshotNavigationCount") == navigation_count + 1
+            button.focus()
+            d.page.keyboard.press("Enter")
+            assert _selected_ids(d) == ["M"]
+            d.page.wait_for_function("() => snapshotReportCount === snapshotNavigationCount")
+            assert d.page.evaluate("snapshotNavigationCount") == navigation_count + 2
+    _snapshot_filter_state(d, "")
+    d.page.locator("#snapshot-select").focus()
+    d.page.keyboard.press("Enter")
+    d.page.wait_for_function("() => snapshotReportCount === snapshotNavigationCount")
+    assert _selected_ids(d) == ["IM"]
+    d.page.evaluate(
+        "() => {window.snapshotFitCount=0;const fit=cy.fit;"
+        " cy.fit=function(...args){snapshotFitCount++;return fit.apply(this,args);};}"
+    )
+    for edge_mode in ("taxi", "elk"):
+        _edge_mode(d, edge_mode)
+        d.page.evaluate("() => {cy.$id('M').position({x:5000,y:5000}).addClass('hidden');}")
+        d.page.wait_for_function("() => !cy.$id('M').visible()")
+        if edge_mode == "elk":
+            _arm_layout_wait(d)
+            _click(d, "#arrange")
+            _wait_layout_done(d)
+            assert d.page.evaluate("() => routeLayoutEpoch === routeEpoch && routesPresent")
+            assert d.page.evaluate("() => cy.edges().some(e => !!elkRoute(e))")
+        d.page.evaluate("() => {cy.zoom(1);cy.pan({x:0,y:0});}")
+        _snapshot_filter_state(d, "done")
+        epoch = d.page.evaluate("routeEpoch")
+        navigation_count = d.page.evaluate("snapshotNavigationCount")
+        d.page.evaluate("snapshotFitCount=0")
+        assert d.page.evaluate("() => !cy.$id('M').visible()")
+        assert d.page.evaluate("() => cy.$id('M').renderedPosition().x > cy.width()")
+        d.page.locator("#snapshot-highlight").click()
+        d.page.wait_for_function("() => snapshotReportCount === snapshotNavigationCount")
+        assert d.page.evaluate("snapshotNavigationCount") == navigation_count + 1
+        assert d.page.evaluate("snapshotFitCount") == 1
+        assert d.page.evaluate(
+            "() => {const n=cy.$id('M'),p=n.renderedPosition();"
+            " return n.visible()&&n.hasClass('hl')&&p.x>=0&&p.x<=cy.width()"
+            " &&p.y>=0&&p.y<=cy.height();}"
+        )
+        assert "not drawn" not in d.page.inner_text("#stats")
+        assert d.page.inner_text("#stats").endswith("snapshot: 1 highlighted")
+        assert _selected_ids(d) == ["IM"]
+        if edge_mode == "elk":
+            assert d.page.evaluate("routeEpoch") > epoch
+            assert d.page.evaluate("() => !cy.edges().some(e => !!elkRoute(e))")
+    assert d.errors == []
+
+
+def test_snapshot_callout_closed_edge_details_and_small_panel(driven_snapshot: Driven) -> None:
+    """DL-385: overlay text follows existing attention, chrome remains bounded and escapable."""
+    d = driven_snapshot
+    _import_snapshot(d, {"nodes": {"P": {"state": "x" * 1000}, "B": {"state": "RU"}}})
+    d.page.locator("#snapshot-panel [data-close-panel]").click()
+    assert d.page.locator("#details").is_hidden()
+    d.page.evaluate("() => {cy.zoom(1);cy.center(cy.$id('P'));}")
+    d.page.mouse.move(**_client_point(d, "P"))
+    d.page.wait_for_function(
+        "() => document.getElementById('name-callout').textContent.includes('State:')"
+    )
+    assert d.page.inner_text("#name-callout").startswith("P\nState: ")
+    assert d.page.locator("#details").is_hidden()
+    bounds = d.page.locator("#name-callout").bounding_box()
+    canvas = d.page.locator("#cy").bounding_box()
+    assert bounds and canvas and bounds["width"] <= 360
+    assert (
+        d.page.locator("#name-callout").evaluate("el=>getComputedStyle(el).pointerEvents") == "none"
+    )
+    d.page.evaluate("() => {cy.edges().not('.lock')[0].emit('tap');}")
+    edge_details = d.page.inner_html("#details")
+    _import_snapshot(d, {"nodes": {"P": {"state": "replacement"}}})
+    assert d.page.inner_html("#details") == edge_details
+    d.page.set_viewport_size({"width": 360, "height": 300})
+    bounds = d.page.locator("#snapshot-panel").bounding_box()
+    canvas = d.page.locator("#cy").bounding_box()
+    assert bounds and canvas
+    assert bounds["width"] <= canvas["width"] and bounds["height"] <= canvas["height"]
+    assert d.page.locator(".chrome-panel:visible").count() == 1
+    d.page.keyboard.press("Escape")
+    assert d.page.locator("#snapshot-panel").is_hidden()
+    assert d.page.evaluate("document.activeElement.id") == "snapshot-toggle"
+    assert d.errors == []
+
+
+def test_snapshot_callout_avoids_details_without_graph_changes(driven_snapshot: Driven) -> None:
+    """DL-386: feasible avoidance follows inspection, hover and native metadata toggles."""
+    d = driven_snapshot
+    observation = {"state": "review needed", "note": ["synthetic metadata"] * 30}
+    _import_snapshot(d, {"nodes": {_LONG_NAME_A: observation, _LONG_NAME_B: observation}})
+    d.page.locator("#snapshot-panel [data-close-panel]").click()
+    _edge_mode(d, "elk")
+    d.page.evaluate("(id) => {cy.zoom(.95);cy.center(cy.$id(id));}", _LONG_NAME_A)
+    d.page.mouse.click(**_client_point(d, _LONG_NAME_A))
+    d.page.mouse.move(**_canvas_point(d, 8, 8))
+    d.page.wait_for_function(
+        "() => !document.getElementById('name-callout').hidden && nameFrame === null"
+    )
+
+    def place_near_right(node_id: str, y: float) -> None:
+        d.page.evaluate(
+            "({id,y}) => {const n=cy.$id(id),z=cy.zoom();"
+            " cy.pan({x:cy.width()-75-n.position('x')*z,y:y-n.position('y')*z});}",
+            {"id": node_id, "y": y},
+        )
+
+    avoided = (
+        "() => {const c=document.getElementById('name-callout').getBoundingClientRect(),"
+        " d=document.getElementById('details').getBoundingClientRect();"
+        " return nameFrame===null && !nameCallout.hidden && c.width>0 && c.height>0"
+        " && c.right <= d.left-7.5;}"
+    )
+    place_near_right(_LONG_NAME_A, 150)
+    d.page.wait_for_function(avoided)
+    before = _snapshot_invariants(d)
+    geometry = _label_geometry(d)
+    d.page.evaluate("() => {scheduleNameCallout();}")
+    d.page.wait_for_function(avoided)
+    assert _snapshot_invariants(d) == before
+
+    # A different real hovered body lies just below details; its preview reaches into it.
+    hover_y = d.page.evaluate(
+        "() => details.getBoundingClientRect().bottom-cy.container().getBoundingClientRect().top+35"
+    )
+    place_near_right(_LONG_NAME_B, hover_y)
+    details_html = d.page.inner_html("#details")
+    attention = (_selected_ids(d), _painted(d))
+    d.page.mouse.move(**_client_point(d, _LONG_NAME_B))
+    d.page.wait_for_function(
+        "(id) => hoveredName?.id()===id && nameCallout.textContent.startsWith(id)",
+        arg=_LONG_NAME_B,
+    )
+    d.page.wait_for_function(avoided)
+    assert d.page.inner_html("#details") == details_html
+    assert (_selected_ids(d), _painted(d)) == attention
+    assert _label_geometry(d) == geometry
+    d.page.mouse.move(**_canvas_point(d, 8, 8))
+    d.page.wait_for_function("() => hoveredName===null && nameFrame===null")
+
+    # Expanding metadata alone changes the panel rectangle, with no canvas event.
+    metadata_y = d.page.evaluate(
+        "() => details.getBoundingClientRect().bottom-cy.container().getBoundingClientRect().top"
+        " + nameCallout.offsetHeight + 60"
+    )
+    place_near_right(_LONG_NAME_A, metadata_y)
+    d.page.wait_for_function(
+        "() => nameFrame===null && nameCallout.getBoundingClientRect().left"
+        " > details.getBoundingClientRect().left"
+    )
+    before = _snapshot_invariants(d)
+    d.page.locator("#d-observation summary").click()
+    d.page.wait_for_function(avoided)
+    assert d.page.locator("#d-observation details").evaluate("el=>el.open")
+    assert _snapshot_invariants(d) == before
+    d.page.locator("#d-observation summary").click()
+    d.page.wait_for_function(
+        "() => nameFrame===null && nameCallout.getBoundingClientRect().left"
+        " > details.getBoundingClientRect().left"
+    )
+
+    _import_snapshot(d, {"nodes": {_LONG_NAME_A: {"state": "replacement"}}})
+    d.page.locator("#snapshot-panel [data-close-panel]").click()
+    d.page.wait_for_function("() => nameCallout.textContent.includes('replacement')")
+    assert _snapshot_invariants(d) == before
+    _click(d, "#snapshot-clear")
+    d.page.wait_for_function("() => !nameCallout.textContent.includes('State:')")
+    assert _snapshot_invariants(d) == before
+
+    d.page.set_viewport_size({"width": 360, "height": 300})
+    d.page.wait_for_function("() => cy.width()===360")
+    place_near_right(_LONG_NAME_A, 50)
+    d.page.wait_for_function(
+        "() => nameFrame===null && !nameCallout.hidden && cy.width()===360"
+        " && nameCallout.getBoundingClientRect().right"
+        " <= cy.container().getBoundingClientRect().right-7.5"
+    )
+    bounds = d.page.locator("#name-callout").bounding_box()
+    canvas = d.page.locator("#cy").bounding_box()
+    panel = d.page.locator("#details").bounding_box()
+    assert bounds and canvas and panel
+    assert bounds["x"] + bounds["width"] > panel["x"]
+    assert panel["x"] - canvas["x"] - 8 - bounds["width"] < 8
+    assert bounds["x"] >= canvas["x"] + 8
+    assert bounds["width"] <= canvas["width"] - 16
+    assert bounds["y"] >= canvas["y"] + 8
+    assert bounds["y"] + bounds["height"] <= canvas["y"] + canvas["height"] - 8
+    assert (
+        d.page.locator("#name-callout").evaluate("el=>getComputedStyle(el).pointerEvents") == "none"
+    )
+    assert d.page.locator("#name-link").evaluate("el=>getComputedStyle(el).pointerEvents") == "none"
+    zoom = d.page.evaluate("() => cy.zoom()")
+    d.page.mouse.move(bounds["x"] + 6, bounds["y"] + 6)
+    d.page.mouse.wheel(0, -100)
+    d.page.wait_for_function("z=>cy.zoom()!==z", arg=zoom)
+    d.page.locator("#d-close").click()
+    d.page.wait_for_function("() => nameCallout.hidden")
+    d.page.set_viewport_size({"width": 1600, "height": 1000})
+    d.page.wait_for_function("() => cy.width()===1600")
+    assert _label_geometry(d) == geometry
+    assert d.errors == []
+
+
+@pytest.mark.parametrize("location", ("entry", "top"))
+def test_snapshot_native_display_failure_retains_prior_model_and_ui(
+    driven_snapshot: Driven,
+    location: str,
+    record_property: Any,
+) -> None:
+    """DL-385: native display capacity is checked before replacing a valid snapshot."""
+    d = driven_snapshot
+    _import_snapshot(d, {"source": "prior", "nodes": {"P": {"state": "prior"}}})
+    before = _snapshot_invariants(d)
+    coverage = d.page.inner_text("#snapshot-coverage")
+    results = d.page.inner_html("#snapshot-results")
+    value = "[" * 12000 + "0" + "]" * 12000
+    deep = (
+        '{"nodes":{"P":{"state":"new","metadata":' + value + "}}}"
+        if location == "entry"
+        else '{"new":true,"metadata":' + value + ',"nodes":{"P":{"state":"new"}}}'
+    )
+    # Separate native capacity evidence from the deterministic injected preparation failure.
+    supported = d.page.evaluate(
+        "({text,location})=>{const value=JSON.parse(text);try {"
+        "JSON.stringify(location==='entry'?value.nodes.P:{new:true,metadata:value.metadata});return true;}"
+        "catch(error){return false;}}",
+        {"text": deep, "location": location},
+    )
+    record_property("native_parse_succeeded", True)
+    record_property("native_stringify_succeeded", supported)
+    if supported:
+        # Native limits differ. A deterministic serializer failure exercises display preparation.
+        d.page.evaluate(
+            "() => {const stringify=JSON.stringify;JSON.stringify=function(value,...args){"
+            " if(value?.state==='new'||value?.new===true)throw new RangeError('injected preparation failure');"
+            " return stringify(value,...args);};}"
+        )
+    _import_snapshot(d, deep)
+    assert "text-display capacity" in d.page.inner_text("#snapshot-error")
+    assert d.page.evaluate("() => snapshotNodes.get('P').state") == "prior"
+    assert d.page.inner_text("#snapshot-coverage") == coverage
+    assert d.page.inner_html("#snapshot-results") == results
+    assert _snapshot_invariants(d) == before
+    assert d.page.inner_text("#snapshot-notice") == "Previous snapshot kept."
+    assert d.errors == []
+
+
+def test_snapshot_real_tab_order_and_long_text_stay_inside_panel(driven_snapshot: Driven) -> None:
+    """DL-385: WebKit reaches every control and unbounded input cannot widen chrome."""
+    d = driven_snapshot
+    _open_control(d, "#snapshot-import")
+    d.page.locator("#snapshot-panel [data-close-panel]").focus()
+    d.page.keyboard.press("Tab")
+    assert d.page.evaluate("document.activeElement.id") == "snapshot-import"
+    with d.page.expect_file_chooser() as chooser:
+        d.page.keyboard.press("Enter")
+    chooser.value.set_files(
+        {
+            "name": "keyboard.json",
+            "mimeType": "application/json",
+            "buffer": b'{"nodes":{"P":{"state":"known"}}}',
+        }
+    )
+    d.page.wait_for_function("() => snapshotLoaded && !snapshotPending")
+    d.page.locator("#snapshot-import").focus()
+    for expected in (
+        "snapshot-clear",
+        "snapshot-shown",
+        "snapshot-preset",
+        "snapshot-filter",
+        "snapshot-select",
+        "snapshot-highlight",
+    ):
+        d.page.keyboard.press("Tab")
+        assert d.page.evaluate("document.activeElement.id") == expected
+    d.page.keyboard.press("Tab")
+    assert d.page.evaluate("document.activeElement.tagName") == "SUMMARY"
+    d.page.keyboard.press("Enter")
+    d.page.keyboard.press("Tab")
+    assert d.page.evaluate("document.activeElement.dataset.snapshotAction") == "select"
+    d.page.keyboard.press("Tab")
+    assert d.page.evaluate("document.activeElement.dataset.snapshotAction") == "highlight"
+    d.page.set_viewport_size({"width": 360, "height": 300})
+    _import_snapshot(d, {"nodes": {"P": {"state": "W" * 1000}}}, "F" * 1000 + ".json")
+    dimensions = d.page.locator("#snapshot-panel").evaluate("el=>[el.clientWidth,el.scrollWidth]")
+    assert dimensions[1] <= dimensions[0] + 1
+    _import_snapshot(d, {"nodes": {"I" * 1000: {"state": None}}})
+    assert d.page.locator("#snapshot-error").is_visible()
+    dimensions = d.page.locator("#snapshot-panel").evaluate("el=>[el.clientWidth,el.scrollWidth]")
+    assert dimensions[1] <= dimensions[0] + 1
+    assert d.errors == []
+
+
+def test_snapshot_lock_inspection_isolation_and_ineligible_raw_entries(
+    driven_locks: Driven,
+) -> None:
+    """DL-385: neither lock hub nor lock-edge inspection is refreshed by observations."""
+    d = driven_locks
+    hub = "lock:r:R_ONE"
+    edge = d.page.evaluate("() => cy.edges('.lock')[0].id()")
+    for target in (hub, edge):
+        d.page.evaluate("id=>{cy.$id(id).emit('tap');}", target)
+        before = d.page.inner_html("#details")
+        inspected = d.page.evaluate("() => cy.edges('.inspected').map(e=>e.id())")
+        _import_snapshot(
+            d,
+            {
+                "nodes": {
+                    hub: {"state": "not a job"},
+                    edge: {"state": "not a node"},
+                    "lk_a": {"state": "SU"},
+                }
+            },
+        )
+        assert d.page.inner_html("#details") == before
+        assert d.page.evaluate("() => cy.edges('.inspected').map(e=>e.id())") == inspected
+        assert "Ineligible IDs: 2" in d.page.inner_text("#snapshot-buckets")
+        assert _snapshot_marker(d, hub) == ""
+        d.page.locator("#snapshot-shown").uncheck()
+        assert d.page.inner_html("#details") == before
+        d.page.locator("#snapshot-shown").check()
+        d.page.locator("#snapshot-clear").click()
+        assert d.page.inner_html("#details") == before
+    assert d.errors == []
+
+
+def test_snapshot_degraded_plugins_keep_native_import_and_find(driven_degraded: Driven) -> None:
+    """DL-385: optional graph plugins do not own offline observations or native actions."""
+    d = driven_degraded
+    node_id = _sample_node(d)
+    _import_snapshot(
+        d, {"nodes": {node_id: {"state": "manual vocabulary"}}, "capture": {"note": "offline"}}
+    )
+    assert _snapshot_marker(d, node_id) == "neutral"
+    assert "1 eligible matches" == d.page.inner_text("#snapshot-find-count")
+    d.page.locator("#snapshot-select").focus()
+    d.page.keyboard.press("Enter")
+    assert _selected_ids(d) == [node_id]
+    assert 'State: "manual vocabulary"' in d.page.inner_text("#d-observation")
+    assert d.errors == []
+
+
+def test_snapshot_reload_has_explicit_page_defaults(driven_snapshot: Driven) -> None:
+    """DL-385: a new page has no snapshot and does not restore hidden/preset form history."""
+    d = driven_snapshot
+    _import_snapshot(d, {"nodes": {"P": {"state": "SU"}}})
+    d.page.locator("#snapshot-shown").uncheck()
+    d.page.locator("#snapshot-preset").select_option("autosys")
+    d.page.reload()
+    _ready(d)
+    _open_control(d, "#snapshot-import")
+    assert d.page.locator("#snapshot-shown").is_checked()
+    assert d.page.locator("#snapshot-preset").input_value() == "generic"
+    assert d.page.locator("#snapshot-data").is_hidden()
+    assert _snapshot_marker(d, "P") == ""
+    assert d.errors == []

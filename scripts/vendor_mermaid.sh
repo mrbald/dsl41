@@ -57,6 +57,25 @@ cd "$work"
 cp "$manifest/package.json" "$manifest/package-lock.json" .
 npm ci --no-audit --no-fund
 
+# Expose completion and optional native labels in the pinned prebuilt entry.
+# Each seam must match exactly once before either edit is written (DL-383, DL-384).
+node <<'EOF'
+const fs = require('node:fs');
+const file = require.resolve('cytoscape-elk');
+let source = fs.readFileSync(file, 'utf8');
+const patches = [
+  ['elk.layout(graph).then(function () {', 'this.promise = elk.layout(graph).then(function () {'],
+  ["  node.scratch('elk', k);", "  if (options.nodeLabels) { k.labels = options.nodeLabels(node); }\n\n  node.scratch('elk', k);"]
+];
+for (const [before, after] of patches) {
+  if (source.split(before).length !== 2) {
+    throw new Error('cytoscape-elk patch no longer matches exactly once: ' + before);
+  }
+  source = source.replace(before, after);
+}
+fs.writeFileSync(file, source);
+EOF
+
 # The installed packages' own package.json is the single source for the
 # versions the banners quote -- scripts/vendor/package.json stays the only
 # place a version is pinned by hand.

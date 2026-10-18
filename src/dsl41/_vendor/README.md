@@ -16,6 +16,14 @@ zero network). Dev-time regeneration only — users of the package never need no
 independent artifacts, and a shared-chunk build would couple their upgrade
 cadence for ~500 KiB deflated (DL-71).
 
+The explore build applies two guarded edits to `cytoscape-elk`'s prebuilt entry.
+DL-383 assigns its existing ELK and position-application promise to
+`layout.promise`; `run()` still returns the layout. DL-384 adds an optional
+`nodeLabels(node)` callback that supplies native ELK label rectangles while
+body dimensions and position application stay unchanged. The page uses
+bounded captions for those rectangles. Each seam must match exactly once
+before the build writes the patched entry. There is one layout pipeline.
+
 Full license texts and source URLs: `THIRD_PARTY_LICENSES` at the repo
 root (shipped in the wheel's dist-info).
 

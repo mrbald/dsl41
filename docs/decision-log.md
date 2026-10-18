@@ -24784,3 +24784,143 @@ relitigate an entry; append a new one.
   no final state, and every outcome a tier reads is as before.
   LIMIT. An exclusion asserts a cell unreachable without proof, as it always did at run time.
   Completeness now relies on that assertion where the root rows' false guards covered the cell.
+- DL-381 Explore offers Orthogonal and Bezier edge styles under View (2026-10-17).
+  Orthogonal remains the default and follows ELK's layering axis. Bezier draws a single
+  connection directly and separates parallel connections with curves. The control refreshes
+  the existing Cytoscape stylesheet without running a layout, fitting, or changing selection,
+  highlights, visibility, or details. Its value also governs edges created by a collapse or
+  restored by an expand. Ancestor/member edges stay Bezier because taxi paths cannot draw
+  overlapping endpoints; lock links stay straight. Edge classes, labels, branch colours, and
+  arrowheads keep their meanings. The choice belongs to the page; no CLI flag or stored
+  preference is added. Rounded taxi retains shared trunks, so it is not offered. Staggered
+  turns still share segments and need an edge-lane policy, so they are left out. ELK's actual
+  edge paths need adapter work; this control changes only Cytoscape's drawing style.
+- DL-382 Explore can draw ELK's calculated edge routes (2026-10-17).
+  View's Edge style adds ELK routes; Orthogonal remains the default and Bezier remains
+  available. The existing adapter supplies node positions and retains edge sections in
+  scratch. The page converts one finite orthogonal section into Cytoscape rounded
+  segments with explicit endpoints, using ELK container coordinates. Terminal legs are
+  clipped to the visible rounded rectangle, diamond or rhomboid; compound bounds remain
+  Cytoscape's. Unsupported sections, degenerate paths and clipping failures fall back
+  to Orthogonal. Ancestor/member edges remain Bezier and locks remain straight.
+  ELK uses orthogonal routing, unmerged edge ports and unmerged hierarchy edges, with
+  12-unit edge spacing within and between layers. No node, edge or annotation is removed.
+  Routes belong to one completed layout. A geometry or topology change expires all
+  cached routes, including edges temporarily removed by folding. Moving or folding
+  runs no layout; Arrange refreshes routes and remains the explicit placement action
+  (DL-198). Pan, zoom, selection, highlighting and the style choice retain valid routes.
+  Layouts are serialized, and a pending arrangement uses the then-visible graph.
+- DL-383 Explore reports route freshness and recovers settled layout failures (2026-10-18).
+  With ELK routes selected, the bottom status shows routed and fallback counts for
+  visible eligible edges; locks, nesting edges and self-loops are excluded. Expired
+  routes show an Arrange refresh action. No layout runs merely to refresh the notice.
+  A synchronous run failure or rejected layout releases the prior grab setting and
+  Arrange, expires routes, and shows a persistent retry action with the error text
+  accessible. Initial failure finishes the load without starting the successful
+  fold/layout continuation. Already queued arrangements remain serialized.
+  Each run owns its completion. A late failure from an earlier completed run cannot
+  release controls or expire routes belonging to a later run. There is no timeout:
+  a hung main-thread engine is outside this recovery boundary.
+  The vendor build applies one checked replacement to cytoscape-elk 2.3.0's prebuilt entry,
+  assigning its existing complete ELK/position-application promise to layout.promise.
+  The adapter still returns the layout from run(); its graph mapping, node placement
+  and layoutstop success path remain the same. The build keeps the transpiled entry
+  required by Cytoscape's constructor wrapper and refuses a changed patch site.
+  No dependency pin changes.
+- DL-384 Explore separates compact node bodies from contextual names (2026-10-18).
+  Body sizes: jobs 72x24, file watchers 80x40, globals 84x30, locks 80x30, folded boxes 96x32.
+  Expanded boxes, including empty boxes, stay content-sized with an 18-unit inset
+  and top title. OR, self-lock and folded-member marks occupy fixed body slots.
+  The final 10 units of their 72x20 band remain available for an observation marker.
+  No imported value enters this band's SVG.
+  LR captions sit below bodies, with at most 22 Unicode characters and 132 units.
+  TD captions sit beside bodies to clear source stems, with at most 18 and 112 units.
+  Expanded box titles retain the wider top treatment. Caption text is measured in
+  the canvas's 11-unit Arial font. Pixel truncation preserves both ends, including
+  wide glyphs; no second end ellipsis erases the suffix. Different names can have
+  the same caption. A caption never stands for exact identity.
+  Adaptive, the default, hides ordinary captions below 8 rendered pixels; Always
+  shows them. Selected captions and expanded titles stay opaque. One viewport-bounded
+  HTML callout shows the full hovered or inspected name; hover wins temporarily.
+  Its anchor and text pass pointer gestures through. Hover changes no selection,
+  details, branch paint, visibility or fit. Closing details ends inspection.
+  Existing click, fold and Escape meanings remain. Multiple Find matches get native
+  full-name buttons in details, including emitted IDs when different. Each explicitly
+  selects, inspects and fits one exact match. Full annotations remain accessible.
+  This supersedes DL-71's label-inclusive ELK dimensions. ELK reads bodies and separate
+  measured native caption rectangles through an optional nodeLabels callback in the
+  pinned adapter's prebuilt entry. The build checks this insertion seam exactly once,
+  beside DL-383's promise seam. Pins, licenses, getPos and route-clip guards stay fixed.
+  Native labels reserve their own space. Residual node/layer gaps are LR 12/32 and TD 24/24.
+  Painted captions and native labels keep a 5-unit gap from the physical border.
+  Cytoscape derives tight compound outlines from children and captions. ELK can retain
+  internal route slack, so its compound rectangle/title reservation need not equal
+  the drawn outline. Conservative clipping still refuses unsupported terminal routes.
+  Lock hubs stay outside ELK and can cross route paths (DL-192, DL-382). There is no
+  obstacle-free-routing guarantee. Name attention changes only paint. Bounded
+  strings, fonts and native-label rectangles stay fixed across zoom, selection and mode.
+  Fit, Find and lock obstacles include bounded captions and exclude overlays/underlays.
+  Post-style geometry checks wait for batched visibility caches to settle.
+  Full names belong to HTML callouts, details and Find. They never enter layout,
+  compound sizing, lock obstacles or routes. The base layout changes deliberately;
+  no density or operator-speed improvement is claimed.
+- DL-385 Explore imports offline snapshots without changing graph facts (2026-10-18).
+  The only required input is {"nodes":{"ID":{"state":"arbitrary string"}}}.
+  Every own entry must have a string state, including unknown or ineligible IDs.
+  Empty and whitespace strings are supplied values. Missing is distinct.
+  All optional top-level/node metadata remains arbitrary JSON rendered as text.
+  Native JSON.parse uses the last duplicate key at every level; producers emit unique keys.
+  One observation Map is separate from copied emitted identity and hierarchy facts.
+  Catalog and EXT emitted IDs match exactly. Labels, locality guesses and prefixes never join.
+  Every edge and synthetic lock is ineligible. Unmatched raw entries remain inspectable.
+  Validation finishes before replacement. Invalid input keeps the prior snapshot.
+  Native JSON text-display preparation also finishes first; browser capacity failures reject.
+  Replacement drops omissions; empty nodes is valid. New file choices and Clear invalidate
+  pending read successes and errors. Show observations and the preset survive both.
+  Fixed trusted glyphs occupy DL-384's last 10-unit slot, only for own supplied state.
+  FW/global marks have fixed inward offsets to clear their sloping outlines; bounds stay fixed.
+  Generic is neutral. Optional AutoSys maps literal codes/names to finite glyphs and tones.
+  Unknown states are neutral. Raw imported values never become SVG, CSS, HTML markup or expressions.
+  There is no inferred readiness, elapsed time, severity or worst-child box state.
+  One existing callout keeps its name first and hover-over-inspection ownership.
+  State previews use JSON-string notation, distinguishing literal sentinel-shaped strings.
+  Full raw state and metadata remain inspectable. Box leaf coverage/counts are separate
+  from own state, exclude boxes and EXT, and remain fixed across folds and hides.
+  Nested descendant scopes overlap and must not be summed globally.
+  Snapshot shares DL-204's one-panel chrome and keyboard/focus/dismissal behavior.
+  It shows catalog coverage, external matches, unknown/ineligible IDs and raw metadata.
+  Findings use explicit filter kinds and raw-state indices, never string sentinels.
+  Select replaces, Shift adds; Highlight adds. Only these explicit actions reveal/expand/fit.
+  Explicit navigation fits and reports after visibility styles settle.
+  Import, replace, Clear, show/hide, preset and filtering run no layout or navigation.
+  Geometry, stable Fit, lock placement, panzoom, folds, visibility, selection, highlights,
+  branch paint, inspection and route caches remain unchanged. Only fixed markers and
+  observation-owned HTML refresh. Closed details stay closed; edge/lock details stay intact.
+  Observation details follow the condition tree so refresh keeps its pointer targets stationary.
+  Hiding observations suppresses marker/callout/detail additions, not Snapshot inspection.
+  No runner/compiler behavior, bridge, polling, history, topology loader or producer is added.
+- DL-386 Explore name callouts avoid open details when space permits (2026-10-18).
+  A measured callout overlapping open details moves left of that panel by 8 pixels
+  only when the whole callout fits the existing 8-pixel viewport margins.
+  Its preferred vertical position, body anchor, pointer transparency and layer order
+  stay fixed. The leader starts at the final callout position. Native details toggles
+  schedule the existing frame so metadata expansion refreshes placement.
+  At infeasible narrow widths, the existing viewport clamp and details priority remain.
+  Exact names and observations remain available in details and explicit Find.
+  This HTML-only avoidance changes no graph geometry, attention, navigation or routes.
+- DL-387 A standalone helper converts one bounded AutoSys summary table (2026-10-18).
+  scripts/autorep_snapshot.py uses only Python's standard library. It emits only
+  DL-385's mandatory nodes/state shape. Exact names and complete trimmed ST/Ex values
+  survive without aliases, enums or inferred state. It accepts one consecutive English
+  six-column header/ruler table with variable name width and trailing widths 20/20/5/8/7.
+  The documented helper subset is printable ASCII with LF or CRLF, nonempty opaque
+  dates, decimal run/try, and optional one-token opaque priority/exit. Unicode byte/display
+  widths are unqualified; this adapter limit does not narrow generic Unicode JSON.
+  Indentation/padding are removed from names; embedded whitespace and exact duplicates
+  fail. Missing fields, wraps, shifts, overflow, controls, mixed output and internal blanks
+  fail the whole input. Empty and header-only input are unsupported, not empty snapshots.
+  All parsing and JSON preparation finish before stdout or atomic named-file replacement.
+  The synthetic summary example uses public Nightbank IDs. Its README links the English
+  12.0 and 24.2.00 vendor examples and guards direct capture on success and empty stderr.
+  Format recognition proves no capture flags, authorization or complete/atomic estate
+  observation. The helper runs no producer and adds no viewer/compiler/runtime dependency.
