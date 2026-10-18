@@ -894,21 +894,19 @@ def test_to_explore_html_wires_everything_essential_above_the_optional_plugin() 
     ec_registration = page.index("cy.expandCollapse({")
     assert "try {" in page[ec_registration - 60 : ec_registration]
     assert page.index('initial.on("layoutstop"') < ec_registration < registration
-    assert ec_registration < page.index("initial.run();") < registration
+    assert ec_registration < page.index("runElkLayout(initial);") < registration
 
 
 def test_to_explore_html_routes_edges_along_the_layout_axis() -> None:
-    # ELK lays the graph out in layers; a bezier between node centres throws
-    # that away and reads as a spline tangle, so edges route orthogonally
-    # along the same axis the layout used (DL-77).
+    # Orthogonal remains the default and follows ELK's layering axis (DL-77, DL-381).
     catalog = catalog_of("insert_job: solo\njob_type: c\ncommand: x\nmachine: m1\n")
     page = to_explore_html(catalog)
-    assert '"curve-style": "taxi"' in page
+    assert '<option value="taxi" selected>Orthogonal</option>' in page
+    assert '<option value="elk">ELK routes</option>' in page
+    assert '<option value="bezier">Bezier</option>' in page
     assert '"taxi-direction": TAXI_DIRECTION' in page
     assert 'TAXI_DIRECTION = DIRECTION === "DOWN" ? "vertical" : "horizontal"' in page
-    # the one exception: taxi cannot draw an edge whose endpoints overlap, and
-    # a member pointing at its own box is exactly that -- those keep the bezier
-    # rather than silently vanishing from the picture
+    # Ancestor/member edges stay Bezier: taxi cannot draw their overlapping endpoints (DL-381).
     assert 'selector: "edge.nesting"' in page
     assert page.count('"curve-style": "bezier"') == 1
     # re-classified after every collapse/expand (DL-190): a collapse re-points

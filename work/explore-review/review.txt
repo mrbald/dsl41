@@ -1,0 +1,124 @@
+Explorer routing and status design review
+
+Scope
+
+DL-381 adds the edge-style control. DL-382 connects ELK sections to Cytoscape
+routes. DL-383 adds route feedback and recovery from settled layout failures.
+The status study is synthetic and illustrative. Snapshot import is planned in
+execution-plan.txt and is not implemented by this routing slice.
+
+Routing findings
+
+1. Effective routing was invisible after cache expiration.
+   The footer now shows routed and fallback counts with ELK routes selected.
+   Moving, folding, hiding or revealing nodes expires the routes and exposes
+   an Arrange action. The action is keyboard reachable. Refreshing the
+   notice does not arrange the graph. Locks, nesting and self-loops are
+   excluded from eligible-edge counts.
+   Source: src/dsl41/templates/viz_explore.html, updateRoutingStatus.
+   Reviewer: main-session Codex. Final verification is recorded below.
+
+2. Rejected ELK layouts left Arrange disabled and node dragging locked.
+   The build exposes the pinned adapter's existing full promise. A rejected
+   promise or synchronous run failure restores the previous grab setting,
+   releases Arrange and displays a persistent retry action. Startup failure
+   finishes loading without running the successful fold/layout continuation.
+   Run ownership prevents an old failure from releasing a newer arrangement.
+   The guard patches the prebuilt adapter entry, preserving its transpiled
+   constructor. The build refuses an unexpected patch site.
+   Sources: releaseLayout, layoutFailed and runElkLayout in the template;
+   scripts/vendor_mermaid.sh; src/dsl41/_vendor/README.md.
+   Reviewer: main-session Codex. Final verification is recorded below.
+
+Known bounds
+
+Three Nightbank compound-to-GLOBAL_RISK_B edges use the Orthogonal fallback:
+ELK's ports lie outside the smaller Cytoscape compound bounds. Unsupported or
+invalid sections preserve their edges and use the fallback. Nesting edges
+remain Bezier and locks remain straight. See DL-382.
+
+Geometry changes expire every route, including distant routes. A moved or
+revealed obstacle can cross a path. Arrange is explicit. Pan, zoom, selection,
+highlights and changing edge style preserve valid route geometry.
+
+Recovery covers settled failures. It does not interrupt a hung main-thread
+engine. There is no timeout that could start overlapping layout work.
+See DL-383.
+
+Scoped architecture review
+
+No material complexity finding in the routing slice. IR-G remains a pure
+catalog derivation. The adapter owns node layout and Cytoscape owns rendering
+and interaction. The route bridge owns only transient display geometry.
+
+Load-bearing: ELK-container coordinates, shape clipping, endpoint projection,
+cache epochs, topology checks and serialized layouts. The geometry cache
+expires routes after movement. The topology check prevents publication after
+mid-layout graph edits while allowing layout movement. A run-owned record
+carries topology and the prior grab setting. The vendor patch exposes the
+existing completion chain and creates no second layout implementation.
+
+This scoped review does not reset the repository-wide architecture baseline.
+Existing architecture and specification review reminders remain outstanding.
+No full specification rewrite or review stamp is included in this slice.
+
+Status design recommendation
+
+Keep the compact controls and large canvas. Preserve job shapes, box fills,
+edge fidelity/branch colors, blue selection and yellow highlights. Use a
+small redundant status glyph, details on selection and descendant counts on
+collapsed boxes. A box's actual reported state is separate from those counts.
+Missing status is distinct from INACTIVE. Status updates must not change
+node dimensions, positions, routing, visibility or operator annotations.
+Appending state text to nodeLabel would change its computed width, so the
+annotation needs stable geometry.
+
+The first source is AutoSys, followed by dsl41. The shared snapshot contract
+requires only exact node IDs and state strings. State vocabulary is open.
+Provenance, capture time, flags, progress and additional detail are optional.
+Import replaces the overlay atomically; invalid input retains the prior
+valid overlay. Missing entries never retain stale state. AutoSys parsing
+belongs in a later conversion helper, not in the viewer's generic core.
+
+The helper is last priority. It consumes the actual autorep report shape,
+uses Python stdlib, accepts stdin/files and emits the shared JSON without
+requiring dsl41. A generic graph loader and live transport are separate work.
+
+Prior art
+
+Airflow provides explicit execution context and task drill-down:
+https://airflow.apache.org/docs/apache-airflow/stable/ui.html#graph-view
+Prefect keeps graph selection in a dedicated details panel:
+https://github.com/PrefectHQ/prefect/blob/main/ui/src/components/FlowRunGraphs.vue
+Dagster+ supports health-based finding and distinguishes unknown health:
+https://dagster.io/docs/guides/observe/asset-health-status
+These inform the interaction proposal. Their status semantics do not define
+AutoSys or dsl41 job/box states.
+
+Verification
+
+Independent Astra review accepted the routing hardening with no open material
+finding. Its WebKit Tab-access finding was fixed and confirmed by that reviewer
+using actual Tab and Enter in Chromium, WebKit and Firefox. Model selection
+was Astra/xhigh; served model identity was not exposed by the agent tool.
+The generated vendor bundle differs only by the 13-byte this.promise= insertion.
+
+All 372 browser cases passed across Chromium, WebKit and Firefox. Twenty-one
+generated example/engine checks verified actual rendered endpoints and bends.
+Nightbank small reports 80 routed / 3 fallback; bank reports 423 / 3 in every
+engine. Neither ELK view introduced a warning or page error. Two initial taxi
+endpoint warnings on bank also occur in the saved pre-change page.
+
+Full Python suite: 9640 passed, 12 skipped. Configured coverage gate: 100%.
+The package-wide branch report is 97.10%; required transition coverage passed.
+Golden replay: 4060 runs, 152213 entries, zero differences. Ruff, formatting,
+mypy, shell syntax and whitespace checks passed. Architecture check exited 0
+with the existing repository-wide review advisories noted above. Coverage and
+transition reports used the same locked .venv interpreter as the suite.
+The installed pre-push hygiene guard remains enabled. A separate read-only
+pass inspected every changed text line and all three design/planning files;
+it found no publication blocker.
+
+The synthetic status study was separately exercised across Chromium,
+WebKit and Firefox at 1024, 736, 360 and 320 widths, plus dark appearance:
+30 width/design/engine checks. It does not test an actual status importer.

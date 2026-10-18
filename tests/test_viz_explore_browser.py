@@ -3143,6 +3143,500 @@ def test_no_uncaught_page_errors_on_the_lock_box_page(driven_lock_box: Driven) -
 # ------------------------------------------------------ DL-204 compact controls
 
 
+def test_edge_style_switch_preserves_geometry_and_graph_state(driven_locks: Driven) -> None:
+    """DL-381: routing changes through the labelled control keep graph state and lock grammar."""
+    d = driven_locks
+    _tap(d, "lk_a")
+    d.page.evaluate(
+        "() => { highlightNodes(cy.$id('lk_b')); cy.$id('lk_q').addClass('hidden');"
+        " cy.edges().not('.lock')[0].addClass('inspected');"
+        " cy.zoom(1.2); cy.pan({x: 37, y: 59});"
+        " window.routingLayouts = 0; cy.on('layoutstart', () => { routingLayouts++; }); }"
+    )
+    _open_control(d, "#edge-style")
+    control = d.page.get_by_label("Edge style", exact=True)
+    assert control.input_value() == "taxi", d.engine
+    snapshot = (
+        "() => ({nodes: cy.nodes().map(n => [n.id(), n.position(), n.selected()]),"
+        " classes: cy.elements().map(e => [e.id(), e.classes()]),"
+        " pan: cy.pan(), zoom: cy.zoom(), rules: cy.style().length,"
+        " details: document.getElementById('details').innerHTML})"
+    )
+    before = d.page.evaluate(snapshot)
+    for style in ("bezier", "taxi", "bezier", "taxi"):
+        control.select_option(style)
+        curves = d.page.evaluate(
+            "() => ({flow: [...new Set(cy.edges().not('.lock, .nesting')"
+            ".map(e => e.style('curve-style')))],"
+            " locks: [...new Set(cy.edges('.lock').map(e => e.style('curve-style')))]})"
+        )
+        assert curves == {"flow": [style], "locks": ["straight"]}, (d.engine, curves)
+        assert d.page.evaluate(snapshot) == before, (d.engine, style)
+        assert d.page.evaluate("() => routingLayouts") == 0, d.engine
+    control.focus()
+    d.page.keyboard.press("Shift+Tab")
+    d.page.keyboard.press("Tab")
+    assert d.page.evaluate("() => document.activeElement.id") == "edge-style", d.engine
+    assert d.errors == [], (d.engine, d.errors)
+
+
+def test_edge_style_follows_fold_restore_and_arrange(driven_cond: Driven) -> None:
+    """DL-381: new and restored edges follow the choice without losing branch annotations."""
+    d = driven_cond
+    _tap(d, "MEM")
+    painted = _painted(d)
+    assert painted, d.engine
+    grammar = (
+        "() => cy.edges().map(e => [e.id(), e.style('line-style'),"
+        " e.style('line-color'), e.style('target-arrow-fill'), e.style('label')])"
+    )
+    before = d.page.evaluate(grammar)
+    _open_control(d, "#edge-style")
+    control = d.page.get_by_label("Edge style", exact=True)
+    control.select_option("bezier")
+    assert _painted(d) == painted, d.engine
+    assert d.page.evaluate(grammar) == before, d.engine
+    _click(d, "#collapse-all")
+    d.page.wait_for_function("() => cy.edges('.cy-expand-collapse-meta-edge').length > 0")
+    assert d.page.evaluate(
+        "() => cy.edges('.cy-expand-collapse-meta-edge')"
+        ".every(e => e.style('curve-style') === 'bezier')"
+    ), d.engine
+    _open_control(d, "#edge-style")
+    control.select_option("taxi")
+    _click(d, "#expand-all")
+    d.page.wait_for_function("() => cy.$id('MEM').length === 1")
+    assert d.page.evaluate(
+        "() => cy.edges().not('.lock, .nesting')"
+        ".every(e => e.style('curve-style') === 'taxi')"
+        " && cy.edges('.nesting').every(e => e.style('curve-style') === 'bezier')"
+    ), d.engine
+    _open_control(d, "#edge-style")
+    control.select_option("bezier")
+    _arm_layout_wait(d)
+    _click(d, "#arrange")
+    _wait_layout_done(d)
+    assert control.input_value() == "bezier", d.engine
+    assert d.page.evaluate(
+        "() => cy.edges().not('.lock').every(e => e.style('curve-style') === 'bezier')"
+    ), d.engine
+    assert d.errors == [], (d.engine, d.errors)
+
+
+def test_edge_style_keeps_ancestor_member_edges_drawable(driven: Driven) -> None:
+    """DL-381: ancestor/member edges retain their Bezier exception in either mode."""
+    d = driven
+    assert d.page.evaluate("() => cy.edges('.nesting').length") > 0, d.engine
+    _open_control(d, "#edge-style")
+    for style in ("bezier", "taxi"):
+        d.page.get_by_label("Edge style", exact=True).select_option(style)
+        assert d.page.evaluate(
+            "() => cy.edges('.nesting').every(e => e.style('curve-style') === 'bezier')"
+        ), d.engine
+    assert d.errors == [], (d.engine, d.errors)
+
+
+def _edge_mode(d: Driven, mode: str) -> None:
+    _open_control(d, "#edge-style")
+    d.page.get_by_label("Edge style", exact=True).select_option(mode)
+    _click(d, "#view-panel [data-close-panel]")
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+@pytest.mark.parametrize("direction", ("RIGHT", "DOWN"))
+def test_elk_routes_render_nested_bends_ports_and_shapes(
+    _playwright: Any, tmp_path: Any, engine: str, direction: str
+) -> None:
+    """DL-382: actual rendered points retain ELK's bends in both layout directions."""
+    text = (
+        _NESTED_BOX_TEXT
+        + "\ninsert_job: WATCH\njob_type: f\nbox_name: IB\nwatch_file: /synthetic/in\n"
+        "machine: m1\n\n"
+        "insert_job: INNER\njob_type: c\nbox_name: IB\ncommand: x\nmachine: m1\n"
+        "condition: s(IM) & s(WATCH)\n\n"
+        "insert_job: GLOBAL_GATE\njob_type: c\nbox_name: B\ncommand: x\nmachine: m1\n"
+        "condition: s(INNER) & v(READY) = 1\n\n"
+        "insert_job: LOOP\njob_type: c\ncommand: x\nmachine: m1\ncondition: s(LOOP)\n"
+    )
+    path = tmp_path / "routes.html"
+    path.write_text(to_explore_html(lower_source(text), direction=direction), encoding="utf-8")
+    browser = getattr(_playwright, engine).launch()
+    try:
+        d = Driven(engine=engine, page=browser.new_page())
+        warnings: list[str] = []
+        d.page.on("pageerror", lambda err: d.errors.append(str(err)))
+        d.page.on(
+            "console", lambda msg: warnings.append(msg.text) if msg.type == "warning" else None
+        )
+        d.page.goto(path.as_uri())
+        _ready(d)
+        before = d.page.evaluate(_LEAF_POSITIONS)
+        _edge_mode(d, "elk")
+        result = d.page.evaluate(
+            """() => {
+              const errors = [], shapes = new Set();
+              let routed = 0, inner = 0, bends = 0;
+              cy.edges().not('.lock, .nesting').forEach(edge => {
+                if (edge.source().same(edge.target())) {
+                  if (elkRoute(edge)) errors.push('loop was routed');
+                  return;
+                }
+                const route = elkRoute(edge), raw = edge.scratch('elk');
+                if (!route) { errors.push('missing route: ' + edge.id()); return; }
+                routed++;
+                const source = edge.source(), target = edge.target();
+                shapes.add(source.style('shape')); shapes.add(target.style('shape'));
+                const actual = [edge.sourceEndpoint(), ...(edge.segmentPoints() || []),
+                  edge.targetEndpoint()];
+                let x = 0, y = 0;
+                if (raw.container !== 'root') {
+                  inner++;
+                  let container = cy.$id(raw.container);
+                  while (container.nonempty()) {
+                    x += container.scratch('elk').x; y += container.scratch('elk').y;
+                    container = container.parent();
+                  }
+                }
+                const expectedBends = raw.sections[0].bendPoints || [];
+                bends += expectedBends.length;
+                if (actual.length !== expectedBends.length + 2) errors.push(edge.id() + ': length');
+                expectedBends.forEach((point, i) => {
+                  if (Math.hypot(actual[i+1].x - point.x - x,
+                      actual[i+1].y - point.y - y) > 0.01) errors.push(edge.id() + ': bend');
+                });
+                actual.forEach((point, i) => {
+                  if (!Number.isFinite(point.x) || !Number.isFinite(point.y))
+                    errors.push(edge.id() + ': nonfinite');
+                  if (i && Math.abs(point.x - actual[i-1].x) > 0.01 &&
+                      Math.abs(point.y - actual[i-1].y) > 0.01) errors.push(edge.id() + ': diagonal');
+                });
+                [source, target].forEach((node, i) => {
+                  const point = actual[i ? actual.length-1 : 0], center = node.position();
+                  const nx = (point.x - center.x) / (node.outerWidth()/2);
+                  const ny = (point.y - center.y) / (node.outerHeight()/2);
+                  if (Math.abs(nx) > 1.001 || Math.abs(ny) > 1.001)
+                    errors.push(edge.id() + ': outside node');
+                  if (node.style('shape') === 'diamond' &&
+                      Math.abs(Math.abs(nx) + Math.abs(ny) - 1) > 0.001)
+                    errors.push(edge.id() + ': diamond outline');
+                  if (node.style('shape') === 'rhomboid' &&
+                      Math.min(Math.abs(ny+1), Math.abs(ny-1),
+                        Math.abs(nx-(-0.6665+0.3335*ny)),
+                        Math.abs(nx-(0.6665+0.3335*ny))) > 0.001)
+                    errors.push(edge.id() + ': rhomboid outline');
+                });
+              });
+              return {errors, routed, inner, bends, shapes: [...shapes].sort()};
+            }"""
+        )
+        assert result["errors"] == [], (engine, direction, result)
+        assert result["routed"] >= 8 and result["inner"] >= 2 and result["bends"] >= 2
+        assert result["shapes"] == ["diamond", "rhomboid", "round-rectangle"]
+        assert d.page.evaluate(_LEAF_POSITIONS) == before
+        assert warnings == [] and d.errors == [], (engine, direction, warnings, d.errors)
+    finally:
+        browser.close()
+
+
+def test_elk_routes_expire_on_real_drag_and_return_on_arrange(driven_trace: Driven) -> None:
+    """DL-382: moving an unconnected member expires unrelated routes without a layout."""
+    d = driven_trace
+    _edge_mode(d, "elk")
+    assert "routed" in d.page.inner_text("#routing-status"), d.engine
+    assert d.page.locator("#refresh-routes").is_hidden(), d.engine
+    assert d.page.evaluate("() => cy.edges().some(e => !!elkRoute(e))"), d.engine
+    d.page.evaluate(
+        "() => { window.routeLayouts = 0; cy.on('layoutstart', () => routeLayouts++); }"
+    )
+    point = _client_point(d, "N")
+    _drag(d, point, {"x": point["x"] + 55, "y": point["y"] + 35})
+    d.page.wait_for_function("() => !cy.edges().some(e => !!elkRoute(e))")
+    assert d.page.evaluate("() => routeLayouts") == 0, d.engine
+    assert d.page.evaluate(
+        "() => cy.edges().not('.nesting, .lock').every(e =>"
+        " e.style('curve-style') === 'taxi' && e.style('source-endpoint') === 'outside-to-node')"
+    ), d.engine
+    assert "expired" in d.page.inner_text("#routing-status"), d.engine
+    assert d.page.locator("#refresh-routes").is_visible(), d.engine
+    _arm_layout_wait(d)
+    d.page.locator("#status-scroll").focus()
+    for _ in range(3):
+        d.page.keyboard.press("Tab")
+        if d.page.evaluate("() => document.activeElement.id === 'refresh-routes'"):
+            break
+    assert d.page.evaluate("() => document.activeElement.id") == "refresh-routes", d.engine
+    d.page.keyboard.press("Enter")
+    _wait_layout_done(d)
+    assert d.page.evaluate("() => cy.edges().some(e => !!elkRoute(e)) && !elkRunning"), d.engine
+    assert "routed" in d.page.inner_text("#routing-status"), d.engine
+    assert d.page.locator("#refresh-routes").is_hidden(), d.engine
+
+
+def test_elk_routes_expire_across_folds_and_hidden_nodes(driven_trace: Driven) -> None:
+    """DL-382: removed edges cannot restore old paths, including after a collapsed layout."""
+    d = driven_trace
+    _edge_mode(d, "elk")
+    d.page.evaluate(
+        "() => { window.routeLayouts = 0; cy.on('layoutstart', () => routeLayouts++); }"
+    )
+    outside = _positions(d, ["P", "Q", "C", "D"])
+    _click(d, "#collapse-all")
+    d.page.wait_for_function("() => cy.$id('M').empty()")
+    assert not d.page.evaluate("() => cy.edges().some(e => !!elkRoute(e))"), d.engine
+    assert "expired" in d.page.inner_text("#routing-status"), d.engine
+    assert _positions(d, list(outside)) == outside
+    assert d.page.evaluate("() => routeLayouts") == 0
+    _arm_layout_wait(d)
+    _click(d, "#arrange")
+    _wait_layout_done(d)
+    assert d.page.evaluate("() => cy.edges().some(e => !!elkRoute(e))"), d.engine
+    _click(d, "#expand-all")
+    d.page.wait_for_function("() => cy.$id('IM').nonempty()")
+    assert not d.page.evaluate("() => cy.edges().some(e => !!elkRoute(e))"), d.engine
+    _arm_layout_wait(d)
+    _click(d, "#arrange")
+    _wait_layout_done(d)
+    point = _client_point(d, "N")
+    d.page.mouse.click(point["x"], point["y"])
+    d.page.wait_for_function("() => cy.$id('N').selected()")
+    _control_ready(d, "#hide-selected")
+    _click(d, "#hide-selected")
+    assert not d.page.evaluate("() => cy.edges().some(e => !!elkRoute(e))"), d.engine
+    _arm_layout_wait(d)
+    _click(d, "#arrange")
+    _wait_layout_done(d)
+    assert d.page.evaluate("() => cy.edges().some(e => !!elkRoute(e))"), d.engine
+    _click(d, "#show-all")
+    assert not d.page.evaluate("() => cy.edges().some(e => !!elkRoute(e))"), d.engine
+
+
+def test_elk_route_cache_survives_view_and_annotation_changes(driven_trace: Driven) -> None:
+    """DL-382: view-only operations preserve paths and switching restores automatic endpoints."""
+    d = driven_trace
+    _edge_mode(d, "elk")
+    epoch = d.page.evaluate("() => routeEpoch")
+    geometry = d.page.evaluate(_LEAF_POSITIONS)
+    d.page.evaluate("() => { cy.$id('N').select(); highlightNodes(cy.$id('M')); }")
+    d.page.evaluate("() => { cy.zoom(1.25); cy.pan({x: 31, y: 47}); }")
+    for mode in ("bezier", "taxi", "elk", "bezier", "elk"):
+        _edge_mode(d, mode)
+        assert d.page.evaluate("() => routeEpoch") == epoch
+        assert d.page.evaluate(_LEAF_POSITIONS) == geometry
+        assert d.page.evaluate("() => cy.$id('N').selected() && cy.$id('M').hasClass('hl')")
+        if mode != "elk":
+            assert d.page.evaluate(
+                "() => cy.edges().every(e => e.style('edge-distances') === 'intersection'"
+                " && e.style('source-endpoint') === 'outside-to-node'"
+                " && e.style('target-endpoint') === 'outside-to-node')"
+            ), d.engine
+    assert d.page.evaluate("() => cy.edges().every(e => !!elkRoute(e))"), d.engine
+
+
+def test_elk_route_rejects_unsupported_sections_without_losing_the_edge(
+    driven_trace: Driven,
+) -> None:
+    """DL-382: a bad section does not become a partial or non-finite rendered path."""
+    d = driven_trace
+    _edge_mode(d, "elk")
+    result = d.page.evaluate(
+        """() => {
+          const edge = cy.edges()[1], original = edge.scratch('elk');
+          const variants = [
+            {...original, sections: []},
+            {...original, sections: [original.sections[0], original.sections[0]]},
+            {...original, sections: [{startPoint: {x: NaN, y: 0}, endPoint: {x: 5, y: 0}}]},
+            {...original, container: 'missing-container'},
+            {...original, sections: [{startPoint: {x: 0, y: 0}, endPoint: {x: 3, y: 4}}]}
+          ];
+          const targetPosition = {...edge.target().position()};
+          try {
+            const rejected = variants.map(raw => {
+              edge.scratch('elk', raw);
+              const route = captureElkRoute(edge);
+              edge.scratch('_elkRoute', route); edge.updateStyle();
+              return route === null && edge.style('curve-style') === 'taxi' && !edge.removed();
+            });
+            const source = edge.source().position();
+            edge.target().position({x: source.x + 10, y: source.y});
+            edge.scratch('elk', {...original, container: 'root', sections: [{
+              startPoint: {x: source.x-15, y: source.y},
+              endPoint: {x: source.x+25, y: source.y}
+            }]});
+            rejected.push(captureElkRoute(edge) === null);
+            return rejected;
+          } finally {
+            edge.scratch('elk', original); edge.target().position(targetPosition);
+          }
+        }"""
+    )
+    assert result == [True] * 6, (d.engine, result)
+    assert d.errors == [], (d.engine, d.errors)
+
+
+def test_elk_arrangements_serialize_and_reject_changed_topology(driven_trace: Driven) -> None:
+    """DL-382: a queued layout cannot publish paths for an earlier visible graph."""
+    d = driven_trace
+    _edge_mode(d, "elk")
+    d.page.evaluate(
+        """() => {
+          window.routeEvents = [];
+          cy.on('layoutstart layoutstop', event => routeEvents.push(event.type));
+          arrangeVisible('first'); arrangeVisible('second'); arrangeVisible('last');
+        }"""
+    )
+    d.page.wait_for_function(
+        "() => routeEvents.filter(e => e === 'layoutstop').length === 2 && !elkRunning"
+    )
+    assert d.page.evaluate("() => routeEvents") == [
+        "layoutstart",
+        "layoutstop",
+        "layoutstart",
+        "layoutstop",
+    ], d.engine
+    assert d.page.evaluate(
+        "() => !cy.autoungrabify() && !document.getElementById('arrange').disabled"
+        " && cy.edges().some(e => !!elkRoute(e))"
+    ), d.engine
+    d.page.evaluate("() => { routeEvents = []; arrangeVisible(); cy.$id('N').addClass('hidden'); }")
+    d.page.wait_for_function("() => routeEvents.includes('layoutstop') && !elkRunning")
+    assert not d.page.evaluate("() => cy.edges().some(e => !!elkRoute(e))"), d.engine
+    assert d.errors == [], (d.engine, d.errors)
+
+
+def test_elk_rejection_releases_controls_and_preserves_the_view(driven_trace: Driven) -> None:
+    """DL-383: an actual engine rejection leaves the graph usable and retryable."""
+    d = driven_trace
+    _edge_mode(d, "elk")
+    d.page.evaluate("() => { cy.$id('M').select(); highlightNodes(cy.$id('N')); }")
+    before = (d.page.evaluate(_LEAF_POSITIONS), _viewport(d), _selected_ids(d))
+    d.page.evaluate(
+        """() => {
+          window.goodElkLayout = elkLayout;
+          elkLayout = () => {
+            const config = goodElkLayout();
+            config.elk.algorithm = 'dsl41-test-missing-algorithm';
+            return config;
+          };
+        }"""
+    )
+    _click(d, "#arrange")
+    d.page.wait_for_function("() => !!layoutError && !elkRunning")
+    assert (d.page.evaluate(_LEAF_POSITIONS), _viewport(d), _selected_ids(d)) == before
+    assert d.page.evaluate(
+        "() => !cy.autoungrabify() && !document.getElementById('arrange').disabled"
+        " && cy.$id('N').hasClass('hl') && !cy.edges().some(e => !!elkRoute(e))"
+    ), d.engine
+    assert "Layout failed" in d.page.inner_text("#routing-status"), d.engine
+    assert "dsl41-test-missing-algorithm" in d.page.get_attribute("#routing-status", "title")
+    assert d.page.locator("#refresh-routes").is_visible(), d.engine
+    d.page.evaluate("() => { elkLayout = goodElkLayout; }")
+    _arm_layout_wait(d)
+    d.page.locator("#refresh-routes").click()
+    _wait_layout_done(d)
+    assert "routed" in d.page.inner_text("#routing-status"), d.engine
+    assert d.page.evaluate("() => !layoutError && !elkRunning && !cy.autoungrabify()")
+    assert d.errors == [], (d.engine, d.errors)
+
+
+@pytest.mark.parametrize("failure", ("synchronous", "capture"))
+def test_elk_pipeline_failure_restores_the_previous_grab_setting(
+    driven_trace: Driven, failure: str
+) -> None:
+    """DL-383: run throws and rejected position/capture work share the failure boundary."""
+    d = driven_trace
+    d.page.evaluate(
+        """failure => {
+          cy.autoungrabify(failure === 'synchronous');
+          if (failure === 'synchronous') {
+            const makeLayout = routedLayout;
+            routedLayout = elements => {
+              const layout = makeLayout(elements);
+              layout.run = () => { throw new Error('synchronous test failure'); };
+              return layout;
+            };
+          } else {
+            captureElkRoutes = () => { throw new Error('capture test failure'); };
+          }
+        }""",
+        failure,
+    )
+    _click(d, "#arrange")
+    d.page.wait_for_function("() => !!layoutError && !elkRunning")
+    assert d.page.evaluate("() => cy.autoungrabify()") == (failure == "synchronous")
+    assert not d.page.locator("#arrange").is_disabled(), d.engine
+    # A layout failure is visible even with the default Orthogonal edge style.
+    assert d.page.locator("#routing-status").is_visible(), d.engine
+    assert failure in d.page.get_attribute("#routing-status", "title")
+    assert d.page.locator("#refresh-routes").is_visible(), d.engine
+    assert d.errors == [], (d.engine, d.errors)
+
+
+def test_elk_old_failure_cannot_release_a_new_arrangement(driven_trace: Driven) -> None:
+    """DL-383: a stop listener can begin the next run before the old promise settles."""
+    d = driven_trace
+    _edge_mode(d, "elk")
+    d.page.evaluate(
+        """() => {
+          window.oldLayoutRejected = false;
+          const old = routedLayout(cy.elements(':visible'));
+          old.on('layoutstop', () => {
+            arrangeVisible('new arrangement');
+            throw new Error('late old stop listener');
+          });
+          runElkLayout(old);
+          old.promise.catch(() => { oldLayoutRejected = true; });
+        }"""
+    )
+    d.page.wait_for_function(
+        "() => oldLayoutRejected && !elkRunning && lastOp === 'new arrangement'"
+    )
+    assert d.page.evaluate(
+        "() => !layoutError && !cy.autoungrabify() &&"
+        " !document.getElementById('arrange').disabled && cy.edges().some(e => !!elkRoute(e))"
+    ), d.engine
+    assert "routed" in d.page.inner_text("#routing-status"), d.engine
+    assert d.errors == [], (d.engine, d.errors)
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+@pytest.mark.parametrize("stage", ("initial", "folded"))
+def test_elk_startup_failure_finishes_loading_and_allows_retry(
+    _playwright: Any, tmp_path: Any, engine: str, stage: str
+) -> None:
+    """DL-383: either startup layout may fail without leaving the page loading forever."""
+    page = to_explore_html(lower_source(_NESTED_BOX_TEXT), collapse_threshold=1)
+    injection = (
+        "initial.options.elk.algorithm = 'dsl41-test-missing-algorithm';\n"
+        if stage == "initial"
+        else "const goodElkLayout = elkLayout;\n"
+        "elkLayout = () => { const config = goodElkLayout();\n"
+        "config.elk.algorithm = 'dsl41-test-missing-algorithm'; return config; };\n"
+    )
+    page = page.replace("runElkLayout(initial);", injection + "runElkLayout(initial);")
+    path = tmp_path / "startup-failure.html"
+    path.write_text(page, encoding="utf-8")
+    browser = getattr(_playwright, engine).launch()
+    try:
+        d = Driven(engine=engine, page=browser.new_page())
+        d.page.on("pageerror", lambda error: d.errors.append(str(error)))
+        d.page.goto(path.as_uri())
+        _ready(d)
+        assert d.page.evaluate("() => !loading && !elkRunning && !cy.autoungrabify()")
+        assert not d.page.locator("#search").is_disabled(), (engine, stage)
+        assert not d.page.locator("#arrange").is_disabled(), (engine, stage)
+        assert "Layout failed" in d.page.inner_text("#routing-status"), (engine, stage)
+        if stage == "folded":
+            d.page.evaluate("() => { elkLayout = goodElkLayout; }")
+        _arm_layout_wait(d)
+        d.page.locator("#refresh-routes").click()
+        _wait_layout_done(d)
+        assert d.page.evaluate("() => !layoutError && !elkRunning")
+        assert d.page.locator("#routing-status").is_hidden()  # default Orthogonal style
+        assert d.errors == [], (engine, stage, d.errors)
+    finally:
+        browser.close()
+
+
 def _chrome_size(d: Driven) -> dict[str, float]:
     size: dict[str, float] = d.page.evaluate(
         "() => ({header: document.querySelector('header').getBoundingClientRect().height,"

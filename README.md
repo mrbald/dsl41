@@ -195,6 +195,15 @@ large estates; the report stays the artifact of record. What the page does:
 - Shift+drag (or ctrl or cmd) on the background adds a region to the
   selection; plain drag pans. Escape closes an open menu or panel, else
   empties the find field while typing there, else clears the selection.
+- View's Edge style offers Orthogonal (the default), ELK routes, and Bezier.
+  Single Bezier connections are direct lines; parallel connections curve
+  apart. Switching styles keeps node positions, pan, and zoom.
+  ELK routes use the layout's bend points and separate connection ports.
+  Moving, hiding, revealing, or folding nodes expires those routes and
+  temporarily uses Orthogonal paths. Arrange refreshes them. Locks stay
+  straight, and ancestor/member edges stay Bezier. The bottom status shows
+  routed and fallback counts, or an Arrange action when routes expire.
+  A failed layout releases the controls and offers Arrange to retry.
 - The header keeps Find, its two match actions, Fit, and Help. Selection,
   Highlight, Visibility, and View open panels over the canvas. A panel stays
   open for repeat commands; Close, Escape, or an outside click dismisses it.

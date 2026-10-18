@@ -1,0 +1,102 @@
+Explorer routing and offline observations: execution plan
+
+Finish routing first. Commit and push each green slice on
+codex/explore-routing-status-snapshots. Use one PR. Keep it open until the
+whole agreed scope passes review. Withhold the final merge.
+
+Current evidence
+
+work/explore-review/review.txt and status-overlay.html are review and design
+artifacts. They do not implement snapshot import. Assess the actual generated
+Nightbank small and bank pages. A mockup alone cannot establish acceptance.
+
+Frame and contract
+
+The first consumer is an existing AutoSys estate. The annotation format is
+domain-generic. It attaches observations to an existing graph; it loads no
+topology. The minimal accepted file is:
+
+{"nodes":{"ID":{"state":"arbitrary-string"}}}
+
+Only exact graph ID and string state are required. IDs are job names today.
+States form an open vocabulary. An optional display mapping can assign quiet
+glyphs and colors. Unknown states remain visible with neutral styling and
+their original text. Source, capture time, per-node times, flags, progress,
+messages, provenance, and extra attributes are optional. No hash, runner
+metadata, version field, or closed scheduler enum is mandatory.
+
+Provide an optional AutoSys display preset for documented source codes.
+Preserve the raw state. The preset adds no mandatory source field and does
+not change the generic import contract.
+
+Import replaces the entire overlay atomically. Validate before applying.
+An invalid file leaves the last valid overlay intact. A missing node means
+no observation. It never means INACTIVE and never keeps a previous value.
+Reject malformed structures with a useful error. Surface supplied
+contradictions without inventing facts from absent metadata.
+
+Match exact IDs, including folded jobs. Never join by labels. The current
+adapter distinguishes catalog jobs from synthetic and external graph nodes.
+Report matched, unmatched, and missing catalog observations separately.
+Keep source and time context visible when supplied.
+
+Rendering is an observation layer. Import changes no node dimensions,
+positions, pan, zoom, visibility, folds, selection, highlights, or ELK route
+validity. Preserve node shapes, edge fidelity, branch colors, blue selection,
+and yellow highlights. Use redundant glyph and color without making normal
+states loud. Keep a box's reported state separate from descendant counts.
+Keep unobserved distinct from INACTIVE.
+
+Findings and inspection include hidden and folded members. An explicit user
+command may reveal a result. Import never reveals, focuses, fits, or lays out
+the graph automatically. Preserve existing keyboard and compact-panel access.
+
+Dependency-ordered slices
+
+| Slice | Work and acceptance | Allocation / review / context |
+| --- | --- | --- |
+| 0 | Finish routing. Footer freshness agrees with actual routes. Rejected layout recovers and permits a later successful layout. Validate actual interactions in all three engines. Commit and push before snapshot work. | Main top-tier Codex executor; independent Astra read-only advisor plus Codex pass; reviewers use fresh bounded context. |
+| 1, after 0 | Deliver importer, quiet display, and status finding together on generated Nightbank small and bank pages. Minimal JSON works offline. Replacement, invalid retention, exact matching, unknown states, folded results, box counts, and geometry invariance pass. | Top-tier Codex executor; Astra read-only adversarial review plus independent Codex integration pass; executor receives contracts and integrated tip, reviewers receive fresh evidence briefs. |
+| 2, after 1 | Add smaller fulfilment, energy, media, or corpus boundary cases. Include synthetic/external IDs, absent jobs, duplicate or malformed input, arbitrary states, optional metadata, and contradictory supplied facts. One non-job vocabulary fixture proves generic annotation without adding a graph loader. All three engines preserve navigation and routing while importing and finding observations. | Top-tier Codex executor; Astra read-only review plus Codex pass over integration; fresh bounded reviewer context. |
+
+Slice 1 is the first usable snapshot deliverable. Slice 2 closes its boundary
+coverage. All fixtures are synthetic and public-safe. Read them line by line
+before staging. Keep shared-template slices sequential from the integrated
+tip. No Claude calls until the user lifts that exclusion. This explicit user
+instruction overrides the usual vendor assignment; it does not waive review.
+
+Verification and review
+
+Read docs/ir-design.md sections 5 and 9, DL-35 and relevant explorer decisions,
+README browser instructions, and docs/agent-workflow.md before implementation.
+Read any affected frozen contract before changing it. Append material
+decisions to docs/decision-log.md. Use arch-review or spec-review when due.
+
+For each implementation slice, run the complete local gate list in
+docs/agent-workflow.md: full suite with coverage and transition checks, golden
+replay, ruff, formatting, mypy, and architecture check. Record exact commands,
+results, revision, and browser evidence. Collect opt-in browser tests and
+verify they ran. Exercise import, replacement, rejection, finding, explicit
+reveal, keyboard access, folds, and routing in Chromium, WebKit, and Firefox.
+Compare graph state before and after import, including route freshness.
+
+Review adversarially before committing. Inspect escaping, duplicate records,
+stale imports, missing-state erasure, hidden members, count identities,
+geometry side effects, leaking tests, and flaky timing assertions. Reviewers
+write detailed findings to scratch files. Main reads the diff and evidence;
+it does not rerun the executor's gates. Only the raising reviewer confirms a
+fix. Use at most three rounds, then raise material unresolved findings.
+Stage explicit paths. Preserve hooks. Commit and push each green slice.
+
+Later priorities
+
+After the snapshot deliverable, add a dsl41 producer adapter using the same
+generic format. Preserve independent flags and distinguish transition time
+from capture time. Review it as semantic work if runner contracts change.
+
+The autorep conversion helper is last. Use Python stdlib, stdin or file input,
+and JSON output with no dsl41 dependency. Target the actual report shape when
+supplied. Do not claim parser support from invented samples.
+
+Future ideas, outside this snapshot slice: live bridge, runtime control,
+generic graph loading, snapshot history, and saved views.

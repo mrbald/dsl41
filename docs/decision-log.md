@@ -24784,3 +24784,46 @@ relitigate an entry; append a new one.
   no final state, and every outcome a tier reads is as before.
   LIMIT. An exclusion asserts a cell unreachable without proof, as it always did at run time.
   Completeness now relies on that assertion where the root rows' false guards covered the cell.
+- DL-381 Explore offers Orthogonal and Bezier edge styles under View (2026-10-17).
+  Orthogonal remains the default and follows ELK's layering axis. Bezier draws a single
+  connection directly and separates parallel connections with curves. The control refreshes
+  the existing Cytoscape stylesheet without running a layout, fitting, or changing selection,
+  highlights, visibility, or details. Its value also governs edges created by a collapse or
+  restored by an expand. Ancestor/member edges stay Bezier because taxi paths cannot draw
+  overlapping endpoints; lock links stay straight. Edge classes, labels, branch colours, and
+  arrowheads keep their meanings. The choice belongs to the page; no CLI flag or stored
+  preference is added. Rounded taxi retains shared trunks, so it is not offered. Staggered
+  turns still share segments and need an edge-lane policy, so they are left out. ELK's actual
+  edge paths need adapter work; this control changes only Cytoscape's drawing style.
+- DL-382 Explore can draw ELK's calculated edge routes (2026-10-17).
+  View's Edge style adds ELK routes; Orthogonal remains the default and Bezier remains
+  available. The existing adapter supplies node positions and retains edge sections in
+  scratch. The page converts one finite orthogonal section into Cytoscape rounded
+  segments with explicit endpoints, using ELK container coordinates. Terminal legs are
+  clipped to the visible rounded rectangle, diamond or rhomboid; compound bounds remain
+  Cytoscape's. Unsupported sections, degenerate paths and clipping failures fall back
+  to Orthogonal. Ancestor/member edges remain Bezier and locks remain straight.
+  ELK uses orthogonal routing, unmerged edge ports and unmerged hierarchy edges, with
+  12-unit edge spacing within and between layers. No node, edge or annotation is removed.
+  Routes belong to one completed layout. A geometry or topology change expires all
+  cached routes, including edges temporarily removed by folding. Moving or folding
+  runs no layout; Arrange refreshes routes and remains the explicit placement action
+  (DL-198). Pan, zoom, selection, highlighting and the style choice retain valid routes.
+  Layouts are serialized, and a pending arrangement uses the then-visible graph.
+- DL-383 Explore reports route freshness and recovers settled layout failures (2026-10-18).
+  With ELK routes selected, the bottom status shows routed and fallback counts for
+  visible eligible edges; locks, nesting edges and self-loops are excluded. Expired
+  routes show an Arrange refresh action. No layout runs merely to refresh the notice.
+  A synchronous run failure or rejected layout releases the prior grab setting and
+  Arrange, expires routes, and shows a persistent retry action with the error text
+  accessible. Initial failure finishes the load without starting the successful
+  fold/layout continuation. Already queued arrangements remain serialized.
+  Each run owns its completion. A late failure from an earlier completed run cannot
+  release controls or expire routes belonging to a later run. There is no timeout:
+  a hung main-thread engine is outside this recovery boundary.
+  The vendor build applies one checked replacement to cytoscape-elk 2.3.0's prebuilt entry,
+  assigning its existing complete ELK/position-application promise to layout.promise.
+  The adapter still returns the layout from run(); its graph mapping, node placement
+  and layoutstop success path remain the same. The build keeps the transpiled entry
+  required by Cytoscape's constructor wrapper and refuses a changed patch site.
+  No dependency pin changes.

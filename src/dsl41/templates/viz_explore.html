@@ -50,6 +50,11 @@
   .panel-settings { display: grid; gap: 6px; border-top: 1px solid #e5e7eb;
              margin-top: 10px; padding-top: 8px; }
   .panel-settings label { color: #374151; user-select: none; }
+  .panel-settings select { margin-left: 6px; padding: 3px 6px; font: inherit;
+             color: inherit; background: #fff; border: 1px solid #d1d5db;
+             border-radius: 4px; }
+  .panel-settings .hint { display: block; margin-top: 6px; max-width: 28rem;
+             font-size: 11px; color: #6b7280; }
   #help-panel p { margin: 8px 0; }
   #help-panel h3 { font-size: 0.95rem; margin: 12px 0 4px; }
   #status-bar { display: flex; gap: 8px; flex: none; height: 30px; box-sizing: border-box;
@@ -59,6 +64,9 @@
   #feature-warning { flex: none; color: #b45309; border: 0; background: none;
              font: inherit; cursor: pointer; text-decoration: underline; }
   #stats { color: #4b5563; font-size: 0.85rem; }
+  #routing-status { margin-left: 8px; color: #4b5563; font-size: 0.85rem; }
+  #refresh-routes { border: 0; background: none; padding: 0; margin-left: 6px;
+             font: inherit; color: #1d4ed8; cursor: pointer; text-decoration: underline; }
   #find-note { color: #b45309; font-size: 0.85rem; }
   #find-note:not(:empty)::after { content: " · "; }
   @media (max-width: 600px) {
@@ -247,6 +255,15 @@
       <button tabindex="0" type="button" id="collapse-all">collapse boxes</button>
       <button tabindex="0" type="button" id="expand-all">expand boxes</button>
     </div>
+    <div class="panel-settings">
+      <div><label for="edge-style">Edge style</label>
+      <select tabindex="0" id="edge-style" aria-describedby="edge-style-note"
+              title="Change arrow paths without moving nodes.">
+        <option value="taxi" selected>Orthogonal</option>
+        <option value="elk">ELK routes</option>
+        <option value="bezier">Bezier</option>
+      </select><span class="hint" id="edge-style-note">Arrange refreshes ELK routes after moving or folding nodes.</span></div>
+    </div>
   </section>
   <section id="help-panel" class="chrome-panel" role="region" aria-labelledby="help-heading" hidden>
     <div class="panel-heading"><h2 id="help-heading">Help</h2>
@@ -269,6 +286,15 @@
     carries &#8744; &middot; a bare n() is a lock and draws no arrow</p>
     <p>dotted gray = lock &middot; the tee marks the job that
     waits</p>
+    <p>View&rsquo;s Edge style offers Orthogonal, ELK routes, and Bezier.
+    Single Bezier connections are direct lines; parallel connections curve apart.
+    Switching styles keeps nodes in place.</p>
+    <p>ELK routes follow the layout&rsquo;s bend points. Moving, hiding, revealing,
+    or folding nodes temporarily uses Orthogonal paths; Arrange refreshes the routes.
+    The bottom status shows routed and fallback counts, or a refresh action when
+    routes expire. Unsupported paths also use Orthogonal. Locks stay straight.</p>
+    <p>A failed layout releases the controls and shows an Arrange retry action.
+    Its error is available on the status message.</p>
   </section>
   <aside id="details" hidden>
     <button type="button" id="d-close" title="close">&#10005;</button>
@@ -280,6 +306,7 @@
 <footer id="status-bar">
   <div id="status-scroll" tabindex="0" aria-label="Graph status; scroll horizontally for the full message">
     <span id="find-note" role="status"></span><span id="stats" role="status">laying out&hellip;</span>
+    <span id="routing-status" role="status" hidden></span><button tabindex="0" type="button" id="refresh-routes" hidden>Arrange</button>
   </div>
   <button tabindex="0" id="feature-warning" type="button" hidden>Features unavailable</button>
 </footer>
@@ -301,9 +328,9 @@ var cytoscape = cyBundle.default;
 
 var DIRECTION = "__DSL41_ELK_DIRECTION__";
 var LABEL_ZOOM = 0.6; /* edge labels overlap at fit zoom; hide below this */
-/* Orthogonal edge routing along ELK's layering axis: a bezier between node
-   centres reads as a spline tangle and hides the layers ELK just computed. */
+/* Orthogonal edge routing follows ELK's layering axis (DL-381). */
 var TAXI_DIRECTION = DIRECTION === "DOWN" ? "vertical" : "horizontal";
+var edgeStyleSelect = document.getElementById("edge-style");
 
 function elkLayout() {
   return {
@@ -314,9 +341,249 @@ function elkLayout() {
     elk: {
       algorithm: "layered",
       "elk.direction": DIRECTION,
-      "elk.hierarchyHandling": "INCLUDE_CHILDREN"
+      "elk.hierarchyHandling": "INCLUDE_CHILDREN",
+      "elk.edgeRouting": "ORTHOGONAL",
+      "elk.layered.mergeEdges": false,
+      "elk.layered.mergeHierarchyEdges": false,
+      "elk.spacing.edgeEdge": 12,
+      "elk.layered.spacing.edgeEdgeBetweenLayers": 12
     }
   };
+}
+
+/* ELK paths belong to one completed layout. Any later geometry change can
+   put an unrelated node across a path; an epoch also expires removed edges
+   which a fold may restore later (DL-382). */
+var routeEpoch = 0;
+var routesPresent = false;
+var routeGeometry = new Map();
+var routeLayoutEpoch = -1;
+var layoutError = "";
+var elkRunning = null;
+var arrangeQueued = null;
+
+function updateRoutingStatus() {
+  var note = document.getElementById("routing-status");
+  var refresh = document.getElementById("refresh-routes");
+  var shown = edgeStyleSelect.value === "elk" || !!layoutError;
+  note.hidden = !shown;
+  refresh.hidden = !shown || !!elkRunning || (!layoutError && routeLayoutEpoch === routeEpoch);
+  if (!shown) return;
+  var text;
+  if (elkRunning) text = "ELK: arranging…";
+  else if (layoutError) text = "Layout failed · Arrange to retry";
+  else if (routeLayoutEpoch !== routeEpoch) text = "ELK routes expired · Arrange to refresh";
+  else {
+    var eligible = flow(cy.edges(":visible")).not(".nesting").filter(function (edge) {
+      return !edge.source().same(edge.target());
+    });
+    var routed = eligible.filter(function (edge) { return !!elkRoute(edge); }).length;
+    text = "ELK: " + routed + " routed · " + (eligible.length - routed) + " fallback";
+  }
+  if (note.textContent !== text) note.textContent = text;
+  note.title = layoutError;
+  note.setAttribute("aria-label", layoutError ? text + ": " + layoutError : text);
+}
+
+function elkRoute(edge) {
+  var route = edge.scratch("_elkRoute");
+  return edgeStyleSelect.value === "elk" && route && route.epoch === routeEpoch ? route : null;
+}
+
+function edgeCurve(edge) {
+  if (edgeStyleSelect.value !== "elk") return edgeStyleSelect.value;
+  var route = elkRoute(edge);
+  return route ? (route.points.length > 2 ? "round-segments" : "straight") : "taxi";
+}
+
+function nodeRouteGeometry(node) {
+  var p = node.position();
+  return JSON.stringify([p.x, p.y, node.outerWidth(), node.outerHeight(),
+    node.visible(), node.parent().id(), node.style("shape")]);
+}
+
+function routeTopology() {
+  return JSON.stringify(flow(cy.elements()).map(function (element) {
+    return element.isNode() ? [element.id(), element.parent().id(), element.visible(),
+      element.isParent() ? null : [element.outerWidth(), element.outerHeight()],
+      element.style("shape")] :
+      [element.id(), element.source().id(), element.target().id(), element.visible()];
+  }));
+}
+
+function invalidateElkRoutes() {
+  routeEpoch++;
+  var hadRoutes = routesPresent;
+  routesPresent = false;
+  routeGeometry.clear();
+  if (hadRoutes) cy.edges().updateStyle();
+  updateRoutingStatus();
+}
+
+/* A terminal orthogonal leg meets the visible node outline, which may
+   differ from ELK's label-inclusive rectangle. Only the page's declared
+   shapes are supported; an absent or reversed intersection falls back
+   rather than inventing a new route (DL-382). */
+function clipRouteEnd(node, point, next) {
+  var horizontal = Math.abs(point.y - next.y) < 0.001;
+  if (!horizontal && Math.abs(point.x - next.x) >= 0.001) return null;
+  var axis = horizontal ? "x" : "y", other = horizontal ? "y" : "x";
+  var sign = Math.sign(next[axis] - point[axis]);
+  if (!sign) return null;
+  var center = node.position(), w = node.outerWidth() / 2, h = node.outerHeight() / 2;
+  var fixed = point[other] - center[other], intersections = [];
+  var shape = node.style("shape");
+  if (shape === "round-rectangle" || shape === "roundrectangle") {
+    var half = horizontal ? w : h, side = horizontal ? h : w;
+    if (Math.abs(fixed) > side) return null;
+    var radius = Math.min(w / 2, h / 2, 8);
+    var corner = Math.max(0, Math.abs(fixed) - (side - radius));
+    var reach = half - radius + Math.sqrt(Math.max(0, radius * radius - corner * corner));
+    intersections = [-reach, reach];
+  } else {
+    var vertices = shape === "diamond" ? [[0, -1], [1, 0], [0, 1], [-1, 0]] :
+      shape === "rhomboid" ? [[-1, -1], [0.333, -1], [1, 1], [-0.333, 1]] : null;
+    if (!vertices) return null;
+    vertices.forEach(function (v, i) {
+      var u = vertices[(i + 1) % vertices.length];
+      var a = {x: v[0] * w, y: v[1] * h}, b = {x: u[0] * w, y: u[1] * h};
+      if (Math.abs(b[other] - a[other]) < 0.001) return;
+      var t = (fixed - a[other]) / (b[other] - a[other]);
+      if (t >= 0 && t <= 1) intersections.push(a[axis] + t * (b[axis] - a[axis]));
+    });
+  }
+  if (!intersections.length) return null;
+  var end = {x: point.x, y: point.y};
+  end[axis] = center[axis] + (sign > 0 ? Math.max.apply(null, intersections) :
+    Math.min.apply(null, intersections));
+  return (next[axis] - end[axis]) * sign > 0.001 ? end : null;
+}
+
+/* The adapter retains ELK's sections in edge scratch. Their container
+   origins are ELK top-left coordinates, not Cytoscape compound bounds
+   (DL-382). */
+function captureElkRoute(edge) {
+  if (edge.hasClass("lock") || edge.hasClass("nesting") || edge.source().same(edge.target())) {
+    return null;
+  }
+  var raw = edge.scratch("elk");
+  if (!raw || !raw.sections || raw.sections.length !== 1) return null;
+  var origin = {x: 0, y: 0};
+  if (raw.container !== "root") {
+    var container = cy.$id(raw.container);
+    if (container.empty()) return null;
+    var ancestors = container.union(container.ancestors());
+    if (ancestors.some(function (node) {
+      var k = node.scratch("elk");
+      return !k || !Number.isFinite(k.x) || !Number.isFinite(k.y);
+    })) return null;
+    ancestors.forEach(function (node) {
+      var k = node.scratch("elk");
+      origin.x += k.x;
+      origin.y += k.y;
+    });
+  }
+  var section = raw.sections[0];
+  var points = [section.startPoint].concat(section.bendPoints || [], [section.endPoint]);
+  if (points.some(function (p) { return !p || !Number.isFinite(p.x) || !Number.isFinite(p.y); })) {
+    return null;
+  }
+  points = points.map(function (p) { return {x: p.x + origin.x, y: p.y + origin.y}; });
+  points = points.filter(function (p, i) {
+    return !i || Math.hypot(p.x - points[i - 1].x, p.y - points[i - 1].y) > 0.001;
+  });
+  if (points.length < 2 || points.some(function (p, i) {
+    return i && Math.abs(p.x - points[i - 1].x) > 0.001 &&
+      Math.abs(p.y - points[i - 1].y) > 0.001;
+  })) return null;
+  var start = clipRouteEnd(edge.source(), points[0], points[1]);
+  var end = clipRouteEnd(edge.target(), points[points.length - 1], points[points.length - 2]);
+  if (!start || !end) return null;
+  if (points.length === 2 && (end.x - start.x) * (points[1].x - points[0].x) +
+      (end.y - start.y) * (points[1].y - points[0].y) <= 0) return null;
+  points[0] = start;
+  points[points.length - 1] = end;
+  var dx = end.x - start.x, dy = end.y - start.y, length2 = dx * dx + dy * dy;
+  if (length2 < 0.001) return null;
+  var weights = [], distances = [];
+  points.slice(1, -1).forEach(function (p) {
+    var x = p.x - start.x, y = p.y - start.y;
+    weights.push((x * dx + y * dy) / length2);
+    distances.push((-x * dy + y * dx) / Math.sqrt(length2));
+  });
+  var src = edge.source().position(), dst = edge.target().position();
+  return {epoch: routeEpoch, points: points,
+    source: (start.x - src.x) + "px " + (start.y - src.y) + "px",
+    target: (end.x - dst.x) + "px " + (end.y - dst.y) + "px",
+    weights: weights.length ? weights : [0.5], distances: distances.length ? distances : [0]};
+}
+
+function captureElkRoutes(elements) {
+  elements.edges(":visible").forEach(function (edge) {
+    var route = captureElkRoute(edge);
+    edge.scratch("_elkRoute", route);
+    if (route) routesPresent = true;
+  });
+  cy.nodes().not(".lock").forEach(function (node) {
+    routeGeometry.set(node.id(), nodeRouteGeometry(node));
+  });
+  routeLayoutEpoch = routeEpoch;
+  cy.edges().updateStyle();
+}
+
+/* Completion belongs to one run. An earlier stop listener cannot release
+   a later startup or queued arrangement (DL-383). */
+function releaseLayout(layout) {
+  if (!elkRunning || elkRunning.layout !== layout) return false;
+  var ungrabify = elkRunning.ungrabify;
+  elkRunning = null;
+  cy.autoungrabify(ungrabify);
+  if (!loading) document.getElementById("arrange").disabled = false;
+  return true;
+}
+
+function drainArrangement() {
+  if (arrangeQueued === null) return;
+  var suffix = arrangeQueued;
+  arrangeQueued = null;
+  setTimeout(function () { arrangeVisible(suffix); }, 0);
+}
+
+function layoutFailed(layout, error) {
+  if (!releaseLayout(layout)) return;
+  layoutError = String(error && error.message ? error.message : error);
+  invalidateElkRoutes();
+  if (loading) finishInitial();
+  else updateStats();
+  updateRoutingStatus();
+  drainArrangement();
+}
+
+function routedLayout(elements) {
+  var layout = flow(elements).layout(elkLayout());
+  layout.on("layoutstop", function () {
+    if (!elkRunning || elkRunning.layout !== layout) return;
+    if (routeTopology() === elkRunning.topology) captureElkRoutes(flow(elements));
+    releaseLayout(layout);
+    updateRoutingStatus();
+    drainArrangement();
+  });
+  return layout;
+}
+
+function runElkLayout(layout) {
+  invalidateElkRoutes();
+  layoutError = "";
+  elkRunning = {layout: layout, topology: routeTopology(), ungrabify: cy.autoungrabify()};
+  cy.autoungrabify(true);
+  document.getElementById("arrange").disabled = true;
+  updateRoutingStatus();
+  try {
+    layout.run();
+    layout.promise.catch(function (error) { layoutFailed(layout, error); });
+  } catch (error) {
+    layoutFailed(layout, error);
+  }
 }
 
 /* The emitted payload: the elements, and the header totals computed with
@@ -432,7 +699,18 @@ var STYLE_BASE = [
         "border-style": "double"
     } },
     { selector: "edge", style: {
-        "curve-style": "taxi",
+        "curve-style": edgeCurve,
+        "edge-distances": function (edge) { return elkRoute(edge) ? "endpoints" : "intersection"; },
+        "source-endpoint": function (edge) {
+          var route = elkRoute(edge); return route ? route.source : "outside-to-node";
+        },
+        "target-endpoint": function (edge) {
+          var route = elkRoute(edge); return route ? route.target : "outside-to-node";
+        },
+        "segment-weights": function (edge) { var r = elkRoute(edge); return r ? r.weights : [0.5]; },
+        "segment-distances": function (edge) { var r = elkRoute(edge); return r ? r.distances : [0]; },
+        "segment-radii": 6,
+        "control-point-step-size": 40,
         "taxi-direction": TAXI_DIRECTION,
         "taxi-turn": "50%",
         "taxi-turn-min-distance": 8,
@@ -573,6 +851,13 @@ var cy = cytoscape({
   style: STYLE_BASE.concat(branchStyles(), STYLE_TAIL)
 });
 
+/* Refresh the existing stylesheet: every edge, including a restored or new
+   meta-edge, reads the same control without accumulating rules (DL-381). */
+edgeStyleSelect.addEventListener("change", function () {
+  cy.style().update();
+  updateRoutingStatus();
+});
+
 /* Edges are never selected (DL-196): the selection is a set of nodes, the
    operand of every bulk op, and an arrow in it would be a lie about what
    the next op acts on. Done again after every fold: a meta-edge is a new
@@ -601,6 +886,15 @@ function classifyNesting() {
   });
 }
 classifyNesting();
+
+cy.on("position style add remove", function (evt) {
+  var element = evt.target;
+  if (elkRunning || routeLayoutEpoch !== routeEpoch || element === cy || element.hasClass("lock")) return;
+  if (evt.type === "add" || evt.type === "remove" ||
+      (element.isNode() && routeGeometry.get(element.id()) !== nodeRouteGeometry(element))) {
+    invalidateElkRoutes();
+  }
+});
 
 /* ------------------------------------------------------------ locks (DL-192) */
 
@@ -854,7 +1148,8 @@ function fitVisible() { cy.fit(cy.nodes(":visible"), 40); }
    call it: manual placement is the operator's, and a layout is how it is
    given up. */
 function arrangeVisible(suffix) {
-  var layout = flow(cy.elements(":visible")).layout(elkLayout());
+  if (elkRunning) { arrangeQueued = suffix || ""; return; }
+  var layout = routedLayout(cy.elements(":visible"));
   layout.on("layoutstop", function () {
     placeLocks();
     /* ELK fitted the elements it laid out, and the hubs are not among
@@ -863,7 +1158,7 @@ function arrangeVisible(suffix) {
     fitVisible();
     updateStats(suffix);
   });
-  layout.run();
+  runElkLayout(layout);
 }
 
 /* --------------------------------------------- the three layers (DL-196) */
@@ -1519,6 +1814,7 @@ wire("fit-selection", fitSelection);
 /* the toggle governs the hide ops; this button governs nothing but itself --
    a layout over what is drawn, whenever the picture has been pulled about */
 wire("arrange", function () { arrangeVisible("arranged"); });
+wire("refresh-routes", function () { arrangeVisible("arranged"); });
 wire("hide-selected", hideSelected);
 wire("hide-others", hideOthers);
 wire("highlight-selected", highlightSelected);
@@ -1656,12 +1952,12 @@ function foldMarked() {
   });
   if (marked.empty()) { finishInitial(); return; }
   marked.forEach(function (box) { ec.collapse(box, { layoutBy: null }); });
-  var again = flow(cy.elements(":visible")).layout(elkLayout());
+  var again = routedLayout(cy.elements(":visible"));
   again.on("layoutstop", finishInitial);
-  again.run();
+  runElkLayout(again);
 }
 
-var initial = flow(cy.elements()).layout(elkLayout());
+var initial = routedLayout(cy.elements());
 initial.on("layoutstop", function () {
   /* the extension registers below and the layout is RUN below that, so `ec`
      or its absence is a known fact here -- one order, not two (DL-193) */
@@ -1795,7 +2091,7 @@ try {
    moving the call buys is that the stop handler runs with `ec` decided,
    instead of a three-flag handshake for the two orders it could arrive
    in (DL-193). */
-initial.run();
+runElkLayout(initial);
 
 function collapseBox(box) { if (ec && ec.isCollapsible(box)) ec.collapse(box); }
 function expandBox(box) { if (ec && ec.isExpandable(box)) ec.expand(box); }

@@ -57,6 +57,19 @@ cd "$work"
 cp "$manifest/package.json" "$manifest/package-lock.json" .
 npm ci --no-audit --no-fund
 
+# Expose the adapter's complete promise without changing its run() result
+# or its layout pipeline. Refuse package-entry drift before building (DL-383).
+node <<'EOF'
+const fs = require('node:fs');
+const file = require.resolve('cytoscape-elk');
+const source = fs.readFileSync(file, 'utf8');
+const before = 'elk.layout(graph).then(function () {';
+if (source.split(before).length !== 2) {
+  throw new Error('cytoscape-elk promise patch no longer matches exactly once');
+}
+fs.writeFileSync(file, source.replace(before, 'this.promise = ' + before));
+EOF
+
 # The installed packages' own package.json is the single source for the
 # versions the banners quote -- scripts/vendor/package.json stays the only
 # place a version is pinned by hand.

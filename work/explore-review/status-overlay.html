@@ -1,0 +1,243 @@
+<div id="dsl41-status-study" class="viz-carousel" aria-label="Explorer status annotation designs">
+  <section data-variant="Quiet markers" aria-label="Quiet status markers">
+    <div class="explore-study" data-design="quiet" aria-label="Quiet status markers">
+      <header class="study-header">
+        <div class="study-title"><strong>Explore: example workflow</strong><span>Design study · synthetic data</span></div>
+        <div class="study-tools">
+          <label><input type="checkbox" data-marks checked> Status marks</label>
+          <button type="button" class="cursor-interaction" data-failures aria-pressed="false">Find failures</button>
+          <span class="study-route">ELK routes · current</span>
+        </div>
+        <div class="study-source">Snapshot · sample estate · period 07 · captured 08:42:10 UTC <span>17 / 18 jobs matched</span></div>
+      </header>
+      <div class="study-body">
+        <div class="study-canvas" aria-label="Workflow with an expanded box, nested box and collapsed box">
+          <svg class="study-links" aria-hidden="true"><path data-link="load-check"></path><path data-link="check-send"></path><path data-link="send-report"></path></svg>
+          <div class="study-box expanded">
+            <div class="study-box-heading"><strong>INGEST_B</strong><span class="study-runtime"><i data-lucide="play" aria-hidden="true"></i> Running</span></div>
+            <span class="study-box-summary study-runtime">1 failed · 1 queued</span>
+          </div>
+          <div class="study-box nested"><strong>VALIDATE_B <span class="study-runtime">▷ Running</span></strong></div>
+          <button type="button" class="study-node cursor-interaction" data-job="LOAD_C" data-state="success"><span class="study-mark study-runtime"><i data-lucide="check" aria-hidden="true"></i></span><span class="study-node-copy"><span>LOAD_C</span><small class="study-runtime">Success</small></span></button>
+          <button type="button" class="study-node selected cursor-interaction" data-job="CHECK_C" data-state="failure" aria-pressed="true"><span class="study-mark study-runtime"><i data-lucide="x" aria-hidden="true"></i></span><span class="study-node-copy"><span>CHECK_C</span><small class="study-runtime">Failure · exit 2</small></span></button>
+          <button type="button" class="study-node cursor-interaction" data-job="SEND_C" data-state="queued"><span class="study-mark study-runtime"><i data-lucide="clock-3" aria-hidden="true"></i></span><span class="study-node-copy"><span>SEND_C</span><small class="study-runtime">Queued · ON_HOLD</small></span></button>
+          <button type="button" class="study-node collapsed cursor-interaction" data-job="REPORT_B" data-state="running"><span class="study-mark study-runtime"><i data-lucide="play" aria-hidden="true"></i></span><span class="study-node-copy"><span>REPORT_B (12)</span><small class="study-runtime">Running</small></span><span class="study-descendants study-runtime"><span class="study-failed-count">2 failed</span> · 3 running<br><span>1 status missing</span></span></button>
+          <div class="study-canvas-note" aria-live="polite">Click a job to inspect its status.</div>
+        </div>
+        <aside class="study-details" aria-label="Selected job details">
+          <h3 data-detail-name>CHECK_C</h3>
+          <div class="study-detail-state" data-detail-state>Failure</div>
+          <dl data-detail-fields></dl>
+          <div class="study-condition" data-condition></div>
+        </aside>
+      </div>
+      <footer class="study-footer"><span>6 visible jobs · 12 folded members</span><span class="study-legend">✓ success · × failure · ▷ running · ◷ queued</span></footer>
+    </div>
+  </section>
+  <section data-variant="Status rows" aria-label="Explicit status rows" hidden></section>
+</div>
+<style>
+#dsl41-status-study { color-scheme: light dark; }
+#dsl41-status-study [data-variant] { min-height: 730px; }
+#dsl41-status-study .explore-study {
+  --ex-bg: light-dark(#fff, #171b23); --ex-fg: light-dark(#263143, #e3e7ef);
+  --ex-muted: light-dark(#637085, #a9b3c4); --ex-line: light-dark(#d5dbe5, #404c60);
+  --ex-control: light-dark(#f8f9fc, #242b38); --ex-box: light-dark(#f7f5ff, #262139);
+  --ex-nest: light-dark(#f0ecff, #312946); --ex-purple: light-dark(#a58ae8, #8b70cb);
+  --ex-green: light-dark(#268050, #80c69a); --ex-red: light-dark(#b53636, #f19393);
+  --ex-blue: light-dark(#3575c8, #8bb8ef); --ex-amber: light-dark(#956410, #e2bc70);
+  --ex-highlight: light-dark(#ffe492, #746024); --ex-selected: light-dark(#bdd9ff, #36577f);
+  background: var(--ex-bg); color: var(--ex-fg); border: 1px solid var(--ex-line);
+  border-radius: 6px; font: 13px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  overflow-wrap: anywhere;
+}
+#dsl41-status-study .study-header { padding: 10px 12px 8px; border-bottom: 1px solid var(--ex-line); }
+#dsl41-status-study .study-title { display: flex; gap: 12px; flex-wrap: wrap; padding-right: 80px; align-items: baseline; }
+#dsl41-status-study .study-title strong { font-size: 15px; font-weight: 500; }
+#dsl41-status-study .study-title > span { font-size: 12px; color: var(--ex-muted); }
+#dsl41-status-study .study-tools { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 9px; }
+#dsl41-status-study .study-tools label { display: flex; align-items: center; gap: 4px; }
+#dsl41-status-study .study-tools input { accent-color: var(--ex-blue); }
+#dsl41-status-study button { font: inherit; color: inherit; }
+#dsl41-status-study .study-tools button { border: 1px solid var(--ex-line); background: var(--ex-control); padding: 4px 9px; border-radius: 4px; }
+#dsl41-status-study .study-tools button[aria-pressed="true"] { background: var(--ex-selected); }
+#dsl41-status-study .study-route { margin-left: auto; font-size: 12px; color: var(--ex-muted); }
+#dsl41-status-study .study-source { display: flex; gap: 6px 16px; flex-wrap: wrap; color: var(--ex-muted); font-size: 12px; margin-top: 9px; }
+#dsl41-status-study .study-source span { margin-left: auto; }
+#dsl41-status-study .study-body { display: grid; grid-template-columns: minmax(0, 1fr) 225px; }
+#dsl41-status-study .study-canvas { position: relative; height: 435px; min-width: 0; }
+#dsl41-status-study .study-links { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; z-index: 1; pointer-events: none; }
+#dsl41-status-study .study-links path { stroke: var(--ex-muted); stroke-width: 1.4; fill: none; }
+#dsl41-status-study .study-box { position: absolute; box-sizing: border-box; border: 1px solid var(--ex-purple); border-radius: 7px; background: var(--ex-box); }
+#dsl41-status-study .study-box.expanded { left: 20px; top: 22px; width: calc(100% - 202px); height: 345px; }
+#dsl41-status-study .study-box.nested { left: 32px; top: 147px; width: calc(100% - 226px); height: 94px; background: var(--ex-nest); }
+#dsl41-status-study .study-box.nested > strong { display: block; text-align: center; margin-top: 6px; font-size: 11px; font-weight: 500; }
+#dsl41-status-study .study-box.nested .study-runtime { color: var(--ex-blue); margin-left: 5px; }
+#dsl41-status-study .study-box-heading { display: flex; flex-wrap: wrap; gap: 3px 8px; align-items: center; padding: 9px 10px 0; }
+#dsl41-status-study .study-box-heading strong { font-weight: 500; }
+#dsl41-status-study .study-box-heading .study-runtime { display: flex; gap: 4px; align-items: center; color: var(--ex-blue); font-size: 12px; margin-left: auto; }
+#dsl41-status-study .study-box-summary { display: block; font-size: 12px; color: var(--ex-muted); padding: 2px 10px; }
+#dsl41-status-study .study-runtime svg { width: 13px; height: 13px; flex: none; }
+#dsl41-status-study .study-node { position: absolute; z-index: 2; box-sizing: border-box; width: min(164px, calc(100% - 250px)); min-height: 44px; display: flex; align-items: center; gap: 6px; padding: 7px 9px; border: 1px solid var(--ex-muted); border-radius: 5px; background: var(--ex-bg); text-align: center; }
+#dsl41-status-study .study-node[data-job="LOAD_C"] { left: calc((100% - 202px) / 2 + 20px); top: 87px; transform: translateX(-50%); }
+#dsl41-status-study .study-node[data-job="CHECK_C"] { left: calc((100% - 202px) / 2 + 20px); top: 181px; transform: translateX(-50%); }
+#dsl41-status-study .study-node[data-job="SEND_C"] { left: calc((100% - 202px) / 2 + 20px); top: 287px; transform: translateX(-50%); }
+#dsl41-status-study .study-node-copy { flex: 1; min-width: 0; }
+#dsl41-status-study .study-node-copy small { font-size: 12px; display: block; margin-top: 3px; }
+#dsl41-status-study [data-design="quiet"] .study-node:not(.collapsed) small { display: none; }
+#dsl41-status-study .study-mark { display: flex; align-items: center; justify-content: center; width: 14px; height: 16px; flex: none; }
+#dsl41-status-study [data-state="success"] .study-mark { color: var(--ex-green); }
+#dsl41-status-study [data-state="failure"] .study-mark { color: var(--ex-red); }
+#dsl41-status-study [data-state="queued"] .study-mark { color: var(--ex-amber); }
+#dsl41-status-study [data-state="running"] .study-mark { color: var(--ex-blue); }
+#dsl41-status-study .study-node.selected { border-color: var(--ex-blue); box-shadow: 0 0 0 3px var(--ex-selected); }
+#dsl41-status-study .study-node.failure-found { outline: 6px solid var(--ex-highlight); outline-offset: 4px; }
+#dsl41-status-study .study-node.collapsed { width: 157px; min-height: 110px; right: 12px; top: 253px; border: 3px double var(--ex-purple); background: var(--ex-nest); flex-wrap: wrap; }
+#dsl41-status-study .study-node.collapsed .study-node-copy { text-align: center; }
+#dsl41-status-study .study-descendants { width: 100%; font-size: 12px; color: var(--ex-muted); text-align: center; }
+#dsl41-status-study .study-descendants .study-failed-count { color: var(--ex-red); }
+#dsl41-status-study .study-canvas-note { position: absolute; bottom: 12px; left: 20px; right: 12px; font-size: 12px; color: var(--ex-muted); }
+#dsl41-status-study .study-details { border-left: 1px solid var(--ex-line); padding: 15px; background: var(--ex-control); }
+#dsl41-status-study .study-details h3 { margin: 0; font-size: 13px; font-weight: 500; }
+#dsl41-status-study .study-detail-state { margin-top: 6px; font-weight: 500; }
+#dsl41-status-study .study-details dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 7px 12px; margin: 14px 0; font-size: 12px; }
+#dsl41-status-study .study-details dt { color: var(--ex-muted); }
+#dsl41-status-study .study-details dd { margin: 0; }
+#dsl41-status-study .study-condition { border-top: 1px solid var(--ex-line); padding-top: 11px; font-size: 12px; }
+#dsl41-status-study .study-footer { padding: 8px 12px; display: flex; justify-content: space-between; gap: 6px 20px; flex-wrap: wrap; border-top: 1px solid var(--ex-line); color: var(--ex-muted); font-size: 12px; }
+#dsl41-status-study .marks-hidden .study-runtime { visibility: hidden; }
+#dsl41-status-study [data-design="rows"] .study-body { grid-template-columns: minmax(0, 1fr); }
+#dsl41-status-study [data-design="rows"] .study-canvas { height: 435px; }
+#dsl41-status-study [data-design="rows"] .study-details { border-left: 0; border-top: 1px solid var(--ex-line); display: grid; grid-template-columns: 115px minmax(0, 1fr); gap: 8px 20px; padding: 10px 14px; }
+#dsl41-status-study [data-design="rows"] .study-detail-state { margin: 0; }
+#dsl41-status-study [data-design="rows"] .study-details dl { grid-column: 2; grid-row: 1 / 3; grid-template-columns: auto 1fr auto 1fr; margin: 0; }
+#dsl41-status-study [data-design="rows"] .study-condition { grid-column: 1 / -1; }
+@media (max-width: 850px) {
+  #dsl41-status-study .study-body { grid-template-columns: minmax(0, 1fr); }
+  #dsl41-status-study .study-details { border-left: 0; border-top: 1px solid var(--ex-line); }
+  #dsl41-status-study .study-details dl { grid-template-columns: auto 1fr auto 1fr; }
+  #dsl41-status-study [data-variant] { min-height: 860px; }
+}
+@media (max-width: 540px) {
+  #dsl41-status-study .study-title { padding-right: 62px; }
+  #dsl41-status-study .study-route { margin-left: 0; }
+  #dsl41-status-study .study-source span { margin-left: 0; }
+  #dsl41-status-study .study-canvas, #dsl41-status-study [data-design="rows"] .study-canvas { height: 558px; }
+  #dsl41-status-study .study-box.expanded { width: calc(100% - 40px); }
+  #dsl41-status-study .study-box.nested { width: calc(100% - 64px); }
+  #dsl41-status-study .study-node:not(.collapsed) { width: 164px; left: 50%; }
+  #dsl41-status-study .study-node.collapsed { top: 401px; right: auto; left: 50%; transform: translateX(-50%); }
+  #dsl41-status-study .study-details dl, #dsl41-status-study [data-design="rows"] .study-details dl { grid-template-columns: auto minmax(0, 1fr); grid-column: auto; grid-row: auto; }
+  #dsl41-status-study [data-design="rows"] .study-details { display: block; }
+  #dsl41-status-study [data-design="rows"] .study-details dl { margin: 14px 0; }
+  #dsl41-status-study .study-condition { grid-column: auto; }
+  #dsl41-status-study [data-variant] { min-height: 1140px; }
+}
+@media (pointer: coarse) { #dsl41-status-study .study-tools label, #dsl41-status-study .study-tools button { min-height: 44px; } }
+</style>
+<script>
+(() => {
+  const root = document.getElementById('dsl41-status-study');
+  const alternate = root.querySelector('[data-variant="Status rows"]');
+  const clone = root.querySelector('.explore-study').cloneNode(true);
+  clone.dataset.design = 'rows';
+  clone.setAttribute('aria-label', 'Explicit status rows');
+  alternate.appendChild(clone);
+  const jobs = {
+    LOAD_C: {state: 'Success', run: '3', exit: '0', time: '08:41:44 UTC', flags: 'None', condition: 'Condition satisfied at capture.'},
+    CHECK_C: {state: 'Failure', run: '3', exit: '2', time: '08:41:58 UTC', flags: 'None', condition: 's(LOAD_C) = true · the job ran and failed.'},
+    SEND_C: {state: 'QUE_WAIT', run: '2', exit: '—', time: '08:42:01 UTC', flags: 'ON_HOLD', condition: 's(CHECK_C) = false · operator hold also applies.'},
+    REPORT_B: {state: 'Running', run: '3', exit: '—', time: '08:38:12 UTC', flags: 'None', condition: 'Reported box state: RUNNING. Descendants: 2 failed, 3 running, 6 successful, 1 without status.'}
+  };
+  const saved = window.openai?.widgetState;
+  const restore = saved?.privateContent || {};
+  const states = new Map();
+  const save = () => {
+    const variants = Object.fromEntries([...states].map(([key, value]) => [key, {...value}]));
+    window.openai?.setWidgetState?.({modelContent: {status_overlay_study: variants}, privateContent: {variants}})?.catch(() => {});
+  };
+  root.querySelectorAll('.explore-study').forEach(app => {
+    const key = app.dataset.design;
+    const initial = restore.variants?.[key] || {};
+    const state = {job: jobs[initial.job] ? initial.job : 'CHECK_C', marks: initial.marks !== false, failures: initial.failures === true};
+    states.set(key, state);
+    const nodes = [...app.querySelectorAll('[data-job]')];
+    function drawLinks() {
+      const canvas = app.querySelector('.study-canvas');
+      if (!canvas.clientWidth) return;
+      const area = canvas.getBoundingClientRect();
+      const bounds = name => {
+        const b = app.querySelector(`[data-job="${name}"]`).getBoundingClientRect();
+        return {x: b.x - area.x, y: b.y - area.y, w: b.width, h: b.height};
+      };
+      const svg = app.querySelector('.study-links');
+      svg.setAttribute('viewBox', `0 0 ${canvas.clientWidth} ${canvas.clientHeight}`);
+      [['load-check', 'LOAD_C', 'CHECK_C'], ['check-send', 'CHECK_C', 'SEND_C'], ['send-report', 'SEND_C', 'REPORT_B']].forEach(([id, a, b]) => {
+        const from = bounds(a), to = bounds(b);
+        const start = {x: from.x + from.w / 2, y: from.y + from.h};
+        let path;
+        if (id === 'load-check') {
+          const laneX = to.x - 18, endX = to.x - 5, endY = to.y + to.h / 2;
+          path = `M ${start.x} ${start.y} V ${start.y + 7} H ${laneX} V ${endY} H ${endX} m -4 -3 l 4 3 l -4 3`;
+        } else if (Math.abs(start.x - to.x - to.w / 2) < 2) {
+          const endY = to.y - 5;
+          path = `M ${start.x} ${start.y} V ${endY} m -3 -4 l 3 4 l 3 -4`;
+        } else {
+          const bendY = Math.max(start.y + 15, to.y + to.h / 2);
+          const endX = to.x - 5;
+          path = `M ${start.x} ${start.y} V ${bendY} H ${endX} m -4 -3 l 4 3 l -4 3`;
+        }
+        app.querySelector(`[data-link="${id}"]`).setAttribute('d', path);
+      });
+    }
+    function render() {
+      app.classList.toggle('marks-hidden', !state.marks);
+      app.querySelector('[data-marks]').checked = state.marks;
+      app.querySelector('[data-failures]').setAttribute('aria-pressed', String(state.failures));
+      nodes.forEach(node => {
+        const selected = node.dataset.job === state.job;
+        node.classList.toggle('selected', selected);
+        node.classList.toggle('failure-found', state.failures && ['CHECK_C', 'REPORT_B'].includes(node.dataset.job));
+        node.setAttribute('aria-pressed', String(selected));
+        const job = jobs[node.dataset.job];
+        node.setAttribute('aria-label', `${node.dataset.job}: ${job.state}${job.flags !== 'None' ? ', ' + job.flags : ''}`);
+      });
+      const job = jobs[state.job];
+      app.querySelector('[data-detail-name]').textContent = state.job;
+      app.querySelector('[data-detail-state]').textContent = job.state;
+      const fields = [['Run', job.run], ['Exit code', job.exit], ['State since', job.time], ['Flags', job.flags]];
+      const dl = app.querySelector('[data-detail-fields]');
+      dl.replaceChildren();
+      fields.forEach(([name, value]) => {
+        const dt = document.createElement('dt'), dd = document.createElement('dd');
+        dt.textContent = name; dd.textContent = value; dl.append(dt, dd);
+      });
+      app.querySelector('[data-condition]').textContent = job.condition;
+      app.querySelector('.study-canvas-note').textContent = state.failures ? '1 visible failure · 2 inside REPORT_B · selection unchanged' : 'Click a job to inspect its status.';
+      drawLinks();
+    }
+    nodes.forEach(node => node.addEventListener('click', () => {state.job = node.dataset.job; render(); save();}));
+    app.querySelector('[data-marks]').addEventListener('change', event => {state.marks = event.target.checked; render(); save();});
+    app.querySelector('[data-failures]').addEventListener('click', () => {state.failures = !state.failures; render(); save();});
+    new ResizeObserver(drawLinks).observe(app.querySelector('.study-canvas'));
+    const style = {marks: state.marks};
+    if (globalThis.Tweak) {
+      const tweak = new Tweak({container: app, onChange: () => {state.marks = style.marks; render();}});
+      tweak.addToggle(style, 'marks', {label: 'Show status marks'});
+    }
+    app._applyState = next => {
+      if (!next) return;
+      state.job = jobs[next.job] ? next.job : state.job;
+      state.marks = next.marks !== false;
+      state.failures = next.failures === true;
+      render();
+    };
+    render();
+  });
+  window.addEventListener('openai:set_globals', event => {
+    const variants = event.detail?.globals?.widgetState?.privateContent?.variants;
+    if (variants) root.querySelectorAll('.explore-study').forEach(app => app._applyState(variants[app.dataset.design]));
+  });
+  if (globalThis.lucide) lucide.createIcons({attrs: {width: 14, height: 14}});
+})();
+</script>

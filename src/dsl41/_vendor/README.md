@@ -16,6 +16,12 @@ zero network). Dev-time regeneration only — users of the package never need no
 independent artifacts, and a shared-chunk build would couple their upgrade
 cadence for ~500 KiB deflated (DL-71).
 
+The explore build applies one local patch to `cytoscape-elk`'s prebuilt entry (DL-383).
+Its existing ELK and position-application promise is assigned to `layout.promise`.
+`run()` still returns the layout. The page uses that promise to recover from a
+rejected layout. The build requires exactly one matching fragment in that entry.
+There is no second layout pipeline or timeout.
+
 Full license texts and source URLs: `THIRD_PARTY_LICENSES` at the repo
 root (shipped in the wheel's dist-info).
 
