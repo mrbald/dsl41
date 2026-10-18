@@ -24924,3 +24924,16 @@ relitigate an entry; append a new one.
   12.0 and 24.2.00 vendor examples and guards direct capture on success and empty stderr.
   Format recognition proves no capture flags, authorization or complete/atomic estate
   observation. The helper runs no producer and adds no viewer/compiler/runtime dependency.
+- DL-388 Vendor hooks are readable patches over exact prebuilt inputs (2026-10-18).
+  The vendor build applies scripts/vendor/patches/cytoscape-elk.patch to the
+  pinned package's unminified dist/cytoscape-elk.js in its disposable npm tree.
+  The two hunks retain DL-383's completion promise and DL-384's optional native
+  labels. The transpiled constructor remains compatible with Cytoscape's wrapper.
+  An exact SHA256 preimage check precedes git apply --check and application.
+  An exact postimage check follows. These checks finish before any vendor asset
+  is written. A mismatch fails the build without fallback or partial acceptance.
+  Package resolution stays in the manifest and lockfile under DL-215.
+  scripts/vendor/patches/README.md records each hook, its coverage and the
+  deliberate upgrade procedure. Remove each hook when upstream supplies its
+  equivalent. This changes only patch maintenance; the patched entry and all
+  four shipping JavaScript assets retain their bytes.

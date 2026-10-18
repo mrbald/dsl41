@@ -1,0 +1,36 @@
+--- a/node_modules/cytoscape-elk/dist/cytoscape-elk.js
++++ b/node_modules/cytoscape-elk/dist/cytoscape-elk.js
+@@ -198,14 +198,16 @@
+ 
+     k.x = p.x - dims.w / 2;
+     k.y = p.y - dims.h / 2;
+     k.width = dims.w;
+     k.height = dims.h;
+   }
+ 
++  if (options.nodeLabels) { k.labels = options.nodeLabels(node); }
++
+   node.scratch('elk', k);
+   return k;
+ };
+ 
+ var makeEdge = function makeEdge(edge
+ /*, options*/
+ ) {
+@@ -300,15 +302,15 @@
+       var options = this.options;
+       var eles = options.eles;
+       var nodes = eles.nodes();
+       var edges = eles.edges();
+       var elk = new (elk_bundled_js_amd_elkjs_root_ELK_default())();
+       var graph = makeGraph(nodes, edges, options);
+       graph['layoutOptions'] = options.elk;
+-      elk.layout(graph).then(function () {
++      this.promise = elk.layout(graph).then(function () {
+         nodes.filter(function (n) {
+           return !n.isParent();
+         }).layoutPositions(layout, options, function (n) {
+           return getPos(n, options);
+         });
+       });
+       return this;

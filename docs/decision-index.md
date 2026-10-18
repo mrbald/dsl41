@@ -398,3 +398,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-385 | Explore imports offline snapshots without changing graph facts |  |
 | DL-386 | Explore name callouts avoid open details when space permits |  |
 | DL-387 | A standalone helper converts one bounded AutoSys summary table |  |
+| DL-388 | Vendor hooks are readable patches over exact prebuilt inputs |  |

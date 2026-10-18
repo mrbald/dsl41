@@ -1,1 +1,3 @@
 src/dsl41/_vendor/*.js -diff linguist-vendored linguist-generated
+# Unified diffs retain blank-line context markers (DL-388).
+scripts/vendor/patches/*.patch whitespace=-blank-at-eol
