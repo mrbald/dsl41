@@ -57,24 +57,23 @@ cd "$work"
 cp "$manifest/package.json" "$manifest/package-lock.json" .
 npm ci --no-audit --no-fund
 
-# Expose completion and optional native labels in the pinned prebuilt entry.
-# Each seam must match exactly once before either edit is written (DL-383, DL-384).
-node <<'EOF'
-const fs = require('node:fs');
-const file = require.resolve('cytoscape-elk');
-let source = fs.readFileSync(file, 'utf8');
-const patches = [
-  ['elk.layout(graph).then(function () {', 'this.promise = elk.layout(graph).then(function () {'],
-  ["  node.scratch('elk', k);", "  if (options.nodeLabels) { k.labels = options.nodeLabels(node); }\n\n  node.scratch('elk', k);"]
-];
-for (const [before, after] of patches) {
-  if (source.split(before).length !== 2) {
-    throw new Error('cytoscape-elk patch no longer matches exactly once: ' + before);
-  }
-  source = source.replace(before, after);
-}
-fs.writeFileSync(file, source);
-EOF
+# Patch only the exact unminified prebuilt entry, before bundling (DL-388).
+elk_entry="node_modules/cytoscape-elk/dist/cytoscape-elk.js"
+elk_patch="$manifest/patches/cytoscape-elk.patch"
+if ! printf '%s  %s\n' \
+    25acbb9dea9b0dc6fef0e79b697547ee56e579f0e1c22ae4353131e72c7e140a \
+    "$elk_entry" | shasum -a 256 --check -; then
+    echo "cytoscape-elk preimage mismatch; see scripts/vendor/patches/README.md" >&2
+    exit 1
+fi
+git apply --check "$elk_patch"
+git apply "$elk_patch"
+if ! printf '%s  %s\n' \
+    e72eab68d6f7273598b64b3e75f0052d2c40633b9296f11712fa1a8b81109185 \
+    "$elk_entry" | shasum -a 256 --check -; then
+    echo "cytoscape-elk postimage mismatch; see scripts/vendor/patches/README.md" >&2
+    exit 1
+fi
 
 # The installed packages' own package.json is the single source for the
 # versions the banners quote -- scripts/vendor/package.json stays the only
