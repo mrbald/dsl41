@@ -1,0 +1,6 @@
+Job Name                         Last Start           Last End             ST/Ex Run/Ntry Pri/Xit
+________________________________ ____________________ ____________________ _____ ________ _______
+EMEA_EOD_B                       01/02/2026 03:04:05  -----                RU/NE 17/1
+ EMEA_EXE_B                      01/02/2026 03:04:05  -----                RU    17/1
+  EMEA_EXE_ORDER_FREEZE_C        01/02/2026 03:04:05  01/02/2026 03:04:06  SU    17/1     0
+GROUP_TREASURY_EOD^PRD           -----                -----                Z?    0/0

@@ -24908,3 +24908,19 @@ relitigate an entry; append a new one.
   At infeasible narrow widths, the existing viewport clamp and details priority remain.
   Exact names and observations remain available in details and explicit Find.
   This HTML-only avoidance changes no graph geometry, attention, navigation or routes.
+- DL-387 A standalone helper converts one bounded AutoSys summary table (2026-10-18).
+  scripts/autorep_snapshot.py uses only Python's standard library. It emits only
+  DL-385's mandatory nodes/state shape. Exact names and complete trimmed ST/Ex values
+  survive without aliases, enums or inferred state. It accepts one consecutive English
+  six-column header/ruler table with variable name width and trailing widths 20/20/5/8/7.
+  The documented helper subset is printable ASCII with LF or CRLF, nonempty opaque
+  dates, decimal run/try, and optional one-token opaque priority/exit. Unicode byte/display
+  widths are unqualified; this adapter limit does not narrow generic Unicode JSON.
+  Indentation/padding are removed from names; embedded whitespace and exact duplicates
+  fail. Missing fields, wraps, shifts, overflow, controls, mixed output and internal blanks
+  fail the whole input. Empty and header-only input are unsupported, not empty snapshots.
+  All parsing and JSON preparation finish before stdout or atomic named-file replacement.
+  The synthetic summary example uses public Nightbank IDs. Its README links the English
+  12.0 and 24.2.00 vendor examples and guards direct capture on success and empty stderr.
+  Format recognition proves no capture flags, authorization or complete/atomic estate
+  observation. The helper runs no producer and adds no viewer/compiler/runtime dependency.

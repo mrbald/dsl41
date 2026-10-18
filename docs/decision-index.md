@@ -397,3 +397,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-384 | Explore separates compact node bodies from contextual names |  |
 | DL-385 | Explore imports offline snapshots without changing graph facts |  |
 | DL-386 | Explore name callouts avoid open details when space permits |  |
+| DL-387 | A standalone helper converts one bounded AutoSys summary table |  |

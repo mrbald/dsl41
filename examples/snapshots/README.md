@@ -5,7 +5,7 @@ and fulfilment graphs. The values are independent examples, not a captured run.
 A box's supplied state is separate from the observations supplied for its
 descendant leaf jobs.
 
-Each sidecar contains only `nodes` and a string `state` for every entry.
+Each JSON sidecar contains only `nodes` and a string `state` for every entry.
 No source, timestamp, version or state vocabulary is required. IDs match the
 emitted graph exactly. Optional metadata is described in the viewer's Format
 section. Replacement drops observations omitted from the new file.
@@ -88,6 +88,85 @@ There are no external matches, unknown IDs or ineligible IDs.
 These are business observations associated with existing emitted nodes.
 The viewer preserves the words as supplied; it does not interpret them as
 scheduler states or load a different topology.
+
+## AutoSys summary converter
+
+The standalone standard-library helper converts one bounded English `autorep`
+summary table to the same JSON sidecar. It reads stdin or a UTF-8 file. It emits
+only JSON on success. `-o` replaces a named output only after the whole input is
+validated and JSON is prepared. Invalid input emits no JSON and keeps an existing
+output file. No AutoSys connection or project installation is needed.
+
+[autorep-summary.txt](autorep-summary.txt) is manually synthetic text, based on
+documented columns and public Nightbank IDs. It is not an AutoSys capture.
+From the repository root:
+
+```sh
+python3 scripts/autorep_snapshot.py examples/snapshots/autorep-summary.txt \
+  -o /tmp/nightbank-autorep.json
+```
+
+Import `/tmp/nightbank-autorep.json` into the small Nightbank page above. There
+are three catalog observations and one exact external match. `EMEA_EOD_B` keeps
+`RU/NE`; `EMEA_EXE_B` keeps `RU`; its supplied order-freeze child keeps `SU`.
+The external `GROUP_TREASURY_EOD^PRD` keeps the invented `Z?` value. The AutoSys
+display preset recognizes only its built-in literal codes/names. Composite
+values such as `RU/NE` and unknown values such as `Z?` remain raw and neutral.
+
+For an actual capture, redirect stdout directly to a file outside this checkout.
+Check producer success and empty, separately captured stderr before conversion:
+
+```sh
+if autorep -J ALL -s > /tmp/autorep-summary.txt 2> /tmp/autorep-summary.err \
+  && test ! -s /tmp/autorep-summary.err; then
+  python3 scripts/autorep_snapshot.py /tmp/autorep-summary.txt \
+    -o /tmp/autorep-snapshot.json
+else
+  printf '%s\n' 'autorep failed or wrote stderr; conversion skipped' >&2
+  false
+fi
+```
+
+The supported columns and capture flags come from the English
+[AutoSys 12.0 reference](https://techdocs.broadcom.com/us/en/ca-enterprise-software/intelligent-automation/autosys-workload-automation/12-0/reference/ae-commands/monitor-and-report-on-workload/autorep-command-report-job-machine-and-variable-information.html)
+and [24.2.00 reference](https://techdocs.broadcom.com/us/en/ca-enterprise-software/intelligent-automation/autosys-workload-automation/24-2-00/reference/ae-commands/monitor-and-report-on-workload/autorep-command-report-job-machine-and-variable-information.html).
+Default job names are complete. Do not use `-n`, which permits truncation.
+In these editions `-w` expands condition names with `-q`; it is not a wide-name
+switch. Do not mix detail, definition, time-zone, previous-run or version output
+into this table. Record `autorep -x` separately when identifying a capture.
+
+The helper supports only this subset (DL-387):
+
+- One consecutive table, surrounded by optional blank lines, with literal
+  `Job Name`, `Last Start`, `Last End`, `ST/Ex`, `Run/Ntry`, `Pri/Xit` headings.
+  Six underscore groups define the columns. The name width varies; the other
+  widths are 20, 20, 5, 8 and 7, separated by one space.
+- Printable ASCII table characters and LF or CRLF line endings. Non-ASCII,
+  tabs, controls, terminal escapes and a UTF-8 BOM are unsupported. The vendor
+  examples do not establish Unicode byte/display widths. This helper limit
+  does not narrow the generic viewer's arbitrary Unicode JSON strings.
+- One nonempty name token after hierarchy indentation and padding are removed.
+  Case, punctuation and qualifiers remain exact. No fixed name maximum is
+  imposed. Duplicate names, malformed or overflowing rows, shifted separators,
+  repeated headers, internal blank lines, diagnostics and mixed reports fail
+  the whole conversion. Lines are never skipped or joined.
+- Nonempty opaque date cells and the complete trimmed raw `ST/Ex` cell.
+  Dates are ignored. No state enumeration, alias conversion or readiness,
+  severity, time-zone or elapsed-time inference occurs. `Run/Ntry` must be
+  decimal digits separated by `/`; its values are not interpreted. `Pri/Xit`
+  is an optional opaque token. Final padding and an absent `Pri/Xit` may be
+  omitted. Other row shapes fail rather than being guessed.
+- At least one data row. Empty, blank and header-only input are explicit helper
+  support limits. They are never converted into an empty overlay.
+
+These references establish a documented subset, not a vendor machine API or
+live-version qualification. The summary contains the last status posted to the
+database. The references also warn that read restrictions can silently omit
+matching objects, and an ALL/wildcard request with no reports can exit zero.
+Cropping or omitted rows that still form a valid supported table cannot be
+detected. The converter cannot prove producer flags, exit status, authorization,
+atomic capture or whole-estate completeness. Check those separately at capture
+time.
 
 ## Inspection and provenance
 
