@@ -57,17 +57,23 @@ cd "$work"
 cp "$manifest/package.json" "$manifest/package-lock.json" .
 npm ci --no-audit --no-fund
 
-# Expose the adapter's complete promise without changing its run() result
-# or its layout pipeline. Refuse package-entry drift before building (DL-383).
+# Expose completion and optional native labels in the pinned prebuilt entry.
+# Each seam must match exactly once before either edit is written (DL-383, DL-384).
 node <<'EOF'
 const fs = require('node:fs');
 const file = require.resolve('cytoscape-elk');
-const source = fs.readFileSync(file, 'utf8');
-const before = 'elk.layout(graph).then(function () {';
-if (source.split(before).length !== 2) {
-  throw new Error('cytoscape-elk promise patch no longer matches exactly once');
+let source = fs.readFileSync(file, 'utf8');
+const patches = [
+  ['elk.layout(graph).then(function () {', 'this.promise = elk.layout(graph).then(function () {'],
+  ["  node.scratch('elk', k);", "  if (options.nodeLabels) { k.labels = options.nodeLabels(node); }\n\n  node.scratch('elk', k);"]
+];
+for (const [before, after] of patches) {
+  if (source.split(before).length !== 2) {
+    throw new Error('cytoscape-elk patch no longer matches exactly once: ' + before);
+  }
+  source = source.replace(before, after);
 }
-fs.writeFileSync(file, source.replace(before, 'this.promise = ' + before));
+fs.writeFileSync(file, source);
 EOF
 
 # The installed packages' own package.json is the single source for the

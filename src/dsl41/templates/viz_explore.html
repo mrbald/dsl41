@@ -76,6 +76,14 @@
   }
   #wrap { position: relative; flex: 1; min-height: 0; overflow: hidden; }
   #cy { position: absolute; inset: 0; }
+  #name-callout { position: absolute; z-index: 20; pointer-events: none;
+             box-sizing: border-box; width: max-content; max-width: min(360px, calc(100% - 16px));
+             max-height: calc(100% - 16px); overflow: hidden; padding: 5px 8px;
+             border: 1px solid #6b7280; border-radius: 4px; background: #fff;
+             color: #111827; font-size: 13px; overflow-wrap: anywhere;
+             box-shadow: 0 1px 4px #0002; }
+  #name-link { position: absolute; inset: 0; width: 100%; height: 100%;
+             z-index: 19; pointer-events: none; }
   /* above #chrome-backdrop (25), below .chrome-panel (30): a controls panel
      must not make the node details inert. The backdrop is what dismisses a
      panel on an outside gesture, and it covers all of #wrap -- so details
@@ -207,6 +215,8 @@
 </header>
 <div id="wrap">
   <div id="cy"></div>
+  <svg id="name-link" hidden aria-hidden="true"><line stroke="#6b7280" stroke-width="1"/></svg>
+  <div id="name-callout" hidden aria-hidden="true"></div>
   <div id="chrome-backdrop" hidden aria-hidden="true"></div>
   <section id="selection-panel" class="chrome-panel" role="region" aria-labelledby="selection-heading" hidden>
     <div class="panel-heading"><h2 id="selection-heading">Selection</h2>
@@ -256,6 +266,11 @@
       <button tabindex="0" type="button" id="expand-all">expand boxes</button>
     </div>
     <div class="panel-settings">
+      <div><label for="node-labels">Labels</label>
+      <select tabindex="0" id="node-labels" aria-describedby="node-labels-note">
+        <option value="adaptive" selected>Adaptive</option>
+        <option value="always">Always</option>
+      </select><span class="hint" id="node-labels-note">Adaptive hides captions below 8 screen pixels. Hover or inspect for the full name. Find and details always use full names.</span></div>
       <div><label for="edge-style">Edge style</label>
       <select tabindex="0" id="edge-style" aria-describedby="edge-style-note"
               title="Change arrow paths without moving nodes.">
@@ -331,14 +346,44 @@ var LABEL_ZOOM = 0.6; /* edge labels overlap at fit zoom; hide below this */
 /* Orthogonal edge routing follows ELK's layering axis (DL-381). */
 var TAXI_DIRECTION = DIRECTION === "DOWN" ? "vertical" : "horizontal";
 var edgeStyleSelect = document.getElementById("edge-style");
+var nodeLabelsSelect = document.getElementById("node-labels");
+var NODE_LABEL_MIN = 8;
+var captionsShown = true;
+
+function expandedBox(node) {
+  return node.hasClass("box") && !node.hasClass("cy-expand-collapse-collapsed-node");
+}
+
+function captionLayoutOptions(node) {
+  return {
+    "elk.spacing.nodeNode": DIRECTION === "DOWN" ? 24 : 12,
+    "elk.layered.spacing.nodeNodeBetweenLayers": DIRECTION === "DOWN" ? 24 : 32,
+    "elk.spacing.labelNode": 5,
+    "elk.padding": "[top=18,left=18,bottom=18,right=18]",
+    "elk.nodeLabels.placement": node && expandedBox(node) ? "[OUTSIDE,H_CENTER,V_TOP]" :
+      DIRECTION === "DOWN" ? "[OUTSIDE,H_RIGHT,V_CENTER]" : "[OUTSIDE,H_CENTER,V_BOTTOM]"
+  };
+}
+
+/* ELK receives the same bounded caption rectangle as compound sizing.
+   Native labels reserve space without widening bodies or ports (DL-384). */
+function elkNodeLabels(node) {
+  var bb = node.boundingBox({ includeNodes: false, includeEdges: false,
+    includeLabels: true, includeOverlays: false, includeUnderlays: false });
+  return [{ text: nodeCaption(node), width: bb.w, height: bb.h }];
+}
 
 function elkLayout() {
   return {
     name: "elk",
-    nodeDimensionsIncludeLabels: true,
+    /* Body dimensions exclude attention halos; native labels reserve bounded
+       caption and compound title space independently (DL-384). */
+    nodeDimensionsIncludeLabels: false,
+    nodeLayoutOptions: captionLayoutOptions,
+    nodeLabels: elkNodeLabels,
     fit: true,
     padding: 30,
-    elk: {
+    elk: Object.assign(captionLayoutOptions(), {
       algorithm: "layered",
       "elk.direction": DIRECTION,
       "elk.hierarchyHandling": "INCLUDE_CHILDREN",
@@ -347,7 +392,7 @@ function elkLayout() {
       "elk.layered.mergeHierarchyEdges": false,
       "elk.spacing.edgeEdge": 12,
       "elk.layered.spacing.edgeEdgeBetweenLayers": 12
-    }
+    })
   };
 }
 
@@ -613,15 +658,47 @@ function foldedMembers(box) {
    and never merges its members'. */
 function condBadge(ele) { return ele.data("cond_badge") || ""; }
 
-/* A job that excludes ITSELF (n(own name), M07) wears the lock glyph: one
-   run at a time, and there is no second node to draw a link to (DL-35). */
-function lockBadge(ele) { return ele.data("self_lock") ? " \uD83D\uDD12" : ""; }
-
-function nodeLabel(ele) {
-  if (ec && ele.hasClass("cy-expand-collapse-collapsed-node")) {
-    return ele.data("label") + " (" + foldedMembers(ele) + ")" + condBadge(ele) + lockBadge(ele);
+/* Names use one bounded envelope. Attention changes only paint, never the
+   text measured by compounds, ELK, Fit or lock placement (DL-384). */
+var captionMeasure = document.createElement("canvas").getContext("2d");
+var captionCache = new Map();
+function nodeCaption(ele) {
+  var name = ele.data("label"), side = DIRECTION === "DOWN" && !expandedBox(ele);
+  var width = side ? 112 : 132, bold = ele.hasClass("box");
+  var key = JSON.stringify([name, side, bold]);
+  if (captionCache.has(key)) return captionCache.get(key);
+  var chars = Array.from(name);
+  captionMeasure.font = (bold ? "bold " : "") + "11px Arial";
+  var text = name;
+  if (chars.length > (side ? 18 : 22) || captionMeasure.measureText(text).width > width - 4) {
+    var left = Math.min(12, chars.length - 2);
+    var right = Math.min(side ? 5 : 9, chars.length - left - 1);
+    function shortened() { return chars.slice(0, left).join("") + "\u2026" + chars.slice(-right).join(""); }
+    text = shortened();
+    while (captionMeasure.measureText(text).width > width - 4 && (left > 1 || right > 1)) {
+      if (right > 1) right--; else left--;
+      text = shortened();
+    }
   }
-  return ele.data("label") + condBadge(ele) + lockBadge(ele);
+  captionCache.set(key, text);
+  return text;
+}
+
+/* Structural marks have fixed slots inside each body; the final 10 units
+   are reserved for an observation marker. Names never enter SVG (DL-384). */
+function nodeMarks(ele) {
+  var badge = condBadge(ele).trim();
+  var count = ele.hasClass("cy-expand-collapse-collapsed-node") ? foldedMembers(ele) : "";
+  var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="72" height="20" viewBox="0 0 72 20">';
+  if (badge) svg += '<text x="10" y="14" font-family="sans-serif" font-size="13" fill="#111827">' + badge + '</text>';
+  if (ele.data("self_lock")) svg += '<g fill="none" stroke="#111827" stroke-width="1.5"><path d="M32 9V6a3 3 0 0 1 6 0v3"/><rect x="30" y="9" width="10" height="8" rx="1"/></g>';
+  if (count !== "") svg += '<text x="44" y="14" font-family="sans-serif" font-size="10" fill="#111827"'
+    + (String(count).length > 3 ? ' textLength="18" lengthAdjust="spacingAndGlyphs"' : '') + '>' + count + '</text>';
+  return "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg + '</svg>');
+}
+
+function captionOpacity(ele) {
+  return expandedBox(ele) || captionsShown || ele.selected() ? 1 : 0;
 }
 
 /* every member under a box, expanded or not: the visible descendants plus
@@ -654,22 +731,31 @@ function branchStyles() {
 var STYLE_BASE = [
     { selector: "node", style: {
         shape: "round-rectangle",
-        width: function (ele) {
-          return Math.max(30, nodeLabel(ele).length * 6.5 + 14);
-        },
+        width: 72,
         height: 24,
-        label: nodeLabel,
-        "text-valign": "center",
-        "text-halign": "center",
+        label: nodeCaption,
+        "text-valign": DIRECTION === "DOWN" ? "center" : "bottom",
+        "text-halign": DIRECTION === "DOWN" ? "right" : "center",
+        "text-margin-x": DIRECTION === "DOWN" ? 7.5 : 0,
+        "text-margin-y": DIRECTION === "DOWN" ? 0 : 7.5,
+        "text-events": "no",
+        "text-max-width": DIRECTION === "DOWN" ? 112 : 132,
+        "text-opacity": captionOpacity,
         "font-size": 11,
-        color: "#111827",
+        "font-family": "Arial",
+        color: "#4b5563",
+        "background-image": nodeMarks,
+        "background-width": 72,
+        "background-height": 20,
+        "background-image-opacity": 1,
         "background-color": "#ffffff",
         "border-width": 1,
         "border-color": "#374151"
     } },
     { selector: "node.fw", style: {  /* file watcher: source/trigger */
         shape: "diamond",
-        height: 34,
+        width: 80,
+        height: 40,
         "background-color": "#def7ec",
         "border-color": "#046c4e"
     } },
@@ -681,19 +767,37 @@ var STYLE_BASE = [
     } },
     { selector: "node.global", style: {  /* global variable producer */
         shape: "rhomboid",
+        width: 84,
+        height: 30,
         "background-color": "#fdf6b2",
         "border-color": "#8a6d00"
     } },
     { selector: "node.box", style: {  /* compound container */
         shape: "round-rectangle",
         "text-valign": "top",
+        "text-halign": "center",
+        "text-margin-x": 0,
+        "text-margin-y": -7.5,
+        "text-max-width": 132,
+        padding: 18,
+        "background-position-x": "100%",
+        "background-position-y": "0%",
         "background-color": "#ece9fd",
         "background-opacity": 0.3,
         "border-color": "#5b21b6",
         "font-weight": "bold"
     } },
     { selector: "node.cy-expand-collapse-collapsed-node", style: {  /* a collapsed box: one node standing for its members */
-        "text-valign": "center",
+        width: 96,
+        height: 32,
+        padding: 0,
+        "text-valign": DIRECTION === "DOWN" ? "center" : "bottom",
+        "text-halign": DIRECTION === "DOWN" ? "right" : "center",
+        "text-margin-x": DIRECTION === "DOWN" ? 8 : 0,
+        "text-margin-y": DIRECTION === "DOWN" ? 0 : 8,
+        "text-max-width": DIRECTION === "DOWN" ? 112 : 132,
+        "background-position-x": "50%",
+        "background-position-y": "50%",
         "background-opacity": 1,
         "border-width": 2,
         "border-style": "double"
@@ -769,6 +873,7 @@ var STYLE_TAIL = [
        round-rectangles and global rhomboids. */
     { selector: "node.lock", style: {
         shape: "octagon",
+        width: 80,
         height: 30,
         "background-color": "#f3f4f6",
         "border-color": "#6b7280",
@@ -809,6 +914,8 @@ var STYLE_TAIL = [
        stands for a highlighted member wears a paler proxy, and its own mark
        on top of that. */
     { selector: "node:selected", style: {
+        color: "#111827",
+        "text-opacity": 1,
         "overlay-color": "#1d4ed8",
         "overlay-opacity": 0.3,
         "overlay-padding": 4
@@ -858,6 +965,61 @@ edgeStyleSelect.addEventListener("change", function () {
   updateRoutingStatus();
 });
 
+/* Caption disclosure changes paint only. The caption string and its font
+   stay in every layout envelope even while invisible (DL-384). */
+function updateNodeLabels() {
+  var shown = nodeLabelsSelect.value === "always" || cy.zoom() * 11 >= NODE_LABEL_MIN;
+  if (shown === captionsShown) return;
+  captionsShown = shown;
+  cy.nodes().updateStyle();
+}
+nodeLabelsSelect.addEventListener("change", updateNodeLabels);
+cy.on("zoom", updateNodeLabels);
+
+/* One screen-sized name follows hover, then inspection. It owns no graph
+   element, label bound or gesture target (DL-384). */
+var hoveredName = null, inspectedName = null, nameFrame = null;
+var nameCallout = document.getElementById("name-callout");
+var nameLink = document.getElementById("name-link");
+function drawnName(node) { return node && !node.removed() && node.visible(); }
+function refreshNameCallout() {
+  nameFrame = null;
+  var node = drawnName(hoveredName) ? hoveredName : (drawnName(inspectedName) ? inspectedName : null);
+  nameCallout.hidden = !node;
+  nameLink.hidden = !node;
+  if (!node) return;
+  var pos = node.renderedPosition(), w = cy.width(), h = cy.height();
+  var left = pos.x - node.renderedOuterWidth() / 2, right = pos.x + node.renderedOuterWidth() / 2;
+  var top = pos.y - node.renderedOuterHeight() / 2, bottom = pos.y + node.renderedOuterHeight() / 2;
+  if (right < 0 || left > w || bottom < 0 || top > h) {
+    nameCallout.hidden = nameLink.hidden = true;
+    return;
+  }
+  var anchorX = Math.max(Math.max(0, left), Math.min(Math.min(w, right), pos.x));
+  var anchorY = Math.max(0, top);
+  nameCallout.textContent = node.hasClass("lock") ? lockTitle(node) : node.data("label");
+  var cw = nameCallout.offsetWidth, ch = nameCallout.offsetHeight;
+  var x = Math.max(8, Math.min(w - cw - 8, anchorX - cw / 2));
+  var y = Math.max(8, Math.min(h - ch - 8, anchorY - ch - 12));
+  nameCallout.style.left = x + "px";
+  nameCallout.style.top = y + "px";
+  var line = nameLink.firstElementChild;
+  line.setAttribute("x1", Math.max(x + 4, Math.min(x + cw - 4, anchorX)));
+  line.setAttribute("y1", y + ch);
+  line.setAttribute("x2", anchorX);
+  line.setAttribute("y2", anchorY);
+}
+function scheduleNameCallout() {
+  if (nameFrame === null) nameFrame = requestAnimationFrame(refreshNameCallout);
+}
+function inspectName(node) { inspectedName = node; scheduleNameCallout(); }
+cy.on("mouseover", "node", function (evt) { hoveredName = evt.target; scheduleNameCallout(); });
+cy.on("mouseout", "node", function (evt) {
+  if (hoveredName === evt.target) hoveredName = null;
+  scheduleNameCallout();
+});
+cy.on("render resize", scheduleNameCallout);
+
 /* Edges are never selected (DL-196): the selection is a set of nodes, the
    operand of every bulk op, and an arrow in it would be a lie about what
    the next op acts on. Done again after every fold: a meta-edge is a new
@@ -887,9 +1049,24 @@ function classifyNesting() {
 }
 classifyNesting();
 
+/* Style events precede batched visibility refresh. Recheck all node geometry
+   after the batch, including compounds affected by child visibility (DL-384). */
+var routeStyleCheckQueued = false;
+function checkRouteStyleGeometry() {
+  routeStyleCheckQueued = false;
+  if (elkRunning || routeLayoutEpoch !== routeEpoch) return;
+  if (cy.nodes().not(".lock").some(function (node) {
+    return routeGeometry.get(node.id()) !== nodeRouteGeometry(node);
+  })) invalidateElkRoutes();
+}
+
 cy.on("position style add remove", function (evt) {
   var element = evt.target;
   if (elkRunning || routeLayoutEpoch !== routeEpoch || element === cy || element.hasClass("lock")) return;
+  if (evt.type === "style" && element.isNode() && !routeStyleCheckQueued) {
+    routeStyleCheckQueued = true;
+    queueMicrotask(checkRouteStyleGeometry);
+  }
   if (evt.type === "add" || evt.type === "remove" ||
       (element.isNode() && routeGeometry.get(element.id()) !== nodeRouteGeometry(element))) {
     invalidateElkRoutes();
@@ -934,6 +1111,11 @@ function boxesOverlap(a, b) {
 }
 
 function hubBox(hub, pos) {
+  if (hub.visible()) {
+    var bb = stableBounds(hub), at = hub.position();
+    return { x1: bb.x1 + pos.x - at.x - LOCK_GAP, x2: bb.x2 + pos.x - at.x + LOCK_GAP,
+      y1: bb.y1 + pos.y - at.y - LOCK_GAP, y2: bb.y2 + pos.y - at.y + LOCK_GAP };
+  }
   var w = hub.width() / 2 + LOCK_GAP, h = hub.height() / 2 + LOCK_GAP;
   return { x1: pos.x - w, x2: pos.x + w, y1: pos.y - h, y2: pos.y + h };
 }
@@ -974,10 +1156,14 @@ var LOCK_TITLE_BAND = 26;  /* a box's own label sits along its top edge */
 function placeLocks() {
   var strict = [], relaxed = [];
   cy.nodes(":visible").not(".lock").forEach(function (n) {
-    var bb = n.boundingBox();
+    var bb = stableBounds(n);
+    var titleBottom = bb.y1 + LOCK_TITLE_BAND;
+    if (condBadge(n) || n.data("self_lock")) {
+      titleBottom = Math.max(titleBottom, n.position("y") - n.outerHeight() / 2 + 20);
+    }
     strict.push(bb);
     relaxed.push(n.isParent()
-      ? { x1: bb.x1, x2: bb.x2, y1: bb.y1, y2: bb.y1 + LOCK_TITLE_BAND }
+      ? { x1: bb.x1, x2: bb.x2, y1: bb.y1, y2: titleBottom }
       : bb);
   });
   cy.nodes(".lock").forEach(function (hub) {
@@ -1139,7 +1325,10 @@ cy.on("zoom", updateEdgeLabels);
 function refreshEdgeLabels() { labelsShown = null; updateEdgeLabels(); }
 
 /* The four places that fit the drawn graph to the viewport, one function. */
-function fitVisible() { cy.fit(cy.nodes(":visible"), 40); }
+function stableBounds(nodes) {
+  return nodes.boundingBox({ includeOverlays: false, includeUnderlays: false });
+}
+function fitVisible() { cy.fit(stableBounds(cy.nodes(":visible")), 40); }
 
 /* ELK over the visible flow graph, then the hubs, a fit and the stats. The
    ONE thing on this page that moves a node on purpose (DL-196): the arrange
@@ -1220,7 +1409,7 @@ function clearSelection() {
 
 function fitSelection() {
   var sel = selectedNodes();
-  if (sel.nonempty()) cy.fit(sel, 40);
+  if (sel.nonempty()) cy.fit(stableBounds(sel), 40);
 }
 
 /* --- highlight. The universe is the live nodes plus the recursively folded
@@ -1428,6 +1617,7 @@ var dRows = document.getElementById("d-rows");
 var dTree = document.getElementById("d-tree");
 
 function showDetails(title, rows) {
+  inspectName(null);
   dTitle.textContent = title;
   dRows.replaceChildren();
   dTree.replaceChildren();
@@ -1454,6 +1644,7 @@ function showDetails(title, rows) {
 
 document.getElementById("d-close").addEventListener("click", function () {
   details.hidden = true;
+  inspectName(null);
 });
 
 /* ------------------------------------------- condition structure (DL-191) */
@@ -1641,6 +1832,7 @@ function showLockDetails(hub) {
   ];
   (d.members || []).forEach(function (m) { rows.push(["member", memberLine(m)]); });
   showDetails(lockTitle(hub), rows);
+  inspectName(hub);
 }
 
 function lockEndName(el) {
@@ -1688,6 +1880,7 @@ function showNodeDetails(n) {
     ["box_failure", d.box_failure, "code"]
   ]);
   renderCondTrees(n, paintBranches(n));
+  inspectName(n);
 }
 
 cy.on("tap", "node", function (evt) {
@@ -1724,6 +1917,7 @@ cy.on("tap", "edge", function (evt) {
 cy.on("tap", function (evt) {
   if (evt.target !== cy) return;
   details.hidden = true;
+  inspectName(null);
   dTree.replaceChildren();
   clearBranchPaint();
   clearInspected();
@@ -1840,6 +2034,35 @@ wire("sel-lock-peers", selectLockPeersOfSelection);
 var findField = document.getElementById("search");
 var findNote = document.getElementById("find-note");
 
+/* Ambiguous bounded captions have a full-name keyboard path in the same
+   details panel. Each button acts on one exact emitted ID (DL-384). */
+function showFindMatches(nodes) {
+  clearBranchPaint();
+  clearInspected();
+  showDetails("Find matches (" + nodes.length + ")", []);
+  nodes.forEach(function (node) {
+    var button = document.createElement("button");
+    button.type = "button";
+    button.tabIndex = 0;
+    button.className = "leaf";
+    var name = node.hasClass("lock") ? lockTitle(node) : node.data("label");
+    button.textContent = "Select and inspect " + name + (name !== node.id() ? " (ID: " + node.id() + ")" : "");
+    button.addEventListener("click", function () {
+      var expanded = expandToReach(function (box) {
+        return ec.getCollapsedChildrenRecursively(box).nodes().some(function (n) { return n.id() === node.id(); });
+      });
+      var live = cy.$id(node.id());
+      if (live.empty() || live.hasClass("lockoff")) return;
+      selectNodes(live, true);
+      if (live.hasClass("lock")) showLockDetails(live[0]); else showNodeDetails(live[0]);
+      reportAfterFold(expanded, function () { cy.fit(stableBounds(live), 60); updateStats("find match selected"); });
+    });
+    var row = document.createElement("div");
+    row.appendChild(button);
+    dTree.appendChild(row);
+  });
+}
+
 function runFind(mode, add) {
   var text = findField.value.trim(), query = text.toLowerCase();
   findNote.textContent = "";
@@ -1866,7 +2089,7 @@ function runFind(mode, add) {
   var shown = kept.nodes;
   if (hits.length === 1 && shown.nonempty()) {
     if (hits.hasClass("lock")) showLockDetails(hits[0]); else showNodeDetails(hits[0]);
-  }
+  } else if (shown.length > 1) showFindMatches(shown);
   /* An expand here is an expand like any other (DL-196): in place, no
      layout. The fit is to the matches -- the answer to the question that
      was asked -- and goes behind the fold's own follow-up. */
@@ -1875,7 +2098,7 @@ function runFind(mode, add) {
     /* queued behind a fold: read the matches again, because anything that
        ran in between could have folded one away */
     var live = shown.filter(function (n) { return !n.removed() && n.visible(); });
-    if (live.nonempty()) cy.fit(live, 60);
+    if (live.nonempty()) cy.fit(stableBounds(live), 60);
   }
   reportAfterFold(expanded, report);
 }

@@ -24827,3 +24827,40 @@ relitigate an entry; append a new one.
   and layoutstop success path remain the same. The build keeps the transpiled entry
   required by Cytoscape's constructor wrapper and refuses a changed patch site.
   No dependency pin changes.
+- DL-384 Explore separates compact node bodies from contextual names (2026-10-18).
+  Body sizes: jobs 72x24, file watchers 80x40, globals 84x30, locks 80x30, folded boxes 96x32.
+  Expanded boxes, including empty boxes, stay content-sized with an 18-unit inset
+  and top title. OR, self-lock and folded-member marks occupy fixed body slots.
+  The final 10 units of their 72x20 band remain available for an observation marker.
+  No imported value enters this band's SVG.
+  LR captions sit below bodies, with at most 22 Unicode characters and 132 units.
+  TD captions sit beside bodies to clear source stems, with at most 18 and 112 units.
+  Expanded box titles retain the wider top treatment. Caption text is measured in
+  the canvas's 11-unit Arial font. Pixel truncation preserves both ends, including
+  wide glyphs; no second end ellipsis erases the suffix. Different names can have
+  the same caption. A caption never stands for exact identity.
+  Adaptive, the default, hides ordinary captions below 8 rendered pixels; Always
+  shows them. Selected captions and expanded titles stay opaque. One viewport-bounded
+  HTML callout shows the full hovered or inspected name; hover wins temporarily.
+  Its anchor and text pass pointer gestures through. Hover changes no selection,
+  details, branch paint, visibility or fit. Closing details ends inspection.
+  Existing click, fold and Escape meanings remain. Multiple Find matches get native
+  full-name buttons in details, including emitted IDs when different. Each explicitly
+  selects, inspects and fits one exact match. Full annotations remain accessible.
+  This supersedes DL-71's label-inclusive ELK dimensions. ELK reads bodies and separate
+  measured native caption rectangles through an optional nodeLabels callback in the
+  pinned adapter's prebuilt entry. The build checks this insertion seam exactly once,
+  beside DL-383's promise seam. Pins, licenses, getPos and route-clip guards stay fixed.
+  Native labels reserve their own space. Residual node/layer gaps are LR 12/32 and TD 24/24.
+  Painted captions and native labels keep a 5-unit gap from the physical border.
+  Cytoscape derives tight compound outlines from children and captions. ELK can retain
+  internal route slack, so its compound rectangle/title reservation need not equal
+  the drawn outline. Conservative clipping still refuses unsupported terminal routes.
+  Lock hubs stay outside ELK and can cross route paths (DL-192, DL-382). There is no
+  obstacle-free-routing guarantee. Name attention changes only paint. Bounded
+  strings, fonts and native-label rectangles stay fixed across zoom, selection and mode.
+  Fit, Find and lock obstacles include bounded captions and exclude overlays/underlays.
+  Post-style geometry checks wait for batched visibility caches to settle.
+  Full names belong to HTML callouts, details and Find. They never enter layout,
+  compound sizing, lock obstacles or routes. The base layout changes deliberately;
+  no density or operator-speed improvement is claimed.

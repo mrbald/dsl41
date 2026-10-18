@@ -983,7 +983,7 @@ def test_to_explore_html_folds_without_a_layout_and_carries_the_arrange_button()
     ]
     assert "relayoutOrFit" not in find_body and "arrangeVisible" not in find_body
     assert "ec.expandRecursively(box, { layoutBy: null });" in page
-    assert "cy.fit(live, 60);" in page  # the matches still drawn when the report runs
+    assert "cy.fit(stableBounds(live), 60);" in page  # the matches still drawn when the report runs
     # what still follows a fold: the hubs (DL-192) and the collapsed count.
     # Read out of the two handler bodies rather than counted, so a reindent
     # or a third legitimate caller does not fail this with a bare number.
@@ -1034,7 +1034,8 @@ def test_to_explore_html_carries_the_condition_grammar() -> None:
     assert r'"cond_badge": " \u2228*"' in page  # complex: read the tree and the text
     assert r'"cond_badge": " \u2228"' in page  # an OR the canvas draws as branches
     assert 'function condBadge(ele) { return ele.data("cond_badge") || ""; }' in page
-    assert "nodeLabel(ele).length" in page
+    assert '"background-image": nodeMarks' in page
+    assert "label: nodeCaption" in page
     assert "all incoming arrows must hold (AND) unless the job" in page
     assert "a bare n() is a lock and draws no arrow" in page
     assert '{ selector: "edge.any", style: {' in page

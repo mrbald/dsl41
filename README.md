@@ -181,6 +181,13 @@ large estates; the report stays the artifact of record. What the page does:
 
 - Click a node or an edge for its full annotations. The details panel shows
   a job's condition text and its AND/OR tree.
+- Node bodies have bounded sizes by kind. Short captions sit below nodes in
+  LR layouts and beside them in TD layouts. Expanded boxes keep their title
+  bands. View's Labels offers Adaptive (the default) and Always. Adaptive
+  hides small captions when zoomed out; selected captions stay opaque.
+  Hovering or inspecting a node shows one full name in a callout. Name
+  attention changes no layout, routes, lock placement, or Fit bounds.
+  Condition, self-lock, and folded-member marks stay on the body.
 - Boxes collapse to one node and expand again: double-click, the corner cue,
   the menu, or two toolbar buttons. `--collapse-threshold` folds the
   over-threshold top-level boxes after the first layout; without it nothing
@@ -192,6 +199,8 @@ large estates; the report stays the artifact of record. What the page does:
   transitive, from the right-click menu or the toolbar. The highlight is
   sticky and survives clicks, hiding, and folding. Visibility is "hide
   selected", "hide others", and "show all".
+  Multiple Find matches also appear as full-name buttons in the details
+  panel. Each button selects and inspects that exact match and fits it.
 - Shift+drag (or ctrl or cmd) on the background adds a region to the
   selection; plain drag pans. Escape closes an open menu or panel, else
   empties the find field while typing there, else clears the selection.

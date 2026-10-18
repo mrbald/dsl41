@@ -881,9 +881,7 @@ def test_dbltap_collapses_box_b_and_folds_its_border_edges(driven_trace: Driven)
         )
     )
     assert meta_ends == ["B>D", "Q>B"], driven_trace.engine
-    assert driven_trace.page.evaluate("() => nodeLabel(cy.$id('B'))") == "B (4)", (
-        driven_trace.engine
-    )
+    assert driven_trace.page.evaluate("() => foldedMembers(cy.$id('B'))") == 4, driven_trace.engine
     stats = driven_trace.page.inner_text("#stats")
     assert "visible 5 / 9 nodes · 4 / 4 edges · 1 box collapsed" in stats, (
         driven_trace.engine,
@@ -1451,7 +1449,11 @@ def driven_cond(_driven_cond: Driven) -> Driven:
 
 
 def _label(d: Driven, node_id: str) -> str:
-    label: str = d.page.evaluate("(id) => nodeLabel(cy.$id(id))", node_id)
+    label: str = d.page.evaluate(
+        "(id) => { const svg = decodeURIComponent(nodeMarks(cy.$id(id)).split(',')[1]);"
+        " return new DOMParser().parseFromString(svg, 'image/svg+xml').documentElement.textContent; }",
+        node_id,
+    )
     return label
 
 
@@ -1478,11 +1480,11 @@ def test_the_badge_marks_or_shapes_and_only_those(driven_cond: Driven) -> None:
     _ready(driven_cond)
     labels = {name: _label(driven_cond, name) for name in ("AOA", "ANY", "CPX", "PLAIN", "BOX")}
     assert labels == {
-        "AOA": "AOA \u2228",
-        "ANY": "ANY \u2228",
-        "CPX": "CPX \u2228*",
-        "PLAIN": "PLAIN",
-        "BOX": "BOX \u2228",
+        "AOA": "\u2228",
+        "ANY": "\u2228",
+        "CPX": "\u2228*",
+        "PLAIN": "",
+        "BOX": "\u2228",
     }, driven_cond.engine
 
 
@@ -1649,12 +1651,18 @@ def test_search_enter_with_one_hit_selects_the_node_and_opens_its_details(
     assert driven_cond.page.inner_text("#d-title") == "AOFA"
     assert driven_cond.page.evaluate("() => cy.nodes(':selected').map(n => n.id())") == ["AOFA"]
     assert _detail_rows(driven_cond)["condition"] == "(s(A) & s(B)) | s(C)"
-    # ...and a search that hits several leaves the panel alone
+    # Multiple hits expose exact full-name choices in details (DL-384).
     driven_cond.page.evaluate("() => { cy.emit('tap'); }")
     driven_cond.page.fill("#search", "ME")
     driven_cond.page.press("#search", "Enter")
-    driven_cond.page.wait_for_timeout(_SETTLE_MS)
-    assert driven_cond.page.get_attribute("#details", "hidden") is not None, driven_cond.engine
+    driven_cond.page.get_by_role("heading", name="Find matches (2)", exact=True).wait_for(
+        state="visible"
+    )
+    for name in ("MEM", "MEM2"):
+        assert driven_cond.page.get_by_role(
+            "button", name="Select and inspect " + name, exact=True
+        ).is_visible(), driven_cond.engine
+    assert _selected_ids(driven_cond) == ["MEM", "MEM2"]
     driven_cond.page.fill("#search", "")
     driven_cond.page.press("#search", "Enter")
     _clear_selection(driven_cond)
@@ -1673,7 +1681,7 @@ def test_a_collapsed_box_keeps_its_own_badge_and_details_and_its_meta_edges_stay
     driven_cond.page.evaluate("() => { cy.$id('BOX').emit('dbltap'); }")
     driven_cond.page.wait_for_timeout(_SETTLE_MS)
 
-    assert _label(driven_cond, "BOX") == "BOX (2) \u2228", driven_cond.engine
+    assert _label(driven_cond, "BOX") == "\u22282", driven_cond.engine
     assert _painted(driven_cond) == [], driven_cond.engine
     meta = driven_cond.page.evaluate(
         "() => cy.edges('.cy-expand-collapse-meta-edge').map(e => [e.data('source')"
@@ -1702,7 +1710,7 @@ def test_a_collapsed_box_keeps_its_own_badge_and_details_and_its_meta_edges_stay
 
     driven_cond.page.evaluate("() => { cy.$id('BOX').emit('dbltap'); }")
     driven_cond.page.wait_for_timeout(_SETTLE_MS)
-    assert _label(driven_cond, "BOX") == "BOX \u2228", driven_cond.engine
+    assert _label(driven_cond, "BOX") == "\u2228", driven_cond.engine
 
 
 def test_no_uncaught_page_errors_on_the_condition_page(driven_cond: Driven) -> None:
@@ -1889,7 +1897,9 @@ def test_lock_links_are_dotted_and_the_tee_marks_the_waiter(driven_locks: Driven
     assert styles["lk_c>lk_d"] == ["dotted", "tee", "tee"], driven_locks.engine
     assert styles["lock:r:R_ONE>lk_x1"] == ["dotted", "none", "none"], driven_locks.engine
     # the self-exclusion is a badge on the job, not a node and not a link
-    assert driven_locks.page.evaluate("() => nodeLabel(cy.$id('lk_h'))") == "lk_h \U0001f512"
+    assert driven_locks.page.evaluate(
+        "() => decodeURIComponent(nodeMarks(cy.$id('lk_h'))).includes('<rect')"
+    )
 
 
 def test_lock_hub_details_name_every_member(driven_locks: Driven) -> None:
@@ -3969,3 +3979,317 @@ def test_short_narrow_graph_menu_scrolls_to_first_and_last_actions_without_zoom(
         assert not d.page.evaluate("() => cy.$id('C').visible()"), d.engine
         assert _viewport(d) == view, d.engine
     assert d.errors == [], (d.engine, d.errors)
+
+
+# ------------------------------------------------------- DL-384 compact captions
+
+_LONG_NAME_A = "REGION_ASSET_NORTH_LEDGER_PRIMARY_01_C"
+_LONG_NAME_B = "REGION_ASSET_SOUTH_LEDGER_PRIMARY_01_C"
+_EMPTY_BOX = "EMPTY_BOX_WITH_A_LONG_TITLE"
+_CJK_NAME = "東京監査_識別名を保持する_C"
+_WIDE_NAME = "WWWWWWWWWWWWWWWWWWWWWWWWW"
+_LABEL_TEXT = (
+    _NESTED_BOX_TEXT + f"\ninsert_job: {_LONG_NAME_A} job_type: c\nbox_name: IB\n"
+    "command: true\ncondition: s(P) | s(Q)\n"
+    + f"\ninsert_job: {_LONG_NAME_B} job_type: c\nbox_name: IB\n"
+    + f"command: true\ncondition: n({_LONG_NAME_B})\n"
+    + "\ninsert_job: FW_OR job_type: f\nwatch_file: /synthetic/watch\n"
+    "condition: (s(P) | s(Q)) & n(FW_OR)\n"
+    + f"\ninsert_job: {_EMPTY_BOX} job_type: b\n"
+    + f"\ninsert_job: {_CJK_NAME} job_type: c\nbox_name: IB\ncommand: true\ncondition: s(M)\n"
+    + f"\ninsert_job: {_WIDE_NAME} job_type: c\ncommand: true\ncondition: s(P)\n"
+)
+
+
+@pytest.fixture(scope="module", params=[(e, d) for e in ENGINES for d in ("LR", "TD")])
+def _driven_labels(
+    request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory, _playwright: Any
+) -> Any:
+    engine, direction = request.param
+    path = tmp_path_factory.mktemp("explore-labels") / "labels.html"
+    path.write_text(
+        to_explore_html(lower_source(_LABEL_TEXT), title="labels", direction=direction),
+        encoding="utf-8",
+    )
+    yield from _open_driven(_playwright, engine, path.as_uri())
+
+
+@pytest.fixture
+def driven_labels(_driven_labels: Driven) -> Driven:
+    return _reset(_driven_labels)
+
+
+def _label_geometry(d: Driven) -> Any:
+    return d.page.evaluate(
+        "() => ({nodes: cy.nodes().map(n => [n.id(), n.position(), n.outerWidth(),"
+        " n.outerHeight(), stableBounds(n), n.layoutDimensions({nodeDimensionsIncludeLabels:false})]),"
+        " fit: cy.getFitViewport(stableBounds(cy.nodes(':visible')),40),"
+        " epoch: [routeEpoch,routeLayoutEpoch],"
+        " routes: cy.edges().not('.lock, .nesting').map(e => [e.id(),!!elkRoute(e)])})"
+    )
+
+
+def test_compact_caption_attention_preserves_geometry_routes_and_fit(driven_labels: Driven) -> None:
+    """DL-384: paint-only attention preserves compound, layout, Fit and route bounds."""
+    d = driven_labels
+    d.page.evaluate(
+        "() => {cy.zoom(.85); cy.center(cy.$id('IB')); placeLocks();"
+        " window.labelLayouts=0;cy.on('layoutstart',()=>labelLayouts++);}"
+    )
+    before = _label_geometry(d)
+    point = _client_point(d, _LONG_NAME_A)
+    d.page.mouse.move(**point)
+    d.page.wait_for_function("() => !document.getElementById('name-callout').hidden")
+    assert d.page.inner_text("#name-callout") == _LONG_NAME_A
+    assert d.page.locator("#details").is_hidden()
+    assert _selected_ids(d) == []
+    assert _painted(d) == []
+    assert _label_geometry(d) == before
+    d.page.mouse.click(**point)
+    d.page.mouse.move(**_canvas_point(d, 8, 8))
+    assert d.page.inner_text("#d-title") == _LONG_NAME_A
+    assert _label_geometry(d) == before
+    d.page.evaluate("() => {cy.nodes().select();highlightNodes(cy.$id('P'));}")
+    assert _label_geometry(d) == before
+    _open_control(d, "#node-labels")
+    control = d.page.get_by_label("Labels", exact=True)
+    for mode in ("always", "adaptive", "always", "adaptive"):
+        control.select_option(mode)
+        assert _label_geometry(d) == before
+    d.page.evaluate("() => {cy.zoom(.3); cy.nodes().unselect();}")
+    assert d.page.evaluate("() => cy.$id('P').style('text-opacity')") == "0"
+    assert _label_geometry(d)["nodes"] == before["nodes"]
+    assert d.page.evaluate("() => cy.$id('B').style('text-opacity')") == "1"
+    d.page.evaluate("() => {cy.$id('P').select();}")
+    assert d.page.evaluate("() => cy.$id('P').style('text-opacity')") == "1"
+    assert _label_geometry(d)["nodes"] == before["nodes"]
+    assert d.page.evaluate("() => labelLayouts") == 0
+    assert d.errors == []
+
+
+def test_full_name_callout_hover_priority_and_viewport_bounds(driven_labels: Driven) -> None:
+    """DL-384: a pointer-transparent preview never replaces details or branch ownership."""
+    d = driven_labels
+    d.page.evaluate("() => {cy.zoom(.9); cy.center(cy.$id('IB'));}")
+    point = _client_point(d, _LONG_NAME_A)
+    d.page.mouse.click(**point)
+    d.page.mouse.move(**_canvas_point(d, 8, 8))
+    d.page.wait_for_function(
+        "() => document.getElementById('name-callout').textContent.includes('NORTH')"
+    )
+    details = d.page.locator("#details").inner_html()
+    painted = _painted(d)
+    d.page.mouse.move(**_client_point(d, _LONG_NAME_B))
+    d.page.wait_for_function(
+        "() => document.getElementById('name-callout').textContent.includes('SOUTH')"
+    )
+    assert d.page.locator("#details").inner_html() == details
+    assert _painted(d) == painted
+    assert _selected_ids(d) == [_LONG_NAME_A]
+    d.page.mouse.move(**_canvas_point(d, 8, 8))
+    d.page.wait_for_function(
+        "() => document.getElementById('name-callout').textContent.includes('NORTH')"
+    )
+    d.page.evaluate(
+        "(id) => {const n=cy.$id(id);cy.pan({x:12-n.position('x')*cy.zoom(),"
+        " y:12-n.position('y')*cy.zoom()});}",
+        _LONG_NAME_A,
+    )
+    d.page.wait_for_function(
+        "(id) => Math.abs(Number(document.querySelector('#name-link line').getAttribute('x2'))"
+        " - cy.$id(id).renderedPosition().x) < .01",
+        arg=_LONG_NAME_A,
+    )
+    bounds = d.page.evaluate(
+        "() => {const c=document.getElementById('name-callout'),b=c.getBoundingClientRect(),"
+        " w=document.getElementById('wrap').getBoundingClientRect();return {visible:!c.hidden,"
+        " inside:b.left>=w.left&&b.top>=w.top&&b.right<=w.right&&b.bottom<=w.bottom,"
+        " pointer:getComputedStyle(c).pointerEvents,link:getComputedStyle(document.getElementById('name-link')).pointerEvents};}"
+    )
+    assert bounds == {"visible": True, "inside": True, "pointer": "none", "link": "none"}
+    _click(d, "#d-close")
+    d.page.wait_for_function("() => document.getElementById('name-callout').hidden")
+    assert _selected_ids(d) == [_LONG_NAME_A]
+    for node_id, compound in ((_LONG_NAME_A, False), ("IB", True)):
+        d.page.evaluate(
+            "({id,compound}) => {const n=cy.$id(id),z=cy.zoom();"
+            " const x=compound?40-n.outerWidth()*z/2:-10;"
+            " cy.pan({x:x-n.position('x')*z,y:120-n.position('y')*z});}",
+            {"id": node_id, "compound": compound},
+        )
+        d.page.mouse.move(**_canvas_point(d, 35 if compound else 5, 120))
+        d.page.wait_for_function(
+            "(name) => {const c=document.getElementById('name-callout');"
+            " return !c.hidden && c.textContent===name;}",
+            arg=node_id,
+        )
+        anchor_x = d.page.evaluate(
+            "Number(document.querySelector('#name-link line').getAttribute('x2'))"
+        )
+        assert anchor_x == 0
+    d.page.evaluate("() => {cy.pan({x:-100000,y:-100000});}")
+    d.page.wait_for_function("() => document.getElementById('name-callout').hidden")
+    assert d.errors == []
+
+
+def test_ambiguous_captions_have_full_name_keyboard_choices(driven_labels: Driven) -> None:
+    """DL-384: colliding captions are disambiguated through native Find result buttons."""
+    d = driven_labels
+    captions = d.page.evaluate(
+        "(ids) => ids.map(id=>nodeCaption(cy.$id(id)))", [_LONG_NAME_A, _LONG_NAME_B]
+    )
+    assert captions[0] == captions[1]
+    assert all("\u2026" in c and c.startswith("REGION") and c.endswith("C") for c in captions)
+    search = d.page.locator("#search")
+    search.fill("REGION_ASSET")
+    search.press("Enter")
+    assert d.page.inner_text("#d-title") == "Find matches (2)"
+    matches = d.page.locator("#d-tree button")
+    assert matches.all_text_contents() == [
+        "Select and inspect " + _LONG_NAME_A,
+        "Select and inspect " + _LONG_NAME_B,
+    ]
+    assert _painted(d) == []
+    matches.nth(1).focus()
+    d.page.keyboard.press("Enter")
+    assert d.page.inner_text("#d-title") == _LONG_NAME_B
+    assert _selected_ids(d) == [_LONG_NAME_B]
+    d.page.wait_for_function(
+        "() => document.getElementById('name-callout').textContent.includes('SOUTH')"
+    )
+    assert d.errors == []
+
+
+def test_compact_marks_survive_suppressed_names_and_nested_fold(driven_labels: Driven) -> None:
+    """DL-384: OR/self-lock/member marks remain distinct from captions and fold in place."""
+    d = driven_labels
+    d.page.evaluate("() => {cy.zoom(.3);}")
+    assert _label(d, _LONG_NAME_A) == "\u2228"
+    assert _label(d, "FW_OR") == "\u2228"
+    assert d.page.evaluate("() => decodeURIComponent(nodeMarks(cy.$id('FW_OR'))).includes('<rect')")
+    assert d.page.evaluate(
+        "(id) => decodeURIComponent(nodeMarks(cy.$id(id))).includes('<rect')", _LONG_NAME_B
+    )
+    assert d.page.evaluate("(id) => cy.$id(id).style('text-opacity')", _LONG_NAME_A) == "0"
+    outside = _positions(d, ["P", "Q", "C", "D"])
+    d.page.evaluate("() => {highlightNodes(cy.$id('P')); ec.collapse(cy.$id('IB'));}")
+    d.page.wait_for_function(
+        "() => foldPending === null && cy.$id('IB').hasClass('cy-expand-collapse-collapsed-node')"
+    )
+    assert _label(d, "IB") == "4"
+    assert d.page.evaluate("() => nodeCaption(cy.$id('IB'))") == "IB"
+    assert _positions(d, ["P", "Q", "C", "D"]) == outside
+    _open_control(d, "#node-labels")
+    d.page.get_by_label("Labels", exact=True).select_option("always")
+    search = d.page.locator("#search")
+    search.fill(_LONG_NAME_B)
+    search.press("Enter")
+    assert not _folded(d, "IB")
+    assert d.page.inner_text("#d-title") == _LONG_NAME_B
+    assert d.page.evaluate("() => cy.$id('P').hasClass('hl')")
+    assert d.page.evaluate("(id) => cy.$id(id).style('text-opacity')", _LONG_NAME_A) == "1"
+    assert _positions(d, ["P", "Q", "C", "D"]) == outside
+    d.page.evaluate("() => {ec.collapse(cy.$id('IB')); cy.zoom(.3);}")
+    _open_control(d, "#node-labels")
+    d.page.get_by_label("Labels", exact=True).select_option("adaptive")
+    d.page.evaluate("() => {ec.expand(cy.$id('IB'));}")
+    assert d.page.evaluate("(id) => cy.$id(id).style('text-opacity')", _LONG_NAME_A) == "0"
+    assert d.errors == []
+
+
+def test_caption_area_does_not_steal_pan_or_selected_node_drag(driven_labels: Driven) -> None:
+    """DL-384: captions are not gesture targets; the body retains selected group drag."""
+    d = driven_labels
+    d.page.evaluate(
+        "(id) => {cy.zoom(1);const n=cy.$id(id);cy.pan({x:400-n.position('x'),"
+        " y:420-n.position('y')});}",
+        "P",
+    )
+    point = _client_point(d, "P")
+    offset = [52, 0] if d.page.evaluate("DIRECTION") == "DOWN" else [0, 23]
+    d.page.mouse.move(point["x"] + offset[0], point["y"] + offset[1])
+    pan = d.page.evaluate("() => cy.pan()")
+    d.page.mouse.down()
+    d.page.mouse.move(point["x"] + offset[0] + 35, point["y"] + offset[1] + 32, steps=8)
+    d.page.mouse.up()
+    assert d.page.evaluate("() => cy.pan()") != pan
+    assert _selected_ids(d) == []
+    d.page.evaluate(
+        "(ids) => {cy.nodes().filter(n=>ids.includes(n.id())).select();}",
+        [_LONG_NAME_A, _LONG_NAME_B],
+    )
+    before = _positions(d, [_LONG_NAME_A, _LONG_NAME_B])
+    point = _client_point(d, _LONG_NAME_A)
+    d.page.mouse.move(**point)
+    d.page.mouse.down()
+    d.page.mouse.move(point["x"] + 31, point["y"] + 29, steps=8)
+    d.page.mouse.up()
+    after = _positions(d, [_LONG_NAME_A, _LONG_NAME_B])
+    deltas = [[after[n][i] - before[n][i] for i in (0, 1)] for n in before]
+    assert deltas[0] == pytest.approx(deltas[1])
+    assert deltas[0] == pytest.approx([31, 29], abs=2)
+    assert d.errors == []
+
+
+def test_compact_caption_lock_obstacles_and_fit_ignore_attention(driven_locks: Driven) -> None:
+    """DL-384: re-placing hubs reads the same caption bounds under zoom/selection/marks."""
+    d = driven_locks
+    d.page.evaluate("() => placeLocks()")
+    before = _label_geometry(d)
+    d.page.evaluate("() => {cy.nodes().select(); highlightNodes(cy.nodes());}")
+    _open_control(d, "#node-labels")
+    control = d.page.get_by_label("Labels", exact=True)
+    for mode in ("always", "adaptive"):
+        control.select_option(mode)
+        d.page.evaluate("() => {cy.zoom(.2); placeLocks();}")
+        assert _label_geometry(d) == before
+    # Halo paint is excluded from the obstacle contract (DL-384).
+    d.page.evaluate("() => {cy.nodes().unselect(); clearHighlights();}")
+    assert _hub_overlaps(d) == []
+    assert d.errors == []
+
+
+def test_compact_caption_empty_box_keeps_top_landmark_and_native_rectangle(
+    driven_labels: Driven,
+) -> None:
+    """DL-384: an empty expanded box owns a title even though it is childless."""
+    d = driven_labels
+    facts = d.page.evaluate(
+        "(id) => {const n=cy.$id(id),k=n.scratch('elk'),l=k.labels[0],"
+        " b=n.boundingBox({includeNodes:false,includeEdges:false,includeLabels:true,"
+        " includeOverlays:false,includeUnderlays:false});return {expanded:expandedBox(n),"
+        " parent:n.isParent(),placement:k.layoutOptions['elk.nodeLabels.placement'],"
+        " delta:[b.x1-k.x-l.x,b.y1-k.y-l.y,b.w-l.width,b.h-l.height]};}",
+        _EMPTY_BOX,
+    )
+    assert facts["expanded"] and not facts["parent"]
+    assert facts["placement"] == "[OUTSIDE,H_CENTER,V_TOP]"
+    assert facts["delta"] == pytest.approx([0, 0, 0, 0], abs=0.01)
+    before = _label_geometry(d)
+    d.page.evaluate("() => {cy.zoom(.2);}")
+    assert d.page.evaluate("(id) => cy.$id(id).style('text-opacity')", _EMPTY_BOX) == "1"
+    assert _label_geometry(d)["nodes"] == before["nodes"]
+    assert d.errors == []
+
+
+def test_compact_caption_pixel_budget_and_native_leaf_rectangles(driven_labels: Driven) -> None:
+    """DL-384: wide glyphs keep both ends without a second ellipsis or port enlargement."""
+    d = driven_labels
+    facts = d.page.evaluate(
+        "(ids) => ids.map(id=>{const n=cy.$id(id),k=n.scratch('elk'),l=k.labels[0],"
+        " c=nodeCaption(n),b=n.boundingBox({includeNodes:false,includeEdges:false,"
+        " includeLabels:true,includeOverlays:false,includeUnderlays:false});"
+        " let x=k.x,y=k.y;n.ancestors().forEach(a=>{x+=a.scratch('elk').x;y+=a.scratch('elk').y;});"
+        "return {caption:c,first:c[0]===n.data('label')[0],last:c.at(-1)===n.data('label').at(-1),"
+        "width:b.w,budget:DIRECTION==='DOWN'?112:132,wrap:n.style('text-wrap'),"
+        "body:[k.width,k.height],actualBody:[n.outerWidth(),n.outerHeight()],"
+        "delta:[b.x1-x-l.x,b.y1-y-l.y,b.w-l.width,b.h-l.height]};})",
+        [_CJK_NAME, _WIDE_NAME],
+    )
+    for fact in facts:
+        assert fact["first"] and fact["last"] and "\u2026" in fact["caption"]
+        assert fact["width"] <= fact["budget"] + 0.01
+        assert fact["wrap"] == "none"
+        assert fact["body"] == fact["actualBody"]
+        assert fact["delta"] == pytest.approx([0, 0, 0, 0], abs=0.01)
+    assert d.errors == []

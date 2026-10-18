@@ -394,3 +394,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-381 | Explore offers Orthogonal and Bezier edge styles under View |  |
 | DL-382 | Explore can draw ELK's calculated edge routes |  |
 | DL-383 | Explore reports route freshness and recovers settled layout failures |  |
+| DL-384 | Explore separates compact node bodies from contextual names |  |
