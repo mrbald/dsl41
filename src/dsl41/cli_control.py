@@ -76,6 +76,10 @@ _BASELINE_PIN_HELP = (
     "Use this baseline id instead of reading it. An exact retry needs the"
     " baseline the original carried; the CLI prints it before sending."
 )
+_ACTOR_PIN_HELP = (
+    "Reuse the original claimed actor for exact recovery. This is logged metadata;"
+    " the socket still authenticates the current OS principal."
+)
 
 
 def _pinned_read(
@@ -141,6 +145,7 @@ def sendevent(
     ),
     epoch: int = typer.Option(None, "--epoch", help=_EPOCH_PIN_HELP),
     baseline: str = typer.Option(None, "--baseline", help=_BASELINE_PIN_HELP),
+    actor: str = typer.Option(None, "--claimed-actor", help=_ACTOR_PIN_HELP),
 ) -> None:
     """Send an AutoSys-style event to a running engine.
 
@@ -197,7 +202,7 @@ def sendevent(
         baseline_id=baseline_id,
         epoch=epoch_value,
         request_id=request_id,
-        claimed_actor=claimed_actor(),
+        claimed_actor=claimed_actor() if actor is None else actor,
     )
     _mutate(socket_path, request)
 
@@ -297,6 +302,7 @@ def host(
     ),
     epoch: int = typer.Option(None, "--epoch", help=_EPOCH_PIN_HELP),
     baseline: str = typer.Option(None, "--baseline", help=_BASELINE_PIN_HELP),
+    actor: str = typer.Option(None, "--claimed-actor", help=_ACTOR_PIN_HELP),
 ) -> None:
     """List, drain, activate or evict execution hosts.
 
@@ -331,7 +337,7 @@ def host(
         baseline_id=baseline_id,
         epoch=epoch_value,
         request_id=request_id,
-        claimed_actor=claimed_actor(),
+        claimed_actor=claimed_actor() if actor is None else actor,
         cmd="host",
     )
     _mutate(socket_path, request)
@@ -586,34 +592,42 @@ def supervise(
         "--deadman-seconds",
         help="start only: exit after this many seconds without a holder.",
     ),
+    force: str | None = typer.Option(
+        None, "--force", help="shutdown only: terminate known command groups deliberately."
+    ),
 ) -> None:
-    """Start, list or shut down a run root's job supervisor.
+    """Start, list or request guarded maintenance of a supervisor.
 
-    ACTION is one of:
-      start     Run the supervisor in the foreground.
-      list      Show its live runs and lease. Read-only.
-      shutdown  Take the lease, then stop every command (TERM, a grace period,
-                KILL), record each outcome, and remove the socket and pidfile.
-                Fails with the holder's details while an engine holds an
-                unexpired lease.
-
-    Exit codes: list and shutdown exit 0 on success and 2 when there is
-    no supervisor or the lease could not be taken. start exits 0 on an
-    orderly exit, 1 when another owner holds the root, 2 on a
-    configuration or usage error, and 7 on a statechart error (a declared
-    machine hit an assertion failure).
+    shutdown refuses active or unobservable work by default. --force=terminate
+    uses TERM, each command's grace period and KILL on validated command groups.
+    Orphaning is unsupported. Shutdown exits 0 on verified completion, 2 on
+    refusal and 4 when delivery or completion is unknown. start returns 8 on
+    maintenance completion, 0 on host shutdown, 1 on failure, 2 on bad
+    configuration and 7 on a statechart error.
     """
     # Design: runner-design ss6a, DL-42 item 4, DL-210
     import json as json_mod
     import math
     import os
     import sys
+    import time
 
     from dsl41.runner_adapters import SupervisorConn, supervisor_argv, supervisor_log_path
+    from dsl41.runner_procid import (
+        current_boot_id,
+        proc_is_zombie,
+        proc_start_token,
+        valid_start_token,
+    )
+    from dsl41.runner_clock import EngineError
 
     verb = action.lower()
     if verb not in ("start", "list", "shutdown"):
         raise typer.Exit(refuse(f"unknown supervise action {action!r} (start|list|shutdown)"))
+    if not isinstance(force, str | type(None)):
+        force = None  # direct Python callers omit Typer's Option default
+    if force is not None and (verb != "shutdown" or force != "terminate"):
+        raise typer.Exit(refuse("--force=terminate is valid only for supervise shutdown"))
     if deadman_seconds is not None:
         if verb != "start":
             raise typer.Exit(refuse("--deadman-seconds is only valid for supervise start"))
@@ -657,6 +671,7 @@ def supervise(
         conn = SupervisorConn(sock_path)
     except OSError as exc:
         raise typer.Exit(refuse(exc, prefix=f"supervisor {sock_path}")) from exc
+    maintenance_attempted = False
     try:
         if verb == "list":
             _answer_or_exit(conn.send({"cmd": "LIST"}))
@@ -665,12 +680,57 @@ def supervise(
         )
         if not acq.get("ok"):
             raise typer.Exit(refuse(f"cannot acquire lease: {json_mod.dumps(acq, sort_keys=True)}"))
-        # the token alone does not authorize a mutating verb: DL-80 pairs it with the
-        # incarnation the ACQUIRE reply names, which `conn` stamps on every later request
-        # (supervisor-protocol ss5); without it the answer is wrong_incarnation
-        resp = conn.send({"cmd": "SHUTDOWN", "token": acq["token"]})
-        _answer_or_exit(resp)
-    except OSError as exc:
-        raise typer.Exit(refuse(exc, prefix=f"supervisor {sock_path}")) from exc
+        incarnation = acq.get("incarnation")
+        token = acq.get("token")
+        if not isinstance(incarnation, str) or not incarnation or type(token) is not int:
+            raise ValueError("malformed supervisor lease reply")
+        # A send failure can follow a partial or complete delivery (DL-216, DL-390).
+        maintenance_attempted = True
+        resp = conn.send({"cmd": "MAINTENANCE_STOP", "token": token, "force": force})
+        if resp.get("ok") is False and resp.get("error") in {
+            "maintenance_refused",
+            "wrong_incarnation",
+            "stale_token",
+            "unknown_verb",
+            "unsupported_version",
+        }:
+            raise typer.Exit(refuse(json_mod.dumps(resp, sort_keys=True)))
+        pid = resp.get("supervisor_pid")
+        start = resp.get("supervisor_start_time")
+        if not (
+            resp.get("ok") is True
+            and resp.get("maintenance") == "completed"
+            and resp.get("incarnation") == incarnation
+            and resp.get("boot_id") == current_boot_id()
+            and type(pid) is int
+            and pid > 0
+            and valid_start_token(start)
+        ):
+            raise ValueError(
+                f"maintenance completion is unknown: {json_mod.dumps(resp, sort_keys=True)}"
+            )
+        deadline = time.monotonic() + 5.0
+        while True:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            observed = proc_start_token(pid)
+            if observed is None:
+                # Only ESRCH proves absence when identity observation fails (DL-390).
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                raise OSError("cannot observe the supervisor process identity")
+            if observed != start or proc_is_zombie(pid):
+                break
+            if time.monotonic() >= deadline:
+                raise OSError("supervisor did not exit after its completion reply")
+            time.sleep(0.02)
+        typer.echo(json_mod.dumps(resp, sort_keys=True))
+    except (OSError, ValueError, EngineError) as exc:
+        refuse(exc, prefix=f"supervisor {sock_path}")
+        raise typer.Exit(4 if maintenance_attempted else 2) from exc
     finally:
         conn.close()

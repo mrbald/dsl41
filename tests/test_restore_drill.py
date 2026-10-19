@@ -42,6 +42,7 @@ import test_nightbank_boundary as tnb
 from dsl41.attest import ATTESTATION_VERIFIED, DERIVATION_VERIFIED, verified_tier
 from dsl41.boundary import EstateAnchor, OpenHead, default_anchor_dir
 from dsl41.period import RuntimeProfile, read_period_manifest, wal_path
+from dsl41.runner_adapters import SupervisorConn
 from test_nightbank_boundary import (
     _drive,
     _invoke,
@@ -151,8 +152,16 @@ def test_the_restoration_drill(short_root: Path, monkeypatch: pytest.MonkeyPatch
         sealed = _seal_offline(run_root, props, "--claimed-actor", "drill@nightbank")
         assert sealed.exit_code == 0, sealed.output
 
-        down = _invoke("supervise", "shutdown", "--run-root", str(run_root))
-        assert down.exit_code == 0, down.output
+        # This unmanaged restoration fixture exercises legacy lifecycle teardown.
+        # Dedicated-service maintenance admission is held separately (DL-390).
+        conn = SupervisorConn(run_root / "supervisor.sock")
+        try:
+            acquired = conn.send({"cmd": "ACQUIRE", "controller_id": "restore-drill", "ttl_s": 60})
+            assert acquired["ok"], acquired
+            down = conn.send({"cmd": "SHUTDOWN", "token": acquired["token"]})
+            assert down["ok"], down
+        finally:
+            conn.close()
     except BaseException:
         _kill_group(run_root)
         raise

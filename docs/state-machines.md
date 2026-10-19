@@ -721,43 +721,59 @@ Clock: monotonic. Time events: deadman.
 
 ```mermaid
 stateDiagram-v2
-    state "process" as s4
-    state s4 {
-        [*] --> s3
-        state "open" as s3
-        state s3 {
-            [*] --> s8
-            state "starting" as s8
+    state "process" as s9
+    state s9 {
+        [*] --> s8
+        state "open" as s8
+        state s8 {
+            [*] --> s13
+            state "starting" as s13
             state "bound" as s0
-            state "up" as s10
-            state s10 {
-                [*] --> s6
-                state "serving" as s6
-                state "shutting_down" as s7
+            state "up" as s15
+            state s15 {
+                [*] --> s11
+                state "serving" as s11
+                state "shutting_down" as s12
+                state "maintenance_checking" as s3
+                state "maintenance_stopping" as s6
+                state "maintenance_uncertain" as s7
+                state "maintenance_completing" as s5
             }
         }
         state "ended" as s2
         state s2 {
-            [*] --> s9
-            state "stopped" as s9
-            state "refused" as s5
+            [*] --> s14
+            state "stopped" as s14
+            state "refused" as s10
+            state "maintenance_completed" as s4
         }
         state "closed" as s1
         s1 --> [*]
     }
-    s8 --> s5 : supervisor_process.01 start [lock_held] / refuse
-    s8 --> s5 : supervisor_process.02 start [owner_live] / refuse
-    s8 --> s0 : supervisor_process.03 start [free]
-    s0 --> s6 : supervisor_process.04 publish
-    s6 --> s7 : supervisor_process.05 SHUTDOWN [credentials]
-    s6 --> s7 : supervisor_process.06 term / drain
-    s7 --> s9 : supervisor_process.07 drained
-    s6 --> s9 : supervisor_process.08 deadman
-    s10 --> s1 : supervisor_process.31 teardown / unlink_published
-    s9 --> s1 : supervisor_process.32 teardown / unlink_published
+    s13 --> s10 : supervisor_process.01 start [lock_held] / refuse
+    s13 --> s10 : supervisor_process.02 start [owner_live] / refuse
+    s13 --> s0 : supervisor_process.03 start [free]
+    s0 --> s11 : supervisor_process.04 publish
+    s11 --> s12 : supervisor_process.05 SHUTDOWN [credentials]
+    s11 --> s12 : supervisor_process.06 term / drain
+    s12 --> s14 : supervisor_process.07 drained
+    s11 --> s14 : supervisor_process.08 deadman
+    s15 --> s1 : supervisor_process.31 teardown / unlink_published
+    s14 --> s1 : supervisor_process.32 teardown / unlink_published
     s0 --> s1 : supervisor_process.33 teardown / unlink_private
-    s8 --> s1 : supervisor_process.34 teardown
-    s5 --> s1 : supervisor_process.35 teardown
+    s13 --> s1 : supervisor_process.34 teardown
+    s10 --> s1 : supervisor_process.35 teardown
+    s11 --> s3 : supervisor_process.37 MAINTENANCE_STOP [credentials]
+    s3 --> s11 : supervisor_process.40 maintenance_refused
+    s3 --> s6 : supervisor_process.41 maintenance_stopping
+    s3 --> s5 : supervisor_process.42 maintenance_idle
+    s6 --> s5 : supervisor_process.43 maintenance_idle
+    s6 --> s7 : supervisor_process.44 maintenance_uncertain
+    s5 --> s7 : supervisor_process.45 maintenance_uncertain
+    s5 --> s4 : supervisor_process.46 maintenance_finished
+    s4 --> s1 : supervisor_process.47 teardown
+    s7 --> s12 : supervisor_process.48 term / drain
+    s7 --> s14 : supervisor_process.49 deadman
 ```
 
 | Id | Source | Event | Guard | Action | Target | Kind | Cite |
@@ -786,6 +802,24 @@ stateDiagram-v2
 | supervisor_process.34 | starting | teardown |  | An error ended startup before the bind: teardown closes the lock if it was taken and unlinks nothing, main exits 1, or 7 for a statechart error. | closed | external | supervisor-protocol ss5, DL-210 |
 | supervisor_process.35 | refused | teardown |  | Another supervisor owns the root: teardown closes the lock if it was taken and unlinks nothing, main exits 1. | closed | external | supervisor-protocol ss5, DL-210 |
 | supervisor_process.36 | shutting_down | term |  | retry |  | internal | supervisor-protocol ss5 SHUTDOWN, DL-300 |
+| supervisor_process.37 | serving | MAINTENANCE_STOP | credentials |  | maintenance_checking | external | supervisor-protocol ss5, DL-390 |
+| supervisor_process.38 | serving | MAINTENANCE_STOP | foreign |  |  | refusal wrong_incarnation | supervisor-protocol ss5, DL-390 |
+| supervisor_process.39 | serving | MAINTENANCE_STOP | stale |  |  | refusal stale_token | supervisor-protocol ss5, DL-390 |
+| supervisor_process.40 | maintenance_checking | maintenance_refused |  |  | serving | external | supervisor-protocol ss5, DL-390 |
+| supervisor_process.41 | maintenance_checking | maintenance_stopping |  |  | maintenance_stopping | external | supervisor-protocol ss5, DL-390 |
+| supervisor_process.42 | maintenance_checking | maintenance_idle |  |  | maintenance_completing | external | supervisor-protocol ss5, DL-390 |
+| supervisor_process.43 | maintenance_stopping | maintenance_idle |  |  | maintenance_completing | external | supervisor-protocol ss5, DL-390 |
+| supervisor_process.44 | maintenance_stopping | maintenance_uncertain |  |  | maintenance_uncertain | external | supervisor-protocol ss5, DL-390 |
+| supervisor_process.45 | maintenance_completing | maintenance_uncertain |  |  | maintenance_uncertain | external | supervisor-protocol ss5, DL-390 |
+| supervisor_process.46 | maintenance_completing | maintenance_finished |  |  | maintenance_completed | external | supervisor-protocol ss5, DL-390 |
+| supervisor_process.47 | maintenance_completed | teardown |  |  | closed | external | supervisor-protocol ss5, DL-390 |
+| supervisor_process.48 | maintenance_uncertain | term |  | drain | shutting_down | external | supervisor-protocol ss5, DL-390 |
+| supervisor_process.49 | maintenance_uncertain | deadman |  |  | stopped | external | supervisor-protocol ss5, DL-390 |
+| supervisor_process.50 | maintenance_completed | term |  |  |  | internal | supervisor-protocol ss5, DL-390 |
+| supervisor_process.51 | maintenance_uncertain | SPAWN |  |  |  | refusal maintenance_uncertain | supervisor-protocol ss5, DL-390 |
+| supervisor_process.52 | maintenance_uncertain | SIGNAL |  |  |  | refusal maintenance_uncertain | supervisor-protocol ss5, DL-390 |
+| supervisor_process.53 | maintenance_uncertain | SHUTDOWN |  |  |  | refusal maintenance_uncertain | supervisor-protocol ss5, DL-390 |
+| supervisor_process.54 | maintenance_uncertain | MAINTENANCE_STOP |  |  |  | refusal maintenance_uncertain | supervisor-protocol ss5, DL-390 |
 
 | State | In | Entry | Exit | Defers | Waits |
 | --- | --- | --- | --- | --- | --- |
@@ -796,9 +830,14 @@ stateDiagram-v2
 | up | open/stage |  |  |  |  |
 | serving | up/service |  |  |  |  |
 | shutting_down | up/service |  |  |  |  |
+| maintenance_checking | up/service |  |  |  |  |
+| maintenance_stopping | up/service |  |  |  |  |
+| maintenance_uncertain | up/service |  |  |  |  |
+| maintenance_completing | up/service |  |  |  |  |
 | ended | process/phase |  |  |  |  |
 | stopped | ended/outcome |  |  |  |  |
 | refused | ended/outcome |  |  |  |  |
+| maintenance_completed | ended/outcome |  |  |  |  |
 | closed (final) | process/phase |  |  |  |  |
 
 | Name | Kind | Prose |

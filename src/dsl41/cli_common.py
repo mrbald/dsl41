@@ -232,7 +232,7 @@ def read_header_of(response: dict[str, Any]) -> "tuple[str, int] | None":
 
 
 def _pins(request: dict[str, Any]) -> str:
-    """The `--expect`, `--epoch` and `--baseline` flags as placed in this envelope (DL-217).
+    """The original revision, epoch, baseline and actor pins (DL-217, DL-391).
 
     Empty for an envelope with no `expect`, such as the seal, whose retry restores its own baseline
     and epoch from the committed record (cli_estate).
@@ -246,6 +246,11 @@ def _pins(request: dict[str, Any]) -> str:
     return (
         f" --expect {revision} --epoch {request.get('epoch')}"
         f" --baseline {shlex.quote(str(request.get('baseline_id')))}"
+        + (
+            f" --claimed-actor {shlex.quote(str(request['claimed_actor']))}"
+            if "claimed_actor" in request
+            else ""
+        )
     )
 
 

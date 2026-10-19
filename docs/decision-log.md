@@ -24937,3 +24937,77 @@ relitigate an entry; append a new one.
   deliberate upgrade procedure. Remove each hook when upstream supplies its
   equivalent. This changes only patch maintenance; the patched entry and all
   four shipping JavaScript assets retain their bytes.
+- DL-389 Offline candidates are manufactured at their final paths (2026-10-19).
+  The configurable prefix defaults to /opt/dsl41. Its .venv is an explicitly
+  activated symlink to .venvs/<runtime-id>; preparation never changes that link.
+  One shell recipe serves manual installation and the reference wheelhouse RPM's
+  %post. System Python 3.12 creates the venv at its final absolute path.
+  Only local binary wheels from the exact release and locked base or UI closure
+  are installed, with hashes, no cache, no source builds and no index fallback.
+  Base is the default. The bundle binds its target and input provenance.
+  Preparation is serialized per prefix. A completion receipt follows dependency
+  checks and installed-code smoke tests. An identical completed candidate is
+  verified again; an incomplete or conflicting directory refuses for inspection.
+  A venv is never relocated: its scripts contain absolute interpreter paths.
+  Versioned deployment assets are staged with the candidate. Package installation
+  replaces no active launcher, unit or site configuration and restarts no service.
+  The RPM prefix is a build macro. RPM owns delivery files only; generated venvs
+  and the active link survive upgrade and erasure. Retirement is a separate act.
+  Package presence is not readiness: a scriptlet failure cannot roll back its
+  effects. Retained runtimes remain usable after candidate preparation fails.
+  Activation uses an atomic symlink replacement after the existing compatibility
+  and quiescence procedures. First installation also requires explicit activation.
+- DL-390 Maintenance is a guarded supervisor operation (2026-10-19).
+  MAINTENANCE_STOP is distinct from legacy SHUTDOWN and is incarnation/lease fenced.
+  The CLI never falls back to SHUTDOWN or signals after an unanswered request.
+  The server takes the existing leader.lock without creating or changing it,
+  verifies its path identity, and keeps exclusion through maintenance teardown.
+  Missing, replaced, unreadable or held evidence refuses before any job signal.
+  Idle proof includes unreaped wrappers and residual descendants, not only LIST.
+  A verified dedicated Linux systemd service cgroup supplies containment evidence;
+  unavailable or incomplete observation refuses. Unmanaged containment is unqualified.
+  Default shutdown refuses active or indeterminate work. --force=terminate permits
+  the existing TERM/grace/KILL ladder for validated command groups only.
+  Force bypasses no ownership, exclusion or observation check. Residual work after
+  that ladder is uncertain; the supervisor retains lifelines and exclusion.
+  Successful maintenance exits 8, after positive completion and teardown checks.
+  CLI completion, refusal and uncertainty are 0, 2 and 4. An acceptance or lost
+  reply is not proof of completion. Orphaning is unsupported.
+  The supervisor unit uses RefuseManualStop=yes, SuccessExitStatus=8 and
+  RestartPreventExitStatus=2 7 8. Routine engine restart remains available.
+  Maintenance admission verifies these loaded unit settings.
+  Crash, deadman and host-shutdown paths retain their existing behavior.
+  Bootstrap provisions the lock only while both units are stopped and disabled.
+  Unresponsive maintenance preserves evidence and requires incident diagnosis;
+  it never authorizes an automatic force, manager kill or lock-file replacement.
+- DL-391 TUI mutations retain their exact recovery envelope (2026-10-19).
+  Each mutation is constructed once from its frozen selection and confirmation.
+  Before sending, the UI displays a complete shell-quoted recovery command.
+  It pins the backing runtime executable and absolute socket path.
+  A failed precondition read refuses a destructive confirmation.
+  It retains that command with an UNKNOWN outcome and never resends automatically.
+  The command pins the socket, verb, payload, request id, revision, epoch,
+  baseline and claimed actor. Cancellation sends nothing.
+  sendevent and host accept --claimed-actor as an explicit recovery pin.
+  The claim is untrusted metadata; kernel peer credentials still decide authority.
+  Recovery must run as the original principal on the original host.
+  Reusing an id with a changed envelope remains a collision, not a retry.
+- DL-392 Blocking supervisor requests have one monotonic deadline (2026-10-19).
+  The configured request timeout covers sending and the complete reply wait.
+  Partial reads and discarded exit pushes do not restart it.
+  The default is 60 seconds; bounded startup probes retain their shorter value.
+  A maintenance timeout after delivery remains uncertain (exit 4), with no
+  automatic resend or signal fallback. Positive completion still requires
+  the separate, bounded process-exit observation under DL-390.
+- DL-393 TUI recovery pins the running Python launch path (2026-10-19).
+  Capture the interpreter when the TUI module loads. Resolve its parent
+  directory, but retain the interpreter filename rather than following a
+  venv's Python symlink to the base interpreter. Recovery uses -P -m dsl41:
+  the working directory cannot shadow the package, and user-site installs
+  remain available. A later active-link switch cannot retarget the command.
+  Recovery retains the original principal, host and Python environment.
+  A non-venv installation must remain installed at the same location;
+  immutable runtime retention is supplied by the qualified venv layout.
+  The separate CLI and TUI pin formatters remain for this release. This
+  scoped fix changes the executable prefix only. Revisit a shared formatter
+  when the envelope pin schema changes (scoped architecture finding C1).

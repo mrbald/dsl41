@@ -12,14 +12,14 @@
 # shellcheck disable=SC2034  # the names below are read by the steps
 set -euo pipefail
 
-DSL41=/opt/dsl41/venv/bin/dsl41
+DSL41=/opt/dsl41/.venv/bin/dsl41
 ROOT=/srv/dsl41/runs/nightbank-01
 ANCHOR=/srv/dsl41/runs/nightbank-01.anchor
 SOCK=$ROOT/control.sock
 LAUNCH=/opt/dsl41/bin/dsl41-launch
 # the launcher's DSL41 runs through this symlink; each install is a venv
 # beside it, and an upgrade flips the link (deployment-runbook ss7)
-VENV=/opt/dsl41/venv
+VENV=/opt/dsl41/.venv
 MAP=/etc/dsl41/nightbank-access.toml
 NIGHTBANK=/srv/dsl41/nightbank
 ESTATE=$NIGHTBANK/estate/small
@@ -39,6 +39,10 @@ LONG_JOB=OPS_XINST_DEMO_C
 # the operator recipes the drill runs as written (deployment-runbook ss0)
 RUNBOOK=$REPO/docs/deployment-runbook.md
 
+# Each offline estate keeps its own durable root (DL-389).
+if [ -n "${DRILL_ROOT-}" ]; then ROOT=$DRILL_ROOT; ANCHOR=$ROOT.anchor; SOCK=$ROOT/control.sock; fi
+if [ -n "${DRILL_ESTATE-}" ]; then ESTATE=$NIGHTBANK/estate/$DRILL_ESTATE; fi
+
 ok() { echo "ok: $*"; }
 fail() {
     echo "FAIL: $*" >&2
@@ -46,7 +50,7 @@ fail() {
 }
 
 # every client command runs as the service account, as an operator's would
-as_dsl41() { (cd / && sudo -u dsl41 -H "$@"); }
+as_dsl41() { (cd / && sudo -u dsl41 -H env PATH="$VENV/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" "$@"); }
 cli() { as_dsl41 "$DSL41" "$@"; }
 
 # The commands of the runbook block marked `<!-- recipe: NAME -->`, the
@@ -182,20 +186,64 @@ next_args() {
     done
 }
 
-# install the wheel the install step built, with the locked closure, into
-# a venv of its own beside the symlink (deployment-runbook ss1, ss7)
-install_build() { # install_build VENV_DIR
-    sudo python3 -m venv "$1"
-    sudo "$1/bin/pip" install --quiet --require-hashes -r "$SCRATCH/runtime.txt"
-    sudo "$1/bin/pip" install --quiet --no-deps "$SCRATCH"/dist/dsl41-*.whl
-    sudo "$1/bin/pip" check
-    "$1/bin/dsl41" --help >/dev/null || fail "$1: dsl41 --help failed"
+# Prepare at the final path; activation remains an explicit atomic link (DL-389).
+install_build() { # install_build base|ui
+    sudo env PYTHON=python3.12 bash "$SCRATCH/bundle/tools/prepare.sh" \
+        "$SCRATCH/bundle" /opt/dsl41 "$1" | sudo tee "$SCRATCH/prepare-$1.log"
+    tail -n 1 "$SCRATCH/prepare-$1.log"
 }
 
-# point the launcher's symlink at VENV_DIR: the upgrade's one switch
-flip() { # flip VENV_DIR
-    sudo ln -sfn "$1" "$VENV"
-    [ "$(readlink "$VENV")" = "$1" ] || fail "$VENV does not lead to $1"
+flip() { # flip CANDIDATE
+    [ -f "$1/.dsl41/receipt.json" ] || [ "$1" = "${OLD_VENV-}" ] ||
+        fail "no completed runtime receipt: $1"
+    sudo test ! -e "$VENV" || sudo test -L "$VENV" || fail "$VENV is a real directory"
+    sudo ln -s ".venvs/${1##*/}" "$VENV.next.$$"
+    sudo mv -T "$VENV.next.$$" "$VENV"
+    [ "$(readlink -f "$VENV")" = "$1" ] || fail "$VENV does not lead to $1"
+}
+
+# A cold root never reuses or truncates an earlier lock (DL-390).
+provision_root() { # provision_root NEW_ROOT
+    sudo mkdir -m 0700 "$1"
+    sudo sh -c 'umask 077; set -C; : >"$1/leader.lock"' sh "$1"
+    sudo chown dsl41:dsl41 "$1" "$1/leader.lock"
+}
+
+# A disabled inactive unit may be collected; retain exit evidence outside its properties (DL-390).
+record_supervisor_exit() {
+    sudo install -d /run/systemd/system/dsl41-supervisor.service.d
+    sudo tee /run/systemd/system/dsl41-supervisor.service.d/10-drill-exit.conf >/dev/null <<'UNIT'
+[Service]
+ExecStopPost=/bin/sh -c 'echo "$$EXIT_STATUS" > /var/lib/dsl41/drill-supervisor-exit'
+UNIT
+    sudo systemctl daemon-reload
+}
+
+# This has no fallback: refusal or uncertainty stops the rehearsal (DL-390).
+ # shellcheck disable=SC2120  # the force scenario passes --force=terminate
+maintenance_stop() {
+    local state
+    state=$(prop "$ENGINE" ActiveState)
+    case $state in inactive|failed) ;; *) fail "stop the engine before maintenance: $state";; esac
+    as_dsl41 rm -f /var/lib/dsl41/drill-supervisor-exit
+    cli supervise shutdown --run-root "$ROOT" "${@}"
+    wait_for 30 "verified maintenance leaves the supervisor inactive" is_state "$SUPERVISOR" inactive
+    [ "$(sudo cat /var/lib/dsl41/drill-supervisor-exit)" = 8 ] || fail "supervisor did not exit 8"
+}
+
+# Deliberate incident containment is separate from verified maintenance (DL-390).
+incident_stop_supervisor() { # incident_stop_supervisor EXPLICIT_REASON
+    [ "$#" = 1 ] && [ -n "$1" ] || fail "an explicit incident reason is required"
+    echo "INCIDENT STOP: $1; command outcomes can be unknown" >&2
+    sudo systemctl stop "$ENGINE"
+    sudo install -d /run/systemd/system/dsl41-supervisor.service.d
+    printf '[Unit]\nRefuseManualStop=no\n[Service]\nRestart=no\n' |
+        sudo tee /run/systemd/system/dsl41-supervisor.service.d/90-incident-stop.conf >/dev/null
+    sudo systemctl daemon-reload
+    sudo systemctl stop "$SUPERVISOR"
+    assert_no_writers "$ROOT"
+    sudo rm /run/systemd/system/dsl41-supervisor.service.d/90-incident-stop.conf
+    sudo systemctl daemon-reload
 }
 
 # UNIT's main process runs from VENV_DIR: its interpreter is that venv's
@@ -279,7 +327,31 @@ boot_target() {
 assert_no_writers() { # assert_no_writers ROOT
     ! sudo test -e "$1/supervisor.pid" || fail "$1/supervisor.pid is still there"
     ! sudo test -e "$1/supervisor.sock" || fail "$1/supervisor.sock is still there"
-    sudo flock --nonblock "$1/leader.lock" true || fail "a process holds $1/leader.lock"
+    if ! as_dsl41 "$VENV/bin/python" -I - "$1/leader.lock" <<'PYTHON'
+import fcntl
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+try:
+    held = os.fstat(fd)
+    named = os.stat(path, follow_symlinks=False)
+    if not stat.S_ISREG(held.st_mode):
+        raise RuntimeError("leader lock is not regular")
+    if (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino):
+        raise RuntimeError("leader lock changed")
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    named = os.stat(path, follow_symlinks=False)
+    if (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino):
+        raise RuntimeError("leader lock changed")
+finally:
+    os.close(fd)
+PYTHON
+    then
+        fail "missing, changed, unreadable or held leader lock: $1/leader.lock"
+    fi
     ! pgrep -u dsl41 >/dev/null || fail "dsl41 processes remain: $(pgrep -a -u dsl41)"
     ok "no writer is left in $1"
 }
@@ -301,7 +373,12 @@ quiesce_shape1() {
         --next-timezone UTC --claimed-actor drill@nightbank
     cli audit --run-root "$ROOT" --estate-anchor "$ANCHOR"
     ok "sealed offline and audited while the supervisor ran"
-    sudo systemctl stop "$SUPERVISOR"
+    if [ "${1-}" = legacy-incident ]; then
+        incident_stop_supervisor "reviewed historical supervisor has no MAINTENANCE_STOP"
+    else
+        # shellcheck disable=SC2119
+        maintenance_stop
+    fi
     assert_units_stay_stopped
     assert_no_writers "$ROOT"
 }
@@ -318,7 +395,11 @@ force_start() { request FORCE_STARTJOB "$1"; }
 # RUNBOOK exercise 15 step 1: hold what the calendar would start
 hold_scheduled() {
     local job
-    for job in "${QUIESCE[@]}"; do
+    local jobs=("${QUIESCE[@]}")
+    if [ "$ESTATE" = "$NIGHTBANK/estate/bank" ]; then
+        jobs=(APAC_EOD_B EMEA_EOD_B AMER_EOD_B OPS_HEARTBEAT_C)
+    fi
+    for job in "${jobs[@]}"; do
         request ON_HOLD "$job"
     done
 }

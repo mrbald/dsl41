@@ -29,6 +29,7 @@ import socket
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -550,6 +551,94 @@ def _refusing_root(root: Path, kind: str) -> int | None:
     return None
 
 
+def _maintenance_process_paths(root: Path, monkeypatch: pytest.MonkeyPatch) -> set[str]:
+    """Procedure results reach every maintenance phase through the real admission belt (DL-390)."""
+    rows: set[str] = set()
+    cases = (
+        "foreign",
+        "stale",
+        "refused",
+        "idle",
+        "force_complete",
+        "force_term",
+        "force_deadman",
+        "teardown_error",
+    )
+    for case in cases:
+        directory = root / case
+        directory.mkdir()
+        (directory / "leader.lock").touch()
+        sup = runner_supervisor.Supervisor(str(directory))
+        sup._bind()
+        sup._sel.register(sup._listen, selectors.EVENT_READ, ("listen", None))
+        server, peer = socket.socketpair()
+        conn = runner_supervisor._Conn(server)
+        sup._conns[server.fileno()] = conn
+        sup._sel.register(server, selectors.EVENT_READ, ("conn", conn))
+        dispatch = sup._machines.dispatch
+
+        def observe(key: Any, event: Any) -> Any:
+            outcomes = dispatch(key, event)
+            if key == "process":
+                rows.update(row for outcome in outcomes for row in outcome.rows)
+            return outcomes
+
+        sup._machines.dispatch = observe
+        grant = sup._h_acquire(conn, {"controller_id": "maintenance-walk"})
+        request = {"incarnation": sup.incarnation, "token": grant["token"], "force": None}
+        active = case.startswith("force")
+        proof = SimpleNamespace(
+            members=lambda: {os.getpid(), 99999999} if active else {os.getpid()}
+        )
+        with monkeypatch.context() as patch:
+            patch.setattr(runner_supervisor.ServiceContainment, "observe", lambda: proof)
+
+            def terminate(_proof: Any) -> None:
+                nonlocal active
+                if case != "force_complete":
+                    raise OSError("unverifiable residual group")
+                active = False
+
+            patch.setattr(sup, "_maintenance_wait", terminate)
+            if case == "foreign":
+                request["incarnation"] = "foreign"
+            elif case == "stale":
+                request["token"] = grant["token"] + 1
+            elif case == "refused":
+                request["force"] = "orphan"
+            elif case.startswith("force"):
+                request["force"] = "terminate"
+            elif case == "teardown_error":
+
+                def fail(_proof: Any) -> None:
+                    raise OSError("owned-file teardown failed")
+
+                patch.setattr(sup, "_maintenance_prepare_teardown", fail)
+            try:
+                answer = sup._h_maintenance_stop(conn, request)
+                if case in ("foreign", "stale", "refused"):
+                    assert not answer["ok"] and sup.state == "serving"
+                elif case in ("idle", "force_complete"):
+                    assert answer["maintenance"] == "completed"
+                    assert sup.state == "maintenance_completed"
+                    sup._process(runner_supervisor.TERM)
+                else:
+                    assert answer["error"] == "maintenance_uncertain"
+                    assert sup.state == "maintenance_uncertain"
+                    for verb in ("SPAWN", "SIGNAL", "SHUTDOWN", "MAINTENANCE_STOP"):
+                        assert sup._fence(verb, request)["error"] == "maintenance_uncertain"
+                    if case == "force_term":
+                        sup._orderly_shutdown(runner_supervisor.TERM)
+                        assert sup.state == "stopped"
+                    elif case == "force_deadman":
+                        sup._process(runner_supervisor.DEADMAN)
+                        assert sup.state == "stopped"
+            finally:
+                sup._teardown()
+                peer.close()
+    return rows
+
+
 def test_every_process_event_at_every_reached_point_takes_a_declared_transition(
     short_root: Path,
     recorded: Path,
@@ -630,6 +719,8 @@ def test_every_process_event_at_every_reached_point_takes_a_declared_transition(
     }
     assert delivered == {(p, s) for p in _POINTS for s in _STIMULI} - unsent
     assert _PROCESS_PAIRS <= taken, sorted(_PROCESS_PAIRS - taken)
+    maintenance_rows = _maintenance_process_paths(short_root, monkeypatch)
+    assert {f"supervisor_process.{number}" for number in range(37, 55)} <= maintenance_rows
     hits = {
         (r["kind"], r["id"], r["detail"])
         for r in _records(recorded, "hits")

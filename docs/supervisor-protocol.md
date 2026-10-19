@@ -3,7 +3,7 @@
 Status: frozen. DL-42 item 3 freezes the spool format and the wrapper
 input spec, and DL-48 freezes the supervisor socket protocol. Entries
 that amend it include DL-80, DL-129, DL-150, DL-151, DL-210, DL-229,
-DL-291, DL-300, DL-325, DL-326 and DL-328; each is cited where it
+DL-291, DL-300, DL-325, DL-326, DL-328, DL-390 and DL-392; each is cited where it
 applies. Each change to a frozen item needs a decision-log entry. This
 document is the extraction boundary of the lifecycle tier (the five
 modules of §1). If a DL-42 trigger fires and the tier is extracted, this
@@ -13,7 +13,7 @@ The tier is deliberately dumb. It records process lifecycle facts
 durably and does nothing else.
 It has no conditions, no retries, no policy and no scheduling timers. Its
 time bounds are lifecycle bounds only (DL-150): the lease TTL, the
-SHUTDOWN waits, the two-second output drain at teardown, the startup PING
+legacy SHUTDOWN and guarded maintenance waits, the two-second output drain at teardown, the startup PING
 probe and the optional deadman (all §5). A handled signal (SIGCHLD,
 SIGTERM, SIGINT) wakes the supervisor loop at delivery through its
 self-pipe, which is also the interpreter's wakeup fd. The loop also reaps
@@ -33,8 +33,8 @@ orchestrator's UI (DL-42 item 6).
 - **supervisor** (`runner_supervisor.py`): keeps parenthood alive across
   engine restarts. It owns the wrapper lifelines, so an engine restart
   REATTACHES to the jobs and does not kill them. It speaks
-  the §5 socket protocol: SPAWN, SIGNAL, LIST, SHUTDOWN, PING and the lease
-  verbs. It imports only the standard library and the tier's own
+  the §5 socket protocol: SPAWN, SIGNAL, LIST, MAINTENANCE_STOP, legacy
+  SHUTDOWN, PING and the lease verbs. It imports only the standard library and the tier's own
   stdlib-only modules below, and runs by file path, under the same
   enforced boundary as the wrapper.
 - **process identity** (`runner_procid.py`, DL-72): the one copy of the
@@ -470,7 +470,7 @@ startup. Leave them unset in production, like `DSL41_WRAPPER_TEST_PAUSE`.
 **Incarnation** (DL-80). The supervisor mints an `incarnation` id at every
 start and returns it from `PING`, `LIST` and `ACQUIRE`. Every verb that
 changes lease or run state must carry it: `SPAWN`, `SIGNAL`, `SHUTDOWN`,
-`RENEW` and `RELEASE` (DL-150 names the last two). A mismatch is
+`MAINTENANCE_STOP`, `RENEW` and `RELEASE` (DL-150, DL-390). A mismatch is
 `{"ok": false, "error": "wrong_incarnation", "incarnation": <current>}`.
 
 The incarnation is not folded into the token, because the fencing counter
@@ -521,7 +521,7 @@ DL-326).
 
 **Read-only verbs** (any connection, no lease):
 
-- `LIST` → `{ok, version: 1, supervisor_pid, boot_id, incarnation,
+- `LIST` → `{ok, version: 1, supervisor_pid, boot_id, incarnation, process_state,
   deadman_s, lease: {holder, expires_at} | null, runs: [{run_id, job,
   run_number, run_dir, wrapper_pid, wrapper_alive, spawned_at,
   wrapper_rc}]}`. The response lists what THIS supervisor still holds in
@@ -543,7 +543,7 @@ DL-326).
   live one (see the lease verbs below). It can still name a holder whose
   connection is gone (DL-150). Nothing may read it as proof that a
   controller is watching.
-- `PING` → `{ok, version: 1, incarnation, deadman_s}`.
+- `PING` → `{ok, version: 1, incarnation, deadman_s, process_state}`.
 
 `deadman_s` (DL-95) is in both read verbs: the interval this
 supervisor was started with, or `null`. A client reads it back rather than
@@ -738,8 +738,63 @@ first. Then a stale or expired token answers
   Exited with no record is `noop`, because nothing here can still be
   addressed. A `sig` outside {`TERM`, `KILL`} answers
   `{ok: false, error: "bad_signal"}`, checked before `run_id`.
-- `SHUTDOWN {incarnation, token}`: an orderly shutdown. It is the one
-  exception to no-escalation, because the engine may be gone. The
+- `MAINTENANCE_STOP {incarnation, token, force}` (DL-390): guarded
+  maintenance. `force` is `null` or `"terminate"`; any other value refuses.
+  The CLI's `supervise shutdown` uses this verb, including with
+  `--force=terminate`. An old supervisor refuses the unknown verb. The
+  CLI never retries through `SHUTDOWN` or a signal.
+
+  Before changing process state, the server opens the **existing**
+  `leader.lock`, without creation or truncation, takes an exclusive
+  nonblocking flock and verifies the descriptor's device/inode against
+  the path. Missing, replaced, unreadable or held evidence refuses.
+  The lock stays held through teardown, excluding a disconnected engine
+  that retains leadership and a new engine racing maintenance.
+
+  Idle means no unreaped wrappers and no residual descendants. An empty
+  LIST is insufficient: completed runs can leave descendants, and LIST's
+  cache can evict completed runs. Maintenance requires positive process
+  observation within a verified dedicated Linux systemd service cgroup.
+  Its MainPID must be this supervisor and its ControlGroup must match the
+  observed membership. Shared, delegated or unobservable containment
+  refuses. Unmanaged supervisors have no qualified maintenance proof.
+  The loaded unit must also have RefuseManualStop=yes and include exit 8
+  in both SuccessExitStatus and RestartPreventExitStatus. A stale unit
+  policy refuses before termination starts.
+
+  With `force: null`, active or indeterminate work refuses without a
+  signal. With `force: "terminate"`, validated command groups take the
+  existing TERM/grace/KILL ladder. Force bypasses no lock or observation
+  check, and signals no unknown cgroup member. If any work remains or
+  observation fails after termination starts, the result is uncertain.
+  The supervisor retains its lifelines and engine exclusion for diagnosis.
+  It refuses further run mutations: SPAWN, SIGNAL, SHUTDOWN and another
+  MAINTENANCE_STOP. Lease operations remain available.
+  PING and LIST expose `process_state`, including `maintenance_uncertain`,
+  so an operator can distinguish this state from ordinary operation.
+  A failure during owned-file teardown may already have removed the socket
+  or pid record. Diagnosis then uses the unit, process identity and log.
+  Recovery uses the explicit incident-stop procedure in the runbook.
+  It does not declare legacy SHUTDOWN's timeout bound to be completion.
+
+  Completion requires positive idle proof and successful owned-file
+  teardown. Its reply is `{ok: true, maintenance: "completed", incarnation,
+  supervisor_pid, supervisor_start_time, boot_id}`. The process exits **8**,
+  reserved for maintenance. The CLI
+  exits **0** only on verified completion, **2** on refusal before the
+  operation starts, and **4** on uncertainty after it may have started.
+  A lost reply never causes an automatic retry or signal escalation.
+  Each blocking CLI request has one monotonic 60-second deadline, including
+  sending, partial reads and discarded exit pushes (DL-392). A longer force operation
+  can still complete after that timeout; its unanswered CLI result is 4.
+  After a completion reply, the CLI allows up to five further seconds to
+  verify that the named process identity has exited. An unobservable or
+  still-live identity yields 4.
+  Orphaning is unsupported. Host signals and deadman retain their
+  separate behavior below. Bootstrap and unresponsive recovery are in
+  `deployment-runbook.md` §3.
+- `SHUTDOWN {incarnation, token}`: the legacy orderly shutdown. Like explicit
+  maintenance termination, it escalates because the engine may be gone. The
   supervisor sends TERM to each live command's process group, waits the
   per-run `grace_seconds`, and sends KILL to survivors. **Lifelines stay
   open until the wrappers exit**, so the wrappers observe the command
@@ -747,8 +802,8 @@ first. Then a stale or expired token answers
   lost". The supervisor waits for the wrappers, replies `{ok}`, exits, and
   unlinks the socket and the pid file. Both removals require the ownership
   checks above (DL-210). SIGTERM and SIGINT start the same shutdown: Tier 2
-  sends SIGTERM, and an operator can send it as a fallback to `dsl41
-  supervise shutdown`. Only SIGKILL, which cannot be handled, leaves the
+  sends SIGTERM during host shutdown. They are not a fallback for an
+  unanswered maintenance request (DL-390). Only SIGKILL, which cannot be handled, leaves the
   wrappers to their own EOF.
 
   Two bounds keep that wait finite (DL-150). First, the supervisor waits up

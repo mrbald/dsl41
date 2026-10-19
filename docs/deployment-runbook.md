@@ -74,7 +74,7 @@ paths. `RUN_ROOT` and `ESTATE_ANCHOR` are the launcher's values.
 <!-- diagram: processes -->
 ```text
 systemd
-├── dsl41-supervisor.service    User=dsl41  Restart=always  RestartPreventExitStatus=2 7
+├── dsl41-supervisor.service    User=dsl41  Restart=always  RestartPreventExitStatus=2 7 8
 │     ExecStart=/opt/dsl41/bin/dsl41-launch supervisor
 │     ExecStartPost=/opt/dsl41/bin/dsl41-launch supervisor-ready
 │     └── dsl41 supervise start --run-root RUN_ROOT                 the supervisor
@@ -93,7 +93,7 @@ systemd
             └── asks the supervisor to spawn and kill over RUN_ROOT/supervisor.sock
 
 storage                               owner and mode              written by
-/opt/dsl41/venv -> venv-<ver>         root                        the installer (§1, §7)
+/opt/dsl41/.venv -> .venvs/<id>      root                        explicit activation (§1, §7)
 /opt/dsl41/bin/dsl41-launch           root, 0755                  the installer; reviewed like code
 /etc/dsl41/nightbank-access.toml      dsl41, 0600                 the operator (§4)
 ESTATE files                          root, read-only to dsl41    a checkout of a tag (§2, §6)
@@ -170,20 +170,24 @@ anchor of its own.
 
 ### Recipe: install and start as a service
 
-1. Install the package (§1). The launcher's `DSL41` is
-   `/opt/dsl41/venv/bin/dsl41`, so install there, or follow §7's venv
-   layout from the start.
-2. From a checkout of the repository at the release's tag (the wheel does
-   not ship the examples), create the service account and its writable
+1. Prepare and explicitly activate the offline candidate (§1). The
+   launcher's `DSL41` is `/opt/dsl41/.venv/bin/dsl41`.
+2. Review the versioned deployment kit staged with the candidate (§1).
+   The recipe below uses the matching release checkout's examples.
+   Create the service account and its writable
    directories, and install the launcher, the access map and the units:
 
 <!-- recipe: service-install -->
 ```sh
+set -eu
 useradd --system --user-group --create-home --home-dir /var/lib/dsl41 \
     --shell /usr/sbin/nologin dsl41
 install -D -m 0755 examples/nightbank/deploy/dsl41-launch /opt/dsl41/bin/dsl41-launch
 install -d -m 0755 /srv/dsl41
 install -d -o dsl41 -g dsl41 -m 0700 /srv/dsl41/runs
+mkdir -m 0700 /srv/dsl41/runs/nightbank-01
+(umask 077; set -C; : >/srv/dsl41/runs/nightbank-01/leader.lock)
+chown dsl41:dsl41 /srv/dsl41/runs/nightbank-01 /srv/dsl41/runs/nightbank-01/leader.lock
 install -d -m 0755 /etc/dsl41
 install -o dsl41 -g dsl41 -m 0600 examples/nightbank/deploy/nightbank-access.toml \
     /etc/dsl41/nightbank-access.toml
@@ -216,6 +220,9 @@ systemctl start dsl41-engine.service
 systemctl is-active dsl41-supervisor.service dsl41-engine.service
 ```
 
+   The new root and empty lock are provisioned before either unit starts.
+   A preexisting root makes the provisioning step refuse; inspect it.
+   Never create a replacement lock in a running root (§3).
    `Requires=` starts the supervisor unit first, and both lines print
    `active`. That is not readiness: a unit that refuses with exit 2 a
    second later printed `active` too. The first start is a genesis: the
@@ -394,7 +401,7 @@ dsl41 query status --job "$JOB" -S "$S"
   the launcher resumes the same root. No seal, and no reboot hold.
 - **Estate stop.** For a window that must outlast a reboot: take §2b's
   reboot hold, then follow §2b's shape-1 steps: stop the engine unit, seal
-  and audit while the supervisor unit runs, stop the supervisor unit, and
+  and audit while the supervisor unit runs, request guarded maintenance, and
   check that neither comes back. To start again, start the engine unit
   (it opens the sealed period's successor), then release the hold.
 - **Seal.** Closing a period is an operator act at the estate's cutoff
@@ -486,10 +493,15 @@ ends with `<root>/wal/<N>.jsonl: missing segment record`. Set
 
    If it stops, something runs under this root. This recipe does not
    cover that case, and no other supported path does.
-2. Stop both units (`systemctl stop dsl41-engine.service
-   dsl41-supervisor.service`), or under shape 2 the supervisor (`dsl41
-   supervise shutdown --run-root "$RUN_ROOT"`). Then run §2b's
-   no-writers check, with its wait past `RestartSec` under shape 1.
+2. Take §2b's reboot hold and stop the engine. Under shape 1, use §3's
+   guarded maintenance as the service account against `"$RUN_ROOT"`.
+   Require exit 0; a manager stop of the protected supervisor unit refuses.
+   On refusal or uncertainty, preserve evidence and follow §3's explicit
+   incident procedure. Under shape 2, guarded maintenance refuses; an
+   incident stop needs an independently verified whole-process scope.
+   Continue only after §2b's no-writers check, including its wait past
+   `RestartSec` under shape 1, proves quiescence. An empty LIST alone is
+   insufficient. Do not create or replace lock evidence to force admission.
 3. Check the root. The check stops, and says why, at any sign that
    the root holds more than a torn opening:
 
@@ -974,69 +986,70 @@ Who cleans what:
 
 ## 1. Install
 
-Dedicated venv, pinned version, `[ui]` extra only where humans look.
-Set the pin and the profile first:
+Use the [offline installation recipe](offline-installation.md) (DL-389).
+The release kit contains the exact DSL41 wheel, locked base and UI wheel
+closures, hashes, target provenance and versioned deployment templates.
+Base is the default. Use UI on a host that serves terminal or browser users.
+
+The connected build host fetches the inputs. The deployment host needs
+system Python 3.12 with venv and ensurepip, plus the OS prerequisites listed
+in that recipe. Preparation runs without networking and creates each venv
+at its final absolute path. Its scripts must never be relocated.
 
 ```sh
-ver=1.10.0
-profile=ui                                            # headless host: profile=base
+prefix=/opt/dsl41
+bundle=/srv/releases/dsl41-wheelhouse
+PYTHON=python3.12 bash "$bundle/tools/prepare.sh" "$bundle" "$prefix" base
 ```
 
-From 1.8.0 on, install what the release tested (DL-215). Its GitHub
-release carries the wheel, the locked dependency closure per profile with
-hashes, and `SHA256SUMS`. The closure goes in first with
-`--require-hashes`, then the wheel with `--no-deps`, so pip resolves nothing
-of its own:
+Read the final output line for the candidate path. A completed candidate
+has `.dsl41/receipt.json`; package presence alone proves nothing.
+An identical repeat verifies the candidate. An incomplete or conflicting
+candidate refuses with recovery instructions. Never repair it in place or
+install through `.venv`. Preparation changes no active link, launcher,
+unit or site configuration and restarts nothing.
+
+The reference RPM invokes this same recipe in `%post`. Its prefix is a
+build macro, defaulting to `/opt/dsl41`. RPM owns delivery files only.
+Generated candidates and the active link survive package upgrades and
+erasure. A failed scriptlet does not roll back its effects; inspect its
+candidate and receipt before deciding that it is ready.
+
+Activation is explicit even on first installation. After the relevant
+compatibility procedure in §7, set `candidate` to the verified final path:
 
 ```sh
-base=https://github.com/mrbald/dsl41/releases/download/v$ver
-mkdir -p /opt/dsl41/dl && cd /opt/dsl41/dl
-for f in SHA256SUMS "requirements-$profile.txt" "dsl41-$ver-py3-none-any.whl"; do
-  curl -fsSLO "$base/$f"
-done
-sha256sum -c --ignore-missing SHA256SUMS              # macOS: shasum -a 256 -c --ignore-missing
-python3.12 -m venv /opt/dsl41/venv
-/opt/dsl41/venv/bin/pip install --require-hashes -r "requirements-$profile.txt"
-/opt/dsl41/venv/bin/pip install --no-deps "dsl41-$ver-py3-none-any.whl"
+set -eu
+prefix=/opt/dsl41
+profile=base
+prepared=$(PYTHON=python3.12 bash "$bundle/tools/prepare.sh" "$bundle" "$prefix" "$profile")
+candidate=$(printf '%s\n' "$prepared" | tail -n 1)
+test -f "$candidate/.dsl41/receipt.json"
+test ! -e "$prefix/.venv" || test -L "$prefix/.venv"
+link="$prefix/.venv.next.$$"
+ln -s ".venvs/${candidate##*/}" "$link"
+mv -T "$link" "$prefix/.venv"
+export PATH="$prefix/.venv/bin:$PATH"
 ```
 
-Releases through 1.7.0 carry no release assets. For those, install from
-PyPI with the pin:
+Set `profile` to the candidate's original profile before verification.
+Operator shells need the active runtime's `bin` directory on `PATH`.
+The service launcher uses the absolute path.
+The rename replaces one link atomically. A real directory at `.venv`
+refuses. Keep the previous candidate and its release kit for rollback
+and retained-estate audit. Copy staged templates into active locations
+only after reviewing site changes. Run `systemctl daemon-reload` after
+unit changes; preparation and RPM scriptlets do not do that for you.
 
-```sh
-python3.12 -m venv /opt/dsl41/venv
-/opt/dsl41/venv/bin/pip install "dsl41[ui]==$ver"     # headless host: "dsl41==$ver"
-```
-
-`uv tool install "dsl41[ui]==$ver"` is the one-liner where uv is the site
-convention. Both resolve the dependencies at install time instead of
-installing the tested closure; keep the pin there too.
-
-Either way, link the command and smoke-test the install:
-
-```sh
-ln -s /opt/dsl41/venv/bin/dsl41 /usr/local/bin/dsl41  # or add the venv bin to PATH
-dsl41 --help                                          # smoke test
-/opt/dsl41/venv/bin/python -c 'from importlib.metadata import version; print(version("dsl41"))'
-```
-
-The package installs no services and has no runtime network dependencies.
-The engine is a foreground process you place under your init system (§3).
-It writes into the run roots you name and their sibling anchor directories
-(§2). The one thing it writes elsewhere is job output: a job's
-`std_out_file` and `std_err_file` are used as written, wherever the JIL
-names them.
-
-The `[ui]` extra floors (`textual>=8`, `textual-serve>=1.1`) are tested
-pairs (DL-46/47); do not force older ones.
+The package has no runtime network dependencies. It writes into the run
+roots and sibling anchors you name (§2), plus the job output paths in JIL.
+The UI dependency floors are tested pairs; do not force older versions.
 
 ## 2. Filesystem layout
 
 ```
-/opt/dsl41/venv-<ver>/    one pinned install per release (§7)
-/opt/dsl41/venv          a symlink to the venv in use; §1's first
-                          install is a directory here until §7
-                          converts it
+/opt/dsl41/.venvs/<runtime-id>/    one pinned install per release (§7)
+/opt/dsl41/.venv         the explicitly activated symlink (§1)
 /srv/dsl41/estate/        JIL + properties files — a git checkout of a tag,
                           never hand-edited in place
 /srv/dsl41/runs/<id>/     a run root holds one period per baseline and
@@ -1307,12 +1320,12 @@ hold before a live seal as before an offline one.
 2. if the period ran detached, confirm the supervisor is still there:
    `dsl41 supervise list --run-root <root>` answers `ok` while it is;
 3. seal offline and audit, as above;
-4. stop the supervisor unit: `systemctl stop dsl41-supervisor.service`.
-   Do not use `dsl41 supervise shutdown` here. It exits the supervisor
-   cleanly, and `Restart=always` starts it again `RestartSec` later.
-   Stopping the unit ends every command still running, so do it only
-   once you want them ended. The engine unit `Requires=` this unit, so
-   this stop also stops the engine unit if it still runs;
+4. request maintenance as the service account:
+   `dsl41 supervise shutdown --run-root <root>`. The server excludes
+   engine startup and proves the service cgroup idle. Exit 0 means
+   completion; 2 means refusal; 4 means uncertain. Stop on 2 or 4 and
+   follow §3. The reloaded unit treats supervisor exit 8 as successful
+   maintenance and does not restart it;
 5. wait longer than the longer `RestartSec` of the two units (5 s in the
    example units; wait 12 s). Then check that neither unit came back:
    `systemctl is-active dsl41-engine.service dsl41-supervisor.service`
@@ -1326,10 +1339,10 @@ hold before a live seal as before an offline one.
 2. if the period ran detached, confirm the supervisor is still there:
    `dsl41 supervise list --run-root <root>` answers `ok` while it is;
 3. seal and audit, as above;
-4. stop the supervisor: `dsl41 supervise shutdown --run-root <root>`.
-   It first sends TERM to anything still running, waits the grace, then
-   sends KILL. So run it only once you want every live command ended, and
-   only once the seal above no longer needs it;
+4. unmanaged containment has no qualified maintenance-idle proof
+   (DL-390). The safe command refuses. Use §3's explicit incident stop
+   after inspecting the complete process scope, or deploy the separate
+   supervisor service before relying on this backup procedure;
 5. run the no-writers check below.
 
 A tethered period has no supervisor. Under shape 1 it skips step 2; the
@@ -1437,12 +1450,13 @@ Decisions to make once, per site:
   per-run-root supervisor, and an engine restart (`--resume --detached`)
   reattaches to them instead of killing them. Detached is the production
   default. Inspect it with `dsl41 supervise list --run-root <root>`.
-  `dsl41 supervise shutdown --run-root <root>` is the break-glass that
-  kills everything, for a stopped engine. It must acquire the
-  supervisor's fencing lease, and a live engine holds it; the refusal
-  names the holder. Stop or kill the engine first. There is no TTL to
-  wait out: the supervisor reads the closed connection as proof that the
-  holder is gone, so the lease is grantable at once.
+  For maintenance, stop the engine and follow §3's guarded procedure.
+  Plain `supervise shutdown` refuses active or indeterminate work.
+  Explicit `--force=terminate` permits TERM/grace/KILL only for validated
+  command groups. Both require the existing leader lock and verified
+  dedicated service containment. A free fencing lease alone proves
+  neither engine exclusion nor idle work. Uncertainty never authorizes
+  an automatic retry or signal fallback.
 - **Faulting commands.** A command whose apply raises is refused with
   `apply_faulted` before it is journaled (concurrency-model §4).
   `--on-transition-violation` is inert (DL-353) and is removed at the
@@ -1523,21 +1537,87 @@ documented shutdown waits (`supervisor-protocol.md` §5); the service
 manager's final cgroup kill can otherwise silence a wrapper before it
 records the command's ending.
 
-Under shape 1, stop the supervisor with
-`systemctl stop dsl41-supervisor.service`.
-`dsl41 supervise shutdown` exits it cleanly,
-then `Restart=always` starts it again. A deadman exit is also clean and is
-restarted on purpose. An ownership refusal exits 1 and retries after two
-seconds; `StartLimitIntervalSec=0` keeps that retry loop from hitting the
-start limit. Exit 2 is a configuration refusal and is not restarted.
-A shutdown whose wait fails twice exits 1 and is restarted; the
-supervisor log names both errors. Its commands then end as on any
-supervisor crash: the unit's stop sends them TERM, so a wrapper may
-record `signaled 15`, and a wrapper still running after `TimeoutStopSec`
-is killed with no record.
-Stopping the supervisor ends its running jobs. Restarting it does not
-resurrect them; the engine reconciles the spool. §2b's backup order and
-§7's upgrade rows stop shape 1 this way.
+**Guarded maintenance (DL-390).** Install and reload the supervisor unit
+before using a new runtime: `[Unit] RefuseManualStop=yes`, and
+`[Service] SuccessExitStatus=8` with `RestartPreventExitStatus=2 7 8`.
+Keep `Restart=always`, `KillMode=control-group` and the stop timeout.
+Manual manager stop and restart refuse. Routine engine restart remains
+available. Dependency shutdown during host shutdown still stops the unit.
+Do not add an `ExecStop` safety command: its refusal does not veto a
+systemd stop, which still kills remaining processes.
+
+Stop the engine, then run as the service account:
+
+```sh
+systemctl stop dsl41-engine.service
+sudo -u dsl41 /opt/dsl41/.venv/bin/dsl41 supervise shutdown --run-root <root>
+```
+
+Default shutdown refuses active or indeterminate work without signals.
+The server holds the existing engine lock through teardown and requires
+verified dedicated service-cgroup observation, including residual children.
+Empty LIST is not idle proof. Exit 0 means verified completion; supervisor
+exit 8 prevents restart. Exit 2 means refusal before maintenance began.
+Exit 4 means the operation may have begun or completed. Read the unit,
+process identity and supervisor log; never automatically repeat or signal.
+The CLI waits 60 seconds for a reply. A force operation with a longer grace
+can complete after that timeout. An uncertain teardown may have removed
+the socket or pid record already; use the unit, process identity and log.
+An old supervisor refuses MAINTENANCE_STOP. The CLI never falls back to
+legacy SHUTDOWN. Coordinate that upgrade using the old runtime's reviewed
+procedure and the explicit incident stop below when needed.
+
+For deliberate termination, use the same command with `--force=terminate`.
+It invokes TERM/grace/KILL for validated known command groups. It bypasses
+no ownership, engine-lock or observation check. Residual or unknown work
+after that ladder yields 4 and retains the supervisor, lifelines and engine
+exclusion. Mutations, including another maintenance attempt, then refuse.
+Recovery is the explicit incident stop below. Orphaning is unsupported.
+
+**Cold bootstrap.** Before enabling either unit, provision a genuinely new
+run root and an empty regular `leader.lock`, owned by the service account
+and mode 0600. §0's install recipe does this exclusively. For a physical
+roll or new estate, do the same for its new root before starting its
+supervisor. A used root's lock is never truncated or replaced. Missing,
+replaced or unreadable lock evidence makes maintenance refuse. Creating a
+lock in a running root can admit another engine; it is not recovery.
+
+**Unresponsive supervisor or uncertain termination.** Preserve the root,
+spool and logs. Take the reboot hold (§2b), stop the engine and inspect the
+unit's MainPID, ControlGroup and remaining processes. Decide explicitly
+that ending every process in this supervisor unit is acceptable. This is
+an incident stop, with possible unobservable job outcomes, not maintenance
+completion. For the example unit, a root operator can temporarily remove
+the manager guard and restart policy:
+
+```sh
+install -d /run/systemd/system/dsl41-supervisor.service.d
+cat >/run/systemd/system/dsl41-supervisor.service.d/90-incident-stop.conf <<'EOF'
+[Unit]
+RefuseManualStop=no
+[Service]
+Restart=no
+EOF
+systemctl daemon-reload
+systemctl stop dsl41-supervisor.service
+systemctl is-active dsl41-supervisor.service
+```
+
+Verify that the cgroup is empty and no writers remain (§2b). Preserve the
+command outcomes from the spool; do not infer that all jobs succeeded.
+Remove only that incident drop-in, reload, and keep both units disabled
+until diagnosis and recovery finish. Do not remove or recreate lock files
+while any previous process may remain. The same procedure applies when
+new units protect an old supervisor without the maintenance verb.
+Unmanaged shape 2 needs an independently verified whole-process scope;
+there is no automatic signal fallback or claim of safe idle shutdown.
+
+Crash, deadman and host-shutdown behavior is unchanged. A deadman exit
+restarts on purpose. Ownership refusal exits 1 and retries after two
+seconds without a start limit. Configuration refusal 2 and statechart
+failure 7 do not restart. A legacy shutdown wait that fails twice exits 1.
+Its wrappers then end as on a supervisor crash. Restarting a supervisor
+never resurrects commands; the engine reconciles the spool.
 
 The optional `supervise start --deadman-seconds N` sets the deadman: a
 finite positive number of seconds with no live leaseholder, normally the
@@ -1561,10 +1641,9 @@ to the engine's main process, so the supervisor and jobs can survive that
 stop in the same cgroup. This gives up the unit's normal whole-cgroup stop
 containment. A killed or stopped engine can leave these processes running;
 monitor the supervisor and its log separately. To stop the estate, stop
-the engine first, then use
-`dsl41 supervise shutdown --run-root <root>`.
-If that cannot reach the supervisor, inspect the remaining
-processes before using a whole-cgroup kill; killing wrappers can leave
+the engine first. Unmanaged containment refuses guarded maintenance.
+Use the explicit
+incident procedure above; killing wrappers can leave
 `exit_status_unobservable` outcomes. Keep the engine's restart exclusions
 and resume rules above. This shape has no separate supervisor restart
 service; a later engine start can start a replacement after proving the
@@ -1592,6 +1671,9 @@ Exit codes:
   error, and its unit does not restart it either. Like any stop of the
   supervisor, it ends every command it still runs: "Stopping the
   supervisor unit ends every command it still runs" (§0).
+- 8: supervisor only, successful guarded maintenance. The supervisor unit
+  treats it as success and does not restart. The maintenance CLI reports
+  its own completion/refusal/uncertainty as 0/2/4 (§3).
 
 Exit 2 means a person misconfigured something, and a restart will not
 help; hence `RestartPreventExitStatus=2 3 6 7` above. A second engine on a
@@ -1606,10 +1688,10 @@ lint findings that survive into operation.
 
 ### A worked example: `examples/nightbank/deploy/`
 
-The repository holds a complete shape-1 deployment of the nightbank
-training estate (DL-218). The files are examples to copy. They are
-not package data, and the wheel does not ship them. Every path and name in
-them is synthetic.
+The repository holds a shape-1 deployment of the Nightbank training estate
+(DL-218). The files are examples to review and copy. The wheel does not
+ship them; the offline kit stages versioned copies with each candidate.
+Every path and name in them is synthetic.
 
 - `dsl41-launch` is a POSIX sh launcher. It is the one place that
   names the run root, the lineage anchor, the estate files in their
@@ -1839,11 +1921,13 @@ The production window is for swapping files, not for finding problems.
    boxes: only `job_terminator` members die with a box.
 3. **Stop the web UI**, if any. It is stateless; the order matters only
    for tidy monitoring.
-4. **Stop the engine** (SIGTERM). If detached, confirm that nothing you
-   are about to redefine is still alive under the supervisor
-   (`dsl41 supervise list --run-root <root>`). Wait it out, or run
-   `dsl41 supervise shutdown --run-root <root>`. A job left running across
-   a new baseline is a process the new catalog knows nothing about.
+4. **Stop the engine** (SIGTERM). If detached, follow §3's guarded
+   maintenance procedure. Wait for active work to finish, or explicitly
+   accept termination with `--force=terminate` under verified service
+   containment. Require exit 0 and §2b's no-writers proof before continuing.
+   Refusal, uncertainty or unmanaged containment requires §3's incident
+   procedure; an empty LIST does not prove completion. A job left running
+   across a new baseline is a process the new catalog knows nothing about.
 5. **Swap the estate**: `git -C /srv/dsl41/estate checkout <new-tag>`.
 6. **New run root**: `dsl41 run ... --run-root /srv/dsl41/runs/<new-id>`,
    a fresh root with no `--resume`. Name run roots after the baseline: a
@@ -2137,42 +2221,21 @@ on a timer.
 
 ## 7. Upgrading dsl41 itself
 
-Each release gets its own venv beside the one in use:
-`/opt/dsl41/venv-<ver>`. `/opt/dsl41/venv` is a symlink to the venv in
-use, and the launcher's `DSL41` runs through it (§3's worked example).
-Flipping the symlink is the upgrade's one switch, and flipping it back is
-the rollback. Install the new venv with §1's commands, with
-`/opt/dsl41/venv-<new>` in place of every `/opt/dsl41/venv`. Skip §1's
-`ln -s` line: the existing link already leads through `/opt/dsl41/venv`.
-Never run §1's commands against `/opt/dsl41/venv` itself. Through the
-symlink they would install into the venv in use and leave nothing to flip
-back to. Smoke test the new venv before the window: `dsl41 --help`, and a
-`rehearse` of the current estate with the new venv's `dsl41`. Give the
-rehearsal the launcher's files in order, its `-p`, `--timezone`,
-`--timezone-map` and `--semantics`, as §6 does. Keep the old venv until
-the new one has run a full cycle.
+Each prepared runtime has its final path under `/opt/dsl41/.venvs/`.
+`/opt/dsl41/.venv` is the active symlink. Prepare and verify the candidate
+with §1 before the maintenance window. Rehearse the current estate with
+its installed executable, using the launcher's ordered files, properties,
+timezone, timezone map and semantics. Read the compatibility table below
+before switching. Atomic activation uses §1's link replacement.
 
-`ln -sfn` replaces a symlink, not a directory: given §1's directory, it
-creates the link inside it. A venv cannot be moved either, because its
-scripts name its own path. So convert §1's layout once, with both units
-stopped:
-
-```sh
-/opt/dsl41/venv/bin/pip freeze >/opt/dsl41/running.txt
-python3.12 -m venv /opt/dsl41/venv-<old>
-/opt/dsl41/venv-<old>/bin/pip install --no-deps -r /opt/dsl41/running.txt
-/opt/dsl41/venv-<old>/bin/pip check
-mv /opt/dsl41/venv /opt/dsl41/venv.orig
-ln -s /opt/dsl41/venv-<old> /opt/dsl41/venv
-```
-
-The frozen list keeps the versions that were running. For a release with
-assets, install its closure and wheel instead, as §1 does. `venv.orig` is
-not a usable venv after the move: its scripts still name
-`/opt/dsl41/venv`, which now leads to `venv-<old>`. Delete it once both
-units run from the link. A process started through the symlink runs from
-the venv the link named when it started, so a kept supervisor keeps its
-own build after a flip.
+Never install into the active link or move a backing venv. To adopt this
+layout from an existing `/opt/dsl41/venv` installation, leave that directory
+at its original path. Prepare a new candidate from the exact old release
+kit, or the qualified upgrade release. During the appropriate window,
+change the reviewed launcher to `.venv`, activate the candidate, reload
+changed units, and start. The original directory remains usable for
+rollback until the retained-estate policy permits its separate removal.
+A process started before activation keeps its original interpreter.
 
 **What moves with a release.** `catalog_hash` v2 excludes
 `meta.tool_version`, and `dsl41_version` is not on the `segment` record,
@@ -2186,7 +2249,7 @@ another is refused at readiness (period-model §2.1), and resume refuses a
 segment pinned to another. Check it in both venvs, whatever the note says:
 
 ```sh
-/opt/dsl41/venv-<ver>/bin/python -c \
+/opt/dsl41/.venvs/<runtime-id>/bin/python -c \
     'from dsl41.runner_ledger import STATE_MACHINE_VERSION as v; print(v)'
 ```
 
@@ -2262,9 +2325,8 @@ the first that picks a row:
 
 The commands below are for shape 1 and the example's paths (§3). Under
 shape 2, stop and start the engine where a row stops and starts the engine
-unit. Where a row stops the supervisor unit, run
-`dsl41 supervise shutdown --run-root <root>` once the engine has stopped
-(§2b, shape 2). A starting engine starts a supervisor from its own venv
+unit. Unmanaged shape 2 cannot prove safe maintenance and needs §3's incident
+procedure where a row stops its supervisor. A starting engine starts a supervisor from its own venv
 when none is running.
 
 **Row 1, resume-safe, with no wrapper or supervisor protocol change.**
@@ -2273,7 +2335,7 @@ reattaches to them:
 
 ```sh
 systemctl stop dsl41-engine.service
-ln -sfn /opt/dsl41/venv-<new> /opt/dsl41/venv
+# activate the verified candidate with the atomic link replacement in §1
 systemctl start dsl41-engine.service     # the launcher passes --resume
 ```
 
@@ -2291,7 +2353,7 @@ with no live execution and an attested seal (§6a). Then open the next
 period in the new root:
 
 ```sh
-ln -sfn /opt/dsl41/venv-<new> /opt/dsl41/venv
+# activate the verified candidate with the atomic link replacement in §1
 # edit the launcher's RUN_ROOT to the new root, and both units'
 # RequiresMountsFor= to match; ESTATE_ANCHOR stays the lineage's anchor
 systemctl daemon-reload
@@ -2333,12 +2395,13 @@ change.** The engine and the supervisor are deployed together, never one
 at a time (`docs/protocol-evolution.md`). Restarting only the engine
 would leave the old supervisor launching the old wrapper. Hold the
 scheduled jobs and let running work finish (§6's window, steps 1 and 2).
-Wait until `dsl41 supervise list --run-root <root>` shows no run with
-`"wrapper_alive": true`. Then:
+LIST can help monitor the drain; only guarded maintenance proves idle. Then:
 
 ```sh
-systemctl stop dsl41-engine.service dsl41-supervisor.service
-ln -sfn /opt/dsl41/venv-<new> /opt/dsl41/venv
+set -eu
+systemctl stop dsl41-engine.service
+sudo -u dsl41 /opt/dsl41/.venv/bin/dsl41 supervise shutdown --run-root <root> || exit "$?"
+# activate the verified candidate with the atomic link replacement in §1
 systemctl start dsl41-engine.service     # Requires= starts the supervisor first
 ```
 
@@ -2352,17 +2415,17 @@ venv and that the engine resumed.
 old estate's periods, and only the old venv can audit them (§6a). Drain
 as for row 3. Take the reboot hold (§2b). Then run §2b's shape-1 steps
 1 to 6 with the old venv: stop the engine unit, a final seal and audit
-while the supervisor runs, stop the supervisor unit. Then start a new
+while the supervisor runs, then guarded maintenance. Then start a new
 estate:
 
 ```sh
-ln -sfn /opt/dsl41/venv-<new> /opt/dsl41/venv
+# activate the verified candidate with the atomic link replacement in §1
 # edit the launcher's RUN_ROOT and ESTATE_ANCHOR to the new estate's,
 # and both units' RequiresMountsFor= to match
 systemctl daemon-reload
 systemctl start dsl41-engine.service     # a genesis, no --resume
 systemctl enable dsl41-supervisor.service dsl41-engine.service   # release the reboot hold (§2b)
-/opt/dsl41/venv-<old>/bin/dsl41 audit --estate-anchor <old-anchor>
+/opt/dsl41/.venvs/<old-runtime-id>/bin/dsl41 audit --estate-anchor <old-anchor>
 ```
 
 If the genesis fails, fix the cause and start the unit again before you
@@ -2450,7 +2513,8 @@ speaks to the supervisor, not the engine, and leaves no WAL record.
 | drain or activate an executor | `host drain`, `host activate` | yes | asserts nothing about reachability |
 | evict an executor | `host evict` | no | gated on concurrency-model §8's preconditions |
 | break glass: forced eviction | `host evict --force` | no | the one path that can double-run; authenticated when the access map is armed, attributed otherwise |
-| break glass: supervisor shutdown | `supervise shutdown` | no | needs no live leaseholder: an expired lease, or an unexpired one whose holder's connection is gone, is grantable (DL-79) |
+| idle supervisor maintenance | `supervise shutdown` | no | stopped engine, verified lock exclusion and dedicated service containment; active or indeterminate work refuses (DL-390) |
+| deliberate supervisor termination | `supervise shutdown --force=terminate` | no | TERM/grace/KILL for validated command groups; uncertainty is not completion or permission to retry (§3) |
 | break glass: reclaim a lineage | `estate reclaim --force` | no | the one path that can fork a lineage (period-model §1.3) |
 
 Break-glass survives the seal as facts: a forced eviction's `forced_by`

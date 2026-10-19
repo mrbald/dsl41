@@ -8,7 +8,7 @@
 #   2. audit the sealed period;
 #   3. wait for the supervisor's commands to end (at most DRAIN_MINUTES,
 #      default 50: the longest soak command sleeps 45 minutes);
-#   4. shut the supervisor down.
+#   4. request guarded supervisor maintenance and report its outcome.
 # Each step's time goes to stdout and to DIR/stop.jsonl. The timer soak.sh
 # started runs this script too; a manual stop cancels the timer first.
 #
@@ -92,18 +92,30 @@ while :; do
             *) drained=true && break ;;
         esac
     elif [ "$code" -eq 2 ] && grep -q '^no supervisor' "$DIR/list.err"; then
-        drained=true && break # no supervisor, so no command left to wait for
+        echo "stop.sh: no supervisor answers; residual command containment is unverified" >&2
+        break
     else
         echo "stop.sh: supervise list exited $code: $(cat "$DIR/list.err"); asking again" >&2
     fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
-        echo "stop.sh: commands may still run after $DRAIN_SECONDS s; the shutdown ends them" >&2
+        echo "stop.sh: commands may still run after $DRAIN_SECONDS s; guarded maintenance may refuse" >&2
         break
     fi
     sleep "$DRAIN_POLL_SECONDS"
 done
-note "{\"step\": \"drain\", \"drained\": $drained, \"seconds\": $(since "$t2")}"
+note "{\"step\": \"drain\", \"drained\": $drained, \"scope\": \"tracked_wrappers\", \"seconds\": $(since "$t2")}"
 
-"$DSL41" supervise shutdown --run-root "$RUN_ROOT" || true
-note "{\"step\": \"supervisor_shutdown\"}"
+maintenance_status=0
+"$DSL41" supervise shutdown --run-root "$RUN_ROOT" || maintenance_status=$?
+note "{\"step\": \"supervisor_shutdown\", \"exit\": $maintenance_status}"
+if [ "$maintenance_status" -ne 0 ]; then
+    if [ "$maintenance_status" -eq 2 ]; then
+        echo "stop.sh: maintenance refused; the supervisor may still run" >&2
+    else
+        echo "stop.sh: maintenance completion is unknown; the supervisor may still run" >&2
+    fi
+    echo "stop.sh: inspect process identity and logs; do not retry or signal automatically" >&2
+    echo "stop.sh: recovery requires an explicit whole-process scope; see docs/deployment-runbook.md section 3" >&2
+    exit "$maintenance_status"
+fi
 exit "$status"

@@ -300,7 +300,7 @@ supervisor → wrappers. The supervisor exists for exactly one reason: jobs
 that must SURVIVE engine restarts (upgrades, crash isolation). The
 supervisor is deliberately dumb (postmaster / s6-supervise philosophy):
 it forks wrappers, reaps them, and answers SPAWN, SIGNAL, LIST and
-SHUTDOWN, plus PING and the lease verbs ACQUIRE, RENEW and RELEASE
+SHUTDOWN and guarded MAINTENANCE_STOP, plus PING and the lease verbs ACQUIRE, RENEW and RELEASE
 (`docs/supervisor-protocol.md` §5). It has no scheduling timers, no conditions, and no configuration reload.
 Its only time bounds are lifecycle bounds, which the
 [supervisor-protocol preamble](supervisor-protocol.md) lists (DL-150). Its own-bug

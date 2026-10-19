@@ -36,7 +36,7 @@ podman build --quiet --tag "$image" --file - "$here" <<EOF >/dev/null
 FROM $base
 RUN apt-get update -q \\
     && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \\
-        systemd systemd-sysv dbus sudo python3-venv jq procps util-linux ca-certificates \\
+        systemd systemd-sysv dbus sudo python3-venv python3-pip jq procps util-linux ca-certificates git \\
     && rm -rf /var/lib/apt/lists/* \\
     && python3 -m venv /opt/uv && /opt/uv/bin/pip install --quiet uv==$uv_version \\
     && ln -s /opt/uv/bin/uv /usr/local/bin/uv \\
@@ -65,10 +65,8 @@ for _ in $(seq 60); do
     sleep 1
 done
 say "systemd is $state in $name"
-podman exec "$name" bash -c 'mkdir /work && tar -C /src -cf - \
-    --exclude=./.venv --exclude=./.git --exclude="*/__pycache__" --exclude=./.mypy_cache \
-    --exclude=./.ruff_cache --exclude=./.pytest_cache --exclude="./.coverage*" --exclude=./dist . |
-    tar -C /work -xf -'
+podman exec "$name" bash -c 'mkdir /work && git -C /src -c safe.directory=/src ls-files --cached -z |
+    tar -C /src --null -T - -cf - | tar -C /work -xf -'
 podman exec "$name" chown -R "$user:$user" /work
 
 steps=$(bash "$here/drill-steps.sh" --list)
@@ -89,7 +87,7 @@ for step in $steps; do
 done
 say "step diagnostics"
 podman exec --user "$user" --workdir /work "$name" \
-    bash examples/nightbank/deploy/drill-steps.sh diagnostics || true
+    bash examples/nightbank/deploy/drill-steps.sh diagnostics || status=1
 
 say "summary"
 printf '  %s\n' "${results[@]}"

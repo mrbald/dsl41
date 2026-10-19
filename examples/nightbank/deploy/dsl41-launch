@@ -46,7 +46,7 @@
 set -eu
 
 # ---- CONFIGURATION ---------------------------------------------------------
-DSL41=/opt/dsl41/venv/bin/dsl41
+DSL41=/opt/dsl41/.venv/bin/dsl41
 # One estate's run root. A new baseline in a fresh root is an operator's
 # edit of this line, never an automatic choice (deployment-runbook ss6).
 RUN_ROOT=/srv/dsl41/runs/nightbank-01
@@ -114,6 +114,11 @@ root_opener() {
     for entry in "$RUN_ROOT"/* "$RUN_ROOT"/.[!.]* "$RUN_ROOT"/..?*; do
         [ -e "$entry" ] || [ -L "$entry" ] || continue # an unmatched glob
         case ${entry##*/} in
+            # Cold provisioning creates only an empty regular lock (DL-390).
+            leader.lock)
+                [ -f "$entry" ] && [ ! -L "$entry" ] && [ ! -s "$entry" ] \
+                    || refuse "$entry is not an empty provisioned lock: inspect the root"
+                ;;
             # what `dsl41 supervise start` puts in a root before any estate
             supervisor.lock | supervisor.log | supervisor.pid | supervisor.sock | .s.*) ;;
             *) refuse "$RUN_ROOT holds ${entry##*/} but no journal.jsonl: it is neither empty nor an estate to resume; inspect it" ;;
