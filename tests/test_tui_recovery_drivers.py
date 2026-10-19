@@ -368,8 +368,6 @@ def _browser_drive(
             diagnostics.mkdir(parents=True, exist_ok=True)
             (diagnostics / "terminal.raw").write_bytes(b"".join(output))
             (diagnostics / "page-errors.txt").write_text("\n".join(errors))
-            with contextlib.suppress(Exception):
-                page.screenshot(path=str(diagnostics / "screen.png"))
             browser.close()
 
 

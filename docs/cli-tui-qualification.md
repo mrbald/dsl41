@@ -72,7 +72,7 @@ They also require the confirmation/cancellation and recovery text on the termina
 The engine seals live, exits with code 3, and resumes in the successor period.
 The same viewer must report the changed baseline and display a newly added job.
 The selected child's hold must survive the boundary.
-They retain raw terminal output, browser errors, a screenshot and the serve log in
+They retain raw terminal output, browser errors and the serve log in
 pytest's temporary directory.
 Missing Playwright or browser binaries fail an explicitly enabled browser lane.
 The default suite skips that lane with a stated reason.

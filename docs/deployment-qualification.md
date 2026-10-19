@@ -57,7 +57,7 @@ fresh mutation id, signal fallback or unattended retry.
 | Ubuntu portable recipe | Both profiles, final-path venv, networking disabled during manufacture, alternate prefix, repeated and concurrent preparation | Record native architecture explicitly. |
 | EL8 reference RPM | Native x86_64, both profiles, default and alternate prefix; fresh install, upgrade, reinstall, downgrade, erase and failed `%post` | Emulation and ARM64 runs do not satisfy native x86_64 acceptance. |
 | Supervisor service | Capability gate, active/idle/force cases, retained leadership, residual descendants, manager refusal and exit-8 non-restart | Container cgroups qualify only the observed container configuration. |
-| Terminal UI | Pilot plus real terminal focus, keyboard, resize, filter, selection, box actions, confirmations, cancel, reconnect, periods, logs and detach | A page-load screenshot is not interaction evidence. |
+| Terminal UI | Pilot plus real terminal focus, keyboard, resize, filter, selection, box actions, confirmations, cancel, reconnect, periods, logs and detach | Loading a page does not prove interaction behavior. |
 | Browser UI | Chromium, WebKit and Firefox; bounded headless interactions and retained diagnostics | Skips, unavailable engines and timeouts are failures or explicit unqualified cells. |
 | Lifecycle | Both Nightbank sizes, process survival and external-effect counts, definition/upgrade rollback, seal/open recovery, backup/restore, access/storage faults | Two installs of one build prove mechanics, not compatibility of two releases. |
 | Real host | Boot order, kernel/process behavior, mount loss and recovery, local filesystem durability, SELinux policy and permissions | Containers do not qualify these host properties. |
