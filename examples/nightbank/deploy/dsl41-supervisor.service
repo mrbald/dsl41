@@ -13,6 +13,8 @@ Description=dsl41 supervisor (nightbank example)
 StartLimitIntervalSec=0
 # the run root dsl41-launch names; no start before its file system is mounted
 RequiresMountsFor=/srv/dsl41/runs/nightbank-01
+# Maintenance uses the guarded CLI; host shutdown still stops the unit (DL-390).
+RefuseManualStop=yes
 
 [Service]
 Type=simple
@@ -27,13 +29,14 @@ TimeoutStartSec=30
 # drain. 60 s covers that with room; raise it with any longer grace, or the
 # final cgroup kill can silence a wrapper before it records its command.
 TimeoutStopSec=60
-# a clean exit (`dsl41 supervise shutdown`, a deadman) restarts on purpose;
+# a clean deadman exit restarts on purpose;
 # exit 2 is a configuration refusal and a retry cannot fix it; exit 7 is a
 # statechart error, a bug the same release would meet again
 # (deployment-runbook ss3)
 Restart=always
 RestartSec=2
-RestartPreventExitStatus=2 7
+RestartPreventExitStatus=2 7 8
+SuccessExitStatus=8
 LimitNOFILE=65536
 # stopping this unit ends its jobs: the commands take SIGTERM, the wrappers
 # ignore it and record what their commands did

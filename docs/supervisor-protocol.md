@@ -738,7 +738,55 @@ first. Then a stale or expired token answers
   Exited with no record is `noop`, because nothing here can still be
   addressed. A `sig` outside {`TERM`, `KILL`} answers
   `{ok: false, error: "bad_signal"}`, checked before `run_id`.
-- `SHUTDOWN {incarnation, token}`: an orderly shutdown. It is the one
+- `MAINTENANCE_STOP {incarnation, token, force}` (DL-390): guarded
+  maintenance. `force` is `null` or `"terminate"`; any other value refuses.
+  The CLI's `supervise shutdown` uses this verb, including with
+  `--force=terminate`. An old supervisor refuses the unknown verb. The
+  CLI never retries through `SHUTDOWN` or a signal.
+
+  Before changing process state, the server opens the **existing**
+  `leader.lock`, without creation or truncation, takes an exclusive
+  nonblocking flock and verifies the descriptor's device/inode against
+  the path. Missing, replaced, unreadable or held evidence refuses.
+  The lock stays held through teardown, excluding a disconnected engine
+  that retains leadership and a new engine racing maintenance.
+
+  Idle means no unreaped wrappers and no residual descendants. An empty
+  LIST is insufficient: completed runs can leave descendants, and LIST's
+  cache can evict completed runs. Maintenance requires positive process
+  observation within a verified dedicated Linux systemd service cgroup.
+  Its MainPID must be this supervisor and its ControlGroup must match the
+  observed membership. Shared, delegated or unobservable containment
+  refuses. Unmanaged supervisors have no qualified maintenance proof.
+  The loaded unit must also have RefuseManualStop=yes and include exit 8
+  in both SuccessExitStatus and RestartPreventExitStatus. A stale unit
+  policy refuses before termination starts.
+
+  With `force: null`, active or indeterminate work refuses without a
+  signal. With `force: "terminate"`, validated command groups take the
+  existing TERM/grace/KILL ladder. Force bypasses no lock or observation
+  check, and signals no unknown cgroup member. If any work remains or
+  observation fails after termination starts, the result is uncertain.
+  The supervisor retains its lifelines and engine exclusion for diagnosis.
+  It refuses further mutations, including a second maintenance request.
+  PING and LIST expose `process_state`, including `maintenance_uncertain`,
+  so an operator can distinguish this state from ordinary operation.
+  A failure during owned-file teardown may already have removed the socket
+  or pid record. Diagnosis then uses the unit, process identity and log.
+  Recovery uses the explicit incident-stop procedure in the runbook.
+  It does not declare legacy SHUTDOWN's timeout bound to be completion.
+
+  Completion requires positive idle proof and successful owned-file
+  teardown. The process exits **8**, reserved for maintenance. The CLI
+  exits **0** only on verified completion, **2** on refusal before the
+  operation starts, and **4** on uncertainty after it may have started.
+  A lost reply never causes an automatic retry or signal escalation.
+  The CLI waits at most 60 seconds for a reply. A longer force operation
+  can still complete after that timeout; its unanswered CLI result is 4.
+  Orphaning is unsupported. Host signals and deadman retain their
+  separate behavior below. Bootstrap and unresponsive recovery are in
+  `deployment-runbook.md` §3.
+- `SHUTDOWN {incarnation, token}`: the legacy orderly shutdown. It is the one
   exception to no-escalation, because the engine may be gone. The
   supervisor sends TERM to each live command's process group, waits the
   per-run `grace_seconds`, and sends KILL to survivors. **Lifelines stay
@@ -747,8 +795,8 @@ first. Then a stale or expired token answers
   lost". The supervisor waits for the wrappers, replies `{ok}`, exits, and
   unlinks the socket and the pid file. Both removals require the ownership
   checks above (DL-210). SIGTERM and SIGINT start the same shutdown: Tier 2
-  sends SIGTERM, and an operator can send it as a fallback to `dsl41
-  supervise shutdown`. Only SIGKILL, which cannot be handled, leaves the
+  sends SIGTERM during host shutdown. They are not a fallback for an
+  unanswered maintenance request (DL-390). Only SIGKILL, which cannot be handled, leaves the
   wrappers to their own EOF.
 
   Two bounds keep that wait finite (DL-150). First, the supervisor waits up

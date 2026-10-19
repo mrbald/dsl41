@@ -39,12 +39,12 @@ FINALLY=diagnostics
 # this tree's wheel, built once, in two venvs: the resume-safe, fresh-root
 # and coordinated rows flip between them. Two installs of one build exercise the
 # rows' mechanics; they do not qualify a version pair.
-BUILD_A=/opt/dsl41/venv-build-a
-BUILD_B=/opt/dsl41/venv-build-b
+BUILD_A=$(cat "$SCRATCH/build-a" 2>/dev/null || true)
+BUILD_B=$(cat "$SCRATCH/build-b" 2>/dev/null || true)
 # the old release of ss7's state-machine row: v1.7.0 from PyPI, which
 # implements state-machine version 1
 OLD_VERSION=1.7.0
-OLD_VENV=/opt/dsl41/venv-$OLD_VERSION
+OLD_VENV=/opt/dsl41/.venvs/historical-$OLD_VERSION
 # the roots the upgrade rows move the launcher to: row 2's roll, and the
 # fresh root of its rollback
 ROLLED_ROOT=/srv/dsl41/runs/nightbank-01b
@@ -60,22 +60,27 @@ FAIL_JOB=AMER_MKT_FX_C
 PROBE_JOB=OPS_SPOOL_C
 
 step_install() { # install dsl41, the nightbank estate, the launcher, the map and the units
-    sudo apt-get update -q
-    sudo apt-get install -y -q python3-venv jq
-    # ss0's service recipe: the account, its directories, the launcher, the
-    # map and the units, enabled; it ends on the launcher's --print
-    run_recipe service-install
-    assert_enablement enabled
-    # the runtime closure exactly as uv.lock pins it, hash-checked, and then
-    # the package alone: a drill failure cannot be dependency drift. The
-    # package is a wheel uv builds once (its build backend bounded by
-    # pyproject), not a pip build of the workspace.
+    # Connected preparation happens before the network-disabled service phase (DL-389).
     mkdir -p "$SCRATCH"
-    (cd "$REPO" && uv export --frozen --no-dev --no-emit-project --format requirements-txt \
-        >"$SCRATCH/runtime.txt")
-    (cd "$REPO" && uv build --wheel --out-dir "$SCRATCH/dist")
-    install_build "$BUILD_A"
+    if [ -n "${DRILL_BUNDLE-}" ]; then
+        cp -a "$DRILL_BUNDLE" "$SCRATCH/bundle"
+    else
+        (cd "$REPO" && uv build --wheel --out-dir "$SCRATCH/dist")
+        PYTHON=python3.12 bash "$REPO/scripts/offline/build-wheelhouse.sh" \
+            "$SCRATCH"/dist/dsl41-*.whl "$SCRATCH/bundle"
+        python3.12 -m pip download --only-binary=:all: "dsl41==$OLD_VERSION" \
+            --dest "$SCRATCH/historical-wheels"
+    fi
+    install_build base
+    BUILD_A=$(tail -n 1 "$SCRATCH/prepare-base.log")
+    printf '%s\n' "$BUILD_A" >"$SCRATCH/build-a"
+    install_build ui
+    BUILD_B=$(tail -n 1 "$SCRATCH/prepare-ui.log")
+    printf '%s\n' "$BUILD_B" >"$SCRATCH/build-b"
     flip "$BUILD_A"
+    run_recipe service-install
+    record_supervisor_exit
+    assert_enablement enabled
     # ss1's link, through the symlink, so the recipes' bare dsl41 follows a flip
     sudo ln -sfn "$VENV/bin/dsl41" /usr/local/bin/dsl41
     # the estate is root-owned and read-only to the service, as a checkout
@@ -100,7 +105,7 @@ module = importlib.util.module_from_spec(spec)
 loader.exec_module(module)
 module.prepare_night(
     Path("$NIGHTBANK/night"),
-    "small",
+    "${DRILL_ESTATE:-small}",
     anchor_utc=datetime.now(UTC) + timedelta(hours=6),
     incidents=True,
 )
@@ -176,11 +181,11 @@ step_detached() { # a detached job survives an engine stop
 
 step_refusal() { # a changed estate is refused without a restart loop
     sudo systemctl stop "$ENGINE"
-    sudo cp "$ESTATE/apac.jil" /tmp/apac.jil.orig
-    sudo sed -i 's/APAC_EXE_TRADES_C --sleep 12 /APAC_EXE_TRADES_C --sleep 13 /' "$ESTATE/apac.jil"
-    ! sudo cmp -s /tmp/apac.jil.orig "$ESTATE/apac.jil" || fail "the edit did not apply"
+    sudo cp "$ESTATE/global.jil" "$SCRATCH/global-refusal.orig"
+    sudo sed -i 's/OPS_XINST_DEMO_C --sleep [0-9][0-9]*/OPS_XINST_DEMO_C --sleep 999/' "$ESTATE/global.jil"
+    ! sudo cmp -s "$SCRATCH/global-refusal.orig" "$ESTATE/global.jil" || fail "the edit did not apply"
     expect_refusal "catalog hash mismatch"
-    sudo cp /tmp/apac.jil.orig "$ESTATE/apac.jil"
+    sudo cp "$SCRATCH/global-refusal.orig" "$ESTATE/global.jil"
     start_engine
 }
 
@@ -248,7 +253,8 @@ step_reboot() { # a host reboot: the enabled units resume the same root at boot
     wait_for 60 "nothing is live under the supervisor" nothing_live "$ROOT"
     assert_enablement enabled
     invocation=$(prop "$ENGINE" InvocationID)
-    sudo systemctl stop "$SUPERVISOR"
+    sudo systemctl stop "$ENGINE"
+    maintenance_stop
     is_state "$ENGINE" inactive || fail "$ENGINE: $(prop "$ENGINE" ActiveState)"
     mark=$(date +%s)
     boot_target
@@ -444,7 +450,7 @@ step_configure() { # configure recipe: identity, socket group, tiers, receipts, 
     # a reload that names another group is refused whole
     sudo sed -i "s/^socket_group = .*/socket_group = \"nightbank-ops\"/" "$MAP"
     before=$(perimeter_count policy_reload_failed 'socket_group is fixed at arming')
-    sudo systemctl kill -s HUP --kill-whom=main "$ENGINE"
+    sudo systemctl kill -s HUP --kill-who=main "$ENGINE"
     wait_for 30 "the reload that names another group is refused (policy_reload_failed)" \
         perimeter_count_exceeds policy_reload_failed 'socket_group is fixed at arming' "$before"
     is_state "$ENGINE" active || fail "the refused reload stopped the engine"
@@ -630,7 +636,7 @@ step_kill_supervisor() { # SIGKILL of the supervisor: restart, resume and lease 
 step_upgrade_resume_safe() { # resume-safe row: engine restarted on the flipped venv, supervisor kept
     local sup_pid pids pid mark
     echo "two installs of one build: this exercises the row, it qualifies no version pair"
-    install_build "$BUILD_B"
+    install_build ui
     force_start "$LONG_JOB"
     wait_for 60 "$LONG_JOB is RUNNING" job_is "$LONG_JOB" RUNNING
     pids=$(pgrep -f "fakework $LONG_JOB") || fail "no $LONG_JOB process"
@@ -670,6 +676,7 @@ roll_into_fresh_root() { # roll_into_fresh_root NEW_ROOT BUILD PERIOD
     take_hold
     quiesce_shape1
     flip "$build"
+    provision_root "$new"
     point_launcher "$new" "$ANCHOR"
     as_dsl41 touch "$new.open-from"
     line=$(sudo -u dsl41 "$LAUNCH" --print)
@@ -715,7 +722,8 @@ flip_both_units() { # flip_both_units BUILD
     local mark sup_pid held
     wait_for 60 "nothing is live under the supervisor" nothing_live "$ROOT"
     sup_pid=$(prop "$SUPERVISOR" MainPID)
-    sudo systemctl stop "$ENGINE" "$SUPERVISOR"
+    sudo systemctl stop "$ENGINE"
+    maintenance_stop
     flip "$1"
     mark=$(date +%s)
     start_engine
@@ -750,13 +758,15 @@ step_upgrade_old_release() { # an estate on the old release, v1.7.0 from PyPI
     ROOT=$ROLLBACK_ROOT
     SOCK=$ROOT/control.sock
     wait_for 60 "nothing is live under the supervisor" nothing_live "$ROOT"
-    sudo systemctl stop "$ENGINE" "$SUPERVISOR"
-    sudo python3 -m venv "$OLD_VENV"
-    sudo "$OLD_VENV/bin/pip" install --quiet "dsl41==$OLD_VERSION"
+    sudo systemctl stop "$ENGINE"
+    maintenance_stop
+    sudo python3.12 -m venv "$OLD_VENV"
+    sudo "$OLD_VENV/bin/pip" install --quiet --no-index --find-links "$SCRATCH/historical-wheels" "dsl41==$OLD_VERSION"
     sudo "$OLD_VENV/bin/pip" check
     version=$(state_machine_version "$OLD_VENV")
     [ "$version" = 1 ] || fail "$OLD_VENV implements state-machine version $version"
     flip "$OLD_VENV"
+    provision_root "$OLD_ROOT"
     point_launcher "$OLD_ROOT" "$OLD_ROOT.anchor"
     ROOT=$OLD_ROOT
     SOCK=$ROOT/control.sock
@@ -782,10 +792,11 @@ step_upgrade_state_machine() { # state-machine row: v1.7.0 to this build, a new 
     SOCK=$ROOT/control.sock
     wait_for 60 "nothing is live under the supervisor" nothing_live "$ROOT"
     take_hold
-    quiesce_shape1
+    quiesce_shape1 legacy-incident
     flip "$BUILD_A"
     version=$(state_machine_version "$BUILD_A")
     [ "$version" != 1 ] || fail "$BUILD_A implements state-machine version 1 too"
+    provision_root "$NEW_ROOT"
     point_launcher "$NEW_ROOT" "$NEW_ROOT.anchor"
     ROOT=$NEW_ROOT
     SOCK=$ROOT/control.sock
@@ -823,7 +834,8 @@ step_upgrade_state_machine_rollback() { # state-machine row's rollback: the old 
     local mark line held
     ROOT=$NEW_ROOT
     wait_for 60 "nothing is live under the supervisor" nothing_live "$ROOT"
-    sudo systemctl stop "$ENGINE" "$SUPERVISOR"
+    sudo systemctl stop "$ENGINE"
+    maintenance_stop
     flip "$OLD_VENV"
     point_launcher "$OLD_ROOT" "$OLD_ROOT.anchor"
     ROOT=$OLD_ROOT
@@ -843,7 +855,8 @@ step_upgrade_state_machine_rollback() { # state-machine row's rollback: the old 
     [ "$held" = true ] || fail "the old estate's hold did not survive"
     ok "the old estate answers on v$OLD_VERSION with period 2 open and its holds"
     # forward again: the new estate resumes where the upgrade left it
-    sudo systemctl stop "$ENGINE" "$SUPERVISOR"
+    sudo systemctl stop "$ENGINE"
+    incident_stop_supervisor "historical rollback complete; replace the old supervisor deliberately"
     flip "$BUILD_A"
     point_launcher "$NEW_ROOT" "$NEW_ROOT.anchor"
     ROOT=$NEW_ROOT
@@ -887,7 +900,7 @@ step_retire() { # retirement: the estate stays stopped after its units go, the h
     wait_for 90 "$ENGINE is failed" is_state "$ENGINE" failed
     [ "$(prop "$ENGINE" ExecMainStatus)" = 3 ] || fail "exit $(prop "$ENGINE" ExecMainStatus), not 3"
     cli audit --run-root "$ROOT" --estate-anchor "$ANCHOR"
-    sudo systemctl stop "$SUPERVISOR"
+    maintenance_stop
     assert_units_stay_stopped
     is_state "$ENGINE" failed || fail "$ENGINE: $(prop "$ENGINE" ActiveState)"
     run_recipe retire-remove RUN_ROOT="$ROOT"
@@ -946,7 +959,8 @@ step_diagnostics() { # diagnostics and teardown
     sudo systemctl status "$ENGINE" "$SUPERVISOR" --no-pager || true
     sudo journalctl -u "$ENGINE" -u "$SUPERVISOR" -o short-precise --no-pager || true
     sudo sh -c 'tail -n 100 /srv/dsl41/runs/*/supervisor.log' || true
-    sudo systemctl stop "$ENGINE" "$SUPERVISOR" || true
+    sudo systemctl stop "$ENGINE"
+    maintenance_stop || true
 }
 
 case ${1-} in

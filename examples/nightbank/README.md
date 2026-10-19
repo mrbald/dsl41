@@ -81,8 +81,11 @@ RUNBOOK exercises 16, 19 and 21), never by raw deletion, which would
 remove the sentinel, WAL, seals and spool the lineage still reaches
 (period-model §12). A training night whose anchor is gone with it — the
 whole `runs/<night>` directory, anchor included — may be deleted as a
-unit once stopped (Ctrl-C, and for `--detached` runs drain the
-supervisor first: `dsl41 supervise shutdown --run-root <run>/engine`);
+unit once every writer has stopped. Ctrl-C stops the engine. A detached
+supervisor remains separate. Unmanaged supervisors refuse guarded
+maintenance because their process scope is unqualified (DL-390).
+Use the deployment runbook's §3 incident procedure with an independently
+verified whole-process scope before deleting an unmanaged training night;
 deleting a LIVE run pulls the socket, journal, and supervisor state out
 from under running processes.
 

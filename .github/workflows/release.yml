@@ -121,8 +121,57 @@ jobs:
           export PYTHON
           bash scripts/release_smoke.sh candidate/dist candidate/exports
 
+  offline:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [ubuntu, el8]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: candidate
+          path: candidate
+      - name: provision the container engine
+        run: sudo apt-get update -q && sudo apt-get install -y podman
+      - name: qualify the exact release wheel on each native target with networking disabled
+        run: |
+          set -euo pipefail
+          wheels=("$PWD"/candidate/dist/*.whl)
+          test "${#wheels[@]}" = 1
+          sudo env DSL41_REQUIRE_NATIVE_X86=1 DSL41_RELEASE_WHEEL="${wheels[0]}" bash examples/nightbank/deploy/offline-local.sh \
+            ${{ matrix.target }} "$RUNNER_TEMP/offline-${{ matrix.target }}"
+          test "$(cat "$RUNNER_TEMP/offline-${{ matrix.target }}/scope")" = all
+          cmp "${wheels[0]}" "$RUNNER_TEMP/offline-${{ matrix.target }}/delivery/bundle/wheels/${wheels[0]##*/}"
+          sudo tar -C "$RUNNER_TEMP/offline-${{ matrix.target }}/delivery" -czf \
+            "dsl41-offline-${{ matrix.target }}-x86_64.tar.gz" bundle
+          if [ '${{ matrix.target }}' = el8 ]; then
+            sudo cp "$RUNNER_TEMP/offline-el8/rpm/"*.rpm .
+          fi
+      - name: archive target qualification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: offline-evidence-${{ matrix.target }}-x86_64
+          path: ${{ runner.temp }}/offline-${{ matrix.target }}/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: offline-delivery-${{ matrix.target }}-x86_64
+          path: |
+            dsl41-offline-${{ matrix.target }}-x86_64.tar.gz
+            dsl41-offline-*.rpm
+          if-no-files-found: error
+
   publish:
-    needs: [gates, build, smoke]
+    needs: [gates, build, smoke, offline]
     if: github.ref_type == 'tag' && (github.event_name == 'push' || inputs.publish)
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -159,11 +208,16 @@ jobs:
         with:
           name: candidate
           path: candidate
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: offline-delivery-*
+          path: offline-deliveries
+          merge-multiple: true
       - name: assets and SHA256SUMS
         run: |
           set -euo pipefail
           mkdir assets
-          cp candidate/dist/* candidate/exports/* assets/
+          cp candidate/dist/* candidate/exports/* offline-deliveries/*.tar.gz offline-deliveries/*.rpm assets/
           cd assets
           sha256sum -- * > ../SHA256SUMS
           mv ../SHA256SUMS .

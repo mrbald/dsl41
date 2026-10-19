@@ -1150,7 +1150,7 @@ def test_pr22b_a_roll_compares_the_deadman_of_a_supervisor_already_running(
     and that supervisor keeps its own deadman. Period 2 pinned 60 and the
     launch asks 60, but the supervisor at the target runs 90: the roll is
     refused before it writes. The twin: a supervisor running 60 rolls."""
-    from test_runner_supervisor import start_supervisor
+    from test_runner_supervisor import start_supervisor, shutdown_unmanaged_supervisor
 
     c2, anchor_dir = _attested_boundary(short_root, "--next-detached", "--next-deadman", "60")
     root_b = short_root / "b"
@@ -1159,8 +1159,9 @@ def test_pr22b_a_roll_compares_the_deadman_of_a_supervisor_already_running(
     supervisor = start_supervisor(root_b, deadman_s=90)
     try:
         _refused_before_writing(_invoke(*roll, *detached), "deadman_us", root_b, anchor_dir, 2)
-        assert _invoke("supervise", "shutdown", "--run-root", str(root_b)).exit_code == 0
-        supervisor.wait(timeout=30)
+        shutdown_unmanaged_supervisor(
+            root_b, controller_id="estate-roll-fixture", process=supervisor
+        )
         supervisor = start_supervisor(root_b, deadman_s=60)
         _rolls(short_root, root_b, anchor_dir, c2, 2, *detached)
     finally:
@@ -1220,7 +1221,7 @@ def test_pr22b_a_roll_asks_a_supervisor_started_after_the_early_check(
     from dsl41.cli_run import _roll_admission
     from dsl41.estate import roll_into_root
     from dsl41.period import runtime_profile_from_cli
-    from test_runner_supervisor import start_supervisor
+    from test_runner_supervisor import start_supervisor, shutdown_unmanaged_supervisor
 
     c2, anchor_dir = _attested_boundary(short_root, "--next-detached", "--next-deadman", "60")
     root_b = short_root / "b"
@@ -1239,8 +1240,9 @@ def test_pr22b_a_roll_asks_a_supervisor_started_after_the_early_check(
         refused = _invoke(*roll, "--detached", "--deadman", "60")
         assert started, "the interleaving hook never ran"
         _refused_before_writing(refused, "deadman_us", root_b, anchor_dir, 2)
-        assert _invoke("supervise", "shutdown", "--run-root", str(root_b)).exit_code == 0
-        started[0].wait(timeout=30)
+        shutdown_unmanaged_supervisor(
+            root_b, controller_id="estate-race-fixture", process=started[0]
+        )
 
         started.append(start_supervisor(root_b, deadman_s=60))
         admit = _roll_admission(root_b, runtime_profile_from_cli(detached=True, deadman_s=60))

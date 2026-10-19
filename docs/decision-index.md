@@ -56,7 +56,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-43 | Phase 11a landed: engine determinism pins |  |
 | DL-44 | Phase 11b landed: lifecycle tier + WAL + resume | [docs/concurrency-model.md](concurrency-model.md), [docs/runner-design.md](runner-design.md) |
 | DL-45 | Phase 11c landed: scheduler + preflight + control socket + headless CLI | [docs/blocks/engine-loop.md](blocks/engine-loop.md), [docs/blocks/scheduler.md](blocks/scheduler.md), [docs/blocks/subscription.md](blocks/subscription.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md), [docs/state-machines.md](state-machines.md) |
-| DL-46 | Phase 11d landed: Textual TUI | [docs/control-protocol.md](control-protocol.md), [docs/deployment-runbook.md](deployment-runbook.md) |
+| DL-46 | Phase 11d landed: Textual TUI | [docs/control-protocol.md](control-protocol.md) |
 | DL-47 | Phase 11e landed: `serve` verb |  |
 | DL-48 | Phase 11f landed: supervisor tier + detached mode | [docs/blocks/supervisor.md](blocks/supervisor.md), [docs/runner-design.md](runner-design.md), [docs/state-machines.md](state-machines.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-49 | insert_machine virtual/real pools + runner machine resolution | [docs/autosys-semantics.md](autosys-semantics.md), [docs/citation-index.md](citation-index.md), [docs/concurrency-model.md](concurrency-model.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
@@ -226,7 +226,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-212 | Preflight names the day the scheduler names: the base zone is the fallback before UTC | [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
 | DL-213 | Preflight always probes the calendars: the anchor defaults to now | [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
 | DL-214 | Architecture review of DL-203 through DL-213: twenty findings acted, seven items declined with their re-find triggers |  |
-| DL-215 | The release publishes only what passed the CI gates and an installed-artifact smoke test, built from locked inputs | [docs/deployment-runbook.md](deployment-runbook.md) |
+| DL-215 | The release publishes only what passed the CI gates and an installed-artifact smoke test, built from locked inputs |  |
 | DL-216 | A client that attempted a write reports any failure as delivered, and the server drops an unterminated request | [docs/control-protocol.md](control-protocol.md) |
 | DL-217 | A lost answer is recovered by a pinned exact retry, and a collision says what the id already decided | [docs/blocks/admission.md](blocks/admission.md), [docs/control-protocol.md](control-protocol.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/gateway.md](gateway.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/state-machines.md](state-machines.md) |
 | DL-218 | The deployment example: one launcher holds the command line, the reattach line is the process's own, the units are verified statically, and the service drill is... | [docs/agent-workflow.md](agent-workflow.md), [docs/deployment-runbook.md](deployment-runbook.md) |
@@ -399,3 +399,6 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-386 | Explore name callouts avoid open details when space permits |  |
 | DL-387 | A standalone helper converts one bounded AutoSys summary table |  |
 | DL-388 | Vendor hooks are readable patches over exact prebuilt inputs |  |
+| DL-389 | Offline candidates are manufactured at their final paths | [docs/deployment-runbook.md](deployment-runbook.md), [docs/offline-installation.md](offline-installation.md), [docs/offline-rehearsal.md](offline-rehearsal.md) |
+| DL-390 | Maintenance is a guarded supervisor operation | [docs/deployment-runbook.md](deployment-runbook.md), [docs/offline-rehearsal.md](offline-rehearsal.md), [docs/state-machines.md](state-machines.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-391 | TUI mutations retain their exact recovery envelope | [docs/cli-tui-qualification.md](cli-tui-qualification.md) |

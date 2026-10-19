@@ -94,6 +94,23 @@ work="$(mktemp -d /tmp/dsl41-smoke.XXXXXX)"
 engine_pid=""
 run_root=""
 venv=""
+# This unmanaged fixture qualifies legacy lifecycle teardown, not maintenance (DL-390).
+legacy_stop_supervisor() {
+    bounded 60 "$venv/bin/python" - "$run_root" <<'PY'
+import sys
+from pathlib import Path
+from dsl41.runner_adapters import SupervisorConn
+
+conn = SupervisorConn(Path(sys.argv[1]) / "supervisor.sock")
+try:
+    acquired = conn.send({"cmd": "ACQUIRE", "controller_id": "release-smoke", "ttl_s": 60})
+    assert acquired["ok"], acquired
+    reply = conn.send({"cmd": "SHUTDOWN", "token": acquired["token"]})
+    assert reply["ok"], reply
+finally:
+    conn.close()
+PY
+}
 cleanup() {
     if [ -n "$engine_pid" ] && kill -0 "$engine_pid" 2>/dev/null; then
         stop_engine "$engine_pid" 10 || true
@@ -101,8 +118,7 @@ cleanup() {
         wait "$engine_pid" 2>/dev/null || true
     fi
     if [ -n "$run_root" ] && [ -e "$run_root/supervisor.lock" ]; then
-        bounded 30 "$venv/bin/dsl41" supervise shutdown --run-root "$run_root" \
-            >/dev/null 2>&1 || true
+        legacy_stop_supervisor >/dev/null 2>&1 || true
     fi
     rm -rf "$work"
 }
@@ -307,8 +323,7 @@ check_lifecycle() {
     engine_pid=""
     [ "$rc" -eq 0 ] || { cat "$log" >&2; fail "[$profile] engine exited $rc on SIGINT"; }
     ok "[$profile] engine stopped on SIGINT with exit 0"
-    bounded 60 "$venv/bin/dsl41" supervise shutdown --run-root "$run_root" >/dev/null \
-        || fail "[$profile] supervise shutdown"
+    legacy_stop_supervisor || fail "[$profile] legacy supervisor teardown"
     run_root=""
     ok "[$profile] supervisor shut down"
 }

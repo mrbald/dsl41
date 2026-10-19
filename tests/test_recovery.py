@@ -537,7 +537,16 @@ def test_a_reply_that_is_malformed_or_missing_is_delivered_and_exits_4(
             )
             assert sent.returncode == 4, sent.stderr
             flags = _advice(sent.stderr)
-            assert flags[2:] == ["--expect", "2", "--epoch", "7", "--baseline", "base-1"]
+            assert flags[2:] == [
+                "--expect",
+                "2",
+                "--epoch",
+                "7",
+                "--baseline",
+                "base-1",
+                "--claimed-actor",
+                control.claimed_actor(),
+            ]
             assert _sending(sent.stderr) == flags
         finally:
             server.close()
@@ -554,7 +563,16 @@ def test_each_pin_replaces_only_its_own_read_value(short_root: Path) -> None:
     async def scenario() -> None:
         server = await _fake_engine(path, _hang_up)
         try:
-            base = ("sendevent", "ON_HOLD", "--job", "j", "--socket", str(path))
+            base = (
+                "sendevent",
+                "ON_HOLD",
+                "--job",
+                "j",
+                "--socket",
+                str(path),
+                "--claimed-actor",
+                "recovery@synthetic",
+            )
             cases = [
                 ((), "--expect 2 --epoch 7 --baseline base-1"),
                 (("--epoch", "3"), "--expect 2 --epoch 3 --baseline base-1"),
@@ -563,12 +581,19 @@ def test_each_pin_replaces_only_its_own_read_value(short_root: Path) -> None:
             ]
             for extra, pins in cases:
                 sent = await asyncio.to_thread(cli, *base, *extra)
-                assert shlex.join(_sending(sent.stderr)[2:]) == pins, (extra, sent.stderr)
+                assert shlex.join(_sending(sent.stderr)[2:]) == (
+                    pins + " --claimed-actor recovery@synthetic"
+                ), (extra, sent.stderr)
+            actor = await asyncio.to_thread(cli, *base, "--claimed-actor", "original actor")
+            assert _sending(actor.stderr)[-2:] == ["--claimed-actor", "original actor"]
             host = await asyncio.to_thread(
                 cli, "host", "drain", "h1", "--epoch", "2", "--socket", str(path)
             )
             assert host.returncode == 4, host.stderr
-            assert shlex.join(_sending(host.stderr)[2:]) == "--expect 4 --epoch 2 --baseline base-1"
+            assert shlex.join(_sending(host.stderr)[2:]) == (
+                "--expect 4 --epoch 2 --baseline base-1 --claimed-actor "
+                + shlex.quote(control.claimed_actor())
+            )
         finally:
             server.close()
             await server.wait_closed()
@@ -599,7 +624,16 @@ def test_release_held_names_the_one_job_retry_with_its_pins(short_root: Path) ->
             ]
             assert len(sending) == 1, swept.stderr
             argv = shlex.split(sending[0])
-            assert argv[8:] == ["--expect", str(revision), "--epoch", "7", "--baseline", "base-1"]
+            assert argv[8:] == [
+                "--expect",
+                str(revision),
+                "--epoch",
+                "7",
+                "--baseline",
+                "base-1",
+                "--claimed-actor",
+                control.claimed_actor(),
+            ]
             assert f"retry ONLY as {sending[0]}" in swept.stderr
 
     asyncio.run(scenario())

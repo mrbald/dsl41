@@ -45,7 +45,7 @@ from test_nightbank_deploy import (
     _unit,
 )
 from test_docs_hygiene import ROOT
-from test_runner_supervisor import wait_for
+from test_runner_supervisor import wait_for, shutdown_unmanaged_supervisor
 
 RUNBOOK = ROOT / "docs" / "deployment-runbook.md"
 MARKER = re.compile(r"^<!-- (recipe|diagram): ([a-z-]+) -->$")
@@ -169,11 +169,7 @@ class _Engine:
     def teardown(self) -> None:
         if self.proc is not None and self.proc.poll() is None:
             _stop(self.proc)
-        subprocess.run(
-            [str(DSL41), "supervise", "shutdown", "--run-root", self.site["RUN_ROOT"]],
-            capture_output=True,
-            timeout=120,
-        )
+        shutdown_unmanaged_supervisor(Path(self.site["RUN_ROOT"]), controller_id="operator-fixture")
 
 
 def _transition(engine: _Engine, env: dict[str, str]) -> None:
@@ -585,14 +581,8 @@ def _launch_once(launcher: Path) -> subprocess.CompletedProcess[str]:
 
 
 def _shutdown_supervisor(root: str) -> None:
-    """Shape 2's supervisor stop; exit 2 means none was running."""
-    done = subprocess.run(
-        [str(DSL41), "supervise", "shutdown", "--run-root", root],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    assert done.returncode in (0, 2), done.stdout + done.stderr
+    """Deliberate legacy teardown of shape 2's unmanaged fixture (DL-390)."""
+    shutdown_unmanaged_supervisor(Path(root), controller_id="operator-stopped-fixture")
 
 
 def _stopped(root: Path) -> None:

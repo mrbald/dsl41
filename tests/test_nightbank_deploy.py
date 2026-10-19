@@ -109,7 +109,7 @@ def test_the_shipped_launcher_prints_the_whole_ordered_line() -> None:
     assert printed.returncode == 0, printed.stderr
     estate = "/srv/dsl41/nightbank/estate/small"
     assert shlex.split(printed.stdout) == [
-        "/opt/dsl41/venv/bin/dsl41",
+        "/opt/dsl41/.venv/bin/dsl41",
         "run",
         *(f"{estate}/{name}" for name in ORDER),
         "-p",
@@ -137,7 +137,7 @@ def test_the_shipped_launcher_prints_the_supervisor_line() -> None:
     printed = _sh(LAUNCH, "--print", "supervisor")
     assert printed.returncode == 0, printed.stderr
     assert shlex.split(printed.stdout) == [
-        "/opt/dsl41/venv/bin/dsl41",
+        "/opt/dsl41/.venv/bin/dsl41",
         "supervise",
         "start",
         "--run-root",
@@ -167,7 +167,14 @@ def test_the_launcher_resumes_if_and_only_if_the_root_holds_its_sentinel(short_r
     assert "--resume" not in shlex.split(_sh(launcher, "--print").stdout)
     root.mkdir(parents=True)
     assert "--resume" not in shlex.split(_sh(launcher, "--print").stdout)
-    for name in ("supervisor.lock", "supervisor.log", "supervisor.pid", "supervisor.sock", ".s.42"):
+    for name in (
+        "leader.lock",
+        "supervisor.lock",
+        "supervisor.log",
+        "supervisor.pid",
+        "supervisor.sock",
+        ".s.42",
+    ):
         (root / name).write_text("")
     genesis = _sh(launcher, "--print")
     assert genesis.returncode == 0, genesis.stderr
@@ -175,6 +182,27 @@ def test_the_launcher_resumes_if_and_only_if_the_root_holds_its_sentinel(short_r
     (root / "journal.jsonl").write_text("")
     words = shlex.split(_sh(launcher, "--print").stdout)
     assert words.count("--resume") == 1 and words[-1] == "--resume"
+
+
+@pytest.mark.parametrize("kind", ["nonempty", "symlink", "directory"])
+def test_the_launcher_refuses_ambiguous_bootstrap_lock(short_root: Path, kind: str) -> None:
+    """DL-390: only a cold empty regular lock can precede genesis."""
+    launcher = _configured(short_root, **_site(short_root))
+    root = short_root / "runs" / "nb"
+    root.mkdir(parents=True)
+    lock = root / "leader.lock"
+    if kind == "nonempty":
+        lock.write_text('{"pid": 123}')
+    elif kind == "directory":
+        lock.mkdir()
+    else:
+        target = short_root / "lock-target"
+        target.touch()
+        lock.symlink_to(target)
+    refused = _sh(launcher, "--print")
+    assert refused.returncode == 2
+    assert "not an empty provisioned lock" in refused.stderr
+    assert not (root / "journal.jsonl").exists()
 
 
 def test_the_open_trigger_makes_the_engine_mode_open_from_the_anchor(short_root: Path) -> None:
@@ -434,11 +462,9 @@ def test_the_launcher_starts_restarts_and_its_reattach_line_resumes(short_root: 
             if proc.poll() is None:  # pragma: no cover -- only a failed assertion
                 proc.kill()
                 proc.wait(timeout=30)
-        subprocess.run(
-            [str(DSL41), "supervise", "shutdown", "--run-root", str(root)],
-            capture_output=True,
-            timeout=120,
-        )
+        from test_runner_supervisor import shutdown_unmanaged_supervisor
+
+        shutdown_unmanaged_supervisor(root, controller_id="launcher-fixture")
 
 
 # ------------------------------------------------------------- the units
@@ -493,7 +519,9 @@ def test_the_units_take_the_documented_separate_service_shape() -> None:
     ]
     assert supervisor["Service"]["Restart"] == ["always"]
     # 7: a statechart error stops the supervisor too, until a fixed build
-    assert supervisor["Service"]["RestartPreventExitStatus"][0].split() == ["2", "7"]
+    assert supervisor["Service"]["RestartPreventExitStatus"][0].split() == ["2", "7", "8"]
+    assert supervisor["Service"]["SuccessExitStatus"] == ["8"]
+    assert supervisor["Unit"]["RefuseManualStop"] == ["yes"]
     assert supervisor["Service"]["KillMode"] == ["control-group"]
     # supervisor-protocol ss5's shutdown waits: the missing-spawn.json wait,
     # the longest grace plus 2 s, and the 2 s output drain
@@ -585,7 +613,7 @@ def test_the_workflow_runs_the_drill_steps_in_their_order() -> None:
     listed = subprocess.run(
         ["bash", str(DRILL_STEPS), "--list"], capture_output=True, text=True, timeout=60, check=True
     ).stdout.split()
-    workflow = DRILL_WORKFLOW.read_text()
+    workflow = DRILL_WORKFLOW.read_text().split("\n  offline:", 1)[0]
     call = "bash examples/nightbank/deploy/drill-steps.sh"
     assert _workflow_runs(workflow) == [f"{call} {step}" for step in listed] + [
         f"{call} diagnostics"

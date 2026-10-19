@@ -67,7 +67,7 @@ from test_estate import (
     _Stopped,
 )
 from test_runner_leadership import engine, cli, wait_for
-from test_runner_supervisor import _kill_group
+from test_runner_supervisor import _kill_group, shutdown_unmanaged_supervisor
 
 #: the only entries a refused resume may create or touch (DL-224)
 _LOCKS = {LOCK_NAME, ANCHOR_LOCK_NAME}
@@ -649,8 +649,7 @@ def _detached_copy(short_root: Path) -> tuple[Path, Path]:
     with engine(short_root, extra=("--detached",)):
         pass
     assert (original / "supervisor.pid").exists()  # the detached period's supervisor
-    down = cli("supervise", "shutdown", "--run-root", str(original))
-    assert down.returncode == 0, down.stderr
+    shutdown_unmanaged_supervisor(original, controller_id="resume-copy-fixture")
     wait_for(lambda: not (original / "supervisor.pid").exists())
     wait_for(lambda: not (original / "supervisor.sock").exists())
     return original, _copy(original, short_root / "copy")

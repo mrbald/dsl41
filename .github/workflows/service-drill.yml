@@ -29,6 +29,12 @@ name: service-drill
 
 on:
   workflow_dispatch:
+    inputs:
+      lane:
+        description: Rehearsal lane
+        type: choice
+        options: [all, offline, exhaustive]
+        default: all
 
 permissions:
   contents: read
@@ -39,8 +45,9 @@ defaults:
 
 jobs:
   drill:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    if: inputs.lane != 'offline'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # uv only exports the lock; the service's venv is the system python's
@@ -118,3 +125,27 @@ jobs:
       - name: diagnostics and teardown
         if: always()
         run: bash examples/nightbank/deploy/drill-steps.sh diagnostics
+
+  offline:
+    if: inputs.lane != 'exhaustive'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [ubuntu, el8]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: provision the container engine
+        run: sudo apt-get update -q && sudo apt-get install -y podman
+      - name: native x86-64 offline installation and service rehearsal
+        run: sudo env DSL41_REQUIRE_NATIVE_X86=1 bash examples/nightbank/deploy/offline-local.sh ${{ matrix.target }} "$RUNNER_TEMP/offline-${{ matrix.target }}"
+      - name: preserve target identities, logs and exact delivery
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: offline-${{ matrix.target }}-x86_64
+          path: ${{ runner.temp }}/offline-${{ matrix.target }}/
+          if-no-files-found: error

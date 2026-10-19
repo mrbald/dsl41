@@ -22,10 +22,13 @@ import fcntl
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
 from datetime import UTC, datetime
 from typing import Any, Final
 
@@ -82,6 +85,208 @@ def flock_exclusive(path: str | os.PathLike[str]) -> int:
         os.close(fd)
         raise
     return fd
+
+
+def verify_lock_path(fd: int, path: str | os.PathLike[str]) -> None:
+    """Maintenance excludes engines only while the existing regular inode stays put (DL-390)."""
+    held = os.fstat(fd)
+    current = os.stat(path, follow_symlinks=False)
+    if not stat.S_ISREG(held.st_mode) or not stat.S_ISREG(current.st_mode):
+        raise LockHeld(errno.ESTALE, "lock is not a regular file", os.fspath(path))
+    if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
+        raise LockHeld(errno.ESTALE, "lock path moved", os.fspath(path))
+    if not current.st_mode & 0o444 or not current.st_mode & 0o222:
+        raise PermissionError(errno.EACCES, "lock is unreadable or unwritable", os.fspath(path))
+
+
+def flock_existing(path: str | os.PathLike[str]) -> int:
+    """Take maintenance exclusion without creating, following or truncating evidence (DL-390)."""
+    fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        verify_lock_path(fd, path)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+class ObservationUnavailable(OSError):
+    """Complete, dedicated service containment cannot be established (DL-390)."""
+
+
+def _systemd_exit_status_codes(text: str) -> set[int]:
+    """Only the exit-code array of systemd's typed (aiai) status pair admits 8 (DL-390)."""
+    fields = text.split()
+    if (
+        len(fields) < 3
+        or fields[0] != "(aiai)"
+        or any(not re.fullmatch(r"[0-9]+", field) for field in fields[1:])
+    ):
+        raise ObservationUnavailable("malformed typed systemd exit policy")
+    try:
+        values = [int(field) for field in fields[1:]]
+    except ValueError as exc:
+        raise ObservationUnavailable("malformed typed systemd exit policy") from exc
+    count = values[0]
+    if any(value > 2**31 - 1 for value in values) or count > len(values) - 2:
+        raise ObservationUnavailable("invalid typed systemd exit policy counts")
+    if len(values) != count + 2 + values[count + 1]:
+        raise ObservationUnavailable("invalid typed systemd exit policy length")
+    return set(values[1 : count + 1])
+
+
+@dataclass(frozen=True)
+class ServiceContainment:
+    """The qualified Linux systemd hierarchy, including its complete subtree (DL-390)."""
+
+    directory: Path
+    control_group: str
+    unit: str
+    pid: int
+
+    @classmethod
+    def observe(cls) -> ServiceContainment:
+        if not sys.platform.startswith("linux"):
+            raise ObservationUnavailable("maintenance requires Linux service containment")
+        entries = [
+            line.split(":", 2) for line in Path("/proc/self/cgroup").read_text().splitlines()
+        ]
+        candidates = [
+            (controllers, group)
+            for _, controllers, group in entries
+            if "name=systemd" in controllers.split(",")
+        ]
+        if not candidates:
+            candidates = [
+                (controllers, group) for _, controllers, group in entries if controllers == ""
+            ]
+        if len(candidates) != 1:
+            raise ObservationUnavailable("no unambiguous systemd cgroup hierarchy")
+        controllers, group = candidates[0]
+        unit = group.rsplit("/", 1)[-1]
+        if not re.fullmatch(r"[A-Za-z0-9_.@:\\-]+[.]service", unit):
+            raise ObservationUnavailable("supervisor is not in a service cgroup")
+        mounts: list[Path] = []
+        for line in Path("/proc/self/mountinfo").read_text().splitlines():
+            left, right = line.split(" - ", 1)
+            fields, fs = left.split(), right.split()
+            expected = "cgroup2" if controllers == "" else "cgroup"
+            if fs[0] != expected:
+                continue
+            if controllers and "name=systemd" not in fs[2].split(","):
+                continue
+            # A restricted mount root cannot prove the manager's whole subtree (DL-390).
+            if fields[3] != "/" or "\\" in fields[4]:
+                raise ObservationUnavailable("unreconciled cgroup mount namespace")
+            mounts.append(Path(fields[4]))
+        if len(mounts) != 1 or not group.startswith("/") or ".." in group.split("/"):
+            raise ObservationUnavailable("no unambiguous complete cgroup mount")
+        proof = cls(mounts[0] / group.lstrip("/"), group, unit, os.getpid())
+        proof.verify_manager()
+        return proof
+
+    def verify_manager(self) -> None:
+        # All manager reads share one bound; helpers are reaped before sampling (DL-390).
+        deadline = time.monotonic() + 5.0
+
+        def query(argv: list[str]) -> str:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ObservationUnavailable("service manager observation timed out")
+            return subprocess.run(
+                argv, capture_output=True, text=True, check=True, timeout=remaining
+            ).stdout
+
+        output = query(
+            [
+                "systemctl",
+                "show",
+                self.unit,
+                "--no-pager",
+                "--property=MainPID",
+                "--property=ControlGroup",
+                "--property=Delegate",
+                "--property=KillMode",
+                "--property=RefuseManualStop",
+                "--property=SuccessExitStatus",
+                "--property=RestartPreventExitStatus",
+            ]
+        )
+        properties = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
+        if (
+            properties.get("MainPID") != str(self.pid)
+            or properties.get("ControlGroup") != self.control_group
+            or properties.get("Delegate") != "no"
+            or properties.get("KillMode") != "control-group"
+            or properties.get("RefuseManualStop") != "yes"
+        ):
+            raise ObservationUnavailable("service ownership, delegation or containment mismatch")
+        statuses = ("SuccessExitStatus", "RestartPreventExitStatus")
+        if any(properties.get(name) == "[unprintable]" for name in statuses):
+            # systemd 239's text formatter cannot print these typed manager values (DL-390).
+            reply = query(
+                [
+                    "busctl",
+                    "--system",
+                    "call",
+                    "org.freedesktop.systemd1",
+                    "/org/freedesktop/systemd1",
+                    "org.freedesktop.systemd1.Manager",
+                    "GetUnit",
+                    "s",
+                    self.unit,
+                ]
+            )
+            signature, _, encoded_path = reply.strip().partition(" ")
+            try:
+                object_path = json.loads(encoded_path)
+            except ValueError as exc:
+                raise ObservationUnavailable("malformed systemd unit object path") from exc
+            if (
+                signature != "o"
+                or not isinstance(object_path, str)
+                or not re.fullmatch(r"/org/freedesktop/systemd1/unit/[A-Za-z0-9_]+", object_path)
+            ):
+                raise ObservationUnavailable("unverified systemd unit object path")
+            for name in statuses:
+                if properties.get(name) == "[unprintable]":
+                    value = query(
+                        [
+                            "busctl",
+                            "--system",
+                            "get-property",
+                            "org.freedesktop.systemd1",
+                            object_path,
+                            "org.freedesktop.systemd1.Service",
+                            name,
+                        ]
+                    )
+                    codes = _systemd_exit_status_codes(value)
+                    properties[name] = " ".join(map(str, codes))
+        if any("8" not in properties.get(name, "").split() for name in statuses):
+            raise ObservationUnavailable("service exit policy does not retain maintenance stop")
+
+    def members(self) -> set[int]:
+        """Read every subgroup. Missing or unreadable membership is never empty (DL-390)."""
+        self.verify_manager()
+        if self.directory.is_symlink() or not self.directory.is_dir():
+            raise ObservationUnavailable("service cgroup disappeared or became a symlink")
+        members: set[int] = set()
+
+        def fail(error: OSError) -> None:
+            raise error
+
+        for root, directories, _files in os.walk(self.directory, onerror=fail, followlinks=False):
+            if any((Path(root) / name).is_symlink() for name in directories):
+                raise ObservationUnavailable("cgroup subtree contains a symlink")
+            lines = (Path(root) / "cgroup.procs").read_text().splitlines()
+            if any(not line.isdecimal() or int(line) <= 0 for line in lines):
+                raise ObservationUnavailable("malformed cgroup membership")
+            members.update(map(int, lines))
+        if self.pid not in members:
+            raise ObservationUnavailable("supervisor absent from observed service cgroup")
+        return members
 
 
 # ------------------------------------------------------------------ durability

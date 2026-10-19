@@ -189,6 +189,44 @@ class RawClient:
         self.sock.close()
 
 
+def shutdown_unmanaged_supervisor(
+    run_root: Path, *, controller_id: str, process: subprocess.Popen | None = None
+) -> None:
+    """Deliberate legacy teardown for unmanaged fixtures, outside maintenance (DL-390)."""
+    from dsl41.runner_adapters import SupervisorConn
+
+    sock_path = run_root / "supervisor.sock"
+    pid_path = run_root / "supervisor.pid"
+    if not sock_path.exists() and not pid_path.exists():
+        return
+    connection = SupervisorConn(sock_path)
+    try:
+        listing = connection.send({"cmd": "LIST"})
+        assert listing["ok"], listing
+        pid = listing["supervisor_pid"]
+        acquired = connection.send({"cmd": "ACQUIRE", "controller_id": controller_id, "ttl_s": 60})
+        assert acquired["ok"], acquired
+        answer = connection.send({"cmd": "SHUTDOWN", "token": acquired["token"]})
+        assert answer["ok"], answer
+    finally:
+        connection.close()
+    if process is not None:
+        assert process.pid == pid
+        assert process.wait(timeout=30) == 0
+    else:
+
+        def gone() -> bool:
+            try:
+                if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                    return True
+            except ChildProcessError:
+                pass
+            return not pid_alive(pid)
+
+        wait_for(gone, timeout_s=30)
+    assert not sock_path.exists() and not pid_path.exists()
+
+
 def teardown_supervisor(run_root: Path, proc: subprocess.Popen) -> None:
     """Best-effort: kill any surviving command groups, then stop the supervisor.
 
@@ -716,17 +754,11 @@ def _supervise_cli(run_root: Path, action: str) -> subprocess.CompletedProcess:
 
 
 def test_dl80_the_supervise_cli_shutdown_carries_the_incarnation(short_root: Path) -> None:
-    """DL-151. `dsl41 supervise shutdown` is the one CLI path that MUTATES on
-    the ss6a socket, and nothing drove it end to end until this test. DL-80
-    put the incarnation beside the token on every mutating verb (frozen ss5);
-    `SupervisorConn` stamped only `v`, so the operator verb answered
-    wrong_incarnation and exited 2 while the supervisor kept running and its
-    wrappers kept their commands alive -- the opposite of what was asked.
+    """DL-390: the CLI fences MAINTENANCE_STOP and refuses unmanaged active work.
 
-    The live shape is the one an operator meets: an engine spawned a command
-    and then died, so the lease is unexpired with its holder connection gone
-    (freely grantable, frozen ss5), and the CLI must take it, TERM the
-    command and end the supervisor."""
+    The old lifecycle SHUTDOWN remains available to adapters and test cleanup.
+    """
+    (short_root / "leader.lock").touch()
     proc = start_supervisor(short_root)
     engine_side = RawClient(short_root)
     rd = short_root / "runs" / "j.1"
@@ -748,8 +780,16 @@ def test_dl80_the_supervise_cli_shutdown_carries_the_incarnation(short_root: Pat
 
         stopped = _supervise_cli(short_root, "shutdown")
         assert "wrong_incarnation" not in stopped.stdout  # the regression itself
-        assert json.loads(stopped.stdout) == {"ok": True}
-        assert stopped.returncode == 0, stopped.stderr
+        assert stopped.returncode == 2, stopped.stderr
+        assert "maintenance_refused" in stopped.stderr
+        assert proc.poll() is None
+        assert not (rd / "status.json").exists()
+        cleanup = RawClient(short_root)
+        try:
+            token = cleanup.send({"v": 1, "cmd": "ACQUIRE", "controller_id": "cleanup"})["token"]
+            assert cleanup.send({"v": 1, "cmd": "SHUTDOWN", "token": token})["ok"]
+        finally:
+            cleanup.close()
         proc.wait(timeout=10)
         assert proc.returncode == 0
         assert json.loads((rd / "status.json").read_text())["outcome"] == "signaled"
@@ -3147,7 +3187,8 @@ def test_dl210_supervise_start_real_exec_logging_and_owner_refusal(short_root):
         log = (root / "supervisor.log").read_text()
         assert startup in log and "another supervisor owns this root" in log
         assert _supervise_cli(root, "list").returncode == 0
-        assert _supervise_cli(root, "shutdown").returncode == 0
+        assert _supervise_cli(root, "shutdown").returncode == 2
+        proc.send_signal(signal.SIGTERM)
         assert proc.wait(timeout=10) == 0
         assert not (root / "supervisor.sock").exists()
     finally:

@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 from typer.testing import CliRunner
 
 from dsl41.cli import app
@@ -178,6 +180,7 @@ def test_the_sampler_counts_command_runs_apart_from_boxes() -> None:
 FAKE_DSL41 = """#!/bin/sh
 echo "$1 $2" >>"$FAKE/calls"
 case "$1 $2" in
+    "supervise shutdown") exit "${MAINTENANCE_EXIT:-0}" ;;
     "supervise list")
         n=$(($(cat "$FAKE/n" 2>/dev/null || echo 0) + 1))
         echo "$n" >"$FAKE/n"
@@ -240,7 +243,8 @@ def test_stop_keeps_draining_through_a_failed_list(tmp_path: Path) -> None:
 def test_stop_without_a_supervisor_has_nothing_to_drain(tmp_path: Path) -> None:
     done, steps, calls = _stop(tmp_path, ["2 no supervisor at x/supervisor.sock"], _exited_pid())
     assert done.returncode == 0, done.stderr
-    assert steps["drain"]["drained"] is True
+    assert steps["drain"]["drained"] is False
+    assert "residual command containment is unverified" in done.stderr
     assert calls.count("supervise list") == 1
 
 
@@ -249,7 +253,7 @@ def test_stop_reports_a_drain_that_ran_out_of_time(tmp_path: Path) -> None:
         tmp_path, ["2 the lease could not be taken"], _exited_pid(), DRAIN_SECONDS="0"
     )
     assert done.returncode == 0, done.stderr
-    assert "the shutdown ends them" in done.stderr
+    assert "guarded maintenance may refuse" in done.stderr
     assert steps["drain"]["drained"] is False
     assert calls[-1] == "supervise shutdown"
 
@@ -266,3 +270,18 @@ def test_stop_gives_up_on_an_engine_that_does_not_exit(tmp_path: Path) -> None:
     assert steps["engine_exit"]["exit"] == 1
     assert "audit --run-root" not in calls  # the engine still holds the lock
     assert "drain" not in steps
+
+
+@pytest.mark.parametrize("maintenance_exit", [2, 4])
+def test_stop_propagates_guarded_maintenance_refusal_and_uncertainty(tmp_path, maintenance_exit):
+    done, steps, calls = _stop(
+        tmp_path, [DONE], _exited_pid(), MAINTENANCE_EXIT=str(maintenance_exit)
+    )
+    assert done.returncode == maintenance_exit
+    assert steps["supervisor_shutdown"]["exit"] == maintenance_exit
+    assert steps["drain"]["scope"] == "tracked_wrappers"
+    assert "supervisor may still run" in done.stderr
+    assert "do not retry or signal automatically" in done.stderr
+    assert "whole-process scope" in done.stderr
+    assert calls.count("supervise shutdown") == 1
+    assert all("force" not in call for call in calls)

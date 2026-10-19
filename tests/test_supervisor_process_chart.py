@@ -47,6 +47,12 @@ PROCESS: dict[str, frozenset[str]] = {
     "stopped": frozenset({"process", "ended", "stopped"}),
     "refused": frozenset({"process", "ended", "refused"}),
     "closed": frozenset({"process", "closed"}),
+    **{
+        phase: frozenset({"process", "open", "up", phase})
+        for phase in runner_supervisor._MAINTENANCE_PHASES
+        if phase != "maintenance_completed"
+    },
+    "maintenance_completed": frozenset({"process", "ended", "maintenance_completed"}),
 }
 #: each phase of the lease as a configuration of SUPERVISOR_LEASE
 LEASE_PHASES: dict[str, frozenset[str]] = {
@@ -113,7 +119,7 @@ def _partitions() -> dict[str, dict[str, Any]]:
             label: runner_supervisor._Request({"cmd": verb, **fields})
             for label, fields in _CREDENTIALS.items()
         }
-        for verb in ("SPAWN", "SIGNAL", "SHUTDOWN")
+        for verb in ("SPAWN", "SIGNAL", "SHUTDOWN", "MAINTENANCE_STOP")
     }
     return {
         runner_supervisor.START: {
@@ -146,6 +152,11 @@ _TEARDOWN = {
     "bound": "33",
     "starting": "34",
     "refused": "35",
+    "maintenance_checking": "31",
+    "maintenance_stopping": "31",
+    "maintenance_uncertain": "31",
+    "maintenance_completing": "31",
+    "maintenance_completed": "47",
 }
 
 #: every event, each of which the final `closed` ignores (statechart-engine §10)
@@ -160,6 +171,12 @@ _EVENTS = (
     "SPAWN",
     "SIGNAL",
     "SHUTDOWN",
+    "MAINTENANCE_STOP",
+    runner_supervisor.MAINTENANCE_REFUSED,
+    runner_supervisor.MAINTENANCE_STOPPING,
+    runner_supervisor.MAINTENANCE_IDLE,
+    runner_supervisor.MAINTENANCE_UNCERTAIN,
+    runner_supervisor.MAINTENANCE_FINISHED,
 )
 
 
@@ -182,16 +199,39 @@ def _section_5(witness: str, event: str, label: str) -> str:
         return "ignored in closed"
     if event == runner_supervisor.START:
         return _row({"lock_held": "01", "owner_live": "02", "free": "03"}[label])
-    if event in ("SPAWN", "SIGNAL", "SHUTDOWN"):
+    if event in ("SPAWN", "SIGNAL", "SHUTDOWN", "MAINTENANCE_STOP"):
+        if phase == "maintenance_uncertain":
+            return "refused maintenance_uncertain"
         if label in ("foreign", "none"):
             return "refused wrong_incarnation"
         if label == "stale" or lease not in ("live", "orphaned"):
             return "refused stale_token"
-        return _row({"SPAWN": "13", "SIGNAL": "14", "SHUTDOWN": "05"}[event])
+        return _row(
+            {"SPAWN": "13", "SIGNAL": "14", "SHUTDOWN": "05", "MAINTENANCE_STOP": "37"}[event]
+        )
     if event == runner_supervisor.TERM:
-        return _row({"stopped": "09", "shutting_down": "36"}.get(phase, "06"))
+        return _row(
+            {
+                "stopped": "09",
+                "shutting_down": "36",
+                "maintenance_uncertain": "48",
+                "maintenance_completed": "50",
+            }.get(phase, "06")
+        )
     if event == runner_supervisor.TEARDOWN:
         return _row(_TEARDOWN[phase])
+    maintenance = {
+        ("maintenance_checking", "maintenance_refused"): "40",
+        ("maintenance_checking", "maintenance_stopping"): "41",
+        ("maintenance_checking", "maintenance_idle"): "42",
+        ("maintenance_stopping", "maintenance_idle"): "43",
+        ("maintenance_stopping", "maintenance_uncertain"): "44",
+        ("maintenance_completing", "maintenance_uncertain"): "45",
+        ("maintenance_completing", "maintenance_finished"): "46",
+        ("maintenance_uncertain", "deadman"): "49",
+    }
+    if (phase, event) in maintenance:
+        return _row(maintenance[phase, event])
     rows = {
         runner_supervisor.PUBLISH: "04",
         runner_supervisor.DRAINED: "07",
@@ -219,14 +259,28 @@ def test_the_completeness_table_is_section_5() -> None:
         ("serving", "deadman"),
         *((phase, "teardown") for phase in PROCESS),
         *(("closed", event) for event in _EVENTS),
-        *(("serving", verb) for verb in ("SPAWN", "SIGNAL", "SHUTDOWN")),
+        *(("serving", verb) for verb in ("SPAWN", "SIGNAL", "SHUTDOWN", "MAINTENANCE_STOP")),
+        *(
+            ("maintenance_uncertain", verb)
+            for verb in ("SPAWN", "SIGNAL", "SHUTDOWN", "MAINTENANCE_STOP")
+        ),
+        ("maintenance_checking", "maintenance_refused"),
+        ("maintenance_checking", "maintenance_stopping"),
+        ("maintenance_checking", "maintenance_idle"),
+        ("maintenance_stopping", "maintenance_idle"),
+        ("maintenance_stopping", "maintenance_uncertain"),
+        ("maintenance_completing", "maintenance_uncertain"),
+        ("maintenance_completing", "maintenance_finished"),
+        ("maintenance_uncertain", "term"),
+        ("maintenance_completed", "term"),
+        ("maintenance_uncertain", "deadman"),
     }
     # ten witnesses (serving by four leases); per event, the reached cells by
     # partition: start 3+3, publish 1+1, term 4+1+1+1, drained 2+2, pass_ended
     # 1+1, deadman 4+1, teardown 10, each verb four leases by four
     # credentials, and each verb in closed by four credentials
-    assert len(WITNESSES) == 10
-    assert len(table) == 6 + 2 + 7 + 4 + 2 + 5 + 10 + 3 * 16 + 3 * 4
+    assert len(WITNESSES) == 15
+    assert len(table) == 152
 
 
 _OUT_OF_ORDER = {
@@ -326,7 +380,16 @@ def test_every_event_the_supervisor_posts_is_in_the_alphabet(
     sup._orderly_shutdown(runner_supervisor.PASS_ENDED)  # 12, then the wait
     sup._orderly_shutdown(runner_supervisor.TERM)  # 09
     assert sup.state == "stopped"
-    assert set(posted) == set(alphabet(CHART))
+    # Maintenance procedure events have their own admission/force/teardown probes.
+    maintenance = {
+        "MAINTENANCE_STOP",
+        "maintenance_refused",
+        "maintenance_stopping",
+        "maintenance_idle",
+        "maintenance_uncertain",
+        "maintenance_finished",
+    }
+    assert set(posted) == set(alphabet(CHART)) - maintenance
     ctx = runner_supervisor.Context("process", runner_supervisor.Event("x"), frozenset(), None)
     for action in CHART.actions.values():
         effects = action(ctx)
@@ -530,6 +593,7 @@ def test_teardown_is_a_row_per_source_state_in_three_ownership_classes() -> None
         (_row("33"), "bound", "unlink_private"),
         (_row("34"), "starting", ""),
         (_row("35"), "refused", ""),
+        (_row("47"), "maintenance_completed", ""),
     ]
     retries = [
         (row.id, row.source, row.event, row.kind) for row in CHART.rows if row.action == "retry"
@@ -538,7 +602,7 @@ def test_teardown_is_a_row_per_source_state_in_three_ownership_classes() -> None
         (_row("12"), "shutting_down", runner_supervisor.PASS_ENDED, "internal"),
         (_row("36"), "shutting_down", runner_supervisor.TERM, "internal"),
     ]
-    assert len(CHART.rows) == 24
+    assert len(CHART.rows) == 42
     assert {row.id for row in CHART.rows} & RETIRED == set()  # a retired id stays out (DL-364)
     ctx = runner_supervisor.Context("process", runner_supervisor.Event("x"), frozenset(), None)
     intents = {name: action(ctx).intents for name, action in CHART.actions.items()}

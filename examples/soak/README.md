@@ -74,7 +74,11 @@ times; seal and replay are timed in process, audit as a command.
 `soak.sh` starts `dsl41 run --detached` on the estate with real commands,
 and a sampler that writes one line a minute to `samples.jsonl`. After the
 given minutes it runs `stop.sh`, which seals the period, audits it, waits
-for the commands still running to end, and shuts the supervisor down.
+for the tracked wrappers to end, then requests guarded supervisor maintenance.
+The detached supervisor started by this script is unmanaged. It has no
+qualified containment proof, so maintenance refuses with exit 2 and leaves
+it running. A managed supervisor can complete only with the dedicated
+service-cgroup proof in the deployment runbook (§3).
 
 ```sh
 uv run examples/soak/soak.sh /tmp/soak-24h 1440   # a day
@@ -89,6 +93,12 @@ A sample holds the engine's and the supervisor's resident set, CPU time and
 open descriptors, the open period's WAL segment and the whole WAL, the trace
 length, the command runs and boxes live, the runs queued, and how long one
 `trace` and one `status` call took at the socket. `stop.jsonl` holds the
-seal, audit and drain times, and whether the drain saw every command end.
+seal, audit and drain times, whether the tracked wrappers drained, and the
+supervisor maintenance exit status. Empty LIST does not prove that residual
+commands are gone. Exit 2 is refusal; exit 4 is unknown completion. The
+script propagates either outcome and sends no fallback signal. Inspect
+process identity and logs before choosing the explicit whole-process stop
+procedure in `docs/deployment-runbook.md` §3. Unmanaged execution needs an
+independently verified process scope for that deliberate stop.
 An engine still running two minutes after the seal stops `stop.sh` with
 exit 1 before the audit; `ENGINE_EXIT_SECONDS` sets the wait.

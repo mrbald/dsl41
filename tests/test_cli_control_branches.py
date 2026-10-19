@@ -353,9 +353,15 @@ def test_supervise_shutdown_takes_the_lease_then_asks_for_the_stop(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     result, conn = _supervised(
-        monkeypatch, tmp_path, [{"ok": True, "token": "t-1"}, {"ok": True, "stopped": 0}]
+        monkeypatch,
+        tmp_path,
+        [
+            {"ok": True, "token": 1, "incarnation": "a" * 32},
+            {"ok": False, "error": "maintenance_refused"},
+        ],
     )
-    assert result.exit_code == 0
-    assert [r["cmd"] for r in conn.sent] == ["ACQUIRE", "SHUTDOWN"]
-    assert conn.sent[1]["token"] == "t-1"
+    assert result.exit_code == 2
+    assert [r["cmd"] for r in conn.sent] == ["ACQUIRE", "MAINTENANCE_STOP"]
+    assert conn.sent[1]["token"] == 1
+    assert conn.sent[1]["force"] is None
     assert conn.closed

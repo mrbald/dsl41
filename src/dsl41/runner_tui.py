@@ -100,6 +100,8 @@ import asyncio
 import functools
 import os
 import re
+import shlex
+import sys
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
@@ -134,6 +136,7 @@ from dsl41.runner_control import (
     JOB_EVENT_VERBS,
     REFUSED,
     REJECTED,
+    UNKNOWN,
     STATUS_FLAG_MARKS,
     STATUSES,
     ControlClient,
@@ -1039,6 +1042,43 @@ def _transport_line(label: str, exc: ControlClientError) -> Text:
     )
 
 
+def recovery_command(socket_path: Path, request: Mapping[str, Any]) -> str:
+    """The complete, shell-quoted recovery command for a TUI mutation (DL-391)."""
+    payload = request["payload"]
+    executable = Path(sys.prefix).resolve() / "bin" / "dsl41"
+    args = [
+        str(executable),
+        "sendevent",
+        str(request["verb"]),
+        "--socket",
+        str(socket_path.absolute()),
+    ]
+    if "job" in payload:
+        args.extend(("--job", str(payload["job"])))
+    if "name" in payload:
+        args.extend(("--global", f"{payload['name']}={payload['value']}"))
+    if "status" in payload:
+        args.extend(("--status", str(payload["status"])))
+    if "exit_code" in payload:
+        args.extend(("--exit-code", str(payload["exit_code"])))
+    (revision,) = request["expect"].values()
+    args.extend(
+        (
+            "--request-id",
+            str(request["request_id"]),
+            "--expect",
+            str(revision),
+            "--epoch",
+            str(request["epoch"]),
+            "--baseline",
+            str(request["baseline_id"]),
+            "--claimed-actor",
+            str(request["claimed_actor"]),
+        )
+    )
+    return shlex.join(args)
+
+
 def parse_console_command(text: str, selected: str | None) -> dict[str, Any] | str:
     """Parse an event-console line into the verb half of a sendevent request, or return an
     error string. Grammar (ss11): `<JOB_VERB> [job]`, `SET_GLOBAL NAME=value`,
@@ -1918,16 +1958,18 @@ class RunnerApp(App[None]):
         # snapshot before any await: status, blast radius and revision describe one instant
         row = self._jobs_snapshot.get(target) or {}
         members = self._descendants(target)
-        frozen: tuple[str, int, int] | None = None
         try:
             frozen = await self._precondition(addressed_key(verb, payload))
-        except (EngineError, ControlClientError):
-            frozen = None  # _do_sendevent re-reads and reports the fault
+        except (EngineError, ControlClientError) as exc:
+            self._console_write(
+                Text(f"{label}: cannot confirm without current pins: {exc}", style="red")
+            )
+            return
         body = confirm_body(
             verb,
             target,
             str(row.get("status") or "?"),
-            frozen[2] if frozen is not None else None,
+            frozen[2],
             members,
         )
         if not await self._confirm("confirm", body):
@@ -2038,27 +2080,36 @@ class RunnerApp(App[None]):
         except EngineError as exc:
             self._console_write(Text(f"{label}: {exc}", style="red"))
             return
+        recovery: str | None = None
         try:
             baseline, epoch, revision = (
                 frozen if frozen is not None else await self._precondition(key)
             )
-            response = await self._client.request(
-                command(
-                    str(request.get("verb")),
-                    payload,
-                    key=key,
-                    revision=revision,
-                    baseline_id=baseline,
-                    epoch=epoch,
-                    claimed_actor=self._claimed_actor,
-                )
+            envelope = command(
+                str(request.get("verb")),
+                payload,
+                key=key,
+                revision=revision,
+                baseline_id=baseline,
+                epoch=epoch,
+                claimed_actor=self._claimed_actor,
             )
+            recovery = recovery_command(self.socket_path, envelope)
+            # DL-391: render the complete pinned command before the write can start.
+            self._console_write(Text(f"sending: {recovery}", style="dim"))
+            await self.query_one("#console", RichLog).wait_for_refresh()
+            response = await self._client.request(envelope)
         except ControlClientError as exc:
             self._set_connected(False, str(exc))
-            self._console_write(_transport_line(label, exc))
+            fault = exc if recovery is not None else ControlClientError(str(exc))
+            self._console_write(_transport_line(label, fault))
+            if exc.delivered and recovery is not None:
+                self._console_write(Text(f"re-read; recover ONLY as: {recovery}", style="yellow"))
             return
         self._set_connected(True)
         self._console_write(_outcome_line(label, response))
+        if outcome_of(response) == UNKNOWN:
+            self._console_write(Text(f"re-read; recover ONLY as: {recovery}", style="yellow"))
         await self._refresh()
 
     async def _precondition(self, key: str) -> tuple[str, int, int]:
