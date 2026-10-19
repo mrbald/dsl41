@@ -270,6 +270,20 @@ def test_containment_reads_complete_subtree_and_refuses_unreadable_child(monkeyp
         proof.members()
 
 
+@pytest.mark.parametrize("platform_name", ["darwin", "win32"])
+def test_non_linux_containment_refuses_before_probing(monkeypatch, platform_name):
+    def unexpected_probe(*_args, **_kwargs):
+        pytest.fail("unsupported platform must refuse before probing containment")
+
+    monkeypatch.setattr(procid.sys, "platform", platform_name)
+    monkeypatch.setattr(Path, "read_text", unexpected_probe)
+    monkeypatch.setattr(procid.subprocess, "run", unexpected_probe)
+    with pytest.raises(
+        procid.ObservationUnavailable, match="maintenance requires Linux service containment"
+    ):
+        procid.ServiceContainment.observe()
+
+
 @pytest.mark.parametrize("hierarchy", ["v1", "v2", "hybrid"])
 def test_systemd_v1_and_v2_hierarchies_are_qualified(monkeypatch, tmp_path, hierarchy):
     actual = Path.read_text

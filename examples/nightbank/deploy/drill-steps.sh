@@ -956,11 +956,29 @@ roots_named() { # roots_named ANCHOR [VENV]
 }
 
 step_diagnostics() { # diagnostics and teardown
+    local load active
     sudo systemctl status "$ENGINE" "$SUPERVISOR" --no-pager || true
     sudo journalctl -u "$ENGINE" -u "$SUPERVISOR" -o short-precise --no-pager || true
     sudo sh -c 'tail -n 100 /srv/dsl41/runs/*/supervisor.log' || true
-    sudo systemctl stop "$ENGINE"
-    maintenance_stop || true
+    # Removed units must be inactive; loaded units retain strict shutdown errors (DL-390).
+    load=$(prop "$ENGINE" LoadState)
+    case $load in
+        not-found)
+            active=$(prop "$ENGINE" ActiveState)
+            [ "$active" = inactive ] || fail "$ENGINE: not-found unit has ActiveState=$active"
+            ;;
+        loaded) sudo systemctl stop "$ENGINE";;
+        *) fail "$ENGINE: unexpected LoadState=$load during diagnostics";;
+    esac
+    load=$(prop "$SUPERVISOR" LoadState)
+    case $load in
+        not-found)
+            active=$(prop "$SUPERVISOR" ActiveState)
+            [ "$active" = inactive ] || fail "$SUPERVISOR: not-found unit has ActiveState=$active"
+            ;;
+        loaded) maintenance_stop;;
+        *) fail "$SUPERVISOR: unexpected LoadState=$load during diagnostics";;
+    esac
 }
 
 case ${1-} in

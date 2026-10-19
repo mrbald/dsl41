@@ -87,7 +87,7 @@ for step in $steps; do
 done
 say "step diagnostics"
 podman exec --user "$user" --workdir /work "$name" \
-    bash examples/nightbank/deploy/drill-steps.sh diagnostics || true
+    bash examples/nightbank/deploy/drill-steps.sh diagnostics || status=1
 
 say "summary"
 printf '  %s\n' "${results[@]}"

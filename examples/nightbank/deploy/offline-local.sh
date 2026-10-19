@@ -10,7 +10,7 @@ scope=${DSL41_REHEARSAL_SCOPE:-all}
 case $scope in all|maintenance) ;; *) echo 'scope must be all or maintenance' >&2; exit 2;; esac
 case $target in
     ubuntu) base=docker.io/library/ubuntu@sha256:534baea6a22c03a63003dbc8dbe78fe34bc0d7e595d9a9dc9834884ff530eb55 ;;
-    el8) base=docker.io/library/rockylinux@sha256:3c2d0ce12bf79fc5ff05e43b1000e30ff062dc89405525f3307cbff71661f1a0 ;;
+    el8) base=docker.io/library/rockylinux@sha256:9794037624aaa6212aeada1d28861ef5e0a935adaf93e4ef79837119f2a2d04c ;;
     *) echo 'target must be ubuntu or el8' >&2; exit 2;;
 esac
 here=$(cd "$(dirname "$0")" && pwd)
