@@ -7,7 +7,9 @@
 #
 # DL-215: nothing is published that did not pass the whole CI gate list
 # (`gates` calls ci.yml) and the installed-artifact smoke test (`smoke` runs
-# scripts/release_smoke.sh on the very files `publish` uploads). `build`
+# scripts/release_smoke.sh on the very files `publish` uploads). DL-389 also
+# gates that wheel through Ubuntu and EL8 offline containers on native x86_64
+# runners. `build`
 # exports the closure from uv.lock with `--frozen` and ships it beside the
 # wheel as requirements-base.txt and requirements-ui.txt.
 #
@@ -17,7 +19,7 @@
 # Publication needs a tag: a tag push, or a manual run (workflow_dispatch) from
 # a tag with `publish` set. `release-assets` follows every publish. A manual
 # run from any other ref, or without `publish`, is a rehearsal: it runs
-# `gates`, `build` and `smoke` and publishes nothing.
+# `gates`, `build`, `smoke` and `offline` and publishes nothing.
 
 name: release
 

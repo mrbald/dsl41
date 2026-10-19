@@ -1008,6 +1008,7 @@ def test_blocking_supervisor_client_skips_exit_push_before_maintenance_reply():
     left, right = socket.socketpair()
     client = SupervisorConn.__new__(SupervisorConn)
     client.conn, client.buf, client.incarnation = left, b"", None
+    client.timeout_s = 60.0
     right.sendall(b'{"push":"exit","run_id":"completed"}\n{"ok":true,"incarnation":"current"}\n')
     try:
         assert client.send({"cmd": "ACQUIRE"}) == {"ok": True, "incarnation": "current"}
@@ -1015,6 +1016,91 @@ def test_blocking_supervisor_client_skips_exit_push_before_maintenance_reply():
     finally:
         client.close()
         right.close()
+
+
+@pytest.mark.parametrize("reply", [b'{"ok":', b'{"push":"exit"}\n'])
+def test_blocking_supervisor_request_deadline_survives_partial_reads_and_pushes(monkeypatch, reply):
+    from dsl41 import runner_adapters as adapters
+
+    clock = SimpleNamespace(now=0.0, reads=0)
+    sent = []
+    waits = []
+
+    def settimeout(seconds):
+        waits.append(seconds)
+
+    def sendall(payload):
+        sent.append(json.loads(payload))
+        clock.now += 5.0
+
+    def recv(_size):
+        clock.reads += 1
+        assert clock.reads <= 3, "request timeout was extended by reply traffic"
+        if waits[-1] < 40.0:
+            clock.now += waits[-1]
+            raise TimeoutError("synthetic socket wait expired")
+        clock.now += 40.0
+        return reply
+
+    wire = SimpleNamespace(settimeout=settimeout, sendall=sendall, recv=recv)
+    client = adapters.SupervisorConn.__new__(adapters.SupervisorConn)
+    client.conn, client.buf, client.incarnation, client.timeout_s = wire, b"", "current", 60.0
+    monkeypatch.setattr(adapters, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    with pytest.raises(TimeoutError):
+        client.send({"cmd": "MAINTENANCE_STOP", "token": 7})
+    assert clock.now == 60.0
+    assert waits[-1] == 15.0
+    assert [request["cmd"] for request in sent] == ["MAINTENANCE_STOP"]
+
+
+def test_blocking_supervisor_deadline_includes_buffered_push_processing(monkeypatch):
+    from dsl41 import runner_adapters as adapters
+
+    clock = SimpleNamespace(now=0.0)
+    sent = []
+    loads = json.loads
+
+    def parse(line):
+        clock.now += 31.0
+        return loads(line)
+
+    client = adapters.SupervisorConn.__new__(adapters.SupervisorConn)
+    client.conn = SimpleNamespace(settimeout=lambda _: None, sendall=sent.append)
+    client.buf = b'{"push":"exit"}\n' * 2 + b'{"ok":true,"incarnation":"late"}\n'
+    client.incarnation, client.timeout_s = "current", 60.0
+    monkeypatch.setattr(adapters, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    monkeypatch.setattr(adapters, "json", SimpleNamespace(dumps=json.dumps, loads=parse))
+    with pytest.raises(TimeoutError, match="supervisor reply deadline expired"):
+        client.send({"cmd": "MAINTENANCE_STOP", "token": 7})
+    assert len(sent) == 1
+    assert client.incarnation == "current"
+    assert client.buf == b'{"ok":true,"incarnation":"late"}\n'
+
+
+def test_blocking_supervisor_each_request_gets_a_fresh_deadline(monkeypatch):
+    from dsl41 import runner_adapters as adapters
+
+    clock = SimpleNamespace(now=0.0)
+    waits = []
+    sent = []
+
+    def sendall(payload):
+        sent.append(json.loads(payload))
+        clock.now += 5.0
+
+    def recv(_size):
+        clock.now += 10.0
+        return b'{"ok":true,"incarnation":"current"}\n'
+
+    client = adapters.SupervisorConn.__new__(adapters.SupervisorConn)
+    client.conn = SimpleNamespace(settimeout=waits.append, sendall=sendall, recv=recv)
+    client.buf, client.incarnation, client.timeout_s = b"", None, 60.0
+    monkeypatch.setattr(adapters, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    for _ in range(2):
+        assert client.send({"cmd": "PING"}) == {"ok": True, "incarnation": "current"}
+        clock.now += 100.0
+    assert [request["cmd"] for request in sent] == ["PING", "PING"]
+    assert waits == [60.0, 55.0, 45.0] * 2
 
 
 def test_force_bound_never_treats_unreaped_wrappers_as_complete(monkeypatch):

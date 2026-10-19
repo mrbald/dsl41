@@ -1009,6 +1009,10 @@ class _LogPane(Vertical):
 #: unknown  -- yellow, not red: the engine may be applying it now, so look, never resend.
 _OUTCOME_STYLE = {APPLIED: "green", REFUSED: "red", REJECTED: "red"}
 
+# DL-393: pin the runtime before activation moves its parent link. Resolving
+# the Python symlink itself would discard the virtual environment.
+_RECOVERY_PYTHON = Path(sys.executable).parent.resolve() / Path(sys.executable).name
+
 
 def _outcome_line(label: str, response: Mapping[str, Any]) -> Text:
     """One console line for one command answer, by ss3 outcome (DL-92): red means "send
@@ -1045,9 +1049,11 @@ def _transport_line(label: str, exc: ControlClientError) -> Text:
 def recovery_command(socket_path: Path, request: Mapping[str, Any]) -> str:
     """The complete, shell-quoted recovery command for a TUI mutation (DL-391)."""
     payload = request["payload"]
-    executable = Path(sys.prefix).resolve() / "bin" / "dsl41"
     args = [
-        str(executable),
+        str(_RECOVERY_PYTHON),
+        "-P",
+        "-m",
+        "dsl41",
         "sendevent",
         str(request["verb"]),
         "--socket",

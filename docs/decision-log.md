@@ -24992,3 +24992,22 @@ relitigate an entry; append a new one.
   The claim is untrusted metadata; kernel peer credentials still decide authority.
   Recovery must run as the original principal on the original host.
   Reusing an id with a changed envelope remains a collision, not a retry.
+- DL-392 Blocking supervisor requests have one monotonic deadline (2026-10-19).
+  The configured request timeout covers sending and the complete reply wait.
+  Partial reads and discarded exit pushes do not restart it.
+  The default is 60 seconds; bounded startup probes retain their shorter value.
+  A maintenance timeout after delivery remains uncertain (exit 4), with no
+  automatic resend or signal fallback. Positive completion still requires
+  the separate, bounded process-exit observation under DL-390.
+- DL-393 TUI recovery pins the running Python launch path (2026-10-19).
+  Capture the interpreter when the TUI module loads. Resolve its parent
+  directory, but retain the interpreter filename rather than following a
+  venv's Python symlink to the base interpreter. Recovery uses -P -m dsl41:
+  the working directory cannot shadow the package, and user-site installs
+  remain available. A later active-link switch cannot retarget the command.
+  Recovery retains the original principal, host and Python environment.
+  A non-venv installation must remain installed at the same location;
+  immutable runtime retention is supplied by the qualified venv layout.
+  The separate CLI and TUI pin formatters remain for this release. This
+  scoped fix changes the executable prefix only. Revisit a shared formatter
+  when the envelope pin schema changes (scoped architecture finding C1).

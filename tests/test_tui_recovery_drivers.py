@@ -19,9 +19,11 @@ import struct
 import sys
 import termios
 import time
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -272,6 +274,187 @@ def test_real_terminal_filter_selection_resize_confirm_cancel_and_detach(
     asyncio.run(scenario())
 
 
+def _footer_ready(rendered: bytes, columns: int, rows: int) -> bool:
+    """DL-391: require a complete footer at its acknowledged size and table focus."""
+    if columns <= 0 or rows <= 0:
+        return False
+    cells: list[str | None] = [None] * columns
+    row, column = 0, 0
+    for token in re.findall(rb"\x1b\[[0-?]*[ -/]*[@-~]|[^\x1b]+|\x1b", rendered):
+        position = re.fullmatch(rb"\x1b\[(\d+);(\d+)H", token)
+        if position:
+            row, column = int(position[1]), int(position[2])
+            if not (1 <= row <= rows and 1 <= column <= columns):
+                cells = [None] * columns
+                row, column = 0, 0
+        elif re.fullmatch(rb"\x1b\[[\d;:]*m", token):
+            continue
+        elif token.startswith(b"\x1b"):
+            cells = [None] * columns
+            row, column = 0, 0
+        else:
+            try:
+                text = token.decode("utf-8")
+            except UnicodeDecodeError:
+                cells = [None] * columns
+                row, column = 0, 0
+                continue
+            # DL-391: only observed one-cell writes prove this footer; unknown controls
+            # or widths invalidate it until another complete, positioned repaint.
+            for char in text:
+                if char == "\n" and 1 <= row < rows:
+                    row += 1
+                    column = 0
+                    continue
+                if (
+                    not (1 <= row <= rows and 1 <= column <= columns)
+                    or unicodedata.category(char) in {"Mn", "Me", "Cf"}
+                    or not char.isprintable()
+                    or unicodedata.combining(char)
+                    or unicodedata.east_asian_width(char) in {"W", "F"}
+                ):
+                    cells = [None] * columns
+                    row, column = 0, 0
+                    break
+                if row == rows:
+                    cells[column - 1] = char
+                column += 1
+    if any(cell is None for cell in cells):
+        return False
+    footer = "".join(cell for cell in cells if cell is not None)
+    return all(label in footer for label in (" s start ", " k kill ", " q detach "))
+
+
+_FOOTER = b" s start  k kill  q detach "
+
+
+@pytest.mark.parametrize("segmented", [False, True])
+def test_browser_footer_accepts_complete_positioned_repaints(segmented: bool) -> None:
+    footer = _FOOTER.decode() + "▏^p palette "
+    if segmented:
+        rendered = b"".join(
+            f"\x1b[38;{column}H\x1b[32m{char}\x1b[0m".encode()
+            for column, char in enumerate(footer, 1)
+        )
+    else:
+        rendered = f"\x1b[38;1H\x1b[32m{footer}\x1b[0m".encode()
+    assert _footer_ready(rendered, len(footer), 38)
+
+
+def test_browser_footer_accepts_interleaved_observed_fragments() -> None:
+    fragments = (
+        " s start ",
+        " f force ",
+        " k kill ",
+        " q detach ",
+        " d details ",
+        " t triggers ",
+        " m zoom log ",
+        " o out/err ",
+        " r refresh ",
+        " f1 help ",
+        " / filte",
+        "▏^",
+        "p palett",
+        "e ",
+    )
+    output = bytearray()
+    column = 1
+    for fragment in fragments:
+        output.extend(f"\x1b[38;{column}H\x1b[32m{fragment}\x1b[0m".encode())
+        output.extend(b"\x1b[13;120H  \x1b[13;122H\n")
+        column += len(fragment)
+    assert column == 123
+    assert _footer_ready(bytes(output), 122, 38)
+
+
+def test_browser_footer_accepts_complete_repaint_after_malformed_bytes() -> None:
+    rendered = b"\x1b[38;1H\xff\x1b[38;1H" + _FOOTER
+    assert _footer_ready(rendered, len(_FOOTER), 38)
+
+
+@pytest.mark.parametrize(
+    ("rendered", "columns", "rows"),
+    [
+        (b"\x1b[38;1H" + _FOOTER, len(_FOOTER), 37),
+        (b"\x1b[38;1H" + _FOOTER, len(_FOOTER) - 1, 38),
+        (b"\x1b[38;1H" + _FOOTER, len(_FOOTER) + 1, 38),
+        (b"\x1b[38;2H" + _FOOTER[1:], len(_FOOTER), 38),
+        (b"\x1b[38;1H" + b" esc clear  f1 help ".ljust(len(_FOOTER)), len(_FOOTER), 38),
+        (b"\x1b[38;1H" + _FOOTER.replace(b"detach", b"      "), len(_FOOTER), 38),
+        (b"\x1b[38;1H" + _FOOTER + b"\x1b[1;1H\x1b[2J", len(_FOOTER), 38),
+        (b"\x1b[38;1H" + _FOOTER + b"\x1b[38;1H" + b" " * len(_FOOTER), len(_FOOTER), 38),
+        (b"\x1b[38;1H" + _FOOTER + b"\n", len(_FOOTER) + 1, 38),
+        (b"\x1b[38;1H" + _FOOTER + b"\xff", len(_FOOTER) + 1, 38),
+        (b"\x1b[38;1H" + _FOOTER + b"\x1b[37;1H\nxxxxx", len(_FOOTER), 38),
+        (b"\x1b[38;1H" + _FOOTER + b"\x1b[37;27Hxx", len(_FOOTER), 38),
+        (b"\x1b[38;1H" + _FOOTER + b"\x1b[39;1H", len(_FOOTER), 38),
+        (b"\x1b[38;1H" + _FOOTER + b"\x1b[38;0H", len(_FOOTER), 38),
+        (b"\x1b[38;1H" + _FOOTER + b"\x1b[37;1H\v", len(_FOOTER), 38),
+        (b"\x1b[38;1H" + _FOOTER + b"\x1b[37;1H\f", len(_FOOTER), 38),
+        (b"\x1b[38;1H" + _FOOTER + b"\t", len(_FOOTER) + 1, 38),
+        (b"\x1b[38;1H" + _FOOTER + "界".encode(), len(_FOOTER) + 1, 38),
+        (b"\x1b[38;1H" + _FOOTER + "\u1715".encode(), len(_FOOTER) + 1, 38),
+        (b"\x1b[38;1H" + _FOOTER + "\ufe0f".encode(), len(_FOOTER) + 1, 38),
+        (b"\x1b[38;1H" + _FOOTER + "\u20dd".encode(), len(_FOOTER) + 1, 38),
+    ],
+    ids=[
+        "wrong-row",
+        "too-wide",
+        "incomplete",
+        "missing-first-cell",
+        "console-focus",
+        "no-detach",
+        "unsupported-control",
+        "overwritten-detach",
+        "line-feed",
+        "invalid-utf8",
+        "line-feed-into-footer",
+        "overflow-on-other-row",
+        "out-of-screen-cursor",
+        "column-zero",
+        "vertical-tab-on-other-row",
+        "form-feed-on-other-row",
+        "tab",
+        "wide-character",
+        "combining-spacing-mark",
+        "variation-selector",
+        "enclosing-mark",
+    ],
+)
+def test_browser_footer_refuses_incomplete_or_unproven_repaints(
+    rendered: bytes, columns: int, rows: int
+) -> None:
+    assert not _footer_ready(rendered, columns, rows)
+
+
+def _websocket_geometry(url: str) -> tuple[int, int] | None:
+    try:
+        query = parse_qs(urlsplit(url).query)
+        width, height = query["width"], query["height"]
+        if len(width) != 1 or len(height) != 1:
+            return None
+        size = int(width[0]), int(height[0])
+    except (KeyError, ValueError):
+        return None
+    return size if min(size) > 0 else None
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("width=166&height=50", (166, 50)),
+        ("width=166", None),
+        ("width=x&height=50", None),
+        ("width=0&height=50", None),
+        ("width=166&height=-1", None),
+        ("width=166&width=122&height=50", None),
+    ],
+)
+def test_browser_initial_websocket_geometry(query: str, expected: tuple[int, int] | None) -> None:
+    assert _websocket_geometry(f"ws://127.0.0.1/ws?{query}") == expected
+
+
 def _browser_drive(
     engine: str, url: str, diagnostics: Path, transition: Callable[[], None]
 ) -> None:
@@ -279,6 +462,11 @@ def _browser_drive(
 
     output: list[bytes] = []
     resizes: list[tuple[int, int]] = []
+    resize_frames: list[int] = []
+    frame_marks: dict[str, int] = {}
+    initial_url: str | None = None
+    initial_geometry: tuple[int, int] | None = None
+    before_resize_geometry: tuple[int, int] | None = None
     errors: list[str] = []
     with sync_playwright() as pw:
         browser = getattr(pw, engine).launch(headless=True)
@@ -287,6 +475,10 @@ def _browser_drive(
         page.on("pageerror", lambda error: errors.append(str(error)))
 
         def socket_opened(ws: Any) -> None:
+            nonlocal initial_url, initial_geometry
+            if initial_url is None:
+                initial_url = ws.url
+                initial_geometry = _websocket_geometry(initial_url)
             ws.on(
                 "framereceived",
                 lambda data: output.append(data if isinstance(data, bytes) else data.encode()),
@@ -296,6 +488,7 @@ def _browser_drive(
                 frame = json.loads(data)
                 if frame[0] == "resize":
                     resizes.append((frame[1]["width"], frame[1]["height"]))
+                    resize_frames.append(len(output))
 
             ws.on("framesent", sent)
 
@@ -317,35 +510,34 @@ def _browser_drive(
                 raise AssertionError(f"{engine} did not render {text!r}; see {diagnostics}")
 
             until("recovery_box")
+            assert initial_geometry is not None, f"unproven initial geometry: {initial_url}"
             page.keyboard.press("/")
             until("filter: substring")
             page.keyboard.type("recovery_child", delay=20)
             until("1/3")
             page.keyboard.press("Enter")
+            before_resize_geometry = resizes[-1] if resizes else initial_geometry
             resize_mark = len(resizes)
             render_mark = len(output)
+            frame_marks.update(resize=resize_mark, render=render_mark)
             page.set_viewport_size({"width": 1100, "height": 760})
             deadline = time.monotonic() + _TIMEOUT
             while time.monotonic() < deadline:
-                if len(resizes) > resize_mark:
+                if len(resizes) > resize_mark and resizes[-1] != before_resize_geometry:
                     columns, rows = resizes[-1]
-                    # DL-391: the app must paint its footer at the acknowledged terminal size
-                    # before a mutation can wrap its recovery command at that size.
-                    footer = re.compile(
-                        rb"\x1b\[" + str(rows).encode() + rb";1H(.*?)(?=\x1b\[\d+;\d+H)",
-                        re.DOTALL,
-                    )
-                    rendered = b"".join(output[render_mark:])
-                    lines = [
-                        re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", match[1]).decode(errors="replace")
-                        for match in footer.finditer(rendered)
-                    ]
-                    if any(len(line) == columns and "detach" in line for line in lines):
+                    frame_marks["acknowledged_render"] = max(render_mark, resize_frames[-1])
+                    if _footer_ready(
+                        b"".join(output[frame_marks["acknowledged_render"] :]), columns, rows
+                    ):
                         break
                 page.wait_for_timeout(20)
             else:
-                raise AssertionError(f"{engine} did not repaint after resize; see {diagnostics}")
+                raise AssertionError(
+                    f"{engine} did not repaint after resize: initial={initial_geometry}, "
+                    f"before={before_resize_geometry}, sent={resizes}; see {diagnostics}"
+                )
             mark = len(output)
+            frame_marks["mutation"] = mark
             page.keyboard.press("h")
             until("--claimed-actor", after=mark)
             page.keyboard.press("k")
@@ -368,6 +560,22 @@ def _browser_drive(
             diagnostics.mkdir(parents=True, exist_ok=True)
             (diagnostics / "terminal.raw").write_bytes(b"".join(output))
             (diagnostics / "page-errors.txt").write_text("\n".join(errors))
+            (diagnostics / "resize-evidence.json").write_text(
+                json.dumps(
+                    {
+                        "engine": engine,
+                        "initial_url": initial_url,
+                        "initial_geometry": initial_geometry,
+                        "before_resize_geometry": before_resize_geometry,
+                        "resizes": resizes,
+                        "resize_frames": resize_frames,
+                        "frame_marks": frame_marks,
+                        "frame_lengths": [len(frame) for frame in output],
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
             browser.close()
 
 

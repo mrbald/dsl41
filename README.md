@@ -457,7 +457,6 @@ dsl41 run jobs.jil --run-root ./run1 --detached   # CMD jobs run under a supervi
 # ...stop the engine (SIGINT); jobs keep running under the supervisor...
 dsl41 run jobs.jil --run-root ./run1 --detached --resume   # reattach, no re-run
 dsl41 supervise list --run-root ./run1            # what the supervisor is holding
-dsl41 supervise shutdown --run-root ./run1        # stop it (TERM, grace, KILL)
 dsl41 supervise start --run-root ./run1           # run the supervisor in the foreground
 dsl41 run jobs.jil --run-root ./run1 --detached --deadman 600  # opt into eviction
 ```
@@ -471,6 +470,16 @@ finished meanwhile. The engine holds a single fencing lease. The socket
 protocol is frozen in
 [docs/supervisor-protocol.md](docs/supervisor-protocol.md).
 `supervise` is read-only unless you ask it to shut down or start.
+
+For a supervisor in a qualified dedicated Linux systemd service,
+`dsl41 supervise shutdown --run-root <root>` refuses active or indeterminate
+work without signals. `--force=terminate` deliberately uses TERM, grace
+and KILL for validated command groups. Both require the stopped engine,
+existing leader lock and verified service containment. The CLI returns
+0 for verified completion, 2 for refusal and 4 for uncertainty. Never
+automatically retry an uncertain stop. An unmanaged supervisor refuses
+these maintenance requests. Follow the [deployment runbook](docs/deployment-runbook.md)
+for unit setup, maintenance and incident shutdown.
 
 `--deadman N` trades some of what `--detached` buys. The supervisor exits
 after N seconds with no live controller, and every job it holds dies by
@@ -753,7 +762,8 @@ Runner:
   [docs/control-protocol.md](docs/control-protocol.md).
 - `src/dsl41/runner_supervisor.py`: the detached supervisor: stdlib-only,
   one per run root. It owns the wrapper lifelines and speaks the supervisor
-  protocol (SPAWN, SIGNAL, LIST, SHUTDOWN, PING, and the lease), with
+  protocol (SPAWN, SIGNAL, LIST, MAINTENANCE_STOP, legacy SHUTDOWN, PING,
+  and the lease), with
   same-uid peer credentials and a Linux subreaper.
 - `src/dsl41/runner_wrapper.py`: the per-run wrapper, stdlib-only. It
   records `spawn.json` and `status.json` durably, and on lifeline EOF it
@@ -1124,12 +1134,13 @@ tag is annotated and names the version in `pyproject.toml`, builds the
 sdist and the wheel, exports the locked dependency closure with hashes,
 smoke-tests the installed wheel with
 [scripts/release_smoke.sh](scripts/release_smoke.sh),
-and publishes only what the smoke tested. Publication uses trusted
+qualifies that wheel in Ubuntu and EL8 containers on native x86_64 runners,
+and publishes only the tested files. Publication uses trusted
 publishing (OIDC) in the `pypi` environment, which waits for the owner's
 approval. The repository holds no PyPI token. The GitHub release that
-follows carries the sdist, the wheel, the two requirements files, and
-`SHA256SUMS`. The workflow's header comment lists its jobs and records the
-one-time trusted-publisher setup on pypi.org.
+follows carries the sdist, the wheel, the two requirements files, the
+Ubuntu and EL8 wheelhouses, the reference EL8 RPM, and `SHA256SUMS`.
+The workflow's header records the one-time trusted-publisher setup on pypi.org.
 The package readme is README.md with every relative link rewritten at
 build time to the file on `main`, because the PyPI project page cannot
 resolve a relative path.
@@ -1153,21 +1164,22 @@ The list follows CI, including format checking and the scoped 100% branch
 coverage requirement.
 
 Set the new version in `pyproject.toml` and run `uv lock`, which writes the
-same version into `uv.lock`. Move the install pin (`ver=`) in
-[docs/deployment-runbook.md](docs/deployment-runbook.md)
+same version into `uv.lock`. Update the wheel filename and RPM version
+examples in [docs/offline-installation.md](docs/offline-installation.md)
 to the same version. Build locally and compare the wheel's file list with
 the previous release's (`uv build`, then `unzip -Z1` on both): the
 difference must be what the tag message is about to say. Commit the three
 files and push them:
 
 ```sh
-git commit pyproject.toml uv.lock docs/deployment-runbook.md \
+git commit pyproject.toml uv.lock docs/offline-installation.md \
   -m "chore: X.Y.Z (one-line summary)"
 git push origin main
 ```
 
 Rehearse the release on that commit before you tag it. A manual run of the
-workflow from a branch runs `gates`, `build`, and `smoke` and publishes
+workflow from a branch runs `gates`, `build`, `smoke`, and `offline`
+qualification in Ubuntu and EL8 containers on native x86_64 runners. It publishes
 nothing, whatever its `publish` input says. Publication needs a tag: a tag
 push, or a manual run from a tag with `publish` set.
 

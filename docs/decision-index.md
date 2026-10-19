@@ -89,7 +89,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-76 | the single-chart offline page returns as `--format html-chart` |  |
 | DL-77 | the explore page was fatally broken in Safari, and nothing in the suite ever ran it |  |
 | DL-78 | the ss10 control plane becomes a module and a frozen document | [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md) |
-| DL-79 | the supervisor lease is fenced by incumbency, not by a label | [docs/blocks/supervisor.md](blocks/supervisor.md), [docs/concurrency-model.md](concurrency-model.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/state-machines.md](state-machines.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-79 | the supervisor lease is fenced by incumbency, not by a label | [docs/blocks/supervisor.md](blocks/supervisor.md), [docs/concurrency-model.md](concurrency-model.md), [docs/state-machines.md](state-machines.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-80 | the supervisor lease carries an incarnation id | [docs/blocks/supervisor.md](blocks/supervisor.md), [docs/concurrency-model.md](concurrency-model.md), [docs/state-machines.md](state-machines.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-81 | an explicit start against a live job is no longer silent | [docs/state-machines.md](state-machines.md) |
 | DL-82 | StatusStore owns every JobRuntime field and every global | [docs/concurrency-model.md](concurrency-model.md) |
@@ -400,5 +400,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-387 | A standalone helper converts one bounded AutoSys summary table |  |
 | DL-388 | Vendor hooks are readable patches over exact prebuilt inputs |  |
 | DL-389 | Offline candidates are manufactured at their final paths | [docs/deployment-runbook.md](deployment-runbook.md), [docs/offline-installation.md](offline-installation.md), [docs/offline-rehearsal.md](offline-rehearsal.md) |
-| DL-390 | Maintenance is a guarded supervisor operation | [docs/deployment-runbook.md](deployment-runbook.md), [docs/offline-rehearsal.md](offline-rehearsal.md), [docs/state-machines.md](state-machines.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-390 | Maintenance is a guarded supervisor operation | [docs/blocks/supervisor.md](blocks/supervisor.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/offline-rehearsal.md](offline-rehearsal.md), [docs/state-machines.md](state-machines.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-391 | TUI mutations retain their exact recovery envelope | [docs/cli-tui-qualification.md](cli-tui-qualification.md) |
+| DL-392 | Blocking supervisor requests have one monotonic deadline | [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-393 | TUI recovery pins the running Python launch path |  |

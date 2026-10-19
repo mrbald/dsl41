@@ -44,7 +44,7 @@ The wheel version, `pyproject.toml`, and `uv.lock` must agree.
 PYTHON=/usr/bin/python3.12
 export PYTHON
 bash scripts/offline/build-wheelhouse.sh \
-    /path/to/dsl41-1.10.0-py3-none-any.whl /tmp/dsl41-offline-bundle
+    /path/to/dsl41-1.11.0-py3-none-any.whl /tmp/dsl41-offline-bundle
 bash scripts/offline/qualify.sh \
     /tmp/dsl41-offline-bundle /tmp/dsl41-offline-qualification
 ```
@@ -175,7 +175,7 @@ mkdir -p /tmp/dsl41-rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 cp /tmp/dsl41-rpm-source/*.tar.gz /tmp/dsl41-rpmbuild/SOURCES/
 rpmbuild -bb scripts/offline/dsl41-offline.spec \
     --define '_topdir /tmp/dsl41-rpmbuild' \
-    --define 'dsl41_version 1.10.0'
+    --define 'dsl41_version 1.11.0'
 ```
 
 Set `--define 'dsl41_prefix /srv/dsl41'` for a different prefix.

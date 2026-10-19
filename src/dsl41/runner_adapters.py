@@ -941,21 +941,26 @@ class SupervisorConn:
             self.conn.close()  # the caller never gets an object to close
             raise
         self.buf = b""
+        self.timeout_s = timeout_s
         #: DL-80: the incarnation rides every mutating verb beside the token (supervisor-protocol
         #: ss5). It is part of the envelope, stamped here as `SupervisorClient._request` stamps
         #: it; an unstamped SHUTDOWN answers `wrong_incarnation` and stops nothing (DL-151).
         self.incarnation: str | None = None
 
     def send(self, request: dict[str, Any]) -> dict[str, Any]:
+        deadline = time.monotonic() + self.timeout_s
+        self._remaining_timeout(deadline)
         self.conn.sendall(
             json.dumps({**request, "v": 1, "incarnation": self.incarnation}).encode("utf-8") + b"\n"
         )
         while True:
-            while b"\n" not in self.buf:
+            self._remaining_timeout(deadline)
+            if b"\n" not in self.buf:
                 chunk = self.conn.recv(65536)
                 if not chunk:
                     raise OSError("supervisor closed the connection")
                 self.buf += chunk
+                continue
             line, self.buf = self.buf.split(b"\n", 1)
             obj = json.loads(line)
             if isinstance(obj, dict) and obj.get("push"):
@@ -968,6 +973,13 @@ class SupervisorConn:
             raise EngineError(
                 f"the supervisor sent a non-object reply: {obj!r} (supervisor-protocol ss5)"
             )
+
+    def _remaining_timeout(self, deadline: float) -> None:
+        # DL-392: partial replies and droppable pushes share one request deadline.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("supervisor reply deadline expired")
+        self.conn.settimeout(remaining)
 
     def _learn_incarnation(self, reply: dict[str, Any]) -> None:
         """The supervisor names its own incarnation in every reply that carries one (PING, LIST,

@@ -493,10 +493,15 @@ ends with `<root>/wal/<N>.jsonl: missing segment record`. Set
 
    If it stops, something runs under this root. This recipe does not
    cover that case, and no other supported path does.
-2. Stop both units (`systemctl stop dsl41-engine.service
-   dsl41-supervisor.service`), or under shape 2 the supervisor (`dsl41
-   supervise shutdown --run-root "$RUN_ROOT"`). Then run §2b's
-   no-writers check, with its wait past `RestartSec` under shape 1.
+2. Take §2b's reboot hold and stop the engine. Under shape 1, use §3's
+   guarded maintenance as the service account against `"$RUN_ROOT"`.
+   Require exit 0; a manager stop of the protected supervisor unit refuses.
+   On refusal or uncertainty, preserve evidence and follow §3's explicit
+   incident procedure. Under shape 2, guarded maintenance refuses; an
+   incident stop needs an independently verified whole-process scope.
+   Continue only after §2b's no-writers check, including its wait past
+   `RestartSec` under shape 1, proves quiescence. An empty LIST alone is
+   insufficient. Do not create or replace lock evidence to force admission.
 3. Check the root. The check stops, and says why, at any sign that
    the root holds more than a torn opening:
 
@@ -1445,12 +1450,13 @@ Decisions to make once, per site:
   per-run-root supervisor, and an engine restart (`--resume --detached`)
   reattaches to them instead of killing them. Detached is the production
   default. Inspect it with `dsl41 supervise list --run-root <root>`.
-  `dsl41 supervise shutdown --run-root <root>` is the break-glass that
-  kills everything, for a stopped engine. It must acquire the
-  supervisor's fencing lease, and a live engine holds it; the refusal
-  names the holder. Stop or kill the engine first. There is no TTL to
-  wait out: the supervisor reads the closed connection as proof that the
-  holder is gone, so the lease is grantable at once.
+  For maintenance, stop the engine and follow §3's guarded procedure.
+  Plain `supervise shutdown` refuses active or indeterminate work.
+  Explicit `--force=terminate` permits TERM/grace/KILL only for validated
+  command groups. Both require the existing leader lock and verified
+  dedicated service containment. A free fencing lease alone proves
+  neither engine exclusion nor idle work. Uncertainty never authorizes
+  an automatic retry or signal fallback.
 - **Faulting commands.** A command whose apply raises is refused with
   `apply_faulted` before it is journaled (concurrency-model §4).
   `--on-transition-violation` is inert (DL-353) and is removed at the
@@ -1635,9 +1641,8 @@ to the engine's main process, so the supervisor and jobs can survive that
 stop in the same cgroup. This gives up the unit's normal whole-cgroup stop
 containment. A killed or stopped engine can leave these processes running;
 monitor the supervisor and its log separately. To stop the estate, stop
-the engine first, then use
-`dsl41 supervise shutdown --run-root <root>`.
-Unmanaged containment refuses guarded maintenance. Use the explicit
+the engine first. Unmanaged containment refuses guarded maintenance.
+Use the explicit
 incident procedure above; killing wrappers can leave
 `exit_status_unobservable` outcomes. Keep the engine's restart exclusions
 and resume rules above. This shape has no separate supervisor restart
@@ -1916,11 +1921,13 @@ The production window is for swapping files, not for finding problems.
    boxes: only `job_terminator` members die with a box.
 3. **Stop the web UI**, if any. It is stateless; the order matters only
    for tidy monitoring.
-4. **Stop the engine** (SIGTERM). If detached, confirm that nothing you
-   are about to redefine is still alive under the supervisor
-   (`dsl41 supervise list --run-root <root>`). Wait it out, or run
-   `dsl41 supervise shutdown --run-root <root>`. A job left running across
-   a new baseline is a process the new catalog knows nothing about.
+4. **Stop the engine** (SIGTERM). If detached, follow §3's guarded
+   maintenance procedure. Wait for active work to finish, or explicitly
+   accept termination with `--force=terminate` under verified service
+   containment. Require exit 0 and §2b's no-writers proof before continuing.
+   Refusal, uncertainty or unmanaged containment requires §3's incident
+   procedure; an empty LIST does not prove completion. A job left running
+   across a new baseline is a process the new catalog knows nothing about.
 5. **Swap the estate**: `git -C /srv/dsl41/estate checkout <new-tag>`.
 6. **New run root**: `dsl41 run ... --run-root /srv/dsl41/runs/<new-id>`,
    a fresh root with no `--resume`. Name run roots after the baseline: a
@@ -2506,7 +2513,8 @@ speaks to the supervisor, not the engine, and leaves no WAL record.
 | drain or activate an executor | `host drain`, `host activate` | yes | asserts nothing about reachability |
 | evict an executor | `host evict` | no | gated on concurrency-model §8's preconditions |
 | break glass: forced eviction | `host evict --force` | no | the one path that can double-run; authenticated when the access map is armed, attributed otherwise |
-| break glass: supervisor shutdown | `supervise shutdown` | no | needs no live leaseholder: an expired lease, or an unexpired one whose holder's connection is gone, is grantable (DL-79) |
+| idle supervisor maintenance | `supervise shutdown` | no | stopped engine, verified lock exclusion and dedicated service containment; active or indeterminate work refuses (DL-390) |
+| deliberate supervisor termination | `supervise shutdown --force=terminate` | no | TERM/grace/KILL for validated command groups; uncertainty is not completion or permission to retry (§3) |
 | break glass: reclaim a lineage | `estate reclaim --force` | no | the one path that can fork a lineage (period-model §1.3) |
 
 Break-glass survives the seal as facts: a forced eviction's `forced_by`

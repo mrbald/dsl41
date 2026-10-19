@@ -67,8 +67,13 @@ def test_tui_recovery_command_reconstructs_the_complete_envelope(
 
     monkeypatch.setattr(cli_control, "_mutate", capture)
     recovery = shlex.split(recovery_command(socket_path, original))
-    assert recovery[0] == str(Path(sys.prefix).resolve() / "bin" / "dsl41")
-    result = CliRunner().invoke(cli_app, recovery[1:])
+    assert recovery[:4] == [
+        str(Path(sys.executable).parent.resolve() / Path(sys.executable).name),
+        "-P",
+        "-m",
+        "dsl41",
+    ]
+    result = CliRunner().invoke(cli_app, recovery[4:])
     assert result.exit_code == 0, result.output
     assert sent == [original]
 
@@ -77,6 +82,9 @@ def test_recovery_pins_the_socket_directory_and_backing_runtime(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    original_python = Path(sys.executable).parent.resolve() / Path(sys.executable).name
+    monkeypatch.setattr(sys, "argv", ["/installed/dsl41/__main__.py", "ui"])
+    monkeypatch.setattr(sys, "executable", "/different/runtime/bin/python")
     envelope = command(
         "ON_HOLD",
         {"job": "j"},
@@ -87,7 +95,7 @@ def test_recovery_pins_the_socket_directory_and_backing_runtime(
         claimed_actor="operator@synthetic",
     )
     args = shlex.split(recovery_command(Path("control.sock"), envelope))
-    assert args[0] == str(Path(sys.prefix).resolve() / "bin" / "dsl41")
+    assert args[:4] == [str(original_python), "-P", "-m", "dsl41"]
     assert args[args.index("--socket") + 1] == str(tmp_path / "control.sock")
 
 

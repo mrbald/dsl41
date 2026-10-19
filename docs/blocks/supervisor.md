@@ -16,7 +16,7 @@ One limit is about transport, not storage: a lease freed on EOF needs a local so
 
 - Started by file path, never with `-m`, by `dsl41 supervise start` or by `SupervisorClient.ensure_running`, with `--run-root` and an optional `--deadman-seconds`.
 - Run-root files: `supervisor.sock` (mode 0600), `supervisor.pid` and `supervisor.lock`. The spawner points stderr at `supervisor.log`.
-- Verbs, as JSON lines: `PING` and `LIST` (read-only); `ACQUIRE`, `RENEW` and `RELEASE` (lease); `SPAWN`, `SIGNAL` and `SHUTDOWN` (mutating). Async `exit` pushes go to the lease holder.
+- Verbs, as JSON lines: `PING` and `LIST` (read-only); `ACQUIRE`, `RENEW` and `RELEASE` (lease); `SPAWN`, `SIGNAL`, `MAINTENANCE_STOP` and legacy `SHUTDOWN` (mutating). Async `exit` pushes go to the lease holder.
 - Engine side: `SupervisorClient` holds and renews the lease, demuxes pushes and runs the shared LIST check. `SupervisedCommandAdapter` spawns, awaits and kills.
 - SPAWN's replay rules have their own card: [SPAWN idempotency](spawn-idempotency.md).
 
@@ -34,7 +34,8 @@ Each anchor holds the generated diagram and transition table.
 
 - One supervisor per run root. Startup takes `supervisor.lock` and proves the old owner absent before it reclaims the socket ([supervisor-protocol §5](../supervisor-protocol.md#5-supervisor-socket-protocol-frozen--phase-11f-dl-48); DL-210).
 - The write end of each wrapper's lifeline lives in the supervisor only, which detaches job lifetime from the engine ([runner-design §6a](../runner-design.md#6a-process-lifecycle-tiers-dl-41a); DL-48).
-- The tier holds no policy. Its lifecycle time bounds are the lease TTL, the SHUTDOWN waits and the optional deadman ([supervisor-protocol preamble](../supervisor-protocol.md#supervisor-protocol--the-lifecycle-tiers-public-contract)); §5 also bounds the startup PING probe and the teardown flush. `SIGNAL` sends one signal and never escalates; only `SHUTDOWN` escalates TERM to KILL (§5).
+- The tier holds no scheduling policy. Its lifecycle time bounds include the lease TTL, shutdown and maintenance waits, and optional deadman ([supervisor-protocol preamble](../supervisor-protocol.md#supervisor-protocol--the-lifecycle-tiers-public-contract)); §5 also bounds the startup PING probe and teardown flush. `SIGNAL` sends one signal and never escalates. Legacy `SHUTDOWN` and explicit maintenance termination escalate TERM to KILL (§5).
+- Guarded maintenance holds the existing engine leader lock through teardown and requires verified dedicated service containment. Default maintenance refuses active or indeterminate work. Explicit termination bypasses no ownership or observation check. Completion exits 8; uncertainty retains lifelines and exclusion (DL-390).
 - One controller at a time. A live lease yields only to a claimant with the current token and this [incarnation](../glossary.md#incarnation); a lease whose holder's connection is gone is free (§5 lease verbs; DL-79).
 - Every mutating verb carries `incarnation` and `token`. `wrong_incarnation` is checked first and is a different answer from `stale_token` (§5; DL-80).
 - Signals go to the recorded command group, never to the wrapper, and only after the (pid, start-time) guard ([supervisor-protocol §3, spawn.json](../supervisor-protocol.md#spawnjson--written-by-the-wrapper-immediately-after-spawning)).
@@ -56,7 +57,7 @@ Each anchor holds the generated diagram and transition table.
 
 ## Owning modules
 
-- `src/dsl41/runner_supervisor.py`: the process, the protocol, the lease, reaping, `SHUTDOWN` and the deadman.
+- `src/dsl41/runner_supervisor.py`: the process, the protocol, the lease, reaping, guarded maintenance, legacy `SHUTDOWN` and the deadman.
 - `src/dsl41/runner_procid.py`: the lock, the durable writes, the boot id, the PID-reuse guard and the group kill.
 - `src/dsl41/runner_adapters.py`: `SupervisorClient` and `SupervisedCommandAdapter`, the engine side.
 
