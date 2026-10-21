@@ -1017,6 +1017,48 @@ def test_the_manifest_pins_the_deadman_the_supervisor_runs_not_the_one_asked_for
     assert _observed_profile(None, 60.0) is None
 
 
+def test_the_deadman_mismatch_hint_is_true_for_genesis_and_for_resume(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """A fresh run can stop the supervisor that is up. A resume starts a missing one at the
+    period's pinned deadman, so only a boundary changes the interval (period-model ss2.1). A
+    supervisor that outlived a boundary runs another value, and stopping it is the remedy."""
+    import shlex
+
+    from dsl41.cli_run import _running_deadman
+
+    class _Client:
+        supervisor_deadman_s = 60.0
+
+    root = tmp_path / "run root"
+    stop = f"`dsl41 supervise shutdown --run-root {shlex.quote(str(root))}`"
+    assert _running_deadman(_Client(), 90.0, root, False, None) == 60.0
+    err = capsys.readouterr().err
+    assert stop in err
+    assert "docs/deployment-runbook.md section 3" in err
+    assert "pinned" not in err
+
+    # the supervisor runs the pin: stopping it changes nothing
+    assert _running_deadman(_Client(), 90.0, root, True, 60.0) == 60.0
+    err = capsys.readouterr().err
+    assert "keeps the deadman it pinned" in err
+    assert "`dsl41 seal --next-deadman`" in err
+    assert "supervise shutdown" not in err
+
+    # a supervisor that outlived a boundary runs the old interval and the resume will refuse
+    for asked in (90.0, 45.0):
+        assert _running_deadman(_Client(), asked, root, True, 90.0) == 60.0
+        err = capsys.readouterr().err
+        assert "not the 90.0 the period pinned" in err
+        assert stop in err
+        assert "docs/deployment-runbook.md section 3" in err
+        assert "keeps the deadman it pinned" not in err
+
+    for resume in (False, True):
+        assert _running_deadman(_Client(), 60.0, root, resume, 60.0) == 60.0
+        assert capsys.readouterr().err == ""
+
+
 def test_a_journal_less_engine_is_untouched_by_any_of_this() -> None:
     """The bisimulation harness runs an Engine with no journal at all;
     period identity is a property of a log, and there is none here."""

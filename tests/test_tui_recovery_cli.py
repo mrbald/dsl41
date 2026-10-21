@@ -317,3 +317,75 @@ def test_cli_before_write_and_unknown_advice_include_the_original_actor(
     monkeypatch.setattr(runner_control, "roundtrip", lose)
     assert command_outcome(Path("/unused"), envelope) == 4
     assert shlex.split(capsys.readouterr().err)[-2:] == ["--claimed-actor", "operator ' one"]
+
+
+def test_pilot_a_send_resumed_under_a_modal_renders_the_pinned_command_first(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DL-391: a send worker that resumes while another send's ConfirmScreen is the active
+    screen still renders the pinned command, then sends. `App.query_one` finds the console on
+    the screen that composes it, so a modal on top does not hide it. This guards a lookup that
+    is limited to the active screen."""
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(
+            short_root / "run", "insert_job: modal_job\njob_type: c\ncommand: x\nmachine: m1\n"
+        )
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(150, 44)) as pilot:
+                await _wait_for_ui(pilot, lambda: "modal_job" in app._rows)
+                lines: list[str] = []
+                sent: list[dict[str, Any]] = []
+                screens: list[bool] = []
+                real_write = app._console_write
+                real_request = app._client.request
+                real_precondition = app._precondition
+                gate = asyncio.Event()
+
+                waiting: list[str] = []
+
+                async def slow(key: str) -> tuple[str, int, int]:
+                    # only the first read, the console worker's, waits for the gate
+                    if not waiting:
+                        waiting.append(key)
+                        await gate.wait()
+                    return await real_precondition(key)
+
+                def write(line: Any) -> None:
+                    lines.append(line.plain)
+                    real_write(line)
+
+                async def exchange(request: dict[str, Any]) -> dict[str, Any]:
+                    if request.get("cmd") == "sendevent":
+                        screens.append(isinstance(app.screen, runner_tui.ConfirmScreen))
+                        assert lines[-1] == f"sending: {recovery_command(server.path, request)}"
+                        sent.append(request)
+                    return await real_request(request)
+
+                request = parse_console_command("ON_HOLD modal_job", None)
+                assert isinstance(request, dict)
+                monkeypatch.setattr(app, "_console_write", write)
+                monkeypatch.setattr(app._client, "request", exchange)
+                monkeypatch.setattr(app, "_precondition", slow)
+                app.run_worker(app._do_sendevent(request), group="send", exclusive=False)
+                await _wait_for_ui(pilot, lambda: bool(waiting))
+                app._selected = "modal_job"
+                await pilot.press("k")
+                await _wait_for_ui(pilot, lambda: isinstance(app.screen, runner_tui.ConfirmScreen))
+                gate.set()
+                await _wait_for_ui(pilot, lambda: bool(sent))
+                await _wait_for_ui(pilot, lambda: app._jobs_snapshot["modal_job"]["on_hold"])
+                assert screens == [True]
+                assert isinstance(app.screen, runner_tui.ConfirmScreen)
+                assert app._exception is None
+                assert len(sent) == 1
+                await pilot.press("escape")
+                await _wait_for_ui(
+                    pilot, lambda: not isinstance(app.screen, runner_tui.ConfirmScreen)
+                )
+                assert len(sent) == 1
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())

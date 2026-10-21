@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -236,3 +237,26 @@ def test_converted_fixture_native_viewer_import(tmp_path: Path, engine: str) -> 
             assert errors == []
         finally:
             browser.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+def test_replacement_keeps_an_existing_outputs_mode(tmp_path: Path) -> None:
+    output = tmp_path / "snapshot.json"
+    output.write_text("old\n", encoding="utf-8")
+    output.chmod(0o640)
+    result = _run(tmp_path, EXAMPLE.read_bytes(), "-o", str(output))
+    assert result.returncode == 0, result.stderr
+    assert json.loads(output.read_text(encoding="utf-8"))["nodes"] == EXPECTED_EXAMPLE
+    assert stat.S_IMODE(output.stat().st_mode) == 0o640
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+def test_a_new_output_takes_the_umask_derived_mode(tmp_path: Path) -> None:
+    output = tmp_path / "snapshot.json"
+    previous = os.umask(0o027)
+    try:
+        result = _run(tmp_path, EXAMPLE.read_bytes(), "-o", str(output))
+    finally:
+        os.umask(previous)
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(output.stat().st_mode) == 0o640

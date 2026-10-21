@@ -544,20 +544,40 @@ def _roll_admission(run_root: Path, profile: "RuntimeProfile") -> "Callable[[Man
     return admit
 
 
-def _running_deadman(client: object, asked: "float | None", run_root: Path) -> "float | None":
+def _running_deadman(
+    client: object, asked: "float | None", run_root: Path, resume: bool, pinned: "float | None"
+) -> "float | None":
     """The deadman the LOCAL SUPERVISOR reports it runs (concurrency-model ss8), and a warning
     when that is not what this invocation asked for.
 
     It is read back, not assumed: the eviction bound has to describe the host, and a number in
     the routing table that names nothing is the length of the wait before a double run."""
+    from dsl41.period import to_us
+
     running = getattr(client, "supervisor_deadman_s", None) if client is not None else None
     if asked is not None and running != asked:
-        typer.echo(
-            f"note: the supervisor serving {run_root} runs deadman {running!r}, not the"
-            f" {asked} asked for -- it was already up. Stop it"
-            " (`dsl41 supervise shutdown`) to change the interval.",
-            err=True,
+        stop = (
+            f" With the engine stopped, stop it: `dsl41 supervise shutdown --run-root"
+            f" {shlex.quote(str(run_root))}`. Caveats: docs/deployment-runbook.md section 3."
         )
+        head = f"note: the supervisor serving {run_root} runs deadman {running!r}, not the "
+        if not resume:
+            text = head + f"{asked} asked for -- it was already up." + stop
+        elif (running if running is None else to_us(running)) == (
+            pinned if pinned is None else to_us(pinned)
+        ):
+            # the period pins its deadman (period-model ss2.1): the resume starts a missing
+            # supervisor at the pin, so stopping this one changes nothing
+            text = (
+                head + f"{asked} asked for. A resumed period keeps the deadman it pinned; it"
+                " changes at the next boundary (`dsl41 seal --next-deadman`,"
+                " docs/deployment-runbook.md section 6a)."
+            )
+        else:
+            # a supervisor that outlived the last boundary keeps its old interval, and the
+            # resume gate refuses it against the pin
+            text = head + f"{pinned} the period pinned -- it was already up." + stop
+        typer.echo(text, err=True)
     return running
 
 
@@ -948,7 +968,7 @@ async def _serve_run(
         client = wiring.client
         adapters = wiring.adapters
         scheduler = wiring.scheduler
-        running_deadman = _running_deadman(client, deadman, run_root)
+        running_deadman = _running_deadman(client, deadman, run_root, resume, supervisor_deadman)
         staged = _observed_profile(staged, running_deadman)
         if resume:
             error = _resume_profile_error(run_root, profile, running_deadman)

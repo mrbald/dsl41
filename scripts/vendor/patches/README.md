@@ -38,7 +38,9 @@ scripts/vendor_mermaid.sh
 
 The script installs the locked npm tree in a temporary directory. It checks
 the unpatched SHA256, runs `git apply --check`, applies the diff, and checks
-the patched SHA256. All four steps precede writes to `src/dsl41/_vendor/`.
+the patched SHA256. It builds the assets in a temporary directory and runs the
+stylesheet, inline-safety and banner checks there. All of these precede writes
+to `src/dsl41/_vendor/`; the script copies the four assets in last.
 A changed input, an already patched input, an invalid diff, or an unexpected
 result fails the build. No fuzzy, reverse, or fallback application is used.
 Do not bypass a failed check or copy a partial result into the checkout.
