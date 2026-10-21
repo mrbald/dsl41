@@ -19,7 +19,7 @@ COLUMNS = 100
 WIDE: frozenset[str] = frozenset({"DL-380"})
 #: DL-379: the lines of the log up to the end of DL-379. A compression tranche lowers this in
 #: the same PR; only a superseded-by mark raises it, by the lines it adds.
-PREFIX_LINES = 24231
+PREFIX_LINES = 23700
 
 _ENTRY_START = re.compile(r"^- DL-(\d+)([a-z]?) ")
 
