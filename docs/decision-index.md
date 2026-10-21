@@ -404,3 +404,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-391 | TUI mutations retain their exact recovery envelope | [docs/cli-tui-qualification.md](cli-tui-qualification.md) |
 | DL-392 | Blocking supervisor requests have one monotonic deadline | [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-393 | TUI recovery pins the running Python launch path |  |
+| DL-394 | Forced maintenance waits for each whole command group | [docs/supervisor-protocol.md](supervisor-protocol.md) |

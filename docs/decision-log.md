@@ -25011,3 +25011,21 @@ relitigate an entry; append a new one.
   The separate CLI and TUI pin formatters remain for this release. This
   scoped fix changes the executable prefix only. Revisit a shared formatter
   when the envelope pin schema changes (scoped architecture finding C1).
+- DL-394 Forced maintenance waits for each whole command group (2026-10-21).
+  This narrows the TERM/grace/KILL ladder of DL-390. A wrapper exits with its
+  command leader, so its exit proves nothing about the rest of the group.
+  The bound ends when every wrapper is reaped and every validated group has
+  no member in the containment sample. The recorded leader's pid and start
+  token verify the group first. After that, a member of the group's previous
+  sample carries the identity while it stays alive and in the group. The
+  kernel does not reuse a group id while the group has a member. A bare pgid
+  never names the group. A member alive after its run's grace gets KILL
+  through the group, even after the leader and wrapper exit. A group whose
+  identity is lost gets no further signal, and the final idle proof decides.
+  A surviving recorded member outside containment or the group is uncertain,
+  as the leader is. The bound and its extension after KILL are unchanged.
+  Refused, uncertain and completed keep their meaning. A group can lose every
+  recorded member between two samples while a newer member lives; it then
+  ends uncertain, and no unverified process is signalled. Samples are at
+  least 0.25 seconds apart, and each KILL takes its own sample first. A
+  longer interval only widens that lost-identity window, which ends uncertain.

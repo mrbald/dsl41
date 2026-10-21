@@ -764,8 +764,13 @@ first. Then a stale or expired token answers
 
   With `force: null`, active or indeterminate work refuses without a
   signal. With `force: "terminate"`, validated command groups take the
-  existing TERM/grace/KILL ladder. Force bypasses no lock or observation
-  check, and signals no unknown cgroup member. If any work remains or
+  existing TERM/grace/KILL ladder. The ladder waits until every wrapper
+  is reaped and every validated group has left containment (DL-394).
+  After the leader exits, a group keeps its identity only while a member
+  of its previous containment sample is alive and still in it. A member
+  alive after its run's grace then gets KILL through that group. Force
+  bypasses no lock or observation check, and signals no unknown cgroup
+  member. If any work remains or
   observation fails after termination starts, the result is uncertain.
   The supervisor retains its lifelines and engine exclusion for diagnosis.
   It refuses further run mutations: SPAWN, SIGNAL, SHUTDOWN and another

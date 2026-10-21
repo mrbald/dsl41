@@ -343,7 +343,6 @@ def test_real_wrapper_force_waits_for_spawn_and_escalates_term_grace_kill(
     rig, monkeypatch, ignore_term
 ):
     from test_runner_supervisor import _spec, wait_for
-    from dsl41.runner_adapters import load_json
 
     sup, conn, request, proof = rig
     run_dir = Path(sup.run_root) / "runs/j.1"
@@ -357,17 +356,7 @@ def test_real_wrapper_force_waits_for_spawn_and_escalates_term_grace_kill(
 
     # The fake boundary supplies only containment. Wrapper/command identity, spawn
     # readiness, signals, waitpid and status records run through their real code.
-    def members():
-        found = {os.getpid()}
-        for run in sup.runs.values():
-            if run.wrapper_rc is None:
-                found.add(run.wrapper_pid)
-            record = load_json(Path(run.run_dir) / "spawn.json")
-            if record and procid.verify_alive(record["command_pid"], record["command_start_time"]):
-                found.add(record["command_pid"])
-        return found
-
-    proof.members = members
+    proof.members = lambda: _service_members(sup)
     signals = []
     original = rs.killpg_quiet
 
@@ -386,6 +375,258 @@ def test_real_wrapper_force_waits_for_spawn_and_escalates_term_grace_kill(
     assert all(run.wrapper_rc is not None for run in sup.runs.values())
     status = json.loads((run_dir / "status.json").read_text())
     assert status["outcome"] == "signaled" and status.get("reason") != "parent lost"
+
+
+def _service_members(sup):
+    """Stand-in containment: this process and every process in a run's wrapper session.
+
+    Each wrapper leads its own session (runner_wrapper duty 1). A command's whole tree
+    stays in that session unless it calls setsid, as a service cgroup keeps a forked
+    tree, so the sample sees every group member, not only the recorded leader. Zombies
+    are left out, as cgroup v2's cgroup.procs leaves them out."""
+    import subprocess
+
+    sessions = {run.wrapper_pid for run in sup.runs.values()}
+    listing = subprocess.run(["ps", "-A", "-o", "pid="], capture_output=True, text=True)
+    found = {os.getpid()}
+    for pid in map(int, listing.stdout.split()):
+        try:
+            if os.getsid(pid) in sessions and not procid.proc_is_zombie(pid):
+                found.add(pid)
+        except OSError:
+            continue
+    return found
+
+
+_GROUP_CHILD = """
+import os, signal, sys, time
+mode, ready = sys.argv[1:]
+if mode == "escape":
+    os.setpgid(0, 0)
+if mode == "graceful":
+    signal.signal(signal.SIGTERM, lambda *_: (time.sleep(0.3), sys.exit(0)))
+else:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+with open(ready + ".tmp", "w") as out:
+    out.write(str(os.getpid()))
+os.rename(ready + ".tmp", ready)
+time.sleep(30)
+"""
+
+
+def _force_group_child(rig, monkeypatch, mode, grace):
+    """Force maintenance on `sh -c 'child & wait'`: the shell leader dies on TERM at once
+    and leaves its child behind. Only containment is faked (`_service_members`)."""
+    import shlex
+    import sys
+    import time
+
+    from test_runner_supervisor import _spec, wait_for
+
+    sup, conn, request, proof = rig
+    run_dir = Path(sup.run_root) / "runs/j.1"
+    ready = run_dir / "child.pid"
+    command = (
+        f"{shlex.quote(sys.executable)} -c {shlex.quote(_GROUP_CHILD)} {mode} "
+        f"{shlex.quote(str(ready))} & wait"
+    )
+    spec = _spec(run_dir, command)
+    spec["grace_seconds"] = grace
+    assert sup.spawn_run(spec)["ok"]
+    child = int(wait_for(lambda: ready.exists() and ready.read_text()))
+    token = procid.proc_start_token(child)
+    assert token is not None
+
+    proof.members = lambda: _service_members(sup)
+    signals = []
+    original = rs.killpg_quiet
+
+    def signal_group(pgid, sig):
+        signals.append((pgid, sig, time.monotonic()))
+        original(pgid, sig)
+
+    monkeypatch.setattr(rs, "killpg_quiet", signal_group)
+    started = time.monotonic()
+    answer = sup._h_maintenance_stop(conn, {**request, "force": "terminate"})
+    return answer, signals, time.monotonic() - started, child, token, run_dir
+
+
+def _kill_child(child, token):
+    from test_runner_supervisor import wait_for
+
+    if procid.verify_alive(child, token):
+        os.kill(child, signal.SIGKILL)
+    wait_for(lambda: not procid.verify_alive(child, token))
+
+
+def test_force_kills_a_term_ignoring_group_member_after_its_leader_exits(rig, monkeypatch):
+    answer, signals, _elapsed, child, token, run_dir = _force_group_child(
+        rig, monkeypatch, "ignore", 0.5
+    )
+    try:
+        assert answer.get("maintenance") == "completed", answer
+        assert [sig for _pgid, sig, _at in signals] == [signal.SIGTERM, signal.SIGKILL]
+        assert len({pgid for pgid, _sig, _at in signals}) == 1
+        assert signals[1][2] - signals[0][2] >= 0.5
+        assert not procid.verify_alive(child, token)
+        status = json.loads((run_dir / "status.json").read_text())
+        assert status["outcome"] == "signaled"
+    finally:
+        _kill_child(child, token)
+
+
+def test_force_group_containment_sampling_is_rate_bounded(monkeypatch):
+    clock = SimpleNamespace(now=0.0)
+
+    def sleep(seconds):
+        clock.now += seconds
+
+    monkeypatch.setattr(rs, "time", SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep))
+    monkeypatch.setattr(rs, "_load_json", lambda _: {})
+    run = SimpleNamespace(run_id="r", run_dir="unused", wrapper_rc=None, grace_seconds=1.0)
+    group = (3000, {3001: "ticks:2"})
+    samples, sent = [], []
+
+    def signal_run(_run, sig, _proof, _group=None):
+        sent.append((sig, clock.now))
+        return None if sig == signal.SIGKILL else group
+
+    def sample(groups, _proof):
+        samples.append(clock.now)
+        return groups
+
+    reap_calls = []
+
+    def reap():
+        reap_calls.append(clock.now)
+        if clock.now > 0:
+            run.wrapper_rc = 0  # the wrapper exits with its leader; the group stays
+
+    owner = SimpleNamespace(
+        runs={"r": run}, _reap=reap, _maintenance_signal=signal_run, _maintenance_groups=sample
+    )
+    rs.Supervisor._maintenance_wait(owner, None)
+    assert [sig for sig, _at in sent] == [signal.SIGTERM, signal.SIGKILL]
+    assert sent[1][1] >= 1.0
+    # A 20 ms cadence would take about 50 samples during the 1 s grace.
+    assert 1 <= len(samples) < 20
+    assert all(b - a >= rs._MAINTENANCE_SAMPLE_S for a, b in zip(samples, samples[1:]))
+    assert len(reap_calls) > 2 * len(samples)
+
+
+def test_force_waits_for_a_graceful_group_member_without_kill(rig, monkeypatch):
+    answer, signals, elapsed, child, token, _run_dir = _force_group_child(
+        rig, monkeypatch, "graceful", 5.0
+    )
+    try:
+        assert answer.get("maintenance") == "completed", answer
+        assert [sig for _pgid, sig, _at in signals] == [signal.SIGTERM]
+        assert elapsed < 5.0
+        assert not procid.verify_alive(child, token)
+    finally:
+        _kill_child(child, token)
+
+
+def test_force_never_signals_a_contained_member_outside_the_verified_group(rig, monkeypatch):
+    sup = rig[0]
+    answer, signals, _elapsed, child, token, _run_dir = _force_group_child(
+        rig, monkeypatch, "escape", 0.5
+    )
+    try:
+        assert answer["error"] == "maintenance_uncertain", answer
+        assert [sig for _pgid, sig, _at in signals] == [signal.SIGTERM]
+        assert os.getpgid(child) not in {pgid for pgid, _sig, _at in signals}
+        assert procid.verify_alive(child, token)
+        assert sup.state == "maintenance_uncertain"
+        assert_excluded(Path(sup.run_root) / "leader.lock")
+    finally:
+        _kill_child(child, token)
+
+
+@pytest.mark.parametrize(
+    "survivor", ["none", "member", "outside", "second_uncontained", "second_own_group"]
+)
+def test_force_group_identity_needs_a_surviving_recorded_member(rig, monkeypatch, survivor):
+    sup, _conn, _request, proof = rig
+    sup._maintenance_lock_fd = procid.flock_existing(Path(sup.run_root) / "leader.lock")
+    run = SimpleNamespace(run_dir=sup.run_root, wrapper_rc=0, job="j", run_number=1, run_id="r")
+    spawn = {
+        "job": "j",
+        "run_number": 1,
+        "run_id": "r",
+        "boot_id": sup.boot_id,
+        "command_pid": 3000,
+        "command_pgid": 3000,
+        "command_start_time": "ticks:1",
+    }
+    (Path(sup.run_root) / "spawn.json").write_text(json.dumps(spawn))
+    # The leader is gone. Pid 3500 now carries pgid 3000; only the recorded member 3001,
+    # alive across the sample and still in the group, proves it is the verified group.
+    # A second surviving recorded member, 3002, outside containment or outside the
+    # group refuses even beside that proof.
+    alive = {
+        "none": set(),
+        "member": {3001},
+        "outside": {3001},
+        "second_uncontained": {3001, 3002},
+        "second_own_group": {3001, 3002},
+    }[survivor]
+    monkeypatch.setattr(rs, "verify_alive", lambda pid, _token: pid in alive)
+    contained = {os.getpid(), 3500}
+    if survivor != "outside":
+        contained |= {3001}
+    if survivor == "second_own_group":
+        contained |= {3002}
+    proof.members = lambda: contained
+    own_group = survivor == "second_own_group"
+    monkeypatch.setattr(os, "getpgid", lambda pid: pid if own_group and pid == 3002 else 3000)
+    monkeypatch.setattr(rs, "proc_start_token", lambda pid: f"ticks:{pid}")
+    sent = []
+    monkeypatch.setattr(rs, "killpg_quiet", lambda pgid, sig: sent.append((pgid, sig)))
+    group = (3000, {3000: "ticks:1", 3001: "ticks:2", 3002: "ticks:3"})
+    if survivor in ("outside", "second_uncontained", "second_own_group"):
+        with pytest.raises(OSError, match="outside its verified containment"):
+            sup._maintenance_signal(run, signal.SIGKILL, proof, group)
+        assert sent == []
+    elif survivor == "none":
+        assert sup._maintenance_signal(run, signal.SIGKILL, proof, group) is None
+        assert sent == []
+    else:
+        found = sup._maintenance_signal(run, signal.SIGKILL, proof, group)
+        assert found == (3000, {3001: "ticks:2", 3500: "ticks:3500"})
+        assert sent == [(3000, signal.SIGKILL)]
+
+
+def test_slow_group_sample_never_spends_the_reaping_interval_after_kill(monkeypatch):
+    clock = SimpleNamespace(now=0.0, kill_at=None)
+
+    def sleep(seconds):
+        clock.now += seconds
+
+    monkeypatch.setattr(rs, "time", SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep))
+    monkeypatch.setattr(rs, "_load_json", lambda _: {})
+    run = SimpleNamespace(run_id="r", run_dir="unused", wrapper_rc=None, grace_seconds=1.0)
+    group = (3000, {3000: "ticks:1"})
+
+    def signal_run(_run, sig, _proof, _group=None):
+        if sig == signal.SIGKILL:
+            clock.kill_at = clock.now
+        return group
+
+    def sample(groups, _proof):
+        clock.now += 2.0  # a manager observation inside its own five-second bound
+        return {} if clock.kill_at is not None else groups
+
+    def reap():
+        if clock.kill_at is not None and clock.now >= clock.kill_at + 0.3:
+            run.wrapper_rc = 0  # the killed leader takes 0.3 s to exit
+
+    owner = SimpleNamespace(
+        runs={"r": run}, _reap=reap, _maintenance_signal=signal_run, _maintenance_groups=sample
+    )
+    rs.Supervisor._maintenance_wait(owner, None)
+    assert run.wrapper_rc == 0
+    assert clock.now - clock.kill_at > 2.0
 
 
 def test_uncertain_force_keeps_live_wrapper_lifeline(rig, monkeypatch):
@@ -632,7 +873,7 @@ def test_termination_observation_latency_cannot_consume_command_grace(monkeypatc
     }
     sent = []
 
-    def signal_run(run, sig, _proof):
+    def signal_run(run, sig, _proof, _group=None):
         if sig == signal.SIGTERM:
             clock.now += 4.0  # a successful manager observation can take up to five seconds
         sent.append((run.run_id, sig, clock.now))
@@ -884,7 +1125,7 @@ def test_slow_verified_kill_batch_gets_a_full_final_reaping_interval(monkeypatch
         for i in range(6)
     }
 
-    def signal_run(_run, sig, _proof):
+    def signal_run(_run, sig, _proof, _group=None):
         if sig == signal.SIGKILL:
             clock.now += 0.5
             clock.kills += 1
@@ -1116,7 +1357,7 @@ def test_force_bound_never_treats_unreaped_wrappers_as_complete(monkeypatch):
     owner = SimpleNamespace(
         runs={"r": run},
         _reap=lambda: None,
-        _maintenance_signal=lambda _run, sig, _proof: sent.append(sig),
+        _maintenance_signal=lambda _run, sig, _proof, _group=None: sent.append(sig),
     )
     with pytest.raises(OSError, match="wrappers remain"):
         rs.Supervisor._maintenance_wait(owner, None)

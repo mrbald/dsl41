@@ -268,6 +268,13 @@ def peer_uid(sock: socket.socket) -> int | None:
 
 # ------------------------------------------------------------------ the daemon
 
+#: A forced maintenance group: its pgid and its contained members' start tokens (DL-394).
+_Group = tuple[int, dict[int, str]]
+
+#: The least interval between containment samples of forced groups. Each sample runs the
+#: manager check; every KILL takes its own sample first (DL-394).
+_MAINTENANCE_SAMPLE_S = 0.25
+
 
 class _Run:
     __slots__ = (
@@ -2552,15 +2559,62 @@ class Supervisor:
             "boot_id": self.boot_id,
         }
 
-    def _maintenance_signal(self, run: _Run, sig: int, proof: ServiceContainment) -> None:
-        """Force addresses only a known command's verified own process group (DL-390)."""
+    def _maintenance_groups(
+        self, groups: dict[str, _Group], proof: ServiceContainment
+    ) -> dict[str, _Group]:
+        """Each verified command group's contained members, from one containment sample.
+
+        A group keeps its identity only while a member recorded in its previous proof is
+        alive across the sample and still in the group: the kernel never reuses a live
+        group's id, so a bare pgid alone never names the group (DL-394). Every surviving
+        recorded member must still be contained and in the group, or the sample refuses.
+        A lost identity drops the group unsignalled; the final idle proof decides
+        (DL-390)."""
+        before = {
+            run_id: {pid: token for pid, token in members.items() if verify_alive(pid, token)}
+            for run_id, (_pgid, members) in groups.items()
+        }
+        contained = proof.members()
+        by_pgid = {pgid: run_id for run_id, (pgid, _members) in groups.items()}
+        found: dict[str, dict[int, str]] = {run_id: {} for run_id in groups}
+        for pid in sorted(contained - {os.getpid()}):
+            try:
+                run_id = by_pgid.get(os.getpgid(pid))
+            except ProcessLookupError:
+                continue
+            if run_id is None:
+                continue
+            token = before[run_id].get(pid) or proc_start_token(pid)
+            if token is not None:
+                found[run_id][pid] = token
+        proven: dict[str, _Group] = {}
+        for run_id, (pgid, _members) in groups.items():
+            survivors = [pid for pid, token in before[run_id].items() if verify_alive(pid, token)]
+            if any(pid not in found[run_id] for pid in survivors):
+                raise OSError("command group is outside its verified containment")
+            if survivors:
+                proven[run_id] = (pgid, found[run_id])
+        return proven
+
+    def _maintenance_signal(
+        self,
+        run: _Run,
+        sig: int,
+        proof: ServiceContainment,
+        group: _Group | None = None,
+    ) -> _Group | None:
+        """Force addresses only a known command's verified own process group (DL-390).
+
+        The recorded leader proves the group first; later, the members of the group's
+        last proof carry that identity after the leader exits (DL-394). Returns the
+        group as signalled, or None when nothing verified remains to address."""
         assert self._maintenance_lock_fd is not None
         verify_lock_path(self._maintenance_lock_fd, os.path.join(self.run_root, "leader.lock"))
         spawn = _load_json(os.path.join(run.run_dir, "spawn.json"))
         if spawn is None:
             if run.wrapper_rc is None:
                 raise OSError("a live wrapper has no command identity")
-            return
+            return None
         if (spawn.get("job"), spawn.get("run_number"), spawn.get("run_id")) != (
             run.job,
             run.run_number,
@@ -2572,22 +2626,21 @@ class Supervisor:
         )
         if not (is_wire_int(pid) and pid > 0 and pgid == pid and isinstance(token, str)):
             raise OSError("unverified command group")
-        if not verify_alive(pid, token):
-            return  # containment, never this absence, decides completion
-        contained = pid in proof.members()
-        try:
-            same_group = contained and os.getpgid(pid) == pgid
-        except ProcessLookupError:
-            same_group = False
-        if not same_group:
-            if not verify_alive(pid, token):
-                return  # a normal exit during observation still needs final idle proof
-            raise OSError("command group is outside its verified containment")
+        if group is None or group[0] != pgid:
+            group = (pgid, {pid: token})
+        # Containment, never an absence, decides completion (DL-390).
+        group = self._maintenance_groups({run.run_id: group}, proof).get(run.run_id)
+        if group is None:
+            return None
         verify_lock_path(self._maintenance_lock_fd, os.path.join(self.run_root, "leader.lock"))
         killpg_quiet(pgid, sig)
+        return group
 
     def _maintenance_wait(self, proof: ServiceContainment) -> None:
-        """Deliberate TERM/grace/KILL never turns a bound into completion (DL-390)."""
+        """Deliberate TERM/grace/KILL never turns a bound into completion (DL-390).
+
+        The bound waits for the wrappers and for every verified group to leave
+        containment; a member outliving its grace gets KILL (DL-394)."""
         live = [run for run in self.runs.values() if run.wrapper_rc is None]
         spawn_deadline = time.monotonic() + 5.0
         while time.monotonic() < spawn_deadline:
@@ -2600,26 +2653,44 @@ class Supervisor:
                 break
             time.sleep(0.05)
         live = [run for run in live if run.wrapper_rc is None]
+        groups: dict[str, _Group] = {}
         for run in live:
-            self._maintenance_signal(run, signal.SIGTERM, proof)
+            if (group := self._maintenance_signal(run, signal.SIGTERM, proof)) is not None:
+                groups[run.run_id] = group
         # Identity and containment probes precede each send; grace follows them (DL-390).
-        term_at = time.monotonic()
+        term_at = sampled_at = time.monotonic()
         killed: set[str] = set()
         deadline = term_at + max((run.grace_seconds for run in live), default=0.0) + 2.0
         while True:
             self._reap()
-            remaining = [run for run in live if run.wrapper_rc is None]
+            if groups and time.monotonic() - sampled_at >= _MAINTENANCE_SAMPLE_S:
+                groups = self._maintenance_groups(groups, proof)
+                sampled_at = time.monotonic()
+                # A slow sample never spends the reaping interval on stale state (DL-390).
+                self._reap()
+            remaining = [run for run in live if run.wrapper_rc is None or run.run_id in groups]
             if not remaining:
                 return
             now = time.monotonic()
+            sent = False
             for run in remaining:
                 if run.run_id not in killed and now - term_at >= run.grace_seconds:
-                    self._maintenance_signal(run, signal.SIGKILL, proof)
+                    group = self._maintenance_signal(
+                        run, signal.SIGKILL, proof, groups.get(run.run_id)
+                    )
+                    if group is None:
+                        groups.pop(run.run_id, None)
+                    else:
+                        groups[run.run_id] = group
+                    sampled_at = time.monotonic()
                     killed.add(run.run_id)
+                    sent = True
                     # Reaping gets its full interval after slow verified KILLs (DL-390).
                     deadline = max(deadline, time.monotonic() + 2.0)
+            if sent:
+                continue  # the bound is judged only on state reaped after the KILL samples
             if now > deadline:
-                raise OSError("wrappers remain after the termination bound")
+                raise OSError("wrappers remain, or command groups stay populated, after the bound")
             time.sleep(0.02)
 
     def _maintenance_prepare_teardown(self, proof: ServiceContainment) -> None:
