@@ -48,7 +48,9 @@ set -euo pipefail
 vendor="$(git rev-parse --show-toplevel)/src/dsl41/_vendor"
 manifest="$(git rev-parse --show-toplevel)/scripts/vendor"
 work="$(mktemp -d)"
+stage="$work/stage"
 trap 'rm -rf "$work"' EXIT
+mkdir "$stage"
 cd "$work"
 
 # npm ci installs exactly the lockfile's closure and fails if the manifest and
@@ -87,15 +89,15 @@ banner="/*! @mermaid-js/layout-elk $layout_elk_version (MIT) bundling elkjs $elk
 banner+=' built by dsl41 scripts/vendor_mermaid.sh; see THIRD_PARTY_LICENSES'
 banner+=' in the dsl41 distribution for full texts and source URLs. */'
 
-cp node_modules/mermaid/dist/mermaid.min.js "$vendor/mermaid.min.js"
+cp node_modules/mermaid/dist/mermaid.min.js "$stage/mermaid.min.js"
 # byte-exact npm copy like mermaid's -- pinned by sha256 in tests, not a size
 # floor; it is a classic script already (the package's unpkg entry), so nothing
 # to build.
-cp node_modules/@ungap/custom-elements/min.js "$vendor/custom-elements.min.js"
+cp node_modules/@ungap/custom-elements/min.js "$stage/custom-elements.min.js"
 npx esbuild @mermaid-js/layout-elk --bundle --format=iife \
     --global-name=elkLayouts --minify --legal-comments=inline \
     --banner:js="$banner" \
-    --outfile="$vendor/mermaid-layout-elk.iife.min.js"
+    --outfile="$stage/mermaid-layout-elk.iife.min.js"
 
 # Bundle #2 (DL-71): cytoscape + extensions for the --explore page. The
 # entry registers every extension so the page only needs cyBundle.default.
@@ -124,7 +126,7 @@ cybanner+=' in the dsl41 distribution for full texts and source URLs. */'
 npx esbuild cy_entry.js --bundle --format=iife \
     --global-name=cyBundle --minify --legal-comments=inline \
     --banner:js="$cybanner" \
-    --outfile="$vendor/cytoscape-explore.iife.min.js"
+    --outfile="$stage/cytoscape-explore.iife.min.js"
 
 # The extension CSS is inlined in templates/viz_explore.html between
 # begin/end sentinel comments (the page uses a flat menu, so the
@@ -148,18 +150,22 @@ diff <(normalize template-css.txt) \
 # errexit exempts '!' pipelines -- review finding).
 for payload in mermaid.min.js mermaid-layout-elk.iife.min.js \
                cytoscape-explore.iife.min.js custom-elements.min.js; do
-    if grep -q '</script' "$vendor/$payload"; then
+    if grep -q '</script' "$stage/$payload"; then
         echo "$payload contains </script -- not inline-safe" >&2
         exit 1
     fi
 done
-grep -q 'EPL-2.0' "$vendor/mermaid-layout-elk.iife.min.js"
-grep -q 'EPL-2.0' "$vendor/cytoscape-explore.iife.min.js"
-grep -q 'var cyBundle' "$vendor/cytoscape-explore.iife.min.js"
+grep -q 'EPL-2.0' "$stage/mermaid-layout-elk.iife.min.js"
+grep -q 'EPL-2.0' "$stage/cytoscape-explore.iife.min.js"
+grep -q 'var cyBundle' "$stage/cytoscape-explore.iife.min.js"
 # the expand-collapse extension registers under this core name (DL-190)
-grep -q 'expandCollapse' "$vendor/cytoscape-explore.iife.min.js"
+grep -q 'expandCollapse' "$stage/cytoscape-explore.iife.min.js"
 # upstream's own banner is the attribution here (nothing of ours is prepended)
-grep -q 'ISC' "$vendor/custom-elements.min.js"
+grep -q 'ISC' "$stage/custom-elements.min.js"
+
+# Builds and checks above write only under $work. No file under $vendor is
+# written until every check has passed.
+cp "$stage"/*.js "$vendor/"
 
 ls -l "$vendor"
 shasum -a 256 "$vendor"/*.js

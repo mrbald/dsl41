@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -67,8 +68,20 @@ def parse_summary(data: bytes) -> dict[str, dict[str, str]]:
     return nodes
 
 
+def _output_mode(path: Path) -> int:
+    """The mode the published file carries: an existing output's own, else the umask-derived
+    mode a plain open() would give."""
+    try:
+        return stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        umask = os.umask(0)
+        os.umask(umask)
+        return 0o666 & ~umask
+
+
 def _replace_output(path: Path, text: str) -> None:
     temporary: Path | None = None
+    mode = _output_mode(path)
     try:
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -80,6 +93,7 @@ def _replace_output(path: Path, text: str) -> None:
         ) as stream:
             temporary = Path(stream.name)
             stream.write(text)
+        os.chmod(temporary, mode)
         os.replace(temporary, path)
     finally:
         if temporary is not None:

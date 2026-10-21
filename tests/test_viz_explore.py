@@ -48,6 +48,17 @@ def test_vendored_cytoscape_bundle_is_inline_safe_and_attributed() -> None:
     assert b"expandCollapse" in payload  # the core extension name the page calls
 
 
+def test_vendored_cytoscape_bundle_carries_both_elk_patch_hooks() -> None:
+    """DL-388: the minified bundle must still hold the DL-383 completion promise and the DL-384
+    native-label callback, so a rebuild from an unpatched entry fails here."""
+    payload = _vendor_bytes("cytoscape-explore.iife.min.js")
+    # esbuild renames the locals, so the hooks match on their shape
+    promise = re.findall(rb"this\.promise=\w+\.layout\(\w+\)\.then\(", payload)
+    labels = re.findall(rb"\.nodeLabels&&\(\w+\.labels=\w+\.nodeLabels\(\w+\)\)", payload)
+    assert len(promise) == 1  # DL-383
+    assert len(labels) == 1  # DL-384
+
+
 def test_vendored_custom_elements_polyfill_is_the_pinned_npm_payload() -> None:
     # cytoscape-context-menus builds its menu from CUSTOMIZED BUILT-IN elements
     # (customElements.define(..., {extends: "div"})), which WebKit does not
