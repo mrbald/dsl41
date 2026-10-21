@@ -22908,22 +22908,16 @@ relitigate an entry; append a new one.
   src/dsl41/job_chart_events.py, src/dsl41/job_chart_rows.py, src/dsl41/capacity.py,
   src/dsl41/classify.py, src/dsl41/runner.py, src/dsl41/runner_history.py,
   src/dsl41/runner_preflight.py, src/dsl41/cli_run.py, src/dsl41/equiv.py, src/dsl41/attest.py,
-  src/dsl41/simulation_register_rows.py, src/dsl41/runner_ledger.py; tests/oracle_inputs.py,
-  tests/test_oracle_inputs.py,
-  tests/oracle_goldens.py, tests/test_oracle_goldens.py, tests/fork_harness.py, tests/conftest.py
-  and the oracle's tests; pyproject.toml; docs/statechart-engine.md §8, §11, §16;
-  docs/blocks/job-lifecycle.md; docs/blocks/capacity.md; docs/blocks/box-execution.md;
-  docs/runner-design.md; docs/autosys-semantics.md; docs/concurrency-model.md §3;
-  docs/citation-index.md; docs/simulation-coverage.md; docs/decision-index.md; README)
-  THE AIM. DL-351 made the chart oracle the engine's and recorded the goldens from the old oracle.
-  This entry is the second of the three switch-over entries (6.4): one oracle remains, under the
-  public name.
+  src/dsl41/simulation_register_rows.py, src/dsl41/runner_ledger.py; statechart-engine §8, §11,
+  §16; docs/runner-design.md; docs/autosys-semantics.md; concurrency-model §3)
+  THE RULE. The second of the three switch-over entries (6.4): DL-351 made the chart oracle the
+  engine's and recorded the goldens from the old oracle; one oracle remains, under the public
+  name.
   ONE ORACLE. `ChartOracle` is `Oracle`; `CascadeOracle` and `AgreeingOracle` are gone, and every
-  construction site follows. The old oracle's bodies that the chart oracle overrode or no longer
-  reached are deleted: 51 methods, DL-350's thirty-one uncalled cascade methods among them, the
+  construction site follows. The old oracle's bodies that the chart oracle overrode or did not
+  reach are deleted: 51 methods, DL-350's thirty-one uncalled cascade methods among them, the
   old dispatch, status handler, owed scan, removed-holder release and SET_GLOBAL's old body, and
-  every body only they reached. A static call closure from the chart's methods found them, and the
-  coverage run confirmed it. `CapacityPool.holds` went with them, unused.
+  every body only they reached. `CapacityPool.holds` went with them, unused.
   THE LAYOUT. One linear chain, one module per concern: `OracleReads` (the store's build, trace
   and emit, conditions, box membership, admission), `OracleSchedule` (windows, calendars,
   deadlines, timers), `OracleCascade` (consequences, moments, audiences, the scan), with its
@@ -22938,36 +22932,24 @@ relitigate an entry; append a new one.
   projection checks stay, and so does the performer's statechart error for an unwritten row. The
   recursion fit leaves too: `fit_recursion_limit`, `FRAMES_PER_NESTED_START`,
   `RECURSION_LIMIT_BASE`. `RECURSION_LIMIT` (DL-351) and both messages of `CascadeDepthError` stay.
-  THE TESTS. The lockstep harness's pairing and its test file leave; the inputs, renderings and
-  estate scripts the goldens use move to tests/oracle_inputs.py. Every test that paired the two
-  oracles runs on the one, keeping each assertion on its own output; mutant tests assert the
-  mutated parts from the oracle with the goldens' renderings, and the eleven STATUS cases that only
-  the pairing checked now pin their end rows and trace. 27 tests go, each with its cover: the
-  old-against-old runs, the mutant machinery and the fourth arm by the goldens and their planted
-  one-line change, the fit's tests by the iterative cascade's tests.
+  The lockstep harness's pairing leaves; the inputs, renderings and estate scripts the goldens use
+  move to tests/oracle_inputs.py.
   A CHECK THAT GOES. The settlement's holding agreement leaves the oracle (DL-349): a settlement
   row whose holding move differed from the store verb's was a statechart error at the verb, in the
-  engine since DL-351. A mismatch that ends in another holding state is now caught at the
-  macrostep's end by the projection check, after the write; its test plants a free read as keep. A
-  spend read as free ends in `none` either way, and the verb writes the right move, so no check
-  sees it and no output differs. The ignored-flag writer keeps its statechart error for ON_ICE and
-  ON_HOLD on a job that is not live, now with a planted test.
-  MOVED, NOT CHANGED. The PENDING markers of Q3c, Q3d, Q15 and Q16 sit at the code that now holds
+  engine since DL-351. A mismatch that ends in another holding state is caught at the macrostep's
+  end by the projection check, after the write. A spend read as free ends in `none` either way,
+  and the verb writes the right move, so no check sees it and no output differs. The ignored-flag
+  writer keeps its statechart error for ON_ICE and ON_HOLD on a job that is not live.
+  MOVED, NOT CHANGED. The PENDING markers of Q3c, Q3d, Q15 and Q16 sit at the code that holds
   each pin, and the register's sites follow. STARTJOB's two deadline timers are two calls, so the
   PR-09 test counts one site per kind across every module of the oracle's chain.
-  BEHAVIOUR. Unchanged: the goldens replay with 0 differing over 4,060 runs and 152,213 entries,
-  and no golden changed. Two defect-path texts change: the ignored-flag error ends "(the rules
-  apply it)", and the holding mismatch reports as the macrostep's projection error.
-  STATE_MACHINE_VERSION stays 23 (DL-235).
+  BEHAVIOUR. Unchanged: the goldens replay with 0 differing, and no golden changed. Two
+  defect-path texts change: the ignored-flag error ends "(the rules apply it)", and the holding
+  mismatch reports as the macrostep's projection error. STATE_MACHINE_VERSION stays 23 (DL-235).
   NOT HERE. The three tables, the verbs' table validation and the violation channel, the
   registration of `job` with `job.312`'s mark, DL-292's retirement, the cost round and the version
   review for those (the entry after). Simplifying the chart's rows and guards is the owner's later
   project.
-  REVIEW. A refactor that keeps behaviour: one Opus reviewer, two rounds, six minor findings, all
-  fixed and confirmed by it. It found the STATUS cases left checking only instance agreement, now
-  pinned against the old oracle's output, a defensive arm of the ignored-flag writer removed as
-  unreached, now restored, and stale names and citations. It re-ran the goldens and the old oracle
-  over the STATUS cases and found both equal.
 - DL-353 The job's transition tables leave and the chart is registered: the store's verbs write the
   chart's moves unchecked, the transition gate covers the job chart with two rows marked
   unreachable, §13 lets a marked row's guard be false, and DL-292's violation channel is retired
@@ -22978,35 +22960,30 @@ relitigate an entry; append a new one.
   src/dsl41/state_machine.py, src/dsl41/cli_run.py, src/dsl41/runner.py,
   src/dsl41/runner_admission.py, src/dsl41/runner_codes.py, src/dsl41/runner_journal.py,
   src/dsl41/runner_seal.py, src/dsl41/runner_supervisor.py, src/dsl41/runner_tui.py,
-  src/dsl41/simulation_register_rows.py; scripts/transition_coverage.py; tests/test_job_chart.py,
-  tests/test_transition_coverage.py, tests/test_oracle_chart_cascade.py, tests/test_dry_apply.py,
-  tests/test_job_machines.py and the oracle's, the engine's and the harnesses' tests;
-  .github/workflows/ci.yml; examples/nightbank/RUNBOOK.md, examples/nightbank/deploy/drill-lib.sh,
-  examples/nightbank/deploy/drill-steps.sh, examples/nightbank/deploy/dsl41-engine.service;
-  docs/statechart-engine.md §13, §16; docs/control-protocol.md; docs/concurrency-model.md;
-  docs/period-model.md; docs/deployment-runbook.md; docs/state-machines.md; docs/risk-map.md;
-  docs/agent-workflow.md; docs/blocks; docs/citation-index.md; docs/simulation-coverage.md; README)
-  THE AIM. The third and last switch-over entry (6.4). DL-351 made the chart oracle the engine's,
-  DL-352 left one oracle. The job's three transition tables were a second source of truth beside the
-  chart; this entry removes them, registers the chart, and retires the channel that reported a move
-  the tables did not list.
-  THE TABLES. `JOB_STATUS`, `JOB_FLAGS` and `JOB_HOLDING` and their 83 transitions leave the store.
+  src/dsl41/simulation_register_rows.py; scripts/transition_coverage.py; statechart-engine §13,
+  §16; docs/control-protocol.md; docs/concurrency-model.md; docs/period-model.md;
+  docs/deployment-runbook.md)
+  THE RULE. The third and last switch-over entry (6.4); DL-351 made the chart oracle the
+  engine's, and DL-352 left one oracle. The job's three transition tables were a second source of
+  truth beside the chart; this entry removes them, registers the chart, and retires the channel
+  that reported a move the tables did not list.
+  THE TABLES. `JOB_STATUS`, `JOB_FLAGS` and `JOB_HOLDING` and their transitions leave the store.
   The store's verbs write the move the chart's row names, with no table check. The chart is the one
   source of the job's transitions. A row the oracle has no writer for is a statechart error, exit 7,
   as before; so is an instance that does not match its row at the commit. The goldens catch a kill
   written to the wrong state, which the table check caught before.
   THE REGISTRATION. `job` joins `machines.MACHINES`, so the transition gate covers the job chart:
-  345 required items, every one hit; the marked rows are listed, never counted. `job.312` is marked
+  every required item is hit; the marked rows are listed, never counted. `job.312` is marked
   unreachable (the admission the oracle builds carries no previous end). `job.314` is marked
   unreachable too: a live status never stands on held units, since `held` is entered only after the
-  status left live and every way back to live leaves `held` first. A hit on either now stops with a
+  status left live and every way back to live leaves `held` first. A hit on either stops with a
   statechart error, exit 7, where the tables made job.314 a no-op; it fails closed, as every marked
-  row does. `job.183` needs no mark: test_a_member_killed_while_starting_ignores_its_own_started
-  reaches it on the oracle's path. The guard false of job.154, 170, 180, 189, 191, 198 and 308 is
-  marked `false_unreachable`, each with its reason; 189, 191, 198 and 308 are the complements of
-  marked rows. A directed test takes job.310, a start with no demand that takes over held units
-  after a catalog change at a period boundary. Test cells built by hand stay out of the record:
-  counted, they would fire eighteen of the nineteen marked rows, on cells the rules never post.
+  row does. `job.183` needs no mark: the oracle's path reaches it. The guard false of job.154, 170,
+  180, 189, 191, 198 and 308 is marked `false_unreachable`, each with its reason; 189, 191, 198 and
+  308 are the complements of marked rows. job.310, a start with no demand that takes over held
+  units after a catalog change at a period boundary, is reached too. Test cells built by hand stay
+  out of the record (an advisor's ruling): counted, they would fire eighteen of the nineteen marked
+  rows, on cells the rules never post.
   §13 NARROWED. DL-333's §13 forbade any outcome of a marked row's guard. A cell evaluates every
   guard of its rows (§3), so a marked row's guard is false whenever a live sibling takes the cell:
   that is the sibling's coverage, not a hit on the marked row. For a marked row, a hit and a true
@@ -23038,27 +23015,15 @@ relitigate an entry; append a new one.
   with the coverage script's and the renderer's table branches, is a follow-up. The nightbank
   drill's table-violation steps are removed but the drill was not run here (it needs systemd).
   Simplifying the chart's rows and guards is the owner's later project.
-  REVIEW. Semantic class and frozen contracts: one Opus reviewer and one Fable advisor pass, and one
-  advisor ruling. The engineer stopped when the transition gate could not be full with `job`
-  registered; the advisor ruled the §13 narrowing and that hand-built cells stay out of the record,
-  and corrected the top level's premise that they covered the missing items. Both reviewers re-ran
-  the goldens and found them equal, checked job.314's mark and found it holds, and found no lost
-  safety. Their findings were text: job.314's new exit 7, the retired codes named under
-  control-protocol's rule, stale comments, and the nightbank drill still injecting table violations,
-  now removed. The Opus reviewer found the stated limit's first text wrong: no trace is persisted.
-  Three rounds each; findings confirmed by the reviewer that raised them, and both agreed to the
-  stated limit's text.
 - DL-354 The suite runs on four workers: test overlap measured and not cut, pytest-xdist adopted
   under DL-211's revisit clause, the transition hits recorded by the controller, four timing tests
   fixed, and the CI timeouts back to 15 minutes
-  (2026-10-15; .github/workflows/ci.yml; pyproject.toml; uv.lock; tests/transition_hits_plugin.py,
-  tests/conftest.py, tests/test_state_machine.py, tests/test_runner.py,
-  tests/test_runner_adapters.py, tests/test_runner_lifecycle.py, tests/test_runner_supervisor.py;
-  docs/agent-workflow.md; docs/risk-map.md)
-  THE AIM. DL-351 raised the test and coverage legs' timeout from 15 to 25 minutes when the chart
+  (2026-10-15; .github/workflows/ci.yml; pyproject.toml; tests/transition_hits_plugin.py,
+  tests/conftest.py; docs/agent-workflow.md; docs/risk-map.md)
+  THE RULE. DL-351 raised the test and coverage legs' timeout from 15 to 25 minutes when the chart
   oracle made the coverage leg take 14.5. DL-211 declined pytest-xdist and said to revisit it if a
-  leg ran long again; that clause fired. The owner asked for the low-hanging fruit and for an
-  analysis of overlapping tests that keeps branch and transition coverage.
+  leg ran long again; that clause fired, and adopting xdist follows it and does not reverse it.
+  The timeout goes back to 15 minutes on the test and coverage legs.
   OVERLAP. Each test's lines, arcs and transition hits were recorded. 5,355 tests, outside the
   trace-named tests, the linter fixture pairs, the goldens and the only witnesses of a cell, are
   covered by another test of their file or by one other test; a consistent set that could all go is
@@ -23068,49 +23033,39 @@ relitigate an entry; append a new one.
   declined: a merged test fails less specifically. No test is cut.
   FOUR WORKERS. `-n 4 --dist loadfile`, pinned, in both test legs and the coverage leg; a file's
   tests share one worker. Locally the plain suite goes from about 437 s to 120 s and the coverage
-  leg's pytest from about 509 s to 154 s, with coverage at 100% and the transition gate full. The
-  flags sit in ci.yml and agent-workflow.md, not in the pytest options, so a local run stays serial
-  unless asked. DL-211's isolation risk split in two. Shared state: the only shared file was the
-  transition hits, which every worker rewrote; the controller now owns the directory and the merge,
-  workers write their own files, and serial and parallel runs record the same 797 hits. Every socket
-  is a Unix socket on a per-test path. Load: four workers on a four-core runner make real-clock
-  tests slower; the acceptance below measures it on the runner. Hypothesis's deadline, a speed check
-  and not a correctness check, is off under a local worker too; CI's profile had it off already. A
-  serial pass for the real-clock tests was rejected: it would hide the timing defects and give up
-  half the gain.
-  THE TIMING TESTS. Three tests raced a real clock and now construct their window (DL-83): the
-  STARTJOB in test_dl137 is queued at the loop's first choice; the sleep test checks the sleep it
-  asked for; the supervisor-spool test holds the kill until the wrapper's status.json exists (its
+  leg's pytest from about 509 s to 154 s. The flags sit in ci.yml and agent-workflow.md, not in the
+  pytest options, so a local run stays serial unless asked. DL-211's isolation risk split in two.
+  Shared state: the only shared file was the transition hits, which every worker rewrote; the
+  controller owns the directory and the merge, workers write their own files, and serial and
+  parallel runs record the same hits. Every socket is a Unix socket on a per-test path. Load: four
+  workers on a four-core runner make real-clock tests slower; the acceptance below measures it on
+  the runner. Hypothesis's deadline, a speed check and not a correctness check, is off under a
+  local worker too; CI's profile had it off already. A serial pass for the real-clock tests was
+  rejected: it would hide the timing defects and give up half the gain.
+  THE TIMING TESTS. Three tests raced a real clock and construct their window (DL-83): a queued
+  STARTJOB, a sleep, and a supervisor spool's kill held until the wrapper's status.json exists (its
   race is probable, not reproduced). A fourth, a zombie check, skips where `os.waitid` is missing
   (macOS before Python 3.13), a platform gap and not a race. Two shorter deadman waits, worth 3.5 s,
-  were declined: they tighten real-clock ratios on slow runners. The first CI run under four
-  workers found an isolation defect the serial order hid: an in-process supervisor run makes the
-  pytest process a Linux child subreaper, the flag outlived the test, and a command a later test
-  orphaned stayed an unreaped zombie, so two death polls timed out. Each test now gets back the
-  flag it started with. The second run found another: a test that parses to the recursion limit on
-  purpose ran an earlier test's finalisers inside an automatic collection with no stack left; it
-  now collects first and parses with automatic collection off.
+  were declined: they tighten real-clock ratios on slow runners. Four workers exposed two isolation
+  defects the serial order hid. An in-process supervisor run makes the pytest process a Linux child
+  subreaper, the flag outlived the test, and a command a later test orphaned stayed an unreaped
+  zombie, so two death polls timed out; each test gets back the flag it started with. A test that
+  parses to the recursion limit on purpose ran an earlier test's finalisers inside an automatic
+  collection with no stack left; it collects first and parses with automatic collection off.
   ACCEPTANCE. Ten consecutive green workflow runs on the branch, thirty leg executions, with zero
   test failures before the merge; a failure is diagnosed and fixed, and the count restarts. A load
   flake that passes at three workers pins three; a second flake of one test after its fix makes its
-  file serial. The runs' result is recorded on the pull request.
-  The timeout goes back to 15 minutes on the test and coverage legs.
-  REVIEW. Tests and tooling: one Opus reviewer, and one advisor ruling on adopting xdist, which
-  found it follows DL-211's revisit clause and does not reverse it. Two rounds; seven findings and
-  two on this entry's text, all fixed and confirmed by the reviewer. The serial and parallel runs
-  record the same transition hits.
+  file serial.
 - DL-355 Each test is checked for leaked global process state: a test that leaves it changed fails
   at its own teardown, naming the state before and after, and this check replaces counting green
   runs as the gate for order-dependent failures
-  (2026-10-15; tests/leak_detector_plugin.py, tests/test_leak_detector.py, tests/conftest.py,
-  tests/test_cascade_depth.py, tests/test_runner_supervisor.py, tests/test_runner_adapters.py,
-  tests/test_runner_leadership.py, tests/test_runner_control.py,
-  tests/test_supervisor_idempotency.py; scripts/arch_check.py; README; docs/agent-workflow.md)
-  THE AIM. DL-354's two isolation defects, a child-subreaper flag and a finaliser at the recursion
+  (2026-10-15; tests/leak_detector_plugin.py, tests/conftest.py; scripts/arch_check.py;
+  docs/agent-workflow.md)
+  THE RULE. DL-354's two isolation defects, a child-subreaper flag and a finaliser at the recursion
   limit, hid behind the serial order and showed under four workers only when the order happened to
   expose them. DL-354 gated the change on ten consecutive green runs. The owner ruled that gate out:
-  a sampled order is evidence, not proof. A test that leaks state now fails itself, in any order,
-  on the first run.
+  a sampled order is evidence, not proof. A test that leaks state fails itself, in any order, on
+  the first run.
   THE CHECK. One fixture, set up first and torn down last among a test's fixtures, snapshots the
   process's global state before the test and compares it after: the recursion limit, the Linux
   child-subreaper flag, the cyclic collector's switch and thresholds, signal handlers and the
@@ -23131,19 +23086,13 @@ relitigate an entry; append a new one.
   SIGINT, SIGTERM and SIGHUP, and the supervisor tests' file-wide restore of a Supervisor method or
   an ignored SIGHUP. Tests that set the recursion limit themselves say so with a fixture. The one
   allow-listed name is `PYTEST_CURRENT_TEST`, which pytest rewrites each phase.
-  LEAKS FIXED. The architecture check added `src` to `sys.path` on every call (twelve tests); two
-  tests left a crashed supervisor's wrapper a zombie; ten tests left a supervisor to its daemon
-  reaper, one failing and nine passing by winning the race, and now wait for the reap; a test
-  server now shuts its sockets down and joins its threads. With a forced collection after every
-  test, no test leaves an unclosed resource on macOS or Linux; the forced collection costs about
-  120 ms a test and is not kept.
+  LEAKS FIXED. The architecture check added `src` to `sys.path` on every call; crashed
+  supervisors' wrappers were left zombies; tests left a supervisor to its daemon reaper, and wait
+  for the reap; a test server shuts its sockets down and joins its threads. With a forced
+  collection after every test, no test leaves an unclosed resource on macOS or Linux. REJECTED:
+  keeping the forced collection, which costs about 120 ms a test.
   COST. About 120 microseconds a test on macOS and 240 on Linux, under two seconds on the parallel
   suite.
-  REVIEW. Tests and tooling: one Opus reviewer. It delayed every reaper thread by up to a second
-  over 52 spawning files and found no test still winning a reap race; it found the first restores
-  undoing every change, which hid four tests' own recursion limits and any test's own signal
-  handler, now narrowed to production's change. Two rounds; nine findings fixed and confirmed by
-  the reviewer.
 - DL-356 The architecture review at dd8e774 lands: each rule the oracle wrote twice has one home,
   the job chart's handlers are named tables, the re-export layer and the chart's second extent go,
   the table core leaves the engine, and a box -> members index replaces the catalog scan
@@ -23152,12 +23101,7 @@ relitigate an entry; append a new one.
   src/dsl41/oracle_state.py, src/dsl41/oracle_writers.py, src/dsl41/job_chart.py,
   src/dsl41/job_chart_events.py, src/dsl41/job_chart_rows.py, src/dsl41/machines.py,
   src/dsl41/state_machine.py; scripts/render_state_machines.py, scripts/transition_coverage.py;
-  tests/transition_hits_plugin.py, tests/fork_harness.py and the charts' and oracle's tests;
-  docs/statechart-engine.md §5, §11, §13, §15; docs/state-machines.md; README)
-  THE
-  REVIEW. An Opus and a Fable reviewer read the code changed since the last stamp independently and
-  agreed on every shared finding. This entry records what was acted on, what was declined and what
-  waits for the owner.
+  statechart-engine §5, §11, §13, §15)
   ONE HOME EACH. The cascade's per-input fields have one reset list, which construction and recovery
   both call; it includes the owed scan, which is always false between inputs, so only an oracle
   reused after a raise sees a difference. Free, keep and spend are decided by one function,
@@ -23167,22 +23111,19 @@ relitigate an entry; append a new one.
   implementation; a cause that carries no ON_NOEXEC reading raises where it would have read one.
   NAMED HANDLERS. Each action that asks the tier passes its own name, and the oracle answers from
   two tables: one for the seven moves and one for the rest. A missing action fails a test. The job
-  chart no longer re-exports its two parts; importers name the defining module.
+  chart does not re-export its two parts; importers name the defining module.
   ONE EXTENT. The chart's code for a payload with no tier handle was a second model of the start
   extent that only a test double reached. It is gone: a payload with no handle is a statechart
   error, and the chart's hand-built test cells dispatch what the tier sends.
   THE TABLE CORE. The generic transition table (`StateMachine`, `Transition`, `take`), its strict
   variable, the hits plugin's violation reads and the scripts' table branches leave; every machine
-  is a statechart, checked by `well_formed`. The engine's contract (docs/statechart-engine.md §5,
-  §11, §13, §15) loses its table text and no rule. The construction check no production path could
-  fail is removed with its test.
+  is a statechart, checked by `well_formed`. The engine's contract (statechart-engine §5, §11, §13,
+  §15) loses its table text and no rule. The construction check no production path could fail is
+  removed.
   THE INDEX. A box's members are indexed once from the catalog, beside the referencers, and shared
   by a fork. DL-351's non-ending cascade stops at the cap in 4.2 s at 200 jobs, 13.0 s at 400 and
   12.5 s at 1,000, against 4.5, 14.4 and 17.3 before; the ceiling stays 400,000.
-  BEHAVIOUR. The goldens replay with 0 differing; STATE_MACHINE_VERSION stays 23. About seventy
-  tests of the removed table core, strict mode and violation reads go or are rewritten, each with
-  its cover in the review's facts; the unwritable hits file's retry is covered by
-  test_statechart_tooling.py.
+  BEHAVIOUR. The goldens replay with 0 differing; STATE_MACHINE_VERSION stays 23.
   WAITING FOR THE OWNER. Structural simplification of the job chart (the writer table beside the
   rows, the verdict guard families, the moment rows, the complement twins, runtime_assembly's 33
   rows) is the owner's project. Four executor features no chart declares (deferral, generations,
@@ -23191,24 +23132,17 @@ relitigate an entry; append a new one.
   keeps every machine on the one engine.
   OPEN DEFECT. A kill that cancels a start while its wrapper is being spawned skips the kill step,
   so the spawned command may outlive a row the oracle wrote TERMINATED; recorded, unfixed.
-  REVIEW. Semantic class, a frozen contract's text: one Opus reviewer and one Fable pass; each
-  re-ran the cap's bench and found it as claimed. Their findings were text but one, a cast the Fable
-  pass turned into a raise. Two rounds; findings confirmed by the reviewer that raised them.
 - DL-357 The lifeline pipe is the wrapper's only parent-death guard
-  (2026-10-15; docs/runner-design.md §6a; tests/test_supervisor_branches.py)
+  (2026-10-15; runner-design §6a)
   DL-41a item (3) named `PR_SET_PDEATHSIG` as a Linux second guard beside the lifeline; it was never
   built. The lifeline covers every supported setup: the parent holds the pipe's only write end, any
   parent death closes it, and the wrapper acts on the EOF. The second guard is dropped from the
   design: it would cover only a leaked write end, at the cost of a handled signal, a `prctl` call
-  and the spawner's pid in the wrapper. Tests hold the write end in one process:
-  test_lifeline_write_end_leaks_nowhere (a test spawner), test_sigkill_engine_midrun_then_resume
-  (the engine's adapter) and test_supervisor_spawn_keeps_each_lifeline_write_end_in_one_process (the
-  supervisor, new; it fails when the write end is made inheritable). runner-design.md §6a states the
-  lifeline alone. The owner ruled it after the spec review of runner-design found the gap; one Opus
-  reviewer.
+  and the spawner's pid in the wrapper. Tests hold the write end in one process: a test spawner's,
+  the engine's adapter's and the supervisor's. runner-design.md §6a states the lifeline alone.
+  The owner ruled it.
 - DL-358 A roll that meets another root's claim names the claim's holder
-  (2026-10-15; src/dsl41/estate.py, src/dsl41/boundary.py; tests/test_boundary.py;
-  docs/period-model.md §15; examples/nightbank/RUNBOOK.md)
+  (2026-10-15; src/dsl41/estate.py, src/dsl41/boundary.py; period-model §15)
   PR-01 (period-model §13, from §1.3's "a different `claim_id` against the same `seal_digest`
   refuses and names the holder", DL-114, DL-116) says the loser of two roots claiming one seal
   refuses and names the holder. The holder is the holder of the claim, `claimed(claim_id,
@@ -23216,17 +23150,13 @@ relitigate an entry; append a new one.
   with the head's state only, though it held the claim's id and target root. It now appends the
   head as the boundary spells it, so the refusal names the holder; its class, code and opening
   words are unchanged. A loser at the held lineage lock met no claim, so PR-01 does not bind it;
-  its test asserts the refusal and that nothing is appended or dispatched. The boundary's head
-  speller is public (`spell_head`), one wording for both modules. Goldens replay unchanged and
+  it refuses, and nothing is appended or dispatched. The boundary's head speller is public
+  (`spell_head`), one wording for both modules. Goldens replay unchanged and
   STATE_MACHINE_VERSION stays 23 (DL-235): only a refusal's text changes, and no accepted input's
   state does. Two gaps stay open: the anchor lock names no holder, and the roll's pre-lock refusal
   has no check under the lock.
-  REVIEW. Semantic class: one Opus reviewer and one Fable pass, two rounds; the advisor's ruling on
-  PR-01's reading came first, after the period-model §13 slice pinned the defect. The nightbank
-  runbook's exercise shows the new refusal.
 - DL-359 A kill during a CMD adapter's spawn stops what the spawn started
-  (2026-10-15; src/dsl41/runner_adapters.py; tests/test_runner_adapters.py,
-  tests/test_adapters_branches.py; docs/runner-design.md §6)
+  (2026-10-15; src/dsl41/runner_adapters.py; runner-design §6)
   DL-356 recorded an open defect: a kill that cancels a start while its wrapper is being spawned
   skips the kill step. The two CMD adapters' spawn paths have eight cancel points, and four were
   safe. A cancel before the adapter task's first step never enters `run`, so nothing is spawned.
@@ -23248,39 +23178,26 @@ relitigate an entry; append a new one.
   launch is engine death between the SPAWN write and the handler: nothing re-keys, and resume's
   `_redrive_orphans` (PR-33) kills the run under its TERMINATED row. The supervised `kill` now ends
   at TERM on `unknown_run`: the supervisor holds no such run, so no push can come, and the ladder
-  no longer waits out two graces for one. A cancel in the grace after `resolve_spool`'s SIGTERM
+  does not wait out two graces for one. A cancel in the grace after `resolve_spool`'s SIGTERM
   skipped its SIGKILL; the SIGKILL now runs on the way out.
-  Tests, each failing without its fix:
-  test_dl356_a_kill_before_the_spec_is_handed_over_prevents_the_launch (the wrapper outlived the
-  cancelled start);
-  test_dl356_a_kill_during_a_detached_spawn_kills_what_the_supervisor_spawned[oracle_kill] and
-  test_dl356_a_kill_during_a_duplicate_spawns_list_kills_the_live_run (the command outlived the
-  cancelled start); test_dl356_a_kill_before_the_spawn_left_ends_on_unknown_run and
-  test_kill_ends_at_sigterm_when_the_supervisor_holds_no_such_run (the ladder waited out its
-  graces; on the base the first fails on its leaked exit future);
-  test_resolve_spool_cancelled_in_the_grace_still_sends_the_sigkill (no SIGKILL).
-  test_dl356_a_kill_before_the_adapter_first_runs_spawns_nothing pins the first point. No frozen
-  contract changes. A kill whose reconnect fails before its ACQUIRE is dispatched ends on
+  The tests of the first point and of the fixes keep the names
+  test_dl356_a_kill_before_the_adapter_first_runs_spawns_nothing,
+  test_dl356_a_kill_before_the_spec_is_handed_over_prevents_the_launch,
+  test_dl356_a_kill_during_a_detached_spawn_kills_what_the_supervisor_spawned,
+  test_dl356_a_kill_during_a_duplicate_spawns_list_kills_the_live_run and
+  test_dl356_a_kill_before_the_spawn_left_ends_on_unknown_run. No frozen contract changes.
+  A kill whose reconnect fails before its ACQUIRE is dispatched ends on
   `SupervisorUnavailable` with no re-key; a late SPAWN is then found by the next resume's
   `_redrive_orphans`. A tethered cancel before the handover leaves a run directory with no spool
   record. Under a TERMINATED row the resume sweep skips it; under a row still live, as after an
   engine crash at the same point, resume reads it as E7.
-  REVIEW. Semantic class: one Opus reviewer and one Fable pass, two rounds each. Both found the
-  cancel during the duplicate-SPAWN LIST unguarded (Opus F1, Fable F1): fixed. Both found the
-  recorded open window closed by the token fence (Opus F2, Fable F2): the entry says so above.
-  Fable F3 removed the second grace wait: kill() ends on unknown_run. Opus F3 to F7 and Fable F4
-  (tests, the entry, runner-design ss6) fixed; each confirmed by the reviewer that raised it.
 - DL-360 Three box and queue defects the reviews recorded leave the oracle: a re-queue takes a
   new rank, an ancestor's reset stops the job_terminator cascade, and the default fold reads
   statuses; the state-machine version moves to 24
   (2026-10-15; src/dsl41/oracle_writers.py, src/dsl41/oracle_cascade.py,
   src/dsl41/oracle_reads.py, src/dsl41/oracle_facts.py, src/dsl41/runner_ledger.py,
-  src/dsl41/semantics.py;
-  tests/test_oracle.py, tests/test_oracle_chart_cascade.py, tests/oracle_goldens.txt;
-  docs/statechart-engine.md §11; docs/autosys-semantics.md SEM-11, SEM-14, §9 Q17;
-  docs/live-instance-runbook.md; docs/citation-index.md; docs/runner-design.md §8a;
-  docs/blocks/box-execution.md;
-  docs/blocks/job-lifecycle.md)
+  src/dsl41/semantics.py; statechart-engine §11; autosys-semantics SEM-11, SEM-14, §9 Q17;
+  docs/live-instance-runbook.md; runner-design §8a)
   THE RANK. DL-345 left a member's rank stale on one path. An injected STATUS takes a queued member
   out of the queue, and its rank stays until its settlement, after its box rules. Where those rules
   restart its box (`s(box)`) and the new run queues it again, the member kept its first rank. It
@@ -23357,72 +23274,48 @@ relitigate an entry; append a new one.
   So a box whose carried member ended FAILURE and was then iced ends SUCCESS when its other
   members end. The ran member's path is unchanged. Q17's runbook protocol carries the probe that
   shows which reading the vendor takes, and the probe for a resolved member given a later FAILURE.
-  Rejected: entering the carried members in the new run's ran set at the box start
-  (s63h3b-advisor.md's candidate). It refuses the vendor's eligible start: over the golden sample
-  it refused 2 STARTJOBs and 18 wake starts, and it reversed the premise of DL-309's walk-up
-  binding. Also rejected: a new box-row field for carried members. It records a fact the vendor
-  derives from status, changes every golden and the seal shape, and leaves the other sources'
-  hang in place. Evidence that would change the fold: a Q17 probe where CHANGE_STATUS SUCCESS on
-  an ACTIVATED member of a running box leaves the box RUNNING after every other member ended. That
-  gives the operator's vote a switch with the vendor's value. Or a vendor sentence that a job
-  RUNNING when its box starts again takes the box's new run number, which refuses the restart.
-  THE VERSION. The fixed oracle against DL-358's, over the goldens' whole sample (4,060 runs,
-  152,213 entries), differs on 201 runs: 26 of the corpus with the directed estates and seeds, 7
-  large, 168 under the switch rows. All 201 change through the fold, and every one changes the
-  trace; no ran set changes. At each run's first differing input, the members that newly vote have
-  these sources, and one run may have more than one: an operator's status or a completion in 121
-  runs, a carried member in 49, a kill in 19, a re-derived subbox in 17. In 16 more the box
-  completed and started again within the same input. 15 of those are the owed-settlement directed
-  script, where a completion lands on a member queued in the new run; the runner's DL-235 gate
-  rejects that completion, so the shape is the harness's. The 16th is a seed. The rank and the
-  reset change no sampled input; directed tests pin them. An accepted input derives differently,
-  so STATE_MACHINE_VERSION moves from 23 to 24 (DL-235), with a note naming the three shapes and
-  the four sources. The goldens are recorded again for the 201 runs: 201 lines of
-  tests/oracle_goldens.txt change, and none else. Tests pin each shape, and each fails on the
-  previous oracle: the re-queue's rank, the parent reset by KILLJOB (with its STATUS twin, which
-  passes on both), a carried member's SUCCESS and FAILURE, an operator's SUCCESS, FAILURE and
-  TERMINATED on a waiting member, a resolved member's later FAILURE, and a never-run subbox the
-  recompute completed, in the direct, engine and fork arms. A mutant that compares the run alone
-  parts from the oracle on the reset shape. DL-309's three walk-up tests pass unchanged.
-  REVIEW. Semantic class with a frozen-contract clause. The engineer stopped twice, on the carried
-  member's restart and on ss11's meaning; a Fable advisor ruled both (the clause above; the fold
-  reads statuses, not a ran set that gains the carried members). Then one Opus reviewer (three
-  rounds) and one Fable pass (two rounds). Opus F1: a never-run subbox re-derived by SEM-15 votes
-  and no ruling covered it; ruled kept, named as the fourth source, tagged [C] with its probe.
-  Opus F2 and Fable R2 agreed the operator vote is a composition: tagged [C], Q17 opened, no
-  switch. Fable R1: a mark decides only while the member reads INACTIVE. Opus G1: the narrowing of
-  DL-154, DL-242 and the next-run text is named above. Opus F6 is recorded with its probe. Every
-  finding was confirmed by the reviewer that raised it.
+  Rejected: entering the carried members in the new run's ran set at the box start. It refuses
+  the vendor's eligible start: over the golden sample it refused 2 STARTJOBs and 18 wake starts,
+  and it reversed the premise of DL-309's walk-up binding. Also rejected: a new box-row field for
+  carried members. It records a fact the vendor derives from status, changes every golden and the
+  seal shape, and leaves the other sources' hang in place. Evidence that would change the fold: a
+  Q17 probe where CHANGE_STATUS SUCCESS on an ACTIVATED member of a running box leaves the box
+  RUNNING after every other member ended. That gives the operator's vote a switch with the
+  vendor's value. Or a vendor sentence that a job RUNNING when its box starts again takes the
+  box's new run number, which refuses the restart.
+  THE VERSION. Over the goldens' sample, the fixed oracle differs from DL-358's only through the
+  fold, and no ran set changes. Some runs differ where a box completed and started again within
+  one input; most are the owed-settlement directed script, where a completion lands on a member
+  queued in the new run, and the runner's DL-235 gate rejects that completion, so the shape is
+  the harness's. The rank and the reset change no sampled input. An accepted input derives
+  differently, so STATE_MACHINE_VERSION moves from 23 to 24 (DL-235), with a note naming the three
+  shapes and the four sources.
 - DL-361 The architecture review at 236c34d lands: one cancel helper, one refusal shape, a named
   seal exit, the box-run test in one place; the fold's single pass and the forwarding actions
   wait for the owner's simplification
   (2026-10-16; src/dsl41/runner_adapters.py, src/dsl41/cli_estate.py, src/dsl41/cli_run.py,
   src/dsl41/runner_startup.py, src/dsl41/oracle_cascade.py)
-  The review (DL-75's skill, one Opus pass over arch-review/2026-10-15T120109Z..236c34d: the spec
-  rounds, the period-model ss13 tests, DL-357 to DL-360, the function-size refactor) found ten
-  things and no defect. ACTED, behaviour kept and the goldens the proof (4,060 runs, 0 differing):
-  the two cancel handlers of the CMD adapter's spawn path (DL-359) are one helper, `_on_cancel`,
-  parameterised by whether the spawn phase still owns the exit future it registered; the helpers
-  the function-size refactor extracted raise `EngineError` as `cli_common.refuse` prescribes
-  instead of returning a refusal in three shapes, and `_serve_run` catches once, texts and exit
-  codes unchanged; the four values between `_await_run_end` and `_stop_and_judge` are a NamedTuple,
-  and the seal's exit code has a name, `EXIT_SEALED = 3` (period-model ss7, PR-30b), where a bool
-  repeated it; the rules DL-359 holds cite DL-359 (their tests keep the `test_dl356_*` names the
-  entry quotes); the resume-evidence tuple has one type alias and a dead `manifest is not None`
-  check is gone; `_in_run` replaces its open-coded body at six sites of oracle_cascade.py (the
-  `_leave_tail` site keeps its own test: its run may be None). DEFERRED to the owner's structural
-  simplification of the machines (DL-356): the SEM-11 fold spans three single-caller methods and
-  two passes where one `_fold(box)` pass would do, the goldens as the check; and 25 job-chart
-  actions that only forward their own name to the oracle's `_MOVES` and `_HANDLERS`, the same
-  shape the Codex design review names as the fragmented binding between a row and its effects.
-  DECLINED: two tests that each build their own roll-stopping seam (test_boundary.py,
+  The review (DL-75's skill, over arch-review/2026-10-15T120109Z..236c34d) found no defect.
+  ACTED, behaviour kept and the goldens the proof: the two cancel handlers of the CMD adapter's
+  spawn path (DL-359) are one helper, `_on_cancel`, parameterised by whether the spawn phase
+  still owns the exit future it registered; the helpers the function-size refactor extracted
+  raise `EngineError` as `cli_common.refuse` prescribes instead of returning a refusal in three
+  shapes, and `_serve_run` catches once, texts and exit codes unchanged; the four values between
+  `_await_run_end` and `_stop_and_judge` are a NamedTuple, and the seal's exit code has a name,
+  `EXIT_SEALED = 3` (period-model ss7, PR-30b), where a bool repeated it; the rules DL-359 holds
+  cite DL-359 (their tests keep the `test_dl356_*` names the entry quotes); the resume-evidence
+  tuple has one type alias and a dead `manifest is not None` check is gone; `_in_run` replaces
+  its open-coded body at six sites of oracle_cascade.py and a seventh in `_ice_resolves` (the
+  `_leave_tail` site keeps its own test: its run may be None). DEFERRED to the owner's
+  structural simplification of the machines (DL-356): the SEM-11 fold spans three single-caller
+  methods and two passes where one `_fold(box)` pass would do, the goldens as the check; and 25
+  job-chart actions that only forward their own name to the oracle's `_MOVES` and `_HANDLERS`,
+  the same shape the Codex design review names as the fragmented binding between a row and its
+  effects. DECLINED: two tests that each build their own roll-stopping seam (test_boundary.py,
   test_estate.py), a seam each test reads locally; and the split of `Engine.__init__` into
   `_init_live_state` and `_init_seal_state`, which keeps the size gate at a low reading cost.
   RECORDED: the offline seal's two closing-manifest refusals (cli_estate.py `_closing_manifest`)
   have no test; a direct probe shows their text unchanged by the refactor.
-  REVIEW. Behaviour-keeping multi-file change: one Opus reviewer, two rounds; R1 (a seventh
-  open-coded `_in_run` in `_ice_resolves`) and three nits fixed and confirmed; R2 is the recorded
-  gap above.
 - DL-362 The comment and docstring diet: a comment states the rule and cites its entry, never
   what changed; two deterministic gates hold the line
   (2026-10-16; src/dsl41/*.py, scripts/comment_equivalence.py, scripts/arch_check.py,
@@ -23436,17 +23329,13 @@ relitigate an entry; append a new one.
   citation. Citation tokens never leave a file: the token's rule is what the reader follows, and
   the citation index resolves it. `PENDING: <label>` markers stay in place; the simulation
   register claims each site by function and position. CLAUDE.md carries the rule in one line.
-  THE PASS. Twelve Sonnet passes over disjoint module groups, each in its own worktree, each
-  gated and then integrated by cherry-pick. Comment lines fell from 7,158 to 4,969 and docstring
-  lines from 15,780 to 10,827 across src/dsl41 (75,272 to 68,139 source lines); the changelog
-  phrases arch_check counts fell from 209 in 46 modules to zero. Held deliberately: the
-  docstrings of the registered chart guards and actions in job_chart.py, which
-  scripts/render_state_machines.py writes into docs/state-machines.md as the row prose; the
-  pydantic model docstrings in ir.py, conditions.py and ast_jil.py, which CatalogIR's hashed
-  JSON schema carries as `description` (the IR_SCHEMA_PIN check); the command docstrings in
-  the CLI modules, which are the `--help` text and had voice edits only; and every comment a
-  test matches by text (the OpenedRuntime docstring words test_seal_artifact.py pins, the
-  pragma and noqa markers).
+  HELD. Held deliberately, because something reads it: the docstrings of the
+  registered chart guards and actions in job_chart.py, which scripts/render_state_machines.py
+  writes into docs/state-machines.md as the row prose; the pydantic model docstrings in ir.py,
+  conditions.py and ast_jil.py, which CatalogIR's hashed JSON schema carries as `description`
+  (the IR_SCHEMA_PIN check); the command docstrings in the CLI modules, which are the `--help`
+  text and had voice edits only; and every comment a test matches by text (the OpenedRuntime
+  docstring words test_seal_artifact.py pins, the pragma and noqa markers).
   THE GATES. `scripts/comment_equivalence.py <base-rev> [paths...]` proves a diff changed no
   code: for every changed Python file under src/, tests/, scripts/ and examples/ the AST with
   docstrings removed must equal the base's, no citation token or PENDING marker present in the
@@ -23457,34 +23346,24 @@ relitigate an entry; append a new one.
   "used to", "formerly", "previously", "since DL-", "before DL-", "after DL-",
   "retired by", "was renamed", "was removed", "moved from", "replaced by"; whole words, never
   string literals), ratcheted per module against scripts/arch_baseline.json, which pins zero;
-  `--changelog-phrases` lists every hit. A comment-only change needs gate 1 and one full suite
-  run, no logic review. Stage labels (`S5c`, `H`) are an index namespace and keep the same
-  "rule (token)" form as DL tokens; they are not phase labels to cut.
+  `--changelog-phrases` lists every hit. "superseded" is not on the list: it is the concurrency
+  model's own word (ss7, DL-234). A comment-only change needs gate 1 and one full suite run, no
+  logic review. Stage labels (`S5c`, `H`) are an index namespace and keep the same "rule
+  (token)" form as DL tokens; they are not phase labels to cut.
   NOT BUILT. The citation shapes are a hand-kept list mirroring docs/citation-index.md, not read
   from it; an evidence tier (`[V]`) or a mapping-class label (`A-row`) is not a protected
   token. The arch-review and spec-review triggers count changed lines without regard to
-  content, so this comment-only diff re-arms both; whether a comment-only diff should count
-  is the owner's call.
-  REVIEW. Stage 0 (the gates): one Opus reviewer, two rounds; nine findings fixed and
-  confirmed (the citation regex widened to the index's shapes, untracked files listed, a bad
-  revision exits 1, the baseline rewrite limited to the new key, the pydantic docstring rule
-  added then narrowed to the schema modules, word boundaries on the phrases, non-Python files
-  compared, the hits listed), one new minor (the PENDING shape) fixed inline. The passes:
-  gate 1 proves the code equal, so no semantic review; one Opus reviewer over the integrated
-  diff hunting a cut comment that carried a rule stated nowhere else: none lost; one major
-  ("superseded" is the concurrency model's own word, ss7 and DL-234, so it left the phrase list
-  and returned at its five sites, a reversal of the stage 0 ruling that kept it on the list),
-  eight minors and nits fixed, all confirmed by the reviewer that raised them.
+  content, so a comment-only diff re-arms both; whether a comment-only diff should count is the
+  owner's call.
 - DL-363 Four handler decisions of the job chart become rows: `start admitted` takes one row per
   admitting verdict, the flag rows of a waiter take their own rows, the ON_NOEXEC ignore rule has
   one home, and §16 states the marked rows without a count
   (2026-10-16; src/dsl41/job_chart.py, src/dsl41/job_chart_rows.py, src/dsl41/oracle_cascade.py,
   src/dsl41/oracle_reads.py, src/dsl41/oracle_facts.py, src/dsl41/oracle_writers.py;
-  tests/test_job_chart.py, tests/test_oracle_chart.py, tests/test_oracle_chart_cascade.py;
-  docs/statechart-engine.md §11, §16; docs/state-machines.md)
-  THE AIM. Step 1 of the job chart simplification. A decision the cascade made in a Python branch
-  of a consequence handler is a row's guard. No outcome of the oracle changes: no golden, no
-  trace line.
+  statechart-engine §11, §16)
+  THE RULE. Step 1 of the job chart simplification: a decision the cascade made in a Python
+  branch of a consequence handler is a row's guard. No outcome of the oracle changes: no golden,
+  no trace line.
   THE EXTENT. `start admitted` had one row, job.402, whose handler branched four ways on the
   payload's verdict. It has one row per verdict, each on `lifecycle`, internal, guarded on the
   verdict the payload carries: job.402 keeps the admission (guard `admitted_admit`, action
@@ -23493,21 +23372,19 @@ relitigate an entry; append a new one.
   (`admitted_on_held`, `on_held_extent`). The guards are mutually exclusive, since the payload
   carries one verdict. The action `start_extent` and its handler leave; each new action has one
   handler, `_on_<action>`, with no branch on the verdict. Their writer is `_w_nothing`, as
-  job.402's was. job.402
-  keeps its id for the admission rather than retire with a mark: a marked row on the same cell
-  would need a guard that is never true.
+  job.402's was. job.402 keeps its id for the admission rather than retire with a mark: a marked
+  row on the same cell would need a guard that is never true.
   THE WAITERS. Three handlers tested `QUE_WAIT` in the configuration. ON_ICE, ON_HOLD and
-  OFF_HOLD now split each flag row by the status: job.201, job.204, job.220, job.205 and job.221
+  OFF_HOLD split each flag row by the status: job.201, job.204, job.220, job.205 and job.221
   keep the job that is not a waiter, and a waiter takes job.234 (ON_ICE, `report_ice`), job.235
   and job.236 (ON_HOLD, `held`), job.237 and job.238 (OFF_HOLD, `released_waiter`), each guarded
   `queued`. The rows that are not a waiter's are guarded `not_live_or_queued` on ON_ICE and
   ON_HOLD, in place of `not_live`, and `not_queued` on OFF_HOLD. `not_live_or_queued` is "neither
   live nor QUE_WAIT"; it holds on the transient ADMITTED as `not_live` did, so no declared cell
-  changes. A held job that is not a
-  waiter has no action on ON_HOLD: its handler sent nothing. `report_ice` is the chart's own
-  action, as `report_flag_move` is for KILLJOB: it sends `flag moved`, and job.112 takes the
-  waiter out of the queue. job.218 (ON_ICE on an iced job) stays whole: its handler does not
-  branch, and an iced job is never a waiter.
+  changes. A held job that is not a waiter has no action on ON_HOLD: its handler sent nothing.
+  `report_ice` is the chart's own action, as `report_flag_move` is for KILLJOB: it sends `flag
+  moved`, and job.112 takes the waiter out of the queue. job.218 (ON_ICE on an iced job) stays
+  whole: its handler does not branch, and an iced job is never a waiter.
   THE IGNORE RULE. ON_NOEXEC's ignore for the job's own ice and status is the chart's
   `noexec_own_reason`; the guard `noexec_ignored` and the oracle's ignored line
   (`_oob_ignored`, on `row_configuration` of the store's row) both read it. A box's contained
@@ -23517,68 +23394,57 @@ relitigate an entry; append a new one.
   §16. The sentence that counted two marked rows states the rule: each marked row states its
   reason, and docs/state-machines.md lists them all. §11 names the four rows of `start
   admitted`.
-  CHECKS. The job chart has 177 rows; the transition gate holds 375 of 375 required items of
-  `job`, every new row and both outcomes of every new guard hit by the oracle's own tests. The
-  completeness table pins the bypass at job.424 and the admission at job.402; the cell test
-  dispatches each waiter's twin at QUE_WAIT. The golden replay: 4,060 runs, 152,213 entries, 0
-  differing.
   THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235): no accepted input derives differently,
   and the goldens replay equal.
   THE PROJECT. The job chart's design review (owner-driven, 2026-10-16) found the chart
   under-declared where the cascade lives (thirteen moment rows run nineteen generators) and
   over-declared in rows that move nothing (92 of 169), with the start rule's precedence written
   twice (the rows' sources and `start_verdict`). The ranked steps: this entry; ADMITTED as a
-  completion state, under two conditions a Codex Astra probe raised (a completion item is a
-  sibling of `start admitted` in the ancestry, so the bound must count another item; STARTING is
-  sent before the reset notifications, so the entry action reports only what precedes it); the
-  status writes as entry actions; ordered row selection within one source and event in place of
-  the verdict-label guards (a choice resolves after the exits, so it is not the form); the per-leaf
-  copies collapsed; one hidden sequence declared, the box door first; `flag moved` as four events;
-  `arm` as a payload fact with its old-value cases kept as guards; named compound conditions.
-  Two rulings the probe reversed: the holding region stays, since a terminal job is `reserved`
-  between its status write and its settlement, an interval the projection `row_holding` does not
-  show; and the missing engine feature is ordered rows, not a choice branch that stays.
-  REVIEW. One Opus reviewer: no blocker, no major; three lows fixed and confirmed by it (a pin for
-  each of job.204, job.220, job.221 and job.238, two on local scripts since no harness script
-  reaches job.220 or job.238 and the goldens' sample does not change; §11's sentence names
-  `start admitted`; the draft says "no branch on the verdict"), one wrap nit in round two fixed.
-  A differential run of HEAD against the tree over 20,000 seeded input sequences showed no
-  difference in trace, rows or errors. One Codex Astra pass (gpt-6-astra, xhigh): none found in
-  four probes; 16,896 selection cells matched after the row-id mapping, four oracle sequences of
-  28 inputs matched rows, trace text, events and microstep order.
+  completion state, under two conditions (a completion item is a sibling of `start admitted` in
+  the ancestry, so the bound must count another item; STARTING is sent before the reset
+  notifications, so the entry action reports only what precedes it); the status writes as entry
+  actions; ordered row selection within one source and event in place of the verdict-label
+  guards (a choice resolves after the exits, so it is not the form); the per-leaf copies
+  collapsed; one hidden sequence declared, the box door first; `flag moved` as four events; `arm`
+  as a payload fact with its old-value cases kept as guards; named compound conditions. Two
+  rulings were reversed: the holding region stays, since a terminal job is `reserved` between its
+  status write and its settlement, an interval the projection `row_holding` does not show; and
+  the missing engine feature is ordered rows, not a choice branch that stays.
 - DL-364 A completion item carries the payload of the microstep that completed its state, and the
   job chart's ADMITTED is a transient state left by its completion: its entry action sends what
   precedes STARTING, and its completion moves to STARTING and sends the rest of the start
   (2026-10-16; src/dsl41/state_machine.py, src/dsl41/job_chart.py, src/dsl41/job_chart_rows.py,
   src/dsl41/job_chart_events.py, src/dsl41/oracle_cascade.py, src/dsl41/oracle_intents.py,
-  src/dsl41/oracle_facts.py, src/dsl41/oracle_writers.py; tests/test_statechart.py,
-  tests/test_job_chart.py, tests/test_oracle_chart.py, tests/test_oracle_chart_cascade.py;
-  docs/statechart-engine.md §4, §5, §8, §11, §17; docs/state-machines.md)
-  THE AIM. Step 2 of the job chart simplification. ADMITTED is declared as what it is: a
-  transient state that runs an entry action and leaves by a completion transition, not by the
-  self-event `starting`. No outcome of the oracle changes: no golden, no trace line.
+  src/dsl41/oracle_facts.py, src/dsl41/oracle_writers.py;
+  statechart-engine §4, §5, §8, §11, §17)
   THE ENGINE RULE. A completion item carries the payload of the microstep that completed its state
   (§4): for a simple state, the event that entered it; for a composite, the event that put its last
   region at rest. The completion's guards and actions read it. The completing state stays readable
   on the item (`_Item.name`) and on the context (`Context.completing`, empty for any other item).
-  Before, the payload was the state's name; one test read it there and reads `Context.completing`
-  now. The reason: this engine's only mutable carrier is the payload, since an instance's data is
-  its catalog entry (§11) and a fork shares data it does not rebind (§5). So a simple state's data
-  is the data of the event that put it there. Without the rule, a completion row's action cannot
-  reach the tier's handle (`Units.consequences`, DL-356), and its writer cannot name the cause. §5
-  step 3 says the completion item carries that payload beside its ancestry.
-  THE CHART. The admitting rows job.102, job.104 and job.124 are internal: each sends `start
-  admitted` and moves nothing. The rows of `start admitted` for an admission (job.402) and a
-  start on held units (job.426) are external rows from `lifecycle` to ADMITTED, with no action.
-  The readmission (job.108) still enters ADMITTED from QUE_WAIT. ADMITTED's entry action
-  `starts_run` sends the units (`admitted start`), the run's start (`actual start`) and a box's
-  `box start` to its reset audience. ADMITTED has two completion rows to STARTING, guarded on the
-  kind of the payload that entered it: job.427 (`admitted_by_start`, an `Admitted`, action
-  `starting_admitted`) and job.428 (`admitted_by_readmit`, any other, the readmission's `readmit`,
-  action `starting_readmitted`). Each action has one handler with no branch on the payload's
-  type. Both send the STARTING move's box rules, settlement and wakes, a box's reset notices
-  (`notify step` over `_notices`), then `started`; job.427 then sends a freed excess's scan and
-  the load mark. The writer of both is `_w_starting`. The bypass (job.424) and the queue
+  The payload was the state's name; no chart read it as such, so the rule changes no chart. The
+  reason: this engine's only mutable carrier is the payload, since an instance's data is its
+  catalog entry (§11) and a fork shares data it does not rebind (§5). So a simple state's data is
+  the data of the event that put it there. Without the rule, a completion row's action cannot
+  reach the tier's handle (`Units.consequences`, DL-356), and its writer cannot name the cause.
+  §5 step 3 says the completion item carries that payload beside its ancestry. REJECTED: keeping
+  the `starting` self-event instead of the rule, because every automatic state to come, the box
+  door first, needs the same.
+  THE CHART. Step 2 of the job chart simplification: ADMITTED is declared as what it is, a
+  transient state that runs an entry action and leaves by a completion transition. No outcome of
+  the oracle changes: no golden, no trace line. The admitting rows job.102, job.104 and job.124
+  are internal: each sends `start admitted` and moves nothing. The rows of `start admitted` for an
+  admission (job.402) and a start on held units (job.426) are external rows from `lifecycle` to
+  ADMITTED, with no action. The readmission (job.108) still enters ADMITTED from QUE_WAIT.
+  ADMITTED's entry action `starts_run` sends the units (`admitted start`), the run's start
+  (`actual start`) and a box's `box start` to its reset audience. ADMITTED has two completion rows
+  to STARTING, guarded on the kind of the payload that entered it: job.427 (`admitted_by_start`,
+  an `Admitted`, action `starting_admitted`) and job.428 (`admitted_by_readmit`, any other, the
+  readmission's `readmit`, action `starting_readmitted`). REJECTED for job.428's guard: an
+  isinstance against the readmission protocol, which would evaluate its lazy facts; the oracle's
+  concrete class does not belong in the chart. Each action has one handler with no branch on the
+  payload's type. Both send the STARTING move's box rules, settlement and wakes, a box's reset
+  notices (`notify step` over `_notices`), then `started`; job.427 then sends a freed excess's
+  scan and the load mark. The writer of both is `_w_starting`. The bypass (job.424) and the queue
   (job.425) stay internal. job.403 and the event `starting` retire, with its ignored row job.419;
   ids are not reused, so job.403 and job.419 name no row. The actions `admit_extent` and
   `on_held_extent` and the payload `Starting` leave. `Batch.starting` leaves too: a box start's
@@ -23606,52 +23472,25 @@ relitigate an entry; append a new one.
   counts items (DL-351), so a cascade within that many items of the cap now completes where it
   raised `CascadeDepthError` before. No golden reaches the cap. `started` and the items after it
   are one link deeper; no guard reads depth.
-  CHECKS. The job chart has 177 rows; the transition gate holds 380 of 380 required items of
-  `job`, both completion rows and both outcomes of each new guard hit by the oracle's own tests.
-  Two new section tests pin the engine rule, for a simple state and for a composite. The extent
-  test pins ADMITTED's children and the completion's for each admitting verdict. Two new tests
-  pin the readmission's completion (job.428): a job's, with its payload and its STARTING line,
-  and a box's, whose completion sends the reset notices. The golden digests replay equal.
   THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235): no accepted input derives differently,
   and the goldens replay equal.
-  THE RULING. The engineer stopped at the brief's STOP: a completion's payload was the state's
-  name, so a completion row's action had no tier handle (DL-356) and could not send what follows
-  STARTING. The top level ruled the engine rule above rather than keep the `starting` self-event:
-  the payload is this engine's only mutable carrier, since an instance's data is its catalog
-  entry (§11), so a state's data is the data of the event that put it there; and every automatic
-  state to come, the box door first, needs the same. The rule changes no chart: none read a
-  completion's payload as the state name.
-  REVIEW. Semantic class (§4, §5, §8, §11 and §17 of a frozen contract). One Opus reviewer: no
-  blocker, no major; a differential run of HEAD against the tree over 40,000 seeded sequences on an
-  estate with held units, a load limit, nested boxes and box readmission showed no difference, with
-  every changed row fired equally on both sides; two minors and two nits fixed and confirmed by it
-  (the composite wording of §4; the item-cap sentence of this entry; two comments that stated a
-  change; a named test for a readmitted box's completion), one nit declined (an isinstance against
-  the readmission protocol would evaluate its lazy facts, and the oracle's concrete class does not
-  belong in the chart). One Codex Astra pass (gpt-6-astra, xhigh): one P2, the same composite
-  wording, fixed and confirmed by it at high; none found on the nested-start bound, the STARTING
-  boundary, the ADMITTED cells and the carried facts, each checked on a constructed input
-  sequence.
 - DL-365 A flag that nothing fires on is a fact, not a region: the scheduled tick's arm leaves the
   job chart's `flags` region and is a fact of the payloads whose rows read it; each row that moved
   the arm is its status's, with one row for each value of the arm where the value parts two effects
   (2026-10-16; src/dsl41/job_chart.py, src/dsl41/job_chart_rows.py, src/dsl41/job_chart_events.py,
   src/dsl41/oracle.py, src/dsl41/oracle_cascade.py, src/dsl41/oracle_facts.py,
   src/dsl41/oracle_intents.py, src/dsl41/oracle_writers.py, src/dsl41/oracle_state.py;
-  tests/test_job_chart.py, tests/test_oracle_chart.py, tests/test_oracle_chart_cascade.py,
-  tests/test_job_machines.py, tests/test_exhaustive_engine.py, tests/test_oracle.py,
-  tests/oracle_inputs.py; docs/statechart-engine.md §11; docs/blocks/job-lifecycle.md;
-  docs/state-machines.md; docs/decision-index.md)
-  THE AIM. Step 8 of the job chart simplification. The arm (SEM-32, DL-54) is data the start rule
-  consults: two lines of `start_verdict`'s gates read it (`_gated`, `_latched`), and no row fires
-  on its value. No outcome of the oracle changes: no golden, no trace line.
-  THE RULE. A flag that nothing fires on is a fact of the payloads that read it, not a region.
-  DL-344's rule, that whether a flag was already set is the row's source state, now holds for the
-  three flags ice, hold and noexec. The arm is read from the job's row when a guard reads it:
-  `StartAttempt.armed` and `Readmission.armed` are lazy facts of `StartFacts` and `ReadmitFacts`,
-  kept on first read; DISARM's, KILLJOB's, `actual start`'s and a box rule's payloads are `Armed`,
-  whose `armed` reads the row through the handle (`RowUnits.armed`). The store's `armed` field and
-  `move_flag`'s arm states are unchanged, and the hook still writes every arm move.
+  statechart-engine §11; docs/blocks/job-lifecycle.md)
+  THE RULE. Step 8 of the job chart simplification: a flag that nothing fires on is a fact of the
+  payloads that read it, not a region. The arm (SEM-32, DL-54) is data the start rule consults:
+  two lines of `start_verdict`'s gates read it (`_gated`, `_latched`), and no row fires on its
+  value. This narrows DL-344's rule, that whether a flag was already set is the row's source
+  state, to the three flags ice, hold and noexec. The arm is read from the job's row when a guard
+  reads it: `StartAttempt.armed` and `Readmission.armed` are lazy facts of `StartFacts` and
+  `ReadmitFacts`, kept on first read; DISARM's, KILLJOB's, `actual start`'s and a box rule's
+  payloads are `Armed`, whose `armed` reads the row through the handle (`RowUnits.armed`). The
+  store's `armed` field and `move_flag`'s arm states are unchanged, and the hook still writes
+  every arm move. No outcome of the oracle changes: no golden, no trace line.
   THE ROWS. The `arm` region and its rows job.212 to job.217, job.224 to job.226, job.228 and
   job.230 retire, with the status rows job.110 and job.111 that their `flag moved` fired. Ids are
   not reused (DL-364). The new rows are status rows, job.429 to job.439: a tick that latches
@@ -23661,72 +23500,53 @@ relitigate an entry; append a new one.
   failed recheck to INACTIVE (job.438 `readmit_leaves_armed`, job.439 `readmit_leaves_unarmed`,
   action `left_queue`), on QUE_WAIT. Each kill row's writer dequeues the waiter, clears the arm,
   then writes the TERMINATED line; job.438's writes the SCHED_DISARM line before the INACTIVE line,
-  in DL-54's order. `start_moves_nothing` (job.180) now holds for `ignored` alone, since job.429
+  in DL-54's order. `start_moves_nothing` (job.180) holds for `ignored` alone, since job.429
   takes the latch. `readmit_verdict` loses its `none` label: every row that reads it is
   QUE_WAIT's. Guards added: `armed`, `unarmed`, `readmit_leaves_armed`,
   `readmit_leaves_unarmed`; removed: `readmit_leaves`, `killed_waiter`, `left_waiter`. Actions
   removed: `report_flag_move`, `waiter_left`, and its handler. `flag moved` loses its causes
   KILLJOB and `readmit`, and `FlagFacts` leaves. `left_queue` reports the scan's `Readmitted` as
   `cancelled` does.
-  THE CONDITION. Codex Astra (R2): old-value distinctions stay declared. Each pair of rows that
-  parted the arm's old value keeps two rows guarded `armed` and `unarmed`: DISARM job.214 and
-  job.225 as job.432 and job.433; `actual start` job.213 and job.224 as job.430 and job.431;
-  KILLJOB job.217 and job.226 as job.436 and job.437; `readmit` job.216 and job.230 as job.438 and
-  job.439; `box run ends` job.215 and job.228 as job.434 and job.435. No distinction moved into an
-  action or a writer; DISARM's writer still names its line by the row that fired.
+  THE CONDITION (R2): old-value distinctions stay declared. Each pair of rows that parted the
+  arm's old value keeps two rows guarded `armed` and `unarmed`: DISARM job.214 and job.225 as
+  job.432 and job.433; `actual start` job.213 and job.224 as job.430 and job.431; KILLJOB job.217
+  and job.226 as job.436 and job.437; `readmit` job.216 and job.230 as job.438 and job.439; `box
+  run ends` job.215 and job.228 as job.434 and job.435. No distinction moved into an action or a
+  writer; DISARM's writer still names its line by the row that fired.
   ITEMS. A waiter's kill and a waiter's failed recheck each pop one item fewer: the `flag moved`
   that carried the status move is gone. The cascade cap counts items (DL-351), so a cascade within
   that many items of the cap now completes where it raised `CascadeDepthError` before. No golden
   reaches the cap.
-  THE CHECK. The macrostep's check that each row projects to its instance no longer sees the
-  arm, since the arm is no state. The hook checks it instead, after each microstep's writes and
-  before the next item (`_check_arm`): the row's `armed` is read before the writes; after them,
-  if the fired rows include job.429 the row is armed, if they include any of job.430 to job.439
-  it is not, and otherwise it is unchanged. Any other value is a `StatechartError` naming the job
-  and the rows. The two sets, `ARM_LATCHES` and `ARM_CLEARS`, name the rows by id in
-  `job_chart_rows`, and a test holds them to every row guarded on the arm. §11 states the three
-  checks.
-  The test that planted a skipped arm write for the projection check plants a skipped hold write;
-  two new tests plant a skipped latch (job.429) and a spurious clear on OFF_HOLD (job.205), and
-  each raises. Codex Astra raised the gap (P2, ruling R7).
-  CHECKS. The job chart has 175 rows, 177 before; the transition gate holds 386 of 386 required
-  items of `job`, every new row and both outcomes of each new guard hit by the oracle's own tests.
-  The completeness table pins each new row from both values of the arm. A new test pins the
-  armed waiter's kill and leave as one row each, the arm cleared and its line before the status
-  line. The golden replay: 4,060 runs, 152,213 entries, 0 differing.
+  THE CHECK (ruling R7). The macrostep's check that each row projects to its instance does not
+  see the arm, since the arm is no state. The hook checks it instead, after each microstep's
+  writes and before the next item (`_check_arm`): the row's `armed` is read before the writes;
+  after them, if the fired rows include job.429 the row is armed, if they include any of job.430
+  to job.439 it is not, and otherwise it is unchanged. Any other value is a `StatechartError`
+  naming the job and the rows. The two sets, `ARM_LATCHES` and `ARM_CLEARS`, name the rows by id
+  in `job_chart_rows`, and a test holds them to every row guarded on the arm. §11 states the
+  three checks. REJECTED: giving the check up. A missed arm write lands in the sealed row, so no
+  stated limit covers it.
   THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235): no accepted input derives differently, and
   the goldens replay equal. The job instances are rebuilt from the rows, so no persisted
   configuration names the arm's states.
-  REVIEW. Semantic class (§11 of a frozen contract, DL-344 narrowed). One Codex Astra pass
-  (gpt-6-astra, xhigh): one P2, the check given up, with the postcondition above as its proposed
-  replacement, fixed and confirmed by it at high; none found on the five old-value pairs, the lazy
-  arm read against a chained arm move in the same macrostep, and the cells of job.180 and job.429,
-  each checked on a constructed input sequence. One Opus reviewer: no blocker, no behaviour defect;
-  a differential run of HEAD against the tree over 1,620 runs and 186,872 entries, on 500 seeded
-  estates and every directed catalog under two recheck settings, showed no difference, each old
-  row or pair firing as often as its new row; its recommendation on the check matched Codex's (a
-  missed arm write lands in the sealed row, so no stated limit covers it); one medium and two lows
-  fixed and confirmed by it (§11 states the three checks; the arm rows' writers and sets are bound
-  by id and a test pins the sets; this entry's file list).
 - DL-366 The status write is the status leaf's entry action: each status leaf of the job chart
   reports the status it is on entry, the hook writes it with the line the entering row's writer
-  gives, and the row's writer keeps the row's own writes (2026-10-16; src/dsl41/job_chart.py,
-  src/dsl41/job_chart_rows.py, src/dsl41/oracle.py, src/dsl41/oracle_cascade.py,
-  src/dsl41/oracle_intents.py, src/dsl41/oracle_writers.py; tests/test_job_chart.py,
-  tests/test_oracle_chart_cascade.py; docs/statechart-engine.md §8, §11, §16;
-  docs/state-machines.md; docs/decision-index.md)
-  THE AIM. Step 3 of the job chart simplification. "On entering STARTING, write STARTING" is the
-  state's, not a table's keyed by row id. No outcome of the oracle changes: no golden, no trace
-  line, no STATUS emission, no order.
-  THE RULE. A status is written by its leaf's entry action. The seven status leaves, INACTIVE,
-  SUCCESS, FAILURE, TERMINATED, QUE_WAIT, STARTING and RUNNING, declare one entry action,
-  `writes_status`. It asks the tier's handle (`Units.consequences`, DL-356), whose handler
-  `_on_writes_status` reports `Entered`, the status the leaf is, read from the configuration
-  (`status_of`). One action for all seven, not one per leaf: the declaration then says once what
-  every status leaf does, and the status is the leaf's own name in the configuration, so a
-  per-leaf action would only repeat it. The initial entry reports nothing: an instance starts in
-  the status its row holds, and its payload has no handle. A restored instance runs no action.
-  ADMITTED keeps `starts_run` (DL-364); it is no status, so nothing writes it.
+  gives, and the row's writer keeps the row's own writes
+  (2026-10-16; src/dsl41/job_chart.py, src/dsl41/job_chart_rows.py, src/dsl41/oracle.py,
+  src/dsl41/oracle_cascade.py, src/dsl41/oracle_intents.py, src/dsl41/oracle_writers.py;
+  statechart-engine §8, §11, §16)
+  THE RULE. Step 3 of the job chart simplification: a status is written by its leaf's entry
+  action. "On entering STARTING, write STARTING" is the state's, not a table's keyed by row id.
+  The seven status leaves, INACTIVE, SUCCESS, FAILURE, TERMINATED, QUE_WAIT, STARTING and
+  RUNNING, declare one entry action, `writes_status`. It asks the tier's handle
+  (`Units.consequences`, DL-356), whose handler `_on_writes_status` reports `Entered`, the status
+  the leaf is, read from the configuration (`status_of`). One action for all seven, not one per
+  leaf: the declaration then says once what every status leaf does, and the status is the leaf's
+  own name in the configuration, so a per-leaf action would only repeat it. The initial entry
+  reports nothing: an instance starts in the status its row holds, and its payload has no
+  handle. A restored instance runs no action. ADMITTED keeps `starts_run` (DL-364); it is no
+  status, so nothing writes it. No outcome of the oracle changes: no golden, no trace line, no
+  STATUS emission, no order.
   THE LINE. The status line's facts are the row's, not the payload's. The row's writer gives them
   as a `StatusLine`: the cause, the exit code the write records (the injected STATUS rows,
   job.117 to job.120, job.135, and job.119's branches job.171 to job.176), and whether the write
@@ -23748,47 +23568,29 @@ relitigate an entry; append a new one.
   writes: the only such sibling is job.319 on STATUS, which writes nothing. So every trace
   line keeps its position. The arm check (DL-365) runs after the status write, as it ran after
   every write.
-  THE WRITERS. `_WRITERS` keeps its 157 entries over 59 writer methods, none removed, renamed
-  or added. 26 writers return their row's line instead of writing the status, `_w_left_armed`
-  among them with `_w_left`'s. No row's writer became `_w_nothing`, since every row that enters a
-  status names its own cause. `_write` takes the status from the entry and the facts from the
-  line; `_status_reached` stays for the override's line, which names the status reached. The
-  table is still keyed by row id because the cause is the row's: the next step puts the cause on
-  the row itself, in the declaration, and leaves the table the per-row extras alone.
+  THE WRITERS. `_WRITERS` keeps its entries and writer methods, none removed, renamed or added.
+  26 writers return their row's line instead of writing the status, `_w_left_armed` among them
+  with `_w_left`'s. No row's writer became `_w_nothing`, since every row that enters a status
+  names its own cause. `_write` takes the status from the entry and the facts from the line;
+  `_status_reached` stays for the override's line, which names the status reached. The table is
+  still keyed by row id because the cause is the row's: the next step puts the cause on the row
+  itself, in the declaration, and leaves the table the per-row extras alone.
   THE CHECK. A microstep whose entries report a status with no line from its writers, or whose
   writers give a line with no status entered, is a statechart error naming the job, the event,
-  the rows, the statuses entered and the lines given. Two planted writers raise it: a kill's
-  writer that gives no line (job.114) and a hold's writer that gives one (job.204).
+  the rows, the statuses entered and the lines given.
   ITEMS. None changes: the entry action reports an intent, not an item.
-  CHECKS. The job chart's rows are unchanged (175); the transition gate holds 386 of 386
-  required items of `job`. A test pins the entry action on the seven leaves beside ADMITTED's,
-  and a test pins that the initial entry reports nothing. The golden replay: 4,060 runs,
-  152,213 entries, 0 differing. Branch coverage 100.
   THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235): no accepted input derives differently,
   and the goldens replay equal.
-  REVIEW. Semantic class (§8 and §11 of a frozen contract, the writer binding of DL-353). One
-  Codex Astra pass (gpt-6-astra, xhigh): none found in five probes (the order of a writer's
-  extras, the status line, the STATUS emission and the move's record; the initial, restored,
-  forked and period-rebuilt paths; the two checks against internal, ignored and choice rows; a
-  payload with no handle), each on a constructed input; a static audit found 48 rows that enter
-  a status, each with a line. One Opus reviewer: no finding above nit; a differential run of HEAD
-  against the tree over 790 runs and 83,820 entries outside the goldens' sample showed no
-  difference; four nits fixed and confirmed by it (two wrapped lines, a plural in the check's
-  message, this entry's file list). Both named the seam for the next step: the line's cause
-  moves beside the row, the destination stays the leaf's.
 - DL-368 A rule is written once, at the source the hierarchy gives it: the job chart's per-leaf
   copies of one rule become one row at the superstate of the statuses it holds for, and an idle
   box's recompute is one row per verdict at `lifecycle`, guarded on the statuses it moves from
   (2026-10-16; src/dsl41/job_chart.py, src/dsl41/job_chart_rows.py, src/dsl41/oracle_writers.py,
-  src/dsl41/oracle_reads.py; tests/test_job_chart.py, tests/test_oracle_chart.py,
-  tests/test_oracle_chart_cascade.py, tests/test_oracle.py, tests/test_exhaustive_engine.py;
-  docs/statechart-engine.md §11; docs/state-machines.md)
-  THE AIM. Step 5 of the job chart simplification. Hierarchy exists so one rule is written once.
-  No outcome of the oracle changes: no golden, no trace line.
-  THE RULE. A rule that holds for every status of a set is one row whose source is the set's
-  superstate. A row at a superstate beside an inner row of the same event is shadowed by the inner
-  row where that row is enabled (§3); a row beside another row of the same source and event must
-  exclude it by guard (§3).
+  src/dsl41/oracle_reads.py; statechart-engine §11)
+  THE RULE. Step 5 of the job chart simplification. Hierarchy exists so one rule is written once.
+  A rule that holds for every status of a set is one row whose source is the set's superstate. A
+  row at a superstate beside an inner row of the same event is shadowed by the inner row where
+  that row is enabled (§3); a row beside another row of the same source and event must exclude it
+  by guard (§3). No outcome of the oracle changes: no golden, no trace line.
   THE ROWS. job.137 to job.140 (KILLJOB ignored at each IDLE leaf) become job.440 at IDLE. job.141
   to job.147 (`start_refused`, seven statuses) become job.441 at `lifecycle`, beside job.180; the
   verdicts exclude each other, and ADMITTED keeps job.421. job.148 and job.149 (ON_ICE ignored)
@@ -23807,24 +23609,17 @@ relitigate an entry; append a new one.
   SUCCESS and FAILURE to FAILURE from firing where no row fired before. job.191 sits at the same
   source, so its guard `is_box` becomes `recomputes_nothing`: a box, not `_recomputes`, and not
   `live_or_terminated_box`; its `false_unreachable` goes. job.192 (`is_job`, marked) stays. A box
-  at ADMITTED took job.191 at HEAD too, since no row of ADMITTED reads the recompute, and still
+  at ADMITTED took job.191 before too, since no row of ADMITTED reads the recompute, and still
   does. The tripwire stays: a box's recompute at STARTING, RUNNING or TERMINATED takes job.450, a
   marked row guarded `live_or_terminated_box` with no writer, so the hook raises a statechart
   error and the gate fails on a hit, as job.193 and job.194 did; a job's takes the marked job.192.
-  No input posts it there.
+  No input posts it there. Without job.450 such a recompute would pass silently through job.191.
   NOT DONE. job.136, job.169 and job.170 (`noexec_settles_box`) stay three rows. Their writer and
   line are the same, but the one common source is `lifecycle`, where job.198
   (`flag_moves_nothing`) is enabled wherever `noexec_settles_box` is: two enabled rows of one
   state raise AmbiguousTransition (§3). The region-as-source rows (job.218 to job.223, job.231 to
   job.233) need an engine change and stay. job.180's `false_unreachable` goes: job.441 beside it
   makes its false outcome reachable.
-  CHECKS. The job chart has 147 rows, 175 before; 75 guards, 73 before. The transition gate holds
-  322 of 322 required items of `job`, 386 before; it forbids 29, 32 before. The completeness table
-  over the test's abstraction (4,710 cells) equals HEAD's under the id mapping, except the 60
-  cells of the retired job.193 and job.194, now the marked job.450 or job.192. A new test pins
-  each rule's one row and its source; the cell test checks each collapsed row from every leaf, and
-  at a leaf where another row takes the cell, that row (17 cells: job.196, job.191 or job.450).
-  The golden replay: 4,060 runs, 152,213 entries, 0 differing. Line and branch coverage 100.
   THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235): no accepted input derives differently, and
   the goldens replay equal.
   THE PROJECT. Two steps of the review's table did not land: ordered row selection in place of
@@ -23834,32 +23629,18 @@ relitigate an entry; append a new one.
   and the status line's cause in the declaration (abandoned: only 5 of the 48 rows that enter a
   status have a literal cause and no extras, so a second table keyed by row id is one more place
   to look; after DL-366 the writer, one per row, is the row's effect column).
-  REVIEW. Semantic class (chart rows; §13's coverage items change). One Codex Astra pass
-  (gpt-6-astra, xhigh): one P3, a box recompute at STARTING, RUNNING or TERMINATED passed silently
-  through job.191 where the retired job.193 and job.194 had raised; fixed by job.450 and confirmed
-  by it at high, with job.191 and job.450 mutually exclusive on every cell; none found on the
-  collapsed cells (114,432 resolver cells compared), the depth rule, `_recomputes`, and the
-  coverage items. One Opus reviewer: no blocker; the same finding as its medium, confirmed in the
-  job.450 form; a low, 24 cases in tests/test_oracle_chart.py named for a status asserted it only
-  through the per-leaf row id, each now asserts the status, confirmed; two notes in this entry.
-  Its differential run of HEAD against the tree: 3,780 runs and 411,648 steps over the fixtures,
-  the test JILs and 60 corpus files under three switch sets, no run differing, every retired row's
-  count equal to its new row's; its own completeness table over 4,710 cells identical under the id
-  mapping except the 60 cells of job.193 and job.194, which end on a marked row as before.
 - DL-369 A chained item names its cause: the job chart's `flag moved` and its `cause` field
   become two events, `ice moved` and `noexec moved`, each status row that read the cause is a
   row of the one event it was for, and a box's ON_NOEXEC settlement is one row at `lifecycle`
   (2026-10-16; src/dsl41/job_chart.py, src/dsl41/job_chart_events.py,
   src/dsl41/job_chart_rows.py, src/dsl41/oracle_cascade.py, src/dsl41/oracle_writers.py;
-  tests/test_job_chart.py, tests/test_oracle_chart.py, tests/test_job_lifecycle_doc.py;
-  docs/statechart-engine.md §11; docs/state-machines.md; docs/job-chart-lifecycle.md)
-  THE AIM. Step 7 of the job chart simplification. A row reads `QUE_WAIT + ice moved ->
-  INACTIVE`, not `QUE_WAIT + flag moved [iced_waiter] -> INACTIVE`. No outcome of the oracle
-  changes: no golden, no trace line.
-  THE RULE. An event says what happened; a guard does not switch on a field that names the
-  sender. Where one event carried two causes and guards tested the cause, each cause is its own
-  event. The `injected status` choice stays: its guards match the status the input names, a
-  fact of the payload, not the sender.
+  statechart-engine §11)
+  THE RULE. Step 7 of the job chart simplification: an event says what happened; a guard does
+  not switch on a field that names the sender. Where one event carried two causes and guards
+  tested the cause, each cause is its own event. A row reads `QUE_WAIT + ice moved -> INACTIVE`,
+  not `QUE_WAIT + flag moved [iced_waiter] -> INACTIVE`. The `injected status` choice stays: its
+  guards match the status the input names, a fact of the payload, not the sender. No outcome of
+  the oracle changes: no golden, no trace line.
   THE EVENTS. `ice moved` is sent by ON_ICE's flag rows: job.234's `report_ice` on a waiter, and
   job.201's `iced` on any other job. Its rows read no fact, so it carries a bare `Payload` with
   the handle. `noexec moved` is sent by `_on_noexec`, the consequence of the ON_NOEXEC flag rows
@@ -23867,8 +23648,8 @@ relitigate an entry; append a new one.
   at the flag row stay read: `tree_busy` is kept on first read, as before, and `change` is read
   when `noexec_settles_box` first needs it. The payload's handle is the job's, as `FlagMoved`'s
   was. `FLAG_MOVED`, `FlagMoved` and the helpers `_noexec` and `_cause` leave. So does the
-  statechart error for a flag move of ON_ICE read for ON_NOEXEC's payload, and its test: no
-  event now carries both.
+  statechart error for a flag move of ON_ICE read for ON_NOEXEC's payload: no event carries
+  both.
   THE ROWS. A row that stays one row with the same cells keeps its id: job.112 is
   `QUE_WAIT + ice moved -> INACTIVE`, unguarded; job.113 and job.121 (`noexec_settles_job`)
   are inner rows of `noexec moved`. job.198 splits per event, as its note did: job.198 keeps
@@ -23883,66 +23664,44 @@ relitigate an entry; append a new one.
   `noexec_applies`, so job.198's guard becomes `noexec_moves_nothing`: `noexec_applies` and not
   `noexec_settles_box`, as job.191's `recomputes_nothing` excludes the recompute's rows. The
   three rows of `noexec moved` at `lifecycle`, job.198, job.199 and job.452, are exclusive on
-  every cell. job.198's false outcome is now reached where job.452 fires, so its
-  `false_unreachable` goes; job.170's goes with the row.
+  every cell. job.198's false outcome is reached where job.452 fires, so its `false_unreachable`
+  goes; job.170's goes with the row.
   ADMITTED. `lifecycle` contains ADMITTED, which the three retired rows did not, so job.452
-  would take a box's applied ON_NOEXEC there, where HEAD took job.198. No input reaches that
+  would take a box's applied ON_NOEXEC there, where job.198 took it before. No input reaches that
   cell: ON_NOEXEC at ADMITTED is itself the marked job.423, so its flag move never pops there.
   job.453 is a marked row at ADMITTED on `noexec moved`, with no guard and no writer. As the
   inner row it shadows job.198, job.199 and job.452 at ADMITTED, so a hit raises in the hook
-  and the gate forbids it: the tripwire form of job.450, stricter than HEAD's silent job.198.
+  and the gate forbids it: the tripwire form of job.450, stricter than the silent job.198.
   THE GUARDS. Removed: `iced_waiter`, which tested the cause only; `flag_moves_nothing` and
   `flag_move_unposted`. Added: `noexec_moves_nothing`. Kept, with the cause clause gone:
   `noexec_settles_job` (`noexec_applies`, a catalog job, not a box) and `noexec_settles_box`
   (`noexec_applies`, a box, not INACTIVE or `change`).
   ITEMS. None changes: each flag move still sends one item.
-  CHECKS. The job chart has 147 rows, as before (three retired, three added); 73 guards, 75
-  before. The transition gate holds 317 of 317 required items of `job`, 322 before; it forbids
-  28, 29 before. A cell table of HEAD against the tree, every status and ADMITTED, every flag
-  and holding, all sixteen `JobData` values, the ice move and the four ON_NOEXEC payloads
-  (15,360 cells), is equal under the id mapping (job.198's ice cells to job.451, job.136,
-  job.169 and job.170 to job.452) outside ADMITTED. All 1,536 ADMITTED cells of `noexec moved`
-  end on job.453, from job.198 or the marked job.199 at HEAD. The cell test checks job.452 from
-  every leaf, and job.199 at RUNNING. The mutant that swaps the job's and the box's settlement
-  guards now raises AmbiguousTransition on a waiter, job.452 beside its complement job.198,
-  before any write; on a FAILED box it still names job.121. The golden replay: 4,060 runs,
-  152,213 entries, 0 differing. Line and branch coverage 100.
   THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235): no accepted input derives differently,
   and the goldens replay equal. No oracle machine defers (§12), so no stored queue names the
   old event.
-  REVIEW. Semantic class (chart events and rows; §11). One Codex Astra pass (gpt-6-astra,
-  xhigh): none found in five probes (2,880 selector cells compared, ten sequences of 29 inputs
-  matched in microstep order, intents, events, records and traces; no production route delivers
-  `noexec moved` to an ADMITTED job; `change` read twice at the same moment; job.452 and job.198
-  exclusive with real facts; no required item lost). One Opus reviewer: no blocker, no material
-  finding; a differential run of HEAD against the tree over 5,730 runs and 573,000 steps, half of
-  them ice and noexec commands, on the fixtures, 31 corpus files, 300 generated estates and a box
-  and resource estate under three switch sets, no step differing, the retired rows' counts equal
-  to their new rows' (job.136, job.169 and job.170 to job.452: 2,357; job.198's ice cases to
-  job.451: 34,642); four lows fixed and confirmed by it (`change` kept on first read, a mutant
-  test's docstring, a cell test for the job.453 tripwire, a wrapped comment).
 - DL-370 A condition the rule reads has a name, and a guard that is another's negation or
   conjunction is written from it: the job chart's start rule names its gates and its window
   cases, and each pair and each box or job conjunct of the guards has one body
-  (2026-10-16; src/dsl41/job_chart.py; docs/statechart-engine.md §11)
-  THE AIM. Step 9 of the job chart simplification (R9: what survives of the declined step 4).
-  The start rule stays one ordered function. No row, event, action, writer or engine changes, no
-  guard name changes, no golden and no trace line.
-  THE RULE. A condition the rule code reads has a name and a docstring. A guard that is the
-  negation of another is `not` of it; a guard that is a conjunction of two calls them, in the
-  order the code tested them, so a lazy fact the second reads is read only when the first holds
-  (the tree's short-circuit is observable). A box clause or a job clause is written once, in
-  `is_box` and `is_job`. The guard column still names one function (no expression language).
-  The start rule's precedence is the order of `start_verdict`'s named tests, and the lazy facts
-  they read are read in that order (docs/statechart-engine.md §11).
+  (2026-10-16; src/dsl41/job_chart.py; statechart-engine §11)
+  THE RULE. Step 9 of the job chart simplification (R9: what survives of the declined step 4).
+  A condition the rule code reads has a name and a docstring. A guard that is the negation of
+  another is `not` of it; a guard that is a conjunction of two calls them, in the order the code
+  tested them, so a lazy fact the second reads is read only when the first holds (the tree's
+  short-circuit is observable). A box clause or a job clause is written once, in `is_box` and
+  `is_job`. The guard column still names one function (no expression language). The start rule
+  stays one ordered function: its precedence is the order of `start_verdict`'s named tests, and
+  the lazy facts they read are read in that order (statechart-engine §11). No row, event, action,
+  writer or engine changes, no guard name changes, no golden and no trace line. With no
+  behaviour change, the change is reviewed outside the semantic class.
   WHAT WAS NAMED. In `start_verdict`: `_superseded`, `_live_or_queued`, `_inside_window`,
   `_bypasses_on_noexec`, `_forced_on_held_units`. The gates of a plain attempt, one predicate
-  each, tested in order by the one function `_gated`: `_gate_iced`, `_gate_held`,
-  `_gate_unarmed_tick` (a dated job asked by anything but its tick, with no arm),
-  `_gate_box_closed`, `_gate_condition_false`. `_tick_latches` is the test of `_latched`. The
-  window cases of `_skipped`: `_window_postponed`, `_member_of_running_box`, `_inactive`,
-  `_in_no_box`. The predicates on the attempt and the configuration are private; the guards of
-  the registry take a context.
+  each, tested in order by the one function `_gated`, so the gate order is written once:
+  `_gate_iced`, `_gate_held`, `_gate_unarmed_tick` (a dated job asked by anything but its tick,
+  with no arm), `_gate_box_closed`, `_gate_condition_false`. `_tick_latches` is the test of
+  `_latched`. The window cases of `_skipped`: `_window_postponed`, `_member_of_running_box`,
+  `_inactive`, `_in_no_box`. The predicates on the attempt and the configuration are private;
+  the guards of the registry take a context.
   THE PAIRS. Each negation is written from its pair: `is_job`, `left_catalog`, `not_queued`,
   `unarmed`, `no_demand`, `takes_over`, `admitted_by_readmit`, `not_live_or_queued` (with
   `noexec_applies`, which already was). Each one-line body calls the pair's predicate.
@@ -23952,40 +23711,27 @@ relitigate an entry; append a new one.
   `force_clears`, `noexec_settles_job`, `noexec_settles_box`, `recomputes_nothing`,
   `live_or_terminated_box`, `terminator_fires`, `readmit_leaves_armed`,
   `readmit_leaves_unarmed`, and the box tests of `_recomputes` and `_door`. No guard is built by
-  a helper: each is a function with its own name in a traceback.
-  CHECKS. The registry has 73 guards, as before. The job chart has 147 rows, as before; the
-  transition gate holds 317 of 317 required items of `job` and forbids 28, as before. The golden
-  replay: 4,060 runs, 152,213 entries, 0 differing. Line and branch coverage 100. No test
-  changes; docs/state-machines.md renders equal.
+  a helper: each is a function with its own name in a traceback. REJECTED: guard combinators
+  that set function names and docstrings by hand; a one-line definition that calls the shared
+  predicate replaces each.
   THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235): no accepted input derives differently,
   and the goldens replay equal.
-  REVIEW. Multi-file, no behaviour change: one Opus reviewer. No blocker, no major; a
-  differential over all 73 guards and the two verdict functions on 90,000 random fact vectors
-  each matched HEAD in every result and in the order of first fact reads; the golden replay
-  re-run by the reviewer, 0 differing. Three minors and three nits, each fixed and confirmed by
-  it: the gate order was written twice (now one `_gated` built from the named gates); two guard
-  combinators that set function names and docstrings by hand were replaced by one-line
-  definitions that call the shared predicate, and the single-use predicates they forced folded
-  back into the parametrised helpers (the file grew by the named conditions alone); the private
-  predicates took an underscore and two near-identical names were parted; one docstring order;
-  one reflowed line of §11.
 - DL-371 A phase of a cascade that decides after a wait is a state with an entry action and a
   completion row: a RUNNING box's completion door becomes RUNNING's region `door`, with
   `settled`, `overriding` and `folding`, and the generator `_door` and the event `completion
-  moment` leave (2026-10-16; src/dsl41/job_chart.py, src/dsl41/job_chart_rows.py,
+  moment` leave
+  (2026-10-16; src/dsl41/job_chart.py, src/dsl41/job_chart_rows.py,
   src/dsl41/job_chart_events.py, src/dsl41/oracle_cascade.py, src/dsl41/oracle_facts.py,
-  src/dsl41/oracle_writers.py, src/dsl41/oracle_intents.py; scripts/render_job_lifecycle.py;
-  tests/test_job_chart.py, tests/test_oracle_chart.py, tests/test_oracle_chart_cascade.py;
-  docs/statechart-engine.md §8, §11; docs/state-machines.md; docs/job-chart-lifecycle.md)
-  THE AIM. Step 6a of the job chart simplification (review 1.1 and 2.3, ruling R11). The door's
-  phases were the suspended positions of a generator, invisible to the chart: send `member
-  moves`, wait for its cascade, check the box still runs the same run, send `completion moment`.
-  They are declared now. No outcome of the oracle changes: no golden, no trace line.
-  THE RULE. A phase of a cascade whose decision is a chart row is a transient state: its entry
-  action reads or sends what the phase needs, and its completion row decides, with the payload of
-  the microstep that entered it (§4, DL-364). The generator that held such a phase between pops
-  was its hidden form (§8). A tier step that only sequences its sends, such as `_walk_up`,
-  `_ice_resolves`, `_box_ends` and `_window_pass`, stays a moment.
+  src/dsl41/oracle_writers.py, src/dsl41/oracle_intents.py; statechart-engine §8, §11)
+  THE RULE. Step 6a of the job chart simplification (ruling R11): a phase of a cascade whose
+  decision is a chart row is a transient state: its entry action reads or sends what the phase
+  needs, and its completion row decides, with the payload of the microstep that entered it (§4,
+  DL-364). The generator that held such a phase between pops was its hidden form (§8). A tier
+  step that only sequences its sends, such as `_walk_up`, `_ice_resolves`, `_box_ends` and
+  `_window_pass`, stays a moment. The door's phases were the suspended positions of a generator,
+  invisible to the chart: send `member moves`, wait for its cascade, check the box still runs
+  the same run, send `completion moment`. No outcome of the oracle changes: no golden, no trace
+  line.
   THE REGION. RUNNING holds one region, `door`: `settled` (initial), `overriding` (entry
   `reads_overrides`) and `folding` (entry `reads_fold`). A job that is not a box rests in
   `settled`, and a RUNNING row projects to RUNNING with `settled` (`configuration`). RUNNING keeps
@@ -24005,10 +23751,10 @@ relitigate an entry; append a new one.
   `overrides` and `folds`. A member's terminal, RUNNING or resolving move at its RUNNING box, an
   ice's completion moment and a box start's window pass read the overrides, then fold. Any other
   move of a member folds alone. The walk up reads an ancestor's overrides alone, and its
-  completion returns to `settled` when none holds; it never folds. A new test pins R11's
-  counter-example: H > G > I > M, G a job_terminator of H, I iced with a box_success that never
-  holds, H failing on `s(M)`; M's SUCCESS visits G (job.454, job.457), then H (job.454,
-  job.127), and G ends TERMINATED. A mutant whose walk up folds ends G SUCCESS and diverges.
+  completion returns to `settled` when none holds; it never folds. R11's counter-example shows
+  why: H > G > I > M, G a job_terminator of H, I iced with a box_success that never holds, H
+  failing on `s(M)`; M's SUCCESS visits G (job.454, job.457), then H (job.454, job.127), and G
+  ends TERMINATED. A walk up that folds ends G SUCCESS and diverges.
   THE PAYLOAD (condition 2). The completions carry the visit's `DoorFacts` (DL-364). Its phases'
   facts are separate lazy objects built by the phase's entry: `OverrideFacts` at `overriding`'s,
   `FoldFacts` at `folding`'s, each read by its completion's guards; a read before its phase
@@ -24019,8 +23765,8 @@ relitigate an entry; append a new one.
   the box in the completion that read it.
   NO RE-ENTRY (condition 3). The rows that enter a phase have `settled` as their source, inside
   the region, so a visit never exits RUNNING and `writes_status` does not run again. job.130
-  stays at RUNNING, inherited by the phases. A cell test pins that a visit asks the handle for
-  nothing but `completed` and the status write of the end it makes.
+  stays at RUNNING, inherited by the phases. A visit asks the handle for nothing but `completed`
+  and the status write of the end it makes.
   THE BUSY CELL (condition 4). The phases' entries only read and the row that enters a phase sends
   nothing, so the phase's completion pops next and no second visit meets an open phase: job.459
   and job.460 are marked unreachable.
@@ -24039,30 +23785,11 @@ relitigate an entry; append a new one.
   811, and the box ring, the fan-in and the box chains are unchanged. A decision row and its cascade
   are one link deeper; after a full visit with no override, the moment's later steps are one link
   shallower. No guard reads depth.
-  CHECKS. The job chart has 151 rows, 147 before; 79 guards, 73 before; 36 actions, 34 before.
-  The transition gate holds 326 of 326 required items of `job`, 317 before; 19 marked rows, 18
-  before. The completeness abstraction gains the witnesses `box RUNNING overriding` and `box
-  RUNNING folding` and the visits as `member moves`' partitions; the sweep adds the phases'
-  configurations. A cell test runs each visit from `settled` and pins its rows, its end, the
-  phases whose entry ran and the payload its completions carry. The golden replay: 4,060 runs,
-  152,213 entries, 0 differing. Line and branch coverage 100.
   THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235): no accepted input derives differently, and
   the goldens replay equal. The added items move no input of the sample or of the measured shapes
   across the cap, which stays ten times the peak of every shape the change moves (ITEMS), as DL-364
   and DL-365 ruled for the opposite direction. Job instances are rebuilt from the rows, so no
-  persisted
-  configuration names the door's states.
-  REVIEW. Semantic class (the door's phases move from a generator to declared states; §8 and
-  §11). One Codex Astra pass (gpt-6-astra, xhigh): none found in five probes (the dropped run
-  check, with the stronger argument that no item pops between a phase's entry and its completion;
-  the three visits against each sender; fact timing; the busy cells; the widened exit set with a
-  kill while overriding), each on a constructed input. One Opus reviewer: no blocker, no major; a
-  differential run of HEAD against the tree over 12,000 box-heavy runs and 484,932 inputs under
-  three switch rows showed no difference in outcome, trace, store, timers or emissions, with items
-  equal to HEAD's plus the two entering rows minus the chaining one in every run and the retired
-  rows' counts equal to their new rows'; three minors and three nits fixed and confirmed by it
-  (the rule narrowed to decisions that are chart rows; the item margin stated; a doc block; two
-  wordings; a stale count; a wrapped line).
+  persisted configuration names the door's states.
 - DL-372 The queue's scan is one declared coordinator: the `queue_scan` chart, one instance per
   oracle on the jobs' executor, whose states wait for each readmission's cascade and whose
   choice gives each turn; the generator `_scan`, the moment `scan` (job.410) and the flags
@@ -24070,29 +23797,26 @@ relitigate an entry; append a new one.
   (2026-10-17; src/dsl41/scan_chart.py, src/dsl41/oracle_cascade.py, src/dsl41/oracle.py,
   src/dsl41/oracle_intents.py, src/dsl41/oracle_state.py, src/dsl41/machines.py,
   src/dsl41/job_chart_events.py, src/dsl41/job_chart_rows.py, src/dsl41/oracle_writers.py,
-  src/dsl41/job_chart.py; tests/test_queue_scan.py, tests/test_scan_chart.py,
-  tests/test_oracle_chart_cascade.py, tests/test_oracle_chart.py, tests/test_job_chart.py,
-  tests/fork_harness.py; docs/statechart-engine.md §8, §11, §16; docs/period-model.md §3.3;
-  docs/state-machines.md; docs/job-chart-lifecycle.md; docs/blocks/README.md,
-  docs/blocks/capacity.md; README.md)
-  THE AIM. Step 6b of the job chart simplification, the last (review 1.1 and 2.3, ruling R11
-  item 6b). The scan's phases were the suspended positions of a generator threaded through
-  `scan` self-events on a job instance: start or join a pass, the next waiter, wait for the
-  readmission's cascade, restart on a move, upgrade an admit-only pass, finish. Four flags held
-  its control state. They are declared now. No outcome of the oracle changes: no golden, no
-  trace line.
-  THE FORM. R11's form A: a chart on the jobs' executor (`state_machine.Statechart`). The
-  owner's in-process DSL (form B) runs outside the executor's worklist. A scan run there runs
-  after the dispatch returns, and that changes resource winners: R has one unit; H, the empty
-  box E, the waiter W and C each need it; E and C depend on `s(H)`. H's end wakes E, which
-  starts, completes at its start and frees R, and its scan admits W before H's wake reaches C.
-  A scan after the dispatch lets C take R. A separate dispatch also resets the item budget and
-  the ancestry (R11 §3). A new test pins W's start and C's wait.
-  THE RULE. Orchestration across instances is its own coordinator (R11). A phase whose decision
-  follows another instance's cascade is a transient state: its entry sends, and its completion
-  decides behind the cascade (§8, DL-364, DL-371). A decision that waits for nothing is a choice,
-  resolved inside the microstep (§4), as job.171 to job.176 and job.309 decide (R13). The scan's
-  record is its payload, which every completion carries.
+  src/dsl41/job_chart.py; statechart-engine §8, §11, §16; period-model §3.3)
+  THE RULE. Step 6b of the job chart simplification (ruling R11 item 6b): orchestration across
+  instances is its own coordinator (R11). A phase whose decision follows another instance's
+  cascade is a transient state: its entry sends, and its completion decides behind the cascade
+  (§8, DL-364, DL-371). A decision that waits for nothing is a choice, resolved inside the
+  microstep (§4), as job.171 to job.176 and job.309 decide (R13). The scan's record is its
+  payload, which every completion carries. The scan's phases were the suspended positions of a
+  generator threaded through `scan` self-events on a job instance: start or join a pass, the
+  next waiter, wait for the readmission's cascade, restart on a move, upgrade an admit-only
+  pass, finish. Four flags held its control state. No outcome of the oracle changes: no golden,
+  no trace line.
+  THE FORM. R11's form A: a chart on the jobs' executor (`state_machine.Statechart`). REJECTED:
+  the owner's in-process DSL (form B), which runs outside the executor's worklist. A scan run
+  there runs after the dispatch returns, and that changes resource winners: R has one unit; H,
+  the empty box E, the waiter W and C each need it; E and C depend on `s(H)`. H's end wakes E,
+  which starts, completes at its start and frees R, and its scan admits W before H's wake
+  reaches C. A scan after the dispatch lets C take R. A separate dispatch also resets the item
+  budget and the ancestry (R11 §3). REJECTED (R13): the turn's decision as a transient state.
+  Three items per turn moved the queue-scan shape's first refusal from about 890 to about 730
+  jobs; the choice keeps two items per turn.
   THE CHART. `queue_scan`, registered in `machines.MACHINES`. The instance lives under
   `SCAN_KEY` on the state owner's executor; the owner restores it idle where it restores the
   job instances (`rebuild_machines`), so a fork, an install and a macrostep that raised each
@@ -24107,7 +23831,7 @@ relitigate an entry; append a new one.
   request is reset. The latch `_readmitted` stays the oracle's: the `job` chart's readmit rows
   report it (`Readmitted`), and a pass's entry clears it (`ClearReadmitted`), so `moved` is the
   reported outcome, not state. The owed scan's mark (`_scan_owed`, `ScanState(owed)`) stays
-  the oracle's.
+  the oracle's. The moments' ids are listed (`MOMENT_IDS`), and 410 is not among them.
   THE ROWS. queue_scan.01: a scan at `idle` begins a pass. queue_scan.02: a scan inside a pass
   latches `full_requested`. queue_scan.03: a scan finds it latched (internal). queue_scan.04:
   `next_waiter`'s completion enters `turn_choice`. `awaiting_readmit`'s completion:
@@ -24142,14 +23866,6 @@ relitigate an entry; append a new one.
   At each root dispatch's end the coordinator rests in `idle`, or the dispatch raises a
   `StatechartError` (`_check_scan_idle`): a pass left open would latch every later scan and
   scan nothing.
-  THE SEQUENCES (built before the change, passing before and after). The restart: A waits on
-  S, B and C on R; a pass keeps A, admits B and ends; the next reads the list again: A, B, A,
-  C, A. The upgrade (R11's counter-example, tests/test_oracle_chart_cascade.py's fixture): the
-  owed admit-only scan keeps M, admits X, X's start fails Q, whose terminator releases X's
-  load and asks a full scan inside the pass; the next pass is full and cancels M: (M, admit
-  only), (X, admit only), (M, full). The nested request: W1's readmission completes the
-  empty box and asks a scan inside the pass, which sends nothing; W1 moved, the next pass
-  admits W2. The join in a wake: R11 §3's sequence above.
   ITEMS. A turn pops two items, as the moment did: the readmission and `awaiting_readmit`'s
   completion, which resolves `turn_choice` and sends the next readmission. A pass pops two more
   than the moment did: `next_waiter`'s completion and `done`'s. A scan asked inside a pass pops
@@ -24162,19 +23878,6 @@ relitigate an entry; append a new one.
   least margin. No golden and no measured shape crosses the cap. A decision is one link deeper
   in the ancestry; no guard reads depth, and the job.100 bound counts `start admitted` links,
   which the coordinator never adds.
-  CHECKS. The job chart has 150 rows, 151 before; the moments' ids are listed (`MOMENT_IDS`)
-  and 410 is not among them. 79 guards and 36 actions, as before. `queue_scan` has 9 rows, one
-  choice with 2 branches, 6 guards and 3 actions; 13 machines are registered, 12 before. The
-  transition gate holds 325 of 325 required items of `job`, 326 before, and 23 of 23 of
-  `queue_scan`, hit by the oracle's own tests; 19 marked rows, as before. The completeness test
-  runs `scan` in each of the seven configurations. A test per phase drives the chart on a bare
-  executor; tests pin that the hook counts the coordinator's microsteps and writes no row for
-  them, that a fault inside a pass leaves the coordinator idle, and that a pass left open at a
-  dispatch's end raises. The fork harness compares the coordinator's configuration on every
-  feed. A differential run of HEAD against the tree over the golden sample: in all 4,060 runs
-  the job instances' outcomes (instance, event, rows, intents, a readmission's mode) are equal
-  in order, with 2,199 readmissions and 3,258 scans asked on each side. The golden replay:
-  4,060 runs, 152,213 entries, 0 differing. Line and branch coverage 100.
   THE CONTRACTS. statechart-engine §8 lists the moments without `scan`; §11 states the scan's
   ownership: the coordinator, its record, its passes, its choice, the request and the idle
   check; §16 names the machine's entry. period-model §3.3's not-carried table names the
@@ -24184,46 +23887,29 @@ relitigate an entry; append a new one.
   input of the sample or of the measured shapes across the cap. No oracle machine defers
   (§12), and the instances are rebuilt from the rows with the coordinator idle, so no stored
   configuration or queue names the retired moment or the new chart's states.
-  REVIEW. Semantic class (the scan moves from a generator to a declared chart; §8, §11, a frozen
-  rule of period-model): one Opus reviewer and one Codex Astra pass, two rounds. Round 1: Codex
-  found nothing on five probes (the completion's entry serial under a nested scan, the record on
-  completions, recovery and the fork, the latch, the hook and the guards' reads) and qualified
-  the cap; Opus raised F1 to F8. F1 (major, Opus; Codex measured the same): three items per turn
-  moved the queue-scan shape's first refusal from about 890 to about 730 jobs, and the draft's
-  version paragraph denied it. Ruled (R13): a decision that waits for nothing is a choice; the
-  turn's decision became `turn_choice`, two items per turn again. F2 (Opus): the idle check at
-  each root dispatch's end. F3 (Opus): `_scan()` takes no mode. F4, F5, F7 (Opus): the Structure
-  section, two comments restated as rules, the runtime-checkable record, the raise in `readmit`,
-  the waiter found once, `ClearReadmitted`. F6 (Opus): the mutable record, a stated limit above.
-  F8 (Opus): the decision index regenerated at landing. Round 2: Opus confirmed F1 to F7 fixed
-  (the shape at 200 and 800 jobs re-measured, a 200-run differential with 0 differing) and found
-  nothing new in the choice under R4 or the cached index; Codex at high found nothing on the
-  choice, the cached index, the idle check and the restart and upgrade sequences.
 - DL-373 A rule of `runtime_assembly` is written once at the source the hierarchy gives it: the
   phases group as `unbuilt`, `open` and `built`, a rule every member of a group takes is one row
   on the group, and `_OPEN` becomes the state `open`; 40 rows become 25
-  (2026-10-17; src/dsl41/oracle_state.py; tests/test_assembly_chart.py,
-  tests/test_job_machines.py; docs/statechart-engine.md §16; docs/blocks/job-lifecycle.md;
-  docs/state-machines.md (generated))
-  THE AIM. Step 5 of the chart simplification on the eleven other charts (charts ruling, slice
-  S2; explorer 2 F1). The flat chart of DL-335 copied four moves across leaves (.08 to .15, "As
-  runtime_assembly.02") and repeated five refusal codes leaf by leaf. The tier held one group of
-  states as data: `_OPEN`, read by `_touch` to decide whether to snapshot. No outcome of the
-  oracle changes: no golden, no trace line, no refusal class or text.
-  THE RULE. A rule every member of a group takes is one row on the group, and only where no
-  member has its own row for the verb (§3: the inner row wins). A group row with an inner row
-  beside it would catch that inner row's deletion as the wrong answer instead of a gap; DL-335
-  dropped the root default refusal for that reason, and the rule keeps its reason. So a
-  deleted row is always an unhandled event.
+  (2026-10-17; src/dsl41/oracle_state.py; statechart-engine §16; docs/blocks/job-lifecycle.md)
+  THE RULE. Step 5 of the chart simplification, on the eleven other charts: a rule every member
+  of a group takes is one row on the group, and only where no member has its own row for the verb
+  (§3: the inner row wins). A group row with an inner row beside it would catch that inner row's
+  deletion as the wrong answer instead of a gap; DL-335 dropped the root default refusal for that
+  reason, and the rule keeps its reason. So a deleted row is always an unhandled event. The flat
+  chart of DL-335 copied four moves across leaves (.08 to .15, "As runtime_assembly.02") and
+  repeated five refusal codes leaf by leaf. The tier held one group of states as data: `_OPEN`,
+  read by `_touch` to decide whether to snapshot. No outcome of the oracle changes: no golden, no
+  trace line, no refusal class or text.
   THE CHART. The region `phase` holds three composite states, each with one region:
   `unbuilt` {fresh, installed, genesis} in `construction`, where construction can still happen
   and no input is open; `open` {genesis_input, input} in `inputs`, an input open; `built`
   {constructed, seeded, live} in `service`, where construction can no longer happen, ended by
   finish_genesis or overtaken by the seed (.05 and .12 reach seeded with no finish), and no
-  input is open. The leaves are the phases (`AssemblyPhase`, `ASSEMBLY_PHASES`);
-  `_phase` reads `active & ASSEMBLY_PHASES`, since the configuration now carries the group.
-  `_touch` snapshots while `open` is active; `_OPEN` is gone. Region names are stored
-  nowhere: the engine names them only in error texts and the generated tables.
+  input is open. The `open` group's region is `inputs`, so no error text names a region and a
+  leaf by one word. The leaves are the phases (`AssemblyPhase`, `ASSEMBLY_PHASES`); `_phase`
+  reads `active & ASSEMBLY_PHASES`, since the configuration carries the group. `_touch` reads
+  the executor directly and snapshots while `open` is active; `_OPEN` is gone. Region names are
+  stored nowhere: the engine names them only in error texts and the generated tables.
   THE ROWS. Nine rows have a group source. .04 (`unbuilt`, finish_genesis to constructed) keeps
   its id: the frozen text of `inside_genesis_input` names it ("genesis_input is not a source of
   runtime_assembly.04"), and that sentence stays true, since genesis_input is not in `unbuilt`.
@@ -24239,57 +23925,27 @@ relitigate an entry; append a new one.
   genesis_input and seeded have their own codes; the seed moves from fresh, installed and
   constructed (.05, .12, .13), which are no one subtree; and the seed_on_used_state refusals
   (.37, .38, .40), since a row on `built` would catch a deleted .13 as the wrong refusal.
-  Moves go from 15 rows to 9 and refusals from 25 to 16.
-  CHECKS. `well_formed` and `chart_warnings` pass. A pinned table of the flat chart's 40 cells,
-  generated once from DL-335's declaration on its executor, is checked cell by cell: 40 of 40
-  fire (kind `fired`, as all 40 did), with the same refusal code or the same phase reached, and
-  the row is the flat one or the group row that took its cell (`MERGED`); the configuration
-  after is the phase with its group. Each of the nine group rows, deleted from a chart copy, raises
-  `UnhandledEvent` through the store's verb at every member, with the phase unmoved; every one
-  of the 25 rows, deleted, leaves each cell it took a gap and every other cell's row unchanged.
-  A fork, `rebuild_machines()` and `rebuild_machines(jobs=False)` restore the same
-  configuration in all eight phases. The completeness test and the store's verbs in each phase
-  keep their expected classes and texts, with the new ids. The constructor's gap tests delete
-  .41. The resolve agreement still compares 40 cells. The transition gate holds 25 of 25
-  required items of `runtime_assembly`, 40 before; every other chart's count is unchanged. The
-  golden replay: 4,060 runs, 152,213 entries, 0 differing.
-  THE CONTRACTS. statechart-engine §16 and the job-lifecycle card said the configuration is the
-  assembly phase; each now says it carries the phase's leaf and the group above it. The leaf
-  determines the group, so nothing they rule changes. §3 and §10 are applied, not changed.
-  concurrency-model §4 is unchanged: every refusal keeps its class and text.
+  THE CONTRACTS. statechart-engine §16 and the job-lifecycle card say the configuration carries
+  the phase's leaf and the group above it. The leaf determines the group, so nothing they rule
+  changes. §3 and §10 are applied, not changed. concurrency-model §4 is unchanged: every refusal
+  keeps its class and text.
   THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235): no accepted input derives differently.
   The phase is not stored: a fork and a rebuild copy the live configuration, which carries the
   group, and nothing persisted, sent or restored from a stored value names a retired id or a
   group (DL-335's "no persisted shape moves").
-  REVIEW. Semantic class (rows change in a §16 machine): one Opus reviewer and one Codex Astra
-  pass, after a Codex probe of the construction before the brief (the group rows only where no
-  member has its own row; the seed refusals kept per leaf; .04 keeps its id). Codex found
-  nothing on five probes: the cells against DL-335's declaration, the deletion hazard, every
-  reader of the configuration with the fork and both rebuilds, the tests' tables and the
-  retired ids, the refusal texts. Opus found no blocker or major and four small items: O1
-  (`built` described as "construction finished", wrong for a seed from fresh: reworded), O2 (the
-  cell test claimed the outcome kind without asserting it: the assert added), O3 (§16 and the
-  job-lifecycle card said the configuration is the phase: both say it carries the leaf and its
-  group), O4 (`_touch` reads the executor directly: kept). Opus confirmed O1 to O3 and the
-  region names, re-ran its own equivalence (40 of 40, 0 hazards), and left two nits fixed at
-  landing: a line of §16 reflowed, and the `open` group's region named `inputs` so no error
-  text names a region and a leaf by one word.
 - DL-374 A rule of `supervisor_client` is written once at the source the hierarchy gives it:
   `alive` holds every state but `closed` and `down` the two with no live connection, rows .01
   and .05 are their unguarded rules, and the guards `down` and `open` are gone; admission's
   `other` is `not same`, and the lease's `challenger` reads ttl_s through a named test
   (2026-10-17; src/dsl41/runner_adapters.py, src/dsl41/runner_admission.py,
-  src/dsl41/runner_supervisor.py; tests/test_supervisor_client_chart.py,
-  tests/test_exhaustive_process.py, tests/test_supervisor_lease_chart.py;
-  docs/state-machines.md (generated), docs/chart-lifecycles.md (generated))
-  THE AIM. Steps 5 and 7 of the chart simplification on the eleven other charts (charts
-  ruling, slice S3; explorer 2 F3, F10, F12). In DL-330's flat chart every guard tested the
+  src/dsl41/runner_supervisor.py; statechart-engine §3, §10, §16)
+  THE RULE. Steps 5 and 7 of the chart simplification, on the eleven other charts, and DL-373's
+  rule: a rule every member of a group takes is one row on the group, and only where no member
+  has its own row for the event (§3: the inner row wins). So a deleted group row is an unhandled
+  event at each member, never another row's answer. In DL-330's flat chart every guard tested the
   configuration: `down` and `open` existed only to give the root rows .01 and .05 a set of
-  sources, and `over` is the third body of one fact, closed. No outcome changes: every cell
-  fires the row it fired, no post, no refusal and no wire text moves.
-  THE RULE. DL-373's: a rule every member of a group takes is one row on the group, and only
-  where no member has its own row for the event (§3: the inner row wins). So a deleted group
-  row is an unhandled event at each member, never another row's answer.
+  sources, and `over` is the third body of one fact, closed. No outcome changes: every cell fires
+  the row it fired, no post, no refusal and no wire text moves.
   THE CHART. The region `phase` holds `alive` and the final `closed`. `alive` has one region,
   `connection`: `down` and `connected`. `down` has one region, `epoch`: `disconnected`, the
   initial state, and `lost`. The leaves are the phases (`CLIENT_PHASES`); `phase()` reads
@@ -24299,29 +23955,15 @@ relitigate an entry; append a new one.
   note (§14). `over` stays: a final state has no rows (`well_formed`, §10), so .08 to .11 stay
   on the root. Since .01 and .02 take every connect in `alive` and .05 every close, the walk
   reaches .08 and .11 only from `closed`: their guard's false outcome is declared
-  `false_unreachable`, and the gate forbids it, as on admission .11 and .12. Guards go from 3
-  to 1. The nested regions get distinct names: the lease's `unheld` region is `record` and its
-  `held` region `connection` (F12). Region names are stored nowhere: the engine names them only
-  in error texts and the generated tables; no stored or wired name changes.
+  `false_unreachable`, and the gate forbids it, as on admission .11 and .12. The nested regions
+  get distinct names: the lease's `unheld` region is `record` and its `held` region
+  `connection`. Region names are stored nowhere: the engine names them only in error texts and
+  the generated tables, so an error text lists the groups in the configuration; no stored or
+  wired name changes.
   THE GUARDS. Admission: `_other` is `not _same`, the same fact with no lazy read; `applied`
   and `rejected` stay, an enum over a two-valued decision. Lease: `_challenger` is
   `_named and _numeric_ttl and not _credentials`; `_numeric_ttl` reads `ttl()` alone and never
   computes the expiry, so the lazy facts are read in the same order as before (R9).
-  CHECKS. `well_formed` and `chart_warnings` pass on the three charts. A pinned table of the
-  flat chart's 16 cells (four leaves by four events), generated once from DL-330's declaration,
-  is checked cell by cell: 14 fire the same row and reach the same leaf, now with its groups,
-  and the two excluded cells still raise `UnhandledEvent`. Each group row, deleted from a chart
-  copy, raises `UnhandledEvent` at every member with the leaf unmoved; every row, deleted,
-  leaves each cell it took a gap and every other cell's row unchanged. The completeness table
-  (22 cells), the alphabet test, the exhaustive client walk and the exit-7 tests keep
-  their outcomes; the reconnect gap is built by sourcing .01 at `disconnected`, and the error
-  texts name the configuration with its groups. No closed-state post: the walk and the alphabet
-  test assert it on connect, close, the cancellation and EOF cleanup after it, and a repeated
-  close. A new lease test pins that `challenger` leaves the expiry uncomputed over the ttl_s shapes
-  it lists and the credential partition, and reads no ttl_s for an unnamed request. The transition
-  gate holds 17 of 17 required items of `supervisor_client`, 23 before (the four outcomes of `down`
-  and `open` gone, and the false outcomes of .08 and .11 now forbidden), with 2 forbidden; admission
-  16 of 16 and the lease 48 of 48, as before.
   THE CONTRACTS. statechart-engine §16's client paragraph is unchanged and holds: the client
   posts nothing once closed. §3 and §10 are applied, not changed. DL-330's ".01 and .05 on the
   root with a guard" is replaced by the groups; its rows, ids and exclusions stand.
@@ -24329,104 +23971,66 @@ relitigate an entry; append a new one.
   oracle state from an identical log. The client and lease charts derive nothing from the log:
   they are the transport's and the supervisor's state. Admission replays from the WAL, but its
   guards answer every input as before. No configuration of these charts is persisted.
-  REVIEW. Semantic class (rows and guards of §16 machines): one Opus reviewer and one Codex
-  Astra pass. Codex found no regression on five probes (the 16 client cells against DL-330's
-  declaration, the deletion hazard, the false-unreachable claims with the gate's count 23 to
-  17, the lease's read order, admission's `other`), and noted that an exception's text now
-  lists the groups in the configuration. Opus found no blocker or major: 0 of 16 cells and 0 of
-  3,000 random sequences differ; 480 lease cases match the old code in answer, ttl value and
-  whether the expiry was computed. Its low items: L2 (a test comment that said what changed:
-  dropped), L3 (the entry claimed a pending request at close that no test holds: the claim
-  removed), L4 (the lease test's docstring claimed every ttl_s shape and a read order it cannot
-  see: narrowed); L1 (the number cited from the tests before the entry landed) is moot, since
-  the entry lands with the slice.
 - DL-375 A rule of `host` is written once at the source the hierarchy gives it, and the gate
   reads the chart with the engine's selection read: host.08 and host.09 are one internal row,
   host.25, on `routed`; `host_move` is `Executor.resolve` on the store's instance, and the
   scratch executor and `rebuild_machines(jobs=False)` are gone; host.11's guard stays
-  (2026-10-17; src/dsl41/oracle_state.py, src/dsl41/runner_hosts.py; tests/test_host_chart.py,
-  tests/test_engine_machines.py, tests/test_oracle_chart.py, tests/test_assembly_chart.py,
-  tests/test_runtime_state.py; docs/statechart-engine.md §16; docs/blocks/host-routing.md;
-  docs/state-machines.md (generated), docs/chart-lifecycles.md (generated))
-  THE AIM. Step 5 of the chart simplification on `host` and H2's `resolve` point (charts ruling,
-  slice S4a; explorer 1 H2, H3, H5; explorer 2 F7). No outcome changes: every cell selects the
-  row it selected, with the two reinstate cells of a routed host under the new id, and no
-  decision, code, revision, row write or wire text moves.
-  THE RULE. DL-373's: a rule every member of a group takes is one row on the group, and only
-  where no member has its own row for the event (§3: the inner row wins). `active` and
-  `passive` have no reinstate row, so host.25 is the only candidate at both. Its note and cite
-  are those of the two copies. host.08 and host.09 retire for good (DL-364); a test keeps them
-  out, as rows and as choice branches. 22 rows become 21.
+  (2026-10-17; src/dsl41/oracle_state.py, src/dsl41/runner_hosts.py; statechart-engine §16;
+  docs/blocks/host-routing.md)
+  THE RULE. Step 5 of the chart simplification, on `host`, and DL-373's rule: a rule every member
+  of a group takes is one row on the group, and only where no member has its own row for the
+  event (§3: the inner row wins). `active` and `passive` have no reinstate row, so host.25 is the
+  only candidate at both. Its note and cite are those of the two copies. host.08 and host.09
+  retire for good (DL-364), as rows and as choice branches. No outcome changes: every cell
+  selects the row it selected, with the two reinstate cells of a routed host under the new id,
+  and no decision, code, revision, row write or wire text moves.
   THE GATE'S READ. `host_move` dispatched on a scratch executor rebuilt from the rows so that
   the gate's read moved nothing. DL-335's `resolve` is that read: selection for one instance
-  and one event, with no action, no move, no history and no hit. The gate now reads the
-  store's own instance with it. The read has three boundaries. It reads the instance, not
-  the row, so it agrees with a dispatch only while every dispatch is projected into the row:
-  the apply writes the leaf, and `_replace_host` refuses a state the instance is not in. A
-  call from inside a macrostep of the store's executor raises `ReentrantDispatch`; the gate
-  runs in the batch after the time half has drained. A host with no instance raises; the
-  gate answers `unknown_host` for a host with no row before it reads. The host chart defers
-  nothing, so the read's refusal of a deferred instance cannot fire. `host_move`'s docstring
-  states the three. No executor is built per host command, so the `jobs=False` form of
-  `rebuild_machines` lost its only caller and is gone. The read names no choice branch, which
-  the gate never read. The row ids the gate keys on, host.10 and host.11, stay (DL-94).
+  and one event, with no action, no move, no history and no hit. The gate reads the store's own
+  instance with it. The read has three boundaries. It reads the instance, not the row, so it
+  agrees with a dispatch only while every dispatch is projected into the row: the apply writes
+  the leaf, and `_replace_host` refuses a state the instance is not in. A call from inside a
+  macrostep of the store's executor raises `ReentrantDispatch`; the gate runs in the batch after
+  the time half has drained. A host with no instance raises; the gate answers `unknown_host` for
+  a host with no row before it reads. The host chart defers nothing, so the read's refusal of a
+  deferred instance cannot fire. `host_move`'s docstring states the three. No executor is built
+  per host command, so the `jobs=False` form of `rebuild_machines` lost its only caller and is
+  gone. The read names no choice branch, which the gate never read. The row ids the gate keys
+  on, host.10 and host.11, stay (DL-94).
+  THE CONSEQUENCES. A rejected host command records no hit, since the read records none. So the
+  refusal rows .13 to .21 are reached by the completeness table and the exhaustive walk, and by
+  the apply's refusal of a decided input, not by rejected commands. A gap the gate meets raises
+  on the store's executor, so its error lists the store's recent host microsteps where the
+  scratch executor's listed none; the text goes to stderr and is not stored.
   HOST.11'S GUARD. `not_evicted` never decides: at `evicted` host.21 wins. It stays, because
   without it a deleted host.21 would fire host.11 and evict an evicted host again; with it the
-  cell is a gap. Its docstring says so, and a test deletes host.21 and meets the gap.
+  cell is a gap. Its docstring says so.
   NOT TAKEN. H3 (`note_executor_reachable` tests the state before it injects `reinstate`, which
-  saves a WAL record per renewal) stays. H4 (`quarantine_host`'s early return) goes with S4b.
+  saves a WAL record per renewal) stays. H4 (`quarantine_host`'s early return) goes with
+  DL-376.
   RETIRED IDS. No row id of `host` is stored or sent: the store, the seal and the LIST answer
   carry `HostState` names, which are unchanged, and `host_configuration` rebuilds from them.
-  tests/host_revisions.json records decision, code, revisions and row, not row ids, and passes
-  unchanged.
-  CHECKS. A differential of the tree against f10dd26 over 100 gate reads (five leaves, two
-  deadman settings, five verbs, with and without force) finds every kind, ignored set and
-  refusal equal, and the rows equal under host.08 and host.09 to host.25 (eight cells). A
-  test pins f10dd26's gate as a table of its 30 distinct cells (kind, row and refusal per
-  leaf and event), recorded once, and compares the 100 reads with it under that mapping,
-  with the instance and the row unmoved. The completeness table (34 cells) names
-  host.25 at both reinstate cells by value. The per-input revision table (1,120 inputs) is
-  unchanged. A rejected host command now records no hit, since the read records none; the test
-  of the rejected verbs reads the row through `host_move` and checks the hit on a fork's
-  dispatch. So the refusal rows .13 to .21 are reached by the completeness table and the
-  exhaustive walk, and by the apply's refusal of a decided input, not by rejected commands. The
-  transition gate holds `host` at 25 of 25. A gap the gate meets now raises on the store's
-  executor, so its error lists the store's recent host microsteps where the scratch
-  executor's listed none; the text goes to stderr and is not stored.
+  tests/host_revisions.json records decision, code, revisions and row, not row ids.
   THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235). The constant covers the derivation of
   oracle state from an identical log. The merged row is internal: as before, the apply writes
   nothing and no revision moves. The gate's verdict is the same for every input, and no stored
   `HostState` changes.
-  REVIEW. Semantic class (rows of a §16 machine and a frozen sentence of §16): one Opus
-  reviewer and one Codex Astra pass. Codex found no production-path defect and named the
-  read's boundaries above (an unprojected dispatch, a reentrant call, a removed instance) and
-  the coverage consequence, which CHECKS states. Opus, over 6,720 gate reads against f10dd26,
-  found rows differing only where host.08 and host.09 became host.25, and no blocker or major;
-  its small items: R1 (the boundaries unstated: stated in the docstring and above), R2 (the
-  read's test compared the engine with itself: it now pins f10dd26's gate as a table), R3 (the
-  gap error's text: stated), R4 (the retired-id test skipped branch ids: covered), R5 (two
-  docstrings named two of four rebuilders: all four), R6 (host-routing.md's test list: the new
-  tests named). Opus confirmed R1 to R6; its two nits (a comment line over 100 columns, and a
-  CHECKS sentence that credited the fork dispatch's hits, which go to a private directory) are
-  fixed at landing.
 - DL-376 Every write of `host` is an intent the chart reports: each leaf's entry action reports
   the state write, the moving rows' actions report the row's other writes, and the apply carries
   out the outcome's intents in order after the dispatch; the leaf ladder of `apply_host_command`
   and `quarantine_host`'s early return are gone
-  (2026-10-17; src/dsl41/oracle_state.py, src/dsl41/runner_hosts.py; tests/test_host_chart.py,
-  tests/test_engine_machines.py, tests/test_runner_leadership.py; docs/statechart-engine.md §16;
-  docs/blocks/host-routing.md; docs/state-machines.md (generated))
-  THE AIM. Steps 4 and 1 of the chart simplification on `host` (charts ruling, slice S4b;
-  explorer 1 H1, H4; explorer 3's "4 is available with work"). After the dispatch the apply read
-  the active leaf and picked the write: an unchanged leaf returned, `quarantined` called
-  `quarantine_host`, `evicted` called `evict_host` with `forced_by` from `cmd.force`, anything
-  else called `set_host_state`. The row notes of host.05, .07, .10 and .11 described these
-  writes, but only that ladder connected a row to its write. No outcome changes: no decision,
-  code, revision, row or wire text moves.
-  THE RULE. A state's write is its entry action (DL-366); a row's own writes are its action.
-  Every action reports and nothing writes inside the chart (§5 step 5). This reopens DL-333's
-  apply, which read the leaf after the microstep and wrote the row through the store's verbs:
-  the chart now names each write, and the apply only carries out what the outcome reports.
+  (2026-10-17; src/dsl41/oracle_state.py, src/dsl41/runner_hosts.py; statechart-engine §16;
+  docs/blocks/host-routing.md)
+  THE RULE. Steps 4 and 1 of the chart simplification, on `host`: a state's write is its entry
+  action (DL-366); a row's own writes are its action. Every action reports and nothing writes
+  inside the chart (§5 step 5). After the dispatch the apply read the active leaf and picked the
+  write: an unchanged leaf returned, `quarantined` called `quarantine_host`, `evicted` called
+  `evict_host` with `forced_by` from `cmd.force`, anything else called `set_host_state`. The row
+  notes of host.05, .07, .10 and .11 described these writes, but only that ladder connected a row
+  to its write. This reopens DL-333's apply, which read the leaf after the microstep and wrote the
+  row through the store's verbs: the chart now names each write, and the apply only carries out
+  what the outcome reports. No outcome changes: no decision, code, revision, row or wire text
+  moves.
   THE INTENTS. Three frozen dataclasses beside the chart: `HostEntered(state)`,
   `HostRemembered(state)` and `HostEvicted(forced_by)`. The leaves `active`, `passive`,
   `quarantined` and `evicted` declare one entry action, `writes_state`, which reports
@@ -24442,6 +24046,9 @@ relitigate an entry; append a new one.
   `HostEvicted` with the actor its event carries. One `HostEvicted` per eviction, so one
   generation bump. The choice reads the remembered state before anything is applied, since
   nothing is applied inside the dispatch. The internal rows .01, .04, .06 and .25 report nothing.
+  REJECTED: a separate forget intent, with leaf writes that keep the memory. A routed row holding
+  a stale quarantine memory would then keep it under drain or activate, where the old write
+  cleared it; no command sequence makes such a row, but a seal carries the field.
   THE PAYLOAD. `host_event(cmd, actor=...)` puts the input's `claimed_actor` on every
   dispatched host event; the actor is keyword-only with no default, and the gate's read passes
   None. The force is the event's name, `force_evict`, not a payload field: host.11 fires only on
@@ -24454,82 +24061,44 @@ relitigate an entry; append a new one.
   generation bump and the attribution). An intent with no verb is a `StatechartError`. The state
   is written after the dispatch, so `_replace_host`'s check that a written state is the
   instance's leaf stays and holds. `quarantine_host` is gone, and with it its early return on a
-  quarantined row (H4): host.06 is internal and reports nothing. `HOST_STATES` lost its only
-  reader and is gone.
+  quarantined row: host.06 is internal and reports nothing. `HOST_STATES` lost its only reader
+  and is gone. A fork binds each host instance's data to the twin's rows (DL-339), so the
+  actions read the twin's row.
   THE GATE. The gate's read is `resolve`, which runs no action and no entry, so a read reports
   no intent and nothing reaches the row through a rejected command.
-  CHECKS. The chart keeps its 21 rows, two branches and two guards and gains four actions;
-  `well_formed` and `chart_warnings` pass; the transition gate holds `host` at 25 of 25.
-  tests/host_revisions.json is unchanged and every one of its 1,120 records is equal; it pins a
-  repeated quarantine as revision-neutral and a reinstatement as `passive` with the memory
-  cleared. A differential of the tree against HEAD over 1,600 cells (every state, a memory of
-  none or any of the four states, `forced_by` set or not, two generations, by every verb with
-  and without force and actor) compares the whole row, the commit list, the revision delta, the
-  configuration and the error class: 0 differ, 1,280 of them on a row with a memory, 640 raise
-  on both sides. A parametrized test plants six wrong writes and requires each to break the
-  revision table: remembering `active` always, remembering nothing, a leaf write that keeps the
-  memory, a force attributed to nobody, a second bump on host.10, and host.10 attributed to the
-  event's actor. New tests: on a bare executor restored at each of the five witnesses, every
-  event's one outcome carries its row's intents, then its entry's, and a cell with no move
-  carries none, with the row unwritten; the initial entry reports nothing; the gate's read
-  reports no intent and moves no row or revision for every verb with and without force at every
-  witness, and an admitted command's apply moves the revision exactly where its cell has
-  intents; a forced eviction records its actor, a gated one none, each bumping the generation
-  once. The repeated-quarantine and state-write tests drive the apply and `set_host_state`,
-  since `quarantine_host` is gone. A fork binds each host instance's data to the twin's rows
-  (DL-339), so the actions read the twin's row; the fork test checks that a reinstatement on the
-  twin clears the twin's memory and leaves the source's.
-  THE CONTRACTS. statechart-engine §16's host paragraph said the row's state is written from
-  its leaf; it now says the leaf's entry reports the state write, the rows' actions the other
-  writes, the initial entry nothing, and the apply carries out the intents in order. §4 and §5
-  are applied, not changed. The host-routing card says the same.
+  THE CONTRACTS. statechart-engine §16's host paragraph says the leaf's entry reports the state
+  write, the rows' actions the other writes, the initial entry nothing, and the apply carries out
+  the intents in order. §4 and §5 are applied, not changed. The host-routing card says the same.
   THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235): no accepted input derives
-  differently, and the revision table is equal. No stored or wired name moves: the store, the
-  seal and the LIST answer carry `HostState` values (protocol-evolution §6), which are
-  unchanged; the intents and the event's payload are never stored, and the actor was already
-  journaled with the input.
-  REVIEW. Semantic class (the effects of a §16 machine's rows move into its actions and
-  entries; DL-333 reopened): one Opus reviewer and one Codex Astra pass, two rounds. Round 1
-  found the same difference from both: a routed row holding a stale quarantine memory kept it
-  under drain or activate where HEAD's write cleared it; no command sequence makes such a row,
-  but a seal carries the field (Codex item 1; Opus O2, 128 of 1,600 cells). Ruled: the memory
-  is quarantine's own, so every leaf's write but `quarantined`'s clears it, and the separate
-  forget intent went. Opus's other items: O1 (two lines over 100 columns: wrapped), O3 (the
-  planted-wrong-action probe was a report: it is a test of six plants), O4 (the actor had a
-  default: keyword-only, none), O5 (a sentence said every host event where the gate's read
-  carries none: "every dispatched host event"). Codex's other probes (the intent order, the
-  revision count under two or three field writes, the initial entry on every path, a replayed
-  forced eviction with no actor, an action on a row that forbids one) found nothing. Round 2:
-  Opus and Codex each re-ran their comparisons against HEAD and confirmed the fixes.
+  differently, and the revision table (tests/host_revisions.json) is equal. No stored or wired
+  name moves: the store, the seal and the LIST answer carry `HostState` values
+  (protocol-evolution §6), which are unchanged; the intents and the event's payload are never
+  stored, and the actor was already journaled with the input.
 - DL-377 The seal boundary's exit is its final state's entry action: `sealed`, `aborted` and
   `stopped` each report the one `SealExit` of their state, and `stopped` notes DL-274's flag
   only in doubt; seal_boundary.05 and .07 are one row, .13, under `stops`; `_past_ponr` calls
   `stops_by_type`
-  (2026-10-17; src/dsl41/runner_seal.py, src/dsl41/runner.py; tests/test_seal_boundary_chart.py,
-  tests/seal_boundary_cells.json (new), tests/test_exhaustive_engine.py;
-  docs/blocks/seal-and-lineage.md; docs/state-machines.md (generated),
-  docs/chart-lifecycles.md (generated))
-  THE AIM. Steps 4, 5 and 7 of the chart simplification on `seal_boundary` (charts ruling,
-  slice S5; explorer 2 F6, F9 and F12; explorer 3's probe of 153 in-flight cells). Each exit
-  row's action reported the verdict of the state the row entered, so three rows to `stopped`
-  carried two copies of one verdict and a third with a note. .05 and .07 made the same move
-  with the same action under two guards. No outcome changes: every cell reaches the leaf it
-  reached and carries the intents it carried, and no reply, code, exit code or wire text moves.
-  THE RULE. A state's verdict is its entry action (DL-366); a rule is written once (DL-368);
-  a condition the rule reads has a name (DL-370). This reopens one sentence of DL-327, which
-  says of an action that "it reports one exit intent": the final state's entry reports it,
-  and the exception rows' partition stays total and exclusive. DL-327's stated limit, "an
-  identity key, no entry action", still holds where it applies: the initial entry runs no
-  action, and only the finals have entries.
+  (2026-10-17; src/dsl41/runner_seal.py, src/dsl41/runner.py; docs/blocks/seal-and-lineage.md;
+  statechart-engine §4, §16)
+  THE RULE. Steps 4, 5 and 7 of the chart simplification, on `seal_boundary`: a state's verdict
+  is its entry action (DL-366); a rule is written once (DL-368); a condition the rule reads has a
+  name (DL-370). Each exit row's action reported the verdict of the state the row entered, so
+  three rows to `stopped` carried two copies of one verdict and a third with a note. .05 and .07
+  made the same move with the same action under two guards. No outcome changes: every cell
+  reaches the leaf it reached and carries the intents it carried, and no reply, code, exit code
+  or wire text moves. This reopens one sentence of DL-327, which says of an action that "it
+  reports one exit intent": the final state's entry reports it, and the exception rows'
+  partition stays total and exclusive. DL-327's stated limit, "an identity key, no entry
+  action", still holds where it applies: the initial entry runs no action, and only the finals
+  have entries.
   THE CHART. `sealed` enters with `answer`, `aborted` with `abort` and `stopped` with `stop`;
   no row carries an action. `stop` reports `SealExit("stop", note)`, where the note is
   DL-274's only when `_in_doubt` holds, read from the `SealFault` on the entering event, and
   names the first flag set: the attempt applying, then the unadmitted input, then the
   unfinished append. Past the point of no return, and with the fence lost, the note is empty,
   as `stop` gave before. No separate note intent. The exception rows are .04 `reversible`,
-  .13 `stops` and .06 `in_doubt`; .13 takes .05's cite, which includes .07's. 11 rows become
-  10, 5 guards 4, 4 actions 3. The region inside `in_flight` is `progress`, so the two regions
-  no longer share the name `phase` (F12).
+  .13 `stops` and .06 `in_doubt`; .13 takes .05's cite, which includes .07's. The region inside
+  `in_flight` is `progress`, so the two regions do not share the name `phase`.
   THE GUARDS. `stops` is `_past_ponr(ctx) or _fence_lost(ctx)`, a one-line definition in the
   code's test order. `_past_ponr` calls `stops_by_type` in place of its own `isinstance`.
   Every fact the guards read is in the `SealFault` the engine builds before the post, so
@@ -24552,75 +24121,45 @@ relitigate an entry; append a new one.
   the only wire text, `SealInFlight`'s, names the leaf the boundary is in: `requested`,
   `frozen`, `committing` or `sealed`, which the tests pin and which are unchanged. Region
   names are stored nowhere.
-  CHECKS. `well_formed` and `chart_warnings` pass. A table of all 306 cells (six leaves by
-  three lifecycle events and 48 exception partitions), recorded once from 395baba's
-  declaration as tests/seal_boundary_cells.json, is compared cell by cell: 0 differ in outcome
-  count, kind, intents (verdict and note) or leaf, the six out-of-order cells still raise
-  `UnhandledEvent`, and the rows are equal under .05 and .07 to .13. Of the 306, 153 are in
-  flight. New tests: on a bare
-  executor the post that enters each final state answers one outcome whose only intent is the
-  entry's `SealExit`; the stop past the point of no return and with the fence lost carries no
-  note over six fault shapes; the exception rows, the entries and the retired ids are pinned. The
-  completeness table names .13 for both stop cases, each still its own case. The exhaustive
-  walk's 13 cells keep their phases and notes, with .13 in place of .05 and .07. The
-  transition gate holds `seal_boundary` at 23 of 23 items, three fewer than HEAD's 26: one
-  row and its two guard outcomes. So the gate no longer counts each stop cause's truth
-  separately: a lost fence alone can make `stops` true. The pinned cell table holds both
-  causes, 48 cells each (.05's and .07's at 395baba), and a mutant of `stops` that drops
-  `BoundaryFailStop` fails it, as one that drops the fence does.
   THE CONTRACTS. statechart-engine §16's seal paragraph is unchanged; §4 is applied, not
   changed. The seal-and-lineage card says the final state's entry reports what the engine does
   next.
   THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235). The constant covers the derivation of
   oracle state from an identical log; the seal chart derives nothing from the log, and its
   configuration is never persisted.
-  REVIEW. Semantic class (rows and actions of a §16 runner machine; one sentence of DL-327
-  reopened): one Opus reviewer and one Codex Astra pass. Codex found no correctness defect on
-  five probes (the note rule over all 32 flag combinations against the old actions, the entry's
-  payload and lifetime, `_seal_exit`'s single outcome and intent, the pinned table's content,
-  the gate's items) and named the coverage limit CHECKS states. Opus ran its own differential,
-  1,314 cells with 0 differing, regenerated the pinned table from the base and found it equal,
-  killed three mutants, and found no blocker or major; its items: O1 (a comment called `stops`
-  a conjunction: reworded), O2 (DL-327 misquoted: quoted), O3 (a leaf of the socket text
-  omitted: named), O4 (a spy's docstring claimed a check it did not make: the check made), O5
-  (a vacuous assertion and a doubled cell run: removed), O6 (the predicates' docstrings repeated
-  `stops`'s prose: their own fact only), O7 and O8 (the gate's lost items and "six flag sets":
-  stated as they are). Opus confirmed O1 to O8.
+  LIMIT. The transition gate does not count each stop cause's truth separately: a lost fence
+  alone can make `stops` true. The pinned cell table holds both causes, and a mutant of `stops`
+  that drops either cause fails it.
 - DL-378 Teardown's ownership is the chart's: a teardown row per source state, in three ownership
   classes, each row reporting its class's unlink; the start verdict is one named function posted
   once; the retry of an errored SHUTDOWN wait is two internal rows that report the flush before the
   drain
-  (2026-10-17; src/dsl41/runner_supervisor.py; tests/test_supervisor_process_chart.py,
-  tests/supervisor_process_cells.json (new), tests/test_exhaustive_process.py,
-  tests/test_runner_supervisor.py; docs/state-machines.md (generated),
-  docs/chart-lifecycles.md (generated))
-  THE AIM. Steps 1 and 7 of the chart simplification on `supervisor_process` (charts ruling, slice
-  S6; explorer 1 P1, P3 and P4; explorer 2 F8 and F12; the Codex probe's item on S6). `_teardown`
-  read the leaf to decide which paths it unlinked, and rows .10 and .11 carried notes only. The
-  start verdict was a tree posted from three sites. The flush before a retried wait was a state
-  test, and .12 was an external self-transition with no entry or exit. No reply, code, exit code,
-  timing or wire text moves.
-  THE RULE. A decision in a handler is a row (step 1); a condition the rule reads has a name (step
-  7, R9: the verdict tree stays one function and the guards compare its label). This supersedes five
-  sentences of DL-328: "`term` moves `up` to `shutting_down`"; "`teardown` moves `ended` and `open`
-  to `closed`"; "the flush of an errored SHUTDOWN answer stays tier code keyed on the state before
-  the post"; "three grouping states keep the old multi-source rows single", since of `up`, `ended`
-  and `open` only `up` stays a source (.31); and "it returns the intent the tier carries out, a
-  refusal that ends the process with exit 1 or the drain", since the intents are now five: refuse,
-  flush, drain and the two unlinks. A row whose source is the leaf can say what the leaf owns, which
-  DL-328's grouped rows could not.
-  THE CHART. Teardown is five rows to `closed`, one per source state in three ownership classes: .31
-  `up` and .32 `stopped` report `unlink_published`, .33 `bound` reports `unlink_private`, and .34
-  `starting` and .35 `refused` report nothing. The teardown procedure is in the prose the docs
+  (2026-10-17; src/dsl41/runner_supervisor.py; supervisor-protocol §5; statechart-engine §5, §16)
+  THE RULE. Steps 1 and 7 of the chart simplification, on `supervisor_process`: a decision in a
+  handler is a row (step 1); a condition the rule reads has a name (step 7, R9: the verdict tree
+  stays one function and the guards compare its label). `_teardown` read the leaf to decide which
+  paths it unlinked, and rows .10 and .11 carried notes only. The start verdict was a tree posted
+  from three sites. The flush before a retried wait was a state test, and .12 was an external
+  self-transition with no entry or exit. A row whose source is the leaf can say what the leaf
+  owns, which DL-328's grouped rows could not. No reply, code, exit code, timing or wire text
+  moves. This supersedes five sentences of DL-328: "`term` moves `up` to `shutting_down`";
+  "`teardown` moves `ended` and `open` to `closed`"; "the flush of an errored SHUTDOWN answer
+  stays tier code keyed on the state before the post"; "three grouping states keep the old
+  multi-source rows single", since of `up`, `ended` and `open` only `up` stays a source (.31); and
+  "it returns the intent the tier carries out, a refusal that ends the process with exit 1 or the
+  drain", since the intents are now five: refuse, flush, drain and the two unlinks.
+  THE CHART. Teardown is five rows to `closed`, one per source state in three ownership classes:
+  .31 `up` and .32 `stopped` report `unlink_published`, .33 `bound` reports `unlink_private`, and
+  .34 `starting` and .35 `refused` report nothing. The teardown procedure is in the prose the docs
   render: the two unlink actions' docstrings name the bounded flush, the dropped connections, the
   closed listener, the checked unlinks, the lifelines and the lock, and exit 1 after an error (7
   for a statechart error, which tears down through .31, .33 or .34 and then returns 7); the notes
-  of .34 and .35 name the lock and the exit. `.12` (`shutting_down + pass_ended`) is internal,
-  and .36 (`shutting_down + term`) is a new internal row; both take the action `retry`, which
-  reports FLUSH then DRAIN. .06 keeps its id and narrows its source from `up` to `serving`, the one
-  cell it still takes, so no inner row overrides it. .01 and .02 stay two rows (R-F8). 30 rows
-  become 34, 2 actions 5, 7 guards unchanged. The nested regions are `stage` (in `open`), `service`
-  (in `up`) and `outcome` (in `ended`), so no two share the name `phase` (F12).
+  of .34 and .35 name the lock and the exit. `.12` (`shutting_down + pass_ended`) is internal, and
+  .36 (`shutting_down + term`) is a new internal row; both take the action `retry`, which reports
+  FLUSH then DRAIN. .06 keeps its id and narrows its source from `up` to `serving`, the one cell it
+  still takes, so no inner row overrides it. .01 and .02 stay two rows (R-F8). The nested regions
+  are `stage` (in `open`), `service` (in `up`) and `outcome` (in `ended`), so no two share the name
+  `phase`.
   THE START. `_start_fact` holds the tree in its order: the lock, the private-socket sweep, the
   owner's presence, the reclaim of the published path, the private bind; it returns LOCK_HELD,
   OWNER_LIVE or FREE. `_owner_present` is its named test: three PING attempts across a second, then
@@ -24645,49 +24184,13 @@ relitigate an entry; append a new one.
   RETIRED IDS. .10 and .11 retire for good (DL-364); .31 to .36 are the next ids. Nothing of the
   process chart is stored or sent: its configuration lives in memory, and the wire carries verbs,
   codes and answers, all unchanged. Region names are stored nowhere.
-  CHECKS. `well_formed` and `chart_warnings` pass. A table of all 220 cells (ten witnesses by every
-  event and partition), recorded once from ec4ecbd's declaration as
-  tests/supervisor_process_cells.json, is compared cell by cell: the 124 that raised still raise,
-  and every other cell keeps its outcome count, kind, ignored rows, refusal codes, intents and
-  configuration, except eleven declared cells: the nine teardown cells take their class's row and
-  intent, and the two retry cells report FLUSH and DRAIN. New tests: the teardown and retry rows and
-  the retired ids are pinned; one test per ownership class shows the right paths unlinked and a
-  decoy at the other path kept. In the `bound` test the decoy is a hard link to the private socket,
-  so it passes the published unlink's inode check and only the class keeps it: a mutant .33 that
-  also reported the published unlink was run once and failed the test. A refused start's
-  `SystemExit` has the `LockHeld` as its cause. A refused SHUTDOWN keeps the latch; a TERM during a
-  successful wait is a no-op at `stopped`; a TERM latched before a SHUTDOWN whose wait fails is
-  retried by .12 with the answer sent first, and the wait runs twice, not three times; a TERM
-  between the retry's flush and its wait stays latched and the wait runs once and ends the process;
-  in `run()` the loop then exits and teardown runs from `stopped`, so the loop posts no TERM, and
-  the test posts the latched TERM by hand to show .09 runs nothing. The §5 completeness table names
-  the new rows. The exhaustive walk keeps its enumeration and its seventeen state-and-row pairs
-  under the new ids. The transition gate holds `supervisor_process` at 77 of 77 items, four more
-  than HEAD's 73: six unguarded rows in, two out.
   THE CONTRACTS. supervisor-protocol §5 and statechart-engine §16 are unchanged; §5 of the engine is
   applied: the intents are carried out after the run.
   THE VERSION. STATE_MACHINE_VERSION stays 24 (DL-235). The constant covers the derivation of oracle
   state from an identical log; the supervisor's process chart derives nothing from the log, and its
   configuration is never persisted.
-  REVIEW. Semantic class (rows and actions of a §16 runner machine; five sentences of DL-328
-  superseded; the supervisor protocol's wire unchanged): one Opus reviewer and one Codex Astra
-  pass. Codex found no blocker: the teardown's paths, checks and order equal from every leaf,
-  the start's order and one post unchanged, the wire unchanged, the 220-cell table reproduced
-  from the base with exactly the eleven declared cells differing; it asked for the lock-held
-  cause chain back (the engineer had dropped it with the start tree: restored, with a test;
-  the `SystemExit`'s `__context__` is None where the handler's raise set it to the `LockHeld`,
-  a difference no reader has and the suppressed context hides, a stated limit) and
-  for the entry to state that the retry's post now precedes the flush. Opus, over a 576-cell
-  differential and nine start and teardown scenarios on real supervisors, found no blocker or
-  major; its items: O1 (the bound teardown test's decoy survived by the inode check, not by its
-  class: the decoy is a hard link, and the mutant row fails the test), O2 (two more DL-328
-  sentences superseded: named), O3 ("one row per class" over-claimed: a row per source state
-  in three classes; the post right after the bind is FREE's), O4 (the teardown procedure's
-  prose had left the rendered docs: in the actions' docstrings and the notes), O5 (the post
-  before the flush: stated), O7 (a TERM between the flush and the drain untested: tested).
-  Round 2: Opus confirmed O1 to O7 and re-ran the mutant, and found two wording items (an exit
-  code stated for the wrong case; a test docstring that credited the loop with a post it does
-  not make), fixed and confirmed in round 3; Codex confirmed its two items.
+  LIMIT. The refusal's `SystemExit` has `__context__` None, where the handler's raise set it to the
+  `LockHeld`: a difference no reader has, and the suppressed context hides it.
 - DL-379 An entry holds the decision and its reasons, and the process record lives in the PR;
   entries from DL-380 on have a line ceiling, and the entries from DL-324 on are compressed to
   the form in tranches, each under a lost-reason review

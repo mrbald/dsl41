@@ -130,14 +130,14 @@ whose rows carry no actions (`runtime_assembly`) gets 5 and the view only.
 7. **A condition the rule reads has a name.** Name the tree's tests; one gate order in one function;
    a guard that is another's negation or conjunction is a one-line definition calling the shared
    predicate, with the operands in the code's test order, never a combinator that sets `__name__`
-   (DL-370 and its review).
+   (DL-370, REJECTED).
 8. **A phase whose decision is a chart row is a state.** First decide who owns the sequence: a phase
    of one instance's lifecycle becomes a region under its status with an entry action per phase and
    completion rows that decide; orchestration across instances becomes its own coordinator chart
    with one instance, whose record is the payload every completion carries (R11, DL-372). Only a
    phase that waits for a cascade is a state; a decision that waits for nothing is a choice,
-   resolved inside the microstep, or it costs an item per turn and moves the item cap (DL-372's
-   review, R13). For the region form: keep distinct visits distinct
+   resolved inside the microstep, or it costs an item per turn and moves the item cap (DL-372,
+   REJECTED, R13). For the region form: keep distinct visits distinct
    (override-only, fold-only, full); build each phase's facts at its entry, and reading them before
    the phase begins is an error; no external row from the status into its own region (it would
    repeat the status write); and only when the entries only read and the entering rows send nothing
@@ -157,7 +157,7 @@ whose rows carry no actions (`runtime_assembly`) gets 5 and the view only.
 - **A `stay` branch on choices** (R4): a choice resolves after the exits, so its guards see a
   configuration without the source; writer dispatch keys on the rows an outcome fired, which a
   branch is not; ignored rows yield to a sibling region's row.
-- **Guard combinators** that set names and docstrings by hand (DL-370's review): tracebacks and the
+- **Guard combinators** that set names and docstrings by hand (DL-370, REJECTED): tracebacks and the
   registry lose the real name; a swapped string passes validation.
 
 ## 4. The loop per step
