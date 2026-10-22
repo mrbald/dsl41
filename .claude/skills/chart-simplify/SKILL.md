@@ -41,8 +41,9 @@ with no other agent running coverage in the checkout.
   rejection of a marked row before the step relies on it.
 - The version constant moves by DL-235 alone.
 - Review class by CLAUDE.md: semantic when rows, events, a frozen rule or the
-  oracle's writes change (one Claude reviewer and one Codex pass); otherwise one
-  Claude reviewer (DL-370 was the second kind). Each reviewer attacks with
+  oracle's writes change (one Opus reviewer and one Astra pass); otherwise one
+  Opus reviewer (DL-370 was the second kind). CLAUDE.md "Self-review" sets the
+  classes and the fallback. Each reviewer attacks with
   constructed input sequences, or with random fact vectors over the guards when
   only guard bodies changed, and a differential run of HEAD against the tree;
   the reviewer that raised a finding confirms its fix; three rounds at most.
@@ -77,7 +78,8 @@ other state is still state if an interval exists where the derivation does not
 hold (the holding region: a terminal job is `reserved` until settled).
 
 Rank the findings by harm to readability and write the steps as a table with
-size and what each reopens. Probe the structural rulings with Codex before the
+size and what each reopens. Probe the structural rulings with Codex (Astra,
+`gpt-6-astra`) before the
 first brief; on the `job` chart the probe reversed two of four.
 
 Which steps apply: 1, 5, 6 and 7 fit any chart with rows and guards; 2 and 8

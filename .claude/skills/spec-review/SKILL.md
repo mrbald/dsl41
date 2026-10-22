@@ -92,7 +92,8 @@ Then a fresh adversarial review of the new text against the code, by an
 Opus reviewer that writes its findings to a scratch file and reports a
 ranked table. It hunts, in this order: false claims against the code,
 present facts dropped, history that survived, broken links or section
-references. A frozen contract also gets a Codex read-only review. Rule on
+references. A frozen contract also gets the Astra pass CLAUDE.md
+"Self-review" requires for the semantic class. Rule on
 every finding before the commit.
 
 ## Step 5: delivery and stamp

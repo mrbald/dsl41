@@ -88,13 +88,19 @@ All ten compiler phases in DL-03 are implemented; their order remains normative.
 
 ## Boss and peer work
 
-The boss uses the configured top-level model and effort.
-It sends a single hard ruling to a stronger model in a read-only advisor
-role, instead of raising the whole session (DL-262).
-It chooses the model, effort, and delegation for other work.
-Use both vendors' frontier models for the highest-impact exploration,
-planning, and review.
-For review, that is the semantic class under "Self-review".
+The boss uses the configured top-level model and effort. A Claude boss
+runs Opus 5.5 at `high` (DL-262); a Codex boss runs at the setting in
+`.codex/config.toml`.
+It sends a single hard ruling to Fable in a read-only advisor role,
+instead of raising the whole session (DL-262, DL-395).
+Sol (`gpt-6.1-sol`) at `xhigh`, run by `codex exec` in the workspace-write
+sandbox, builds bounded, low-risk edge code with a settled design. Its
+observed strength is reusing established designs and libraries. Opus keeps
+design-sensitive and core work (DL-395).
+The boss chooses the model, effort, and delegation for other work.
+Use both vendors for the highest-impact exploration, planning, and review.
+For review, that is Opus and Astra in the semantic class under
+"Self-review". Fable only advises; it reviews nothing.
 Exchange independent findings before reconciling material disagreements.
 Use `docs/agent-workflow.md` for CLI recipes and review handoffs.
 
@@ -119,21 +125,31 @@ load.
 ## Self-review
 
 Run an adversarial review before committing a change in one of these
-classes. The class sets the reviewers (DL-262):
-- Semantic class, at any size: one Claude reviewer subagent and one Codex
+classes. The class sets the reviewers, whoever built the change (DL-262,
+DL-395). A reviewer-grade model is Opus 5.5 or Astra (`gpt-6-astra`), at the
+round efforts DL-262 sets.
+- Semantic class, at any size: one Opus reviewer subagent and one Astra
   pass. It covers a change to what a compiled or run estate does: lowering,
   the oracle, the runner, the scheduler, or calendars. It also covers any
   version constant, any rule `docs/` freezes, and instruction policy. The
   frozen rules are the runner contracts listed under "Read for the task"
   and the rules DL-225 names.
-- Any other multi-file change: one Claude reviewer subagent. Examples are a
-  refactor that keeps behavior, tests, docs, tooling, and the browser or TUI
-  front ends.
-- In addition, slices built apart and integrated together get one Codex
+- Any other multi-file change: one Opus reviewer subagent. Examples are a
+  refactor that keeps behavior, tests, docs, tooling, and the browser or
+  TUI front ends.
+- In addition, slices built apart and integrated together get one Astra
   pass over what the integration changed. Each slice keeps its own review.
 
+When a named reviewer's vendor is out of budget, a reviewer-grade model of
+the other vendor stands in. In the semantic class, that is a second fresh
+model of the vendor with budget. If both vendors are out, the change waits.
+A vendor is out of budget only when its quota is used up and the change
+cannot wait for the reset. The PR, or the review record when there is no
+PR, states both and names the stand-in. If the vendor of a finding's raiser
+is out of budget, the stand-in confirms the fix, and the record names it.
+
 Count review rounds per change, three at most.
-Only the reviewer that raised a finding confirms its fix.
+Only the reviewer that raised a finding, or its stand-in, confirms its fix.
 A material finding still open after round three goes to the owner.
 From round two on, a finding may become a stated limit instead of a fix.
 It qualifies only when it needs a deliberately hostile operator or an
