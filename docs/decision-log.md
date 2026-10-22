@@ -24001,3 +24001,39 @@ relitigate an entry; append a new one.
   ends uncertain, and no unverified process is signalled. Samples are at
   least 0.25 seconds apart, and each KILL takes its own sample first. A
   longer interval only widens that lost-identity window, which ends uncertain.
+- DL-395 Opus reviews multi-file changes, Astra joins semantic and integration ones, Sol builds
+  bounded edge code, and Fable only advises (2026-10-21; CLAUDE.md "Boss and peer work" and
+  "Self-review"; docs/agent-workflow.md; .claude/skills/chart-simplify and spec-review)
+  THE RULE. A Claude boss stays Opus 5.5 at `high` (DL-262); a Codex boss runs at the Codex
+  setting. An ordinary multi-file change gets one Opus reviewer, whoever built it. The semantic
+  class gets one Opus reviewer and one Astra (`gpt-6-astra`) pass, whoever built it. An
+  integration gets one Astra pass. When a named reviewer's vendor is out of budget, a
+  reviewer-grade model of the other vendor stands in; in the semantic class, a second fresh model
+  of the vendor with budget. With both vendors out, the change waits. Out of budget means the
+  quota is used up and the change cannot wait for the reset. The PR, or the review record, states
+  both and names the stand-in, which also confirms that reviewer's fixes. Sol (`gpt-6.1-sol`) at
+  `xhigh` builds bounded, low-risk edge code with a settled design; Opus keeps design-sensitive
+  and core work. Fable reviews nothing; it advises on single hard rulings.
+  THE EVIDENCE. The owner's review records: prod-runner-2026-10-07 and the folders the
+  unique-catch ledger of 2026-10-21 cites. In the ledger's pairs (same slices, not always the same
+  revision), Opus caught 15 serious defects that Codex missed. Codex caught 11 that Opus missed,
+  only 4 of them serious (OC2, OC6, OC24, OC31: two error paths, a durable-state commit, a
+  concurrency case); 17 were shared. Opus caught 20 that Fable missed, Fable 4 that Opus missed.
+  In prod-runner, 10 of 98 Opus reviews, 2 of 55 Fable reviews and 5 of 30 Codex passes named a
+  blocker (grep counts). Caveats: OC12 was found on a later revision than Opus saw, OC21's matches
+  are unverified, the slices were picked for risk, and the vendors saw different populations. So
+  Opus is the one reviewer on every multi-file change. Codex's four serious catches are of the
+  kinds semantic changes carry, and the owner observes Codex catching complex defects that Claude
+  misses, so those passes keep Astra. Sol's strength, reusing established designs and libraries
+  (the explorer redesign reused Airflow and Dagster patterns), is the owner's observation, not a
+  measurement.
+  REJECTED: a cross-vendor reviewer on every ordinary change, because the counts favor Opus there;
+  Fable as a second reviewer, for 4 catches against Opus's 20.
+  WHAT IT NARROWS. DL-262's "Any other multi-file change gets one Claude reviewer" now names Opus.
+  Its "The semantic class keeps both vendors at any size" yields to the fallback, which can give
+  two reviewers of one vendor. Its "a stronger model in a read-only advisor role" is now Fable.
+  Its "Only the reviewer that raised a finding confirms its fix" admits the stand-in. Its Codex
+  integration pass is now an Astra pass. DL-186's "High-impact exploration, planning, and review
+  use both vendors" means, for review, Opus and Astra in the semantic class. DL-262's REVISIT is
+  not discharged: these counts do not compare reviewers per slice on one population. DL-262's
+  round cap and `xhigh`/`high` round efforts stand.

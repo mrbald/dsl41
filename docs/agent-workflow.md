@@ -16,12 +16,13 @@ CI installs with `--locked`, which also checks the lock against `pyproject.toml`
 a stale lock passes `--frozen` locally and fails in CI.
 
 Project model defaults live in `.codex/config.toml` and
-`.claude/settings.json`. A Claude boss runs at the Claude defaults: Opus at
-`high` (DL-262). A Codex boss runs at the Codex setting.
+`.claude/settings.json`. `CLAUDE.md` "Boss and peer work" names the boss
+model and effort for each vendor.
 Codex loads project configuration only in trusted projects.
 Check effective model and effort after a CLI or model upgrade.
 Launch flags, environment, user settings, and managed settings may affect them.
-Record model and effort selections, plus returned identity when exposed.
+The boss records the model and effort it selects for itself and for each
+agent or peer, plus returned identity when exposed.
 If identity is not exposed, record that gap; selection is not server verification.
 Do not silently substitute another model if the requested one is unavailable.
 
@@ -120,7 +121,8 @@ and Firefox. A skipped suite is not validation.
 
 ## Peer review
 
-Use the allocation policy in `CLAUDE.md`.
+Use the allocation policy in `CLAUDE.md`. "Boss and peer work" names the
+models and "Self-review" names each change's reviewers.
 
 Keep scratch files outside the checkout when they may contain private context.
 The brief names the task, evidence paths, exact artifact, allowed paths,
@@ -159,7 +161,7 @@ Keep raw logs in scratch; pass only the verdict and relevant evidence to the bos
 For a read-only Codex peer:
 
 ```sh
-codex exec --sandbox read-only --ephemeral --json \
+codex exec --sandbox read-only --ephemeral --json -m gpt-6-astra \
   -c model_reasoning_effort='"xhigh"' - < brief.md > review.jsonl
 ```
 
@@ -173,6 +175,22 @@ Use `xhigh` for a first review round and `high` for a round that confirms
 fixes (DL-262).
 Use an ordinary persistent session if later resumption is needed.
 Keep existing permission controls. Do not bypass them to make a peer run succeed.
+
+For a Sol implementer (DL-395), put the complete brief in a scratch file:
+
+```sh
+codex exec --sandbox workspace-write --ephemeral --json -m gpt-6.1-sol \
+  -c model_reasoning_effort='"xhigh"' - < brief.md > build.jsonl
+```
+
+Run from the checkout or worktree the slice owns.
+The brief names the allowed paths and the gates to run, as for a peer.
+Drop `--ephemeral` if a rework round will resume the session.
+The workspace-write sandbox may block the uv cache and the network, so the
+gates may need `--add-dir ~/.cache/uv` or a `UV_CACHE_DIR` inside the
+worktree. This is untested.
+The JSON output does not identify the served model; record the selection and
+that gap, as Setup says.
 
 Run commands in the foreground.
 Use a sufficient timeout when the tool exposes one.
