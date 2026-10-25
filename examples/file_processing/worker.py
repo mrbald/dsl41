@@ -9,10 +9,12 @@ import json
 import os
 from pathlib import Path
 import stat
+import sys
 import tempfile
 
 from dsl41.file_processing import (
     Completed,
+    LockBusy,
     Policy,
     ProtocolError,
     Result,
@@ -102,6 +104,15 @@ class CountsHandler:
             temp.unlink(missing_ok=True)
 
 
+# Exit codes (CONTRACT.md "Activation is external"): 1 is a stopped run whose reason
+# is in the ledger. A busy role lock and a refusal are never success and never a
+# stopped run; their values come from sysexits.h. ProtocolError is a ValueError; the
+# library's other ValueErrors reject arguments such as an invalid processor id.
+EXIT_STOPPED = 1
+EXIT_LOCK_BUSY = 75  # EX_TEMPFAIL: the role's lock was busy; nothing ran.
+EXIT_REFUSED = 65  # EX_DATAERR: corrupt, inconsistent or unsupported worker input.
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("role", choices=("archive", "process"))
@@ -112,15 +123,21 @@ def main() -> None:
     parser.add_argument("--batch", choices=("one", "all"), default="all")
     args = parser.parse_args()
     policy = Policy(args.order, args.batch)
-    if args.role == "archive":
-        summary = archive(args.root, args.processor_id, policy)
-    else:
-        summary = process(
-            args.root, args.processor_id, CountsHandler(args.output or args.root / "output"), policy
-        )
+    try:
+        if args.role == "archive":
+            summary = archive(args.root, args.processor_id, policy)
+        else:
+            output = args.output or args.root / "output"
+            summary = process(args.root, args.processor_id, CountsHandler(output), policy)
+    except LockBusy:
+        print(f"{args.role}.lock busy: another {args.role} run owns it", file=sys.stderr)
+        raise SystemExit(EXIT_LOCK_BUSY) from None
+    except ValueError as exc:
+        print(f"{args.role} refused: {' '.join(str(exc).split())}", file=sys.stderr)
+        raise SystemExit(EXIT_REFUSED) from None
     print(json.dumps(asdict(summary), sort_keys=True))
     if summary.stopped:
-        raise SystemExit(1)
+        raise SystemExit(EXIT_STOPPED)
 
 
 if __name__ == "__main__":

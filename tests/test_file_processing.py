@@ -40,6 +40,11 @@ def handler(root: Path) -> CountsHandler:
     return CountsHandler(root / "output")
 
 
+def published(directory: Path) -> list[Path]:
+    """Published entries, without the reserved staging directory."""
+    return sorted(path for path in directory.iterdir() if path.name != fp.STAGE)
+
+
 def test_duplicate_deliveries_and_distinct_original_names(tmp_path: Path) -> None:
     deliver(tmp_path, "001-report.txt", b"first\n")
     deliver(tmp_path, "002-report.txt", b"first\n")
@@ -53,7 +58,7 @@ def test_duplicate_deliveries_and_distinct_original_names(tmp_path: Path) -> Non
     ]
     assert all(row["state"] == "FILE_ARCHIVED" for row in receipts)
     assert report.completed == 3 and report.duplicates == 1
-    assert len(list((tmp_path / "objects").iterdir())) == 2
+    assert len(published(tmp_path / "objects")) == 2
     assert len(query(tmp_path, "SELECT * FROM work")) == 2
     assert fp.process(tmp_path, IDENTITY, handler(tmp_path)).completed == 2
     assert len(list((tmp_path / "output").glob("*.json"))) == 2
@@ -68,7 +73,7 @@ def test_before_archive_and_reruns_are_noops(tmp_path: Path) -> None:
     original = tuple(query(tmp_path, "SELECT * FROM work")[0])
     deliver(tmp_path, "delivery-2", b"one\n")
     assert fp.archive(tmp_path, IDENTITY).duplicates == 1
-    assert not list((tmp_path / "todo").iterdir())
+    assert not published(tmp_path / "todo")
     assert fp.process(tmp_path, IDENTITY, handler(tmp_path)).selected == 0
     assert fp.archive(tmp_path, IDENTITY).selected == 0
     assert tuple(query(tmp_path, "SELECT * FROM work")[0]) == original
@@ -189,10 +194,10 @@ def test_archive_crash_boundaries_converge(tmp_path: Path, stage: str) -> None:
     )
     assert child.returncode == 31, child.stderr
     assert (tmp_path / "inbox" / "delivery").exists()
-    assert len(list((tmp_path / "objects").iterdir())) == 1
+    assert len(published(tmp_path / "objects")) == 1
     receipt = query(tmp_path, "SELECT * FROM receipts")[0]
     assert receipt["state"] == ("FILE_RECEIVED" if stage == "object_published" else "FILE_ARCHIVED")
-    assert bool(list((tmp_path / "todo").iterdir())) == (stage == "todo_published")
+    assert bool(published(tmp_path / "todo")) == (stage == "todo_published")
     fp.archive(tmp_path, IDENTITY)
     assert not list((tmp_path / "inbox").iterdir())
     assert len(query(tmp_path, "SELECT * FROM receipts")) == 1
@@ -203,10 +208,12 @@ def test_archive_crash_boundaries_converge(tmp_path: Path, stage: str) -> None:
 def test_archive_repairs_missing_outbox_without_arrivals(tmp_path: Path) -> None:
     deliver(tmp_path, "delivery", b"data")
     fp.archive(tmp_path, IDENTITY)
-    next((tmp_path / "todo").iterdir()).unlink()
-    (tmp_path / "tmp" / "archive-orphan").write_bytes(b"incomplete")
+    published(tmp_path / "todo")[0].unlink()
+    (tmp_path / "objects" / fp.STAGE / "object-orphan").write_bytes(b"incomplete")
+    (tmp_path / "todo" / fp.STAGE / "todo-orphan").write_bytes(b"incomplete")
     assert fp.archive(tmp_path, IDENTITY).selected == 0
-    assert not list((tmp_path / "tmp").iterdir())
+    assert not list((tmp_path / "objects" / fp.STAGE).iterdir())
+    assert not list((tmp_path / "todo" / fp.STAGE).iterdir())
     assert fp.process(tmp_path, IDENTITY, handler(tmp_path)).completed == 1
 
 
@@ -264,7 +271,7 @@ def test_processor_can_finish_before_crashed_archiver_cleans_source(tmp_path: Pa
     original = tuple(query(tmp_path, "SELECT * FROM work")[0])
     assert fp.archive(tmp_path, IDENTITY).selected == 0
     assert not list((tmp_path / "inbox").iterdir())
-    assert not list((tmp_path / "todo").iterdir())
+    assert not published(tmp_path / "todo")
     assert tuple(query(tmp_path, "SELECT * FROM work")[0]) == original
 
 
@@ -306,7 +313,7 @@ def test_interrupted_running_reconciles_actual_sample_output_once(tmp_path: Path
     assert (report.selected, report.reconciled, report.completed) == (1, 1, 1)
     assert (target.stat().st_ino, target.read_bytes()) == original
     assert query(tmp_path, "SELECT state FROM work")[0][0] == "DONE"
-    assert not list((tmp_path / "todo").iterdir())
+    assert not published(tmp_path / "todo")
 
 
 def test_unknown_external_effect_never_silently_retries(tmp_path: Path) -> None:
@@ -390,7 +397,7 @@ def test_os_lock_overlap_and_release_on_process_death(tmp_path: Path, role: str)
 def test_malformed_or_tampered_todo_refused(tmp_path: Path, tamper: str) -> None:
     deliver(tmp_path, "a", b"a")
     fp.archive(tmp_path, IDENTITY)
-    target = next((tmp_path / "todo").iterdir())
+    target = published(tmp_path / "todo")[0]
     value = json.loads(target.read_text())
     if tamper == "malformed":
         target.write_text("{")
@@ -403,7 +410,7 @@ def test_malformed_or_tampered_todo_refused(tmp_path: Path, tamper: str) -> None
             ]
         ] = {"identity": "0" * 64, "sequence": 999, "path": "../../elsewhere"}[tamper]
         target.write_text(json.dumps(value))
-    with pytest.raises((fp.ProtocolError, json.JSONDecodeError)):
+    with pytest.raises(fp.ProtocolError):
         fp.process(tmp_path, IDENTITY, handler(tmp_path))
     assert query(tmp_path, "SELECT state FROM work")[0][0] == "READY"
     assert not (tmp_path / "output").exists()
@@ -413,7 +420,7 @@ def test_malformed_or_tampered_todo_refused(tmp_path: Path, tamper: str) -> None
 def test_input_object_integrity_before_callback(tmp_path: Path, damage: str) -> None:
     deliver(tmp_path, "a", b"original")
     fp.archive(tmp_path, IDENTITY)
-    obj = next((tmp_path / "objects").iterdir())
+    obj = published(tmp_path / "objects")[0]
     if damage == "wrong":
         obj.chmod(0o644)
         obj.write_bytes(b"wrong")
@@ -432,7 +439,7 @@ def test_input_object_integrity_before_callback(tmp_path: Path, damage: str) -> 
 def test_corrupt_reused_object_and_changed_identity_refused(tmp_path: Path) -> None:
     deliver(tmp_path, "a", b"data")
     fp.archive(tmp_path, IDENTITY)
-    obj = next((tmp_path / "objects").iterdir())
+    obj = published(tmp_path / "objects")[0]
     obj.chmod(0o644)
     obj.write_bytes(b"bad")
     deliver(tmp_path, "b", b"data")
@@ -477,24 +484,24 @@ def test_stale_archiver_read_cannot_republish_done(
     called = False
 
     def complete_before_publish(
-        root: Path, db: sqlite3.Connection, identity: str, key: str
+        root: Path, db: sqlite3.Connection, identity: str, key: str, **seam: fp.Failpoint
     ) -> None:
         nonlocal called
         if not called:
             called = True
             assert fp.process(root, identity, handler(root)).completed == 1
-        original(root, db, identity, key)
+        original(root, db, identity, key, **seam)
 
     monkeypatch.setattr(fp, "_publish_todo", complete_before_publish)
     fp.archive(tmp_path, IDENTITY)
-    assert called and not list((tmp_path / "todo").iterdir())
+    assert called and not published(tmp_path / "todo")
     assert fp.process(tmp_path, IDENTITY, handler(tmp_path)).selected == 0
 
 
 def test_leftover_done_todo_cleaned_without_handler(tmp_path: Path) -> None:
     deliver(tmp_path, "a", b"a")
     fp.archive(tmp_path, IDENTITY)
-    path = next((tmp_path / "todo").iterdir())
+    path = published(tmp_path / "todo")[0]
     todo = path.read_bytes()
     fp.process(tmp_path, IDENTITY, handler(tmp_path))
     path.write_bytes(todo)
@@ -510,7 +517,7 @@ def test_archiver_can_remove_done_todo_after_processor_snapshot(
 ) -> None:
     deliver(tmp_path, "a", b"a")
     fp.archive(tmp_path, IDENTITY)
-    path = next((tmp_path / "todo").iterdir())
+    path = published(tmp_path / "todo")[0]
     todo = path.read_bytes()
     fp.process(tmp_path, IDENTITY, handler(tmp_path))
     path.write_bytes(todo)
@@ -576,7 +583,7 @@ def test_charts_choose_deterministic_persisted_states() -> None:
 def test_synthetic_demo_counts_and_output_identity(tmp_path: Path) -> None:
     report = run(tmp_path)
     assert (report["receipts"], report["objects"], report["done"], report["todo"]) == (4, 3, 3, 0)
-    for obj in (tmp_path / "objects").iterdir():
+    for obj in published(tmp_path / "objects"):
         assert hashlib.sha256(obj.read_bytes()).hexdigest() == obj.name
 
 

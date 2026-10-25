@@ -17,19 +17,44 @@ Concurrent modification by other users or a handler is outside this contract.
 
 ```text
 root/
-  inbox/                 complete producer deliveries
+  inbox/                 complete producer deliveries; read and unlinked only
   objects/<sha256>       immutable input bytes
+  objects/.tmp/          private object staging
   todo/<work_key>.json   actual JSON handover read by the processor
+  todo/.tmp/             private TODO staging
   ledger.sqlite3        authoritative receipts, work, completion evidence
   archive.lock          one archiver; OS releases the lock on death
   process.lock          one processor; independent from archive.lock
-  tmp/                  private archive and TODO staging
 ```
 
+Each published directory stages inside itself, under the reserved name `.tmp`.
+Publication is a nonreplacing hard link from that staging directory into its
+parent, so it never crosses a filesystem. Only the archiver stages, under
+`archive.lock`. Its repair removes abandoned `object-*` and `todo-*` stage files.
+Any other entry in a staging directory is foreign and refused, never removed.
+The processor skips `todo/.tmp` and refuses any other entry that is not a TODO.
+
 An empty root or inbox-only initial root can be initialized. If the ledger is
-missing while objects, TODOs, staging files or SQLite sidecars remain, both
-roles refuse before creating a replacement ledger. They cannot reconstruct
-lost identity or completion evidence from those artifacts.
+missing while objects, TODOs, abandoned stage files or SQLite sidecars remain,
+both roles refuse before creating a replacement ledger. Any entry in `objects/`
+or `todo/` other than an empty staging directory counts. They cannot
+reconstruct lost identity or completion evidence from those artifacts.
+
+## Filesystem requirements
+
+`CONTRACT.md` "Filesystem" governs. The inbox, objects, TODOs and the ledger
+may be separate mounts.
+
+- `inbox/` must be readable, traversable and writable by the worker UID, so the
+  archiver can read and unlink deliveries. Its directory must accept `fsync`.
+  The archiver copies each delivery through one read stream and unlinks it
+  after handover. It never renames, links or writes a file in the inbox.
+- `objects/` and `todo/` each need `mkstemp`, hard links within the directory
+  tree, file and directory `fsync`, `O_NOFOLLOW`, `O_DIRECTORY`, and coherent
+  `lstat`/`fstat` regular-file reads. Do not mount anything on `.tmp`.
+- The ledger and both lock files need working SQLite locking and `flock`.
+  Local storage is the qualified case; NFS and SMB are not qualified.
+- Mode `0o444` on objects is a convention, not protection.
 
 Keep runtime files outside the checkout. One processor identity owns a root.
 A different identity is refused. Include a business revision in the identity
@@ -71,16 +96,19 @@ provides no durability itself. No extra states model individual syscalls.
 
 The archiver snapshots inbox names, repairs previous handovers, then admits and
 selects deliveries. It copies and hashes the same open input stream into a
-private temp file. It flushes the file, publishes the object with a nonreplacing
-hard link, verifies any existing object, and syncs the object directory. One SQL
-transaction marks the receipt `FILE_ARCHIVED` and inserts a `READY` work row only
-if absent. Only then does it atomically publish the TODO and remove the source.
+stage file in `objects/.tmp`. It flushes the file, publishes the object with a
+nonreplacing hard link, verifies any existing object, and syncs the object
+directory. One SQL transaction marks the receipt `FILE_ARCHIVED` and inserts a
+`READY` work row only if absent. Only then does it stage the TODO in
+`todo/.tmp` and publish it with a nonreplacing hard link. It unlinks the source
+and syncs the inbox directory only after the object is verified again and the
+handover is complete: a published TODO, or a terminal work row for a duplicate.
 Sources remain until handover succeeds. Short SQL write transactions coordinate
 TODO eligibility and publication with processor completion. A stale archiver
-read cannot recreate a TODO for `DONE` work.
+read cannot recreate a TODO for terminal work.
 
 A later archive invocation repairs missing TODOs even with no new arrivals,
-finishes inbox cleanup, and removes its own stale staging files. An object
+finishes inbox cleanup, and removes its own abandoned stage files. An object
 published before a crash but without a receipt commit is reused on recovery.
 Before retiring an uncleaned archived receipt, cleanup verifies the archived
 object's identity and bytes as well as any retained inbox copy. A missing or
@@ -94,7 +122,9 @@ Its callback also receives the key, hash, stable receipt sequence and metadata.
 It never discovers inbox deliveries or repairs archive projections. A missing
 TODO requires an archiver invocation; the processor reports ledger backlog in
 `remaining`. Malformed JSON, tampering and missing/corrupt objects fail loudly.
-A leftover TODO for `DONE` is validated and removed without processing again.
+A leftover TODO for a terminal row is validated and removed without processing
+again. `DONE` is the only terminal state; `TERMINAL` in the worker module derives
+the set from the chart's final states.
 
 ## Callbacks, recovery and selection
 
@@ -123,13 +153,14 @@ The first failure stops the invocation. `newest` does not guarantee fairness.
 
 Both roles return a `Summary` with selected/completed/duplicates/remaining/unknown,
 reconciled and stopped fields. Archive `remaining` counts admitted FILE_RECEIVED
-receipts. Processor `remaining` counts non-DONE ledger work, including missing
+receipts. Processor `remaining` counts nonterminal ledger work, including missing
 TODO projections. New arrivals after the snapshot may not yet be registered.
 `remaining=0` therefore proves neither an empty inbox nor end-to-end draining.
 Archive failures raise. Processor callback
 failures return a stopped summary and retain the reason in SQLite. The sample
 CLI exits 1 for a stopped summary. OS role locks reject overlap immediately;
-short SQLite transactions arbitrate between roles. There are no HA leases.
+the sample CLI reports `LockBusy` as exit 75 and a refusal as exit 65.
+Short SQLite transactions arbitrate between roles. There are no HA leases.
 
 ## Run the synthetic demo
 
@@ -154,6 +185,14 @@ Workers can also run independently in either order:
 .venv/bin/python -m examples.file_processing.worker process --root "$root" --batch all
 ```
 
+The sample CLI prints one JSON summary and exits 0 when the selected snapshot
+completed. Exit 1 means the run stopped; the ledger holds the reason. The
+exception is a ledger busy past its timeout: its reason is on stderr only, and
+items completed earlier in the run stay committed. Exit 75
+(`EX_TEMPFAIL`) means the role's lock was busy and nothing ran. Exit 65
+(`EX_DATAERR`) means a refusal of corrupt, inconsistent or unsupported input.
+Exits 75 and 65 print no summary and one line on stderr.
+
 ## Python estate and one-cycle watcher
 
 Import `add_file_processing_jobs` from `dsl41.file_processing_dsl` to add exactly
@@ -168,8 +207,10 @@ PROCESSOR. ARCHIVER depends on watcher success. PROCESSOR uses
 `s(ARCHIVER,0)`. There is no TODO watcher. The ready signal path is an explicit
 one-cycle demonstration input. Publish the complete inbox deliveries before
 publishing that signal. The FW watches a literal file and size stability; it
-does not discover a glob or directory queue. Continuous rearming and safe
-recurrent signalling remain unsolved by this example.
+does not discover a glob or directory queue. How the jobs run again is the
+estate author's choice: a timed archiver sweep, a rearm, or an operator's manual
+run (CONTRACT.md, "Activation is external"). The workers and the helper assume
+none of them.
 
 The CLI catalog loader accepts JIL. Generate a temporary JIL artifact through
 the normal Python builder pipeline; direct `.py` CLI loading is not supported:
@@ -190,15 +231,22 @@ supervisor or assert runner qualification.
 Zero lookback compares the archiver END with the processor's last END (SEM-04).
 A first run can match an old archiver success. An archiver completion during a
 processor run can become stale before that processor ends. A one-item batch
-can leave backlog without a new scheduler wakeup. The oracle test demonstrates
-that overlap, then explicitly invokes the processor later to drain the backlog.
-Use subsequent explicit invocations as shown above. Reliable recurrent wakeups
-are separate work. This example claims neither automatic retry nor `n_retrys`
-behavior.
+can leave backlog that only a later invocation drains. The oracle test
+demonstrates that overlap, then invokes the processor explicitly to drain the
+backlog. Closing this edge belongs to the activation the estate author chooses.
+This example claims neither automatic retry nor `n_retrys` behavior.
 
-Focused tests use abrupt subprocess exits at all three archive boundaries and
-an injected `SystemExit` after real sample output publication. They also cover
-lock release on process death, immutable dedupe, selection, outbox recovery,
-UNKNOWN refusal, handover corruption, DSL round trips and the oracle backlog gap.
+Focused tests interrupt one archival with an abrupt subprocess exit after each
+durable boundary: object staged, object published, receipt and work committed,
+TODO staged, TODO published, and source unlinked before `cleaned=1`. Each case
+converges on the next run in either role order, and later runs change nothing.
+Cross-role probes pause one role on a pipe handshake while the other runs: the
+processor completes work whose TODO the archiver just published, and the
+archiver archives a duplicate while the processor holds a claim. The sample CLI
+is shown to exit nonzero on `LockBusy` and to leave a root unchanged on repeated
+no-op runs. Other tests inject a `SystemExit` after real sample output
+publication and cover lock release on process death, immutable dedupe,
+selection, outbox recovery, UNKNOWN refusal, handover corruption, foreign
+staging entries, lost-ledger evidence, DSL round trips and the oracle backlog gap.
 They do not qualify power-loss behavior, network filesystems, distributed use,
 continuous signalling or arbitrary external-effect reconciliation.
