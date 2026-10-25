@@ -24154,3 +24154,15 @@ relitigate an entry; append a new one.
   REJECTED: dropping the `busctl` path, because systemd 239 (RHEL 8, Oracle Linux 8) is a target
   (owner, 2026-10-25). Checking the exit policy on the forced path only: a stop verb that reports
   done while the service returns misleads on the default path too.
+- DL-400 A supervisor statechart error keeps exit 7 (2026-10-25; owner ruling; no code change)
+  THE RULE. DL-325 stands for the supervisor. A statechart error in the supervisor prints its
+  report and exits 7, and the unit does not restart it. The exit ends every job by lifeline EOF;
+  each wrapper records `terminated / parent lost`.
+  THE REASON. That cost is a consequence of DL-48: the supervisor owns the lifelines, so its
+  perimeter holds every job and the kill authority over them. Only restart survival, wrappers
+  that outlive the supervisor and reconnect to its successor, could remove it. A rare bug
+  class, guarded by the completeness test and the transition-coverage gate, does not buy a
+  second lifecycle.
+  REJECTED: a degraded mode that refuses SPAWN and lease changes, keeps the lifelines and SIGNAL,
+  and exits 7 after the last job. It keeps kill authority in a controller whose own control logic
+  has just been proven wrong, and it adds a lifecycle outside the declared chart.
