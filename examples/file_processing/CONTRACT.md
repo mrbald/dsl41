@@ -25,7 +25,14 @@ What the workers promise to any schedule:
 - Archiver and processor may overlap. Short SQLite write transactions
   arbitrate every shared row; no durable invariant depends on their order.
 - Exit 0 means the selected snapshot completed. Exit 1 means the run stopped;
-  the ledger holds the reason. The next run, however it is started, resumes.
+  the ledger holds the reason, except for a ledger busy past its timeout,
+  whose reason is on stderr only and whose earlier items stay committed.
+  Exit 75 (`EX_TEMPFAIL`) means the role's lock was busy; nothing ran.
+  Exit 65 (`EX_DATAERR`) means a refusal: corrupt, inconsistent or
+  unsupported state that an operator must look at, whatever Python error
+  surfaced it. The next run, however it is started, resumes.
+  (Exit codes and the `tmp/` removal below are Fable's slice-2 rulings, not
+  the owner's.)
 - A dead process leaves at most a stale `RUNNING` claim; the next processor run
   treats it as uncertain before anything else.
 
@@ -91,7 +98,7 @@ outside this contract and need their own policy input before they exist.
 
 ### Filesystem (owner: do not assume one filesystem)
 
-`inbox/`, `objects/`, `todo/`, `tmp/` and the ledger may be separate mounts.
+`inbox/`, `objects/`, `todo/` and the ledger may be separate mounts.
 Therefore:
 
 - `inbox/` must be readable, traversable and deletable by the worker UID, and
@@ -158,6 +165,11 @@ durable boundary.
 - One processor identity per root, fixed for the root's life.
 - No power-loss qualification beyond `fsync` at each durable boundary.
 - No HA, no leases, no second host.
+- Ledger corruption in pages the run reads only after opening (a damaged
+  page deep in `work`, for example) surfaces as exit 1 with a traceback, not
+  as exit 65. Opus raised it in slice 2 round 3 and agreed to this limit; it
+  needs a damaged ledger and causes no corruption or external effect. Slice 3
+  routes the CLI's `sqlite3.DatabaseError` through the busy check and closes it.
 - The zero-lookback edge (SEM-04) is the estate author's to close with the
   activation they choose.
 

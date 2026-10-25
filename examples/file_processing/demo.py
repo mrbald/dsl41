@@ -8,8 +8,12 @@ import json
 from pathlib import Path
 import sqlite3
 
-from dsl41.file_processing import Policy, archive, process
+from dsl41.file_processing import STAGE, Policy, archive, process
 from examples.file_processing.worker import CountsHandler
+
+
+def _published(directory: Path) -> int:
+    return sum(path.name != STAGE for path in directory.iterdir())
 
 
 def run(root: Path) -> dict[str, object]:
@@ -48,9 +52,9 @@ def run(root: Path) -> dict[str, object]:
         assert json.loads(path.read_text())["processing_key"] == path.stem
     return {
         "receipts": receipts,
-        "objects": len(list((root / "objects").iterdir())),
+        "objects": _published(root / "objects"),
         "done": done,
-        "todo": len(list((root / "todo").iterdir())),
+        "todo": _published(root / "todo"),
         "before": asdict(before),
         "archive": asdict(archived),
         "first": asdict(first),

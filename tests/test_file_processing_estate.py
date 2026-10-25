@@ -11,7 +11,7 @@ import pytest
 
 from dsl41.dsl import CatalogBuilder, cond_to_source, decompile
 from dsl41.equiv import catalog_hash, equivalent_tier_a
-from dsl41.file_processing import Policy, WorkItem, archive, process
+from dsl41.file_processing import STAGE, Policy, WorkItem, archive, process
 from dsl41.file_processing_dsl import add_file_processing_jobs
 from dsl41.ir import CatalogIR, ExecSpec
 from dsl41.oracle import Oracle
@@ -110,4 +110,4 @@ def test_sem04_overlap_leaves_backlog_until_explicit_later_invocation(tmp_path: 
     assert len(list((tmp_path / "todo").glob("*.json"))) == 1
     assert process(tmp_path, identity, CountsHandler(tmp_path / "output")).completed == 1
     assert len(list((tmp_path / "output").glob("*.json"))) == 2
-    assert not list((tmp_path / "todo").iterdir())
+    assert [path.name for path in (tmp_path / "todo").iterdir()] == [STAGE]
