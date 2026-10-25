@@ -481,9 +481,13 @@ For a supervisor in a qualified dedicated Linux systemd service,
 `dsl41 supervise shutdown --run-root <root>` refuses active or indeterminate
 work without signals. `--force=terminate` deliberately uses TERM, grace
 and KILL for validated command groups. Both require the stopped engine,
-existing leader lock and verified service containment. The CLI returns
-0 for verified completion, 2 for refusal and 4 for uncertainty. Never
-automatically retry an uncertain stop. An unmanaged supervisor refuses
+existing leader lock and verified service containment. The supervisor
+answers at once and records the operation's outcome in
+`<root>/maintenance.json`, which the CLI watches. The CLI returns 0 for
+verified completion, 2 for refusal, 3 for an operation still running when
+its watch ends, and 4 for uncertainty. Running it again
+watches an operation already admitted and sends nothing; never signal or
+force an uncertain stop by reflex. An unmanaged supervisor refuses
 these maintenance requests. To stop a whole estate under the example
 units, root disables both units and stops the engine unit; then
 `dsl41 estate quiesce` seals, audits and stops the supervisor, and checks

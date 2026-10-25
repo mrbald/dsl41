@@ -980,6 +980,7 @@ Who cleans what:
 | --- | --- | --- |
 | default job logs | `RUN_ROOT/logs/<job>.<run>.out` and `.err` | dsl41: `dsl41 estate prune --tombstones` removes them with their run (§2a) |
 | external job output | a job's `std_out_file` and `std_err_file` | the site's log rotation; dsl41 never touches them. Rotate between runs: a run appends |
+| maintenance record | `RUN_ROOT/maintenance.json` | the supervisor. Each maintenance admission replaces it and nothing deletes it; it goes with its root (DL-401) |
 | supervisor log | `RUN_ROOT/supervisor.log` | the site. The supervisor appends to it and nothing in dsl41 reads it. Rotate with copy and truncate, or with the supervisor unit stopped |
 | perimeter journal | `RUN_ROOT/perimeter.jsonl` | nobody on its own. Never truncate or rotate `perimeter.jsonl` on its own: truncating it restarts `access_seq`, and later receipts reuse identities that already exist (access-model §6). It goes only with its whole root |
 | system journal | journald, for both units | the site's journald retention. It holds each start's launcher line and the engine's output |
@@ -1349,6 +1350,8 @@ guarded maintenance as `supervise shutdown` does (§3), and hands
 `leader.lock` to the supervisor with that request. A process that takes
 the lock in that one request makes the supervisor refuse maintenance:
 the verb exits 2, the seal and the audit stand, and the lease goes back.
+The supervisor answers at once and the verb watches the operation in
+`maintenance.json` for its `bound_s` (DL-401).
 It reads both units once after the supervisor's exit, and runs the
 no-writers check below. Each stage ends with one line: `quiesce:
 <stage>: ok`, `refused: <reason>` or `skipped: <reason>`.
@@ -1356,18 +1359,27 @@ no-writers check below. Each stage ends with one line: `quiesce:
 The verb never waits for a precondition. A stage that cannot pass yet
 refuses with exit 2 and names what to wait for: the end of the retry
 horizon, or the runs that are still live. Wait, then run the same
-command again. Its one bounded wait is the exit observation after a
-completion reply, five seconds at most. What the earlier stages did is
-durable, and a stage already done is skipped, so a rerun on a stopped
-estate exits 0. Maintenance with live runs refuses and prints them; the
+command again. Its one bounded wait is the watch of an admitted
+operation, `bound_s` plus two seconds at most. What the earlier stages
+did is durable, and a stage already done is skipped, so a rerun on a
+stopped estate exits 0. A rerun reads `maintenance.json` before it asks
+for maintenance and never asks twice: a supervisor gone with its record
+`completed` is skipped, an operation still running is watched for the
+rest of its bound, and `uncertain` is exit 4. The supervisor holds
+`leader.lock` meanwhile: on a sealed period the leadership stage is
+skipped; on an unsealed one it refuses and names the operation, since
+the seal needs the lock. Maintenance with live runs refuses and prints them; the
 verb gives the lease and the lock back, and the runs go on. `--force
 terminate` ends them instead, as `supervise shutdown --force=terminate`
 does. Every other refusal names its own cause: the process that holds
 `leader.lock`, the controller that holds the lease, or the containment
 or unit policy §3 describes. A unit still deactivating is a refusal; run
-the verb again once it is inactive. Exit 4 is uncertain: a lost
-maintenance answer, or a unit its exit policy restarted. Read the unit,
-the process and `supervisor.log` before anything else (§3).
+the verb again once it is inactive. Exit 3 means maintenance is
+admitted and still running when the verb's watch ends: it finishes on
+its own; run the verb again, which watches it and asks nothing. Exit 4
+is uncertain: an operation whose record does not prove completion, or a
+unit its exit policy restarted. Read `maintenance.json`, the unit, the process and
+`supervisor.log` before anything else (§3).
 
 **Shape 2, and an engine outside any service manager:**
 
@@ -1589,7 +1601,12 @@ Keep the engine's existing restart and resume rules above. Set the
 supervisor's `TimeoutStopSec` to cover its longest command grace plus the
 documented shutdown waits (`supervisor-protocol.md` §5); the service
 manager's final cgroup kill can otherwise silence a wrapper before it
-records the command's ending.
+records the command's ending. A host stop that arrives during forced
+maintenance is held until the operation ends, so also cover the
+operation's `bound_s`: 15 + 5 + the longest grace + 2 + 8 s per live run
++ 10 s (DL-401). The example unit's 900 s is the small estate's 82 jobs
+all live at the default 10 s grace, 15 + 5 + 10 + 2 + 8 × 82 + 10 =
+698 s, rounded up; size another estate by the same line.
 
 **Guarded maintenance (DL-390).** Install and reload the supervisor unit
 before using a new runtime: `[Unit] RefuseManualStop=yes`, and
@@ -1619,16 +1636,37 @@ its `Description=` names.
 Default shutdown refuses active or indeterminate work without signals.
 The server holds the existing engine lock through teardown and requires
 verified dedicated service-cgroup observation, including residual children.
-Empty LIST is not idle proof. Exit 0 means verified completion; supervisor
-exit 8 prevents restart. Exit 2 means refusal before maintenance began.
-Exit 4 means the operation may have begun or completed. Read the unit,
-process identity and supervisor log; never automatically repeat or signal.
-The CLI waits 60 seconds for a reply. A force operation with a longer grace
-can complete after that timeout. An uncertain teardown may have removed
-the socket or pid record already; use the unit, process identity and log.
-An old supervisor refuses MAINTENANCE_STOP. The CLI never falls back to
-legacy SHUTDOWN. Coordinate that upgrade using the old runtime's reviewed
-procedure and the explicit incident stop below when needed.
+Empty LIST is not idle proof. The supervisor answers an admitted request
+at once with `bound_s`, its own bound on the operation, and runs the
+operation in its loop; `supervise list` shows it in `process_state` and
+`maintenance` meanwhile (DL-401). The CLI then watches
+`RUN_ROOT/maintenance.json` and the supervisor's process for `bound_s`
+plus two seconds. `bound_s` is the supervisor's estimate; the operation
+is never cut short at it. Exit 0 means verified completion: the process
+exited and the record says `completed`; supervisor exit 8 prevents
+restart. Exit 2 means refusal before maintenance began, or a request
+whose reply was lost that was never admitted. Exit 3 means the operation
+is admitted and a PING shows it still running as the watch ends: it
+finishes on its own; read `maintenance.json` or run the same command
+again, which watches it and sends nothing. Exit 4 means the outcome
+cannot be observed. A supervisor alive without a socket that shows a
+running operation is 4: read `supervisor.log` before anything else. A record
+proves nothing about a later supervisor: one that started after it and
+ended outside maintenance makes the rerun answer 4, not 0.
+
+On exit 4, read `maintenance.json` first. `uncertain` names the cause in
+`detail`; the supervisor is still up, holding its lifelines and the lock.
+`admitted` with the process gone means it ended without completing. Then
+read the unit, the process identity and `supervisor.log`; never
+automatically repeat or signal. A lost reply is not resent: the CLI
+reconnects once, fences its own request with its lease, and reads PING
+and the record. An uncertain teardown may have removed the socket or pid
+record already; `maintenance.json`, the unit, the process identity and
+the log remain.
+An old supervisor refuses MAINTENANCE_STOP or its version 2, and the CLI
+exits 2. The CLI never falls back to legacy SHUTDOWN. Coordinate that
+upgrade using the old runtime's reviewed procedure and the explicit
+incident stop below when needed.
 
 For deliberate termination, use the same command with `--force=terminate`.
 It invokes TERM/grace/KILL for validated known command groups. It bypasses
@@ -1738,7 +1776,8 @@ Exit codes:
   supervisor unit ends every command it still runs" (§0).
 - 8: supervisor only, successful guarded maintenance. The supervisor unit
   treats it as success and does not restart. The maintenance CLI reports
-  its own completion/refusal/uncertainty as 0/2/4 (§3).
+  its own completion/refusal/in-progress/uncertainty as 0/2/3/4 (§3,
+  DL-401).
 
 Exit 2 means a person misconfigured something, and a restart will not
 help; hence `RestartPreventExitStatus=2 3 6 7` above. A second engine on a

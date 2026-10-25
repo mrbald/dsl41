@@ -70,6 +70,7 @@ import sys
 import time
 import uuid
 from collections import deque
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -276,6 +277,160 @@ _Group = tuple[int, dict[int, str]]
 #: The least interval between containment samples of forced groups. Each sample runs the
 #: manager check; every KILL takes its own sample first (DL-394).
 _MAINTENANCE_SAMPLE_S = 0.25
+
+#: MAINTENANCE_STOP's own request version (DL-401). Version 2 is answered at admission and
+#: the operation runs in the loop. Version 1, answered only at completion, is refused by name.
+MAINTENANCE_STOP_VERSION = 2
+_MAINTENANCE_STOP_V1_RETIRED = (
+    "MAINTENANCE_STOP v 1, answered only at completion, is retired by DL-401; send v 2"
+)
+
+#: `<run_root>/maintenance.json`: the durable state of the last admitted maintenance on the
+#: root (DL-401). One JSON object, written as spawn.json is; a reader refuses another version.
+MAINTENANCE_RECORD = "maintenance.json"
+MAINTENANCE_RECORD_VERSION = 1
+#: the version of the start note each supervisor writes into supervisor.lock (DL-401)
+START_NOTE_VERSION = 1
+
+#: The parts of `bound_s`, the supervisor's estimate of an operation under its latency model
+#: (DL-401); the ladder never stops at it. Forced live work waits for spawn records, the
+#: longest grace and the KILL settle; each live group has two verified sends, TERM and KILL,
+#: at up to 4 s each; the samples between them have their own allowance. Teardown is two
+#: idle proofs of up to 5 s each, the owned-file teardown, the two-second reply flush and
+#: the exit.
+_MAINTENANCE_SPAWN_WAIT_S = 5.0
+_MAINTENANCE_SETTLE_S = 2.0
+_MAINTENANCE_SEND_S = 4.0
+_MAINTENANCE_SAMPLES_S = 10.0
+_MAINTENANCE_TEARDOWN_S = 15.0
+
+
+def _is_bound(value: object) -> bool:
+    """A finite number of zero or more, never a boolean."""
+    return (
+        isinstance(value, int | float)
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value >= 0
+    )
+
+
+#: what every maintenance record holds, by field (DL-401)
+_RECORD_FIELDS: dict[str, Any] = {
+    "state": lambda v: v in ("admitted", "completed", "uncertain"),
+    "incarnation": lambda v: isinstance(v, str) and bool(v),
+    "supervisor_pid": lambda v: is_wire_int(v) and v > 0,
+    "supervisor_start_time": valid_start_token,
+    "boot_id": lambda v: isinstance(v, str) and bool(v),
+    "force": lambda v: v is None or v == "terminate",
+    "bound_s": _is_bound,
+    "started_at": lambda v: isinstance(v, str),
+}
+
+
+def read_maintenance_record(run_root: str | os.PathLike[str]) -> dict[str, Any] | None:
+    """`<run_root>/maintenance.json`, or None when the file does not exist (DL-401).
+
+    Unknown fields are ignored. A record that is not one JSON object, names a `version`
+    other than MAINTENANCE_RECORD_VERSION or none, or lacks or mistypes a field raises
+    ValueError: every reader refuses it rather than guess what it says."""
+    path = os.path.join(os.fspath(run_root), MAINTENANCE_RECORD)
+    try:
+        with open(path, "rb") as f:
+            raw = f.read()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ValueError(f"{path} cannot be read: {exc}") from exc
+    try:
+        record = json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError) as exc:
+        raise ValueError(f"{path} is not one JSON object: {exc}") from exc
+    if not isinstance(record, dict):
+        raise ValueError(f"{path} is not one JSON object")
+    version = record.get("version")
+    if not _is_wire_int_equal(version, MAINTENANCE_RECORD_VERSION):
+        raise ValueError(
+            f"{path} has version {version!r}; this reader implements"
+            f" {MAINTENANCE_RECORD_VERSION} (DL-401)"
+        )
+    fields = dict(_RECORD_FIELDS)
+    if record.get("state") != "admitted":
+        fields["finished_at"] = lambda v: isinstance(v, str)
+    if record.get("state") == "uncertain":
+        fields["detail"] = lambda v: isinstance(v, str)
+    bad = sorted(name for name, valid in fields.items() if not valid(record.get(name)))
+    if bad:
+        raise ValueError(f"{path} lacks or mistypes {', '.join(bad)} (DL-401)")
+    return record
+
+
+def record_owner_problem(run_root: str | os.PathLike[str], record: dict[str, Any]) -> str | None:
+    """Why `record` is not the outcome of the root's last supervisor, or None (DL-401). Each
+    start notes its incarnation in supervisor.lock and then writes supervisor.pid. The note
+    must be well formed and name the record's incarnation: a missing, empty, partial or
+    unparsable note is no evidence, and a record needs evidence. A pid record, when present,
+    must name it too; one that names another incarnation is a later supervisor that ended
+    outside maintenance."""
+    root = os.fspath(run_root)
+    named: list[tuple[str, object]] = []
+    for name in ("supervisor.lock", "supervisor.pid"):
+        try:
+            with open(os.path.join(root, name), "rb") as f:
+                raw = f.read()
+        except FileNotFoundError:
+            if name == "supervisor.lock":
+                return f"{name} is missing: no start note names the record's supervisor"
+            continue
+        except OSError as exc:
+            return f"{name} cannot be read: {exc}"
+        try:
+            note = json.loads(raw.decode("utf-8"))
+        except (ValueError, RecursionError):
+            return f"{name} is not one JSON object"
+        if not isinstance(note, dict):
+            return f"{name} is not one JSON object"
+        if name == "supervisor.lock" and not _is_wire_int_equal(
+            note.get("version"), START_NOTE_VERSION
+        ):
+            return f"{name} has version {note.get('version')!r}; this reader implements 1 (DL-401)"
+        named.append((name, note.get("incarnation")))
+    for name, incarnation in named:
+        if incarnation != record["incarnation"]:
+            return (
+                f"{name} names another supervisor ({incarnation}), which ended outside"
+                " maintenance: not a maintenance outcome; read the unit and the log"
+            )
+    return None
+
+
+def _pwrite_all(fd: int, data: bytes, offset: int) -> None:
+    """Every byte at `offset`, or an error: `os.pwrite` may write fewer bytes than given."""
+    written = 0
+    while written < len(data):
+        count = os.pwrite(fd, data[written:], offset + written)
+        if count <= 0:  # pragma: no cover -- POSIX: 0 only for an empty write
+            raise OSError(f"short write: {written} of {len(data)} bytes")
+        written += count
+
+
+class _Maintenance:
+    """An admitted maintenance operation (DL-401): its record, the containment proof it was
+    admitted under, the forced ladder (None when admission proved idle) and the pause the
+    loop takes before the next pass."""
+
+    __slots__ = ("record", "proof", "ladder", "pause")
+
+    def __init__(
+        self,
+        record: dict[str, Any],
+        proof: ServiceContainment,
+        ladder: Iterator[float] | None,
+    ) -> None:
+        self.record = record
+        self.proof = proof
+        self.ladder = ladder
+        self.pause = 0.0
 
 
 class _Run:
@@ -852,6 +1007,8 @@ MAINTENANCE_STOPPING = "maintenance_stopping"
 MAINTENANCE_IDLE = "maintenance_idle"
 MAINTENANCE_UNCERTAIN = "maintenance_uncertain"
 MAINTENANCE_FINISHED = "maintenance_finished"
+#: the end of a loop pass of an admitted operation (DL-401)
+MAINTENANCE_PASS = "maintenance_pass"
 _MAINTENANCE_PHASES = (
     "maintenance_checking",
     "maintenance_stopping",
@@ -872,6 +1029,8 @@ FLUSH = "flush"
 DRAIN = "drain"
 UNLINK_PUBLISHED = "unlink_published"
 UNLINK_PRIVATE = "unlink_private"
+ADVANCE = "advance"
+COMPLETE = "complete"
 #: the leaf states of SUPERVISOR_PROCESS.
 _PROCESS_PHASES = frozenset(
     {
@@ -938,6 +1097,20 @@ def _unlink_published(_ctx: Context) -> Effects:
     return Effects(intents=(UNLINK_PUBLISHED,))
 
 
+def _advance(_ctx: Context) -> Effects:
+    """Run the forced ladder to its next pause: up to 5 s for missing spawn records, TERM
+    each verified command group, and KILL each member that outlives its run's grace, until
+    every wrapper is reaped and every group has left containment. Passing the operation's
+    bound is uncertain (DL-394, DL-401)."""
+    return Effects(intents=(ADVANCE,))
+
+
+def _complete(_ctx: Context) -> Effects:
+    """Prove idle again, verify and remove the published socket and pid record, close the
+    listener and the child pipe, and record the operation completed (DL-390, DL-401)."""
+    return Effects(intents=(COMPLETE,))
+
+
 def _unlink_private(_ctx: Context) -> Effects:
     """This incarnation bound its private socket and an error ended startup before the
     publish. Teardown closes the listener, unlinks supervisor.pid if it names this
@@ -989,24 +1162,39 @@ for _event, _allowed in {
         tuple(sorted(_PROCESS_PHASES - _allowed - {"closed"})),
         "maintenance facts are posted only by their owning procedure (DL-390)",
     )
+_PROCESS_UNREACHABLE[MAINTENANCE_PASS] = (
+    tuple(sorted(_PROCESS_PHASES - {"maintenance_stopping", "maintenance_completing", "closed"})),
+    "the loop posts maintenance_pass only while an admitted operation runs (DL-401)",
+)
 for _event in (START, PUBLISH, DRAINED, PASS_ENDED, *_MUTATING):
     _states, _reason = _PROCESS_UNREACHABLE[_event]
     _extra = set(_MAINTENANCE_PHASES)
     if _event in _MUTATING:
-        _extra.discard("maintenance_uncertain")
+        # an uncertain or a running operation refuses them (DL-390, DL-401)
+        _extra -= {"maintenance_uncertain", "maintenance_stopping", "maintenance_completing"}
     _PROCESS_UNREACHABLE[_event] = (tuple((*_states, *sorted(_extra))), _reason)
 
 for _event in (TERM, DEADMAN):
     _states, _reason = _PROCESS_UNREACHABLE[_event]
-    _PROCESS_UNREACHABLE[_event] = (
-        (*_states, "maintenance_checking", "maintenance_stopping", "maintenance_completing"),
-        _reason,
+    _PROCESS_UNREACHABLE[_event] = ((*_states, "maintenance_checking"), _reason)
+
+#: An admitted operation runs to its outcome: the loop holds a latched signal and samples
+#: no deadman until maintenance_uncertain or the exit (DL-401).
+_HELD_WHILE_MAINTAINING = tuple(
+    Exclusion(
+        "maintaining",
+        event,
+        f"the loop holds {event} while an admitted operation runs, until its outcome (DL-401)",
     )
+    for event in (TERM, DEADMAN)
+)
 
 #: the supervisor's own lifecycle (ss5, DL-210, DL-289). Rows 01 to 12 and 36 are the
 #: lifecycle, 13 to 20 the fence, 21 to 30 the events ignored once closed, and 31 to 35
 #: teardown, a row per source state in three ownership classes; 10 and 11 are out of use
-#: (DL-378). A fence refusal is answered with its code, and with the incarnation for
+#: (DL-378). Rows 37 to 60 are guarded maintenance (DL-390): admission answers in the
+#: request, and 55 and 56 run the admitted operation one loop pass at a time (DL-401).
+#: A fence refusal is answered with its code, and with the incarnation for
 #: wrong_incarnation.
 #: SIGKILL ends the process in any state and runs no code, so no row is taken for it:
 #: each wrapper takes lifeline EOF and records in its own time (ss5, DL-205).
@@ -1037,11 +1225,21 @@ SUPERVISOR_PROCESS = Statechart(
                                                 (
                                                     State("serving"),
                                                     State("shutting_down"),
-                                                    *(
-                                                        State(name)
-                                                        for name in _MAINTENANCE_PHASES
-                                                        if name != "maintenance_completed"
+                                                    State("maintenance_checking"),
+                                                    State(
+                                                        "maintaining",
+                                                        regions=(
+                                                            Region(
+                                                                "operation",
+                                                                "maintenance_stopping",
+                                                                (
+                                                                    State("maintenance_stopping"),
+                                                                    State("maintenance_completing"),
+                                                                ),
+                                                            ),
+                                                        ),
                                                     ),
+                                                    State("maintenance_uncertain"),
                                                 ),
                                             ),
                                         ),
@@ -1400,6 +1598,33 @@ SUPERVISOR_PROCESS = Statechart(
             )
             for number, verb in enumerate(_MUTATING, 51)
         ),
+        Row(
+            "supervisor_process.55",
+            "maintenance_stopping",
+            MAINTENANCE_PASS,
+            action="advance",
+            kind="internal",
+            cite=f"{_SP5}, DL-394, DL-401",
+        ),
+        Row(
+            "supervisor_process.56",
+            "maintenance_completing",
+            MAINTENANCE_PASS,
+            action="complete",
+            kind="internal",
+            cite=f"{_SP5}, DL-390, DL-401",
+        ),
+        *(
+            Row(
+                f"supervisor_process.{number}",
+                "maintaining",
+                verb,
+                kind="refusal",
+                code="maintenance_in_progress",
+                cite=f"{_SP5}, DL-401",
+            )
+            for number, verb in enumerate(_MUTATING, 57)
+        ),
     ),
     guards={
         "lock_held": _lock_held,
@@ -1413,15 +1638,20 @@ SUPERVISOR_PROCESS = Statechart(
         "refuse": _refuse,
         "drain": _drain,
         "retry": _retry,
+        "advance": _advance,
+        "complete": _complete,
         "unlink_published": _unlink_published,
         "unlink_private": _unlink_private,
     },
     time_events=(TimeEvent(DEADMAN),),
     clock="monotonic",
-    exclusions=tuple(
-        Exclusion(state, event, reason)
-        for event, (states, reason) in _PROCESS_UNREACHABLE.items()
-        for state in states
+    exclusions=(
+        *(
+            Exclusion(state, event, reason)
+            for event, (states, reason) in _PROCESS_UNREACHABLE.items()
+            for state in states
+        ),
+        *_HELD_WHILE_MAINTAINING,
     ),
 )
 
@@ -1443,6 +1673,8 @@ class Supervisor:
         self.pid_path = os.path.join(run_root, "supervisor.pid")
         self._lock_fd: int | None = None
         self._maintenance_lock_fd: int | None = None
+        #: the admitted maintenance operation, from admission to the exit (DL-401)
+        self._maintenance: _Maintenance | None = None
         self._private_path = os.path.join(run_root, f".s.{os.getpid()}")
         self._socket_inode: int | None = None
         self.boot_id = current_boot_id()
@@ -1495,12 +1727,26 @@ class Supervisor:
 
     @property
     def _running(self) -> bool:
-        """Serve normally, or provide diagnostics while uncertain (DL-390).
+        """Serve normally, run an admitted maintenance operation, or provide diagnostics
+        while uncertain (DL-390, DL-401).
 
-        Uncertain maintenance refuses every mutating verb through the chart fence.
+        A running or uncertain operation refuses every mutating verb through the chart.
         Legacy shutting_down dispatches nothing, including after a failed wait.
         """
-        return self.state in ("serving", "maintenance_uncertain")
+        return self.state in ("serving", "maintenance_uncertain") or self._maintaining
+
+    @property
+    def _maintaining(self) -> bool:
+        """An admitted operation runs: the loop passes are its steps (DL-401)."""
+        return "maintaining" in self._machines.active(_PROCESS)
+
+    def _pause(self) -> float:
+        """The loop's select timeout: the pause the running operation asked for, else the
+        one-second reap tick."""
+        if self._maintaining:
+            assert self._maintenance is not None  # admission sets it before maintaining
+            return self._maintenance.pause
+        return 1.0
 
     # -- startup ------------------------------------------------------------
 
@@ -1634,6 +1880,7 @@ class Supervisor:
         self._listen.listen(64)
         os.chmod(self._private_path, 0o600)
         self._socket_inode = os.stat(self._private_path).st_ino
+        self._note_start()
         durable_write_json(
             self.pid_path,
             {
@@ -1647,6 +1894,24 @@ class Supervisor:
         os.rename(self._private_path, self.sock_path)
         self._process(PUBLISH)
         self._listen.setblocking(False)
+
+    def _note_start(self) -> None:
+        """Note this incarnation in supervisor.lock, under the lock and before the pid record.
+        No teardown removes it, so a maintenance record names the root's last supervisor only
+        while the note names it too (DL-401). The file is never cut first. Its first byte is
+        spoiled, the new note is written after it, then its first byte, then the file is cut
+        to its length: an interruption leaves a note no reader accepts, or the new one. The
+        flock is on the inode, so no rename."""
+        assert self._lock_fd is not None
+        note = json.dumps(
+            {"version": START_NOTE_VERSION, "incarnation": self.incarnation, "pid": os.getpid()},
+            sort_keys=True,
+        ).encode("utf-8")
+        _pwrite_all(self._lock_fd, b"!", 0)
+        _pwrite_all(self._lock_fd, note[1:], 1)
+        _pwrite_all(self._lock_fd, note[:1], 0)
+        os.ftruncate(self._lock_fd, len(note))
+        os.fsync(self._lock_fd)
 
     def _install_signals(self) -> None:
         signal.signal(signal.SIGCHLD, self._on_chld_signal)
@@ -1694,8 +1959,9 @@ class Supervisor:
                 flush=True,
             )
             while self._running:
-                for key, mask in self._sel.select(timeout=1.0):
-                    # Maintenance can close descriptors named by this batch (DL-390).
+                for key, mask in self._sel.select(timeout=self._pause()):
+                    # A dispatch in this batch can end the loop or close a descriptor it
+                    # names (DL-390).
                     if not self._running:
                         break
                     if self._sel.get_map().get(key.fd) != key:
@@ -1706,7 +1972,7 @@ class Supervisor:
                     elif tag == "chld":
                         self._drain_chld()
                         self._reap()
-                        if self._shutdown_requested:
+                        if self._shutdown_requested and not self._maintaining:
                             self._orderly_shutdown(TERM)
                     elif tag == "conn":  # pragma: no branch -- no other tag is registered
                         if mask & selectors.EVENT_WRITE:
@@ -1716,7 +1982,11 @@ class Supervisor:
                 # the self-pipe can coalesce a SIGCHLD under load; the select timeout is the
                 # unconditional reap tick
                 self._reap()
-                if self._shutdown_requested:
+                if self._maintaining:
+                    # an admitted operation runs to its outcome; a latched signal waits
+                    # for it (DL-401)
+                    self._maintenance_pass()
+                elif self._shutdown_requested:
                     self._orderly_shutdown(TERM)
                 elif self.state == "shutting_down":
                     # an error ended a SHUTDOWN's wait: run it once more rather than leave
@@ -1942,9 +2212,19 @@ class Supervisor:
                 raise ValueError("request must be a JSON object")
         except (ValueError, RecursionError):
             return {"ok": False, "error": "malformed_json"}
-        if not _is_wire_int_equal(req.get("v"), PROTOCOL_VERSION):
-            return {"ok": False, "error": "unsupported_version"}
         cmd = req.get("cmd")
+        if cmd == "MAINTENANCE_STOP":
+            # the verb's own version (DL-401); its retired v 1 is refused by name
+            if _is_wire_int_equal(req.get("v"), PROTOCOL_VERSION):
+                return {
+                    "ok": False,
+                    "error": "unsupported_version",
+                    "detail": _MAINTENANCE_STOP_V1_RETIRED,
+                }
+            if not _is_wire_int_equal(req.get("v"), MAINTENANCE_STOP_VERSION):
+                return {"ok": False, "error": "unsupported_version"}
+        elif not _is_wire_int_equal(req.get("v"), PROTOCOL_VERSION):
+            return {"ok": False, "error": "unsupported_version"}
         handler = {
             "PING": self._h_ping,
             "LIST": self._h_list,
@@ -1979,7 +2259,16 @@ class Supervisor:
             "incarnation": self.incarnation,
             "deadman_s": self.deadman_s,
             "process_state": self.state,
+            **self._operation(),
         }
+
+    def _operation(self) -> dict[str, Any]:
+        """The admitted maintenance operation as PING and LIST show it (DL-401): an
+        additive `maintenance` field while it runs or stays uncertain."""
+        if self._maintenance is None:
+            return {}
+        record = self._maintenance.record
+        return {"maintenance": {key: record[key] for key in ("force", "bound_s", "started_at")}}
 
     def _h_list(self, _conn: _Conn, _req: dict[str, Any]) -> dict[str, Any]:
         lease = None
@@ -1994,6 +2283,7 @@ class Supervisor:
             "incarnation": self.incarnation,
             "deadman_s": self.deadman_s,
             "process_state": self.state,
+            **self._operation(),
             "lease": lease,
             "runs": [
                 {
@@ -2515,6 +2805,9 @@ class Supervisor:
         }
 
     def _h_maintenance_stop(self, conn: _Conn, req: dict[str, Any]) -> dict[str, Any]:
+        """Admission, answered in the request (DL-390, DL-401). A refusal changes nothing.
+        An admitted operation is recorded first and then runs in the loop, one pass at a
+        time, to completed or uncertain."""
         if (error := self._fence("MAINTENANCE_STOP", req)) is not None:
             return error
         try:
@@ -2526,40 +2819,136 @@ class Supervisor:
             idle = self._maintenance_idle(proof)
             if not idle and mode is None:
                 raise ValueError("active wrappers or residual service processes")
+            operation = self._admit(mode, proof, idle)
         except StatechartError:
             raise
         except Exception as exc:
             self._release_maintenance_lock()
             self._process(MAINTENANCE_REFUSED)
             return {"ok": False, "error": "maintenance_refused", "detail": str(exc)}
+        self._maintenance = operation
+        self._process(MAINTENANCE_IDLE if idle else MAINTENANCE_STOPPING)
+        record = operation.record
+        print(
+            f"supervisor: maintenance admitted force={record['force']} bound_s={record['bound_s']}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return {
+            "ok": True,
+            "maintenance": "admitted",
+            **{key: value for key, value in record.items() if key not in ("version", "state")},
+        }
+
+    def _admit(self, mode: str | None, proof: ServiceContainment, idle: bool) -> _Maintenance:
+        """The operation's estimated bound and its admitted record, written before the answer
+        (DL-401). Idle work needs only teardown. Forced work adds the spawn-record wait, the
+        longest live grace, the KILL settle, two verified sends per live group and the
+        sample allowance. A failed write removes a record of this incarnation, so a refusal
+        leaves the previous record or none."""
+        start_time = proc_start_token(os.getpid())
+        if start_time is None:
+            raise OSError("this supervisor's own start token cannot be read")
+        bound_s = _MAINTENANCE_TEARDOWN_S
         if not idle:
-            self._process(MAINTENANCE_STOPPING)
-            try:
-                self._maintenance_wait(proof)
-                if not self._maintenance_idle(proof):
-                    raise OSError("work remains after the termination bound")
-            except StatechartError:
-                raise
-            except Exception as exc:
-                self._process(MAINTENANCE_UNCERTAIN)
-                return {"ok": False, "error": "maintenance_uncertain", "detail": str(exc)}
-        self._process(MAINTENANCE_IDLE)
+            live = [run for run in self.runs.values() if run.wrapper_rc is None]
+            grace_s = max((run.grace_seconds for run in live), default=0.0)
+            bound_s += (
+                _MAINTENANCE_SPAWN_WAIT_S
+                + grace_s
+                + _MAINTENANCE_SETTLE_S
+                + 2 * _MAINTENANCE_SEND_S * len(live)
+                + _MAINTENANCE_SAMPLES_S
+            )
+        record = {
+            "version": MAINTENANCE_RECORD_VERSION,
+            "state": "admitted",
+            "incarnation": self.incarnation,
+            "supervisor_pid": os.getpid(),
+            "supervisor_start_time": start_time,
+            "boot_id": self.boot_id,
+            "force": mode,
+            "bound_s": bound_s,
+            "started_at": utc_now_iso(),
+        }
+        path = os.path.join(self.run_root, MAINTENANCE_RECORD)
         try:
-            self._maintenance_prepare_teardown(proof)
+            durable_write_json(path, record)
+        except OSError:
+            self._unlink_own_record(path)
+            raise
+        ladder = None if idle else self._maintenance_ladder(proof)
+        return _Maintenance(record, proof, ladder)
+
+    def _unlink_own_record(self, path: str) -> None:
+        """A write that failed after its rename leaves this incarnation's `admitted` record
+        for a refused request: remove it, best effort and logged (DL-401). A record of
+        another incarnation is the previous operation's and stays."""
+        try:
+            left = read_maintenance_record(self.run_root)
+            if left is not None and left["incarnation"] == self.incarnation:
+                os.unlink(path)
+                print(
+                    f"supervisor: removed {MAINTENANCE_RECORD} of a refused admission",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        except (OSError, ValueError) as exc:
+            print(
+                f"supervisor: {MAINTENANCE_RECORD} of a refused admission stays: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    def _record_outcome(self, state: str, **extra: str) -> None:
+        """Replace the admitted record by its outcome, with the instant it was reached."""
+        assert self._maintenance is not None
+        record = {
+            **self._maintenance.record,
+            "state": state,
+            "finished_at": utc_now_iso(),
+            **extra,
+        }
+        durable_write_json(os.path.join(self.run_root, MAINTENANCE_RECORD), record)
+
+    def _maintenance_pass(self) -> None:
+        """One loop pass of the admitted operation (DL-401). The row taken names the step:
+        the ladder runs to its next pause, or the owned teardown completes the operation.
+        Any failure after admission is uncertain: the lifelines and the lock stay."""
+        operation = self._maintenance
+        assert operation is not None
+        intents = self._process(MAINTENANCE_PASS).intents
+        try:
+            if COMPLETE in intents:
+                self._maintenance_prepare_teardown(operation.proof)
+                self._record_outcome("completed")
+                self._process(MAINTENANCE_FINISHED)
+                print("supervisor: maintenance completed", file=sys.stderr, flush=True)
+                return
+            assert operation.ladder is not None  # only forced work enters stopping
+            try:
+                operation.pause = next(operation.ladder)
+                return
+            except StopIteration:
+                pass
+            if not self._maintenance_idle(operation.proof):
+                raise OSError("work remains after the termination bound")
+            operation.pause = 0.0
+            self._process(MAINTENANCE_IDLE)
         except StatechartError:
             raise
         except Exception as exc:
+            detail = str(exc) or type(exc).__name__
+            print(f"supervisor: maintenance uncertain: {detail}", file=sys.stderr, flush=True)
+            try:
+                self._record_outcome("uncertain", detail=detail)
+            except OSError as lost:
+                print(
+                    f"supervisor: {MAINTENANCE_RECORD} not written: {lost}",
+                    file=sys.stderr,
+                    flush=True,
+                )
             self._process(MAINTENANCE_UNCERTAIN)
-            return {"ok": False, "error": "maintenance_uncertain", "detail": str(exc)}
-        self._process(MAINTENANCE_FINISHED)
-        return {
-            "ok": True,
-            "maintenance": "completed",
-            "incarnation": self.incarnation,
-            "supervisor_pid": os.getpid(),
-            "supervisor_start_time": proc_start_token(os.getpid()),
-            "boot_id": self.boot_id,
-        }
 
     def _maintenance_groups(
         self, groups: dict[str, _Group], proof: ServiceContainment
@@ -2638,13 +3027,16 @@ class Supervisor:
         killpg_quiet(pgid, sig)
         return group
 
-    def _maintenance_wait(self, proof: ServiceContainment) -> None:
+    def _maintenance_ladder(self, proof: ServiceContainment) -> Iterator[float]:
         """Deliberate TERM/grace/KILL never turns a bound into completion (DL-390).
 
         The bound waits for the wrappers and for every verified group to leave
-        containment; a member outliving its grace gets KILL (DL-394)."""
+        containment; a member outliving its grace gets KILL (DL-394). Each yield is a
+        pause in seconds, which the loop spends serving; a step runs at most one verified
+        send or one containment sample (DL-401). `bound_s` estimates this ladder and
+        never cuts it short."""
         live = [run for run in self.runs.values() if run.wrapper_rc is None]
-        spawn_deadline = time.monotonic() + 5.0
+        spawn_deadline = time.monotonic() + _MAINTENANCE_SPAWN_WAIT_S
         while time.monotonic() < spawn_deadline:
             self._reap()
             if all(
@@ -2653,21 +3045,25 @@ class Supervisor:
                 for run in live
             ):
                 break
-            time.sleep(0.05)
+            yield 0.05
         live = [run for run in live if run.wrapper_rc is None]
         groups: dict[str, _Group] = {}
         for run in live:
             if (group := self._maintenance_signal(run, signal.SIGTERM, proof)) is not None:
                 groups[run.run_id] = group
+            yield 0.0
         # Identity and containment probes precede each send; grace follows them (DL-390).
         term_at = sampled_at = time.monotonic()
         killed: set[str] = set()
-        deadline = term_at + max((run.grace_seconds for run in live), default=0.0) + 2.0
+        deadline = (
+            term_at + max((run.grace_seconds for run in live), default=0.0) + _MAINTENANCE_SETTLE_S
+        )
         while True:
             self._reap()
             if groups and time.monotonic() - sampled_at >= _MAINTENANCE_SAMPLE_S:
                 groups = self._maintenance_groups(groups, proof)
                 sampled_at = time.monotonic()
+                yield 0.0
                 # A slow sample never spends the reaping interval on stale state (DL-390).
                 self._reap()
             remaining = [run for run in live if run.wrapper_rc is None or run.run_id in groups]
@@ -2688,12 +3084,13 @@ class Supervisor:
                     killed.add(run.run_id)
                     sent = True
                     # Reaping gets its full interval after slow verified KILLs (DL-390).
-                    deadline = max(deadline, time.monotonic() + 2.0)
+                    deadline = max(deadline, time.monotonic() + _MAINTENANCE_SETTLE_S)
+                    yield 0.0
             if sent:
                 continue  # the bound is judged only on state reaped after the KILL samples
             if now > deadline:
                 raise OSError("wrappers remain, or command groups stay populated, after the bound")
-            time.sleep(0.02)
+            yield 0.02
 
     def _maintenance_prepare_teardown(self, proof: ServiceContainment) -> None:
         """Prove idle and remove owned publications before the completion answer (DL-390)."""

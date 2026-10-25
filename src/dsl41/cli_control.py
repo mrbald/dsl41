@@ -18,6 +18,7 @@ import typer
 from dsl41.cli_common import (
     command_outcome,
     guarded_maintenance,
+    settle_rerun,
     import_tui_or_exit_2,
     read_header_of,
     refuse,
@@ -606,12 +607,15 @@ def supervise(
 
     shutdown refuses active or unobservable work by default. --force=terminate
     uses TERM, each command's grace period and KILL on validated command groups.
-    Orphaning is unsupported. Shutdown exits 0 on verified completion, 2 on
-    refusal and 4 when delivery or completion is unknown. start returns 8 on
+    Orphaning is unsupported. The supervisor answers at once and the CLI
+    watches the operation in maintenance.json. Shutdown exits 0 on verified
+    completion, 2 on refusal, 3 when the operation still runs as the wait ends
+    (it finishes on its own) and 4 when the outcome is unknown; run again, it
+    watches an operation already admitted and sends nothing. start returns 8 on
     maintenance completion, 0 on host shutdown, 1 on failure, 2 on bad
     configuration and 7 on a statechart error.
     """
-    # Design: runner-design ss6a, DL-42 item 4, DL-210
+    # Design: runner-design ss6a, DL-42 item 4, DL-210, DL-401
     import math
     import os
     import sys
@@ -664,6 +668,9 @@ def supervise(
             raise typer.Exit(refuse(exc, prefix="supervisor start")) from exc
     sock_path = run_root / "supervisor.sock"
     if not sock_path.exists():
+        if verb == "shutdown" and (run_root / "maintenance.json").exists():
+            # a rerun after an admitted operation: its record says how it ended (DL-401)
+            raise typer.Exit(settle_rerun(run_root))
         raise typer.Exit(refuse(f"no supervisor at {sock_path}"))
     try:
         conn = SupervisorConn(sock_path)

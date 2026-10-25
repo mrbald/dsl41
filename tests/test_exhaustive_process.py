@@ -593,13 +593,14 @@ def _maintenance_process_paths(root: Path, monkeypatch: pytest.MonkeyPatch) -> s
         with monkeypatch.context() as patch:
             patch.setattr(runner_supervisor.ServiceContainment, "observe", lambda: proof)
 
-            def terminate(_proof: Any) -> None:
+            def terminate(_proof: Any) -> Any:
                 nonlocal active
+                yield 0.0
                 if case != "force_complete":
                     raise OSError("unverifiable residual group")
                 active = False
 
-            patch.setattr(sup, "_maintenance_wait", terminate)
+            patch.setattr(sup, "_maintenance_ladder", terminate)
             if case == "foreign":
                 request["incarnation"] = "foreign"
             elif case == "stale":
@@ -616,14 +617,21 @@ def _maintenance_process_paths(root: Path, monkeypatch: pytest.MonkeyPatch) -> s
                 patch.setattr(sup, "_maintenance_prepare_teardown", fail)
             try:
                 answer = sup._h_maintenance_stop(conn, request)
+                if sup._maintaining:
+                    # an admitted operation refuses every run mutation until its outcome
+                    for verb in ("SPAWN", "SIGNAL", "SHUTDOWN", "MAINTENANCE_STOP"):
+                        refusal = sup._fence(verb, request)
+                        assert refusal == {"ok": False, "error": "maintenance_in_progress"}
+                while sup._maintaining:
+                    sup._maintenance_pass()
                 if case in ("foreign", "stale", "refused"):
                     assert not answer["ok"] and sup.state == "serving"
                 elif case in ("idle", "force_complete"):
-                    assert answer["maintenance"] == "completed"
+                    assert answer["maintenance"] == "admitted"
                     assert sup.state == "maintenance_completed"
                     sup._process(runner_supervisor.TERM)
                 else:
-                    assert answer["error"] == "maintenance_uncertain"
+                    assert answer["maintenance"] == "admitted"
                     assert sup.state == "maintenance_uncertain"
                     for verb in ("SPAWN", "SIGNAL", "SHUTDOWN", "MAINTENANCE_STOP"):
                         assert sup._fence(verb, request)["error"] == "maintenance_uncertain"
@@ -720,7 +728,7 @@ def test_every_process_event_at_every_reached_point_takes_a_declared_transition(
     assert delivered == {(p, s) for p in _POINTS for s in _STIMULI} - unsent
     assert _PROCESS_PAIRS <= taken, sorted(_PROCESS_PAIRS - taken)
     maintenance_rows = _maintenance_process_paths(short_root, monkeypatch)
-    assert {f"supervisor_process.{number}" for number in range(37, 55)} <= maintenance_rows
+    assert {f"supervisor_process.{number}" for number in range(37, 61)} <= maintenance_rows
     hits = {
         (r["kind"], r["id"], r["detail"])
         for r in _records(recorded, "hits")

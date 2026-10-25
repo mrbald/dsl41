@@ -104,14 +104,15 @@ attested = durable + attest
 
 ## supervisor_process
 
-Shown: 24. Folded: 18 (refusals 12, internal 6). Rows in the chart: 42.
+Shown: 24. Folded: 24 (refusals 16, internal 8). Rows in the chart: 48.
 
 ### phase
 
 ```text
 starting <- initial
 open = {starting, bound, up}
-up = {serving, shutting_down, maintenance_checking, maintenance_stopping, maintenance_uncertain, maintenance_completing}
+up = {serving, shutting_down, maintenance_checking, maintaining, maintenance_uncertain}
+maintaining = {maintenance_stopping, maintenance_completing}
 ended = {stopped, refused, maintenance_completed}
 bound = starting + start [free]
 serving = bound + publish
@@ -121,10 +122,10 @@ shutting_down = serving + SHUTDOWN [credentials]
              || maintenance_uncertain + term
 maintenance_checking = serving + MAINTENANCE_STOP [credentials]
 maintenance_stopping = maintenance_checking + maintenance_stopping
-maintenance_uncertain = maintenance_stopping + maintenance_uncertain
-                     || maintenance_completing + maintenance_uncertain
 maintenance_completing = maintenance_checking + maintenance_idle
                       || maintenance_stopping + maintenance_idle
+maintenance_uncertain = maintenance_stopping + maintenance_uncertain
+                     || maintenance_completing + maintenance_uncertain
 stopped = serving + deadman
        || shutting_down + drained
        || maintenance_uncertain + deadman

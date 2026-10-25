@@ -29,8 +29,10 @@ from dsl41.cli_common import (
     check_base_tz,
     command_outcome,
     confirmed_resume_refusal,
+    IN_PROGRESS,
     guarded_maintenance,
     lineage_of,
+    ping_probe,
     load_catalog_and_ast_or_exit_2,
     load_semantics,
     load_tz_aliases,
@@ -38,7 +40,9 @@ from dsl41.cli_common import (
     refuse,
     resume_target_period,
     say_next,
+    settle_maintenance,
     statechart_report,
+    supervisor_exited,
     walk_estate_or_exit_2,
 )
 from dsl41.period import ARCHIVE_CLASS
@@ -1286,7 +1290,8 @@ def _merged(*verdicts: "tuple[Artifact, ...]") -> "tuple[Artifact, ...]":
 # (DL-390), and checks that neither unit came back and nothing writes. Each stage ends with one
 # line. The verb never waits for a precondition: a stage that cannot pass yet refuses with what
 # to wait for, and a stage already done is skipped, so a rerun is safe. Its one bounded wait is
-# the exit observation after a completion reply, five seconds at most.
+# the watch of an admitted maintenance operation, its `bound_s` and a margin at most; a rerun
+# watches the operation `maintenance.json` names and never requests it twice (DL-401).
 
 #: a reader of the service manager: `systemctl` argv in, its stdout out
 SystemctlReader = Callable[[list[str]], str]
@@ -1434,6 +1439,13 @@ class _QuiesceRequest:
     supervisor_unit: str
 
 
+#: what an unknown maintenance outcome asks of the operator (DL-390, DL-401)
+_UNKNOWN_MAINTENANCE = (
+    "the outcome is unknown: read maintenance.json, the unit, the process and supervisor.log"
+    " before anything else; never repeat it blindly (deployment-runbook ss3)"
+)
+
+
 class _Stop(Exception):
     """A stage that did not pass, with its exit code."""
 
@@ -1453,6 +1465,8 @@ class _Quiesce:
         self.done: list[str] = []
         self.sealed: int | None = None
         self.supervisor_pid: int | None = None
+        #: the supervisor stage's LIST answer, when one answered
+        self.listing: dict[str, Any] = {}
         self.exited_pid: int | None = None
 
     # ------------------------------------------------------------------ output
@@ -1555,11 +1569,41 @@ class _Quiesce:
         try:
             self.lock.acquire()
         except EngineError as exc:
-            raise self.refuse("leadership", f"{exc}; find the process that holds {path}") from exc
+            holder = self._operation_holding_lock()
+            if holder is None:
+                raise self.refuse(
+                    "leadership", f"{exc}; find the process that holds {path}"
+                ) from exc
+            self.sealed = self._sealed_period()
+            if self.sealed is None:
+                # the seal needs the lock; the operation keeps it until its exit (DL-401)
+                raise self.refuse(
+                    "leadership",
+                    f"the supervisor (pid {holder}) holds {path} for an admitted maintenance"
+                    " operation and the period is not sealed; rerun once it has ended",
+                ) from exc
+            # the period is sealed, so no later stage needs the lock: a rerun watches it
+            self.say("leadership", "skipped: the supervisor holds it for maintenance (DL-401)")
         except OSError as exc:
             raise self.refuse("leadership", f"{path}: {exc}") from exc
-        self.say("leadership", "ok")
-        self.sealed = self._sealed_period()
+        else:
+            self.say("leadership", "ok")
+            self.sealed = self._sealed_period()
+
+    def _operation_holding_lock(self) -> int | None:
+        """The pid of the live supervisor whose admitted or uncertain operation
+        `maintenance.json` records, or None: from admission to its exit that supervisor holds
+        `leader.lock` (DL-390, DL-401). An unreadable record names nobody."""
+        from dsl41.runner_supervisor import read_maintenance_record
+
+        try:
+            record = read_maintenance_record(self.request.run_root)
+            if record is None or record["state"] not in ("admitted", "uncertain"):
+                return None
+            pid: int = record["supervisor_pid"]
+            return None if supervisor_exited(pid, record["supervisor_start_time"]) else pid
+        except (OSError, ValueError):
+            return None
 
     def _sealed_period(self) -> int | None:
         """The period this root holds sealed and not yet opened, or None."""
@@ -1584,6 +1628,7 @@ class _Quiesce:
             listing = {"ok": False, "error": str(exc)}
         if listing.get("ok") is True:
             self.supervisor_pid = listing.get("supervisor_pid")
+            self.listing = listing
             live = [run for run in listing.get("runs", []) if run.get("wrapper_alive")]
             self.say("supervisor", f"ok: LIST answers, {len(live)} live run(s)")
             return
@@ -1695,10 +1740,22 @@ class _Quiesce:
             self.say("audit", f"ok: attested through period {targets[-1]}")
 
     def maintenance(self) -> None:
-        if self.supervisor_pid is None:
+        """Guarded maintenance, or, on a rerun, the admitted operation `maintenance.json` names:
+        it is watched to its outcome and never requested again (DL-401)."""
+        from dsl41.runner_supervisor import read_maintenance_record
+
+        root = self.request.run_root
+        try:
+            record = read_maintenance_record(root)
+        except ValueError as exc:
+            raise self.refuse("maintenance", f"{exc}; see deployment-runbook ss3", 4) from exc
+        if self.supervisor_pid is None and record is None:
             self.say("maintenance", "skipped: no supervisor")
             return
-        sock = self.request.run_root / "supervisor.sock"
+        if self.supervisor_pid is None or self.listing.get("process_state") != "serving":
+            self._settle(record)
+            return
+        sock = root / "supervisor.sock"
         try:
             conn = self.host.connect(sock)
         except OSError as exc:
@@ -1714,6 +1771,7 @@ class _Quiesce:
                 before_stop=self.lock.let_go,
                 on_refusal=lambda incarnation, token: self._report_and_release(conn, token),
                 sleep=self.host.sleep,
+                connect=self.host.connect,
             )
         finally:
             conn.close()
@@ -1721,14 +1779,61 @@ class _Quiesce:
             self.exited_pid = reply.get("supervisor_pid")
             self.say("maintenance", f"ok: completed; the supervisor (pid {self.exited_pid}) exited")
             return
+        if code == 3:
+            raise self.refuse("maintenance", IN_PROGRESS, 3)
         if code == 4:
+            raise self.refuse("maintenance", _UNKNOWN_MAINTENANCE, 4)
+        raise self.refuse("maintenance", self._maintenance_remedy(reply or {}))
+
+    def _settle(self, record: dict[str, Any] | None) -> None:
+        """A rerun meets an admitted operation. The owner rule runs first: the record must name
+        the supervisor LIST shows, or with none answering, the one the start note names; any
+        other record is not a maintenance outcome, 4 (DL-401). Then an exited supervisor whose
+        record says completed is skipped, a live one is watched for the rest of its bound, and
+        uncertain is 4."""
+        from dsl41.runner_supervisor import record_owner_problem
+
+        if record is None:
             raise self.refuse(
                 "maintenance",
-                "the outcome is unknown: read the unit, the process and supervisor.log"
-                " before anything else; never repeat it blindly (deployment-runbook ss3)",
+                f"the supervisor is {self.listing.get('process_state')} and no maintenance.json"
+                f" names it; {_UNKNOWN_MAINTENANCE}",
                 4,
             )
-        raise self.refuse("maintenance", self._maintenance_remedy(reply or {}))
+        pid = record["supervisor_pid"]
+        incarnation = self.listing.get("incarnation")
+        if incarnation is None:
+            problem = record_owner_problem(self.request.run_root, record)
+        elif record["incarnation"] != incarnation:
+            problem = "maintenance.json names another supervisor than the one LIST shows"
+        else:
+            problem = None
+        if problem is not None:
+            raise self.refuse("maintenance", f"{problem}; {_UNKNOWN_MAINTENANCE}", 4)
+        try:
+            if record["state"] == "completed" and supervisor_exited(
+                pid, record["supervisor_start_time"]
+            ):
+                self.exited_pid = pid
+                self.say(
+                    "maintenance",
+                    f"skipped: already completed; the supervisor (pid {pid}) exited",
+                )
+                return
+            code, reason, _ = settle_maintenance(
+                self.request.run_root,
+                incarnation,
+                sleep=self.host.sleep,
+                probe=ping_probe(self.request.run_root / "supervisor.sock", self.host.connect),
+            )
+        except (OSError, ValueError) as exc:
+            code, reason = 4, str(exc)
+        if code == 3:
+            raise self.refuse("maintenance", reason, 3)
+        if code != 0:
+            raise self.refuse("maintenance", f"{reason}; {_UNKNOWN_MAINTENANCE}", 4)
+        self.exited_pid = pid
+        self.say("maintenance", f"ok: {reason}")
 
     def _maintenance_remedy(self, reply: dict[str, Any]) -> str:
         """A refusal's cause and its own next move."""
@@ -1738,6 +1843,8 @@ class _Quiesce:
                 f"the supervisor's lease is held by {reply.get('holder')} until"
                 f" {reply.get('expires_at')}; find that controller, then rerun"
             )
+        if error == "not_admitted":
+            return f"the reply was lost and the request was {detail}; rerun"
         if error != "maintenance_refused":
             return f"the supervisor answered {error}; see deployment-runbook ss3"
         if "active wrappers" in detail:
@@ -1881,11 +1988,12 @@ def estate_quiesce(
     done is skipped, so a quiesced estate runs to exit 0 again.
 
     Exit codes: 0 the estate is stopped; 2 a stage refused, and what
-    the earlier stages did is durable; 4 uncertain: a lost maintenance
-    answer or a unit that came back, or a seal whose outcome is
-    unknown.
+    the earlier stages did is durable; 3 maintenance is admitted and
+    still runs: it finishes on its own, so run the verb again; 4
+    uncertain: a maintenance outcome maintenance.json does not prove, a
+    unit that came back, or a seal whose outcome is unknown.
     """
-    # Design: DL-398, deployment-runbook ss2b
+    # Design: DL-398, DL-401, deployment-runbook ss2b
     from dsl41.runner_control import claimed_actor as default_actor
 
     if force is not None and force != "terminate":

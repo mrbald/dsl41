@@ -33,9 +33,10 @@ fresh mutation id, signal fallback or unattended retry.
 | Completed leader leaves descendants | Full verified service-cgroup observation | Refuse safe maintenance. Unknown descendants are never blanket-signalled. |
 | Missing process observation or shared/delegated cgroup | Capability refusal | Fix containment or use incident recovery; absence of evidence is not idle. |
 | Explicit termination does not clear all work | Force signals validated groups, then rechecks containment | UNKNOWN retains supervisor, lifelines and exclusion. Diagnose before emergency stop. |
-| Old supervisor lacks maintenance verb | Unknown-command refusal | Coordinate the supervisor upgrade; never fall back to SHUTDOWN. |
+| Old supervisor lacks maintenance verb or its version 2 | `unknown_verb` or `unsupported_version` refusal, exit 2 (DL-401) | Coordinate the supervisor upgrade; never fall back to SHUTDOWN. |
 | Manual supervisor stop or restart | `RefuseManualStop=yes`, checked at supervisor start (DL-399) | Manager refuses. Routine engine restart remains available and jobs survive. A unit without it fails to start. |
-| Lost maintenance answer or partial write | CLI exits 4 after possible delivery | Inspect supervisor PID, unit and log. No automatic retry or signal escalation. |
+| Lost maintenance answer or partial write | One reconnect fences the request with its lease, then PING and `maintenance.json` decide (DL-401) | Never admitted: exit 2. Admitted: watched to completion, 0; still running at the watch's end, 3; unobservable, 4 with the reason. No resend or signal escalation. |
+| A later supervisor ends outside maintenance | Its start note in `supervisor.lock` or its pid record names it (DL-401) | An older `completed` record is not its outcome: a rerun answers 4, not 0. |
 | Successful maintenance restarts itself | Exit 8 plus reloaded unit exclusions | Supervisor stays inactive; engine is already stopped. |
 | Reboot ends a maintenance window | Disable both units before stopping | Hold remains through reboot. Release only after the intended recovery. |
 | Unresponsive supervisor | No safe observation or answer | Explicit incident procedure acknowledges termination; it is not successful maintenance. |

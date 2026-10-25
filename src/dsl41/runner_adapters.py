@@ -935,7 +935,8 @@ class SupervisorConn:
 
     It sits beside `SupervisorClient` as `roundtrip` sits beside `ControlClient` (DL-78, DL-91):
     two transports for ONE protocol. The framing rule is stamp `"v": 1` AND the incarnation, read
-    newline-delimited JSON, drop pushes; a frozen document owns it."""
+    newline-delimited JSON, drop pushes; a frozen document owns it. A request that names its own
+    `v` keeps it: MAINTENANCE_STOP is version 2 (DL-401)."""
 
     def __init__(self, sock_path: Path, *, timeout_s: float = 60.0) -> None:
         self.conn = socket.socket(socket.AF_UNIX)
@@ -958,7 +959,7 @@ class SupervisorConn:
         deadline = time.monotonic() + self.timeout_s
         self._remaining_timeout(deadline)
         self.conn.sendall(
-            json.dumps({**request, "v": 1, "incarnation": self.incarnation}).encode("utf-8") + b"\n"
+            json.dumps({"v": 1, **request, "incarnation": self.incarnation}).encode("utf-8") + b"\n"
         )
         while True:
             self._remaining_timeout(deadline)
