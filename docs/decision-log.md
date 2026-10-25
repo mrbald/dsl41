@@ -24231,3 +24231,23 @@ relitigate an entry; append a new one.
   REJECTED: an operator's launcher edit at each flip, which the runbook would have to teach.
   Matching `run --help` text, which fails open. A line for every busctl read: the maintenance
   ladder reads the policy on each poll.
+- DL-403 A `setsid` escapee is a stated limit of process-group containment, not a hardening to
+  build (2026-10-25; owner ruling; docs/runner-design.md ss6a; no code change)
+  THE RULE. The runner contains a command by its process group: the wrapper gives each command
+  its own group and the ladders signal validated groups (DL-41a, DL-394). A helper that a job
+  starts with its own session (`setsid`, or a tool that does the same) leaves that group and is
+  not reached. A forced stop that meets one sees it in the unit's cgroup, signals nothing it
+  cannot attribute to a run, ends `uncertain` and names it; the operator finishes by hand
+  (deployment-runbook ss3). The whole-estate stop under systemd is unaffected: `KillMode=
+  control-group` ends every process left in the unit's cgroup, escapees included. The runner
+  builds no per-run cgroup, scope or delegated subtree for this; `--scope` stays unbuilt.
+  THE REASON. Three independent passes agreed that per-run containment answers one need only,
+  ending a single run's whole tree while other runs continue, and that nothing in the code or the
+  contract declares a live estate idle because of an escapee. supervisord's group-stop flags are
+  the same process-group kill. The owner's rule: minimum required complexity, flexibility by
+  composition, and a sloppy job is fixed in the job. A job that must end its own helpers ends
+  them itself.
+  REJECTED: per-run transient systemd scopes (a privilege rule in the kit and an idle proof that
+  must walk every scope); `Delegate=yes` with per-run sub-cgroups (reverses DL-390's containment
+  evidence); a private cgroup v1 hierarchy (a compatibility burden on later hosts). Each would be
+  reopened only by a supported workload shown to need selective termination, and none was.
