@@ -136,6 +136,63 @@ def _systemd_exit_status_codes(text: str) -> set[int]:
     return set(values[1 : count + 1])
 
 
+def _own_systemd_cgroup() -> tuple[str, str, str]:
+    """This process's systemd hierarchy: (controllers, cgroup path, unit), the unit a
+    `.service`. Raises `ObservationUnavailable` when it is not unambiguous."""
+    entries = [line.split(":", 2) for line in Path("/proc/self/cgroup").read_text().splitlines()]
+    candidates = [
+        (controllers, group)
+        for _, controllers, group in entries
+        if "name=systemd" in controllers.split(",")
+    ]
+    if not candidates:
+        candidates = [
+            (controllers, group) for _, controllers, group in entries if controllers == ""
+        ]
+    if len(candidates) != 1:
+        raise ObservationUnavailable("no unambiguous systemd cgroup hierarchy")
+    controllers, group = candidates[0]
+    unit = group.rsplit("/", 1)[-1]
+    if not re.fullmatch(r"[A-Za-z0-9_.@:\\-]+[.]service", unit):
+        raise ObservationUnavailable("supervisor is not in a service cgroup")
+    return controllers, group, unit
+
+
+def stop_guard_refusal() -> str | None:
+    """Shape 1's start check (DL-399): a supervisor that is the main process of its `.service`
+    unit needs `RefuseManualStop=yes` there, or a manual `systemctl stop` ends every job. The
+    refusal text, or None. Off Linux, outside a service cgroup, as a unit's non-main process
+    (shape 2) or when the manager cannot be read, there is nothing to verify."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        _, _, unit = _own_systemd_cgroup()
+        output = subprocess.run(
+            [
+                "systemctl",
+                "show",
+                unit,
+                "--no-pager",
+                "--property=MainPID",
+                "--property=RefuseManualStop",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5.0,
+        ).stdout
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    properties = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
+    if properties.get("MainPID") != str(os.getpid()) or properties.get("RefuseManualStop") == "yes":
+        return None
+    return (
+        f"{unit} runs this supervisor as its main process without RefuseManualStop=yes:"
+        " a manual stop would end every job; add it to the unit's [Unit] section and"
+        " reload (deployment-runbook ss3, DL-399)"
+    )
+
+
 @dataclass(frozen=True)
 class ServiceContainment:
     """The qualified Linux systemd hierarchy, including its complete subtree (DL-390)."""
@@ -149,24 +206,7 @@ class ServiceContainment:
     def observe(cls) -> ServiceContainment:
         if not sys.platform.startswith("linux"):
             raise ObservationUnavailable("maintenance requires Linux service containment")
-        entries = [
-            line.split(":", 2) for line in Path("/proc/self/cgroup").read_text().splitlines()
-        ]
-        candidates = [
-            (controllers, group)
-            for _, controllers, group in entries
-            if "name=systemd" in controllers.split(",")
-        ]
-        if not candidates:
-            candidates = [
-                (controllers, group) for _, controllers, group in entries if controllers == ""
-            ]
-        if len(candidates) != 1:
-            raise ObservationUnavailable("no unambiguous systemd cgroup hierarchy")
-        controllers, group = candidates[0]
-        unit = group.rsplit("/", 1)[-1]
-        if not re.fullmatch(r"[A-Za-z0-9_.@:\\-]+[.]service", unit):
-            raise ObservationUnavailable("supervisor is not in a service cgroup")
+        controllers, group, unit = _own_systemd_cgroup()
         mounts: list[Path] = []
         for line in Path("/proc/self/mountinfo").read_text().splitlines():
             left, right = line.split(" - ", 1)
@@ -187,6 +227,7 @@ class ServiceContainment:
         return proof
 
     def verify_manager(self) -> None:
+        # Identity, containment and exit policy; the stop guard is checked at start (DL-399).
         # All manager reads share one bound; helpers are reaped before sampling (DL-390).
         deadline = time.monotonic() + 5.0
 
@@ -208,7 +249,6 @@ class ServiceContainment:
                 "--property=ControlGroup",
                 "--property=Delegate",
                 "--property=KillMode",
-                "--property=RefuseManualStop",
                 "--property=SuccessExitStatus",
                 "--property=RestartPreventExitStatus",
             ]
@@ -219,7 +259,6 @@ class ServiceContainment:
             or properties.get("ControlGroup") != self.control_group
             or properties.get("Delegate") != "no"
             or properties.get("KillMode") != "control-group"
-            or properties.get("RefuseManualStop") != "yes"
         ):
             raise ObservationUnavailable("service ownership, delegation or containment mismatch")
         statuses = ("SuccessExitStatus", "RestartPreventExitStatus")

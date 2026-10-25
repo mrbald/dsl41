@@ -1175,14 +1175,11 @@ def test_command_exit_during_valid_observation_is_not_a_false_uncertainty(rig, m
 @pytest.mark.parametrize(
     "property_name,value",
     [
-        ("RefuseManualStop", "no"),
         ("SuccessExitStatus", ""),
         ("RestartPreventExitStatus", "2 7"),
     ],
 )
-def test_stale_or_unprotected_unit_policy_refuses_maintenance(
-    monkeypatch, tmp_path, property_name, value
-):
+def test_stale_unit_exit_policy_refuses_maintenance(monkeypatch, tmp_path, property_name, value):
     properties = {
         "MainPID": str(os.getpid()),
         "ControlGroup": "/test.service",
@@ -1203,6 +1200,117 @@ def test_stale_or_unprotected_unit_policy_refuses_maintenance(
     proof = procid.ServiceContainment(tmp_path, "/test.service", "test.service", os.getpid())
     with pytest.raises(procid.ObservationUnavailable):
         proof.verify_manager()
+
+
+def test_maintenance_admission_no_longer_reads_the_stop_guard(monkeypatch, tmp_path):
+    """DL-399: admission verifies identity, containment and exit policy. The
+    stop guard is verified at start, so a unit without it is admitted here."""
+    calls = []
+
+    def query(argv, **_kwargs):
+        calls.append(argv)
+        return SimpleNamespace(
+            stdout=(
+                f"MainPID={os.getpid()}\nControlGroup=/test.service\nDelegate=no\n"
+                "KillMode=control-group\nRefuseManualStop=no\nSuccessExitStatus=8\n"
+                "RestartPreventExitStatus=2 7 8\n"
+            )
+        )
+
+    monkeypatch.setattr(procid.subprocess, "run", query)
+    proof = procid.ServiceContainment(tmp_path, "/test.service", "test.service", os.getpid())
+    proof.verify_manager()
+    assert len(calls) == 1
+    assert not any("RefuseManualStop" in arg for arg in calls[0])
+
+
+# ------------------------------------------------- the stop guard at start (DL-399)
+
+
+def _systemd_host(monkeypatch, cgroup, reply):
+    """A Linux host whose /proc/self/cgroup reads `cgroup` and whose
+    `systemctl show` answers `reply`; the systemctl argv it was asked."""
+    asked = []
+
+    def read(path, *_a, **_kw):
+        assert str(path) == "/proc/self/cgroup"
+        return cgroup
+
+    def query(argv, **kwargs):
+        asked.append(argv)
+        assert kwargs["check"] is True and 0 < kwargs["timeout"] <= 5
+        return SimpleNamespace(stdout=reply)
+
+    monkeypatch.setattr(procid.sys, "platform", "linux")
+    monkeypatch.setattr(Path, "read_text", read)
+    monkeypatch.setattr(procid.subprocess, "run", query)
+    return asked
+
+
+@pytest.mark.parametrize("guard,refused", [("no", True), ("", True), ("yes", False)])
+def test_a_unit_main_supervisor_without_the_stop_guard_is_refused(monkeypatch, guard, refused):
+    """Shape 1: the supervisor is its unit's MainPID. Without
+    RefuseManualStop=yes it refuses, naming the directive and the unit."""
+    asked = _systemd_host(
+        monkeypatch,
+        "0::/system.slice/dsl41-supervisor.service\n",
+        f"MainPID={os.getpid()}\nRefuseManualStop={guard}\n",
+    )
+    refusal = procid.stop_guard_refusal()
+    assert asked == [
+        [
+            "systemctl",
+            "show",
+            "dsl41-supervisor.service",
+            "--no-pager",
+            "--property=MainPID",
+            "--property=RefuseManualStop",
+        ]
+    ]
+    if refused:
+        assert refusal is not None
+        assert "dsl41-supervisor.service" in refusal and "RefuseManualStop=yes" in refusal
+    else:
+        assert refusal is None
+
+
+def test_shape_2_and_a_session_read_no_stop_guard(monkeypatch):
+    """Shape 2: the service's MainPID is the engine, so nothing is refused.
+    Outside a service cgroup, and off Linux, the manager is not asked."""
+    asked = _systemd_host(
+        monkeypatch,
+        "0::/system.slice/dsl41-engine.service\n",
+        "MainPID=1\nRefuseManualStop=no\n",
+    )
+    assert procid.stop_guard_refusal() is None
+    assert len(asked) == 1
+    asked = _systemd_host(monkeypatch, "0::/user.slice/user-1000.slice/session-3.scope\n", "")
+    assert procid.stop_guard_refusal() is None
+    assert asked == []
+    monkeypatch.setattr(procid.sys, "platform", "darwin")
+    assert procid.stop_guard_refusal() is None
+    assert asked == []
+
+
+def test_an_unreadable_manager_is_not_a_refusal(monkeypatch):
+    monkeypatch.setattr(procid.sys, "platform", "linux")
+    monkeypatch.setattr(Path, "read_text", lambda *_a, **_kw: "0::/system.slice/x.service\n")
+
+    def failing(*_a, **_kw):
+        raise FileNotFoundError("systemctl")
+
+    monkeypatch.setattr(procid.subprocess, "run", failing)
+    assert procid.stop_guard_refusal() is None
+
+
+def test_the_stop_guard_refusal_exits_2_before_the_supervisor_takes_its_root(
+    monkeypatch, tmp_path, capsys
+):
+    """A configuration refusal: exit 2, which the unit does not restart."""
+    monkeypatch.setattr(rs, "stop_guard_refusal", lambda: "x.service runs this supervisor")
+    assert rs.main(["--run-root", str(tmp_path)]) == 2
+    assert "supervisor: x.service runs this supervisor" in capsys.readouterr().err
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize(

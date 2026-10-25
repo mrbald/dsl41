@@ -1596,7 +1596,10 @@ before using a new runtime: `[Unit] RefuseManualStop=yes`, and
 `[Service] SuccessExitStatus=8` with `RestartPreventExitStatus=2 7 8`.
 Keep `Restart=always`, `KillMode=control-group` and the stop timeout.
 Manual manager stop and restart refuse. Routine engine restart remains
-available. Dependency shutdown during host shutdown still stops the unit.
+available. The supervisor checks the stop guard when it starts: as its
+unit's main process without `RefuseManualStop=yes`, it exits 2, naming
+the unit and the directive, and the unit stays down (DL-399). Maintenance
+admission checks the unit's identity, containment and exit policy. Dependency shutdown during host shutdown still stops the unit.
 Do not add an `ExecStop` safety command: its refusal does not veto a
 systemd stop, which still kills remaining processes.
 

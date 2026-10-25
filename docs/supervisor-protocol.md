@@ -3,8 +3,8 @@
 Status: frozen. DL-42 item 3 freezes the spool format and the wrapper
 input spec, and DL-48 freezes the supervisor socket protocol. Entries
 that amend it include DL-80, DL-129, DL-150, DL-151, DL-210, DL-229,
-DL-291, DL-300, DL-325, DL-326, DL-328, DL-390, DL-392 and DL-396; each is cited where it
-applies. Each change to a frozen item needs a decision-log entry. This
+DL-291, DL-300, DL-325, DL-326, DL-328, DL-390, DL-392, DL-396 and
+DL-399; each is cited where it applies. Each change to a frozen item needs a decision-log entry. This
 document is the extraction boundary of the lifecycle tier (the five
 modules of §1). If a DL-42 trigger fires and the tier is extracted, this
 document is its public API.
@@ -384,7 +384,12 @@ A held lock, a PING answer or a live recorded process refuses startup with
 exit 1 and the message `another supervisor owns this root`. A zombie
 (exited and unreaped) counts as absent: it holds no descriptor, no lock
 and no socket. Runtime `OSError` failures also exit 1, so that the service
-can retry. Configuration refusals exit 2.
+can retry. Configuration refusals exit 2. One of them is the stop guard
+(DL-399): a supervisor that is the MainPID of its `.service` unit reads
+that unit's RefuseManualStop once, before it takes the lock, and exits 2
+unless it is `yes`. The message names the unit and the directive. A
+supervisor in a service whose MainPID is another process (shape 2), or
+outside systemd, reads nothing.
 
 A statechart error (`StatechartError`, an assertion failure of the process
 or lease chart) exits 7, `EXIT_STATECHART_ERROR` in `state_machine.py`
@@ -763,9 +768,10 @@ first. Then a stale or expired token answers
   Its MainPID must be this supervisor and its ControlGroup must match the
   observed membership. Shared, delegated or unobservable containment
   refuses. Unmanaged supervisors have no qualified maintenance proof.
-  The loaded unit must also have RefuseManualStop=yes and include exit 8
-  in both SuccessExitStatus and RestartPreventExitStatus. A stale unit
-  policy refuses before termination starts.
+  The loaded unit must also include exit 8 in both SuccessExitStatus and
+  RestartPreventExitStatus. A stale unit policy refuses before
+  termination starts. Admission does not read RefuseManualStop; startup
+  verifies it (DL-399).
 
   With `force: null`, active or indeterminate work refuses without a
   signal. With `force: "terminate"`, validated command groups take the

@@ -24130,3 +24130,27 @@ relitigate an entry; append a new one.
   REJECTED: performing the root steps, which needs root. A sleep or a poll for the horizon or
   `RestartSec`: a refusal and a rerun say the same and cannot hang. A second exclusion beside
   `leader.lock`. Holding the lock through maintenance, which the supervisor refuses as held.
+- DL-399 Maintenance admission checks identity, containment and exit policy; the stop guard is
+  checked at start (2026-10-25; src/dsl41/runner_procid.py, runner_supervisor.py;
+  docs/supervisor-protocol.md ss5, deployment-runbook.md ss3, deployment-qualification.md)
+  THE RULE. `ServiceContainment.verify_manager` no longer reads `RefuseManualStop`. It still
+  checks the unit's identity and containment (MainPID, ControlGroup, Delegate, KillMode) and its
+  exit policy (exit 8 in both SuccessExitStatus and RestartPreventExitStatus), on the default and
+  the forced path alike, with the `busctl` read for systemd 239. A supervisor that finds itself
+  the MainPID of a `.service` unit (shape 1) reads that unit's `RefuseManualStop` once at start,
+  before it takes its lock, and exits 2 unless it is `yes`, naming the unit and the directive.
+  Exit 2 is in the example unit's `RestartPreventExitStatus`, so the unit stays down. A supervisor
+  in a service whose MainPID is another process (shape 2), or outside systemd, reads nothing, and
+  a manager it cannot read is not a refusal; admission still reads that manager later.
+  THE REASON. The three checks have three jobs. The idle proof walks the verified cgroup, so it
+  needs identity and containment at that moment. The outcome needs the exit policy: without 8 the
+  unit restarts a supervisor the CLI reported stopped. The stop guard protects against a manual
+  `systemctl stop` at any other time; checked at maintenance it can neither prevent that stop nor
+  change the outcome, and a misconfigured unit was found only at the first maintenance. At start
+  it is found on the first day.
+  WHAT IT NARROWS. DL-390's "Maintenance admission verifies these loaded unit settings" now
+  covers identity, containment and exit policy; the stop guard is verified at start. DL-390's
+  text stands.
+  REJECTED: dropping the `busctl` path, because systemd 239 (RHEL 8, Oracle Linux 8) is a target
+  (owner, 2026-10-25). Checking the exit policy on the forced path only: a stop verb that reports
+  done while the service returns misleads on the default path too.
