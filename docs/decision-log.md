@@ -24073,3 +24073,22 @@ relitigate an entry; append a new one.
   REJECTED: a `RuntimeProfile` field, because who started the supervisor does not change what a
   period runs, and a field would move the pin and its hash for an operational choice. A default
   of `attach` for `run`, because shape 2 and development rely on the engine starting its own.
+- DL-397 Offline manufacturing consumes bound release exports (2026-10-25).
+  This narrows DL-215's --frozen release export to --locked and adds
+  release-inputs.json to the candidate and checksummed release assets.
+  The upstream release build exports the locked base and UI dependency sets.
+  An input manifest binds both named exports to the exact release wheel,
+  pyproject.toml and uv.lock by SHA-256. The native target verifies that binding
+  before creating a bundle or downloading wheels. Original exports and their
+  manifest remain in the bundle; installation requirements add the release pin.
+  The manifest detects mismatched inputs. It is not a signature: the operator
+  verifies the wheel, exports and manifest against trusted release checksums,
+  or CI consumes them from the same candidate artifact.
+  Target wheelhouse manufacturing, RPM assembly and runtime preparation use
+  system Python and pip without the uv executable. uv.lock remains provenance
+  data. The upstream exporter uses uv with --locked; it owns profile selection
+  and lock freshness. The native builder requires supplied release inputs and
+  has no source-wheel build fallback. Both target rehearsal phases check that
+  uv is absent from PATH. Existing diagnostic delivery reuse remains explicit.
+  DL-389's target checks, binary-wheel hashes, preparation, receipts, retention
+  and separate activation rules remain in force.

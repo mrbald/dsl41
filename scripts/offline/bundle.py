@@ -56,17 +56,24 @@ def wheel_identity(wheel: Path) -> tuple[str, str]:
     return str(metadata["Name"]), str(metadata["Version"])
 
 
-def check_input(repo: Path, wheel: Path) -> None:
-    target()
+def check_release(repo: Path, wheel: Path) -> str:
+    """Check release metadata without qualifying a target interpreter (DL-397)."""
     project = tomllib.loads((repo / "pyproject.toml").read_text())["project"]
     lock = tomllib.loads((repo / "uv.lock").read_text())
     locked = [package for package in lock["package"] if package["name"] == "dsl41"]
-    if wheel.suffix != ".whl" or wheel_identity(wheel) != ("dsl41", project["version"]):
+    identity = (project["name"], project["version"])
+    if identity[0] != "dsl41" or wheel.suffix != ".whl" or wheel_identity(wheel) != identity:
         raise Refusal("release wheel metadata must match pyproject.toml name and version")
     if len(locked) != 1 or locked[0]["version"] != project["version"]:
         raise Refusal("uv.lock must name the same dsl41 release")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+_-]*", project["version"]):
         raise Refusal("release version is not a safe runtime directory component")
+    return str(project["version"])
+
+
+def check_input(repo: Path, wheel: Path) -> None:
+    target()
+    check_release(repo, wheel)
 
 
 def inventory(root: Path) -> dict[str, dict[str, Any]]:
@@ -82,7 +89,7 @@ def inventory(root: Path) -> dict[str, dict[str, Any]]:
     return files
 
 
-def check_requirements(path: Path) -> None:
+def check_requirements(path: Path, *, reject_project: bool = False) -> None:
     # Only ordinary hashed pins are admitted; pip --no-index permits direct URLs (DL-389).
     pin = r"[A-Za-z0-9][A-Za-z0-9_.-]*(?:\[[A-Za-z0-9_,.-]+\])?==[A-Za-z0-9][A-Za-z0-9.!+_-]*"
     marker = r"(?:\s*;\s*[^@\\]+?)?"
@@ -94,6 +101,42 @@ def check_requirements(path: Path) -> None:
         options = "--" in re.sub(hashes, "", line)
         if line and not line.startswith("#") and (not valid or options):
             raise Refusal(f"only hashed package==version pins and markers are allowed: {path.name}")
+        if reject_project and re.match(r"dsl41(?:\[|==)", line, re.IGNORECASE):
+            raise Refusal(f"incoming exports must not pin dsl41: {path.name}")
+
+
+def release_inputs(repo: Path, wheel: Path, exports: Path) -> dict[str, Any]:
+    """Bind upstream exports to exact release and project metadata bytes (DL-397)."""
+    version = check_release(repo, wheel)
+    requirements = {}
+    for profile in ("base", "ui"):
+        path = exports / f"requirements-{profile}.txt"
+        check_requirements(path, reject_project=True)
+        requirements[path.name] = digest(path)
+    return {
+        "schema": 1,
+        "version": version,
+        "release_wheel": {"filename": wheel.name, "sha256": digest(wheel)},
+        "pyproject_sha256": digest(repo / "pyproject.toml"),
+        "uv_lock_sha256": digest(repo / "uv.lock"),
+        "requirements": requirements,
+    }
+
+
+def write_release_inputs(repo: Path, wheel: Path, exports: Path) -> None:
+    manifest = release_inputs(repo, wheel, exports)
+    with (exports / "release-inputs.json").open("x") as stream:
+        json.dump(manifest, stream, sort_keys=True, indent=2)
+        stream.write("\n")
+
+
+def verify_release_inputs(repo: Path, wheel: Path, exports: Path) -> None:
+    expected = release_inputs(repo, wheel, exports)
+    manifest = json.loads((exports / "release-inputs.json").read_text())
+    if manifest != expected:
+        raise Refusal(
+            "release-inputs.json differs from the release wheel, project metadata, or exports"
+        )
 
 
 def write_manifest(bundle: Path, release_wheel: Path) -> None:
@@ -298,6 +341,12 @@ def main() -> None:
         locked(*args)
     elif command == "check-input":
         check_input(*(Path(arg) for arg in args))
+    elif command == "check-release":
+        check_release(*(Path(arg) for arg in args))
+    elif command == "release-inputs":
+        write_release_inputs(*(Path(arg) for arg in args))
+    elif command == "verify-inputs":
+        verify_release_inputs(*(Path(arg) for arg in args))
     elif command == "manifest":
         write_manifest(*(Path(arg) for arg in args))
     elif command == "add-release":

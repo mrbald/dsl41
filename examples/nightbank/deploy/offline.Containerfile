@@ -3,7 +3,6 @@ FROM ${BASE}
 ARG TARGET
 ARG APT_MIRROR
 ARG RPM_MIRROR
-ARG PYTHON_INDEX
 RUN if [ "$TARGET" = el8 ]; then \
         if [ -n "$RPM_MIRROR" ]; then \
             sed -i -e 's|^mirrorlist=|#mirrorlist=|' \
@@ -24,9 +23,7 @@ RUN if [ "$TARGET" = el8 ]; then \
         && dpkg-query -W >/opt/os-packages.txt && rm -rf /var/lib/apt/lists/*; \
     fi \
     && python3.12 -I -c 'import venv, ensurepip' \
-    && python3.12 -m venv /opt/uv \
-    && /opt/uv/bin/pip install --index-url "$PYTHON_INDEX" uv==0.9.7 \
-    && ln -s /opt/uv/bin/uv /usr/local/bin/uv \
+    && ! command -v uv \
     && useradd --create-home --shell /bin/bash runner \
     && echo 'runner ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/runner \
     && chmod 0440 /etc/sudoers.d/runner

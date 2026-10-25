@@ -15,6 +15,12 @@ case $target in
 esac
 here=$(cd "$(dirname "$0")" && pwd)
 tree=$(cd "$here/../../.." && pwd)
+if [ -z "${DSL41_REUSE_DELIVERY-}" ]; then
+    : "${DSL41_RELEASE_WHEEL:?set DSL41_RELEASE_WHEEL to the exact release wheel}"
+    : "${DSL41_RELEASE_INPUTS:?set DSL41_RELEASE_INPUTS to its upstream exports directory}"
+    "${PYTHON:-python3}" -I "$tree/scripts/offline/bundle.py" verify-inputs \
+        "$tree" "$DSL41_RELEASE_WHEEL" "$DSL41_RELEASE_INPUTS"
+fi
 mkdir "$2"
 evidence=$(cd "$2" && pwd -P)
 printf '%s\n' "$scope" >"$evidence/scope"
@@ -45,7 +51,6 @@ if [ -z "${DSL41_REHEARSAL_IMAGE-}" ]; then
     podman build --tag "$image" --build-arg "BASE=${DSL41_OCI_IMAGE:-$base}" \
         --build-arg "TARGET=$target" --build-arg "APT_MIRROR=${DSL41_APT_MIRROR-}" \
         --build-arg "RPM_MIRROR=${DSL41_RPM_MIRROR-}" \
-        --build-arg "PYTHON_INDEX=${DSL41_PYTHON_INDEX:-https://pypi.org/simple}" \
         --file "$here/offline.Containerfile" "$here" >"$evidence/image-build.log" 2>&1
 fi
 podman image inspect "$image" >"$evidence/image.json"
@@ -60,7 +65,10 @@ if [ -n "${DSL41_REUSE_DELIVERY-}" ]; then
     cp -a "$DSL41_REUSE_DELIVERY/." "$evidence/delivery/"
     printf 'reused delivery: %s\n' "$DSL41_REUSE_DELIVERY" >"$evidence/delivery-build.log"
 else
-    if [ -n "${DSL41_RELEASE_WHEEL-}" ]; then cp "$DSL41_RELEASE_WHEEL" "$evidence/delivery/"; fi
+    cp "$DSL41_RELEASE_WHEEL" "$evidence/delivery/"
+    mkdir "$evidence/delivery/release-inputs"
+    cp "$DSL41_RELEASE_INPUTS"/{requirements-base.txt,requirements-ui.txt,release-inputs.json} \
+        "$evidence/delivery/release-inputs/"
     podman run --rm --volume "$tree:/src:ro" --volume "$evidence/delivery:/delivery" \
         --env "DSL41_PYTHON_INDEX=${DSL41_PYTHON_INDEX:-https://pypi.org/simple}" \
         "$image" bash /src/examples/nightbank/deploy/offline-target.sh build \
