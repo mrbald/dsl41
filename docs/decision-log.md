@@ -24205,3 +24205,29 @@ relitigate an entry; append a new one.
   admission only. Both texts stand; DL-394 stands whole.
   REJECTED: a hard cap at `bound_s`: under slow sends it ended forced stops uncertain before
   KILL. A new state for "admitted". A resend after a lost reply.
+- DL-402 The example launcher passes `--supervisor attach` only to a `dsl41` whose `run` accepts
+  it; the supervisor logs the busctl read of its exit policy (2026-10-25;
+  examples/nightbank/deploy/dsl41-launch, drill-lib.sh, drill-steps.sh, drill-local.sh;
+  src/dsl41/runner_procid.py; docs/deployment-runbook.md ss7 and the deployment example)
+  THE RULE. The launcher's engine mode runs `$DSL41 run --supervisor attach --help` once, with
+  its output discarded. Exit 0 passes `--supervisor attach`. Exit 2, the parser's "no such
+  option", omits it: a release before DL-396 gets its supervisor as it always did. Any other
+  exit, or a missing binary, refuses with exit 2 and names the code; it never falls back to
+  spawn. One launcher therefore serves an upgrade and a rollback across DL-396
+  (deployment-runbook ss7 row 4). `--print` runs this probe and no estate command. The
+  supervisor writes `supervisor: exit policy read through busctl (systemd text formatter
+  printed [unprintable])` to its log once per process, the first time DL-390's busctl branch
+  reads its exit policy. The service drill asserts that line on systemd before 240 and its
+  absence from 240 on. It asserts that every launch line it reads carries `--supervisor attach`,
+  except under the old release's venv, where it carries none.
+  THE REASON. The drill's row 4 ran v1.7.0 under the launcher DL-396 changed. v1.7.0 refused
+  `--supervisor` with exit 2, so the engine unit stayed failed, and the runbook's rollback did
+  not work as written. A probe of the help text failed open: under FORCE_COLOR the text did not
+  match, and the launch fell back to spawn, the stray DL-396 removed. An exit code does not
+  depend on rendering. The busctl branch logged nothing, so no log showed which path
+  admission took on systemd 239.
+  WHAT IT NARROWS. DL-396's "The example launcher passes `--supervisor attach`": only to a
+  release whose `run` accepts it. DL-396's text stands.
+  REJECTED: an operator's launcher edit at each flip, which the runbook would have to teach.
+  Matching `run --help` text, which fails open. A line for every busctl read: the maintenance
+  ladder reads the policy on each poll.

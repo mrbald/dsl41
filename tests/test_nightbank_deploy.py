@@ -102,14 +102,15 @@ def _grant_me(path: Path) -> None:
 # ------------------------------------------------------------ the command
 
 
-def test_the_shipped_launcher_prints_the_whole_ordered_line() -> None:
+def test_the_shipped_launcher_prints_the_whole_ordered_line(tmp_path: Path) -> None:
     if Path(SHIPPED_ROOT, "journal.jsonl").exists():  # pragma: no cover -- a real host
         pytest.skip("this host holds the example's run root")
-    printed = _sh(LAUNCH, "--print")
+    # this build's dsl41 in place of the shipped path, so the --supervisor probe finds it
+    printed = _sh(_configured(tmp_path, DSL41=str(DSL41)), "--print")
     assert printed.returncode == 0, printed.stderr
     estate = "/srv/dsl41/nightbank/estate/small"
     assert shlex.split(printed.stdout) == [
-        "/opt/dsl41/.venv/bin/dsl41",
+        str(DSL41),
         "run",
         *(f"{estate}/{name}" for name in ORDER),
         "-p",
@@ -136,6 +137,41 @@ def test_the_shipped_launcher_prints_the_whole_ordered_line() -> None:
     assert sorted(ORDER) == sorted(p.name for p in (NB / "estate" / "small").glob("*.jil"))
 
 
+@pytest.mark.parametrize("probe", [0, 2, 1])
+def test_the_launcher_passes_supervisor_attach_only_to_a_dsl41_that_accepts_it(
+    tmp_path: Path, probe: int
+) -> None:
+    """DL-402: the parse of `run --supervisor attach --help` decides by exit
+    code. 0 passes the option, 2 (a release before DL-396: no such option)
+    omits it, and any other code refuses instead of falling back to spawn."""
+    fake = tmp_path / "fake-dsl41"
+    fake.write_text(
+        "#!/bin/sh\n"
+        'echo "probe: $*"\n'
+        'echo "probe: $*" >&2\n'
+        '[ "$*" = "run --supervisor attach --help" ] || exit 9\n'
+        f"exit {probe}\n"
+    )
+    fake.chmod(0o755)
+    printed = _sh(_configured(tmp_path, DSL41=str(fake), RUN_ROOT=str(tmp_path / "nb")), "--print")
+    if probe == 1:
+        assert printed.returncode == 2 and printed.stdout == ""
+        assert printed.stderr.splitlines() == [
+            f"dsl41-launch: {fake} run --supervisor attach --help exited 1:"
+            " cannot tell attach from spawn"
+        ]
+        return
+    assert printed.returncode == 0, printed.stderr
+    assert printed.stderr == ""  # the probe's output is discarded
+    words = shlex.split(printed.stdout)
+    if probe == 0:
+        at = words.index("--supervisor")
+        assert words[at - 1 : at + 2] == ["--detached", "--supervisor", "attach"]
+    else:
+        assert "--supervisor" not in words and "attach" not in words
+        assert words[words.index("--detached") + 1] == "--as-machine"
+
+
 def test_the_shipped_launcher_prints_the_supervisor_line() -> None:
     printed = _sh(LAUNCH, "--print", "supervisor")
     assert printed.returncode == 0, printed.stderr
@@ -149,7 +185,8 @@ def test_the_shipped_launcher_prints_the_supervisor_line() -> None:
 
 
 def test_the_printed_line_is_shell_quoted(short_root: Path) -> None:
-    launcher = _configured(short_root, RUN_ROOT=str(short_root / "it's a root"))
+    # this build's dsl41, so the --supervisor probe has a binary to run (DL-402)
+    launcher = _configured(short_root, DSL41=str(DSL41), RUN_ROOT=str(short_root / "it's a root"))
     printed = _sh(launcher, "--print")
     assert printed.returncode == 0, printed.stderr
     words = shlex.split(printed.stdout)
@@ -738,7 +775,12 @@ def test_drill_local_runs_every_step_as_an_unprivileged_sudoer() -> None:
     assert len(assignments) == 1 and assignments[0] != "root"
     assert "useradd --create-home --shell /bin/bash $user" in text
     assert "echo '$user ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/$user" in text
-    assert 'chown -R "$user:$user" /work' in text
+    # the user's own group: its name on the built image, its primary group on a named one
+    assert 'chown -R "$user:$group" /work' in text
+    assert re.findall(r"^\s*group=(.+)$", text, re.M) == [
+        "$user",
+        '$(podman exec "$name" id -gn "$user")',
+    ]
     # the step loop and the diagnostics, both as the user
     assert _drill_local_step_users(text) == ['"$user"', '"$user"']
     # and nothing inside those execs climbs back to root
