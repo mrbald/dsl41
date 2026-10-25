@@ -34,7 +34,7 @@ fresh mutation id, signal fallback or unattended retry.
 | Missing process observation or shared/delegated cgroup | Capability refusal | Fix containment or use incident recovery; absence of evidence is not idle. |
 | Explicit termination does not clear all work | Force signals validated groups, then rechecks containment | UNKNOWN retains supervisor, lifelines and exclusion. Diagnose before emergency stop. |
 | Old supervisor lacks maintenance verb | Unknown-command refusal | Coordinate the supervisor upgrade; never fall back to SHUTDOWN. |
-| Manual supervisor stop or restart | `RefuseManualStop=yes` | Manager refuses. Routine engine restart remains available and jobs survive. |
+| Manual supervisor stop or restart | `RefuseManualStop=yes`, checked at supervisor start (DL-399) | Manager refuses. Routine engine restart remains available and jobs survive. A unit without it fails to start. |
 | Lost maintenance answer or partial write | CLI exits 4 after possible delivery | Inspect supervisor PID, unit and log. No automatic retry or signal escalation. |
 | Successful maintenance restarts itself | Exit 8 plus reloaded unit exclusions | Supervisor stays inactive; engine is already stopped. |
 | Reboot ends a maintenance window | Disable both units before stopping | Hold remains through reboot. Release only after the intended recovery. |

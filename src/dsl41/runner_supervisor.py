@@ -100,6 +100,7 @@ if TYPE_CHECKING:
         flock_existing,
         verify_lock_path,
         ServiceContainment,
+        stop_guard_refusal,
         proc_is_zombie,
         proc_start_token,
         start_tokens_match,
@@ -143,6 +144,7 @@ else:
         flock_existing,
         verify_lock_path,
         ServiceContainment,
+        stop_guard_refusal,
         proc_is_zombie,
         proc_start_token,
         start_tokens_match,
@@ -3123,6 +3125,11 @@ def main(argv: list[str] | None = None) -> int:
     # ENOENT on the run_root is a caller bug (the engine makes it first)
     if not os.path.isdir(args.run_root):
         print(f"supervisor: run-root {args.run_root!r} does not exist", file=sys.stderr)
+        return 2
+    # a unit that runs this supervisor must refuse a manual stop (DL-399)
+    refusal = stop_guard_refusal()
+    if refusal is not None:
+        print(f"supervisor: {refusal}", file=sys.stderr)
         return 2
     try:
         supervisor = Supervisor(args.run_root, deadman_s=args.deadman_seconds)
