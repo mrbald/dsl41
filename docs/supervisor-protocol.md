@@ -3,8 +3,8 @@
 Status: frozen. DL-42 item 3 freezes the spool format and the wrapper
 input spec, and DL-48 freezes the supervisor socket protocol. Entries
 that amend it include DL-80, DL-129, DL-150, DL-151, DL-210, DL-229,
-DL-291, DL-300, DL-325, DL-326, DL-328, DL-390, DL-392, DL-396 and
-DL-399; each is cited where it applies. Each change to a frozen item needs a decision-log entry. This
+DL-291, DL-300, DL-325, DL-326, DL-328, DL-390, DL-392, DL-396,
+DL-399 and DL-401; each is cited where it applies. Each change to a frozen item needs a decision-log entry. This
 document is the extraction boundary of the lifecycle tier (the five
 modules of §1). If a DL-42 trigger fires and the tier is extracted, this
 document is its public API.
@@ -375,6 +375,40 @@ The supervisor also writes `<run_root>/supervisor.pid` (JSON: `pid`,
 stderr and opens no log file (DL-150). The spawner points that stderr at
 `<run_root>/supervisor.log`.
 
+`<run_root>/maintenance.json` records the last admitted guarded
+maintenance on the root (DL-401). It is one JSON object, written as
+`spawn.json` is: sorted keys, one trailing newline, the §3 durability
+liturgy. Its fields are `version` (1), `state`, `incarnation`,
+`supervisor_pid`, `supervisor_start_time`, `boot_id`, `force`, `bound_s`
+and `started_at`. `state` is `admitted` when the operation is admitted,
+then `completed` or `uncertain`, each with `finished_at`; `uncertain`
+also carries `detail`. Only an admission writes it. A write that fails
+after its rename makes the admission refuse; the supervisor then removes a
+record of its own incarnation, best effort and logged, so a refusal
+leaves the previous record or none. A start leaves the record alone, and
+the next admission replaces it. A reader ignores unknown fields and
+refuses a record that is not one object, lacks or mistypes a field, or
+names any `version` but 1, an absent one included
+(`runner_supervisor.read_maintenance_record`).
+
+A record is evidence only for the supervisor it names. Each start writes
+a note into `supervisor.lock`, under the lock and before the pid record:
+`{version: 1, incarnation, pid}`. No teardown removes it. The file is
+never cut first and never renamed, since the flock is on its inode: the
+first byte is spoiled, the note is written after it, then its first
+byte, then the file is cut to its length. An interrupted write leaves a
+note no reader accepts. A reader with no live supervisor to ask
+(`runner_supervisor.record_owner_problem`) accepts a record only when
+the note is well formed and names the record's incarnation, and the pid
+record, when there is one, names it too. A missing, empty, partial or
+unparsable note is no evidence, and the record is refused. A note or pid
+record naming another incarnation is a later supervisor that ended
+outside maintenance: a crash between its pid record and its socket, or a
+deadman exit before the unit restarts it. That is not a maintenance
+outcome. A note of another version is refused. The rule runs before any
+shortcut, in `estate quiesce` as in `supervise shutdown`. A live supervisor never inherits a record: PING and
+LIST carry no `maintenance` field until its own admission.
+
 Startup first takes `<run_root>/supervisor.lock`, an exclusive
 non-blocking flock held for the process lifetime (DL-210). The file is
 never unlinked. Under that lock, the supervisor sweeps leftover `.s.*`
@@ -433,7 +467,8 @@ the service manager, restarts it after it dies.
 
 **Framing.** The protocol is JSON lines over `SOCK_STREAM`. One request
 line gets one response line; async pushes (below) are the exception. Every
-request carries `"v": 1`. Responses are `{"ok": true, …}` or
+request carries `"v": 1`, except MAINTENANCE_STOP, which carries its own
+version 2 (DL-401). Responses are `{"ok": true, …}` or
 `{"ok": false, "error": "<code>", …}`.
 
 Accepted sockets are non-blocking (DL-210). Replies and pushes are queued
@@ -554,6 +589,11 @@ DL-326).
   connection is gone (DL-150). Nothing may read it as proof that a
   controller is watching.
 - `PING` → `{ok, version: 1, incarnation, deadman_s, process_state}`.
+
+Both read verbs add `maintenance: {force, bound_s, started_at}` from a
+maintenance admission on, while the operation runs or stays uncertain
+(DL-401). The field is additive: a client that ignores it reads the
+answer as before.
 
 `deadman_s` (DL-95) is in both read verbs: the interval this
 supervisor was started with, or `null`. A client reads it back rather than
@@ -748,18 +788,23 @@ first. Then a stale or expired token answers
   Exited with no record is `noop`, because nothing here can still be
   addressed. A `sig` outside {`TERM`, `KILL`} answers
   `{ok: false, error: "bad_signal"}`, checked before `run_id`.
-- `MAINTENANCE_STOP {incarnation, token, force}` (DL-390): guarded
-  maintenance. `force` is `null` or `"terminate"`; any other value refuses.
+- `MAINTENANCE_STOP {incarnation, token, force}` (DL-390, DL-401): guarded
+  maintenance. The request carries `"v": 2`, the verb's own version. A
+  `"v": 1` MAINTENANCE_STOP, which answered only at completion, is retired:
+  it is refused `unsupported_version` with a `detail` that names DL-401.
+  `force` is `null` or `"terminate"`; any other value refuses.
   The CLI's `supervise shutdown` uses this verb, including with
-  `--force=terminate`. An old supervisor refuses the unknown verb. The
-  CLI never retries through `SHUTDOWN` or a signal.
+  `--force=terminate`. An older supervisor refuses the verb or its
+  version, and the CLI exits 2. The CLI never retries through `SHUTDOWN`
+  or a signal.
 
-  Before changing process state, the server opens the **existing**
-  `leader.lock`, without creation or truncation, takes an exclusive
-  nonblocking flock and verifies the descriptor's device/inode against
-  the path. Missing, replaced, unreadable or held evidence refuses.
-  The lock stays held through teardown, excluding a disconnected engine
-  that retains leadership and a new engine racing maintenance.
+  **Admission** is answered in the request. Before changing process
+  state, the server opens the **existing** `leader.lock`, without creation
+  or truncation, takes an exclusive nonblocking flock and verifies the
+  descriptor's device/inode against the path. Missing, replaced,
+  unreadable or held evidence refuses. The lock stays held through
+  teardown, excluding a disconnected engine that retains leadership and a
+  new engine racing maintenance.
 
   Idle means no unreaped wrappers and no residual descendants. An empty
   LIST is insufficient: completed runs can leave descendants, and LIST's
@@ -771,41 +816,99 @@ first. Then a stale or expired token answers
   The loaded unit must also include exit 8 in both SuccessExitStatus and
   RestartPreventExitStatus. A stale unit policy refuses before
   termination starts. Admission does not read RefuseManualStop; startup
-  verifies it (DL-399).
+  verifies it (DL-399). With `force: null`, active or indeterminate work
+  refuses without a signal. A refusal is
+  `{ok: false, error: "maintenance_refused", detail}`; it writes no record
+  and changes no state.
 
-  With `force: null`, active or indeterminate work refuses without a
-  signal. With `force: "terminate"`, validated command groups take the
-  existing TERM/grace/KILL ladder. The ladder waits until every wrapper
-  is reaped and every validated group has left containment (DL-394).
-  After the leader exits, a group keeps its identity only while a member
-  of its previous containment sample is alive and still in it. A member
-  alive after its run's grace then gets KILL through that group. Force
-  bypasses no lock or observation check, and signals no unknown cgroup
-  member. If any work remains or
-  observation fails after termination starts, the result is uncertain.
-  The supervisor retains its lifelines and engine exclusion for diagnosis.
-  It refuses further run mutations: SPAWN, SIGNAL, SHUTDOWN and another
-  MAINTENANCE_STOP. Lease operations remain available.
-  PING and LIST expose `process_state`, including `maintenance_uncertain`,
-  so an operator can distinguish this state from ordinary operation.
-  A failure during owned-file teardown may already have removed the socket
-  or pid record. Diagnosis then uses the unit, process identity and log.
-  Recovery uses the explicit incident-stop procedure in the runbook.
-  It does not declare legacy SHUTDOWN's timeout bound to be completion.
+  An admitted operation first writes `maintenance.json` with `state:
+  "admitted"`. A failed write refuses. The answer is then `{ok: true,
+  maintenance: "admitted", incarnation, supervisor_pid,
+  supervisor_start_time, boot_id, force, bound_s, started_at}`, the
+  record's fields. `bound_s` is the supervisor's estimate of the
+  operation, in seconds from admission, under its latency model of 4 s
+  per verified send and 5 s per manager observation. It never cuts the
+  operation short. Work proved idle at admission needs only the teardown
+  allowance, 15 s: two idle proofs, the owned-file teardown, the reply
+  flush and the exit. Forced work with n live runs adds the 5 s
+  spawn-record wait, the longest live grace G, the 2 s KILL settle,
+  2 × 4 s × n for each group's TERM and KILL, and a 10 s sample allowance:
+  `bound_s = 15 + 5 + G + 2 + 8n + 10`.
+
+  **The operation** runs in the supervisor's loop, one pass at a time
+  (`supervisor_process.55` and `.56`). A pass runs at most one verified
+  send or one containment observation. Between passes the loop answers
+  PING, LIST and the lease verbs. It refuses SPAWN, SIGNAL, SHUTDOWN and
+  another MAINTENANCE_STOP with `{ok: false, error:
+  "maintenance_in_progress"}`. A SIGTERM or SIGINT that arrives is held
+  until the outcome, and the deadman is not sampled. With `force:
+  "terminate"`, validated command groups take the existing TERM/grace/KILL
+  ladder. The ladder waits until every wrapper is reaped and every
+  validated group has left containment (DL-394). After the leader exits, a
+  group keeps its identity only while a member of its previous containment
+  sample is alive and still in it. A member alive after its run's grace
+  then gets KILL through that group. Force bypasses no lock or observation
+  check, and signals no unknown cgroup member. The ladder runs in full
+  however long its sends and samples take; only its end decides.
 
   Completion requires positive idle proof and successful owned-file
-  teardown. Its reply is `{ok: true, maintenance: "completed", incarnation,
-  supervisor_pid, supervisor_start_time, boot_id}`. The process exits **8**,
-  reserved for maintenance. The CLI
-  exits **0** only on verified completion, **2** on refusal before the
-  operation starts, and **4** on uncertainty after it may have started.
-  A lost reply never causes an automatic retry or signal escalation.
-  Each blocking CLI request has one monotonic 60-second deadline, including
-  sending, partial reads and discarded exit pushes (DL-392). A longer force operation
-  can still complete after that timeout; its unanswered CLI result is 4.
-  After a completion reply, the CLI allows up to five further seconds to
-  verify that the named process identity has exited. An unobservable or
-  still-live identity yields 4.
+  teardown. The supervisor then writes `state: "completed"` and exits
+  **8**, reserved for maintenance. A failed `completed` write leaves the
+  `admitted` record and a supervisor without a socket in
+  `maintenance_uncertain`; a client then reads 4. This is a stated limit
+  of a failing disk. If any work remains, or observation or
+  teardown fails, after admission, the operation is uncertain. The
+  supervisor writes `state: "uncertain"` with the `detail`, and logs it.
+  It retains its lifelines and engine exclusion for diagnosis. It refuses
+  further run mutations: SPAWN, SIGNAL, SHUTDOWN and another
+  MAINTENANCE_STOP. Lease operations remain available. A held signal then
+  starts the legacy shutdown, and the deadman applies again.
+  PING and LIST expose `process_state`, including `maintenance_stopping`,
+  `maintenance_completing` and `maintenance_uncertain`. From admission on
+  they also carry `maintenance: {force, bound_s, started_at}`, an additive
+  field. A failure during owned-file teardown may already have removed the
+  socket or pid record. Diagnosis then uses `maintenance.json`, the unit,
+  the process identity and the log. Recovery uses the explicit
+  incident-stop procedure in the runbook. It does not declare legacy
+  SHUTDOWN's timeout bound to be completion.
+
+  **The client** (`cli_common.guarded_maintenance`, shared by `supervise
+  shutdown` and `estate quiesce`) sends PING first. A PING that shows an
+  operation already admitted is watched as below, and nothing is sent.
+  Otherwise it sends ACQUIRE and MAINTENANCE_STOP once. It watches the
+  named identity and the record for `bound_s` plus a 2 s margin. The CLI
+  exits **0** only on verified completion: the named process identity has
+  exited and `maintenance.json` names it `completed`; stdout is that
+  record. It exits **2** on a refusal, when nothing changed. It exits
+  **3** when the operation is admitted and still running as the watch
+  ends, which needs a PING that answers with the operation running: it
+  finishes on its own; read `maintenance.json` or run the command again.
+  A live identity whose socket shows no running operation is 4, since
+  nothing more is scheduled: read `supervisor.log` before anything else. It exits **4** when the outcome cannot be observed: the
+  identity cannot be read, the record says `uncertain`, is unreadable or
+  missing, does not say `completed` after the exit, or names no
+  supervisor this client can tie it to. Once PING or the record has shown
+  an admitted operation, a failure is 4, never 2. Each blocking request
+  keeps its one monotonic 60-second deadline (DL-392); an admission
+  answers within it. A `maintenance_in_progress` refusal watches the
+  operation that runs.
+
+  A reply lost after the send is never resent and never escalated to a
+  signal. The client reconnects once and sends ACQUIRE with the lost
+  request's own incarnation and token. Either answer ends that token: a
+  live lease is re-keyed, a free or orphaned one is granted anew, and a
+  `lease_held` means another controller already holds a newer one; the
+  client does not read the answer. So a
+  request not yet read when the reconnect lands is refused `stale_token`
+  and cannot be admitted later. The client then reads PING. `serving` in
+  the same incarnation, with no record of that incarnation, is exit 2,
+  "not admitted; nothing changed". A maintenance state, another
+  incarnation or no answer is settled from `maintenance.json` as above.
+  `supervise shutdown` run again where no socket is left reads
+  `maintenance.json` the same way, under the start-note rule above. The
+  rest of a recorded bound is read on the wall clock, which both
+  processes share, held within the bound.
+
   Orphaning is unsupported. Host signals and deadman retain their
   separate behavior below. Bootstrap and unresponsive recovery are in
   `deployment-runbook.md` §3.

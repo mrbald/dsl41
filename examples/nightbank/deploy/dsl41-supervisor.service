@@ -28,9 +28,14 @@ ExecStartPost=/opt/dsl41/bin/dsl41-launch supervisor-ready
 TimeoutStartSec=30
 # supervisor-protocol ss5: up to 5 s for a missing spawn.json, then the
 # longest per-run grace (10 s by default) plus 2 s, then a 2 s output
-# drain. 60 s covers that with room; raise it with any longer grace, or the
-# final cgroup kill can silence a wrapper before it records its command.
-TimeoutStopSec=60
+# drain; raise this with any longer grace, or the final cgroup kill can
+# silence a wrapper before it records its command. A host stop during
+# forced maintenance is held until the operation ends, so this also covers
+# its bound_s, 15 + 5 + grace + 2 + 8 per live run + 10 s (DL-401), or the
+# stop timeout's kill lands mid-ladder. The small estate's 82 jobs all live
+# at the default 10 s grace give 15 + 5 + 10 + 2 + 8 x 82 + 10 = 698 s,
+# rounded up to 900; another estate sizes it by the same line.
+TimeoutStopSec=900
 # a clean deadman exit restarts on purpose;
 # exit 2 is a configuration refusal and a retry cannot fix it; exit 7 is a
 # statechart error, a bug the same release would meet again

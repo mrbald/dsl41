@@ -188,17 +188,19 @@ PYTHON
         fail 'the default request was not refused for residual work'
     [ "$(process_token "$child")" = "$token" ] || fail 'default refusal signalled the residual'
     maintenance_outcome 4 --force=terminate
-    jq -e -s 'length == 1 and .[0].ok == false and .[0].error == "maintenance_uncertain"
-        and .[0].detail == "work remains after the termination bound"' <<<"$MAINTENANCE_JSON" >/dev/null ||
-        fail 'the force result did not report retained residual work'
+    # the admitted operation's outcome is its record (DL-401)
+    sudo cat "$ROOT/maintenance.json" | jq -e '.state == "uncertain" and .force == "terminate"
+        and .detail == "work remains after the termination bound"' >/dev/null ||
+        fail 'the force result did not record retained residual work'
     [ "$(prop "$SUPERVISOR" MainPID)" = "$sup" ] || fail 'uncertainty dropped supervisor custody'
     [ "$(process_token "$child")" = "$token" ] || fail 'force signalled an unknown residual'
     manual start || true
     wait_for 30 'the uncertain supervisor excludes engine startup' is_state "$ENGINE" failed
     [ "$(prop "$ENGINE" ExecMainStatus)" = 2 ] || fail 'excluded engine did not refuse with 2'
     maintenance_outcome 4
-    jq -e -s 'length == 1 and .[0].ok == false and .[0].error == "maintenance_uncertain"' \
-        <<<"$MAINTENANCE_JSON" >/dev/null || fail 'the repeated request lost the uncertain state'
+    # the rerun reads the uncertain operation from PING and its record and sends nothing
+    grep -qF 'maintenance is uncertain: work remains after the termination bound' \
+        <<<"$MAINTENANCE_REPLY" || fail 'the repeated request lost the uncertain state'
     # This named fixture deliberately accepts containment, never an automatic fallback (DL-390).
     incident_stop_supervisor 'injected unknown residual; explicit fixture containment after outcome 4'
     if [ "$(prop "$fixture" LoadState)" != not-found ]; then sudo systemctl stop "$fixture"; fi

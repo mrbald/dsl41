@@ -24166,3 +24166,42 @@ relitigate an entry; append a new one.
   REJECTED: a degraded mode that refuses SPAWN and lease changes, keeps the lifelines and SIGNAL,
   and exits 7 after the last job. It keeps kill authority in a controller whose own control logic
   has just been proven wrong, and it adds a lifecycle outside the declared chart.
+- DL-401 Maintenance is a queryable operation: admission answers at once, the loop runs it,
+  `maintenance.json` records it (2026-10-25; src/dsl41/runner_supervisor.py, cli_common.py,
+  cli_control.py, cli_estate.py, runner_adapters.py; docs/supervisor-protocol.md ss5,
+  protocol-evolution.md, deployment-runbook.md ss2b and ss3, deployment-qualification.md)
+  THE RULE. MAINTENANCE_STOP, now `"v": 2` (v 1 refused naming this entry; other verbs stay 1),
+  keeps its synchronous admission and refusals. Admission writes `<run_root>/maintenance.json`
+  (`admitted`, the spawn.json discipline) and answers its fields: incarnation, identity, force,
+  `bound_s`, `started_at`; a failed write refuses and removes a record of this incarnation. The
+  loop runs the operation one `maintenance_pass` at a time (`maintaining` groups stopping and
+  completing), each pass at most one verified send or one containment observation; between them
+  it answers PING, LIST and the lease verbs, refuses run mutations `maintenance_in_progress`,
+  and holds a latched signal and the deadman. The ladder runs DL-394 in full; only its end
+  decides `completed` (then exit 8) or `uncertain` (with `detail`), which replace the record.
+  A start notes `{version, incarnation, pid}` in supervisor.lock (spoil the first byte, write,
+  restore it, cut; never cut first). A record is evidence only when that note is well formed and
+  names its supervisor, and a pid record, if any, agrees; checked before every shortcut. PING
+  and LIST add `maintenance: {force, bound_s, started_at}` from the supervisor's own admission.
+  THE ESTIMATE. `bound_s` = 15 s teardown (two idle proofs, flush, exit) for idle work; forced
+  work with n live runs adds 5 s spawn-record wait + longest grace + 2 s settle + 8n s (TERM and
+  KILL at 4 s per verified send) + 10 s samples. It is an estimate and stops nothing.
+  THE CLIENT. PING first: an admitted operation is watched and nothing is sent; else ACQUIRE and
+  one MAINTENANCE_STOP. The watch reads the identity and the record for `bound_s` plus 2 s: 0
+  exited and `completed`; 3 still running at the end, shown by a PING; 4 the outcome cannot be
+  observed (identity unreadable; alive with no running operation on its socket; record
+  `uncertain`, unreadable, missing, not `completed` after the exit, or tied to no supervisor).
+  After PING or the record shows an operation, no failure is 2. A lost reply is never resent:
+  one reconnect sends ACQUIRE with the lost token, whose answer the client need not read,
+  since any answer ends that token; then PING. `serving`
+  with no record of that incarnation is 2, "not admitted"; else the record decides. The rerun
+  of `supervise shutdown` with no socket, and of `estate quiesce`, read the record (wall clock
+  for the rest of its bound, held within it); quiesce skips leadership only while the
+  operation holds the lock on a sealed period, and maps 3 to a rerun.
+  THE REASON. One blocking request under a 60 s deadline let completion follow a client's 4.
+  LIMIT. A failed `completed` write leaves `admitted` and no socket: clients read 4.
+  WHAT IT NARROWS. DL-390's "An acceptance or lost reply is not proof of completion": completion
+  is the identity's exit plus a `completed` record. DL-392's maintenance timeout covers the
+  admission only. Both texts stand; DL-394 stands whole.
+  REJECTED: a hard cap at `bound_s`: under slow sends it ended forced stops uncertain before
+  KILL. A new state for "admitted". A resend after a lost reply.

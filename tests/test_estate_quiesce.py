@@ -88,11 +88,11 @@ def _dead_pid() -> int:
 
 
 class FakeSupervisor:
-    """LIST, ACQUIRE, MAINTENANCE_STOP and RELEASE, as a supervisor answers
-    them. Maintenance refuses while a run is live and completes otherwise,
-    naming a process that has already exited. At MAINTENANCE_STOP it takes
-    `leader.lock` as the real server does (DL-390), which proves the verb
-    handed it over."""
+    """LIST, PING, ACQUIRE, MAINTENANCE_STOP and RELEASE, as a supervisor answers
+    them. Maintenance refuses while a run is live. Otherwise it is admitted and
+    completes at once: maintenance.json records it completed, naming a process
+    that has already exited (DL-401). At MAINTENANCE_STOP it takes `leader.lock`
+    as the real server does (DL-390), which proves the verb handed it over."""
 
     def __init__(self, run_root: Path) -> None:
         self.run_root = run_root
@@ -114,8 +114,11 @@ class FakeSupervisor:
     def send(self, request: dict[str, Any]) -> dict[str, Any]:
         self.sent.append(request)
         cmd = request["cmd"]
+        state = {"ok": True, "incarnation": "a" * 32, "process_state": "serving"}
         if cmd == "LIST":
-            return {"ok": True, "supervisor_pid": self.pid, "runs": self.runs, "lease": None}
+            return {**state, "supervisor_pid": self.pid, "runs": self.runs, "lease": None}
+        if cmd == "PING":
+            return state
         if cmd == "ACQUIRE":
             return self.acquired
         if cmd == "RELEASE":
@@ -127,19 +130,30 @@ class FakeSupervisor:
             detail = "active wrappers or residual service processes"
             return {"ok": False, "error": "maintenance_refused", "detail": detail}
         self.up = False
-        return {
-            "ok": True,
-            "maintenance": "completed",
+        identity = {
             "incarnation": "a" * 32,
             "supervisor_pid": self.pid,
             "supervisor_start_time": self.start,
             "boot_id": procid.current_boot_id(),
+            "force": request["force"],
+            "bound_s": 0.0,
+            "started_at": datetime.now(UTC).isoformat(),
         }
+        record = {"version": 1, "state": "completed", **identity, "finished_at": "now"}
+        (self.run_root / "maintenance.json").write_text(json.dumps(record))
+        _note(self.run_root, self.pid)
+        return {"ok": True, "maintenance": "admitted", **identity}
+
+
+def _note(run_root: Path, pid: int) -> None:
+    """The start note a supervisor of incarnation `"a" * 32` writes in supervisor.lock."""
+    note = {"version": 1, "incarnation": "a" * 32, "pid": pid}
+    (run_root / "supervisor.lock").write_text(json.dumps(note))
 
 
 class Sleeps:
-    """The verb's sleep. It sleeps only inside maintenance's exit observation,
-    and fails the test anywhere else."""
+    """The verb's sleep. It sleeps only inside maintenance's watch of an
+    admitted operation (DL-401), and fails the test anywhere else."""
 
     def __init__(self) -> None:
         self.inside = False
@@ -168,6 +182,16 @@ def sleeps(monkeypatch: pytest.MonkeyPatch) -> Sleeps:
             guard.inside = False
 
     monkeypatch.setattr(cli_estate, "guarded_maintenance", observed)
+    settle = cli_estate.settle_maintenance
+
+    def watched(*args: Any, **kwargs: Any) -> Any:
+        guard.inside = True
+        try:
+            return settle(*args, **kwargs)
+        finally:
+            guard.inside = False
+
+    monkeypatch.setattr(cli_estate, "settle_maintenance", watched)
     return guard
 
 
@@ -270,7 +294,8 @@ def test_live_work_refuses_at_maintenance_then_the_rerun_stops_the_estate(
         "units": "ok",
         "writers": "ok",
     }
-    assert [r["cmd"] for r in supervisor.sent[-3:]] == ["LIST", "ACQUIRE", "MAINTENANCE_STOP"]
+    cmds = ["LIST", "PING", "ACQUIRE", "MAINTENANCE_STOP"]
+    assert [r["cmd"] for r in supervisor.sent[-4:]] == cmds
     assert supervisor.sent[-2]["controller_id"] == f"estate-quiesce-{os.getpid()}"
     assert _lock_is_free(run_root)
 
@@ -451,10 +476,10 @@ def test_the_units_are_read_once_after_the_exit(
 def test_the_one_wait_is_the_exit_observation_after_completion(
     short_root: Path, monkeypatch: pytest.MonkeyPatch, host: QuiesceHost, sleeps: Sleeps
 ) -> None:
-    """The completion reply names a process that is still alive. It exits
-    only once the observation has slept, so the verb waits for its exit,
-    bounded by five seconds, and sleeps nowhere else. No fixed delay decides
-    the order."""
+    """The admitted operation names a process that is still alive. It exits
+    only once the watch has slept, so the verb waits for its exit, bounded by
+    the operation's `bound_s` and the margin, and sleeps nowhere else. No fixed
+    delay decides the order (DL-401)."""
     run_root, next_jil = _stopped_root(short_root)
     supervisor = FakeSupervisor(run_root)
     sleeps.release = short_root / "release"
@@ -472,7 +497,7 @@ def test_the_one_wait_is_the_exit_observation_after_completion(
         sleeps.release.touch()
         lingering.wait(timeout=30)
     assert result.exit_code == 0, result.output
-    assert sleeps.slept and set(sleeps.slept) == {0.02}
+    assert sleeps.slept and set(sleeps.slept) == {0.05}
     assert sum(sleeps.slept) < 5
 
 
@@ -814,3 +839,285 @@ def test_force_terminate_is_passed_to_maintenance_and_nothing_else_is_accepted(
     assert result.exit_code == code, result.output
     stops = [request for request in supervisor.sent if request["cmd"] == "MAINTENANCE_STOP"]
     assert [request["force"] for request in stops] == ([force] if code == 0 else [])
+
+
+# ------------------------------------------------------- a rerun meets an admitted operation
+
+#: The supervisor of an admitted operation, as the rerun meets it: it holds leader.lock, as
+#: maintenance does from admission to the exit (DL-390). Told to go, it writes its outcome
+#: and exits; told nothing, it stays.
+_OPERATING = """
+import fcntl, os, sys, time
+lock, release, outcome, record = sys.argv[1:]
+fd = os.open(lock, os.O_RDWR)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(release + ".held", "w").close()
+while not os.path.exists(release):
+    time.sleep(0.01)
+if outcome:
+    os.replace(outcome, record)
+"""
+
+
+def _operating(
+    run_root: Path, release: Path, state: str, bound_s: float = 30.0, **extra: Any
+) -> tuple[Any, dict]:
+    """A process holding leader.lock and the record that names it, in `state`. Its outcome,
+    completed, replaces the record when `release` appears."""
+    outcome = run_root / "maintenance.next"
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            _OPERATING,
+            str(run_root / "leader.lock"),
+            str(release),
+            str(outcome) if state == "admitted" else "",
+            str(run_root / "maintenance.json"),
+        ]
+    )
+    wait_for(lambda: Path(str(release) + ".held").exists())
+    start = procid.proc_start_token(proc.pid)
+    record = {
+        "version": 1,
+        "state": state,
+        "incarnation": "a" * 32,
+        "supervisor_pid": proc.pid,
+        "supervisor_start_time": start,
+        "boot_id": procid.current_boot_id(),
+        "force": "terminate",
+        "bound_s": bound_s,
+        "started_at": datetime.now(UTC).isoformat(),
+        **extra,
+    }
+    (run_root / "maintenance.json").write_text(json.dumps(record))
+    _note(run_root, proc.pid)
+    outcome.write_text(json.dumps({**record, "state": "completed", "finished_at": "now"}))
+    return proc, record
+
+
+def _sealed_and_refused(short_root: Path, monkeypatch: pytest.MonkeyPatch, host: QuiesceHost):
+    """A root the verb has sealed and audited, whose maintenance refused live work."""
+    run_root, next_jil = _stopped_root(short_root)
+    supervisor = FakeSupervisor(run_root)
+    supervisor.runs = [
+        {"run_id": "r-1", "job": "a", "run_number": 1, "wrapper_pid": 4242, "wrapper_alive": True}
+    ]
+    _use(monkeypatch, host, connect=supervisor.connect)
+    assert _quiesce(run_root, next_jil).exit_code == 2
+    supervisor.runs = []
+    return run_root, next_jil, supervisor
+
+
+def test_a_rerun_during_an_admitted_operation_watches_it_and_never_requests_again(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, host: QuiesceHost, sleeps: Sleeps
+) -> None:
+    """A client lost after its request, and the verb rerun (DL-401). The supervisor
+    holds leader.lock for its operation, so leadership is skipped, and LIST shows the
+    operation. The maintenance stage reads maintenance.json and waits the rest of the
+    bound: the supervisor exits and records completed, and the verb ends 0 having sent
+    no MAINTENANCE_STOP."""
+    run_root, next_jil, supervisor = _sealed_and_refused(short_root, monkeypatch, host)
+    sleeps.release = short_root / "release"
+    proc, record = _operating(run_root, sleeps.release, "admitted")
+    supervisor.pid = proc.pid
+    real_send = supervisor.send
+
+    def send(request: dict[str, Any]) -> dict[str, Any]:
+        answer = real_send(request)
+        if request["cmd"] == "LIST":
+            answer["process_state"] = "maintenance_stopping"
+        return answer
+
+    supervisor.send = send  # type: ignore[method-assign]
+    supervisor.sent.clear()
+    try:
+        result = _quiesce(run_root, next_jil)
+    finally:
+        sleeps.release.touch()
+        proc.wait(timeout=30)
+    assert result.exit_code == 0, result.output
+    stages = _stages(result.output)
+    assert stages["leadership"] == "skipped" and stages["maintenance"] == "ok"
+    assert "the supervisor holds it for maintenance (DL-401)" in result.output
+    assert f"completed; the supervisor (pid {proc.pid}) exited" in result.output
+    assert [request["cmd"] for request in supervisor.sent] == ["LIST"]
+    assert sleeps.slept and set(sleeps.slept) == {0.05}
+    assert _lock_is_free(run_root)
+
+
+def test_a_rerun_after_completion_skips_maintenance(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, host: QuiesceHost
+) -> None:
+    run_root, next_jil, supervisor = _sealed_and_refused(short_root, monkeypatch, host)
+    release = short_root / "release"
+    proc, record = _operating(run_root, release, "admitted")
+    release.touch()
+    proc.wait(timeout=30)
+    supervisor.up = False
+    supervisor.sent.clear()
+    result = _quiesce(run_root, next_jil)
+    assert result.exit_code == 0, result.output
+    assert f"quiesce: maintenance: skipped: already completed; the supervisor (pid {proc.pid})" in (
+        result.output
+    )
+    assert "MAINTENANCE_STOP" not in [request["cmd"] for request in supervisor.sent]
+
+
+@pytest.mark.parametrize("case", ["uncertain", "unknown_version", "exited_admitted", "no_record"])
+def test_a_rerun_that_cannot_prove_the_outcome_refuses(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, host: QuiesceHost, case: str
+) -> None:
+    """An uncertain record, a record this reader cannot trust, and a supervisor gone
+    with its record still admitted are unknown: exit 4 with the runbook pointer, and no
+    MAINTENANCE_STOP (DL-401). A held lock that no record names refuses at leadership,
+    exit 2, as for any other holder."""
+    run_root, next_jil, supervisor = _sealed_and_refused(short_root, monkeypatch, host)
+    release = short_root / "release"
+    state = "uncertain" if case == "uncertain" else "admitted"
+    extra = {"finished_at": "now", "detail": "work remains"} if state == "uncertain" else {}
+    proc, record = _operating(run_root, release, state, **extra)
+    real_send = supervisor.send
+
+    def send(request: dict[str, Any]) -> dict[str, Any]:
+        answer = real_send(request)
+        if request["cmd"] == "LIST":
+            answer["process_state"] = "maintenance_uncertain"
+        return answer
+
+    if case in ("uncertain", "no_record"):
+        supervisor.pid = proc.pid
+        supervisor.send = send  # type: ignore[method-assign]
+    else:
+        release.touch()
+        proc.wait(timeout=30)
+        supervisor.up = False
+        (run_root / "maintenance.json").write_text(json.dumps(record))
+    if case == "unknown_version":
+        (run_root / "maintenance.json").write_text(json.dumps({**record, "version": 2}))
+    if case == "no_record":
+        (run_root / "maintenance.json").unlink()
+    supervisor.sent.clear()
+    try:
+        result = _quiesce(run_root, next_jil)
+    finally:
+        release.touch()
+        proc.wait(timeout=30)
+    assert result.exit_code == (2 if case == "no_record" else 4), result.output
+    if case == "no_record":
+        # the lock's holder is named by no record: leadership refuses, as for any holder
+        assert _stages(result.output)["leadership"] == "refused"
+        return
+    assert _stages(result.output)["maintenance"] == "refused"
+    assert "deployment-runbook ss3" in result.output
+    assert "MAINTENANCE_STOP" not in [request["cmd"] for request in supervisor.sent]
+    if case == "uncertain":
+        assert "maintenance is uncertain: work remains" in result.output
+    if case == "unknown_version":
+        assert "has version 2" in result.output
+
+
+def test_an_operation_that_holds_the_lock_on_an_unsealed_period_refuses_leadership(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, host: QuiesceHost
+) -> None:
+    """The seal needs leader.lock, and an admitted operation keeps it until its exit: on an
+    unsealed period the verb refuses at leadership and names the operation, rather than run
+    a seal without the lock (DL-401)."""
+    run_root, next_jil = _stopped_root(short_root)
+    supervisor = FakeSupervisor(run_root)
+    _use(monkeypatch, host, connect=supervisor.connect)
+    release = short_root / "release"
+    proc, _record = _operating(run_root, release, "admitted")
+    try:
+        result = _quiesce(run_root, next_jil)
+    finally:
+        release.touch()
+        proc.wait(timeout=30)
+    assert result.exit_code == 2, result.output
+    assert _stages(result.output) == {"hold": "ok", "engine": "ok", "leadership": "refused"}
+    assert f"the supervisor (pid {proc.pid}) holds" in result.output
+    assert "the period is not sealed; rerun once it has ended" in result.output
+    assert supervisor.sent == []
+
+
+def test_an_operation_still_running_when_the_wait_ends_is_exit_3(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, host: QuiesceHost
+) -> None:
+    """The rerun watches an admitted operation for the rest of its bound and the margin.
+    One still running then is exit 3: it finishes on its own (DL-401)."""
+    run_root, next_jil, supervisor = _sealed_and_refused(short_root, monkeypatch, host)
+    release = short_root / "release"
+    proc, _record = _operating(run_root, release, "admitted", bound_s=0.0)
+    supervisor.pid = proc.pid
+    real_send = supervisor.send
+
+    def send(request: dict[str, Any]) -> dict[str, Any]:
+        answer = real_send(request)
+        if request["cmd"] in ("LIST", "PING"):
+            answer["process_state"] = "maintenance_stopping"
+        return answer
+
+    supervisor.send = send  # type: ignore[method-assign]
+    try:
+        result = _quiesce(run_root, next_jil)
+    finally:
+        release.touch()
+        proc.wait(timeout=30)
+    assert result.exit_code == 3, result.output
+    assert "quiesce: maintenance: refused: in progress; it finishes on its own" in result.output
+
+
+def test_a_lost_reply_that_was_never_admitted_names_it(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, host: QuiesceHost
+) -> None:
+    """A lost reply resolved as "not admitted" is a refusal with its own cause (DL-401)."""
+    run_root, next_jil = _stopped_root(short_root)
+    supervisor = FakeSupervisor(run_root)
+    real_send = supervisor.send
+
+    def send(request: dict[str, Any]) -> dict[str, Any]:
+        if request["cmd"] == "MAINTENANCE_STOP":
+            supervisor.sent.append(request)
+            raise OSError("synthetic lost reply")
+        return real_send(request)
+
+    supervisor.send = send  # type: ignore[method-assign]
+    _use(monkeypatch, host, connect=supervisor.connect)
+    result = _quiesce(run_root, next_jil)
+    assert result.exit_code == 2, result.output
+    assert (
+        "quiesce: maintenance: refused: the reply was lost and the request was not admitted;"
+        " nothing changed; rerun"
+    ) in result.output
+    cmds = [request["cmd"] for request in supervisor.sent]
+    assert cmds.count("MAINTENANCE_STOP") == 1 and cmds[-2:] == ["ACQUIRE", "PING"]
+
+
+def test_a_later_supervisor_ended_by_its_deadman_voids_the_record_for_the_rerun(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, host: QuiesceHost
+) -> None:
+    """Supervisor A's record says completed. B starts on the root, notes itself, and exits
+    by its deadman, which removes its socket and pid record. The rerun meets no supervisor
+    and A's record: the owner rule runs before the skip, so it is 4, "not a maintenance
+    outcome", never `skipped: already completed` (DL-401)."""
+    from dsl41 import runner_supervisor as rs
+
+    run_root, next_jil, supervisor = _sealed_and_refused(short_root, monkeypatch, host)
+    release = short_root / "release"
+    proc, _record = _operating(run_root, release, "admitted")
+    release.touch()
+    proc.wait(timeout=30)
+    with monkeypatch.context() as patch:
+        for name in ("_install_signals", "_set_subreaper", "_reap"):
+            patch.setattr(rs.Supervisor, name, lambda self: None)
+        later = rs.Supervisor(str(run_root), deadman_s=1e-9)
+        assert later.run() == 0
+    assert not (run_root / "supervisor.pid").exists()
+    supervisor.up = False
+    supervisor.sent.clear()
+    result = _quiesce(run_root, next_jil)
+    assert result.exit_code == 4, result.output
+    assert _stages(result.output)["maintenance"] == "refused"
+    assert f"names another supervisor ({later.incarnation})" in result.output
+    assert "not a maintenance outcome" in result.output
+    assert "already completed" not in result.output

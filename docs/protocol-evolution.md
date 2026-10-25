@@ -1,7 +1,7 @@
 # Protocol evolution — how a dialect enters service, and how it leaves
 
 Status: **normative (DL-138; amended by DL-147, DL-150, DL-151, DL-157,
-DL-158, DL-168, DL-170, DL-217, DL-227 and DL-263).** A change to what this
+DL-158, DL-168, DL-170, DL-217, DL-227, DL-263 and DL-401).** A change to what this
 document fixes requires a decision-log entry. Each amendment is cited where
 it applies.
 
@@ -62,11 +62,13 @@ a row.
 | **Tolerant estate files** — `sources.json` (`docs/period-model.md` §1.1), and every `watch.jsonl` line written by the FW adapter (§3.5) | `artifact_format_version` | ignored: the reader takes the fields it needs. §3.2's canonical form binds the writer, not the reader | refused, naming the version (PR-08d) | refused, the same as an unsupported one | `sources.json`: as durable as its catalog bundle. A watch line: as durable as the run spool that holds it | no retained instance |
 | **Tolerant supervisor artifacts** — `receipt.json`, `reply.json`, the `run_id` index entry (`docs/supervisor-protocol.md` §3) | `artifact_format_version` | ignored, by that section's forward-compatibility rule | refused | refused: the evidence schema requires the field | as durable as the spool. The retention floor also holds the `run_id` index while its SPAWN can still be replayed | no retained instance |
 | **Wrapper-owned spool files** — `spawn.json` and `status.json`, and only those two (`docs/supervisor-protocol.md` §3) | their own `version` field | ignored | refused | passed (`runner_procid.spool_version_supported`) | as durable as the run directory | no retained spool holds one |
+| **Supervisor maintenance record** — `maintenance.json` in the run root (`docs/supervisor-protocol.md` §5, DL-401) | its own `version` field | ignored | refused, naming the version | refused, the same as unsupported: every instance was written with one | until the next admission on the root replaces it, or the root goes | no retained root holds one |
+| **Supervisor start note** — the content of `supervisor.lock` (`docs/supervisor-protocol.md` §5, DL-401) | its own `version` field | ignored | refused, naming the version | refused, as are an empty, partial or unparsable note: a record it should vouch for is refused | until the next start on the root rewrites it | no retained root holds one |
 | **Wrapper input spec** — the one JSON object on the wrapper's stdin (`docs/supervisor-protocol.md` §2, DL-150) | its own `version` field | **refused**, unlike the two spool files the same wrapper writes. §2 is frozen and the whole object is fingerprinted. A key the schema does not pin has no pinned type, and the fingerprint is injective only over pinned types | refused **by the wrapper, after the fork**. The supervisor's gate pins the types; the value is the wrapper's own check. An unimplemented `version` exits 2 with no spawn record. A spec that is not readable JSON exits 1, before the version is read | refused. The supervisor's gate refuses a spec with no `version` key before the fork, as a missing key (supervisor-protocol §2, DL-150). A spec that reaches the wrapper without one exits 2, the same as unimplemented (supervisor-protocol §4 step 6) | the fork it is passed to. The wrapper points stdin at `/dev/null` after the read | none beyond the door |
 | **Perimeter journal** — `perimeter.jsonl` (`docs/access-model.md` §6, DL-146, DL-147) | the record's `rec` kind; no per-record version field | ignored. Evolution is additive: an incompatible change takes a NEW kind name, as in the WAL | not applicable by construction. No engine dispatches this journal: seq recovery reads only `access_seq`, and the rest is audit. An unknown kind is skipped, not refused | not applicable: there is no version field | as durable as its run root. Pruned only with the whole root: truncating it in place would restart `access_seq` and forge duplicate keys | no retained root holds one |
 | **Access role map** — the `--access-map` file (`docs/access-model.md` §4, DL-150) | `format_version` | refused. The map is a closed table, and the loader cannot check the meaning of a key it does not pin | refused, naming the integer this loader implements | refused, the same as unsupported | the operator's own file. It lives outside the estate: it is policy, not evidence, and a reload replaces it whole | no operator's map still names it |
 | **Control socket** — `docs/control-protocol.md` §2 | `"v"` on every request, queries and `subscribe` included | ignored | refused. The refusal does not close the connection | refused, the same as unsupported | the request that carries it (DL-150). The version is per request, not per connection: one connection may carry several requests, and a refusal ends none of them. `subscribe` is the exception. Its request opens a stream that owns the connection until hangup (§5), so its instance lasts as long as the connection | none beyond the door: nothing durable holds the dialect |
-| **Supervisor socket** — `docs/supervisor-protocol.md` §5 | `"v"` on every request, plus `incarnation` on every mutating verb except `ACQUIRE`, which grants a free lease without one (§5) | ignored | refused as `unsupported_version`. The refusal does not close the connection | refused, the same as unsupported | the request that carries it, as on the control socket | as on the control socket |
+| **Supervisor socket** — `docs/supervisor-protocol.md` §5 | `"v"` on every request, plus `incarnation` on every mutating verb except `ACQUIRE`, which grants a free lease without one (§5). MAINTENANCE_STOP has its own version, 2; every other verb is 1 (DL-401) | ignored | refused as `unsupported_version`. The refusal does not close the connection. A retired version is refused by name: MAINTENANCE_STOP v 1 carries a `detail` naming DL-401 | refused, the same as unsupported | the request that carries it, as on the control socket | as on the control socket |
 | **`state_machine_version`** — `docs/period-model.md` §2.1 | the field itself, on `segment`, on the seal, on `staged_manifest.json`, on `candidate.json`, on the committed period manifest and on the attestation | not a format question: one executable implements exactly one version and refuses every other | refused | refused by construction: no carrier defaults it | the estate | not retired but **replaced**: a full drain and a new-estate genesis (the last note below; `docs/period-model.md` §2.1) |
 
 An **absent version** (DL-157) is refused on every row that carries a
@@ -234,6 +236,18 @@ a **request**, not a connection. A refusal answers one line, and the next
 line on the same connection is read normally. `subscribe` is the one request
 that outlives its answer: it owns its connection until hangup
 (`control-protocol.md` §5). That instance ends with the connection.
+
+**MAINTENANCE_STOP's version 2 is a new dialect, and v 1 retired with it**
+(DL-401). Version 1 answered only at completion, and version 2 answers at
+admission. A version 1 client would read an admission answer as an unknown
+completion, so the answer changes how a reply is classified, and the verb
+took a new version rather than an added field. The version is per verb, so
+no other verb's clients change. §2's four steps landed in one release, which
+§2 allows for a wire row: the CLI that sends the verb ships with the
+supervisor. A v 1 request is refused `unsupported_version` with a `detail`
+naming DL-401, which a v 1 client already reads as a refusal: exit 2,
+nothing changed. A v 2 client meeting an older supervisor gets
+`unsupported_version` too and exits 2.
 
 **An additive answer field is not a new dialect** (DL-217). The basis is
 `control-protocol.md` §2: consumers must ignore unknown fields. Every current

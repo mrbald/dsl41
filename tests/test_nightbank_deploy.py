@@ -617,6 +617,11 @@ def test_the_units_take_the_documented_separate_service_shape() -> None:
     # the longest grace plus 2 s, and the 2 s output drain
     (stop,) = supervisor["Service"]["TimeoutStopSec"]
     assert int(stop) >= 5 + CMD_GRACE_S + 2 + 2
+    # DL-401: a host stop is held through forced maintenance, whose bound_s for the small
+    # estate with every job live is 15 + 5 + grace + 2 + 8 per run + 10
+    small = Path(__file__).resolve().parent.parent / "examples/nightbank/estate/small"
+    jobs = sum(path.read_text().count("insert_job:") for path in small.glob("*.jil"))
+    assert int(stop) >= 15 + 5 + CMD_GRACE_S + 2 + 8 * jobs + 10
 
 
 def test_the_units_repeat_the_run_root_only_for_its_mount() -> None:

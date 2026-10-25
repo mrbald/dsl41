@@ -47,10 +47,11 @@ PROCESS: dict[str, frozenset[str]] = {
     "stopped": frozenset({"process", "ended", "stopped"}),
     "refused": frozenset({"process", "ended", "refused"}),
     "closed": frozenset({"process", "closed"}),
+    "maintenance_checking": frozenset({"process", "open", "up", "maintenance_checking"}),
+    "maintenance_uncertain": frozenset({"process", "open", "up", "maintenance_uncertain"}),
     **{
-        phase: frozenset({"process", "open", "up", phase})
-        for phase in runner_supervisor._MAINTENANCE_PHASES
-        if phase != "maintenance_completed"
+        phase: frozenset({"process", "open", "up", "maintaining", phase})
+        for phase in ("maintenance_stopping", "maintenance_completing")
     },
     "maintenance_completed": frozenset({"process", "ended", "maintenance_completed"}),
 }
@@ -177,6 +178,7 @@ _EVENTS = (
     runner_supervisor.MAINTENANCE_IDLE,
     runner_supervisor.MAINTENANCE_UNCERTAIN,
     runner_supervisor.MAINTENANCE_FINISHED,
+    runner_supervisor.MAINTENANCE_PASS,
 )
 
 
@@ -202,6 +204,8 @@ def _section_5(witness: str, event: str, label: str) -> str:
     if event in ("SPAWN", "SIGNAL", "SHUTDOWN", "MAINTENANCE_STOP"):
         if phase == "maintenance_uncertain":
             return "refused maintenance_uncertain"
+        if phase in ("maintenance_stopping", "maintenance_completing"):
+            return "refused maintenance_in_progress"
         if label in ("foreign", "none"):
             return "refused wrong_incarnation"
         if label == "stale" or lease not in ("live", "orphaned"):
@@ -229,6 +233,8 @@ def _section_5(witness: str, event: str, label: str) -> str:
         ("maintenance_completing", "maintenance_uncertain"): "45",
         ("maintenance_completing", "maintenance_finished"): "46",
         ("maintenance_uncertain", "deadman"): "49",
+        ("maintenance_stopping", "maintenance_pass"): "55",
+        ("maintenance_completing", "maintenance_pass"): "56",
     }
     if (phase, event) in maintenance:
         return _row(maintenance[phase, event])
@@ -261,9 +267,16 @@ def test_the_completeness_table_is_section_5() -> None:
         *(("closed", event) for event in _EVENTS),
         *(("serving", verb) for verb in ("SPAWN", "SIGNAL", "SHUTDOWN", "MAINTENANCE_STOP")),
         *(
-            ("maintenance_uncertain", verb)
+            (phase, verb)
+            for phase in (
+                "maintenance_uncertain",
+                "maintenance_stopping",
+                "maintenance_completing",
+            )
             for verb in ("SPAWN", "SIGNAL", "SHUTDOWN", "MAINTENANCE_STOP")
         ),
+        ("maintenance_stopping", "maintenance_pass"),
+        ("maintenance_completing", "maintenance_pass"),
         ("maintenance_checking", "maintenance_refused"),
         ("maintenance_checking", "maintenance_stopping"),
         ("maintenance_checking", "maintenance_idle"),
@@ -278,9 +291,11 @@ def test_the_completeness_table_is_section_5() -> None:
     # ten witnesses (serving by four leases); per event, the reached cells by
     # partition: start 3+3, publish 1+1, term 4+1+1+1, drained 2+2, pass_ended
     # 1+1, deadman 4+1, teardown 10, each verb four leases by four
-    # credentials, and each verb in closed by four credentials
+    # credentials, and each verb in closed by four credentials; DL-401 adds each
+    # verb in the two maintaining phases by four credentials (32) and maintenance_pass
+    # in them and in closed (3)
     assert len(WITNESSES) == 15
-    assert len(table) == 152
+    assert len(table) == 187
 
 
 _OUT_OF_ORDER = {
@@ -388,6 +403,7 @@ def test_every_event_the_supervisor_posts_is_in_the_alphabet(
         "maintenance_idle",
         "maintenance_uncertain",
         "maintenance_finished",
+        "maintenance_pass",
     }
     assert set(posted) == set(alphabet(CHART)) - maintenance
     ctx = runner_supervisor.Context("process", runner_supervisor.Event("x"), frozenset(), None)
@@ -602,7 +618,7 @@ def test_teardown_is_a_row_per_source_state_in_three_ownership_classes() -> None
         (_row("12"), "shutting_down", runner_supervisor.PASS_ENDED, "internal"),
         (_row("36"), "shutting_down", runner_supervisor.TERM, "internal"),
     ]
-    assert len(CHART.rows) == 42
+    assert len(CHART.rows) == 48
     assert {row.id for row in CHART.rows} & RETIRED == set()  # a retired id stays out (DL-364)
     ctx = runner_supervisor.Context("process", runner_supervisor.Event("x"), frozenset(), None)
     intents = {name: action(ctx).intents for name, action in CHART.actions.items()}
@@ -610,6 +626,8 @@ def test_teardown_is_a_row_per_source_state_in_three_ownership_classes() -> None
         "refuse": (runner_supervisor.REFUSE,),
         "drain": (runner_supervisor.DRAIN,),
         "retry": (runner_supervisor.FLUSH, runner_supervisor.DRAIN),
+        "advance": (runner_supervisor.ADVANCE,),
+        "complete": (runner_supervisor.COMPLETE,),
         "unlink_published": (runner_supervisor.UNLINK_PUBLISHED,),
         "unlink_private": (runner_supervisor.UNLINK_PRIVATE,),
     }

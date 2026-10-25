@@ -318,6 +318,10 @@ class _Conn:
         self.closed = True
 
 
+#: PING's answer of a supervisor that serves: no admitted operation to watch (DL-401)
+_SERVING = {"ok": True, "incarnation": "a" * 32, "process_state": "serving"}
+
+
 def _supervised(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, script: list[Any]
 ) -> tuple[Any, _Conn]:
@@ -333,10 +337,10 @@ def _supervised(
 def test_supervise_shutdown_stops_when_the_lease_is_refused(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    result, conn = _supervised(monkeypatch, tmp_path, [{"ok": False, "error": "held"}])
+    result, conn = _supervised(monkeypatch, tmp_path, [_SERVING, {"ok": False, "error": "held"}])
     assert result.exit_code == 2
     assert 'cannot acquire lease: {"error": "held", "ok": false}' in result.output
-    assert [r["cmd"] for r in conn.sent] == ["ACQUIRE"]
+    assert [r["cmd"] for r in conn.sent] == ["PING", "ACQUIRE"]
     assert conn.closed
 
 
@@ -356,12 +360,13 @@ def test_supervise_shutdown_takes_the_lease_then_asks_for_the_stop(
         monkeypatch,
         tmp_path,
         [
+            _SERVING,
             {"ok": True, "token": 1, "incarnation": "a" * 32},
             {"ok": False, "error": "maintenance_refused"},
         ],
     )
     assert result.exit_code == 2
-    assert [r["cmd"] for r in conn.sent] == ["ACQUIRE", "MAINTENANCE_STOP"]
-    assert conn.sent[1]["token"] == 1
-    assert conn.sent[1]["force"] is None
+    assert [r["cmd"] for r in conn.sent] == ["PING", "ACQUIRE", "MAINTENANCE_STOP"]
+    assert conn.sent[2]["token"] == 1
+    assert conn.sent[2]["force"] is None
     assert conn.closed

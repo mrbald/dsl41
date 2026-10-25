@@ -1,4 +1,5 @@
-"""DL-390 maintenance admission, containment, force and delivery boundaries."""
+"""DL-390 maintenance admission, containment, force and delivery boundaries; DL-401's
+admission answer, the loop that runs the operation, maintenance.json and its readers."""
 
 from __future__ import annotations
 
@@ -47,6 +48,36 @@ def assert_excluded(path):
         os.close(fd)
 
 
+def stop(sup, conn, request):
+    """MAINTENANCE_STOP's admission answer, then the loop's passes until the operation
+    leaves `maintaining`, each pause spent on `rs.time`, as the loop's select spends it."""
+    answer = sup._h_maintenance_stop(conn, request)
+    while sup._maintaining:
+        sup._maintenance_pass()
+        rs.time.sleep(sup._maintenance.pause)
+    return answer
+
+
+def record_of(sup):
+    return rs.read_maintenance_record(sup.run_root)
+
+
+def ladder_of(effect):
+    """A stand-in for the forced ladder: one step that runs `effect`, then done."""
+
+    def ladder(*_args):
+        yield from ()
+        effect()
+
+    return ladder
+
+
+def run_ladder(owner, proof=None):
+    """The ladder to its end, each pause slept on `rs.time`."""
+    for pause in rs.Supervisor._maintenance_ladder(owner, proof):
+        rs.time.sleep(pause)
+
+
 @pytest.mark.parametrize("failure", ["missing", "held", "symlink", "unreadable", "replaced"])
 def test_leader_evidence_refuses_without_teardown(rig, monkeypatch, failure):
     sup, conn, request, _proof = rig
@@ -77,6 +108,7 @@ def test_leader_evidence_refuses_without_teardown(rig, monkeypatch, failure):
         assert answer["error"] == "maintenance_refused"
         assert sup.state == "serving"
         assert sup._maintenance_lock_fd is None
+        assert record_of(sup) is None
         assert Path(sup.sock_path).exists() and Path(sup.pid_path).exists()
         if failure == "missing":
             assert not path.exists()
@@ -91,9 +123,10 @@ def test_leader_evidence_refuses_without_teardown(rig, monkeypatch, failure):
 @pytest.mark.parametrize("force", ["orphan", "kill", True, 1, []])
 def test_unknown_modes_never_enter_termination(rig, monkeypatch, force):
     sup, conn, request, _proof = rig
-    monkeypatch.setattr(sup, "_maintenance_wait", lambda _: pytest.fail("unexpected termination"))
+    monkeypatch.setattr(sup, "_maintenance_ladder", lambda *_: pytest.fail("unexpected ladder"))
     answer = sup._h_maintenance_stop(conn, {**request, "force": force})
     assert answer["error"] == "maintenance_refused" and sup.state == "serving"
+    assert record_of(sup) is None
 
 
 @pytest.mark.parametrize("reason", ["active", "just_spawned", "prior_incarnation", "evicted"])
@@ -153,9 +186,12 @@ def test_success_is_late_and_holds_engine_exclusion_through_teardown(rig, monkey
         original(proof)
 
     monkeypatch.setattr(sup, "_maintenance_prepare_teardown", prepare)
-    answer = sup._h_maintenance_stop(conn, request)
-    assert answer["maintenance"] == "completed" and sup.state == "maintenance_completed"
+    answer = stop(sup, conn, request)
+    assert answer["maintenance"] == "admitted" and sup.state == "maintenance_completed"
     assert answer["incarnation"] == sup.incarnation
+    assert answer["bound_s"] == rs._MAINTENANCE_TEARDOWN_S and answer["force"] is None
+    record = record_of(sup)
+    assert record["state"] == "completed" and record["incarnation"] == sup.incarnation
     assert not Path(sup.sock_path).exists() and not Path(sup.pid_path).exists()
     assert_excluded(path)
     sup._teardown()
@@ -177,24 +213,29 @@ def test_accepted_force_uncertainty_retains_lifelines_and_lock(rig, monkeypatch,
 
     proof.members = members
 
-    def wait(_):
+    def wait():
         assert_excluded(Path(sup.run_root) / "leader.lock")
         if failure == "termination":
             raise OSError("unverified command")
 
-    monkeypatch.setattr(sup, "_maintenance_wait", wait)
+    monkeypatch.setattr(sup, "_maintenance_ladder", ladder_of(wait))
     if failure == "teardown":
         monkeypatch.setattr(
             sup, "_maintenance_prepare_teardown", lambda _: (_ for _ in ()).throw(OSError("unlink"))
         )
-    answer = sup._h_maintenance_stop(conn, {**request, "force": "terminate"})
-    assert answer["error"] == "maintenance_uncertain" and sup.state == "maintenance_uncertain"
+    answer = stop(sup, conn, {**request, "force": "terminate"})
+    assert answer["maintenance"] == "admitted" and sup.state == "maintenance_uncertain"
+    record = record_of(sup)
+    assert record["state"] == "uncertain" and record["detail"] and record["force"] == "terminate"
     assert_excluded(Path(sup.run_root) / "leader.lock")
     for verb in ("MAINTENANCE_STOP", "SPAWN", "SIGNAL", "SHUTDOWN"):
         assert sup._fence(verb, request)["error"] == "maintenance_uncertain"
     assert sup.state == "maintenance_uncertain" and sup._running
     assert sup._h_ping(conn, {})["process_state"] == "maintenance_uncertain"
     assert sup._h_list(conn, {})["process_state"] == "maintenance_uncertain"
+    shown = {key: record[key] for key in ("force", "bound_s", "started_at")}
+    assert sup._h_ping(conn, {})["maintenance"] == shown
+    assert sup._h_list(conn, {})["maintenance"] == shown
 
 
 def test_force_signals_only_validated_known_group(rig, monkeypatch):
@@ -309,20 +350,27 @@ def test_systemd_v1_and_v2_hierarchies_are_qualified(monkeypatch, tmp_path, hier
     "reply,expected",
     [
         ({"ok": False, "error": "unknown_verb"}, 2),
+        ({"ok": False, "error": "unsupported_version"}, 2),
         ({"ok": False, "error": "maintenance_refused"}, 2),
         ({"ok": False, "error": "maintenance_uncertain"}, 4),
         ({"ok": True}, 4),
+        ({"ok": True, "maintenance": "completed"}, 4),
         (OSError("partial send or lost reply"), 4),
         (ValueError("malformed reply"), 4),
     ],
 )
 def test_cli_mixed_version_and_uncertainty_never_fallback(monkeypatch, tmp_path, reply, expected):
+    """MAINTENANCE_STOP is sent once, as v 2. A lost or malformed reply reconnects once,
+    fences the request with its own lease and reads PING; it never sends the verb again
+    (DL-401). A v 1 completion reply from an older supervisor is unknown."""
     from dsl41 import runner_adapters
 
     sent = []
 
     def send(request):
         sent.append(request)
+        if request["cmd"] == "PING" and len(sent) == 1:
+            return {"ok": True, "incarnation": "a" * 32, "process_state": "serving"}
         if request["cmd"] == "ACQUIRE":
             return {"ok": True, "token": 1, "incarnation": "a" * 32}
         if isinstance(reply, BaseException):
@@ -334,8 +382,13 @@ def test_cli_mixed_version_and_uncertainty_never_fallback(monkeypatch, tmp_path,
     (tmp_path / "supervisor.sock").touch()
     result = CliRunner().invoke(app, ["supervise", "shutdown", "--run-root", str(tmp_path)])
     assert result.exit_code == expected, result.output
-    assert [request["cmd"] for request in sent] == ["ACQUIRE", "MAINTENANCE_STOP"]
-    assert sent[-1]["force"] is None
+    cmds = [request["cmd"] for request in sent]
+    if isinstance(reply, BaseException):
+        assert cmds == ["PING", "ACQUIRE", "MAINTENANCE_STOP", "ACQUIRE", "PING"]
+        assert sent[3]["token"] == 1  # the lost request's own lease
+    else:
+        assert cmds == ["PING", "ACQUIRE", "MAINTENANCE_STOP"]
+    assert sent[2]["force"] is None and sent[2]["v"] == rs.MAINTENANCE_STOP_VERSION
 
 
 @pytest.mark.parametrize("ignore_term", [False, True])
@@ -366,8 +419,10 @@ def test_real_wrapper_force_waits_for_spawn_and_escalates_term_grace_kill(
         original(pid, sig)
 
     monkeypatch.setattr(rs, "killpg_quiet", signal_group)
-    answer = sup._h_maintenance_stop(conn, {**request, "force": "terminate"})
-    assert answer.get("maintenance") == "completed", answer
+    answer = stop(sup, conn, {**request, "force": "terminate"})
+    assert answer.get("maintenance") == "admitted", answer
+    assert sup.state == "maintenance_completed", record_of(sup)
+    assert answer["bound_s"] >= 0.05 + rs._MAINTENANCE_TEARDOWN_S
     assert signals[0] == signal.SIGTERM
     assert set(signals) <= {signal.SIGTERM, signal.SIGKILL}
     if ignore_term:
@@ -447,8 +502,8 @@ def _force_group_child(rig, monkeypatch, mode, grace):
 
     monkeypatch.setattr(rs, "killpg_quiet", signal_group)
     started = time.monotonic()
-    answer = sup._h_maintenance_stop(conn, {**request, "force": "terminate"})
-    return answer, signals, time.monotonic() - started, child, token, run_dir
+    stop(sup, conn, {**request, "force": "terminate"})
+    return sup.state, signals, time.monotonic() - started, child, token, run_dir
 
 
 def _kill_child(child, token):
@@ -460,11 +515,11 @@ def _kill_child(child, token):
 
 
 def test_force_kills_a_term_ignoring_group_member_after_its_leader_exits(rig, monkeypatch):
-    answer, signals, _elapsed, child, token, run_dir = _force_group_child(
+    state, signals, _elapsed, child, token, run_dir = _force_group_child(
         rig, monkeypatch, "ignore", 0.5
     )
     try:
-        assert answer.get("maintenance") == "completed", answer
+        assert state == "maintenance_completed", record_of(rig[0])
         assert [sig for _pgid, sig, _at in signals] == [signal.SIGTERM, signal.SIGKILL]
         assert len({pgid for pgid, _sig, _at in signals}) == 1
         assert signals[1][2] - signals[0][2] >= 0.5
@@ -505,7 +560,7 @@ def test_force_group_containment_sampling_is_rate_bounded(monkeypatch):
     owner = SimpleNamespace(
         runs={"r": run}, _reap=reap, _maintenance_signal=signal_run, _maintenance_groups=sample
     )
-    rs.Supervisor._maintenance_wait(owner, None)
+    run_ladder(owner)
     assert [sig for sig, _at in sent] == [signal.SIGTERM, signal.SIGKILL]
     assert sent[1][1] >= 1.0
     # A 20 ms cadence would take about 50 samples during the 1 s grace.
@@ -515,11 +570,11 @@ def test_force_group_containment_sampling_is_rate_bounded(monkeypatch):
 
 
 def test_force_waits_for_a_graceful_group_member_without_kill(rig, monkeypatch):
-    answer, signals, elapsed, child, token, _run_dir = _force_group_child(
+    state, signals, elapsed, child, token, _run_dir = _force_group_child(
         rig, monkeypatch, "graceful", 5.0
     )
     try:
-        assert answer.get("maintenance") == "completed", answer
+        assert state == "maintenance_completed", record_of(rig[0])
         assert [sig for _pgid, sig, _at in signals] == [signal.SIGTERM]
         assert elapsed < 5.0
         assert not procid.verify_alive(child, token)
@@ -529,11 +584,12 @@ def test_force_waits_for_a_graceful_group_member_without_kill(rig, monkeypatch):
 
 def test_force_never_signals_a_contained_member_outside_the_verified_group(rig, monkeypatch):
     sup = rig[0]
-    answer, signals, _elapsed, child, token, _run_dir = _force_group_child(
+    state, signals, _elapsed, child, token, _run_dir = _force_group_child(
         rig, monkeypatch, "escape", 0.5
     )
     try:
-        assert answer["error"] == "maintenance_uncertain", answer
+        assert state == "maintenance_uncertain", record_of(sup)
+        assert record_of(sup)["state"] == "uncertain"
         assert [sig for _pgid, sig, _at in signals] == [signal.SIGTERM]
         assert os.getpgid(child) not in {pgid for pgid, _sig, _at in signals}
         assert procid.verify_alive(child, token)
@@ -624,7 +680,7 @@ def test_slow_group_sample_never_spends_the_reaping_interval_after_kill(monkeypa
     owner = SimpleNamespace(
         runs={"r": run}, _reap=reap, _maintenance_signal=signal_run, _maintenance_groups=sample
     )
-    rs.Supervisor._maintenance_wait(owner, None)
+    run_ladder(owner)
     assert run.wrapper_rc == 0
     assert clock.now - clock.kill_at > 2.0
 
@@ -644,10 +700,11 @@ def test_uncertain_force_keeps_live_wrapper_lifeline(rig, monkeypatch):
     )
     sup.runs["r"] = run
     proof.members = lambda: {os.getpid(), 99999999}
-    monkeypatch.setattr(sup, "_maintenance_wait", lambda _: None)
+    monkeypatch.setattr(sup, "_maintenance_ladder", ladder_of(lambda: None))
     try:
-        answer = sup._h_maintenance_stop(conn, {**request, "force": "terminate"})
-        assert answer["error"] == "maintenance_uncertain"
+        stop(sup, conn, {**request, "force": "terminate"})
+        assert sup.state == "maintenance_uncertain"
+        assert record_of(sup)["detail"] == "work remains after the termination bound"
         os.fstat(write_fd)
         assert run.wrapper_rc is None
         assert_excluded(Path(sup.run_root) / "leader.lock")
@@ -655,36 +712,43 @@ def test_uncertain_force_keeps_live_wrapper_lifeline(rig, monkeypatch):
         os.close(read_fd)
 
 
-@pytest.mark.parametrize("stale_tail", [None, "chld", "listen"])
-@pytest.mark.parametrize("partial_teardown", [False, True])
-def test_real_process_completed_maintenance_exits_eight_and_cli_verifies_exit(
-    short_root, stale_tail, partial_teardown
-):
-    import subprocess
-    import sys
-    from test_runner_supervisor import wait_for
-
-    (short_root / "leader.lock").touch()
-    launcher = f"""
-import os, sys, selectors
+#: A supervisor process whose containment is faked: this process and every process in a
+#: run's wrapper session, as `_service_members` reads it. Everything else is real.
+_LAUNCHER = """
+import os, selectors, subprocess, sys
 from types import SimpleNamespace
+from dsl41 import runner_procid as procid
 from dsl41 import runner_supervisor as r
-r.ServiceContainment.observe = lambda: SimpleNamespace(members=lambda: {{os.getpid()}})
+
+OWNER = []
+
+def members():
+    sessions = {run.wrapper_pid for run in OWNER[0].runs.values()}
+    listing = subprocess.run(["ps", "-A", "-o", "pid="], capture_output=True, text=True)
+    found = {os.getpid()}
+    for pid in map(int, listing.stdout.split()):
+        try:
+            if os.getsid(pid) in sessions and not procid.proc_is_zombie(pid):
+                found.add(pid)
+        except OSError:
+            continue
+    return found
+
+r.ServiceContainment.observe = lambda: SimpleNamespace(members=members)
 original = r.Supervisor._bind
 def bind(self):
+    OWNER.append(self)
     original(self)
     select = self._sel.select
     def batch(*args, **kwargs):
         ready = select(*args, **kwargs)
-        if any(key.data[0] == 'conn' and mask & selectors.EVENT_READ for key, mask in ready):
-            keys = [key for key in self._sel.get_map().values() if key.data[0] == {stale_tail!r}]
-            if keys:
-                ready = [pair for pair in ready if pair[0].data[0] != {stale_tail!r}]
-                ready.append((keys[0], selectors.EVENT_READ))
+        if STALE and any(k.data[0] == 'conn' and m & selectors.EVENT_READ for k, m in ready):
+            # a key whose descriptor the map no longer names this way is skipped
+            ready.append((ready[0][0]._replace(data=("chld", None)), selectors.EVENT_READ))
         return ready
     self._sel.select = batch
 r.Supervisor._bind = bind
-if {partial_teardown!r}:
+if PARTIAL:
     prepare = r.Supervisor._maintenance_prepare_teardown
     def partial(self, proof):
         prepare(self, proof)
@@ -692,35 +756,65 @@ if {partial_teardown!r}:
     r.Supervisor._maintenance_prepare_teardown = partial
 sys.exit(r.main(sys.argv[1:]))
 """
+
+
+def _launch(root, *, stale=False, partial=False):
+    import subprocess
+    import sys
+
+    from test_runner_supervisor import wait_for
+
+    code = f"STALE = {stale!r}\nPARTIAL = {partial!r}\n" + _LAUNCHER
     supervisor = subprocess.Popen(
-        [sys.executable, "-c", launcher, "--run-root", str(short_root)],
+        [sys.executable, "-c", code, "--run-root", str(root)],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
     )
+    wait_for(lambda: (root / "supervisor.sock").exists())
+    return supervisor
+
+
+def _reap_launched(supervisor):
+    if supervisor.poll() is None:
+        supervisor.terminate()
+    supervisor.wait(timeout=10)
+    supervisor.stderr.close()
+
+
+@pytest.mark.parametrize("stale", [False, True])
+@pytest.mark.parametrize("partial_teardown", [False, True])
+def test_real_process_completed_maintenance_exits_eight_and_cli_verifies_exit(
+    short_root, stale, partial_teardown
+):
+    import subprocess
+    import sys
+
+    (short_root / "leader.lock").touch()
+    supervisor = _launch(short_root, stale=stale, partial=partial_teardown)
     try:
-        wait_for(lambda: (short_root / "supervisor.sock").exists())
         cli = subprocess.run(
             [sys.executable, "-m", "dsl41", "supervise", "shutdown", "--run-root", str(short_root)],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=30,
         )
+        record = rs.read_maintenance_record(short_root)
         if partial_teardown:
             assert cli.returncode == 4, cli.stderr
+            assert "maintenance is uncertain: synthetic error" in cli.stderr
+            assert record["state"] == "uncertain"
             assert supervisor.poll() is None
             supervisor.terminate()  # deliberate fixture host stop after proving retained uncertainty
             assert supervisor.wait(timeout=5) == 0, supervisor.stderr.read()
         else:
             assert cli.returncode == 0, cli.stderr
-            assert json.loads(cli.stdout)["maintenance"] == "completed"
+            # exit 0 prints the completed record, nothing else (DL-401)
+            assert json.loads(cli.stdout) == record and record["state"] == "completed"
             assert supervisor.wait(timeout=5) == 8, supervisor.stderr.read()
         assert not (short_root / "supervisor.sock").exists()
         assert not (short_root / "supervisor.pid").exists()
     finally:
-        if supervisor.poll() is None:
-            supervisor.terminate()
-        supervisor.wait(timeout=10)
-        supervisor.stderr.close()
+        _reap_launched(supervisor)
 
 
 def test_late_teardown_failure_never_returns_maintenance_success(rig, monkeypatch):
@@ -733,8 +827,7 @@ def test_late_teardown_failure_never_returns_maintenance_success(rig, monkeypatc
         real(path)
 
     monkeypatch.setattr(rs.os, "unlink", unlink)
-    answer = sup._h_maintenance_stop(conn, request)
-    assert answer["error"] == "maintenance_uncertain"
+    stop(sup, conn, request)
     assert sup.state == "maintenance_uncertain"
     assert_excluded(Path(sup.run_root) / "leader.lock")
     assert Path(sup.sock_path).exists()
@@ -744,41 +837,63 @@ def test_late_teardown_failure_never_returns_maintenance_success(rig, monkeypatc
     "which",
     [
         "stays_alive",
+        "stays_alive_without_socket",
         "unobservable",
         "gone",
         "zombie",
         "reused",
         "vanished_during_probe",
         "wait_then_gone",
+        "gone_admitted",
+        "uncertain",
     ],
 )
 def test_cli_requires_completion_and_target_process_exit(monkeypatch, tmp_path, which):
-    from dsl41 import runner_adapters
+    """The admitted operation is watched in maintenance.json (DL-401): exit 0 needs the
+    named process gone and the record completed. A live process at the bound is 3 only
+    while a PING shows its operation still running; with no running operation on its
+    socket it is 4, as are an identity it cannot read, an exit without completion and an
+    uncertain record."""
+    from dsl41 import cli_common, runner_adapters
 
-    reply = {
-        "ok": True,
-        "maintenance": "completed",
+    identity = {
         "incarnation": "a" * 32,
         "supervisor_pid": 123,
         "supervisor_start_time": "ticks:1",
         "boot_id": procid.current_boot_id(),
+        "force": None,
+        "bound_s": 0.0,
+        "started_at": "2026-10-25T00:00:00+00:00",
     }
+    state = {"gone_admitted": "admitted", "uncertain": "uncertain"}.get(which, "completed")
+    record = {"version": 1, "state": state, **identity, "finished_at": "then", "detail": "why"}
+    (tmp_path / "maintenance.json").write_text(json.dumps(record))
+
+    pings = []
 
     def send(request):
+        if request["cmd"] == "PING":
+            pings.append(request)
+            # the first PING precedes the request; a later one is the watch's probe
+            running = len(pings) > 1 and which == "stays_alive"
+            state = "maintenance_stopping" if running else "serving"
+            return {"ok": True, "incarnation": "a" * 32, "process_state": state}
         if request["cmd"] == "ACQUIRE":
             return {"ok": True, "token": 1, "incarnation": "a" * 32}
-        return reply
+        return {"ok": True, "maintenance": "admitted", **identity}
 
     monkeypatch.setattr(
         runner_adapters, "SupervisorConn", lambda _: SimpleNamespace(send=send, close=lambda: None)
     )
-
+    # the bound is spent at once where the process stays; wait_then_gone needs a pass
+    margin = 5.0 if which == "wait_then_gone" else 0.0
+    monkeypatch.setattr(cli_common, "MAINTENANCE_MARGIN_S", margin)
     kill_calls = 0
 
     def kill(*_):
         nonlocal kill_calls
         kill_calls += 1
-        if which == "gone" or (
+        if which in ("gone", "gone_admitted") or (
             which in ("vanished_during_probe", "wait_then_gone") and kill_calls > 1
         ):
             raise ProcessLookupError()
@@ -796,13 +911,22 @@ def test_cli_requires_completion_and_target_process_exit(monkeypatch, tmp_path, 
         ),
     )
     monkeypatch.setattr(procid, "proc_is_zombie", lambda _: which == "zombie")
-    import time
-
-    ticks = iter([0, 1, 10] if which == "wait_then_gone" else [0, 10])
-    monkeypatch.setattr(time, "monotonic", lambda: next(ticks))
     (tmp_path / "supervisor.sock").touch()
     result = CliRunner().invoke(app, ["supervise", "shutdown", "--run-root", str(tmp_path)])
-    assert result.exit_code == (4 if which in ("stays_alive", "unobservable") else 0), result.output
+    expected = {
+        "stays_alive": 3,
+        "stays_alive_without_socket": 4,
+        "unobservable": 4,
+        "gone_admitted": 4,
+        "uncertain": 4,
+    }
+    assert result.exit_code == expected.get(which, 0), result.output
+    if which == "stays_alive":
+        assert "in progress; it finishes on its own" in result.output
+    if which == "stays_alive_without_socket":
+        assert "alive without a running operation on its socket (serving)" in result.output
+    if which == "uncertain":
+        assert "maintenance is uncertain: why" in result.output
 
 
 def test_force_missing_spawn_identity_is_uncertain_without_signal_or_lifeline_close(
@@ -830,9 +954,8 @@ def test_force_missing_spawn_identity_is_uncertain_without_signal_or_lifeline_cl
     monkeypatch.setattr(rs, "time", SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep))
     monkeypatch.setattr(rs, "killpg_quiet", lambda *_: pytest.fail("signalled an unknown group"))
     try:
-        answer = sup._h_maintenance_stop(conn, {**request, "force": "terminate"})
-        assert answer["error"] == "maintenance_uncertain"
-        assert "no command identity" in answer["detail"]
+        stop(sup, conn, {**request, "force": "terminate"})
+        assert "no command identity" in record_of(sup)["detail"]
         assert sup.state == "maintenance_uncertain" and clock.now >= 5
         os.fstat(write_fd)
         assert_excluded(Path(sup.run_root) / "leader.lock")
@@ -852,8 +975,7 @@ def test_owned_teardown_failure_before_reply_is_uncertain(rig, monkeypatch):
             real(fd)
 
         patch.setattr(os, "close", close)
-        answer = sup._h_maintenance_stop(conn, request)
-    assert answer["error"] == "maintenance_uncertain"
+        stop(sup, conn, request)
     assert sup.state == "maintenance_uncertain"
     assert_excluded(Path(sup.run_root) / "leader.lock")
 
@@ -881,7 +1003,7 @@ def test_termination_observation_latency_cannot_consume_command_grace(monkeypatc
             run.wrapper_rc = 0
 
     owner = SimpleNamespace(runs=runs, _reap=lambda: None, _maintenance_signal=signal_run)
-    rs.Supervisor._maintenance_wait(owner, None)
+    run_ladder(owner)
     for run_id in runs:
         signals = [(sig, at) for ident, sig, at in sent if ident == run_id]
         assert [sig for sig, _ in signals] == [signal.SIGTERM, signal.SIGKILL]
@@ -1026,11 +1148,11 @@ def test_maintenance_statechart_error_is_fatal_and_never_a_refusal(rig, monkeypa
         monkeypatch.setattr(rs.ServiceContainment, "observe", fail)
     elif stage == "force":
         proof.members = lambda: {os.getpid(), 99999999}
-        monkeypatch.setattr(sup, "_maintenance_wait", fail)
+        monkeypatch.setattr(sup, "_maintenance_ladder", ladder_of(fail))
     else:
         monkeypatch.setattr(sup, "_maintenance_prepare_teardown", fail)
     with pytest.raises(rs.StatechartError):
-        sup._h_maintenance_stop(conn, {**request, "force": "terminate"})
+        stop(sup, conn, {**request, "force": "terminate"})
     assert sup.state != "maintenance_completed"
 
 
@@ -1103,11 +1225,10 @@ def test_teardown_requires_final_idle_and_ownership_proofs(rig, monkeypatch, fau
         sup._sel.unregister(sup._listen)
         sup._listen.close()
         sup._listen = None
-    answer = sup._h_maintenance_stop(conn, request)
+    stop(sup, conn, request)
     if fault == "no_listener":
-        assert answer.get("maintenance") == "completed"
+        assert sup.state == "maintenance_completed"
     else:
-        assert answer["error"] == "maintenance_uncertain"
         assert sup.state == "maintenance_uncertain"
         assert_excluded(Path(sup.run_root) / "leader.lock")
 
@@ -1137,7 +1258,7 @@ def test_slow_verified_kill_batch_gets_a_full_final_reaping_interval(monkeypatch
                 run.wrapper_rc = 0
 
     owner = SimpleNamespace(runs=runs, _reap=reap, _maintenance_signal=signal_run)
-    rs.Supervisor._maintenance_wait(owner, None)
+    run_ladder(owner)
     assert clock.kills == len(runs)
     assert all(run.wrapper_rc is not None for run in runs.values())
     assert clock.now - clock.last_kill >= 1.5
@@ -1348,7 +1469,7 @@ def test_cli_malformed_lease_never_attempts_maintenance(monkeypatch, tmp_path, a
     result = CliRunner().invoke(app, ["supervise", "shutdown", "--run-root", str(tmp_path)])
     assert result.exit_code == 2
     assert "malformed supervisor lease" in result.output
-    assert [request["cmd"] for request in sent] == ["ACQUIRE"]
+    assert [request["cmd"] for request in sent] == ["PING", "ACQUIRE"]
 
 
 def test_blocking_supervisor_client_skips_exit_push_before_maintenance_reply():
@@ -1468,7 +1589,7 @@ def test_force_bound_never_treats_unreaped_wrappers_as_complete(monkeypatch):
         _maintenance_signal=lambda _run, sig, _proof, _group=None: sent.append(sig),
     )
     with pytest.raises(OSError, match="wrappers remain"):
-        rs.Supervisor._maintenance_wait(owner, None)
+        run_ladder(owner)
     assert sent == [signal.SIGTERM, signal.SIGKILL]
     assert clock.now >= 2
 
@@ -1479,8 +1600,8 @@ def test_final_reply_transport_failure_does_not_reclassify_successful_maintenanc
 ):
     sup, conn, request, _proof = rig
     if maintenance:
-        answer = sup._h_maintenance_stop(conn, request)
-        assert answer["maintenance"] == "completed"
+        answer = stop(sup, conn, request)
+        assert answer["maintenance"] == "admitted" and sup.state == "maintenance_completed"
     else:
         answer = {"ok": True}
     sup._send(conn, answer)
@@ -1546,8 +1667,8 @@ def test_partial_termination_stops_on_second_run_identity_failure_and_retains_re
     sent = []
     monkeypatch.setattr(rs, "killpg_quiet", lambda pid, sig: sent.append((pid, sig)))
     try:
-        answer = sup._h_maintenance_stop(conn, {**request, "force": "terminate"})
-        assert answer["error"] == "maintenance_uncertain"
+        stop(sup, conn, {**request, "force": "terminate"})
+        assert record_of(sup)["state"] == "uncertain"
         assert sent == [(3001, signal.SIGTERM)]
         assert sup.state == "maintenance_uncertain" and sup._running
         assert_excluded(Path(sup.run_root) / "leader.lock")
@@ -1811,3 +1932,652 @@ def test_exhausted_manager_budget_starts_no_additional_helper(monkeypatch, tmp_p
     with pytest.raises(procid.ObservationUnavailable, match="timed out"):
         proof.verify_manager()
     assert len(calls) == 1
+
+
+# ---- DL-401: admission answers at once; the operation runs in the loop
+
+
+def _line(**request):
+    return json.dumps(request).encode("utf-8")
+
+
+@pytest.mark.parametrize(
+    "version,detail",
+    [(1, True), (3, False), (True, False), (2.0, False), (None, False)],
+)
+def test_maintenance_stop_is_version_2_and_its_v1_is_refused_by_name(rig, version, detail):
+    """The verb's own version (DL-401). v 1, the completion-only dialect, is a tombstone
+    that names DL-401; any other version is the unknown case. Nothing is admitted."""
+    sup, conn, request, _proof = rig
+    answer = sup._answer(conn, _line(cmd="MAINTENANCE_STOP", v=version, **request))
+    assert answer["error"] == "unsupported_version"
+    assert ("DL-401" in answer.get("detail", "")) is detail
+    assert sup.state == "serving" and record_of(sup) is None
+    assert sup._answer(conn, _line(cmd="PING", v=2))["error"] == "unsupported_version"
+
+
+def test_admission_answers_with_the_bound_and_the_record_before_the_operation(rig, monkeypatch):
+    """The admitted answer is the record's identity, bound and start. The record is
+    durable before the answer. The loop then answers PING, LIST and the lease verbs and
+    refuses run mutations while the forced ladder runs; the latched signal and the
+    deadman wait for the outcome (DL-401). An unknown request field is ignored."""
+    sup, conn, request, proof = rig
+    proof.members = lambda: {os.getpid(), 99999999} if steps else {os.getpid()}
+    read_fd, write_fd = os.pipe()
+    sup.runs["r"] = rs._Run(
+        run_id="r",
+        job="j",
+        run_number=1,
+        run_dir=sup.run_root,
+        wrapper_pid=99999999,
+        lifeline_w=write_fd,
+        spawned_at="now",
+        grace_seconds=120,
+    )
+    steps = [0.5, 0.25]
+
+    def ladder(_proof):
+        while steps:
+            yield steps.pop(0)
+        sup.runs["r"].wrapper_rc = 0
+
+    monkeypatch.setattr(sup, "_maintenance_ladder", ladder)
+    try:
+        answer = sup._answer(
+            conn,
+            _line(
+                cmd="MAINTENANCE_STOP", v=2, future="ignored", **{**request, "force": "terminate"}
+            ),
+        )
+        record = record_of(sup)
+        assert answer["maintenance"] == "admitted" and answer["force"] == "terminate"
+        # spawn wait, grace, settle, two verified sends for one group, samples, teardown
+        assert answer["bound_s"] == 5.0 + 120 + 2.0 + 2 * 4.0 + 10.0 + 15.0
+        assert {key: answer[key] for key in record if key not in ("version", "state")} == {
+            key: record[key] for key in record if key not in ("version", "state")
+        }
+        assert record["state"] == "admitted" and sup.state == "maintenance_stopping"
+        assert sup._pause() == 0.0
+        sup._shutdown_requested = True
+        sup.deadman_s = 1e-9
+        for pause in (0.5, 0.25):
+            sup._maintenance_pass()
+            assert sup._pause() == pause and sup.state == "maintenance_stopping"
+            ping = sup._answer(conn, _line(cmd="PING", v=1))
+            assert ping["process_state"] == "maintenance_stopping"
+            assert ping["maintenance"] == {
+                "force": "terminate",
+                "bound_s": answer["bound_s"],
+                "started_at": answer["started_at"],
+            }
+            assert sup._answer(conn, _line(cmd="LIST", v=1))["maintenance"] == ping["maintenance"]
+            renewed = sup._answer(conn, _line(cmd="RENEW", v=1, ttl_s=60, **request))
+            assert renewed["ok"] is True
+            for verb in ("SPAWN", "SIGNAL", "SHUTDOWN"):
+                refused = sup._answer(conn, _line(cmd=verb, v=1, **request))
+                assert refused == {"ok": False, "error": "maintenance_in_progress"}
+            again = sup._answer(conn, _line(cmd="MAINTENANCE_STOP", v=2, **request))
+            assert again == {"ok": False, "error": "maintenance_in_progress"}
+        sup._maintenance_pass()
+        assert sup.state == "maintenance_completing" and sup._pause() == 0.0
+        sup._maintenance_pass()
+        assert sup.state == "maintenance_completed" and sup._shutdown_requested
+        assert record_of(sup)["state"] == "completed" and record_of(sup)["finished_at"]
+        assert sup._pause() == 1.0
+    finally:
+        os.close(read_fd)
+
+
+@pytest.mark.parametrize("fault", ["record", "start_token"])
+def test_admission_that_cannot_record_or_name_itself_is_refused(rig, monkeypatch, fault):
+    """No record, no identity: a refusal, exit 2, nothing changed (DL-401)."""
+    sup, conn, request, _proof = rig
+    if fault == "record":
+
+        def write(*_args):
+            raise OSError("synthetic full disk")
+
+        monkeypatch.setattr(rs, "durable_write_json", write)
+    else:
+        monkeypatch.setattr(rs, "proc_start_token", lambda _pid: None)
+    answer = sup._h_maintenance_stop(conn, request)
+    assert answer["error"] == "maintenance_refused" and sup.state == "serving"
+    assert sup._maintenance is None and sup._maintenance_lock_fd is None
+    assert record_of(sup) is None
+    assert sup._h_ping(conn, {}).get("maintenance") is None
+
+
+def test_an_uncertain_outcome_the_record_cannot_take_is_still_uncertain(rig, monkeypatch, capsys):
+    sup, conn, request, proof = rig
+    proof.members = lambda: {os.getpid(), 99999999}
+
+    def fail():
+        def write(*_args):
+            raise OSError("synthetic lost disk")
+
+        monkeypatch.setattr(rs, "durable_write_json", write)
+        raise OSError("unverified command")
+
+    monkeypatch.setattr(sup, "_maintenance_ladder", ladder_of(fail))
+    stop(sup, conn, {**request, "force": "terminate"})
+    assert sup.state == "maintenance_uncertain"
+    assert record_of(sup)["state"] == "admitted"
+    err = capsys.readouterr().err
+    assert "supervisor: maintenance uncertain: unverified command" in err
+    assert "maintenance.json not written: synthetic lost disk" in err
+
+
+@pytest.mark.parametrize("runs", [5, 200])
+def test_the_ladder_runs_dl394_in_full_past_its_estimate(monkeypatch, runs):
+    """The bound is an estimate, never a stop (DL-401). Runs that ignore TERM, at 4 s per
+    verified send for five and 0.1 s for two hundred, each get TERM, their grace, then KILL,
+    and the ladder ends on their reaping, however long the sends take."""
+    clock = SimpleNamespace(now=0.0)
+
+    def sleep(seconds):
+        clock.now += seconds
+
+    monkeypatch.setattr(rs, "time", SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep))
+    monkeypatch.setattr(rs, "_load_json", lambda _: {})
+    cost = 4.0 if runs == 5 else 0.1
+    table = {
+        str(i): SimpleNamespace(wrapper_rc=None, run_dir="unused", run_id=str(i), grace_seconds=3.0)
+        for i in range(runs)
+    }
+    sent = []
+
+    def signal_run(run, sig, _proof, _group=None):
+        clock.now += cost
+        sent.append((run.run_id, sig))
+        if sig == signal.SIGKILL:
+            run.wrapper_rc = -9
+
+    owner = SimpleNamespace(runs=table, _reap=lambda: None, _maintenance_signal=signal_run)
+    run_ladder(owner)
+    assert [sig for _, sig in sent].count(signal.SIGKILL) == runs
+    assert all(run.wrapper_rc == -9 for run in table.values())
+    assert clock.now > 5.0 + 3.0 + 2.0 if runs == 5 else True
+
+
+def test_each_pass_runs_at_most_one_observation_and_the_loop_answers_between(rig, monkeypatch):
+    """The real ladder under the latency model: each verified send and each containment
+    sample costs 4 s on the supervisor's clock. A pass spends at most one of them, and PING
+    is answered between passes (DL-401)."""
+    sup, conn, request, proof = rig
+    clock = SimpleNamespace(now=0.0)
+
+    def sleep(seconds):
+        clock.now += seconds
+
+    monkeypatch.setattr(rs, "time", SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep))
+    lifelines = []
+    for number in range(3):
+        read_fd, write_fd = os.pipe()
+        lifelines.append(read_fd)
+        sup.runs[f"r{number}"] = rs._Run(
+            run_id=f"r{number}",
+            job="j",
+            run_number=number,
+            run_dir=sup.run_root,
+            wrapper_pid=99999990 + number,
+            lifeline_w=write_fd,
+            spawned_at="now",
+            grace_seconds=1.0,
+        )
+    members = {os.getpid(), 99999990}
+    proof.members = lambda: set(members)
+    real_load = rs._load_json
+    monkeypatch.setattr(  # every run has its spawn record; the pid record is read for real
+        rs, "_load_json", lambda path: {} if path.endswith("spawn.json") else real_load(path)
+    )
+
+    def send(run, sig, _proof, group=None):
+        clock.now += 4.0
+        if sig == signal.SIGKILL:
+            run.wrapper_rc = -9
+            members.discard(99999990)
+        return (3000, {3001: "ticks:1"}) if sig == signal.SIGTERM else None
+
+    def sample(groups, _proof):
+        clock.now += 4.0
+        return groups
+
+    monkeypatch.setattr(sup, "_maintenance_signal", send)
+    monkeypatch.setattr(sup, "_maintenance_groups", sample)
+    monkeypatch.setattr(sup, "_reap", lambda: None)
+    try:
+        answer = sup._h_maintenance_stop(conn, {**request, "force": "terminate"})
+        assert answer["maintenance"] == "admitted"
+        passes = 0
+        while sup._maintaining:
+            before = clock.now
+            sup._maintenance_pass()
+            assert clock.now - before <= 4.0, (passes, clock.now - before)
+            assert sup._h_ping(conn, {})["ok"] is True
+            rs.time.sleep(sup._pause())
+            passes += 1
+        assert sup.state == "maintenance_completed", record_of(sup)
+        assert passes > 6
+    finally:
+        for fd in lifelines:
+            os.close(fd)
+
+
+def test_a_lost_request_is_fenced_by_its_own_lease_before_the_ping(rig):
+    """A reconnect that presents the lost request's lease to ACQUIRE ends that token:
+    the request, read only afterwards, is refused stale_token, and PING says serving.
+    The ordering of two connections cannot admit it later (DL-401)."""
+    sup, conn, request, _proof = rig
+    left, right = socket.socketpair()
+    other = rs._Conn(left)
+    sup._conns[left.fileno()] = other
+    sup._sel.register(left, selectors.EVENT_READ, ("conn", other))
+    try:
+        fence = sup._answer(
+            other, _line(cmd="ACQUIRE", v=1, controller_id="again", ttl_s=60, **request)
+        )
+        assert fence["ok"] is True and fence["token"] != request["token"]
+        late = sup._answer(conn, _line(cmd="MAINTENANCE_STOP", v=2, **request))
+        assert late == {"ok": False, "error": "stale_token"}
+        assert sup._answer(other, _line(cmd="PING", v=1))["process_state"] == "serving"
+        assert record_of(sup) is None
+    finally:
+        sup._drop_conn(other)
+        right.close()
+
+
+@pytest.mark.parametrize(
+    "content,match",
+    [
+        ({"version": 2}, "has version 2"),
+        ({"version": True}, "has version True"),
+        ({"version": "1"}, "has version '1'"),
+        ({}, "has version None"),
+        ({"version": 1, "state": "admitted"}, "lacks or mistypes"),
+        ({"version": 1, "state": "done"}, "lacks or mistypes"),
+        ([1], "not one JSON object"),
+        (b"\xff", "not one JSON object"),
+        ("dir", "cannot be read"),
+    ],
+)
+def test_every_reader_refuses_a_record_it_cannot_trust(short_root, content, match):
+    path = short_root / rs.MAINTENANCE_RECORD
+    if content == "dir":
+        path.mkdir()
+    elif isinstance(content, bytes):
+        path.write_bytes(content)
+    else:
+        path.write_text(json.dumps(content))
+    with pytest.raises(ValueError, match=match):
+        rs.read_maintenance_record(short_root)
+    # the CLI's rerun meets the same reader: an unknown outcome, never a guess
+    result = CliRunner().invoke(app, ["supervise", "shutdown", "--run-root", str(short_root)])
+    assert result.exit_code == 4, result.output
+    assert match.split("'")[0] in result.output
+
+
+def _record(pid, start, state="completed", **extra):
+    return {
+        "version": 1,
+        "state": state,
+        "incarnation": "a" * 32,
+        "supervisor_pid": pid,
+        "supervisor_start_time": start,
+        "boot_id": procid.current_boot_id(),
+        "force": None,
+        "bound_s": 0.0,
+        "started_at": "2026-10-25T00:00:00+00:00",
+        "finished_at": "2026-10-25T00:00:01+00:00",
+        "future_field": "ignored",
+        **extra,
+    }
+
+
+def _own_note(gone_pid):
+    return json.dumps({"version": 1, "incarnation": "a" * 32, "pid": gone_pid})
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "completed",
+        "no_note",
+        "empty_note",
+        "partial_note",
+        "admitted",
+        "uncertain",
+        "later_boot",
+        "later_pid_record",
+        "later_lock_note",
+        "unreadable_note",
+        "unknown_note_version",
+        "pid_record_not_an_object",
+        "pid_record_unreadable",
+    ],
+)
+def test_a_shutdown_rerun_without_a_socket_reads_the_record(tmp_path, state):
+    """No socket and a record: the record's operation decides, and only for the supervisor
+    the start note names (DL-401). An exited supervisor whose record says completed, named
+    by a well-formed note, is 0. A missing, empty, partial or unparsable note is no
+    evidence, and a note or pid record naming a later supervisor is one that ended outside
+    maintenance: 4, never the old record's 0. So is anything the record cannot prove."""
+    import subprocess
+
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    extra = {"detail": "why"} if state == "uncertain" else {}
+    base = state if state in ("admitted", "uncertain") else "completed"
+    record = _record(gone.pid, "ticks:1", base, **extra)
+    if state == "later_boot":
+        record["boot_id"] = "another-boot"
+    (tmp_path / rs.MAINTENANCE_RECORD).write_text(json.dumps(record))
+    note = tmp_path / "supervisor.lock"
+    later = {"version": 1, "incarnation": "b" * 32, "pid": 4242}
+    if state != "no_note":
+        note.write_text(_own_note(gone.pid))
+    if state == "empty_note":
+        note.write_text("")
+    elif state == "partial_note":
+        note.write_text(_own_note(gone.pid)[:20])
+    elif state == "later_pid_record":
+        (tmp_path / "supervisor.pid").write_text(json.dumps(later))
+    elif state == "later_lock_note":
+        note.write_text(json.dumps(later))
+    elif state == "unreadable_note":
+        note.write_text("{not json")
+    elif state == "pid_record_not_an_object":
+        (tmp_path / "supervisor.pid").write_text("[1]")
+    elif state == "pid_record_unreadable":
+        (tmp_path / "supervisor.pid").mkdir()
+    elif state == "unknown_note_version":
+        note.write_text(json.dumps({**later, "version": 2}))
+    assert rs.read_maintenance_record(tmp_path)["future_field"] == "ignored"
+    result = CliRunner().invoke(app, ["supervise", "shutdown", "--run-root", str(tmp_path)])
+    assert result.exit_code == (0 if state == "completed" else 4), result.output
+    if state == "completed":
+        assert set(json.loads(result.output)) == set(record)
+    if state.startswith("later_") and state != "later_boot":
+        assert "ended outside maintenance: not a maintenance outcome" in result.output
+    plain = CliRunner().invoke(app, ["supervise", "list", "--run-root", str(tmp_path)])
+    assert plain.exit_code == 2 and "no supervisor at" in plain.output
+
+
+def test_an_interrupted_start_note_is_no_evidence(short_root, monkeypatch):
+    """A start whose note write fails part way leaves a note no reader accepts, never the
+    old one whole and never an empty file: the first byte is spoiled before the new note
+    is written, and the file is cut to its length last (DL-401). The old record then has
+    no evidence: 4, not 0."""
+    import subprocess
+
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    (short_root / rs.MAINTENANCE_RECORD).write_text(json.dumps(_record(gone.pid, "ticks:1")))
+    (short_root / "supervisor.lock").write_text(_own_note(gone.pid))
+    real_pwrite = rs.os.pwrite
+    calls = []
+
+    def interrupted(fd, data, offset):
+        calls.append(offset)
+        if len(calls) < 2:
+            return real_pwrite(fd, data, offset)
+        real_pwrite(fd, data[: len(data) // 2], offset)
+        raise OSError("synthetic disk error mid-write")
+
+    for name in ("_install_signals", "_set_subreaper", "_reap"):
+        monkeypatch.setattr(rs.Supervisor, name, lambda self: None)
+    later = rs.Supervisor(str(short_root), deadman_s=1e-9)
+    with monkeypatch.context() as patch:
+        patch.setattr(rs.os, "pwrite", interrupted)
+        with pytest.raises(OSError, match="mid-write"):
+            later.run()
+    assert later.state == "closed" and not (short_root / "supervisor.pid").exists()
+    with pytest.raises(ValueError):
+        json.loads((short_root / "supervisor.lock").read_text())
+    result = CliRunner().invoke(app, ["supervise", "shutdown", "--run-root", str(short_root)])
+    assert result.exit_code == 4, result.output
+    assert "supervisor.lock is not one JSON object" in result.output
+
+
+def test_a_later_supervisor_that_ends_by_its_deadman_voids_the_old_record(short_root, monkeypatch):
+    """The deadman window (DL-401): supervisor A's record says completed; B starts on the
+    same root, notes itself in supervisor.lock, and exits by its deadman, which removes its
+    socket and pid record. The rerun reads B's note and answers 4, not A's 0. A start leaves
+    the record as it found it."""
+    import subprocess
+
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    record = _record(gone.pid, "ticks:1")
+    (short_root / rs.MAINTENANCE_RECORD).write_text(json.dumps(record))
+    for name in ("_install_signals", "_set_subreaper", "_reap"):
+        monkeypatch.setattr(rs.Supervisor, name, lambda self: None)
+    later = rs.Supervisor(str(short_root), deadman_s=1e-9)
+    assert later.run() == 0 and later.state == "closed"
+    assert later._h_ping(None, {}).get("maintenance") is None
+    assert not (short_root / "supervisor.pid").exists()
+    note = json.loads((short_root / "supervisor.lock").read_text())
+    assert note["incarnation"] == later.incarnation
+    assert rs.read_maintenance_record(short_root) == record
+    result = CliRunner().invoke(app, ["supervise", "shutdown", "--run-root", str(short_root)])
+    assert result.exit_code == 4, result.output
+    assert f"names another supervisor ({later.incarnation})" in result.output
+
+
+def _spawn_over_the_wire(root, command, grace):
+    """A run the launched supervisor holds, spawned by a client that then leaves."""
+    from dsl41.runner_adapters import SupervisorConn
+
+    from test_runner_supervisor import _spec
+
+    conn = SupervisorConn(root / "supervisor.sock")
+    try:
+        grant = conn.send({"cmd": "ACQUIRE", "controller_id": "spawner", "ttl_s": 60})
+        spec = _spec(root / "runs" / "j.1", command, grace)
+        answer = conn.send({"cmd": "SPAWN", "token": grant["token"], "spec": spec})
+        assert answer["ok"], answer
+    finally:
+        conn.close()
+    return root / "runs" / "j.1"
+
+
+def test_forced_maintenance_outlives_the_request_deadline(short_root, capsys):
+    """A forced stop whose grace exceeds the client's request deadline completes with
+    exit 0 after about the grace: the request is answered at admission, and the client
+    then watches the record within `bound_s` (DL-401). The acceptance names a 120 s
+    grace against the 60 s deadline; this runs the same shape at 3 s against 1 s."""
+    import time
+
+    from dsl41.cli_common import guarded_maintenance
+    from dsl41.runner_adapters import SupervisorConn
+
+    from test_runner_supervisor import wait_for
+
+    (short_root / "leader.lock").touch()
+    supervisor = _launch(short_root)
+    try:
+        run_dir = _spawn_over_the_wire(
+            short_root, f"trap '' TERM; touch '{short_root}/runs/j.1/ready'; sleep 30", 3.0
+        )
+        wait_for(lambda: (run_dir / "ready").exists())
+        client = SupervisorConn(short_root / "supervisor.sock", timeout_s=1.0)
+        started = time.monotonic()
+        try:
+            code, record = guarded_maintenance(
+                client, short_root / "supervisor.sock", controller_id="t", force="terminate"
+            )
+        finally:
+            client.close()
+        elapsed = time.monotonic() - started
+        assert code == 0, capsys.readouterr().err
+        assert record["state"] == "completed" and record["bound_s"] >= 3.0
+        assert 3.0 <= elapsed < 3.0 + 10.0
+        assert supervisor.wait(timeout=10) == 8
+        status = json.loads((run_dir / "status.json").read_text())
+        assert status["outcome"] == "signaled" and status.get("reason") != "parent lost"
+    finally:
+        _reap_launched(supervisor)
+
+
+_KILLED_CLIENT = """
+import json, os, socket, sys
+sock = socket.socket(socket.AF_UNIX)
+sock.connect(sys.argv[1])
+reader = sock.makefile("rb")
+sock.sendall(b'{"v": 1, "cmd": "ACQUIRE", "controller_id": "killed", "ttl_s": 60}\\n')
+grant = json.loads(reader.readline())
+request = {"v": 2, "cmd": "MAINTENANCE_STOP", "token": grant["token"],
+           "incarnation": grant["incarnation"], "force": "terminate"}
+sock.sendall(json.dumps(request).encode() + b"\\n")
+os.kill(os.getpid(), 9)
+"""
+
+
+@pytest.mark.parametrize("client", ["killed", "lost"])
+def test_a_lost_reply_is_resolved_without_a_resend_and_the_supervisor_exits_8_once(
+    short_root, monkeypatch, capsys, client
+):
+    """Astra's acceptance 5 (DL-401). `killed`: a client dies right after sending an
+    admitted forced MAINTENANCE_STOP, and `supervise shutdown` resolves it from PING and
+    maintenance.json, sending no MAINTENANCE_STOP of its own. `lost`: the reply of the
+    client's own request is lost, and the one reconnect resolves it. Either way the
+    supervisor admits once and exits 8."""
+    import subprocess
+    import sys
+
+    from dsl41 import runner_adapters
+    from dsl41.cli_common import guarded_maintenance
+
+    from test_runner_supervisor import wait_for
+
+    (short_root / "leader.lock").touch()
+    supervisor = _launch(short_root)
+    sock = short_root / "supervisor.sock"
+    try:
+        run_dir = _spawn_over_the_wire(
+            short_root, f"trap '' TERM; touch '{short_root}/runs/j.1/ready'; sleep 30", 1.0
+        )
+        wait_for(lambda: (run_dir / "ready").exists())
+        sent = []
+        real_send = runner_adapters.SupervisorConn.send
+
+        def counted(self, request):
+            sent.append(request["cmd"])
+            if (
+                client == "lost"
+                and request["cmd"] == "MAINTENANCE_STOP"
+                and sent.count("MAINTENANCE_STOP") == 1
+            ):
+                payload = {"v": 1, **request, "incarnation": self.incarnation}
+                self.conn.sendall(json.dumps(payload).encode("utf-8") + b"\n")
+                raise OSError("synthetic lost reply")
+            return real_send(self, request)
+
+        monkeypatch.setattr(runner_adapters.SupervisorConn, "send", counted)
+        if client == "killed":
+            killed = subprocess.run([sys.executable, "-c", _KILLED_CLIENT, str(sock)])
+            assert killed.returncode == -signal.SIGKILL
+            wait_for(lambda: rs.read_maintenance_record(short_root) is not None)
+        conn = runner_adapters.SupervisorConn(sock)
+        try:
+            code, record = guarded_maintenance(conn, sock, controller_id="t", force="terminate")
+        finally:
+            conn.close()
+        assert code == 0, capsys.readouterr().err
+        assert record["state"] == "completed"
+        assert sent.count("MAINTENANCE_STOP") == (0 if client == "killed" else 1)
+        if client == "lost":
+            assert sent == ["PING", "ACQUIRE", "MAINTENANCE_STOP", "ACQUIRE", "PING"]
+        assert supervisor.wait(timeout=10) == 8
+        log = supervisor.stderr.read().decode()
+        assert log.count("supervisor: maintenance admitted") == 1, log
+        assert log.count("supervisor: maintenance completed") == 1, log
+    finally:
+        _reap_launched(supervisor)
+
+
+@pytest.mark.parametrize("fault", ["after_rename", "before_rename", "unlink_fails"])
+def test_a_refused_admission_leaves_no_record_of_its_own(rig, monkeypatch, capsys, fault):
+    """A write that fails after its rename would leave an `admitted` record for a refused
+    request. The supervisor removes a record of its own incarnation before it refuses; a
+    previous operation's record stays; a removal that fails is logged (DL-401)."""
+    sup, conn, request, _proof = rig
+    path = Path(sup.run_root) / rs.MAINTENANCE_RECORD
+    previous = _record(4242, "ticks:1")
+    path.write_text(json.dumps(previous))
+    real_write, real_unlink = rs.durable_write_json, rs.os.unlink
+
+    def write(target, record):
+        if fault != "before_rename":
+            real_write(target, record)
+        raise OSError("synthetic directory fsync failure")
+
+    def unlink(target):
+        if str(target) == str(path):
+            raise PermissionError("synthetic unlink failure")
+        real_unlink(target)
+
+    monkeypatch.setattr(rs, "durable_write_json", write)
+    if fault == "unlink_fails":
+        monkeypatch.setattr(rs.os, "unlink", unlink)
+    answer = sup._h_maintenance_stop(conn, request)
+    assert answer["error"] == "maintenance_refused" and sup.state == "serving"
+    err = capsys.readouterr().err
+    if fault == "after_rename":
+        assert not path.exists()
+        assert "removed maintenance.json of a refused admission" in err
+    elif fault == "before_rename":
+        assert rs.read_maintenance_record(sup.run_root) == previous
+    else:
+        assert rs.read_maintenance_record(sup.run_root)["incarnation"] == sup.incarnation
+        assert "maintenance.json of a refused admission stays: synthetic unlink" in err
+
+
+def test_a_watch_that_ping_started_never_exits_2(monkeypatch, tmp_path):
+    """PING showed an admitted operation: every later failure is an unknown outcome, 4,
+    never the refusal's 2 (DL-401). Here the record has a version this reader refuses."""
+    from dsl41 import runner_adapters
+
+    (tmp_path / rs.MAINTENANCE_RECORD).write_text(
+        json.dumps({**_record(1, "ticks:1"), "version": 2})
+    )
+    sent = []
+
+    def send(request):
+        sent.append(request["cmd"])
+        return {"ok": True, "incarnation": "a" * 32, "process_state": "maintenance_stopping"}
+
+    monkeypatch.setattr(
+        runner_adapters, "SupervisorConn", lambda _: SimpleNamespace(send=send, close=lambda: None)
+    )
+    (tmp_path / "supervisor.sock").touch()
+    result = CliRunner().invoke(app, ["supervise", "shutdown", "--run-root", str(tmp_path)])
+    assert result.exit_code == 4, result.output
+    assert "has version 2" in result.output and sent == ["PING"]
+
+
+def test_failed_outcome_writes_after_teardown_are_4_not_in_progress(rig, monkeypatch):
+    """Both outcome writes fail after the owned teardown: the supervisor stays uncertain
+    without its socket and the record still says admitted. Nothing more is scheduled, so a
+    watch that ends there is 4, not 3: 3 needs a PING that shows the operation running
+    (DL-401)."""
+    from dsl41.cli_common import ping_probe, settle_maintenance
+    from dsl41.runner_adapters import SupervisorConn
+
+    sup, conn, request, _proof = rig
+    answer = sup._h_maintenance_stop(conn, request)
+    assert answer["maintenance"] == "admitted" and sup.state == "maintenance_completing"
+
+    def write(*_args):
+        raise OSError("synthetic lost disk")
+
+    monkeypatch.setattr(rs, "durable_write_json", write)
+    sup._maintenance_pass()
+    assert sup.state == "maintenance_uncertain" and not Path(sup.sock_path).exists()
+    assert record_of(sup)["state"] == "admitted"
+    sock = Path(sup.run_root) / "supervisor.sock"
+    code, reason, _ = settle_maintenance(
+        Path(sup.run_root), sup.incarnation, within_s=0.0, probe=ping_probe(sock, SupervisorConn)
+    )
+    assert code == 4
+    assert "alive without a running operation on its socket (no answer)" in reason
+    assert "read supervisor.log before anything else" in reason
