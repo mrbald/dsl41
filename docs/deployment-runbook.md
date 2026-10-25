@@ -1804,7 +1804,9 @@ Every path and name in them is synthetic.
   states its rules: when it passes `--resume`, when its one-shot open
   trigger makes it pass `--open-from` (§7), what it refuses, and why it
   execs `dsl41`. `dsl41-launch --print` prints the command,
-  shell-quoted, and runs nothing.
+  shell-quoted, and runs no estate command. It does run the installed
+  `dsl41` once, to probe whether `run` accepts `--supervisor` (DL-402),
+  so print as a user who can run it, after the venv is installed.
 - `dsl41-engine.service` and `dsl41-supervisor.service` are shape 1's
   two units. Both call the launcher. Each repeats the run root once,
   in `RequiresMountsFor=`; edit it with the launcher's `RUN_ROOT`.
@@ -2545,7 +2547,10 @@ the old estate's periods. The rollback is the old venv only, on the old
 estate. Stop both units and flip back. Point the launcher's `RUN_ROOT`
 and `ESTATE_ANCHOR` back at the old estate's, and both units'
 `RequiresMountsFor=` to match; run `systemctl daemon-reload` if a unit
-file changed. Then start the engine unit. `Requires=` starts the
+file changed. Keep the launcher otherwise as it is: it passes
+`--supervisor attach` only to a `dsl41` whose `run` accepts the option,
+so a release before DL-396 gets its supervisor as it always did (DL-402).
+Then start the engine unit. `Requires=` starts the
 supervisor unit first, and the engine opens the old estate's next
 period. A rollback after a failed genesis still holds the estate down
 across reboots: once the old estate answers, release the hold with

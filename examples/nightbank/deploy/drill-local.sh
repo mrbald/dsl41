@@ -13,6 +13,12 @@
 #
 #   drill-local.sh               run every step
 #   DRILL_KEEP=1 drill-local.sh  keep the container afterwards, to inspect it
+#   DRILL_BASE_IMAGE=IMAGE drill-local.sh
+#                                run on IMAGE instead of building the Ubuntu
+#                                image, for another host class such as the EL8
+#                                image scripts/wargame.sh builds; IMAGE needs
+#                                systemd, sudo, python3.12, uv, jq, procps and
+#                                git, and `runner` is created only when missing
 #
 # The container runs the host's architecture: arm64 on Apple silicon,
 # where GitHub's runner is x86_64. Both images come from one index digest.
@@ -32,6 +38,7 @@ name=dsl41-service-drill-$$
 
 say() { printf 'drill-local: %s\n' "$*"; }
 
+if [ -z "${DRILL_BASE_IMAGE-}" ]; then
 podman build --quiet --tag "$image" --file - "$here" <<EOF >/dev/null
 FROM $base
 RUN apt-get update -q \\
@@ -45,6 +52,9 @@ RUN apt-get update -q \\
     && chmod 0440 /etc/sudoers.d/$user
 CMD ["/sbin/init"]
 EOF
+else
+    image=$DRILL_BASE_IMAGE
+fi
 
 # shellcheck disable=SC2329  # the EXIT trap invokes it
 cleanup() {
@@ -65,9 +75,29 @@ for _ in $(seq 60); do
     sleep 1
 done
 say "systemd is $state in $name"
+group=$user
+if [ -n "${DRILL_BASE_IMAGE-}" ]; then
+    case $state in
+        running | degraded) ;;
+        *)
+            say "systemd did not come up on $image (state: ${state:-no answer}); it needs /sbin/init as CMD"
+            exit 1
+            ;;
+    esac
+    podman exec "$name" bash -c "id -u $user >/dev/null 2>&1 || useradd --create-home --shell /bin/bash $user
+        test -f /etc/sudoers.d/$user || {
+            echo '$user ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/$user
+            chmod 0440 /etc/sudoers.d/$user
+        }"
+    podman exec --user "$user" "$name" sudo -n true || {
+        say "$user has no passwordless sudo in $image"
+        exit 1
+    }
+    group=$(podman exec "$name" id -gn "$user")
+fi
 podman exec "$name" bash -c 'mkdir /work && git -C /src -c safe.directory=/src ls-files --cached -z |
     tar -C /src --null -T - -cf - | tar -C /work -xf -'
-podman exec "$name" chown -R "$user:$user" /work
+podman exec "$name" chown -R "$user:$group" /work
 
 steps=$(bash "$here/drill-steps.sh" --list)
 results=()

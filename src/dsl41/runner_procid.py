@@ -115,6 +115,10 @@ class ObservationUnavailable(OSError):
     """Complete, dedicated service containment cannot be established (DL-390)."""
 
 
+# The supervisor's log names the busctl read of its exit policy once per process (DL-390).
+_busctl_policy_logged = False
+
+
 def _systemd_exit_status_codes(text: str) -> set[int]:
     """Only the exit-code array of systemd's typed (aiai) status pair admits 8 (DL-390)."""
     fields = text.split()
@@ -303,6 +307,21 @@ class ServiceContainment:
                     )
                     codes = _systemd_exit_status_codes(value)
                     properties[name] = " ".join(map(str, codes))
+            global _busctl_policy_logged
+            if not _busctl_policy_logged:
+                # a diagnostic never decides admission: a failed write leaves the verdict and
+                # the flag alone, so the line is tried again on the next read (DL-402)
+                try:
+                    print(
+                        "supervisor: exit policy read through busctl"
+                        " (systemd text formatter printed [unprintable])",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                except OSError:
+                    pass
+                else:
+                    _busctl_policy_logged = True
         if any("8" not in properties.get(name, "").split() for name in statuses):
             raise ObservationUnavailable("service exit policy does not retain maintenance stop")
 

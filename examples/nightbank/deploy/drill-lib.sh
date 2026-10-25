@@ -130,7 +130,20 @@ launch_line_since() {
         sleep 1
     done
     [ -n "$line" ] || fail "no dsl41-launch line in the $ENGINE journal after $tries tries"
+    assert_supervisor_option "$line"
     printf '%s\n' "$line"
+}
+
+# The launcher passes --supervisor attach to every dsl41 whose run accepts it,
+# and none to the old release, which has no such option (DL-396, DL-402). The
+# venv is the one the launcher's link leads to now: no step flips between a
+# start and its check.
+assert_supervisor_option() { # assert_supervisor_option LAUNCH_LINE
+    if [ -n "${OLD_VENV-}" ] && [ "$(readlink -f "$VENV")" = "$OLD_VENV" ]; then
+        [[ $1 != *--supervisor* ]] || fail "the old release's launch names --supervisor: $1"
+    else
+        [[ $1 == *" --detached --supervisor attach "* ]] || fail "the launch does not attach: $1"
+    fi
 }
 
 # The engine unit allows five starts in five minutes, and the drill's own
@@ -398,6 +411,27 @@ quiesce_shape1() {
     assert_units_stay_stopped
     assert_no_writers "$ROOT"
 }
+# systemd before 240 prints a unit's exit-status lists as [unprintable], so the
+# supervisor reads its exit policy through busctl, and its log says so (DL-390).
+# Only the log's bytes after OFFSET count: the log is append-only, so an
+# earlier supervisor's line would otherwise satisfy the check.
+assert_policy_read_logged() { # assert_policy_read_logged ROOT OFFSET
+    local version line='supervisor: exit policy read through busctl' since
+    version=$(systemctl --version | awk 'NR == 1 { print $2 }')
+    [[ $version =~ ^[0-9]+$ ]] || fail "cannot read the systemd version: $version"
+    since=$(sudo tail -c "+$(($2 + 1))" "$1/supervisor.log")
+    if ((version < 240)); then
+        grep -qF -- "$line" <<<"$since" || fail "systemd $version: no '$line' since byte $2"
+        ok "systemd $version: the supervisor read its exit policy through busctl"
+    else
+        ! grep -qF -- "$line" <<<"$since" || fail "systemd $version: '$line' since byte $2"
+        ok "systemd $version: the supervisor read its exit policy from systemctl show"
+    fi
+}
+# the size of ROOT's supervisor log in bytes; no log yet is 0
+supervisor_log_size() { # supervisor_log_size ROOT
+    sudo sh -c 'if [ -e "$1" ]; then wc -c <"$1"; else echo 0; fi' sh "$1/supervisor.log" | tr -d ' '
+}
 quiesce_verb() { # quiesce_verb NEXT_ARGS...
     cli estate quiesce --run-root "$ROOT" --estate-anchor "$ANCHOR" "$@" -p "$PROPERTIES" \
         --next-detached --next-as-machine localhost --next-machine-policy strict \
@@ -486,6 +520,17 @@ lease_renewed_past() { # lease_renewed_past WAS
 }
 journal_has() { # journal_has UNIT EPOCH FRAGMENT
     sudo journalctl -u "$1" --since "@$2" -o cat --no-pager | grep -qF -- "$3"
+}
+# systemd's own line for a job of UNIT since EPOCH. systemd 255 names the unit
+# and its description ("Started UNIT - DESCRIPTION."), systemd 239 the
+# description alone ("Started DESCRIPTION."), so the line is matched by both.
+journal_job() { # journal_job UNIT EPOCH Started|Stopping
+    local description
+    description=$(prop "$1" Description)
+    # an empty description would match every line
+    [ -n "$description" ] || fail "$1 has no Description to match its journal by"
+    sudo journalctl -u "$1" --since "@$2" -o cat --no-pager | grep -F -- "$3 " |
+        grep -F -- "$description" >/dev/null
 }
 
 # a client command run as another login, with the venv the launcher uses

@@ -4,6 +4,7 @@ admission answer, the loop that runs the operation, maintenance.json and its rea
 from __future__ import annotations
 
 import json
+import errno
 import os
 import selectors
 import signal
@@ -1735,6 +1736,71 @@ def test_el8_unprintable_policy_reads_typed_loaded_manager_values(
     proof.verify_manager()
     assert len(calls) == 2 + len(unprintable)
     assert all(0 < kwargs["timeout"] <= 5 and kwargs["check"] is True for _, kwargs in calls)
+
+
+@pytest.mark.parametrize("unprintable", [True, False])
+def test_the_busctl_policy_read_is_logged_once_per_process(
+    monkeypatch, tmp_path, capsys, unprintable
+):
+    """DL-390: systemd 239's formatter prints [unprintable]; the log names the busctl read."""
+    path = "/org/freedesktop/systemd1/unit/test_2eservice"
+    printable = {} if unprintable else {"SuccessExitStatus": "8", "RestartPreventExitStatus": "2 8"}
+
+    def query(argv, **_kwargs):
+        if argv[0] == "systemctl":
+            return SimpleNamespace(stdout=_manager_policy_text(**printable))
+        if "GetUnit" in argv:
+            return SimpleNamespace(stdout=f'o "{path}"\n')
+        return SimpleNamespace(stdout="(aiai) 1 8 0\n")
+
+    monkeypatch.setattr(procid.subprocess, "run", query)
+    monkeypatch.setattr(procid, "_busctl_policy_logged", False)
+    proof = procid.ServiceContainment(tmp_path, "/test.service", "test.service", os.getpid())
+    proof.verify_manager()
+    proof.verify_manager()
+    line = (
+        "supervisor: exit policy read through busctl (systemd text formatter printed [unprintable])"
+    )
+    assert capsys.readouterr().err.splitlines().count(line) == (1 if unprintable else 0)
+
+
+def test_a_failed_busctl_log_write_changes_no_verdict_and_is_tried_again(monkeypatch, tmp_path):
+    """DL-402: the diagnostic never decides admission. A stderr write that fails (ENOSPC here)
+    leaves the manager verdict as it was, and the line is written on the next read."""
+    path = "/org/freedesktop/systemd1/unit/test_2eservice"
+
+    def query(argv, **_kwargs):
+        if argv[0] == "systemctl":
+            return SimpleNamespace(stdout=_manager_policy_text())
+        if "GetUnit" in argv:
+            return SimpleNamespace(stdout=f'o "{path}"\n')
+        return SimpleNamespace(stdout="(aiai) 1 8 0\n")
+
+    class FailingOnce:
+        def __init__(self) -> None:
+            self.failed = False
+            self.lines: list[str] = []
+
+        def write(self, text: str) -> int:
+            if not self.failed:
+                self.failed = True
+                raise OSError(errno.ENOSPC, "no space left on device")
+            self.lines.append(text)
+            return len(text)
+
+        def flush(self) -> None:
+            pass
+
+    stderr = FailingOnce()
+    monkeypatch.setattr(procid.subprocess, "run", query)
+    monkeypatch.setattr(procid, "_busctl_policy_logged", False)
+    monkeypatch.setattr(procid.sys, "stderr", stderr)
+    proof = procid.ServiceContainment(tmp_path, "/test.service", "test.service", os.getpid())
+    proof.verify_manager()  # the write fails; the verdict stands
+    assert stderr.failed and stderr.lines == [] and procid._busctl_policy_logged is False
+    proof.verify_manager()  # written now, and the flag set
+    assert "".join(stderr.lines).count("exit policy read through busctl") == 1
+    assert procid._busctl_policy_logged is True
 
 
 @pytest.mark.parametrize(

@@ -215,8 +215,11 @@ step_sealed() { # a sealed engine stays stopped until the next period is opened
 }
 
 step_quiesce() { # managed quiescence: both units stopped and staying stopped (runbook ss2b)
+    local log_size
     take_hold
+    log_size=$(supervisor_log_size "$ROOT")
     quiesce_shape1
+    assert_policy_read_logged "$ROOT" "$log_size"
     # the disabled units stay down through a boot's target, too
     boot_target
     assert_units_stay_stopped
@@ -582,10 +585,10 @@ step_kill_supervisor() { # SIGKILL of the supervisor: restart, resume and lease 
     wait_for 60 "systemd restarted the supervisor" unit_replaced "$SUPERVISOR" "$sup"
     journal_has "$SUPERVISOR" "$mark" 'status=9/KILL' || fail "the journal does not say status=9/KILL"
     wait_for 30 "the supervisor unit's journal records the new start" \
-        journal_has "$SUPERVISOR" "$mark" 'Started dsl41-supervisor'
+        journal_job "$SUPERVISOR" "$mark" Started
     wait_for 90 "the engine unit began a new invocation" engine_reinvoked "$eng_inv"
     # a stop job from Requires=, not the unit's own on-failure restart
-    journal_has "$ENGINE" "$mark" 'Stopping dsl41-engine' || fail "no stop of the engine unit in its journal"
+    journal_job "$ENGINE" "$mark" Stopping || fail "no stop of the engine unit in its journal"
     [ "$(prop "$ENGINE" NRestarts)" -le "$restarts" ] || fail "the engine unit restarted itself"
     wait_up
     launch_line_since "$mark" | grep -q -- ' --resume$' || fail "the engine did not resume"
