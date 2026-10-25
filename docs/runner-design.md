@@ -292,8 +292,9 @@ that reaps and reports after the control daemon disconnects. There are
 three tiers, outermost first:
 
 **Tier 2 — init-system backstop** (deployment note, not code): run the
-runner under systemd (Linux) / launchd (macOS). On Linux, per-run
-transient scopes (cgroup kill) are the only true containment (see below).
+runner under systemd (Linux) / launchd (macOS). On Linux the unit's
+cgroup contains the whole estate; containment of one run is its process
+group, and the escapee that leaves it is a stated limit (DL-403, below).
 
 **Tier 1 — supervisor** (the availability tier): engine →
 supervisor → wrappers. The supervisor exists for exactly one reason: jobs
@@ -414,10 +415,13 @@ test_sigkill_engine_midrun_then_resume,
 test_supervisor_spawn_keeps_each_lifeline_write_end_in_one_process).
 
 **Containment honesty:** pgid kill does not catch `setsid`/double-fork
-escapees (`sh -c 'daemon & '`). Vendor agents share this limitation. The
-documented Linux hardening is a per-run transient systemd scope (cgroup
-kill), which also survives runner restarts better than any fd- or
-pid-based mechanism. A `--scope` option is not built.
+escapees (`sh -c 'daemon & '`). Vendor agents share this limitation, and
+supervisord's group-stop flags are the same group kill. A per-run cgroup
+would attribute such a helper to its run; by the owner's ruling it is a
+stated limit, not a hardening to build (DL-403): a forced stop that meets
+one ends `uncertain` and names it, the whole-estate stop under systemd
+kills the unit's cgroup regardless, and a job that must end its own
+helpers ends them itself. A `--scope` option is not built.
 
 The crash matrix that remains after Tier 0: `kill -9` of a *wrapper*
 alone (the command survives, no status.json will ever appear) and `-9` of
