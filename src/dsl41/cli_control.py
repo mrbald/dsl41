@@ -15,7 +15,13 @@ from typing import Any
 
 import typer
 
-from dsl41.cli_common import command_outcome, import_tui_or_exit_2, read_header_of, refuse
+from dsl41.cli_common import (
+    command_outcome,
+    guarded_maintenance,
+    import_tui_or_exit_2,
+    read_header_of,
+    refuse,
+)
 from dsl41.oracle_state import FAILED
 from dsl41.runner_access import REQUIRED_TIER, Tier
 
@@ -606,19 +612,11 @@ def supervise(
     configuration and 7 on a statechart error.
     """
     # Design: runner-design ss6a, DL-42 item 4, DL-210
-    import json as json_mod
     import math
     import os
     import sys
-    import time
 
     from dsl41.runner_adapters import SupervisorConn, supervisor_argv, supervisor_log_path
-    from dsl41.runner_procid import (
-        current_boot_id,
-        proc_is_zombie,
-        proc_start_token,
-        valid_start_token,
-    )
     from dsl41.runner_clock import EngineError
 
     verb = action.lower()
@@ -671,66 +669,16 @@ def supervise(
         conn = SupervisorConn(sock_path)
     except OSError as exc:
         raise typer.Exit(refuse(exc, prefix=f"supervisor {sock_path}")) from exc
-    maintenance_attempted = False
     try:
         if verb == "list":
-            _answer_or_exit(conn.send({"cmd": "LIST"}))
-        acq = conn.send(
-            {"cmd": "ACQUIRE", "controller_id": f"supervise-cli-{os.getpid()}", "ttl_s": 60}
-        )
-        if not acq.get("ok"):
-            raise typer.Exit(refuse(f"cannot acquire lease: {json_mod.dumps(acq, sort_keys=True)}"))
-        incarnation = acq.get("incarnation")
-        token = acq.get("token")
-        if not isinstance(incarnation, str) or not incarnation or type(token) is not int:
-            raise ValueError("malformed supervisor lease reply")
-        # A send failure can follow a partial or complete delivery (DL-216, DL-390).
-        maintenance_attempted = True
-        resp = conn.send({"cmd": "MAINTENANCE_STOP", "token": token, "force": force})
-        if resp.get("ok") is False and resp.get("error") in {
-            "maintenance_refused",
-            "wrong_incarnation",
-            "stale_token",
-            "unknown_verb",
-            "unsupported_version",
-        }:
-            raise typer.Exit(refuse(json_mod.dumps(resp, sort_keys=True)))
-        pid = resp.get("supervisor_pid")
-        start = resp.get("supervisor_start_time")
-        if not (
-            resp.get("ok") is True
-            and resp.get("maintenance") == "completed"
-            and resp.get("incarnation") == incarnation
-            and resp.get("boot_id") == current_boot_id()
-            and type(pid) is int
-            and pid > 0
-            and valid_start_token(start)
-        ):
-            raise ValueError(
-                f"maintenance completion is unknown: {json_mod.dumps(resp, sort_keys=True)}"
-            )
-        deadline = time.monotonic() + 5.0
-        while True:
             try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                break
-            observed = proc_start_token(pid)
-            if observed is None:
-                # Only ESRCH proves absence when identity observation fails (DL-390).
-                try:
-                    os.kill(pid, 0)
-                except ProcessLookupError:
-                    break
-                raise OSError("cannot observe the supervisor process identity")
-            if observed != start or proc_is_zombie(pid):
-                break
-            if time.monotonic() >= deadline:
-                raise OSError("supervisor did not exit after its completion reply")
-            time.sleep(0.02)
-        typer.echo(json_mod.dumps(resp, sort_keys=True))
-    except (OSError, ValueError, EngineError) as exc:
-        refuse(exc, prefix=f"supervisor {sock_path}")
-        raise typer.Exit(4 if maintenance_attempted else 2) from exc
+                listing = conn.send({"cmd": "LIST"})
+            except (OSError, ValueError, EngineError) as exc:
+                raise typer.Exit(refuse(exc, prefix=f"supervisor {sock_path}")) from exc
+            _answer_or_exit(listing)
+        code, _ = guarded_maintenance(
+            conn, sock_path, controller_id=f"supervise-cli-{os.getpid()}", force=force
+        )
     finally:
         conn.close()
+    raise typer.Exit(code)

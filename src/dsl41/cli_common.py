@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import json
+import os
+import time
 from collections.abc import Callable, Iterable
 from enum import Enum
 from pathlib import Path
@@ -25,6 +28,7 @@ from dsl41.state_machine import EXIT_STATECHART_ERROR, StatechartError
 
 if TYPE_CHECKING:
     from dsl41.boundary import EstateWalk, Lineage
+    from dsl41.runner_adapters import SupervisorConn
     from dsl41.runner_clock import EngineError
 
 
@@ -385,6 +389,96 @@ def command_outcome(
     if outcome == UNKNOWN:
         _no_decision(request, retry_command)
     return {REFUSED: 2, REJECTED: 3, UNKNOWN: 4}.get(outcome, 0)
+
+
+def guarded_maintenance(
+    conn: SupervisorConn,
+    sock_path: Path,
+    *,
+    controller_id: str,
+    force: str | None,
+    before_stop: Callable[[], None] | None = None,
+    on_refusal: Callable[[str, int], None] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[int, dict[str, Any] | None]:
+    """The client half of guarded maintenance (DL-390): ACQUIRE, MAINTENANCE_STOP, then the
+    bounded observation of the supervisor's exit. Returns 0 completed, 2 refused or 4 unknown,
+    with the completion or refusal reply, ACQUIRE's when the lease is refused. `supervise
+    shutdown` and `estate quiesce` share it.
+
+    `before_stop` runs once the lease is held and before the request is sent. `on_refusal` gets
+    the lease (incarnation, token) of a refused request while the connection is open. The
+    caller closes `conn`."""
+    from dsl41.runner_clock import EngineError
+    from dsl41.runner_procid import (
+        current_boot_id,
+        proc_is_zombie,
+        proc_start_token,
+        valid_start_token,
+    )
+
+    maintenance_attempted = False
+    try:
+        acq = conn.send({"cmd": "ACQUIRE", "controller_id": controller_id, "ttl_s": 60})
+        if not acq.get("ok"):
+            return refuse(f"cannot acquire lease: {json.dumps(acq, sort_keys=True)}"), acq
+        incarnation = acq.get("incarnation")
+        token = acq.get("token")
+        if not isinstance(incarnation, str) or not incarnation or type(token) is not int:
+            raise ValueError("malformed supervisor lease reply")
+        if before_stop is not None:
+            before_stop()
+        # A send failure can follow a partial or complete delivery (DL-216, DL-390).
+        maintenance_attempted = True
+        resp = conn.send({"cmd": "MAINTENANCE_STOP", "token": token, "force": force})
+        if resp.get("ok") is False and resp.get("error") in {
+            "maintenance_refused",
+            "wrong_incarnation",
+            "stale_token",
+            "unknown_verb",
+            "unsupported_version",
+        }:
+            if on_refusal is not None:
+                on_refusal(incarnation, token)
+            return refuse(json.dumps(resp, sort_keys=True)), resp
+        pid = resp.get("supervisor_pid")
+        start = resp.get("supervisor_start_time")
+        if not (
+            resp.get("ok") is True
+            and resp.get("maintenance") == "completed"
+            and resp.get("incarnation") == incarnation
+            and resp.get("boot_id") == current_boot_id()
+            and type(pid) is int
+            and pid > 0
+            and valid_start_token(start)
+        ):
+            raise ValueError(
+                f"maintenance completion is unknown: {json.dumps(resp, sort_keys=True)}"
+            )
+        deadline = time.monotonic() + 5.0
+        while True:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            observed = proc_start_token(pid)
+            if observed is None:
+                # Only ESRCH proves absence when identity observation fails (DL-390).
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    break
+                raise OSError("cannot observe the supervisor process identity")
+            if observed != start or proc_is_zombie(pid):
+                break
+            if time.monotonic() >= deadline:
+                raise OSError("supervisor did not exit after its completion reply")
+            sleep(0.02)
+        typer.echo(json.dumps(resp, sort_keys=True))
+        return 0, resp
+    except (OSError, ValueError, EngineError) as exc:
+        refuse(exc, prefix=f"supervisor {sock_path}")
+        return (4 if maintenance_attempted else 2), None
 
 
 def active_period(run_root: Path) -> int:

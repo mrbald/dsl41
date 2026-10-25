@@ -7,13 +7,15 @@
 # from dsl41-launch; this unit repeats only the run root, for
 # RequiresMountsFor=, and a test holds the two equal.
 [Unit]
-Description=dsl41 supervisor (nightbank example)
+Description=dsl41 supervisor (nightbank example; stop: dsl41 estate quiesce or dsl41 supervise shutdown)
 # an ownership refusal exits 1 and retries every RestartSec; no start limit
 # may turn that retry into a permanent failure (deployment-runbook ss3)
 StartLimitIntervalSec=0
 # the run root dsl41-launch names; no start before its file system is mounted
 RequiresMountsFor=/srv/dsl41/runs/nightbank-01
-# Maintenance uses the guarded CLI; host shutdown still stops the unit (DL-390).
+# systemctl stop refuses: the stop is the service account's `dsl41 estate
+# quiesce` (the estate) or `dsl41 supervise shutdown` (this supervisor); host
+# shutdown still stops the unit (DL-390, DL-398).
 RefuseManualStop=yes
 
 [Service]

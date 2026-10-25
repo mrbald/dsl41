@@ -242,11 +242,13 @@ def test_a_boundary_that_fails_outside_the_house_error_still_exits_two(
     import asyncio as asyncio_mod
 
     from dsl41.cli_estate import _drive_boundary
+    from dsl41.runner_adapters import DetachSignal
 
     class _StubEngine:
         """Just the surface `_drive_boundary` reads."""
 
         journal = None
+        detach = DetachSignal()
 
         async def submit_seal(self, request: Any) -> Any:
             raise OSError("the volume holding the anchor went away")

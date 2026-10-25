@@ -484,8 +484,13 @@ and KILL for validated command groups. Both require the stopped engine,
 existing leader lock and verified service containment. The CLI returns
 0 for verified completion, 2 for refusal and 4 for uncertainty. Never
 automatically retry an uncertain stop. An unmanaged supervisor refuses
-these maintenance requests. Follow the [deployment runbook](docs/deployment-runbook.md)
-for unit setup, maintenance and incident shutdown.
+these maintenance requests. To stop a whole estate under the example
+units, root disables both units and stops the engine unit; then
+`dsl41 estate quiesce` seals, audits and stops the supervisor, and checks
+that nothing comes back. It never waits for a precondition: a refusal
+names what to wait for, and a rerun skips what is done. Follow the
+[deployment runbook](docs/deployment-runbook.md) for unit setup,
+maintenance and incident shutdown.
 
 `--deadman N` trades some of what `--detached` buys. The supervisor exits
 after N seconds with no live controller, and every job it holds dies by

@@ -24092,3 +24092,41 @@ relitigate an entry; append a new one.
   uv is absent from PATH. Existing diagnostic delivery reuse remains explicit.
   DL-389's target checks, binary-wheel hashes, preparation, receipts, retention
   and separate activation rules remain in force.
+- DL-398 One verb stops a shape 1 estate: `dsl41 estate quiesce` (2026-10-25;
+  src/dsl41/cli_estate.py, cli_common.py, cli_control.py, cli.py;
+  examples/nightbank/deploy/drill-lib.sh, dsl41-supervisor.service; docs/deployment-runbook.md
+  ss0, ss2b, ss3 and ss7; README.md)
+  THE RULE. `dsl41 estate quiesce` runs as the service account and needs no root. It checks the
+  two root steps with `systemctl show` and performs neither: both units `disabled` or `masked`
+  (the reboot hold), the engine unit `inactive` or `failed`. A failed check exits 2 and prints
+  the root command. The stages, in order: hold, engine, leadership, supervisor, horizon, seal,
+  audit, maintenance, units, writers. Each ends with one stdout line, `quiesce: <stage>: ok`,
+  `refused: <reason>` or `skipped: <reason>`, on every exit path. The verb never waits for a
+  precondition: a stage that cannot pass yet refuses and names what to wait for, the horizon's
+  end or the live runs, and the operator reruns it. Its one bounded wait is the exit observation
+  after a completion reply, five seconds at most. A stage already done is skipped (the period
+  sealed and not opened, every closed period attested, the supervisor gone), so a stopped estate
+  reruns to exit 0; the checks run on every rerun. Leadership is `leader.lock`, taken at the
+  start; the seal and the audit run under it (S6a). The supervisor takes that lock itself for
+  maintenance (DL-390), so the verb hands it over just before MAINTENANCE_STOP and takes it again
+  for the writers check. The seal is the offline seal with `seal`'s next-period options, attached
+  to the running supervisor (DL-396). Maintenance is `supervise shutdown`'s client path
+  (`cli_common.guarded_maintenance`), as `estate-quiesce-<pid>`, with `--force terminate` passed
+  through; a refusal prints the live runs, gives the lease back, and names its own cause: live
+  work, the lock's holder, the lease's holder, or containment and unit policy. The units stage
+  reads both units once: down (`inactive` or `failed`) passes; `deactivating`, or the supervisor
+  unit active under the pid that exited, is a rerun (2); any other state is 4. The writers stage
+  is deployment-runbook ss2b's no-writers check. On Linux it also refuses any other live process
+  of the effective uid outside the verb's parent chain, and a process it cannot read; elsewhere it
+  reports `skipped: not linux`. The exits are 0, 2, 4 and a statechart error's 7. The supervisor
+  unit's `Description=` names both stops. The offline seal's teardown is a detach-stop
+  (runner-design ss6a case b): a carried live run keeps running for the next period (PR-30b).
+  THE REASON. The shape 1 stop was six ordered manual steps by two users with a 12 s sleep, owned
+  by nobody but the runbook; two review passes found it, and the drill scripted it. Composing it
+  found that the offline seal's teardown signalled every carried live run; no drill met it,
+  because each drained first. A process that takes `leader.lock` in the handover's one request
+  makes the supervisor refuse maintenance, so the verb exits 2, never 0, with the seal and the
+  audit durable.
+  REJECTED: performing the root steps, which needs root. A sleep or a poll for the horizon or
+  `RestartSec`: a refusal and a rerun say the same and cannot hang. A second exclusion beside
+  `leader.lock`. Holding the lock through maintenance, which the supervisor refuses as held.
