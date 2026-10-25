@@ -6,11 +6,18 @@ It constructs the delivery in a connected target container.
 It manufactures runtimes and exercises services in a second container started
 with `--network none`.
 The second container has systemd as PID 1.
+Both target phases require uv to be absent from PATH and record that check
+(DL-397). Release inputs are prepared upstream of these containers.
 The host architecture is recorded; local ARM64 results do not qualify x86-64.
 
-Run from a trusted source checkout with Podman available:
+Obtain the wheel and exports using [offline installation](offline-installation.md).
+The host needs Podman and Python 3.11 or later as `python3`, or `PYTHON` set to
+that interpreter's path. Run from the matching trusted release-tag checkout.
+Substitute the release version in the wheel path:
 
 ```sh
+export DSL41_RELEASE_WHEEL=/absolute/dsl41-X.Y.Z-py3-none-any.whl
+export DSL41_RELEASE_INPUTS=/absolute/dsl41-release-inputs
 bash examples/nightbank/deploy/offline-local.sh ubuntu /tmp/offline-ubuntu
 bash examples/nightbank/deploy/offline-local.sh el8 /tmp/offline-el8
 ```
@@ -28,11 +35,16 @@ network state are retained in the evidence directory.
 OS repositories are resolved during the connected image build.
 Their package versions are recorded rather than assumed from the base tag.
 
-`DSL41_RELEASE_WHEEL=/absolute/release.whl` selects an already built wheel.
-Without it, the connected target builds one wheel from the copied checkout.
-The builder downloads the closure of both profiles from the source lock.
+`DSL41_RELEASE_WHEEL` and `DSL41_RELEASE_INPUTS` are required for a new delivery.
+The exports directory contains both profile requirements and `release-inputs.json`.
+Their binding to the exact wheel, lock and project metadata is verified before
+image or container creation and again before target downloads.
+The target does not build a source wheel or export dependencies.
+Its pip downloads the applicable binary wheels from the supplied profile pins.
 The wheel hash and bundle manifest identify the tested delivery.
 Preparation and service probes use that wheel only.
+`DSL41_REUSE_DELIVERY` explicitly bypasses new delivery construction for a
+diagnostic repeat. It does not require new release inputs.
 
 The following overrides are explicit site inputs:
 
@@ -43,6 +55,7 @@ The following overrides are explicit site inputs:
 | `DSL41_RPM_MIRROR` | Rocky mirror root containing version, repository and architecture paths |
 | `DSL41_PYTHON_INDEX` | Connected Python package index URL; lock hashes still apply |
 | `DSL41_RELEASE_WHEEL` | Exact release wheel path |
+| `DSL41_RELEASE_INPUTS` | Directory containing both profile exports and their input manifest |
 | `DSL41_REHEARSAL_IMAGE` | Existing provisioned image; its full inspection is recorded |
 | `DSL41_REUSE_DELIVERY` | Existing delivery directory for a diagnostic repeat on the same target tuple |
 | `DSL41_REHEARSAL_SCOPE=maintenance` | Run all package/fault cells and the focused installed maintenance probes; this is not full acceptance |
@@ -56,6 +69,7 @@ The offline target runs these checks:
 
 | Scope | Observable check |
 | --- | --- |
+| Release inputs | Exact wheel, `pyproject.toml`, `uv.lock` and named profile hashes match; uv is absent from both target phases |
 | Capability | Dedicated service cgroup, manager-stop refusal, completion exit 8, working Python 3.12 |
 | Ubuntu portable installation | Prepare and repeat base/UI at `/opt/dsl41` and an alternate prefix |
 | EL8 reference RPM | Fresh, upgrade, reinstall, downgrade, failed `%post` and erase at default/alternate prefixes with base/UI; actual RPM dependency checks |
@@ -97,10 +111,12 @@ It does not reboot the host.
 
 The `service-drill` workflow dispatch accepts `all`, `offline`, or `exhaustive`.
 The offline matrix runs Ubuntu and EL8 on native x86-64 workers.
-The release workflow sends the already built candidate wheel to the same
-matrix and blocks publication on it.
-It archives qualified target bundles and the EL8 default-prefix/base revision-1
-RPM beside the release checksums.
+The release workflow sends the candidate wheel and bound profile exports to
+the same matrix and blocks publication on it.
+The service-drill workflow builds and exports its inputs on the runner before
+entering the target containers.
+The release workflow archives qualified target bundles and the EL8
+default-prefix/base revision-1 RPM beside the release checksums.
 The failed-scriptlet fixture RPM is excluded.
 Publication still requires the existing tag and environment approval.
 

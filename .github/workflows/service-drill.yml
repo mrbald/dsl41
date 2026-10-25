@@ -138,10 +138,26 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: false
+      - name: prepare the release wheel and locked inputs upstream of the target
+        run: |
+          set -euo pipefail
+          uv build --wheel
+          wheels=(dist/*.whl)
+          test "${#wheels[@]}" = 1
+          bash scripts/export-release-inputs.sh "${wheels[0]}" exports
       - name: provision the container engine
         run: sudo apt-get update -q && sudo apt-get install -y podman
       - name: native x86-64 offline installation and service rehearsal
-        run: sudo env DSL41_REQUIRE_NATIVE_X86=1 bash examples/nightbank/deploy/offline-local.sh ${{ matrix.target }} "$RUNNER_TEMP/offline-${{ matrix.target }}"
+        run: |
+          set -euo pipefail
+          wheels=("$PWD"/dist/*.whl)
+          test "${#wheels[@]}" = 1
+          sudo env DSL41_REQUIRE_NATIVE_X86=1 DSL41_RELEASE_WHEEL="${wheels[0]}" \
+            DSL41_RELEASE_INPUTS="$PWD/exports" bash examples/nightbank/deploy/offline-local.sh \
+            ${{ matrix.target }} "$RUNNER_TEMP/offline-${{ matrix.target }}"
       - name: preserve target identities, logs and exact delivery
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

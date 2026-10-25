@@ -10,8 +10,8 @@
 # scripts/release_smoke.sh on the very files `publish` uploads). DL-389 also
 # gates that wheel through Ubuntu and EL8 offline containers on native x86_64
 # runners. `build`
-# exports the closure from uv.lock with `--frozen` and ships it beside the
-# wheel as requirements-base.txt and requirements-ui.txt.
+# exports the closure from uv.lock with `--locked` and binds it to the exact
+# wheel, pyproject.toml and uv.lock in release-inputs.json (DL-397).
 #
 # The release jobs keep no git credentials and use no uv cache, so nothing a
 # cache or an earlier step left behind reaches the candidate.
@@ -84,9 +84,9 @@ jobs:
       - name: export the locked closure (hashes included)
         run: |
           set -euo pipefail
-          mkdir exports
-          uv export --frozen --no-dev --no-emit-project -o exports/requirements-base.txt
-          uv export --frozen --no-dev --no-emit-project --extra ui -o exports/requirements-ui.txt
+          wheels=(dist/*.whl)
+          test "${#wheels[@]}" = 1
+          bash scripts/export-release-inputs.sh "${wheels[0]}" exports
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: candidate
@@ -148,7 +148,8 @@ jobs:
           set -euo pipefail
           wheels=("$PWD"/candidate/dist/*.whl)
           test "${#wheels[@]}" = 1
-          sudo env DSL41_REQUIRE_NATIVE_X86=1 DSL41_RELEASE_WHEEL="${wheels[0]}" bash examples/nightbank/deploy/offline-local.sh \
+          sudo env DSL41_REQUIRE_NATIVE_X86=1 DSL41_RELEASE_WHEEL="${wheels[0]}" \
+            DSL41_RELEASE_INPUTS="$PWD/candidate/exports" bash examples/nightbank/deploy/offline-local.sh \
             ${{ matrix.target }} "$RUNNER_TEMP/offline-${{ matrix.target }}"
           test "$(cat "$RUNNER_TEMP/offline-${{ matrix.target }}/scope")" = all
           cmp "${wheels[0]}" "$RUNNER_TEMP/offline-${{ matrix.target }}/delivery/bundle/wheels/${wheels[0]##*/}"
