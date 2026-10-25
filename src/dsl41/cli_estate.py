@@ -8,8 +8,17 @@ retention allows. `cli.py` assembles the `estate` sub-app.
 
 from __future__ import annotations
 
+import asyncio
+import errno
+import os
+import subprocess
+import sys
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import typer
 
@@ -20,6 +29,8 @@ from dsl41.cli_common import (
     check_base_tz,
     command_outcome,
     confirmed_resume_refusal,
+    guarded_maintenance,
+    lineage_of,
     load_catalog_and_ast_or_exit_2,
     load_semantics,
     load_tz_aliases,
@@ -31,17 +42,17 @@ from dsl41.cli_common import (
     walk_estate_or_exit_2,
 )
 from dsl41.period import ARCHIVE_CLASS
+from dsl41.runner_clock import RealClock
+from dsl41.runner_ledger import LOCK_NAME, LeaderLock
 
 if TYPE_CHECKING:
-    from datetime import datetime
-
     from dsl41.boundary import EstateAnchor, EstateWalk, SealRequest
     from dsl41.attest import Attestation
     from dsl41.retention import Artifact, PruneReport, RetentionPlan
     from dsl41.ir import CatalogIR
     from dsl41.period import Manifest, RuntimeProfile, StagedManifest
     from dsl41.runner import Engine
-    from dsl41.runner_ledger import LeaderLock
+    from dsl41.runner_adapters import SupervisorConn
     from dsl41.runner_startup import SupervisorLaunch, Wiring
     from dsl41.seal import Seal, StagedNextPeriod
 
@@ -73,6 +84,65 @@ _ACTOR_OPT = typer.Option(
     help="Who is asking, for the log. This is a claim, not an authorization:"
     " this tier has no authentication. Defaults to <user>@<host>.",
 )  # control-protocol ss7 gap 2
+
+
+# The options `seal` and `estate quiesce` share: both seal the running period into the next one.
+NEXT_FILES_OPT = typer.Option(
+    ...,
+    "--next",
+    help="JIL files of the next period's estate. Repeatable; the order is part of the bundle hash.",
+)
+FORCE_SEAL_OPT = typer.Option(
+    False,
+    "--force-seal",
+    help="Commit inside the closing period's retry horizon. Recorded"
+    " in the seal as force_seal: true, with the gate's numbers when"
+    " the gate was engaged.",
+)  # period-model ss9
+REQUEST_ID_OPT = typer.Option(
+    None,
+    "--request-id",
+    help="Reuse the id of an earlier attempt to retry it exactly. A"
+    " committed boundary answers its exact retry from the next"
+    " period. Any other id is a fresh request.",
+)
+NEXT_TIMEZONE_OPT = typer.Option(
+    None,
+    "--next-timezone",
+    help="The next period's timezone for schedules that do not set their own.",
+)
+NEXT_TIMEZONE_MAP_OPT = typer.Option(
+    None,
+    "--next-timezone-map",
+    help="The next period's timezone map. See 'dsl41 run --help' for --timezone-map.",
+)  # SEM-35/DL-62
+NEXT_AS_MACHINE_OPT = typer.Option(
+    [],
+    "--next-as-machine",
+    help="Machine names the next period runs as. Repeatable. See"
+    " 'dsl41 run --help' for --as-machine.",
+)  # DL-52
+NEXT_MACHINE_POLICY_OPT = typer.Option(
+    "strict",
+    "--next-machine-policy",
+    help="The next period's machine policy: strict or local-eligible.",
+)
+NEXT_DETACHED_OPT = typer.Option(
+    False,
+    "--next-detached",
+    help="The next period runs command jobs under the supervisor.",
+)  # ss6a Tier 1
+NEXT_DEADMAN_OPT = typer.Option(
+    None,
+    "--next-deadman",
+    help="The next period's supervisor deadman, in seconds. Needs --next-detached.",
+)
+NEXT_SEMANTICS_OPT = typer.Option(
+    [],
+    "--next-semantics",
+    metavar="NAME=VALUE",
+    help="The next period's semantic switches. Repeatable. See 'dsl41 run --help' for --semantics.",
+)  # runner-design ss8a, DL-252
 
 
 def _next_profile(
@@ -138,67 +208,19 @@ def _stage_next(
 
 
 def seal(
-    next_files: list[Path] = typer.Option(
-        ...,
-        "--next",
-        help="JIL files of the next period's estate. Repeatable; the order"
-        " is part of the bundle hash.",
-    ),
+    next_files: list[Path] = NEXT_FILES_OPT,
     run_root: Path = _RUN_ROOT_OPT,
     estate_anchor: Path = _ANCHOR_OPT,
-    force_seal: bool = typer.Option(
-        False,
-        "--force-seal",
-        help="Commit inside the closing period's retry horizon. Recorded"
-        " in the seal as force_seal: true, with the gate's numbers when"
-        " the gate was engaged.",
-    ),  # period-model ss9
+    force_seal: bool = FORCE_SEAL_OPT,
     claimed_actor: str = _ACTOR_OPT,
-    request_id: str = typer.Option(
-        None,
-        "--request-id",
-        help="Reuse the id of an earlier attempt to retry it exactly. A"
-        " committed boundary answers its exact retry from the next"
-        " period. Any other id is a fresh request.",
-    ),
-    next_timezone: str = typer.Option(
-        None,
-        "--next-timezone",
-        help="The next period's timezone for schedules that do not set their own.",
-    ),
-    next_timezone_map: Path = typer.Option(
-        None,
-        "--next-timezone-map",
-        help="The next period's timezone map. See 'dsl41 run --help' for --timezone-map.",
-    ),  # SEM-35/DL-62
-    next_as_machine: list[str] = typer.Option(
-        [],
-        "--next-as-machine",
-        help="Machine names the next period runs as. Repeatable. See"
-        " 'dsl41 run --help' for --as-machine.",
-    ),  # DL-52
-    next_machine_policy: str = typer.Option(
-        "strict",
-        "--next-machine-policy",
-        help="The next period's machine policy: strict or local-eligible.",
-    ),
-    next_detached: bool = typer.Option(
-        False,
-        "--next-detached",
-        help="The next period runs command jobs under the supervisor.",
-    ),  # ss6a Tier 1
-    next_deadman: float = typer.Option(
-        None,
-        "--next-deadman",
-        help="The next period's supervisor deadman, in seconds. Needs --next-detached.",
-    ),
-    next_semantics: list[str] = typer.Option(
-        [],
-        "--next-semantics",
-        metavar="NAME=VALUE",
-        help="The next period's semantic switches. Repeatable. See 'dsl41 run"
-        " --help' for --semantics.",
-    ),  # runner-design ss8a, DL-252
+    request_id: str = REQUEST_ID_OPT,
+    next_timezone: str = NEXT_TIMEZONE_OPT,
+    next_timezone_map: Path = NEXT_TIMEZONE_MAP_OPT,
+    next_as_machine: list[str] = NEXT_AS_MACHINE_OPT,
+    next_machine_policy: str = NEXT_MACHINE_POLICY_OPT,
+    next_detached: bool = NEXT_DETACHED_OPT,
+    next_deadman: float = NEXT_DEADMAN_OPT,
+    next_semantics: list[str] = NEXT_SEMANTICS_OPT,
     supervisor: SupervisorChoice = typer.Option(
         SupervisorChoice.attach,
         "--supervisor",
@@ -664,9 +686,13 @@ def _answer_from_committed(
 
 async def _close_engine(engine: "Engine") -> None:
     """Give back what an offline sealer took, whatever became of the boundary: the engine's loop
-    and its journal."""
+    and its journal.
+
+    The teardown is a detach-stop (runner-design ss6a case b): a run the closing period carries
+    live keeps running under the supervisor, and the next period reattaches to it (PR-30b)."""
     import contextlib
 
+    engine.detach.stopping = True
     with contextlib.suppress(Exception):
         await engine.shutdown()
     if engine.journal is not None:
@@ -806,8 +832,12 @@ def audit(
         for line in skipped:
             typer.echo(line)
         raise typer.Exit(refuse(f"{where}: no closed period to audit"))
+    from dsl41.runner_clock import EngineError
+
     try:
         _attest_each(targets, anchor, name_root=run_root is None)
+    except EngineError as exc:
+        raise typer.Exit(refuse(exc)) from exc
     finally:
         # in a `finally` so a refusal partway through the walk still reports what was not audited
         for line in skipped:
@@ -867,8 +897,10 @@ def _closed_across_roots(
 
 def _attest_each(
     targets: list[tuple[int, Path]], anchor: "EstateAnchor", *, name_root: bool
-) -> None:
-    """Re-derive each (period, root) in turn and report it; both audit modes share this loop."""
+) -> int:
+    """Re-derive each (period, root) in turn and report it; both audit modes and `estate
+    quiesce` share this loop. Returns how many checkpoints wait for their registry row; a
+    refusal raises `EngineError`."""
     from dsl41.attest import (
         ATTESTATION_VERIFIED,
         DERIVATION_VERIFIED,
@@ -876,36 +908,32 @@ def _attest_each(
         audit_period,
         verified_tier,
     )
-    from dsl41.runner_clock import EngineError
 
     outstanding = 0
-    try:
-        for period_id, root in targets:
-            at = f" in {root}" if name_root else ""
-            tier = verified_tier(root, period_id)
-            try:
-                # SEAL-ONLY or not, this is the same call: `audit_period` re-derives when the
-                # inputs are there and consumes the stored checkpoint when not (PR-02e), and only
-                # one of the two paths may report itself as a derivation. Skipping an archived
-                # period would also skip the `attested` row a busy lineage lock left unflipped.
-                attestation = audit_period(root, period_id, anchor=anchor)
-            except Unattested as exc:
-                # the checkpoint IS written and durable; only the registry row, which is
-                # bookkeeping, is not. `Unattested` means the lineage lock was busy, the ordinary
-                # state of an estate with a live engine, so it is this period's note and never the
-                # walk's reason to stop
-                typer.echo(str(exc), err=True)
-                outstanding += 1
-                continue
-            typer.echo(
-                _archived_line(root, period_id, at, attestation)
-                if tier == ATTESTATION_VERIFIED
-                else f"period {period_id}{at} attested, {DERIVATION_VERIFIED}:"
-                f" {attestation.digest} (seal {attestation.seal_digest}, chain through"
-                f" {attestation.chain_through_period})"
-            )
-    except EngineError as exc:
-        raise typer.Exit(refuse(exc)) from exc
+    for period_id, root in targets:
+        at = f" in {root}" if name_root else ""
+        tier = verified_tier(root, period_id)
+        try:
+            # SEAL-ONLY or not, this is the same call: `audit_period` re-derives when the
+            # inputs are there and consumes the stored checkpoint when not (PR-02e), and only
+            # one of the two paths may report itself as a derivation. Skipping an archived
+            # period would also skip the `attested` row a busy lineage lock left unflipped.
+            attestation = audit_period(root, period_id, anchor=anchor)
+        except Unattested as exc:
+            # the checkpoint IS written and durable; only the registry row, which is
+            # bookkeeping, is not. `Unattested` means the lineage lock was busy, the ordinary
+            # state of an estate with a live engine, so it is this period's note and never the
+            # walk's reason to stop
+            typer.echo(str(exc), err=True)
+            outstanding += 1
+            continue
+        typer.echo(
+            _archived_line(root, period_id, at, attestation)
+            if tier == ATTESTATION_VERIFIED
+            else f"period {period_id}{at} attested, {DERIVATION_VERIFIED}:"
+            f" {attestation.digest} (seal {attestation.seal_digest}, chain through"
+            f" {attestation.chain_through_period})"
+        )
     if outstanding:
         typer.echo(
             f"{outstanding} checkpoint(s) are durable with the registry row"
@@ -913,6 +941,7 @@ def _attest_each(
             " idempotent and finishes the row (period-model ss1.3)",
             err=True,
         )
+    return outstanding
 
 
 def _archived_line(root: Path, period_id: int, at: str, attestation: "Attestation") -> str:
@@ -1246,3 +1275,642 @@ def _merged(*verdicts: "tuple[Artifact, ...]") -> "tuple[Artifact, ...]":
             seen.add(key)
             out.append(item)
     return tuple(out)
+
+
+# ------------------------------------------------------- the estate stop (DL-398)
+#
+# `estate quiesce` is the shape 1 estate stop as one verb. It runs as the service account and
+# needs no root. The two root steps stay with the operator and are checked, not performed: the
+# reboot hold and the stopped engine unit. Then it leads the run root, seals and audits the
+# running period while the supervisor runs, asks the supervisor for guarded maintenance
+# (DL-390), and checks that neither unit came back and nothing writes. Each stage ends with one
+# line. The verb never waits for a precondition: a stage that cannot pass yet refuses with what
+# to wait for, and a stage already done is skipped, so a rerun is safe. Its one bounded wait is
+# the exit observation after a completion reply, five seconds at most.
+
+#: a reader of the service manager: `systemctl` argv in, its stdout out
+SystemctlReader = Callable[[list[str]], str]
+
+#: the example units' names (examples/nightbank/deploy)
+ENGINE_UNIT = "dsl41-engine.service"
+SUPERVISOR_UNIT = "dsl41-supervisor.service"
+
+#: ActiveState values of a unit that is down; `failed` is a sealed engine's exit 3
+_UNIT_DOWN = ("inactive", "failed")
+
+
+def read_systemctl(argv: list[str]) -> str:
+    """The real reader. `systemctl show` needs no privilege."""
+    return subprocess.run(argv, capture_output=True, text=True, check=True, timeout=5.0).stdout
+
+
+def _gone(error: OSError) -> bool:
+    """Whether a failed read of `/proc/<pid>` proves that the process has gone."""
+    return isinstance(error, FileNotFoundError | ProcessLookupError) or error.errno in (
+        errno.ENOENT,
+        errno.ESRCH,
+    )
+
+
+def _proc_status(pid: str) -> dict[str, str]:
+    status = Path(f"/proc/{pid}/status").read_text()
+    return {
+        key: value.strip()
+        for key, _, value in (line.partition(":") for line in status.splitlines())
+    }
+
+
+def _foreign(entry: Path, uid: str) -> bool:
+    """Whether another uid owns `/proc/<pid>`, or the process has gone; a stat that fails
+    otherwise proves neither."""
+    try:
+        return str(_proc_owner(entry)) != uid
+    except OSError as exc:
+        if _gone(exc):
+            return True
+        raise OSError(f"cannot observe pid {entry.name} ({exc})") from exc
+
+
+def _proc_owner(entry: Path) -> int:
+    return entry.stat().st_uid
+
+
+def _ancestors() -> set[str]:
+    """This process and its parent chain: the shell or sudo that started the verb writes
+    nothing in the run root."""
+    chain: set[str] = set()
+    pid = str(os.getpid())
+    while pid not in chain and pid not in ("0", ""):
+        chain.add(pid)
+        try:
+            pid = _proc_status(pid).get("PPid", "")
+        except OSError:
+            break
+    return chain
+
+
+def other_processes() -> list[str] | None:
+    """Every other live process of this effective uid, as `pid (command)`; None off Linux.
+
+    The verb and its ancestors are left out, and so is a zombie: it has exited and holds no file.
+    Only a read that proves the process gone skips it, or a denied read of a process another uid
+    owns (`/proc` mounted `hidepid`). Any other failed read raises `OSError`, because a process
+    that cannot be observed is not shown absent."""
+    if not sys.platform.startswith("linux"):
+        return None
+    mine, uid = _ancestors(), str(os.geteuid())
+    found: list[str] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdecimal() or entry.name in mine:
+            continue
+        try:
+            fields = _proc_status(entry.name)
+        except OSError as exc:
+            if _gone(exc) or (exc.errno in (errno.EACCES, errno.EPERM) and _foreign(entry, uid)):
+                continue
+            raise OSError(f"cannot observe pid {entry.name} ({exc})") from exc
+        uids = fields.get("Uid", "").split()
+        if len(uids) < 2 or uids[1] != uid or fields.get("State", "").startswith("Z"):
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except OSError:
+            raw = b""
+        command = raw.replace(b"\0", b" ").decode(errors="replace").strip()
+        found.append(f"{entry.name} ({command or fields.get('Name', '?')})")
+    return found
+
+
+def _supervisor_conn(sock_path: Path) -> SupervisorConn:
+    from dsl41.runner_adapters import SupervisorConn
+
+    return SupervisorConn(sock_path)
+
+
+@dataclass(frozen=True)
+class QuiesceHost:
+    """What the verb reads of the machine around it. Tests replace each part."""
+
+    systemctl: SystemctlReader = read_systemctl
+    #: naive UTC, the journal's clock domain (runner_clock.RealClock)
+    now: Callable[[], datetime] = RealClock().now
+    sleep: Callable[[float], None] = time.sleep
+    connect: Callable[[Path], SupervisorConn] = _supervisor_conn
+    processes: Callable[[], list[str] | None] = other_processes
+
+
+#: the host `estate quiesce` reads
+QUIESCE_HOST = QuiesceHost()
+
+
+class _HeldLeaderLock(LeaderLock):
+    """`leader.lock` as the verb holds it (S6a). The offline seal's engine gives its proofs back
+    when its journal closes; leadership stays with the verb until `let_go`."""
+
+    def release(self) -> None:
+        """The seal's engine, or its refused resume, returns the lock; the verb keeps it."""
+
+    def let_go(self) -> None:
+        super().release()
+
+    def holder(self) -> str:
+        """Who the lock file records as its holder, for a refusal."""
+        return self._holder()
+
+
+@dataclass(frozen=True)
+class _QuiesceRequest:
+    run_root: Path
+    estate_anchor: Path | None
+    next_files: list[Path]
+    profile: RuntimeProfile
+    permit_unknown: bool
+    properties: list[Path] | None
+    force_seal: bool
+    actor: str
+    request_id: str | None
+    force: str | None
+    engine_unit: str
+    supervisor_unit: str
+
+
+class _Stop(Exception):
+    """A stage that did not pass, with its exit code."""
+
+    def __init__(self, code: int) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class _Quiesce:
+    """One run of the stages, in order. Each stage method prints its line or raises `_Stop`."""
+
+    def __init__(self, request: _QuiesceRequest, host: QuiesceHost) -> None:
+        self.request = request
+        self.host = host
+        self.lock = _HeldLeaderLock(request.run_root)
+        #: what this run or an earlier one made durable, for a refusal line
+        self.done: list[str] = []
+        self.sealed: int | None = None
+        self.supervisor_pid: int | None = None
+        self.exited_pid: int | None = None
+
+    # ------------------------------------------------------------------ output
+
+    def say(self, stage: str, outcome: str) -> None:
+        typer.echo(f"quiesce: {stage}: {outcome}")
+
+    def refuse(self, stage: str, reason: str, code: int = 2) -> _Stop:
+        durable = f"; durable: {', '.join(self.done)}" if self.done else ""
+        self.say(stage, f"refused: {reason}{durable}")
+        return _Stop(code)
+
+    # ------------------------------------------------------------------ stages
+
+    def run(self) -> int:
+        from dsl41.state_machine import StatechartError
+
+        try:
+            for stage in (
+                self.hold,
+                self.engine,
+                self.leadership,
+                self.supervisor,
+                self.horizon,
+                self.seal,
+                self.audit,
+                self.maintenance,
+                self.units,
+                self.writers,
+            ):
+                try:
+                    stage()
+                except typer.Exit as exit_:
+                    # a door the stage shares with another verb printed its own refusal
+                    raise self.refuse(stage.__name__, f"exited {exit_.exit_code}", exit_.exit_code)
+                except StatechartError:
+                    self.say(stage.__name__, "refused: a statechart error, reported on stderr")
+                    raise
+        except _Stop as stop:
+            return stop.code
+        finally:
+            self.lock.let_go()
+        return 0
+
+    def _unit(self, stage: str, unit: str) -> dict[str, str]:
+        argv = ["systemctl", "show", unit]
+        for name in ("LoadState", "UnitFileState", "ActiveState", "SubState", "MainPID"):
+            argv += ["-p", name]
+        try:
+            output = self.host.systemctl(argv)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise self.refuse(stage, f"cannot read {unit}: {exc}") from exc
+        props = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
+        if props.get("LoadState") not in ("loaded", "masked"):
+            raise self.refuse(
+                stage,
+                f"{unit} is not a loaded unit ({props.get('LoadState', '?')}); name the units"
+                " with --engine-unit and --supervisor-unit",
+            )
+        return props
+
+    def hold(self) -> None:
+        """The reboot hold: both units disabled or masked, so a reboot inside the window starts
+        nothing."""
+        units = (self.request.engine_unit, self.request.supervisor_unit)
+        enabled = [
+            f"{unit} is {state or 'unknown'}"
+            for unit in units
+            if (state := self._unit("hold", unit).get("UnitFileState"))
+            not in ("disabled", "masked")
+        ]
+        if enabled:
+            raise self.refuse(
+                "hold", f"{'; '.join(enabled)}; as root: systemctl disable {' '.join(units)}"
+            )
+        self.say("hold", "ok")
+
+    def engine(self) -> None:
+        unit = self.request.engine_unit
+        props = self._unit("engine", unit)
+        if props.get("ActiveState") not in _UNIT_DOWN:
+            raise self.refuse(
+                "engine",
+                f"{unit} is {props.get('ActiveState')}/{props.get('SubState')};"
+                f" as root: systemctl stop {unit}",
+            )
+        self.say("engine", "ok")
+
+    def leadership(self) -> None:
+        from dsl41.runner_clock import EngineError
+
+        root = self.request.run_root
+        path = root / LOCK_NAME
+        if path.is_symlink() or not path.is_file():
+            raise self.refuse(
+                "leadership",
+                f"no {LOCK_NAME} in {root}: a used run root has one, and maintenance"
+                " refuses without it (deployment-runbook ss3, cold bootstrap)",
+            )
+        try:
+            self.lock.acquire()
+        except EngineError as exc:
+            raise self.refuse("leadership", f"{exc}; find the process that holds {path}") from exc
+        except OSError as exc:
+            raise self.refuse("leadership", f"{path}: {exc}") from exc
+        self.say("leadership", "ok")
+        self.sealed = self._sealed_period()
+
+    def _sealed_period(self) -> int | None:
+        """The period this root holds sealed and not yet opened, or None."""
+        lineage = lineage_of(self.request.run_root)
+        if lineage is None or not lineage.opens_next or lineage.seal is None:
+            return None
+        self.done.append(f"period {lineage.seal.period_id} sealed")
+        return lineage.seal.period_id
+
+    def supervisor(self) -> None:
+        from dsl41.runner_clock import EngineError
+
+        root = self.request.run_root
+        sock = root / "supervisor.sock"
+        try:
+            conn = self.host.connect(sock)
+            try:
+                listing = conn.send({"cmd": "LIST"})
+            finally:
+                conn.close()
+        except (OSError, ValueError, EngineError) as exc:
+            listing = {"ok": False, "error": str(exc)}
+        if listing.get("ok") is True:
+            self.supervisor_pid = listing.get("supervisor_pid")
+            live = [run for run in listing.get("runs", []) if run.get("wrapper_alive")]
+            self.say("supervisor", f"ok: LIST answers, {len(live)} live run(s)")
+            return
+        if (root / "supervisor.pid").exists() or sock.exists():
+            raise self.refuse(
+                "supervisor",
+                f"no LIST answers on {sock} ({listing.get('error')}) and its files remain:"
+                f" wait for {self.request.supervisor_unit} to restart, or follow"
+                " deployment-runbook ss3 for an unresponsive supervisor",
+            )
+        if self.sealed is not None:
+            self.say("supervisor", "skipped: already gone")
+        else:
+            # a tethered period needs none; a detached one makes the seal refuse with its remedy
+            self.say("supervisor", "skipped: none answers")
+
+    def horizon(self) -> None:
+        """period-model ss9's retry horizon, read before the seal so the refusal names its end."""
+        from dsl41.boundary import externally_requested_attempts
+        from dsl41.period import estate_wal
+        from dsl41.runner_clock import EngineError
+        from dsl41.runner_journal import read_journal
+
+        if self.sealed is not None:
+            self.say("horizon", "skipped: already sealed")
+            return
+        root = self.request.run_root
+        try:
+            horizon_us = _closing_manifest(root).runtime_profile.retry_horizon_us
+            attempts = externally_requested_attempts(read_journal(estate_wal(root)))
+        except (OSError, ValueError, EngineError) as exc:
+            raise self.refuse("horizon", str(exc)) from exc
+        if not attempts:
+            self.say("horizon", "ok: no operator request in this period")
+            return
+        # the journal's `at` and `Host.now` are both naive UTC (runner_clock)
+        last = max(datetime.fromisoformat(str(attempt["at"])) for attempt in attempts)
+        end = last + timedelta(microseconds=horizon_us)
+        stamp = f"{end.isoformat(timespec='seconds')} UTC"
+        if self.host.now() >= end:
+            self.say("horizon", f"ok: ended at {stamp}")
+        elif self.request.force_seal:
+            self.say("horizon", f"ok: runs until {stamp}; --force-seal records the force")
+        else:
+            raise self.refuse(
+                "horizon",
+                f"the retry horizon runs until {stamp}; rerun after it, or pass --force-seal",
+            )
+
+    def seal(self) -> None:
+        if self.sealed is not None:
+            self.say(
+                "seal",
+                f"skipped: already sealed: period {self.sealed};"
+                f" period {self.sealed + 1} waits to be opened",
+            )
+            return
+        r = self.request
+        code = asyncio.run(
+            _offline_seal(
+                r.run_root,
+                r.estate_anchor,
+                r.next_files,
+                r.profile,
+                r.permit_unknown,
+                r.properties,
+                r.force_seal,
+                r.actor,
+                r.request_id,
+                self.lock,
+                "attach",
+            )
+        )
+        if code == 4:
+            raise self.refuse(
+                "seal", "its outcome is unknown; rerun with the --request-id it printed", 4
+            )
+        if code != 0:
+            raise self.refuse("seal", f"the offline seal exited {code}, the period is open", code)
+        self.sealed = self._sealed_period()
+        if self.sealed is None:
+            raise self.refuse("seal", "the seal reported success and the root holds no seal", 4)
+        self.say("seal", f"ok: period {self.sealed} sealed")
+
+    def audit(self) -> None:
+        from dsl41.attest import read_attestation
+        from dsl41.boundary import EstateAnchor, default_anchor_dir
+        from dsl41.runner_clock import EngineError
+
+        root = self.request.run_root
+        targets = _root_periods(root)
+        if not targets:
+            raise self.refuse("audit", f"{root}: no closed period to audit")
+        already = all(read_attestation(root, period) is not None for period in targets)
+        anchor = EstateAnchor(self.request.estate_anchor or default_anchor_dir(root))
+        try:
+            outstanding = _attest_each([(p, root) for p in targets], anchor, name_root=False)
+        except EngineError as exc:
+            raise self.refuse("audit", str(exc)) from exc
+        if outstanding:
+            raise self.refuse(
+                "audit",
+                f"{outstanding} registry row(s) wait for the lineage lock; rerun when it is free",
+            )
+        self.done.append(f"attested through period {targets[-1]}")
+        if already:
+            self.say("audit", f"skipped: already attested through period {targets[-1]}")
+        else:
+            self.say("audit", f"ok: attested through period {targets[-1]}")
+
+    def maintenance(self) -> None:
+        if self.supervisor_pid is None:
+            self.say("maintenance", "skipped: no supervisor")
+            return
+        sock = self.request.run_root / "supervisor.sock"
+        try:
+            conn = self.host.connect(sock)
+        except OSError as exc:
+            raise self.refuse("maintenance", f"{sock}: {exc}") from exc
+        try:
+            code, reply = guarded_maintenance(
+                conn,
+                sock,
+                controller_id=f"estate-quiesce-{os.getpid()}",
+                force=self.request.force,
+                # the supervisor takes leader.lock itself for maintenance and holds it through
+                # its teardown (DL-390); the verb hands it over with the request
+                before_stop=self.lock.let_go,
+                on_refusal=lambda incarnation, token: self._report_and_release(conn, token),
+                sleep=self.host.sleep,
+            )
+        finally:
+            conn.close()
+        if code == 0 and reply is not None:
+            self.exited_pid = reply.get("supervisor_pid")
+            self.say("maintenance", f"ok: completed; the supervisor (pid {self.exited_pid}) exited")
+            return
+        if code == 4:
+            raise self.refuse(
+                "maintenance",
+                "the outcome is unknown: read the unit, the process and supervisor.log"
+                " before anything else; never repeat it blindly (deployment-runbook ss3)",
+                4,
+            )
+        raise self.refuse("maintenance", self._maintenance_remedy(reply or {}))
+
+    def _maintenance_remedy(self, reply: dict[str, Any]) -> str:
+        """A refusal's cause and its own next move."""
+        error, detail = reply.get("error"), str(reply.get("detail") or "")
+        if error == "lease_held":
+            return (
+                f"the supervisor's lease is held by {reply.get('holder')} until"
+                f" {reply.get('expires_at')}; find that controller, then rerun"
+            )
+        if error != "maintenance_refused":
+            return f"the supervisor answered {error}; see deployment-runbook ss3"
+        if "active wrappers" in detail:
+            return f"{detail}; the jobs go on: rerun once they end, or pass --force terminate"
+        if LOCK_NAME in detail or self._lock_unavailable():
+            return (
+                f"the supervisor could not take {self.lock.path} ({detail}), held by"
+                f" {self.lock.holder()}; find the process that holds it, then rerun"
+            )
+        return f"{detail}; containment and unit policy: see deployment-runbook ss3"
+
+    def _lock_unavailable(self) -> bool:
+        """Whether `leader.lock` cannot be taken now: the supervisor's refusal does not always
+        name the lock it could not take."""
+        from dsl41.runner_procid import flock_existing
+
+        try:
+            fd = flock_existing(self.lock.path)
+        except OSError:
+            return True
+        os.close(fd)
+        return False
+
+    def _report_and_release(self, conn: SupervisorConn, token: int) -> None:
+        """A refused maintenance: print the live runs, then give the lease back."""
+        try:
+            listing = conn.send({"cmd": "LIST"})
+            for run in listing.get("runs", []):
+                if run.get("wrapper_alive"):
+                    typer.echo(
+                        f"quiesce: live run: {run.get('job')} run {run.get('run_number')}"
+                        f" ({run.get('run_id')}), wrapper pid {run.get('wrapper_pid')}"
+                    )
+            conn.send({"cmd": "RELEASE", "token": token})
+        except Exception as exc:  # noqa: BLE001 -- a lost lease is freed by the connection's close
+            typer.echo(f"quiesce: listing or releasing after the refusal failed: {exc}", err=True)
+
+    def units(self) -> None:
+        """Both units down, read once after the observed exit. A restart policy that did not
+        keep the stop shows as `activating`/`auto-restart`, or as a new main process."""
+        stopping: list[str] = []
+        back: list[str] = []
+        for unit in (self.request.engine_unit, self.request.supervisor_unit):
+            props = self._unit("units", unit)
+            active, sub = props.get("ActiveState"), props.get("SubState")
+            state = f"{unit} is {active}/{sub}"
+            if active in _UNIT_DOWN and sub in ("dead", "failed"):
+                continue
+            if active == "deactivating" or (
+                unit == self.request.supervisor_unit
+                and active == "active"
+                and self.exited_pid is not None
+                and props.get("MainPID") == str(self.exited_pid)
+            ):
+                stopping.append(state)  # the manager has not finished recording the exit
+            else:
+                back.append(state)
+        if back:
+            raise self.refuse(
+                "units",
+                f"{'; '.join(back)}: its exit policy did not keep the stop; read the unit"
+                " before anything else",
+                4,
+            )
+        if stopping:
+            raise self.refuse("units", f"{'; '.join(stopping)}; rerun once it is inactive")
+        self.say("units", "ok")
+
+    def writers(self) -> None:
+        """deployment-runbook ss2b's no-writers check, then leadership goes."""
+        from dsl41.runner_clock import EngineError
+
+        root = self.request.run_root
+        left = [name for name in ("supervisor.pid", "supervisor.sock") if (root / name).exists()]
+        if left:
+            raise self.refuse("writers", f"{', '.join(left)} still in {root}")
+        if not self.lock.held:
+            try:
+                self.lock.acquire()
+            except (EngineError, OSError) as exc:
+                raise self.refuse(
+                    "writers", f"{exc}; find the process that holds {self.lock.path}"
+                ) from exc
+        try:
+            others = self.host.processes()
+        except OSError as exc:
+            raise self.refuse("writers", f"{exc}; rerun") from exc
+        if others is None:
+            self.say("writers", "skipped: not linux (no supervisor files; leader.lock free)")
+            return
+        if others:
+            raise self.refuse(
+                "writers", f"processes of uid {os.geteuid()} remain: {', '.join(others)}"
+            )
+        self.say("writers", "ok")
+
+
+def estate_quiesce(
+    run_root: Path = _RUN_ROOT_OPT,
+    estate_anchor: Path = _ANCHOR_OPT,
+    next_files: list[Path] = typer.Option(
+        ...,
+        "--next",
+        help=f"{NEXT_FILES_OPT.help} A rerun after the seal reads no file and ignores them.",
+    ),
+    force_seal: bool = FORCE_SEAL_OPT,
+    claimed_actor: str = _ACTOR_OPT,
+    request_id: str = REQUEST_ID_OPT,
+    next_timezone: str = NEXT_TIMEZONE_OPT,
+    next_timezone_map: Path = NEXT_TIMEZONE_MAP_OPT,
+    next_as_machine: list[str] = NEXT_AS_MACHINE_OPT,
+    next_machine_policy: str = NEXT_MACHINE_POLICY_OPT,
+    next_detached: bool = NEXT_DETACHED_OPT,
+    next_deadman: float = NEXT_DEADMAN_OPT,
+    next_semantics: list[str] = NEXT_SEMANTICS_OPT,
+    force: str = typer.Option(
+        None,
+        "--force",
+        metavar="terminate",
+        help="Maintenance only: terminate the supervisor's known command groups"
+        " deliberately, as 'supervise shutdown --force=terminate'.",
+    ),
+    engine_unit: str = typer.Option(ENGINE_UNIT, "--engine-unit", help="The engine's unit."),
+    supervisor_unit: str = typer.Option(
+        SUPERVISOR_UNIT, "--supervisor-unit", help="The supervisor's unit."
+    ),
+    permit_unknown: bool = PERMIT_UNKNOWN,
+    properties: list[Path] = PROPERTIES,
+) -> None:
+    """Stop a shape 1 estate: seal, audit and guarded maintenance in one verb.
+
+    Run it as the service account after two root steps, which it
+    checks: the reboot hold (both units disabled) and the stopped
+    engine unit. It takes leader.lock, seals the running period offline
+    and audits it while the supervisor runs, then asks the supervisor
+    for guarded maintenance. It reads both units once and checks that
+    nothing writes in the run root.
+
+    Each stage prints one line. A stage that cannot pass yet refuses
+    and names what to wait for; run the verb again. A stage already
+    done is skipped, so a quiesced estate runs to exit 0 again.
+
+    Exit codes: 0 the estate is stopped; 2 a stage refused, and what
+    the earlier stages did is durable; 4 uncertain: a lost maintenance
+    answer or a unit that came back, or a seal whose outcome is
+    unknown.
+    """
+    # Design: DL-398, deployment-runbook ss2b
+    from dsl41.runner_control import claimed_actor as default_actor
+
+    if force is not None and force != "terminate":
+        raise typer.Exit(refuse("--force takes one value: terminate"))
+    profile = _next_profile(
+        next_timezone,
+        next_timezone_map,
+        next_as_machine,
+        next_machine_policy,
+        next_detached,
+        next_deadman,
+        next_semantics,
+    )
+    request = _QuiesceRequest(
+        run_root=run_root,
+        estate_anchor=estate_anchor,
+        next_files=next_files,
+        profile=profile,
+        permit_unknown=permit_unknown,
+        properties=properties,
+        force_seal=force_seal,
+        actor=claimed_actor or default_actor(),
+        request_id=request_id,
+        force=force,
+        engine_unit=engine_unit,
+        supervisor_unit=supervisor_unit,
+    )
+    raise typer.Exit(_Quiesce(request, QUIESCE_HOST).run())

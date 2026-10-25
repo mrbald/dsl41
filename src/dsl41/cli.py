@@ -11,7 +11,7 @@ verbs live one file per domain (DL-137):
     cli_control.py  what an operator says to a RUNNING engine: sendevent, host, query, ui,
                     serve, supervise
     cli_estate.py   the period boundary and its surroundings: seal, audit, verify,
-                    estate reclaim, estate prune
+                    estate reclaim, estate prune, estate quiesce
 
 Imports run one way: this file imports the verb modules, the verb modules import `cli_common`,
 and no library module imports any of them.
@@ -86,9 +86,10 @@ app.command(rich_help_panel="Periods and retention")(stops(cli_estate.verify))
 
 estate_app = typer.Typer(
     no_args_is_help=True,
-    help="Prune what retention allows, or reclaim a stale claim.",
+    help="Stop the estate, prune what retention allows, or reclaim a stale claim.",
     context_settings={"help_option_names": ["-h", "--help"]},
 )
 app.add_typer(estate_app, name="estate", rich_help_panel="Periods and retention")
 estate_app.command("reclaim")(stops(cli_estate.estate_reclaim))
 estate_app.command("prune")(stops(cli_estate.estate_prune))
+estate_app.command("quiesce")(stops(cli_estate.estate_quiesce))

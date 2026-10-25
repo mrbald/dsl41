@@ -356,31 +356,52 @@ PYTHON
     ok "no writer is left in $1"
 }
 
-# deployment-runbook ss2b, shape 1, steps 1 to 6 (the caller takes the
-# reboot hold first): stop the engine unit,
-# seal offline and audit while the supervisor unit runs, stop the
-# supervisor unit, prove both stay stopped and nothing writes
+# deployment-runbook ss2b, shape 1 (the caller takes the reboot hold first):
+# root stops the engine unit, then the service account runs `dsl41 estate
+# quiesce`, which seals offline and audits while the supervisor unit runs,
+# requests guarded maintenance, reads both units once and checks the
+# writers (DL-398). The assertions after it check what the verb claims.
 quiesce_shape1() {
-    local next
+    local next out rc=0
     mapfile -t next < <(next_args)
     sudo systemctl stop "$ENGINE"
     is_state "$ENGINE" inactive || fail "$ENGINE: $(prop "$ENGINE" ActiveState)"
     cli supervise list --run-root "$ROOT" >/dev/null || fail "the supervisor did not outlive $ENGINE"
     ok "the supervisor outlived $ENGINE"
     wait_out_retry_horizon
-    cli seal --run-root "$ROOT" --estate-anchor "$ANCHOR" "${next[@]}" -p "$PROPERTIES" \
-        --next-detached --next-as-machine localhost --next-machine-policy strict \
-        --next-timezone UTC --claimed-actor drill@nightbank
-    cli audit --run-root "$ROOT" --estate-anchor "$ANCHOR"
-    ok "sealed offline and audited while the supervisor ran"
     if [ "${1-}" = legacy-incident ]; then
+        # the reviewed historical runtime has neither the verb nor MAINTENANCE_STOP
+        cli seal --run-root "$ROOT" --estate-anchor "$ANCHOR" "${next[@]}" -p "$PROPERTIES" \
+            --next-detached --next-as-machine localhost --next-machine-policy strict \
+            --next-timezone UTC --claimed-actor drill@nightbank
+        cli audit --run-root "$ROOT" --estate-anchor "$ANCHOR"
+        ok "sealed offline and audited while the supervisor ran"
         incident_stop_supervisor "reviewed historical supervisor has no MAINTENANCE_STOP"
     else
-        # shellcheck disable=SC2119
-        maintenance_stop
+        as_dsl41 rm -f /var/lib/dsl41/drill-supervisor-exit
+        out=$(quiesce_verb "${next[@]}") || rc=$?
+        printf '%s\n' "$out"
+        if [ "$rc" = 2 ] && grep -q '^quiesce: units: refused: .*rerun once it is inactive' <<<"$out"; then
+            # the drill's ExecStopPost keeps the unit deactivating for a moment
+            wait_for 30 "$SUPERVISOR finished stopping" is_state "$SUPERVISOR" inactive
+            rc=0
+            out=$(quiesce_verb "${next[@]}") || rc=$?
+            printf '%s\n' "$out"
+            grep -q '^quiesce: maintenance: skipped: ' <<<"$out" || fail "the rerun asked again"
+        fi
+        [ "$rc" = 0 ] || fail "estate quiesce exited $rc"
+        grep -qE '^quiesce: seal: (ok|skipped): ' <<<"$out" || fail "the verb did not seal"
+        ! cli supervise list --run-root "$ROOT" >/dev/null 2>&1 || fail "LIST still answers"
+        [ "$(sudo cat /var/lib/dsl41/drill-supervisor-exit)" = 8 ] || fail "supervisor did not exit 8"
+        ok "estate quiesce sealed, audited and stopped the supervisor"
     fi
     assert_units_stay_stopped
     assert_no_writers "$ROOT"
+}
+quiesce_verb() { # quiesce_verb NEXT_ARGS...
+    cli estate quiesce --run-root "$ROOT" --estate-anchor "$ANCHOR" "$@" -p "$PROPERTIES" \
+        --next-detached --next-as-machine localhost --next-machine-policy strict \
+        --next-timezone UTC --claimed-actor drill@nightbank
 }
 
 # An operator's request, with its time kept: a seal refuses inside

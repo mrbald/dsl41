@@ -128,10 +128,10 @@ What has to happen?
 │
 ├── nothing may run or write, even across a reboot                   ESTATE STOP
 │   (a backup, a retirement, upgrade rows 2 and 4)
-│     take the reboot hold, then seal and audit while the supervisor unit
-│     runs, then stop that unit (§2b); release the hold at the end
-│     (a retirement never does); stopping the supervisor unit ends every
-│     running command
+│     take the reboot hold and stop the engine unit, then run
+│     dsl41 estate quiesce: it seals, audits and stops the supervisor
+│     unit (§2b); release the hold at the end (a retirement never does);
+│     it refuses while a command runs, unless --force terminate
 │
 ├── the engine unit failed with exit 3                               SEALED, NOT OPENED
 │     the period is sealed and the next one waits; nothing runs until it opens
@@ -400,9 +400,11 @@ dsl41 query status --job "$JOB" -S "$S"
   (§6, steps 1 and 2), then reboot. The enabled units start at boot, and
   the launcher resumes the same root. No seal, and no reboot hold.
 - **Estate stop.** For a window that must outlast a reboot: take §2b's
-  reboot hold, then follow §2b's shape-1 steps: stop the engine unit, seal
-  and audit while the supervisor unit runs, request guarded maintenance, and
-  check that neither comes back. To start again, start the engine unit
+  reboot hold, then follow §2b's shape-1 steps: stop the engine unit, then
+  run `dsl41 estate quiesce` as the service account. It seals and audits
+  while the supervisor unit runs, requests guarded maintenance, and checks
+  that neither unit comes back and that nothing writes. A refusal names
+  what to wait for; run it again. To start again, start the engine unit
   (it opens the sealed period's successor), then release the hold.
 - **Seal.** Closing a period is an operator act at the estate's cutoff
   (§6a). A live seal stops the engine with exit 3. The next period opens
@@ -903,7 +905,7 @@ and when, is the site's retention decision (§2a).
 
 2. Hold the scheduled jobs, and let running work finish or end it (§6,
    steps 1 and 2).
-3. Seal, audit and stop, as §2b's shape-1 steps 1 to 6 do. The final seal
+3. Seal, audit and stop, as §2b's shape-1 steps do. The final seal
    commits a successor that nobody opens; it is the lineage's closing
    record. The audit attests the last period.
 4. Remove the estate's units, so that a stray `systemctl start` finds no
@@ -1314,30 +1316,58 @@ runs the deadman the period pinned. It is a development path (DL-396). A seal, l
 offline, refuses inside the closing period's retry horizon (period-model
 §9). The horizon counts
 from the last operator request, an `ON_HOLD` included; wait it out. A
-live seal stops the engine itself with exit 3, so it takes the place of
-steps 1 to 3 below. It does not replace the reboot hold: take the reboot
-hold before a live seal as before an offline one.
+live seal stops the engine itself with exit 3. Under shape 1 the verb
+below then finds the period sealed and skips its seal; under shape 2 the
+live seal takes the place of steps 1 to 3. It does not replace the
+reboot hold: take the reboot hold before a live seal as before an
+offline one.
 
-**Shape 1, a supervisor unit of its own** (the example units):
+**Shape 1, a supervisor unit of its own** (the example units). Two root
+steps, then one verb as the service account (DL-398):
 
 1. with the reboot hold taken (above), stop the engine unit:
    `systemctl stop dsl41-engine.service`. The supervisor unit keeps
    running;
-2. if the period ran detached, confirm the supervisor is still there:
-   `dsl41 supervise list --run-root <root>` answers `ok` while it is;
-3. seal offline and audit, as above;
-4. request maintenance as the service account:
-   `dsl41 supervise shutdown --run-root <root>`. The server excludes
-   engine startup and proves the service cgroup idle. Exit 0 means
-   completion; 2 means refusal; 4 means uncertain. Stop on 2 or 4 and
-   follow §3. The reloaded unit treats supervisor exit 8 as successful
-   maintenance and does not restart it;
-5. wait longer than the longer `RestartSec` of the two units (5 s in the
-   example units; wait 12 s). Then check that neither unit came back:
-   `systemctl is-active dsl41-engine.service dsl41-supervisor.service`
-   must print `inactive` or `failed` for each, never `active` or
-   `activating`. `activating` is a unit waiting to restart;
-6. run the no-writers check below.
+2. run `dsl41 estate quiesce` as the service account, with the seal's
+   options for the next period (§6a; the job recipe's seal shows them):
+
+```sh
+sudo -u dsl41 -H /opt/dsl41/.venv/bin/dsl41 estate quiesce \
+    --run-root "$RUN_ROOT" --estate-anchor "$ESTATE_ANCHOR" \
+    --next "$ESTATE/amer.jil" --next "$ESTATE/apac.jil" --next "$ESTATE/calendars.jil" \
+    --next "$ESTATE/emea.jil" --next "$ESTATE/global.jil" --next "$ESTATE/infra.jil" \
+    -p "$PROPERTIES" \
+    --next-detached --next-as-machine localhost --next-machine-policy strict --next-timezone UTC
+```
+
+The verb checks the two root steps and performs neither: a unit still
+enabled (a masked unit counts as held), or an engine unit still active,
+refuses and prints the root command to run. It then takes `leader.lock`,
+so an engine started during the seal and the audit is refused. It seals
+the period offline and audits it while the supervisor runs. It requests
+guarded maintenance as `supervise shutdown` does (§3), and hands
+`leader.lock` to the supervisor with that request. A process that takes
+the lock in that one request makes the supervisor refuse maintenance:
+the verb exits 2, the seal and the audit stand, and the lease goes back.
+It reads both units once after the supervisor's exit, and runs the
+no-writers check below. Each stage ends with one line: `quiesce:
+<stage>: ok`, `refused: <reason>` or `skipped: <reason>`.
+
+The verb never waits for a precondition. A stage that cannot pass yet
+refuses with exit 2 and names what to wait for: the end of the retry
+horizon, or the runs that are still live. Wait, then run the same
+command again. Its one bounded wait is the exit observation after a
+completion reply, five seconds at most. What the earlier stages did is
+durable, and a stage already done is skipped, so a rerun on a stopped
+estate exits 0. Maintenance with live runs refuses and prints them; the
+verb gives the lease and the lock back, and the runs go on. `--force
+terminate` ends them instead, as `supervise shutdown --force=terminate`
+does. Every other refusal names its own cause: the process that holds
+`leader.lock`, the controller that holds the lease, or the containment
+or unit policy §3 describes. A unit still deactivating is a refusal; run
+the verb again once it is inactive. Exit 4 is uncertain: a lost
+maintenance answer, or a unit its exit policy restarted. Read the unit,
+the process and `supervisor.log` before anything else (§3).
 
 **Shape 2, and an engine outside any service manager:**
 
@@ -1351,15 +1381,21 @@ hold before a live seal as before an offline one.
    supervisor service before relying on this backup procedure;
 5. run the no-writers check below.
 
-A tethered period has no supervisor. Under shape 1 it skips step 2; the
-supervisor unit still runs, so step 4 still applies. Under shape 2 it
-skips steps 2 and 4.
+A tethered period has no supervisor of its own. Under shape 1 the verb
+seals it without one, and maintenance still stops the supervisor unit.
+Under shape 2 it skips steps 2 and 4.
 
 **The no-writers check**, in every shape, before you copy anything: no
 `supervisor.pid`, no `supervisor.sock`, no engine holding `leader.lock`.
-`tests/test_restore_drill.py` asserts that both files are absent at this
-point, with a supervisor outside any service manager. The service drill
-runs shape 1's steps (§3's worked example). It waits past `RestartSec`,
+Under shape 1 it is the verb's last stage, which on Linux also finds no
+other process of the service account. The verb's own parent chain, such
+as the shell it was started from, does not count; any other process of
+the account refuses, named by pid and command, and so does one the scan
+cannot read. `tests/test_restore_drill.py`
+asserts that both files are absent at this point, with a supervisor
+outside any service manager. The service drill runs shape 1's steps
+(§3's worked example) and checks what the verb printed. It waits past
+`RestartSec`,
 copies the root and the anchor, deletes them, and restores them at the
 recorded paths. It then audits the lineage and opens the next period.
 Under shape 1, start a restored estate with `systemctl start
@@ -1456,7 +1492,8 @@ Decisions to make once, per site:
   per-run-root supervisor, and an engine restart (`--resume --detached`)
   reattaches to them instead of killing them. Detached is the production
   default. Inspect it with `dsl41 supervise list --run-root <root>`.
-  For maintenance, stop the engine and follow §3's guarded procedure.
+  For maintenance, stop the engine and follow §3's guarded procedure;
+  for an estate stop, run `dsl41 estate quiesce` (§2b).
   Plain `supervise shutdown` refuses active or indeterminate work.
   Explicit `--force=terminate` permits TERM/grace/KILL only for validated
   command groups. Both require the existing leader lock and verified
@@ -1569,6 +1606,12 @@ Stop the engine, then run as the service account:
 systemctl stop dsl41-engine.service
 sudo -u dsl41 /opt/dsl41/.venv/bin/dsl41 supervise shutdown --run-root <root>
 ```
+
+That stops the supervisor and leaves the period open. To stop the whole
+estate, sealed and audited, run `dsl41 estate quiesce` instead (§2b,
+DL-398): it sends this request after the seal and the audit, then checks
+both units and the writers. Both are the supervisor unit's stop, which
+its `Description=` names.
 
 Default shutdown refuses active or indeterminate work without signals.
 The server holds the existing engine lock through teardown and requires
@@ -2367,7 +2410,10 @@ pair is resume-safe.
 **Row 2, a note that does not say resume-safe.** Work at a boundary.
 First hold the scheduled jobs and let running work finish (§6's window,
 steps 1 and 2). Take the reboot hold (§2b). Then run §2b's shape-1
-steps 1 to 6 with the old venv. A physical roll needs a closing period
+steps with the old venv. An old venv without `estate quiesce` runs them
+one by one: stop the engine unit, the offline seal and `dsl41 audit`
+(§6a) while the supervisor runs, then `supervise shutdown` (§3), and
+check that neither unit comes back. A physical roll needs a closing period
 with no live execution and an attested seal (§6a). Then open the next
 period in the new root:
 
@@ -2433,9 +2479,10 @@ venv and that the engine resumed.
 **Row 4, a state-machine version change.** The new build cannot open the
 old estate's periods, and only the old venv can audit them (§6a). Drain
 as for row 3. Take the reboot hold (§2b). Then run §2b's shape-1 steps
-1 to 6 with the old venv: stop the engine unit, a final seal and audit
-while the supervisor runs, then guarded maintenance. Then start a new
-estate:
+with the old venv: stop the engine unit, a final seal and audit while the
+supervisor runs, then guarded maintenance. An old venv without `estate
+quiesce` runs them one by one: the offline seal and `dsl41 audit` (§6a),
+then `supervise shutdown` (§3). Then start a new estate:
 
 ```sh
 # activate the verified candidate with the atomic link replacement in §1
