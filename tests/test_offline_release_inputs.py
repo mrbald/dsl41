@@ -17,6 +17,20 @@ from test_offline_packaging import python312 as python312
 REPO = TOOLS.parents[1]
 
 
+@pytest.fixture(scope="module")
+def target_python(python312: str, tmp_path_factory: pytest.TempPathFactory) -> str:
+    """The target interpreter supplies pip independently of the test runner (DL-389)."""
+    target = tmp_path_factory.mktemp("offline-target-python") / "venv"
+    subprocess.run(
+        [python312, "-I", "-m", "venv", str(target)],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    return str(target / "bin/python")
+
+
 @pytest.fixture
 def inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     repo = tmp_path / "checkout"
@@ -170,7 +184,7 @@ def test_release_inputs_roundtrip_on_producer_python(
 )
 def test_builder_refuses_inputs_before_output_or_download(
     tmp_path: Path,
-    python312: str,
+    target_python: str,
     inputs: tuple[Path, Path, Path, Path],
     fault: str,
 ) -> None:
@@ -207,7 +221,7 @@ def test_builder_refuses_inputs_before_output_or_download(
     # pip's index is absent too: a reached download would fail independently (DL-396).
     shutil.rmtree(index)
     bundle = tmp_path / "refused-bundle"
-    result = _build(inputs, python312, bundle, trap)
+    result = _build(inputs, target_python, bundle, trap)
     assert result.returncode != 0
     assert "refused" in result.stderr
     assert not bundle.exists()
@@ -227,7 +241,7 @@ def test_builder_refuses_inputs_before_output_or_download(
 )
 def test_unsafe_exports_refuse_creation_and_import_even_with_matching_manifest(
     tmp_path: Path,
-    python312: str,
+    target_python: str,
     inputs: tuple[Path, Path, Path, Path],
     requirement: str,
 ) -> None:
@@ -249,7 +263,7 @@ def test_unsafe_exports_refuse_creation_and_import_even_with_matching_manifest(
     trap = tmp_path / "bin"
     marker = _trap(trap, "uv")
     bundle = tmp_path / "refused-bundle"
-    result = _build(inputs, python312, bundle, trap)
+    result = _build(inputs, target_python, bundle, trap)
     assert result.returncode != 0
     assert not bundle.exists()
     assert not marker.exists()
@@ -258,7 +272,7 @@ def test_unsafe_exports_refuse_creation_and_import_even_with_matching_manifest(
 @pytest.mark.parametrize("uv_present", [True, False])
 def test_builder_downloads_and_installs_both_profiles_without_uv(
     tmp_path: Path,
-    python312: str,
+    target_python: str,
     inputs: tuple[Path, Path, Path, Path],
     uv_present: bool,
 ) -> None:
@@ -268,14 +282,15 @@ def test_builder_downloads_and_installs_both_profiles_without_uv(
     marker = _trap(trap, "uv") if uv_present else trap / "uv-called"
     bundle = tmp_path / "bundle"
     originals = {path.name: path.read_bytes() for path in exports.iterdir()}
-    built = _build(inputs, python312, bundle, trap)
+    built = _build(inputs, target_python, bundle, trap)
     assert built.returncode == 0, built.stdout + built.stderr
     assert not marker.exists()
     assert {path.name: path.read_bytes() for path in exports.iterdir()} == originals
     for name, contents in originals.items():
         assert (bundle / "release-inputs" / name).read_bytes() == contents
     assert (
-        _tool(python312, "verify-inputs", repo, release, bundle / "release-inputs").returncode == 0
+        _tool(target_python, "verify-inputs", repo, release, bundle / "release-inputs").returncode
+        == 0
     )
     manifest = json.loads((bundle / "manifest.json").read_text())
     assert set(manifest["wheels"]) == {path.name for path in release.parent.glob("*.whl")}
@@ -285,9 +300,9 @@ def test_builder_downloads_and_installs_both_profiles_without_uv(
         assert requirement.read_bytes().startswith(originals[requirement.name])
         assert requirement.read_text().endswith(f"dsl41==1.0.0 --hash=sha256:{_sha(release)}\n")
         prefix = tmp_path / profile
-        prepared = _prepare(python312, bundle, prefix, profile)
+        prepared = _prepare(target_python, bundle, prefix, profile)
         assert prepared.returncode == 0, prepared.stdout + prepared.stderr
-        candidate = _candidate(python312, bundle, prefix, profile)
+        candidate = _candidate(target_python, bundle, prefix, profile)
         installed = subprocess.run(
             [
                 str(candidate / "bin/python"),
@@ -307,7 +322,7 @@ def test_builder_downloads_and_installs_both_profiles_without_uv(
         assert json.loads(installed.stdout) == expected
     retained_export = bundle / "release-inputs/requirements-ui.txt"
     retained_export.write_bytes(retained_export.read_bytes() + b"# tampered export\n")
-    assert _tool(python312, "candidate", bundle, tmp_path / "refused", "base").returncode != 0
+    assert _tool(target_python, "candidate", bundle, tmp_path / "refused", "base").returncode != 0
 
 
 @pytest.mark.parametrize("missing", ["wheel", "exports", "invalid-exports"])
@@ -342,7 +357,7 @@ def test_native_harness_checks_inputs_before_any_container_work(
 
 def test_export_producer_uses_locked_uv_upstream_and_preserves_selected_wheels(
     tmp_path: Path,
-    python312: str,
+    target_python: str,
     inputs: tuple[Path, Path, Path, Path],
 ) -> None:
     uv = shutil.which("uv")
@@ -379,7 +394,7 @@ def test_export_producer_uses_locked_uv_upstream_and_preserves_selected_wheels(
     selected = []
     for exports in (frozen, generated):
         bundle = tmp_path / ("bundle-" + exports.name)
-        result = _build((repo, release, exports, index), python312, bundle, trap)
+        result = _build((repo, release, exports, index), target_python, bundle, trap)
         assert result.returncode == 0, result.stdout + result.stderr
         selected.append({path.name: _sha(path) for path in (bundle / "wheels").iterdir()})
     assert selected[0] == selected[1]
