@@ -38,7 +38,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from dsl41 import runner_procid as _procid
 from dsl41.ir import CatalogIR, JobIR
@@ -50,6 +50,7 @@ from dsl41.runner_adapters import (
     SupervisedCommandAdapter,
     SupervisorClient,
     SupervisorListSuccess,
+    SupervisorRefused,
     SupervisorRunRow,
     SupervisorUnavailable,
     Terminated,
@@ -205,6 +206,26 @@ def _derive_runtime_profile(
     return RuntimeProfile.model_validate(values)
 
 
+#: how a detached launch gets its supervisor (DL-396). `attach` connects to the one that answers
+#: on the run root and forks nothing; `spawn` starts one when none answers. A launch option, not a
+#: `RuntimeProfile` field: it does not change what the period runs, only who started its supervisor.
+SupervisorLaunch = Literal["attach", "spawn"]
+
+
+class SupervisorAbsent(EngineError):
+    """An `attach` launch found no supervisor on its run root, and forked none (DL-396).
+
+    A subclass, because the verbs answer it with their own exit and remedy: `run` exits 1 so a
+    service manager retries it behind the supervisor unit, and the offline `seal` refuses with 2."""
+
+    def __init__(self, run_root: Path, detail: str | None = None) -> None:
+        # `detail` names a loss that is not plain absence (the transport dropped after an answer),
+        # so the operator reads the cause and not only the retryable verdict (DL-396)
+        base = f"no supervisor answers on {run_root}"
+        super().__init__(base if detail is None else f"{base}: {detail}")
+        self.run_root = run_root
+
+
 async def _return_lease(client: "SupervisorClient | None") -> None:
     """Give the supervisor lease back and close the transport, each step guaranteed whatever the
     one before it did (DL-145).
@@ -246,10 +267,19 @@ class Wiring:
 
 
 async def wire_from_profile(
-    run_root: Path, catalog: CatalogIR, profile: RuntimeProfile, *, start: datetime
+    run_root: Path,
+    catalog: CatalogIR,
+    profile: RuntimeProfile,
+    *,
+    start: datetime,
+    supervisor: SupervisorLaunch,
 ) -> Wiring:
     """Build adapters, scheduler and (when the profile says detached) the supervisor client from
     `profile`, with the scheduler started at `start`.
+
+    `supervisor` says how a detached profile gets its supervisor (DL-396): `attach` connects and
+    raises `SupervisorAbsent` when none answers; `spawn` starts one when none answers. Every caller
+    names it, so no verb forks a supervisor by omission. A tethered profile ignores it.
 
     `start` is the caller's (DL-145). This function reads no clock: a builder that took `now()`
     could put a scheduler on a different instant from the engine it is wired into.
@@ -271,9 +301,20 @@ async def wire_from_profile(
         if profile.execution_mode == "detached":
             client = SupervisorClient(run_root, deadman_s=deadman_s, machines=machines)
             try:
-                await client.ensure_running()
+                if supervisor == "attach":
+                    await client.connect()
+                else:
+                    await client.provision()
                 await client.acquire()
+            except SupervisorRefused as exc:
+                raise EngineError(f"supervisor unavailable: {exc}") from exc
             except SupervisorUnavailable as exc:
+                # under attach, a transport lost before the lease is held is absence, the
+                # condition a retry fixes; a supervisor that answered and refused is not (DL-396)
+                if supervisor == "attach":
+                    cause = str(exc)
+                    detail = None if cause.startswith("no supervisor answers") else cause
+                    raise SupervisorAbsent(run_root, detail) from exc
                 raise EngineError(f"supervisor unavailable: {exc}") from exc
             cmd: object = SupervisedCommandAdapter(
                 client,

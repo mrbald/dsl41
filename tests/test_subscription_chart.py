@@ -417,7 +417,12 @@ def _serve_with_a_client(
 
     async def scenario() -> tuple[int, list[Any]]:
         serve = cli_run._serve_run(
-            lower_source(_JIL), run_root, False, [], profile=runtime_profile_from_cli()
+            lower_source(_JIL),
+            run_root,
+            False,
+            [],
+            profile=runtime_profile_from_cli(),
+            supervisor="spawn",
         )
         # bounded: an engine that swallowed the error would serve on forever
         code = await asyncio.wait_for(serve, timeout=60)
@@ -683,7 +688,12 @@ def test_a_statechart_error_while_the_server_closes_keeps_a_sealed_exit_3(
 
     async def scenario() -> tuple[int, list[Any]]:
         serve = cli_run._serve_run(
-            lower_source(_JIL), run_root, False, [], profile=runtime_profile_from_cli()
+            lower_source(_JIL),
+            run_root,
+            False,
+            [],
+            profile=runtime_profile_from_cli(),
+            supervisor="spawn",
         )
         code = await asyncio.wait_for(serve, timeout=60)
         (client,) = clients

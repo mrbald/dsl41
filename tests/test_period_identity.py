@@ -2050,7 +2050,7 @@ def test_serve_wires_every_adapter_window_from_the_pinned_profile(
             self.deadman_s = deadman_s
             clients.append(self)
 
-        async def ensure_running(self) -> None:
+        async def provision(self) -> None:
             return None
 
         async def acquire(self) -> None:
@@ -2077,7 +2077,9 @@ def test_serve_wires_every_adapter_window_from_the_pinned_profile(
     monkeypatch.setattr(runner_startup, "start_run", _capture)
 
     with pytest.raises(EngineError, match="stop before the loop"):
-        asyncio.run(_serve_run(catalog, tmp_path / "root", False, [], profile=profile))
+        asyncio.run(
+            _serve_run(catalog, tmp_path / "root", False, [], profile=profile, supervisor="spawn")
+        )
 
     assert captured["adapters"]["CMD"].grace_seconds == 7.0
     assert captured["adapters"]["CMD"].settle_seconds == 11.0
@@ -2137,8 +2139,8 @@ def test_an_early_refusal_after_the_wiring_gives_back_the_lease_and_the_lock(
         ) -> None:
             self.deadman_s = deadman_s
 
-        async def ensure_running(self) -> None:
-            lease.append("ensure_running")
+        async def provision(self) -> None:
+            lease.append("provision")
 
         async def acquire(self) -> None:
             lease.append("acquire")
@@ -2153,10 +2155,10 @@ def test_an_early_refusal_after_the_wiring_gives_back_the_lease_and_the_lock(
     monkeypatch.setattr(runner_adapters, "SupervisorClient", _FakeSupervisorClient)
 
     drifted = runtime_profile_from_cli(timezone="Europe/Zurich", detached=True)
-    code = asyncio.run(_serve_run(catalog, run_root, True, [], profile=drifted))
+    code = asyncio.run(_serve_run(catalog, run_root, True, [], profile=drifted, supervisor="spawn"))
 
     assert code == 2  # the run never started: the pin says another zone
-    assert lease == ["ensure_running", "acquire", "release", "close"]
+    assert lease == ["provision", "acquire", "release", "close"]
     # the raw-fd lock conflicts with a retry in THIS process, so a held one
     # would refuse here -- which is exactly what an operator's corrected
     # re-run would have met
@@ -2182,7 +2184,7 @@ def test_wire_from_profile_detached_takes_the_lease_in_order_and_close_returns_i
     calls: list[str] = []
 
     async def _ensure(self: Any) -> None:
-        calls.append("ensure_running")
+        calls.append("provision")
 
     async def _acquire(self: Any) -> None:
         calls.append("acquire")
@@ -2193,18 +2195,18 @@ def test_wire_from_profile_detached_takes_the_lease_in_order_and_close_returns_i
     async def _close(self: Any) -> None:
         calls.append("close")
 
-    monkeypatch.setattr(runner_adapters.SupervisorClient, "ensure_running", _ensure)
+    monkeypatch.setattr(runner_adapters.SupervisorClient, "provision", _ensure)
     monkeypatch.setattr(runner_adapters.SupervisorClient, "acquire", _acquire)
     monkeypatch.setattr(runner_adapters.SupervisorClient, "release", _release)
     monkeypatch.setattr(runner_adapters.SupervisorClient, "close", _close)
 
     async def _drive() -> None:
-        wiring = await wire_from_profile(tmp_path, catalog, profile, start=_NOW)
-        assert calls == ["ensure_running", "acquire"]
+        wiring = await wire_from_profile(tmp_path, catalog, profile, start=_NOW, supervisor="spawn")
+        assert calls == ["provision", "acquire"]
         assert wiring.client is not None
         assert wiring.deadman_s == 41.0
         await wiring.close()
-        assert calls == ["ensure_running", "acquire", "release", "close"]
+        assert calls == ["provision", "acquire", "release", "close"]
 
     asyncio.run(_drive())
 
@@ -2269,7 +2271,7 @@ def test_a_lease_release_that_raises_still_closes_the_journal_and_the_lock(
         ) -> None:
             self.deadman_s = deadman_s
 
-        async def ensure_running(self) -> None:
+        async def provision(self) -> None:
             return None
 
         async def acquire(self) -> None:
@@ -2298,7 +2300,7 @@ def test_a_lease_release_that_raises_still_closes_the_journal_and_the_lock(
 
     profile = runtime_profile_from_cli(detached=True)
     with pytest.raises(OSError, match="died mid-RELEASE"):
-        asyncio.run(_serve_run(catalog, run_root, False, [], profile=profile))
+        asyncio.run(_serve_run(catalog, run_root, False, [], profile=profile, supervisor="spawn"))
     # the transport and the journal both closed, in the order they are owed
     assert steps == ["release", "close", "journal"]
     retry = acquire_run_root(run_root)  # and the lock came back
@@ -2333,7 +2335,11 @@ def test_a_failing_journal_close_still_gives_the_leader_lock_back(
     monkeypatch.setattr(runner_journal.Journal, "close", _bad_close)
 
     with pytest.raises(OSError, match="fsync failed on the way out"):
-        asyncio.run(_serve_run(catalog, run_root, False, [], profile=runtime_profile_from_cli()))
+        asyncio.run(
+            _serve_run(
+                catalog, run_root, False, [], profile=runtime_profile_from_cli(), supervisor="spawn"
+            )
+        )
     retry = acquire_run_root(run_root)
     retry.release()
 
@@ -2366,8 +2372,8 @@ def test_wire_from_profile_gives_back_a_lease_it_cannot_finish_wiring(
         ) -> None:
             self.deadman_s = deadman_s
 
-        async def ensure_running(self) -> None:
-            lease.append("ensure_running")
+        async def provision(self) -> None:
+            lease.append("provision")
 
         async def acquire(self) -> None:
             lease.append("acquire")
@@ -2383,14 +2389,16 @@ def test_wire_from_profile_gives_back_a_lease_it_cannot_finish_wiring(
 
     profile = RuntimeProfile(execution_mode="detached")
     with pytest.raises(EngineError, match="no calendar definition"):
-        asyncio.run(wire_from_profile(tmp_path, catalog, profile, start=_NOW))
-    assert lease == ["ensure_running", "acquire", "release", "close"]
+        asyncio.run(wire_from_profile(tmp_path, catalog, profile, start=_NOW, supervisor="spawn"))
+    assert lease == ["provision", "acquire", "release", "close"]
 
     # the TETHERED half of the same refusal: there is no lease to give
     # back, and the teardown must not invent a client to close
     lease.clear()
     with pytest.raises(EngineError, match="no calendar definition"):
-        asyncio.run(wire_from_profile(tmp_path, catalog, RuntimeProfile(), start=_NOW))
+        asyncio.run(
+            wire_from_profile(tmp_path, catalog, RuntimeProfile(), start=_NOW, supervisor="spawn")
+        )
     assert lease == []
 
 
@@ -2408,9 +2416,9 @@ def test_wire_from_profile_refuses_a_supervisor_that_cannot_come_up(
     async def _boom(self: Any) -> None:
         raise runner_adapters.SupervisorUnavailable("no socket answered")
 
-    monkeypatch.setattr(runner_adapters.SupervisorClient, "ensure_running", _boom)
+    monkeypatch.setattr(runner_adapters.SupervisorClient, "provision", _boom)
     with pytest.raises(EngineError, match="supervisor unavailable: no socket answered"):
-        asyncio.run(wire_from_profile(tmp_path, catalog, profile, start=_NOW))
+        asyncio.run(wire_from_profile(tmp_path, catalog, profile, start=_NOW, supervisor="spawn"))
 
 
 _CAL_JIL = (

@@ -434,7 +434,7 @@ def test_cm09_five_failed_renewals_quarantine_the_host_and_new_work_is_held(
         run_root = short_root / "run"
         run_root.mkdir(parents=True)
         client = SupervisorClient(run_root, deadman_s=deadman)
-        await client.ensure_running()
+        await client.provision()
         sup_pid = json.loads((run_root / "supervisor.pid").read_text())["pid"]
         await client.acquire()
         engine = start_run(

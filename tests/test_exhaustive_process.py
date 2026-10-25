@@ -777,7 +777,7 @@ class _FakeSupervisor:
         self.writers.clear()
 
 
-_CLIENT_EVENTS = ("ensure_running", "reconnect", "request", "acquire", "eof", "cancel", "close")
+_CLIENT_EVENTS = ("connect", "reconnect", "request", "acquire", "eof", "cancel", "close")
 
 
 async def _client_event(client: SupervisorClient, peer: _FakeSupervisor, event: str) -> None:
@@ -785,8 +785,8 @@ async def _client_event(client: SupervisorClient, peer: _FakeSupervisor, event: 
     client's own refusal and passes; anything else propagates."""
     with contextlib.suppress(SupervisorUnavailable):
         match event:
-            case "ensure_running":
-                await client.ensure_running()
+            case "connect":
+                await client.connect()
             case "reconnect":
                 await client.reconnect()
             case "request":
@@ -836,7 +836,7 @@ def test_every_client_event_in_every_reached_client_state_takes_a_declared_trans
 ) -> None:
     """supervisor_client. Against a peer on a real unix socket, a
     breadth-first walk applies every event to every state it reaches, keyed on
-    (phase, writer held, token held). The events: `ensure_running`,
+    (phase, writer held, token held). The events: `connect`,
     `reconnect`, a request, `acquire`, the peer closing the connection (EOF),
     a request cancelled while its reply is outstanding, and `close`. The
     walk reaches disconnected; connected and lost (by EOF, writer kept; by a
@@ -847,17 +847,16 @@ def test_every_client_event_in_every_reached_client_state_takes_a_declared_trans
     configuration it met: the tier never posts to a closed client, and no
     background task handed a statechart error to `_fail`.
 
-    Left out: spawning a supervisor. `ensure_running` spawns one when its
-    connect is refused, as it always is on a closed client, so the test
-    replaces `_spawn_supervisor` with a SupervisorUnavailable. A refused
-    connect posts nothing."""
+    Left out: spawning a supervisor. `connect` forks none (DL-396), so the
+    test replaces `_spawn_supervisor` with an assertion failure: a fork on
+    any path fails the walk. A refused connect posts nothing."""
     sock = short_root / "supervisor.sock"
     problems: list[str] = []
     executors: list[_SpiedExecutor] = []
     clients: list[SupervisorClient] = []
 
     def no_spawn() -> None:
-        raise SupervisorUnavailable("the test spawns no supervisor")
+        raise AssertionError("a client event forked a supervisor")
 
     async def build(path: tuple[str, ...]) -> SupervisorClient:
         machines = _SpiedExecutor()

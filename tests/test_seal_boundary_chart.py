@@ -612,7 +612,12 @@ def test_dsl41_run_exits_7_when_a_seal_meets_a_statechart_error(
         first = "seal_boundary _PendingSeal('r-seal-1'): no row and no deferral for exception"
     jil = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
     serve = cli_run._serve_run(
-        lower_source(jil), run_root, False, [], profile=runtime_profile_from_cli()
+        lower_source(jil),
+        run_root,
+        False,
+        [],
+        profile=runtime_profile_from_cli(),
+        supervisor="spawn",
     )
     # bounded: an engine that swallowed the error would serve on forever
     code = asyncio.run(asyncio.wait_for(serve, timeout=60))
@@ -657,7 +662,12 @@ def test_a_statechart_error_at_the_committed_post_leaves_the_seal_durable(
     _gap(monkeypatch, tmp_path, "03")
     jil = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
     serve = cli_run._serve_run(
-        lower_source(jil), run_root, False, [], profile=runtime_profile_from_cli()
+        lower_source(jil),
+        run_root,
+        False,
+        [],
+        profile=runtime_profile_from_cli(),
+        supervisor="spawn",
     )
     code = asyncio.run(asyncio.wait_for(serve, timeout=60))
     assert code == 7

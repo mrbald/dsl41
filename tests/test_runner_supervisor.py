@@ -943,7 +943,7 @@ def test_cancelled_request_poisons_and_reconnects(short_root: Path) -> None:
 
         server = await asyncio.start_unix_server(handle, path=str(short_root / "supervisor.sock"))
         client = SupervisorClient(short_root)
-        await client.ensure_running()
+        await client.connect()
         tok1 = await client.acquire()
         task = asyncio.ensure_future(client.list_runs())
         await asyncio.sleep(0.2)  # LIST written; reply held; task parks on its future
@@ -979,7 +979,7 @@ def test_renew_loop_reacquires_after_lease_lapse(short_root: Path) -> None:
 
         async def scenario() -> tuple[int, int | None, SupervisorListReply]:
             client = SupervisorClient(short_root)
-            await client.ensure_running()
+            await client.connect()
             client._RENEW_EVERY_S = 0.6  # first renew lands AFTER the lease lapses
             tok1 = await client.acquire(ttl_s=0.2)
             await asyncio.sleep(1.5)  # lapse -> stale RENEW -> re-ACQUIRE cycles
@@ -1022,7 +1022,7 @@ def test_renewal_resumes_after_the_client_gave_up(short_root: Path, monkeypatch)
         gave_up: list[float] = []
         client.on_unreachable = lambda: gave_up.append(time.monotonic())
         try:
-            await client.ensure_running()
+            await client.connect()
             await client.acquire()
             first.kill()
             first.wait()
@@ -1173,7 +1173,7 @@ def test_dl173_every_mutating_verbs_wire_request_carries_the_current_token(
 
         server = await asyncio.start_unix_server(handle, path=str(short_root / "supervisor.sock"))
         client = SupervisorClient(short_root)
-        await client.ensure_running()
+        await client.connect()
         tok1 = await client.acquire()
         tok2 = await client.acquire()  # re-ACQUIRE: presents tok1 to prove incumbency
         # RENEW has no public non-loop method; this is the exact shape
@@ -1243,7 +1243,7 @@ def test_dl173_ping_carries_token_and_incarnation_and_is_still_answered(
 
         server = await asyncio.start_unix_server(handle, path=str(short_root / "supervisor.sock"))
         client = SupervisorClient(short_root)
-        await client.ensure_running()
+        await client.connect()
         await client.acquire()
         ping_resp = await client._request({"cmd": "PING"})
         await client.close()
@@ -1694,7 +1694,7 @@ def _adapters(client: SupervisorClient) -> dict:
 
 async def _resume_and_finish(run_root: Path, catalog=None) -> tuple[str, list]:
     client = SupervisorClient(run_root)
-    await client.ensure_running()
+    await client.provision()
     await client.acquire()
     engine = await resume_run(
         catalog if catalog is not None else CATALOG,
@@ -1862,7 +1862,7 @@ async def _resume_and_watch(run_root: Path, command_pid: int) -> bool:
     the outbox did."""
     catalog = lower_source("insert_job: slow\njob_type: c\ncommand: sleep 300; exit 0\n")
     client = SupervisorClient(run_root)
-    await client.ensure_running()
+    await client.provision()
     await client.acquire()
     engine = await resume_run(
         catalog,
@@ -2000,7 +2000,7 @@ def test_kill_supervisor_midrun_engine_resolves_via_spool(short_root: Path) -> N
         run_root = short_root / "run"
         run_root.mkdir(parents=True)
         client = SupervisorClient(run_root)
-        await client.ensure_running()
+        await client.provision()
         await client.acquire()
         catalog = lower_source("insert_job: slow\njob_type: c\ncommand: sleep 60\n")
         engine = __import__("dsl41.runner_startup", fromlist=["start_run"]).start_run(
@@ -2055,7 +2055,7 @@ def test_oracle_kill_detached_terminates(short_root: Path) -> None:
         run_root = short_root / "run"
         run_root.mkdir(parents=True)
         client = SupervisorClient(run_root)
-        await client.ensure_running()
+        await client.provision()
         sup_pid = json.loads((run_root / "supervisor.pid").read_text())["pid"]
         await client.acquire()
         catalog = lower_source("insert_job: slow\njob_type: c\ncommand: sleep 60\n")
@@ -3743,7 +3743,7 @@ def test_sigterm_during_a_shutdown_wait_is_answered_once(short_root: Path) -> No
         teardown_supervisor(short_root, proc)
 
 
-def test_ensure_running_on_a_connected_client_supersedes_the_connection(
+def test_connect_on_a_connected_client_supersedes_the_connection(
     short_root: Path,
 ) -> None:
     """supervisor_client.02. A second connect replaces a live connection: the
@@ -3755,10 +3755,10 @@ def test_ensure_running_on_a_connected_client_supersedes_the_connection(
         client = SupervisorClient(short_root)
         phases = [client.phase()]
         try:
-            await client.ensure_running()
+            await client.connect()
             phases.append(client.phase())
             old_writer, old_lost = client._writer, client.lost
-            await client.ensure_running()
+            await client.connect()
             phases.append(client.phase())
             assert old_writer is not None and old_writer.is_closing()
             listing = await client.list_runs()

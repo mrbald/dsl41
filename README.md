@@ -458,6 +458,7 @@ dsl41 run jobs.jil --run-root ./run1 --detached   # CMD jobs run under a supervi
 dsl41 run jobs.jil --run-root ./run1 --detached --resume   # reattach, no re-run
 dsl41 supervise list --run-root ./run1            # what the supervisor is holding
 dsl41 supervise start --run-root ./run1           # run the supervisor in the foreground
+dsl41 run jobs.jil --run-root ./run1 --detached --supervisor attach  # use that one, start none
 dsl41 run jobs.jil --run-root ./run1 --detached --deadman 600  # opt into eviction
 ```
 
@@ -466,7 +467,12 @@ per run root) owns the lifelines of the job wrappers, so the parent of the
 jobs is the supervisor, not the engine. If the engine stops or crashes, the
 jobs continue. `--resume --detached` reconnects and reattaches to the runs
 still alive, with no re-run, and resolves from the spool any run that
-finished meanwhile. The engine holds a single fencing lease. The socket
+finished meanwhile. The engine holds a single fencing lease.
+By default `run --detached` starts a supervisor when none answers on the
+run root. Under a supervisor service, pass `--supervisor attach`: the
+engine connects to the running supervisor, starts none, and exits 1 when
+none answers. The offline `dsl41 seal` attaches by default and starts one
+only with `--supervisor spawn`. The socket
 protocol is frozen in
 [docs/supervisor-protocol.md](docs/supervisor-protocol.md).
 `supervise` is read-only unless you ask it to shut down or start.

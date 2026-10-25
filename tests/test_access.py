@@ -1082,6 +1082,7 @@ def test_access_run_installs_signal_handlers_before_the_socket_binds(
             [],
             profile=RuntimeProfile(),
             access_map=map_path,
+            supervisor="spawn",
         )
 
     assert asyncio.run(scenario()) == 2

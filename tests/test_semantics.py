@@ -848,7 +848,7 @@ def test_fw_existence_reaches_the_adapter_from_the_pinned_profile(tmp_path: Path
     catalog = lower_source("insert_job: w\njob_type: f\nmachine: m1\nwatch_file: /tmp/x\n")
 
     async def wire(profile: RuntimeProfile) -> str:
-        wiring = await wire_from_profile(tmp_path, catalog, profile, start=T0)
+        wiring = await wire_from_profile(tmp_path, catalog, profile, start=T0, supervisor="spawn")
         try:
             fw = wiring.adapters["FW"]
             assert isinstance(fw, FileWatcherAdapter)
@@ -1119,7 +1119,7 @@ def test_run_without_a_staged_bundle_wires_and_pins_the_calendar_switch(
     profile = RuntimeProfile(semantics=BOTH)
     catalog = lower_source(_WEKR_JIL + "\n" + _ICED_JIL)
     with pytest.raises(EngineError, match="stop before the loop"):
-        asyncio.run(_serve_run(catalog, run_root, False, [], profile=profile))
+        asyncio.run(_serve_run(catalog, run_root, False, [], profile=profile, supervisor="spawn"))
     assert seen == {"scheduler": semantics.resolve(BOTH), "engine": semantics.resolve(BOTH)}
     manifest = read_period_manifest(run_root)
     assert manifest is not None and manifest.runtime_profile.semantics == BOTH
@@ -1393,7 +1393,7 @@ def test_wire_from_profile_builds_the_scheduler_under_the_profile_s_switch(
     )
 
     async def wired(profile: RuntimeProfile) -> str:
-        wiring = await wire_from_profile(tmp_path, catalog, profile, start=T0)
+        wiring = await wire_from_profile(tmp_path, catalog, profile, start=T0, supervisor="spawn")
         await wiring.close()
         assert wiring.scheduler is not None
         return wiring.scheduler.semantics.dst_start_times

@@ -809,7 +809,23 @@ class _NeverPublishes:
         return None  # alive, and its socket never appears
 
 
-def test_ensure_running_gives_up_after_the_spawn_attempt_limit(tmp_path: Path) -> None:
+def test_connect_forks_nothing_when_no_supervisor_answers(tmp_path: Path) -> None:
+    """DL-396: `connect` attaches or raises; only `provision` may fork."""
+    client = SupervisorClient(tmp_path)
+    spawns: list[int] = []
+
+    def spawn() -> _NeverStarted:
+        spawns.append(1)
+        return _NeverStarted()
+
+    client._spawn_supervisor = spawn  # type: ignore[method-assign, assignment]
+    with pytest.raises(SupervisorUnavailable, match="no supervisor answers on"):
+        asyncio.run(client.connect())
+    assert spawns == []
+    assert client.phase() == "disconnected"
+
+
+def test_provision_gives_up_after_the_spawn_attempt_limit(tmp_path: Path) -> None:
     client = SupervisorClient(tmp_path)
     spawns: list[int] = []
 
@@ -819,11 +835,11 @@ def test_ensure_running_gives_up_after_the_spawn_attempt_limit(tmp_path: Path) -
 
     client._spawn_supervisor = spawn  # type: ignore[method-assign, assignment]
     with pytest.raises(SupervisorUnavailable, match=r"3 spawn attempt\(s\)"):
-        asyncio.run(client.ensure_running())
+        asyncio.run(client.provision())
     assert len(spawns) == _adapters._SPAWN_ATTEMPTS
 
 
-def test_ensure_running_gives_up_when_the_window_passes_with_a_live_unpublished_child(
+def test_provision_gives_up_when_the_window_passes_with_a_live_unpublished_child(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _patch_monotonic(monkeypatch, 6.0)  # the 10 s window is gone after two probes
@@ -836,7 +852,7 @@ def test_ensure_running_gives_up_when_the_window_passes_with_a_live_unpublished_
 
     client._spawn_supervisor = spawn  # type: ignore[method-assign, assignment]
     with pytest.raises(SupervisorUnavailable, match=r"1 spawn attempt\(s\)"):
-        asyncio.run(client.ensure_running())
+        asyncio.run(client.provision())
     assert spawns == [1]
 
 

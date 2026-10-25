@@ -546,7 +546,11 @@ open it with `dsl41 run --resume --run-root <run>/engine <new estate files>`, �
 
 Which mode you get is decided by the LOCK and never by a flag. There is no
 `--offline`: an engine that holds `leader.lock` IS a live engine, and a
-flag would let you assert something the estate can prove.
+flag would let you assert something the estate can prove. One flag does
+exist for a detached night: the offline seal attaches to the night's
+supervisor and starts none, so with the supervisor gone it refuses with
+exit 2 and names the remedy; `--supervisor spawn` starts one for the
+boundary (DL-396).
 
 *Why.* A boundary is a RECORD, not a directory (`docs/period-model.md`
 §6, §7). The cutoff freezes admission at one instant T, drains every

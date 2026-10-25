@@ -9,13 +9,14 @@ retention allows. `cli.py` assembles the `estate` sub-app.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import typer
 
 from dsl41.cli_common import (
     PERMIT_UNKNOWN,
     PROPERTIES,
+    SupervisorChoice,
     check_base_tz,
     command_outcome,
     confirmed_resume_refusal,
@@ -41,7 +42,7 @@ if TYPE_CHECKING:
     from dsl41.period import Manifest, RuntimeProfile, StagedManifest
     from dsl41.runner import Engine
     from dsl41.runner_ledger import LeaderLock
-    from dsl41.runner_startup import Wiring
+    from dsl41.runner_startup import SupervisorLaunch, Wiring
     from dsl41.seal import Seal, StagedNextPeriod
 
 
@@ -198,6 +199,15 @@ def seal(
         help="The next period's semantic switches. Repeatable. See 'dsl41 run"
         " --help' for --semantics.",
     ),  # runner-design ss8a, DL-252
+    supervisor: SupervisorChoice = typer.Option(
+        SupervisorChoice.attach,
+        "--supervisor",
+        metavar="MODE",
+        help="Offline, for a detached period: how this command reaches the"
+        " period's supervisor, attach or spawn. attach, the default, connects to the running"
+        " one and refuses when none answers. spawn starts one with the"
+        " period's pinned deadman, for development. A live seal ignores it.",
+    ),  # DL-396
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
 ) -> None:
@@ -209,7 +219,8 @@ def seal(
     control socket; the engine runs the cutoff and exits with code 3.
     Offline: nothing leads it, so this command takes the locks, runs
     recovery, and performs the boundary itself. The lock decides which,
-    not a flag.
+    not a flag. Offline, a detached period needs its supervisor running:
+    with none answering, the seal refuses unless --supervisor spawn.
 
     After the seal, open the next period with 'dsl41 run --resume' on
     the same root or 'dsl41 run --open-from' into a fresh one. A period
@@ -270,6 +281,7 @@ def seal(
                     actor,
                     request_id,
                     lock,
+                    supervisor.value,
                 )
             )
         )
@@ -433,7 +445,7 @@ def _load_closing_catalog(run_root: Path, pinned: "Manifest") -> "tuple[CatalogI
 
 
 def _offline_seal_request(
-    engine: "Engine",
+    engine: "Engine | None",
     retry: "Seal | None",
     request_id: "str | None",
     staged: "StagedNextPeriod",
@@ -441,18 +453,22 @@ def _offline_seal_request(
     force_seal: bool,
     actor: str,
 ) -> "SealRequest":
-    """The `SealRequest` the offline sealer submits as its one boundary."""
+    """The `SealRequest` the offline sealer submits as its one boundary. A retry of a committed
+    boundary needs no engine; a fresh request takes its envelope from the resumed one."""
     import uuid
 
     from dsl41.boundary import SealRequest
 
+    # ss2.2's retry route: a retry carries the envelope its ORIGINAL attempt carried, because
+    # the stored decision is fingerprinted over it. The engine's CURRENT header, which
+    # `resume_run` has moved to the next period, names a different command, and offline
+    # nothing would recognise the retry before it closed a SECOND period (DL-151).
+    envelope: "Seal | Engine | None" = retry if retry is not None else engine
+    if envelope is None:
+        raise ValueError("a fresh seal request takes its envelope from the resumed engine")
     return SealRequest(
-        # ss2.2's retry route: a retry carries the envelope its ORIGINAL attempt carried, because
-        # the stored decision is fingerprinted over it. The engine's CURRENT header, which
-        # `resume_run` has moved to the next period, names a different command, and offline
-        # nothing would recognise the retry before it closed a SECOND period (DL-151).
-        baseline_id=retry.baseline_id if retry is not None else engine.baseline_id,
-        epoch=retry.epoch if retry is not None else engine.epoch,
+        baseline_id=envelope.baseline_id,
+        epoch=envelope.epoch,
         request_id=request_id or str(uuid.uuid4()),
         next_period=staged,
         stage_digest=staged.stage_digest,
@@ -472,6 +488,7 @@ async def _offline_seal(
     actor: str,
     request_id: "str | None",
     lock: "LeaderLock",
+    supervisor: "SupervisorLaunch",
 ) -> int:
     """ss7 offline mode: no engine, so this process leads exactly one boundary.
 
@@ -482,7 +499,8 @@ async def _offline_seal(
     period's identity is the manifest's."""
     from dsl41.runner_admission import refuse_reserved_request_id
     from dsl41.runner_clock import EngineError, RealClock
-    from dsl41.runner_startup import resume_run, wire_from_profile
+    from dsl41.period import wal_path
+    from dsl41.runner_startup import SupervisorAbsent, resume_run, wire_from_profile
 
     # this path builds its `SealRequest` without an envelope, so the reserved prefix is refused
     # here, as `parse_envelope` does on the socket
@@ -503,6 +521,25 @@ async def _offline_seal(
     staged, staged_manifest, _ = _stage_next(
         run_root, next_files, profile, permit_unknown, properties
     )
+    # an exact retry of a committed boundary is answered from the lineage on disk before any
+    # supervisor is wired: the answer needs no engine (period-model ss2.2, DL-396)
+    early = _committed_boundary(run_root, request_id)
+    if early is not None:
+        answered = _answer_from_committed(
+            early,
+            _offline_seal_request(
+                None, early, request_id, staged, force_seal=force_seal, actor=actor
+            ),
+            run_root,
+            estate_anchor,
+            # no recovery ran here: the next period is open on this root only if its WAL
+            # segment exists (period-model ss1.1), as on a root rolled from the anchor (DL-169)
+            next_period=(
+                "open" if wal_path(run_root, early.next_period.period_id).exists() else "ready"
+            ),
+        )
+        if answered is not None:
+            return answered
     wiring: "Wiring | None" = None
     #: what the body raised, so the lease's teardown does not mask it
     failed: BaseException | None = None
@@ -514,6 +551,7 @@ async def _offline_seal(
                 catalog,
                 pinned.runtime_profile,
                 start=now,
+                supervisor=supervisor,
             )
             engine = await resume_run(
                 catalog,
@@ -528,13 +566,20 @@ async def _offline_seal(
                 anchor_dir=estate_anchor,
                 machines=wiring.machines,
             )
+        except SupervisorAbsent as exc:
+            return refuse(
+                f"{exc}; start the supervisor service, or pass --supervisor spawn to start one"
+                " in this session"
+            )
         except EngineError as exc:
             return refuse(exc)
         retry = _committed_boundary(run_root, request_id)
         request = _offline_seal_request(
             engine, retry, request_id, staged, force_seal=force_seal, actor=actor
         )
-        answered = _answer_from_committed(retry, request, run_root, estate_anchor)
+        answered = _answer_from_committed(
+            retry, request, run_root, estate_anchor, next_period="opened here"
+        )
         if answered is not None:
             await _close_engine(engine)
             return answered
@@ -571,8 +616,15 @@ def _answer_from_committed(
     request: "SealRequest",
     run_root: Path,
     estate_anchor: "Path | None",
+    *,
+    next_period: "Literal['opened here', 'open', 'ready']",
 ) -> int | None:
     """ss2.2's retry route offline: answer from the boundary that already committed, or None.
+
+    `next_period` is where the root stands, said truthfully for each path (DL-396): `opened here`
+    when this command's recovery opened it; `open` when the early answer from the lineage on disk
+    finds its WAL segment (period-model ss1.1), as on a root rolled from the anchor; `ready` when
+    it finds none.
 
     The live path gets this from the period N+1 engine's `seal` record
     (`ControlServer._committed_seal`). Offline, `runner_control.committed_retry` is applied to the
@@ -595,11 +647,16 @@ def _answer_from_committed(
             f"request_id {request.request_id} already named the boundary that closed"
             f" period {seal.period_id} under a different envelope: " + RETRY_SWAP_REASON
         )
+    period = seal.next_period.period_id
+    where = {
+        "opened here": f"This root is at period {period}, which the recovery this command ran"
+        " has opened",
+        "open": f"This root is at period {period}, already open",
+        "ready": f"period {period} is ready to open",
+    }[next_period]
     typer.echo(
         f"period {seal.period_id} was already closed by request_id"
-        f" {request.request_id}: seal {seal.digest}. No second boundary."
-        f" This root is at period {seal.next_period.period_id}, which the"
-        " recovery this command ran has opened"
+        f" {request.request_id}: seal {seal.digest}. No second boundary. {where}"
     )
     say_next(run_root, estate_anchor)
     return 0

@@ -523,6 +523,7 @@ def test_a_crash_exits_1_and_5_is_retired(
             False,
             [],
             profile=runtime_profile_from_cli(),
+            supervisor="spawn",
         )
     )
     assert exit_code == 1

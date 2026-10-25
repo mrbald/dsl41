@@ -686,6 +686,7 @@ def test_a_time_half_stop_exits_6_and_a_crash_exits_1(
             False,
             [],
             profile=runtime_profile_from_cli(),
+            supervisor="spawn",
         )
     )
     assert exit_code == code

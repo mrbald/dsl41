@@ -817,7 +817,11 @@ async def _start_detached_night(base: Path) -> _LiveNight:
     # again either
     try:
         wiring = await wire_from_profile(
-            run_root, catalog, DETACHED, start=datetime.now(UTC).replace(tzinfo=None)
+            run_root,
+            catalog,
+            DETACHED,
+            start=datetime.now(UTC).replace(tzinfo=None),
+            supervisor="spawn",
         )
         sources = [SourceFile(path=jf.file, text=render_preserve(jf)) for jf in parsed]
         staged = stage_manifest(
@@ -1167,7 +1171,11 @@ async def _reopen_detached(night: _LiveNight, catalog):
     catalog. The night's engine and wiring become C2's."""
     await _stop_engine(night)
     wiring = await wire_from_profile(
-        night.run_root, catalog, DETACHED, start=datetime.now(UTC).replace(tzinfo=None)
+        night.run_root,
+        catalog,
+        DETACHED,
+        start=datetime.now(UTC).replace(tzinfo=None),
+        supervisor="spawn",
     )
     engine = await resume_run(
         catalog,
@@ -1707,7 +1715,7 @@ def test_b2_a_restarted_supervisor_cannot_prove_the_seal(
             # `_await_outcome` by now
             gate = _park_reconciliation(monkeypatch)
             _kill_group(night.run_root)  # the operator's restart: -9 and come back
-            await client.ensure_running()
+            await client.provision()
             await client.acquire()
             # the fixture's own check that a restart really happened; the
             # engine's objection below is about the LIST, not this value

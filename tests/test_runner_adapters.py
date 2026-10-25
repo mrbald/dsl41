@@ -531,7 +531,7 @@ def _cancel_in_a_detached_spawn(
         # inside `readline` once connected
         monkeypatch.setattr(asyncio.StreamReader, "readline", holding_readline)
         client = SupervisorClient(run_root)
-        await client.ensure_running()
+        await client.provision()
         await client.acquire()
         detach = DetachSignal()
         ctx = AdapterContext(clock=RealClock(), run_root=run_root, run_id=run_id, detach=detach)
@@ -630,7 +630,7 @@ def test_dl356_a_kill_before_the_spawn_left_ends_on_unknown_run(
 
         async def scenario() -> bool:
             client = SupervisorClient(short_root)
-            await client.ensure_running()
+            await client.connect()
             await client.acquire()
             real_ensure = client._ensure_connected
             parked = asyncio.Event()
@@ -1906,10 +1906,10 @@ def test_dl75_the_per_wait_list_recheck_interval_is_seconds_not_poll_counts(
     assert later >= 1, "the interval elapsed and the re-check never happened"
 
 
-def test_dl210_ensure_running_respawns_a_supervisor_that_exits_before_publishing(
+def test_dl210_provision_respawns_a_supervisor_that_exits_before_publishing(
     monkeypatch,
 ) -> None:
-    """Breaks when `ensure_running` waits its whole window on one spawn that
+    """Breaks when `provision` waits its whole window on one spawn that
     already exited. Exit 1 is "another supervisor owns this root", a
     transient (an old one still tearing down) that the runbook retries
     through systemd; the engine's own spawn retries it inside its window.
@@ -1938,7 +1938,7 @@ def test_dl210_ensure_running_respawns_a_supervisor_that_exits_before_publishing
     monkeypatch.setattr(client, "_spawn_supervisor", flaky)
 
     async def scenario() -> None:
-        await client.ensure_running()
+        await client.provision()
         try:
             assert isinstance(await client.list_runs(), SupervisorListSuccess)
         finally:

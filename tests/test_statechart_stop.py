@@ -336,7 +336,9 @@ def test_a_resume_that_meets_one_exits_7_and_releases_the_lock(
         mp.setattr(Engine, "run_until_quiescent", crash)
         assert (
             asyncio.run(
-                cli_run._serve_run(lower_source(_JIL), run_root, False, [], profile=profile)
+                cli_run._serve_run(
+                    lower_source(_JIL), run_root, False, [], profile=profile, supervisor="spawn"
+                )
             )
             == 1
         )
@@ -348,7 +350,11 @@ def test_a_resume_that_meets_one_exits_7_and_releases_the_lock(
 
     monkeypatch.setattr(runner_startup, "replay_inputs", replay)
     capsys.readouterr()
-    code = asyncio.run(cli_run._serve_run(lower_source(_JIL), run_root, True, [], profile=profile))
+    code = asyncio.run(
+        cli_run._serve_run(
+            lower_source(_JIL), run_root, True, [], profile=profile, supervisor="spawn"
+        )
+    )
     assert code == 7
     err = capsys.readouterr().err
     assert f"{STATECHART_LOG_PREFIX}: {WAL_FACT}" in err.splitlines()
@@ -372,7 +378,12 @@ def test_dsl41_run_exits_7_with_the_report_under_one_prefix(
     monkeypatch.setattr(Engine, "run_until_quiescent", halt)
     code = asyncio.run(
         cli_run._serve_run(
-            lower_source(_JIL), short_root / "root", False, [], profile=runtime_profile_from_cli()
+            lower_source(_JIL),
+            short_root / "root",
+            False,
+            [],
+            profile=runtime_profile_from_cli(),
+            supervisor="spawn",
         )
     )
     assert code == 7
