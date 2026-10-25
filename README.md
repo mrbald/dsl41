@@ -1202,8 +1202,7 @@ The smoke test also runs locally, on macOS or Linux, against a local build.
 
 ```sh
 uv build --sdist && uv build --wheel
-uv export --frozen --no-dev --no-emit-project -o exports/requirements-base.txt
-uv export --frozen --no-dev --no-emit-project --extra ui -o exports/requirements-ui.txt
+bash scripts/export-release-inputs.sh dist/*.whl exports
 bash scripts/release_smoke.sh dist exports
 ```
 

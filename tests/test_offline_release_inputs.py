@@ -218,7 +218,7 @@ def test_builder_refuses_inputs_before_output_or_download(
             stream.write("\n# same version, stale source bytes\n")
     trap = tmp_path / "bin"
     marker = _trap(trap, "uv")
-    # pip's index is absent too: a reached download would fail independently (DL-397).
+    # pip's index is absent too: a reached download would fail independently.
     shutil.rmtree(index)
     bundle = tmp_path / "refused-bundle"
     result = _build(inputs, target_python, bundle, trap)
@@ -473,7 +473,7 @@ def test_target_container_refuses_uv_on_path(
     work = tmp_path / "work"
     script = tmp_path / "target.sh"
     source = (REPO / "examples/nightbank/deploy/offline-target.sh").read_text()
-    # Fixed container roots map to disposable fixture roots (DL-397).
+    # Fixed container roots map to disposable fixture roots.
     for old, new in (
         ("/src", str(repo)),
         ("/delivery", str(delivery)),
