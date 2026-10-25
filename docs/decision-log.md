@@ -24037,3 +24037,22 @@ relitigate an entry; append a new one.
   use both vendors" means, for review, Opus and Astra in the semantic class. DL-262's REVISIT is
   not discharged: these counts do not compare reviewers per slice on one population. DL-262's
   round cap and `xhigh`/`high` round efforts stand.
+- DL-396 Offline manufacturing consumes bound release exports (2026-10-25).
+  This narrows DL-215's --frozen release export to --locked and adds
+  release-inputs.json to the candidate and checksummed release assets.
+  The upstream release build exports the locked base and UI dependency sets.
+  An input manifest binds both named exports to the exact release wheel,
+  pyproject.toml and uv.lock by SHA-256. The native target verifies that binding
+  before creating a bundle or downloading wheels. Original exports and their
+  manifest remain in the bundle; installation requirements add the release pin.
+  The manifest detects mismatched inputs. It is not a signature: the operator
+  verifies the wheel, exports and manifest against trusted release checksums,
+  or CI consumes them from the same candidate artifact.
+  Target wheelhouse manufacturing, RPM assembly and runtime preparation use
+  system Python and pip without the uv executable. uv.lock remains provenance
+  data. The upstream exporter uses uv with --locked; it owns profile selection
+  and lock freshness. The native builder requires supplied release inputs and
+  has no source-wheel build fallback. Both target rehearsal phases check that
+  uv is absent from PATH. Existing diagnostic delivery reuse remains explicit.
+  DL-389's target checks, binary-wheel hashes, preparation, receipts, retention
+  and separate activation rules remain in force.

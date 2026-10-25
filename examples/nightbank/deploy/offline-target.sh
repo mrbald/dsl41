@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 # Both target lanes use the exact wheel and shared installed scenario bodies (DL-389).
 set -euo pipefail
+check_no_uv() {
+    # Target manufacturing and qualification require an absent uv executable (DL-396).
+    local found
+    if found=$(command -v uv); then
+        printf 'refused: uv found at %s\n' "$found" | tee "$1" >&2
+        return 2
+    fi
+    printf 'uv absent from PATH: %s\n' "$PATH" >"$1"
+}
 copy_tree() {
     mkdir /work
     git -C /src -c safe.directory=/src ls-files --cached -z |
@@ -38,26 +47,27 @@ archive_evidence() {
 }
 case ${1-} in
     build)
+        check_no_uv /delivery/uv-absence-build.txt
         copy_tree
         cd /work
         shopt -s nullglob
         wheels=(/delivery/dsl41-*.whl)
-        if [ "${#wheels[@]}" = 0 ]; then uv build --wheel --out-dir /delivery; fi
-        wheels=(/delivery/dsl41-*.whl)
         [ "${#wheels[@]}" = 1 ] || { echo 'exactly one release wheel required' >&2; exit 2; }
-        PYTHON=python3.12 bash scripts/offline/build-wheelhouse.sh "${wheels[0]}" /delivery/bundle
+        PYTHON=python3.12 bash scripts/offline/build-wheelhouse.sh \
+            "${wheels[0]}" /delivery/release-inputs /delivery/bundle
         sha256sum /delivery/*.whl >/delivery/release-wheel.sha256
         ;;
     qualify)
         copy_tree
         cd /work
         mkdir evidence
+        trap archive_evidence EXIT
+        check_no_uv evidence/uv-absence-qualification.txt
         cp /opt/os-packages.txt /etc/os-release evidence/
         uname -a >evidence/kernel.txt
         systemctl --version >evidence/systemd.txt
         python3.12 -VV >evidence/python.txt
         ip -o addr >evidence/network.txt 2>/dev/null || cat /proc/net/route >evidence/network.txt
-        trap archive_evidence EXIT
         capability=()
         if [ "${DSL41_REQUIRE_NATIVE_X86-}" = 1 ]; then capability=(--native-x86_64); fi
         bash examples/nightbank/deploy/capability-check.sh "${capability[@]}" | tee evidence/capability.log

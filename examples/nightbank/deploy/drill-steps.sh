@@ -66,8 +66,10 @@ step_install() { # install dsl41, the nightbank estate, the launcher, the map an
         cp -a "$DRILL_BUNDLE" "$SCRATCH/bundle"
     else
         (cd "$REPO" && uv build --wheel --out-dir "$SCRATCH/dist")
+        PYTHON=python3.12 bash "$REPO/scripts/export-release-inputs.sh" \
+            "$SCRATCH"/dist/dsl41-*.whl "$SCRATCH/exports"
         PYTHON=python3.12 bash "$REPO/scripts/offline/build-wheelhouse.sh" \
-            "$SCRATCH"/dist/dsl41-*.whl "$SCRATCH/bundle"
+            "$SCRATCH"/dist/dsl41-*.whl "$SCRATCH/exports" "$SCRATCH/bundle"
         python3.12 -m pip download --only-binary=:all: "dsl41==$OLD_VERSION" \
             --dest "$SCRATCH/historical-wheels"
     fi

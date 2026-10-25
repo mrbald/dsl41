@@ -1138,7 +1138,7 @@ qualifies that wheel in Ubuntu and EL8 containers on native x86_64 runners,
 and publishes only the tested files. Publication uses trusted
 publishing (OIDC) in the `pypi` environment, which waits for the owner's
 approval. The repository holds no PyPI token. The GitHub release that
-follows carries the sdist, the wheel, the two requirements files, the
+follows carries the sdist, the wheel, the two requirements files, their input manifest, the
 Ubuntu and EL8 wheelhouses, the reference EL8 RPM, and `SHA256SUMS`.
 The workflow's header records the one-time trusted-publisher setup on pypi.org.
 The package readme is README.md with every relative link rewritten at

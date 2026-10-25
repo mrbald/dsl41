@@ -33,34 +33,71 @@ Do not move one after creation.
 Its entry-point scripts contain that path.
 See [Python's venv documentation](https://docs.python.org/3.12/library/venv.html).
 
-## Build and qualify on a connected target
+## Prepare release inputs upstream
 
 Use a trusted checkout of the release tag.
-Pass the exact release wheel; the builder does not rebuild it.
-Verify that wheel against the release's trusted `SHA256SUMS` first.
-The wheel version, `pyproject.toml`, and `uv.lock` must agree.
+Obtain its exact wheel, `requirements-base.txt`, `requirements-ui.txt`,
+and `release-inputs.json` from the same release.
+Verify all four files against the release's trusted `SHA256SUMS` before use.
+Keep the two requirements files and the input manifest together in an exports
+directory. Release CI takes these inputs from one candidate artifact.
+The producer needs Python 3.11 or later as `python3`, or set `PYTHON` to that
+interpreter's path.
+
+The upstream producer uses uv to check the lock and export both profiles
+(DL-396). For a development rehearsal, build and export before entering the
+target environment:
+
+```sh
+uv build --wheel --out-dir /tmp/dsl41-release-dist
+bash scripts/export-release-inputs.sh \
+    /tmp/dsl41-release-dist/dsl41-1.11.0-py3-none-any.whl /tmp/dsl41-release-inputs
+```
+
+The exports directory must be new.
+The producer uses `uv export --locked` and preserves markers and hashes.
+It omits the command header so local build paths do not enter the exports.
+Its input manifest binds the wheel filename and bytes, `pyproject.toml`,
+`uv.lock`, and each named profile export by SHA-256.
+The input manifest detects mismatched files; it does not authenticate a release.
+The trusted release checksums or CI artifact supply that trust.
+
+## Build and qualify on a connected target
+
+Run the native builder from the same trusted release-tag checkout.
+It needs system Python 3.12 and pip; it does not need uv.
+The rehearsal containers check that uv is absent.
+Pass the supplied release wheel and its exports directory.
+It verifies their input manifest against `pyproject.toml` and `uv.lock` before
+creating output or downloading dependencies. Missing or changed inputs refuse.
+The builder has no wheel-build or dependency-export fallback.
 
 ```sh
 PYTHON=/usr/bin/python3.12
 export PYTHON
 bash scripts/offline/build-wheelhouse.sh \
-    /path/to/dsl41-1.11.0-py3-none-any.whl /tmp/dsl41-offline-bundle
+    /path/to/dsl41-1.11.0-py3-none-any.whl /path/to/dsl41-release-inputs \
+    /tmp/dsl41-offline-bundle
 bash scripts/offline/qualify.sh \
     /tmp/dsl41-offline-bundle /tmp/dsl41-offline-qualification
 ```
 
-The builder uses `uv export --locked` for both profiles.
-It downloads only pinned binary wheels with their lock hashes.
+The builder retains the original exports and input manifest under
+`release-inputs/` in the bundle. It copies each profile's requirements and
+appends the exact release-wheel pin for installation.
+The target's pip evaluates the exported markers and downloads only pinned
+binary wheels with their lock hashes.
 Set `DSL41_PYTHON_INDEX` to an approved mirror's simple-index URL when needed.
 The lock's hashes still govern downloaded bytes.
 Record the mirror origin with the rehearsal inputs; the manifest's wheel
 source URL remains the lock's provenance.
-It copies the supplied release wheel and deployment templates.
+The builder copies the supplied release wheel and deployment templates.
 `manifest.json` records every delivered file's SHA-256 and mode.
 It records each dependency wheel's URL and lock hash.
 It also records Python version, implementation, platform, machine, libc,
 and operating-system release.
-The copied lock and project metadata are covered by the file hashes.
+The copied lock, project metadata and release inputs are covered by the file
+hashes. `uv.lock` is provenance data; reading it does not require uv.
 The target must match this recorded Python/OS/architecture tuple.
 Cross-platform download and broad manylinux compatibility are not claimed.
 Build and qualify a separate delivery for each target tuple.

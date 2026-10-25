@@ -406,3 +406,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-393 | TUI recovery pins the running Python launch path |  |
 | DL-394 | Forced maintenance waits for each whole command group | [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-395 | Opus reviews multi-file changes, Astra joins semantic and integration ones, Sol builds bounded edge code, and Fable only advises | [docs/agent-workflow.md](agent-workflow.md) |
+| DL-396 | Offline manufacturing consumes bound release exports | [docs/offline-installation.md](offline-installation.md), [docs/offline-rehearsal.md](offline-rehearsal.md) |
