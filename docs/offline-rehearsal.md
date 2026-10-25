@@ -10,6 +10,39 @@ Both target phases require uv to be absent from PATH and record that check
 (DL-396). Release inputs are prepared upstream of these containers.
 The host architecture is recorded; local ARM64 results do not qualify x86-64.
 
+For a manual installation wargame, use the prerequisite image without running
+installation or service scenarios:
+
+```sh
+bash examples/nightbank/deploy/wargame.sh build
+bash examples/nightbank/deploy/wargame.sh start
+bash examples/nightbank/deploy/wargame.sh join
+bash examples/nightbank/deploy/wargame.sh stop
+bash examples/nightbank/deploy/wargame.sh dispose
+```
+
+Each verb accepts one optional `NAME`, defaulting to the checkout directory name.
+Use the same name for every verb in one wargame.
+The container is `dsl41-wargame-NAME`; the image is `localhost/dsl41-wargame:NAME`.
+`build` needs network access and installs the OS prerequisites, including Python
+3.12. OS package versions can change between builds; the image records them in
+`/opt/os-packages.txt`. Keep the built image to repeat with the same prerequisites.
+`start` creates an offline systemd container with two CPUs and 3 GiB of memory,
+or restarts the retained container, then runs the capability gate as root.
+A failed gate leaves the container available for inspection.
+`join` opens a root Bash shell. The checkout is not mounted.
+Transfer a verified delivery with `podman cp`, then follow
+[offline installation](offline-installation.md) and the
+[deployment runbook](deployment-runbook.md).
+Keep delivery files and retained evidence under `/var/tmp`, rather than `/tmp`.
+`stop` retains the container's disk files. Temporary mounts, including `/tmp`
+and `/run`, are cleared on restart; volatile service journals may be lost.
+`dispose` forcibly removes the container and all state inside it; copy evidence out first. The image remains available.
+Rebuilding the image changes only future containers; dispose before starting
+from the rebuilt image. These containers use the Podman host's architecture.
+The wrapper uses the pinned public Rocky image and its configured repositories.
+The overrides below apply to the automated rehearsal.
+
 Obtain the wheel and exports using [offline installation](offline-installation.md).
 The host needs Podman and Python 3.11 or later as `python3`, or `PYTHON` set to
 that interpreter's path. Run from the matching trusted release-tag checkout.
