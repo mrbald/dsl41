@@ -22,7 +22,7 @@ import sqlite3
 import stat
 import tempfile
 from types import MappingProxyType
-from typing import Literal, Protocol
+from typing import Literal, NoReturn, Protocol
 
 from dsl41.file_processing_charts import ARCHIVE, PROCESS, state_after
 from dsl41.state_machine import StatechartError
@@ -98,6 +98,29 @@ class ReconcilingHandler(Handler, Protocol):
 
 type Failpoint = Callable[[str], None]
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
+# Each published directory stages inside itself under this reserved name, so every
+# publication is a hard link within one filesystem (CONTRACT.md "Filesystem").
+STAGE = ".tmp"
+_STAGES = (("objects", "object-"), ("todo", "todo-"))
+# Terminal work states are the PROCESS chart's final states, which have no rows
+# (CONTRACT.md "Failure disposition is `stop`").
+TERMINAL = frozenset(
+    state.name for region in PROCESS.root.regions for state in region.states if state.final
+)
+
+
+def _no_failpoint(_: str) -> None:
+    return None
+
+
+def _terminal(state: str) -> bool:
+    return state in TERMINAL
+
+
+def _pending(db: sqlite3.Connection) -> int:
+    marks = ",".join("?" * len(TERMINAL))
+    sql = f"SELECT count(*) FROM work WHERE state NOT IN ({marks})"
+    return int(db.execute(sql, tuple(TERMINAL)).fetchone()[0])
 
 
 def processing_key(processor_id: str, content_hash: str) -> str:
@@ -181,16 +204,41 @@ def _write(db: sqlite3.Connection) -> Iterator[None]:
         raise
 
 
+def _established(root: Path) -> bool:
+    """Evidence of a used root: any entry besides an empty staging directory, or a sidecar."""
+    for name, _ in _STAGES:
+        if any(path.name != STAGE for path in (root / name).iterdir()):
+            return True
+        if any((root / name / STAGE).iterdir()):
+            return True
+    return any(root.glob("ledger.sqlite3-*"))
+
+
+def _ledger_failure(ledger: Path, exc: sqlite3.DatabaseError) -> NoReturn:
+    """A busy or locked ledger stays an OperationalError: the run stopped on contention.
+
+    Every other database error is a refusal of corrupt or unsupported ledger state.
+    """
+    busy = (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    if isinstance(exc, sqlite3.OperationalError) and exc.sqlite_errorcode & 0xFF in busy:
+        raise exc
+    raise ProtocolError(f"unreadable ledger {ledger}: {exc}") from exc
+
+
 def _open(root: Path, processor_id: str) -> sqlite3.Connection:
     ledger = root / "ledger.sqlite3"
     if ledger.is_symlink():
         raise ProtocolError("symlink ledger")
-    if not ledger.exists() and (
-        any(any((root / name).iterdir()) for name in ("objects", "todo", "tmp"))
-        or any(root.glob("ledger.sqlite3-*"))
-    ):
+    # Evidence first: it appears only after the ledger exists, so another role
+    # creating the ledger between the two reads cannot cause a false refusal
+    # (CONTRACT.md invariant 9).
+    established = _established(root)
+    if not ledger.exists() and established:
         raise ProtocolError("missing ledger in an established worker root")
-    db = sqlite3.connect(ledger, isolation_level=None, timeout=5)
+    try:
+        db = sqlite3.connect(ledger, isolation_level=None, timeout=5)
+    except sqlite3.DatabaseError as exc:
+        _ledger_failure(ledger, exc)
     try:
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA synchronous=FULL")
@@ -217,6 +265,9 @@ def _open(root: Path, processor_id: str) -> sqlite3.Connection:
             )
         _sync_dir(root)
         return db
+    except sqlite3.DatabaseError as exc:
+        db.close()
+        _ledger_failure(ledger, exc)
     except BaseException:
         db.close()
         raise
@@ -226,11 +277,16 @@ def _layout(root: Path, processor_id: str) -> None:
     if not processor_id or "\x00" in processor_id:
         raise ValueError("processor_id must be nonempty and contain no NUL")
     root.mkdir(parents=True, exist_ok=True)
-    for path in (root, *(root / name for name in ("inbox", "objects", "todo", "tmp"))):
-        path.mkdir(exist_ok=True)
+    published = [root / name for name, _ in _STAGES]
+    for path in (root, root / "inbox", *published, *(path / STAGE for path in published)):
+        try:
+            path.mkdir()
+        except FileExistsError:
+            pass
         if not stat.S_ISDIR(path.lstat().st_mode):
             raise ProtocolError(f"not a real directory: {path}")
-    _sync_dir(root)
+    for path in (root, *published):
+        _sync_dir(path)
 
 
 def _todo(processor_id: str, row: sqlite3.Row) -> dict[str, object]:
@@ -254,9 +310,13 @@ def _unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 
 def _load(path: Path) -> object:
-    with _read(path) as fd:
-        with os.fdopen(os.dup(fd), "r", encoding="utf-8") as stream:
-            return json.load(stream, object_pairs_hook=_unique_pairs)
+    """A TODO that cannot be read or decoded is a refusal, like a tampered one."""
+    try:
+        with _read(path) as fd:
+            with os.fdopen(os.dup(fd), "r", encoding="utf-8") as stream:
+                return json.load(stream, object_pairs_hook=_unique_pairs)
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+        raise ProtocolError(f"unreadable TODO {path}: {exc}") from exc
 
 
 def _validate_todo(path: Path, processor_id: str, row: sqlite3.Row) -> None:
@@ -276,39 +336,57 @@ def _remove(path: Path) -> None:
     _sync_dir(path.parent)
 
 
-def _publish_todo(root: Path, db: sqlite3.Connection, processor_id: str, key: str) -> None:
-    """Serialize TODO eligibility and publication with DONE under a write transaction."""
+def _publish_todo(
+    root: Path,
+    db: sqlite3.Connection,
+    processor_id: str,
+    key: str,
+    *,
+    failpoint: Failpoint = _no_failpoint,
+) -> None:
+    """Serialize TODO eligibility and publication with completion under a write transaction.
+
+    A terminal row never gets a TODO, and a leftover one is removed (CONTRACT.md invariant 6).
+    """
     with _write(db):
         row = db.execute("SELECT * FROM work WHERE work_key=?", (key,)).fetchone()
         assert row is not None
         target = root / "todo" / f"{key}.json"
         if target.exists() or target.is_symlink():
             _validate_todo(target, processor_id, row)
-            if row["state"] == "DONE":
+            if _terminal(row["state"]):
                 _remove(target)
             else:
                 _sync_dir(target.parent)
             return
-        if row["state"] == "DONE":
+        if _terminal(row["state"]):
             return
-        fd, name = tempfile.mkstemp(prefix="todo-", dir=root / "tmp")
+        fd, name = tempfile.mkstemp(prefix="todo-", dir=root / "todo" / STAGE)
         temp = Path(name)
         try:
             with os.fdopen(fd, "wb") as stream:
                 stream.write(_json(_todo(processor_id, row)))
                 stream.flush()
                 os.fsync(stream.fileno())
+            failpoint("todo_staged")
             os.link(temp, target)
             _sync_dir(target.parent)
         finally:
             temp.unlink(missing_ok=True)
 
 
-def _repair(root: Path, db: sqlite3.Connection, processor_id: str) -> None:
-    for path in (root / "tmp").iterdir():
-        if path.name.startswith(("archive-", "todo-")):
+def _clean_stages(root: Path) -> None:
+    """Only the archiver stages, under archive.lock; a foreign staging entry is refused."""
+    for name, prefix in _STAGES:
+        for path in (root / name / STAGE).iterdir():
+            if not path.name.startswith(prefix):
+                raise ProtocolError(f"foreign entry in staging directory: {path}")
             _regular(path)
             path.unlink()
+
+
+def _repair(root: Path, db: sqlite3.Connection, processor_id: str) -> None:
+    _clean_stages(root)
     for row in db.execute("SELECT work_key FROM work ORDER BY receipt_seq").fetchall():
         _publish_todo(root, db, processor_id, row[0])
     for row in db.execute(
@@ -317,21 +395,43 @@ def _repair(root: Path, db: sqlite3.Connection, processor_id: str) -> None:
         _cleanup_receipt(root, db, row)
 
 
-def _cleanup_receipt(root: Path, db: sqlite3.Connection, row: sqlite3.Row) -> None:
+def _handed_over(root: Path, db: sqlite3.Connection, key: str) -> bool:
+    """A published TODO or a durable terminal row completes the handover (CONTRACT.md
+    invariant 7).
+
+    The write lock orders this read against completion and its TODO removal.
+    """
+    with _write(db):
+        row = db.execute("SELECT state FROM work WHERE work_key=?", (key,)).fetchone()
+        return row is not None and (_terminal(row[0]) or (root / "todo" / f"{key}.json").exists())
+
+
+def _cleanup_receipt(
+    root: Path,
+    db: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    failpoint: Failpoint = _no_failpoint,
+) -> None:
+    """Unlink the inbox source only after verification and handover; never write the inbox."""
     _verified_object(root, row["content_hash"])
     source = root / "inbox" / row["name"]
+    if not _handed_over(root, db, row["work_key"]):
+        raise ProtocolError(f"handover incomplete; inbox source retained: {source}")
     if source.exists() or source.is_symlink():
         if _hash(source) != row["content_hash"]:
             raise ProtocolError(f"archived inbox file changed: {source}")
         _remove(source)
     else:
         _sync_dir(source.parent)
+    failpoint("source_unlinked")
     with _write(db):
         db.execute("UPDATE receipts SET cleaned=1 WHERE seq=?", (row["seq"],))
 
 
-def _object(root: Path, source: Path) -> str:
-    fd, name = tempfile.mkstemp(prefix="archive-", dir=root / "tmp")
+def _object(root: Path, source: Path, failpoint: Failpoint) -> str:
+    """Copy and hash one read stream; the inbox is never linked from (CONTRACT.md "Filesystem")."""
+    fd, name = tempfile.mkstemp(prefix="object-", dir=root / "objects" / STAGE)
     temp = Path(name)
     digest = hashlib.sha256()
     try:
@@ -342,6 +442,7 @@ def _object(root: Path, source: Path) -> str:
             stream.flush()
             os.fchmod(stream.fileno(), 0o444)
             os.fsync(stream.fileno())
+        failpoint("object_staged")
         content_hash = digest.hexdigest()
         target = root / "objects" / content_hash
         try:
@@ -365,12 +466,14 @@ def archive(
     processor_id: str,
     policy: Policy = Policy(),
     *,
-    failpoint: Failpoint = lambda _: None,
+    failpoint: Failpoint = _no_failpoint,
 ) -> Summary:
     """Archive a delivery snapshot. Failures raise; committed handovers repair next run.
 
-    The failpoint callback is a test seam, called at the three documented crash
-    boundaries. It is not a retry or a user action hook.
+    The failpoint callback is a test seam, called after each durable boundary of a
+    selected archival: object_staged, object_published, archive_committed,
+    todo_staged, todo_published and source_unlinked. Repair calls none of them.
+    It is not a retry or a user action hook.
     """
     Policy(policy.order, policy.batch)
     _layout(root, processor_id)
@@ -396,7 +499,7 @@ def archive(
             selected = _select(rows, policy)
             duplicates = 0
             for row in selected:
-                content_hash = _object(root, root / "inbox" / row["name"])
+                content_hash = _object(root, root / "inbox" / row["name"], failpoint)
                 failpoint("object_published")
                 key = processing_key(processor_id, content_hash)
                 with _write(db):
@@ -421,12 +524,12 @@ def archive(
                     )
                 duplicates += int(not inserted)
                 failpoint("archive_committed")
-                _publish_todo(root, db, processor_id, key)
+                _publish_todo(root, db, processor_id, key, failpoint=failpoint)
                 failpoint("todo_published")
                 archived = db.execute(
                     "SELECT * FROM receipts WHERE seq=?", (row["seq"],)
                 ).fetchone()
-                _cleanup_receipt(root, db, archived)
+                _cleanup_receipt(root, db, archived, failpoint=failpoint)
             remaining = db.execute(
                 "SELECT count(*) FROM receipts WHERE state='FILE_RECEIVED'"
             ).fetchone()[0]
@@ -479,16 +582,18 @@ def process(root: Path, processor_id: str, handler: Handler, policy: Policy = Po
         try:
             rows = []
             for path in sorted((root / "todo").iterdir()):
+                if path.name == STAGE:
+                    continue
                 if path.suffix != ".json" or not _HEX.fullmatch(path.stem):
                     raise ProtocolError(f"invalid TODO filename: {path}")
                 with _write(db):
                     row = db.execute("SELECT * FROM work WHERE work_key=?", (path.stem,)).fetchone()
                     if row is None:
                         raise ProtocolError(f"TODO has no ledger work: {path}")
-                    if row["state"] == "DONE" and not path.exists() and not path.is_symlink():
+                    if _terminal(row["state"]) and not path.exists() and not path.is_symlink():
                         continue
                     _validate_todo(path, processor_id, row)
-                    if row["state"] == "DONE":
+                    if _terminal(row["state"]):
                         _remove(path)
                     else:
                         rows.append(row)
@@ -538,7 +643,7 @@ def process(root: Path, processor_id: str, handler: Handler, policy: Policy = Po
                 else:
                     stopped = True
                     break
-            remaining = db.execute("SELECT count(*) FROM work WHERE state!='DONE'").fetchone()[0]
+            remaining = _pending(db)
             unknown = db.execute("SELECT count(*) FROM work WHERE state='UNKNOWN'").fetchone()[0]
             return Summary(selected, completed, 0, remaining, unknown, reconciled, stopped)
         finally:
