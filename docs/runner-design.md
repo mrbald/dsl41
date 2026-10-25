@@ -308,7 +308,13 @@ crash surface is near zero. Wrappers hold ITS lifeline (below). Thus even
 `kill -9` of the supervisor keeps
 "supervisor death ⇒ all jobs terminate and are recorded". On restart, the
 engine reattaches and LISTs. No job is orphaned, because its parent did not
-die, so nothing is adopted (E4). Linux hardening:
+die, so nothing is adopted (E4). Who starts the supervisor is a launch
+option, not part of the runtime profile (DL-396). Under a supervisor
+service, `dsl41 supervise start` starts it and the engine attaches
+(`run --detached --supervisor attach`); with none answering, the engine
+forks nothing and exits 1. Without a service, `run --detached` starts one
+when none answers (`--supervisor spawn`, the default). The offline
+`dsl41 seal` attaches by default. Linux hardening:
 `PR_SET_CHILD_SUBREAPER`, so that a killed wrapper's command reparents to
 the supervisor for reaping/killing.
 
@@ -1305,7 +1311,8 @@ code. None is guess-resolved.
 
 - **E4** — jobs that survive engine restarts: closed (DL-41a, DL-48). Never
   non-child adoption. The supervisor keeps parenthood alive, so survival is
-  reattachment (`run --detached`). On the default tethered path, engine
+  reattachment (`run --detached`), to a supervisor the engine started or
+  one it attaches to (§6a, DL-396). On the default tethered path, engine
   death terminates jobs, and resume uses §7's reconciliation ladder.
 - **E5** — profile sourcing failure semantics [?]. Default: the job fails
   with sh's exit code (§6).

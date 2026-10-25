@@ -7,7 +7,7 @@ components ship in one package:
 | Component | Process | How it runs |
 |---|---|---|
 | engine (runner + calendar scheduler + control socket) | `dsl41 run` | one long-lived foreground process per estate |
-| supervisor | spawned by `dsl41 run --detached` | one per run root, outlives the engine |
+| supervisor | `dsl41 supervise start` in its own unit (§3, shape 1), or spawned by `dsl41 run --detached` (shape 2) | one per run root, outlives the engine |
 | TUI | `dsl41 ui` | thin client of the control socket, attach/detach at will |
 | web UI | `dsl41 serve` | thin client; one `dsl41 ui` subprocess per browser session |
 
@@ -85,7 +85,7 @@ systemd
 └── dsl41-engine.service        User=dsl41  Restart=on-failure  RestartPreventExitStatus=2 3 6 7
       Requires=dsl41-supervisor.service  After=dsl41-supervisor.service
       ExecStart=/opt/dsl41/bin/dsl41-launch engine
-      └── dsl41 run ... --run-root RUN_ROOT --estate-anchor ESTATE_ANCHOR --detached   the engine
+      └── dsl41 run ... --run-root RUN_ROOT --estate-anchor ESTATE_ANCHOR --detached --supervisor attach   the engine
             ├── holds RUN_ROOT/leader.lock and ESTATE_ANCHOR/anchor.lock for its whole life
             ├── writes RUN_ROOT/wal/, seals/, periods/, catalogs/, perimeter.jsonl
             │   and ESTATE_ANCHOR/anchor.json
@@ -1302,11 +1302,17 @@ The seal is the same in every shape. Seal the period (§6a) and
 `dsl41 audit` it, so what you back up is closed and attested. Do this
 while a detached period's supervisor is still up. The offline `seal`
 command wires a detached period's supervisor client as a live engine does
-(`wire_from_profile`). That client reconnects to a supervisor that is
-still there. If none is, it spawns a fresh one, with no deadman. A seal
-after the supervisor is down therefore leaves a second supervisor behind
-that no procedure accounts for. A seal, live or offline, refuses inside
-the closing period's retry horizon (period-model §9). The horizon counts
+(`wire_from_profile`), and attaches to the supervisor that is running.
+With none running, it refuses with exit 2, forks nothing, and names the
+remedy: start the supervisor service, or pass `--supervisor spawn`. Under
+shape 1, the service is the unit: `systemctl start
+dsl41-supervisor.service`. Do not type `dsl41 supervise start` by hand
+under a unit: it runs the supervisor in your session, outside the unit's
+cgroup, and guarded maintenance then refuses it. `--supervisor spawn`
+forks a supervisor in the operator's session too, and that supervisor
+runs the deadman the period pinned. It is a development path (DL-396). A seal, live or
+offline, refuses inside the closing period's retry horizon (period-model
+§9). The horizon counts
 from the last operator request, an `ON_HOLD` included; wait it out. A
 live seal stops the engine itself with exit 3, so it takes the place of
 steps 1 to 3 below. It does not replace the reboot hold: take the reboot
@@ -1530,6 +1536,17 @@ shape-1 supervisor unit; copy it and edit its paths. Its
 
 Order the engine unit after this unit and require its successful start:
 `After=dsl41-supervisor.service` and `Requires=dsl41-supervisor.service`.
+The engine attaches to this supervisor and never starts its own: pass
+`run --detached --supervisor attach`, as the example launcher does
+(DL-396). An engine that finds no supervisor answering forks nothing and
+exits 1, `no supervisor answers on <root>`, and the engine unit retries it.
+So does a supervisor that drops the connection before the engine holds
+its lease. A supervisor that answers and refuses, an incompatible protocol
+version or a lease another controller holds, is exit 2. To bring the
+supervisor back, start its unit, `systemctl start dsl41-supervisor.service`.
+Never run `dsl41 supervise start` by hand under shape 1: that supervisor
+runs in your session, outside the unit's cgroup, and guarded maintenance
+refuses it.
 Do not add `PartOf=` or `BindsTo=` from the supervisor to the engine.
 Keep the engine's existing restart and resume rules above. Set the
 supervisor's `TimeoutStopSec` to cover its longest command grace plus the
@@ -1635,8 +1652,9 @@ cascade that does not end under half that lapse at every measured size.
 A cascade that loops across one input's root dispatches, or inside one
 condition, is not bounded by it, as for any hung engine.
 
-**Shape 2: supervisor started by the engine.** Keep `run --detached` and
-set `KillMode=process` on the engine unit. It limits service-stop signals
+**Shape 2: supervisor started by the engine.** Keep `run --detached`,
+whose default `--supervisor spawn` starts a supervisor when none answers,
+and set `KillMode=process` on the engine unit. It limits service-stop signals
 to the engine's main process, so the supervisor and jobs can survive that
 stop in the same cgroup. This gives up the unit's normal whole-cgroup stop
 containment. A killed or stopped engine can leave these processes running;
@@ -1652,7 +1670,8 @@ old owner is absent.
 Exit codes:
 
 - 0: a clean stop.
-- 1: the engine or the estate failed.
+- 1: the engine or the estate failed, or `--supervisor attach` found no
+  supervisor; a restart retries both.
 - 2: refused before start: a used run root, a resume gate (catalog hash,
   clock domain or runtime profile), a preflight ERROR, or a root another
   engine already leads.

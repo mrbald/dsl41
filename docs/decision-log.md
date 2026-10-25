@@ -24037,3 +24037,39 @@ relitigate an entry; append a new one.
   use both vendors" means, for review, Opus and Astra in the semantic class. DL-262's REVISIT is
   not discharged: these counts do not compare reviewers per slice on one population. DL-262's
   round cap and `xhigh`/`high` round efforts stand.
+- DL-396 A detached launch names how it gets its supervisor: attach or spawn (2026-10-25;
+  src/dsl41/runner_adapters.py, runner_startup.py, cli_run.py, cli_estate.py, cli_common.py;
+  examples/nightbank/deploy/dsl41-launch; docs/deployment-runbook.md, supervisor-protocol.md,
+  runner-design.md ss6a and ss15, blocks/supervisor.md; README.md)
+  THE RULE. A method that says "connect" never starts a service. `SupervisorClient.connect`
+  attaches to the supervisor that answers on `supervisor.sock` and raises `SupervisorUnavailable`
+  when none does. `SupervisorClient.provision` attaches to a live supervisor or spawns one, within
+  the spawn window and its DL-210 respawns; it is the client's one forking method.
+  `wire_from_profile` takes a required keyword `supervisor`, `attach` or `spawn`, so no verb forks
+  by omission. It is a launch option, not a `RuntimeProfile` field: the pin, its hash and the
+  drift check do not change. `dsl41 run` takes `--supervisor attach|spawn`, default `spawn`, and
+  only with `--detached` (exit 2 otherwise); `--resume` honours it. `attach` with no supervisor
+  forks nothing and exits 1, naming the run root, because the engine unit must retry it behind
+  `Requires=` and its `RestartPreventExitStatus=2 3 6 7` would stop a 2. Under `attach`, a
+  connection lost before the lease is held is the same retryable absence, exit 1; a supervisor
+  that answers and refuses (an incompatible protocol version, a lease another controller holds)
+  is exit 2. The offline `dsl41 seal` defaults to `attach`. With no supervisor it refuses with
+  exit 2 and names the remedy: start the supervisor service, or pass `--supervisor spawn` to start
+  one in this session. The message names no command: under shape 1 the service is the unit, and
+  `dsl41 supervise start` typed by hand would start the very stray this rule removes. `spawn` is
+  the development path; the supervisor it forks runs the period's pinned deadman. An exact retry
+  of a committed boundary (`--request-id`) is answered from the lineage on disk before the
+  wiring, so it needs no supervisor. A live seal ignores the option, and a tethered period has no
+  supervisor to reach. The example launcher passes `--supervisor attach`, and reads the
+  `catalogs/` and `periods/.staging/` a refused genesis leaves as residue, as dsl41 does
+  (period-model ss1.1), so the unit's retry is a genesis and not its exit 2.
+  THE REASON. In shape 1 the supervisor is the supervisor unit's main process, in that unit's
+  cgroup, and guarded maintenance admits only that (DL-390). A `run` or an offline `seal` typed
+  while the unit was down forked a supervisor in the operator's session. The unit then retried
+  exit 1 against the held lock, the engine attached to the stray, and maintenance later refused
+  it as outside a service cgroup. The runbook documented the stray instead of preventing it, and
+  said wrongly that the stray ran no deadman; the seal passes the pinned profile, and the wiring
+  derives the deadman from it.
+  REJECTED: a `RuntimeProfile` field, because who started the supervisor does not change what a
+  period runs, and a field would move the pin and its hash for an operational choice. A default
+  of `attach` for `run`, because shape 2 and development rely on the engine starting its own.

@@ -692,7 +692,12 @@ def _serve(run_root: Path, resume: bool) -> int:
     from dsl41.period import runtime_profile_from_cli
 
     serve = cli_run._serve_run(
-        lower_source(_RUN_JIL), run_root, resume, [], profile=runtime_profile_from_cli()
+        lower_source(_RUN_JIL),
+        run_root,
+        resume,
+        [],
+        profile=runtime_profile_from_cli(),
+        supervisor="spawn",
     )
     # bounded: an engine that swallowed the error would serve on forever
     return asyncio.run(asyncio.wait_for(serve, timeout=60))

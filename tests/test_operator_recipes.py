@@ -14,9 +14,12 @@ holds that partition.
 Where the runbook says `systemctl start dsl41-engine.service`, these tests
 run what that unit's `ExecStart=` runs: the launcher's engine mode, which
 returns at once as a `Type=simple` start does. It runs as the invoking
-user, with no supervisor unit, so the detached engine starts its own
-supervisor (shape 2, not shape 1). The claim that systemd starts the unit,
-and does not restart exit 2 or 3, is the drill's.
+user. Before each start, when no supervisor answers on the root, the
+supervisor unit's `ExecStart=` runs first, the launcher's supervisor mode,
+as the engine unit's `Requires=` starts it; the engine attaches to it
+(shape 1, DL-396). No service manager restarts that supervisor. The claim
+that systemd starts the units, and does not restart exit 2 or 3, is the
+drill's.
 """
 
 from __future__ import annotations
@@ -136,7 +139,7 @@ def _site(base: Path) -> dict[str, str]:
 
 class _Engine:
     """The engine unit's ExecStart, run by hand: the configured launcher's
-    engine mode, one process per start."""
+    engine mode, one process per start, after the supervisor unit's."""
 
     def __init__(self, base: Path, site: dict[str, str]) -> None:
         self.base = base
@@ -145,11 +148,39 @@ class _Engine:
         self.launcher = _configured(base, **site)
         self.proc: subprocess.Popen[str] | None = None
         self.starts = 0
+        #: the supervisor mode's processes, reaped at teardown
+        self.supervisors: list[subprocess.Popen[bytes]] = []
+
+    def supervisor_up(self) -> None:
+        """`Requires=`: the supervisor unit's ExecStart, unless a supervisor
+        already answers on the root, then its `ExecStartPost=` readiness."""
+        listed = subprocess.run(
+            [str(DSL41), "supervise", "list", "--run-root", self.site["RUN_ROOT"]],
+            capture_output=True,
+            timeout=60,
+        )
+        if listed.returncode == 0:
+            return
+        self.supervisors.append(
+            subprocess.Popen(
+                ["sh", str(self.launcher), "supervisor"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        )
+        ready = subprocess.run(
+            ["sh", str(self.launcher), "supervisor-ready"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert ready.returncode == 0, ready.stderr
 
     def start(self, env: dict[str, str]) -> str:
         """Start, as `systemctl start` does, without waiting; then the
         runbook's own readiness wait. Returns the launcher's line: the
         command this start ran."""
+        self.supervisor_up()
         self.starts += 1
         log = self.base / f"engine-{self.starts}.log"
         with open(log, "w") as out:
@@ -169,7 +200,15 @@ class _Engine:
     def teardown(self) -> None:
         if self.proc is not None and self.proc.poll() is None:
             _stop(self.proc)
-        shutdown_unmanaged_supervisor(Path(self.site["RUN_ROOT"]), controller_id="operator-fixture")
+        try:
+            shutdown_unmanaged_supervisor(
+                Path(self.site["RUN_ROOT"]), controller_id="operator-fixture"
+            )
+        finally:
+            for supervisor in self.supervisors:
+                if supervisor.poll() is None:  # pragma: no cover -- only a failed assertion
+                    supervisor.kill()
+                    supervisor.wait(timeout=30)
 
 
 def _transition(engine: _Engine, env: dict[str, str]) -> None:
@@ -572,21 +611,23 @@ def test_a_sealed_period_not_yet_opened_shows_on_the_anchor(short_root: Path) ->
         engine.teardown()
 
 
-def _launch_once(launcher: Path) -> subprocess.CompletedProcess[str]:
+def _launch_once(engine: _Engine) -> subprocess.CompletedProcess[str]:
     """One start of the engine unit that is expected to refuse: the
-    launcher's engine mode, run to its exit."""
+    launcher's engine mode, run to its exit, after the supervisor unit's."""
+    engine.supervisor_up()
     return subprocess.run(
-        ["sh", str(launcher), "engine"], capture_output=True, text=True, timeout=120
+        ["sh", str(engine.launcher), "engine"], capture_output=True, text=True, timeout=120
     )
 
 
 def _shutdown_supervisor(root: str) -> None:
-    """Deliberate legacy teardown of shape 2's unmanaged fixture (DL-390)."""
+    """Deliberate legacy teardown of the unmanaged supervisor stand-in (DL-390)."""
     shutdown_unmanaged_supervisor(Path(root), controller_id="operator-stopped-fixture")
 
 
 def _stopped(root: Path) -> None:
-    """Shape 2's stop, then ss2b's no-writers check: no supervisor files."""
+    """The stand-in supervisor's stop, then ss2b's no-writers check: no
+    supervisor files."""
     _shutdown_supervisor(str(root))
     wait_for(lambda: not (root / "supervisor.pid").exists(), timeout_s=60)
     wait_for(lambda: not (root / "supervisor.sock").exists(), timeout_s=60)
@@ -718,18 +759,18 @@ def test_a_torn_sole_opening_of_a_rolled_root_is_recovered_by_the_recipe(
         segment.write_bytes(first[: len(first) // 2])
 
         # the unit's start refuses, and so does the identical retry
-        refused = _launch_once(engine_b.launcher)
+        refused = _launch_once(engine_b)
         assert refused.returncode == 2
         assert "missing segment record" in refused.stdout + refused.stderr
         if cause != "damage":
             Path(f"{root_b}.open-from").touch()
-            retried = _launch_once(engine_b.launcher)
+            retried = _launch_once(engine_b)
             assert retried.returncode == 2
             assert "missing segment record" in retried.stdout + retried.stderr
             assert head()["state"] == "claimed"
 
-        # steps 1 to 3: look, stop, check. The refused detached starts
-        # left B's supervisor up, so the look asks it for its runs
+        # steps 1 to 3: look, stop, check. B's supervisor stand-in is up,
+        # as its unit is, so the look asks it for its runs
         assert (root_b / "supervisor.sock").exists()
         looked = _ok("torn-look", env_b).splitlines()
         assert json.loads(looked[0])["state"] == ("open" if cause == "damage" else "claimed")
@@ -779,7 +820,7 @@ def test_a_torn_sole_opening_of_a_rolled_root_is_recovered_by_the_recipe(
         # B can no longer resume: the anchor does not name it. C stops
         # first, or B meets C's anchor lock before the rule
         assert engine_c.proc is not None and _stop(engine_c.proc) == 0
-        stale = _launch_once(engine_b.launcher)
+        stale = _launch_once(engine_b)
         assert stale.returncode == 2
         assert "this anchor does not name" in stale.stdout + stale.stderr
         line = engine_c.start(env_c)

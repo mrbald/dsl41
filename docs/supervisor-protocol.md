@@ -3,7 +3,7 @@
 Status: frozen. DL-42 item 3 freezes the spool format and the wrapper
 input spec, and DL-48 freezes the supervisor socket protocol. Entries
 that amend it include DL-80, DL-129, DL-150, DL-151, DL-210, DL-229,
-DL-291, DL-300, DL-325, DL-326, DL-328, DL-390 and DL-392; each is cited where it
+DL-291, DL-300, DL-325, DL-326, DL-328, DL-390, DL-392 and DL-396; each is cited where it
 applies. Each change to a frozen item needs a decision-log entry. This
 document is the extraction boundary of the lifecycle tier (the five
 modules of §1). If a DL-42 trigger fires and the tier is extracted, this
@@ -36,7 +36,12 @@ orchestrator's UI (DL-42 item 6).
   the §5 socket protocol: SPAWN, SIGNAL, LIST, MAINTENANCE_STOP, legacy
   SHUTDOWN, PING and the lease verbs. It imports only the standard library and the tier's own
   stdlib-only modules below, and runs by file path, under the same
-  enforced boundary as the wrapper.
+  enforced boundary as the wrapper. Two starters exist (DL-396):
+  `dsl41 supervise start`, the command a supervisor service runs, and
+  the engine's client, whose `provision` starts one when none answers.
+  The client's `connect` attaches to the supervisor that answers and
+  starts none. A live socket is reused either way, and that reuse is the
+  engine's reattachment.
 - **process identity** (`runner_procid.py`, DL-72): the one copy of the
   durability liturgy, the boot-session id, the (pid, start-time) PID-reuse
   guard and the quiet group kill. The wrapper and the supervisor share it.

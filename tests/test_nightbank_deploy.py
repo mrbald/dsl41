@@ -119,6 +119,9 @@ def test_the_shipped_launcher_prints_the_whole_ordered_line() -> None:
         "--estate-anchor",
         f"{SHIPPED_ROOT}.anchor",
         "--detached",
+        # shape 1: the engine attaches to the supervisor unit and never forks its own (DL-396)
+        "--supervisor",
+        "attach",
         "--as-machine",
         "localhost",
         "--machine-policy",
@@ -182,6 +185,25 @@ def test_the_launcher_resumes_if_and_only_if_the_root_holds_its_sentinel(short_r
     (root / "journal.jsonl").write_text("")
     words = shlex.split(_sh(launcher, "--print").stdout)
     assert words.count("--resume") == 1 and words[-1] == "--resume"
+
+
+def test_the_launcher_reads_dsl41s_genesis_staging_as_residue(short_root: Path) -> None:
+    """period-model ss1.1: dsl41 stages `catalogs/` and `periods/.staging/`
+    before its genesis and tolerates both there, so a start refused before
+    the sentinel (DL-396: no supervisor answered) is followed by a genesis,
+    not by the launcher's exit 2. Anything else under `periods/` refuses."""
+    launcher = _configured(short_root, **_site(short_root))
+    root = short_root / "runs" / "nb"
+    (root / "catalogs" / "sha256-x").mkdir(parents=True)
+    (root / "periods" / ".staging" / "sha256-y").mkdir(parents=True)
+    (root / "leader.lock").write_text("")
+    genesis = _sh(launcher, "--print")
+    assert genesis.returncode == 0, genesis.stderr
+    assert "--resume" not in shlex.split(genesis.stdout)
+    (root / "periods" / "000001").mkdir()
+    refused = _sh(launcher, "--print")
+    assert refused.returncode == 2
+    assert "holds periods/000001 but no journal.jsonl" in refused.stderr
 
 
 @pytest.mark.parametrize("kind", ["nonempty", "symlink", "directory"])
@@ -419,16 +441,75 @@ def _stop(proc: subprocess.Popen[str]) -> int:
     return proc.wait(timeout=60)
 
 
+def test_an_engine_start_with_no_supervisor_exits_1_and_the_retry_is_a_genesis(
+    short_root: Path,
+) -> None:
+    """DL-396 under the shipped launcher: the engine mode attaches, so a start
+    while no supervisor answers forks nothing and exits 1, which the engine
+    unit retries. Once the supervisor mode is up, the next start is the same
+    genesis and serves its control socket."""
+    _night(short_root)
+    _grant_me(short_root / "etc" / "access.toml")
+    launcher = _configured(short_root, **_site(short_root))
+    root = short_root / "runs" / "nb"
+    socket = root / "control.sock"
+    first = _sh(launcher, "engine")
+    assert first.returncode == 1, first.stdout + first.stderr
+    assert f"no supervisor answers on {root}" in first.stderr
+    assert not (root / "supervisor.pid").exists() and not (root / "supervisor.sock").exists()
+    assert not (root / "journal.jsonl").exists()
+    supervisor: subprocess.Popen[bytes] | None = None
+    engine: subprocess.Popen[str] | None = None
+    try:
+        supervisor = subprocess.Popen(
+            ["sh", str(launcher), "supervisor"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        ready = _sh(launcher, "supervisor-ready")
+        assert ready.returncode == 0, ready.stderr
+        with open(short_root / "retry.log", "w") as out:
+            engine = subprocess.Popen(
+                ["sh", str(launcher), "engine"], stdout=out, stderr=subprocess.STDOUT, text=True
+            )
+        _wait_up(socket, engine)
+        line = (short_root / "retry.log").read_text().splitlines()[0]
+        assert line.startswith("dsl41-launch: engine: ") and "--resume" not in line, line
+        assert _stop(engine) == 0
+    finally:
+        if engine is not None and engine.poll() is None:  # pragma: no cover -- a failure
+            engine.kill()
+            engine.wait(timeout=30)
+        if supervisor is not None:
+            from test_runner_supervisor import shutdown_unmanaged_supervisor
+
+            try:
+                shutdown_unmanaged_supervisor(
+                    root, controller_id="retry-fixture", process=supervisor
+                )
+            finally:
+                if supervisor.poll() is None:  # pragma: no cover -- a failure
+                    supervisor.kill()
+                    supervisor.wait(timeout=30)
+
+
 def test_the_launcher_starts_restarts_and_its_reattach_line_resumes(short_root: Path) -> None:
     """The launcher's line is one `dsl41 run` accepts; its second start is
     a resume of the same root; and the reattach line the detached engine
-    prints on the way out is itself a working resume, access map included."""
+    prints on the way out is itself a working resume, access map included.
+    The supervisor mode runs first, as shape 1's supervisor unit does: the
+    engine mode attaches to it (DL-396)."""
     _night(short_root)
     _grant_me(short_root / "etc" / "access.toml")
     launcher = _configured(short_root, **_site(short_root))
     root = short_root / "runs" / "nb"
     socket = root / "control.sock"
     procs: list[subprocess.Popen[str]] = []
+    supervisor = subprocess.Popen(
+        ["sh", str(launcher), "supervisor"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
     def start(argv: list[str], log: str) -> subprocess.Popen[str]:
         with open(short_root / log, "w") as out:
@@ -438,6 +519,8 @@ def test_the_launcher_starts_restarts_and_its_reattach_line_resumes(short_root: 
         return proc
 
     try:
+        ready = _sh(launcher, "supervisor-ready")
+        assert ready.returncode == 0, ready.stderr
         first = start(["sh", str(launcher), "engine"], "first.log")
         assert _stop(first) == 0
         first_log = (short_root / "first.log").read_text()
@@ -464,7 +547,14 @@ def test_the_launcher_starts_restarts_and_its_reattach_line_resumes(short_root: 
                 proc.wait(timeout=30)
         from test_runner_supervisor import shutdown_unmanaged_supervisor
 
-        shutdown_unmanaged_supervisor(root, controller_id="launcher-fixture")
+        try:
+            shutdown_unmanaged_supervisor(
+                root, controller_id="launcher-fixture", process=supervisor
+            )
+        finally:
+            if supervisor.poll() is None:  # pragma: no cover -- only a failed assertion
+                supervisor.kill()
+                supervisor.wait(timeout=30)
 
 
 # ------------------------------------------------------------- the units

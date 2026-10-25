@@ -10,6 +10,7 @@ from __future__ import annotations
 import functools
 import hashlib
 from collections.abc import Callable, Iterable
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NoReturn
 
@@ -78,6 +79,16 @@ SEMANTICS_OPT = typer.Option(
     " resume must repeat it. The section on semantic switches in"
     " docs/runner-design.md explains each one. Switches: " + help_text(),
 )  # runner-design ss8a, DL-252
+
+
+class SupervisorChoice(str, Enum):
+    """`--supervisor`: how a detached launch gets its supervisor (DL-396).
+
+    `attach` connects to the supervisor already running on the run root and starts none. `spawn`
+    starts one when none answers. `run` defaults to `spawn` and the offline `seal` to `attach`."""
+
+    attach = "attach"
+    spawn = "spawn"
 
 
 def load_semantics(items: "list[str] | None", *, option: str = "--semantics") -> dict[str, str]:

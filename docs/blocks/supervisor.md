@@ -14,7 +14,7 @@ One limit is about transport, not storage: a lease freed on EOF needs a local so
 
 ## Interface
 
-- Started by file path, never with `-m`, by `dsl41 supervise start` or by `SupervisorClient.ensure_running`, with `--run-root` and an optional `--deadman-seconds`.
+- Started by file path, never with `-m`, by `dsl41 supervise start` or by `SupervisorClient.provision` (DL-396), with `--run-root` and an optional `--deadman-seconds`.
 - Run-root files: `supervisor.sock` (mode 0600), `supervisor.pid` and `supervisor.lock`. The spawner points stderr at `supervisor.log`.
 - Verbs, as JSON lines: `PING` and `LIST` (read-only); `ACQUIRE`, `RENEW` and `RELEASE` (lease); `SPAWN`, `SIGNAL`, `MAINTENANCE_STOP` and legacy `SHUTDOWN` (mutating). Async `exit` pushes go to the lease holder.
 - Engine side: `SupervisorClient` holds and renews the lease, demuxes pushes and runs the shared LIST check. `SupervisedCommandAdapter` spawns, awaits and kills.

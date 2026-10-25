@@ -24,6 +24,7 @@ from dsl41.cli_common import (
     SEMANTICS_OPT,
     TIMEZONE_MAP_OPT,
     TIMEZONE_OPT,
+    SupervisorChoice,
     check_base_tz,
     confirmed_resume_refusal,
     import_tui_or_exit_2,
@@ -60,7 +61,7 @@ if TYPE_CHECKING:
     from dsl41.runner_history import RunRow
     from dsl41.runner_admission import DecisionIndex
     from dsl41.runner_preflight import PreflightItem
-    from dsl41.runner_startup import Wiring
+    from dsl41.runner_startup import SupervisorLaunch, Wiring
     from dsl41.seal import CarriedRows
     from dsl41.semantics import SemanticSwitches
 
@@ -68,18 +69,18 @@ if TYPE_CHECKING:
 # ------------------------------------------------------------------- runner
 #
 # Exit codes for the runner verbs: 0 clean (run: operator-stopped; rehearse: quiescent), 1 the
-# engine/estate failed while running (EngineError, oracle refusal mid-run), 2 the run never
-# started (preflight ERROR, resume gate, unreadable scenario, unreachable socket). The
-# control-plane verbs (cli_control.py) read the same 0/1/2 and split 2 three ways. Exit 3 is
-# per-verb (DL-184): run's 3 is a committed seal boundary; rehearse's 3 is --check-cadence
-# finding deviations after a clean play. 4 is the control verbs' unknown outcome. 5 is reserved:
-# deployed units list it in `RestartPreventExitStatus` (DL-353). run's 6 is a time-half stop
-# (concurrency-model ss4): an engine-made input's time half raised, and the engine stopped before
-# it was logged. run's and rehearse's 7 is a statechart error (docs/statechart-engine.md ss5): a
-# declared machine hit an assertion failure, and the engine stopped before any durable write of
-# it. EXIT_STATECHART_ERROR lives in state_machine.py, shared with the supervisor; the units list
-# it in `RestartPreventExitStatus`, because a restart would run the same build into the same bug
-# (deployment-runbook ss3).
+# engine/estate failed while running (EngineError, oracle refusal mid-run) or an attach launch found
+# no supervisor to retry against (DL-396), 2 the run never started (preflight ERROR, resume gate,
+# unreadable scenario, unreachable socket). The control-plane verbs (cli_control.py) read the same
+# 0/1/2 and split 2 three ways. Exit 3 is per-verb (DL-184): run's 3 is a committed seal boundary;
+# rehearse's 3 is --check-cadence finding deviations after a clean play. 4 is the control verbs'
+# unknown outcome. 5 is reserved: deployed units list it in `RestartPreventExitStatus` (DL-353).
+# run's 6 is a time-half stop (concurrency-model ss4): an engine-made input's time half raised, and
+# the engine stopped before it was logged. run's and rehearse's 7 is a statechart error
+# (docs/statechart-engine.md ss5): a declared machine hit an assertion failure, and the engine
+# stopped before any durable write of it. EXIT_STATECHART_ERROR lives in state_machine.py, shared
+# with the supervisor; the units list it in `RestartPreventExitStatus`, because a restart would run
+# the same build into the same bug (deployment-runbook ss3).
 
 #: The one stderr line `run --on-transition-violation` prints, whatever its value.
 INERT_VIOLATION_OPTION = (
@@ -217,6 +218,15 @@ def run(
         " jobs.",
         # concurrency-model ss8
     ),
+    supervisor: SupervisorChoice | None = typer.Option(
+        None,
+        "--supervisor",
+        metavar="MODE",
+        help="How a --detached run gets its supervisor: attach or spawn. spawn, the default,"
+        " starts one when none answers on the run root. attach connects to"
+        " the one already running, such as a supervisor service, and starts"
+        " none: when none answers, the run exits 1. Needs --detached.",
+    ),  # DL-396
     machine_policy: str = typer.Option(
         "strict",
         "--machine-policy",
@@ -270,9 +280,10 @@ def run(
     elsewhere.
 
     Exit codes: 0 stopped by the operator; 1 the engine or the estate
-    failed while running; 2 the run never started (a preflight error, a
-    refused resume, an unreadable input); 3 a seal committed, and the
-    next period is ready to open; 6 a time-half stop (the time half of an
+    failed while running, or --supervisor attach found no supervisor; 2
+    the run never started (a preflight error, a refused resume, an
+    unreadable input); 3 a seal committed, and the next period is ready
+    to open; 6 a time-half stop (the time half of an
     engine-made input raised, and the engine stopped before logging it);
     7 a statechart error (a declared machine hit an assertion failure).
     Exit 5 is retired and unused.
@@ -325,6 +336,8 @@ def run(
         raise typer.Exit(refuse("--deadman needs --detached: a tethered run has no supervisor"))
     if deadman is not None and deadman <= 0:
         raise typer.Exit(refuse("--deadman must be a positive number of seconds"))
+    if supervisor is not None and not detached:
+        raise typer.Exit(refuse("--supervisor needs --detached: a tethered run has no supervisor"))
     from dsl41.runner_clock import EngineError
     from dsl41.period import runtime_profile_from_cli
 
@@ -356,6 +369,7 @@ def run(
                     open_from=open_from,
                     access_map=access_map,
                     reattach=_reattach_line(sys.argv, _value_options(ctx.command.params)),
+                    supervisor=(supervisor or SupervisorChoice.spawn).value,
                 )
             )
         )
@@ -520,8 +534,9 @@ def _roll_admission(run_root: Path, profile: "RuntimeProfile") -> "Callable[[Man
     raises `EngineError` with `_profile_mismatch`'s refusal.
 
     The deadman is compared at the value the run will observe. A tethered run has none. A detached
-    run with no supervisor at the target starts one at the pinned deadman. One already running
-    keeps its own interval, so the gate asks it, read-only, after the local comparison passes."""
+    run with no supervisor at the target starts one at the pinned deadman; under `--supervisor
+    attach` it stops at the wiring and starts none (DL-396). One already running keeps its own
+    interval, so the gate asks it, read-only, after the local comparison passes."""
     from dsl41.period import to_us
     from dsl41.runner_adapters import running_supervisor_deadman
     from dsl41.runner_clock import EngineError
@@ -839,6 +854,7 @@ async def _serve_run(
     open_from: "Path | None" = None,
     access_map: "Path | None" = None,
     reattach: "str | None" = None,
+    supervisor: "SupervisorLaunch",
 ) -> int:
     """`dsl41 run`, from the acquire to the last teardown.
 
@@ -852,7 +868,7 @@ async def _serve_run(
 
     from dsl41.boundary import stage_period
     from dsl41.period import to_us
-    from dsl41.runner_startup import start_run, wire_from_profile
+    from dsl41.runner_startup import SupervisorAbsent, start_run, wire_from_profile
     from dsl41.runner_control import ControlServer
     from dsl41.runner_startup import resume_run as _resume_run
     from dsl41.runner_access import AccessError
@@ -868,8 +884,8 @@ async def _serve_run(
         admit = _preflight_launch(run_root, profile, open_from, access_map)
     except (EngineError, AccessError) as exc:
         return refuse(exc)
-    # ACQUIRE first (S6a, concurrency-model ss7): the next step starts a supervisor and takes
-    # its lease, an act on an estate this process may not lead
+    # ACQUIRE first (S6a, concurrency-model ss7): the next step starts or attaches to a supervisor
+    # and takes its lease, an act on an estate this process may not lead
     try:
         lock = acquire_run_root(run_root)
     except EngineError as exc:
@@ -962,7 +978,15 @@ async def _serve_run(
                 catalog,
                 profile.with_deadman(pinned_deadman_us),
                 start=datetime.now(UTC).replace(tzinfo=None),
+                supervisor=supervisor,
             )
+        except SupervisorAbsent as exc:
+            # exit 1, not a refusal's 2: the engine unit retries it behind `Requires=` until its
+            # supervisor unit answers (DL-396)
+            typer.echo(
+                f"{exc}; --supervisor attach starts none: start the supervisor service", err=True
+            )
+            return 1
         except EngineError as exc:
             return refuse(exc)
         client = wiring.client

@@ -639,7 +639,7 @@ class _Spied(Executor):
 
 
 def test_every_event_the_client_posts_is_in_the_alphabet(short_root: Path, peers: _Peers) -> None:
-    """The posters are the client's own: `ensure_running` connects, and again
+    """The posters are the client's own: `provision` connects, and again
     on a live connection (the supersede); the peer drops the connection
     (EOF); a reconnect, then a request cancelled while its reply is
     outstanding (the poison); and close."""
@@ -648,8 +648,8 @@ def test_every_event_the_client_posts_is_in_the_alphabet(short_root: Path, peers
     async def scenario() -> None:
         client = SupervisorClient(short_root, machines=machines)
         try:
-            await client.ensure_running()
-            await client.ensure_running()
+            await client.provision()
+            await client.provision()
             lost = client.lost
             peers[0].drop_all()
             await asyncio.wait_for(lost.wait(), 5)
@@ -766,6 +766,7 @@ def _serve_detached(
             False,
             [],
             profile=runtime_profile_from_cli(detached=True),
+            supervisor="spawn",
         )
         # bounded: an engine that swallowed the error would serve on forever
         return await asyncio.wait_for(serve, timeout=60)
@@ -844,6 +845,7 @@ def test_a_statechart_error_during_the_lease_s_return_exits_7(
             False,
             [],
             profile=runtime_profile_from_cli(detached=True),
+            supervisor="spawn",
         )
     )
     assert code == 7
@@ -888,6 +890,7 @@ def test_a_statechart_error_at_the_teardown_s_close_exits_7(
                 False,
                 [],
                 profile=runtime_profile_from_cli(detached=True),
+                supervisor="spawn",
             )
         )
 
@@ -941,6 +944,7 @@ def test_a_lease_return_that_raises_still_judges_the_run_and_names_the_next_step
                 False,
                 [],
                 profile=runtime_profile_from_cli(detached=True),
+                supervisor="spawn",
             )
         )
 
@@ -1003,7 +1007,8 @@ def test_the_offline_sealer_exits_7_when_the_client_meets_a_gap(
     engine.journal.close()
     _gapped(monkeypatch, tmp_path, **_without("03"))
     peers.hang_up_on, peers.answer_first = "LIST", {"resume": 0, "proof": 1}[where]
-    result = _seal_offline(run_root, nxt)
+    # the fixture's peer stands in for a spawned supervisor (DL-396)
+    result = _seal_offline(run_root, nxt, "--supervisor", "spawn")
     assert result.exit_code == 7, result.output
     lines = result.output.splitlines()
     assert f"{STATECHART_LOG_PREFIX}: machine: supervisor_client" in lines
@@ -1052,7 +1057,7 @@ def test_the_adapter_s_wait_does_not_spin_after_a_discarded_post(
 
         client.watch_exit = counted  # type: ignore[method-assign]
         adapter = SupervisedCommandAdapter(client, grace_seconds=0.0, settle_seconds=0.0)
-        await client.ensure_running()
+        await client.provision()
         task = asyncio.ensure_future(adapter._await_outcome("run", run_dir, "j", 1))
         try:
             while passes < 1:

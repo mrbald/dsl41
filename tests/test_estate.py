@@ -2182,5 +2182,5 @@ def test_dl169_a_rolled_roots_retry_still_answers_from_the_imported_sidecar(
     )
     assert retried.exit_code == 0, retried.output
     assert "already closed" in retried.output and "period 1" in retried.output
-    assert "This root is at period 2" in retried.output
+    assert "This root is at period 2, already open" in retried.output  # the roll opened it
     assert sealed_periods(root_b) == [1]  # no second boundary

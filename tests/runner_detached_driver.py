@@ -33,7 +33,7 @@ async def main(run_root: str, sleep_s: str) -> None:
     root = Path(run_root)
     root.mkdir(parents=True, exist_ok=True)
     client = SupervisorClient(root)
-    await client.ensure_running()
+    await client.provision()
     await client.acquire()
     engine = start_run(
         catalog,

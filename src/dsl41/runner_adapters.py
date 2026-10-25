@@ -108,7 +108,7 @@ def supervisor_log_path(run_root: Path) -> Path:
 # still bounds a runaway peer. Public because three modules need it (this one, runner_control's
 # server AND client) (DL-78).
 LINE_LIMIT: int = 2**24
-#: spawns `ensure_running` makes inside its 10 s window when a fresh supervisor exits before
+#: spawns `provision` makes inside its 10 s window when a fresh supervisor exits before
 #: publishing its socket (DL-210: exit 1 is retryable)
 _SPAWN_ATTEMPTS = 3
 
@@ -913,6 +913,13 @@ class SupervisorUnavailable(RuntimeError):
     the detached path."""
 
 
+class SupervisorRefused(SupervisorUnavailable):
+    """The supervisor answered and refused: PING with an error, such as `unsupported_version`, or
+    a lease ACQUIRE another controller holds. A subclass, so every `except SupervisorUnavailable`
+    covers it; an attach launch tells it from absence, because a retry cannot fix a refusal
+    (DL-396)."""
+
+
 class SpawnInProgress(SupervisorUnavailable):
     """ss11a's `in_progress`: this SPAWN's wrapper is forked and has not recorded yet, so the
     supervisor gives no answer. It is NOT a failure: the run is alive, and reporting a completion
@@ -1470,10 +1477,26 @@ class SupervisorClient:
 
     # -- connection ---------------------------------------------------------
 
-    async def ensure_running(self) -> None:
-        """Connect to a live supervisor, or spawn a fresh one DETACHED (setsid, stdio to
-        supervisor.log) and connect-with-retry. A live socket is reused; that reuse IS reattachment
-        (spec ss1)."""
+    async def connect(self) -> None:
+        """Attach to the supervisor that answers on `supervisor.sock`, and fork nothing: a method
+        that says "connect" never starts a service (DL-396). A live socket is reused; that reuse
+        IS reattachment (runner-design ss6a). Raises `SupervisorUnavailable` when none answers."""
+        resp = await self._ping_new_connection()
+        if resp is None:
+            raise SupervisorUnavailable(f"no supervisor answers on {self.sock_path}")
+        if not resp.get("ok"):
+            error = resp.get("error")
+            why = (
+                "it does not speak protocol version 1, the one this client sends"
+                if error == "unsupported_version"
+                else f"it answered {error!r}"
+            )
+            raise SupervisorRefused(f"the supervisor on {self.sock_path} refused PING: {why}")
+
+    async def provision(self) -> None:
+        """Attach to a live supervisor, or spawn a fresh one DETACHED (setsid, stdio to
+        supervisor.log) and connect-with-retry. The one method of this client that may fork a
+        supervisor (DL-396); a live socket is still reused, so a restarted engine reattaches."""
         if await self._try_connect():
             return
         child = self._spawn_supervisor()
@@ -1496,8 +1519,13 @@ class SupervisorClient:
         )
 
     async def _try_connect(self) -> bool:
+        resp = await self._ping_new_connection()
+        return resp is not None and bool(resp.get("ok"))
+
+    async def _ping_new_connection(self) -> dict[str, Any] | None:
+        """Open a connection and PING on it: the answer, or None when nothing answers."""
         if not self.sock_path.exists():
-            return False
+            return None
         try:
             reader, writer = await asyncio.open_unix_connection(
                 str(self.sock_path), limit=LINE_LIMIT
@@ -1505,18 +1533,18 @@ class SupervisorClient:
         except OSError:
             # only the supervisor owns this pathname; a refusal can race its bind/listen window,
             # and unlinking here would hide a live successor
-            return False
+            return None
         if self._closed:
             writer.close()  # nothing posts to a closing client
-            return False
+            return None
         self._new_epoch(reader, writer)
         try:
             resp = await self._request({"cmd": "PING"}, _connect=False)
         except SupervisorUnavailable:
-            return False
+            return None
         if resp.get("ok"):
             self._note_contact(resp)  # PING is where a REATTACH learns the deadman
-        return bool(resp.get("ok"))
+        return resp
 
     def _new_epoch(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """Post `connect`, then retire the previous connection's remains and install this one
@@ -1800,7 +1828,7 @@ class SupervisorClient:
             }
         )
         if not resp.get("ok"):
-            raise SupervisorUnavailable(f"lease acquire refused: {resp}")
+            raise SupervisorRefused(f"lease acquire refused: {resp}")
         self.token = int(resp["token"])
         self.incarnation = resp.get("incarnation")  # DL-80
         self._note_contact(resp)
