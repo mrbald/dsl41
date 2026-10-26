@@ -83,11 +83,11 @@ def test_each_for_form_builds_its_verbs_arguments(tmp_path: Path) -> None:
         "--semantics",
         sems[1],
     ]
-    assert build_args(manifest, ArgsFor.run) == run
-    assert build_args(manifest, ArgsFor.rehearse) == run
-    assert build_args(manifest, ArgsFor.lint) == run[:8]
-    assert build_args(manifest, ArgsFor.viz) == run[:4]
-    assert build_args(manifest, ArgsFor.seal) == [
+    assert build_args(manifest, ArgsFor.run, "dev") == run
+    assert build_args(manifest, ArgsFor.rehearse, "dev") == run
+    assert build_args(manifest, ArgsFor.lint, "dev") == run[:8]
+    assert build_args(manifest, ArgsFor.viz, "dev") == run[:4]
+    assert build_args(manifest, ArgsFor.seal, "dev") == [
         "--next",
         files[0],
         "--next",
@@ -124,7 +124,7 @@ def test_environment_layers_follow_the_manifests_own_in_order(tmp_path: Path) ->
         f"{d}/site.properties",
     ]
     # an environment with no layers of its own keeps the base layers only
-    assert build_args(manifest, ArgsFor.viz, "dev") == build_args(manifest, ArgsFor.viz)
+    assert build_args(manifest, ArgsFor.viz, "dev")[2:] == ["-p", f"{d}/base.properties"]
 
 
 def test_paths_are_joined_as_given_without_resolving_symlinks(tmp_path: Path) -> None:
@@ -133,17 +133,19 @@ def test_paths_are_joined_as_given_without_resolving_symlinks(tmp_path: Path) ->
     real = _estate(tmp_path / "releases" / "r1").parent
     link = tmp_path / "current"
     link.symlink_to(real)
-    argv = build_args(link / "estate.toml", ArgsFor.viz)
+    argv = build_args(link / "estate.toml", ArgsFor.viz, "dev")
     assert argv[0] == str(link / "b.jil")
     assert str(real) not in " ".join(argv)
 
 
-def test_a_relative_manifest_path_gives_relative_strings(
+def test_a_relative_manifest_path_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Two spellings of one manifest would print two path strings and two bundle hashes."""
     _estate(tmp_path / "rel")
     monkeypatch.chdir(tmp_path)
-    assert build_args(Path("rel/estate.toml"), ArgsFor.viz)[:2] == ["rel/b.jil", "rel/a.jil"]
+    assert "give the manifest as an absolute path" in _refusal(Path("rel/estate.toml"), env="dev")
+    assert build_args(tmp_path / "rel" / "estate.toml", ArgsFor.viz, "dev")
 
 
 # ------------------------------------------------------------- refusals
@@ -171,6 +173,9 @@ def test_bad_toml_is_refused(tmp_path: Path) -> None:
     manifest = _estate(tmp_path, 'name = "x\n')
     assert "not valid TOML" in _refusal(manifest)
     manifest.write_bytes(b'name = "\xff"\n')
+    assert "not valid TOML" in _refusal(manifest)
+    # tomllib recurses per nesting level, and deep nesting raises RecursionError
+    manifest.write_text("a = " + "[" * 100_000 + "]" * 100_000 + "\n")
     assert "not valid TOML" in _refusal(manifest)
 
 
@@ -209,27 +214,66 @@ def test_a_named_file_that_is_absent_is_refused(tmp_path: Path, name: str) -> No
     assert f"{name!r} is not a file under {tmp_path}" in _refusal(manifest)
 
 
-def test_an_absolute_name_is_refused(tmp_path: Path) -> None:
-    manifest = _estate(tmp_path)
-    _edit(manifest, '"a.jil"]', f'"{tmp_path / "a.jil"}"]')
-    assert "must be a path relative to the manifest" in _refusal(manifest)
-
-
-def test_a_name_that_would_read_as_an_option_is_refused(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ('"a.jil"]', '"ABS"]'),
+        ('"a.jil"]', '"../rel/a.jil"]'),
+        ('"a.jil"]', '"sub/../a.jil"]'),
+        ('timezone_map = "tz.map"', 'timezone_map = ""'),
+    ],
+    ids=["absolute", "parent", "inner-parent", "empty"],
+)
+def test_a_name_outside_the_release_directory_is_refused(
+    tmp_path: Path, old: str, new: str
 ) -> None:
-    _estate(tmp_path, 'name = "x"\nfiles = ["-x.jil"]\n')
-    (tmp_path / "-x.jil").write_text("")
-    assert build_args(tmp_path / "estate.toml", ArgsFor.viz) == [str(tmp_path / "-x.jil")]
-    monkeypatch.chdir(tmp_path)
-    assert "would reach the verb as an option" in _refusal(Path("estate.toml"))
+    manifest = _estate(tmp_path / "rel")
+    (tmp_path / "rel" / "sub").mkdir()
+    _edit(manifest, old, new.replace("ABS", str(tmp_path / "rel" / "a.jil")))
+    assert "must be a path relative to the manifest, with no '..' part" in _refusal(manifest)
 
 
-def test_an_undeclared_environment_is_refused(tmp_path: Path) -> None:
+def test_a_directory_named_as_a_file_is_refused(tmp_path: Path) -> None:
+    manifest = _estate(tmp_path)
+    (tmp_path / "sub").mkdir()
+    _edit(manifest, '"a.jil"]', '"sub"]')
+    assert f"'sub' is not a file under {tmp_path}" in _refusal(manifest)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "fragment"),
+    [
+        ('"a.jil"]', '"a.jil", "./a.jil"]', "files names {d}/a.jil twice"),
+        ('["prod.properties"', '["base.properties"', "properties names {d}/base.properties twice"),
+        (
+            '"prod.properties", "site.properties"]',
+            '"prod.properties", "prod.properties"]',
+            "properties names {d}/prod.properties twice",
+        ),
+    ],
+    ids=["files", "base-and-environment", "environment"],
+)
+def test_a_repeated_path_is_refused(tmp_path: Path, old: str, new: str, fragment: str) -> None:
+    manifest = _estate(tmp_path)
+    # the same layer in two environments is not a repeat: one build sees one environment
+    _edit(
+        manifest,
+        "[environments.dev]\nproperties = []",
+        '[environments.dev]\nproperties = ["site.properties"]',
+    )
+    assert build_args(manifest, ArgsFor.viz, "dev")
+    _edit(manifest, old, new)
+    # every environment is checked, so the build for dev refuses a repeat in prod too
+    assert fragment.format(d=tmp_path) in _refusal(manifest, env="dev")
+
+
+def test_an_undeclared_or_missing_environment_is_refused(tmp_path: Path) -> None:
     manifest = _estate(tmp_path)
     assert "no environment 'qa'; the manifest declares dev, prod" in _refusal(manifest, env="qa")
+    assert "choose an environment; the manifest declares dev, prod" in _refusal(manifest)
     bare = _estate(tmp_path / "bare", 'name = "x"\nfiles = ["a.jil"]\n')
     assert "no environment 'prod'; the manifest declares none" in _refusal(bare, env="prod")
+    assert build_args(bare, ArgsFor.viz) == [str(tmp_path / "bare" / "a.jil")]
 
 
 @pytest.mark.parametrize(
@@ -275,7 +319,7 @@ def test_requires_dsl41_met(
     monkeypatch.setattr(estate_manifest, "tool_version", lambda: installed)
     manifest = _estate(tmp_path)
     _edit(manifest, 'requires_dsl41 = ">=0.1"', f'requires_dsl41 = "{requirement}"')
-    assert build_args(manifest, ArgsFor.viz)
+    assert build_args(manifest, ArgsFor.viz, "dev")
 
 
 @pytest.mark.parametrize(
@@ -324,16 +368,21 @@ def test_cli_line_and_json_carry_the_same_argv(tmp_path: Path) -> None:
     ("args", "fragment"),
     [
         (["--environment", "qa"], "no environment 'qa'"),
-        (["--for", "run"], "unknown key owner"),
+        ([], "choose an environment"),
+        (["--environment", "dev"], "unknown key owner"),
+        (["--environment", "dev"], "give the manifest as an absolute path"),
     ],
-    ids=["environment", "schema"],
+    ids=["environment", "no-environment", "schema", "relative"],
 )
 def test_cli_refuses_with_exit_2_and_one_line(
-    tmp_path: Path, args: list[str], fragment: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args: list[str], fragment: str
 ) -> None:
     manifest = _estate(tmp_path)
     if fragment.startswith("unknown key"):
         _edit(manifest, 'name = "demo"', 'name = "demo"\nowner = "ops"')
+    if fragment.startswith("give"):
+        monkeypatch.chdir(tmp_path)
+        manifest = Path("estate.toml")
     result = _invoke("estate", "args", str(manifest), "--for", "run", *args)
     assert result.exit_code == 2
     assert result.stdout == ""
@@ -346,7 +395,8 @@ def test_cli_refuses_with_exit_2_and_one_line(
 @pytest.fixture(scope="module")
 def nightbank_release(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """The small estate copied into a release directory beside its manifest, with the night's
-    properties prepared by the launcher's own `prepare_night` at a fixed anchor."""
+    properties prepared by the launcher's own `prepare_night` at a fixed anchor. The prod layer
+    restates one of the night's values, so it reaches the verbs without changing the estate."""
     base = tmp_path_factory.mktemp("release")
     _launcher().prepare_night(
         base, "small", anchor_utc=datetime(2026, 1, 6, 0, 5, tzinfo=UTC), incidents=False
@@ -354,19 +404,23 @@ def nightbank_release(tmp_path_factory: pytest.TempPathFactory) -> Path:
     names = [Path(path).name for path in SMALL]
     for path in SMALL:
         shutil.copy(path, base)
+    (base / "prod.properties").write_text((base / "night.properties").read_text().splitlines()[0])
+    (base / "tz-aliases").write_text("ZRH Europe/Zurich\n")
     manifest = base / "estate.toml"
     manifest.write_text(
         'name = "nightbank-small"\n'
         f"files = {json.dumps(names)}\n"
         'properties = ["night.properties"]\n'
         'timezone = "UTC"\n'
+        'timezone_map = "tz-aliases"\n'
         '[semantics]\ndst-start-times = "fold0"\n'
+        '[environments.prod]\nproperties = ["prod.properties"]\n'
     )
     return manifest
 
 
 def _printed(manifest: Path, verb: str) -> list[str]:
-    result = _invoke("estate", "args", str(manifest), "--for", verb)
+    result = _invoke("estate", "args", str(manifest), "--for", verb, "--environment", "prod")
     assert result.exit_code == 0, result.stderr
     return shlex.split(result.stdout)
 
@@ -387,19 +441,50 @@ def test_the_printed_rehearse_arguments_rehearse(nightbank_release: Path) -> Non
 @pytest.mark.parametrize(
     ("verb", "extra", "keys"),
     [
-        ("seal", ["--run-root", "r"], ("next_files", "next_timezone", "next_semantics")),
-        ("run", ["--run-root", "r"], ("files", "timezone", "semantics")),
+        (
+            "seal",
+            ["--run-root", "r"],
+            ("next_files", "next_timezone", "next_timezone_map", "next_semantics"),
+        ),
+        ("run", ["--run-root", "r"], ("files", "timezone", "timezone_map", "semantics")),
     ],
 )
 def test_the_printed_seal_and_run_arguments_parse(
-    nightbank_release: Path, verb: str, extra: list[str], keys: tuple[str, str, str]
+    nightbank_release: Path, verb: str, extra: list[str], keys: tuple[str, str, str, str]
 ) -> None:
     """A dry parse through the verb's own parser: a full seal needs a live estate root, and the
     claim here is only that the parser takes the printed list as it stands."""
     command = typer.main.get_command(app).commands[verb]  # type: ignore[attr-defined]
     params = command.make_context(verb, [*_printed(nightbank_release, verb), *extra]).params
-    files, timezone, semantics = (params[key] for key in keys)
-    assert list(files) == [str(nightbank_release.parent / Path(p).name) for p in SMALL]
-    assert list(params["properties"]) == [str(nightbank_release.parent / "night.properties")]
+    files, timezone, timezone_map, semantics = (params[key] for key in keys)
+    release = nightbank_release.parent
+    assert list(files) == [str(release / Path(p).name) for p in SMALL]
+    assert list(params["properties"]) == [
+        str(release / "night.properties"),
+        str(release / "prod.properties"),
+    ]
     assert timezone == "UTC"
+    assert timezone_map == str(release / "tz-aliases")
     assert list(semantics) == ["dst-start-times=fold0"]
+
+
+@pytest.mark.parametrize(
+    ("verb", "options"),
+    [
+        ("run", {"-p", "--timezone", "--timezone-map", "--semantics"}),
+        ("rehearse", {"-p", "--timezone", "--timezone-map", "--semantics"}),
+        ("lint", {"-p", "--timezone", "--timezone-map"}),
+        ("viz", {"-p"}),
+        ("seal", {"--next", "-p", "--next-timezone", "--next-timezone-map", "--next-semantics"}),
+    ],
+)
+def test_every_printed_option_is_one_the_verb_declares(
+    nightbank_release: Path, verb: str, options: set[str]
+) -> None:
+    """Every option word the builder prints is among the verb's own declared option names, and
+    the fixture reaches every option the form can print."""
+    command = typer.main.get_command(app).commands[verb]  # type: ignore[attr-defined]
+    declared = {opt for param in command.params for opt in param.opts}
+    printed = {word for word in _printed(nightbank_release, verb) if word.startswith("-")}
+    assert printed == options
+    assert printed <= declared
