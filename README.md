@@ -25,10 +25,11 @@ the other four.
 **Packager**: build the site package (the RPM or equivalent that installs
 dsl41 and your services), ship JIL releases on your own schedule.
 
-1. [docs/offline-installation.md](docs/offline-installation.md) - the release inputs, the reference RPM, what the package owns
-2. [docs/deployment-runbook.md §1](docs/deployment-runbook.md#1-install) to §3 - install, filesystem layout, starting the engine; the launcher and units are the example under [examples/nightbank/deploy](examples/nightbank/deploy)
-3. [docs/deployment-runbook.md §6](docs/deployment-runbook.md#6-jil-rollout--updating-the-estate) - the JIL rollout cycles; §7 upgrades of dsl41 itself
-4. [docs/deployment-qualification.md](docs/deployment-qualification.md) and [docs/offline-rehearsal.md](docs/offline-rehearsal.md) - qualifying a target and rehearsing the exact wheel
+1. [docs/site-package.md](docs/site-package.md) - the packager guide: what a release gives you, the reference RPM or the offline recipe, what the site adds, install and first start, JIL releases on your own schedule, qualification
+2. [docs/offline-installation.md](docs/offline-installation.md) - the release inputs, the reference RPM, what the package owns
+3. [docs/deployment-runbook.md §1](docs/deployment-runbook.md#1-install) to §3 - install, filesystem layout, starting the engine; the launcher and units are the example under [examples/nightbank/deploy](examples/nightbank/deploy)
+4. [docs/deployment-runbook.md §6](docs/deployment-runbook.md#6-jil-rollout--updating-the-estate) - the JIL rollout cycles; §7 upgrades of dsl41 itself
+5. [docs/deployment-qualification.md](docs/deployment-qualification.md) and [docs/offline-rehearsal.md](docs/offline-rehearsal.md) - qualifying a target and rehearsing the exact wheel
 
 **Operator**: start, watch, recover and retire the engine; drills and incidents.
 
