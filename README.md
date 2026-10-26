@@ -20,10 +20,10 @@ boundaries for estates that run for months.
 
 Each document is written for one reader ([docs/writing.md](docs/writing.md),
 DL-405). Pick your track; the architect's track is the background reading for
-the other three.
+the other four.
 
-**Packager**: build the site package, install the services, ship JIL releases
-on your own schedule.
+**Packager**: build the site package (the RPM or equivalent that installs
+dsl41 and your services), ship JIL releases on your own schedule.
 
 1. [docs/offline-installation.md](docs/offline-installation.md) - the release inputs, the reference RPM, what the package owns
 2. [docs/deployment-runbook.md §1](docs/deployment-runbook.md#1-install) to §3 - install, filesystem layout, starting the engine; the launcher and units are the example under [examples/nightbank/deploy](examples/nightbank/deploy)
@@ -33,24 +33,31 @@ on your own schedule.
 **Operator**: start, watch, recover and retire the engine; drills and incidents.
 
 1. [docs/deployment-runbook.md §0](docs/deployment-runbook.md#0-the-operator-path) - the operator path: tasks, diagrams, recipes, monitoring and retirement; §2b backup and restore, §6a the period boundary, §8 scenarios
-2. [examples/nightbank/README.md](examples/nightbank/README.md) and its [RUNBOOK](examples/nightbank/RUNBOOK.md) - the training sandbox: 21 operator exercises on the real engine; `scripts/wargame.sh` gives a disposable EL8 systemd container for them
+2. [examples/nightbank/README.md](examples/nightbank/README.md) and its [RUNBOOK](examples/nightbank/RUNBOOK.md) - the training sandbox: numbered operator exercises on the real engine, run from a checkout with `uv run examples/nightbank/bin/nightbank up`; `scripts/wargame.sh` gives a disposable EL8 systemd container for the service drills of §3
 3. [examples/file_processing/README.md](examples/file_processing/README.md) - the operator CLI and procedures of the file-processing block; [examples/dst-drill](examples/dst-drill/README.md) for the clock-change drill
 
-**Job author**: write an estate in JIL or the Python DSL and get it accepted.
+**Job author**: write an estate in JIL or the Python DSL, or bring an existing one in, and get it accepted.
 
-1. [CLI](#cli) - `lint`, `rehearse`, `viz` and the rules L001-L023 an estate must pass
-2. [Implementation memo](#implementation-memo) - the Python DSL builders (`job`, `box`, `sequence`, `parallel`) and `to_jil()`; [examples/file_processing/estate.py](examples/file_processing/estate.py) is a worked Python estate, the other `examples/` directories are worked JIL estates
-3. [docs/autosys-semantics.md](docs/autosys-semantics.md) - the meaning of JIL (SEM entries); [docs/simulation-coverage.md](docs/simulation-coverage.md) - what the runner models, refuses, or assumes; [docs/jil-statement-syntax.md](docs/jil-statement-syntax.md) - the statement scanner spec
-4. [docs/deployment-runbook.md §6](docs/deployment-runbook.md#6-jil-rollout--updating-the-estate) - how an accepted estate reaches the engine
+1. [Lint a catalog](#lint-a-catalog) - the rules L001-L023, and `rehearse` and `viz` under [CLI](#cli)
+2. [DSL -> JIL (build)](#dsl---jil-build) - the Python DSL builders (`job`, `box`, `sequence`, `parallel`) and `to_jil()`; [examples/file_processing/estate.py](examples/file_processing/estate.py) is a worked Python estate; `examples/nightbank`, `fulfilment`, `energy`, `media` and `dst-drill` hold worked JIL estates
+3. [JIL -> DSL (decompile)](#jil---dsl-decompile) and [Prove two catalogs equivalent](#prove-two-catalogs-equivalent) - bringing an existing estate in and checking a rewrite
+4. [docs/autosys-semantics.md](docs/autosys-semantics.md) - the meaning of JIL (SEM entries); [docs/simulation-coverage.md](docs/simulation-coverage.md) - what the runner models, refuses, or assumes; [docs/jil-statement-syntax.md](docs/jil-statement-syntax.md) - the statement scanner spec
+5. [docs/deployment-runbook.md §6](docs/deployment-runbook.md#6-jil-rollout--updating-the-estate) - how an accepted estate reaches the engine
 
-An author guide for the Python DSL and the supported JIL subset is planned; until it exists, the items above are the author's reading.
+No author guide exists; the items above are the author's reading.
 
 **Architect**: the design and the implementation.
 
 1. [docs/architecture.md](docs/architecture.md) - the reader's map, then the [block cards](docs/blocks/README.md), then [docs/glossary.md](docs/glossary.md)
-2. [docs/runner-design.md](docs/runner-design.md) - the runner's design; [docs/ir-design.md](docs/ir-design.md) - AST, IR-F, IR-G, oracle, and equivalence; [Implementation memo](#implementation-memo) - the compiler side
-3. [docs/stonebranch-semantics.md](docs/stonebranch-semantics.md) - the target model and the AutoSys-to-UC mapping (UCS/M entries)
-4. [docs/decision-log.md](docs/decision-log.md) - the reasons for the decisions, indexed by [docs/decision-index.md](docs/decision-index.md); [docs/citation-index.md](docs/citation-index.md) - what every reference token in the sources means; [docs/risk-map.md](docs/risk-map.md) - each runner machine with its branch coverage and open findings
+2. [docs/runner-design.md](docs/runner-design.md) - the runner's design; [docs/ir-design.md](docs/ir-design.md) - AST, IR-F, IR-G, oracle, and equivalence; [Implementation memo](#implementation-memo) - the compiler side and the source map
+3. [docs/state-machines.md](docs/state-machines.md), [docs/job-chart-lifecycle.md](docs/job-chart-lifecycle.md) and [docs/chart-lifecycles.md](docs/chart-lifecycles.md) - the generated views of every declared chart
+4. [docs/stonebranch-semantics.md](docs/stonebranch-semantics.md) and [docs/uc-edge-schema.md](docs/uc-edge-schema.md) - the target model and the AutoSys-to-UC mapping (UCS/M entries); the UC backend is descoped (DL-288)
+5. [docs/decision-log.md](docs/decision-log.md) - the reasons for the decisions, indexed by [docs/decision-index.md](docs/decision-index.md); [docs/citation-index.md](docs/citation-index.md) - what every reference token in the sources means; [docs/risk-map.md](docs/risk-map.md) - each runner machine with its branch coverage and open findings
+
+**Maintainer**: contribute code or documents, or run an agent that does.
+
+1. [CLAUDE.md](CLAUDE.md) - the shared agent contract with task-specific reading routes; [docs/agent-workflow.md](docs/agent-workflow.md) - setup, verification commands, review recipes
+2. [docs/writing.md](docs/writing.md) - the rules for human-facing documents; [docs/cli-tui-qualification.md](docs/cli-tui-qualification.md) - how a release's CLI and TUI are qualified
 
 The runner's frozen contracts are
 [docs/supervisor-protocol.md](docs/supervisor-protocol.md),
@@ -63,11 +70,6 @@ and [docs/statechart-engine.md](docs/statechart-engine.md).
 They are reference, cited from the pages above, not reading.
 A proposed HTTP and WebSocket gateway is specified in
 [docs/gateway.md](docs/gateway.md); nothing of it is built.
-
-Agent setup, verification commands, and cross-vendor review recipes are in
-[docs/agent-workflow.md](docs/agent-workflow.md), and
-[CLAUDE.md](CLAUDE.md) is the shared agent contract with task-specific
-reading routes.
 
 ## Status
 

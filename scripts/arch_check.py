@@ -1178,6 +1178,7 @@ def changed_lines_since_review() -> tuple[int, str] | None:
 SPEC_EXCLUDED = (
     "decision-log.md",
     "citation-index.md",
+    "writing.md",
     "glossary.md",
     "risk-map.md",
     "decision-index.md",

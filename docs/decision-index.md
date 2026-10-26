@@ -236,7 +236,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-222 | Actions are pinned to commits and the `pypi` environment requires the owner's approval; a tag ruleset and `skip-existing` are declined |  |
 | DL-223 | The service drill and the release rehearsal ran and pass on main; DL-218's NOT RUN is retired |  |
 | DL-224 | `run --resume` refuses a root its anchor does not name; DL-219's open item closes | [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md) |
-| DL-225 | Specification review: one document per pass, present state only, reconciled with the code; per-document stamps and an advisory gate line | [docs/agent-workflow.md](agent-workflow.md), [docs/period-model.md](period-model.md) |
+| DL-225 | Specification review: one document per pass, present state only, reconciled with the code; per-document stamps and an advisory gate line | [docs/agent-workflow.md](agent-workflow.md), [docs/period-model.md](period-model.md), [docs/writing.md](writing.md) |
 | DL-226 | Resume kill of a surviving command group is a verified-leader group kill, and E8's TERMINATED pin is vendor-cited | [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/runner-design.md](runner-design.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-227 | protocol-evolution reconciliation: the absent-version rule is restated per row, and three readers get the refusals the matrix promises | [docs/protocol-evolution.md](protocol-evolution.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-228 | control-protocol reconciliation: the DISARM audit distinction reads the target's revision, the scalar-string rule covers the fields a verb reads, and a... | [docs/control-protocol.md](control-protocol.md) |
@@ -415,4 +415,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-402 | The example launcher passes `--supervisor attach` only to a `dsl41` whose `run` accepts it; the supervisor logs the busctl read of its exit policy | [docs/deployment-runbook.md](deployment-runbook.md) |
 | DL-403 | A `setsid` escapee is a stated limit of process-group containment, not a hardening to build | [docs/runner-design.md](runner-design.md) |
 | DL-404 | Recoverable file processing is a building block of two ordinary jobs, a contract and an operator interface, qualified through slice 3 | [README.md](../README.md) |
-| DL-405 | A human-facing document is written for one of four readers under docs/writing.md; the reader-docs skill is the procedure | [README.md](../README.md) |
+| DL-405 | A human-facing document is written for one of five readers under docs/writing.md; the reader-docs skill is the procedure | [README.md](../README.md), [docs/writing.md](writing.md) |
