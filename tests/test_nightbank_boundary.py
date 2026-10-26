@@ -1811,17 +1811,34 @@ def test_b2_an_applied_spawn_with_no_binding_refuses(short_root: Path) -> None:
 # ---------------------------------------------- the RUNBOOK is a contract
 
 
-def test_every_dsl41_verb_the_runbook_types_exists() -> None:
-    """The RUNBOOK is a contract, the same way the job names in it are
-    (`test_runbook_job_names_exist_in_an_estate`).
+@pytest.mark.parametrize(
+    ("page", "verbs_reached", "pairs_reached"),
+    [
+        (
+            "RUNBOOK.md",
+            {"run", "query", "sendevent", "seal", "audit", "verify"},
+            {("estate", "reclaim"), ("estate", "prune")},
+        ),
+        (
+            "RUNBOOK-service.md",
+            {"query", "sendevent", "host", "supervise", "journal", "audit"},
+            {("estate", "quiesce"), ("supervise", "shutdown"), ("host", "evict")},
+        ),
+    ],
+)
+def test_every_dsl41_verb_the_runbook_types_exists(
+    page: str, verbs_reached: set[str], pairs_reached: set[tuple[str, str]]
+) -> None:
+    """The RUNBOOK and the service RUNBOOK are contracts, the same way the job
+    names in the RUNBOOK are (`test_runbook_job_names_exist_in_an_estate`).
 
     A renamed CLI verb is a refactor nobody thinks of as a documentation
     change, and an exercise that opens with a command that does not exist
-    is worse than no exercise. So: every `dsl41 <verb>` the runbook types
+    is worse than no exercise. So: every `dsl41 <verb>` a runbook types
     must resolve to a command this build has -- and where the verb is a
     GROUP, its subcommand is resolved too, or `estate prune` would pass on
     the strength of `estate` alone."""
-    text = (NB / "RUNBOOK.md").read_text()
+    text = (NB / page).read_text()
     typed = {
         (match.group(1), match.group(2))
         # `\s+` and not a literal space: prose wraps `dsl41 estate` and its
@@ -1842,9 +1859,22 @@ def test_every_dsl41_verb_the_runbook_types_exists() -> None:
         for verb, sub in typed
         if verb not in top and (verb not in groups or sub not in groups[verb])
     )
-    assert not missing, f"RUNBOOK types verbs this build has no command for: {missing}"
-    # the extraction itself must keep working, and it must reach the
-    # boundary-era exercises rather than only the ones that came before
-    verbs = {verb for verb, _ in typed}
-    assert {"run", "query", "sendevent", "seal", "audit", "verify"} <= verbs
-    assert {("estate", "reclaim"), ("estate", "prune")} <= typed
+    assert not missing, f"{page} types verbs this build has no command for: {missing}"
+    # the extraction itself must keep working, and it must reach the page's
+    # later exercises rather than only its first ones
+    assert verbs_reached <= {verb for verb, _ in typed}
+    assert pairs_reached <= typed
+
+
+def test_every_recipe_the_service_runbook_names_is_a_marked_block() -> None:
+    """The service RUNBOOK links the deployment runbook's blocks and does not
+    copy them; it names each one as recipe `NAME`. A name with no
+    `<!-- recipe: NAME -->` marker in docs/deployment-runbook.md sends the
+    operator to a block that does not exist (DL-268)."""
+    text = (NB / "RUNBOOK-service.md").read_text()
+    named = set(re.findall(r"\b[Rr]ecipe `([a-z][a-z-]*)`", text))
+    runbook = (NB.parents[1] / "docs" / "deployment-runbook.md").read_text()
+    marked = set(re.findall(r"^<!-- recipe: ([a-z][a-z-]*) -->$", runbook, re.MULTILINE))
+    # the extraction itself must keep working, through the retirement
+    assert {"service-install", "wait-answers", "torn-check", "retire-list"} <= named
+    assert not named - marked, f"no such recipe in the deployment runbook: {named - marked}"

@@ -31,7 +31,8 @@ uv run examples/nightbank/bin/nightbank up --estate bank   # ~520 jobs
 Then work through [RUNBOOK.md](RUNBOOK.md) — twenty live operator exercises, with one retired
 (stalled feeds, hung jobs, reruns, QUE_WAIT, the approval gate, restart
 drills, and the boundary era below). The default night does not complete
-without you.
+without you. [RUNBOOK-service.md](RUNBOOK-service.md) follows with exercises 22 to 32,
+the service tasks typed by hand on a `scripts/wargame.sh` host.
 
 ## The boundary era
 
