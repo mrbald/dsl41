@@ -201,7 +201,7 @@ Save this minimal scenario as `scenario.json`:
 }
 ```
 
-A scenario event's `at` is a naive UTC instant with no `Z` and no offset.
+A scenario event's `at` may carry a zone and is read as UTC when it has none, as `--start` is.
 For `STARTJOB`, use `{"job": NAME}` with the job's name as a JSON string.
 Choose the job names, event times and `--start` date for your estate.
 
