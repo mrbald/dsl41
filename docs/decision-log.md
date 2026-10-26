@@ -24321,12 +24321,14 @@ relitigate an entry; append a new one.
   what belongs together sits together and looks alike; one topic per paragraph, carried by
   its first sentence; a respectful tone; sibling pages for one reader share one shape; a
   reader's question about a shipped page is a defect fixed in the page. The reader-docs
-  brief states where the page is read, and its checklist carries the new rules.
+  brief states where the page is read and the page whose section pattern it follows, and
+  its checklist carries the new rules. An existing page meets an added rule at its next
+  change. This narrows DL-405's rejected item from reproducing the standard's text to
+  naming the standard at all.
   THE REASON. The owner asked for the rules to stand on their own, distilled to the
   smallest set that a writer and a reviewer can check, in the way the engineering core
-  compresses its rules. The additions are the ones the existing pages did not already
-  enforce and that a reviewer could not check from the old list.
-  REJECTED: citing or paraphrasing the standard clause by clause (the text is licensed, the
-  public material gives the headings only, and a rule the project cannot check adds load
-  without value); word or sentence-length limits (the pages are judged by whether the reader
+  compresses its rules. The additions are the ones the existing rules did not already
+  require and that a reviewer could not check from the old list.
+  REJECTED: citing or paraphrasing the standard clause by clause (the text is licensed, and
+  a rule the project cannot check adds load without value); word or sentence-length limits (the pages are judged by whether the reader
   can do the task, not by a count).
