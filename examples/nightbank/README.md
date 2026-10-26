@@ -28,7 +28,7 @@ uv run examples/nightbank/bin/nightbank up --headless --no-incidents
 uv run examples/nightbank/bin/nightbank up --estate bank   # ~520 jobs
 ```
 
-Then work through [RUNBOOK.md](RUNBOOK.md) — twenty-one operator exercises
+Then work through [RUNBOOK.md](RUNBOOK.md) — twenty live operator exercises, with one retired
 (stalled feeds, hung jobs, reruns, QUE_WAIT, the approval gate, restart
 drills, and the boundary era below). The default night does not complete
 without you.
@@ -77,7 +77,7 @@ sibling of the run root and never inside it, so archiving the run root
 never carries the fence away with it. A night whose lineage anchor still names its root is a RETAINED
 estate: retire it through the boundary-era verbs (`dsl41 audit`, then
 `verify`, roll forward or `estate prune` the licensed classes —
-RUNBOOK exercises 16, 19 and 21), never by raw deletion, which would
+RUNBOOK exercises 17, 19 and 21), never by raw deletion, which would
 remove the sentinel, WAL, seals and spool the lineage still reaches
 (period-model §12). A training night whose anchor is gone with it — the
 whole `runs/<night>` directory, anchor included — may be deleted as a

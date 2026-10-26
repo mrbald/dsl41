@@ -33,9 +33,10 @@ dsl41 and your services), ship JIL releases on your own schedule.
 
 **Operator**: start, watch, recover and retire the engine; drills and incidents.
 
-1. [docs/deployment-runbook.md §0](docs/deployment-runbook.md#0-the-operator-path) - the operator path: tasks, diagrams, recipes, monitoring and retirement; §2b backup and restore, §6a the period boundary, §8 scenarios
-2. [examples/nightbank/README.md](examples/nightbank/README.md) and its [RUNBOOK](examples/nightbank/RUNBOOK.md) - the training sandbox: numbered operator exercises on the real engine, run from a checkout with `uv run examples/nightbank/bin/nightbank up`; `scripts/wargame.sh` gives a disposable EL8 systemd container for the service drills of §3
-3. [examples/file_processing/README.md](examples/file_processing/README.md) - the operator CLI and procedures of the file-processing block; [examples/dst-drill](examples/dst-drill/README.md) for the clock-change drill
+1. [docs/operator-curriculum.md](docs/operator-curriculum.md) - the operator course: the nightbank exercises in order, the service drills, what no drill trains, where to look on shift
+2. [docs/deployment-runbook.md §0](docs/deployment-runbook.md#0-the-operator-path) - the operator path: tasks, diagrams, recipes, monitoring and retirement; §2b backup and restore, §6a the period boundary, §8 scenarios
+3. [examples/nightbank/README.md](examples/nightbank/README.md) and its [RUNBOOK](examples/nightbank/RUNBOOK.md) - the training sandbox: numbered operator exercises on the real engine, run from a checkout with `uv run examples/nightbank/bin/nightbank up`; `scripts/wargame.sh` supplies a disposable EL8 systemd container for service exercises by hand; it has no network and no `uv`, so it runs neither nightbank nor the drills
+4. [examples/file_processing/README.md](examples/file_processing/README.md) - the operator CLI and procedures of the file-processing block; [examples/dst-drill](examples/dst-drill/README.md) for the clock-change drill
 
 **Job author**: write an estate in JIL or the Python DSL, or bring an existing one in, and get it accepted.
 
