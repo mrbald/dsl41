@@ -1,6 +1,6 @@
 # Writing for readers
 
-Status: binding for every human-facing document (DL-405): the README, the
+Status: binding for every human-facing document (DL-405, DL-406): the README, the
 pages under `docs/` that are not frozen contracts, the block cards, and the
 READMEs and runbooks under `examples/`. The `spec-review` procedure (DL-225)
 covers every page under `docs/` except the decision log, the citation
@@ -13,8 +13,8 @@ adds to them. The block cards keep the shape `docs/blocks/README.md` fixes
 reports by agents follow the core style contract, not this page.
 
 The rules below follow four principles: readers get what they need, can
-find it, can understand it, and can use it. The last one is the test of the
-other three.
+find it, can understand it, and can use it. An existing page meets a rule
+added by DL-406 at its next change.
 
 ## 1. One reader, one task
 
@@ -42,11 +42,11 @@ inside an example's directory is reached from that README.
 
 - Content follows the reader's task, not the code's layout or the order in
   which the design was made.
-- Content fits where the reader reads it. A runbook read at a terminal during
-  an incident puts the recovery step first; a guide read at a desk may
-  explain first.
-- A limit or a gap the reader would run into is stated where they would
-  look for it, never left out.
+- Content fits where the reader reads it. A procedure read at a terminal
+  during an incident gives its commands first and its explanation after; a
+  guide read at a desk may explain first.
+- A limit or a gap the reader would run into is stated, or linked, where
+  they would look for it, never left out.
 - How the design got here, what was rejected, and why, live in the decision
   log. A document cites the entry; it does not retell it.
 - Rules live in the contract that states them. A document links the section;
@@ -69,8 +69,9 @@ inside an example's directory is reached from that README.
 - A procedure the reader runs is a numbered list with one action per step and
   the command complete and copyable.
 - A warning stands before the step it guards.
-- What belongs together sits together and looks alike: every recipe block on
-  a page has one shape, and every table of one kind has one column order.
+- What belongs together is placed together and looks alike: every recipe
+  block on a page has one layout, and every table of one kind has one
+  column order.
 
 ## 4. The reader can understand it
 
@@ -80,20 +81,21 @@ inside an example's directory is reached from that README.
   "the source is unlinked".
 - An example before a rule when the rule is not obvious.
 - Counts and measures go in a table or on a line of their own.
-- A paragraph has one topic, and its first sentence carries it.
+- A paragraph has one topic, and its first sentence states it.
 - No metaphor, no marketing, no changelog sentence ("now", "no longer",
   "was"). A fact is stated once, as a fact.
 - The tone respects the reader: no blame, and no "simply", "obviously" or
-  "just".
-- Sibling pages for one reader share one shape, so the second page reads
-  like the first.
+  "just" that makes a step sound easy.
+- Pages of one kind for one reader (the reader pages of a track, the
+  runbooks of an example) use one section pattern; the audience brief names
+  the page to match.
 
 ## 5. The reader can use it
 
 - A document is walked by a reviewer who reads as its reader, before it
   merges: can they do the task from the page alone?
 - A question a reader had to ask after reading the page is a defect of the
-  page. The fix goes into the page, not into a reply.
+  page, and the page is fixed.
 - Every claim about the code comes from a fact sheet taken from the code,
   never from memory (the `reader-docs` and `spec-review` procedures).
 - A specification under `docs/` carries a `spec-review` stamp, and the gate

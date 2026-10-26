@@ -24,8 +24,8 @@ body, so it can be checked later:
   accepted estate, a recovered engine).
 - Prior knowledge assumed, and the glossary terms the page may use without
   defining.
-- Where the reader reads it: a terminal during an incident, a desk, a
-  printed page.
+- Where the reader reads it: a terminal during an incident, or a desk; and
+  the existing page of the same kind whose section pattern it follows.
 - Sources: the contracts, code and examples the page draws on.
 - Out of scope: what the page links instead of covering.
 
@@ -55,8 +55,10 @@ section, then as a whole:
 Relevant (writing.md §2)
 - Every section serves the brief's task. A section that serves another
   reader moves to that reader's page, with a link.
-- The order fits where the brief says the page is read.
-- A limit or gap the reader would hit is stated where they would look.
+- Commands before explanation where the brief says the page is read at a
+  terminal during an incident.
+- A limit or gap the reader would hit is stated, or linked, where they
+  would look.
 - History and rejected options are not told; the decision entry is cited.
 - No rule is restated from a frozen table; the section is linked.
 
@@ -65,7 +67,8 @@ Findable (§3)
 - Headings are tasks or facts. A new page is in the reader's order.
 - Procedures are numbered, one action per step, commands complete.
 - A warning precedes the step it guards.
-- Recipe blocks and tables of one kind share one shape.
+- What belongs together is placed together; recipe blocks and tables of
+  one kind share one layout.
 - One concept has one home; the second mention links it.
 
 Understandable (§4)
@@ -75,14 +78,17 @@ Understandable (§4)
 - One topic per paragraph, carried by its first sentence.
 - Numbers sit in a table or on their own line.
 - No metaphor, marketing or changelog sentence; no blame, no "simply",
-  "obviously" or "just".
-- The page has the shape of its sibling pages for the same reader.
+  "obviously" or "just" that makes a step sound easy.
+- The page follows the section pattern of the page the brief names.
 
 Usable (§5)
 - A reader of the brief's kind could do the task from the page alone.
 - Every code claim traces to a fact-sheet line.
 - The page says what it leaves out, with the link.
-- A reader's question about a shipped page is fixed in the page.
+
+After the merge: a question a reader asks that the page should have
+answered is a defect of the page; it is fixed in the page, as its own
+slice under this procedure.
 
 Visuals and state machines (§6, §7)
 - A visual appears only for one of the three structures §6 names; it is

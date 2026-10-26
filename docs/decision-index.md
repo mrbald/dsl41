@@ -416,4 +416,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-403 | A `setsid` escapee is a stated limit of process-group containment, not a hardening to build | [docs/runner-design.md](runner-design.md) |
 | DL-404 | Recoverable file processing is a building block of two ordinary jobs, a contract and an operator interface, qualified through slice 3 | [README.md](../README.md) |
 | DL-405 | A human-facing document is written for one of five readers under docs/writing.md; the reader-docs skill is the procedure | [README.md](../README.md), [docs/writing.md](writing.md) |
-| DL-406 | docs/writing.md states the project's own reader rules and names no standard; eight rules are added |  |
+| DL-406 | docs/writing.md states the project's own reader rules and names no standard; eight rules are added | [docs/writing.md](writing.md) |
