@@ -792,7 +792,7 @@ def test_drill_local_runs_every_step_as_an_unprivileged_sudoer() -> None:
 
 
 def test_the_wargame_image_is_the_offline_image_with_the_drills_uv() -> None:
-    """wargame.sh builds the EL8 offline image, then a layer on it that adds
+    """wargame.sh builds the EL8 offline image, then a second build on it that adds
     the uv drill-local.sh pins, so the result serves as DRILL_BASE_IMAGE.
     The offline image keeps its no-uv assertion for the rehearsal lanes."""
     script = WARGAME.read_text().replace("\\\n", " ")
@@ -808,3 +808,50 @@ def test_the_wargame_image_is_the_offline_image_with_the_drills_uv() -> None:
     layer = WARGAME.with_name("wargame.Containerfile").read_text()
     assert re.findall(r"\buv==(\S+)", layer) == [pinned]
     assert "&& ! command -v uv" in (DEPLOY / "offline.Containerfile").read_text()
+
+
+def test_wargame_verbs_refuse_early_keep_work_and_tag_the_documented_image(
+    tmp_path: Path,
+) -> None:
+    """A stub podman logs its calls. `deliver` refuses before podman on a bad
+    bundle and, naming `start`, on a missing container; `start` of an existing
+    container extracts nothing into /work; `build` tags the image the docs name."""
+    stub = tmp_path / "bin" / "podman"
+    stub.parent.mkdir()
+    stub.write_text(
+        '#!/bin/sh\necho "$*" >> "$STUB_LOG"\ncase $* in\n'
+        '"container exists "*) [ "$STUB_EXISTS" = 1 ] ;;\n'
+        '*dsl41.wargame*) echo "$STUB_OWNER" ;;\n'
+        "*inspect*) echo true ;;\n*is-system-running*) echo running ;;\nesac\n"
+    )
+    stub.chmod(0o755)
+    log = tmp_path / "log"
+    bundle = tmp_path / "bundle" / "tools"
+    bundle.mkdir(parents=True)
+    (bundle / "prepare.sh").write_text("")
+    env = {
+        **os.environ,
+        "PATH": f"{stub.parent}:{os.environ['PATH']}",
+        "STUB_LOG": str(log),
+        "STUB_OWNER": str(WARGAME.parents[1]),
+    }
+
+    def run(exists: str, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(WARGAME), *args],
+            env={**env, "STUB_EXISTS": exists},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    refused = run("0", "deliver", str(tmp_path / "nonexistent"), "t")
+    assert refused.returncode == 2 and not log.exists()
+    missing = run("0", "deliver", str(bundle.parent), "t")
+    assert missing.returncode == 2 and "start" in missing.stderr
+    log.unlink()
+    assert run("1", "start", "t").returncode == 0
+    assert "/work.new" not in log.read_text()
+    log.unlink()
+    assert run("1", "build", "t").returncode == 0
+    assert "--tag localhost/dsl41-wargame:t " in log.read_text()

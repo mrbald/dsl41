@@ -7,23 +7,27 @@
 # DRILL_BASE_IMAGE=localhost/dsl41-wargame:NAME examples/nightbank/deploy/drill-local.sh,
 # or run service exercises in it by hand.
 #
-# The image has two layers. The base is examples/nightbank/deploy/offline.Containerfile,
-# built as the EL8 rehearsal lane builds it; that file asserts uv is absent, because the
-# rehearsal lanes prove an install that needs no uv. scripts/wargame.Containerfile adds
-# uv on top, from PYTHON_INDEX (default PyPI).
+# The image takes two builds. The first builds examples/nightbank/deploy/offline.Containerfile
+# as the EL8 rehearsal lane builds it, with DSL41_RPM_MIRROR (a Rocky mirror root, default
+# none) as its RPM_MIRROR. That file asserts uv is absent, because the rehearsal lanes
+# prove an install that needs no uv. The second build, scripts/wargame.Containerfile, adds
+# uv on top, from PYTHON_INDEX (default https://pypi.org/simple).
 #
 #   scripts/wargame.sh build   [NAME]       build the image
-#   scripts/wargame.sh start   [NAME]       run (or restart) the container, wait for
-#                                           systemd, and copy the checkout to /work
-#   scripts/wargame.sh deliver DIR [NAME]   copy the prepared delivery bundle DIR to
-#                                           /delivery/bundle, replacing any earlier one
+#   scripts/wargame.sh start   [NAME]       run (or restart) the container and wait for
+#                                           systemd; copy the checkout to /work if absent
+#   scripts/wargame.sh deliver DIR [NAME]   copy the built delivery bundle DIR to
+#                                           /delivery/bundle, replacing any earlier one;
+#                                           the container must be running
 #   scripts/wargame.sh join    [NAME]       a shell inside it
 #   scripts/wargame.sh stop    [NAME]       stop it, keeping its state
 #   scripts/wargame.sh dispose [NAME]       remove it
 #
 # NAME defaults to this checkout's directory name, so two checkouts never share a
 # container; images and containers carry the checkout path as a label and the script
-# refuses to touch one made from another checkout.
+# refuses to touch one made from another checkout. `stop` keeps state, and `start` of an
+# existing container keeps /work. For a fresh /work, remove it inside, or `dispose`, then
+# `start`.
 set -euo pipefail
 
 usage() { echo "usage: $0 build|start|join|stop|dispose [NAME] | deliver DIR [NAME]" >&2; exit 2; }
@@ -37,7 +41,7 @@ case $verb in
         bundle=$1
         shift
         [ -f "$bundle/tools/prepare.sh" ] || {
-            echo "not a prepared delivery bundle (no tools/prepare.sh): $bundle" >&2
+            echo "not a built delivery bundle (no tools/prepare.sh): $bundle" >&2
             exit 2
         }
         ;;
@@ -97,17 +101,41 @@ case $verb in
         [ "$ready" = true ] || { echo "systemd did not become ready: $container" >&2; exit 1; }
         podman cp "$deploy/capability-check.sh" "$container:/tmp/dsl41-capability-check.sh"
         podman exec "$container" bash /tmp/dsl41-capability-check.sh
-        # Only tracked files reach /work, as in drill-local.sh: untracked scratch stays out.
-        podman exec "$container" bash -c 'rm -rf /work && mkdir /work'
-        git -C "$tree" ls-files --cached -z |
-            COPYFILE_DISABLE=1 tar -C "$tree" --null -T - -cf - |
-            podman exec -i "$container" tar -C /work --warning=no-unknown-keyword -xf -
-        podman exec "$container" chown -R runner:runner /work
+        # /work is copied only while absent, so a restart keeps the operator's work and a
+        # failed copy is retried by the next start. The copy lists tracked files minus
+        # those the working tree deleted, extracts to /work.new, and renames it, so a
+        # failure leaves no /work. Untracked scratch stays out, as in drill-local.sh.
+        if ! podman exec "$container" test -d /work; then
+            podman exec "$container" bash -c 'rm -rf /work /work.new && mkdir /work.new'
+            python3 -I -c '
+import subprocess, sys
+def ls(*opts):
+    out = subprocess.run(["git", "-C", sys.argv[1], "ls-files", "-z", *opts],
+                         check=True, capture_output=True).stdout
+    return out.split(b"\0")
+gone = set(ls("--deleted"))
+sys.stdout.buffer.write(b"".join(p + b"\0" for p in ls("--cached") if p and p not in gone))
+' "$tree" |
+                COPYFILE_DISABLE=1 tar -C "$tree" --null -T - -cf - |
+                podman exec -i "$container" tar -C /work.new --warning=no-unknown-keyword -xf -
+            podman exec "$container" bash -c \
+                'chown -R runner:runner /work.new && mv /work.new /work'
+        fi
         ;;
     deliver)
-        podman exec "$container" bash -c 'rm -rf /delivery/bundle && mkdir -p /delivery'
-        podman cp "$bundle" "$container:/delivery/bundle"
-        podman exec "$container" chown -R runner:runner /delivery/bundle
+        podman container exists "$container" || {
+            echo "no container $container; run: $0 start $name" >&2
+            exit 2
+        }
+        [ "$(podman container inspect --format '{{.State.Running}}' "$container")" = true ] || {
+            echo "container $container is not running; run: $0 start $name" >&2
+            exit 2
+        }
+        podman exec "$container" bash -c 'rm -rf /delivery/bundle.new && mkdir -p /delivery'
+        podman cp "$bundle" "$container:/delivery/bundle.new"
+        podman exec "$container" bash -c \
+            'chown -R runner:runner /delivery/bundle.new &&
+             rm -rf /delivery/bundle && mv /delivery/bundle.new /delivery/bundle'
         ;;
     join) exec podman exec -it "$container" bash ;;
     stop) podman stop --time 30 "$container" ;;
