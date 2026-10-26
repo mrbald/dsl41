@@ -25,7 +25,8 @@ body, so it can be checked later:
 - Prior knowledge assumed, and the glossary terms the page may use without
   defining.
 - Where the reader reads it: a terminal during an incident, or a desk; and
-  the existing page of the same kind whose section pattern it follows.
+  the existing page of the same kind whose section pattern it follows, or
+  "none" for the first page of a kind.
 - Sources: the contracts, code and examples the page draws on.
 - Out of scope: what the page links instead of covering.
 
