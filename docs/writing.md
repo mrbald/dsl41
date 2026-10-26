@@ -12,10 +12,9 @@ adds to them. The block cards keep the shape `docs/blocks/README.md` fixes
 §1 and §3 below do not bind a card, the other sections do. Replies and
 reports by agents follow the core style contract, not this page.
 
-The rules below follow the four governing principles of ISO 24495-1:2023
-(plain language, part 1), stated here in this project's words: readers get
-what they need, can find it, can understand it, and can use it. The
-standard's text is not reproduced.
+The rules below follow four principles: readers get what they need, can
+find it, can understand it, and can use it. The last one is the test of the
+other three.
 
 ## 1. One reader, one task
 
@@ -43,6 +42,11 @@ inside an example's directory is reached from that README.
 
 - Content follows the reader's task, not the code's layout or the order in
   which the design was made.
+- Content fits where the reader reads it. A runbook read at a terminal during
+  an incident puts the recovery step first; a guide read at a desk may
+  explain first.
+- A limit or a gap the reader would run into is stated where they would
+  look for it, never left out.
 - How the design got here, what was rejected, and why, live in the decision
   log. A document cites the entry; it does not retell it.
 - Rules live in the contract that states them. A document links the section;
@@ -64,6 +68,9 @@ inside an example's directory is reached from that README.
 - One concept, one place. A second place links the first.
 - A procedure the reader runs is a numbered list with one action per step and
   the command complete and copyable.
+- A warning stands before the step it guards.
+- What belongs together sits together and looks alike: every recipe block on
+  a page has one shape, and every table of one kind has one column order.
 
 ## 4. The reader can understand it
 
@@ -73,13 +80,20 @@ inside an example's directory is reached from that README.
   "the source is unlinked".
 - An example before a rule when the rule is not obvious.
 - Counts and measures go in a table or on a line of their own.
+- A paragraph has one topic, and its first sentence carries it.
 - No metaphor, no marketing, no changelog sentence ("now", "no longer",
   "was"). A fact is stated once, as a fact.
+- The tone respects the reader: no blame, and no "simply", "obviously" or
+  "just".
+- Sibling pages for one reader share one shape, so the second page reads
+  like the first.
 
 ## 5. The reader can use it
 
 - A document is walked by a reviewer who reads as its reader, before it
   merges: can they do the task from the page alone?
+- A question a reader had to ask after reading the page is a defect of the
+  page. The fix goes into the page, not into a reply.
 - Every claim about the code comes from a fact sheet taken from the code,
   never from memory (the `reader-docs` and `spec-review` procedures).
 - A specification under `docs/` carries a `spec-review` stamp, and the gate
