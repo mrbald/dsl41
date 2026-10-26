@@ -24251,3 +24251,29 @@ relitigate an entry; append a new one.
   must walk every scope); `Delegate=yes` with per-run sub-cgroups (reverses DL-390's containment
   evidence); a private cgroup v1 hierarchy (a compatibility burden on later hosts). Each would be
   reopened only by a supported workload shown to need selective termination, and none was.
+- DL-404 Recoverable file processing is a building block of two ordinary jobs, a contract and
+  an operator interface, qualified through slice 3 (2026-10-26; owner rulings in
+  examples/file_processing/CONTRACT.md; src/dsl41/file_processing.py,
+  src/dsl41/file_processing_charts.py, src/dsl41/file_processing_dsl.py)
+  THE RULE. An estate composes file processing from an existing file watcher and two CMD jobs,
+  an archiver and a processor, each a one-cycle worker over a privately managed root: `inbox/`,
+  immutable `objects/<sha256>`, `todo/<key>.json`, a SQLite ledger and one lock per role. Work is
+  keyed by `(processor_id, content_hash)`; a delivery basename is unique forever. The two flat
+  charts `file_archive` and `file_process` are the only state vocabulary; every ledger state
+  write is the executor's leaf. The processor claims before it calls the handler, stops at the
+  first non-completion, and leaves `UNKNOWN` to a reconciler or an operator. `DONE` and
+  `REJECTED` are terminal; only an operator rejects, through `READY` or `UNKNOWN`, and a stale
+  `RUNNING` is converted to `UNKNOWN` first. Every move appends one row to an append-only
+  decision record. Activation, retention, HA and a second host are outside the contract; the
+  contract states its filesystem requirements per directory and does not assume one filesystem.
+  A refusal (corrupt, inconsistent or unsupported storage) exits 65 and is never a stopped run.
+  THE REASON. The owner's rulings: reactivation is the estate author's, failure disposition is
+  `stop` because the queue is ordered, `REJECTED` exists because one toxic delivery must not stop
+  a pipeline for good, and a same-filesystem assumption was too tight. Slices 1 to 3 were built
+  under the repository's semantic-class review (one Opus reviewer and one Astra pass per slice,
+  three rounds at most); the review record lives with the programme's records, outside the
+  repository. Slices 4 to 6 of the plan in examples/file_processing/HANDOVER.md (Python
+  authoring, scheduler composition through the real runner, qualification) are not yet built.
+  REJECTED: skipping a stuck item (the order would be a lie); automatic retry of arbitrary
+  effects; a shared `tmp/` staging area; garbage collection and schema migration without their
+  own policy input; automating the archiver's storage repairs.

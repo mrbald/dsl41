@@ -593,6 +593,20 @@ CI also uses it to test the concurrency model
 acted on, duplicated and stale completions, quarantine, and drain, with a
 check that no `(job, run_number)` ever runs twice.
 
+### Recoverable file processing (examples/file_processing)
+
+A building block for estates that process delivered files: an archiver and
+a processor as two ordinary CMD jobs behind an existing file watcher, a
+SQLite ledger, immutable content-addressed objects, a JSON handover per
+work item, and an operator interface that lists, shows and rules stuck
+work. The owner's rulings are in
+[examples/file_processing/CONTRACT.md](examples/file_processing/CONTRACT.md)
+and the design in
+[examples/file_processing/README.md](examples/file_processing/README.md)
+(DL-404). The library is `dsl41.file_processing`; the handler and operator
+CLIs under `examples/` are samples. Composition through the real runner is
+not yet qualified.
+
 ## Implementation memo
 
 The compiler modules build in this order: ast_jil, conditions, ir, lint,
