@@ -62,7 +62,8 @@ Unmanaged supervisors refuse guarded maintenance; follow the [§3 incident proce
 
 ## 2. Work through the course in RUNBOOK order
 
-Live numbered exercises: 20.
+Live numbered exercises: 20 in the RUNBOOK, and 11 in the
+[service runbook](../examples/nightbank/RUNBOOK-service.md).
 
 The RUNBOOK names [18. Retired: a night from before the boundary era](../examples/nightbank/RUNBOOK.md#18-retired-a-night-from-before-the-boundary-era).
 
@@ -74,6 +75,7 @@ Plan the nights:
 4. Give [exercise 13](../examples/nightbank/RUNBOOK.md#13-skip-the-day) its own night with the approval gate still held.
 5. Read the recorded run history with [exercise 14](../examples/nightbank/RUNBOOK.md#14-after-the-night--run-history) after exercise 13 ends the night.
 6. Start a fresh night after exercise 13 for the boundary exercises, then follow their seal, open and roll sequence.
+7. Run exercises 22–32 in order on one wargame host (§3 below), after exercise 21: each one starts from the state the one before it left.
 
 Each `nightbank up` creates a new night directory and refuses an existing directory.
 In exercises 15–21, learn to recognise the refusal before running the command that works.
@@ -107,6 +109,17 @@ An empty task cell marks training without a runbook recipe.
 | [21. Retention — what may go, and what may never](../examples/nightbank/RUNBOOK.md#21-retention--what-may-go-and-what-may-never) | Survey retained history and prune only licensed classes. | [Keep or prune history](deployment-runbook.md#2a-retention--the-floors-and-the-prune-verb) |
 | [Day-shift extras](../examples/nightbank/RUNBOOK.md#day-shift-extras) | Inspect browser views, graphs, reports and a dry run. | |
 | [Bank scale](../examples/nightbank/RUNBOOK.md#bank-scale) | Repeat the exercises on the larger estate. | |
+| [22. Build the wargame host and deliver the bundle](../examples/nightbank/RUNBOOK-service.md#22-build-the-wargame-host-and-deliver-the-bundle) | Build the EL8 host, pass its capability check, and deliver an offline bundle. | [Offline installation](offline-installation.md#build-and-qualify-on-a-connected-target) |
+| [23. Install the package](../examples/nightbank/RUNBOOK-service.md#23-install-the-package) | Prepare a runtime at its final path, then activate it with the explicit link. | [Install the package](deployment-runbook.md#1-install) |
+| [24. Install and start as a service](../examples/nightbank/RUNBOOK-service.md#24-install-and-start-as-a-service) | Install the units; recognise an `active` unit that refused; start the genesis. | [Install and start as a service](deployment-runbook.md#recipe-install-and-start-as-a-service) |
+| [25. Configure an estate](../examples/nightbank/RUNBOOK-service.md#25-configure-an-estate) | Open the socket to a group, read tiers and receipts, and recognise the reload and profile refusals. | [Configure an estate](deployment-runbook.md#recipe-configure-an-estate) |
+| [26. Watch and measure](../examples/nightbank/RUNBOOK-service.md#26-watch-and-measure) | Read every monitoring signal, find a failure, and take the capacity observations. | [What to watch](deployment-runbook.md#what-to-watch); [capacity and limits](deployment-runbook.md#capacity-and-limits) |
+| [27. Back up and restore](../examples/nightbank/RUNBOOK-service.md#27-back-up-and-restore) | Quiesce through each refusal, copy, and restore at the recorded paths. | [Back up and restore](deployment-runbook.md#2b-quiescent-backup-and-restore) |
+| [28. Upgrade dsl41, row 1 and row 2](../examples/nightbank/RUNBOOK-service.md#28-upgrade-dsl41-row-1-and-row-2) | Flip the runtime under a live job; roll to a fresh root with the open trigger; roll back. | [Upgrade dsl41](deployment-runbook.md#7-upgrading-dsl41-itself) |
+| [29. Recover a rolled root whose opening is torn](../examples/nightbank/RUNBOOK-service.md#29-recover-a-rolled-root-whose-opening-is-torn) | Recognise `missing segment record` and recover through the recipe's `open` branch. | [Recover a torn opening](deployment-runbook.md#recipe-recover-a-rolled-root-whose-opening-is-torn) |
+| [30. Idle supervisor maintenance](../examples/nightbank/RUNBOOK-service.md#30-idle-supervisor-maintenance) | Recognise the refused manager stop and live-work refusal; terminate deliberately. | [Manual intervention](deployment-runbook.md#manual-intervention) |
+| [31. Break glass: evict the executor](../examples/nightbank/RUNBOOK-service.md#31-break-glass-evict-the-executor) | Read the gated eviction's refusal, force it with attribution, and see what remains. | [Manual intervention](deployment-runbook.md#manual-intervention) |
+| [32. Retire the estate](../examples/nightbank/RUNBOOK-service.md#32-retire-the-estate) | Seal, remove the units, check that nothing starts, and audit the kept history. | [Retire an estate](deployment-runbook.md#retiring-an-estate) |
 
 ## 3. Run the service drills on a systemd host
 
@@ -144,6 +157,7 @@ The installed-service probes and capability check need that host too.
 `drill-local.sh` and `offline-local.sh` create their own containers.
 
 `wargame.sh` runs no drill itself.
+The [service runbook](../examples/nightbank/RUNBOOK-service.md)'s exercises 22 to 32 run on its host by hand.
 Its image has `uv`, so it can serve as `DRILL_BASE_IMAGE`.
 `DRILL_BASE_IMAGE=localhost/dsl41-wargame:NAME examples/nightbank/deploy/drill-local.sh` runs the service drill on EL8.
 `NAME` defaults to the checkout directory name.
@@ -154,22 +168,15 @@ The wargame image is built on the offline rehearsal image, which has no `uv`, be
 
 ## 4. Read through the tasks the course does not train
 
-The numbered course has no exercise for the complete tasks below.
+The numbered course has no exercise for the tasks below.
 The trainer can walk each linked procedure with the operator by reading it.
 The drill column records coverage outside the numbered course.
 
 | Task to read through | Existing drill coverage |
 | --- | --- |
-| [Install the package](deployment-runbook.md#1-install) | The `install` step and the offline rehearsal cover installation. |
-| [Install and start as a service](deployment-runbook.md#recipe-install-and-start-as-a-service) | The `install` and `first-start` steps run the recipe. |
-| [Configure an estate](deployment-runbook.md#recipe-configure-an-estate) | The `configure` step and offline access probes cover configuration. |
 | [Add, change or remove a job in place](deployment-runbook.md#recipe-add-change-or-remove-a-job) | Drill only: `definition_probe` in `offline-scenarios.sh`. |
-| [Recover a rolled root whose opening is torn](deployment-runbook.md#recipe-recover-a-rolled-root-whose-opening-is-torn) | No exercise or drill; exercise 20 covers reclaim after a crashed roll. |
-| [Capacity and limits](deployment-runbook.md#capacity-and-limits) | No exercise or drill. |
-| [Use host evict --force](deployment-runbook.md#manual-intervention) | No exercise or drill for this forced intervention. |
-| [Back up and restore](deployment-runbook.md#2b-quiescent-backup-and-restore) | Drill only: `quiesce`, `restore` and the offline backup probes. |
-| [Upgrade dsl41](deployment-runbook.md#7-upgrading-dsl41-itself) | Drill only: `upgrade-*` steps; exercise 19 covers only the fresh-root mechanic. |
-| [Use supervise shutdown](deployment-runbook.md#manual-intervention) | Drill only: `drill-steps.sh` calls `maintenance_stop` in reboot, upgrade and retirement steps; offline probes also exercise `--force=terminate`. |
+| [Upgrade dsl41, rows 3 and 4](deployment-runbook.md#7-upgrading-dsl41-itself) | Drill only: the `upgrade-coordinated*`, `upgrade-old-release` and `upgrade-state-machine*` steps. |
+| [Recover a torn opening whose head is `claimed`](deployment-runbook.md#recipe-recover-a-rolled-root-whose-opening-is-torn) | No drill; `tests/test_operator_recipes.py` runs the branch. Exercise 29 trains the `open` branch. |
 
 ## 5. On shift, choose the source for the situation
 
