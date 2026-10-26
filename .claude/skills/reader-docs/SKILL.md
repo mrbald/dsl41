@@ -1,6 +1,6 @@
 ---
 name: reader-docs
-description: Write, split or restructure one human-facing document (README sections, unfrozen docs/ pages, block cards, example READMEs and runbooks) for one named reader, under docs/writing.md. Use when the user asks for a reader-facing document, a documentation track, or a rewrite for a packager, operator, job author or architect. Takes the document path and the reader. Does not merge or stamp until the boss accepts the pass.
+description: Write, split or restructure one human-facing document (README sections, unfrozen docs/ pages, block cards, example READMEs and runbooks) for one named reader, under docs/writing.md. Use when the user asks for a reader-facing document, a documentation track, or a rewrite for a packager, operator, job author, architect or maintainer. Takes the document path and the reader. Does not merge until the boss accepts the pass.
 ---
 
 # Reader-facing documents (DL-405)
@@ -9,14 +9,16 @@ One document, one reader, one PR. The argument is the document path and the
 reader (`/reader-docs docs/site-package.md packager`). The rules are in
 [docs/writing.md](../../../docs/writing.md); this skill is the procedure
 that applies them. For a frozen contract, use `spec-review` instead; this
-skill never changes a rule's meaning.
+skill never changes a rule's meaning. Where both procedures apply to a page
+under `docs/`, `spec-review`'s rules on section numbers, citation tokens
+and history govern (writing.md's status paragraph).
 
 ## Step 0: the audience brief
 
-Before any reading, write the brief to the review directory, under ten
-lines:
+Before any reading, write the brief, under ten lines. It goes into the PR
+body, so it can be checked later:
 
-- Reader: one of packager, operator, job author, architect.
+- Reader: one of packager, operator, job author, architect, maintainer.
 - Task: what the reader comes to do, as a verb phrase.
 - Done: how the reader knows they have finished (a running service, an
   accepted estate, a recovered engine).
@@ -34,14 +36,19 @@ Delegate a read-only fact sheet, as `spec-review` step 1 describes: per
 planned section, what the code says about every claim the section will
 make (verbs and options from `--help`, constants, module and function names,
 test names), plus every existing document that already covers the ground,
-with the section to link. The writer works from the sheet, never from
+with the section to link. For an existing page, the sheet also lists every
+place that cites it: search `src/`, `tests/`, `scripts/`, `docs/` and
+`examples/` for the page's stem, then for bare `ssN` and `§N` references in
+every file that names it. The writer works from the sheet, never from
 memory. For a packager or operator page, the sheet also lists the files
 under `examples/*/deploy/` and `scripts/` the page will name.
 
 ## Step 2: the draft
 
-Write from the brief and the sheet. Check the draft against this list,
-section by section, then as a whole:
+Write from the brief and the sheet. An existing page keeps its section
+numbers and anchors (writing.md §3); a reorder is its own slice that updates
+every citer the sheet lists. Check the draft against this list, section by
+section, then as a whole:
 
 Relevant (writing.md §2)
 - Every section serves the brief's task. A section that serves another
@@ -51,7 +58,7 @@ Relevant (writing.md §2)
 
 Findable (§3)
 - The first paragraph names the reader, the task, and the track.
-- Headings are tasks or facts. Order is the reader's order.
+- Headings are tasks or facts. A new page is in the reader's order.
 - Procedures are numbered, one action per step, commands complete.
 - One concept has one home; the second mention links it.
 
@@ -68,16 +75,18 @@ Usable (§5)
 - The page says what it leaves out, with the link.
 
 Visuals and state machines (§6, §7)
-- A visual appears only where the reader would hold more than three things
-  at once; it is text in git with one sentence under it.
-- A state machine is a generated view or a link to one, in the renderer's
-  notation. No hand-copied rows. A chart without a view gets a renderer
-  change first, as its own slice.
+- A visual appears only for one of the three structures §6 names; it is
+  text in git with one sentence under it.
+- A state machine is a generated view or a link to one: the renderer's
+  equation notation in prose, the generated diagram and table of
+  `state-machines.md` as a chart's reference. No hand-copied rows. A chart
+  without a view gets a renderer change first, as its own slice.
 
-Cross-vendor drafting: Sol (`codex exec -m gpt-6.1-sol`, xhigh,
-`--sandbox workspace-write`) may write the draft from the brief and the
-sheet, one page per run, with the checklist in its prompt. Its diff gets the
-same review as any other.
+Cross-vendor drafting: DL-405 lets Sol (`codex exec -m gpt-6.1-sol`, xhigh,
+`--sandbox workspace-write`) write the draft of a reader page from the brief
+and the sheet, one page per run, with this checklist in its prompt. The
+top level rules on the voice, and the diff gets the same review as any
+other.
 
 ## Step 3: reconciliation
 
@@ -88,13 +97,13 @@ and line. The page changes neither a rule nor the code.
 
 ## Step 4: verification and review
 
-Run `scripts/arch_check.py` first (test names in backticks, the source map,
-links), then the docs tests:
-
-```sh
-uv run python scripts/arch_check.py
-uv run pytest -q tests/test_docs_links.py tests/test_docs_hygiene.py tests/test_arch_check.py
-```
+Run the full local gates listed under "Verify a change" in
+`docs/agent-workflow.md`, starting with `scripts/arch_check.py` (test names
+in backticks, the source map, links). The tests most likely to trip on a
+rewritten page parse it: the decision index rendering, the operator recipes,
+the nightbank example and deploy tests, the architecture and block-card
+tests, the lifecycle view and the simulation register. Report each command
+with its exit status.
 
 Then one Opus reviewer, read-only, that writes its findings to a scratch
 file and reports a ranked table. Its hunt order: false claims against the
@@ -107,12 +116,11 @@ A page that touches instruction policy, or restates how a frozen contract
 is used, also gets the Astra pass the repository's "Self-review" requires.
 Rule on every finding before the commit; three rounds at most.
 
-## Step 5: delivery and stamp
+## Step 5: delivery
 
 One document per PR, on a branch named `docs/<stem>`. The PR body carries
 the brief, the reconciliation findings, and the review table. Ask before
-merging. A page under `docs/` is stamped on `main` after the merge the way
-`spec-review` step 5 stamps, with the tag prefix `spec-review/<stem>/` and
-the outcome `reader`. The README and the pages under `examples/` carry no
-stamp; the README "Documents" tracks are updated in the same PR as any page
-they list.
+merging. This skill stamps nothing: a specification's `spec-review` stamp
+and its 800-line clock belong to that procedure, and a reader page, a card
+or a page under `examples/` has no stamp. The README "Documents" tracks are
+updated in the same PR as any page they list.

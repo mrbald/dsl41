@@ -24277,26 +24277,36 @@ relitigate an entry; append a new one.
   REJECTED: skipping a stuck item (the order would be a lie); automatic retry of arbitrary
   effects; a shared `tmp/` staging area; garbage collection and schema migration without their
   own policy input; automating the archiver's storage repairs.
-- DL-405 A human-facing document is written for one of four readers under docs/writing.md;
+- DL-405 A human-facing document is written for one of five readers under docs/writing.md;
   the reader-docs skill is the procedure (2026-10-26; owner ruling; docs/writing.md,
-  .claude/skills/reader-docs/SKILL.md, README "Documents"; no code change)
+  .claude/skills/reader-docs/SKILL.md, README "Documents"; scripts/arch_check.py excludes
+  the page from the specification list)
   THE RULE. Every human-facing document (the README, the unfrozen pages under docs/, the block
   cards, the READMEs and runbooks under examples/) names its reader, one of packager, operator,
-  job author or architect, and the task the reader comes with. docs/writing.md states the
-  binding rules in this project's words, after the four reader outcomes of ISO 24495-1: the
-  reader gets what they need, can find it, can understand it, can use it. Visuals appear only
-  where the reader would hold more than three things at once, as text in git. A state machine
-  is shown only as a generated view in the renderer's notation, `TARGET = SOURCE + event
-  [guard]`, never as hand-copied rows. The README "Documents" section is one reading track per
-  reader. Agents write and review such documents through the reader-docs skill: audience
-  brief, fact sheet from the code, checklist, one Opus reviewer that reads as the page's
-  reader, one page per PR; spec-review keeps the frozen contracts and the decision log.
+  job author, architect or maintainer, and the task the reader comes with. docs/writing.md
+  states the binding rules in this project's words, after the four governing principles of ISO
+  24495-1:2023: the reader gets what they need, can find it, can understand it, can use it.
+  spec-review (DL-225) keeps its scope, every page under docs/ but the log and the citation
+  index, and where both apply its rules on section numbers, citation tokens and history
+  govern. The block cards keep the shape docs/blocks/README.md fixes. A visual appears only
+  for a topology of three or more communicating parts, a flow with a branch, or a nested
+  layout, as text in git. A state machine is shown only as a generated view: the renderer's
+  `TARGET = SOURCE + event [guard]` notation in prose, the generated diagram and table of
+  state-machines.md as a chart's reference; never hand-copied rows. The README "Documents"
+  section is one reading track per reader, and every human-facing page is in a track. Agents
+  write and review such documents through the reader-docs skill: audience brief in the PR
+  body, fact sheet from the code with the page's citers, checklist, the full gates, one Opus
+  reviewer that reads as the page's reader, one page per PR, no stamp. Sol may draft a reader
+  page from the brief and the sheet; the top level rules on the voice and the Opus review
+  checks the diff. That narrows DL-395's "edge code" scope for documents and is the owner's
+  ruling; DL-206's house-voice rule stays, as the top level's ruling on the draft.
   THE REASON. The shelf was organized by artifact kind (contracts, cards, runbooks, log), not
   by reader. The owner's four questions found a workable path for the operator and the
   architect, a path spread over three documents and an example directory for the packager, and
   no document for the job author. The two entry points in the README disagreed. A plain-language
   rule that names the reader and the task is what the writer and the reviewer can both check.
   REJECTED: rewriting the frozen contracts for readers (they are rules; a reader page links
-  them); hand-drawn state diagrams (they drift from the chart); reproducing the standard's
-  text (it is ISO's; the principles are enough); one index page per document kind (the
-  reader's question is "which track", not "which kind").
+  them); hand-drawn state diagrams (they drift from the chart); a second stamp family for
+  reader pages (it would reset the specification clock); reproducing the standard's text (it
+  is ISO's; the principles are enough); one index page per document kind (the reader's
+  question is "which track", not "which kind").
