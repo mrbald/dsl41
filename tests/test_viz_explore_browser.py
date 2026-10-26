@@ -4942,10 +4942,12 @@ def test_snapshot_real_tab_order_and_long_text_stay_inside_panel(driven_snapshot
     """DL-385: WebKit reaches every control and unbounded input cannot widen chrome."""
     d = driven_snapshot
     _open_control(d, "#snapshot-import")
-    d.page.locator("#snapshot-panel [data-close-panel]").focus()
-    d.page.keyboard.press("Tab")
-    assert d.page.evaluate("document.activeElement.id") == "snapshot-import"
+    # The chooser wait is armed before the round trips that reach the control, because a busy
+    # Chromium renderer can run a key event ahead of a just-sent file-chooser interception.
     with d.page.expect_file_chooser() as chooser:
+        d.page.locator("#snapshot-panel [data-close-panel]").focus()
+        d.page.keyboard.press("Tab")
+        assert d.page.evaluate("document.activeElement.id") == "snapshot-import"
         d.page.keyboard.press("Enter")
     chooser.value.set_files(
         {
