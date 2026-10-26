@@ -18,24 +18,41 @@ boundaries for estates that run for months.
 
 ## Documents
 
-To review the design, start with the architecture overview,
-[docs/architecture.md](docs/architecture.md), then the
-[block cards](docs/blocks/README.md).
-For everything else, read these in this order:
+Each document is written for one reader ([docs/writing.md](docs/writing.md),
+DL-405). Pick your track; the architect's track is the background reading for
+the other three.
 
-1. [docs/deployment-runbook.md §0](docs/deployment-runbook.md#0-the-operator-path) - the operator path: tasks, diagrams, recipes, monitoring and retirement
-2. [docs/autosys-semantics.md](docs/autosys-semantics.md) - the meaning of JIL (SEM entries)
+**Packager**: build the site package, install the services, ship JIL releases
+on your own schedule.
+
+1. [docs/offline-installation.md](docs/offline-installation.md) - the release inputs, the reference RPM, what the package owns
+2. [docs/deployment-runbook.md §1](docs/deployment-runbook.md#1-install) to §3 - install, filesystem layout, starting the engine; the launcher and units are the example under [examples/nightbank/deploy](examples/nightbank/deploy)
+3. [docs/deployment-runbook.md §6](docs/deployment-runbook.md#6-jil-rollout--updating-the-estate) - the JIL rollout cycles; §7 upgrades of dsl41 itself
+4. [docs/deployment-qualification.md](docs/deployment-qualification.md) and [docs/offline-rehearsal.md](docs/offline-rehearsal.md) - qualifying a target and rehearsing the exact wheel
+
+**Operator**: start, watch, recover and retire the engine; drills and incidents.
+
+1. [docs/deployment-runbook.md §0](docs/deployment-runbook.md#0-the-operator-path) - the operator path: tasks, diagrams, recipes, monitoring and retirement; §2b backup and restore, §6a the period boundary, §8 scenarios
+2. [examples/nightbank/README.md](examples/nightbank/README.md) and its [RUNBOOK](examples/nightbank/RUNBOOK.md) - the training sandbox: 21 operator exercises on the real engine; `scripts/wargame.sh` gives a disposable EL8 systemd container for them
+3. [examples/file_processing/README.md](examples/file_processing/README.md) - the operator CLI and procedures of the file-processing block; [examples/dst-drill](examples/dst-drill/README.md) for the clock-change drill
+
+**Job author**: write an estate in JIL or the Python DSL and get it accepted.
+
+1. [CLI](#cli) - `lint`, `rehearse`, `viz` and the rules L001-L023 an estate must pass
+2. [Implementation memo](#implementation-memo) - the Python DSL builders (`job`, `box`, `sequence`, `parallel`) and `to_jil()`; [examples/file_processing/estate.py](examples/file_processing/estate.py) is a worked Python estate, the other `examples/` directories are worked JIL estates
+3. [docs/autosys-semantics.md](docs/autosys-semantics.md) - the meaning of JIL (SEM entries); [docs/simulation-coverage.md](docs/simulation-coverage.md) - what the runner models, refuses, or assumes; [docs/jil-statement-syntax.md](docs/jil-statement-syntax.md) - the statement scanner spec
+4. [docs/deployment-runbook.md §6](docs/deployment-runbook.md#6-jil-rollout--updating-the-estate) - how an accepted estate reaches the engine
+
+An author guide for the Python DSL and the supported JIL subset is planned; until it exists, the items above are the author's reading.
+
+**Architect**: the design and the implementation.
+
+1. [docs/architecture.md](docs/architecture.md) - the reader's map, then the [block cards](docs/blocks/README.md), then [docs/glossary.md](docs/glossary.md)
+2. [docs/runner-design.md](docs/runner-design.md) - the runner's design; [docs/ir-design.md](docs/ir-design.md) - AST, IR-F, IR-G, oracle, and equivalence; [Implementation memo](#implementation-memo) - the compiler side
 3. [docs/stonebranch-semantics.md](docs/stonebranch-semantics.md) - the target model and the AutoSys-to-UC mapping (UCS/M entries)
-4. [docs/ir-design.md](docs/ir-design.md) - AST, IR-F, IR-G, oracle, and equivalence design
-5. [docs/jil-statement-syntax.md](docs/jil-statement-syntax.md) - the statement scanner spec
-6. [docs/decision-log.md](docs/decision-log.md) - the reasons for the decisions
-7. [docs/citation-index.md](docs/citation-index.md) - what every reference token in the sources means
-8. [docs/simulation-coverage.md](docs/simulation-coverage.md) - what the simulation models, refuses, or assumes
-9. [CLAUDE.md](CLAUDE.md) - the shared agent contract and task-specific reading routes
+4. [docs/decision-log.md](docs/decision-log.md) - the reasons for the decisions, indexed by [docs/decision-index.md](docs/decision-index.md); [docs/citation-index.md](docs/citation-index.md) - what every reference token in the sources means; [docs/risk-map.md](docs/risk-map.md) - each runner machine with its branch coverage and open findings
 
-The runner's design is
-[docs/runner-design.md](docs/runner-design.md).
-Its frozen contracts are
+The runner's frozen contracts are
 [docs/supervisor-protocol.md](docs/supervisor-protocol.md),
 [docs/control-protocol.md](docs/control-protocol.md),
 [docs/concurrency-model.md](docs/concurrency-model.md),
@@ -43,22 +60,14 @@ Its frozen contracts are
 [docs/protocol-evolution.md](docs/protocol-evolution.md),
 [docs/access-model.md](docs/access-model.md),
 and [docs/statechart-engine.md](docs/statechart-engine.md).
+They are reference, cited from the pages above, not reading.
 A proposed HTTP and WebSocket gateway is specified in
 [docs/gateway.md](docs/gateway.md); nothing of it is built.
 
-Three more reader aids sit beside the contracts and hold no rules:
-[docs/glossary.md](docs/glossary.md) defines the runner's terms and links
-each to the section that defines it,
-[docs/risk-map.md](docs/risk-map.md) lists each runner machine with its
-branch coverage and open findings, and
-[docs/decision-index.md](docs/decision-index.md) lists every decision-log
-entry with the docs that cite it.
-
 Agent setup, verification commands, and cross-vendor review recipes are in
-[docs/agent-workflow.md](docs/agent-workflow.md).
-Operating the runner on a server (install, systemd, web UI exposure, the
-JIL-update cycle, upgrades) is
-[docs/deployment-runbook.md](docs/deployment-runbook.md).
+[docs/agent-workflow.md](docs/agent-workflow.md), and
+[CLAUDE.md](CLAUDE.md) is the shared agent contract with task-specific
+reading routes.
 
 ## Status
 
