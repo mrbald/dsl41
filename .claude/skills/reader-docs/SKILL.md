@@ -58,8 +58,8 @@ Relevant (writing.md §2)
   reader moves to that reader's page, with a link.
 - Commands before explanation where the brief says the page is read at a
   terminal during an incident.
-- A limit or gap the reader would hit is stated, or linked, where they
-  would look.
+- The page states, or links, every limit or gap the reader would hit,
+  where they would look.
 - History and rejected options are not told; the decision entry is cited.
 - No rule is restated from a frozen table; the section is linked.
 
@@ -76,7 +76,7 @@ Understandable (§4)
 - One idea per sentence; common words; glossary terms used as defined.
 - Active voice with a named actor.
 - An example precedes a non-obvious rule.
-- One topic per paragraph, carried by its first sentence.
+- One topic per paragraph, stated by its first sentence.
 - Numbers sit in a table or on their own line.
 - No metaphor, marketing or changelog sentence; no blame, no "simply",
   "obviously" or "just" that makes a step sound easy.
