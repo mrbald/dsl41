@@ -1837,7 +1837,10 @@ def test_every_dsl41_verb_the_runbook_types_exists(
     is worse than no exercise. So: every `dsl41 <verb>` a runbook types
     must resolve to a command this build has -- and where the verb is a
     GROUP, its subcommand is resolved too, or `estate prune` would pass on
-    the strength of `estate` alone."""
+    the strength of `estate` alone. `host`, `query` and `supervise` are
+    commands whose first argument is an ACTION, and their ACTION is resolved
+    against the values the handler accepts, or `host expel` would pass on the
+    strength of `host`."""
     text = (NB / page).read_text()
     typed = {
         (match.group(1), match.group(2))
@@ -1854,16 +1857,36 @@ def test_every_dsl41_verb_the_runbook_types_exists(
         }
         for group in app.registered_groups
     }
+    actions = _accepted_actions()
     missing = sorted(
-        f"{verb} {sub}" if verb in groups else verb
+        f"{verb} {sub}" if verb in groups or verb in actions else verb
         for verb, sub in typed
-        if verb not in top and (verb not in groups or sub not in groups[verb])
+        if (verb not in top and (verb not in groups or sub not in groups[verb]))
+        or (verb in actions and sub not in actions[verb])
     )
     assert not missing, f"{page} types verbs this build has no command for: {missing}"
     # the extraction itself must keep working, and it must reach the page's
     # later exercises rather than only its first ones
     assert verbs_reached <= {verb for verb, _ in typed}
     assert pairs_reached <= typed
+
+
+def _accepted_actions() -> dict[str, set[str]]:
+    """The ACTION values each action-taking command accepts. `host list` is the
+    CLI's own read and the rest are the wire's operator verbs (concurrency-model
+    ss8); `query` names its verbs and predicates; `supervise` states its
+    accepted actions in the refusal of any other, which is read back here."""
+    from dsl41.cli_control import _QUERY_PREDICATES, _QUERY_VERBS
+    from dsl41.runner_hosts import HOST_VERBS
+
+    refused = runner.invoke(app, ["supervise", "no-such-action", "--run-root", "/nonexistent"])
+    choices = re.search(r"unknown supervise action .*\(([a-z|]+)\)", refused.output)
+    assert refused.exit_code == 2 and choices, refused.output
+    return {
+        "host": {"list", *HOST_VERBS},
+        "query": {*_QUERY_VERBS, *_QUERY_PREDICATES},
+        "supervise": set(choices.group(1).split("|")),
+    }
 
 
 def test_every_recipe_the_service_runbook_names_is_a_marked_block() -> None:

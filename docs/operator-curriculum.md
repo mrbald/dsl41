@@ -176,7 +176,7 @@ The drill column records coverage outside the numbered course.
 | --- | --- |
 | [Add, change or remove a job in place](deployment-runbook.md#recipe-add-change-or-remove-a-job) | Drill only: `definition_probe` in `offline-scenarios.sh`. |
 | [Upgrade dsl41, rows 3 and 4](deployment-runbook.md#7-upgrading-dsl41-itself) | Drill only: the `upgrade-coordinated*`, `upgrade-old-release` and `upgrade-state-machine*` steps. |
-| [Recover a torn opening whose head is `claimed`](deployment-runbook.md#recipe-recover-a-rolled-root-whose-opening-is-torn) | No drill; `tests/test_operator_recipes.py` runs the branch. Exercise 29 trains the `open` branch. |
+| [Recover a torn opening whose head is `claimed`](deployment-runbook.md#recipe-recover-a-rolled-root-whose-opening-is-torn) | No drill; `tests/test_operator_recipes.py` runs the branch. Exercise 29 trains the `open` branch; [exercise 20](../examples/nightbank/RUNBOOK.md#20-reclaim-after-a-crashed-roll) trains the reclaim the branch falls back to. |
 
 ## 5. On shift, choose the source for the situation
 

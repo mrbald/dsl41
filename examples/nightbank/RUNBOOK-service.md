@@ -36,8 +36,8 @@ bundle exercise 23 installs. `offline-local.sh el8` checks the same build.
 
 1. On your machine, from the checkout, build the EL8 offline image (no `uv`) and the
    wargame image on it (with `uv`). Export the release inputs for a development
-   rehearsal, [upstream](../../docs/offline-installation.md#prepare-release-inputs-upstream),
-   under `$HOME`, which Podman on macOS shares. Build and qualify the bundle in the
+   rehearsal, [upstream](../../docs/offline-installation.md#prepare-release-inputs-upstream).
+   Podman on macOS mounts only `$HOME`, so keep the checkout and `$out` under it. Build and qualify the bundle in the
    offline image, the [connected target](../../docs/offline-installation.md#build-and-qualify-on-a-connected-target):
 
 ```sh
@@ -108,7 +108,7 @@ sudo journalctl -u dsl41-engine.service -o cat | tail -3   # [Errno 2] No such f
 ```
 
 3. Put the estate where the launcher's `ESTATE` names it, root-owned and read-only to the
-   account. Prepare the night as the account with the launcher's own `prepare_night`,
+   account. Prepare the night as the account with nightbank's own `prepare_night`,
    anchors six hours out, as the drill does. The last line makes one job run long:
 
 ```sh
@@ -151,16 +151,27 @@ sudo useradd -M -s /usr/sbin/nologin -G nightbank-socket,nightbank-observers dre
 ```
 
 2. Name the group in the map and restart: the account is not a member, so the start
-   refuses with exit 2. Add it, start, and grant the run roots' directory. Log in again
-   for your new groups (`exit`, then your shell as above), and let the bindings decide:
+   refuses with exit 2. Add it, start, wait for the engine as the service account, and
+   grant the run roots' directory:
 
 ```sh
 sudo systemctl stop dsl41-engine.service
 sudo sed -i 's/^# socket_group = .*/socket_group = "nightbank-socket"/' /etc/dsl41/nightbank-access.toml
-sudo systemctl start dsl41-engine.service   # journal: cannot open the run root to group 'nightbank-socket'
+sudo systemctl start dsl41-engine.service
+sleep 5   # wait 5 s for the start to refuse
+sudo journalctl -u dsl41-engine.service -o cat | tail -3   # cannot open the run root to group 'nightbank-socket'
 sudo usermod -aG nightbank-socket dsl41 && sudo systemctl start dsl41-engine.service
+sudo -u dsl41 -H bash -c 'for try in $(seq 90); do /opt/dsl41/.venv/bin/dsl41 query status --brief -S "$1" >/dev/null 2>&1 && break; sleep 1; done' sh "$S"   # wait up to 90 s for an answer
 sudo stat -c '%a %G' "$RUN_ROOT" "$S"   # 710 nightbank-socket, 660 nightbank-socket
 sudo chgrp nightbank-socket /srv/dsl41/runs && sudo chmod 0710 /srv/dsl41/runs
+```
+
+3. Log in again, so your shell has the new groups: `exit`, then open your shell as above
+   (`su - runner`, the `PATH` line, recipe `operator-env`). `id` lists `nightbank-socket`
+   and `nightbank-ops`.
+4. Let the bindings decide:
+
+```sh
 dsl41 sendevent ON_HOLD -J OPS_SPOOL_C -S "$S" && dsl41 sendevent OFF_HOLD -J OPS_SPOOL_C -S "$S"
 sudo -u dreadu /opt/dsl41/.venv/bin/dsl41 query status --brief -S "$S"   # answers
 sudo -u dreadu /opt/dsl41/.venv/bin/dsl41 sendevent ON_HOLD -J OPS_SPOOL_C -S "$S"
@@ -168,23 +179,28 @@ sudo -u dreadu /opt/dsl41/.venv/bin/dsl41 sendevent ON_HOLD -J OPS_SPOOL_C -S "$
 sudo jq -r 'select(.rec == "access_denied") | .principal' "$RUN_ROOT/perimeter.jsonl"   # dreadu
 ```
 
-3. Reload a map that names another group: the engine stays up and refuses it. Then
-   change the runtime profile: the resume gate refuses with exit 2. Put both files back:
+5. Reload a map that names another group: the engine stays up and refuses it. Then
+   change the runtime profile: the resume gate refuses with exit 2. Put both files back.
+   The last start can fail: `systemctl` prints `Job for dsl41-engine.service failed`, and
+   the journal says `Start request repeated too quickly`, because the start limit (five
+   in 300 s) counts your starts. Then run `sudo systemctl reset-failed
+   dsl41-engine.service` and start again ([stop recipe](../../docs/deployment-runbook.md#recipe-stop-restart-seal-and-recover)):
 
 ```sh
 sudo sed -i 's/^socket_group = .*/socket_group = "nightbank-ops"/' /etc/dsl41/nightbank-access.toml
 sudo systemctl kill -s HUP --kill-who=main dsl41-engine.service
+sleep 3   # wait 3 s for the reload
 sudo jq -r 'select(.rec == "policy_reload_failed") | .error' "$RUN_ROOT/perimeter.jsonl"   # socket_group is fixed at arming, …
 sudo sed -i 's/^socket_group = .*/socket_group = "nightbank-socket"/' /etc/dsl41/nightbank-access.toml
 sudo systemctl stop dsl41-engine.service && sudo cp -p /opt/dsl41/bin/dsl41-launch /root/launch.orig
 sudo sed -i 's|^        --timezone UTC|        --timezone America/New_York|' /opt/dsl41/bin/dsl41-launch
-sudo systemctl start dsl41-engine.service   # exit 2; journal: runtime-profile mismatch: … (default_tz) …
+sudo systemctl start dsl41-engine.service
+sleep 5   # wait 5 s for the resume gate to refuse
+sudo journalctl -u dsl41-engine.service -o cat | tail -3   # runtime-profile mismatch: … (default_tz) …
 sudo cp -p /root/launch.orig /opt/dsl41/bin/dsl41-launch && sudo systemctl start dsl41-engine.service
+sudo -u dsl41 -H bash -c 'for try in $(seq 90); do /opt/dsl41/.venv/bin/dsl41 query status --brief -S "$1" >/dev/null 2>&1 && break; sleep 1; done' sh "$S"   # wait up to 90 s for an answer
 ```
 
-   The last start can fail with `Start request repeated too quickly`: the start limit
-   (five in 300 s) counts your starts. Run `sudo systemctl reset-failed
-   dsl41-engine.service` and start again ([stop recipe](../../docs/deployment-runbook.md#recipe-stop-restart-seal-and-recover)).
    Keep the socket group: the later exercises send control commands as you.
 
 *Why.* Bindings, not the socket's mode, decide tiers (access-model §4, §7). A reload
@@ -198,7 +214,8 @@ once, find a failure, and take the five observations of
 drill's `watch` step runs every row's command and checks its output.
 
 1. Run each row's "Read it with" command in the shell it needs. Here the engine unit
-   reads `active`, status 0, no restarts; recipe `watch-sealed` prints `open`;
+   reads `active`, status 0, no restarts; recipe `watch-sealed`, in the service account's
+   shell, prints `open`;
    `dsl41 supervise list` answers `"ok": true`, `"runs": []`, `"deadman_s": null`; the
    `pid` in `leader.lock` is the engine's `MainPID`.
 2. In a second terminal, as yourself, run `dsl41 query subscribe -S "$S"`. Start the job
@@ -206,16 +223,24 @@ drill's `watch` step runs every row's command and checks its output.
 
 ```sh
 dsl41 sendevent FORCE_STARTJOB -J AMER_MKT_FX_C -S "$S"
+sleep 15   # wait 15 s: the run fails about 9 s after its start
 dsl41 query status --brief -S "$S" --job AMER_MKT_FX_C   # FAILURE … run 1 exit 5
 dsl41 query trace --since 0 -S "$S" | jq -c '.entries[] | select(.transition | test("FAILURE"))'
 # RUNNING->FAILURE for the job; INACTIVE->FAILURE for its box, AMER_EOD_B
 sudo journalctl -u dsl41-engine.service -o cat | grep -c -e '^dsl41: input quarantined' -e '^dsl41: statechart error'   # 0
 ```
 
-3. Take the capacity observations. As yourself the WAL glob finds nothing: the root is
-   `0710` to your group, which reaches the socket and cannot list the directory. Run the
-   reads inside `RUN_ROOT` in the service account's shell. Here the engine read 56832
-   KiB, the open segment 8 KiB, `last_seq` 9, and one `query status --brief` 0.21 s.
+3. Take the five capacity observations. As yourself the WAL glob finds nothing: the
+   root is `0710` to your group, which reaches the socket and cannot list the directory.
+   Run the reads inside `RUN_ROOT` in the service account's shell. On this host:
+
+| Observation | Read |
+| --- | --- |
+| engine resident set | 56832 KiB |
+| open WAL segment | 8 KiB |
+| trace length, `last_seq` | 9 |
+| run directory: `runs`, `logs`, entries under `runs` | 40 KiB, 0 KiB, 14 |
+| one `dsl41 query status --brief` | 0.21 s |
 
 ## 27. Back up and restore
 
@@ -235,9 +260,10 @@ quiesce: engine: refused: dsl41-engine.service is active/running; as root: syste
 quiesce: horizon: refused: the retry horizon runs until <time> UTC; rerun after it, or pass --force-seal
 ```
 
-   The horizon counts from step 1's holds. After it, every stage ends `ok`, with `sealed
-   period 1 …; period 2 is ready to open` and `period 1 attested`, and the verb exits 0.
-   Recipe `watch-sealed` prints `closed`; `pgrep -u dsl41` prints nothing.
+   The horizon counts from step 1's holds: wait until the time it names, about a minute.
+   Then every stage ends `ok`, with `sealed period 1 …; period 2 is ready to open` and
+   `period 1 attested`, and the verb exits 0. Recipe `watch-sealed`, in the service
+   account's shell, prints `closed`; `pgrep -u dsl41` prints nothing.
 3. Copy, lose both, restore the anchor alone, and audit. Restore the root at its
    recorded path, and audit again:
 
@@ -257,7 +283,7 @@ sudo -u dsl41 -H /opt/dsl41/.venv/bin/dsl41 audit --estate-anchor "$ESTATE_ANCHO
    `dsl41 query status --brief`).
 
 *Why.* The verb never waits for a precondition (DL-398). The registry names each root by
-its absolute path, so a restore elsewhere is refused (DL-224).
+its absolute path, so audit and resume refuse a restore elsewhere (DL-224).
 
 ## 28. Upgrade dsl41, row 1 and row 2
 
@@ -272,19 +298,22 @@ profiles of one build and qualify no version pair. The drill's upgrade steps che
 ```sh
 prefix=/opt/dsl41; sudo env PYTHON=python3.12 bash /delivery/bundle/tools/prepare.sh /delivery/bundle "$prefix" ui
 dsl41 sendevent FORCE_STARTJOB -J OPS_XINST_DEMO_C -S "$S"
+sleep 3   # wait 3 s for the job's process
 pgrep -f 'fakework OPS_XINST_DEMO_C'; systemctl show -p MainPID --value dsl41-supervisor.service
 ```
 
-2. Run row 1's three commands, activating with §1's block in a root shell,
-   `bundle=/delivery/bundle` and `profile=ui`. The launch line ends `--resume`, the
+2. Run row 1's three commands. For the activation, set `bundle=/delivery/bundle` in a
+   root shell and type §1's block with its `profile=base` line changed to `profile=ui`.
+   After the start, wait with recipe `wait-answers`. The launch line ends `--resume`, the
    engine runs from `.venvs/1.12.0-ui-…`, and both processes live on. Roll back the same
-   way with `profile=base`; the job ends `SUCCESS`.
+   way, with §1's block as printed (`profile=base`); within two minutes the job reads
+   `SUCCESS`.
 3. Row 2: check that `dsl41 supervise list` shows no live wrapper, take recipe
    `hold-down`, stop the engine unit, and run exercise 27's `estate quiesce` command: it
    seals period 2. Keep a §2b copy of the anchor for exercise 29
    (`sudo rm -rf /srv/dsl41/backup/anchor-before-roll`, then
-   `sudo cp -a "$ESTATE_ANCHOR" /srv/dsl41/backup/anchor-before-roll`), and activate
-   `profile=ui` with §1's block.
+   `sudo cp -a "$ESTATE_ANCHOR" /srv/dsl41/backup/anchor-before-roll`), and activate as in
+   step 2, with the `profile=ui` line.
 4. Provision the new root, point the launcher and both units at it, and ask the launcher
    for its command. It refuses with exit 2:
 
@@ -302,13 +331,14 @@ sudo -u dsl41 -H /opt/dsl41/bin/dsl41-launch --print
 ```
 
 5. Run row 2's commands from the trigger on, with `<new>` as `nightbank-01b`. With the
-   trigger, `--print` ends `--open-from /srv/dsl41/runs/nightbank-01.anchor`. The journal
+   trigger, `--print` ends `--open-from /srv/dsl41/runs/nightbank-01.anchor`. After the
+   start, wait with recipe `wait-answers` in the service account's shell. The journal
    says `opened period 3 in /srv/dsl41/runs/nightbank-01b from seal sha256:…`, and the
    trigger is gone. Set `RUN_ROOT` and `S` to the new root in each shell. The holds
    crossed; row 2 releases them with `OFF_HOLD`, but keep them, so the calendar starts
    nothing later. A job whose tick fell while held shows `HA`, the armed latch of the
    [RUNBOOK's exercise 16](RUNBOOK.md#16-open-period-2--what-crossed-and-what-did-not).
-6. Roll back: repeat steps 3 to 5 with `profile=base` and `nightbank-01c`. The journal
+6. Roll back: repeat steps 3 to 5 with §1's block as printed and `nightbank-01c`. The journal
    says `opened period 4 in /srv/dsl41/runs/nightbank-01c`.
 
 *Why.* A release not marked resume-safe opens a fresh root with its own supervisor
@@ -328,19 +358,23 @@ sudo systemctl stop dsl41-engine.service
 sudo -u dsl41 -H /opt/dsl41/.venv/bin/dsl41 supervise shutdown --run-root "$RUN_ROOT"   # exit 0
 sudo -u dsl41 -H bash -c 'seg=$1/wal/000004.jsonl; first=$(head -n 1 "$seg")
     printf %s "${first:0:$((${#first} / 2))}" >"$seg"' sh "$RUN_ROOT"
-sudo systemctl start dsl41-engine.service   # exit 2; journal: …/wal/000004.jsonl: missing segment record
+sudo systemctl start dsl41-engine.service
+sleep 5   # wait 5 s for the start to refuse with exit 2
+sudo journalctl -u dsl41-engine.service -o cat | tail -3   # …/wal/000004.jsonl: missing segment record
 ```
 
 2. Step 1: recipe `torn-look`, in the service account's shell, prints
    `{"period_id":4,"root":"/srv/dsl41/runs/nightbank-01c","state":"open"}` and exits 0:
    the supervisor `Requires=` started lists no runs.
-3. Step 2: recipe `hold-down`, and step 1's guarded maintenance again. Past `RestartSec`
-   (2 s) the supervisor unit stays `inactive`; `pgrep -u dsl41` prints nothing.
-4. Step 3: recipe `torn-check` prints `open 000004.jsonl`. An `open` head is damage, so
-   the recipe goes to its step 6: restore the anchor from exercise 28's copy
-   (`sudo rm -rf "$ESTATE_ANCHOR"`, then
-   `sudo cp -a /srv/dsl41/backup/anchor-before-roll "$ESTATE_ANCHOR"`). Its head reads
-   `closed`, period 3.
+3. Step 2, in your shell: recipe `hold-down`, and this exercise's step 1 `supervise
+   shutdown` again. Wait 6 s, past `RestartSec` (2 s): the supervisor unit stays
+   `inactive`, and `pgrep -u dsl41` prints nothing.
+4. Step 3: recipe `torn-check`, in the service account's shell, prints `open
+   000004.jsonl`. An `open` head is damage, so the recipe goes to its step 6. In your
+   shell, restore the anchor from exercise 28's copy (`sudo rm -rf "$ESTATE_ANCHOR"`,
+   then `sudo cp -a /srv/dsl41/backup/anchor-before-roll "$ESTATE_ANCHOR"`). Its head
+   reads `closed`, period 3. `nightbank-01b` did not change after the copy, so it needs
+   no restore.
 5. Step 7: provision `/srv/dsl41/runs/nightbank-01d` and point the launcher and units at
    it, as in exercise 28 step 4. Set `RUN_ROOT` and `S` to it, type recipe `torn-open` in
    the service account's shell, start the engine unit, and wait with recipe
@@ -365,6 +399,7 @@ rehearsal's maintenance probe checks the same.
 
 ```sh
 dsl41 sendevent FORCE_STARTJOB -J OPS_XINST_DEMO_C -S "$S"
+sleep 3   # wait 3 s for the job to run
 sudo systemctl stop dsl41-supervisor.service   # exit 4: … Operation refused … (restart too)
 sudo -u dsl41 -H /opt/dsl41/.venv/bin/dsl41 supervise shutdown --run-root "$RUN_ROOT"
 # exit 2: cannot acquire lease: {"error": "lease_held", … "holder": "engine:/srv/dsl41/runs/nightbank-01d#…"}
@@ -377,7 +412,8 @@ systemctl show -p ActiveState -p Result -p ExecMainStatus dsl41-supervisor.servi
 ```
 
 `supervisor.log` ends `maintenance admitted force=terminate bound_s=50.0` and
-`maintenance completed`. Start the engine unit and wait: the job reads `TERMINATED`,
+`maintenance completed`. Start the engine unit, wait with recipe `wait-answers`, and
+wait 5 s more for the reconciliation: the job reads `TERMINATED`,
 still run 2, and `dsl41 journal "$RUN_ROOT"` prints
 `OPS_XINST_DEMO_C RUNNING->TERMINATED [injected STATUS]`.
 
@@ -401,17 +437,22 @@ dsl41 host list -S "$S" | jq -c .hosts.local   # "forced_by":"os/runner", "gener
 dsl41 host activate local -S "$S"
 # exit 3: host 'local' was evicted at generation 1: it returns by re-registering … and self-fencing first …
 dsl41 sendevent FORCE_STARTJOB -J AMER_INV_MACROS_C -S "$S"   # applied
+sleep 12   # wait 12 s, past the start's dispatch
 dsl41 query status -S "$S" --job AMER_INV_MACROS_C | jq -c '.jobs[] | {status, held}'   # RUNNING, held
 ```
 
 The leader alone sets `quarantined`, so the gated path ends at precondition 1 here.
+Precondition 2 fails too: `deadman_s` is null, and a host with a null deadman cannot be
+evicted except by force ([period-model §3.3](../../docs/period-model.md#33-carried-and-not-carried)).
 `forced_by` names the authenticated principal, not the claim, because the access map is
 armed. The forced start has no process: `dsl41 supervise list` shows no run.
 
-No document gives a path from an evicted sole executor back to an estate that runs
-jobs: re-registration and self-fencing are the relay's acts, and the relay is not built
-(concurrency-model §8; DL-97, DL-230). The estate can still seal and audit, so this
-exercise ends in exercise 32.
+This lineage has no path back to running jobs. On one host an evicted row is a dead
+end: the un-evict, re-registration and self-fencing, is the relay's act, and the relay
+is not built (period-model §3.3; concurrency-model §8; DL-97, DL-103). A new estate, a
+genesis on a new root and anchor ([§7 row 4](../../docs/deployment-runbook.md#7-upgrading-dsl41-itself)),
+runs jobs again. This lineage can still seal and audit, so this exercise ends in
+exercise 32.
 
 *Why.* `evicted` lets other hosts rerun this host's work, so it alone can cause a
 double run. Force skips the proof and records who took it (DL-151).
