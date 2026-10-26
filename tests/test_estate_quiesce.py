@@ -578,7 +578,17 @@ def _fake_proc(
             raise value
         return value
 
+    real_read_bytes = Path.read_bytes
+
+    def read_bytes(self: Path) -> bytes:
+        # The fake table owns every name: a pid of the table that a real process on the host
+        # also holds must not answer with that process's cmdline (DL-398).
+        if self.parent.parent == Path("/proc") and self.name == "cmdline":
+            raise FileNotFoundError(2, "no such process")
+        return real_read_bytes(self)
+
     monkeypatch.setattr(Path, "iterdir", iterdir)
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
     monkeypatch.setattr(cli_estate, "_proc_status", status)
     monkeypatch.setattr(cli_estate, "_proc_owner", lambda entry: owners.get(entry.name, 1))
     monkeypatch.setattr(os, "geteuid", lambda: 1)
