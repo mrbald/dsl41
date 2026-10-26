@@ -97,9 +97,12 @@ and line. The page changes neither a rule nor the code.
 
 ## Step 4: verification and review
 
-Run the full local gates listed under "Verify a change" in
-`docs/agent-workflow.md`, starting with `scripts/arch_check.py` (test names
-in backticks, the source map, links). The tests most likely to trip on a
+Stage the new or changed page first (`git add` the path): the decision
+index renderer and its test read tracked files only, so an unstaged page
+leaves `docs/decision-index.md` stale and CI red. Then run the full local
+gates listed under "Verify a change" in `docs/agent-workflow.md`, starting
+with `scripts/arch_check.py` (test names in backticks, the source map,
+links) and `scripts/render_decision_index.py`. The tests most likely to trip on a
 rewritten page parse it: the decision index rendering, the operator recipes,
 the nightbank example and deploy tests, the architecture and block-card
 tests, the lifecycle view and the simulation register. Report each command
