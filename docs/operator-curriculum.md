@@ -146,9 +146,11 @@ The installed-service probes and capability check need that host too.
 `wargame.sh` runs no drill itself.
 Its image has `uv`, so it can serve as `DRILL_BASE_IMAGE`.
 `DRILL_BASE_IMAGE=localhost/dsl41-wargame:NAME examples/nightbank/deploy/drill-local.sh` runs the service drill on EL8.
-`wargame.sh start` copies the checkout's tracked files to `/work` in the container, owned by `runner`.
-`wargame.sh deliver DIR` copies a prepared delivery bundle to `/delivery/bundle`.
-The offline rehearsal image under the wargame image has no `uv`, because the rehearsal proves an install that needs none.
+`NAME` defaults to the checkout directory name.
+`wargame.sh start` copies the checkout's tracked files to `/work` when the container has none, owned by `runner`.
+`start` of an existing container keeps `/work`; remove `/work` inside it, or `dispose` it, for a fresh copy.
+`wargame.sh deliver DIR` copies a built delivery bundle to `/delivery/bundle`.
+The wargame image is built on the offline rehearsal image, which has no `uv`, because the rehearsal proves an install that needs none.
 
 ## 4. Read through the tasks the course does not train
 
