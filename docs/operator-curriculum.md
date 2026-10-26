@@ -129,7 +129,7 @@ The drill entry points call scripts marked **Internal**; do not run those script
 
 | Script | What it exercises | Invocation | Host or container needed |
 | --- | --- | --- | --- |
-| [wargame.sh](../scripts/wargame.sh) | Supplies a disposable EL8 systemd host for exercises. | `scripts/wargame.sh build`, then `start`, `join`, `stop` or `dispose`; each accepts an optional `NAME`. | Podman; a connected host for the build; Rocky Linux 8 container with systemd as PID 1 and `--network none`. |
+| [wargame.sh](../scripts/wargame.sh) | Supplies a disposable EL8 systemd host with `uv` for exercises by hand and for the service drill. | `scripts/wargame.sh build`, then `start`, `deliver DIR`, `join`, `stop` or `dispose`; each accepts an optional `NAME`. | Podman; a connected host for the build; Rocky Linux 8 container with systemd as PID 1 and `--network none`. |
 | [drill-local.sh](../examples/nightbank/deploy/drill-local.sh) | Runs every service-drill step and collects diagnostics. | `examples/nightbank/deploy/drill-local.sh`; prefix with `DRILL_KEEP=1` to keep its container. | Podman; the script supplies an Ubuntu systemd container and runs steps as `runner` with sudo. |
 | [drill-steps.sh](../examples/nightbank/deploy/drill-steps.sh) | Checks start, restart, detached jobs, refusals, sealing, restore, monitoring, configuration, recovery, upgrades and retirement. | `examples/nightbank/deploy/drill-steps.sh --list`; `examples/nightbank/deploy/drill-steps.sh STEP`. | Real or container systemd host; sudo, `uv`, `jq` and `python3-venv`. |
 | [drill-lib.sh](../examples/nightbank/deploy/drill-lib.sh) | Supplies paths and waits to the drill steps. | **Internal**: the drill scripts source it. | The same systemd host and sudo environment as its caller. |
@@ -143,7 +143,12 @@ The drill entry points call scripts marked **Internal**; do not run those script
 The installed-service probes and capability check need that host too.
 `drill-local.sh` and `offline-local.sh` create their own containers.
 
-The wargame image has no `uv`, so it cannot serve as `DRILL_BASE_IMAGE`; `wargame.sh` runs no drill.
+`wargame.sh` runs no drill itself.
+Its image has `uv`, so it can serve as `DRILL_BASE_IMAGE`.
+`DRILL_BASE_IMAGE=localhost/dsl41-wargame:NAME examples/nightbank/deploy/drill-local.sh` runs the service drill on EL8.
+`wargame.sh start` copies the checkout's tracked files to `/work` in the container, owned by `runner`.
+`wargame.sh deliver DIR` copies a prepared delivery bundle to `/delivery/bundle`.
+The offline rehearsal image under the wargame image has no `uv`, because the rehearsal proves an install that needs none.
 
 ## 4. Read through the tasks the course does not train
 

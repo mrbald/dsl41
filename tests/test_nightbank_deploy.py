@@ -35,6 +35,7 @@ DRILL_LIB = DEPLOY / "drill-lib.sh"
 DRILL_STEPS = DEPLOY / "drill-steps.sh"
 DRILL_WORKFLOW = NB.parents[1] / ".github" / "workflows" / "service-drill.yml"
 DRILL_LOCAL = DEPLOY / "drill-local.sh"
+WARGAME = NB.parents[1] / "scripts" / "wargame.sh"
 DSL41 = Path(sys.executable).with_name("dsl41")
 ME = pwd.getpwuid(os.geteuid()).pw_name
 #: the order the launcher names the files in; it is part of the catalog
@@ -788,3 +789,22 @@ def test_drill_local_runs_every_step_as_an_unprivileged_sudoer() -> None:
     for line in joined.splitlines():
         if "podman exec" in line and "drill-steps.sh" in line:
             assert not re.search(r"\bsudo\b|\bsu\b|runuser", line), line
+
+
+def test_the_wargame_image_is_the_offline_image_with_the_drills_uv() -> None:
+    """wargame.sh builds the EL8 offline image, then a layer on it that adds
+    the uv drill-local.sh pins, so the result serves as DRILL_BASE_IMAGE.
+    The offline image keeps its no-uv assertion for the rehearsal lanes."""
+    script = WARGAME.read_text().replace("\\\n", " ")
+    builds = [line for line in script.splitlines() if "podman build" in line]
+    assert [re.findall(r"--file (\S+)", line) for line in builds] == [
+        ['"$deploy/offline.Containerfile"'],
+        ['"$here/wargame.Containerfile"'],
+    ]
+    # the second build starts from the image the first one tags
+    (first_tag,) = re.findall(r'--tag "\$(\w+)"', builds[0])
+    assert f'--build-arg "BASE=${first_tag}"' in builds[1]
+    (pinned,) = re.findall(r"^uv_version=(\S+)$", DRILL_LOCAL.read_text(), re.M)
+    layer = WARGAME.with_name("wargame.Containerfile").read_text()
+    assert re.findall(r"\buv==(\S+)", layer) == [pinned]
+    assert "&& ! command -v uv" in (DEPLOY / "offline.Containerfile").read_text()
