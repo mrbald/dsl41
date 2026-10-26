@@ -5,11 +5,18 @@ timezone and its map, and the semantic switches. `build_args` turns it into the 
 one verb, and `dsl41 estate args` prints that list (DL-407). The verbs keep their own parsers
 and never read the manifest.
 
-Each name is joined to the manifest's directory as given. Nothing resolves a symlink or
-normalises the path beyond pathlib's join, because `source_bundle_hash` frames each input's path
-string as given (period-model ss1.1): the seal's `--next` paths and the opener's paths must be
-the same strings. pathlib's form of the join is the string a verb hashes after typer turns the
-argument into a Path, so the printed path and the hashed path agree.
+The manifest carries the interpretation half of the runtime profile: files, layers, timezone,
+timezone map and semantics. The launcher carries the deployment half (`--detached`,
+`--deadman`, `--as-machine`, `--machine-policy`), and every seal restates it as `--next-*`,
+because an omitted `--next-*` option takes its default (DL-407).
+
+The manifest is given as an absolute path, and each name is joined to its directory as given.
+Nothing resolves a symlink or normalises the path beyond pathlib's join, because
+`source_bundle_hash` frames each input's path string as given (period-model ss1.1): the seal's
+`--next` paths and the opener's paths must be the same strings whatever the working directory.
+pathlib's form of the join is the string a verb hashes after typer turns the argument into a
+Path, so the printed path and the hashed path agree. A name with a `..` part is refused, so a
+release directory holds every input it names.
 """
 
 from __future__ import annotations
@@ -51,7 +58,7 @@ class Environment(_Strict):
 
 
 class Manifest(_Strict):
-    """The parsed `estate.toml`; `name` appears in messages only."""
+    """The parsed `estate.toml`; `name` is required and informative only."""
 
     name: str = Field(min_length=1)
     requires_dsl41: str | None = None
@@ -76,7 +83,9 @@ def _release(version: str) -> tuple[int, ...]:
 
 
 def _check_requirement(path: Path, requirement: str, installed: str) -> None:
-    """`>=X.Y[.Z]` against the installed version as a dotted-integer tuple (DL-407)."""
+    """`>=X.Y[.Z]` against the installed version as a dotted-integer tuple (DL-407).
+
+    Only the leading integers count, so a pre-release or dev build of X counts as X."""
     text = requirement.strip()
     operator = next((op for op in _OPERATORS if text.startswith(op)), None)
     wanted = text[len(operator or "") :].strip()
@@ -107,9 +116,14 @@ def _validation_sentence(path: Path, exc: ValidationError) -> str:
 def load_manifest(path: Path) -> Manifest:
     """Parse and validate the manifest at `path`, or raise ManifestError (DL-407).
 
-    Every name must be relative and must exist as a file under the manifest's directory, every
-    environment's layers included, so a manifest that refuses for one environment refuses for
-    all."""
+    Every name must be relative, free of `..`, and an existing file under the manifest's
+    directory, every environment's layers included, so a manifest that refuses for one
+    environment refuses for all. A joined path repeated among the files, or among the base
+    layers and one environment's, is refused."""
+    if not path.is_absolute():
+        raise ManifestError(
+            f"{path}: give the manifest as an absolute path: the printed paths are hashed as given"
+        )
     try:
         raw = path.read_bytes()
     except OSError as exc:
@@ -129,23 +143,31 @@ def load_manifest(path: Path) -> Manifest:
         check_overrides(manifest.semantics)
     except ValueError as exc:
         raise ManifestError(f"{path}: semantics: {exc}") from exc
-    names = [*manifest.files, *manifest.properties]
-    names += [layer for env in manifest.environments.values() for layer in env.properties]
+    _distinct(path, "files", manifest.files)
+    for env in [Environment(), *manifest.environments.values()]:
+        _distinct(path, "properties", [*manifest.properties, *env.properties])
     if manifest.timezone_map is not None:
-        names.append(manifest.timezone_map)
-    for name in names:
-        _join(path, name)
+        _join(path, manifest.timezone_map)
     return manifest
+
+
+def _distinct(path: Path, key: str, names: list[str]) -> None:
+    """Join each name, and refuse a joined path the list repeats (DL-407)."""
+    seen: set[str] = set()
+    for name in names:
+        joined = _join(path, name)
+        if joined in seen:
+            raise ManifestError(f"{path}: {key} names {joined} twice")
+        seen.add(joined)
 
 
 def _join(path: Path, name: str) -> str:
     """`name` joined to the manifest's directory, as the string every verb receives."""
-    if not name or Path(name).is_absolute():
-        raise ManifestError(f"{path}: {name!r} must be a path relative to the manifest")
+    if not name or Path(name).is_absolute() or ".." in Path(name).parts:
+        raise ManifestError(
+            f"{path}: {name!r} must be a path relative to the manifest, with no '..' part"
+        )
     joined = path.parent / name
-    if str(joined).startswith("-"):
-        # pathlib drops a leading './', so the verb would read this word as an option
-        raise ManifestError(f"{path}: {name!r} would reach the verb as an option")
     if not joined.is_file():
         raise ManifestError(f"{path}: {name!r} is not a file under {path.parent}")
     return str(joined)
@@ -161,9 +183,13 @@ def build_args(path: Path, verb: ArgsFor, environment: str | None = None) -> lis
     run and rehearse get the positional files, `-p` per layer, `--timezone`, `--timezone-map`
     and `--semantics NAME=VALUE` each; seal gets the same as `--next FILE` each, `-p` each and
     the `--next-` options; lint stops before the semantics, and viz after the layers. The layers
-    are the manifest's `properties`, then the chosen environment's."""
+    are the manifest's `properties`, then the chosen environment's; a manifest that declares
+    environments needs one chosen. The deployment half of the profile is the launcher's."""
     manifest = load_manifest(path)
     layers = list(manifest.properties)
+    if environment is None and manifest.environments:
+        declared = ", ".join(sorted(manifest.environments))
+        raise ManifestError(f"{path}: choose an environment; the manifest declares {declared}")
     if environment is not None:
         chosen = manifest.environments.get(environment)
         if chosen is None:

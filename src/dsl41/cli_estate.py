@@ -2049,7 +2049,8 @@ def estate_args(
     environment: str = typer.Option(
         None,
         "--environment",
-        help="The environment whose properties layers follow the manifest's own.",
+        help="The environment whose properties layers follow the manifest's own. Required when"
+        " the manifest declares environments.",
     ),
     output: ArgsFormat = typer.Option(
         ArgsFormat.line,
@@ -2061,13 +2062,20 @@ def estate_args(
     """Print the arguments one verb takes for the estate a manifest declares.
 
     The manifest is the application's one declaration of its catalog
-    files, properties layers, timezone and semantic switches. The output
-    carries no other option: add --run-root and the rest after it. Paths
-    are the manifest's names joined to its directory, unresolved, because
-    the bundle hash covers the path strings.
+    files, properties layers, timezone and semantic switches: the
+    interpretation half of the runtime profile. The deployment half
+    stays with the launcher: --detached, --deadman, --as-machine and
+    --machine-policy, which every seal restates as --next-*, because an
+    omitted --next-* option takes its default. Add those and --run-root
+    after the printed arguments.
 
-    Exit codes: 0 the arguments are printed; 2 the manifest cannot be
-    read or validated, or the environment is not declared.
+    Give MANIFEST as an absolute path. Paths are the manifest's names
+    joined to its directory, unresolved, because the bundle hash covers
+    the path strings.
+
+    Exit codes: 0 the arguments are printed; 2 the manifest is relative,
+    cannot be read or validated, or the environment is missing or not
+    declared.
     """  # DL-407, period-model ss1.1
     try:
         argv = build_args(manifest, verb, environment)
