@@ -715,6 +715,17 @@ Backend and DSL:
 - `src/dsl41/dsl.py`: the builder surface (`job`, `box`, `sequence`,
   `parallel`) and the decompiler, extracted from corpus-observed patterns
   only.
+- `src/dsl41/file_processing.py`: the recoverable file-processing workers,
+  `archive` and `process`, the handler and reconciler protocols, and the
+  operator interface (`list_work`, `show_work`, `rule_work`) over one
+  privately managed root: inbox, immutable objects, TODO handover, SQLite
+  ledger with an append-only decision record, one lock per role (DL-404).
+- `src/dsl41/file_processing_charts.py`: the flat `file_archive` and
+  `file_process` charts run by the executor; every ledger state write is
+  the executor's leaf. Not runner machine registrations.
+- `src/dsl41/file_processing_dsl.py`: `add_file_processing_jobs`, the two
+  CMD jobs (archiver on the watcher, processor on the archiver with zero
+  lookback) added to an existing Python estate.
 
 Tools:
 
