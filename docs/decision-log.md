@@ -24316,19 +24316,21 @@ relitigate an entry; append a new one.
   .claude/skills/reader-docs/SKILL.md)
   THE RULE. The four principles of writing.md are the project's: readers get what they
   need, can find it, can understand it, and can use it; the page cites no standard and
-  quotes none. The rules add: content fits where the reader reads it; a limit or gap the
-  reader would hit is stated where they would look; a warning precedes the step it guards;
-  what belongs together sits together and looks alike; one topic per paragraph, carried by
-  its first sentence; a respectful tone; sibling pages for one reader share one shape; a
-  reader's question about a shipped page is a defect fixed in the page. The reader-docs
-  brief states where the page is read and the page whose section pattern it follows, and
-  its checklist carries the new rules. An existing page meets an added rule at its next
-  change. This narrows DL-405's rejected item from reproducing the standard's text to
-  naming the standard at all.
+  quotes none. The rules add: content fits where the reader reads it (commands before
+  explanation in a procedure read during an incident); a limit or gap the reader would hit
+  is stated, or linked, where they would look; a warning precedes the step it guards; what
+  belongs together is placed together and looks alike; one topic per paragraph, stated by
+  its first sentence; a respectful tone; pages of one kind for one reader use one section
+  pattern, and the brief names the page to match; a question a reader had to ask after
+  reading a shipped page is a defect of the page, fixed in the page. The reader-docs brief
+  states where the page is read and the page whose pattern it follows; its draft checklist
+  carries the rules a draft can meet, and its delivery step carries the after-merge rule.
+  An existing page meets an added rule at its next change. This reverses the clause of
+  DL-405's rule that derived the principles from a named standard.
   THE REASON. The owner asked for the rules to stand on their own, distilled to the
   smallest set that a writer and a reviewer can check, in the way the engineering core
   compresses its rules. The additions are the ones the existing rules did not already
   require and that a reviewer could not check from the old list.
   REJECTED: citing or paraphrasing the standard clause by clause (the text is licensed, and
-  a rule the project cannot check adds load without value); word or sentence-length limits (the pages are judged by whether the reader
-  can do the task, not by a count).
+  a rule the project cannot check adds load without value); word or sentence-length limits
+  (the pages are judged by whether the reader can do the task, not by a count).
