@@ -24321,8 +24321,8 @@ relitigate an entry; append a new one.
   is stated, or linked, where they would look; a warning precedes the step it guards; what
   belongs together is placed together and looks alike; one topic per paragraph, stated by
   its first sentence; a respectful tone; pages of one kind for one reader use one section
-  pattern, and the brief names the page to match; a question a reader had to ask after
-  reading a shipped page is a defect of the page, fixed in the page. The reader-docs brief
+  pattern, and the brief names the page to match; a question in a shipped page's scope
+  that a reader had to ask is a defect of the page, fixed in the page. The reader-docs brief
   states where the page is read and the page whose pattern it follows; its draft checklist
   carries the rules a draft can meet, and its delivery step carries the after-merge rule.
   An existing page meets an added rule at its next change. This reverses the clause of
