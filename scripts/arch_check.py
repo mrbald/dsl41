@@ -1174,7 +1174,8 @@ def changed_lines_since_review() -> tuple[int, str] | None:
 
 #: a log and a registry, not specifications (DL-225, DL-230); the reader
 #: aids and generated files, which are not specifications either; and the
-#: UC documents, whose topic is descoped (DL-288).
+#: UC documents, whose topic is descoped (DL-288); and the writing policy page,
+#: which makes no claim about the code (DL-405).
 SPEC_EXCLUDED = (
     "decision-log.md",
     "citation-index.md",

@@ -40,7 +40,7 @@ dsl41 and your services), ship JIL releases on your own schedule.
 
 1. [Lint a catalog](#lint-a-catalog) - the rules L001-L023, and `rehearse` and `viz` under [CLI](#cli)
 2. [DSL -> JIL (build)](#dsl---jil-build) - the Python DSL builders (`job`, `box`, `sequence`, `parallel`) and `to_jil()`; [examples/file_processing/estate.py](examples/file_processing/estate.py) is a worked Python estate; `examples/nightbank`, `fulfilment`, `energy`, `media` and `dst-drill` hold worked JIL estates
-3. [JIL -> DSL (decompile)](#jil---dsl-decompile) and [Prove two catalogs equivalent](#prove-two-catalogs-equivalent) - bringing an existing estate in and checking a rewrite
+3. [JIL -> DSL (decompile)](#jil---dsl-decompile) and [Prove two catalogs equivalent](#prove-two-catalogs-equivalent) - bringing an existing estate in and checking a rewrite; [examples/README.md](examples/README.md) indexes the worked estates
 4. [docs/autosys-semantics.md](docs/autosys-semantics.md) - the meaning of JIL (SEM entries); [docs/simulation-coverage.md](docs/simulation-coverage.md) - what the runner models, refuses, or assumes; [docs/jil-statement-syntax.md](docs/jil-statement-syntax.md) - the statement scanner spec
 5. [docs/deployment-runbook.md §6](docs/deployment-runbook.md#6-jil-rollout--updating-the-estate) - how an accepted estate reaches the engine
 
@@ -52,12 +52,14 @@ No author guide exists; the items above are the author's reading.
 2. [docs/runner-design.md](docs/runner-design.md) - the runner's design; [docs/ir-design.md](docs/ir-design.md) - AST, IR-F, IR-G, oracle, and equivalence; [Implementation memo](#implementation-memo) - the compiler side and the source map
 3. [docs/state-machines.md](docs/state-machines.md), [docs/job-chart-lifecycle.md](docs/job-chart-lifecycle.md) and [docs/chart-lifecycles.md](docs/chart-lifecycles.md) - the generated views of every declared chart
 4. [docs/stonebranch-semantics.md](docs/stonebranch-semantics.md) and [docs/uc-edge-schema.md](docs/uc-edge-schema.md) - the target model and the AutoSys-to-UC mapping (UCS/M entries); the UC backend is descoped (DL-288)
-5. [docs/decision-log.md](docs/decision-log.md) - the reasons for the decisions, indexed by [docs/decision-index.md](docs/decision-index.md); [docs/citation-index.md](docs/citation-index.md) - what every reference token in the sources means; [docs/risk-map.md](docs/risk-map.md) - each runner machine with its branch coverage and open findings
+5. [docs/gateway.md](docs/gateway.md) - a proposed HTTP and WebSocket gateway; nothing of it is built
+6. [docs/decision-log.md](docs/decision-log.md) - the reasons for the decisions, indexed by [docs/decision-index.md](docs/decision-index.md); [docs/citation-index.md](docs/citation-index.md) - what every reference token in the sources means; [docs/risk-map.md](docs/risk-map.md) - each runner machine with its branch coverage and open findings
 
 **Maintainer**: contribute code or documents, or run an agent that does.
 
 1. [CLAUDE.md](CLAUDE.md) - the shared agent contract with task-specific reading routes; [docs/agent-workflow.md](docs/agent-workflow.md) - setup, verification commands, review recipes
 2. [docs/writing.md](docs/writing.md) - the rules for human-facing documents; [docs/cli-tui-qualification.md](docs/cli-tui-qualification.md) - how a release's CLI and TUI are qualified
+3. [docs/live-instance-runbook.md](docs/live-instance-runbook.md) - probing a live AutoSys instance to settle an open semantic question
 
 The runner's frozen contracts are
 [docs/supervisor-protocol.md](docs/supervisor-protocol.md),
@@ -68,8 +70,6 @@ The runner's frozen contracts are
 [docs/access-model.md](docs/access-model.md),
 and [docs/statechart-engine.md](docs/statechart-engine.md).
 They are reference, cited from the pages above, not reading.
-A proposed HTTP and WebSocket gateway is specified in
-[docs/gateway.md](docs/gateway.md); nothing of it is built.
 
 ## Status
 
