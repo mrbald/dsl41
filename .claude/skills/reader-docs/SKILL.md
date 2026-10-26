@@ -86,10 +86,6 @@ Usable (§5)
 - Every code claim traces to a fact-sheet line.
 - The page says what it leaves out, with the link.
 
-After the merge: a question a reader asks that the page should have
-answered is a defect of the page; it is fixed in the page, as its own
-slice under this procedure.
-
 Visuals and state machines (§6, §7)
 - A visual appears only for one of the three structures §6 names; it is
   text in git with one sentence under it.
@@ -143,3 +139,7 @@ merging. This skill stamps nothing: a specification's `spec-review` stamp
 and its 800-line clock belong to that procedure, and a reader page, a card
 or a page under `examples/` has no stamp. The README "Documents" tracks are
 updated in the same PR as any page they list.
+
+After the merge, a question in the page's scope that a reader had to ask
+is a defect of the page. The maintainer fixes the page, as its own
+slice under this procedure.

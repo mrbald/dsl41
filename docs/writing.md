@@ -45,8 +45,8 @@ inside an example's directory is reached from that README.
 - Content fits where the reader reads it. A procedure read at a terminal
   during an incident gives its commands first and its explanation after; a
   guide read at a desk may explain first.
-- A limit or a gap the reader would run into is stated, or linked, where
-  they would look for it, never left out.
+- The page states, or links, every limit or gap the reader would run into,
+  where they would look for it.
 - How the design got here, what was rejected, and why, live in the decision
   log. A document cites the entry; it does not retell it.
 - Rules live in the contract that states them. A document links the section;
@@ -86,7 +86,7 @@ inside an example's directory is reached from that README.
   "was"). A fact is stated once, as a fact.
 - The tone respects the reader: no blame, and no "simply", "obviously" or
   "just" that makes a step sound easy.
-- Pages of one kind for one reader (the reader pages of a track, the
+- Pages of one kind for one reader (the guides of a track, the
   runbooks of an example) use one section pattern; the audience brief names
   the page to match.
 
@@ -94,8 +94,8 @@ inside an example's directory is reached from that README.
 
 - A document is walked by a reviewer who reads as its reader, before it
   merges: can they do the task from the page alone?
-- A question a reader had to ask after reading the page is a defect of the
-  page, and the page is fixed.
+- A question in the page's scope that a reader had to ask after reading it
+  is a defect of the page. The maintainer fixes the page.
 - Every claim about the code comes from a fact sheet taken from the code,
   never from memory (the `reader-docs` and `spec-review` procedures).
 - A specification under `docs/` carries a `spec-review` stamp, and the gate
