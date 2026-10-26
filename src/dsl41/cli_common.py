@@ -70,8 +70,7 @@ TIMEZONE_MAP_OPT = typer.Option(
     "--timezone-map",
     help="File that maps AutoSys timezone names to zones: the output of"
     " 'autotimezone -l', or plain 'name zone' lines. Without it, an unknown"
-    " city name falls back to the one matching zoneinfo city, with a"
-    " warning.",
+    " city name is read as the one matching zoneinfo city, with a warning.",
 )  # SEM-35/DL-62
 
 SEMANTICS_OPT = typer.Option(
