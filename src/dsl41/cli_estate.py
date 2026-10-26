@@ -3,20 +3,24 @@
 `seal` closes the running period and commits the next, live or offline (period-model ss7);
 `audit` re-derives a closed period and writes its attestation, `verify` validates one;
 `estate reclaim` moves a stale successor claim out of the way and `estate prune` deletes what
-retention allows. `cli.py` assembles the `estate` sub-app.
+retention allows; `estate args` prints a verb's arguments from the estate manifest (DL-407).
+`cli.py` assembles the `estate` sub-app.
 """
 
 from __future__ import annotations
 
 import asyncio
 import errno
+import json
 import os
+import shlex
 import subprocess
 import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -45,6 +49,7 @@ from dsl41.cli_common import (
     supervisor_exited,
     walk_estate_or_exit_2,
 )
+from dsl41.estate_manifest import ArgsFor, ManifestError, build_args
 from dsl41.period import ARCHIVE_CLASS
 from dsl41.runner_clock import RealClock
 from dsl41.runner_ledger import LOCK_NAME, LeaderLock
@@ -2022,3 +2027,50 @@ def estate_quiesce(
         supervisor_unit=supervisor_unit,
     )
     raise typer.Exit(_Quiesce(request, QUIESCE_HOST).run())
+
+
+class ArgsFormat(str, Enum):
+    """`estate args --format`: one shell-quoted line, or a JSON document (DL-407)."""
+
+    line = "line"
+    json = "json"
+
+
+def estate_args(
+    manifest: Path = typer.Argument(
+        ..., help="The estate manifest, estate.toml, in the release directory."
+    ),
+    verb: ArgsFor = typer.Option(
+        ...,
+        "--for",
+        metavar="VERB",
+        help="The verb to build arguments for: run, seal, lint, rehearse or viz.",
+    ),
+    environment: str = typer.Option(
+        None,
+        "--environment",
+        help="The environment whose properties layers follow the manifest's own.",
+    ),
+    output: ArgsFormat = typer.Option(
+        ArgsFormat.line,
+        "--format",
+        metavar="FORMAT",
+        help='line: one shell-quoted line. json: {"argv": [...]}.',
+    ),
+) -> None:
+    """Print the arguments one verb takes for the estate a manifest declares.
+
+    The manifest is the application's one declaration of its catalog
+    files, properties layers, timezone and semantic switches. The output
+    carries no other option: add --run-root and the rest after it. Paths
+    are the manifest's names joined to its directory, unresolved, because
+    the bundle hash covers the path strings.
+
+    Exit codes: 0 the arguments are printed; 2 the manifest cannot be
+    read or validated, or the environment is not declared.
+    """  # DL-407, period-model ss1.1
+    try:
+        argv = build_args(manifest, verb, environment)
+    except ManifestError as exc:
+        raise typer.Exit(refuse(exc)) from exc
+    typer.echo(shlex.join(argv) if output is ArgsFormat.line else json.dumps({"argv": argv}))

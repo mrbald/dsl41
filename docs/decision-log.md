@@ -24334,3 +24334,27 @@ relitigate an entry; append a new one.
   REJECTED: citing or paraphrasing the standard clause by clause (the text is licensed, and
   a rule the project cannot check adds load without value); word or sentence-length limits
   (the pages are judged by whether the reader can do the task, not by a count).
+- DL-407 The estate manifest, `estate.toml`, is the application's one declaration of its
+  estate inputs; `dsl41 estate args` is the one builder of the verbs' arguments (2026-10-26;
+  owner ruling; src/dsl41/estate_manifest.py, src/dsl41/cli_estate.py, period-model §1.1)
+  THE RULE. An application declares its estate once, in `estate.toml` beside its JIL: the
+  catalog files in command-line order, the properties layers, the base timezone and its map,
+  the semantic switches, and per environment the layers applied after the base ones. An
+  unknown key is refused at every level, and every named file must exist under the
+  manifest's directory. `dsl41 estate args MANIFEST --for run|seal|lint|rehearse|viz` prints
+  the arguments that verb takes, as one shell-quoted line or as JSON, and exits 2 with one
+  sentence on a refusal. The hash model and the parsers and options of run, seal, lint,
+  rehearse and viz are unchanged; no verb reads the manifest. Each path is the manifest's
+  name joined to the manifest's directory, with no symlink resolution and no normalisation
+  beyond the join, because `source_bundle_hash` frames each path string as given (§1.1): the
+  seal's `--next` paths and the opener's paths come out as the same strings. The optional
+  `requires_dsl41 = ">=X.Y[.Z]"` is the gate between the application's train and the
+  infrastructure's: a dotted-integer compare with the installed version, and any other
+  operator refused by name.
+  THE REASON. The owner's ruling that dsl41 is infrastructure and the estate is application
+  config. The estate's inputs were restated in three places, the launcher, the seal line and
+  the check commands, and a drift between the first two changes the bundle hash and the
+  opening refuses.
+  REJECTED: a `current` symlink to the active release (it changes the hashed path strings);
+  reading the manifest inside `run` or `seal` (a second input path to the same parsers);
+  `packaging` for the version compare (a dependency for one operator).
