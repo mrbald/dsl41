@@ -76,7 +76,7 @@ Understandable (§4)
 - One idea per sentence; common words; glossary terms used as defined.
 - Active voice with a named actor.
 - An example precedes a non-obvious rule.
-- One topic per paragraph, stated by its first sentence.
+- One topic per paragraph; the first sentence states it.
 - Numbers sit in a table or on their own line.
 - No metaphor, marketing or changelog sentence; no blame, no "simply",
   "obviously" or "just" that makes a step sound easy.
