@@ -1,5 +1,8 @@
 # File processing: design and implementation handover
 
+This is the historical handover, written before slice 1. CONTRACT.md and README.md
+describe the current state.
+
 This is an experimental design expressed in Python. It is not a qualified release.
 The intended caller is an estate author using `dsl41.dsl.CatalogBuilder`.
 The next phase is to settle the remaining protocol choices and implement bounded

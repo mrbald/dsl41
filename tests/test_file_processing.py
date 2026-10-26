@@ -18,6 +18,7 @@ from dsl41.file_processing_charts import ARCHIVE, PROCESS, state_after
 from dsl41.state_machine import StatechartError, well_formed
 from examples.file_processing.demo import run
 from examples.file_processing.worker import CountsHandler
+from file_processing_checker import check_counts_outputs
 
 IDENTITY = "counts-v1"
 
@@ -62,7 +63,9 @@ def test_duplicate_deliveries_and_distinct_original_names(tmp_path: Path) -> Non
     assert len(query(tmp_path, "SELECT * FROM work")) == 2
     assert fp.process(tmp_path, IDENTITY, handler(tmp_path)).completed == 2
     assert len(list((tmp_path / "output").glob("*.json"))) == 2
-    assert query(tmp_path, "SELECT count(*) FROM work WHERE evidence IS NOT NULL")[0][0] == 2
+    done = "SELECT count(*) FROM decisions WHERE state='DONE' AND evidence IS NOT NULL"
+    assert query(tmp_path, done)[0][0] == 2
+    check_counts_outputs(tmp_path)
 
 
 def test_before_archive_and_reruns_are_noops(tmp_path: Path) -> None:
@@ -77,6 +80,7 @@ def test_before_archive_and_reruns_are_noops(tmp_path: Path) -> None:
     assert fp.process(tmp_path, IDENTITY, handler(tmp_path)).selected == 0
     assert fp.archive(tmp_path, IDENTITY).selected == 0
     assert tuple(query(tmp_path, "SELECT * FROM work")[0]) == original
+    check_counts_outputs(tmp_path)
 
 
 @pytest.mark.parametrize("role", ["archive", "process"])
@@ -117,6 +121,7 @@ def test_inbox_only_initial_root_remains_valid(tmp_path: Path) -> None:
     assert fp.process(tmp_path, IDENTITY, handler(tmp_path)).selected == 0
     assert fp.archive(tmp_path, IDENTITY).completed == 1
     assert fp.process(tmp_path, IDENTITY, handler(tmp_path)).completed == 1
+    check_counts_outputs(tmp_path)
 
 
 @pytest.mark.parametrize("order,first", [("oldest", "a"), ("newest", "c")])
@@ -203,6 +208,7 @@ def test_archive_crash_boundaries_converge(tmp_path: Path, stage: str) -> None:
     assert len(query(tmp_path, "SELECT * FROM receipts")) == 1
     assert fp.process(tmp_path, IDENTITY, handler(tmp_path)).completed == 1
     assert len(list((tmp_path / "output").glob("*.json"))) == 1
+    check_counts_outputs(tmp_path)
 
 
 def test_archive_repairs_missing_outbox_without_arrivals(tmp_path: Path) -> None:
@@ -215,6 +221,7 @@ def test_archive_repairs_missing_outbox_without_arrivals(tmp_path: Path) -> None
     assert not list((tmp_path / "objects" / fp.STAGE).iterdir())
     assert not list((tmp_path / "todo" / fp.STAGE).iterdir())
     assert fp.process(tmp_path, IDENTITY, handler(tmp_path)).completed == 1
+    check_counts_outputs(tmp_path)
 
 
 @pytest.mark.parametrize("damage", ["missing", "corrupt"])
@@ -273,6 +280,7 @@ def test_processor_can_finish_before_crashed_archiver_cleans_source(tmp_path: Pa
     assert not list((tmp_path / "inbox").iterdir())
     assert not published(tmp_path / "todo")
     assert tuple(query(tmp_path, "SELECT * FROM work")[0]) == original
+    check_counts_outputs(tmp_path)
 
 
 def test_bounded_snapshots_leave_arrivals_for_next_invocation(tmp_path: Path) -> None:
@@ -293,6 +301,7 @@ def test_bounded_snapshots_leave_arrivals_for_next_invocation(tmp_path: Path) ->
     report = fp.process(tmp_path, IDENTITY, AddsWork())
     assert report.selected == 1 and report.remaining == 1
     assert fp.process(tmp_path, IDENTITY, handler(tmp_path)).completed == 1
+    check_counts_outputs(tmp_path)
 
 
 def test_interrupted_running_reconciles_actual_sample_output_once(tmp_path: Path) -> None:
@@ -314,6 +323,7 @@ def test_interrupted_running_reconciles_actual_sample_output_once(tmp_path: Path
     assert (target.stat().st_ino, target.read_bytes()) == original
     assert query(tmp_path, "SELECT state FROM work")[0][0] == "DONE"
     assert not published(tmp_path / "todo")
+    check_counts_outputs(tmp_path)
 
 
 def test_unknown_external_effect_never_silently_retries(tmp_path: Path) -> None:
@@ -414,6 +424,7 @@ def test_malformed_or_tampered_todo_refused(tmp_path: Path, tamper: str) -> None
         fp.process(tmp_path, IDENTITY, handler(tmp_path))
     assert query(tmp_path, "SELECT state FROM work")[0][0] == "READY"
     assert not (tmp_path / "output").exists()
+    check_counts_outputs(tmp_path)
 
 
 @pytest.mark.parametrize("damage", ["wrong", "missing", "symlink"])
@@ -434,6 +445,7 @@ def test_input_object_integrity_before_callback(tmp_path: Path, damage: str) -> 
         fp.process(tmp_path, IDENTITY, handler(tmp_path))
     assert query(tmp_path, "SELECT state FROM work")[0][0] == "READY"
     assert not (tmp_path / "output").exists()
+    check_counts_outputs(tmp_path)
 
 
 def test_corrupt_reused_object_and_changed_identity_refused(tmp_path: Path) -> None:
@@ -496,6 +508,7 @@ def test_stale_archiver_read_cannot_republish_done(
     fp.archive(tmp_path, IDENTITY)
     assert called and not published(tmp_path / "todo")
     assert fp.process(tmp_path, IDENTITY, handler(tmp_path)).selected == 0
+    check_counts_outputs(tmp_path)
 
 
 def test_leftover_done_todo_cleaned_without_handler(tmp_path: Path) -> None:
@@ -510,6 +523,7 @@ def test_leftover_done_todo_cleaned_without_handler(tmp_path: Path) -> None:
     path.write_bytes(todo)
     fp.archive(tmp_path, IDENTITY)
     assert not path.exists()
+    check_counts_outputs(tmp_path)
 
 
 def test_archiver_can_remove_done_todo_after_processor_snapshot(
@@ -535,6 +549,7 @@ def test_archiver_can_remove_done_todo_after_processor_snapshot(
     monkeypatch.setattr(Path, "iterdir", snapshot)
     assert fp.process(tmp_path, IDENTITY, handler(tmp_path)).selected == 0
     assert raced and not path.exists()
+    check_counts_outputs(tmp_path)
 
 
 def test_sample_reconciliation_checks_identity_and_content(tmp_path: Path) -> None:
@@ -585,6 +600,7 @@ def test_synthetic_demo_counts_and_output_identity(tmp_path: Path) -> None:
     assert (report["receipts"], report["objects"], report["done"], report["todo"]) == (4, 3, 3, 0)
     for obj in published(tmp_path / "objects"):
         assert hashlib.sha256(obj.read_bytes()).hexdigest() == obj.name
+    check_counts_outputs(tmp_path)
 
 
 def test_worker_import_stays_independent_of_compiler_and_scheduler(tmp_path: Path) -> None:

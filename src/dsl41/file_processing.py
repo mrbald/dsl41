@@ -11,7 +11,9 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import cache
+from datetime import UTC, datetime
 import fcntl
 import hashlib
 import json
@@ -24,7 +26,7 @@ import tempfile
 from types import MappingProxyType
 from typing import Literal, NoReturn, Protocol
 
-from dsl41.file_processing_charts import ARCHIVE, PROCESS, state_after
+from dsl41.file_processing_charts import ARCHIVE, PROCESS, state_after, transition
 from dsl41.state_machine import StatechartError
 
 
@@ -61,13 +63,17 @@ class Summary:
 
 @dataclass(frozen=True)
 class WorkItem:
-    """receipt_sequence is the admission sequence of the delivery creating this work row."""
+    """receipt_sequence is the admission sequence of the delivery creating this work row.
+
+    attempt counts the claims of this row; a reconciliation sees the attempt it reconciles.
+    """
 
     input_path: Path
     processing_key: str
     content_hash: str
     receipt_sequence: int
     metadata: Mapping[str, str]
+    attempt: int = 0
 
 
 @dataclass(frozen=True)
@@ -96,6 +102,55 @@ class ReconcilingHandler(Handler, Protocol):
     def reconcile(self, item: WorkItem) -> Result: ...
 
 
+type Origin = Literal["handler", "reconciler", "operator"]
+
+
+@dataclass(frozen=True)
+class Decision:
+    """One appended transition of a work row; the record is never updated or deleted.
+
+    chart_row is the id of the row the executor fired. decided_at is ISO 8601 UTC from
+    the wall clock (CONTRACT.md "Failure disposition is `stop`").
+    """
+
+    work_key: str
+    attempt: int
+    prior_state: str
+    state: str
+    chart_row: str
+    origin: Origin
+    actor: str
+    decided_at: str
+    reason: str | None
+    evidence: str | None
+
+
+@dataclass(frozen=True)
+class Receipt:
+    seq: int
+    name: str
+    cleaned: bool
+
+
+@dataclass(frozen=True)
+class WorkStatus:
+    """One work row with its receipts, storage diagnostics and latest decision.
+
+    object is verified, missing or unverified (present but not the recorded bytes).
+    todo says whether the TODO path exists; it is not validated.
+    """
+
+    work_key: str
+    content_hash: str
+    receipt_sequence: int
+    state: str
+    attempt: int
+    receipts: tuple[Receipt, ...]
+    object: Literal["verified", "missing", "unverified"]
+    todo: bool
+    latest: Decision | None
+
+
 type Failpoint = Callable[[str], None]
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
 # Each published directory stages inside itself under this reserved name, so every
@@ -106,6 +161,13 @@ _STAGES = (("objects", "object-"), ("todo", "todo-"))
 # (CONTRACT.md "Failure disposition is `stop`").
 TERMINAL = frozenset(
     state.name for region in PROCESS.root.regions for state in region.states if state.final
+)
+# The ledger admits exactly the PROCESS chart's states (CONTRACT.md invariant 4).
+_WORK_STATES = ",".join(
+    f"'{state.name}'" for region in PROCESS.root.regions for state in region.states
+)
+_DECISION_FIELDS = (
+    "work_key,attempt,prior_state,state,chart_row,origin,actor,decided_at,reason,evidence"
 )
 
 
@@ -217,12 +279,97 @@ def _established(root: Path) -> bool:
 def _ledger_failure(ledger: Path, exc: sqlite3.DatabaseError) -> NoReturn:
     """A busy or locked ledger stays an OperationalError: the run stopped on contention.
 
-    Every other database error is a refusal of corrupt or unsupported ledger state.
+    Every other database error is a refusal: corrupt or unsupported ledger state, or a
+    ledger the run cannot write, such as a full disk.
     """
-    busy = (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
-    if isinstance(exc, sqlite3.OperationalError) and exc.sqlite_errorcode & 0xFF in busy:
+    if _busy(exc):
         raise exc
-    raise ProtocolError(f"unreadable ledger {ledger}: {exc}") from exc
+    raise ProtocolError(f"unusable ledger {ledger}: {exc}") from exc
+
+
+def _busy(exc: sqlite3.DatabaseError) -> bool:
+    # An error the sqlite3 module raises itself, such as a TEXT cell that is not UTF-8,
+    # has no SQLite result code; it is never contention.
+    code = getattr(exc, "sqlite_errorcode", None)
+    busy = (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+    return isinstance(exc, sqlite3.OperationalError) and code is not None and code & 0xFF in busy
+
+
+# The supported ledger schema. An existing table with other columns is refused, never
+# migrated (CONTRACT.md "Stated limits").
+_TABLES = (
+    ("identity", "CREATE TABLE IF NOT EXISTS identity (processor_id TEXT NOT NULL)"),
+    (
+        "receipts",
+        "CREATE TABLE IF NOT EXISTS receipts ("
+        "seq INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL,"
+        "state TEXT NOT NULL CHECK(state IN ('FILE_RECEIVED','FILE_ARCHIVED')),"
+        "content_hash TEXT, work_key TEXT, cleaned INTEGER NOT NULL DEFAULT 0)",
+    ),
+    (
+        "work",
+        "CREATE TABLE IF NOT EXISTS work ("
+        "work_key TEXT PRIMARY KEY, content_hash TEXT UNIQUE NOT NULL,"
+        "receipt_seq INTEGER NOT NULL REFERENCES receipts(seq), metadata TEXT NOT NULL,"
+        f"state TEXT NOT NULL CHECK(state IN ({_WORK_STATES})),"
+        "attempt INTEGER NOT NULL DEFAULT 0)",
+    ),
+    # The decision record is the source of truth for outcomes; it is append-only
+    # (CONTRACT.md "Failure disposition is `stop`").
+    (
+        "decisions",
+        "CREATE TABLE IF NOT EXISTS decisions ("
+        "seq INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "work_key TEXT NOT NULL REFERENCES work(work_key), attempt INTEGER NOT NULL,"
+        f"prior_state TEXT NOT NULL CHECK(prior_state IN ({_WORK_STATES})),"
+        f"state TEXT NOT NULL CHECK(state IN ({_WORK_STATES})), chart_row TEXT NOT NULL,"
+        "origin TEXT NOT NULL CHECK(origin IN ('handler','reconciler','operator')),"
+        "actor TEXT NOT NULL, decided_at TEXT NOT NULL, reason TEXT, evidence TEXT)",
+    ),
+)
+_SUPPORT = (
+    "CREATE INDEX IF NOT EXISTS decisions_by_work ON decisions(work_key, seq)",
+    *(
+        f"CREATE TRIGGER IF NOT EXISTS decisions_no_{verb.lower()} BEFORE {verb} ON decisions"
+        " BEGIN SELECT RAISE(ABORT, 'decisions are append-only'); END"
+        for verb in ("UPDATE", "DELETE")
+    ),
+)
+
+
+def _columns(db: sqlite3.Connection, table: str) -> frozenset[str]:
+    return frozenset(row[1] for row in db.execute(f"PRAGMA table_info({table})"))
+
+
+@cache
+def _supported_columns() -> dict[str, frozenset[str]]:
+    """Each table's columns, read from the DDL above so the two cannot disagree."""
+    db = sqlite3.connect(":memory:")
+    try:
+        for _, ddl in _TABLES:
+            db.execute(ddl)
+        return {name: _columns(db, name) for name, _ in _TABLES}
+    finally:
+        db.close()
+
+
+def _check_schema(db: sqlite3.Connection, *, complete: bool) -> None:
+    """Refuse an existing table whose columns differ; with complete, a missing one too."""
+    present = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    for name, expected in _supported_columns().items():
+        if name not in present:
+            if complete:
+                raise ProtocolError(f"unsupported ledger schema: no table {name}")
+            continue
+        actual = _columns(db, name)
+        if actual != expected:
+            listed = ", ".join(sorted(actual))
+            raise ProtocolError(f"unsupported ledger schema: table {name} has {listed}")
+
+
+def _check_processor_id(processor_id: str) -> None:
+    if not processor_id or "\x00" in processor_id:
+        raise ValueError("processor_id must be nonempty and contain no NUL")
 
 
 def _open(root: Path, processor_id: str) -> sqlite3.Connection:
@@ -244,25 +391,16 @@ def _open(root: Path, processor_id: str) -> sqlite3.Connection:
         db.execute("PRAGMA synchronous=FULL")
         db.execute("PRAGMA foreign_keys=ON")
         with _write(db):
-            db.execute("CREATE TABLE IF NOT EXISTS identity (processor_id TEXT NOT NULL)")
+            _check_schema(db, complete=False)
+            for _, ddl in _TABLES:
+                db.execute(ddl)
+            for ddl in _SUPPORT:
+                db.execute(ddl)
             rows = db.execute("SELECT processor_id FROM identity").fetchall()
             if not rows:
                 db.execute("INSERT INTO identity VALUES (?)", (processor_id,))
             elif len(rows) != 1 or rows[0][0] != processor_id:
                 raise ProtocolError("root belongs to a different processor identity")
-            db.execute(
-                "CREATE TABLE IF NOT EXISTS receipts ("
-                "seq INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL,"
-                "state TEXT NOT NULL CHECK(state IN ('FILE_RECEIVED','FILE_ARCHIVED')),"
-                "content_hash TEXT, work_key TEXT, cleaned INTEGER NOT NULL DEFAULT 0)"
-            )
-            db.execute(
-                "CREATE TABLE IF NOT EXISTS work ("
-                "work_key TEXT PRIMARY KEY, content_hash TEXT UNIQUE NOT NULL,"
-                "receipt_seq INTEGER NOT NULL REFERENCES receipts(seq), metadata TEXT NOT NULL,"
-                "state TEXT NOT NULL CHECK(state IN ('READY','RUNNING','DONE','UNKNOWN')),"
-                "evidence TEXT, detail TEXT)"
-            )
         _sync_dir(root)
         return db
     except sqlite3.DatabaseError as exc:
@@ -274,8 +412,7 @@ def _open(root: Path, processor_id: str) -> sqlite3.Connection:
 
 
 def _layout(root: Path, processor_id: str) -> None:
-    if not processor_id or "\x00" in processor_id:
-        raise ValueError("processor_id must be nonempty and contain no NUL")
+    _check_processor_id(processor_id)
     root.mkdir(parents=True, exist_ok=True)
     published = [root / name for name, _ in _STAGES]
     for path in (root, root / "inbox", *published, *(path / STAGE for path in published)):
@@ -504,7 +641,8 @@ def archive(
                 key = processing_key(processor_id, content_hash)
                 with _write(db):
                     inserted = db.execute(
-                        "INSERT OR IGNORE INTO work VALUES (?,?,?,?,?,NULL,NULL)",
+                        "INSERT OR IGNORE INTO work"
+                        "(work_key,content_hash,receipt_seq,metadata,state) VALUES (?,?,?,?,?)",
                         (
                             key,
                             content_hash,
@@ -534,6 +672,8 @@ def archive(
                 "SELECT count(*) FROM receipts WHERE state='FILE_RECEIVED'"
             ).fetchone()[0]
             return Summary(len(selected), len(selected), duplicates, remaining)
+        except sqlite3.DatabaseError as exc:
+            _ledger_failure(root / "ledger.sqlite3", exc)
         finally:
             db.close()
 
@@ -548,32 +688,103 @@ def _item(root: Path, row: sqlite3.Row, processor_id: str) -> WorkItem:
         raise ProtocolError("invalid ledger object identity")
     path = _verified_object(root, content_hash)
     return WorkItem(
-        path, key, content_hash, row["receipt_seq"], MappingProxyType(json.loads(row["metadata"]))
+        path,
+        key,
+        content_hash,
+        row["receipt_seq"],
+        MappingProxyType(json.loads(row["metadata"])),
+        row["attempt"],
     )
 
 
-def _move(db: sqlite3.Connection, key: str, event: str, result: Result | None = None) -> str:
+def _decision(row: sqlite3.Row) -> Decision:
+    return Decision(*(row[name] for name in _DECISION_FIELDS.split(",")))
+
+
+def _move(
+    db: sqlite3.Connection,
+    key: str,
+    event: str,
+    origin: Origin,
+    actor: str,
+    *,
+    reason: str | None = None,
+    evidence: str | None = None,
+    expect: tuple[str, int] | None = None,
+) -> Decision:
+    """Apply the executor's move and append its decision in one transaction.
+
+    Only the claim increments the attempt. With expect, the row must still be in that
+    state and attempt inside the same transaction, or nothing moves.
+    """
     with _write(db):
-        old = db.execute("SELECT state FROM work WHERE work_key=?", (key,)).fetchone()[0]
-        new = state_after(PROCESS, old, event)
-        db.execute(
-            "UPDATE work SET state=?, evidence=?, detail=? WHERE work_key=?",
-            (
-                new,
-                result.evidence if isinstance(result, Completed) else None,
-                result.reason if isinstance(result, RetrySafe | Unknown) else None,
-                key,
-            ),
+        # The whole row is read, so a damaged cell refuses the move.
+        row = db.execute("SELECT * FROM work WHERE work_key=?", (key,)).fetchone()
+        if row is None:
+            raise ProtocolError(f"no work row {key}")
+        if expect is not None and (row["state"], row["attempt"]) != expect:
+            raise ProtocolError(
+                f"work {key} is {row['state']} at attempt {row['attempt']},"
+                f" not {expect[0]} at attempt {expect[1]}"
+            )
+        state, chart_row = transition(PROCESS, row["state"], event)
+        attempt = row["attempt"] + (event == "claim")
+        decided_at = datetime.now(UTC).isoformat()
+        decision = Decision(
+            key,
+            attempt,
+            row["state"],
+            state,
+            chart_row,
+            origin,
+            actor,
+            decided_at,
+            reason,
+            evidence,
         )
-        return new
+        db.execute("UPDATE work SET state=?, attempt=? WHERE work_key=?", (state, attempt, key))
+        db.execute(
+            f"INSERT INTO decisions({_DECISION_FIELDS}) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            tuple(getattr(decision, name) for name in _DECISION_FIELDS.split(",")),
+        )
+        return decision
 
 
-def process(root: Path, processor_id: str, handler: Handler, policy: Policy = Policy()) -> Summary:
+def _outcome(result: Result) -> tuple[str, str | None, str | None]:
+    """The chart event of a callback result, with its reason and evidence."""
+    if isinstance(result, Completed):
+        return "completed", None, result.evidence
+    return ("retry_safe" if isinstance(result, RetrySafe) else "uncertain"), result.reason, None
+
+
+_INTERRUPTED = "interrupted RUNNING"
+
+
+def _remove_todo(root: Path, db: sqlite3.Connection, key: str) -> None:
+    """Remove a terminal row's TODO after the move commits (CONTRACT.md invariant 6)."""
+    with _write(db):
+        _remove(root / "todo" / f"{key}.json")
+
+
+def process(
+    root: Path,
+    processor_id: str,
+    handler: Handler,
+    policy: Policy = Policy(),
+    *,
+    failpoint: Failpoint = _no_failpoint,
+) -> Summary:
     """Read TODOs and process a bounded snapshot under the process lock.
 
-    RUNNING/UNKNOWN reconciliation precedes READY work. A reconciliation consumes
-    one selected item, even when it proves RetrySafe; execution waits for the
-    next invocation. No reconciler means Unknown. Every failure stops this run.
+    RUNNING/UNKNOWN reconciliation precedes READY work. A stale RUNNING claim becomes
+    UNKNOWN through file_process.04 before its object is verified, so a missing object
+    leaves an UNKNOWN row for the operator. A reconciliation consumes one selected item,
+    even when it proves RetrySafe; execution waits for the next invocation. No reconciler
+    means Unknown. Every failure stops this run.
+
+    The failpoint callback is a test seam, called after each durable boundary of a
+    selected item: claimed (claim committed, handler not called), handler_returned
+    (callback returned, outcome not committed) and outcome_committed (TODO not removed).
     """
     Policy(policy.order, policy.batch)
     _layout(root, processor_id)
@@ -606,17 +817,23 @@ def process(root: Path, processor_id: str, handler: Handler, policy: Policy = Po
             selected = completed = reconciled = 0
             stopped = False
             for row in candidates:
+                key = row["work_key"]
+                if row["state"] == "RUNNING":
+                    # The processor's own normalization of a stale claim is recovery work
+                    # (CONTRACT.md "Failure disposition is `stop`").
+                    _move(db, key, "uncertain", "reconciler", processor_id, reason=_INTERRUPTED)
                 item = _item(root, row, processor_id)
                 selected += 1
                 call: Callable[[WorkItem], Result] | None
+                origin: Origin
                 if row["state"] == "READY":
-                    _move(db, item.processing_key, "claim")
-                    call = handler.process
+                    claim = _move(db, key, "claim", "handler", processor_id)
+                    failpoint("claimed")
+                    item = replace(item, attempt=claim.attempt)
+                    call, origin = handler.process, "handler"
                 else:
                     reconciled += 1
-                    if row["state"] == "RUNNING":
-                        _move(db, item.processing_key, "uncertain", Unknown("interrupted RUNNING"))
-                    call = getattr(handler, "reconcile", None)
+                    call, origin = getattr(handler, "reconcile", None), "reconciler"
                 try:
                     result = call(item) if call is not None else Unknown("no reconciler")
                     if not isinstance(result, Completed | RetrySafe | Unknown):
@@ -628,23 +845,227 @@ def process(root: Path, processor_id: str, handler: Handler, policy: Policy = Po
                     raise
                 except Exception as exc:
                     result = Unknown(f"{type(exc).__name__}: {exc}")
-                event = (
-                    "completed"
-                    if isinstance(result, Completed)
-                    else "retry_safe"
-                    if isinstance(result, RetrySafe)
-                    else "uncertain"
+                failpoint("handler_returned")
+                event, reason, evidence = _outcome(result)
+                moved = _move(
+                    db, key, event, origin, processor_id, reason=reason, evidence=evidence
                 )
-                _move(db, item.processing_key, event, result)
-                if isinstance(result, Completed):
-                    completed += 1
-                    with _write(db):
-                        _remove(root / "todo" / f"{item.processing_key}.json")
-                else:
+                failpoint("outcome_committed")
+                if not _terminal(moved.state):
                     stopped = True
                     break
+                completed += 1
+                _remove_todo(root, db, key)
             remaining = _pending(db)
             unknown = db.execute("SELECT count(*) FROM work WHERE state='UNKNOWN'").fetchone()[0]
             return Summary(selected, completed, 0, remaining, unknown, reconciled, stopped)
+        except sqlite3.DatabaseError as exc:
+            _ledger_failure(root / "ledger.sqlite3", exc)
+        finally:
+            db.close()
+
+
+# Operator interface (CONTRACT.md "Failure disposition is `stop`"). Reads take no role
+# lock; every ruling takes process.lock.
+
+
+def _ledger_path(root: Path) -> Path:
+    """The ledger of an existing root; the operator never initializes one."""
+    if root.is_symlink() or not root.is_dir():
+        raise ProtocolError(f"not a worker root: {root}")
+    ledger = root / "ledger.sqlite3"
+    if ledger.is_symlink() or not ledger.is_file():
+        raise ProtocolError(f"no ledger in worker root: {ledger}")
+    return ledger
+
+
+def _open_readonly(root: Path, processor_id: str) -> sqlite3.Connection:
+    """Open an existing ledger read-only and check its schema and identity.
+
+    It creates nothing and syncs nothing.
+    """
+    _check_processor_id(processor_id)
+    ledger = _ledger_path(root)
+    try:
+        db = sqlite3.connect(
+            f"{ledger.absolute().as_uri()}?mode=ro", uri=True, isolation_level=None, timeout=5
+        )
+    except sqlite3.DatabaseError as exc:
+        _ledger_failure(ledger, exc)
+    try:
+        db.row_factory = sqlite3.Row
+        _check_schema(db, complete=True)
+        rows = db.execute("SELECT processor_id FROM identity").fetchall()
+        if len(rows) != 1 or rows[0][0] != processor_id:
+            raise ProtocolError("root belongs to a different processor identity")
+        return db
+    except sqlite3.DatabaseError as exc:
+        db.close()
+        # A read-only connection cannot roll back a hot journal that a killed worker
+        # left; a worker's next read-write open does. It is not a lost ledger.
+        sidecars = (ledger.with_name(ledger.name + suffix) for suffix in ("-journal", "-wal"))
+        if not _busy(exc) and any(os.path.lexists(path) for path in sidecars):
+            raise ProtocolError(
+                "ledger has a hot journal from an interrupted worker;"
+                " run archive or process to recover it, never restore from backup"
+            ) from exc
+        _ledger_failure(ledger, exc)
+    except BaseException:
+        db.close()
+        raise
+
+
+@contextmanager
+def _snapshot(db: sqlite3.Connection) -> Iterator[None]:
+    """One read transaction, so the rows read agree with each other. It holds a SHARED
+    lock that delays every writer's commit, so no file is read inside it."""
+    db.execute("BEGIN")
+    try:
+        yield
+    finally:
+        db.rollback()
+
+
+def _object_status(root: Path, content_hash: str) -> Literal["verified", "missing", "unverified"]:
+    try:
+        _verified_object(root, content_hash)
+    except ProtocolError:
+        return "unverified" if os.path.lexists(root / "objects" / content_hash) else "missing"
+    return "verified"
+
+
+type _Rows = tuple[sqlite3.Row, list[sqlite3.Row], sqlite3.Row | None]
+
+
+def _rows(db: sqlite3.Connection, row: sqlite3.Row) -> _Rows:
+    key = row["work_key"]
+    receipts = db.execute(
+        "SELECT seq, name, cleaned FROM receipts WHERE work_key=? ORDER BY seq", (key,)
+    ).fetchall()
+    latest = db.execute(
+        "SELECT * FROM decisions WHERE work_key=? ORDER BY seq DESC LIMIT 1", (key,)
+    ).fetchone()
+    return row, receipts, latest
+
+
+def _status(root: Path, rows: _Rows) -> WorkStatus:
+    """Combine a snapshot's rows with the filesystem as it is now."""
+    row, receipts, latest = rows
+    key = row["work_key"]
+    return WorkStatus(
+        key,
+        row["content_hash"],
+        row["receipt_seq"],
+        row["state"],
+        row["attempt"],
+        tuple(Receipt(seq, name, bool(cleaned)) for seq, name, cleaned in receipts),
+        _object_status(root, row["content_hash"]),
+        os.path.lexists(root / "todo" / f"{key}.json"),
+        None if latest is None else _decision(latest),
+    )
+
+
+def list_work(root: Path, processor_id: str) -> list[WorkStatus]:
+    """Every work row in admission order, with its diagnostics.
+
+    Takes no role lock and opens the ledger read-only. The SQL rows are one snapshot;
+    the object and TODO checks read the filesystem after that snapshot ends.
+    """
+    db = _open_readonly(root, processor_id)
+    try:
+        with _snapshot(db):
+            work = db.execute("SELECT * FROM work ORDER BY receipt_seq").fetchall()
+            snapshot = [_rows(db, row) for row in work]
+    except sqlite3.DatabaseError as exc:
+        _ledger_failure(root / "ledger.sqlite3", exc)
+    finally:
+        db.close()
+    return [_status(root, rows) for rows in snapshot]
+
+
+def show_work(root: Path, processor_id: str, key: str) -> tuple[WorkStatus, list[Decision]]:
+    """One work row and its whole decision record, oldest first.
+
+    Takes no role lock and opens the ledger read-only; the filesystem checks follow the
+    snapshot, as in list_work.
+    """
+    if not _HEX.fullmatch(key):
+        raise ValueError("work key must be 64 lowercase hex digits")
+    db = _open_readonly(root, processor_id)
+    try:
+        with _snapshot(db):
+            row = db.execute("SELECT * FROM work WHERE work_key=?", (key,)).fetchone()
+            if row is None:
+                raise ProtocolError(f"no work row {key}")
+            rows = _rows(db, row)
+            record = db.execute(
+                "SELECT * FROM decisions WHERE work_key=? ORDER BY seq", (key,)
+            ).fetchall()
+    except sqlite3.DatabaseError as exc:
+        _ledger_failure(root / "ledger.sqlite3", exc)
+    finally:
+        db.close()
+    return _status(root, rows), [_decision(decision) for decision in record]
+
+
+def rule_work(
+    root: Path,
+    processor_id: str,
+    key: str,
+    event: str,
+    *,
+    expect_state: str,
+    expect_attempt: int,
+    actor: str,
+    reason: str | None = None,
+    evidence: str | None = None,
+) -> Decision:
+    """Record an operator ruling on one work row under process.lock.
+
+    `completed` takes evidence; `retry_safe`, `rejected` and `uncertain` take a reason.
+    A RUNNING row accepts only `uncertain`, the stale-claim conversion, and reads no
+    object; every other ruling names a settled state. The chart decides whether the
+    event moves the expected state. The row must still be in the expected state and
+    attempt inside the transaction that moves it, or ProtocolError. A terminal ruling
+    removes the TODO after it commits.
+    """
+    if not _HEX.fullmatch(key):
+        raise ValueError("work key must be 64 lowercase hex digits")
+    if event not in ("completed", "retry_safe", "rejected", "uncertain"):
+        raise ValueError(f"no operator ruling for event {event!r}")
+    given = evidence if event == "completed" else reason
+    other = reason if event == "completed" else evidence
+    if not isinstance(given, str) or not given or other is not None:
+        needed = "evidence" if event == "completed" else "a reason"
+        raise ValueError(f"{event} requires {needed} and nothing else")
+    if not actor:
+        raise ValueError("a ruling requires an actor")
+    _check_processor_id(processor_id)
+    if (expect_state == "RUNNING") != (event == "uncertain"):
+        raise ValueError("a RUNNING row is converted with uncertain first, and only it")
+    try:
+        transition(PROCESS, expect_state, event)
+    except (StatechartError, ValueError) as exc:
+        raise ValueError(f"the chart moves no {expect_state} row on {event}") from exc
+    _ledger_path(root)
+    with _lock(root, "process"):
+        _layout(root, processor_id)
+        db = _open(root, processor_id)
+        try:
+            decision = _move(
+                db,
+                key,
+                event,
+                "operator",
+                actor,
+                reason=reason,
+                evidence=evidence,
+                expect=(expect_state, expect_attempt),
+            )
+            if _terminal(decision.state):
+                _remove_todo(root, db, key)
+            return decision
+        except sqlite3.DatabaseError as exc:
+            _ledger_failure(root / "ledger.sqlite3", exc)
         finally:
             db.close()
