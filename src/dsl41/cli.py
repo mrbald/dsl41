@@ -86,10 +86,12 @@ app.command(rich_help_panel="Periods and retention")(stops(cli_estate.verify))
 
 estate_app = typer.Typer(
     no_args_is_help=True,
-    help="Stop the estate, prune what retention allows, or reclaim a stale claim.",
+    help="Stop the estate, prune what retention allows, reclaim a stale claim, or print a"
+    " verb's arguments from the estate manifest (args).",
     context_settings={"help_option_names": ["-h", "--help"]},
 )
 app.add_typer(estate_app, name="estate", rich_help_panel="Periods and retention")
 estate_app.command("reclaim")(stops(cli_estate.estate_reclaim))
 estate_app.command("prune")(stops(cli_estate.estate_prune))
 estate_app.command("quiesce")(stops(cli_estate.estate_quiesce))
+estate_app.command("args")(cli_estate.estate_args)

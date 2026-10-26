@@ -857,6 +857,10 @@ Period boundary:
   can verify a chain whose earlier roots are gone.
 - `src/dsl41/estate.py`: the physical roll (`run --open-from`): opening a
   lineage's next period in a fresh root.
+- `src/dsl41/estate_manifest.py`: the estate manifest, `estate.toml`: the
+  application's one declaration of its catalog files, properties layers,
+  timezone and semantic switches, and the builder behind `estate args`
+  that turns it into one verb's arguments.
 - `src/dsl41/retention.py`: the retention floors and `estate prune`: what
   may never be deleted, computed from the root, with three verdicts
   (floored, held, prunable). The remover refuses a path that is not
@@ -1128,6 +1132,9 @@ Period boundary:
   the structural guards, and the prune flags.
 - `tests/test_estate_wide.py`: `audit`, `journal`, `runs`, and
   `estate prune` over a lineage rather than one root.
+- `tests/test_estate_manifest.py`: the manifest's refusals, each
+  `estate args --for` form, and the printed arguments taken by `lint`,
+  `rehearse`, and the `seal` and `run` parsers.
 - `tests/test_restore_drill.py`: backup, delete, restore at the same path,
   and re-open over the nightbank estate.
 
