@@ -124,6 +124,9 @@ disallow_any_generics = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# the repository root is importable in-process, so a test can import a sample
+# under examples/ the way the sample CLIs run it (`python -m examples...`)
+pythonpath = ["."]
 # a wedged test dumps every thread's stack instead of hanging silently (the
 # whole suite runs in ~30s; the v0.2.0 release hang burned a 6h CI slot mute)
 faulthandler_timeout = 120
