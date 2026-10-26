@@ -13,8 +13,9 @@ adds to them. The block cards keep the shape `docs/blocks/README.md` fixes
 reports by agents follow the core style contract, not this page.
 
 The rules below follow four principles: readers get what they need, can
-find it, can understand it, and can use it. An existing page meets a rule
-added by DL-406 at its next change.
+find it, can understand it, and can use it.
+
+An existing page meets a rule added by DL-406 at its next change.
 
 ## 1. One reader, one task
 
