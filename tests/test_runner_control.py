@@ -1149,6 +1149,69 @@ def test_cli_rehearse_with_a_scenario_file(tmp_path: Path) -> None:
     assert "SUCCESS" in result.output
 
 
+@pytest.mark.parametrize(
+    ("at", "fires"),
+    [
+        ("2026-07-06T09:00:00Z", "2026-07-06T09:00:00"),
+        ("2026-07-06T10:00:00+02:00", "2026-07-06T08:00:00"),
+        ("2026-07-06T09:00:00", "2026-07-06T09:00:00"),
+    ],
+    ids=["Z", "offset", "no-zone"],
+)
+def test_cli_rehearse_scenario_event_at_reads_as_start_does(
+    tmp_path: Path, at: str, fires: str
+) -> None:
+    """DL-44 (5), DL-178 (j), DL-179 (e): an event's `at` takes a zone and is read as UTC without
+    one, the rule --start follows; the engine only sees naive UTC."""
+    jil = tmp_path / "estate.jil"
+    jil.write_text("insert_job: tz_job\njob_type: c\ncommand: x\nmachine: m1\n", encoding="utf-8")
+    scenario = tmp_path / "scenario.json"
+    scenario.write_text(
+        json.dumps({"events": [{"at": at, "kind": "STARTJOB", "payload": {"job": "tz_job"}}]}),
+        encoding="utf-8",
+    )
+    result = cli_runner.invoke(
+        app,
+        [
+            "rehearse",
+            str(jil),
+            "--scenario",
+            str(scenario),
+            "--start",
+            "2026-07-06T08:00:00",
+            "--hours",
+            "3",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Traceback" not in result.output
+    trace = json.loads(result.output)["trace"]
+    starts = [
+        t["at"] for t in trace if t["job"] == "tz_job" and t["transition"].endswith("->STARTING")
+    ]
+    assert starts == [fires]
+
+
+def test_cli_rehearse_scenario_aware_event_at_under_the_flag_sweep(tmp_path: Path) -> None:
+    """The --sweep flags path compares each SET_GLOBAL `at` with the start (DL-44 (5), DL-179 (e))."""
+    jil = tmp_path / "estate.jil"
+    jil.write_text("insert_job: tz_job\njob_type: c\ncommand: x\nmachine: m1\n", encoding="utf-8")
+    scenario = tmp_path / "scenario.json"
+    payload = {"name": "g", "value": "1"}
+    event = {"at": "2026-07-06T10:00:00+02:00", "kind": "SET_GLOBAL", "payload": payload}
+    scenario.write_text(json.dumps({"events": [event]}), encoding="utf-8")
+    result = cli_runner.invoke(
+        app,
+        ["rehearse", str(jil), "--scenario", str(scenario), "--start", "2026-07-06T08:00:00"]
+        + ["--hours", "3", "--check-cadence", "--sweep", "flags"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Traceback" not in result.output
+    assert "tz_job" in result.output
+
+
 def test_cli_rehearse_scenario_object_default_and_summary(tmp_path: Path) -> None:
     """DL-180 (4)+(5): `adapter.default` in the runs-entry object form used
     to die as a leaked KeyError(0); --summary appends per-job run counts,

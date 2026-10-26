@@ -1144,6 +1144,7 @@ def _scenario_adapter(scenario: Path | None) -> "tuple[FakeAdapter, list[Event]]
     OSError/ValueError/TypeError/KeyError; the caller owns the refusal."""
     import json as json_mod
 
+    from dsl41.canon import naive_utc
     from dsl41.oracle_state import Event
     from dsl41.runner_adapters import FakeAdapter
 
@@ -1178,7 +1179,12 @@ def _scenario_adapter(scenario: Path | None) -> "tuple[FakeAdapter, list[Event]]
             script[key] = None
         else:
             script[key] = _scenario_completion(entry, f"adapter.runs {key[0]}#{key[1]}")
-    events = [Event.model_validate(entry) for entry in data.get("events", [])]
+    # An event's `at` reads as --start does (_naive_utc_arg): the engine sees naive UTC only
+    # (DL-44 (5)); canon.naive_utc owns the conversion (DL-178 (j), DL-179 (e)).
+    events = [
+        (ev := Event.model_validate(entry)).model_copy(update={"at": naive_utc(ev.at)})
+        for entry in data.get("events", [])
+    ]
     return FakeAdapter(script, default=default, park=park), events
 
 
@@ -1445,6 +1451,7 @@ def rehearse(
         None,
         "--scenario",
         help="JSON scenario with scripted job outcomes and events to inject."
+        " An event's instant may carry a zone and is read as UTC when it has none."
         " The shape is described above.",
     ),
     start: str = typer.Option(
