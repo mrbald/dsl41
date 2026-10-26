@@ -98,7 +98,7 @@ and line. The page changes neither a rule nor the code.
 ## Step 4: verification and review
 
 Stage the new or changed page first (`git add` the path): the decision
-index renderer and its test read tracked files only, so an unstaged page
+index renderer and its test select tracked paths only, so a new untracked page
 leaves `docs/decision-index.md` stale and CI red. Then run the full local
 gates listed under "Verify a change" in `docs/agent-workflow.md`, starting
 with `scripts/arch_check.py` (test names in backticks, the source map,
