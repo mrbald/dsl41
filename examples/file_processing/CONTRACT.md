@@ -165,11 +165,6 @@ durable boundary.
 - One processor identity per root, fixed for the root's life.
 - No power-loss qualification beyond `fsync` at each durable boundary.
 - No HA, no leases, no second host.
-- Ledger corruption in pages the run reads only after opening (a damaged
-  page deep in `work`, for example) surfaces as exit 1 with a traceback, not
-  as exit 65. Opus raised it in slice 2 round 3 and agreed to this limit; it
-  needs a damaged ledger and causes no corruption or external effect. Slice 3
-  routes the CLI's `sqlite3.DatabaseError` through the busy check and closes it.
 - The zero-lookback edge (SEM-04) is the estate author's to close with the
   activation they choose.
 
@@ -179,3 +174,11 @@ Astra co-advised on 2026-10-25: R1 agreed; R2, R3 and R4 amended by F1 to F5,
 all reproduced and all accepted above; the confirmation round added F6 and F7
 on `REJECTED`, both accepted. The brief, report and reconciliation
 are kept with the programme's review records, outside the repository.
+
+Slice 3 review (2026-10-26): one Opus reviewer and one Astra pass, three
+rounds. Round 1: Opus O1 to O10 and Astra F1 to F3 (F1 = O2, F3 = O6), all
+fixed; F2 (an unsupported ledger schema was mutated, then crashed) became the
+schema check in `_open`. Round 2: all confirmed by their raisers; Opus R2-1
+(a hot journal made operator reads refuse with the generic message) fixed with
+a distinct refusal. Round 3: R2-1 confirmed. No stated limit was added; the
+slice 2 ledger-corruption limit is closed. Material findings open: 0.

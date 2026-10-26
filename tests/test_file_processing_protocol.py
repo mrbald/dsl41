@@ -20,6 +20,7 @@ import pytest
 from dsl41 import file_processing as fp
 from dsl41.file_processing_charts import PROCESS
 from examples.file_processing.worker import EXIT_LOCK_BUSY, EXIT_REFUSED, CountsHandler
+from file_processing_checker import check_counts_outputs, record
 
 IDENTITY = "counts-v1"
 REPO = Path(__file__).resolve().parents[1]
@@ -35,6 +36,13 @@ BOUNDARIES = (
 CRASH = (
     "import os,sys; from pathlib import Path; from dsl41.file_processing import archive; "
     "archive(Path(sys.argv[1]),'counts-v1', "
+    "failpoint=lambda name: os._exit(31) if name == sys.argv[2] else None)"
+)
+PROCESS_BOUNDARIES = ("claimed", "handler_returned", "outcome_committed")
+PROCESS_CRASH = (
+    "import os,sys; from pathlib import Path; from dsl41.file_processing import process; "
+    "from examples.file_processing.worker import CountsHandler; root=Path(sys.argv[1]); "
+    "process(root,'counts-v1',CountsHandler(root/'output'), "
     "failpoint=lambda name: os._exit(31) if name == sys.argv[2] else None)"
 )
 
@@ -96,6 +104,17 @@ def cli(root: Path, role: str, *extra: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def operator_cli(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    operator = [sys.executable, "-m", "examples.file_processing.operate"]
+    return subprocess.run(
+        [*operator, "--root", str(root), *args],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
 def assert_drained(root: Path) -> None:
     assert not list((root / "inbox").iterdir())
     assert staged(root, "objects") == staged(root, "todo") == []
@@ -105,6 +124,7 @@ def assert_drained(root: Path) -> None:
     assert receipts and all(tuple(row) == ("FILE_ARCHIVED", 1) for row in receipts)
     assert [row[0] for row in query(root, "SELECT state FROM work")] == ["DONE"]
     assert len(list((root / "output").glob("*.json"))) == 1
+    check_counts_outputs(root)
 
 
 CASES = [
@@ -287,6 +307,7 @@ def test_repeated_noop_cli_runs_change_nothing(tmp_path: Path, backlog: bool) ->
         summary = json.loads(run.stdout)
         assert (summary["selected"], summary["remaining"], summary["stopped"]) == (0, 0, False)
         assert snapshot(tmp_path) == before
+    check_counts_outputs(tmp_path)
 
 
 @pytest.mark.parametrize("role", ["archive", "process"])
@@ -412,6 +433,48 @@ def test_busy_ledger_is_not_a_refusal(tmp_path: Path) -> None:
     other.sqlite_errorcode = sqlite3.SQLITE_ERROR
     with pytest.raises(fp.ProtocolError, match="no such column"):
         fp._ledger_failure(ledger, other)
+    uncoded = sqlite3.OperationalError("Could not decode to UTF-8 column 'metadata'")
+    assert not hasattr(uncoded, "sqlite_errorcode")
+    with pytest.raises(fp.ProtocolError, match="decode"):
+        fp._ledger_failure(ledger, uncoded)
+
+
+def test_ledger_busy_after_opening_exits_1_with_the_reason(tmp_path: Path) -> None:
+    """A peer holds the write lock from the claim on; the outcome commit times out."""
+    deliver(tmp_path, "a", DATA)
+    fp.archive(tmp_path, IDENTITY)
+    script = (
+        "import sys; from examples.file_processing import worker\n"
+        "class Pause(worker.CountsHandler):\n"
+        "    def process(self, item):\n"
+        "        print('claimed', flush=True); sys.stdin.readline()\n"
+        "        return super().process(item)\n"
+        "worker.CountsHandler = Pause\n"
+        "sys.argv = ['worker', 'process', '--root', sys.argv[1]]\n"
+        "worker.main()\n"
+    )
+    peer = sqlite3.connect(tmp_path / "ledger.sqlite3", isolation_level=None)
+    try:
+        with subprocess.Popen(
+            [sys.executable, "-c", script, str(tmp_path)],
+            cwd=REPO,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        ) as child:
+            assert child.stdout is not None
+            assert child.stdout.readline().strip() == "claimed"
+            peer.execute("BEGIN IMMEDIATE")
+            out, err = child.communicate("resume\n", timeout=60)
+            peer.rollback()
+    finally:
+        peer.close()
+    assert (child.returncode, out) == (1, "")
+    assert err.splitlines()[-1] == "sqlite3.OperationalError: database is locked"
+    assert tuple(query(tmp_path, "SELECT state, attempt FROM work")[0]) == ("RUNNING", 1)
+    assert fp.process(tmp_path, IDENTITY, handler(tmp_path)).completed == 1
+    assert_drained(tmp_path)
 
 
 def test_handover_check_takes_the_write_lock(tmp_path: Path) -> None:
@@ -503,8 +566,184 @@ def test_lost_ledger_evidence_excludes_empty_staging(
         assert not (tmp_path / "ledger.sqlite3").exists()
 
 
+class WithoutReconciler:
+    def __init__(self, output: Path) -> None:
+        self.counts = CountsHandler(output)
+
+    def process(self, item: fp.WorkItem) -> fp.Result:
+        return self.counts.process(item)
+
+
+def moves(root: Path) -> list[tuple[str, str]]:
+    [rows] = record(root).values()
+    return [(row["chart_row"], row["origin"]) for row in rows]
+
+
+@pytest.mark.parametrize("reconciler", [True, False])
+@pytest.mark.parametrize("stage", PROCESS_BOUNDARIES)
+def test_every_processing_boundary_converges(tmp_path: Path, stage: str, reconciler: bool) -> None:
+    """A run killed at each durable boundary converges on the next runs: the item ends DONE
+    after reconciliation with the sample handler, or UNKNOWN without a reconciler."""
+    deliver(tmp_path, "delivery", DATA)
+    fp.archive(tmp_path, IDENTITY)
+    child = subprocess.run(
+        [sys.executable, "-c", PROCESS_CRASH, str(tmp_path), stage],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert child.returncode == 31, child.stderr
+    committed = stage == "outcome_committed"
+    work = tuple(query(tmp_path, "SELECT state, attempt FROM work")[0])
+    assert work == ("DONE" if committed else "RUNNING", 1)
+    assert len(published(tmp_path / "todo")) == 1
+    assert len(list((tmp_path / "output").glob("*.json"))) == int(stage != "claimed")
+    callback = handler(tmp_path) if reconciler else WithoutReconciler(tmp_path / "output")
+    selected = [fp.process(tmp_path, IDENTITY, callback).selected for _ in range(2)]
+    claim, done = ("file_process.01", "handler"), ("file_process.02", "handler")
+    interrupted = ("file_process.04", "reconciler")
+    if committed:
+        state, expected, counts = "DONE", [claim, done], [0, 0]
+    elif not reconciler:
+        unknown = ("file_process.07", "reconciler")
+        state, expected, counts = "UNKNOWN", [claim, interrupted, unknown, unknown], [1, 1]
+    elif stage == "handler_returned":
+        reconciled = ("file_process.05", "reconciler")
+        state, expected, counts = "DONE", [claim, interrupted, reconciled], [1, 0]
+    else:
+        retry = ("file_process.06", "reconciler")
+        state, expected, counts = "DONE", [claim, interrupted, retry, claim, done], [1, 1]
+    assert (moves(tmp_path), selected) == (expected, counts)
+    assert query(tmp_path, "SELECT state FROM work")[0][0] == state
+    assert len(published(tmp_path / "todo")) == int(state == "UNKNOWN")
+    check_counts_outputs(tmp_path)
+    if state == "DONE":
+        deliver(tmp_path, "again", DATA)
+        fp.archive(tmp_path, IDENTITY)
+        assert_drained(tmp_path)
+        before = snapshot(tmp_path)
+        assert fp.process(tmp_path, IDENTITY, handler(tmp_path)).selected == 0
+        assert snapshot(tmp_path) == before
+
+
+def refusals(root: Path, key: str) -> list[tuple[str, subprocess.CompletedProcess[str]]]:
+    """Every role and operator command, run once through its CLI."""
+    rule = ["rule", "--key", key, "--event", "rejected", "--expect-state", "READY"]
+    return [
+        ("archive", cli(root, "archive")),
+        ("process", cli(root, "process")),
+        ("list", operator_cli(root, "list")),
+        ("show", operator_cli(root, "show", "--key", key)),
+        ("rule", operator_cli(root, *rule, "--expect-attempt", "0", "--reason", "x")),
+    ]
+
+
+@pytest.mark.parametrize("damage", ["page", "text"])
+def test_ledger_damage_after_opening_is_a_refusal_in_every_role(
+    tmp_path: Path, damage: str
+) -> None:
+    """The damage is beyond what _open reads: the work table's root page, or one byte of
+    one work row's metadata, which is then not UTF-8. Each CLI exits 65 without a summary."""
+    for index in range(3):
+        deliver(tmp_path, f"d{index}", f"{index}\n".encode())
+    fp.archive(tmp_path, IDENTITY)
+    fp.process(tmp_path, IDENTITY, handler(tmp_path), fp.Policy(batch="one"))
+    key = fp.processing_key(IDENTITY, hashlib.sha256(b"1\n").hexdigest())
+    ledger = tmp_path / "ledger.sqlite3"
+    data = bytearray(ledger.read_bytes())
+    if damage == "page":
+        page_size = query(tmp_path, "PRAGMA page_size")[0][0]
+        roots = {
+            row[0]: row[1] for row in query(tmp_path, "SELECT name, rootpage FROM sqlite_master")
+        }
+        assert roots["work"] not in {roots["sqlite_sequence"], roots["identity"], 1}
+        offset = (roots["work"] - 1) * page_size
+        data[offset : offset + page_size] = b"\xff" * page_size
+    else:
+        cell = b'{"delivery_name":"d1"}'
+        assert data.count(cell) == 1
+        data[data.index(cell) + len(cell) - 3] = 0xFF
+    ledger.write_bytes(bytes(data))
+    fp._open(tmp_path, IDENTITY).close()
+    before = tree(tmp_path)
+    for command, run in refusals(tmp_path, key):
+        assert (run.returncode, run.stdout) == (EXIT_REFUSED, ""), (command, run.stderr)
+        assert run.stderr.startswith(f"{command} refused: unusable ledger"), run.stderr
+        assert len(run.stderr.splitlines()) == 1
+    assert tree(tmp_path) == before
+
+
+SLICE2_SCHEMA = (
+    "CREATE TABLE identity (processor_id TEXT NOT NULL)",
+    "CREATE TABLE receipts (seq INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL,"
+    "state TEXT NOT NULL CHECK(state IN ('FILE_RECEIVED','FILE_ARCHIVED')),"
+    "content_hash TEXT, work_key TEXT, cleaned INTEGER NOT NULL DEFAULT 0)",
+    "CREATE TABLE work (work_key TEXT PRIMARY KEY, content_hash TEXT UNIQUE NOT NULL,"
+    "receipt_seq INTEGER NOT NULL REFERENCES receipts(seq), metadata TEXT NOT NULL,"
+    "state TEXT NOT NULL CHECK(state IN ('READY','RUNNING','DONE','UNKNOWN')),"
+    "evidence TEXT, detail TEXT)",
+)
+
+
+def test_prior_ledger_schema_is_refused_without_a_change(tmp_path: Path) -> None:
+    """No migration: a slice 2 ledger is refused by every role and command (exit 65)."""
+    fp._layout(tmp_path, IDENTITY)
+    content_hash = hashlib.sha256(DATA).hexdigest()
+    key = fp.processing_key(IDENTITY, content_hash)
+    db = sqlite3.connect(tmp_path / "ledger.sqlite3")
+    for ddl in SLICE2_SCHEMA:
+        db.execute(ddl)
+    db.execute("INSERT INTO identity VALUES (?)", (IDENTITY,))
+    db.execute("INSERT INTO receipts VALUES (1,'a','FILE_ARCHIVED',?,?,1)", (content_hash, key))
+    db.execute("INSERT INTO work VALUES (?,?,1,'{}','READY',NULL,NULL)", (key, content_hash))
+    db.commit()
+    db.close()
+    before = tree(tmp_path)
+    for command, run in refusals(tmp_path, key):
+        assert (run.returncode, run.stdout) == (EXIT_REFUSED, ""), (command, run.stderr)
+        assert run.stderr.startswith(f"{command} refused: unsupported ledger schema: table work")
+        assert len(run.stderr.splitlines()) == 1
+    assert tree(tmp_path) == before
+
+
+def test_checker_validates_an_uncertain_effect(tmp_path: Path) -> None:
+    """After a handler_returned crash without a reconciler the output stays UNKNOWN; its
+    bytes are still checked, and an operator's completed ruling is checked for them too."""
+    deliver(tmp_path, "delivery", DATA)
+    fp.archive(tmp_path, IDENTITY)
+    child = subprocess.run(
+        [sys.executable, "-c", PROCESS_CRASH, str(tmp_path), "handler_returned"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert child.returncode == 31, child.stderr
+    assert fp.process(tmp_path, IDENTITY, WithoutReconciler(tmp_path / "output")).unknown == 1
+    check_counts_outputs(tmp_path)
+    [output] = (tmp_path / "output").glob("*.json")
+    good = output.read_bytes()
+    output.chmod(0o644)
+    output.write_bytes(b"not the count\n")
+    with pytest.raises(AssertionError, match="UNKNOWN"):
+        check_counts_outputs(tmp_path)
+    output.write_bytes(good)
+    fp.rule_work(
+        tmp_path,
+        IDENTITY,
+        output.stem,
+        "completed",
+        expect_state="UNKNOWN",
+        expect_attempt=1,
+        actor="op",
+        evidence="operator compared the count file",
+    )
+    check_counts_outputs(tmp_path)
+
+
 def test_terminal_states_are_the_process_chart_finals() -> None:
-    assert fp.TERMINAL == {"DONE"}
+    assert fp.TERMINAL == {"DONE", "REJECTED"}
     assert not {row.source for row in PROCESS.rows} & fp.TERMINAL
     assert all(fp._terminal(state) for state in fp.TERMINAL)
     assert not any(fp._terminal(state) for state in ("READY", "RUNNING", "UNKNOWN"))
