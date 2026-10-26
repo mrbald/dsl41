@@ -22,7 +22,7 @@ root/
   objects/.tmp/          private object staging
   todo/<work_key>.json   actual JSON handover read by the processor
   todo/.tmp/             private TODO staging
-  ledger.sqlite3        authoritative receipts, work, completion evidence
+  ledger.sqlite3        authoritative receipts, work and the decision record
   archive.lock          one archiver; OS releases the lock on death
   process.lock          one processor; independent from archive.lock
 ```
@@ -39,6 +39,8 @@ missing while objects, TODOs, abandoned stage files or SQLite sidecars remain,
 both roles refuse before creating a replacement ledger. Any entry in `objects/`
 or `todo/` other than an empty staging directory counts. They cannot
 reconstruct lost identity or completion evidence from those artifacts.
+A ledger whose existing tables have other columns than this release's is refused
+with exit 65 before anything changes; it is never migrated.
 
 ## Filesystem requirements
 
@@ -88,11 +90,24 @@ UNKNOWN = RUNNING + uncertain                 // unexpected exception or interru
 DONE = UNKNOWN + completed                    // reconciliation verified the effect; terminal
 READY = UNKNOWN + retry_safe                  // reconciliation proved safe retry
 UNKNOWN = UNKNOWN + uncertain                 // insufficient evidence; no process call
+REJECTED = READY + rejected                   // operator only: no further attempt; terminal
+REJECTED = UNKNOWN + rejected                 // operator only; the uncertainty stays recorded
 ```
 
+`RUNNING + rejected` is excluded: a stale claim is converted through `.04` first.
 Every SQL state write uses the executor's resulting leaf. The charts do not
 perform I/O. Restoring a durable state runs no entry actions. The executor
 provides no durability itself. No extra states model individual syscalls.
+
+Each work row carries an `attempt` count. Only the `claim` move increments it,
+in the claim's own transaction; handlers see it as `WorkItem.attempt`. Each move
+also appends one row to the `decisions` table in the same transaction: work key,
+attempt, prior and resulting state, the id of the chart row the executor fired,
+origin (`handler`, `reconciler` or `operator`), actor, ISO 8601 UTC wall-clock
+time, reason and evidence. The record is the only store of outcomes; triggers
+refuse an update or a delete. The processor's actor is its processor identity.
+Its own conversion of a stale claim through `.04` has origin `reconciler`.
+Admission of a `READY` row is not a move and has no decision.
 
 The archiver snapshots inbox names, repairs previous handovers, then admits and
 selects deliveries. It copies and hashes the same open input stream into a
@@ -123,8 +138,12 @@ It never discovers inbox deliveries or repairs archive projections. A missing
 TODO requires an archiver invocation; the processor reports ledger backlog in
 `remaining`. Malformed JSON, tampering and missing/corrupt objects fail loudly.
 A leftover TODO for a terminal row is validated and removed without processing
-again. `DONE` is the only terminal state; `TERMINAL` in the worker module derives
-the set from the chart's final states.
+again. `DONE` and `REJECTED` are terminal; `TERMINAL` in the worker module derives
+the set from the chart's final states. Every path treats them alike: the move and
+its decision commit before the TODO is removed, either role finishes an
+interrupted removal, repair never republishes them, selection and `remaining`
+exclude them, a duplicate delivery leaves them unchanged, and a duplicate source
+is unlinked once the object is verified.
 
 ## Callbacks, recovery and selection
 
@@ -132,9 +151,10 @@ the set from the chart's final states.
 `Unknown(reason)`. Evidence and reasons are nonempty strings. The handler owns
 the truth of its evidence. Optional `reconcile(item)` uses the same result types.
 Unexpected callback exceptions become `UNKNOWN`. Interruptions leave a durable
-`RUNNING` claim. On the next selected recovery, that becomes `UNKNOWN` before
-reconciliation. Without a reconciler it remains `UNKNOWN`. There is no automatic
-retry for arbitrary effects and no exactly-once guarantee.
+`RUNNING` claim. On the next selected recovery, that becomes `UNKNOWN` before the
+processor verifies the object, so a claim whose object is missing still reaches
+the operator as `UNKNOWN`. Without a reconciler it remains `UNKNOWN`. There is no
+automatic retry for arbitrary effects and no exactly-once guarantee.
 
 The sample `CountsHandler` routes JSON arrays to record counting and UTF-8 text
 to line counting. It atomically publishes immutable JSON output keyed by the
@@ -190,8 +210,100 @@ completed. Exit 1 means the run stopped; the ledger holds the reason. The
 exception is a ledger busy past its timeout: its reason is on stderr only, and
 items completed earlier in the run stay committed. Exit 75
 (`EX_TEMPFAIL`) means the role's lock was busy and nothing ran. Exit 65
-(`EX_DATAERR`) means a refusal of corrupt, inconsistent or unsupported input.
+(`EX_DATAERR`) means a refusal of corrupt, inconsistent or unsupported input,
+including a damaged ledger wherever the run reads it. It also covers a ledger the
+run cannot write, such as a full disk or an I/O error; the stderr line names the
+SQLite error.
 Exits 75 and 65 print no summary and one line on stderr.
+
+## Operator CLI
+
+The library's `list_work`, `show_work` and `rule_work` back a sample operator
+CLI with the worker's exit codes and JSON on stdout:
+
+```sh
+.venv/bin/python -m examples.file_processing.operate --root "$root" list
+.venv/bin/python -m examples.file_processing.operate --root "$root" show --key "$key"
+.venv/bin/python -m examples.file_processing.operate --root "$root" rule --key "$key" \
+  --event rejected --expect-state UNKNOWN --expect-attempt 2 --reason "toxic input"
+```
+
+`list` shows every work row with its state, attempt, receipts and their cleaned
+flags, whether the object is verified, missing or unverified, whether a TODO
+exists, and the latest decision. `show` adds the whole decision record. Neither
+takes a role lock, and both open the ledger read-only and create nothing. The SQL
+rows are one snapshot; the object and TODO checks read the filesystem after that
+snapshot ends, so hashing objects never delays a worker's commit. A read-only open
+cannot roll back a hot journal left by a killed worker; `list` and `show` then
+refuse with "ledger has a hot journal", and the next `archive` or `process` run
+recovers it.
+
+`rule` takes `process.lock`, so it never races a processor. Inside the
+transaction that moves the row it checks `--expect-state` and `--expect-attempt`.
+Read the expected attempt from `list` or `show` immediately before `rule`, because
+a stuck item's attempt can rise on every processor run; a mismatch is refused with
+exit 65. It records origin `operator` and `--actor`, by default the login name.
+The rulings are:
+
+- `UNKNOWN + completed` with `--evidence`: the operator verified the effect.
+- `UNKNOWN + retry_safe` with `--reason`: the operator proved another attempt safe.
+- `READY + rejected` or `UNKNOWN + rejected` with `--reason`: make no further attempt.
+  This proves nothing about the business effect.
+- `RUNNING + uncertain` with `--reason`: convert a stale claim without reading the
+  object. Then rule the `UNKNOWN` row.
+
+The chart decides whether the event moves the expected state. A ruling to a
+terminal state removes the TODO after it commits. Under the `stop` disposition a
+stuck head blocks the queue until an operator rules it.
+
+## Operator procedures
+
+Four archiver refusals are not work states, and no ruling repairs them. The
+procedures below are manual. A storage repair holds both `archive.lock` and
+`process.lock` for its whole duration, because either role can read what it
+changes. With util-linux `flock(1)`, which takes the same `flock(2)` locks as
+the workers:
+
+```sh
+flock --nonblock "$root/archive.lock" \
+  flock --nonblock "$root/process.lock" \
+  sh -c 'the repair commands'
+```
+
+Where `flock(1)` is absent, as on macOS, the same two locks from Python's
+standard library:
+
+```sh
+python3 -c 'import fcntl,os,subprocess,sys; fds=[os.open(p,os.O_RDWR|os.O_CREAT,0o600) for p in sys.argv[1:3]]; [fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB) for fd in fds]; sys.exit(subprocess.call(sys.argv[3:]))' "$root/archive.lock" "$root/process.lock" sh -c 'the repair commands'
+```
+
+A busy lock makes either recipe exit nonzero without running the repair, as
+`LockBusy` does for the workers; retry later.
+
+- **Reused basename** (`delivery basename reused`). Move the delivery out of
+  `inbox/` to a quarantine directory outside the root. The producer redelivers
+  it under a new unique basename. Never rename it inside `inbox/`.
+- **Missing or corrupt committed object** (`missing or unreadable archived
+  object`, `corrupt archived object`, `corrupt existing object`). Remove a
+  corrupt `objects/<sha256>`. Restore the file from backup, or from a retained
+  inbox copy, verify that its SHA-256 equals its name, set mode `0444`, and
+  sync. Then run the archiver.
+- **Damaged TODO** (`unreadable TODO`, `TODO differs from ledger`, `invalid TODO
+  filename`, `TODO has no ledger work`). Move the file out of `todo/`. The next
+  archiver run republishes a TODO for nonterminal work from the ledger.
+- **Lost ledger** (`missing ledger in an established worker root`). A refusal
+  that names a hot journal is not a lost ledger; run a worker to recover it. Restore
+  `ledger.sqlite3` from backup, with its own journal if it had one; never pair it
+  with a sidecar left by the lost ledger. A backup older than the last decision
+  forgets that decision, and the processor would claim that work again. Disable
+  processor activation before releasing the locks, because `rule` takes
+  `process.lock` itself. With no processor run pending, compare each nonterminal
+  row in `list` with the handler's effects, and rule `rejected` where the effect
+  is known to exist; then enable activation. Receipts admitted after the backup
+  are lost from the ledger. Their TODOs become `TODO has no ledger work`
+  refusals; move them out of `todo/`. Their objects stay as harmless orphans. The
+  producer must redeliver those files under new basenames.
+  Without a backup, the root cannot be recovered; start a new root.
 
 ## Python estate and one-cycle watcher
 
@@ -240,6 +352,12 @@ Focused tests interrupt one archival with an abrupt subprocess exit after each
 durable boundary: object staged, object published, receipt and work committed,
 TODO staged, TODO published, and source unlinked before `cleaned=1`. Each case
 converges on the next run in either role order, and later runs change nothing.
+They interrupt processing the same way after the claim commit, after the handler
+returns and after the outcome commit, with and without a reconciler. A test-only
+checker recomputes the sample handler's outputs from the ledger and `objects/`
+alone and compares them with the files and the recorded evidence.
+A ledger damaged in pages read only after opening is refused with exit 65 by
+every role and every operator command.
 Cross-role probes pause one role on a pipe handshake while the other runs: the
 processor completes work whose TODO the archiver just published, and the
 archiver archives a duplicate while the processor holds a claim. The sample CLI
