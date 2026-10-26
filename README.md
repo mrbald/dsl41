@@ -38,13 +38,12 @@ dsl41 and your services), ship JIL releases on your own schedule.
 
 **Job author**: write an estate in JIL or the Python DSL, or bring an existing one in, and get it accepted.
 
-1. [Lint a catalog](#lint-a-catalog) - the rules L001-L023, and `rehearse` and `viz` under [CLI](#cli)
-2. [DSL -> JIL (build)](#dsl---jil-build) - the Python DSL builders (`job`, `box`, `sequence`, `parallel`) and `to_jil()`; [examples/file_processing/estate.py](examples/file_processing/estate.py) is a worked Python estate; `examples/nightbank`, `fulfilment`, `energy`, `media` and `dst-drill` hold worked JIL estates
-3. [JIL -> DSL (decompile)](#jil---dsl-decompile) and [Prove two catalogs equivalent](#prove-two-catalogs-equivalent) - bringing an existing estate in and checking a rewrite; [examples/README.md](examples/README.md) indexes the worked estates
-4. [docs/autosys-semantics.md](docs/autosys-semantics.md) - the meaning of JIL (SEM entries); [docs/simulation-coverage.md](docs/simulation-coverage.md) - what the runner models, refuses, or assumes; [docs/jil-statement-syntax.md](docs/jil-statement-syntax.md) - the statement scanner spec
-5. [docs/deployment-runbook.md §6](docs/deployment-runbook.md#6-jil-rollout--updating-the-estate) - how an accepted estate reaches the engine
-
-No author guide exists; the items above are the author's reading.
+1. [docs/authoring.md](docs/authoring.md) - the author guide: JIL or the Python DSL, what dsl41 accepts, conditions, lint, rehearse, viz, bringing an estate in, the rollout handoff
+2. [Lint a catalog](#lint-a-catalog) - the rules L001-L023, and `rehearse` and `viz` under [CLI](#cli)
+3. [DSL -> JIL (build)](#dsl---jil-build) - the Python DSL builders (`job`, `box`, `sequence`, `parallel`) and `to_jil()`; [examples/file_processing/estate.py](examples/file_processing/estate.py) is a worked Python estate; `examples/nightbank`, `fulfilment`, `energy`, `media` and `dst-drill` hold worked JIL estates
+4. [JIL -> DSL (decompile)](#jil---dsl-decompile) and [Prove two catalogs equivalent](#prove-two-catalogs-equivalent) - bringing an existing estate in and checking a rewrite; [examples/README.md](examples/README.md) indexes the worked estates
+5. [docs/autosys-semantics.md](docs/autosys-semantics.md) - the meaning of JIL (SEM entries); [docs/simulation-coverage.md](docs/simulation-coverage.md) - what the runner models, refuses, or assumes; [docs/jil-statement-syntax.md](docs/jil-statement-syntax.md) - the statement scanner spec
+6. [docs/deployment-runbook.md §6](docs/deployment-runbook.md#6-jil-rollout--updating-the-estate) - how an accepted estate reaches the engine
 
 **Architect**: the design and the implementation.
 
