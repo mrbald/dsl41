@@ -36,8 +36,8 @@ paragraph, with the task the reader comes with:
 A document that serves two readers is two documents, or one document with a
 named section per reader. The README's "Documents" section keeps one reading
 track per reader. Every page under `docs/` that is not a frozen contract, and
-every example's README, is in a track; a page inside an example's directory
-is reached from that README.
+every example's README, is in a track, itself or through an index page the track names; a page
+inside an example's directory is reached from that README.
 
 ## 2. The reader gets what they need
 
