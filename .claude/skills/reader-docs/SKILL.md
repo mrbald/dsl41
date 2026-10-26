@@ -46,8 +46,8 @@ under `examples/*/deploy/` and `scripts/` the page will name.
 ## Step 2: the draft
 
 Write from the brief and the sheet. An existing page keeps its section
-numbers and anchors (writing.md §3); a reorder is its own slice that updates
-every citer the sheet lists. Check the draft against this list, section by
+numbers and anchors (writing.md §3); a reorder or a split is its own slice
+that updates every citer the sheet lists. Check the draft against this list, section by
 section, then as a whole:
 
 Relevant (writing.md §2)

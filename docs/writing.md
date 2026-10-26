@@ -3,8 +3,8 @@
 Status: binding for every human-facing document (DL-405): the README, the
 pages under `docs/` that are not frozen contracts, the block cards, and the
 READMEs and runbooks under `examples/`. The `spec-review` procedure (DL-225)
-covers every page under `docs/` except the decision log and the citation
-index, for one purpose: the page states the present design and agrees with
+covers every page under `docs/` except the decision log, the citation
+index and this page, for one purpose: the page states the present design and agrees with
 the code. This page adds the reader rules. Where both apply, `spec-review`'s
 rules on section numbers, citation tokens and history govern, and this page
 adds to them. The block cards keep the shape `docs/blocks/README.md` fixes
@@ -35,7 +35,9 @@ paragraph, with the task the reader comes with:
 
 A document that serves two readers is two documents, or one document with a
 named section per reader. The README's "Documents" section keeps one reading
-track per reader, and every human-facing page is in a track.
+track per reader. Every page under `docs/` that is not a frozen contract, and
+every example's README, is in a track; a page inside an example's directory
+is reached from that README.
 
 ## 2. The reader gets what they need
 
@@ -57,8 +59,8 @@ track per reader, and every human-facing page is in a track.
   before start, start before recover, the common case before the exception.
   An existing page keeps its section numbers and anchors, because code,
   docstrings and the decision log cite them by number and no gate checks
-  those citations; a page whose order must change is split, or reordered in
-  its own slice that updates every citer the `spec-review` fact sheet lists.
+  those citations; a page whose order must change, or that is split, does so
+  in its own slice that updates every citer the fact sheet lists.
 - One concept, one place. A second place links the first.
 - A procedure the reader runs is a numbered list with one action per step and
   the command complete and copyable.

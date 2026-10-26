@@ -24307,6 +24307,7 @@ relitigate an entry; append a new one.
   rule that names the reader and the task is what the writer and the reviewer can both check.
   REJECTED: rewriting the frozen contracts for readers (they are rules; a reader page links
   them); hand-drawn state diagrams (they drift from the chart); a second stamp family for
-  reader pages (it would reset the specification clock); reproducing the standard's text (it
+  reader pages (no gate reads it; a reader page's claims come from the fact sheet and its
+  review is the pull request); reproducing the standard's text (it
   is ISO's; the principles are enough); one index page per document kind (the reader's
   question is "which track", not "which kind").
