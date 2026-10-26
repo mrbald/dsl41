@@ -26,6 +26,8 @@ Do not re-derive settled decisions.
   (DL-59); reserve calendar errors for uninterpretable input.
 - A comment states the rule and cites its entry; it never states what changed
   (DL-362). `scripts/comment_equivalence.py <base>` proves a comment-only diff.
+- A human-facing document is written for one reader under `docs/writing.md`
+  (DL-405): plain language, visuals only for topology, generated state-machine views.
 - Append material decisions to `docs/decision-log.md`; never edit, renumber or
   delete an old entry, except a superseded-by mark and a compression tranche
   under DL-379, which may reword and shorten one. Before adding a citation
@@ -80,6 +82,10 @@ All ten compiler phases in DL-03 are implemented; their order remains normative.
   `spec-review` with the document path (DL-225). Its shared body is
   `.claude/skills/spec-review/SKILL.md`; Codex discovers it through
   `.agents/skills/spec-review`.
+- When the user asks for a reader-facing document, a documentation track, or a
+  rewrite for a packager, operator, job author or architect, use `reader-docs`
+  (DL-405). Its shared body is `.claude/skills/reader-docs/SKILL.md`; Codex
+  discovers it through `.agents/skills/reader-docs`.
 - When the user asks for a chart review or simplification, or a slice finds
   hidden control flow, copied rows or guard families in a declared chart, use
   `chart-simplify` (DL-363 to DL-372). Its shared body is
