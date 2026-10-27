@@ -83,7 +83,7 @@ if args[0] == "sendevent":
         print(f"refused: {verb} {job}", file=sys.stderr)
         sys.exit(2)
     rid = opt("--request-id") or str(uuid.uuid4())
-    if rid in state["decisions"] and job in state["refuse_resend"]:
+    if rid in state["seen"] and job in state["refuse_resend"]:
         save()
         print(f"refused: {verb} {job} resent", file=sys.stderr)
         sys.exit(2)
@@ -100,6 +100,12 @@ if args[0] == "sendevent":
     wal = root / "wal" / f"{state['period']:06d}.jsonl"
     record = {"rec": "input", "seq": state["index"], "request_id": rid, "kind": verb}
     append(wal, record | {"payload": {"job": job}})
+    state["seen"].append(rid)
+    if job in state["undecided"].get(verb, []):  # the engine died after the input
+        state["undecided"][verb].remove(job)
+        save()
+        print("no decision: this command may still apply", file=sys.stderr)
+        sys.exit(4)
     expect = opt("--expect")
     forced = (state["release_outcomes"].get(job) or [None]).pop(0) if verb == "OFF_HOLD" else None
     if forced == 3 or (expect is not None and int(expect) != row["state_rev"]):
@@ -294,6 +300,8 @@ class Site:
                 "noop_holds": [],
                 "release_outcomes": {},
                 "refuse_resend": [],
+                "undecided": {},
+                "seen": [],
                 "index": 0,
                 "start_fails": False,
                 "calls": [],
@@ -656,6 +664,31 @@ def test_a_release_resent_and_refused_is_settled_by_the_log(site: Site) -> None:
     assert resumed.returncode == 0, resumed.stderr
     assert site.receipt("v2")["released"] == ["NB_B", "NB_FREE_C"]
     assert site.state()["sent"].count(["OFF_HOLD", "NB_FREE_C"]) == 1
+
+
+@pytest.mark.parametrize(
+    ("verb", "says", "state"),
+    [
+        ("ON_HOLD", "the engine has not decided the hold of NB_FREE_C", "pending"),
+        ("OFF_HOLD", "the engine has not decided the release of NB_FREE_C", "releasing"),
+    ],
+)
+def test_a_resend_whose_first_send_the_log_shows_undecided_stops_with_its_record(
+    site: Site, verb: str, says: str, state: str
+) -> None:
+    """The engine logged the input and died before its decision; a resend is refused, and
+    recovery may still apply the input, so the apply stops and keeps its record."""
+    site.prepared("v2")
+    site.edit(undecided={verb: ["NB_FREE_C"]}, refuse_resend=["NB_FREE_C"])
+    assert site.run("apply", "v2").returncode == 3
+    stopped = site.run("apply", "--resume", "v2")
+    assert stopped.returncode == 3, stopped.stderr
+    assert f"{says}; resume once it answers" in stopped.stderr
+    record = site.record()
+    assert record is not None
+    (entry,) = [hold for hold in record["holds"] if hold["job"] == "NB_FREE_C"]
+    assert entry["state"] == state
+    assert site.active.read_text() == ("r1\n" if verb == "ON_HOLD" else "v2\n")
 
 
 def test_a_rejected_release_is_settled_again_and_sent_under_a_new_id(site: Site) -> None:
