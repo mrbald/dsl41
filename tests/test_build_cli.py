@@ -4,6 +4,7 @@ the module builds nothing, and the verb writes, prints or checks the JIL that es
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -62,14 +63,17 @@ def test_decompile_without_properties_keeps_placeholder_tokens(tmp_path: Path) -
         tmp_path,
         "template.jil",
         "insert_job: ~{$PFX}~_load\njob_type: c\ncommand: ~{$BIN}~/load.sh --day ~{$DAY}~\n"
-        "machine: ~{$HOST}~\n",
+        "machine: ~{$HOST}~\n\n"
+        "insert_job: ~{$PFX}~_report\njob_type: c\ncommand: ~{$BIN}~/report.sh ~{$DAY}~\n"
+        'machine: ~{$HOST}~\ncondition: s(~{$PFX}~_load) & v(~{$VAR}~) = "~{$VAL}~"\n',
     )
     result = runner.invoke(app, ["decompile", "-o", str(tmp_path / "estate.py"), str(template)])
     assert result.exit_code == 0, result.stderr
     module = tmp_path / "estate.py"
     source = module.read_text(encoding="utf-8")
-    for token in ("~{$PFX}~", "~{$HOST}~", "~{$BIN}~", "~{$DAY}~"):
+    for token in ("~{$PFX}~", "~{$HOST}~", "~{$BIN}~", "~{$DAY}~", "~{$VAR}~", "~{$VAL}~"):
         assert token in source
+    assert """condition='s(~{$PFX}~_load) & v(~{$VAR}~) = "~{$VAL}~"'""" in source
     built = runner.invoke(app, ["build", str(module), "--stdout"])
     assert built.exit_code == 0, built.stderr
     assert built.stdout == template.read_text(encoding="utf-8")
@@ -81,13 +85,24 @@ def test_decompile_properties_help_warns_that_tokens_are_lost() -> None:
     assert "decompile the template JIL to keep them" in result.stdout
 
 
-def test_decompile_check_honours_permit_unknown(tmp_path: Path) -> None:
-    source = _write(
-        tmp_path, "unknown.jil", "insert_job: a\njob_type: c\nmachine: m1\ncommand: x\nfrob: 1\n"
-    )
+def test_decompile_permit_unknown_reaches_the_check_the_footer_and_the_hint(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    jil = "insert_job: a\njob_type: c\ncommand: x\nmachine: m1\nfrob: 1\n"
+    source = _write(tmp_path, "unknown.jil", jil)
     result = runner.invoke(app, ["decompile", "--permit-unknown", str(source)])
     assert result.exit_code == 0, result.stderr
-    assert "passthrough={'frob': '1'}" in result.stdout
+    module = result.stdout
+    assert "passthrough={'frob': '1'}" in module
+    assert module.startswith(
+        "# Decompiled by dsl41 (phase 10). Write its JIL with: dsl41 build --permit-unknown"
+    )
+    assert "    c.build(permit_unknown=True)\n" in module
+    namespace: dict[str, object] = {"__name__": "__main__"}
+    exec(compile(module, "<main>", "exec"), namespace)  # noqa: S102
+    assert capsys.readouterr().out == jil
+    plain = decompile(lower_catalog([parse_file(SOURCE_JIL)]))
+    assert "--permit-unknown" not in plain and "    c.build()\n" in plain
 
 
 # ------------------------------------------------------------------ dsl41 build
@@ -132,6 +147,37 @@ def test_build_check_prints_a_diff_and_exits_1_on_mismatch(tmp_path: Path) -> No
     assert "-insert_job: job_old\n" in result.stdout
     assert "+insert_job: job_a\n" in result.stdout
     assert target.read_text(encoding="utf-8") == stale
+
+
+def test_build_check_marks_a_missing_final_newline(tmp_path: Path) -> None:
+    module = _module(tmp_path)
+    expected = _expected_jil(module)
+    target = _write(tmp_path, "jobs.jil", expected.rstrip("\n").replace("job_b", "job_old"))
+    result = runner.invoke(app, ["build", str(module), "--check", str(target)])
+    assert result.exit_code == 1
+    assert "\n\\ No newline at end of file\n" in result.stdout
+    assert all(line.count("insert_job") <= 1 for line in result.stdout.splitlines())
+    assert "only in line endings" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        lambda text: text.replace("\n", "\r\n"),
+        lambda text: text.rstrip("\n"),
+        lambda text: text + "\n",
+    ],
+    ids=["crlf", "no-final-newline", "extra-blank-line"],
+)
+def test_build_check_names_a_line_ending_only_difference(
+    tmp_path: Path, variant: Callable[[str], str]
+) -> None:
+    module = _module(tmp_path)
+    target = tmp_path / "jobs.jil"
+    target.write_bytes(variant(_expected_jil(module)).encode("utf-8"))
+    result = runner.invoke(app, ["build", str(module), "--check", str(target)])
+    assert result.exit_code == 1
+    assert result.stdout.endswith("The two differ only in line endings or trailing newlines.\n")
 
 
 def test_build_check_refuses_an_unreadable_file(tmp_path: Path) -> None:
@@ -203,20 +249,46 @@ def test_build_permit_unknown_carries_unknown_attributes(tmp_path: Path) -> None
     assert "frob: 1\n" in result.stdout
 
 
-def test_build_imports_sibling_modules_and_restores_sys_path(tmp_path: Path) -> None:
-    _write(tmp_path, "train_shared.py", "MACHINE = 'm1'\n")
+@pytest.mark.parametrize("where", ["at-import", "inside-estate"])
+def test_build_imports_sibling_modules_and_restores_the_interpreter(
+    tmp_path: Path, where: str
+) -> None:
+    """The second estate's sibling has the first one's name; it must load its own."""
+    path_before = list(sys.path)
+    for index, machine in enumerate(("m1", "m2")):
+        directory = tmp_path / f"estate{index}"
+        directory.mkdir()
+        _write(directory, "train_shared.py", f"MACHINE = {machine!r}\n")
+        importing = "    from train_shared import MACHINE\n"
+        module = _write(
+            directory,
+            "estate.py",
+            "from dsl41.dsl import CatalogBuilder\n"
+            + (importing.strip() + "\n" if where == "at-import" else "")
+            + "\n\ndef estate():\n"
+            + (importing if where == "inside-estate" else "")
+            + "    return CatalogBuilder().job('a', command='x', machine=MACHINE)\n",
+        )
+        result = runner.invoke(app, ["build", str(module), "--stdout"])
+        assert result.exit_code == 0, result.stderr
+        assert f"machine: {machine}\n" in result.stdout
+        assert sorted(p.name for p in directory.iterdir()) == ["estate.py", "train_shared.py"]
+    assert sys.path == path_before
+    assert "train_shared" not in sys.modules
+    assert not [name for name in sys.modules if name.startswith("dsl41_build_")]
+
+
+def test_build_runs_a_dataclass_under_postponed_annotations(tmp_path: Path) -> None:
     module = _write(
         tmp_path,
         "estate.py",
-        "from dsl41.dsl import CatalogBuilder\nfrom train_shared import MACHINE\n\n\n"
-        "def estate():\n    return CatalogBuilder().job('a', command='x', machine=MACHINE)\n",
+        "from __future__ import annotations\n\nfrom dataclasses import dataclass\n\n"
+        "from dsl41.dsl import CatalogBuilder\n\n\n@dataclass\nclass Feed:\n"
+        "    name: str\n    machine: str\n\n\ndef estate() -> CatalogBuilder:\n"
+        "    feed = Feed('a', 'm1')\n"
+        "    return CatalogBuilder().job(feed.name, command='x', machine=feed.machine)\n",
     )
-    path_before = list(sys.path)
-    try:
-        result = runner.invoke(app, ["build", str(module), "--stdout"])
-    finally:
-        sys.modules.pop("train_shared", None)
+    result = runner.invoke(app, ["build", str(module), "--stdout"])
     assert result.exit_code == 0, result.stderr
-    assert "machine: m1\n" in result.stdout
-    assert sys.path == path_before
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["estate.py", "train_shared.py"]
+    assert "insert_job: a\n" in result.stdout
+    assert not [name for name in sys.modules if name.startswith("dsl41_build_")]
