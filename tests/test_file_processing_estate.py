@@ -165,13 +165,20 @@ def test_helper_refuses_what_breaks_the_contract(tmp_path: Path) -> None:
         builder = CatalogBuilder().job("FW", job_type="f", watch_file=str(tmp_path / "ready"))
         return builder.job("CMD", command="true")
 
-    refusals = [
+    refusals: list[tuple[dict[str, object], str]] = [
         ({"inbox_watcher": "CMD"}, "existing FW job"),
         ({"process_argv": []}, "nonempty"),
         ({"archiver": "CMD"}, "two new job names"),
         ({"archiver": "ONE", "processor": "ONE"}, "two new job names"),
         ({"archiver_attrs": {"condition": "s(CMD)"}}, "sets condition"),
         ({"processor_attrs": {"box_name": "B", "machine": "m"}}, "sets box_name, machine"),
+        ({"processor_attrs": {"name": "X"}}, "sets name"),
+        ({"archiver_attrs": {"passthrough": {"box_name": "CMD"}}}, "sets box_name"),
+        ({"archiver_attrs": {"passthrough": {"insert_job": "EVIL"}}}, "sets insert_job"),
+        ({"processor_attrs": {"annotations": {"Machine": "m"}}}, "sets Machine"),
+        ({"processor": "BAD NAME"}, "not JIL-name-shaped"),
+        ({"process_argv": ["a\nb"]}, "newline"),
+        ({"processor_attrs": {"bad-key!": 1}}, "not JIL-key-shaped"),
     ]
     for kwargs, message in refusals:
         builder = fresh()
@@ -229,7 +236,10 @@ def test_deployed_worker_runs_without_a_checkout(tmp_path: Path) -> None:
             timeout=30,
         )
 
-    for spec, message in (("site_handler", "MODULE:FACTORY"), ("site_handler:broken", "process")):
+    for spec, message in (
+        ("site_handler", "MODULE:FACTORY"),
+        ("site_handler:broken", "without a process method"),
+    ):
         refused = worker("process", "--handler", spec)
         assert refused.returncode == 2 and message in refused.stderr
     assert not (root / "ledger.sqlite3").exists()

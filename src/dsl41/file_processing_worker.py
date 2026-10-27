@@ -8,7 +8,9 @@ FACTORY is the job author's callable. It takes the root and returns the handler.
 The command needs the installed package and the handler's module, not a checkout.
 Exit codes follow CONTRACT.md "Activation is external": 0 the snapshot completed,
 1 the run stopped, 75 the role's lock was busy, 65 a refusal. A command line or a
-handler that cannot be loaded exits 2 before the run touches the root.
+handler that cannot be loaded exits 2 before the run touches the root. Exit 1 also
+covers a Python without dsl41 and any uncaught error; then the ledger holds no
+reason, and stderr carries the traceback.
 """
 
 from __future__ import annotations

@@ -31,10 +31,11 @@ What the workers promise to any schedule:
   Exit 65 (`EX_DATAERR`) means a refusal: corrupt, inconsistent or
   unsupported state that an operator must look at, whatever Python error
   surfaced it. The next run, however it is started, resumes.
-  Exit 2 means the command line or the `--handler` spec could not be loaded, or
-  the handler has no `process`; the worker exits before any claim (DL-411).
   (Exit codes and the `tmp/` removal below are Fable's slice-2 rulings, not
   the owner's.)
+  Exit 2 means the command line or the `--handler` spec could not be loaded, or
+  the handler has no `process`; the worker exits before any claim. This line is
+  DL-411's, the slice-4 ruling, neither Fable's nor the owner's.
 - A dead process leaves at most a stale `RUNNING` claim; the next processor run
   treats it as uncertain before anything else.
 

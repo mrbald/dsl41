@@ -109,13 +109,14 @@ add_file_processing_jobs(
 | `ARCHIVER` | `s(INBOX_FW)` | `archive` |
 | `PROCESSOR` | `s(ARCHIVER, 0)` | `process` |
 
-The call refuses with a `ValueError` before it adds a job when:
+The call refuses with a `ValueError`, and adds neither job, when:
 
 - `inbox_watcher` does not name an FW job already in the builder;
 - an argv list is empty;
 - a job name is taken, or the two names are equal;
 - the call is inside a `box()` context;
-- `archiver_attrs` or `processor_attrs` sets `job_type`, `box_name`, `machine`, `command` or `condition`.
+- `archiver_attrs` or `processor_attrs` sets `job_type`, `box_name`, `machine`, `command`, `condition`, `name` or a statement verb such as `insert_job`, at the top level or inside `passthrough` or `annotations`;
+- a name, an argv element or an attribute is one the builder refuses, such as a name with a space or an argv element with a newline.
 
 Pass other JIL attributes, such as `owner` or `std_out_file`, in `archiver_attrs` and `processor_attrs`.
 `archiver=` and `processor=` rename the two jobs.
@@ -134,7 +135,7 @@ The command needs dsl41 and your handler's module installed in that Python envir
 | Worker exit | Meaning |
 | --- | --- |
 | 0 | The selected snapshot completed. |
-| 1 | The run stopped; the ledger holds the reason, or stderr does for a busy ledger. |
+| 1 | The run stopped; the ledger holds the reason, or stderr does for a busy ledger. Exit 1 also covers a Python without dsl41 and any uncaught error; the ledger then holds no reason, so read stderr. |
 | 2 | The command line or the handler could not be loaded; nothing ran. |
 | 65 | A refusal: corrupt, inconsistent or unsupported state for an operator. |
 | 75 | The role's lock was busy; nothing ran. |

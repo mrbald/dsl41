@@ -24462,24 +24462,25 @@ relitigate an entry; append a new one.
 - DL-411 Slice 4 of DL-404's plan is built: one supported composition call and one packaged
   worker command (2026-10-27; src/dsl41/file_processing_dsl.py,
   src/dsl41/file_processing_worker.py, docs/authoring.md §1.1,
-  examples/file_processing/CONTRACT.md)
+  examples/file_processing/CONTRACT.md, examples/file_processing/estate.py)
   THE RULE. `dsl41.file_processing_dsl.add_file_processing_jobs(builder, *, inbox_watcher,
   machine, archive_argv, process_argv, archiver="ARCHIVER", processor="PROCESSOR",
   archiver_attrs=None, processor_attrs=None)` is the supported composition. It adds the
   archiver on `s(inbox_watcher)` and the processor on `s(archiver, 0)`, and nothing else. It
-  refuses with a ValueError, before it adds a job, a watcher that is not an existing FW job, an
-  empty argv, a taken or repeated job name, a call inside a `box()` context, and attrs that set
-  `job_type`, `box_name`, `machine`, `command` or `condition`. The packaged command is `python
-  -m dsl41.file_processing_worker archive|process --root ROOT --processor-id ID`; `process`
-  takes `--handler MODULE:FACTORY`, where `FACTORY(root)` returns the handler. The worker loads
-  the handler and checks its `process` before any I/O, and exits 2 when it cannot. A host needs
-  dsl41 and the handler's module installed, not a checkout. Slices 5 and 6 stay unbuilt.
+  refuses with a ValueError a watcher that is not an existing FW job, an empty argv, a taken or
+  repeated job name, a call inside a `box()` context, and an owned key (`job_type`, `box_name`,
+  `machine`, `command`, `condition`, `name` or a statement verb) in either attrs mapping or in
+  a dict inside it, such as `passthrough`. Both jobs render first, so a refusal adds neither.
+  The packaged command is `python -m dsl41.file_processing_worker archive|process --root ROOT
+  --processor-id ID`; `process` takes `--handler MODULE:FACTORY`, `FACTORY(root)` returning the
+  handler, loaded and checked for `process` before any I/O, or exit 2. A host needs dsl41 and
+  the handler's module, not a checkout. The example declares `estate()` (DL-410). Slices 5 and
+  6 stay unbuilt.
   THE REASON. The package shipped no worker command; the example's needed a checkout. Running
   `python -m dsl41.file_processing` would load the module twice, and the handler's result
-  classes would fail the processor's checks, so the command is a module of its own. A handler
-  that fails to load after a claim would leave work `UNKNOWN`; loading it first makes a
-  misconfiguration a usage error. The contract names the watcher and two jobs as the whole
-  scheduler surface, so the helper owns their conditions and refuses a box.
+  classes would fail the processor's checks. A handler that fails to load after a claim would
+  leave work `UNKNOWN`. The contract names the watcher and two jobs as the whole scheduler
+  surface, so the helper owns their records' conditions, placement and commands.
   REJECTED: a console script (a pyproject entry, and `python -m` names the interpreter the
   commands already name); building argv inside the helper (hides wrappers and policy flags).
 >>>>>>> f2c3cb3 (file processing slice 4: add_file_processing_jobs is the supported composition of the two jobs, and python -m dsl41.file_processing_worker is the packaged command with its handler loaded before any claim; the example estate declares estate() (DL-411))
