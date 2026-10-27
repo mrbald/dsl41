@@ -398,8 +398,11 @@ def _builder_from_module(module: Path) -> "CatalogBuilder":
     MODULE`, so an estate may import its sibling modules, at import or inside estate(). Nothing
     writes bytecode beside the source. The module is registered in sys.modules under a name no
     real module has, so code that looks itself up there (a dataclass under postponed
-    annotations) works. Afterwards the module and every module newly imported from its
-    directory leave sys.modules, so a later load in the same process imports its own siblings."""
+    annotations) works. Afterwards the module leaves sys.modules, and so does every module newly
+    imported through the directory's sys.path entry: a sibling file, or a sibling package and
+    its submodules. A later load in the same process then imports its own siblings. A module
+    found through another sys.path entry stays, even one below the directory, such as a
+    project's `.venv` or `src`."""
     import importlib.util
     import os
     import sys
@@ -438,7 +441,14 @@ def _builder_from_module(module: Path) -> "CatalogBuilder":
         sys.path.remove(str(directory))
         for name in set(sys.modules) - known:
             origin = getattr(sys.modules[name], "__file__", None)
-            if name == spec.name or (origin and Path(origin).resolve().is_relative_to(directory)):
+            top = directory / name.partition(".")[0]
+            if name == spec.name or (
+                origin is not None
+                and (
+                    Path(origin).resolve() == top.with_name(f"{top.name}.py")
+                    or Path(origin).resolve().is_relative_to(top)
+                )
+            ):
                 del sys.modules[name]
     if not isinstance(builder, CatalogBuilder):
         raise typer.Exit(
