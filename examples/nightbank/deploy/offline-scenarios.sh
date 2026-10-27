@@ -207,7 +207,7 @@ PYTHON
     start_engine
     ok 'residual refusal, uncertain force, retained engine exclusion and explicit incident containment'
 }
-# Definitions change through the release helper (DL-407): an added job, a
+# Definitions change through `dsl41 release` (DL-407, DL-412): an added job, a
 # changed one, a removal that leaves a ghost, and a rollback by the same path.
 # The last release has the inputs the lane started with.
 definition_probe() {
@@ -255,7 +255,7 @@ JIL
     [ "$RELEASE" = "$size-p3" ] || fail "the second rollback activated $RELEASE"
     release_teardown
     cli audit --estate-anchor "$ANCHOR"
-    ok 'definition add/change/remove/rollback through the helper; exact replay produced no duplicate effect'
+    ok 'definition add/change/remove/rollback through dsl41 release; exact replay produced no duplicate effect'
 }
 # Each phase can be resumed explicitly after a diagnosed harness failure (DL-389).
 use_estate() { # use_estate small|bank

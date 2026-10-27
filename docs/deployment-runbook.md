@@ -26,7 +26,9 @@ root. Run the `dsl41` commands that read or write the run root itself
 (`seal`, `audit`, `estate`, `supervise`, `journal`, `runs`) as the service
 account, for example with `sudo -u dsl41 -H`. Send control-socket commands
 (`query`, `sendevent`, `host`, `ui`) as yourself: the access map then names
-you in its receipts ([configure](#recipe-configure-an-estate)).
+you in its receipts ([configure](#recipe-configure-an-estate)). Run
+`dsl41 release` as the deployment identity
+([the job recipe](#recipe-add-change-or-remove-a-job)).
 
 The recipes name the launcher's configuration through these variables.
 Set them once per shell. The values are the example launcher's. `ESTATE`
@@ -50,7 +52,7 @@ Some blocks are marked as recipes in this file's source.
 hand path's seal and open, the readiness wait and the retirement's audit
 and list as written, against a synthetic estate, with the engine unit's
 `ExecStart=` in place of `systemctl start`.
-`tests/test_release_helper.py` runs the release helper against a stub
+`tests/test_release.py` runs `dsl41 release` against a stub
 engine, and the service drill runs it on a host.
 `tests/test_operator_recipes.py` also runs the sealed check and the
 torn-opening recipe where `jq` is installed. The service drill (§3's worked example) runs the service, hold,
@@ -104,9 +106,9 @@ storage                               owner and mode              written by
 /opt/dsl41/.venv -> .venvs/<id>      root                        explicit activation (§1, §7)
 /opt/dsl41/bin/dsl41-launch           root, 0755                  the installer; reviewed like code
 /etc/dsl41/nightbank-access.toml      dsl41, 0600                 the operator (§4)
-ESTATE_RELEASES/<name>                deployment identity; its    dsl41-release prepare (§0's job recipe)
+ESTATE_RELEASES/<name>                deployment identity; its    dsl41 release prepare (§0's job recipe)
                                       inputs read-only to all
-ACTIVE                                deployment identity         dsl41-release apply, or the installer
+ACTIVE                                deployment identity         dsl41 release apply, or the installer
                                                                   before the first start
 PROPERTIES                            readable by dsl41           the operator
 RUN_ROOT                              dsl41, 0700                 the engine, the supervisor, the wrappers
@@ -160,7 +162,7 @@ What has to happen?
 │
 ├── new JIL, properties or run options, and the history continues   TRANSITION
 │   ├── in the same run root                                         IN-PLACE TRANSITION
-│   │     dsl41-release apply: hold, drain, seal, start, verify (§0, §6a)
+│   │     dsl41 release apply: hold, drain, seal, start, verify (§0, §6a)
 │   └── in a fresh run root, same lineage and anchor                 PHYSICAL ROLL
 │         seal, audit, the open trigger, start (§6a, §7 row 2)
 │
@@ -204,7 +206,6 @@ install -o dsl41 -g dsl41 -m 0600 examples/nightbank/deploy/nightbank-access.tom
     /etc/dsl41/nightbank-access.toml
 install -m 0644 examples/nightbank/deploy/dsl41-engine.service \
     examples/nightbank/deploy/dsl41-supervisor.service /etc/systemd/system/
-install -m 0755 examples/nightbank/deploy/dsl41-release /opt/dsl41/bin/dsl41-release
 install -m 0440 examples/nightbank/deploy/dsl41-release.sudoers /etc/sudoers.d/dsl41-release
 visudo -cf /etc/sudoers.d/dsl41-release
 systemctl daemon-reload
@@ -226,7 +227,7 @@ systemctl enable dsl41-supervisor.service dsl41-engine.service
    CONFIGURATION block, and the run root in both units'
    `RequiresMountsFor=`. Run `systemctl daemon-reload` after a unit edit.
    Then prepare the first release as the deployment identity, with
-   `/opt/dsl41/bin/dsl41-release prepare NAME DIR`, and write NAME to
+   `/opt/dsl41/.venv/bin/dsl41 release prepare NAME DIR`, and write NAME to
    `ACTIVE`, a plain file the deployment identity owns. The launcher
    refuses to start without it (DL-407).
    `dsl41-launch --print` shows the command the engine unit will run. It
@@ -337,18 +338,21 @@ editing its block. Remove one by deleting its block. A job that a
 remaining condition still names is a lint error (L001).
 
 The change ships as a release on the application's train (§6; DL-407,
-DL-408). The release helper, `/opt/dsl41/bin/dsl41-release`, prepares the
-release, applies it in one window and rolls it back the same way. Run it
-as the deployment identity, `nbdeploy` in the example; the
+DL-408). `dsl41 release` prepares the release, applies it in one window
+and rolls it back the same way (DL-412). Run it as the deployment
+identity, `nbdeploy` in the example; the
 [packager's contract](site-package.md#5-ship-jil-releases-on-the-applications-train)
-gives that identity its grant. Type the helper's full path: it runs its
-service-account part through `sudo` by the path it was started as, and the
-grant names that path. Below, `NAME` is a release's name, one directory
-under `ESTATE_RELEASES`, and `JOB` is a job's name.
+gives that identity its grant. `sudo -u nbdeploy` gives no `PATH` to the
+runtime, so the commands below name `/opt/dsl41/.venv/bin/dsl41`. The
+verbs run their service-account part through `sudo` by the launcher's
+`DSL41` path, which the grant names, whatever path you typed. Run the
+window under `tmux` or `screen`, so a dropped connection does not end it.
+Below, `NAME` is a release's name, one directory under `ESTATE_RELEASES`,
+and `JOB` is a job's name.
 
 1. Commit the edit to the estate's repository and tag it. If it adds or
    removes a file, edit the release's `estate.toml` to match: the launcher
-   and the helper take the file list from it (DL-407).
+   and `dsl41 release` take the file list from it (DL-407).
 2. Before the window, check the new tag in a checkout of its own, with
    `ESTATE` pointing at that checkout. Fix every ERROR. The blocks take
    lint's and rehearse's `--timezone` and `--timezone-map` from the
@@ -371,41 +375,40 @@ dsl41 rehearse "$@" -p "$PROPERTIES"
    holds `estate.toml` and which the deployment identity can read:
 
 ```sh
-/opt/dsl41/bin/dsl41-release prepare NAME DIR
+cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release prepare NAME DIR
 ```
 
    Prepare copies `DIR` to `ESTATE_RELEASES/NAME` and makes its inputs
-   read-only. It lints and rehearses the release with the installed
-   runtime, the launcher's `ENVIRONMENT` and the site's `PROPERTIES`;
-   rehearse plays one day from now. It refuses the release with exit 2,
-   and removes it, when lint or rehearse exits nonzero, when the release
-   holds more jobs than the launcher's `MAX_JOBS`, or when the runtime's
-   command grace is above `MAX_GRACE_S`. That ceiling is the packager's
-   (site-package §5). A name is installed once, so a fixed release takes a
-   new name. After a runtime switch, apply refuses a release prepared
-   under another dsl41 version until
-   `/opt/dsl41/bin/dsl41-release prepare --requalify NAME` has run the same
-   checks again.
-3. In the window, apply the release. Never set
-   `DSL41_RELEASE_STOP_AFTER`: its two values, `seal-reply` and `seal`,
-   kill the helper on either side of recording the seal, for the service
-   drill only.
+   read-only. It lints the release with the installed runtime, the
+   launcher's `ENVIRONMENT` and the site's `PROPERTIES`, then rehearses it
+   one day from now. It refuses the release with exit 2 when lint or
+   rehearse exits nonzero, when the release holds more jobs than the
+   launcher's `MAX_JOBS`, or when the runtime's command grace is above
+   `MAX_GRACE_S`. That ceiling is the packager's (site-package §5). A
+   refused prepare installs nothing, so its name can be used again. A
+   prepared name is installed once, so a fixed release takes a new name.
+   After a runtime switch, apply refuses a release prepared under another
+   dsl41 version until `dsl41 release prepare --requalify NAME` has run
+   the same checks again. The same command checks a release installed
+   by hand, where it is.
+3. In the window, apply the release:
 
 ```sh
-/opt/dsl41/bin/dsl41-release apply NAME
+cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release apply NAME
 ```
 
-   The helper records each step before it acts, and takes them in this
-   order:
+   `dsl41 release apply` records each step before it acts, and takes them
+   in this order:
 
    1. It refuses unless the engine answers and NAME's files are the ones
       prepare checked.
    2. It holds the scheduled jobs.
-   3. It waits until no job is `STARTING`, `RUNNING` or `QUE_WAIT`.
+   3. It waits until no job is `STARTING`, `RUNNING` or `QUE_WAIT`, and
+      prints the jobs it waits for once a minute.
    4. It refuses when a job the release changes or removes is still armed
       or has a pending timer. Wait until it is not, or `DISARM` it, and
       apply again. The seal itself would let a changed latent job cross
-      with a recorded assumption (period-model §10.3); the helper does not.
+      with a recorded assumption (period-model §10.3); the apply does not.
    5. It seals from NAME's manifest, with the launcher's deployment
       options restated as `--next-*`.
    6. It writes NAME to `ACTIVE`.
@@ -415,30 +418,38 @@ dsl41 rehearse "$@" -p "$PROPERTIES"
    9. It releases only the holds it applied itself, and keeps a hold an
       operator took or released since. It writes NAME's receipt.
 
-   The helper sends a seal that the retry horizon refused again, under a
-   new request id, once the horizon it names has passed (period-model §9).
-   Three options bound the waits, in seconds:
+   A hold the apply takes starts the retry horizon (period-model §9). The
+   seal refuses inside it, so the apply waits it out and seals again under
+   a new request id. It prints one line for the wait. Three options bound
+   the waits, in seconds:
 
    | Option | Default | When it runs out |
    | --- | --- | --- |
-   | `--drain-timeout` | 600 | nothing is sealed. Exit 2 when the helper has released its holds; exit 3, with the apply recorded for `--resume`, when that release fails |
+   | `--drain-timeout` | 600 | nothing is sealed. Exit 2 when the apply has released its holds; exit 3, with the apply recorded for `resume`, when removing those holds fails |
    | `--horizon-timeout` | 300 | exit 2: the seal did not commit |
    | `--open-timeout` | 90 | exit 3: the apply stays recorded |
 
-4. Act on the helper's exit code. It prints one line that says why it
-   stopped.
+4. Act on the exit code. `apply`, `resume` and `rollback` print the cause
+   and the next command, one line each.
 
    | Exit | What it means | What you do |
    | --- | --- | --- |
-   | 0 | NAME is active in the next period. | Verify (step 5). |
-   | 2 | Refused, or the seal did not commit. Nothing was sealed and `ACTIVE` is as it was. The holds this invocation took are released, so a job a tick latched under one of them starts; no apply stays recorded. | Fix the cause the line names, and apply again. Files that need a change go in a new release under a new name. When the line names an apply already recorded, that apply stays: run `/opt/dsl41/bin/dsl41-release status` and resume it. |
-   | 3 | Stopped. | Run `/opt/dsl41/bin/dsl41-release status`. When it shows a recorded apply, it says what `apply --resume NAME` will do: fix the cause, then run `/opt/dsl41/bin/dsl41-release apply --resume NAME`. When it shows none, and NAME's latest receipt is this apply's, the apply completed and NAME is active. Otherwise nothing was sealed, and the holds this apply took were released before its record was cleared: fix the cause and apply again. |
-   | 4 | The seal's outcome is unknown. The apply is recorded with its request id. | Run `/opt/dsl41/bin/dsl41-release apply --resume NAME`. It reads the estate for that request id first, and retries under it, and under a new id only after a retry-horizon refusal. Do not seal by hand. |
+   | 0 | NAME is active in the next period, and every hold the apply took is released. | Verify (step 5). |
+   | 1 | NAME is active, and some holds the apply took stay on. Each is printed with its reason and the `OFF_HOLD` command that releases it. | Verify (step 5). Release each printed hold once it is safe. A hold another operator changed may be theirs: agree with them first. |
+   | 2 | Refused, or the seal did not commit. Nothing was sealed and `ACTIVE` is as it was. The holds the apply took are released, so a job a tick latched under one of them starts; no apply stays recorded, and NAME's `.release/` keeps a `refused-` receipt. | Fix the cause the line names, and apply again. Files that need a change go in a new release under a new name. When the line names an apply already recorded, that apply stays: run `dsl41 release status` and resume it. |
+   | 3 | Stopped. An interrupt or a lost session stops it the same way. | Run `dsl41 release status` and do what it says. It shows a recorded apply and what `dsl41 release resume` will do; fix the cause, then resume. With no apply recorded, its `last apply` line says whether the last apply completed or sealed nothing. |
+   | 4 | The seal's outcome is unknown. The apply is recorded with its request id, and the scheduled jobs stay held. | Run `dsl41 release resume`. It reads the estate for that request id first, and retries under it, and under a new id only after a retry-horizon refusal. Do not seal by hand. |
 
-   A new apply, and a rollback, refuse while an apply is recorded.
-5. Verify. `/opt/dsl41/bin/dsl41-release status` names the active release
-   and each release's latest receipt and its count of applies. An added
-   or changed job answers with the
+   A new apply, and a rollback, refuse while an apply is recorded. One
+   case differs: when the new period opened and its check failed (exit 3
+   at step 8), `dsl41 release resume` checks again, and
+   `dsl41 release rollback` takes the apply over. It releases that
+   apply's holds, writes a `rolled-back-` receipt with the problems,
+   clears the record, and applies the release the apply replaced, with
+   the exit codes above. `dsl41 release status` names both commands.
+5. Verify. `dsl41 release status` names the active release, whether an
+   engine answers, where a rollback goes, and how the last apply ended,
+   with each hold it kept. An added or changed job answers with the
    definition this period loaded:
 
 <!-- recipe: job-verify -->
@@ -458,16 +469,20 @@ dsl41 query status --job "$JOB" -S "$S"
 6. Roll back with the same window:
 
 ```sh
-/opt/dsl41/bin/dsl41-release rollback
+cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release rollback
 ```
 
    It applies the release that the active release's latest receipt names
-   as its previous one, with the exit codes of step 4. With no such
-   receipt, apply the earlier release by name.
+   as its previous one, with the exit codes of step 4, and prints that
+   target first. A second rollback therefore goes forward again: check the
+   target `dsl41 release status` names before you type it. A release
+   installed by hand, or applied without these verbs, has no receipt, so
+   rollback has no target: apply the earlier release by name, after
+   `dsl41 release prepare --requalify NAME` if it was never prepared.
 
-A host without the helper takes the same window by hand, in these
-steps. The hand path checks neither the ceiling nor the files prepare
-recorded.
+A host whose runtime predates `dsl41 release` takes the same window by
+hand, in these steps. The hand path checks neither the ceiling nor the
+files prepare recorded.
 
 1. Hold the scheduled jobs and let running work finish (§6, steps 1
    and 2).
@@ -500,7 +515,7 @@ dsl41 seal --run-root "$RUN_ROOT" --estate-anchor "$ESTATE_ANCHOR" "$@" -p "$PRO
 systemctl start dsl41-engine.service
 ```
 
-6. Verify, as step 5 of the helper's path does.
+6. Verify, as step 5 of the `dsl41 release` path does.
 7. Release the holds with `OFF_HOLD`.
 
 ### Recipe: stop, restart, seal and recover
@@ -1171,7 +1186,7 @@ The UI dependency floors are tested pairs; do not force older versions.
 /opt/dsl41/.venv         the explicitly activated symlink (§1)
 /srv/dsl41/nightbank/releases/<name>/
                           one release: its JIL, properties layers and
-                          estate.toml, prepared by dsl41-release and
+                          estate.toml, prepared by dsl41 release and
                           never changed (§0's job recipe)
 /srv/dsl41/nightbank/active
                           the plain file that names the active release
@@ -2083,7 +2098,7 @@ explicit `FORCE_STARTJOB`s, which are journaled.
 ## 6. JIL rollout — updating the estate
 
 An estate changes in one of two cycles (DL-408). The application train
-is the common one: the release helper seals a release into the running
+is the common one: `dsl41 release apply` seals a release into the running
 estate and opens it in place, in the same run root (DL-133, DL-134,
 DL-407). [The job recipe](#recipe-add-change-or-remove-a-job) gives its
 steps, and §6a gives the verbs under them. A boundary closes the running
@@ -2163,7 +2178,7 @@ is for swapping files, not for finding problems.
    procedure; an empty LIST does not prove completion. A job left running
    across a new baseline is a process the new catalog knows nothing about.
 5. **Name the release**: as the deployment identity, prepare it with
-   `/opt/dsl41/bin/dsl41-release prepare NAME DIR`, and write NAME to
+   `/opt/dsl41/.venv/bin/dsl41 release prepare NAME DIR`, and write NAME to
    `ACTIVE`, as the service recipe's step 4 does. The launcher reads only
    the release `ACTIVE` names.
 6. **New run root**: `dsl41 run ... --run-root /srv/dsl41/runs/<new-id>`,
@@ -2719,11 +2734,11 @@ speaks to the supervisor, not the engine, and leaves no WAL record.
 
 | scenario | procedure |
 | --- | --- |
-| initial JIL release | `dsl41-release prepare NAME DIR`, then write NAME to `ACTIVE` before the first start; native genesis opens period 1, and there is no opening seal (§3; DL-407) |
-| incremental change, emergency hotfix mid-cycle | `dsl41-release prepare NAME DIR`, then `dsl41-release apply NAME` ([the job recipe](#recipe-add-change-or-remove-a-job)): seal, classified diff, open under the new catalog (§6a; DL-131, DL-133). The R-gate refuses only while something in the changed closure is live. Tethered mode drains, because a transition is a restart |
-| rollback | `dsl41-release rollback`: a transition back to the previous release (§6a). A fresh run root is an infrastructure act (§6) |
-| calendar or holiday change | `dsl41-release prepare NAME DIR`, then `dsl41-release apply NAME`: a catalog change, so firing dates move, the hash moves and §6a applies |
-| properties or placeholder change | `dsl41-release prepare NAME DIR`, then `dsl41-release apply NAME`, for a release whose own layer changes: a catalog change, because it changes the post-placeholder JIL, so the hash moves and §6a applies |
+| initial JIL release | `dsl41 release prepare NAME DIR`, then write NAME to `ACTIVE` before the first start; native genesis opens period 1, and there is no opening seal (§3; DL-407) |
+| incremental change, emergency hotfix mid-cycle | `dsl41 release prepare NAME DIR`, then `dsl41 release apply NAME` ([the job recipe](#recipe-add-change-or-remove-a-job)): seal, classified diff, open under the new catalog (§6a; DL-131, DL-133). The R-gate refuses only while something in the changed closure is live. Tethered mode drains, because a transition is a restart |
+| rollback | `dsl41 release rollback`: a transition back to the previous release (§6a). A fresh run root is an infrastructure act (§6) |
+| calendar or holiday change | `dsl41 release prepare NAME DIR`, then `dsl41 release apply NAME`: a catalog change, so firing dates move, the hash moves and §6a applies |
+| properties or placeholder change | `dsl41 release prepare NAME DIR`, then `dsl41 release apply NAME`, for a release whose own layer changes: a catalog change, because it changes the post-placeholder JIL, so the hash moves and §6a applies |
 | affinity role remap | not built: the `route` verb is specified in period-model §2.2 |
 
 ### Running the cycle

@@ -1,11 +1,12 @@
-"""DL-407: the nightbank release helper, `examples/nightbank/deploy/dsl41-release`.
+"""DL-407, DL-412: the release train's verbs, `dsl41 release prepare|apply|resume|rollback|status`,
+and the hidden `dsl41 release service` they run through sudo.
 
-Each test installs the shipped helper beside a copy of the shipped launcher, with only the
-launcher's CONFIGURATION values replaced and the helper's interpreter line pointed at this
-interpreter. `sudo` and `systemctl` are stubs on PATH, and the launcher's dsl41 is a stub
-engine that keeps its state in one JSON file: it answers `query`, `sendevent` and `seal`,
-and hands `estate args`, `lint` and `rehearse` to this build's dsl41. The service drill
-runs the same helper against systemd and a real engine.
+Each test lays out a site the way offline-installation installs one: a runtime under
+<prefix>/.venvs/, here a venv that imports this build, and a copy of the shipped launcher at
+<prefix>/bin/dsl41-launch with only its CONFIGURATION values replaced. `sudo` and `systemctl`
+are stubs on PATH, and the launcher's DSL41 is a stub engine that keeps its state in one JSON
+file: it answers `query`, `sendevent` and `seal`, and hands `release`, `lint` and `rehearse` to
+the runtime's dsl41. The service drill runs the same verbs against systemd and a real engine.
 """
 
 from __future__ import annotations
@@ -13,22 +14,32 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import pwd
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import time
+import venv
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from test_nightbank_deploy import DEPLOY, NB, _configured, _night
+from test_nightbank_deploy import NB, _configured, _night
 
-HELPER = DEPLOY / "dsl41-release"
-DSL41 = Path(sys.executable).with_name("dsl41")
 SMALL = NB / "estate" / "small"
+ME = pwd.getpwuid(os.geteuid()).pw_name
+#: the runtime's entry, with the test-only hook set from its first argument (DL-412)
+ENTRY = """import sys
+from dsl41 import release
+from dsl41.cli import app
+release.STOP_AFTER = sys.argv[1] or None
+app(args=sys.argv[2:], prog_name="dsl41")
+"""
 
 #: the stub engine: its state is state.json beside it (see the module docstring)
 STUB_DSL41 = r"""
@@ -39,11 +50,13 @@ HERE = Path(__file__).resolve().parent
 STATE = HERE / "state.json"
 REAL = os.environ["RELEASE_TEST_DSL41"]
 args = sys.argv[1:]
-if args[:2] == ["estate", "args"] or args[:1] in (["lint"], ["rehearse"]):
+if args[:1] in (["release"], ["lint"], ["rehearse"]):
+    with (HERE / "forwarded.log").open("a") as log:
+        log.write(" ".join(args[:3]) + "\n")
     forced = HERE / f"{args[0]}.exit"
     if forced.exists():
         sys.exit(int(forced.read_text()))
-    os.execv(REAL, [REAL, *args])
+    os.execv(REAL, [REAL, "-m", "dsl41", *args])
 state = json.loads(STATE.read_text())
 state["calls"].append(args)
 
@@ -147,14 +160,16 @@ if args[0] == "seal":
             sys.exit(0)  # an exact retry of a committed boundary is answered from it (DL-151)
     outcome = state["seal_outcomes"].pop(0) if state["seal_outcomes"] else "commit"
     state["seal_requests"].append(rid)
-    if outcome == "horizon":
+    if outcome in ("horizon", "horizon-unworded"):
         save()
-        print(
+        error = (
             "the last externally requested attempt was 59.500s ago and the closing period's"
             " retry_horizon_us is 60000000: a retry composed under this baseline can no"
-            " longer be answered after the boundary.",
-            file=sys.stderr,
+            " longer be answered after the boundary. Wait it out, or seal with --force-seal"
         )
+        if outcome == "horizon-unworded":
+            error = "a retry horizon"
+        print(json.dumps({"ok": False, "code": "seal_retry_horizon", "error": error}))
         sys.exit(2)
     if outcome in ("refuse", "unknown"):
         save()
@@ -238,7 +253,7 @@ def _script(path: Path, body: str) -> None:
 
 
 class Site:
-    """A layout the helper releases into, with the stub engine running period 1."""
+    """A site the verbs release into, with the stub engine running period 1."""
 
     def __init__(self, base: Path) -> None:
         self.base = base
@@ -246,12 +261,14 @@ class Site:
         self.active = base / "active"
         self.root = base / "runs" / "nb"
         self.stub = base / "stub"
-        bin_dir = base / "bin"
-        for path in (bin_dir, self.stub, base / "path", self.root):
+        self.prefix = base / "opt"
+        for path in (self.prefix / "bin", self.stub, base / "path", self.root):
             path.mkdir(parents=True)
+        self.python = _runtime(self.prefix / ".venvs" / "rt")
         shutil.copytree(SMALL, self.releases / "r1")
         self.active.write_text("r1\n")
-        launcher = _configured(
+        self.launcher = self.prefix / "bin" / "dsl41-launch"
+        _configured(
             base,
             DSL41=str(self.stub / "dsl41"),
             RUN_ROOT=str(self.root),
@@ -259,12 +276,8 @@ class Site:
             ESTATE_RELEASES=str(self.releases),
             ACTIVE=str(self.active),
             PROPERTIES=str(_night(base)),
-        )
-        launcher.rename(bin_dir / "dsl41-launch")
-        text = HELPER.read_text().split("\n", 1)[1]
-        self.helper = bin_dir / "dsl41-release"
-        self.helper.write_text(f"#!{sys.executable} -I\n{text}")
-        self.helper.chmod(0o755)
+            SERVICE_ACCOUNT=ME,
+        ).rename(self.launcher)
         _script(self.stub / "dsl41", STUB_DSL41)
         _script(base / "path" / "systemctl", STUB_SYSTEMCTL)
         _script(base / "path" / "sudo", STUB_SUDO)
@@ -320,20 +333,28 @@ class Site:
     def edit(self, **values: Any) -> None:
         self.save(self.state() | values)
 
-    def run(
-        self, *args: str, env: dict[str, str] | None = None
-    ) -> subprocess.CompletedProcess[str]:
-        environ = {
-            **{
-                key: value for key, value in os.environ.items() if key != "DSL41_RELEASE_STOP_AFTER"
-            },
+    def environ(self, **more: str) -> dict[str, str]:
+        return {
+            **os.environ,
             "PATH": f"{self.base / 'path'}:{os.environ['PATH']}",
-            "RELEASE_TEST_DSL41": str(DSL41),
+            "RELEASE_TEST_DSL41": str(self.python),
             "RELEASE_TEST_SUDO_LOG": str(self.base / "sudo.log"),
-            **(env or {}),
+            **more,
         }
+
+    def command(self, *args: str, stop: str | None = None) -> list[str]:
+        """`dsl41 release ARGS` on the site's runtime, the test-only hook set to STOP."""
+        return [str(self.python), "-c", ENTRY, stop or "", "release", *args]
+
+    def run(
+        self, *args: str, stop: str | None = None, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [str(self.helper), *args], capture_output=True, text=True, timeout=300, env=environ
+            self.command(*args, stop=stop),
+            capture_output=True,
+            text=True,
+            timeout=300,
+            env=self.environ(**(env or {})),
         )
 
     def source(self, name: str, *, add_job: bool = False, change_job: bool = False) -> Path:
@@ -372,11 +393,25 @@ class Site:
 
     def stub_cli(self, *args: str) -> None:
         """The stub engine's CLI, as an operator runs it."""
-        env = {**os.environ, "RELEASE_TEST_DSL41": str(DSL41)}
+        env = {**os.environ, "RELEASE_TEST_DSL41": str(self.python)}
         subprocess.run([str(self.stub / "dsl41"), *args], check=True, env=env, capture_output=True)
+
+    def sudo_log(self) -> list[str]:
+        """What ran through sudo, the stub engine's path shortened to `dsl41`."""
+        text = (self.base / "sudo.log").read_text()
+        return text.replace(str(self.stub / "dsl41"), "dsl41").splitlines()
 
     def seals(self) -> list[list[str]]:
         return [call for call in self.state()["calls"] if call[0] == "seal"]
+
+
+def _runtime(path: Path) -> Path:
+    """An installed runtime's stand-in at PATH: a venv that imports this build; its python."""
+    venv.EnvBuilder(symlinks=True, with_pip=False).create(path)
+    (site_packages,) = path.glob("lib/python*/site-packages")
+    entries = [entry for entry in sys.path if entry and Path(entry).is_dir()]
+    (site_packages / "dsl41_test.pth").write_text("\n".join(entries) + "\n")
+    return path / "bin" / "python"
 
 
 def _job(job_type: str, *, box: str | None = None, on_hold: bool = False) -> dict[str, Any]:
@@ -425,42 +460,64 @@ def test_prepare_installs_a_read_only_release_with_its_qualification(site: Site)
     assert not os.access(release / "global.jil", os.W_OK)
     assert not os.access(release, os.W_OK)
     assert os.access(release / ".release", os.W_OK)
-    # the check ran as the service account, through the helper's own service mode
-    assert (site.base / "sudo.log").read_text() == f"{site.helper} service check v2\n"
+    # the check ran as the service account, through the launcher's DSL41
+    assert site.sudo_log() == ["dsl41 release service check v2"]
 
 
 def test_prepare_refuses_a_name_that_exists_and_a_source_without_a_manifest(site: Site) -> None:
-    refused = site.run("prepare", "r1", str(site.source("again")))
+    """A prepared name is installed once; a name installed by hand points at --requalify."""
+    site.prepared("v1")
+    refused = site.run("prepare", "v1", str(site.source("again")))
     assert refused.returncode == 2
-    assert f"{site.releases / 'r1'} exists" in refused.stderr
+    assert f"{site.releases / 'v1'} is prepared already" in refused.stderr
+    refused = site.run("prepare", "r1", str(site.source("again2")))
+    assert refused.returncode == 2
+    assert f"{site.releases / 'r1'} exists and is not prepared" in refused.stderr
+    assert "`dsl41 release prepare --requalify r1`" in refused.stderr
     empty = site.base / "empty"
     empty.mkdir()
     refused = site.run("prepare", "v9", str(empty))
     assert refused.returncode == 2 and "holds no estate.toml" in refused.stderr
     for name in ("../x", ".hidden", "a/b", "v9.new"):
         refused = site.run("prepare", name, str(site.source("other" + str(len(name)))))
-        assert refused.returncode == 2 and "is not one release name" in refused.stderr
-    assert sorted(path.name for path in site.releases.iterdir()) == ["r1"]
+        assert refused.returncode == 2 and "is not a release name" in refused.stderr
+    assert sorted(path.name for path in site.releases.iterdir()) == ["r1", "v1"]
+
+
+def test_prepare_names_its_missing_argument(site: Site) -> None:
+    """DL-412: a usage error names the argument it lacks."""
+    missing = site.run("prepare", "v2")
+    assert missing.returncode == 2
+    assert "SOURCE_DIR" in missing.stderr and "unless --requalify" in missing.stderr
+    both = site.run("prepare", "--requalify", "v2", str(site.source("v2")))
+    assert both.returncode == 2 and "--requalify takes no SOURCE_DIR" in both.stderr
+    nothing = site.run("apply")
+    assert nothing.returncode == 2 and "Missing argument" in nothing.stderr
 
 
 @pytest.mark.parametrize(
     ("values", "says"),
     [
-        ({"MAX_JOBS": "81"}, "it holds 82 jobs, above MAX_JOBS=81"),
-        ({"MAX_GRACE_S": "5"}, "the runtime's command grace 10.0s is above MAX_GRACE_S=5"),
+        ({"MAX_JOBS": "81"}, "it holds 82 jobs, above the site's ceiling of 81 (MAX_JOBS)."),
+        (
+            {"MAX_GRACE_S": "5"},
+            "the runtime's command grace, 10 s, is above the site's MAX_GRACE_S, 5 s.",
+        ),
     ],
 )
 def test_prepare_refuses_a_release_above_the_launchers_ceiling(
     site: Site, values: dict[str, str], says: str
 ) -> None:
-    launcher = site.base / "bin" / "dsl41-launch"
-    text = launcher.read_text()
+    text = site.launcher.read_text()
     for key, value in values.items():
         text = re.sub(rf"^{key}=\d+$", f"{key}={value}", text, count=1, flags=re.M)
-    launcher.write_text(text)
+    site.launcher.write_text(text)
     refused = site.run("prepare", "v2", str(site.source("v2")))
     assert refused.returncode == 2, refused.stderr
     assert says in refused.stderr
+    assert "nothing is installed under v2, so the name is free again." in refused.stderr
+    if "MAX_GRACE_S" in values:
+        assert "ask the site package's owner" in refused.stderr
     assert not (site.releases / "v2").exists()
 
 
@@ -471,6 +528,20 @@ def test_prepare_refuses_a_release_lint_or_rehearse_refuses(site: Site, verb: st
     assert refused.returncode == 2
     assert f"{verb} exited 1" in refused.stderr
     assert not (site.releases / "v2").exists()
+    # a lint that fails runs no rehearse, so a lowering error prints once (DL-412)
+    forwarded = (site.stub / "forwarded.log").read_text().splitlines()
+    assert [line.split()[0] for line in forwarded].count("rehearse") == (verb == "rehearse")
+
+
+def test_prepare_refuses_a_release_that_holds_a_symlink(site: Site) -> None:
+    """DL-412: prepare's copy holds no symlink, so the service side refuses one in place."""
+    raw = site.releases / "raw"
+    shutil.copytree(SMALL, raw)
+    (raw / "link.jil").symlink_to(raw / "global.jil")
+    refused = site.run("prepare", "--requalify", "raw")
+    assert refused.returncode == 2 and "raw holds symlinks: link.jil." in refused.stderr
+    assert "raw stays unprepared." in refused.stderr
+    assert not (raw / ".release" / "prepared.json").exists()
 
 
 # -------------------------------------------------------------------- apply
@@ -501,6 +572,9 @@ def test_apply_holds_drains_seals_selects_starts_verifies_and_releases_its_own_h
     assert [hold["job"] for hold in receipt["holds"]] == ["NB_B", "NB_FREE_C"]
     assert receipt["released"] == ["NB_B", "NB_FREE_C"] and receipt["kept"] == []
     assert (site.releases / "v2" / ".release" / f"applied-{receipt['request_id']}.json").exists()
+    assert receipt["outcome"] == "applied" and receipt["actor"].startswith(f"{ME}@")
+    assert "holds taken: NB_B, NB_FREE_C." in done.stderr
+    assert done.stderr.endswith("dsl41 release: v2 is active in period 2.\n")
     assert seal[:5] == [
         "seal",
         "--run-root",
@@ -518,16 +592,17 @@ def test_apply_holds_drains_seals_selects_starts_verifies_and_releases_its_own_h
         "localhost",
         "--next-machine-policy",
     ]
-    assert tail[-4:] == ["--claimed-actor", "os/dsl41", "--request-id", receipt["request_id"]]
+    # the service side claims the service account's actor itself (DL-412)
+    assert tail[-4:] == ["--claimed-actor", f"os/{ME}", "--request-id", receipt["request_id"]]
     assert ["start", "dsl41-engine.service"] in state["systemctl"]
     rid = receipt["request_id"]
-    assert (site.base / "sudo.log").read_text().splitlines()[1:] == [
-        f"{site.helper} service changes r1 v2",
-        f"{site.helper} service seal v2 {rid} os/dsl41",
-        f"{site.helper} service committed {rid}",
+    assert site.sudo_log()[1:] == [
+        "dsl41 release service changes r1 v2",
+        f"dsl41 release service seal v2 {rid}",
+        f"dsl41 release service committed {rid}",
         "systemctl start dsl41-engine.service",
-        f"{site.helper} service pins {rid}",
-        *(f"{site.helper} service holds {hold['job']}" for hold in receipt["holds"]),
+        f"dsl41 release service pins {rid}",
+        *(f"dsl41 release service holds {hold['job']}" for hold in receipt["holds"]),
     ]
 
 
@@ -541,7 +616,7 @@ def test_a_held_job_a_tick_latched_is_released(site: Site) -> None:
     state["jobs"]["NB_FREE_C"]["state_rev"] += 1
     state["jobs"]["NB_FREE_C"]["armed"] = True
     site.save(state)
-    resumed = site.run("apply", "--resume", "v2")
+    resumed = site.run("resume")
     assert resumed.returncode == 0, resumed.stderr
     receipt = site.receipt("v2")
     assert receipt["released"] == ["NB_B", "NB_FREE_C"] and receipt["kept"] == []
@@ -557,7 +632,7 @@ def test_a_pending_hold_is_sent_again_under_its_id_on_resume(site: Site) -> None
     assert record is not None and record["step"] == "started"
     (pending,) = [entry for entry in record["holds"] if entry["job"] == "NB_FREE_C"]
     assert pending["state"] == "pending"
-    resumed = site.run("apply", "--resume", "v2")
+    resumed = site.run("resume")
     assert resumed.returncode == 0, resumed.stderr
     holds = [
         call[call.index("--request-id") + 1]
@@ -597,7 +672,7 @@ def test_a_hold_that_moved_no_revision_is_a_no_op_and_never_released(site: Site)
     state = site.state()
     state["jobs"]["NB_FREE_C"]["on_hold"] = True  # an operator's first hold
     site.save(state)
-    resumed = site.run("apply", "--resume", "v2")
+    resumed = site.run("resume")
     assert resumed.returncode == 0, resumed.stderr
     assert ["OFF_HOLD", "NB_FREE_C"] not in site.state()["sent"]
     assert site.receipt("v2")["released"] == ["NB_B"]
@@ -618,12 +693,22 @@ def test_an_operators_release_and_rehold_after_the_helpers_hold_is_kept(site: Si
     assert site.run("apply", "v2").returncode == 4
     for verb in ("OFF_HOLD", "ON_HOLD"):
         site.stub_cli("sendevent", verb, "-J", "NB_FREE_C", "-S", "x")
-    resumed = site.run("apply", "--resume", "v2")
-    assert resumed.returncode == 0, resumed.stderr
+    resumed = site.run("resume")
+    # done, with a hold kept: exit 1, the hold named with the command that takes it off
+    assert resumed.returncode == 1, resumed.stderr
     receipt = site.receipt("v2")
     assert receipt["released"] == ["NB_B"] and receipt["kept"] == ["NB_FREE_C"]
-    assert "hold of NB_FREE_C kept: its hold moved since, by request OFF_HOLD" in resumed.stderr
+    assert (
+        "NB_FREE_C stays on hold: another request changed its hold after this apply held it"
+        " (OFF_HOLD" in resumed.stderr
+    )
+    assert (
+        "that hold may be another operator's; agree with them before you release it:"
+        f" `dsl41 sendevent OFF_HOLD -J NB_FREE_C -S {site.root}/control.sock`." in resumed.stderr
+    )
     assert site.state()["jobs"]["NB_FREE_C"]["on_hold"] is True
+    shown = site.run("status").stdout
+    assert "  NB_FREE_C stays on hold: another request changed its hold" in shown
 
 
 def test_a_hold_moved_by_noexec_and_set_again_by_an_operator_is_kept(site: Site) -> None:
@@ -635,11 +720,11 @@ def test_a_hold_moved_by_noexec_and_set_again_by_an_operator_is_kept(site: Site)
     assert site.run("apply", "v2").returncode == 4
     for verb in ("ON_NOEXEC", "OFF_NOEXEC", "ON_HOLD"):
         site.stub_cli("sendevent", verb, "-J", "NB_FREE_C", "-S", "x")
-    resumed = site.run("apply", "--resume", "v2")
-    assert resumed.returncode == 0, resumed.stderr
+    resumed = site.run("resume")
+    assert resumed.returncode == 1, resumed.stderr
     receipt = site.receipt("v2")
     assert receipt["released"] == ["NB_B"] and receipt["kept"] == ["NB_FREE_C"]
-    assert "its hold moved since, by request ON_NOEXEC" in resumed.stderr
+    assert "after this apply held it (ON_NOEXEC" in resumed.stderr
     assert site.state()["jobs"]["NB_FREE_C"]["on_hold"] is True
 
 
@@ -649,7 +734,7 @@ def test_a_hold_resent_and_refused_is_settled_by_the_log(site: Site) -> None:
     site.prepared("v2")
     site.edit(send_unknown=["NB_FREE_C"], refuse_resend=["NB_FREE_C"])
     assert site.run("apply", "v2").returncode == 3
-    resumed = site.run("apply", "--resume", "v2")
+    resumed = site.run("resume")
     assert resumed.returncode == 0, resumed.stderr
     (entry,) = [hold for hold in site.receipt("v2")["holds"] if hold["job"] == "NB_FREE_C"]
     assert entry["state"] == "released" and entry["rev"] == 4
@@ -660,7 +745,7 @@ def test_a_release_resent_and_refused_is_settled_by_the_log(site: Site) -> None:
     site.prepared("v2")
     site.edit(release_outcomes={"NB_FREE_C": [4]}, refuse_resend=["NB_FREE_C"])
     assert site.run("apply", "v2").returncode == 3
-    resumed = site.run("apply", "--resume", "v2")
+    resumed = site.run("resume")
     assert resumed.returncode == 0, resumed.stderr
     assert site.receipt("v2")["released"] == ["NB_B", "NB_FREE_C"]
     assert site.state()["sent"].count(["OFF_HOLD", "NB_FREE_C"]) == 1
@@ -669,8 +754,12 @@ def test_a_release_resent_and_refused_is_settled_by_the_log(site: Site) -> None:
 @pytest.mark.parametrize(
     ("verb", "says", "state"),
     [
-        ("ON_HOLD", "the engine has not decided the hold of NB_FREE_C", "pending"),
-        ("OFF_HOLD", "the engine has not decided the release of NB_FREE_C", "releasing"),
+        ("ON_HOLD", "the engine has not decided the hold of NB_FREE_C yet", "pending"),
+        (
+            "OFF_HOLD",
+            "the engine has not decided the release of NB_FREE_C yet",
+            "releasing",
+        ),
     ],
 )
 def test_a_resend_whose_first_send_the_log_shows_undecided_stops_with_its_record(
@@ -681,7 +770,7 @@ def test_a_resend_whose_first_send_the_log_shows_undecided_stops_with_its_record
     site.prepared("v2")
     site.edit(undecided={verb: ["NB_FREE_C"]}, refuse_resend=["NB_FREE_C"])
     assert site.run("apply", "v2").returncode == 3
-    stopped = site.run("apply", "--resume", "v2")
+    stopped = site.run("resume")
     assert stopped.returncode == 3, stopped.stderr
     assert f"{says}; resume once it answers" in stopped.stderr
     record = site.record()
@@ -713,11 +802,18 @@ def test_a_release_rejected_three_times_is_kept_with_its_reason(site: Site) -> N
     site.prepared("v2")
     site.edit(release_outcomes={"NB_FREE_C": [3, 3, 3]})
     done = site.run("apply", "v2")
-    assert done.returncode == 0, done.stderr
+    assert done.returncode == 1, done.stderr
     receipt = site.receipt("v2")
     assert receipt["released"] == ["NB_B"] and receipt["kept"] == ["NB_FREE_C"]
     (entry,) = [hold for hold in receipt["holds"] if hold["job"] == "NB_FREE_C"]
-    assert entry["reason"] == "OFF_HOLD exited 3: it moved"
+    assert entry["reason"] == "the engine did not release it (OFF_HOLD exited 3: it moved)"
+    assert entry["kept_because"] == "rejected"
+    assert (
+        "NB_FREE_C stays on hold: the engine did not release it (OFF_HOLD exited 3: it moved)."
+        in done.stderr
+    )
+    assert "release it once it is safe: `dsl41 sendevent OFF_HOLD -J NB_FREE_C" in done.stderr
+    assert done.stderr.endswith("dsl41 release: v2 is active in period 2.\n")
 
 
 def test_a_release_with_no_decision_stops_and_resume_resends_it_under_its_id(
@@ -731,7 +827,7 @@ def test_a_release_with_no_decision_stops_and_resume_resends_it_under_its_id(
     assert record is not None and record["step"] == "verified"
     (entry,) = [hold for hold in record["holds"] if hold["job"] == "NB_FREE_C"]
     assert entry["state"] == "releasing"
-    resumed = site.run("apply", "--resume", "v2")
+    resumed = site.run("resume")
     assert resumed.returncode == 0, resumed.stderr
     offs = [
         call[call.index("--request-id") + 1]
@@ -748,7 +844,7 @@ def test_a_refused_hold_is_rejected_and_refuses_the_apply(site: Site) -> None:
     site.edit(refuse_send=["NB_FREE_C"])
     refused = site.run("apply", "v2")
     assert refused.returncode == 2, refused.stderr
-    assert "the hold of NB_FREE_C was refused: refused: ON_HOLD NB_FREE_C" in refused.stderr
+    assert "the engine refused to hold NB_FREE_C: refused: ON_HOLD NB_FREE_C" in refused.stderr
     assert site.record() is None and site.active.read_text() == "r1\n"
     assert site.state()["sent"] == [["ON_HOLD", "NB_B"], ["OFF_HOLD", "NB_B"]]
 
@@ -760,10 +856,20 @@ def test_a_seal_that_does_not_commit_promotes_nothing_and_releases_the_holds(
     site.edit(seal_outcomes=["refuse"])
     refused = site.run("apply", "v2")
     assert refused.returncode == 2, refused.stderr
-    assert "the seal did not commit" in refused.stderr
+    assert "the seal did not commit; its refusal is above." in refused.stderr
+    assert "v2 is not applied; nothing was sealed, and ACTIVE still names r1." in refused.stderr
+    assert "this apply's holds are released: NB_B, NB_FREE_C;" in refused.stderr
     assert site.active.read_text() == "r1\n"
     assert site.record() is None
     assert not (site.releases / "v2" / ".release" / "latest").exists()
+    # a refused apply leaves its receipt, and status says how it ended (DL-412)
+    (path,) = (site.releases / "v2" / ".release").glob("refused-*.json")
+    receipt = json.loads(path.read_text())
+    assert receipt["outcome"] == "refused" and receipt["released"] == ["NB_B", "NB_FREE_C"]
+    assert receipt["reason"] == ["the seal did not commit; its refusal is above."]
+    shown = site.run("status").stdout
+    assert "last apply: v2 over r1, started " in shown
+    assert ": refused, and nothing was sealed: the seal did not commit;" in shown
     state = site.state()
     assert [verb for verb, _ in state["sent"]] == ["ON_HOLD", "ON_HOLD", "OFF_HOLD", "OFF_HOLD"]
     assert ["start", "dsl41-engine.service"] not in state["systemctl"]
@@ -787,18 +893,23 @@ def test_an_unknown_seal_keeps_its_record_and_resume_reads_the_estate_then_retri
     record = site.record()
     assert record is not None and record["step"] == "sealing"
     request_id = record["request_id"]
-    assert record["seal_actor"] == "os/dsl41"
-    assert "retries under that id" in unknown.stderr
+    assert record["seal_actor"] == f"os/{ME}"
+    assert "the seal's outcome is unknown: it exited 4" in unknown.stderr
+    assert "the scheduled jobs stay on hold, and the engine may have exited." in unknown.stderr
+    assert "sends the seal again only under that id." in unknown.stderr
+    assert "ss6a" not in unknown.stderr and "step" not in unknown.stderr
     assert site.active.read_text() == "r1\n"
     shown = site.run("status")
-    assert f"at step sealing, request id {request_id}" in shown.stdout
-    assert f"read the estate for request id {request_id}" in shown.stdout
-    # a plain apply is refused while one is recorded, and so is a resume of another name
+    assert "recorded apply: v2 over r1, started " in shown.stdout
+    assert f"ask the estate whether the seal under request id {request_id}" in shown.stdout
+    assert "  holds taken by this apply: NB_B, NB_FREE_C." in shown.stdout
+    assert "request id None" not in shown.stdout
+    # a plain apply and a rollback are refused while one is recorded before its period opened
     again = site.run("apply", "v2")
-    assert again.returncode == 2 and "apply --resume v2" in again.stderr
-    other = site.run("apply", "--resume", "r1")
-    assert other.returncode == 2 and "the recorded apply is of v2, not r1" in other.stderr
-    resumed = site.run("apply", "--resume", "v2")
+    assert again.returncode == 2 and "`dsl41 release resume` to finish it" in again.stderr
+    back = site.run("rollback")
+    assert back.returncode == 2 and "its new period has not opened" in back.stderr
+    resumed = site.run("resume")
     assert resumed.returncode == 0, resumed.stderr
     assert site.state()["seal_requests"] == [request_id, request_id]
     assert site.receipt("v2")["request_id"] == request_id
@@ -810,11 +921,11 @@ def test_a_seal_committed_under_another_actor_is_read_not_sent_again(site: Site)
     a collision, exit 2. The resume reads the estate and never sends it."""
     site.prepared("v2")
     site.edit(actor="os/someone-else")
-    killed = site.run("apply", "v2", env={"DSL41_RELEASE_STOP_AFTER": "seal-reply"})
+    killed = site.run("apply", "v2", stop="seal-reply")
     assert killed.returncode == -9
     record = site.record()
     assert record is not None and record["step"] == "sealing"
-    resumed = site.run("apply", "--resume", "v2")
+    resumed = site.run("resume")
     assert resumed.returncode == 0, resumed.stderr
     assert len(site.seals()) == 1
     assert site.active.read_text() == "v2\n"
@@ -825,9 +936,23 @@ def test_a_retry_horizon_refusal_is_waited_out_and_sealed_under_a_new_id(site: S
     site.edit(seal_outcomes=["horizon"])
     done = site.run("apply", "v2")
     assert done.returncode == 0, done.stderr
-    assert "waiting 1.5s for the retry horizon" in done.stderr
+    assert "waiting 1.5 s for the retry horizon of the last operator request" in done.stderr
+    # the seal's own refusal text is not shown: the wait is keyed on its code (DL-412)
+    assert "force-seal" not in done.stderr and "retry_horizon_us" not in done.stderr
     first, second = [call[call.index("--request-id") + 1] for call in site.seals()]
     assert first != second == site.receipt("v2")["request_id"]
+
+
+def test_a_horizon_refusal_is_known_by_its_code_not_its_wording(site: Site) -> None:
+    """DL-412: a `seal_retry_horizon` answer whose text names no figures is still a horizon
+    refusal; the apply waits a fixed time, here past the bound, and seals nothing."""
+    site.prepared("v2")
+    site.edit(seal_outcomes=["horizon-unworded"])
+    refused = site.run("apply", "v2", "--horizon-timeout", "5")
+    assert refused.returncode == 2, refused.stderr
+    assert "outlasts --horizon-timeout 5 s, so nothing was sealed." in refused.stderr
+    assert "a retry horizon" not in refused.stderr
+    assert site.record() is None and site.active.read_text() == "r1\n"
 
 
 def test_a_horizon_past_the_timeout_and_a_drain_past_its_timeout_are_refusals(
@@ -837,14 +962,17 @@ def test_a_horizon_past_the_timeout_and_a_drain_past_its_timeout_are_refusals(
     site.edit(seal_outcomes=["horizon"])
     refused = site.run("apply", "v2", "--horizon-timeout", "1")
     assert refused.returncode == 2, refused.stderr
-    assert "the retry horizon outlasts --horizon-timeout 1s" in refused.stderr
+    assert "outlasts --horizon-timeout 1 s, so nothing was sealed." in refused.stderr
     state = site.state()
     state["jobs"]["NB_IDLE_C"]["status"] = "QUE_WAIT"
     state["sent"] = []
     site.save(state)
     refused = site.run("apply", "v2", "--drain-timeout", "1")
     assert refused.returncode == 2, refused.stderr
-    assert "still STARTING, RUNNING or QUE_WAIT after 1s: NB_IDLE_C" in refused.stderr
+    assert "jobs still run after 1 s: NB_IDLE_C." in refused.stderr
+    assert "apply again later, or with a longer --drain-timeout." in refused.stderr
+    assert "waiting for 1 running jobs to finish" in refused.stderr
+    assert "this apply's holds are released" in refused.stderr
     assert [verb for verb, _ in site.state()["sent"]] == ["ON_HOLD"] * 2 + ["OFF_HOLD"] * 2
     assert site.active.read_text() == "r1\n" and site.record() is None
     assert len(site.seals()) == 1
@@ -860,13 +988,15 @@ def test_a_removed_or_changed_latent_job_refuses(site: Site) -> None:
     site.prepared("v2")
     refused = site.run("apply", "v2")
     assert refused.returncode == 2, refused.stderr
-    assert "NB_ADDED_C: a job the release changes or removes must not be live" in (refused.stderr)
+    assert "v2 changes or removes NB_ADDED_C, and each is armed or has a pending timer." in (
+        refused.stderr
+    )
     assert site.active.read_text() == "v1\n" and len(site.seals()) == 1
     site.prepared("v3", add_job=True, change_job=True)
     refused = site.run("apply", "v3")
     assert refused.returncode == 2, refused.stderr
-    assert "OPS_SPOOL_C: a job the release changes or removes must not be live" in (refused.stderr)
-    assert "DISARM" in refused.stderr
+    assert "v3 changes or removes OPS_SPOOL_C, and each" in refused.stderr
+    assert f"`dsl41 sendevent DISARM -J JOB -S {site.root}/control.sock`" in refused.stderr
     assert site.active.read_text() == "v1\n" and len(site.seals()) == 1
 
 
@@ -874,7 +1004,8 @@ def test_an_apply_refuses_up_front_when_no_engine_answers(site: Site) -> None:
     site.prepared("v2")
     site.edit(up=False)
     refused = site.run("apply", "v2")
-    assert refused.returncode == 2 and "query status exited 2" in refused.stderr
+    assert refused.returncode == 2 and "`dsl41 query status` exited 2" in refused.stderr
+    assert "check the engine with `systemctl status dsl41-engine.service`." in refused.stderr
     assert site.record() is None
 
 
@@ -900,17 +1031,59 @@ def test_an_apply_killed_around_the_seal_resumes_and_never_seals_again(
     site: Site, stop: str, step: str
 ) -> None:
     site.prepared("v2")
-    killed = site.run("apply", "v2", env={"DSL41_RELEASE_STOP_AFTER": stop})
+    killed = site.run("apply", "v2", stop=stop)
     assert killed.returncode == -9
     record = site.record()
     assert record is not None and record["step"] == step
     assert site.active.read_text() == "r1\n"
     assert ["start", "dsl41-engine.service"] not in site.state()["systemctl"]
-    resumed = site.run("apply", "--resume", "v2")
+    resumed = site.run("resume")
     assert resumed.returncode == 0, resumed.stderr
     assert site.state()["seal_requests"] == [record["request_id"]]
     assert site.active.read_text() == "v2\n"
     assert site.receipt("v2")["request_id"] == record["request_id"]
+
+
+def test_the_environment_cannot_stop_an_apply(site: Site) -> None:
+    """DL-412: the stop points are a test-only hook; the old variable does nothing."""
+    site.prepared("v2")
+    done = site.run("apply", "v2", env={"DSL41_RELEASE_STOP_AFTER": "seal"})
+    assert done.returncode == 0, done.stderr
+    assert site.record() is None and site.active.read_text() == "v2\n"
+
+
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGHUP])
+def test_an_interrupt_keeps_the_record_and_names_resume(site: Site, signum: int) -> None:
+    """DL-412: Ctrl-C or a lost session stops the apply with exit 3 and its record kept."""
+    site.prepared("v2")
+    state = site.state()
+    state["jobs"]["NB_IDLE_C"]["status"] = "RUNNING"
+    site.save(state)
+    process = subprocess.Popen(
+        site.command("apply", "v2"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=site.environ(),
+    )
+    deadline = time.monotonic() + 60
+    while (site.record() or {}).get("step") != "held":
+        assert time.monotonic() < deadline, "the apply never reached the drain"
+        time.sleep(0.2)
+    process.send_signal(signum)
+    _, stderr = process.communicate(timeout=60)
+    assert process.returncode == 3, stderr
+    assert "interrupted." in stderr and "Traceback" not in stderr
+    assert "the apply of v2 is recorded." in stderr
+    assert "run `dsl41 release resume` to finish it." in stderr
+    record = site.record()
+    assert record is not None and record["step"] == "held"
+    state = site.state()
+    state["jobs"]["NB_IDLE_C"]["status"] = "SUCCESS"
+    site.save(state)
+    resumed = site.run("resume")
+    assert resumed.returncode == 0, resumed.stderr
+    assert site.active.read_text() == "v2\n"
 
 
 def test_a_failure_after_the_seal_stops_with_the_record_and_resume_finishes(
@@ -920,11 +1093,17 @@ def test_a_failure_after_the_seal_stops_with_the_record_and_resume_finishes(
     site.edit(start_fails=True)
     stopped = site.run("apply", "v2")
     assert stopped.returncode == 3, stopped.stderr
-    assert "recorded at step selected" in stopped.stderr
-    assert "will start the engine unit once the sealed engine has exited" in stopped.stderr
+    assert "stopped: `systemctl start dsl41-engine.service` exited 1." in stopped.stderr
+    assert "no engine runs now, so no job is scheduled." in stopped.stderr
+    assert "read `journalctl -u dsl41-engine.service` for the cause." in stopped.stderr
+    assert "`dsl41 release resume` will start the engine once the sealed engine has exited" in (
+        stopped.stderr
+    )
+    assert "step" not in stopped.stderr
     assert site.active.read_text() == "v2\n"
+    assert site.record()["step"] == "selected"  # type: ignore[index]
     site.edit(start_fails=False)
-    resumed = site.run("apply", "--resume", "v2")
+    resumed = site.run("resume")
     assert resumed.returncode == 0, resumed.stderr
     assert len(site.seals()) == 1 and site.record() is None
 
@@ -938,13 +1117,72 @@ def test_an_opened_bundle_the_seal_did_not_commit_stops_the_apply(site: Site) ->
     assert "period 2's manifest pins another bundle" in stopped.stderr
     record = site.record()
     assert record is not None and record["step"] == "opened"
+    assert record["problems"][0] == "period 2's segment does not open the committed seal"
     assert [verb for verb, _ in site.state()["sent"]] == ["ON_HOLD", "ON_HOLD"]
+    assert (
+        "`dsl41 release rollback` would release this apply's holds instead, and roll back"
+        " to r1." in stopped.stderr
+    )
+    # resume checks again, and stops again with the record kept
+    again = site.run("resume")
+    assert again.returncode == 3 and site.record() is not None
+    shown = site.run("status").stdout
+    assert "  the new period's check failed: period 2's segment" in shown
+    assert "  `dsl41 release resume` will check the new period again" in shown
+    assert "  `dsl41 release rollback` would release this apply's holds instead" in shown
+
+
+def test_rollback_takes_over_an_apply_whose_check_failed(site: Site) -> None:
+    """DL-412: a failed check after the open is an apply rollback may take over. It takes
+    off that apply's holds, writes a rolled-back receipt with the problems, clears the
+    record and applies the release that apply replaced."""
+    site.prepared("v1")
+    assert site.run("apply", "v1").returncode == 0
+    site.prepared("v2")
+    site.edit(opened_hash="sha256:" + "0" * 64)
+    assert site.run("apply", "v2").returncode == 3
+    record = site.record()
+    assert record is not None and record["step"] == "opened"
+    site.edit(opened_hash=None)
+    back = site.run("rollback")
+    assert back.returncode == 0, back.stderr
+    assert "rolling back from v2 to v1." in back.stderr
+    assert site.active.read_text() == "v1\n" and site.record() is None
+    (path,) = (site.releases / "v2" / ".release").glob("rolled-back-*.json")
+    given_up = json.loads(path.read_text())
+    assert given_up["outcome"] == "rolled_back" and given_up["verify_failed"] is True
+    assert given_up["problems"] == record["problems"]
+    assert given_up["released"] == ["NB_B", "NB_FREE_C"]
+    assert not (site.releases / "v2" / ".release" / "latest").exists()
+    assert site.receipt("v1")["previous"] == "v2"
+    assert len(site.seals()) == 3
+    state = site.state()
+    assert not state["jobs"]["NB_FREE_C"]["on_hold"] and not state["jobs"]["NB_B"]["on_hold"]
+
+
+def test_rollback_takes_over_an_apply_stopped_after_its_check(site: Site) -> None:
+    """DL-412: an apply stopped while releasing its holds, its check passed, is taken over the
+    same way; its receipt is not marked verify_failed."""
+    site.prepared("v1")
+    assert site.run("apply", "v1").returncode == 0
+    site.prepared("v2")
+    site.edit(release_outcomes={"NB_FREE_C": [4]})
+    assert site.run("apply", "v2").returncode == 3
+    assert site.record()["step"] == "verified"  # type: ignore[index]
+    back = site.run("rollback")
+    assert back.returncode == 0, back.stderr
+    (path,) = (site.releases / "v2" / ".release").glob("rolled-back-*.json")
+    given_up = json.loads(path.read_text())
+    assert given_up["verify_failed"] is False and given_up["problems"] == []
+    assert site.active.read_text() == "v1\n" and site.record() is None
+    assert site.state()["sent"].count(["OFF_HOLD", "NB_FREE_C"]) == 3
 
 
 def test_apply_refuses_an_unprepared_changed_or_active_release(site: Site) -> None:
     shutil.copytree(SMALL, site.releases / "raw")
     refused = site.run("apply", "raw")
-    assert refused.returncode == 2 and "raw is not prepared" in refused.stderr
+    assert refused.returncode == 2 and "raw is installed but not prepared." in refused.stderr
+    assert "run `dsl41 release prepare --requalify raw` to check it in place." in refused.stderr
     site.prepared("v2")
     site.active.write_text("v2\n")
     refused = site.run("apply", "v2")
@@ -969,7 +1207,7 @@ def test_apply_refuses_another_runtime_until_requalify(site: Site) -> None:
     prepared.write_text(json.dumps(json.loads(prepared.read_text()) | {"dsl41_version": "0.0.1"}))
     refused = site.run("apply", "v2")
     assert refused.returncode == 2 and "was prepared under dsl41 0.0.1" in refused.stderr
-    assert "run `dsl41-release prepare --requalify v2`" in refused.stderr
+    assert "run `dsl41 release prepare --requalify v2` to check it again." in refused.stderr
     before = {path: path.read_bytes() for path in release.rglob("*.jil")}
     usage = site.run("prepare", "--requalify", "v2", str(site.source("other")))
     assert usage.returncode == 2
@@ -986,22 +1224,43 @@ def test_apply_refuses_another_runtime_until_requalify(site: Site) -> None:
     assert requalified["dsl41_version"] != "0.0.1"
     assert requalified["source"] == str((site.base / "sources" / "v2").resolve())
     assert site.run("apply", "v2").returncode == 0
-    shutil.copytree(SMALL, site.releases / "raw")
+
+
+def test_requalify_checks_a_release_installed_but_never_prepared_in_place(site: Site) -> None:
+    """DL-412: the refusal of an unprepared installed release names --requalify, and
+    --requalify checks it where it is, its inputs made read-only, its files unchanged."""
+    raw = site.releases / "raw"
+    shutil.copytree(SMALL, raw)
+    before = {path.name: path.read_bytes() for path in raw.glob("*.jil")}
+    (site.stub / "lint.exit").write_text("1")
     refused = site.run("prepare", "--requalify", "raw")
-    assert refused.returncode == 2 and "raw was never prepared" in refused.stderr
+    assert refused.returncode == 2 and "raw stays unprepared." in refused.stderr
+    assert not (raw / ".release" / "prepared.json").exists()
+    (site.stub / "lint.exit").unlink()
+    done = site.run("prepare", "--requalify", "raw")
+    assert done.returncode == 0, done.stderr
+    prepared = site.receipt("raw", "prepared")
+    assert prepared["source"] is None and set(prepared["files"]) >= set(before)
+    assert {path.name: path.read_bytes() for path in raw.glob("*.jil")} == before
+    assert not os.access(raw / "global.jil", os.W_OK) and not os.access(raw, os.W_OK)
+    assert site.run("apply", "raw").returncode == 0
+    assert site.active.read_text() == "raw\n"
 
 
 def test_rollback_applies_the_previous_release_and_keeps_every_receipt(site: Site) -> None:
     site.prepared("v1")
     site.prepared("v2", add_job=True)
     refused = site.run("rollback")
-    assert refused.returncode == 2 and "r1: no previous release; use apply NAME" in refused.stderr
+    assert refused.returncode == 2
+    assert "no receipt of r1 names the release it replaced." in refused.stderr
+    assert "apply the earlier release by name: `dsl41 release apply NAME`." in refused.stderr
     assert site.run("apply", "v1").returncode == 0
     first = site.receipt("v1")
     assert site.run("apply", "v2").returncode == 0
     back = site.run("rollback")
     assert back.returncode == 0, back.stderr
-    assert "rolling back from v2 to v1" in back.stderr
+    # the target is printed before the window starts
+    assert back.stderr.startswith("dsl41 release: rolling back from v2 to v1.\n")
     assert site.active.read_text() == "v1\n"
     assert site.receipt("v1")["previous"] == "v2"
     receipts = sorted((site.releases / "v1" / ".release").glob("applied-*.json"))
@@ -1017,35 +1276,56 @@ def test_rollback_applies_the_previous_release_and_keeps_every_receipt(site: Sit
     assert site.run("rollback").returncode == 0 and site.active.read_text() == "v2\n"
 
 
-def test_status_lists_active_prepared_and_applied_releases(site: Site) -> None:
-    site.prepared("v2")
-    assert site.run("apply", "v2").returncode == 0
-    shown = site.run("status")
-    assert shown.returncode == 0
-    lines = shown.stdout.splitlines()
-    assert lines[0] == "active: v2"
-    assert lines[1] == "release r1: not prepared"
-    assert lines[2].startswith("release v2: prepared ")
-    assert "after r1, period 2 (1 applies)" in lines[2]
-    assert lines[3] == "apply: none recorded"
-    report = json.loads(site.run("status", "--format", "json").stdout)
-    assert report["active"] == "v2" and report["apply"] is None
-    assert [release["name"] for release in report["releases"]] == ["r1", "v2"]
-
-
-def test_the_service_mode_takes_only_release_names_a_request_id_and_an_actor(
+def test_status_shows_the_active_release_the_engine_the_rollback_and_the_last_apply(
     site: Site,
 ) -> None:
+    site.prepared("v2")
+    shown = site.run("status")
+    assert shown.returncode == 0, shown.stderr
+    assert shown.stdout.splitlines() == [
+        "active: r1.",
+        f"engine: answers on {site.root}/control.sock.",
+        "rollback: no receipt names an earlier release; apply one by name.",
+        "recorded apply: none.",
+        "last apply: none.",
+        "releases: 2 installed; `--format json` lists each.",
+    ]
+    assert site.run("apply", "v2").returncode == 0
+    site.edit(up=False)
+    lines = site.run("status").stdout.splitlines()
+    assert lines[0] == "active: v2, active since period 2."
+    assert lines[1] == (
+        f"engine: no answer on {site.root}/control.sock; check"
+        " `systemctl status dsl41-engine.service`."
+    )
+    assert lines[2] == "rollback: `dsl41 release rollback` would apply r1."
+    assert lines[3] == "recorded apply: none."
+    assert lines[4].startswith("last apply: v2 over r1, started ")
+    assert lines[4].endswith(": completed; v2 became active in period 2.")
+    report = json.loads(site.run("status", "--format", "json").stdout)
+    assert report["active"] == "v2" and report["apply"] is None
+    assert report["rollback_to"] == "r1" and report["engine"]["answers"] is False
+    assert report["last"]["outcome"] == "applied"
+    assert [release["name"] for release in report["releases"]] == ["r1", "v2"]
+    site.active.write_text("r1\nv2\n")
+    lines = site.run("status").stdout.splitlines()
+    assert lines[0] == (
+        f"active: none; {site.active} does not name one release, so the launcher refuses it."
+    )
+
+
+def test_the_service_side_takes_only_release_names_a_request_id_and_a_job(site: Site) -> None:
     rid = "0" * 8 + "-0000-0000-0000-" + "0" * 12
     for args in (
-        ("service", "seal", "v2", "not-an-id", "os/dsl41"),
-        ("service", "seal", "../x", rid, "os/dsl41"),
-        ("service", "seal", "r1", rid, "a b"),
-        ("service", "seal", "r1", rid),
+        ("service", "seal", "v2", "not-an-id"),
+        ("service", "seal", "../x", rid),
+        ("service", "seal", "r1", rid, "os/dsl41"),
+        ("service", "seal", "r1"),
         ("service", "committed"),
         ("service", "pins", "x"),
         ("service", "holds", "../x", rid),
-        ("service", "holds", "NB_B", "x"),
+        ("service", "holds", "NB B"),
+        ("service", "check", "../x"),
         ("service", "changes", "r1", "../x"),
         ("service", "run", "v2"),
         ("service",),
@@ -1055,6 +1335,30 @@ def test_the_service_mode_takes_only_release_names_a_request_id_and_an_actor(
     assert site.seals() == []
     shown = site.run("service", "committed", rid)
     assert shown.returncode == 0 and json.loads(shown.stdout) == {"committed": False}
+    # a job name takes the engine's rule, `#` included (DL-412)
+    held = site.run("service", "holds", "EOD#1")
+    assert held.returncode == 0 and json.loads(held.stdout) == {"changes": []}
+
+
+def test_the_service_side_runs_only_as_the_service_account(site: Site) -> None:
+    text = site.launcher.read_text().replace(f"SERVICE_ACCOUNT={ME}\n", "SERVICE_ACCOUNT=nobody\n")
+    site.launcher.write_text(text)
+    refused = site.run("service", "committed", "0" * 8 + "-0000-0000-0000-" + "0" * 12)
+    assert refused.returncode == 2
+    assert f"the service side runs as nobody, not as {ME}." in refused.stderr
+
+
+def test_a_job_with_a_hash_in_its_name_is_held_and_taken_off(site: Site) -> None:
+    """DL-412: a job name the release-name rule refuses still reads its hold history."""
+    site.prepared("v2")
+    state = site.state()
+    state["jobs"]["EOD#1"] = _job("CMD")
+    state["timers"].append({"due": "2026-10-28T02:00:00", "job": "EOD#1", "kind": "schedule"})
+    site.save(state)
+    done = site.run("apply", "v2")
+    assert done.returncode == 0, done.stderr
+    assert "EOD#1" in site.receipt("v2")["released"]
+    assert "dsl41 release service holds EOD#1" in site.sudo_log()
 
 
 def test_a_hand_run_service_seal_refuses_an_unprepared_or_changed_release(
@@ -1063,22 +1367,57 @@ def test_a_hand_run_service_seal_refuses_an_unprepared_or_changed_release(
     """The deployment identity can run `service seal` through sudo by hand; it seals
     nothing prepare did not check."""
     rid = "0" * 8 + "-0000-0000-0000-" + "0" * 12
-    refused = site.run("service", "seal", "r1", rid, "os/dsl41")
-    assert refused.returncode == 2 and "r1 is not prepared" in refused.stderr
+    refused = site.run("service", "seal", "r1", rid)
+    assert refused.returncode == 2 and "r1 is installed but not prepared" in refused.stderr
     site.prepared("v2")
     jil = site.releases / "v2" / "global.jil"
     (site.releases / "v2").chmod(0o755)
     jil.chmod(0o644)
     jil.write_text(jil.read_text() + "\n")
-    refused = site.run("service", "seal", "v2", rid, "os/dsl41")
+    refused = site.run("service", "seal", "v2", rid)
     assert refused.returncode == 2 and "v2's files changed since prepare" in refused.stderr
     assert site.seals() == []
 
 
-def test_the_launcher_vars_mode_prints_what_the_helper_reads(site: Site) -> None:
-    done = subprocess.run(
-        [str(site.base / "bin" / "dsl41-launch"), "vars"], capture_output=True, text=True
+def test_a_missing_grant_names_the_sudoers_file(site: Site) -> None:
+    """DL-412: sudo's own refusal is read as a grant to fix, not as a failed check."""
+    _script(
+        site.base / "path" / "sudo", "#!/bin/sh\necho 'sudo: a password is required' >&2\nexit 1\n"
     )
+    refused = site.run("prepare", "v2", str(site.source("v2")))
+    assert refused.returncode == 2
+    assert "sudo did not run `" in refused.stderr
+    assert "sudoers grant is missing or names another path" in refused.stderr
+
+
+def test_the_verbs_find_the_launcher_beside_the_runtime_only(site: Site) -> None:
+    """DL-412: the launcher is <prefix>/bin/dsl41-launch for a runtime under <prefix>/.venvs,
+    a plain file no one else can write; no argument or variable names another."""
+    site.launcher.chmod(0o777)
+    refused = site.run("status")
+    assert refused.returncode == 2 and "must be a plain file that only root can write" in (
+        refused.stderr
+    )
+    site.launcher.unlink()
+    refused = site.run("status")
+    assert refused.returncode == 2 and f"{site.launcher} is missing." in refused.stderr
+    outside = subprocess.run(
+        [sys.executable, "-m", "dsl41", "release", "status"], capture_output=True, text=True
+    )
+    assert outside.returncode == 2 and "not an installed runtime under" in outside.stderr
+
+
+def test_a_launcher_without_the_verbs_vars_refuses(site: Site) -> None:
+    text = site.launcher.read_text().replace('"ENGINE_UNIT=$ENGINE_UNIT"', "")
+    site.launcher.write_text(text)
+    refused = site.run("status")
+    assert refused.returncode == 2
+    assert "vars` printed no ENGINE_UNIT." in refused.stderr
+    assert "ask the site package's owner to fix the launcher's CONFIGURATION." in refused.stderr
+
+
+def test_the_launcher_vars_mode_prints_what_the_verbs_read(site: Site) -> None:
+    done = subprocess.run([str(site.launcher), "vars"], capture_output=True, text=True)
     assert done.returncode == 0
     values: dict[str, str] = {}
     for line in done.stdout.splitlines():
@@ -1087,6 +1426,7 @@ def test_the_launcher_vars_mode_prints_what_the_helper_reads(site: Site) -> None
     assert values["ESTATE_RELEASES"] == str(site.releases)
     assert values["ACTIVE"] == str(site.active)
     assert values["MAX_JOBS"] == "107" and values["MAX_GRACE_S"] == "10"
+    assert values["SERVICE_ACCOUNT"] == ME and values["ENGINE_UNIT"] == "dsl41-engine.service"
     assert shlex.split(values["NEXT_PROFILE"]) == [
         "--next-detached",
         "--next-as-machine",

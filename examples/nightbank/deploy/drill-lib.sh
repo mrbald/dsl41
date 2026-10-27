@@ -44,17 +44,18 @@ LONG_JOB=OPS_XINST_DEMO_C
 # the operator recipes the drill runs as written (deployment-runbook ss0)
 RUNBOOK=$REPO/docs/deployment-runbook.md
 
-# The release helper's deployment identity and its group: the steps that
+# The release verbs' deployment identity and its group: the steps that
 # release bind the login to ops in the map and make the group the map's
 # socket_group (DL-407, access-model ss4)
 DEPLOY_USER=nbdeploy
 DEPLOY_GROUP=nightbank-deploy
-RELEASE_HELPER=/opt/dsl41/bin/dsl41-release
+# the deployment identity's grant for the verbs' service side (DL-412)
+SUDOERS_GRANT=/etc/sudoers.d/dsl41-release
 
 # Each offline estate keeps its own durable root (DL-389).
 if [ -n "${DRILL_ROOT-}" ]; then ROOT=$DRILL_ROOT; ANCHOR=$ROOT.anchor; SOCK=$ROOT/control.sock; fi
 
-# The release ACTIVE names, once one is active: the release helper moves it,
+# The release ACTIVE names, once one is active: `dsl41 release apply` moves it,
 # and every seal and every in-place edit is of the active release (DL-407).
 follow_active() {
     if [ -f "$ACTIVE" ]; then
@@ -683,15 +684,30 @@ size_ceiling() { # size_ceiling JOBS
     ok "the ceiling is $1 jobs; $SUPERVISOR stops within ${stop}s"
 }
 
-# ---- the release helper (DL-407)
+# ---- the release verbs (DL-407, DL-412)
 
-# The helper as the deployment identity, from /, as an application on-call
-# runs it.
-deploy() { (cd / && sudo -u "$DEPLOY_USER" -H "$RELEASE_HELPER" "$@"); }
+# `dsl41 release VERB` as the deployment identity, from /, as an application
+# on-call runs it.
+deploy() { (cd / && sudo -u "$DEPLOY_USER" -H "$VENV/bin/dsl41" release "$@"); }
+
+# The same, with the verbs' test-only hook set to STOP: the verb kills itself
+# on that side of recording a committed seal (DL-412). No environment
+# variable reaches the hook.
+deploy_stopped() { # deploy_stopped STOP VERB...
+    local stop=$1
+    shift
+    (cd / && sudo -u "$DEPLOY_USER" -H "$VENV/bin/python" -I -c '
+import sys
+from dsl41 import release
+from dsl41.cli import app
+release.STOP_AFTER = sys.argv[1]
+app(args=["release", *sys.argv[2:]], prog_name="dsl41")
+' "$stop" "$@")
+}
 
 # An apply, or a rollback, after which the steps follow ACTIVE. The engine
 # unit's start limit counts the drill's own starts, as `manual` says, and the
-# helper's start is one more.
+# apply's start is one more.
 release_apply() { # release_apply NAME | release_apply rollback
     sudo systemctl reset-failed "$ENGINE" 2>/dev/null || true
     if [ "$1" = rollback ]; then deploy rollback; else deploy apply "$1"; fi
@@ -726,17 +742,17 @@ infra_state() {
 
 # The site's part of a release train that the service recipe leaves out: the
 # deployment identity and its group, and the releases directory and ACTIVE's
-# directory that group writes (the recipe installs the helper and its two
-# sudo grants). The second call changes nothing.
+# directory that group writes (the recipe installs the verbs' two sudo
+# grants; the verbs ship in dsl41). The second call changes nothing.
 release_identity() {
     getent group "$DEPLOY_GROUP" >/dev/null || sudo groupadd "$DEPLOY_GROUP"
     id "$DEPLOY_USER" >/dev/null 2>&1 ||
         sudo useradd -M -s /usr/sbin/nologin -g "$DEPLOY_GROUP" "$DEPLOY_USER"
-    sudo test -x "$RELEASE_HELPER" || fail "the service recipe did not install $RELEASE_HELPER"
+    sudo test -f "$SUDOERS_GRANT" || fail "the service recipe did not install $SUDOERS_GRANT"
     sudo install -d -m 0755 "$ESTATE_RELEASES"
     sudo chown "$DEPLOY_USER:$DEPLOY_GROUP" "$ESTATE_RELEASES"
     ! sudo test -e "$ACTIVE" || sudo chown "$DEPLOY_USER:$DEPLOY_GROUP" "$ACTIVE"
-    # the helper replaces ACTIVE by a rename in its directory; the sticky bit
+    # the apply replaces ACTIVE by a rename in its directory; the sticky bit
     # keeps every other entry there out of its reach
     sudo chgrp "$DEPLOY_GROUP" "$(dirname "$ACTIVE")"
     sudo chmod 1775 "$(dirname "$ACTIVE")"
@@ -758,12 +774,12 @@ release_setup() {
     sudo chgrp "$DEPLOY_GROUP" "$(dirname "$ROOT")"
     sudo chmod 0710 "$(dirname "$ROOT")"
     start_engine
-    deploy status >/dev/null || fail "the helper does not run as $DEPLOY_USER"
-    ok "$DEPLOY_USER runs the helper; the map binds it to ops behind $DEPLOY_GROUP"
+    deploy status >/dev/null || fail "dsl41 release does not run as $DEPLOY_USER"
+    ok "$DEPLOY_USER runs dsl41 release; the map binds it to ops behind $DEPLOY_GROUP"
 }
 
 # The map and the run roots' directory as they were, and the engine restarted
-# on them; the identity and the helper stay installed.
+# on them; the identity and its grant stay installed.
 release_teardown() {
     sudo systemctl stop "$ENGINE"
     sudo cp "$SCRATCH/map.release.orig" "$MAP"

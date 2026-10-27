@@ -1,8 +1,9 @@
 # dsl41-release.sudoers -- the nightbank example's grant to its deployment
-# identity, nbdeploy (DL-407). Every name here is synthetic. Install as
-# /etc/sudoers.d/dsl41-release, owned by root, mode 0440, and check it with
-# `visudo -cf`. The release helper runs its service-account part as dsl41
-# and starts the engine unit; the deployment identity may run nothing else
-# through sudo.
-nbdeploy ALL=(dsl41) NOPASSWD: /opt/dsl41/bin/dsl41-release service *
+# identity, nbdeploy (DL-407, DL-412). Every name here is synthetic. Install
+# as /etc/sudoers.d/dsl41-release, owned by root, mode 0440, and check it
+# with `visudo -cf`. The release verbs, `dsl41 release prepare|apply|resume|
+# rollback`, run their service-account part as dsl41, through the launcher's
+# DSL41 path, and start the engine unit; the deployment identity may run
+# nothing else through sudo.
+nbdeploy ALL=(dsl41) NOPASSWD: /opt/dsl41/.venv/bin/dsl41 release service *
 nbdeploy ALL=(root) NOPASSWD: /usr/bin/systemctl start dsl41-engine.service
