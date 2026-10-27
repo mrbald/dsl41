@@ -1,7 +1,7 @@
 # Write an estate for rollout
 
 This page is for the job author who writes an estate or brings an AutoSys estate in.
-It takes you from JIL or the Python DSL to checks, the estate manifest and the rollout handoff.
+It takes you from JIL or the Python DSL to checks, the estate manifest, the rollout handoff and the interruption contract every job meets.
 The rest of your track is under **Job author** in the
 [README's Documents section](../README.md#documents).
 
@@ -501,39 +501,51 @@ Write every job so that a second run, or a run after a kill in the middle, leave
 These events end a running command:
 
 - an operator's KILLJOB, or the job's own `term_run_time` ([runner-design §6](runner-design.md#6-adapters));
-- the loss of the supervisor that started the command, by a crash or a `kill -9` ([supervisor-protocol §4](supervisor-protocol.md#4-wrapper-behavior-frozen-semantics), step 5);
-- a SIGTERM or SIGINT to the supervisor, which a host shutdown or reboot sends ([supervisor-protocol §5](supervisor-protocol.md#5-supervisor-socket-protocol-frozen--phase-11f-dl-48), `SHUTDOWN`);
+- an operator's CHANGE_STATUS of the running job to SUCCESS, FAILURE or TERMINATED;
+- a `job_terminator` or `box_terminator` cascade ([SEM-14](autosys-semantics.md#sem-14--box_terminator--job_terminator-vc));
+- the loss of the supervisor that started the command, by a crash, a `kill -9` or its deadman ([supervisor-protocol §4](supervisor-protocol.md#4-wrapper-behavior-frozen-semantics), step 5, and [§5](supervisor-protocol.md#5-supervisor-socket-protocol-frozen--phase-11f-dl-48), "The deadman");
+- the stop or loss of an engine that runs without a supervisor ([runner-design §15](runner-design.md#15-open-questions-e-series), E4);
+- a host shutdown or reboot: the service manager sends SIGTERM to the supervisor and to every command in its unit ([supervisor-protocol §5](supervisor-protocol.md#5-supervisor-socket-protocol-frozen--phase-11f-dl-48), `SHUTDOWN`);
 - the operator's forced maintenance, `--force=terminate` (DL-390, DL-394).
 
-In each case, dsl41 sends SIGTERM to the command's process group.
-It waits the command grace.
-Then it sends SIGKILL to every process of the group that is still alive.
-The supervisor's service unit bounds the whole stop.
-An engine restart alone ends no command: the engine reattaches to the running commands ([runner-design §6a](runner-design.md#6a-process-lifecycle-tiers-dl-41a)).
+Under a supervisor with no deadman, an engine restart ends no command: the engine reattaches to the running commands ([runner-design §6a](runner-design.md#6a-process-lifecycle-tiers-dl-41a)).
+Without a supervisor, or when the engine stays away longer than the supervisor's deadman, the engine's loss ends every command.
 
-| Bound | Default | Source |
+dsl41 sends SIGTERM to the command's process group and waits the command grace.
+If the command is still running when the grace ends, dsl41 sends SIGKILL to its process group.
+A helper process that outlives the command may get no SIGKILL from dsl41.
+A helper that leaves the group with `setsid` gets none.
+The job ends its own helpers itself (DL-403).
+
+| Bound | Value | Source |
 | --- | --- | --- |
-| Command grace, from SIGTERM to SIGKILL | 10 s | `CMD_GRACE_S` in `src/dsl41/period.py`, pinned in each period's runtime profile as `cmd_grace_us` ([period-model §2.1](period-model.md#21-segment--the-first-record-of-every-segment)) |
-| Whole supervisor stop | 900 s in the example unit | `TimeoutStopSec` in [the example supervisor unit](../examples/nightbank/deploy/dsl41-supervisor.service), sized per estate by the operator ([deployment-runbook §3](deployment-runbook.md#3-starting-the-engine), DL-401) |
+| Command grace, from SIGTERM to SIGKILL | 10 s; no site setting changes it | `CMD_GRACE_S` in `src/dsl41/period.py`, pinned in each period's runtime profile as `cmd_grace_us` ([period-model §2.1](period-model.md#21-segment--the-first-record-of-every-segment)) |
+| Whole supervisor stop | 900 s in the example unit | `TimeoutStopSec` in the supervisor unit, which the site package sizes against `MAX_JOBS` and `MAX_GRACE_S` ([site-package §5](site-package.md#5-ship-jil-releases-on-the-applications-train), DL-401) |
 
-Ask the operator for your site's values.
+Your SIGTERM cleanup has the command grace to finish.
+Ask the packager for your site's stop bound.
 
-dsl41 records the outcome of every interrupted run:
+What dsl41 records depends on who ended the run:
 
-| How the command ended | Recorded status |
+| Who ended the run | Recorded status |
 | --- | --- |
-| The signal killed it. | TERMINATED |
-| It caught SIGTERM and exited with a code. | SUCCESS or FAILURE, by the job's exit-code rules ([SEM-09](autosys-semantics.md#sem-09--max_exit_success-shifts-successfailure-boundary-v)) |
-| No record of its end exists, for example after the service manager killed the wrapper at the stop bound. | FAILURE, cause `exit_status_unobservable` ([runner-design §15](runner-design.md#15-open-questions-e-series), E7) |
+| KILLJOB, `term_run_time` or a terminator cascade | TERMINATED, whatever the command does after the signal |
+| CHANGE_STATUS to a terminal status | That status |
+| The loss of the supervisor, or of an engine that runs without one | TERMINATED (`parent lost`), unless the command ended before the signal |
+| A host shutdown, forced maintenance or an engine stop, and the signal killed the command | TERMINATED ([runner-design §15](runner-design.md#15-open-questions-e-series), E8) |
+| A host shutdown, forced maintenance or an engine stop, and the command caught SIGTERM and exited | SUCCESS or FAILURE, by the job's exit-code rules ([SEM-09](autosys-semantics.md#sem-09--max_exit_success-shifts-successfailure-boundary-v)) |
+| Any of these, and no record of the command's end exists | FAILURE, cause `exit_status_unobservable` ([runner-design §15](runner-design.md#15-open-questions-e-series), E7) |
 
-A command that catches SIGTERM and then exits 0 records SUCCESS, and its successors start.
-After its cleanup, such a command must exit with a failure code.
+Warning: on a host shutdown, a forced maintenance or an engine stop, a command that catches SIGTERM and then exits 0 records SUCCESS, and its successors start.
+A command that catches SIGTERM finishes its cleanup within the grace.
+Then it resets the trap and sends itself SIGTERM, so the run records TERMINATED as an untrapped kill would.
 
 The engine never runs an interrupted job again by itself.
-Neither the oracle nor the runner models `n_retrys`, and preflight warns when a job sets it above 0
+dsl41 does not act on `n_retrys`, and preflight warns when a job sets it above 0
 ([the `n_retrys` row](autosys-semantics.md#5-attributes-with-control-flow-teeth-quick-inventory); Q4 in [§9](autosys-semantics.md#9-open-questions-and-their-pinned-defaults)).
-The next run comes from the job's schedule, its conditions or an operator's FORCE_STARTJOB.
-That run finds whatever the interrupted run left behind.
+The next run comes from the job's schedule, its conditions, its box's next start, or an operator's STARTJOB or FORCE_STARTJOB.
+A start time missed while the engine is down is skipped, not run late ([runner-design §15](runner-design.md#15-open-questions-e-series), E9).
+The next run finds whatever the interrupted run left behind.
 
 Write each job in one of two ways:
 

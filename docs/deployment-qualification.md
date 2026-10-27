@@ -50,23 +50,15 @@ fresh mutation id, signal fallback or unattended retry.
 | TUI loses reply or reconnects | Retained complete recovery command beside UNKNOWN | Read state first; deliberate exact recovery only, never automatic resend. |
 | Storage write or fsync fails | Existing durable-before-effect gates | Preserve failed-run evidence; compare journal, spool and external-effect counts. |
 
-## Jobs interrupted by a stop
+## A stop records every interrupted job and reruns none
 
-A host shutdown, a supervisor crash, forced maintenance, a KILLJOB or a
-`term_run_time` ends a running command. dsl41 sends SIGTERM to the
-command's process group, waits the command grace, and then sends SIGKILL
-to what is still alive. dsl41 guarantees three things for every such run:
-
-- it records the run's outcome: TERMINATED, the status its own exit code gives,
-  or FAILURE with cause `exit_status_unobservable`;
-- it loses no run silently: a run with no record of its end still gets
-  that FAILURE, and the runner reports it;
-- it never starts the job again by itself.
-
-dsl41 requires one thing of the estate: every job must be safe to run
-again after a kill in the middle, side effects included. The job author's page
-states that contract, the grace and the stop bound:
-[authoring §6.2](authoring.md#62-write-every-job-to-survive-interruption).
+A stop, a crash or an operator's action may end any job while its command
+runs. dsl41 records an outcome for every such run, loses none silently, and
+never starts the job again by itself. dsl41 requires one thing of the
+estate: every job must be safe to run again after a kill in the middle,
+side effects included.
+[Authoring §6.2](authoring.md#62-write-every-job-to-survive-interruption)
+lists the events, the grace, the stop bound and the recorded statuses.
 
 ## Evidence lanes
 
