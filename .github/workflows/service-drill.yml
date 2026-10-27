@@ -95,6 +95,24 @@ jobs:
       - name: stop and recover from a crash loop, replay a request, rerun a job
         run: bash examples/nightbank/deploy/drill-steps.sh stop-recover
 
+      - name: a prepared release that adds a job file and changes a job is applied by the helper
+        run: bash examples/nightbank/deploy/drill-steps.sh release
+
+      - name: the helper rolls back to the previous release, and a removed job stays a ghost
+        run: bash examples/nightbank/deploy/drill-steps.sh release-rollback
+
+      - name: a properties-only release moves the bundle hash through the window
+        run: bash examples/nightbank/deploy/drill-steps.sh release-properties-only
+
+      - name: a calendar-only release moves the bundle hash through the window
+        run: bash examples/nightbank/deploy/drill-steps.sh release-calendar-only
+
+      - name: a second apply is refused while the first holds the lock
+        run: bash examples/nightbank/deploy/drill-steps.sh release-concurrent
+
+      - name: an apply stopped after its seal resumes from its record
+        run: bash examples/nightbank/deploy/drill-steps.sh release-interrupted
+
       - name: upgrade by the resume-safe row resumes the engine and keeps the supervisor
         run: bash examples/nightbank/deploy/drill-steps.sh upgrade-resume-safe
 

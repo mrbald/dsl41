@@ -1111,3 +1111,111 @@ def test_wargame_verbs_refuse_early_keep_work_and_tag_the_documented_image(
     log.unlink()
     assert run("1", "build", "t").returncode == 0
     assert "--tag localhost/dsl41-wargame:t " in log.read_text()
+
+
+# ---------------------------------------------------------- the release helper
+
+RELEASE_HELPER = DEPLOY / "dsl41-release"
+SUDOERS = DEPLOY / "dsl41-release.sudoers"
+#: the drill's release steps (DL-407)
+RELEASE_STEPS = (
+    "release",
+    "release-rollback",
+    "release-properties-only",
+    "release-calendar-only",
+    "release-concurrent",
+    "release-interrupted",
+)
+
+
+def test_the_sudoers_example_grants_the_helpers_service_mode_and_the_engine_start_only() -> None:
+    """DL-407: the deployment identity runs the helper's service-account part as the
+    units' user and starts the engine unit; the file grants those two commands and no
+    other, at the paths the launcher and the units name."""
+    lines = [line for line in SUDOERS.read_text().splitlines() if line and not line.startswith("#")]
+    (prefix,) = re.findall(r"^PREFIX=(\S+)$", LAUNCH.read_text(), re.M)
+    (user,) = _unit("dsl41-engine.service")["Service"]["User"]
+    assert _unit("dsl41-supervisor.service")["Service"]["User"] == [user]
+    assert lines == [
+        f"nbdeploy ALL=({user}) NOPASSWD: {prefix}/bin/dsl41-release service *",
+        "nbdeploy ALL=(root) NOPASSWD: /usr/bin/systemctl start dsl41-engine.service",
+    ]
+    text = RELEASE_HELPER.read_text()
+    assert f'SERVICE_ACCOUNT = "{user}"' in text
+    assert 'ENGINE_UNIT = "dsl41-engine.service"' in text
+    # the helper runs on the runtime the launcher's link selects
+    assert text.splitlines()[0] == f"#!{prefix}/.venv/bin/python -I"
+    assert os.access(RELEASE_HELPER, os.X_OK)
+
+
+def test_the_helpers_exit_codes_are_the_table_its_header_prints() -> None:
+    """Each code the helper exits with is one row of its header's table, and each row
+    is a code it defines."""
+    text = RELEASE_HELPER.read_text()
+    header = text.split('"""', 2)[1]
+    table = header.split("Exit codes:\n", 1)[1]
+    rows = {int(code) for code in re.findall(r"^  (\d)  \S", table, re.M)}
+    defined = {int(code) for code in re.findall(r"^EXIT_[A-Z]+ = (\d)$", text, re.M)}
+    assert rows == defined == {0, 2, 3, 4}
+    exits = re.findall(r"(?:Stop\(|return |sys\.exit\()\s*(EXIT_[A-Z]+|\d)\b", text)
+    assert {name for name in exits if not name.isdigit()} <= {
+        name for name in re.findall(r"^(EXIT_[A-Z]+) = ", text, re.M)
+    }
+    assert {name for name in exits if name.isdigit()} == set()
+
+
+def test_the_launchers_vars_restate_the_engines_deployment_options_for_a_seal(
+    tmp_path: Path,
+) -> None:
+    """DL-407: every seal restates the deployment half of the profile as --next-*. The
+    launcher prints it from the same function the engine line uses, so the two agree."""
+    releases = _releases(tmp_path)
+    launcher = _configured(tmp_path, DSL41=str(DSL41), **releases)
+    printed = shlex.split(_sh(launcher, "--print").stdout)
+    done = _sh(launcher, "vars")
+    assert done.returncode == 0, done.stderr
+    values = dict(shlex.split(line)[0].split("=", 1) for line in done.stdout.splitlines())
+    deployment = {"--detached", "--deadman", "--as-machine", "--machine-policy"}
+    run_form: list[str] = []
+    for index, word in enumerate(printed):
+        if word in deployment:
+            run_form += [word] if word == "--detached" else [word, printed[index + 1]]
+    restated = [word.replace("--next-", "--", 1) for word in shlex.split(values["NEXT_PROFILE"])]
+    assert restated == run_form
+    assert {key: values[key] for key in releases} == releases
+    assert set(values) == {
+        "DSL41",
+        "RUN_ROOT",
+        "ESTATE_ANCHOR",
+        "ESTATE_RELEASES",
+        "ACTIVE",
+        "ENVIRONMENT",
+        "PROPERTIES",
+        "MAX_JOBS",
+        "MAX_GRACE_S",
+        "NEXT_PROFILE",
+    }
+
+
+def test_the_drill_runs_each_release_step_once_through_the_helper() -> None:
+    """The drill names each release step once, in --list and in the workflow, and each
+    step's body runs the installed helper; definition_probe goes through it too."""
+    listed = subprocess.run(
+        ["bash", str(DRILL_STEPS), "--list"], capture_output=True, text=True, timeout=60, check=True
+    ).stdout.split()
+    assert [step for step in listed if step.startswith("release")] == list(RELEASE_STEPS)
+    text = DRILL_STEPS.read_text()
+    for step in RELEASE_STEPS:
+        body = re.search(rf"^step_{step.replace('-', '_')}\(\) \{{.*?^\}}$", text, re.M | re.S)
+        assert body is not None, step
+        assert re.search(r"\b(deploy|release_apply|release_prepare)\b", body.group()), step
+    lib = DRILL_LIB.read_text()
+    assert '"$REPO/examples/nightbank/deploy/dsl41-release"' in lib
+    assert '"$REPO/examples/nightbank/deploy/dsl41-release.sudoers"' in lib
+    probe = re.search(
+        r"^definition_probe\(\) \{.*?^\}$",
+        (DEPLOY / "offline-scenarios.sh").read_text(),
+        re.M | re.S,
+    )
+    assert probe is not None
+    assert "release_apply" in probe.group() and "seal_next" not in probe.group()

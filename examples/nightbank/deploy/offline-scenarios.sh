@@ -207,10 +207,14 @@ PYTHON
     start_engine
     ok 'residual refusal, uncertain force, retained engine exclusion and explicit incident containment'
 }
+# Definitions change through the release helper (DL-407): an added job, a
+# changed one, a removal that leaves a ghost, and a rollback by the same path.
+# The last release has the inputs the lane started with.
 definition_probe() {
-    local original=$SCRATCH/global-$size.jil effect=$NIGHTBANK/night/effects-$size first
-    sudo cp "$ESTATE/global.jil" "$original"
-    sudo tee -a "$ESTATE/global.jil" >/dev/null <<JIL
+    local original=$ESTATE effect=$NIGHTBANK/night/effects-$size first src
+    release_setup
+    src=$(release_source "$size-p1" "$original")
+    cat >>"$src/global.jil" <<JIL
 
 insert_job: OFFLINE_EFFECT_C
 job_type: c
@@ -218,8 +222,9 @@ command: printf 'v1\\n' >> $effect
 machine: localhost
 owner: dsl41
 JIL
-    seal_next
-    cli query spec -J OFFLINE_EFFECT_C -S "$SOCK" | jq -e '.jil | contains("v1")' >/dev/null
+    deploy prepare "$size-p1" "$src"
+    release_apply "$size-p1"
+    spec_has OFFLINE_EFFECT_C v1 || fail 'the added definition is not v1'
     send_keeping_retry FORCE_STARTJOB OFFLINE_EFFECT_C
     first=$ANSWER
     wait_for 30 'added definition produced one effect' job_is OFFLINE_EFFECT_C SUCCESS
@@ -229,25 +234,28 @@ JIL
     [ "$(jq -c '{request_id,decision,index}' <<<"$ANSWER")" = \
         "$(jq -c '{request_id,decision,index}' <<<"$first")" ] || fail 'request replay changed its decision'
     [ "$(sudo cat "$effect" | wc -l | tr -d ' ')" = 1 ] || fail 'request replay repeated external effect'
-    sudo cp "$ESTATE/global.jil" "$SCRATCH/added-$size.jil"
-    sudo sed -i "s/printf 'v1/printf 'v2/" "$ESTATE/global.jil"
-    seal_next
-    cli query spec -J OFFLINE_EFFECT_C -S "$SOCK" | jq -e '.jil | contains("v2")' >/dev/null
+    src=$(release_source "$size-p2" "$ESTATE")
+    sed -i "s/printf 'v1/printf 'v2/" "$src/global.jil"
+    deploy prepare "$size-p2" "$src"
+    release_apply "$size-p2"
+    spec_has OFFLINE_EFFECT_C v2 || fail 'the changed definition is not v2'
     force_start OFFLINE_EFFECT_C
     wait_for 30 'changed definition ran' ran_to_success OFFLINE_EFFECT_C 2
-    sudo cp "$original" "$ESTATE/global.jil"
-    seal_next
+    src=$(release_source "$size-p3" "$original")
+    deploy prepare "$size-p3" "$src"
+    release_apply "$size-p3"
     expect_exit 2 cli query spec -J OFFLINE_EFFECT_C -S "$SOCK"
     [ "$(job_field OFFLINE_EFFECT_C job_type)" = null ] || fail 'removed definition is not a ghost'
-    sudo cp "$SCRATCH/added-$size.jil" "$ESTATE/global.jil"
-    seal_next
+    release_apply rollback
+    [ "$RELEASE" = "$size-p2" ] || fail "the rollback activated $RELEASE"
     force_start OFFLINE_EFFECT_C
     wait_for 30 'definition rollback ran' ran_to_success OFFLINE_EFFECT_C 3
-    [ "$(sudo cat "$effect")" = $'v1\nv2\nv1' ] || fail 'definition effects differ'
-    sudo cp "$original" "$ESTATE/global.jil"
-    seal_next
+    [ "$(sudo cat "$effect")" = $'v1\nv2\nv2' ] || fail 'definition effects differ'
+    release_apply rollback
+    [ "$RELEASE" = "$size-p3" ] || fail "the second rollback activated $RELEASE"
+    release_teardown
     cli audit --estate-anchor "$ANCHOR"
-    ok 'definition add/change/remove/rollback; exact replay produced no duplicate effect'
+    ok 'definition add/change/remove/rollback through the helper; exact replay produced no duplicate effect'
 }
 # Each phase can be resumed explicitly after a diagnosed harness failure (DL-389).
 use_estate() { # use_estate small|bank
@@ -272,7 +280,11 @@ bootstrap_estate() {
         ESTATE=$ESTATE_RELEASES/$RELEASE
         provision_root "$ROOT"
         point_launcher "$ROOT" "$ANCHOR"
-        install_release "$RELEASE" "$NIGHTBANK/estate/bank"
+        # The bank estate is above the example's ceiling, so this lane sizes the
+        # ceiling and the supervisor unit's stop timeout for it, together, by
+        # DL-401's line: the estate and the one job definition_probe adds.
+        size_ceiling $(($(cat "$NIGHTBANK/estate/bank"/*.jil | grep -c '^insert_job:') + 1))
+        deploy prepare "$RELEASE" "$NIGHTBANK/estate/bank"
         activate "$RELEASE"
         # The shared install preparation also supplies the bank estate's incident table (DL-389).
         sudo cp "$ESTATE/incidents.conf" "$NIGHTBANK/night/incidents.conf"

@@ -19,9 +19,10 @@
 # and restore of deployment-runbook ss2b, the signals of "What to watch",
 # the configure recipe,
 # the stop-and-recover recipe, a SIGKILL of the engine and of the
-# supervisor, every upgrade row of ss7 with its rollback, and ss0's
-# retirement. The install, the first start and the retirement run ss0's
-# recipe blocks as the runbook prints them (run_recipe).
+# supervisor, the application's release train through dsl41-release, every
+# upgrade row of ss7 with its rollback, and ss0's retirement. The install,
+# the first start and the retirement run ss0's recipe blocks as the runbook
+# prints them (run_recipe).
 # The two access-map refusals prove the same systemd claim as the changed
 # estate, and are pinned in tests/test_nightbank_deploy.py instead.
 set -euo pipefail
@@ -30,6 +31,8 @@ source "$(dirname "${BASH_SOURCE[0]}")/drill-lib.sh"
 
 STEPS=(install first-start restart detached refusal sealed quiesce restore reboot
     watch configure kill-engine kill-supervisor stop-recover
+    release release-rollback release-properties-only release-calendar-only
+    release-concurrent release-interrupted
     upgrade-resume-safe upgrade-fresh-root upgrade-fresh-root-rollback
     upgrade-coordinated upgrade-coordinated-rollback
     upgrade-old-release upgrade-state-machine upgrade-state-machine-rollback retire)
@@ -81,15 +84,11 @@ step_install() { # install dsl41, the nightbank estate, the launcher, the map an
     printf '%s\n' "$BUILD_B" >"$SCRATCH/build-b"
     flip "$BUILD_A"
     # the example is root-owned and read-only to the service, as a checkout
-    # of a tag would be. The active release comes from its estate before the
-    # service recipe, whose last line prints the launcher's command and so
-    # reads the release's manifest (DL-407)
+    # of a tag would be
     sudo install -d -m 0755 /srv/dsl41
     sudo cp -R "$REPO/examples/nightbank" "$NIGHTBANK"
     sudo chown -R root:root "$NIGHTBANK"
     sudo chmod -R go-w,a+rX "$NIGHTBANK"
-    install_release "$RELEASE" "$NIGHTBANK/estate/${DRILL_ESTATE:-small}"
-    activate "$RELEASE"
     run_recipe service-install
     record_supervisor_exit
     assert_enablement enabled
@@ -121,6 +120,14 @@ PY
     # one scripted delay: the job the drill starts runs long enough to
     # outlive an engine stop and start
     echo "$LONG_JOB late 45" | as_dsl41 tee -a "$NIGHTBANK/night/incidents.conf"
+    # Every release on the host is prepared, the first one included: the
+    # deployment identity prepares it with the site's properties in place,
+    # and ACTIVE names it for the genesis (DL-407). The launcher's printed
+    # line reads that release's manifest.
+    release_identity
+    deploy prepare "$RELEASE" "$NIGHTBANK/estate/${DRILL_ESTATE:-small}"
+    activate "$RELEASE"
+    run_recipe service-print
 }
 
 step_first_start() { # first start is a genesis, beside a supervisor in its own unit
@@ -644,6 +651,181 @@ step_kill_supervisor() { # SIGKILL of the supervisor: restart, resume and lease 
     wait_up
 }
 
+# The application's release train (DL-407): the deployment identity prepares,
+# applies and rolls back releases with dsl41-release, through the window of
+# deployment-runbook ss6a, and changes no file the infrastructure owns. The
+# steps run in order: each starts from the release the last one left active.
+
+# a release's receipt, one field; the active release's by default
+receipt() { # receipt FIELD [RELEASE]
+    sudo jq -r --arg f "$1" '.[$f]' "$ESTATE_RELEASES/${2:-$RELEASE}/.release/applied.json"
+}
+# exactly FILE differs between the releases' inputs
+only_differs() { # only_differs FROM TO FILE
+    local out
+    out=$(sudo diff -rq -x .release "$1" "$2" || true)
+    [ "$out" = "Files $1/$3 and $2/$3 differ" ] || fail "the release changes more than $3: $out"
+}
+
+step_release() { # a prepared release that adds a job file and changes a job, applied by the helper
+    local before src
+    release_setup
+    before=$(infra_state)
+    # v1: the active release's inputs, a properties layer of the release's own
+    # and a job that reads it
+    src=$(release_source small-v1 "$ESTATE")
+    cat >"$src/probe.jil" <<'JIL'
+insert_job: RELEASE_PROBE_C
+job_type: c
+command: echo probe ~{$PROBE_WORD}~
+machine: localhost
+owner: dsl41
+JIL
+    echo 'PROBE_WORD=v1' >"$src/release.properties"
+    sed -i -e 's/^files = \[\(.*\)\]$/files = [\1, "probe.jil"]/' \
+        -e '/^timezone = /i properties = ["release.properties"]' "$src/estate.toml"
+    deploy prepare small-v1 "$src"
+    release_apply small-v1
+    spec_has RELEASE_PROBE_C "echo probe v1" || fail "the probe job does not read the layer"
+    # v2: one more job file, and the probe job changed
+    src=$(release_source small-v2 "$ESTATE")
+    cat >"$src/added.jil" <<'JIL'
+insert_job: RELEASE_ADDED_C
+job_type: c
+command: echo added
+machine: localhost
+owner: dsl41
+JIL
+    sed -i 's/^command: echo probe /command: echo changed /' "$src/probe.jil"
+    sed -i 's/"probe.jil"\]$/"probe.jil", "added.jil"]/' "$src/estate.toml"
+    grep -qF '"added.jil"]' "$src/estate.toml" || fail "the manifest edit did not apply"
+    deploy prepare small-v2 "$src"
+    # one scheduled job the helper must hold and release itself; the request
+    # also makes the seal wait out the retry horizon
+    request OFF_HOLD EMEA_EOD_B
+    release_apply small-v2
+    spec_has RELEASE_ADDED_C "echo added" || fail "the added job has no definition"
+    spec_has RELEASE_PROBE_C "echo changed v1" || fail "the changed job is not the new definition"
+    [ "$(receipt previous)" = small-v1 ] || fail "the receipt does not name small-v1"
+    sudo jq -e '.holds == .released and (.holds | index("EMEA_EOD_B") != null)
+        and (.holds | index("APAC_EOD_B") == null)' "$ESTATE/.release/applied.json" >/dev/null ||
+        fail "the helper's holds: $(receipt holds), released: $(receipt released)"
+    [ "$(job_field EMEA_EOD_B on_hold)" = false ] || fail "the helper kept its hold"
+    [ "$(job_field APAC_EOD_B on_hold)" = true ] || fail "the helper released a hold it did not take"
+    request ON_HOLD EMEA_EOD_B
+    # one run, so the job has history to keep when a release removes it
+    force_start RELEASE_ADDED_C
+    wait_for 60 "RELEASE_ADDED_C ended in SUCCESS" job_is RELEASE_ADDED_C SUCCESS
+    [ "$(infra_state)" = "$before" ] || fail "the release changed a file the infrastructure owns"
+    ok "small-v2 is active: the added job answers, the changed job is new, the launcher, units and runtime link are unchanged"
+}
+
+step_release_rollback() { # rollback to v1 by the same path; the removed job stays a ghost
+    local before rc
+    before=$(infra_state)
+    release_apply rollback
+    [ "$RELEASE" = small-v1 ] || fail "the rollback activated $RELEASE"
+    [ "$(receipt previous)" = small-v2 ] || fail "the receipt does not name small-v2"
+    rc=0
+    cli query spec -J RELEASE_ADDED_C -S "$SOCK" >/dev/null 2>&1 || rc=$?
+    [ "$rc" = 2 ] || fail "query spec of the removed job exited $rc, not 2"
+    [ "$(job_field RELEASE_ADDED_C job_type)" = null ] || fail "the removed job is not a ghost"
+    [ "$(job_field RELEASE_ADDED_C run_number)" = 1 ] || fail "the ghost lost its history"
+    spec_has RELEASE_PROBE_C "echo probe v1" || fail "the probe job is not v1's again"
+    [ "$(infra_state)" = "$before" ] || fail "the rollback changed a file the infrastructure owns"
+    ok "rolled back to small-v1: RELEASE_ADDED_C is a ghost with its run, the launcher, units and runtime link are unchanged"
+}
+
+step_release_properties_only() { # a release that changes only its properties layer
+    local src from=$ESTATE
+    src=$(release_source small-v3 "$ESTATE")
+    echo 'PROBE_WORD=v3' >"$src/release.properties"
+    only_differs "$from" "$src" release.properties
+    deploy prepare small-v3 "$src"
+    release_apply small-v3
+    spec_has RELEASE_PROBE_C "echo probe v3" || fail "the probe job does not read the new layer"
+    [ "$(receipt source_bundle_hash)" != "$(receipt source_bundle_hash small-v1)" ] ||
+        fail "the bundle hash did not move"
+    [ "$(receipt period)" -gt "$(receipt period small-v1)" ] || fail "no new period opened"
+    ok "a properties-only release moved the bundle hash and opened period $(receipt period)"
+}
+
+step_release_calendar_only() { # a release that changes only a calendar
+    local src from=$ESTATE hash
+    src=$(release_source small-v4 "$ESTATE")
+    sed -i 's|^01/01/2027$|01/01/2027\n01/01/2028|' "$src/calendars.jil"
+    only_differs "$from" "$src" calendars.jil
+    deploy prepare small-v4 "$src"
+    release_apply small-v4
+    hash=$(receipt source_bundle_hash)
+    [ "$hash" != "$(receipt source_bundle_hash small-v3)" ] || fail "the bundle hash did not move"
+    sudo grep -rqF 01/01/2028 "$ROOT/catalogs/${hash#sha256:}" ||
+        fail "the opened bundle does not hold the new holiday"
+    ok "a calendar-only release moved the bundle hash and opened period $(receipt period)"
+}
+
+step_release_concurrent() { # a second apply is refused while the first holds the lock
+    local src first rc out
+    src=$(release_source small-v5 "$ESTATE")
+    deploy prepare small-v5 "$src"
+    # the first apply holds EMEA_EOD_B and waits out the retry horizon, holding the lock
+    request OFF_HOLD EMEA_EOD_B
+    sudo systemctl reset-failed "$ENGINE" 2>/dev/null || true
+    deploy apply small-v5 >"$SCRATCH/release-first.log" 2>&1 &
+    first=$!
+    wait_for 60 "the first apply recorded itself" sudo test -e "$ESTATE_RELEASES/.apply.json"
+    rc=0
+    out=$(deploy rollback 2>&1) || rc=$?
+    echo "$out"
+    [ "$rc" = 2 ] || fail "the second apply exited $rc, not 2"
+    grep -qE "another apply holds $ESTATE_RELEASES/.apply.lock: pid [0-9]+, $DEPLOY_USER@" <<<"$out" ||
+        fail "the refusal does not name the holder"
+    rc=0
+    wait "$first" || rc=$?
+    cat "$SCRATCH/release-first.log"
+    [ "$rc" = 0 ] || fail "the first apply exited $rc"
+    follow_active
+    [ "$RELEASE" = small-v5 ] || fail "ACTIVE names $RELEASE, not small-v5"
+    wait_up
+    request ON_HOLD EMEA_EOD_B
+    ok "the second apply was refused naming the first, which completed"
+}
+
+# the committed seals in ROOT
+seal_count() { sudo find "$ROOT/seals" -name '[0-9][0-9][0-9][0-9][0-9][0-9].json' | wc -l; }
+step_release_interrupted() { # the helper killed after the seal: status shows it, resume completes it
+    local src rc seals out
+    # the estate's own inputs again, so the release the steps leave active
+    # has the file set of the release the drill installed
+    src=$(release_source small-v6 "$NIGHTBANK/estate/${DRILL_ESTATE:-small}")
+    deploy prepare small-v6 "$src"
+    seals=$(seal_count)
+    sudo systemctl reset-failed "$ENGINE" 2>/dev/null || true
+    rc=0
+    (cd / && sudo -u "$DEPLOY_USER" -H env DSL41_RELEASE_STOP_AFTER=seal "$RELEASE_HELPER" \
+        apply small-v6) || rc=$?
+    [ "$rc" != 0 ] || fail "the helper was not stopped after the seal"
+    [ "$(sudo jq -r .step "$ESTATE_RELEASES/.apply.json")" = sealed ] || fail "the record is not at sealed"
+    [ "$(cat "$ACTIVE")" = small-v5 ] || fail "ACTIVE moved before the helper wrote it"
+    [ "$(seal_count)" = $((seals + 1)) ] || fail "the seal did not commit"
+    wait_for 90 "$ENGINE is failed" is_state "$ENGINE" failed
+    [ "$(prop "$ENGINE" ExecMainStatus)" = 3 ] || fail "exit $(prop "$ENGINE" ExecMainStatus), not 3"
+    out=$(deploy status)
+    echo "$out"
+    grep -qF 'apply: small-v6 after small-v5, at step sealed' <<<"$out" || fail "status does not show the step"
+    grep -qF 'will write ACTIVE, start the engine unit, verify, and release the holds' <<<"$out" ||
+        fail "status does not say what resume does"
+    sudo systemctl reset-failed "$ENGINE" 2>/dev/null || true
+    deploy apply --resume small-v6
+    follow_active
+    [ "$RELEASE" = small-v6 ] || fail "ACTIVE names $RELEASE, not small-v6"
+    [ "$(seal_count)" = $((seals + 1)) ] || fail "the resume sealed again"
+    ! sudo test -e "$ESTATE_RELEASES/.apply.json" || fail "the record is still there"
+    wait_up
+    release_teardown
+    ok "the interrupted apply resumed from its record with no second seal; small-v6 is active"
+}
+
 # ss7 row 1, a patch marked resume-safe: stop the engine unit, flip, start
 # it again; the supervisor unit and its detached job are kept. Rollback is
 # the same with the old venv.
@@ -684,6 +866,15 @@ step_upgrade_resume_safe() { # resume-safe row: engine restarted on the flipped 
 # engine unit run the opener, so the new root's supervisor and jobs live in
 # the units' cgroups. The rollback is the same procedure with the old venv
 # and another fresh root.
+# the period a roll of ROOT opens: the one after its newest segment, which the
+# roll's seal closes
+next_period() { # next_period ROOT
+    local newest
+    newest=$(sudo find "$1/wal" -name '[0-9]*.jsonl' | sort | tail -n 1)
+    [ -n "$newest" ] || fail "$1 holds no segment"
+    newest=${newest##*/}
+    echo $((10#${newest%.jsonl} + 1))
+}
 roll_into_fresh_root() { # roll_into_fresh_root NEW_ROOT BUILD PERIOD
     local new=$1 build=$2 period=$3 mark line
     wait_for 60 "nothing is live under the supervisor" nothing_live "$ROOT"
@@ -703,7 +894,7 @@ roll_into_fresh_root() { # roll_into_fresh_root NEW_ROOT BUILD PERIOD
     launch_line_since "$mark" | grep -qF -- " --open-from $ANCHOR" || fail "the unit did not open $ROOT"
     engine_log_since "$mark" | grep -qF "opened period $period in $ROOT" || fail "no roll into $ROOT"
     ! sudo test -e "$ROOT.open-from" || fail "the open trigger is still there"
-    sudo test -e "$ROOT/wal/00000$period.jsonl" || fail "period $period did not open in $ROOT"
+    sudo test -e "$ROOT/wal/$(printf %06d "$period").jsonl" || fail "period $period did not open in $ROOT"
     on_build "$ENGINE" "$build"
     on_build "$SUPERVISOR" "$build"
     ok "the engine unit opened period $period in $ROOT; both units run from $build"
@@ -718,14 +909,14 @@ roll_into_fresh_root() { # roll_into_fresh_root NEW_ROOT BUILD PERIOD
 
 step_upgrade_fresh_root() { # silent-note row: the next period opens in a fresh root on the flipped venv
     echo "two installs of one build: this exercises the row, it qualifies no version pair"
-    roll_into_fresh_root "$ROLLED_ROOT" "$BUILD_B" 4
+    roll_into_fresh_root "$ROLLED_ROOT" "$BUILD_B" "$(next_period "$ROOT")"
 }
 
 step_upgrade_fresh_root_rollback() { # silent-note row's rollback: the old venv, another fresh root
     echo "two installs of one build: this exercises the row, it qualifies no version pair"
     ROOT=$ROLLED_ROOT
     SOCK=$ROOT/control.sock
-    roll_into_fresh_root "$ROLLBACK_ROOT" "$BUILD_A" 5
+    roll_into_fresh_root "$ROLLBACK_ROOT" "$BUILD_A" "$(next_period "$ROOT")"
 }
 
 # ss7 row 3, resume-safe with a wrapper or supervisor protocol change:

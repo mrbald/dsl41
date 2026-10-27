@@ -29,6 +29,9 @@
 #   dsl41-launch --print [MODE]      print MODE's command, shell-quoted, and
 #                                    run no estate command (MODE defaults to
 #                                    engine; it runs the --supervisor probe)
+#   dsl41-launch vars                print the CONFIGURATION a release helper
+#                                    reads, one NAME=VALUE line each, the
+#                                    value shell-quoted, and run nothing
 #
 # The engine mode passes --resume if and only if the run root holds its
 # sentinel, <root>/journal.jsonl (deployment-runbook ss3). It chooses a
@@ -89,12 +92,26 @@ ENVIRONMENT=wargame
 PROPERTIES=/srv/dsl41/nightbank/night/night.properties
 # The workload the units' limits were sized for: the supervisor unit's
 # TimeoutStopSec=900 covers 15 + 5 + MAX_GRACE_S + 2 + 8 x MAX_JOBS + 10
-# seconds (DL-401). Nothing here reads them; a release's prepare refuses a
-# release above them.
-# shellcheck disable=SC2034  # read by the release's prepare, not here
+# seconds (DL-401). `vars` prints them, and the release helper's prepare
+# refuses a release above them (DL-407).
 MAX_JOBS=107
-# shellcheck disable=SC2034  # read by the release's prepare, not here
 MAX_GRACE_S=10
+
+# The engine's options after the estate's words, shell-quoted; a SUPERVISOR
+# mode follows --detached. Their deployment half, --detached, --deadman,
+# --as-machine and --machine-policy, is what every seal restates as --next-*,
+# because an omitted --next-* option takes its default; `vars` prints it in
+# that form (DL-407, deployment-runbook ss6a).
+run_options() { # run_options [SUPERVISOR]
+    quote_all -p "$PROPERTIES" \
+        --run-root "$RUN_ROOT" \
+        --estate-anchor "$ESTATE_ANCHOR" \
+        --detached \
+        ${1:+--supervisor "$1"} \
+        --as-machine localhost \
+        --machine-policy strict \
+        --access-map "$ACCESS_MAP"
+}
 
 engine_command() {
     # The engine attaches to the supervisor unit's supervisor and never forks
@@ -126,14 +143,8 @@ engine_command() {
     estate=$("$DSL41" estate args "$ESTATE/estate.toml" --for run \
         --environment "$ENVIRONMENT") ||
         refuse "$DSL41 estate args exited $? for $ESTATE/estate.toml"
-    set -- -p "$PROPERTIES" \
-        --run-root "$RUN_ROOT" \
-        --estate-anchor "$ESTATE_ANCHOR" \
-        --detached \
-        ${supervisor:+--supervisor "$supervisor"} \
-        --as-machine localhost \
-        --machine-policy strict \
-        --access-map "$ACCESS_MAP"
+    options=$(run_options "$supervisor")
+    eval "set -- $options"
     opener=$(root_opener) || exit $?
     case $opener in
         resume) set -- "$@" --resume ;;
@@ -235,6 +246,27 @@ genesis() {
     echo genesis
 }
 
+# run_options' deployment half, as a seal's --next-* options (see run_options)
+# shellcheck disable=SC2120  # its words are run_options', set inside
+next_profile() {
+    eval "set -- $(run_options)"
+    sep=
+    while [ $# -gt 0 ]; do
+        case $1 in
+            --detached)
+                printf '%s--next-detached' "$sep"
+                sep=' '
+                ;;
+            --deadman | --as-machine | --machine-policy)
+                printf '%s--next-%s %s' "$sep" "${1#--}" "$(quote "$2")"
+                sep=' '
+                shift
+                ;;
+        esac
+        shift
+    done
+}
+
 supervisor_command() {
     quote_all "$DSL41" supervise start --run-root "$RUN_ROOT"
 }
@@ -267,7 +299,7 @@ refuse() {
 }
 
 usage() {
-    refuse "usage: dsl41-launch [--print] [engine|supervisor|supervisor-ready]"
+    refuse "usage: dsl41-launch [--print] [engine|supervisor|supervisor-ready] | dsl41-launch vars"
 }
 
 print=0
@@ -294,6 +326,16 @@ case $mode in
         printf 'dsl41-launch: no supervisor answered on %s after %s tries\n' \
             "$RUN_ROOT" "$attempt" >&2
         exit 1
+        ;;
+    vars)
+        [ "$print" -eq 0 ] || usage
+        for pair in "DSL41=$DSL41" "RUN_ROOT=$RUN_ROOT" "ESTATE_ANCHOR=$ESTATE_ANCHOR" \
+            "ESTATE_RELEASES=$ESTATE_RELEASES" "ACTIVE=$ACTIVE" "ENVIRONMENT=$ENVIRONMENT" \
+            "PROPERTIES=$PROPERTIES" "MAX_JOBS=$MAX_JOBS" "MAX_GRACE_S=$MAX_GRACE_S"; do
+            printf '%s=%s\n' "${pair%%=*}" "$(quote "${pair#*=}")"
+        done
+        printf 'NEXT_PROFILE=%s\n' "$(quote "$(next_profile)")"
+        exit 0
         ;;
     *) usage ;;
 esac

@@ -200,16 +200,16 @@ install -m 0644 examples/nightbank/deploy/dsl41-engine.service \
     examples/nightbank/deploy/dsl41-supervisor.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable dsl41-supervisor.service dsl41-engine.service
-sudo -u dsl41 /opt/dsl41/bin/dsl41-launch --print
 ```
 
 3. The service account writes the run roots and their anchors under
    `/srv/dsl41/runs`, and whatever its jobs write. A job's data
    directories and its `std_out_file` targets must be the account's:
    nightbank's jobs write under `/srv/dsl41/nightbank/night`, which the
-   drill creates owned by the account. Install the estate's release under the
-   launcher's `ESTATE_RELEASES` and name it in `ACTIVE`, owned by root and
-   read-only to the account (§2). The
+   drill creates owned by the account. Prepare the estate's first release
+   under the launcher's `ESTATE_RELEASES` with the release helper,
+   `dsl41-release prepare NAME DIR` as the deployment identity, and then name
+   it in `ACTIVE` (§2). A prepared release is read-only to every account. The
    access map must be owned by the account and writable by no one else,
    in a directory owned by root or the account and writable by no one
    else (access-model §4).
@@ -217,7 +217,13 @@ sudo -u dsl41 /opt/dsl41/bin/dsl41-launch --print
    CONFIGURATION block, and the run root in both units'
    `RequiresMountsFor=`. Run `systemctl daemon-reload` after a unit edit.
    `dsl41-launch --print` shows the command the engine unit will run. It
-   names every estate file, in order, every `-p` and every run option.
+   names every estate file, in order, every `-p` and every run option:
+
+<!-- recipe: service-print -->
+```sh
+sudo -u dsl41 /opt/dsl41/bin/dsl41-launch --print
+```
+
 5. Start:
 
 <!-- recipe: service-start -->

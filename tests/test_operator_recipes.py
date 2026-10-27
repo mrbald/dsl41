@@ -269,6 +269,7 @@ RUN_HERE = {
 #: the recipes drill-steps.sh runs as written
 RUN_BY_DRILL = {
     "service-install",
+    "service-print",
     "service-start",
     "wait-answers",
     "watch-sealed",
@@ -406,7 +407,8 @@ def test_the_service_install_recipe_installs_what_the_units_and_launcher_name() 
     enable = [line for line in lines if line.startswith("systemctl enable ")]
     assert len(enable) == 1 and sorted(enable[0].split()[2:]) == shipped
     assert lines.index("systemctl daemon-reload") < lines.index(enable[0])
-    assert lines[-1] == f"sudo -u {user} {launch_path} --print"
+    # the printed line reads ACTIVE, which names a prepared release only after the install
+    assert _lines("service-print") == [f"sudo -u {user} {launch_path} --print"]
 
 
 def test_the_service_start_recipe_starts_the_engine_unit_and_reads_both() -> None:
