@@ -83,6 +83,10 @@ if args[0] == "sendevent":
         print(f"refused: {verb} {job}", file=sys.stderr)
         sys.exit(2)
     rid = opt("--request-id") or str(uuid.uuid4())
+    if rid in state["decisions"] and job in state["refuse_resend"]:
+        save()
+        print(f"refused: {verb} {job} resent", file=sys.stderr)
+        sys.exit(2)
     if rid in state["decisions"]:  # an exact retry is answered from the first decision
         code, answer = state["decisions"][rid]
         save()
@@ -107,13 +111,15 @@ if args[0] == "sendevent":
         sys.exit(3)
     noop = verb == "ON_HOLD" and job in state["noop_holds"]
     if not noop:
-        row["on_hold"] = verb == "ON_HOLD"
+        if verb in ("ON_HOLD", "OFF_HOLD", "ON_NOEXEC", "FORCE_STARTJOB"):
+            row["on_hold"] = verb == "ON_HOLD"
         row["state_rev"] += 1
         state["sent"].append([verb, job])
     answer = {"ok": True, "decision": "applied", "request_id": rid}
     answer["revisions"] = {} if noop else {f"job:{job}": row["state_rev"]}
     state["decisions"][rid] = [0, answer]
-    append(wal, {"rec": "decision", "index": state["index"], "decision": "applied"})
+    decision = {"rec": "decision", "index": state["index"], "decision": "applied"}
+    append(wal, decision | {"revisions": answer["revisions"]})
     lost = (verb == "ON_HOLD" and job in state["send_unknown"]) or forced == 4
     if verb == "ON_HOLD" and job in state["send_unknown"]:
         state["send_unknown"].remove(job)
@@ -287,6 +293,7 @@ class Site:
                 "send_unknown": [],
                 "noop_holds": [],
                 "release_outcomes": {},
+                "refuse_resend": [],
                 "index": 0,
                 "start_fails": False,
                 "calls": [],
@@ -512,10 +519,7 @@ def test_apply_holds_drains_seals_selects_starts_verifies_and_releases_its_own_h
         f"{site.helper} service committed {rid}",
         "systemctl start dsl41-engine.service",
         f"{site.helper} service pins {rid}",
-        *(
-            f"{site.helper} service holds {hold['job']} {hold['request_id']}"
-            for hold in receipt["holds"]
-        ),
+        *(f"{site.helper} service holds {hold['job']}" for hold in receipt["holds"]),
     ]
 
 
@@ -610,13 +614,71 @@ def test_an_operators_release_and_rehold_after_the_helpers_hold_is_kept(site: Si
     assert resumed.returncode == 0, resumed.stderr
     receipt = site.receipt("v2")
     assert receipt["released"] == ["NB_B"] and receipt["kept"] == ["NB_FREE_C"]
-    assert "hold of NB_FREE_C kept: released since by request" in resumed.stderr
+    assert "hold of NB_FREE_C kept: its hold moved since, by request OFF_HOLD" in resumed.stderr
     assert site.state()["jobs"]["NB_FREE_C"]["on_hold"] is True
 
 
-def test_a_rejected_release_is_kept_with_its_reason(site: Site) -> None:
+def test_a_hold_moved_by_noexec_and_set_again_by_an_operator_is_kept(site: Site) -> None:
+    """ON_NOEXEC supersedes the helper's hold, OFF_NOEXEC leaves the job unheld, and an
+    operator's ON_HOLD holds it again: no OFF_HOLD is in the log, and still the hold there
+    now is not the helper's, so it stays."""
+    site.prepared("v2")
+    site.edit(seal_outcomes=["unknown"])
+    assert site.run("apply", "v2").returncode == 4
+    for verb in ("ON_NOEXEC", "OFF_NOEXEC", "ON_HOLD"):
+        site.stub_cli("sendevent", verb, "-J", "NB_FREE_C", "-S", "x")
+    resumed = site.run("apply", "--resume", "v2")
+    assert resumed.returncode == 0, resumed.stderr
+    receipt = site.receipt("v2")
+    assert receipt["released"] == ["NB_B"] and receipt["kept"] == ["NB_FREE_C"]
+    assert "its hold moved since, by request ON_NOEXEC" in resumed.stderr
+    assert site.state()["jobs"]["NB_FREE_C"]["on_hold"] is True
+
+
+def test_a_hold_resent_and_refused_is_settled_by_the_log(site: Site) -> None:
+    """The ON_HOLD applied and its answer was lost; the resume's resend is refused
+    outright, and the log shows the hold applied, so it is the helper's to release."""
+    site.prepared("v2")
+    site.edit(send_unknown=["NB_FREE_C"], refuse_resend=["NB_FREE_C"])
+    assert site.run("apply", "v2").returncode == 3
+    resumed = site.run("apply", "--resume", "v2")
+    assert resumed.returncode == 0, resumed.stderr
+    (entry,) = [hold for hold in site.receipt("v2")["holds"] if hold["job"] == "NB_FREE_C"]
+    assert entry["state"] == "released" and entry["rev"] == 4
+    assert site.state()["jobs"]["NB_FREE_C"]["on_hold"] is False
+
+
+def test_a_release_resent_and_refused_is_settled_by_the_log(site: Site) -> None:
+    site.prepared("v2")
+    site.edit(release_outcomes={"NB_FREE_C": [4]}, refuse_resend=["NB_FREE_C"])
+    assert site.run("apply", "v2").returncode == 3
+    resumed = site.run("apply", "--resume", "v2")
+    assert resumed.returncode == 0, resumed.stderr
+    assert site.receipt("v2")["released"] == ["NB_B", "NB_FREE_C"]
+    assert site.state()["sent"].count(["OFF_HOLD", "NB_FREE_C"]) == 1
+
+
+def test_a_rejected_release_is_settled_again_and_sent_under_a_new_id(site: Site) -> None:
+    """A tick that latches the job between the expect's read and the OFF_HOLD rejects it
+    once; the helper reads the row again and releases the hold under a new id."""
     site.prepared("v2")
     site.edit(release_outcomes={"NB_FREE_C": [3]})
+    done = site.run("apply", "v2")
+    assert done.returncode == 0, done.stderr
+    receipt = site.receipt("v2")
+    assert receipt["released"] == ["NB_B", "NB_FREE_C"] and receipt["kept"] == []
+    ids = [
+        call[call.index("--request-id") + 1]
+        for call in site.state()["calls"]
+        if call[:2] == ["sendevent", "OFF_HOLD"] and "NB_FREE_C" in call
+    ]
+    assert len(ids) == 2 and ids[0] != ids[1]
+    assert site.state()["jobs"]["NB_FREE_C"]["on_hold"] is False
+
+
+def test_a_release_rejected_three_times_is_kept_with_its_reason(site: Site) -> None:
+    site.prepared("v2")
+    site.edit(release_outcomes={"NB_FREE_C": [3, 3, 3]})
     done = site.run("apply", "v2")
     assert done.returncode == 0, done.stderr
     receipt = site.receipt("v2")
