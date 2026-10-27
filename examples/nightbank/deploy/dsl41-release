@@ -62,10 +62,13 @@ committed seal is never sent again, and a retry never takes a fresh id.
 A hold is the helper's when the helper's own request applied it. The
 request id is composed and recorded before the send, so a resume sends a
 pending hold again under that id, and the engine answers from its first
-decision. The helper releases its applied holds that are still held, a hold
-a schedule tick latched included, and never a hold it did not apply. A
-limit: an operator who releases and sets again, inside the window, a hold
-the helper took has that hold released with the helper's. DSL41_RELEASE_STOP_AFTER=seal-reply kills the
+decision; an applied hold that moved no revision held nothing new and is
+not the helper's. The helper releases each of its holds that is still held,
+a hold a schedule tick latched included, under a request id recorded before
+the send, so a release with no decision is sent again under that id. It
+keeps a hold when the run root's log shows an OFF_HOLD of the job from
+another request after the helper's hold: the hold there now is somebody
+else's. It never releases a hold it did not apply. DSL41_RELEASE_STOP_AFTER=seal-reply kills the
 helper after the seal exits 0 and before that is recorded; =seal kills it
 after it is recorded and before ACTIVE is written. The drill uses both, and
 nothing else should.
@@ -77,8 +80,10 @@ a member of the map's socket_group (access-model ss4, ss10). Lint, rehearse,
 the seal and the reads inside the run root run as the service account, as
 this file's `service` mode through `sudo -u dsl41 -H`, invoked by the path
 this file was run as. That mode takes release names, a request id and the
-recorded actor, never a command line, and its seal exits with `dsl41 seal`'s
-own code. The start runs through `sudo systemctl start dsl41-engine.service`.
+recorded actor, never a command line. Its seal refuses, exit 2, a release
+that is not prepared under this runtime or whose files changed since, as an
+apply does, so the grant seals nothing prepare did not check; otherwise it
+exits with `dsl41 seal`'s own code. The start runs through `sudo systemctl start dsl41-engine.service`.
 dsl41-release.sudoers beside this file grants those two commands and nothing
 else.
 
@@ -477,9 +482,41 @@ def service_pins(cfg: Config, request_id: str) -> dict[str, Any]:
     }
 
 
+def hold_history(cfg: Config, job: str, request_id: str) -> dict[str, Any]:
+    """Whether the run root's log holds the applied ON_HOLD of JOB under REQUEST_ID, and
+    the request ids of applied OFF_HOLDs of JOB after it, across the last three WAL
+    segments: an `input` names the verb, the job and the request id, and the `decision` at
+    its index says whether it applied (period-model ss2.3)."""
+    inputs: list[dict[str, Any]] = []
+    applied: set[tuple[str, int]] = set()
+    for segment in sorted((cfg.run_root / "wal").glob(SEGMENT))[-3:]:
+        for line in segment.read_bytes().split(b"\n"):
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if record.get("rec") == "input" and (record.get("payload") or {}).get("job") == job:
+                if record.get("kind") in ("ON_HOLD", "OFF_HOLD"):
+                    inputs.append(record | {"segment": segment.name})
+            if record.get("rec") == "decision" and record.get("decision") == "applied":
+                applied.add((segment.name, int(record["index"])))
+    found = False
+    released_by: list[str] = []
+    for record in inputs:
+        if (record["segment"], int(record["seq"])) not in applied:
+            continue
+        if record["kind"] == "ON_HOLD" and record.get("request_id") == request_id:
+            found, released_by = True, []
+        elif found and record["kind"] == "OFF_HOLD":
+            released_by.append(str(record.get("request_id")))
+    return {"found": found, "released_by": released_by}
+
+
 def service_seal(cfg: Config, name: str, request_id: str, actor: str) -> int:
     """The seal of the running period into release NAME, its profile restated from the
-    launcher; dsl41's exit code is this command's."""
+    launcher; dsl41's exit code is this command's. NAME must be prepared under this runtime
+    with its files unchanged, so a hand-run seal is held to what prepare checked."""
+    check_prepared(cfg, name)
     path = release_dir(cfg, name)
     argv = [cfg.dsl41, "seal", "--run-root", str(cfg.run_root)]
     argv += ["--estate-anchor", str(cfg.estate_anchor), *estate_args(cfg, path, "seal")]
@@ -504,13 +541,16 @@ def service(argv: list[str]) -> int:
     if action == "committed" and len(rest) == 1 and ids == rest:
         print(json.dumps(committed(cfg, rest[0])))
         return EXIT_OK
+    if action == "holds" and len(rest) == 2 and NAME.fullmatch(rest[0]) and ids == rest[1:]:
+        print(json.dumps(hold_history(cfg, rest[0], rest[1])))
+        return EXIT_OK
     if action == "pins" and len(rest) == 1 and ids == rest:
         print(json.dumps(service_pins(cfg, rest[0])))
         return EXIT_OK
     raise Stop(
         EXIT_REFUSED,
         "usage: service check NAME | changes FROM TO | seal NAME ID ACTOR | committed ID"
-        f" | pins ID, not {argv}",
+        f" | holds JOB ID | pins ID, not {argv}",
     )
 
 
@@ -673,7 +713,7 @@ def query(cfg: Config, what: str, job: str | None = None) -> dict[str, Any]:
 
 
 def send(cfg: Config, verb: str, job: str, *expect: str) -> tuple[int, dict[str, Any]]:
-    """One sendevent; its exit code and its answer."""
+    """One sendevent; its exit code and its answer, a refusal's text under `error`."""
     done = subprocess.run(
         [cfg.dsl41, "sendevent", verb, "-J", job, "-S", cfg.socket, *expect],
         capture_output=True,
@@ -683,11 +723,14 @@ def send(cfg: Config, verb: str, job: str, *expect: str) -> tuple[int, dict[str,
         answer = json.loads(done.stdout.strip().splitlines()[-1]) if done.stdout.strip() else {}
     except ValueError:
         answer = {}
-    if done.returncode not in (0, 3, 4):
+    if done.returncode not in (0, 2, 3, 4):
         raise Stop(
             EXIT_REFUSED, f"sendevent {verb} -J {job} exited {done.returncode}: {done.stderr}"
         )
-    return done.returncode, answer if isinstance(answer, dict) else {}
+    answer = answer if isinstance(answer, dict) else {}
+    if done.returncode == 2:
+        answer = answer | {"error": answer.get("error") or done.stderr.strip()}
+    return done.returncode, answer
 
 
 class Apply:
@@ -806,9 +849,9 @@ class Apply:
                     "job": job,
                     "state": "pending",
                     "request_id": str(uuid.uuid4()),
-                    "expect": int(row["state_rev"]),
-                    "epoch": int(answer["epoch"]),
-                    "baseline": str(answer["baseline_id"]),
+                    "request_id_expect": int(row["state_rev"]),
+                    "request_id_epoch": int(answer["epoch"]),
+                    "request_id_baseline": str(answer["baseline_id"]),
                 }
                 self.record["holds"].append(entry)
                 self.step(self.record["step"])
@@ -821,29 +864,42 @@ class Apply:
 
     def send_hold(self, entry: dict[str, Any]) -> bool:
         """The ON_HOLD of ENTRY under its recorded request id, expect, epoch and baseline; an
-        exact resend is answered from the first decision. Whether it applied settles whether
-        the hold is the helper's; its revision is kept as a fact."""
+        exact resend is answered from the first decision, which settles whether the hold is
+        the helper's. An applied answer that moved no revision of the job held nothing new (a
+        RUNNING job's hold is a no-op), so that hold is never the helper's to release."""
+        code, answer = self.send_recorded("ON_HOLD", entry, "request_id")
+        if code == 2:
+            entry |= {"state": "rejected", "reason": answer["error"]}
+            self.step(self.record["step"])
+            raise Stop(EXIT_REFUSED, f"the hold of {entry['job']} was refused: {answer['error']}")
+        rev = (answer.get("revisions") or {}).get(f"job:{entry['job']}")
+        if code != 0:
+            entry["state"] = "rejected"
+        elif rev is None:
+            entry["state"] = "noop"
+        else:
+            entry |= {"state": "applied", "rev": rev}
+        self.step(self.record["step"])
+        return code == 0
+
+    def send_recorded(self, verb: str, entry: dict[str, Any], key: str) -> tuple[int, Any]:
+        """VERB for ENTRY's job under the request id at KEY and the expect, epoch and baseline
+        recorded with it; no decision stops the apply with its record, and a resume sends
+        the same request again."""
         code, answer = send(
             self.cfg,
-            "ON_HOLD",
+            verb,
             entry["job"],
-            *("--request-id", entry["request_id"], "--expect", str(entry["expect"])),
-            *("--epoch", str(entry["epoch"]), "--baseline", entry["baseline"]),
+            *("--request-id", entry[key], "--expect", str(entry[f"{key}_expect"])),
+            *("--epoch", str(entry[f"{key}_epoch"]), "--baseline", entry[f"{key}_baseline"]),
         )
         if code == 4:
             raise Stop(
                 EXIT_STOPPED,
-                f"the hold of {entry['job']} has no decision; a resume sends it again under"
-                f" request id {entry['request_id']}",
+                f"the {verb} of {entry['job']} has no decision; a resume sends it again under"
+                f" request id {entry[key]}",
             )
-        entry["state"] = "applied" if code == 0 else "rejected"
-        # a fact, not a gate: a no-op hold answers with no revisions, so it is read back
-        entry["rev"] = (answer.get("revisions") or {}).get(f"job:{entry['job']}")
-        if entry["rev"] is None and code == 0:
-            row = query(self.cfg, "status", entry["job"])["jobs"].get(entry["job"]) or {}
-            entry["rev"] = row.get("state_rev")
-        self.step(self.record["step"])
-        return code == 0
+        return code, answer
 
     def drain(self) -> None:
         """No job STARTING, RUNNING or QUE_WAIT; then no job the release changes or removes
@@ -995,29 +1051,63 @@ class Apply:
             raise Stop(EXIT_STOPPED, "; ".join(problems))
 
     def release_holds(self) -> tuple[list[str], list[str]]:
-        """OFF_HOLD for each hold this apply's own request applied that is still held; a
-        pending hold is settled first under its request id. A hold the helper never applied
-        is never released. A job the new period no longer defines is a ghost and keeps its
-        row (period-model ss10); it, and a hold found released, are kept as they are."""
+        """OFF_HOLD for each hold this apply's own request applied, under a request id
+        recorded before the send. A pending hold is settled first, and a release left without
+        a decision is sent again under its id. A hold stays when the job is no longer held
+        or no longer defined (a ghost keeps its row, period-model ss10), or when the run root's
+        log shows an OFF_HOLD of the job from another request after the helper's hold: the
+        hold there now is somebody else's. A hold the helper never applied is never released.
+        The receipt's lists are the recorded states."""
         for entry in self.record["holds"]:
             if entry["state"] == "pending":
                 self.send_hold(entry)
-        applied = [entry["job"] for entry in self.record["holds"] if entry["state"] == "applied"]
-        if not applied:
-            return [], []
-        jobs = query(self.cfg, "status")["jobs"]
-        released: list[str] = []
-        kept: list[str] = []
-        for job in applied:
-            row = jobs.get(job)
-            if row is None or row.get("job_type") is None or not row.get("on_hold"):
-                kept.append(job)
-                continue
-            send(self.cfg, "OFF_HOLD", job)
-            released.append(job)
-        if kept:
-            say(f"holds found released, or of a job no longer defined: {', '.join(kept)}")
+        for entry in self.record["holds"]:
+            if entry["state"] == "applied":
+                self.settle_release(entry)
+            if entry["state"] == "releasing":
+                self.send_release(entry)
+        released = [e["job"] for e in self.record["holds"] if e["state"] == "released"]
+        kept = [e["job"] for e in self.record["holds"] if e["state"] == "kept"]
+        for entry in (e for e in self.record["holds"] if e["state"] == "kept"):
+            say(f"hold of {entry['job']} kept: {entry['reason']}")
         return released, kept
+
+    def settle_release(self, entry: dict[str, Any]) -> None:
+        """Whether the helper's applied hold on ENTRY's job is still its own to release."""
+        job = entry["job"]
+        answer = query(self.cfg, "status", job)
+        row = answer["jobs"].get(job)
+        reason = None
+        if row is None or row.get("job_type") is None:
+            reason = "the job is no longer defined"
+        elif not row.get("on_hold"):
+            reason = "the job is no longer held"
+        else:
+            others = service_json("holds", job, entry["request_id"])
+            if not others["found"]:
+                reason = "the run root's log does not show the helper's hold"
+            elif others["released_by"]:
+                reason = f"released since by request {', '.join(others['released_by'])}"
+        if reason is not None:
+            entry |= {"state": "kept", "reason": reason}
+        else:
+            entry |= {
+                "state": "releasing",
+                "release_id": str(uuid.uuid4()),
+                "release_id_expect": int(row["state_rev"]),
+                "release_id_epoch": int(answer["epoch"]),
+                "release_id_baseline": str(answer["baseline_id"]),
+            }
+        self.step(self.record["step"])
+
+    def send_release(self, entry: dict[str, Any]) -> None:
+        code, answer = self.send_recorded("OFF_HOLD", entry, "release_id")
+        if code == 0:
+            entry["state"] = "released"
+        else:
+            reason = answer.get("error") or answer.get("code") or answer.get("decision")
+            entry |= {"state": "kept", "reason": f"OFF_HOLD exited {code}: {reason}"}
+        self.step(self.record["step"])
 
     def abort(self, reason: str) -> int:
         """Nothing was sealed: release this apply's holds and clear its record."""

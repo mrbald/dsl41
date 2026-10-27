@@ -708,7 +708,7 @@ JIL
     spec_has RELEASE_ADDED_C "echo added" || fail "the added job has no definition"
     spec_has RELEASE_PROBE_C "echo changed v1" || fail "the changed job is not the new definition"
     [ "$(receipt previous)" = small-v1 ] || fail "the receipt does not name small-v1"
-    [ "$(receipt holds | jq -c '[.[] | select(.state == "applied") | .job]')" = \
+    [ "$(receipt holds | jq -c '[.[] | select(.state == "released") | .job]')" = \
         "$(receipt released | jq -c .)" ] ||
         fail "the helper's holds: $(receipt holds), released: $(receipt released)"
     receipt released | jq -e 'index("EMEA_EOD_B") != null and index("APAC_EOD_B") == null' \

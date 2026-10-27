@@ -92,22 +92,30 @@ if args[0] == "sendevent":
     if verb == "ON_HOLD" and job in state["operator_holds"]:
         state["operator_holds"].remove(job)
         row["on_hold"], row["state_rev"] = True, row["state_rev"] + 1
+    state["index"] += 1
+    wal = root / "wal" / f"{state['period']:06d}.jsonl"
+    record = {"rec": "input", "seq": state["index"], "request_id": rid, "kind": verb}
+    append(wal, record | {"payload": {"job": job}})
     expect = opt("--expect")
-    if expect is not None and int(expect) != row["state_rev"]:
-        answer = {"ok": False, "decision": "rejected", "request_id": rid}
+    forced = (state["release_outcomes"].get(job) or [None]).pop(0) if verb == "OFF_HOLD" else None
+    if forced == 3 or (expect is not None and int(expect) != row["state_rev"]):
+        answer = {"ok": False, "decision": "rejected", "request_id": rid, "error": "it moved"}
         state["decisions"][rid] = [3, answer]
+        append(wal, {"rec": "decision", "index": state["index"], "decision": "rejected"})
         save()
         print(json.dumps(answer))
         sys.exit(3)
-    row["on_hold"] = verb == "ON_HOLD"
-    row["state_rev"] += 1
-    state["sent"].append([verb, job])
-    answer = {"ok": True, "decision": "applied", "request_id": rid}
     noop = verb == "ON_HOLD" and job in state["noop_holds"]
+    if not noop:
+        row["on_hold"] = verb == "ON_HOLD"
+        row["state_rev"] += 1
+        state["sent"].append([verb, job])
+    answer = {"ok": True, "decision": "applied", "request_id": rid}
     answer["revisions"] = {} if noop else {f"job:{job}": row["state_rev"]}
     state["decisions"][rid] = [0, answer]
-    lost = verb == "ON_HOLD" and job in state["send_unknown"]
-    if lost:
+    append(wal, {"rec": "decision", "index": state["index"], "decision": "applied"})
+    lost = (verb == "ON_HOLD" and job in state["send_unknown"]) or forced == 4
+    if verb == "ON_HOLD" and job in state["send_unknown"]:
         state["send_unknown"].remove(job)
     save()
     if lost:
@@ -278,6 +286,8 @@ class Site:
                 "operator_holds": [],
                 "send_unknown": [],
                 "noop_holds": [],
+                "release_outcomes": {},
+                "index": 0,
                 "start_fails": False,
                 "calls": [],
                 "sent": [],
@@ -344,6 +354,11 @@ class Site:
         file = (directory / "latest").read_text().strip() if kind == "applied" else f"{kind}.json"
         loaded: dict[str, Any] = json.loads((directory / file).read_text())
         return loaded
+
+    def stub_cli(self, *args: str) -> None:
+        """The stub engine's CLI, as an operator runs it."""
+        env = {**os.environ, "RELEASE_TEST_DSL41": str(DSL41)}
+        subprocess.run([str(self.stub / "dsl41"), *args], check=True, env=env, capture_output=True)
 
     def seals(self) -> list[list[str]]:
         return [call for call in self.state()["calls"] if call[0] == "seal"]
@@ -462,11 +477,9 @@ def test_apply_holds_drains_seals_selects_starts_verifies_and_releases_its_own_h
         ["OFF_HOLD", "NB_FREE_C"],
     ]
     assert state["jobs"]["NB_HELD_C"]["on_hold"] is True
-    # each hold is sent under the helper's own request id; a release names no revision
-    ons = [call for call in state["calls"] if call[:2] == ["sendevent", "ON_HOLD"]]
-    offs = [call for call in state["calls"] if call[:2] == ["sendevent", "OFF_HOLD"]]
-    assert all("--request-id" in call and "--expect" in call for call in ons)
-    assert not any("--expect" in call for call in offs)
+    # each hold and each release is sent under a request id the helper recorded first
+    sends = [call for call in state["calls"] if call[0] == "sendevent"]
+    assert len(sends) == 4 and all("--request-id" in call for call in sends)
     (seal,) = site.seals()
     receipt = site.receipt("v2")
     assert receipt["previous"] == "r1" and receipt["period"] == 2
@@ -499,6 +512,10 @@ def test_apply_holds_drains_seals_selects_starts_verifies_and_releases_its_own_h
         f"{site.helper} service committed {rid}",
         "systemctl start dsl41-engine.service",
         f"{site.helper} service pins {rid}",
+        *(
+            f"{site.helper} service holds {hold['job']} {hold['request_id']}"
+            for hold in receipt["holds"]
+        ),
     ]
 
 
@@ -549,21 +566,96 @@ def test_a_hold_the_helper_never_applied_is_never_released(site: Site) -> None:
     done = site.run("apply", "v2")
     assert done.returncode == 0, done.stderr
     receipt = site.receipt("v2")
-    assert [entry["state"] for entry in receipt["holds"]] == ["applied", "rejected"]
+    assert [entry["state"] for entry in receipt["holds"]] == ["released", "rejected"]
     assert receipt["released"] == ["NB_B"]
     assert ["OFF_HOLD", "NB_FREE_C"] not in site.state()["sent"]
     assert site.state()["jobs"]["NB_FREE_C"]["on_hold"] is True
 
 
-def test_a_hold_answered_with_no_revisions_reads_the_revision_back(site: Site) -> None:
-    """ON_HOLD on a RUNNING job applies as a no-op and moves no revision: the answer's
-    `revisions` is empty, and the helper reads the job's revision instead."""
+def test_a_hold_that_moved_no_revision_is_a_no_op_and_never_released(site: Site) -> None:
+    """ON_HOLD on a RUNNING job applies as a no-op: the answer's `revisions` has no entry
+    for the job. That hold is not the helper's, so an operator's later hold stays."""
     site.prepared("v2")
-    site.edit(noop_holds=["NB_FREE_C"])
+    site.edit(noop_holds=["NB_FREE_C"], seal_outcomes=["unknown"])
+    assert site.run("apply", "v2").returncode == 4
+    record = site.record()
+    assert record is not None
+    (entry,) = [hold for hold in record["holds"] if hold["job"] == "NB_FREE_C"]
+    assert entry["state"] == "noop" and "rev" not in entry
+    state = site.state()
+    state["jobs"]["NB_FREE_C"]["on_hold"] = True  # an operator's first hold
+    site.save(state)
+    resumed = site.run("apply", "--resume", "v2")
+    assert resumed.returncode == 0, resumed.stderr
+    assert ["OFF_HOLD", "NB_FREE_C"] not in site.state()["sent"]
+    assert site.receipt("v2")["released"] == ["NB_B"]
+
+
+def test_an_applied_hold_records_the_revision_its_answer_carries(site: Site) -> None:
+    site.prepared("v2")
+    assert site.run("apply", "v2").returncode == 0
+    holds = {hold["job"]: hold for hold in site.receipt("v2")["holds"]}
+    assert holds["NB_FREE_C"]["rev"] == 4 and holds["NB_FREE_C"]["state"] == "released"
+
+
+def test_an_operators_release_and_rehold_after_the_helpers_hold_is_kept(site: Site) -> None:
+    """The run root's log shows an OFF_HOLD of NB_FREE_C from another request after the
+    helper's hold applied: the hold there now is the operator's, and it stays."""
+    site.prepared("v2")
+    site.edit(seal_outcomes=["unknown"])
+    assert site.run("apply", "v2").returncode == 4
+    for verb in ("OFF_HOLD", "ON_HOLD"):
+        site.stub_cli("sendevent", verb, "-J", "NB_FREE_C", "-S", "x")
+    resumed = site.run("apply", "--resume", "v2")
+    assert resumed.returncode == 0, resumed.stderr
+    receipt = site.receipt("v2")
+    assert receipt["released"] == ["NB_B"] and receipt["kept"] == ["NB_FREE_C"]
+    assert "hold of NB_FREE_C kept: released since by request" in resumed.stderr
+    assert site.state()["jobs"]["NB_FREE_C"]["on_hold"] is True
+
+
+def test_a_rejected_release_is_kept_with_its_reason(site: Site) -> None:
+    site.prepared("v2")
+    site.edit(release_outcomes={"NB_FREE_C": [3]})
     done = site.run("apply", "v2")
     assert done.returncode == 0, done.stderr
-    (entry,) = [hold for hold in site.receipt("v2")["holds"] if hold["job"] == "NB_FREE_C"]
-    assert entry["state"] == "applied" and entry["rev"] == 4
+    receipt = site.receipt("v2")
+    assert receipt["released"] == ["NB_B"] and receipt["kept"] == ["NB_FREE_C"]
+    (entry,) = [hold for hold in receipt["holds"] if hold["job"] == "NB_FREE_C"]
+    assert entry["reason"] == "OFF_HOLD exited 3: it moved"
+
+
+def test_a_release_with_no_decision_stops_and_resume_resends_it_under_its_id(
+    site: Site,
+) -> None:
+    site.prepared("v2")
+    site.edit(release_outcomes={"NB_FREE_C": [4]})
+    stopped = site.run("apply", "v2")
+    assert stopped.returncode == 3, stopped.stderr
+    record = site.record()
+    assert record is not None and record["step"] == "verified"
+    (entry,) = [hold for hold in record["holds"] if hold["job"] == "NB_FREE_C"]
+    assert entry["state"] == "releasing"
+    resumed = site.run("apply", "--resume", "v2")
+    assert resumed.returncode == 0, resumed.stderr
+    offs = [
+        call[call.index("--request-id") + 1]
+        for call in site.state()["calls"]
+        if call[:2] == ["sendevent", "OFF_HOLD"] and "NB_FREE_C" in call
+    ]
+    assert offs == [entry["release_id"], entry["release_id"]]
+    assert site.state()["sent"].count(["OFF_HOLD", "NB_FREE_C"]) == 1
+    assert site.receipt("v2")["released"] == ["NB_B", "NB_FREE_C"]
+
+
+def test_a_refused_hold_is_rejected_and_refuses_the_apply(site: Site) -> None:
+    site.prepared("v2")
+    site.edit(refuse_send=["NB_FREE_C"])
+    refused = site.run("apply", "v2")
+    assert refused.returncode == 2, refused.stderr
+    assert "the hold of NB_FREE_C was refused: refused: ON_HOLD NB_FREE_C" in refused.stderr
+    assert site.record() is None and site.active.read_text() == "r1\n"
+    assert site.state()["sent"] == [["ON_HOLD", "NB_B"], ["OFF_HOLD", "NB_B"]]
 
 
 def test_a_seal_that_does_not_commit_promotes_nothing_and_releases_the_holds(
@@ -857,6 +949,8 @@ def test_the_service_mode_takes_only_release_names_a_request_id_and_an_actor(
         ("service", "seal", "r1", rid),
         ("service", "committed"),
         ("service", "pins", "x"),
+        ("service", "holds", "../x", rid),
+        ("service", "holds", "NB_B", "x"),
         ("service", "changes", "r1", "../x"),
         ("service", "run", "v2"),
         ("service",),
@@ -866,6 +960,24 @@ def test_the_service_mode_takes_only_release_names_a_request_id_and_an_actor(
     assert site.seals() == []
     shown = site.run("service", "committed", rid)
     assert shown.returncode == 0 and json.loads(shown.stdout) == {"committed": False}
+
+
+def test_a_hand_run_service_seal_refuses_an_unprepared_or_changed_release(
+    site: Site,
+) -> None:
+    """The deployment identity can run `service seal` through sudo by hand; it seals
+    nothing prepare did not check."""
+    rid = "0" * 8 + "-0000-0000-0000-" + "0" * 12
+    refused = site.run("service", "seal", "r1", rid, "os/dsl41")
+    assert refused.returncode == 2 and "r1 is not prepared" in refused.stderr
+    site.prepared("v2")
+    jil = site.releases / "v2" / "global.jil"
+    (site.releases / "v2").chmod(0o755)
+    jil.chmod(0o644)
+    jil.write_text(jil.read_text() + "\n")
+    refused = site.run("service", "seal", "v2", rid, "os/dsl41")
+    assert refused.returncode == 2 and "v2's files changed since prepare" in refused.stderr
+    assert site.seals() == []
 
 
 def test_the_launcher_vars_mode_prints_what_the_helper_reads(site: Site) -> None:
