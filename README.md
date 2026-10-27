@@ -23,7 +23,7 @@ DL-405). Pick your track; the architect's track is the background reading for
 the other four.
 
 **Packager**: build the site package (the RPM or equivalent that installs
-dsl41 and your services), ship JIL releases on your own schedule.
+dsl41 and your services) and keep fixed what the application's JIL releases run within.
 
 1. [docs/site-package.md](docs/site-package.md) - the packager guide: what a release gives you, the reference RPM or the offline recipe, what the site adds, install and first start, the infrastructure contract for the application's JIL releases, qualification
 2. [docs/offline-installation.md](docs/offline-installation.md) - the release inputs, the reference RPM, what the package owns

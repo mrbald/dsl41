@@ -563,8 +563,8 @@ def test_both_diagrams_name_only_units_the_example_ships() -> None:
 
 
 def test_the_job_recipe_adds_changes_and_removes_a_job(short_root: Path) -> None:
-    """ss0's job recipe, three times over one lineage: add a job, change its
-    command, remove it. Each pass is a complete catalog, a live seal that
+    """ss0's job recipe as a host without the helper runs it, three times over one
+    lineage: add a job, change its command, remove it. Each pass is a complete catalog, a live seal that
     stops the engine with exit 3, and an in-place open; each verifies with
     the recipe's own query. The removed job stays as a ghost."""
     site = _site(short_root)
