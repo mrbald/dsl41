@@ -24400,28 +24400,36 @@ relitigate an entry; append a new one.
   one tag for every environment).
 - DL-409 A lease renewal with no reply within ten seconds is a failed renewal (2026-10-27;
   src/dsl41/runner_adapters.py, concurrency-model §8, supervisor-protocol §5)
-  THE RULE. The engine's renewal loop gives each renewal one deadline, `_RENEW_TIMEOUT_S`,
-  10 s. It covers every request the renewal makes: the lazy reconnect's PING and re-ACQUIRE,
-  the RENEW, and a refused RENEW's re-ACQUIRE. At the deadline the renewal is cancelled, which
-  poisons the connection (DL-48), and the loop counts one failed renewal and logs one line,
-  until the host is reported unreachable. The next renewal reconnects. The fifth consecutive
-  failure reports the host unreachable, as before (DL-291). From the moment a supervisor stops
-  answering to `quarantined` is 54 to 74 s: the wait for the next 20 s renewal, then five
-  deadlines with a 1 s backoff between them. Other requests keep no deadline in the async
-  client; the synchronous client keeps its own (DL-392).
-  THE REASON. A supervisor stopped with SIGSTOP keeps its socket. The kernel accepts the
-  connection and the RENEW, and no reply comes. The renewal awaited it without end, so no
-  failure was counted: the host stayed `passive` with a frozen `last_contact` for over three
-  minutes, and was never quarantined. DL-291's count assumed every renewal ends; a hung one
-  never did. Ten seconds is far above a healthy supervisor's reply time, so a loaded host does
-  not lose its connection, and the exit pushes on it, to a false timeout. It is short enough
-  that a renewal sent at 20 s fails by 30 s and is retried three times before the 60 s lease
-  lapses, which keeps DL-48's rule that a transient blip does not lapse a live lease.
+  THE RULE. Each renewal has one deadline, `_RENEW_TIMEOUT_S`, 10 s, over every request it
+  makes: the lazy reconnect's PING and re-ACQUIRE, the RENEW, and a refused RENEW's re-ACQUIRE.
+  At the deadline the renewal is cancelled, which poisons the connection when a request of its
+  own is in flight (DL-48); the loop counts one failure and logs one line until the host is
+  reported unreachable, at the fifth (DL-291). From a supervisor's freeze to `quarantined` is
+  about 44 to 74 s, by the phase of the renewal interval: the renewal in flight or the next
+  20 s one, then five deadlines with a 1 s backoff between them. Three rules protect a live
+  supervisor. A request that finds the stream lost once it holds the client's lock has written
+  nothing; if it may reconnect, it reconnects and is sent once more, and a second such finding
+  fails it. A reconnect is done only when its re-ACQUIRE is answered: until then no request that
+  may reconnect is written on the new connection, and the next one runs the sequence again. A
+  contact reported between failures, such as a reconnect's PING, reinstates the host, so it
+  restarts the count. Other async requests keep no deadline; the synchronous client keeps its
+  own (DL-392).
+  THE REASON. A supervisor stopped with SIGSTOP keeps its socket: the kernel accepts the
+  connection and the RENEW, and no reply comes. The renewal waited without end, no failure was
+  counted, and the host stayed `passive` with a frozen `last_contact` for over three minutes.
+  A timeout on a live supervisor has a cost: the poison drops the exit pushes on the
+  connection, and the lease, its holder connection gone, is orphaned, so a supervisor's deadman
+  starts its clock until a re-ACQUIRE lands. A supervisor slower than the deadline on every
+  reply never gets one and, after `T_deadman`, exits and kills its wrappers. So the value sits
+  far above a healthy reply time of milliseconds, and short enough that a renewal sent at 20 s
+  fails by 30 s and is retried three times before the 60 s lease lapses (DL-48). Without the
+  three rules, a SPAWN or SIGNAL queued behind a timed-out renewal failed unsent and read as
+  "supervisor gone"; a reconnect cut short before its re-ACQUIRE left RENEWs renewing an
+  orphaned lease that takes no pushes; and a host reinstated by a PING past the fifth failure
+  was never quarantined again.
   REJECTED: a deadline per request inside the renewal (after the first poison the hang moves to
-  the reconnect's PING, which a deadline on the RENEW alone would not cover); counting the
-  timeout and leaving the request pending (with no correlation ids the late reply would reach
-  the next request, DL-48); DL-392's 60 s (five of them take over five minutes); a deadline on
-  every async request (SPAWN, SIGNAL and LIST callers have their own recovery, and the
-  renewal is the one request whose silence must be counted); a log line on every timeout of an
-  outage (one line per eleven seconds for as long as the freeze lasts, after the unreachable
-  report has said the renewal keeps retrying).
+  the reconnect's PING); counting the timeout and leaving the request pending (the late reply
+  would reach the next request, DL-48); DL-392's 60 s (five take over five minutes); a deadline
+  on every async request (their callers read `SupervisorUnavailable` as a supervisor gone); an
+  unbounded resend of a queued request; a log line on every timeout of an outage (one line per
+  eleven seconds for as long as the freeze lasts).

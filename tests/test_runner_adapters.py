@@ -1844,33 +1844,46 @@ def test_the_renewal_loop_ends_when_the_client_closes(tmp_path: Path, monkeypatc
 
 
 class _FreezableSupervisor:
-    """A supervisor double on a unix socket. It answers PING, ACQUIRE and RENEW. While `frozen`
-    it reads each request and never replies, which is what a stopped supervisor's peer sees:
-    the kernel takes the connection and the bytes, and no answer comes. `renew_delay_s` holds
-    each RENEW reply that long."""
+    """A supervisor double on a unix socket. It answers every request with `ok`, and ACQUIRE with
+    a fresh token. While `frozen` it reads each request and never replies, which is what a stopped
+    supervisor's peer sees: the kernel takes the connection and the bytes, and no answer comes.
+    A frozen stub still answers once each command listed in `answer_while_frozen`. `delay_s`
+    holds the reply to each listed command that long. `push` writes to the connection the last
+    ACQUIRE came on, as the supervisor pushes to the lease holder."""
 
     def __init__(self) -> None:
         self.frozen = False
-        self.renew_delay_s = 0.0
+        self.answer_while_frozen: list[str] = []
+        self.delay_s: dict[str, float] = {}
         self.connections = 0
+        self.received: list[str] = []
         self.unanswered: list[str] = []
         self.answered: list[str] = []
+        self._holder: asyncio.StreamWriter | None = None
         self._token = 0
+
+    async def push(self, obj: dict[str, Any]) -> None:
+        assert self._holder is not None
+        self._holder.write(json.dumps(obj).encode("utf-8") + b"\n")
+        await self._holder.drain()
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.connections += 1
         try:
             while line := await reader.readline():
                 cmd = json.loads(line)["cmd"]
+                self.received.append(cmd)
                 if self.frozen:
-                    self.unanswered.append(cmd)
-                    continue
+                    if cmd not in self.answer_while_frozen:
+                        self.unanswered.append(cmd)
+                        continue
+                    self.answer_while_frozen.remove(cmd)
                 resp: dict[str, Any] = {"ok": True, "incarnation": "inc-1"}
+                await asyncio.sleep(self.delay_s.get(cmd, 0.0))
                 if cmd == "ACQUIRE":
                     self._token += 1
                     resp["token"] = self._token
-                elif cmd == "RENEW":
-                    await asyncio.sleep(self.renew_delay_s)
+                    self._holder = writer
                 self.answered.append(cmd)  # before the client can read the reply
                 writer.write(json.dumps(resp).encode("utf-8") + b"\n")
                 await writer.drain()
@@ -1888,49 +1901,108 @@ async def _serve_freezable(short_root: Path) -> tuple[_FreezableSupervisor, asyn
     return stub, server
 
 
+async def _until(predicate: Callable[[], bool], why: str, within_s: float = 10.0) -> None:
+    deadline = time.monotonic() + within_s
+    while not predicate():
+        assert time.monotonic() < deadline, why
+        await asyncio.sleep(0.005)
+
+
+def _shrink_renewal(monkeypatch, timeout_s: float) -> None:
+    monkeypatch.setattr(SupervisorClient, "_RENEW_EVERY_S", 0.05)
+    monkeypatch.setattr(SupervisorClient, "_RETRY_EVERY_S", 0.01)
+    monkeypatch.setattr(SupervisorClient, "_RENEW_TIMEOUT_S", timeout_s)
+
+
 def test_dl409_renewals_with_no_reply_report_the_host_unreachable_at_the_fifth(
     short_root: Path, monkeypatch, capsys
 ) -> None:
     """A supervisor that takes the request and never answers (a frozen or hung
     process) fails each renewal at the deadline. The fifth such failure reports
-    the host unreachable. The first answer after it reports contact and resets
-    the count: a second freeze is reported again after exactly five more."""
-    monkeypatch.setattr(SupervisorClient, "_RENEW_EVERY_S", 0.05)
-    monkeypatch.setattr(SupervisorClient, "_RETRY_EVERY_S", 0.01)
-    monkeypatch.setattr(SupervisorClient, "_RENEW_TIMEOUT_S", 0.2)
+    the host unreachable, and the deadlines past it log nothing more. The first
+    answer after the outage reports contact and resets the count: a second
+    freeze is reported again after exactly five more."""
+    _shrink_renewal(monkeypatch, 0.2)
 
-    async def scenario() -> tuple[list[int], list[str], list[str]]:
+    async def scenario() -> tuple[list[int], list[int], list[str], list[str]]:
         stub, server = await _serve_freezable(short_root)
         client = SupervisorClient(short_root)
         events: list[str] = []
-        unanswered_at_report: list[int] = []
-        reported = asyncio.Event()
-        renewed = asyncio.Event()
-
-        def unreachable() -> None:
-            events.append("unreachable")
-            unanswered_at_report.append(len(stub.unanswered))
-            stub.frozen = False  # the supervisor thaws
-            reported.set()
+        at_report: list[int] = []
+        at_thaw: list[int] = []
 
         def contact() -> None:
             events.append("contact")
             if stub.answered[-1:] == ["RENEW"]:
-                renewed.set()
+                events.append("renewed")
+
+        def unreachable() -> None:
+            events.append("unreachable")
+            at_report.append(len(stub.unanswered))
 
         client.on_unreachable = unreachable
         client.on_contact = contact
         try:
             await client.connect()
             await client.acquire()
-            for _ in range(2):  # two outages: the second proves the count was reset
-                renewed.clear()
+            for outage in (1, 2):  # the second proves the count was reset
                 stub.frozen = True
-                await asyncio.wait_for(reported.wait(), 10)
-                reported.clear()
-                await asyncio.wait_for(renewed.wait(), 10)
+                await _until(lambda: len(at_report) == outage, "never reported unreachable")
+                # two more deadlines pass inside the same outage, silently
+                await _until(lambda: len(stub.unanswered) >= at_report[-1] + 2, "renewal stopped")
+                at_thaw.append(len(stub.unanswered))
+                stub.frozen = False
+                await _until(lambda: events.count("renewed") == outage, "never renewed")
                 assert client._renew_task is not None and not client._renew_task.done()
-            return unanswered_at_report, events, stub.unanswered
+            return at_report, at_thaw, events, stub.unanswered
+        finally:
+            stub.frozen = False
+            await client.close()
+            server.close()
+            await server.wait_closed()
+
+    at_report, at_thaw, events, unanswered = asyncio.run(scenario())
+    # one RENEW on the frozen connection, then each later renewal's reconnect
+    # PING on a fresh one: five requests, five failures, one report
+    assert at_report == [5, 12] and at_thaw == [7, 14], (at_report, at_thaw)
+    assert unanswered == ["RENEW", *["PING"] * 6] * 2, unanswered
+    assert events.count("unreachable") == 2
+    # the reinstatement: contact follows each report
+    assert events[events.index("unreachable") + 1] == "contact"
+    assert events[-1] == "renewed"
+    err = capsys.readouterr().err
+    assert err.count("lease renewal had no reply within 0.2s") == 10  # five per outage
+    assert err.count("renewed after 7 failed renewals") == 2
+
+
+def test_dl409_a_contact_between_silent_renewals_rearms_the_unreachable_report(
+    short_root: Path, monkeypatch, capsys
+) -> None:
+    """After the report, one renewal's reconnect PING is answered, which
+    reinstates the host, and its re-ACQUIRE is not. That failure starts a new
+    outage: five more silent renewals report the host unreachable again."""
+    _shrink_renewal(monkeypatch, 0.2)
+
+    async def scenario() -> tuple[list[int], list[str], list[str]]:
+        stub, server = await _serve_freezable(short_root)
+        client = SupervisorClient(short_root)
+        events: list[str] = []
+        at_report: list[int] = []
+
+        def unreachable() -> None:
+            events.append("unreachable")
+            at_report.append(len(stub.unanswered))
+            if len(at_report) == 1:
+                stub.answer_while_frozen.append("PING")  # a thaw for one PING only
+
+        client.on_unreachable = unreachable
+        client.on_contact = lambda: events.append("contact")
+        try:
+            await client.connect()
+            await client.acquire()
+            stub.frozen = True
+            await _until(lambda: len(at_report) == 2, "the second outage was never reported")
+            return at_report, events, stub.unanswered
         finally:
             stub.frozen = False
             await client.close()
@@ -1938,17 +2010,96 @@ def test_dl409_renewals_with_no_reply_report_the_host_unreachable_at_the_fifth(
             await server.wait_closed()
 
     at_report, events, unanswered = asyncio.run(scenario())
-    # one RENEW on the frozen connection, then each later renewal's reconnect
-    # PING on a fresh one: five requests, five failures, one report
     assert at_report == [5, 10], at_report
-    assert unanswered == ["RENEW", "PING", "PING", "PING", "PING"] * 2, unanswered
-    assert events.count("unreachable") == 2
-    # the reinstatement: contact follows each report
-    assert events[events.index("unreachable") + 1] == "contact"
-    assert events[-1] == "contact"
-    err = capsys.readouterr().err
-    assert err.count("lease renewal had no reply within 0.2s") == 10
-    assert err.count("renewed after 5 failed renewals") == 2
+    assert unanswered == ["RENEW", *["PING"] * 4, "ACQUIRE", *["PING"] * 4], unanswered
+    assert events[events.index("unreachable") :] == ["unreachable", "contact", "unreachable"]
+    assert capsys.readouterr().err.count("lease renewal had no reply within 0.2s") == 10
+
+
+def test_dl409_a_spawn_and_a_signal_queued_behind_a_timed_out_renewal_are_sent(
+    short_root: Path, monkeypatch
+) -> None:
+    """The deadline poisons a stream whose supervisor is alive. A SPAWN and a
+    SIGNAL waiting on the lock behind that RENEW wrote nothing, so they
+    reconnect and are sent: a supervisor that was slow for one renewal is not
+    a supervisor gone, and neither the job nor the kill may be lost."""
+    _shrink_renewal(monkeypatch, 0.3)
+
+    async def scenario() -> tuple[list[dict[str, Any]], list[str], int]:
+        stub, server = await _serve_freezable(short_root)
+        client = SupervisorClient(short_root)
+        try:
+            await client.connect()
+            await client.acquire()
+            stub.frozen = True
+            await _until(lambda: stub.unanswered == ["RENEW"], "no RENEW was held")
+            queued = [
+                asyncio.ensure_future(client.spawn({"run_id": "r1"})),
+                asyncio.ensure_future(client.signal("r1", "TERM")),
+            ]
+            await asyncio.sleep(0.05)  # both are waiting on the lock the RENEW holds
+            assert client._lock.locked() and not any(task.done() for task in queued)
+            stub.frozen = False  # it answers again; the RENEW it read stays unanswered
+            replies = await asyncio.wait_for(asyncio.gather(*queued), 5)
+            return replies, stub.answered, stub.connections
+        finally:
+            stub.frozen = False
+            await client.close()
+            server.close()
+            await server.wait_closed()
+
+    replies, answered, connections = asyncio.run(scenario())
+    assert all(reply["ok"] for reply in replies)
+    assert answered.count("SPAWN") == 1 and answered.count("SIGNAL") == 1
+    assert connections == 2  # sent on the reconnect after the deadline's poison
+
+
+def test_dl409_a_reconnect_cut_short_by_the_deadline_is_run_again_before_any_renew(
+    short_root: Path, monkeypatch
+) -> None:
+    """A renewal's reconnect is cut short by the deadline after its PING and
+    before its re-ACQUIRE, which waits for the lock behind a slow SIGNAL. A
+    connection with no ACQUIRE on it holds no lease, and a RENEW on it renews
+    an orphaned lease that takes no pushes. So the reconnect is done only when
+    the re-ACQUIRE is answered: the SIGNAL waits for it, an ACQUIRE comes
+    before any later RENEW, and an exit push reaches the client."""
+    _shrink_renewal(monkeypatch, 0.3)
+
+    async def scenario() -> tuple[list[str], dict[str, Any], dict[str, Any]]:
+        stub, server = await _serve_freezable(short_root)
+        client = SupervisorClient(short_root)
+        try:
+            await client.connect()
+            await client.acquire()
+            stub.frozen = True
+            await _until(lambda: stub.unanswered == ["RENEW"], "no RENEW was held")
+            mark = len(stub.received)
+            stub.delay_s = {"PING": 0.1, "SIGNAL": 1.0}
+            stub.frozen = False
+            # the reconnect's PING is in flight: a SIGNAL now meets a part-done reconnect
+            await _until(lambda: "PING" in stub.received[mark:], "the renewal never reconnected")
+            signalled = await asyncio.wait_for(client.signal("r1", "TERM"), 5)
+            await _until(
+                lambda: "RENEW" in stub.answered[stub.answered.index("SIGNAL") :],
+                "no renewal landed after the SIGNAL",
+            )
+            after_thaw = stub.received[mark:]
+            # the lease is re-acquired before anything else is written on the new connection
+            assert after_thaw.index("ACQUIRE") < after_thaw.index("SIGNAL"), after_thaw
+            assert after_thaw.index("ACQUIRE") < after_thaw.index("RENEW"), after_thaw
+            exited = client.exit_future("r1")
+            await stub.push({"push": "exit", "run_id": "r1", "rc": 0})
+            return after_thaw, signalled, await asyncio.wait_for(exited, 5)
+        finally:
+            stub.frozen = False
+            await client.close()
+            server.close()
+            await server.wait_closed()
+
+    after_thaw, signalled, exited = asyncio.run(scenario())
+    assert after_thaw[:2] == ["PING", "ACQUIRE"], after_thaw
+    assert signalled["ok"]
+    assert exited["run_id"] == "r1"
 
 
 def test_dl409_a_renewal_answered_inside_the_deadline_is_not_a_failure(
@@ -1963,7 +2114,7 @@ def test_dl409_a_renewal_answered_inside_the_deadline_is_not_a_failure(
 
     async def scenario() -> tuple[int, list[str], int]:
         stub, server = await _serve_freezable(short_root)
-        stub.renew_delay_s = 0.3
+        stub.delay_s = {"RENEW": 0.3}
         client = SupervisorClient(short_root)
         events: list[str] = []
         enough = asyncio.Event()

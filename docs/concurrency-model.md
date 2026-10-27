@@ -1092,9 +1092,10 @@ The three operator verbs are `activate`, `drain` and `evict`.
 consecutive failed lease renewal, and clears it when the host answers
 again (DL-291). A renewal with no reply within `_RENEW_TIMEOUT_S`, ten
 seconds, counts as failed (DL-409). So a supervisor that is frozen or hung,
-and still accepts the request, is quarantined 54 to 74 seconds after it
-stops: up to one 20-second renewal interval, then five deadlines with a
-one-second backoff between them.
+and still accepts the request, is quarantined about 44 to 74 seconds after
+it stops, by the phase of the renewal interval: the wait for the renewal in
+flight or the next one, then five deadlines with a one-second backoff
+between them. A contact between failures restarts the count.
 
 Two more rules come from the deadman (DL-95):
 
