@@ -464,8 +464,9 @@ async def _held_estate(
                             engine.journal.close()
         finally:
             try:
+                # bounded: a supervisor that never answers is killed and reaped below
                 with contextlib.suppress(Exception):
-                    await client.shutdown()
+                    await asyncio.wait_for(client.shutdown(), 5)
                 await client.close()
             finally:
                 if sup_pid is not None:
