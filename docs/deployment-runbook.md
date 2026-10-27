@@ -52,8 +52,8 @@ and list as written, against a synthetic estate, with the engine unit's
 `ExecStart=` in place of `systemctl start`.
 `tests/test_release_helper.py` runs the release helper against a stub
 engine, and the service drill runs it on a host.
-It runs the sealed check and the torn-opening recipe where `jq` is
-installed. The service drill (§3's worked example) runs the service, hold,
+`tests/test_operator_recipes.py` also runs the sealed check and the
+torn-opening recipe where `jq` is installed. The service drill (§3's worked example) runs the service, hold,
 sealed-check and retirement recipes as written; CI checks their content
 but does not run them. The variables block is compared with the launcher.
 
