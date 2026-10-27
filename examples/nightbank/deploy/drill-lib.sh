@@ -724,17 +724,15 @@ infra_state() {
     readlink "$VENV"
 }
 
-# The site's part of a release train: the deployment identity and its group,
-# the helper and its two sudo grants, and the releases directory and ACTIVE
-# that identity writes. The second call changes nothing.
+# The site's part of a release train that the service recipe leaves out: the
+# deployment identity and its group, and the releases directory and ACTIVE's
+# directory that group writes (the recipe installs the helper and its two
+# sudo grants). The second call changes nothing.
 release_identity() {
     getent group "$DEPLOY_GROUP" >/dev/null || sudo groupadd "$DEPLOY_GROUP"
     id "$DEPLOY_USER" >/dev/null 2>&1 ||
         sudo useradd -M -s /usr/sbin/nologin -g "$DEPLOY_GROUP" "$DEPLOY_USER"
-    sudo install -m 0755 "$REPO/examples/nightbank/deploy/dsl41-release" "$RELEASE_HELPER"
-    sudo install -m 0440 "$REPO/examples/nightbank/deploy/dsl41-release.sudoers" \
-        /etc/sudoers.d/dsl41-release
-    sudo visudo -cf /etc/sudoers.d/dsl41-release >/dev/null || fail "the sudoers example does not parse"
+    sudo test -x "$RELEASE_HELPER" || fail "the service recipe did not install $RELEASE_HELPER"
     sudo install -d -m 0755 "$ESTATE_RELEASES"
     sudo chown "$DEPLOY_USER:$DEPLOY_GROUP" "$ESTATE_RELEASES"
     ! sudo test -e "$ACTIVE" || sudo chown "$DEPLOY_USER:$DEPLOY_GROUP" "$ACTIVE"

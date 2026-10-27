@@ -246,7 +246,10 @@ genesis() {
     echo genesis
 }
 
-# run_options' deployment half, as a seal's --next-* options (see run_options)
+# run_options' deployment half, as a seal's --next-* options (see run_options).
+# Every other option is one the seal states itself; an option outside both
+# lists refuses, because a seal would drop it and the opener would refuse
+# the committed period (DL-407).
 # shellcheck disable=SC2120  # its words are run_options', set inside
 next_profile() {
     eval "set -- $(run_options)"
@@ -262,6 +265,8 @@ next_profile() {
                 sep=' '
                 shift
                 ;;
+            -p | --run-root | --estate-anchor | --supervisor | --access-map) shift ;;
+            *) refuse "run_options names $1, which no seal restates: add it to next_profile" ;;
         esac
         shift
     done
@@ -329,12 +334,13 @@ case $mode in
         ;;
     vars)
         [ "$print" -eq 0 ] || usage
+        profile=$(next_profile) || exit $?
         for pair in "DSL41=$DSL41" "RUN_ROOT=$RUN_ROOT" "ESTATE_ANCHOR=$ESTATE_ANCHOR" \
             "ESTATE_RELEASES=$ESTATE_RELEASES" "ACTIVE=$ACTIVE" "ENVIRONMENT=$ENVIRONMENT" \
             "PROPERTIES=$PROPERTIES" "MAX_JOBS=$MAX_JOBS" "MAX_GRACE_S=$MAX_GRACE_S"; do
             printf '%s=%s\n' "${pair%%=*}" "$(quote "${pair#*=}")"
         done
-        printf 'NEXT_PROFILE=%s\n' "$(quote "$(next_profile)")"
+        printf 'NEXT_PROFILE=%s\n' "$(quote "$profile")"
         exit 0
         ;;
     *) usage ;;

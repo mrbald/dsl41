@@ -1208,10 +1208,18 @@ def test_the_drill_runs_each_release_step_once_through_the_helper() -> None:
     for step in RELEASE_STEPS:
         body = re.search(rf"^step_{step.replace('-', '_')}\(\) \{{.*?^\}}$", text, re.M | re.S)
         assert body is not None, step
-        assert re.search(r"\b(deploy|release_apply|release_prepare)\b", body.group()), step
-    lib = DRILL_LIB.read_text()
-    assert '"$REPO/examples/nightbank/deploy/dsl41-release"' in lib
-    assert '"$REPO/examples/nightbank/deploy/dsl41-release.sudoers"' in lib
+        assert re.search(r"\b(deploy|release_apply|interrupted_apply)\b", body.group()), step
+    # the service recipe the drill runs installs the helper and its grant
+    runbook = (NB.parents[1] / "docs" / "deployment-runbook.md").read_text()
+    install = runbook.split("<!-- recipe: service-install -->", 1)[1].split("```", 2)[1]
+    assert (
+        "install -m 0755 examples/nightbank/deploy/dsl41-release /opt/dsl41/bin/dsl41-release"
+        in install.splitlines()
+    )
+    assert (
+        "install -m 0440 examples/nightbank/deploy/dsl41-release.sudoers"
+        " /etc/sudoers.d/dsl41-release" in install.splitlines()
+    )
     probe = re.search(
         r"^definition_probe\(\) \{.*?^\}$",
         (DEPLOY / "offline-scenarios.sh").read_text(),
@@ -1219,3 +1227,22 @@ def test_the_drill_runs_each_release_step_once_through_the_helper() -> None:
     )
     assert probe is not None
     assert "release_apply" in probe.group() and "seal_next" not in probe.group()
+
+
+def test_the_launcher_refuses_a_run_option_no_seal_restates(tmp_path: Path) -> None:
+    """DL-407: a seal restates the deployment half as --next-*; a run option outside that
+    half and outside what the seal states itself would be dropped, and the opener would
+    refuse the committed period. `vars` refuses it first."""
+    releases = _releases(tmp_path)
+    launcher = _configured(tmp_path, DSL41=str(DSL41), **releases)
+    text = launcher.read_text()
+    assert text.count("        --machine-policy strict \\\n") == 1
+    launcher.write_text(
+        text.replace(
+            "        --machine-policy strict \\\n",
+            "        --machine-policy strict \\\n        --timezone UTC \\\n",
+        )
+    )
+    refused = _sh(launcher, "vars")
+    assert refused.returncode == 2 and refused.stdout == ""
+    assert "run_options names --timezone, which no seal restates" in refused.stderr

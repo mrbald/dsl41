@@ -16,48 +16,67 @@ dsl41 package.
       day from now, its default. Refuse it when either exits nonzero, when
       it holds more jobs than MAX_JOBS, or when the runtime's command grace
       is above MAX_GRACE_S. The grace is the runtime's, not a job's: dsl41
-      has no per-job grace. A prepared release holds .release/prepared.json,
-      and its inputs are read-only. A refused one is removed. prepared.json
-      carries no bundle hash: no dsl41 verb prints one before a seal stages
-      the bundle, so the seal and applied.json carry it.
+      has no per-job grace. A prepared release holds .release/prepared.json
+      with the sha256 of each of its files, and its inputs are read-only. A
+      refused one is removed. prepared.json carries no bundle hash: no dsl41
+      verb prints one before a seal stages the bundle, so the seal and the
+      apply's receipt carry it.
   dsl41-release prepare --requalify NAME
       Run the same checks on the installed release under the current runtime,
-      its inputs untouched, and replace prepared.json when they pass. An apply
+      its files unchanged, and replace prepared.json when they pass. An apply
       refuses a release prepared under another dsl41 version until then.
   dsl41-release apply [--resume] NAME
-      Release NAME into the running estate (deployment-runbook ss6a): hold
-      every scheduled top-level job `query timers` lists that is not held,
-      wait until no job is RUNNING or STARTING, seal from NAME's manifest,
-      write ACTIVE, start the engine unit, check that the opened period's
-      bundle is the one the seal committed and reads NAME's files, release
-      the holds this command took, and write NAME/.release/applied.json.
-      A seal refused inside the retry horizon is sent again, under a new
-      request id, once the horizon it names has passed (period-model ss9).
+      Release NAME into the running estate (deployment-runbook ss0's job
+      recipe, ss6a). It refuses unless the engine answers and NAME's files
+      are the ones prepare checked. Then it holds every scheduled top-level
+      job `query timers` lists that is not held, and waits until no job is
+      STARTING, RUNNING or QUE_WAIT. A job the release removes that is still
+      armed or has a pending timer refuses the apply; one it changes crosses
+      with a recorded assumption (period-model ss10.3), which it reports.
+      It seals from NAME's manifest, writes ACTIVE, waits for the sealed
+      engine to exit and starts the engine unit. It checks that the
+      successor answers in the committed period, under a new leader, from
+      the bundle the seal committed and NAME's files. It releases the holds
+      it took and writes NAME/.release/applied-<request id>.json, which
+      NAME/.release/latest names. A seal refused inside the retry horizon is
+      sent again, under a new request id, once the horizon it names has
+      passed (period-model ss9).
   dsl41-release rollback
-      Apply the release the active release's applied.json names as its
+      Apply the release the active release's latest receipt names as its
       previous one, the same way; with none, use `apply NAME`.
   dsl41-release status [--format text|json]
       The active release, each release's receipts, and a recorded apply with
       what `apply --resume` would do.
 
-An apply holds ESTATE_RELEASES/.apply.lock, so a second one is refused, and
-records each step in ESTATE_RELEASES/.apply.json before it acts. A stopped
-apply, an interrupted one included, resumes from that record and never from
-ACTIVE. After an unknown seal outcome, resume retries under the recorded
-request id and never composes a fresh one (deployment-runbook ss6a, Day 2).
-DSL41_RELEASE_STOP_AFTER=seal kills the helper after the seal commits and
-before ACTIVE is written; the drill uses it, and nothing else should.
+An apply holds ESTATE_RELEASES/.apply.lock, so a second one, or a rollback,
+is refused, and records each step in ESTATE_RELEASES/.apply.json before it
+acts. A stopped apply, an interrupted one included, resumes from that record
+and never from ACTIVE. Every seal it sends claims one actor, recorded with
+the apply: the spelling the engine records for the service account
+(access-model ss3), so a retry is the same envelope live or offline. Before
+it sends a seal again under a recorded request id, and after any seal that
+did not exit 0, it reads the estate for that id: a seal record at the end
+of a WAL segment, with its sidecar (deployment-runbook ss6a, Day 2). A
+committed seal is never sent again, and a retry never takes a fresh id.
+A hold is the helper's once the engine applied it, and the record keeps the
+revision the hold left; it releases a hold only at that revision, so a hold
+an operator touched since stays. A hold applied and not yet recorded when
+the helper died stays too. DSL41_RELEASE_STOP_AFTER=seal-reply kills the
+helper after the seal exits 0 and before that is recorded; =seal kills it
+after it is recorded and before ACTIVE is written. The drill uses both, and
+nothing else should.
 
 Identity. Run it as the deployment identity, which owns ESTATE_RELEASES and
 ACTIVE and may replace ACTIVE in its directory. It sends `query` and
 `sendevent` itself, so the access map must bind it to `ops`, and it must be
 a member of the map's socket_group (access-model ss4, ss10). Lint, rehearse,
 the seal and the reads inside the run root run as the service account, as
-this file's `service` mode through `sudo -u dsl41 -H`. That mode takes a
-release name and a request id, never a command line, and its seal exits
-with `dsl41 seal`'s own code. The start runs through `sudo systemctl start
-dsl41-engine.service`. dsl41-release.sudoers beside this file grants those
-two commands and nothing else.
+this file's `service` mode through `sudo -u dsl41 -H`, invoked by the path
+this file was run as. That mode takes release names, a request id and the
+recorded actor, never a command line, and its seal exits with `dsl41 seal`'s
+own code. The start runs through `sudo systemctl start dsl41-engine.service`.
+dsl41-release.sudoers beside this file grants those two commands and nothing
+else.
 
 Exit codes:
   0  done
@@ -66,7 +85,7 @@ Exit codes:
   3  stopped with the apply recorded: `status` says what
      `apply --resume NAME` does
   4  the seal's outcome is unknown: the apply is recorded with its request
-     id, and `apply --resume NAME` retries the seal under it
+     id, and `apply --resume NAME` reads the estate for it first
 """
 
 from __future__ import annotations
@@ -74,6 +93,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import getpass
+import hashlib
 import importlib.metadata
 import json
 import os
@@ -101,15 +121,23 @@ EXIT_UNKNOWN = 4
 #: the units' User= and the engine unit's name (dsl41-engine.service)
 SERVICE_ACCOUNT = "dsl41"
 ENGINE_UNIT = "dsl41-engine.service"
-HELPER = Path(__file__).resolve()
-LAUNCH = HELPER.parent / "dsl41-launch"
+#: the actor every seal claims: the engine replaces a live claim with this spelling of the
+#: service account it authenticates, and an offline seal records the claim (access-model ss3)
+SEAL_ACTOR = f"os/{SERVICE_ACCOUNT}"
+#: the path this file was run as, which the sudoers line names
+INVOKED = Path(os.path.abspath(sys.argv[0]))
+LAUNCH = Path(__file__).resolve().parent / "dsl41-launch"
 #: one directory name under ESTATE_RELEASES, as the launcher reads ACTIVE (DL-407)
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
 REQUEST_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+ACTOR = re.compile(r"[A-Za-z0-9._@/-]{1,200}")
+SEGMENT = "[0-9]" * 6 + ".jsonl"
 #: the seal's retry-horizon refusal (period-model ss9)
 HORIZON = re.compile(
     r"was (-?\d+(?:\.\d+)?)s ago and the closing period's retry_horizon_us is (\d+)"
 )
+#: the job states the drain waits out (deployment-runbook ss0, job recipe step 3)
+LIVE = ("STARTING", "RUNNING", "QUE_WAIT")
 #: the apply's steps, in order; each is recorded before the next acts
 STEPS = ("started", "held", "drained", "sealing", "sealed", "selected", "opened", "verified")
 ABORTING = "aborting"
@@ -117,9 +145,11 @@ RESUME = {
     "started": "take the holds, drain, and seal under a new request id",
     "held": "take the holds, drain, and seal under a new request id",
     "drained": "take the holds, drain, and seal under a new request id",
-    "sealing": "send the seal again under request id {request_id}, never a fresh one",
+    "sealing": "read the estate for request id {request_id}, go on if that seal committed,"
+    " and otherwise send it again under that id, never a fresh one",
     "sealed": "write ACTIVE, start the engine unit, verify, and release the holds",
-    "selected": "start the engine unit, verify, and release the holds",
+    "selected": "start the engine unit once the sealed engine has exited, verify, and"
+    " release the holds",
     "opened": "verify the opened period and release the holds",
     "verified": "release the holds and write the receipt",
     ABORTING: "release the holds and clear the record; nothing was sealed",
@@ -239,20 +269,21 @@ def read_json(path: Path) -> dict[str, Any] | None:
 
 def write_json(path: Path, value: dict[str, Any]) -> None:
     """Write `value` beside `path` and rename it over, both durable."""
+    write_text(path, json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def write_text(path: Path, text: str) -> None:
+    """Write `text` beside `path` and rename it over, both durable."""
     temp = path.with_name(f".{path.name}.{os.getpid()}")
-    write_durable(temp, json.dumps(value, indent=2, sort_keys=True) + "\n")
-    os.replace(temp, path)
-    fsync_dir(path.parent)
-
-
-def write_durable(path: Path, text: str) -> None:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
     try:
         os.write(fd, text.encode())
         os.fchmod(fd, 0o644)
         os.fsync(fd)
     finally:
         os.close(fd)
+    os.replace(temp, path)
+    fsync_dir(path.parent)
 
 
 def fsync_dir(path: Path) -> None:
@@ -263,11 +294,51 @@ def fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
+def file_digests(path: Path) -> dict[str, str]:
+    """The sha256 of every file of the release, its .release directory aside."""
+    return {
+        str(file.relative_to(path)): "sha256:" + hashlib.sha256(file.read_bytes()).hexdigest()
+        for file in sorted(path.rglob("*"))
+        if file.is_file() and ".release" not in file.relative_to(path).parts
+    }
+
+
+def changed_files(path: Path, prepared: dict[str, Any]) -> list[str]:
+    recorded: dict[str, str] = prepared.get("files") or {}
+    current = file_digests(path)
+    return sorted(
+        name for name in set(recorded) | set(current) if recorded.get(name) != current.get(name)
+    )
+
+
+def latest_receipt(cfg: Config, name: str) -> dict[str, Any] | None:
+    """The receipt of the apply that last made NAME active, which .release/latest names."""
+    directory = cfg.releases / name / ".release"
+    try:
+        latest = (directory / "latest").read_text().strip()
+    except FileNotFoundError:
+        return None
+    return read_json(directory / latest)
+
+
 # ------------------------------------------------ the service account's part
 
 
 def as_service(*args: str) -> list[str]:
-    return ["sudo", "-n", "-u", SERVICE_ACCOUNT, "-H", str(HELPER), "service", *args]
+    return ["sudo", "-n", "-u", SERVICE_ACCOUNT, "-H", str(INVOKED), "service", *args]
+
+
+def service_json(*args: str) -> dict[str, Any]:
+    """One `service` read, as the service account; its stdout is one JSON object."""
+    done = subprocess.run(as_service(*args), capture_output=True, text=True, check=False)
+    sys.stderr.write(done.stderr)
+    if done.returncode != 0:
+        raise Stop(EXIT_STOPPED, f"the service account's {args[0]} exited {done.returncode}")
+    try:
+        answer: dict[str, Any] = json.loads(done.stdout)
+    except ValueError as exc:
+        raise Stop(EXIT_STOPPED, f"the service account's {args[0]} printed no JSON") from exc
+    return answer
 
 
 def estate_args(cfg: Config, path: Path, verb: str) -> list[str]:
@@ -284,9 +355,9 @@ def estate_args(cfg: Config, path: Path, verb: str) -> list[str]:
     return argv
 
 
-def service_check(cfg: Config, name: str) -> int:
-    """Lint and rehearse the release; print what ran, its exit codes, its job count and
-    the runtime's command grace as one JSON object."""
+def service_check(cfg: Config, name: str) -> dict[str, Any]:
+    """Lint and rehearse the release: what ran, its exit codes, its job count and the
+    runtime's command grace."""
     from dsl41.period import CMD_GRACE_S
 
     path = cfg.releases / name
@@ -300,7 +371,7 @@ def service_check(cfg: Config, name: str) -> int:
     jobs = None
     if played.returncode == 0:
         jobs = len(json.loads(played.stdout)["jobs"])
-    result = {
+    return {
         "lint": {"argv": lint, "exit": linted.returncode},
         "rehearse": {"argv": rehearse, "exit": played.returncode},
         "jobs": jobs,
@@ -308,15 +379,104 @@ def service_check(cfg: Config, name: str) -> int:
         "runtime": os.path.realpath(cfg.dsl41),
         "dsl41_version": runtime_version(),
     }
-    print(json.dumps(result))
-    return EXIT_OK
 
 
-def service_seal(cfg: Config, name: str, request_id: str) -> int:
+def service_changes(cfg: Config, before: str, after: str) -> dict[str, Any]:
+    """The jobs release AFTER changes or removes against release BEFORE, by the classifier's
+    leaf test, a fingerprint of each resolved definition (period-model ss10.2)."""
+    from dsl41.cli_common import load_catalog_or_exit_2
+    from dsl41.period import job_fingerprints
+
+    prints = []
+    for name in (before, after):
+        argv = estate_args(cfg, release_dir(cfg, name), "viz")
+        files = [Path(word) for word in argv if not word.startswith("-")]
+        layers = [Path(argv[i + 1]) for i, word in enumerate(argv) if word == "-p"]
+        files = [file for file in files if file not in layers]
+        catalog = load_catalog_or_exit_2(files, False, [*layers, Path(cfg.properties)])
+        prints.append(job_fingerprints(catalog))
+    old, new = prints
+    return {
+        "changed": sorted(job for job in old if job in new and old[job] != new[job]),
+        "removed": sorted(job for job in old if job not in new),
+    }
+
+
+def last_record(segment: Path) -> dict[str, Any] | None:
+    """The last whole record of a WAL segment; a torn final append is no record."""
+    with segment.open("rb") as stream:
+        stream.seek(max(segment.stat().st_size - 65536, 0))
+        lines = [line for line in stream.read().split(b"\n") if line]
+    for line in reversed(lines[-2:]):
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        return record if isinstance(record, dict) else None
+    return None
+
+
+def committed(cfg: Config, request_id: str) -> dict[str, Any]:
+    """Whether the seal REQUEST_ID committed, read as deployment-runbook ss6a Day 2 reads
+    it: a `seal` record at the end of a WAL segment, the commit point, and its sidecar
+    seals/<N>.json (period-model ss2.2). Never ACTIVE."""
+    for segment in sorted((cfg.run_root / "wal").glob(SEGMENT))[-2:]:
+        record = last_record(segment)
+        if record is None or record.get("rec") != "seal":
+            continue
+        if record.get("request_id") != request_id:
+            continue
+        sidecar = cfg.run_root / "seals" / f"{segment.stem}.json"
+        seal = json.loads(sidecar.read_text())
+        nxt = seal["next_period"]
+        return {
+            "committed": True,
+            "seal": str(sidecar),
+            "period": int(record["period_id"]),
+            "epoch": int(seal["epoch"]),
+            "actor": record.get("claimed_actor"),
+            "next_period": int(nxt["period_id"]),
+            "next_baseline": nxt["baseline_id"],
+            "source_bundle_hash": nxt["source_bundle_hash"],
+        }
+    return {"committed": False}
+
+
+def service_pins(cfg: Config, request_id: str) -> dict[str, Any]:
+    """What the opener wrote for the period the seal REQUEST_ID committed: the segment's
+    opening record and leader records, the period's manifest, and the paths its bundle was
+    read from."""
+    seal = committed(cfg, request_id)
+    if not seal["committed"]:
+        raise Stop(EXIT_STOPPED, f"no committed seal in {cfg.run_root} names {request_id}")
+    period = seal["next_period"]
+    segment = cfg.run_root / "wal" / f"{period:06d}.jsonl"
+    opening, epochs = None, []
+    if segment.is_file():
+        for line in segment.read_bytes().split(b"\n"):
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            if record.get("rec") == "segment" and opening is None:
+                opening = record
+            if record.get("rec") == "leader":
+                epochs.append(int(record["epoch"]))
+    manifest = cfg.run_root / "periods" / f"{period:06d}" / "manifest.json"
+    address = json.loads(manifest.read_text())["source_bundle_hash"]
+    bundle = cfg.run_root / "catalogs" / str(address).split(":")[-1] / "sources.json"
+    return seal | {
+        "segment": opening,
+        "leader_epoch": max(epochs, default=None),
+        "manifest_source_bundle_hash": address,
+        "sources": [entry["path"] for entry in json.loads(bundle.read_text())["sources"]],
+    }
+
+
+def service_seal(cfg: Config, name: str, request_id: str, actor: str) -> int:
     """The seal of the running period into release NAME, its profile restated from the
     launcher; dsl41's exit code is this command's."""
     path = release_dir(cfg, name)
-    actor = f"{os.environ.get('SUDO_USER') or getpass.getuser()}@{socket.gethostname()}"
     argv = [cfg.dsl41, "seal", "--run-root", str(cfg.run_root)]
     argv += ["--estate-anchor", str(cfg.estate_anchor), *estate_args(cfg, path, "seal")]
     argv += ["-p", cfg.properties, *cfg.next_profile]
@@ -325,48 +485,29 @@ def service_seal(cfg: Config, name: str, request_id: str) -> int:
     return subprocess.run(argv, check=False).returncode
 
 
-def service_pins(cfg: Config, request_id: str) -> int:
-    """What the run root says about the seal REQUEST_ID committed: its next period, that
-    period's manifest, whether its segment exists, and the paths its bundle was read from."""
-    for seal_path in sorted((cfg.run_root / "seals").glob("[0-9]" * 6 + ".json")):
-        seal = json.loads(seal_path.read_text())
-        if seal.get("boundary_request", {}).get("request_id") != request_id:
-            continue
-        nxt = seal["next_period"]
-        period = int(nxt["period_id"])
-        manifest = json.loads(
-            (cfg.run_root / "periods" / f"{period:06d}" / "manifest.json").read_text()
-        )
-        address = str(manifest["source_bundle_hash"])
-        bundle = cfg.run_root / "catalogs" / address.split(":")[-1] / "sources.json"
-        sources = [entry["path"] for entry in json.loads(bundle.read_text())["sources"]]
-        pins = {
-            "seal": str(seal_path),
-            "period": period,
-            "sealed_source_bundle_hash": nxt["source_bundle_hash"],
-            "opened_source_bundle_hash": address,
-            "opened": (cfg.run_root / "wal" / f"{period:06d}.jsonl").is_file(),
-            "sources": sources,
-        }
-        print(json.dumps(pins))
-        return EXIT_OK
-    say(f"no seal in {cfg.run_root}/seals names request id {request_id}")
-    return EXIT_STOPPED
-
-
 def service(argv: list[str]) -> int:
     cfg = config()
     action, rest = (argv[0], argv[1:]) if argv else ("", [])
-    if action == "check" and len(rest) == 1:
-        (name,) = rest
-        if not NAME.fullmatch(name):
-            raise Stop(EXIT_REFUSED, f"'{name}' is not one release directory")
-        return service_check(cfg, name)
-    if action == "seal" and len(rest) == 2 and REQUEST_ID.fullmatch(rest[1]):
-        return service_seal(cfg, checked_name(rest[0]), rest[1])
-    if action == "pins" and len(rest) == 1 and REQUEST_ID.fullmatch(rest[0]):
-        return service_pins(cfg, rest[0])
-    raise Stop(EXIT_REFUSED, f"usage: service check NAME | seal NAME ID | pins ID, not {argv}")
+    ids = [word for word in rest if REQUEST_ID.fullmatch(word)]
+    if action == "check" and len(rest) == 1 and NAME.fullmatch(rest[0]):
+        print(json.dumps(service_check(cfg, rest[0])))
+        return EXIT_OK
+    if action == "changes" and len(rest) == 2:
+        print(json.dumps(service_changes(cfg, checked_name(rest[0]), checked_name(rest[1]))))
+        return EXIT_OK
+    if action == "seal" and len(rest) == 3 and ids == [rest[1]] and ACTOR.fullmatch(rest[2]):
+        return service_seal(cfg, checked_name(rest[0]), rest[1], rest[2])
+    if action == "committed" and len(rest) == 1 and ids == rest:
+        print(json.dumps(committed(cfg, rest[0])))
+        return EXIT_OK
+    if action == "pins" and len(rest) == 1 and ids == rest:
+        print(json.dumps(service_pins(cfg, rest[0])))
+        return EXIT_OK
+    raise Stop(
+        EXIT_REFUSED,
+        "usage: service check NAME | changes FROM TO | seal NAME ID ACTOR | committed ID"
+        f" | pins ID, not {argv}",
+    )
 
 
 # ------------------------------------------------------------------ prepare
@@ -392,14 +533,10 @@ def remove(path: Path) -> None:
 def qualify(cfg: Config, name: str) -> dict[str, Any]:
     """Lint and rehearse release NAME as the service account, and hold it to the
     launcher's ceiling; the check's record, or a refusal."""
-    done = subprocess.run(as_service("check", name), capture_output=True, text=True)
-    sys.stderr.write(done.stderr)
-    if done.returncode != 0:
-        raise Stop(EXIT_REFUSED, f"the service account's check exited {done.returncode}")
     try:
-        check: dict[str, Any] = json.loads(done.stdout)
-    except ValueError as exc:
-        raise Stop(EXIT_REFUSED, f"the service account's check printed no JSON: {exc}") from exc
+        check = service_json("check", name)
+    except Stop as exc:
+        raise Stop(EXIT_REFUSED, str(exc)) from exc
     refusals = []
     if check["lint"]["exit"] != 0:
         refusals.append(f"lint exited {check['lint']['exit']}")
@@ -418,8 +555,9 @@ def qualify(cfg: Config, name: str) -> dict[str, Any]:
 
 
 def write_prepared(cfg: Config, name: str, source: str | None, check: dict[str, Any]) -> None:
+    path = cfg.releases / name
     write_json(
-        cfg.releases / name / ".release" / "prepared.json",
+        path / ".release" / "prepared.json",
         {
             "name": name,
             "source": source,
@@ -428,12 +566,11 @@ def write_prepared(cfg: Config, name: str, source: str | None, check: dict[str, 
             "environment": cfg.environment,
             "max_jobs": cfg.max_jobs,
             "max_grace_s": cfg.max_grace_s,
+            "files": file_digests(path),
             **check,
         },
     )
-    say(
-        f"prepared {cfg.releases / name}: {check['jobs']} jobs, under dsl41 {check['dsl41_version']}"
-    )
+    say(f"prepared {path}: {check['jobs']} jobs, under dsl41 {check['dsl41_version']}")
 
 
 def prepare(name: str, source: Path) -> int:
@@ -462,15 +599,36 @@ def prepare(name: str, source: Path) -> int:
 
 
 def requalify(name: str) -> int:
-    """The checks again, on the installed release under this runtime; its inputs are not
-    touched, and prepared.json is replaced only when they pass."""
+    """The checks again, on the installed release under this runtime; its files must be
+    the ones prepare checked, and prepared.json is replaced only when the checks pass."""
     cfg = config()
     path = release_dir(cfg, checked_name(name))
     earlier = read_json(path / ".release" / "prepared.json")
     if earlier is None:
         raise Stop(EXIT_REFUSED, f"{name} was never prepared: prepare its inputs under a new name")
+    moved = changed_files(path, earlier)
+    if moved:
+        raise Stop(EXIT_REFUSED, f"{name}'s files changed since prepare: {', '.join(moved)}")
     write_prepared(cfg, name, earlier.get("source"), qualify(cfg, name))
     return EXIT_OK
+
+
+def check_prepared(cfg: Config, name: str) -> None:
+    """NAME is prepared under this runtime, and its files are the ones prepare checked."""
+    path = release_dir(cfg, checked_name(name))
+    prepared = read_json(path / ".release" / "prepared.json")
+    if prepared is None:
+        raise Stop(EXIT_REFUSED, f"{name} is not prepared: run `dsl41-release prepare` first")
+    if prepared.get("dsl41_version") != runtime_version():
+        raise Stop(
+            EXIT_REFUSED,
+            f"{name} was prepared under dsl41 {prepared.get('dsl41_version')}, and this"
+            f" runtime is dsl41 {runtime_version()}: run `dsl41-release prepare --requalify"
+            f" {name}`",
+        )
+    moved = changed_files(path, prepared)
+    if moved:
+        raise Stop(EXIT_REFUSED, f"{name}'s files changed since prepare: {', '.join(moved)}")
 
 
 # -------------------------------------------------------------------- apply
@@ -508,16 +666,22 @@ def query(cfg: Config, what: str) -> dict[str, Any]:
     return answer
 
 
-def send(cfg: Config, verb: str, job: str) -> None:
+def send(cfg: Config, verb: str, job: str, *expect: str) -> tuple[int, dict[str, Any]]:
+    """One sendevent; its exit code and its answer."""
     done = subprocess.run(
-        [cfg.dsl41, "sendevent", verb, "-J", job, "-S", cfg.socket],
+        [cfg.dsl41, "sendevent", verb, "-J", job, "-S", cfg.socket, *expect],
         capture_output=True,
         text=True,
     )
-    if done.returncode != 0:
+    try:
+        answer = json.loads(done.stdout.strip().splitlines()[-1]) if done.stdout.strip() else {}
+    except ValueError:
+        answer = {}
+    if done.returncode not in (0, 3):
         raise Stop(
             EXIT_REFUSED, f"sendevent {verb} -J {job} exited {done.returncode}: {done.stderr}"
         )
+    return done.returncode, answer if isinstance(answer, dict) else {}
 
 
 class Apply:
@@ -538,6 +702,14 @@ class Apply:
     def at_or_before(self, step: str) -> bool:
         return STEPS.index(self.record["step"]) <= STEPS.index(step)
 
+    def stopped(self, exc: BaseException) -> Stop:
+        return Stop(
+            EXIT_STOPPED,
+            f"{exc}. The apply of {self.name} is recorded at step {self.record['step']};"
+            f" `dsl41-release apply --resume {self.name}` will"
+            f" {RESUME[self.record['step']].format(**self.record)}",
+        )
+
     def run(self) -> int:
         if self.record["step"] == ABORTING:
             return self.abort("a refused apply's holds are released")
@@ -550,15 +722,19 @@ class Apply:
             except Stop as exc:
                 return self.abort(str(exc))
         if self.at_or_before("sealing"):
-            code = self.seal()
+            try:
+                code = self.seal()
+            except (Stop, OSError, ValueError, KeyError) as exc:
+                raise self.stopped(exc) from exc
             if code == EXIT_REFUSED:
                 return self.abort("the seal did not commit")
             if code != EXIT_OK:
                 raise Stop(
                     EXIT_UNKNOWN,
-                    f"the seal exited {code}: its outcome is unknown. Read the estate"
-                    " (deployment-runbook ss6a, Day 2), then `dsl41-release apply --resume"
-                    f" {self.name}` retries under request id {self.record['request_id']}",
+                    f"the seal exited {code} and the estate shows no seal under request id"
+                    f" {self.record['request_id']}: its outcome is unknown. `dsl41-release"
+                    f" apply --resume {self.name}` reads the estate again and retries under"
+                    " that id (deployment-runbook ss6a, Day 2)",
                 )
             self.step("sealed")
             if os.environ.get("DSL41_RELEASE_STOP_AFTER") == "seal":
@@ -573,79 +749,127 @@ class Apply:
             if self.at_or_before("opened"):
                 self.verify()
                 self.step("verified")
-            released = self.release_holds()
+            released, kept = self.release_holds()
         except (Stop, OSError, ValueError, KeyError) as exc:
-            raise Stop(
-                EXIT_STOPPED,
-                f"{exc}. The apply of {self.name} is recorded at step {self.record['step']};"
-                f" `dsl41-release apply --resume {self.name}` will"
-                f" {RESUME[self.record['step']].format(**self.record)}",
-            ) from exc
+            raise self.stopped(exc) from exc
+        seal = self.record["sealed"]
         receipt = {
             key: self.record.get(key)
-            for key in ("previous", "request_id", "actor", "holds", "period", "seal")
+            for key in ("previous", "request_id", "actor", "seal_actor", "holds", "started_at")
         }
         receipt |= {
             "name": self.name,
             "applied_at": now(),
-            "source_bundle_hash": self.record.get("source_bundle_hash"),
+            "period": seal["next_period"],
+            "seal": seal["seal"],
+            "source_bundle_hash": seal["source_bundle_hash"],
             "released": released,
+            "kept": kept,
         }
-        write_json(self.cfg.releases / self.name / ".release" / "applied.json", receipt)
+        directory = self.cfg.releases / self.name / ".release"
+        receipt_name = f"applied-{self.record['request_id']}.json"
+        write_json(directory / receipt_name, receipt)
+        write_text(directory / "latest", f"{receipt_name}\n")
         self.cfg.record.unlink()
         fsync_dir(self.cfg.releases)
-        say(f"{self.name} is active in period {self.record.get('period')}")
+        say(f"{self.name} is active in period {seal['next_period']}")
         return EXIT_OK
 
     def hold(self) -> None:
         """Hold every scheduled top-level job with a future tick that is not held; a hold
-        that was there before stays and is never released here (deployment-runbook ss6)."""
+        that was there before stays and is never released here (deployment-runbook ss6).
+        A hold is the helper's once the engine applied it, at the revision it left."""
         timers = query(self.cfg, "timers")["timers"]
         jobs = query(self.cfg, "status")["jobs"]
+        mine = {hold["job"] for hold in self.record["holds"]}
         scheduled = sorted({row["job"] for row in timers if row.get("kind") == "schedule"})
         for job in scheduled:
             row = jobs.get(job)
             if row is None or row.get("job_type") is None or row.get("box_name") is not None:
                 continue
-            if row.get("on_hold") and job not in self.record["holds"]:
+            if row.get("on_hold") or job in mine:
                 continue
-            if job not in self.record["holds"]:
-                self.record["holds"].append(job)
-                self.step(self.record["step"])
-            if not row.get("on_hold"):
-                send(self.cfg, "ON_HOLD", job)
-        say(f"holds taken: {', '.join(self.record['holds']) or 'none'}")
+            code, answer = send(self.cfg, "ON_HOLD", job, "--expect", str(row["state_rev"]))
+            if code != 0:
+                raise Stop(EXIT_REFUSED, f"{job} changed while it was being held; apply again")
+            self.record["holds"].append(
+                {
+                    "job": job,
+                    "request_id": answer.get("request_id"),
+                    "rev": int(answer["revisions"][f"job:{job}"]),
+                }
+            )
+            self.step(self.record["step"])
+        taken = ", ".join(hold["job"] for hold in self.record["holds"]) or "none"
+        say(f"holds taken: {taken}")
 
     def drain(self) -> None:
+        """No job STARTING, RUNNING or QUE_WAIT; then a job the release removes may not be
+        latent, and one it changes that is latent crosses with an assumption (deployment-
+        runbook ss0, job recipe step 3; period-model ss10.3)."""
         deadline = time.monotonic() + self.args.drain_timeout
         while True:
             jobs = query(self.cfg, "status")["jobs"]
-            live = sorted(
-                job for job, row in jobs.items() if row.get("status") in ("RUNNING", "STARTING")
-            )
+            live = sorted(job for job, row in jobs.items() if row.get("status") in LIVE)
             if not live:
-                return
+                break
             if time.monotonic() >= deadline:
                 raise Stop(
                     EXIT_REFUSED,
-                    f"still running after {self.args.drain_timeout:g}s: {', '.join(live)}",
+                    f"still STARTING, RUNNING or QUE_WAIT after {self.args.drain_timeout:g}s:"
+                    f" {', '.join(live)}",
                 )
             time.sleep(1)
+        changes = service_json("changes", self.record["previous"], self.name)
+
+        def latent(job: str) -> bool:
+            row = jobs.get(job) or {}
+            return bool(row.get("armed") or row.get("pending_timers"))
+
+        removed = [job for job in changes["removed"] if latent(job)]
+        if removed:
+            raise Stop(
+                EXIT_REFUSED,
+                f"{', '.join(removed)}: the seal refuses a removed job that is executing or"
+                " latent (armed, QUE_WAIT, a live timer); wait until it is not, or DISARM it",
+            )
+        for job in (job for job in changes["changed"] if latent(job)):
+            say(f"{job} is latent and changed: it crosses with a recorded assumption")
+
+    def read_estate(self) -> bool:
+        """Whether the seal under the recorded request id committed; records its facts."""
+        seal = service_json("committed", self.record["request_id"])
+        if seal["committed"]:
+            self.record["sealed"] = seal
+            say(f"the estate shows {seal['seal']} under request id {self.record['request_id']}")
+        return bool(seal["committed"])
 
     def seal(self) -> int:
-        """The seal, as the service account; a retry-horizon refusal waits out the horizon
-        it names and seals again under a new request id (period-model ss9)."""
+        """The seal, as the service account. A recorded request id is read in the estate
+        before it is sent again, and so is every seal that did not exit 0. A retry-horizon
+        refusal waits out the horizon it names and seals under a new request id (period-model
+        ss9)."""
+        if self.record.get("request_id") is not None and self.read_estate():
+            return EXIT_OK
         deadline = time.monotonic() + self.args.horizon_timeout
         while True:
             if self.record.get("request_id") is None:
                 self.record["request_id"] = str(uuid.uuid4())
             self.step("sealing")
             done = subprocess.run(
-                as_service("seal", self.name, self.record["request_id"]),
+                as_service("seal", self.name, self.record["request_id"], self.record["seal_actor"]),
                 capture_output=True,
                 text=True,
             )
             sys.stderr.write(done.stdout + done.stderr)
+            if done.returncode == EXIT_OK and os.environ.get("DSL41_RELEASE_STOP_AFTER") == (
+                "seal-reply"
+            ):
+                os.kill(os.getpid(), signal.SIGKILL)
+            if self.read_estate():
+                return EXIT_OK
+            if done.returncode == EXIT_OK:
+                raise Stop(EXIT_STOPPED, "the seal exited 0 and the estate shows no seal")
             if done.returncode != EXIT_REFUSED:
                 return done.returncode
             horizon = HORIZON.search(done.stdout + done.stderr)
@@ -661,66 +885,95 @@ class Apply:
 
     def select(self) -> None:
         """ACTIVE names the candidate: a plain file replaced by a rename (DL-407)."""
-        temp = self.cfg.active.with_name(f"{self.cfg.active.name}.new")
-        write_durable(temp, f"{self.name}\n")
-        os.replace(temp, self.cfg.active)
-        fsync_dir(self.cfg.active.parent)
+        write_text(self.cfg.active, f"{self.name}\n")
 
     def start(self) -> None:
+        """Start the engine unit once the sealed engine has exited, and wait until the
+        successor answers in the committed period under a new leader."""
+        seal = self.record["sealed"]
+        deadline = time.monotonic() + self.args.open_timeout
+        if self.successor_answers():
+            return
+        show = ["systemctl", "show", "-p", "ActiveState", "--value", ENGINE_UNIT]
+        while True:
+            state = subprocess.run(show, capture_output=True, text=True).stdout.strip()
+            if state in ("inactive", "failed"):
+                break
+            if time.monotonic() >= deadline:
+                raise Stop(EXIT_STOPPED, f"{ENGINE_UNIT} is still {state}: the sealed engine")
+            time.sleep(1)
         done = subprocess.run(["sudo", "-n", "systemctl", "start", ENGINE_UNIT], check=False)
         if done.returncode != 0:
             raise Stop(EXIT_STOPPED, f"systemctl start {ENGINE_UNIT} exited {done.returncode}")
-        brief = [self.cfg.dsl41, "query", "status", "--brief", "-S", self.cfg.socket]
-        for _ in range(int(self.args.open_timeout)):
-            if subprocess.run(brief, capture_output=True, check=False).returncode == 0:
+        while time.monotonic() < deadline:
+            if self.successor_answers():
                 return
             time.sleep(1)
         raise Stop(
             EXIT_STOPPED,
-            f"the engine did not answer within {self.args.open_timeout:g}s; read"
-            f" `journalctl -u {ENGINE_UNIT}`",
+            f"no engine answered in period {seal['next_period']} within"
+            f" {self.args.open_timeout:g}s; read `journalctl -u {ENGINE_UNIT}`",
+        )
+
+    def successor_answers(self) -> bool:
+        """An engine answers in the committed period's baseline, under an epoch past the
+        seal's: the successor, not the sealed engine."""
+        seal = self.record["sealed"]
+        status = [self.cfg.dsl41, "query", "status", "-S", self.cfg.socket]
+        done = subprocess.run(status, capture_output=True, text=True, check=False)
+        if done.returncode != 0:
+            return False
+        header = json.loads(done.stdout)
+        return bool(
+            header.get("baseline_id") == seal["next_baseline"]
+            and int(header.get("epoch", 0)) > int(seal["epoch"])
         )
 
     def verify(self) -> None:
-        done = subprocess.run(
-            as_service("pins", self.record["request_id"]), capture_output=True, text=True
-        )
-        sys.stderr.write(done.stderr)
-        if done.returncode != 0:
-            raise Stop(EXIT_STOPPED, f"the service account's pins exited {done.returncode}")
-        pins = json.loads(done.stdout)
+        """The opener's segment, leader record and manifest name the bundle the seal
+        committed, and the bundle was read from the candidate's files."""
+        pins = service_json("pins", self.record["request_id"])
         prefix = f"{self.cfg.releases / self.name}/"
+        sealed, period = pins["source_bundle_hash"], pins["next_period"]
+        segment = pins["segment"] or {}
         problems = []
-        if not pins["opened"]:
-            problems.append(f"period {pins['period']} has no segment")
-        if pins["opened_source_bundle_hash"] != pins["sealed_source_bundle_hash"]:
-            problems.append(
-                f"period {pins['period']} pins {pins['opened_source_bundle_hash']}, the seal"
-                f" committed {pins['sealed_source_bundle_hash']}"
-            )
+        if not segment:
+            problems.append(f"period {period} has no opening segment")
+        elif (
+            segment.get("source_bundle_hash") != sealed
+            or (segment.get("opens_from_seal") or {}).get("period_id") != pins["period"]
+            or segment.get("baseline_id") != pins["next_baseline"]
+        ):
+            problems.append(f"period {period}'s segment does not open the committed seal")
+        if pins["leader_epoch"] is None or pins["leader_epoch"] <= pins["epoch"]:
+            problems.append(f"period {period} has no leader record after the seal")
+        if pins["manifest_source_bundle_hash"] != sealed:
+            problems.append(f"period {period}'s manifest pins another bundle than {sealed}")
         outside = [path for path in pins["sources"] if not path.startswith(prefix)]
         if outside:
             problems.append(f"the bundle reads {', '.join(outside)}, outside {prefix}")
         if problems:
             raise Stop(EXIT_STOPPED, "; ".join(problems))
-        self.record |= {
-            "period": pins["period"],
-            "seal": pins["seal"],
-            "source_bundle_hash": pins["opened_source_bundle_hash"],
-        }
 
-    def release_holds(self) -> list[str]:
-        """OFF_HOLD for each hold this apply took that is still held; a job the new period
-        no longer defines is a ghost and keeps its row (period-model ss10)."""
+    def release_holds(self) -> tuple[list[str], list[str]]:
+        """OFF_HOLD, at the revision the hold left, for each hold this apply took; a hold
+        that moved since stays, and a job the new period no longer defines is a ghost and
+        keeps its row (period-model ss10)."""
+        if not self.record["holds"]:
+            return [], []
         jobs = query(self.cfg, "status")["jobs"]
-        released = []
-        for job in self.record["holds"]:
+        released: list[str] = []
+        kept: list[str] = []
+        for hold in self.record["holds"]:
+            job = hold["job"]
             row = jobs.get(job)
             if row is None or row.get("job_type") is None or not row.get("on_hold"):
                 continue
-            send(self.cfg, "OFF_HOLD", job)
-            released.append(job)
-        return released
+            code, _ = send(self.cfg, "OFF_HOLD", job, "--expect", str(hold["rev"]))
+            (released if code == 0 else kept).append(job)
+        if kept:
+            say(f"holds kept, each moved since this apply took it: {', '.join(kept)}")
+        return released, kept
 
     def abort(self, reason: str) -> int:
         """Nothing was sealed: release this apply's holds and clear its record."""
@@ -739,21 +992,9 @@ class Apply:
         return EXIT_REFUSED
 
 
-def check_prepared(cfg: Config, name: str) -> None:
-    path = release_dir(cfg, checked_name(name))
-    prepared = read_json(path / ".release" / "prepared.json")
-    if prepared is None:
-        raise Stop(EXIT_REFUSED, f"{name} is not prepared: run `dsl41-release prepare` first")
-    if prepared.get("dsl41_version") != runtime_version():
-        raise Stop(
-            EXIT_REFUSED,
-            f"{name} was prepared under dsl41 {prepared.get('dsl41_version')}, and this"
-            f" runtime is dsl41 {runtime_version()}: run `dsl41-release prepare --requalify"
-            f" {name}`",
-        )
-
-
-def apply(name: str, args: argparse.Namespace) -> int:
+def apply(args: argparse.Namespace, name: str | None) -> int:
+    """An apply of NAME, or with no NAME the rollback to the active release's previous one;
+    the target is resolved under the lock."""
     cfg = config()
     with apply_lock(cfg):
         record = read_json(cfg.record)
@@ -765,6 +1006,8 @@ def apply(name: str, args: argparse.Namespace) -> int:
                     EXIT_REFUSED,
                     f"the recorded apply is of {record['candidate']}, not {name}",
                 )
+            if record["step"] in STEPS[: STEPS.index("sealing") + 1]:
+                check_prepared(cfg, record["candidate"])
         else:
             if record is not None:
                 raise Stop(
@@ -773,32 +1016,29 @@ def apply(name: str, args: argparse.Namespace) -> int:
                     " run `dsl41-release status`, then `dsl41-release apply --resume"
                     f" {record['candidate']}`",
                 )
-            check_prepared(cfg, name)
             previous = read_active(cfg)
+            if name is None:
+                latest = latest_receipt(cfg, previous)
+                if latest is None or not latest.get("previous"):
+                    raise Stop(EXIT_REFUSED, f"{previous}: no previous release; use apply NAME")
+                name = str(latest["previous"])
+                say(f"rolling back from {previous} to {name}")
+            check_prepared(cfg, name)
             if previous == name:
                 raise Stop(EXIT_REFUSED, f"{name} is already active")
+            query(cfg, "status")
             record = {
                 "candidate": name,
                 "previous": previous,
                 "step": STEPS[0],
                 "request_id": None,
+                "seal_actor": SEAL_ACTOR,
                 "holds": [],
                 "actor": f"{getpass.getuser()}@{socket.gethostname()}",
                 "started_at": now(),
             }
             write_json(cfg.record, record)
         return Apply(cfg, record, args).run()
-
-
-def rollback(args: argparse.Namespace) -> int:
-    cfg = config()
-    active = read_active(cfg)
-    applied = read_json(cfg.releases / active / ".release" / "applied.json")
-    if applied is None or not applied.get("previous"):
-        raise Stop(EXIT_REFUSED, f"{active}: no previous release; use apply NAME")
-    say(f"rolling back from {active} to {applied['previous']}")
-    args.resume = False
-    return apply(str(applied["previous"]), args)
 
 
 # ------------------------------------------------------------------- status
@@ -814,11 +1054,13 @@ def status(fmt: str) -> int:
     for path in sorted(cfg.releases.iterdir()) if cfg.releases.is_dir() else []:
         if path.name.startswith(".") or not path.is_dir():
             continue
+        receipts = sorted((path / ".release").glob("applied-*.json"))
         releases.append(
             {
                 "name": path.name,
                 "prepared": read_json(path / ".release" / "prepared.json"),
-                "applied": read_json(path / ".release" / "applied.json"),
+                "applied": latest_receipt(cfg, path.name),
+                "applies": len(receipts),
             }
         )
     record = read_json(cfg.record)
@@ -840,7 +1082,7 @@ def status(fmt: str) -> int:
         if applied:
             line += (
                 f"; applied {applied['applied_at']} after {applied['previous']},"
-                f" period {applied['period']}"
+                f" period {applied['period']} ({release['applies']} applies)"
             )
         print(line)
     if record is None:
@@ -886,9 +1128,10 @@ def main(argv: list[str]) -> int:
             return EXIT_REFUSED
         return requalify(args.name) if args.requalify else prepare(args.name, args.source)
     if args.command == "apply":
-        return apply(args.name, args)
+        return apply(args, args.name)
     if args.command == "rollback":
-        return rollback(args)
+        args.resume = False
+        return apply(args, None)
     return status(args.format)
 
 
