@@ -96,19 +96,20 @@ then `uv run dsl41 --help`.
 ## CLI
 
 There is one entry point, `dsl41`. Run `uv run dsl41 --help` in a checkout,
-or install the package and run `dsl41`. Every compiler command takes one or
-more JIL files, which together form one catalog. The files may include
-`autocal_asc` calendar exports (`calendar`, `cycle`, `extended_calendar`,
-and `ext_calendar` statements) next to job definitions.
+or install the package and run `dsl41`. Every compiler command except
+`build` takes one or more JIL files, which together form one catalog. The
+files may include `autocal_asc` calendar exports (`calendar`, `cycle`,
+`extended_calendar`, and `ext_calendar` statements) next to job definitions.
 
 Exit codes: 0 is success or clean. 2 means the input never reached the
 tool: an unreadable file, a JIL parse error, a lowering refusal, or a
-preflight refusal. Findings exit 1: `lint`, `equiv`, `uc --strict`, and a
-failed `decompile` check. A mid-run engine failure in `run` or `rehearse`
-exits 1 as well. `minify` refusals and a `rehearse --check-cadence`
-deviation exit 3. The control verbs `sendevent`, `host`, and `seal` spend a
-code per outcome: 0 applied, 2 refused, 3 rejected, 4 outcome unknown. On 4,
-retry with the printed `request_id` instead of re-sending. `report` exits 0
+preflight refusal. Findings exit 1: `lint`, `equiv`, `uc --strict`, a
+failed `decompile` check, and a `build --check` difference. A mid-run engine
+failure in `run` or `rehearse` exits 1 as well. `minify` refusals and a
+`rehearse --check-cadence` deviation exit 3. The control verbs `sendevent`,
+`host`, and `seal` spend a code per outcome: 0 applied, 2 refused, 3
+rejected, 4 outcome unknown. On 4, retry with the printed `request_id`
+instead of re-sending. `report` exits 0
 once the report is written; the findings are in the report. Each verb's
 `--help` states its own codes.
 
@@ -333,35 +334,47 @@ prove that nothing changed.
 dsl41 decompile jobs.jil -o catalog.py
 ```
 
-The command emits a runnable Python module over the DSL builders. Running
-the module rebuilds a catalog whose canonical form equals the original's;
-this round-trip property is tested over the whole corpus. Recognized
-structural patterns fold into builder calls from a closed registry, which
-`dsl41 folds` lists. `--no-fold CODE` disables the named fold; the option is
-repeatable and accepts comma-separated codes.
+The command emits a Python module over the DSL builders. Its `estate()`
+function returns a `CatalogBuilder`; importing the module builds nothing.
+The rebuilt catalog's canonical form equals the original's, and this
+round-trip property is tested over the whole corpus. Recognized structural
+patterns fold into builder calls from a closed registry, which `dsl41 folds`
+lists. `--no-fold CODE` disables the named fold; the option is repeatable and
+accepts comma-separated codes. Decompile the template JIL, not a bound copy:
+`-p` fills the `~{$NAME}~` placeholders first, and the module cannot recover
+them.
 
 ### DSL -> JIL (build)
 
-The reverse direction is a Python API, not a CLI command:
+```sh
+dsl41 build catalog.py -o jobs.jil          # write the JIL
+dsl41 build catalog.py --check jobs.jil     # exit 1 and a diff if jobs.jil is stale
+```
+
+A Python estate is a module whose `estate()` function returns a
+`CatalogBuilder`:
 
 ```python
 from dsl41.dsl import CatalogBuilder
 
-b = CatalogBuilder()
-b.machine("prod1")
-with b.box("nightly"):
-    b.job("extract", command="/opt/etl/extract.sh", machine="prod1")
-    b.job("transform", command="/opt/etl/transform.sh", machine="prod1")
-    b.job("load", command="/opt/etl/load.sh", machine="prod1")
-b.sequence("extract", "transform", "load")
 
-jil_text = b.to_jil()   # JIL text, byte-for-byte what the front end accepts
-catalog = b.build()     # ...or parse+lower it through the real pipeline
+def estate() -> CatalogBuilder:
+    b = CatalogBuilder()
+    b.machine("prod1")
+    with b.box("nightly"):
+        b.job("extract", command="/opt/etl/extract.sh", machine="prod1")
+        b.job("transform", command="/opt/etl/transform.sh", machine="prod1")
+        b.job("load", command="/opt/etl/load.sh", machine="prod1")
+    b.sequence("extract", "transform", "load")
+    return b
 ```
 
-`build()` returns the in-process catalog every phase and the engine consume.
-`to_jil()` returns the durable form. `dsl41 run` and the run root take JIL
-bytes only: `python catalog.py > jobs.jil && dsl41 run jobs.jil --run-root ./run1`.
+`dsl41 build` imports the module, which runs its code, so use it only on
+modules you trust. It calls `estate()`, lowers the JIL through the compiler,
+and writes it through a temporary file and a rename. `--check FILE` compares
+bytes and writes nothing; `--stdout` prints. `dsl41 run` and the run root
+take JIL bytes only. In Python, the builder's `to_jil()` returns the JIL
+text, and its `build()` returns the in-process catalog.
 
 `job()` keyword names are JIL attribute names. `sequence()` wires `s()`
 chains; `parallel()` wires a fan-out and a fan-in. Both refuse to merge into
@@ -969,6 +982,8 @@ Compiler:
   expected-divergence pairs, driving `tests/uc_oracle.py`.
 - `tests/test_dsl.py`: the corpus-extracted builders, condition source
   fidelity, and the decompile round-trip property.
+- `tests/test_build_cli.py`: the decompiled module's `estate()` shape, the
+  `build` verb's write, print and check modes, and its refusals.
 - `tests/test_placeholders.py`: every format decision of the templating
   preprocessor, plus a resolved corpus run through the pipeline.
 - `tests/test_minify.py`: the minifier's classes, naming, condition

@@ -44,6 +44,7 @@ def invoke(cli: Path, work: Path, *args: str) -> subprocess.CompletedProcess[str
                 "equiv",
                 "uc",
                 "decompile",
+                "build",
                 "folds",
                 "minify",
                 "resolve",

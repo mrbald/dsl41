@@ -24434,3 +24434,25 @@ relitigate an entry; append a new one.
   on every async request (their callers read `SupervisorUnavailable` as a supervisor gone); an
   unbounded resend of a queued request; a log line on every timeout of an outage (one line per
   eleven seconds for as long as the freeze lasts).
+- DL-410 A decompiled estate is a Python module that declares `estate()`, and `dsl41 build`
+  renders it (2026-10-27; src/dsl41/dsl.py, src/dsl41/cli_compile.py, README "DSL -> JIL
+  (build)", docs/authoring.md §1 and §5)
+  THE RULE. `decompile` emits a module whose `estate()` returns a `CatalogBuilder`; importing
+  the module builds nothing, and run as a script it prints the JIL. `dsl41 build MODULE`
+  is the one way to render a module: it imports MODULE, calls `estate()`, lowers the JIL through
+  the compiler, and then writes it with `--out` through a temporary file and a rename, prints it
+  with `--stdout`, or compares bytes with `--check FILE`, which exits 1 with a diff and writes
+  nothing. It refuses with exit 2 a module with no `estate()`, an `estate()` that raises or
+  returns anything but a `CatalogBuilder`, and JIL that does not lower. The Python is an
+  authoring source: the runner and the run root take JIL bytes only and never import it.
+  `decompile -p` emits a bound snapshot and cannot recover the `~{$NAME}~` tokens, so the
+  template JIL is what to decompile; without `-p` the tokens pass through `estate()` unchanged.
+  THE REASON. The owner's ruling of 2026-10-27: the estate is maintained in Python after
+  `decompile`, as a step towards a simpler DSL, so the module stays thin and a checked-in JIL
+  must not go stale behind it. The design note "Decompile CLI: reconciled brainstorm" agreed
+  the module shape, the verb and `--check`. A module that built at import gave no single
+  loader; `build()` clashed with `CatalogBuilder.build()`, which returns a catalog.
+  REJECTED: a generated CLI inside each module (copies drift from the verb); `dsl41 run` on a
+  module or a module in the manifest's files (rebuilding at launch breaks the durable-input
+  contract and replay provenance); `equiv` on a .py through the shared catalog loader (every
+  catalog verb, `run` included, would then import Python).

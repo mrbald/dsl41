@@ -1,8 +1,9 @@
 """The compiler verbs (DL-137): every verb that reads JIL and writes a finding, report, bundle,
 module, chart or de-identified estate, and touches no run root and no socket.
 
-The verbs are `lint`, `equiv`, `report`, `uc`, `decompile`, `minify`, `folds`, `resolve` and
-`viz`. The exit-code contract is stated in `cli.py`.
+The verbs are `lint`, `equiv`, `report`, `uc`, `decompile`, `build`, `minify`, `folds`,
+`resolve` and `viz`. `build` is the one verb that reads Python: it imports an authored module and
+writes the JIL its estate() declares. The exit-code contract is stated in `cli.py`.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from dsl41.lint import lint_catalog
 from dsl41.placeholders import PlaceholderError, load_properties, substitute
 
 if TYPE_CHECKING:  # type-only: equiv's runtime import stays deferred
+    from dsl41.dsl import CatalogBuilder
     from dsl41.minify import MinifyRefusal
     from dsl41.equiv import TierAResult, TierBCatalogResult, TierCResult
     from dsl41.viz import Direction
@@ -315,15 +317,24 @@ def decompile(
         " comma-separated lists accepted. 'dsl41 folds' lists the codes.",
     ),  # DL-38
     permit_unknown: bool = PERMIT_UNKNOWN,
-    properties: list[Path] = PROPERTIES,
+    properties: list[Path] = typer.Option(
+        None,
+        "--properties",
+        "-p",
+        help="Properties files with KEY=VALUE lines. Their values fill ~{$NAME}~"
+        " placeholders before parsing. Repeatable; later files override earlier"
+        " ones. The module then holds the bound values and cannot recover the"
+        " ~{$NAME}~ tokens, so decompile the template JIL to keep them.",
+    ),  # DL-19/DL-22
 ) -> None:
     """Turn JIL files into a Python module that rebuilds the same catalog.
 
-    The module uses the dsl41 builder DSL. Running it rebuilds a catalog
-    whose canonical form equals the input's. With --check (the default),
-    this command runs the module and compares the two before you rely on
-    it. The fold inventory and any construct left explicit are reported
-    on stderr.
+    The module uses the dsl41 builder DSL. Its estate() function returns
+    the builder, and 'dsl41 build' writes the JIL from it. The rebuilt
+    catalog's canonical form equals the input's. With --check (the
+    default), this command runs estate() and compares the two before you
+    rely on it. The fold inventory and any construct left explicit are
+    reported on stderr.
 
     Exit codes: 0 module written; 1 the check found a difference (the
     module is still written, and the difference is a decompiler bug
@@ -356,6 +367,9 @@ def decompile(
         namespace: dict[str, object] = {"__name__": "<decompiled>"}
         try:
             exec(compile(source, "<decompiled>", "exec"), namespace)  # noqa: S102
+            rebuilt = namespace["estate"]().build(  # type: ignore[operator]
+                permit_unknown=permit_unknown
+            )
         except Exception as exc:
             typer.echo(
                 "round-trip check FAILED (a decompiler gap, not your input):"
@@ -363,7 +377,6 @@ def decompile(
                 err=True,
             )
             raise typer.Exit(1) from exc
-        rebuilt = namespace["catalog"]
         assert isinstance(rebuilt, CatalogIR)
         if catalog_hash(rebuilt) != catalog_hash(catalog):
             result = equivalent_tier_a(catalog, rebuilt)
@@ -375,6 +388,132 @@ def decompile(
                 err=True,
             )
             raise typer.Exit(1)
+
+
+def _builder_from_module(module: Path) -> "CatalogBuilder":
+    """Import MODULE from its path and return what its estate() returns, or exit 2.
+
+    The module's directory leads sys.path during the import, as it does for `python MODULE`, so
+    an estate may import its sibling modules. The import writes no bytecode beside the source."""
+    import importlib.util
+    import sys
+
+    from dsl41.dsl import CatalogBuilder
+
+    spec = importlib.util.spec_from_file_location(module.stem, module)
+    if spec is None or spec.loader is None:
+        raise typer.Exit(refuse(f"{module}: not a Python source file"))
+    loaded = importlib.util.module_from_spec(spec)
+    directory = str(module.resolve().parent)
+    sys.path.insert(0, directory)
+    write_bytecode, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+    try:
+        spec.loader.exec_module(loaded)
+    except (Exception, SystemExit) as exc:
+        raise typer.Exit(
+            refuse(f"{module}: importing the module raised {type(exc).__name__}: {exc}")
+        ) from exc
+    finally:
+        sys.dont_write_bytecode = write_bytecode
+        sys.path.remove(directory)
+    function = getattr(loaded, "estate", None)
+    if not callable(function):
+        raise typer.Exit(refuse(f"{module}: the module defines no estate() function"))
+    try:
+        builder = function()
+    except (Exception, SystemExit) as exc:
+        raise typer.Exit(refuse(f"{module}: estate() raised {type(exc).__name__}: {exc}")) from exc
+    if not isinstance(builder, CatalogBuilder):
+        raise typer.Exit(
+            refuse(f"{module}: estate() returned {type(builder).__name__}, not a CatalogBuilder")
+        )
+    return builder
+
+
+def _write_atomic(target: Path, data: bytes) -> None:
+    """Write DATA to a temporary file beside TARGET, then rename it over TARGET.
+
+    A reader of TARGET sees the old bytes or the new bytes, never a partial file."""
+    import os
+
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    try:
+        with temporary.open("wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def build(
+    module: Path = typer.Argument(
+        ..., help="Python file that defines estate() and returns a CatalogBuilder."
+    ),
+    out: Path = typer.Option(
+        None, "--out", "-o", help="Write the JIL to this file. The file is replaced whole."
+    ),
+    check: Path = typer.Option(
+        None,
+        "--check",
+        help="Compare the JIL with this file instead of writing. A difference"
+        " prints a unified diff.",
+    ),
+    stdout: bool = typer.Option(False, "--stdout", help="Print the JIL instead of writing."),
+    permit_unknown: bool = PERMIT_UNKNOWN,
+) -> None:
+    """Write the JIL that a Python module's estate() declares.
+
+    This command imports MODULE, so it executes that code: run it only
+    on modules you trust. It calls estate(), parses and lowers the JIL
+    through the compiler, and writes it. Give exactly one of --out,
+    --check or --stdout. --out writes through a temporary file beside the
+    target and a rename. --check writes nothing.
+
+    Exit codes: 0 written, printed, or equal to the --check file; 1 the
+    --check file differs; 2 MODULE could not be imported or has no
+    estate(), estate() raised or returned something other than a
+    CatalogBuilder, its JIL did not lower, or a file could not be read
+    or written.
+    """
+    import difflib
+
+    from dsl41.ast_jil import JilParseError
+    from dsl41.ir import LoweringError
+
+    if sum((out is not None, check is not None, stdout)) != 1:
+        raise typer.Exit(refuse("give exactly one of --out, --check or --stdout"))
+    builder = _builder_from_module(module)
+    try:
+        builder.build(permit_unknown=permit_unknown)
+    except (JilParseError, LoweringError) as exc:
+        raise typer.Exit(refuse(exc, prefix=f"{module}: the built JIL does not lower")) from exc
+    data = builder.to_jil().encode("utf-8")
+    if stdout:
+        typer.echo(data.decode("utf-8"), nl=False)
+        return
+    try:
+        if check is None:
+            assert out is not None
+            _write_atomic(out, data)
+            typer.echo(f"wrote {out}")
+            return
+        current = check.read_bytes()
+    except OSError as exc:
+        raise typer.Exit(refuse(exc)) from exc
+    if current == data:
+        typer.echo(f"{check} matches {module}")
+        return
+    diff = difflib.unified_diff(
+        current.decode("utf-8", errors="replace").splitlines(keepends=True),
+        data.decode("utf-8").splitlines(keepends=True),
+        fromfile=str(check),
+        tofile=f"{module} estate()",
+    )
+    typer.echo("".join(diff), nl=False)
+    raise typer.Exit(1)
 
 
 def folds() -> None:

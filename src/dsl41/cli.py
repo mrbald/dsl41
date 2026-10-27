@@ -5,8 +5,8 @@ verbs live one file per domain (DL-137):
 
     cli_common.py   shared options, the catalog door, and the readings that turn an exception
                     or a control answer into an exit code
-    cli_compile.py  a catalog in, an artifact out: lint, equiv, report, uc, decompile, minify,
-                    folds, resolve, viz
+    cli_compile.py  a catalog in, an artifact out: lint, equiv, report, uc, decompile, build,
+                    minify, folds, resolve, viz
     cli_run.py      run, rehearse, and their offline readers journal, runs
     cli_control.py  what an operator says to a RUNNING engine: sendevent, host, query, ui,
                     serve, supervise
@@ -66,6 +66,7 @@ app.command(rich_help_panel="Compile JIL")(cli_compile.viz)
 app.command(rich_help_panel="Compile JIL")(cli_compile.equiv)
 app.command(rich_help_panel="Compile JIL")(cli_compile.uc)
 app.command(rich_help_panel="Compile JIL")(cli_compile.decompile)
+app.command(rich_help_panel="Compile JIL")(cli_compile.build)
 app.command(rich_help_panel="Compile JIL")(cli_compile.folds)
 app.command(rich_help_panel="Compile JIL")(cli_compile.minify)
 app.command(rich_help_panel="Compile JIL")(cli_compile.resolve)
