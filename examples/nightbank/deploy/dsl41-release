@@ -66,7 +66,8 @@ decision; an applied hold that moved no revision held nothing new and is
 not the helper's. The helper releases each of its holds that is still held,
 a hold a schedule tick latched included, under a request id recorded before
 the send, so a release with no decision is sent again under that id; a
-resend refused outright is settled by the run root's log. It keeps a hold
+resend refused outright is settled by the run root's log, and one the log
+shows undecided stops the apply until the engine decides it. It keeps a hold
 when that log shows, after the helper's hold, an applied request of another
 that can move the job's hold (ON_HOLD, OFF_HOLD, FORCE_STARTJOB, ON_NOEXEC):
 the hold there now may be somebody else's. It never releases a hold it did
@@ -488,12 +489,14 @@ def service_pins(cfg: Config, request_id: str) -> dict[str, Any]:
 
 
 def hold_history(cfg: Config, job: str) -> dict[str, Any]:
-    """The applied requests that can move JOB's hold, in the run root's log order across the
-    last three WAL segments: each `input` of a kind in HOLD_KINDS that names the job, whose
-    `decision` at its index applied, with the revision that decision gave the job
-    (period-model ss2.3)."""
+    """The requests that can move JOB's hold, in the run root's log order across the last
+    three WAL segments: each `input` of a kind in HOLD_KINDS that names the job, `applied`
+    with the revision its `decision` gave the job, or `undecided` while no decision follows
+    it, since recovery may still apply it (period-model ss2.3). A rejected one is left
+    out."""
     inputs: list[dict[str, Any]] = []
     applied: dict[tuple[str, int], Any] = {}
+    decided: set[tuple[str, int]] = set()
     for segment in sorted((cfg.run_root / "wal").glob(SEGMENT))[-3:]:
         for line in segment.read_bytes().split(b"\n"):
             try:
@@ -503,20 +506,22 @@ def hold_history(cfg: Config, job: str) -> dict[str, Any]:
             if record.get("rec") == "input" and (record.get("payload") or {}).get("job") == job:
                 if record.get("kind") in HOLD_KINDS:
                     inputs.append(record | {"segment": segment.name})
-            if record.get("rec") == "decision" and record.get("decision") == "applied":
-                revisions = record.get("revisions") or {}
-                applied[(segment.name, int(record["index"]))] = revisions.get(f"job:{job}")
-    return {
-        "changes": [
-            {
-                "request_id": record.get("request_id"),
-                "kind": record["kind"],
-                "rev": applied[(record["segment"], int(record["seq"]))],
-            }
-            for record in inputs
-            if (record["segment"], int(record["seq"])) in applied
-        ]
-    }
+            if record.get("rec") == "decision":
+                decided.add((segment.name, int(record["index"])))
+                if record.get("decision") == "applied":
+                    revisions = record.get("revisions") or {}
+                    applied[(segment.name, int(record["index"]))] = revisions.get(f"job:{job}")
+    changes = []
+    for record in inputs:
+        key = (record["segment"], int(record["seq"]))
+        if key in decided and key not in applied:
+            continue
+        change = {"request_id": record.get("request_id"), "kind": record["kind"]}
+        if key in applied:
+            changes.append(change | {"decision": "applied", "rev": applied[key]})
+        else:
+            changes.append(change | {"decision": "undecided", "rev": None})
+    return {"changes": changes}
 
 
 def service_seal(cfg: Config, name: str, request_id: str, actor: str) -> int:
@@ -882,6 +887,12 @@ class Apply:
             mine = [
                 c for c in self.hold_log(entry["job"]) if c["request_id"] == entry["request_id"]
             ]
+            if mine and mine[0]["decision"] == "undecided":
+                raise Stop(
+                    EXIT_STOPPED,
+                    f"the engine has not decided the hold of {entry['job']}; resume once it"
+                    " answers",
+                )
             if mine:
                 code, rev = 0, mine[0]["rev"]
         if code == 2:
@@ -1139,11 +1150,18 @@ class Apply:
         code, answer = self.send_recorded("OFF_HOLD", entry, "release_id")
         attempts = int(entry.get("release_attempts", 1))
         if code == 2 and resend:
-            log = self.hold_log(entry["job"])
-            released = any(
-                c["request_id"] == entry["release_id"] and c["kind"] == "OFF_HOLD" for c in log
-            )
-            code = 0 if released else 3
+            mine = [
+                c
+                for c in self.hold_log(entry["job"])
+                if c["request_id"] == entry["release_id"] and c["kind"] == "OFF_HOLD"
+            ]
+            if mine and mine[0]["decision"] == "undecided":
+                raise Stop(
+                    EXIT_STOPPED,
+                    f"the engine has not decided the release of {entry['job']}; resume once"
+                    " it answers",
+                )
+            code = 0 if mine else 3
         if code == 0:
             entry["state"] = "released"
         elif code == 3 and attempts < 3:
