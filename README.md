@@ -25,7 +25,7 @@ the other four.
 **Packager**: build the site package (the RPM or equivalent that installs
 dsl41 and your services), ship JIL releases on your own schedule.
 
-1. [docs/site-package.md](docs/site-package.md) - the packager guide: what a release gives you, the reference RPM or the offline recipe, what the site adds, install and first start, JIL releases on your own schedule, qualification
+1. [docs/site-package.md](docs/site-package.md) - the packager guide: what a release gives you, the reference RPM or the offline recipe, what the site adds, install and first start, the infrastructure contract for the application's JIL releases, qualification
 2. [docs/offline-installation.md](docs/offline-installation.md) - the release inputs, the reference RPM, what the package owns
 3. [docs/deployment-runbook.md §1](docs/deployment-runbook.md#1-install) to §3 - install, filesystem layout, starting the engine; the launcher and units are the example under [examples/nightbank/deploy](examples/nightbank/deploy)
 4. [docs/deployment-runbook.md §6](docs/deployment-runbook.md#6-jil-rollout--updating-the-estate) - the JIL rollout cycles; §7 upgrades of dsl41 itself
@@ -40,7 +40,7 @@ dsl41 and your services), ship JIL releases on your own schedule.
 
 **Job author**: write an estate in JIL or the Python DSL, or bring an existing one in, and get it accepted.
 
-1. [docs/authoring.md](docs/authoring.md) - the author guide: JIL or the Python DSL, what dsl41 accepts, conditions, lint, rehearse, viz, bringing an estate in, the rollout handoff
+1. [docs/authoring.md](docs/authoring.md) - the author guide: JIL or the Python DSL, what dsl41 accepts, conditions, lint, rehearse, viz, bringing an estate in, the rollout handoff and the estate manifest
 2. [Lint a catalog](#lint-a-catalog) - the rules L001-L023, and `rehearse` and `viz` under [CLI](#cli)
 3. [DSL -> JIL (build)](#dsl---jil-build) - the Python DSL builders (`job`, `box`, `sequence`, `parallel`) and `to_jil()`; [examples/file_processing/estate.py](examples/file_processing/estate.py) is a worked Python estate; `examples/nightbank`, `fulfilment`, `energy`, `media` and `dst-drill` hold worked JIL estates
 4. [JIL -> DSL (decompile)](#jil---dsl-decompile) and [Prove two catalogs equivalent](#prove-two-catalogs-equivalent) - bringing an existing estate in and checking a rewrite; [examples/README.md](examples/README.md) indexes the worked estates

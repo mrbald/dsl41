@@ -224,7 +224,8 @@ class _Engine:
 
 
 def _transition(engine: _Engine, env: dict[str, str]) -> None:
-    """ss0's job recipe, steps 2 to 5, on whatever the estate now holds."""
+    """ss0's job recipe as a host without the helper runs it: step 2's check, then the
+    hand-path paragraph's seal and open, on whatever the estate now holds."""
     _ok("job-check", env)
     _ok("job-seal", env)
     assert engine.exit_code() == 3  # sealed: the unit stays failed until opened

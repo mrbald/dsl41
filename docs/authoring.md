@@ -1,7 +1,7 @@
 # Write an estate for rollout
 
 This page is for the job author who writes an estate or brings an AutoSys estate in.
-It takes you from JIL or the Python DSL to checks and the rollout handoff.
+It takes you from JIL or the Python DSL to checks, the estate manifest and the rollout handoff.
 The rest of your track is under **Job author** in the
 [README's Documents section](../README.md#documents).
 
@@ -358,9 +358,72 @@ Use [§4's properties option](#4-check-the-estate) for those bindings.
 
 After the checks pass, commit and tag the estate edit under the
 [job-edit recipe](deployment-runbook.md#recipe-add-change-or-remove-a-job).
+The tag holds the estate's manifest ([§6.1](#61-declare-the-estate-in-estatetoml)).
 Give the operator the checked, tagged estate for the rollout window.
 The operator follows [deployment-runbook §6](deployment-runbook.md#6-jil-rollout--updating-the-estate)
 from there.
+
+### 6.1. Declare the estate in estate.toml
+
+The manifest, `estate.toml`, declares the estate's inputs once, beside its JIL (DL-407).
+The launcher, the release helper and your checks take the file list, the properties layers,
+the timezone and the semantic switches from it.
+This example declares four files, one layer for every environment and one more for `prod`:
+
+```toml
+name = "payments"
+requires_dsl41 = ">=1.13"
+files = ["calendars.jil", "global.jil", "eod.jil", "reports.jil"]
+properties = ["base.properties"]
+timezone = "UTC"
+
+[semantics]
+# NAME = "VALUE", one line per switch the operator's profile sets
+
+[environments.prod]
+properties = ["prod.properties"]
+
+[environments.uat]
+```
+
+| Key | Required | What it holds |
+| --- | --- | --- |
+| `name` | yes | The estate's name; dsl41 uses it in messages only. |
+| `requires_dsl41` | no | The lowest dsl41 version the estate needs, as `">=X.Y"` or `">=X.Y.Z"`. |
+| `files` | yes | The catalog files, in command-line order. |
+| `properties` | no | The properties layers every environment applies; a later layer overrides an earlier one. |
+| `timezone` | no | The base zone; without it, every verb works in UTC. |
+| `timezone_map` | no | The site's timezone alias file. |
+| `semantics` | no | A table of the [semantic switches](runner-design.md#8a-semantic-switches), each `NAME = "VALUE"`. |
+| `environments.NAME.properties` | no | The layers environment `NAME` applies after the base ones. |
+
+The order of `files` is part of the catalog's hash, so a reorder is a catalog change.
+Every name is a path relative to the manifest, with no `..` part, and names an existing file under the manifest's directory.
+dsl41 refuses an unknown key at any level, and a path that `files`, or the base and one environment's layers, name twice.
+`requires_dsl41` accepts only `>=`, and compares the leading integers of the version, so a pre-release or dev build of X counts as X.
+
+The environment layers follow the base layers.
+A manifest that declares environments needs one chosen; the launcher's `ENVIRONMENT` chooses it on each host.
+An environment with no layers of its own, `uat` above, applies the base layers only.
+The site's own properties file comes after every layer, so the site's values win.
+One tag serves every environment.
+
+`dsl41 estate args MANIFEST --for VERB` prints the arguments the manifest gives one verb, as one shell-quoted line.
+`VERB` is `run`, `seal`, `lint`, `rehearse` or `viz`.
+Give `--environment NAME` when the manifest declares environments, and `--format json` for `{"argv": [...]}`.
+`MANIFEST` must be an absolute path, because the bundle hash covers each path string as printed.
+For a manifest at `/work/payments/estate.toml` with no environments, `--for lint` prints the files, a `-p` per layer and the timezone:
+
+```text
+/work/payments/calendars.jil /work/payments/global.jil /work/payments/eod.jil /work/payments/reports.jil -p /work/payments/base.properties --timezone UTC
+```
+
+`--for rehearse` adds `--semantics` per switch, `--for viz` stops after the layers, and `--for seal` prints the `--next` forms.
+The command exits `0` after printing, or `2` with one sentence that names the refusal.
+
+Run the runbook's [check block](deployment-runbook.md#recipe-add-change-or-remove-a-job) in CI on the commit you are about to tag.
+It runs `estate args`, then `lint` and `rehearse` with the printed arguments and the site's properties file.
+A manifest that `estate args` refuses fails that check, before the tag exists.
 
 ## 7. Follow the other tracks for engine work
 
