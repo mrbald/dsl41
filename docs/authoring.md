@@ -493,6 +493,75 @@ Run the runbook's [check block](deployment-runbook.md#recipe-add-change-or-remov
 It runs `estate args`, then `lint` and `rehearse` with the printed arguments and the site's properties file.
 A manifest that `estate args` refuses fails that check, before the tag exists.
 
+### 6.2. Write every job to survive interruption
+
+dsl41 may end any job while its command runs.
+Write every job so that a second run, or a run after a kill in the middle, leaves the same result as one run.
+
+These events end a running command:
+
+- an operator's KILLJOB, or the job's own `term_run_time` ([runner-design §6](runner-design.md#6-adapters));
+- the loss of the supervisor that started the command, by a crash or a `kill -9` ([supervisor-protocol §4](supervisor-protocol.md#4-wrapper-behavior-frozen-semantics), step 5);
+- a SIGTERM or SIGINT to the supervisor, which a host shutdown or reboot sends ([supervisor-protocol §5](supervisor-protocol.md#5-supervisor-socket-protocol-frozen--phase-11f-dl-48), `SHUTDOWN`);
+- the operator's forced maintenance, `--force=terminate` (DL-390, DL-394).
+
+In each case, dsl41 sends SIGTERM to the command's process group.
+It waits the command grace.
+Then it sends SIGKILL to every process of the group that is still alive.
+The supervisor's service unit bounds the whole stop.
+An engine restart alone ends no command: the engine reattaches to the running commands ([runner-design §6a](runner-design.md#6a-process-lifecycle-tiers-dl-41a)).
+
+| Bound | Default | Source |
+| --- | --- | --- |
+| Command grace, from SIGTERM to SIGKILL | 10 s | `CMD_GRACE_S` in `src/dsl41/period.py`, pinned in each period's runtime profile as `cmd_grace_us` ([period-model §2.1](period-model.md#21-segment--the-first-record-of-every-segment)) |
+| Whole supervisor stop | 900 s in the example unit | `TimeoutStopSec` in [the example supervisor unit](../examples/nightbank/deploy/dsl41-supervisor.service), sized per estate by the operator ([deployment-runbook §3](deployment-runbook.md#3-starting-the-engine), DL-401) |
+
+Ask the operator for your site's values.
+
+dsl41 records the outcome of every interrupted run:
+
+| How the command ended | Recorded status |
+| --- | --- |
+| The signal killed it. | TERMINATED |
+| It caught SIGTERM and exited with a code. | SUCCESS or FAILURE, by the job's exit-code rules ([SEM-09](autosys-semantics.md#sem-09--max_exit_success-shifts-successfailure-boundary-v)) |
+| No record of its end exists, for example after the service manager killed the wrapper at the stop bound. | FAILURE, cause `exit_status_unobservable` ([runner-design §15](runner-design.md#15-open-questions-e-series), E7) |
+
+A command that catches SIGTERM and then exits 0 records SUCCESS, and its successors start.
+After its cleanup, such a command must exit with a failure code.
+
+The engine never runs an interrupted job again by itself.
+Neither the oracle nor the runner models `n_retrys`, and preflight warns when a job sets it above 0
+([the `n_retrys` row](autosys-semantics.md#5-attributes-with-control-flow-teeth-quick-inventory); Q4 in [§9](autosys-semantics.md#9-open-questions-and-their-pinned-defaults)).
+The next run comes from the job's schedule, its conditions or an operator's FORCE_STARTJOB.
+That run finds whatever the interrupted run left behind.
+
+Write each job in one of two ways:
+
+- idempotent: a second run leaves the same result as one run;
+- restartable: the job records its own checkpoints and resumes from the last one.
+
+Its side effects must also tolerate a second run.
+That covers every file it moves, every row it writes and every message it sends.
+
+A safe shape writes to a temporary name and renames the file at the end:
+
+```sh
+make_report > /data/out/report.csv.tmp && mv /data/out/report.csv.tmp /data/out/report.csv
+```
+
+A kill before the `mv` leaves only the temporary file, and the next run overwrites it.
+The rename is atomic when both names are on one filesystem.
+
+An unsafe shape appends without a marker:
+
+```sh
+extract_rows >> /data/out/ledger.csv
+```
+
+A kill in the middle leaves part of the rows in the file.
+The next run appends every row again, so the file holds duplicates.
+Write each batch to its own file by the safe shape, or record a key per batch and skip a batch whose key is present.
+
 ## 7. Follow the other tracks for engine work
 
 This page leaves engine operation to the [operator track](deployment-runbook.md#0-the-operator-path),
