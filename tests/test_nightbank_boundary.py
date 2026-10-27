@@ -37,6 +37,8 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -1822,7 +1824,12 @@ def test_b2_an_applied_spawn_with_no_binding_refuses(short_root: Path) -> None:
         (
             "RUNBOOK-service.md",
             {"query", "sendevent", "host", "supervise", "journal", "audit"},
-            {("estate", "quiesce"), ("supervise", "shutdown"), ("host", "evict")},
+            {
+                ("estate", "quiesce"),
+                ("query", "spec"),
+                ("supervise", "shutdown"),
+                ("host", "evict"),
+            },
         ),
     ],
 )
@@ -1899,5 +1906,33 @@ def test_every_recipe_the_service_runbook_names_is_a_marked_block() -> None:
     runbook = (NB.parents[1] / "docs" / "deployment-runbook.md").read_text()
     marked = set(re.findall(r"^<!-- recipe: ([a-z][a-z-]*) -->$", runbook, re.MULTILINE))
     # the extraction itself must keep working, through the retirement
-    assert {"service-install", "wait-answers", "torn-check", "retire-list"} <= named
+    assert {
+        "service-install",
+        "wait-answers",
+        "torn-check",
+        "job-verify",
+        "job-verify-removed",
+        "retire-list",
+    } <= named
     assert not named - marked, f"no such recipe in the deployment runbook: {named - marked}"
+
+
+def test_every_release_helper_verb_the_service_runbook_types_exists() -> None:
+    """The service RUNBOOK's release exercise types the release helper,
+    `dsl41-release VERB`, which is no `dsl41` command, so the verb test above
+    does not reach it. Every verb the page types must be one the helper's
+    parser accepts (DL-407)."""
+    text = (NB / "RUNBOOK-service.md").read_text()
+    typed = set(re.findall(r"\bdsl41-release\s+([a-z][a-z-]*)", text))
+    usage = subprocess.run(
+        [sys.executable, "-I", str(NB / "deploy" / "dsl41-release"), "--help"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    choices = re.search(r"\{([a-z,]+)\}", usage)
+    assert choices, usage
+    # the extraction itself must keep working, through the rollback
+    assert {"prepare", "apply", "rollback", "status"} <= typed
+    unknown = typed - set(choices.group(1).split(","))
+    assert not unknown, f"RUNBOOK-service.md types helper verbs it has no command for: {unknown}"

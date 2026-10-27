@@ -1,4 +1,4 @@
-# Nightbank service runbook — operator exercises 22 to 32
+# Nightbank service runbook — operator exercises 22 to 33
 
 This page is for an operator who will install, run, recover and retire the engine as
 a service. You type the service tasks of the
@@ -11,7 +11,7 @@ Work through the [RUNBOOK](RUNBOOK.md)'s exercises 1 to 21 first: this page assu
 The host is a Rocky Linux 8 container with systemd as PID 1 and no network, from
 [`scripts/wargame.sh`](../../scripts/wargame.sh). Each exercise links the runbook blocks
 it uses, named as in recipe `service-install`; type them from there. A comment after a
-command gives what you see. The job recipe and §7's rows 3 and 4 are not trained here:
+command gives what you see. §7's rows 3 and 4 are not trained here:
 see the [operator curriculum](../../docs/operator-curriculum.md#4-read-through-the-tasks-the-course-does-not-train).
 The RPM is the packager's ([site package](../../docs/site-package.md)).
 
@@ -87,42 +87,51 @@ PYTHON=python3.12 bash "$bundle/tools/prepare.sh" "$bundle" "$prefix" base   # �
 ```sh
 readlink /opt/dsl41/.venv                             # .venvs/1.12.0-base-<hash>
 jq -r .profile /opt/dsl41/.venv/.dsl41/receipt.json   # base
-/opt/dsl41/.venv/bin/python -c 'from dsl41.runner_ledger import STATE_MACHINE_VERSION as v; print(v)'   # 24
+/opt/dsl41/.venv/bin/python -B -c 'from dsl41.runner_ledger import STATE_MACHINE_VERSION as v; print(v)'   # 24
 ```
+
+   `-B` stops Python writing bytecode. Nothing writes into a prepared runtime: a later
+   activation verifies it, and refuses one whose files changed.
 
 *Why.* Preparation changes no active link, launcher or unit, and package presence
 proves nothing without the receipt (DL-389).
 
 ## 24. Install and start as a service
 
-Goal: place the estate's first release, install the account, launcher, map and units;
-see a start that systemd calls `active` and that refused; start the genesis. Follow
+Goal: install the account, launcher, map and units; see a start that systemd calls
+`active` and that refused; prepare the estate's first release; start the genesis. Follow
 [the service recipe](../../docs/deployment-runbook.md#recipe-install-and-start-as-a-service).
 The drill's `install` and `first-start` steps check the same.
 
 1. In a root shell from `/work`, place the example, root-owned and read-only to the
-   account. Install the small estate as the release `small-r1`, and name it in `active`.
-   Recipe `service-install` ends with the launcher's `--print`, which reads that
-   release's manifest, so the release comes first:
+   account:
 
 ```sh
 install -d -m 0755 /srv/dsl41 && cp -R examples/nightbank /srv/dsl41/nightbank
-install -d -m 0755 /srv/dsl41/nightbank/releases
-cp -R /srv/dsl41/nightbank/estate/small /srv/dsl41/nightbank/releases/small-r1
-printf '%s\n' small-r1 >/srv/dsl41/nightbank/active
 chown -R root:root /srv/dsl41/nightbank && chmod -R go-w,a+rX /srv/dsl41/nightbank
 ```
 
-   In the same shell, type recipe `service-install`, and `exit`. Its last line, the
-   engine's command, names the release's six files in its manifest's order, then
-   `--timezone UTC` from the manifest, and ends
-   `--access-map /etc/dsl41/nightbank-access.toml`.
+   In the same shell, type recipe `service-install`. Then create what the site package
+   would have created for the release train
+   ([site-package §5](../../docs/site-package.md#5-ship-jil-releases-on-the-applications-train)):
+   the deployment identity `nbdeploy` in its group, the releases directory it owns,
+   `active`'s directory with its group and the sticky bit, and its `ops` binding in the
+   map. `exit` after the block:
+
+```sh
+groupadd nightbank-deploy
+useradd -M -s /usr/sbin/nologin -g nightbank-deploy nbdeploy
+install -d -o nbdeploy -g nightbank-deploy -m 0755 /srv/dsl41/nightbank/releases
+chgrp nightbank-deploy /srv/dsl41/nightbank && chmod 1775 /srv/dsl41/nightbank
+printf '\n[[binding]]\nsubject = "user:os/nbdeploy"\ntier = "ops"\n' >>/etc/dsl41/nightbank-access.toml
+```
+
 2. Type recipe `service-start`, with `sudo` on each line. Both lines print `active`. Five
    seconds later:
 
 ```sh
 systemctl show -p ActiveState -p ExecMainStatus dsl41-engine.service   # failed, 2
-sudo journalctl -u dsl41-engine.service -o cat | tail -3   # [Errno 2] No such file … night.properties'
+sudo journalctl -u dsl41-engine.service -o cat | tail -3   # dsl41-launch: /srv/dsl41/nightbank/active is missing: no release is active
 ```
 
 3. Prepare the night as the account with nightbank's own `prepare_night`, anchors six
@@ -137,7 +146,20 @@ m.prepare_night(pathlib.Path("/srv/dsl41/nightbank/night"), "small", anchor_utc=
 echo "OPS_XINST_DEMO_C late 45" | sudo -u dsl41 -H tee -a /srv/dsl41/nightbank/night/incidents.conf
 ```
 
-4. Type recipe `service-start` again, and recipe `wait-answers` in the service account's
+4. As the deployment identity, prepare the small estate as the release `small-r1`, and
+   name it in `active`. Prepare lints and rehearses with the night's properties, so the
+   night comes first. Then type recipe `service-print`:
+
+```sh
+cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release prepare small-r1 /srv/dsl41/nightbank/estate/small
+# prepared /srv/dsl41/nightbank/releases/small-r1: 82 jobs, under dsl41 1.12.0
+cd / && sudo -u nbdeploy sh -c 'printf "%s\n" small-r1 >/srv/dsl41/nightbank/active'
+```
+
+   The printed command names the release's six files in its manifest's order, then
+   `--timezone UTC` from the manifest, and ends
+   `--access-map /etc/dsl41/nightbank-access.toml`.
+5. Type recipe `service-start` again, and recipe `wait-answers` in the service account's
    shell: it prints one `INACTIVE` line per job, and the journal ends `engine up; control
    socket: …`. Read the engine unit's cgroup:
    `sudo cat /sys/fs/cgroup/system.slice/dsl41-engine.service/cgroup.procs | xargs ps -o args= -p`
@@ -156,14 +178,15 @@ refusals only a restart or a boundary clears. Follow
 drill's `configure` step checks the same.
 
 1. Check the identities and ask the socket as yourself. Create the groups: you join ops,
-   and `dreadu` observes:
+   the deployment identity joins the socket group (exercise 30 sends control commands
+   as it), and `dreadu` observes:
 
 ```sh
 systemctl show -p User --value dsl41-engine.service dsl41-supervisor.service   # dsl41 (both)
 sudo stat -c '%U %a %n' "$RUN_ROOT" "$ESTATE_ANCHOR" /etc/dsl41/nightbank-access.toml   # 700, 700, 600
 dsl41 query status --brief -S "$S"   # exit 2: [Errno 13] Permission denied
 for group in nightbank-socket nightbank-ops nightbank-observers; do sudo groupadd "$group"; done
-sudo usermod -aG nightbank-socket,nightbank-ops runner
+sudo usermod -aG nightbank-socket,nightbank-ops runner && sudo usermod -aG nightbank-socket nbdeploy
 sudo useradd -M -s /usr/sbin/nologin -G nightbank-socket,nightbank-observers dreadu
 ```
 
@@ -408,7 +431,142 @@ recipe's `claimed` branch (its steps 4 and 5, and the reclaim) is not trained he
 *Why.* A rolled root has no earlier segment to reopen from, and no code repairs a torn
 sole opening (DL-144). After step 7 the registry does not name the old root (DL-224).
 
-## 30. Idle supervisor maintenance
+## 30. Release a job change and roll it back
+
+Goal: prepare, apply and roll back a release that adds one job and changes another,
+with the release helper. Follow
+[the job recipe](../../docs/deployment-runbook.md#recipe-add-change-or-remove-a-job). The
+drill's `release` and `release-rollback` steps check the same.
+
+You run the helper as the deployment identity that exercise 24 created, by its full
+path, with `cd / && sudo -u nbdeploy -H` in front.
+
+1. Read the helper's status, and meet two refusals: a second prepare under a name
+   already installed, and an apply of a directory that was never prepared. Remove that
+   directory after:
+
+```sh
+cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release status
+cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release prepare small-r1 /srv/dsl41/nightbank/estate/small
+# exit 2: /srv/dsl41/nightbank/releases/small-r1 exists: a release is installed once
+cd / && sudo -u nbdeploy cp -R /srv/dsl41/nightbank/estate/small /srv/dsl41/nightbank/releases/small-copy
+cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release apply small-copy
+# exit 2: small-copy is not prepared: run `dsl41-release prepare` first
+cd / && sudo -u nbdeploy rm -rf /srv/dsl41/nightbank/releases/small-copy
+```
+
+   The status prints `active: small-r1`, `release small-r1: prepared … under dsl41
+   1.12.0` and `apply: none recorded`. Prepare also refuses, with exit 2, a release that
+   holds more jobs than the launcher's `MAX_JOBS`, and removes it. That ceiling is 107;
+   nightbank's estates are 82 jobs or more than 500, so this host does not show the
+   refusal.
+2. Build the next release from the small estate's inputs. Add the job
+   `OPS_RELEASE_PROBE_C` in a new file, shorten `OPS_SPOOL_C`'s command, add the file to
+   the manifest, and prepare it as `small-r2`:
+
+```sh
+cp -R /srv/dsl41/nightbank/estate/small /tmp/small-r2 && cd /tmp/small-r2
+cat >release.jil <<'JIL'
+insert_job: OPS_RELEASE_PROBE_C
+job_type: c
+command: fakework OPS_RELEASE_PROBE_C --sleep 5
+machine: ops_util
+owner: ~{$OWNER}~
+profile: ~{$NB_PROFILE}~
+std_out_file: ~{$NB_LOGS}~/OPS_RELEASE_PROBE_C.out
+std_err_file: ~{$NB_LOGS}~/OPS_RELEASE_PROBE_C.err
+JIL
+sed -i 's/^command: fakework OPS_SPOOL_C --sleep 240$/command: fakework OPS_SPOOL_C --sleep 120/' global.jil
+sed -i 's/"infra.jil"\]$/"infra.jil", "release.jil"]/' estate.toml
+diff -r /srv/dsl41/nightbank/estate/small /tmp/small-r2   # the files line, the OPS_SPOOL_C command, Only in /tmp/small-r2: release.jil
+cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release prepare small-r2 /tmp/small-r2
+```
+
+   Prepare prints lint's `L011 warn` for `OPS_RELEASE_PROBE_C`, a job with no schedule,
+   condition or box, and `prepared …/small-r2: 83 jobs`. A warning refuses nothing. The
+   prepared release's files are read-only, and `.release/prepared.json` records each
+   file's sha256.
+3. Release one hold, so the apply has a scheduled job to hold, and apply `small-r2`:
+
+```sh
+dsl41 sendevent OFF_HOLD -J EMEA_EOD_B -S "$S"
+cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release apply small-r2
+```
+
+   The helper prints `holds taken: EMEA_EOD_B`. An apply that takes a hold waits out the
+   retry horizon that hold started, about a minute. The hold is an operator request, and
+   a retry of it, composed under this period's baseline, cannot be answered after the
+   boundary; so a seal inside the horizon is refused
+   ([period-model §9](../../docs/period-model.md#9-retries-across-a-boundary)). The first
+   seal is refused with `seal_retry_horizon`. The helper prints
+   `waiting 56.8s for the retry horizon, then sealing again`, and seals period 4 under a
+   new request id. It ends `small-r2 is active in period 5`, with exit 0, about 70 s
+   after the start.
+4. Read the result. Type recipe `operator-env` again, because `active` changed. Then
+   read the status, the two jobs' definitions (recipe `job-verify`), the receipt, and
+   the hold the helper released:
+
+```sh
+cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release status
+dsl41 query spec -J OPS_RELEASE_PROBE_C -S "$S" | jq -r .jil   # release.jil's block, its variables resolved
+dsl41 query spec -J OPS_SPOOL_C -S "$S" | jq -r .jil | grep '^command'   # command: fakework OPS_SPOOL_C --sleep 120
+r=$ESTATE_RELEASES/small-r2/.release; jq -c '{previous, period, released, kept}' "$r/$(cat "$r/latest")"
+dsl41 query status --brief -S "$S" --job EMEA_EOD_B   # INACTIVE …, with no H
+```
+
+   The status names `small-r2` active, applied after `small-r1` in period 5. The receipt
+   reads `{"previous":"small-r1","period":5,"released":["EMEA_EOD_B"],"kept":[]}`.
+5. Give the added job one run, so it has history for the rollback to keep:
+
+```sh
+dsl41 sendevent FORCE_STARTJOB -J OPS_RELEASE_PROBE_C -S "$S"
+sleep 12   # wait 12 s for the 5 s run
+dsl41 query status --brief -S "$S" --job OPS_RELEASE_PROBE_C   # SUCCESS … run 1 exit 0
+```
+
+6. Roll back:
+
+```sh
+cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release rollback
+```
+
+   It prints `rolling back from small-r2 to small-r1` and `holds taken: EMEA_EOD_B`,
+   waits out the retry horizon again, seals period 5, and ends
+   `small-r1 is active in period 6`, with exit 0.
+7. Type recipe `operator-env` again, and read the removed job and the changed one.
+   `OPS_RELEASE_PROBE_C` is a ghost: its row and its run stay, with no definition
+   (recipe `job-verify-removed`):
+
+```sh
+dsl41 query spec -J OPS_RELEASE_PROBE_C -S "$S"   # exit 2: … "code": "unknown_job" …
+dsl41 query status --job OPS_RELEASE_PROBE_C -S "$S" | jq -c '.jobs[] | {status, job_type, run_number}'
+# {"status":"SUCCESS","job_type":null,"run_number":1}
+dsl41 query spec -J OPS_SPOOL_C -S "$S" | jq -r .jil | grep '^command'   # command: fakework OPS_SPOOL_C --sleep 240
+cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release status
+```
+
+   The status names `small-r1` active, applied after `small-r2` in period 6, and
+   `apply: none recorded`.
+8. Hold `EMEA_EOD_B` again, so the calendar starts nothing in the later exercises:
+   `dsl41 sendevent ON_HOLD -J EMEA_EOD_B -S "$S"`.
+
+The apply and the rollback exited 0. Exit 2 would have meant a refusal, or a seal that
+did not commit: nothing sealed, `active` unchanged, and the hold the helper took released.
+Exit 3 would have left the apply recorded: `status` says what
+`apply --resume NAME` does. Exit 4 would have meant the seal's outcome is unknown: run
+`apply --resume NAME`, and never seal by hand.
+[The recipe's step 4](../../docs/deployment-runbook.md#recipe-add-change-or-remove-a-job)
+says what to do for each.
+
+The estate is in period 6 of `nightbank-01d`, under `small-r1`. The apply and the
+rollback left `000004.json` and `000005.json` in its `seals/`, and every scheduled job is
+held.
+
+*Why.* A release is a whole catalog that opens at a boundary; a running estate is never
+edited (DL-407). A removed job keeps its history (period-model §10). The helper
+releases only the holds its own requests applied (DL-407).
+
+## 31. Idle supervisor maintenance
 
 Goal: see that only the service account's guarded verb stops the supervisor, that it
 refuses live work, and what `--force=terminate` leaves. Follow
@@ -439,7 +597,7 @@ still run 2, and `dsl41 journal "$RUN_ROOT"` prints
 *Why.* `RefuseManualStop=yes` leaves the stop to the verb; exit 8 is completed
 maintenance, never restarted (DL-390, DL-399). The engine reconciles from the spool.
 
-## 31. Break glass: evict the executor
+## 32. Break glass: evict the executor
 
 Goal: see why the gated eviction refuses here, take the forced one, and see what the
 estate can do afterwards ([concurrency-model §8](../../docs/concurrency-model.md#8-host-lifecycle-active-passive-quarantined-evicted)).
@@ -471,26 +629,26 @@ end: the un-evict, re-registration and self-fencing, is the relay's act, and the
 is not built (period-model §3.3; concurrency-model §8; DL-97, DL-103). A new estate, a
 genesis on a new root and anchor ([§7 row 4](../../docs/deployment-runbook.md#7-upgrading-dsl41-itself)),
 runs jobs again. This lineage can still seal and audit, so this exercise ends in
-exercise 32.
+exercise 33.
 
 *Why.* `evicted` lets other hosts rerun this host's work, so it alone can cause a
 double run. Force skips the proof and records who took it (DL-151).
 
-## 32. Retire the estate
+## 33. Retire the estate
 
 Goal: end the lineage, keep its history, and leave nothing that starts. Follow
 [retiring an estate](../../docs/deployment-runbook.md#retiring-an-estate). The drill's
 `retire` step checks the same.
 
 1. Step 1: recipe `hold-down`; both units stay `active`.
-2. Steps 2 and 3: the jobs are held, and exercise 31's start has no process. Stop the
+2. Steps 2 and 3: the jobs are held, and exercise 32's start has no process. Stop the
    engine unit and run the `estate quiesce` command, after the horizon it names: it
-   seals period 4. The seal carries the evicted row and the unlaunched start:
+   seals period 6. The seal carries the evicted row and the unlaunched start:
 
 ```sh
-sudo jq -c '.state.hosts.local | {state, forced_by}' "$RUN_ROOT/seals/000004.json"
+sudo jq -c '.state.hosts.local | {state, forced_by}' "$RUN_ROOT/seals/000006.json"
 # {"state":"evicted","forced_by":"os/runner"}
-sudo jq -c '.executions[] | {job, kind}' "$RUN_ROOT/seals/000004.json"
+sudo jq -c '.executions[] | {job, kind}' "$RUN_ROOT/seals/000006.json"
 # {"job":"AMER_INV_MACROS_C","kind":"pending_spawn"}
 ```
 
@@ -500,7 +658,7 @@ sudo jq -c '.executions[] | {job, kind}' "$RUN_ROOT/seals/000004.json"
    and `ActiveState=inactive`. A stray `sudo systemctl start dsl41-engine.service` exits
    5, `Unit dsl41-engine.service not found`, and `pgrep -u dsl41` prints nothing.
 5. Steps 6 and 7, in the service account's shell: recipe `retire-audit` attests periods
-   1 and 2 in `nightbank-01`, 3 in `-01b` and 4 in `-01d`. Recipe `retire-list` names
+   1 and 2 in `nightbank-01`, 3 in `-01b` and 4 to 6 in `-01d`. Recipe `retire-list` names
    those three roots, not exercise 29's damaged `nightbank-01c`.
 6. Leave the host. On your machine, run `scripts/wargame.sh dispose` and
    `rm -rf "$HOME/dsl41-delivery"`.
