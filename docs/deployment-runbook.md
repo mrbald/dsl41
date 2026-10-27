@@ -35,7 +35,10 @@ Set them once per shell. The values are the example launcher's:
 ```sh
 RUN_ROOT=/srv/dsl41/runs/nightbank-01
 ESTATE_ANCHOR=/srv/dsl41/runs/nightbank-01.anchor
-ESTATE=/srv/dsl41/nightbank/estate/small
+ESTATE_RELEASES=/srv/dsl41/nightbank/releases
+ACTIVE=/srv/dsl41/nightbank/active
+ENVIRONMENT=wargame
+ESTATE=$ESTATE_RELEASES/$(cat "$ACTIVE")
 PROPERTIES=/srv/dsl41/nightbank/night/night.properties
 S=$RUN_ROOT/control.sock
 ```
@@ -319,12 +322,12 @@ condition still names is a lint error (L001).
 
 <!-- recipe: job-check -->
 ```sh
-dsl41 lint "$ESTATE/amer.jil" "$ESTATE/apac.jil" "$ESTATE/calendars.jil" \
-    "$ESTATE/emea.jil" "$ESTATE/global.jil" "$ESTATE/infra.jil" -p "$PROPERTIES" \
-    --timezone UTC
-dsl41 rehearse "$ESTATE/amer.jil" "$ESTATE/apac.jil" "$ESTATE/calendars.jil" \
-    "$ESTATE/emea.jil" "$ESTATE/global.jil" "$ESTATE/infra.jil" -p "$PROPERTIES" \
-    --timezone UTC
+args=$(dsl41 estate args "$ESTATE/estate.toml" --for lint --environment "$ENVIRONMENT")
+eval "set -- $args"
+dsl41 lint "$@" -p "$PROPERTIES"
+args=$(dsl41 estate args "$ESTATE/estate.toml" --for rehearse --environment "$ENVIRONMENT")
+eval "set -- $args"
+dsl41 rehearse "$@" -p "$PROPERTIES"
 ```
 
 3. In the window, hold the scheduled jobs and let running work finish
@@ -348,11 +351,10 @@ dsl41 rehearse "$ESTATE/amer.jil" "$ESTATE/apac.jil" "$ESTATE/calendars.jil" \
 
 <!-- recipe: job-seal -->
 ```sh
-dsl41 seal --run-root "$RUN_ROOT" --estate-anchor "$ESTATE_ANCHOR" \
-    --next "$ESTATE/amer.jil" --next "$ESTATE/apac.jil" --next "$ESTATE/calendars.jil" \
-    --next "$ESTATE/emea.jil" --next "$ESTATE/global.jil" --next "$ESTATE/infra.jil" \
-    -p "$PROPERTIES" \
-    --next-detached --next-as-machine localhost --next-machine-policy strict --next-timezone UTC
+args=$(dsl41 estate args "$ESTATE/estate.toml" --for seal --environment "$ENVIRONMENT")
+eval "set -- $args"
+dsl41 seal --run-root "$RUN_ROOT" --estate-anchor "$ESTATE_ANCHOR" "$@" -p "$PROPERTIES" \
+    --next-detached --next-as-machine localhost --next-machine-policy strict
 ```
 
    The live engine exits 3, and the engine unit stays failed on purpose.
@@ -1333,12 +1335,11 @@ steps, then one verb as the service account (DL-398):
    options for the next period (§6a; the job recipe's seal shows them):
 
 ```sh
+args=$(dsl41 estate args "$ESTATE/estate.toml" --for seal --environment "$ENVIRONMENT")
+eval "set -- $args"
 sudo -u dsl41 -H /opt/dsl41/.venv/bin/dsl41 estate quiesce \
-    --run-root "$RUN_ROOT" --estate-anchor "$ESTATE_ANCHOR" \
-    --next "$ESTATE/amer.jil" --next "$ESTATE/apac.jil" --next "$ESTATE/calendars.jil" \
-    --next "$ESTATE/emea.jil" --next "$ESTATE/global.jil" --next "$ESTATE/infra.jil" \
-    -p "$PROPERTIES" \
-    --next-detached --next-as-machine localhost --next-machine-policy strict --next-timezone UTC
+    --run-root "$RUN_ROOT" --estate-anchor "$ESTATE_ANCHOR" "$@" -p "$PROPERTIES" \
+    --next-detached --next-as-machine localhost --next-machine-policy strict
 ```
 
 The verb checks the two root steps and performs neither: a unit still

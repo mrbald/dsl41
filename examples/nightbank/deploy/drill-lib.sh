@@ -12,7 +12,8 @@
 # shellcheck disable=SC2034  # the names below are read by the steps
 set -euo pipefail
 
-DSL41=/opt/dsl41/.venv/bin/dsl41
+PREFIX=/opt/dsl41
+DSL41=$PREFIX/.venv/bin/dsl41
 ROOT=/srv/dsl41/runs/nightbank-01
 ANCHOR=/srv/dsl41/runs/nightbank-01.anchor
 SOCK=$ROOT/control.sock
@@ -22,15 +23,19 @@ LAUNCH=/opt/dsl41/bin/dsl41-launch
 VENV=/opt/dsl41/.venv
 MAP=/etc/dsl41/nightbank-access.toml
 NIGHTBANK=/srv/dsl41/nightbank
-ESTATE=$NIGHTBANK/estate/small
+# the application's releases and the plain file naming the active one
+ESTATE_RELEASES=$NIGHTBANK/releases
+ACTIVE=$NIGHTBANK/active
+ENVIRONMENT=wargame
+# the release the install creates from the checkout's estate, and its path
+RELEASE=${DRILL_ESTATE:-small}-r1
+ESTATE=$ESTATE_RELEASES/$RELEASE
 PROPERTIES=$NIGHTBANK/night/night.properties
 ENGINE=dsl41-engine.service
 SUPERVISOR=dsl41-supervisor.service
 # the checkout the drill runs from, and a scratch directory for the wheel
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 SCRATCH=${RUNNER_TEMP:-/tmp}/dsl41-drill
-# the order dsl41-launch names the files in
-FILES=(amer apac calendars emea global infra)
 # RUNBOOK exercise 15 step 1: every scheduled top-level job or box with a
 # future tick, held so nothing the calendar starts runs under the drill
 QUIESCE=(APAC_EOD_B EMEA_EOD_B AMER_EOD_B OPS_HEARTBEAT_C OPS_MONTHLY_ATTRIB_C OPS_QTR_REG_REPORT_C)
@@ -41,7 +46,6 @@ RUNBOOK=$REPO/docs/deployment-runbook.md
 
 # Each offline estate keeps its own durable root (DL-389).
 if [ -n "${DRILL_ROOT-}" ]; then ROOT=$DRILL_ROOT; ANCHOR=$ROOT.anchor; SOCK=$ROOT/control.sock; fi
-if [ -n "${DRILL_ESTATE-}" ]; then ESTATE=$NIGHTBANK/estate/$DRILL_ESTATE; fi
 
 ok() { echo "ok: $*"; }
 fail() {
@@ -191,12 +195,51 @@ expect_refusal() { # expect_refusal FRAGMENT
     launch_line_since "$mark" | grep -q -- ' --resume$' || fail "the refused start was not a resume"
 }
 
-# the seal's --next list: the launcher's estate files, in its order
+# The seal's estate words for the release in ESTATE, from its manifest
+# (DL-407), into the array NEXT; the caller adds the site's -p and the
+# launcher's --next-* options. The drill's own build prints them: the
+# v1.7.0 venv of the old-release rows has no `estate args`.
 next_args() {
-    local file
-    for file in "${FILES[@]}"; do
-        printf -- '--next\n%s\n' "$ESTATE/$file.jil"
-    done
+    local out
+    out=$(as_dsl41 "$(cat "$SCRATCH/build-a")/bin/dsl41" estate args "$ESTATE/estate.toml" \
+        --for seal --environment "$ENVIRONMENT" --format json) ||
+        fail "estate args refused $ESTATE/estate.toml"
+    mapfile -t NEXT < <(jq -r '.argv[]' <<<"$out")
+}
+
+# A release directory, installed whole from DIR and root-owned, read-only
+# to the service account, as a release is never changed in place (DL-407).
+install_release() { # install_release NAME DIR
+    sudo test ! -e "$ESTATE_RELEASES/$1" || fail "$ESTATE_RELEASES/$1 already exists"
+    sudo install -d -m 0755 "$ESTATE_RELEASES"
+    sudo cp -R "$2" "$ESTATE_RELEASES/$1"
+    sudo chown -R root:root "$ESTATE_RELEASES/$1"
+    sudo chmod -R go-w,a+rX "$ESTATE_RELEASES/$1"
+}
+# ACTIVE names NAME: a plain file replaced by a rename, never a symlink,
+# so the opener reads the paths the seal read (DL-407).
+activate() { # activate NAME
+    printf '%s\n' "$1" | sudo tee "$ACTIVE.next" >/dev/null
+    sudo chmod 0644 "$ACTIVE.next"
+    sudo mv -T "$ACTIVE.next" "$ACTIVE"
+    if ! sudo test -f "$ACTIVE" || sudo test -L "$ACTIVE"; then fail "$ACTIVE is not a plain file"; fi
+    [ "$(sudo cat "$ACTIVE")" = "$1" ] || fail "$ACTIVE does not name $1"
+}
+# A runtime before dsl41 1.13 has no `estate args`, and the current
+# launcher refuses it: a site that rolls back below 1.13 reinstalls the site
+# package qualified with that release (DL-407). The drill's v1.7.0 steps
+# install that generation's launcher, kept as a fixture, at the launcher's
+# path, with ESTATE the active release; restore_launcher puts the current one
+# back. Each is followed by point_launcher, which names the root.
+install_old_launcher() {
+    sudo install -m 0755 "$REPO/examples/nightbank/deploy/compat/dsl41-launch-pre-manifest" "$LAUNCH"
+    sudo sed -i "s|^ESTATE=.*|ESTATE=$ESTATE|" "$LAUNCH"
+    grep -qxF "ESTATE=$ESTATE" "$LAUNCH" || fail "the old launcher does not name $ESTATE"
+    ! grep -qF ' estate args --help' "$LAUNCH" || fail "$LAUNCH is not the pre-manifest launcher"
+}
+restore_launcher() {
+    sudo install -m 0755 "$REPO/examples/nightbank/deploy/dsl41-launch" "$LAUNCH"
+    grep -qF ' estate args --help' "$LAUNCH" || fail "$LAUNCH is not the current launcher"
 }
 
 # Prepare at the final path; activation remains an explicit atomic link (DL-389).
@@ -375,8 +418,8 @@ PYTHON
 # requests guarded maintenance, reads both units once and checks the
 # writers (DL-398). The assertions after it check what the verb claims.
 quiesce_shape1() {
-    local next out rc=0
-    mapfile -t next < <(next_args)
+    local out rc=0
+    next_args
     sudo systemctl stop "$ENGINE"
     is_state "$ENGINE" inactive || fail "$ENGINE: $(prop "$ENGINE" ActiveState)"
     cli supervise list --run-root "$ROOT" >/dev/null || fail "the supervisor did not outlive $ENGINE"
@@ -384,21 +427,21 @@ quiesce_shape1() {
     wait_out_retry_horizon
     if [ "${1-}" = legacy-incident ]; then
         # the reviewed historical runtime has neither the verb nor MAINTENANCE_STOP
-        cli seal --run-root "$ROOT" --estate-anchor "$ANCHOR" "${next[@]}" -p "$PROPERTIES" \
+        cli seal --run-root "$ROOT" --estate-anchor "$ANCHOR" "${NEXT[@]}" -p "$PROPERTIES" \
             --next-detached --next-as-machine localhost --next-machine-policy strict \
-            --next-timezone UTC --claimed-actor drill@nightbank
+            --claimed-actor drill@nightbank
         cli audit --run-root "$ROOT" --estate-anchor "$ANCHOR"
         ok "sealed offline and audited while the supervisor ran"
         incident_stop_supervisor "reviewed historical supervisor has no MAINTENANCE_STOP"
     else
         as_dsl41 rm -f /var/lib/dsl41/drill-supervisor-exit
-        out=$(quiesce_verb "${next[@]}") || rc=$?
+        out=$(quiesce_verb "${NEXT[@]}") || rc=$?
         printf '%s\n' "$out"
         if [ "$rc" = 2 ] && grep -q '^quiesce: units: refused: .*rerun once it is inactive' <<<"$out"; then
             # the drill's ExecStopPost keeps the unit deactivating for a moment
             wait_for 30 "$SUPERVISOR finished stopping" is_state "$SUPERVISOR" inactive
             rc=0
-            out=$(quiesce_verb "${next[@]}") || rc=$?
+            out=$(quiesce_verb "${NEXT[@]}") || rc=$?
             printf '%s\n' "$out"
             grep -q '^quiesce: maintenance: skipped: ' <<<"$out" || fail "the rerun asked again"
         fi
@@ -435,7 +478,7 @@ supervisor_log_size() { # supervisor_log_size ROOT
 quiesce_verb() { # quiesce_verb NEXT_ARGS...
     cli estate quiesce --run-root "$ROOT" --estate-anchor "$ANCHOR" "$@" -p "$PROPERTIES" \
         --next-detached --next-as-machine localhost --next-machine-policy strict \
-        --next-timezone UTC --claimed-actor drill@nightbank
+        --claimed-actor drill@nightbank
 }
 
 # An operator's request, with its time kept: a seal refuses inside
@@ -451,7 +494,7 @@ force_start() { request FORCE_STARTJOB "$1"; }
 hold_scheduled() {
     local job
     local jobs=("${QUIESCE[@]}")
-    if [ "$ESTATE" = "$NIGHTBANK/estate/bank" ]; then
+    if [ "$RELEASE" = bank-r1 ]; then
         jobs=(APAC_EOD_B EMEA_EOD_B AMER_EOD_B OPS_HEARTBEAT_C)
     fi
     for job in "${jobs[@]}"; do

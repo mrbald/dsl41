@@ -22,6 +22,8 @@ from zoneinfo import ZoneInfo
 
 import typer
 
+from dsl41.estate_manifest import ArgsFor, ManifestError, build_args
+
 app = typer.Typer(add_completion=False, help=__doc__)
 
 BASE = Path(__file__).resolve().parent.parent
@@ -72,12 +74,14 @@ def write_kv(path: Path, kv: dict[str, str]) -> None:
     path.write_text("".join(f"{k}={v}\n" for k, v in kv.items()))
 
 
-def estate_files(estate: str) -> list[Path]:
-    files = sorted((BASE / "estate" / estate).glob("*.jil"))
-    if not files:
-        typer.echo(f"nightbank: no JIL under estate/{estate}/", err=True)
-        raise typer.Exit(2)
-    return files
+def estate_args(estate: str) -> list[str]:
+    """The estate's `dsl41 run` arguments, from its manifest, as the service launcher
+    takes them (DL-407)."""
+    try:
+        return build_args(BASE / "estate" / estate / "estate.toml", ArgsFor.run, "sandbox")
+    except ManifestError as exc:
+        typer.echo(f"nightbank: {exc}", err=True)
+        raise typer.Exit(2) from exc
 
 
 def _socket_alive(sock: Path) -> bool:
@@ -183,7 +187,7 @@ def up(
 
     argv = [
         sys.executable, "-m", "dsl41", "run",
-        *(str(f) for f in estate_files(estate.value)),
+        *estate_args(estate.value),
         "-p", str(run_dir / "night.properties"),
         "--run-root", str(engine_dir),
     ]

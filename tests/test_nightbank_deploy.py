@@ -2,10 +2,11 @@
 systemd units beside it (examples/nightbank/deploy/).
 
 The launcher is the one reviewed place that holds the run root and the
-whole ordered `dsl41 run` line. These tests run the shipped script. Where a
-test needs a root it can write, it copies the script and replaces only the
-values in its CONFIGURATION block, so the logic under test is the shipped
-logic. The service-level claims -- systemd starting, restarting and
+whole `dsl41 run` line; the estate's words in it come from the active
+release's manifest (DL-407). These tests run the shipped script. Where a
+test needs a root or a release it can write, it copies the script and
+replaces only the values in its CONFIGURATION block, so the logic under
+test is the shipped logic. The service-level claims -- systemd starting, restarting and
 refusing -- are the drill's (`.github/workflows/service-drill.yml`), not
 these tests'.
 """
@@ -16,6 +17,7 @@ import os
 import pwd
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -25,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+from dsl41.estate_manifest import load_manifest
 from dsl41.period import CMD_GRACE_S
 
 from test_nightbank_example import NB, _launcher
@@ -38,14 +41,25 @@ DRILL_LOCAL = DEPLOY / "drill-local.sh"
 WARGAME = NB.parents[1] / "scripts" / "wargame.sh"
 DSL41 = Path(sys.executable).with_name("dsl41")
 ME = pwd.getpwuid(os.geteuid()).pw_name
-#: the order the launcher names the files in; it is part of the catalog
-#: address, so a reordering is a new estate and this list pins it
+#: the order the estate's manifest names the files in; it is part of the
+#: catalog address, so a reordering is a new estate and this list pins it
 ORDER = ("amer.jil", "apac.jil", "calendars.jil", "emea.jil", "global.jil", "infra.jil")
 SHIPPED_ROOT = "/srv/dsl41/runs/nightbank-01"
+#: the release name the tests' releases take
+RELEASE = "r1"
 
 
 def _sh(launcher: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["sh", str(launcher), *args], capture_output=True, text=True, timeout=120)
+
+
+def _releases(base: Path, estate: Path = NB / "estate" / "small") -> dict[str, str]:
+    """A releases directory under `base` holding a copy of `estate` as release r1,
+    and the ACTIVE file naming it: the launcher's values for both."""
+    releases = base / "releases"
+    shutil.copytree(estate, releases / RELEASE)
+    (base / "active").write_text(f"{RELEASE}\n")
+    return {"ESTATE_RELEASES": str(releases), "ACTIVE": str(base / "active")}
 
 
 def _site(base: Path) -> dict[str, str]:
@@ -54,7 +68,7 @@ def _site(base: Path) -> dict[str, str]:
         "RUN_ROOT": str(base / "runs" / "nb"),
         "ESTATE_ANCHOR": str(base / "runs" / "nb.anchor"),
         "ACCESS_MAP": str(base / "etc" / "access.toml"),
-        "ESTATE": str(NB / "estate" / "small"),
+        **_releases(base),
         "PROPERTIES": str(base / "night" / "night.properties"),
     }
 
@@ -106,14 +120,19 @@ def _grant_me(path: Path) -> None:
 def test_the_shipped_launcher_prints_the_whole_ordered_line(tmp_path: Path) -> None:
     if Path(SHIPPED_ROOT, "journal.jsonl").exists():  # pragma: no cover -- a real host
         pytest.skip("this host holds the example's run root")
-    # this build's dsl41 in place of the shipped path, so the --supervisor probe finds it
-    printed = _sh(_configured(tmp_path, DSL41=str(DSL41)), "--print")
+    # this build's dsl41 in place of the shipped path, so the --supervisor probe finds it;
+    # a release of the small estate in place of the shipped releases directory
+    releases = _releases(tmp_path)
+    printed = _sh(_configured(tmp_path, DSL41=str(DSL41), **releases), "--print")
     assert printed.returncode == 0, printed.stderr
-    estate = "/srv/dsl41/nightbank/estate/small"
+    estate = f"{releases['ESTATE_RELEASES']}/{RELEASE}"
     assert shlex.split(printed.stdout) == [
         str(DSL41),
         "run",
         *(f"{estate}/{name}" for name in ORDER),
+        # the manifest's timezone; the site's properties follow the manifest's words
+        "--timezone",
+        "UTC",
         "-p",
         "/srv/dsl41/nightbank/night/night.properties",
         "--run-root",
@@ -128,14 +147,166 @@ def test_the_shipped_launcher_prints_the_whole_ordered_line(tmp_path: Path) -> N
         "localhost",
         "--machine-policy",
         "strict",
-        "--timezone",
-        "UTC",
         "--access-map",
         "/etc/dsl41/nightbank-access.toml",
     ]
     assert printed.stdout.count("\n") == 1  # one line, nothing else on stdout
-    # the order pin above is the estate's own file set, not a subset of it
-    assert sorted(ORDER) == sorted(p.name for p in (NB / "estate" / "small").glob("*.jil"))
+
+
+@pytest.mark.parametrize("estate", ["small", "bank"])
+def test_each_estates_manifest_names_its_whole_file_set_in_the_pinned_order(estate: str) -> None:
+    """DL-407: the manifest is the one list. It names every JIL file of the estate, in
+    the order the catalog address pins, with the launcher's environment declared."""
+    directory = NB / "estate" / estate
+    manifest = load_manifest(directory / "estate.toml")
+    assert tuple(manifest.files) == ORDER
+    assert sorted(ORDER) == sorted(p.name for p in directory.glob("*.jil"))
+    assert manifest.timezone == "UTC" and manifest.properties == []
+    (environment,) = re.findall(r"^ENVIRONMENT=(\S+)$", LAUNCH.read_text(), re.M)
+    assert environment in manifest.environments
+
+
+def _release(base: Path, manifest: str, layers: tuple[str, ...] = ()) -> dict[str, str]:
+    """`_releases` with the release's estate.toml replaced by `manifest`, and an empty
+    properties file for each name in `layers`."""
+    releases = _releases(base)
+    release = Path(releases["ESTATE_RELEASES"], RELEASE)
+    (release / "estate.toml").write_text(manifest)
+    for name in layers:
+        (release / name).write_text("")
+    return releases
+
+
+def test_the_printed_line_takes_the_manifests_order_and_ends_with_the_sites_layer(
+    tmp_path: Path,
+) -> None:
+    """DL-407: --print shows the manifest's files in the manifest's order, whatever it
+    is, then its layers and the chosen environment's, then the site's PROPERTIES as the
+    last -p, so the site's values win."""
+    reverse = list(reversed(ORDER))
+    releases = _release(
+        tmp_path,
+        f"name = 'x'\nfiles = {reverse!r}\nproperties = ['app.properties']\n"
+        "timezone = 'Europe/Zurich'\n[environments.wargame]\nproperties = ['host.properties']\n"
+        "[environments.other]\nproperties = []\n",
+        ("app.properties", "host.properties"),
+    )
+    launcher = _configured(tmp_path, DSL41=str(DSL41), RUN_ROOT=str(tmp_path / "nb"), **releases)
+    printed = _sh(launcher, "--print")
+    assert printed.returncode == 0, printed.stderr
+    words = shlex.split(printed.stdout)
+    release = f"{releases['ESTATE_RELEASES']}/{RELEASE}"
+    assert words[2 : words.index("--run-root")] == [
+        *(f"{release}/{name}" for name in reverse),
+        "-p",
+        f"{release}/app.properties",
+        "-p",
+        f"{release}/host.properties",
+        "--timezone",
+        "Europe/Zurich",
+        "-p",
+        "/srv/dsl41/nightbank/night/night.properties",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("active", "says"),
+    [
+        (None, "is missing: no release is active"),
+        ("", "is empty: no release is active"),
+        ("\n", "is empty: no release is active"),
+        ("r1\nr2\n", "holds more than one line: name one release"),
+        ("../r1\n", "which is not one directory name"),
+        ("..\n", "which is not one directory name"),
+        ("r2\n", "holds no estate.toml: not a release"),
+    ],
+)
+def test_the_launcher_refuses_an_active_file_that_names_no_one_release(
+    tmp_path: Path, active: str | None, says: str
+) -> None:
+    """DL-407: ACTIVE holds one line, one directory name under ESTATE_RELEASES that
+    holds estate.toml. Anything else is the launcher's exit 2, before dsl41 runs."""
+    releases = _releases(tmp_path)
+    path = Path(releases["ACTIVE"])
+    if active is None:
+        path.unlink()
+    else:
+        path.write_text(active)
+    launcher = _configured(tmp_path, DSL41=str(DSL41), RUN_ROOT=str(tmp_path / "nb"), **releases)
+    for mode in ("--print", "engine"):
+        refused = _sh(launcher, mode)
+        assert refused.returncode == 2, refused.stdout + refused.stderr
+        assert says in refused.stderr and refused.stdout == ""
+        assert not (tmp_path / "nb").exists()
+
+
+def test_a_manifest_estate_args_refuses_is_the_launchers_refusal(tmp_path: Path) -> None:
+    """DL-407: `estate args` exit 2 (here: the environment the launcher names is not
+    declared) refuses the start with exit 2, and the verb's sentence is in the log."""
+    releases = _release(tmp_path, "name = 'x'\nfiles = ['amer.jil']\n[environments.prod]\n")
+    launcher = _configured(tmp_path, DSL41=str(DSL41), RUN_ROOT=str(tmp_path / "nb"), **releases)
+    refused = _sh(launcher, "--print")
+    assert refused.returncode == 2 and refused.stdout == ""
+    assert "no environment 'wargame'; the manifest declares prod" in refused.stderr
+    assert "estate args exited 2 for " in refused.stderr
+
+
+def test_the_declared_workload_ceiling_fits_the_supervisor_units_stop_timeout() -> None:
+    """The launcher declares the workload the units were sized for (DL-401's bound):
+    15 + 5 + grace + 2 + 8 per live run + 10 seconds fits TimeoutStopSec, the grace is
+    at least the default, and the small estate the drill runs is inside the ceiling."""
+    text = LAUNCH.read_text()
+    (jobs,) = map(int, re.findall(r"^MAX_JOBS=(\d+)$", text, re.M))
+    (grace,) = map(int, re.findall(r"^MAX_GRACE_S=(\d+)$", text, re.M))
+    (stop,) = _unit("dsl41-supervisor.service")["Service"]["TimeoutStopSec"]
+    assert 15 + 5 + grace + 2 + 8 * jobs + 10 <= int(stop)
+    assert grace >= CMD_GRACE_S
+    small = NB / "estate" / "small"
+    assert sum(path.read_text().count("insert_job:") for path in small.glob("*.jil")) <= jobs
+
+
+def _fake_dsl41(base: Path, body: str) -> Path:
+    """A dsl41 that hands `estate args` to this build's and runs `body` for
+    anything else."""
+    fake = base / "fake-dsl41"
+    fake.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1 $2" = "estate args" ]; then exec {shlex.quote(str(DSL41))} "$@"; fi\n' + body
+    )
+    fake.chmod(0o755)
+    return fake
+
+
+@pytest.mark.parametrize(
+    ("probe", "says"),
+    [
+        (
+            2,
+            "this launcher needs dsl41 1.13 or later;"
+            " a rollback below it reinstalls the site package qualified with that release",
+        ),
+        (1, "estate args --help exited 1: cannot tell whether it reads a manifest"),
+    ],
+)
+def test_the_launcher_refuses_a_dsl41_without_estate_args(
+    tmp_path: Path, probe: int, says: str
+) -> None:
+    """DL-407: the launcher reads the manifest through `estate args`. A dsl41 whose
+    parse of `estate args --help` exits 2 has no such verb, and any other failure
+    cannot tell: both refuse with exit 2, before the release is read (DL-402's probe)."""
+    fake = tmp_path / "fake-dsl41"
+    fake.write_text(
+        f'#!/bin/sh\n[ "$*" = "estate args --help" ] && exit {probe}\n'
+        '[ "$*" = "run --supervisor attach --help" ] && exit 2\nexit 9\n'
+    )
+    fake.chmod(0o755)
+    launcher = _configured(
+        tmp_path, DSL41=str(fake), RUN_ROOT=str(tmp_path / "nb"), **_releases(tmp_path)
+    )
+    for mode in ("--print", "engine"):
+        refused = _sh(launcher, mode)
+        assert refused.returncode == 2 and refused.stdout == ""
+        assert refused.stderr.endswith(f"{says}\n"), refused.stderr
 
 
 @pytest.mark.parametrize("probe", [0, 2, 1])
@@ -145,16 +316,17 @@ def test_the_launcher_passes_supervisor_attach_only_to_a_dsl41_that_accepts_it(
     """DL-402: the parse of `run --supervisor attach --help` decides by exit
     code. 0 passes the option, 2 (a release before DL-396: no such option)
     omits it, and any other code refuses instead of falling back to spawn."""
-    fake = tmp_path / "fake-dsl41"
-    fake.write_text(
-        "#!/bin/sh\n"
+    fake = _fake_dsl41(
+        tmp_path,
         'echo "probe: $*"\n'
         'echo "probe: $*" >&2\n'
         '[ "$*" = "run --supervisor attach --help" ] || exit 9\n'
-        f"exit {probe}\n"
+        f"exit {probe}\n",
     )
-    fake.chmod(0o755)
-    printed = _sh(_configured(tmp_path, DSL41=str(fake), RUN_ROOT=str(tmp_path / "nb")), "--print")
+    launcher = _configured(
+        tmp_path, DSL41=str(fake), RUN_ROOT=str(tmp_path / "nb"), **_releases(tmp_path)
+    )
+    printed = _sh(launcher, "--print")
     if probe == 1:
         assert printed.returncode == 2 and printed.stdout == ""
         assert printed.stderr.splitlines() == [
@@ -187,7 +359,12 @@ def test_the_shipped_launcher_prints_the_supervisor_line() -> None:
 
 def test_the_printed_line_is_shell_quoted(short_root: Path) -> None:
     # this build's dsl41, so the --supervisor probe has a binary to run (DL-402)
-    launcher = _configured(short_root, DSL41=str(DSL41), RUN_ROOT=str(short_root / "it's a root"))
+    launcher = _configured(
+        short_root,
+        DSL41=str(DSL41),
+        RUN_ROOT=str(short_root / "it's a root"),
+        **_releases(short_root),
+    )
     printed = _sh(launcher, "--print")
     assert printed.returncode == 0, printed.stderr
     words = shlex.split(printed.stdout)
@@ -331,9 +508,7 @@ def test_the_engine_mode_removes_the_open_trigger_before_it_runs_dsl41(
     dsl41, so the unit's next start resumes the opened root instead of
     opening it again."""
     seen = short_root / "argv"
-    fake = short_root / "fake-dsl41"
-    fake.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\" >{shlex.quote(str(seen))}\n")
-    fake.chmod(0o755)
+    fake = _fake_dsl41(short_root, f"printf '%s\\n' \"$@\" >{shlex.quote(str(seen))}\n")
     site = {**_site(short_root), "DSL41": str(fake)}
     launcher = _configured(short_root, **site)
     trigger = Path(site["RUN_ROOT"] + ".open-from")
@@ -678,8 +853,8 @@ def test_the_units_repeat_the_run_root_only_for_its_mount() -> None:
 
 
 def _drill_vars(text: str) -> dict[str, str]:
-    """The simple `NAME=value` assignments at the top of drill-lib.sh,
-    with `$NAME` references (e.g. `ESTATE=$NIGHTBANK/estate/small`)
+    """The simple `NAME=value` assignments at the top of drill-lib.sh or
+    the launcher, with `$NAME` references (e.g. `DSL41=$PREFIX/.venv/bin/dsl41`)
     resolved against earlier assignments in the same dict."""
     values: dict[str, str] = {}
     for name, raw in re.findall(r"^(\w+)=(\S+)$", text, re.M):
@@ -690,30 +865,100 @@ def _drill_vars(text: str) -> dict[str, str]:
 
 
 def test_the_drill_names_the_same_paths_and_file_order_as_the_launcher() -> None:
-    """drill-lib.sh installs at the paths dsl41-launch runs on and repeats
-    the estate file order to feed the seal step's `--next` list; both must
-    name the same values, the way the units' `RequiresMountsFor=` is held
-    equal to the launcher's `RUN_ROOT`."""
+    """drill-lib.sh installs at the paths dsl41-launch runs on, and both
+    must name the same values, the way the units' `RequiresMountsFor=` is
+    held equal to the launcher's `RUN_ROOT`. Neither names an estate file:
+    the file order of the seal's `--next` list, like the launcher's line,
+    is the release manifest's (DL-407)."""
     launcher_text = LAUNCH.read_text()
     drill_text = DRILL_LIB.read_text()
+    launcher_values = _drill_vars(launcher_text)
     drill_values = _drill_vars(drill_text)
     for launcher_name, drill_name in (
+        ("PREFIX", "PREFIX"),
         ("DSL41", "DSL41"),
         ("RUN_ROOT", "ROOT"),
         ("ESTATE_ANCHOR", "ANCHOR"),
         ("ACCESS_MAP", "MAP"),
-        ("ESTATE", "ESTATE"),
+        ("ESTATE_RELEASES", "ESTATE_RELEASES"),
+        ("ACTIVE", "ACTIVE"),
+        ("ENVIRONMENT", "ENVIRONMENT"),
         ("PROPERTIES", "PROPERTIES"),
     ):
-        (launcher_value,) = re.findall(rf"^{launcher_name}=(\S+)$", launcher_text, re.M)
-        assert drill_values[drill_name] == launcher_value, (launcher_name, drill_name)
+        assert drill_values[drill_name] == launcher_values[launcher_name], launcher_name
 
     # the upgrade steps flip the symlink the launcher's dsl41 runs through
     assert drill_values["DSL41"] == drill_values["VENV"] + "/bin/dsl41"
+    # the drill's release is one directory under the launcher's releases
+    assert drill_values["ESTATE"] == f"{drill_values['ESTATE_RELEASES']}/{drill_values['RELEASE']}"
+    for text in (launcher_text, drill_text):
+        assert ".jil" not in text and not re.search(r"^FILES=", text, re.M)
+    assert tuple(load_manifest(NB / "estate" / "small" / "estate.toml").files) == ORDER
 
-    launcher_order = re.findall(r'"\$ESTATE/(\w+)\.jil"', launcher_text)
-    (files_literal,) = re.findall(r"^FILES=\(([^)]*)\)$", drill_text, re.M)
-    assert files_literal.split() == launcher_order
+
+COMPAT = DEPLOY / "compat" / "dsl41-launch-pre-manifest"
+
+
+def test_the_drill_runs_v1_7_0_under_the_pre_manifest_launcher_and_restores_the_current() -> None:
+    """DL-407: the current launcher refuses a dsl41 before 1.13, and a site that rolls
+    back below it reinstalls that generation's launcher. The fixture is that launcher:
+    it reads no manifest and names one release directory. The drill installs it for the
+    v1.7.0 steps only, and the steps after them run the current launcher again."""
+    fixture = COMPAT.read_text()
+    assert "estate args --help" not in fixture and '"$DSL41" estate args' not in fixture
+    assert "DL-407" in fixture.split("\n\n", 1)[0]
+    assert re.findall(r"^ESTATE=(\S+)$", fixture, re.M) == [
+        f"{_drill_vars(DRILL_LIB.read_text())['ESTATE_RELEASES']}/small-r1"
+    ]
+    assert os.access(COMPAT, os.X_OK)
+    assert "estate args --help" in LAUNCH.read_text()
+    steps = subprocess.run(
+        ["bash", str(DRILL_STEPS), "--list"], capture_output=True, text=True, timeout=60, check=True
+    ).stdout.split()
+    text = DRILL_STEPS.read_text()
+    calls: list[tuple[str, str]] = []
+    for step in steps:
+        body = re.search(rf"^step_{step.replace('-', '_')}\(\) \{{.*?^\}}$", text, re.M | re.S)
+        assert body is not None, step
+        calls += [
+            (step, call)
+            for call in re.findall(
+                r"^\s+(install_old_launcher|restore_launcher)$", body.group(), re.M
+            )
+        ]
+    assert calls == [
+        ("upgrade-old-release", "install_old_launcher"),
+        ("upgrade-state-machine", "restore_launcher"),
+        ("upgrade-state-machine-rollback", "install_old_launcher"),
+        ("upgrade-state-machine-rollback", "restore_launcher"),
+    ]
+    # each install is for a flip to the old venv, each restore for a flip to this build
+    for step, call in calls:
+        body = re.search(rf"^step_{step.replace('-', '_')}\(\) \{{.*?^\}}$", text, re.M | re.S)
+        assert body is not None
+        before = body.group()[: body.group().index(call)]
+        flips = re.findall(r'flip "\$(\w+)"', before)
+        assert flips[-1] == ("OLD_VENV" if call == "install_old_launcher" else "BUILD_A"), step
+
+
+def test_the_drill_writes_active_as_a_plain_file_and_never_links_it() -> None:
+    """DL-407: a symlink selector would change the hashed path strings. The
+    drill writes ACTIVE only through `activate`, which replaces a plain file
+    by a rename and checks it is no symlink; no drill script links it."""
+    texts = {
+        path.name: path.read_text()
+        for path in (DRILL_LIB, DRILL_STEPS, DEPLOY / "offline-scenarios.sh")
+    }
+    body = re.search(r"^activate\(\) \{.*?^\}$", texts["drill-lib.sh"], re.M | re.S)
+    assert body is not None
+    assert 'sudo mv -T "$ACTIVE.next" "$ACTIVE"' in body.group()
+    assert 'sudo test -L "$ACTIVE"' in body.group()
+    for name, text in texts.items():
+        assert not re.search(r"\bln\b[^\n]*\$ACTIVE", text), name
+        outside = text.replace(body.group(), "") if name == "drill-lib.sh" else text
+        assert not re.search(r"(?:>|tee|mv|cp)[^\n]*\$ACTIVE\b", outside), name
+    install = re.search(r"^step_install\(\).*?^\}$", texts["drill-steps.sh"], re.M | re.S)
+    assert install is not None and 'activate "$RELEASE"' in install.group()
 
 
 def _workflow_runs(text: str) -> list[str]:

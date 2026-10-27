@@ -1,0 +1,13 @@
+# The estate's inputs, which the launcher and every seal take from here
+# (DL-407). The files are in command-line order, which the catalog address
+# hashes. The site's properties file is the launcher's, added after these
+# layers; nightbank's application has no layers of its own.
+name = "nightbank-small"
+files = ["amer.jil", "apac.jil", "calendars.jil", "emea.jil", "global.jil", "infra.jil"]
+timezone = "UTC"
+
+# the service drill's and the wargame host's environment
+[environments.wargame]
+
+# bin/nightbank up, from the checkout
+[environments.sandbox]

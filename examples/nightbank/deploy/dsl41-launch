@@ -8,6 +8,20 @@
 # (deployment-runbook ss5). The two units beside this file call it; the
 # only thing they repeat is the run root's RequiresMountsFor=.
 #
+# The estate is the application's release, and this file holds only the
+# infrastructure's facts (DL-407). Under the site's estate directory,
+# ESTATE_RELEASES holds one directory per release, installed whole and never
+# changed: its JIL, its calendars, its properties layers and its manifest,
+# estate.toml. ACTIVE is a plain text file whose one line names the active
+# release. It is never a symlink: the bundle hash covers each input's path
+# string, so the opener must name the same paths the seal named (period-model
+# ss1.1). The engine mode takes the estate's files, layers, timezone and
+# semantics from the active release's manifest through `dsl41 estate args`,
+# so a JIL release never edits this file. The site's own properties file,
+# PROPERTIES, follows the manifest's layers as one more -p, so the site's
+# values override the application's. A missing, empty or multi-line ACTIVE,
+# or a release without estate.toml, refuses the start.
+#
 #   dsl41-launch engine              exec `dsl41 run` on the configured root
 #   dsl41-launch supervisor          exec `dsl41 supervise start` on that root
 #   dsl41-launch supervisor-ready    wait until the supervisor answers LIST
@@ -49,7 +63,10 @@
 set -eu
 
 # ---- CONFIGURATION ---------------------------------------------------------
-DSL41=/opt/dsl41/.venv/bin/dsl41
+# The install prefix: the runtime is the venv its .venv link selects
+# (deployment-runbook ss7).
+PREFIX=/opt/dsl41
+DSL41=$PREFIX/.venv/bin/dsl41
 # One estate's run root. A new baseline in a fresh root is an operator's
 # edit of this line, never an automatic choice (deployment-runbook ss6).
 RUN_ROOT=/srv/dsl41/runs/nightbank-01
@@ -60,8 +77,23 @@ ESTATE_ANCHOR=/srv/dsl41/runs/nightbank-01.anchor
 # `dsl41 run` refuse with exit 2; an omitted one would bring the engine up
 # with no perimeter (deployment-runbook ss4, ss5).
 ACCESS_MAP=/etc/dsl41/nightbank-access.toml
-ESTATE=/srv/dsl41/nightbank/estate/small
+# The application's releases, and the file that names the active one
+# (see the header).
+ESTATE_RELEASES=/srv/dsl41/nightbank/releases
+ACTIVE=/srv/dsl41/nightbank/active
+# The manifest environment this host runs: its layers follow the manifest's
+# own (DL-407).
+ENVIRONMENT=wargame
+# The site's properties, generated at install; the last -p, so they win.
 PROPERTIES=/srv/dsl41/nightbank/night/night.properties
+# The workload the units' limits were sized for: the supervisor unit's
+# TimeoutStopSec=900 covers 15 + 5 + MAX_GRACE_S + 2 + 8 x MAX_JOBS + 10
+# seconds (DL-401). Nothing here reads them; a release's prepare refuses a
+# release above them.
+# shellcheck disable=SC2034  # read by the release's prepare, not here
+MAX_JOBS=107
+# shellcheck disable=SC2034  # read by the release's prepare, not here
+MAX_GRACE_S=10
 
 engine_command() {
     # The engine attaches to the supervisor unit's supervisor and never forks
@@ -77,35 +109,59 @@ engine_command() {
         2) supervisor= ;;
         *) refuse "$DSL41 run --supervisor attach --help exited $probe: cannot tell attach from spawn" ;;
     esac
-    # the complete ordered argument list; the estate files are named one by
-    # one, because a glob's order is the locale's and the order is hashed
-    set -- "$DSL41" run \
-        "$ESTATE/amer.jil" \
-        "$ESTATE/apac.jil" \
-        "$ESTATE/calendars.jil" \
-        "$ESTATE/emea.jil" \
-        "$ESTATE/global.jil" \
-        "$ESTATE/infra.jil" \
-        -p "$PROPERTIES" \
+    # The estate's words come from the active release's manifest, in its
+    # order, which is hashed (DL-407). A runtime without `estate args` is
+    # before 1.13, and a rollback to it brings the launcher of its site
+    # package; the parse decides by exit code, as for --supervisor (DL-402).
+    probe=0
+    "$DSL41" estate args --help >/dev/null 2>&1 || probe=$?
+    case $probe in
+        0) ;;
+        2) refuse "this launcher needs dsl41 1.13 or later; a rollback below it reinstalls the site package qualified with that release" ;;
+        *) refuse "$DSL41 estate args --help exited $probe: cannot tell whether it reads a manifest" ;;
+    esac
+    release=$(active_release) || exit $?
+    ESTATE=$ESTATE_RELEASES/$release
+    estate=$("$DSL41" estate args "$ESTATE/estate.toml" --for run \
+        --environment "$ENVIRONMENT") ||
+        refuse "$DSL41 estate args exited $? for $ESTATE/estate.toml"
+    set -- -p "$PROPERTIES" \
         --run-root "$RUN_ROOT" \
         --estate-anchor "$ESTATE_ANCHOR" \
         --detached \
         ${supervisor:+--supervisor "$supervisor"} \
         --as-machine localhost \
         --machine-policy strict \
-        --timezone UTC \
         --access-map "$ACCESS_MAP"
     opener=$(root_opener) || exit $?
     case $opener in
         resume) set -- "$@" --resume ;;
         open-from) set -- "$@" --open-from "$ESTATE_ANCHOR" ;;
     esac
-    quote_all "$@"
+    printf '%s %s %s' "$(quote_all "$DSL41" run)" "$estate" "$(quote_all "$@")"
 }
 # ---- end of CONFIGURATION --------------------------------------------------
 
 # the one-shot open trigger (see the header)
 OPEN_TRIGGER=$RUN_ROOT.open-from
+
+# The active release's name: the one line of ACTIVE, one directory name
+# under ESTATE_RELEASES that holds estate.toml (see the header, DL-407).
+active_release() {
+    [ -e "$ACTIVE" ] || [ -L "$ACTIVE" ] || refuse "$ACTIVE is missing: no release is active"
+    [ -f "$ACTIVE" ] || refuse "$ACTIVE is not a file"
+    name=$(cat "$ACTIVE") || refuse "cannot read $ACTIVE"
+    case $name in
+        '') refuse "$ACTIVE is empty: no release is active" ;;
+        *"$NEWLINE"*) refuse "$ACTIVE holds more than one line: name one release" ;;
+        . | .. | */*) refuse "$ACTIVE names '$name', which is not one directory name" ;;
+    esac
+    [ -f "$ESTATE_RELEASES/$name/estate.toml" ] ||
+        refuse "$ESTATE_RELEASES/$name holds no estate.toml: not a release"
+    printf '%s\n' "$name"
+}
+NEWLINE='
+'
 
 # genesis or resume, decided from the run root alone, unless the one-shot
 # open trigger exists; anything else refuses

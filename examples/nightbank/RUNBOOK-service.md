@@ -92,13 +92,28 @@ proves nothing without the receipt (DL-389).
 
 ## 24. Install and start as a service
 
-Goal: install the account, launcher, map and units; see a start that systemd calls
-`active` and that refused; start the genesis. Follow
+Goal: place the estate's first release, install the account, launcher, map and units;
+see a start that systemd calls `active` and that refused; start the genesis. Follow
 [the service recipe](../../docs/deployment-runbook.md#recipe-install-and-start-as-a-service).
-The drill's `first-start` step checks the same.
+The drill's `install` and `first-start` steps check the same.
 
-1. In a root shell from `/work`, type recipe `service-install`, and `exit`. Its last line,
-   the engine's command, ends `--access-map /etc/dsl41/nightbank-access.toml`.
+1. In a root shell from `/work`, place the example, root-owned and read-only to the
+   account. Install the small estate as the release `small-r1`, and name it in `active`.
+   Recipe `service-install` ends with the launcher's `--print`, which reads that
+   release's manifest, so the release comes first:
+
+```sh
+install -d -m 0755 /srv/dsl41 && cp -R examples/nightbank /srv/dsl41/nightbank
+install -d -m 0755 /srv/dsl41/nightbank/releases
+cp -R /srv/dsl41/nightbank/estate/small /srv/dsl41/nightbank/releases/small-r1
+chown -R root:root /srv/dsl41/nightbank && chmod -R go-w,a+rX /srv/dsl41/nightbank
+printf '%s\n' small-r1 >/srv/dsl41/nightbank/active
+```
+
+   In the same shell, type recipe `service-install`, and `exit`. Its last line, the
+   engine's command, names the release's six files in its manifest's order, then
+   `--timezone UTC` from the manifest, and ends
+   `--access-map /etc/dsl41/nightbank-access.toml`.
 2. Type recipe `service-start`, with `sudo` on each line. Both lines print `active`. Five
    seconds later:
 
@@ -107,13 +122,10 @@ systemctl show -p ActiveState -p ExecMainStatus dsl41-engine.service   # failed,
 sudo journalctl -u dsl41-engine.service -o cat | tail -3   # [Errno 2] No such file … night.properties'
 ```
 
-3. Put the estate where the launcher's `ESTATE` names it, root-owned and read-only to the
-   account. Prepare the night as the account with nightbank's own `prepare_night`,
-   anchors six hours out, as the drill does. The last line makes one job run long:
+3. Prepare the night as the account with nightbank's own `prepare_night`, anchors six
+   hours out, as the drill does. The last line makes one job run long:
 
 ```sh
-sudo cp -R examples/nightbank /srv/dsl41/nightbank
-sudo chown -R root:root /srv/dsl41/nightbank && sudo chmod -R go-w,a+rX /srv/dsl41/nightbank
 sudo install -d -o dsl41 -g dsl41 -m 0700 /srv/dsl41/nightbank/night
 cd / && sudo -u dsl41 -H /opt/dsl41/.venv/bin/python -c 'import datetime as d, importlib.util as u, pathlib
 from importlib.machinery import SourceFileLoader as Loader
@@ -129,7 +141,9 @@ echo "OPS_XINST_DEMO_C late 45" | sudo -u dsl41 -H tee -a /srv/dsl41/nightbank/n
    names `dsl41 run` alone; the supervisor unit's names `runner_supervisor.py`.
 
 *Why.* `active` is not readiness: a unit that refuses a second later printed it too.
-The supervisor's own unit keeps its jobs through an engine stop (§0's diagram 1).
+The supervisor's own unit keeps its jobs through an engine stop (§0's diagram 1). A
+release directory is never changed, and `active` is a plain file, never a symlink: the
+opener must name the paths the seal named (DL-407).
 
 ## 25. Configure an estate
 
@@ -180,7 +194,9 @@ sudo jq -r 'select(.rec == "access_denied") | .principal' "$RUN_ROOT/perimeter.j
 ```
 
 5. Reload a map that names another group: the engine stays up and refuses it. Then
-   change the runtime profile: the resume gate refuses with exit 2. Put both files back.
+   change the runtime profile: the timezone is the release manifest's, and an edit of it
+   in place stands for a release that changes it. The resume gate refuses with exit 2.
+   Put both files back.
    The last start can fail: `systemctl` prints `Job for dsl41-engine.service failed`, and
    the journal says `Start request repeated too quickly`, because the start limit (five
    in 300 s) counts your starts. Then run `sudo systemctl reset-failed
@@ -192,12 +208,12 @@ sudo systemctl kill -s HUP --kill-who=main dsl41-engine.service
 sleep 3   # wait 3 s for the reload
 sudo jq -r 'select(.rec == "policy_reload_failed") | .error' "$RUN_ROOT/perimeter.jsonl"   # socket_group is fixed at arming, …
 sudo sed -i 's/^socket_group = .*/socket_group = "nightbank-socket"/' /etc/dsl41/nightbank-access.toml
-sudo systemctl stop dsl41-engine.service && sudo cp -p /opt/dsl41/bin/dsl41-launch /root/launch.orig
-sudo sed -i 's|^        --timezone UTC|        --timezone America/New_York|' /opt/dsl41/bin/dsl41-launch
+sudo systemctl stop dsl41-engine.service && sudo cp -p "$ESTATE/estate.toml" /root/estate.toml.orig
+sudo sed -i 's|^timezone = "UTC"$|timezone = "America/New_York"|' "$ESTATE/estate.toml"
 sudo systemctl start dsl41-engine.service
 sleep 5   # wait 5 s for the resume gate to refuse
 sudo journalctl -u dsl41-engine.service -o cat | tail -3   # runtime-profile mismatch: … (default_tz) …
-sudo cp -p /root/launch.orig /opt/dsl41/bin/dsl41-launch && sudo systemctl start dsl41-engine.service
+sudo cp -p /root/estate.toml.orig "$ESTATE/estate.toml" && sudo systemctl start dsl41-engine.service
 sudo -u dsl41 -H bash -c 'for try in $(seq 90); do /opt/dsl41/.venv/bin/dsl41 query status --brief -S "$1" >/dev/null 2>&1 && break; sleep 1; done' sh "$S"   # wait up to 90 s for an answer
 ```
 

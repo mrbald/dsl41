@@ -66,9 +66,23 @@ CI, so the exercises are checked rather than remembered.
   files under the run's `data/` and applies `incidents.conf` behaviors.
 - `estate/<profile>/incidents.conf` — each estate's scripted failures
   (bank targets are per-asset-class names that only exist there).
+- `estate/<profile>/estate.toml` — the estate's manifest (DL-407): its
+  files in catalog order, its timezone and its environments. `bin/nightbank
+  up` and the service launcher both take the file list from it.
 - `deploy/` — the estate as a service: a launcher that holds the whole
   `dsl41 run` line, two systemd units and a role map (deployment-runbook
   §3, "A worked example").
+
+On a service host the estate is an application release. Under
+`/srv/dsl41/nightbank/`, `releases/<name>/` holds one directory per
+release, installed whole and never changed: its JIL, calendars, properties
+layers and `estate.toml`. `active` is a plain text file whose one line
+names the active release. It is never a symlink, because the bundle hash
+covers each input's path string and the opener must name the paths the
+seal named. The launcher takes the estate's files, layers and timezone from
+the active release's manifest through `dsl41 estate args`, so a JIL release
+never edits the launcher. The site's own properties file comes last, so
+its values override the application's.
 
 Each night is one directory under `runs/` (data, logs, properties, control
 socket). The engine's own run root is `<run>/engine` inside it: the

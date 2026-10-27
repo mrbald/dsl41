@@ -94,7 +94,8 @@ def _env(site: dict[str, str], **extra: str) -> dict[str, str]:
         "PATH": f"{DSL41.parent}{os.pathsep}{os.environ.get('PATH', '')}",
         "RUN_ROOT": site["RUN_ROOT"],
         "ESTATE_ANCHOR": site["ESTATE_ANCHOR"],
-        "ESTATE": site["ESTATE"],
+        "ESTATE": str(_estate(site)),
+        "ENVIRONMENT": "wargame",
         "PROPERTIES": site["PROPERTIES"],
         "S": f"{site['RUN_ROOT']}/control.sock",
         **extra,
@@ -115,24 +116,35 @@ def _ok(name: str, env: dict[str, str]) -> str:
 
 
 def _write_estate(directory: Path, extra: str = "") -> None:
-    """The launcher's six files, in its names: comments, PING, and `extra`."""
-    directory.mkdir(exist_ok=True)
+    """The nightbank manifest's six files, in its names: comments, PING, and
+    `extra`; and a manifest naming them in its order (DL-407)."""
+    directory.mkdir(parents=True, exist_ok=True)
     for name in ORDER:
         body = f"/* {name}: synthetic */\n"
         if name == ORDER[-1]:
             body += PING + extra
         (directory / name).write_text(body)
+    (directory / "estate.toml").write_text(
+        f"name = 'synthetic'\nfiles = {list(ORDER)!r}\ntimezone = 'UTC'\n[environments.wargame]\n"
+    )
+
+
+def _estate(site: dict[str, str]) -> Path:
+    """The active release's directory: the one release the tests install."""
+    return Path(site["ESTATE_RELEASES"], Path(site["ACTIVE"]).read_text().strip())
 
 
 def _site(base: Path) -> dict[str, str]:
     (base / "night").mkdir()
     (base / "night" / "night.properties").write_text("GREETING=hello\n")
+    (base / "active").write_text("r1\n")
     return {
         "DSL41": str(DSL41),
         "RUN_ROOT": str(base / "runs" / "nb"),
         "ESTATE_ANCHOR": str(base / "runs" / "nb.anchor"),
         "ACCESS_MAP": str(base / "etc" / "access.toml"),
-        "ESTATE": str(base / "estate"),
+        "ESTATE_RELEASES": str(base / "releases"),
+        "ACTIVE": str(base / "active"),
         "PROPERTIES": str(base / "night" / "night.properties"),
     }
 
@@ -438,10 +450,19 @@ def test_the_retirement_unit_recipes_name_each_shipped_unit() -> None:
 
 
 def test_the_operator_variables_are_the_launchers_values() -> None:
+    """The launcher's values, and ESTATE the active release's directory, as the
+    launcher builds it from ACTIVE (DL-407)."""
     text = LAUNCH.read_text()
-    launcher = dict(re.findall(r"^(RUN_ROOT|ESTATE_ANCHOR|ESTATE|PROPERTIES)=(\S+)$", text, re.M))
-    assigned = dict(re.findall(r"^(\w+)=(\S+)$", recipe("operator-env"), re.M))
-    assert assigned == {**launcher, "S": "$RUN_ROOT/control.sock"}
+    names = "RUN_ROOT|ESTATE_ANCHOR|ESTATE_RELEASES|ACTIVE|ENVIRONMENT|PROPERTIES"
+    launcher = dict(re.findall(rf"^({names})=(\S+)$", text, re.M))
+    assert len(launcher) == 6
+    assigned = dict(re.findall(r"^(\w+)=(.+)$", recipe("operator-env"), re.M))
+    assert assigned == {
+        **launcher,
+        "ESTATE": '$ESTATE_RELEASES/$(cat "$ACTIVE")',
+        "S": "$RUN_ROOT/control.sock",
+    }
+    assert re.findall(r"^\s+ESTATE=(\S+)$", text, re.M) == ["$ESTATE_RELEASES/$release"]
 
 
 def test_the_job_recipe_opens_through_the_engine_units_exec_start() -> None:
@@ -453,18 +474,37 @@ def test_the_job_recipe_opens_through_the_engine_units_exec_start() -> None:
     ]
 
 
-def test_the_seal_recipe_restates_the_launchers_order_and_options() -> None:
-    """`--next` names the launcher's files in its order, and the `--next-*`
-    options are the launcher's run options (a seal does not inherit them)."""
-    seal = recipe("job-seal")
-    assert re.findall(r'--next "\$ESTATE/([\w.]+)"', seal) == list(ORDER)
-    # job-check lints, then rehearses, the same files in the same order
-    assert re.findall(r'"\$ESTATE/([\w.]+)"', recipe("job-check")) == list(ORDER) * 2
+#: how a recipe takes the estate's words for VERB from the release's manifest (DL-407)
+ESTATE_ARGS = (
+    'args=$(dsl41 estate args "$ESTATE/estate.toml" --for {verb} --environment "$ENVIRONMENT")',
+    'eval "set -- $args"',
+)
+
+
+def test_the_seal_recipe_restates_the_launchers_options_after_the_manifests_words() -> None:
+    """The estate's words come from the manifest, as the launcher's do: `--for seal`
+    gives the files as `--next` and the timezone as `--next-timezone`. The site's
+    `-p` follows them, and the `--next-*` options after it are the launcher's
+    deployment options (a seal does not inherit them). job-check lints, then
+    rehearses, from the same manifest."""
+    seal = _lines("job-seal")
+    assert seal[:2] == [line.format(verb="seal") for line in ESTATE_ARGS]
+    assert seal[2].startswith(
+        'dsl41 seal --run-root "$RUN_ROOT" --estate-anchor "$ESTATE_ANCHOR" "$@" -p "$PROPERTIES" '
+    )
+    assert "$ESTATE/" not in seal[2] and "--next-timezone" not in seal[2]
     launch = LAUNCH.read_text()
-    for option in ("--detached", "--as-machine", "--machine-policy", "--timezone"):
+    assert not re.search(r"^\s+--timezone", launch, re.M)  # the manifest's, not the launcher's
+    for option in ("--detached", "--as-machine", "--machine-policy"):
         (value,) = re.findall(rf"^\s+{option}(?: (\S+))? \\$", launch, re.M)
         spelled = f"--next-{option[2:]}" + (f" {value}" if value else "")
-        assert spelled in seal, spelled
+        assert spelled in seal[2], spelled
+    assert _lines("job-check") == [
+        *(line.format(verb="lint") for line in ESTATE_ARGS),
+        'dsl41 lint "$@" -p "$PROPERTIES"',
+        *(line.format(verb="rehearse") for line in ESTATE_ARGS),
+        'dsl41 rehearse "$@" -p "$PROPERTIES"',
+    ]
 
 
 # ------------------------------------------------------------- the diagrams
@@ -526,24 +566,24 @@ def test_the_job_recipe_adds_changes_and_removes_a_job(short_root: Path) -> None
     stops the engine with exit 3, and an in-place open; each verifies with
     the recipe's own query. The removed job stays as a ghost."""
     site = _site(short_root)
-    _write_estate(Path(site["ESTATE"]))
+    _write_estate(_estate(site))
     engine = _Engine(short_root, site)
     env = _env(site, JOB=NEW)
     try:
         genesis = engine.start(env)
         assert "--resume" not in genesis and "--open-from" not in genesis
 
-        _write_estate(Path(site["ESTATE"]), _job("/bin/echo first"))
+        _write_estate(_estate(site), _job("/bin/echo first"))
         _transition(engine, env)
         spec = json.loads(_ok("job-verify", env))
         assert spec["job_type"] == "CMD" and "/bin/echo first" in spec["jil"]
 
-        _write_estate(Path(site["ESTATE"]), _job("/bin/echo second"))
+        _write_estate(_estate(site), _job("/bin/echo second"))
         _transition(engine, env)
         spec = json.loads(_ok("job-verify", env))
         assert "/bin/echo second" in spec["jil"] and "/bin/echo first" not in spec["jil"]
 
-        _write_estate(Path(site["ESTATE"]))
+        _write_estate(_estate(site))
         _transition(engine, env)
         row = json.loads(_ok("job-verify-removed", env))["jobs"][NEW]
         assert row["job_type"] is None and row["status"] == "INACTIVE"
@@ -578,7 +618,7 @@ def test_the_job_recipe_refuses_a_delta_file(short_root: Path) -> None:
     """ss0: AutoSys delta forms are refused, and the recipe's own check is
     where the maintainer meets the refusal, before any window."""
     site = _site(short_root)
-    _write_estate(Path(site["ESTATE"]), "\nupdate_job: OPS_PING_C\ncommand: /bin/echo x\n")
+    _write_estate(_estate(site), "\nupdate_job: OPS_PING_C\ncommand: /bin/echo x\n")
     done = _run("job-check", _env(site))
     assert done.returncode == 2
     assert "subcommand 'update_job' is not supported" in done.stdout + done.stderr
@@ -590,7 +630,7 @@ def test_a_sealed_period_not_yet_opened_shows_on_the_anchor(short_root: Path) ->
     opens the next period, the lineage head reads `closed` and no engine
     answers; once opened it reads `open` again."""
     site = _site(short_root)
-    _write_estate(Path(site["ESTATE"]))
+    _write_estate(_estate(site))
     engine = _Engine(short_root, site)
     env = _env(site)
     try:
@@ -699,7 +739,7 @@ def test_a_torn_sole_opening_of_a_rolled_root_is_recovered_by_the_recipe(
     from dsl41.runner_journal import read_journal
 
     site = _site(short_root)
-    _write_estate(Path(site["ESTATE"]))
+    _write_estate(_estate(site))
     root_a, anchor = Path(site["RUN_ROOT"]), Path(site["ESTATE_ANCHOR"])
     site_b = {**site, "RUN_ROOT": str(short_root / "runs" / "nb-b")}
     site_c = {**site, "RUN_ROOT": str(short_root / "runs" / "nb-c")}
