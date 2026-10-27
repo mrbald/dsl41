@@ -24404,9 +24404,10 @@ relitigate an entry; append a new one.
   makes: the lazy reconnect's PING and re-ACQUIRE, the RENEW, and a refused RENEW's re-ACQUIRE.
   At the deadline the renewal is cancelled, which poisons the connection when a request of its
   own is in flight (DL-48); the loop counts one failure and logs one line until the host is
-  reported unreachable, at the fifth (DL-291). From a supervisor's freeze to `quarantined` is
-  about 44 to 74 s, by the phase of the renewal interval: the renewal in flight or the next
-  20 s one, then five deadlines with a 1 s backoff between them. Three rules protect a live
+  reported unreachable, at the fifth (DL-291). From a freeze to `quarantined` is 54 to 74 s
+  from a supervisor that answered until it froze, by the phase of the renewal interval: the
+  next 20 s renewal, then five deadlines with a 1 s backoff between them; a renewal already
+  unanswered when it froze shortens that by up to 10 s. Three rules protect a live
   supervisor. A request that finds the stream lost once it holds the client's lock has written
   nothing; if it may reconnect, it reconnects and is sent once more, and a second such finding
   fails it. A reconnect is done only when its re-ACQUIRE is answered: until then no request that
