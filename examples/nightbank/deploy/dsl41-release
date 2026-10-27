@@ -30,9 +30,10 @@ dsl41 package.
       recipe, ss6a). It refuses unless the engine answers and NAME's files
       are the ones prepare checked. Then it holds every scheduled top-level
       job `query timers` lists that is not held, and waits until no job is
-      STARTING, RUNNING or QUE_WAIT. A job the release removes that is still
-      armed or has a pending timer refuses the apply; one it changes crosses
-      with a recorded assumption (period-model ss10.3), which it reports.
+      STARTING, RUNNING or QUE_WAIT. A job the release changes or removes
+      that is still armed or has a pending timer refuses the apply, as the
+      recipe requires; the seal itself would let a changed one cross with a
+      recorded assumption (period-model ss10.3).
       It seals from NAME's manifest, writes ACTIVE, waits for the sealed
       engine to exit and starts the engine unit. It checks that the
       successor answers in the committed period, under a new leader, from
@@ -58,10 +59,13 @@ it sends a seal again under a recorded request id, and after any seal that
 did not exit 0, it reads the estate for that id: a seal record at the end
 of a WAL segment, with its sidecar (deployment-runbook ss6a, Day 2). A
 committed seal is never sent again, and a retry never takes a fresh id.
-A hold is the helper's once the engine applied it, and the record keeps the
-revision the hold left; it releases a hold only at that revision, so a hold
-an operator touched since stays. A hold applied and not yet recorded when
-the helper died stays too. DSL41_RELEASE_STOP_AFTER=seal-reply kills the
+A hold is the helper's when the helper's own request applied it. The
+request id is composed and recorded before the send, so a resume sends a
+pending hold again under that id, and the engine answers from its first
+decision. The helper releases its applied holds that are still held, a hold
+a schedule tick latched included, and never a hold it did not apply. A
+limit: an operator who releases and sets again, inside the window, a hold
+the helper took has that hold released with the helper's. DSL41_RELEASE_STOP_AFTER=seal-reply kills the
 helper after the seal exits 0 and before that is recorded; =seal kills it
 after it is recorded and before ACTIVE is written. The drill uses both, and
 nothing else should.
@@ -653,9 +657,11 @@ def apply_lock(cfg: Config) -> Iterator[None]:
         os.close(fd)
 
 
-def query(cfg: Config, what: str) -> dict[str, Any]:
+def query(cfg: Config, what: str, job: str | None = None) -> dict[str, Any]:
     done = subprocess.run(
-        [cfg.dsl41, "query", what, "-S", cfg.socket], capture_output=True, text=True
+        [cfg.dsl41, "query", what, "-S", cfg.socket, *(["--job", job] if job else [])],
+        capture_output=True,
+        text=True,
     )
     if done.returncode != 0:
         raise Stop(EXIT_REFUSED, f"query {what} exited {done.returncode}: {done.stderr.strip()}")
@@ -677,7 +683,7 @@ def send(cfg: Config, verb: str, job: str, *expect: str) -> tuple[int, dict[str,
         answer = json.loads(done.stdout.strip().splitlines()[-1]) if done.stdout.strip() else {}
     except ValueError:
         answer = {}
-    if done.returncode not in (0, 3):
+    if done.returncode not in (0, 3, 4):
         raise Stop(
             EXIT_REFUSED, f"sendevent {verb} -J {job} exited {done.returncode}: {done.stderr}"
         )
@@ -720,6 +726,8 @@ class Apply:
                 self.drain()
                 self.step("drained")
             except Stop as exc:
+                if exc.code == EXIT_STOPPED:
+                    raise self.stopped(exc) from exc
                 return self.abort(str(exc))
         if self.at_or_before("sealing"):
             try:
@@ -778,35 +786,68 @@ class Apply:
     def hold(self) -> None:
         """Hold every scheduled top-level job with a future tick that is not held; a hold
         that was there before stays and is never released here (deployment-runbook ss6).
-        A hold is the helper's once the engine applied it, at the revision it left."""
+        A hold is the helper's when its own request applied: the request id is composed and
+        recorded before the send, so a resume sends a pending hold again under it."""
+        for entry in self.record["holds"]:
+            if entry["state"] == "pending":
+                self.send_hold(entry)
         timers = query(self.cfg, "timers")["timers"]
-        jobs = query(self.cfg, "status")["jobs"]
-        mine = {hold["job"] for hold in self.record["holds"]}
+        mine = {entry["job"] for entry in self.record["holds"] if entry["state"] != "rejected"}
         scheduled = sorted({row["job"] for row in timers if row.get("kind") == "schedule"})
-        for job in scheduled:
-            row = jobs.get(job)
-            if row is None or row.get("job_type") is None or row.get("box_name") is not None:
-                continue
-            if row.get("on_hold") or job in mine:
-                continue
-            code, answer = send(self.cfg, "ON_HOLD", job, "--expect", str(row["state_rev"]))
-            if code != 0:
-                raise Stop(EXIT_REFUSED, f"{job} changed while it was being held; apply again")
-            self.record["holds"].append(
-                {
+        for job in (job for job in scheduled if job not in mine):
+            for _ in range(3):
+                answer = query(self.cfg, "status", job)
+                row = answer["jobs"].get(job)
+                if row is None or row.get("job_type") is None or row.get("box_name") is not None:
+                    break
+                if row.get("on_hold"):
+                    break
+                entry = {
                     "job": job,
-                    "request_id": answer.get("request_id"),
-                    "rev": int(answer["revisions"][f"job:{job}"]),
+                    "state": "pending",
+                    "request_id": str(uuid.uuid4()),
+                    "expect": int(row["state_rev"]),
+                    "epoch": int(answer["epoch"]),
+                    "baseline": str(answer["baseline_id"]),
                 }
+                self.record["holds"].append(entry)
+                self.step(self.record["step"])
+                if self.send_hold(entry):
+                    break
+            else:
+                raise Stop(EXIT_REFUSED, f"{job} moved at each of three holds; apply again")
+        taken = [entry["job"] for entry in self.record["holds"] if entry["state"] == "applied"]
+        say(f"holds taken: {', '.join(taken) or 'none'}")
+
+    def send_hold(self, entry: dict[str, Any]) -> bool:
+        """The ON_HOLD of ENTRY under its recorded request id, expect, epoch and baseline; an
+        exact resend is answered from the first decision. Whether it applied settles whether
+        the hold is the helper's; its revision is kept as a fact."""
+        code, answer = send(
+            self.cfg,
+            "ON_HOLD",
+            entry["job"],
+            *("--request-id", entry["request_id"], "--expect", str(entry["expect"])),
+            *("--epoch", str(entry["epoch"]), "--baseline", entry["baseline"]),
+        )
+        if code == 4:
+            raise Stop(
+                EXIT_STOPPED,
+                f"the hold of {entry['job']} has no decision; a resume sends it again under"
+                f" request id {entry['request_id']}",
             )
-            self.step(self.record["step"])
-        taken = ", ".join(hold["job"] for hold in self.record["holds"]) or "none"
-        say(f"holds taken: {taken}")
+        entry["state"] = "applied" if code == 0 else "rejected"
+        # a fact, not a gate: a no-op hold answers with no revisions, so it is read back
+        entry["rev"] = (answer.get("revisions") or {}).get(f"job:{entry['job']}")
+        if entry["rev"] is None and code == 0:
+            row = query(self.cfg, "status", entry["job"])["jobs"].get(entry["job"]) or {}
+            entry["rev"] = row.get("state_rev")
+        self.step(self.record["step"])
+        return code == 0
 
     def drain(self) -> None:
-        """No job STARTING, RUNNING or QUE_WAIT; then a job the release removes may not be
-        latent, and one it changes that is latent crosses with an assumption (deployment-
-        runbook ss0, job recipe step 3; period-model ss10.3)."""
+        """No job STARTING, RUNNING or QUE_WAIT; then no job the release changes or removes
+        may be armed or have a pending timer (deployment-runbook ss0, job recipe step 3)."""
         deadline = time.monotonic() + self.args.drain_timeout
         while True:
             jobs = query(self.cfg, "status")["jobs"]
@@ -826,15 +867,13 @@ class Apply:
             row = jobs.get(job) or {}
             return bool(row.get("armed") or row.get("pending_timers"))
 
-        removed = [job for job in changes["removed"] if latent(job)]
-        if removed:
+        moving = [job for job in (*changes["removed"], *changes["changed"]) if latent(job)]
+        if moving:
             raise Stop(
                 EXIT_REFUSED,
-                f"{', '.join(removed)}: the seal refuses a removed job that is executing or"
-                " latent (armed, QUE_WAIT, a live timer); wait until it is not, or DISARM it",
+                f"{', '.join(sorted(moving))}: a job the release changes or removes must not"
+                " be live (armed, QUE_WAIT, a live timer); wait until it is not, or DISARM it",
             )
-        for job in (job for job in changes["changed"] if latent(job)):
-            say(f"{job} is latent and changed: it crosses with a recorded assumption")
 
     def read_estate(self) -> bool:
         """Whether the seal under the recorded request id committed; records its facts."""
@@ -956,23 +995,28 @@ class Apply:
             raise Stop(EXIT_STOPPED, "; ".join(problems))
 
     def release_holds(self) -> tuple[list[str], list[str]]:
-        """OFF_HOLD, at the revision the hold left, for each hold this apply took; a hold
-        that moved since stays, and a job the new period no longer defines is a ghost and
-        keeps its row (period-model ss10)."""
-        if not self.record["holds"]:
+        """OFF_HOLD for each hold this apply's own request applied that is still held; a
+        pending hold is settled first under its request id. A hold the helper never applied
+        is never released. A job the new period no longer defines is a ghost and keeps its
+        row (period-model ss10); it, and a hold found released, are kept as they are."""
+        for entry in self.record["holds"]:
+            if entry["state"] == "pending":
+                self.send_hold(entry)
+        applied = [entry["job"] for entry in self.record["holds"] if entry["state"] == "applied"]
+        if not applied:
             return [], []
         jobs = query(self.cfg, "status")["jobs"]
         released: list[str] = []
         kept: list[str] = []
-        for hold in self.record["holds"]:
-            job = hold["job"]
+        for job in applied:
             row = jobs.get(job)
             if row is None or row.get("job_type") is None or not row.get("on_hold"):
+                kept.append(job)
                 continue
-            code, _ = send(self.cfg, "OFF_HOLD", job, "--expect", str(hold["rev"]))
-            (released if code == 0 else kept).append(job)
+            send(self.cfg, "OFF_HOLD", job)
+            released.append(job)
         if kept:
-            say(f"holds kept, each moved since this apply took it: {', '.join(kept)}")
+            say(f"holds found released, or of a job no longer defined: {', '.join(kept)}")
         return released, kept
 
     def abort(self, reason: str) -> int:

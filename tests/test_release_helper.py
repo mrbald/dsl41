@@ -82,18 +82,38 @@ if args[0] == "sendevent":
         save()
         print(f"refused: {verb} {job}", file=sys.stderr)
         sys.exit(2)
+    rid = opt("--request-id") or str(uuid.uuid4())
+    if rid in state["decisions"]:  # an exact retry is answered from the first decision
+        code, answer = state["decisions"][rid]
+        save()
+        print(json.dumps(answer))
+        sys.exit(code)
     row = state["jobs"][job]
+    if verb == "ON_HOLD" and job in state["operator_holds"]:
+        state["operator_holds"].remove(job)
+        row["on_hold"], row["state_rev"] = True, row["state_rev"] + 1
     expect = opt("--expect")
     if expect is not None and int(expect) != row["state_rev"]:
+        answer = {"ok": False, "decision": "rejected", "request_id": rid}
+        state["decisions"][rid] = [3, answer]
         save()
-        print(json.dumps({"ok": False, "decision": "rejected"}))
+        print(json.dumps(answer))
         sys.exit(3)
     row["on_hold"] = verb == "ON_HOLD"
     row["state_rev"] += 1
     state["sent"].append([verb, job])
+    answer = {"ok": True, "decision": "applied", "request_id": rid}
+    noop = verb == "ON_HOLD" and job in state["noop_holds"]
+    answer["revisions"] = {} if noop else {f"job:{job}": row["state_rev"]}
+    state["decisions"][rid] = [0, answer]
+    lost = verb == "ON_HOLD" and job in state["send_unknown"]
+    if lost:
+        state["send_unknown"].remove(job)
     save()
-    answer = {"ok": True, "decision": "applied", "request_id": str(uuid.uuid4())}
-    print(json.dumps(answer | {"revisions": {f"job:{job}": row["state_rev"]}}))
+    if lost:
+        print("no decision: this command may still apply", file=sys.stderr)
+        sys.exit(4)
+    print(json.dumps(answer))
     sys.exit(0)
 if args[0] == "seal":
     rid, actor = opt("--request-id"), opt("--claimed-actor")
@@ -254,6 +274,10 @@ class Site:
                 "seal_requests": [],
                 "opened_hash": None,
                 "refuse_send": [],
+                "decisions": {},
+                "operator_holds": [],
+                "send_unknown": [],
+                "noop_holds": [],
                 "start_fails": False,
                 "calls": [],
                 "sent": [],
@@ -438,9 +462,11 @@ def test_apply_holds_drains_seals_selects_starts_verifies_and_releases_its_own_h
         ["OFF_HOLD", "NB_FREE_C"],
     ]
     assert state["jobs"]["NB_HELD_C"]["on_hold"] is True
-    # each release names the revision its hold left
+    # each hold is sent under the helper's own request id; a release names no revision
+    ons = [call for call in state["calls"] if call[:2] == ["sendevent", "ON_HOLD"]]
     offs = [call for call in state["calls"] if call[:2] == ["sendevent", "OFF_HOLD"]]
-    assert [call[call.index("--expect") + 1] for call in offs] == ["4", "4"]
+    assert all("--request-id" in call and "--expect" in call for call in ons)
+    assert not any("--expect" in call for call in offs)
     (seal,) = site.seals()
     receipt = site.receipt("v2")
     assert receipt["previous"] == "r1" and receipt["period"] == 2
@@ -476,20 +502,68 @@ def test_apply_holds_drains_seals_selects_starts_verifies_and_releases_its_own_h
     ]
 
 
-def test_a_hold_moved_since_the_helper_took_it_is_kept(site: Site) -> None:
+def test_a_held_job_a_tick_latched_is_released(site: Site) -> None:
+    """A tick that lands on a held job arms it and moves its revision; the helper's own
+    hold is still released, so the latched start runs (deployment-runbook ss6, step 1)."""
     site.prepared("v2")
     site.edit(seal_outcomes=["unknown"])
     assert site.run("apply", "v2").returncode == 4
     state = site.state()
-    # an operator touches NB_FREE_C's hold while the apply is stopped
     state["jobs"]["NB_FREE_C"]["state_rev"] += 1
+    state["jobs"]["NB_FREE_C"]["armed"] = True
     site.save(state)
     resumed = site.run("apply", "--resume", "v2")
     assert resumed.returncode == 0, resumed.stderr
-    assert "holds kept, each moved since this apply took it: NB_FREE_C" in resumed.stderr
     receipt = site.receipt("v2")
-    assert receipt["released"] == ["NB_B"] and receipt["kept"] == ["NB_FREE_C"]
+    assert receipt["released"] == ["NB_B", "NB_FREE_C"] and receipt["kept"] == []
+    assert site.state()["jobs"]["NB_FREE_C"]["on_hold"] is False
+
+
+def test_a_pending_hold_is_sent_again_under_its_id_on_resume(site: Site) -> None:
+    site.prepared("v2")
+    site.edit(send_unknown=["NB_FREE_C"])
+    stopped = site.run("apply", "v2")
+    assert stopped.returncode == 3, stopped.stderr
+    record = site.record()
+    assert record is not None and record["step"] == "started"
+    (pending,) = [entry for entry in record["holds"] if entry["job"] == "NB_FREE_C"]
+    assert pending["state"] == "pending"
+    resumed = site.run("apply", "--resume", "v2")
+    assert resumed.returncode == 0, resumed.stderr
+    holds = [
+        call[call.index("--request-id") + 1]
+        for call in site.state()["calls"]
+        if call[:2] == ["sendevent", "ON_HOLD"] and call[call.index("-J") + 1] == "NB_FREE_C"
+    ]
+    assert holds == [pending["request_id"], pending["request_id"]]
+    assert ["ON_HOLD", "NB_FREE_C"] in site.state()["sent"]
+    assert site.state()["sent"].count(["ON_HOLD", "NB_FREE_C"]) == 1
+    assert "NB_FREE_C" in site.receipt("v2")["released"]
+
+
+def test_a_hold_the_helper_never_applied_is_never_released(site: Site) -> None:
+    """An operator holds NB_FREE_C between the helper's read and its send: the helper's
+    ON_HOLD is rejected, the re-read finds the job held, and its hold stays."""
+    site.prepared("v2")
+    site.edit(operator_holds=["NB_FREE_C"])
+    done = site.run("apply", "v2")
+    assert done.returncode == 0, done.stderr
+    receipt = site.receipt("v2")
+    assert [entry["state"] for entry in receipt["holds"]] == ["applied", "rejected"]
+    assert receipt["released"] == ["NB_B"]
+    assert ["OFF_HOLD", "NB_FREE_C"] not in site.state()["sent"]
     assert site.state()["jobs"]["NB_FREE_C"]["on_hold"] is True
+
+
+def test_a_hold_answered_with_no_revisions_reads_the_revision_back(site: Site) -> None:
+    """ON_HOLD on a RUNNING job applies as a no-op and moves no revision: the answer's
+    `revisions` is empty, and the helper reads the job's revision instead."""
+    site.prepared("v2")
+    site.edit(noop_holds=["NB_FREE_C"])
+    done = site.run("apply", "v2")
+    assert done.returncode == 0, done.stderr
+    (entry,) = [hold for hold in site.receipt("v2")["holds"] if hold["job"] == "NB_FREE_C"]
+    assert entry["state"] == "applied" and entry["rev"] == 4
 
 
 def test_a_seal_that_does_not_commit_promotes_nothing_and_releases_the_holds(
@@ -589,7 +663,7 @@ def test_a_horizon_past_the_timeout_and_a_drain_past_its_timeout_are_refusals(
     assert len(site.seals()) == 1
 
 
-def test_a_removed_latent_job_refuses_and_a_changed_one_crosses(site: Site) -> None:
+def test_a_removed_or_changed_latent_job_refuses(site: Site) -> None:
     site.prepared("v1", add_job=True)
     assert site.run("apply", "v1").returncode == 0
     state = site.state()
@@ -599,16 +673,14 @@ def test_a_removed_latent_job_refuses_and_a_changed_one_crosses(site: Site) -> N
     site.prepared("v2")
     refused = site.run("apply", "v2")
     assert refused.returncode == 2, refused.stderr
-    assert "NB_ADDED_C: the seal refuses a removed job that is executing or latent" in (
-        refused.stderr
-    )
+    assert "NB_ADDED_C: a job the release changes or removes must not be live" in (refused.stderr)
     assert site.active.read_text() == "v1\n" and len(site.seals()) == 1
     site.prepared("v3", add_job=True, change_job=True)
-    done = site.run("apply", "v3")
-    assert done.returncode == 0, done.stderr
-    assert "OPS_SPOOL_C is latent and changed: it crosses with a recorded assumption" in (
-        done.stderr
-    )
+    refused = site.run("apply", "v3")
+    assert refused.returncode == 2, refused.stderr
+    assert "OPS_SPOOL_C: a job the release changes or removes must not be live" in (refused.stderr)
+    assert "DISARM" in refused.stderr
+    assert site.active.read_text() == "v1\n" and len(site.seals()) == 1
 
 
 def test_an_apply_refuses_up_front_when_no_engine_answers(site: Site) -> None:
