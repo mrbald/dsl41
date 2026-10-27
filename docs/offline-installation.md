@@ -147,6 +147,8 @@ Repeating preparation verifies the delivery identity, the system Python
 executable, every installed non-cache file and symlink, and every retained
 asset against that receipt.
 Generated Python bytecode must match its source.
+Nothing writes into a retained runtime after its receipt is taken.
+Run any process that imports from it outside the launcher, a root check included, with `python -B` or `PYTHONDONTWRITEBYTECODE=1`, because a `.pyc` written through the `.venv` link makes the next activation refuse the runtime.
 The repeat also runs `pip check` and the installed-code smoke tests.
 It never repairs an existing candidate.
 
