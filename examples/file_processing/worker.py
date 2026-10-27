@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
 import hashlib
 import json
 import os
@@ -19,10 +18,8 @@ from dsl41.file_processing import (
     RetrySafe,
     Unknown,
     WorkItem,
-    archive,
-    process,
 )
-from examples.file_processing.exits import EXIT_LOCK_BUSY, EXIT_REFUSED, EXIT_STOPPED, exit_codes
+from dsl41.file_processing_worker import EXIT_LOCK_BUSY, EXIT_REFUSED, EXIT_STOPPED, run
 
 __all__ = [
     "EXIT_LOCK_BUSY",
@@ -30,6 +27,7 @@ __all__ = [
     "EXIT_STOPPED",
     "CountsHandler",
     "count_json",
+    "counts_handler",
     "count_text",
     "main",
 ]
@@ -113,7 +111,13 @@ class CountsHandler:
             temp.unlink(missing_ok=True)
 
 
+def counts_handler(root: Path) -> CountsHandler:
+    """The deployed worker's factory: --handler examples.file_processing.worker:counts_handler."""
+    return CountsHandler(root / "output")
+
+
 def main() -> None:
+    """The sample CLI: the deployed worker with this handler and a sample processor id."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("role", choices=("archive", "process"))
     parser.add_argument("--root", type=Path, required=True)
@@ -122,16 +126,8 @@ def main() -> None:
     parser.add_argument("--order", choices=("oldest", "newest"), default="oldest")
     parser.add_argument("--batch", choices=("one", "all"), default="all")
     args = parser.parse_args()
-    policy = Policy(args.order, args.batch)
-    with exit_codes(args.role):
-        if args.role == "archive":
-            summary = archive(args.root, args.processor_id, policy)
-        else:
-            output = args.output or args.root / "output"
-            summary = process(args.root, args.processor_id, CountsHandler(output), policy)
-    print(json.dumps(asdict(summary), sort_keys=True))
-    if summary.stopped:
-        raise SystemExit(EXIT_STOPPED)
+    handler = CountsHandler(args.output or args.root / "output")
+    run(args.role, args.root, args.processor_id, Policy(args.order, args.batch), handler)
 
 
 if __name__ == "__main__":

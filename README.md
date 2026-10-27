@@ -630,9 +630,12 @@ work. The owner's rulings are in
 [examples/file_processing/CONTRACT.md](examples/file_processing/CONTRACT.md)
 and the design in
 [examples/file_processing/README.md](examples/file_processing/README.md)
-(DL-404). The library is `dsl41.file_processing`; the handler and operator
-CLIs under `examples/` are samples. Composition through the real runner is
-not yet qualified.
+(DL-404). The library is `dsl41.file_processing`. A job author adds the two
+jobs with `add_file_processing_jobs` and deploys
+`python -m dsl41.file_processing_worker` with their own handler
+([authoring §1.1](docs/authoring.md#11-add-file-processing-to-an-estate)).
+The handler and operator CLIs under `examples/` are samples. Composition
+through the real runner is not yet qualified.
 
 ## Implementation memo
 
@@ -753,6 +756,10 @@ Backend and DSL:
 - `src/dsl41/file_processing_dsl.py`: `add_file_processing_jobs`, the two
   CMD jobs (archiver on the watcher, processor on the archiver with zero
   lookback) added to an existing Python estate.
+- `src/dsl41/file_processing_worker.py`: the deployed worker command,
+  `python -m dsl41.file_processing_worker archive|process`, which loads the
+  job author's handler from `--handler MODULE:FACTORY` and maps outcomes to
+  the contract's exit codes.
 
 Tools:
 
