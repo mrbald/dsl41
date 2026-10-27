@@ -82,7 +82,66 @@ Then use the [checks in §4](#4-check-the-estate).
 The [examples index](../examples/README.md) links the worked estates.
 For JIL, start with [nightbank](../examples/nightbank/README.md).
 The [file-processing Python estate](../examples/file_processing/estate.py) uses the DSL.
-That example is experimental and has no frozen API.
+
+### 1.1. Add file processing to an estate
+
+`add_file_processing_jobs` adds two command jobs to a builder that already has a file watcher.
+The archiver moves each inbox delivery into the root's object store and records it in the ledger.
+The processor passes each archived file to your handler and records the outcome.
+[The file-processing README](../examples/file_processing/README.md) states the protocol and its limits.
+
+```python
+from dsl41.file_processing_dsl import add_file_processing_jobs
+
+worker = ["/opt/site/venv/bin/python", "-m", "dsl41.file_processing_worker"]
+common = ["--root", "/srv/fp", "--processor-id", "invoices-v1"]
+add_file_processing_jobs(
+    b,
+    inbox_watcher="INBOX_FW",
+    machine="prod1",
+    archive_argv=[*worker, "archive", *common],
+    process_argv=[*worker, "process", *common, "--handler", "invoices.handler:make"],
+)
+```
+
+| Job | Condition | Command role |
+| --- | --- | --- |
+| `ARCHIVER` | `s(INBOX_FW)` | `archive` |
+| `PROCESSOR` | `s(ARCHIVER, 0)` | `process` |
+
+The call refuses with a `ValueError`, and adds neither job, when:
+
+- `inbox_watcher` does not name an FW job already in the builder;
+- an argv list is empty;
+- a job name is taken, or the two names are equal;
+- the call is inside a `box()` context;
+- `archiver_attrs` or `processor_attrs` sets `job_type`, `box_name`, `machine`, `command`, `condition`, `name` or a statement verb such as `insert_job`, at the top level or inside `passthrough` or `annotations`;
+- a name, an argv element or an attribute is one the builder refuses, such as a name with a space or an argv element with a newline.
+
+Pass other JIL attributes, such as `owner` or `std_out_file`, in `archiver_attrs` and `processor_attrs`.
+`archiver=` and `processor=` rename the two jobs.
+
+On the host, each job's `command:` is the argv joined with shell quoting:
+
+```text
+/opt/site/venv/bin/python -m dsl41.file_processing_worker archive --root /srv/fp --processor-id invoices-v1
+/opt/site/venv/bin/python -m dsl41.file_processing_worker process --root /srv/fp --processor-id invoices-v1 --handler invoices.handler:make
+```
+
+The command needs dsl41 and your handler's module installed in that Python environment, and no checkout.
+`MODULE:FACTORY` names a callable that takes the root as a `Path` and returns the handler.
+`--order oldest` and `--batch all` are the defaults and the production policy.
+
+| Worker exit | Meaning |
+| --- | --- |
+| 0 | The selected snapshot completed. |
+| 1 | The run stopped; the ledger holds the reason, or stderr does for a busy ledger. Exit 1 also covers a Python without dsl41 and any uncaught error; the ledger then holds no reason, so read stderr. |
+| 2 | The command line or the handler could not be loaded; nothing ran. |
+| 65 | A refusal: corrupt, inconsistent or unsupported state for an operator. |
+| 75 | The role's lock was busy; nothing ran. |
+
+The helper adds no timer and no rearm.
+How the jobs run again is your choice: [the contract's activation ruling](../examples/file_processing/CONTRACT.md#activation-is-external-owner) lists the options and the zero-lookback edge.
 
 ## 2. Check which constructs dsl41 accepts
 

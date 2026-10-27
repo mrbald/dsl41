@@ -1,7 +1,12 @@
 # Experimental file processing
 
 This is code as documentation for one host and a local POSIX filesystem.
-It is not a frozen dsl41 API. It adds no compiler or scheduler behavior.
+Slices 1 to 4 of [HANDOVER.md](HANDOVER.md) are built. The authoring API is
+`add_file_processing_jobs` and the worker command
+`python -m dsl41.file_processing_worker`; the job author's guide shows both
+([authoring §1.1](../../docs/authoring.md#11-add-file-processing-to-an-estate)).
+Slice 5 (scheduler composition through the real runner) and slice 6
+(qualification) are not built. It adds no compiler or scheduler behavior.
 The worker imports the existing statechart executor, but no scheduler.
 The Python estate uses ordinary `CatalogBuilder.job` calls.
 
@@ -308,14 +313,16 @@ A busy lock makes either recipe exit nonzero without running the repair, as
 ## Python estate and one-cycle watcher
 
 Import `add_file_processing_jobs` from `dsl41.file_processing_dsl` to add exactly
-two command jobs to an existing builder. This helper is explicitly experimental
-and separate from the worker's imports.
-The caller supplies the existing FW name, machine and trusted command argv.
-`shlex.join` quotes argv. Commands explicitly invoke the chosen Python worker.
+two command jobs to an existing builder. The helper is separate from the
+worker's imports. The caller supplies the existing FW name, machine and trusted
+command argv. `shlex.join` quotes argv. Commands explicitly invoke the chosen
+Python and the deployed worker, `python -m dsl41.file_processing_worker`.
 There is no implicit runtime dependency in compiled artifacts.
+[Authoring §1.1](../../docs/authoring.md#11-add-file-processing-to-an-estate)
+lists the helper's refusals, the host command and the worker's exit codes.
 
-`build_estate` demonstrates exactly one literal-path FW plus ARCHIVER and
-PROCESSOR. ARCHIVER depends on watcher success. PROCESSOR uses
+`estate` in [estate.py](estate.py) demonstrates exactly one literal-path FW plus
+ARCHIVER and PROCESSOR. ARCHIVER depends on watcher success. PROCESSOR uses
 `s(ARCHIVER,0)`. There is no TODO watcher. The ready signal path is an explicit
 one-cycle demonstration input. Publish the complete inbox deliveries before
 publishing that signal. The FW watches a literal file and size stability; it
@@ -334,11 +341,11 @@ the normal Python builder pipeline; direct `.py` CLI loading is not supported:
 .venv/bin/dsl41 run "$root/estate.jil"
 ```
 
-The command jobs use `python -m examples.file_processing.worker`. The repository
-root must therefore be importable by those processes. Supply absolute script
-paths or another installed application entry point in a real caller's argv.
-The generated catalog command above is illustrative; the demo does not run a
-supervisor or assert runner qualification.
+The process job names the sample handler as
+`--handler examples.file_processing.worker:counts_handler`, so the repository
+root must be importable by that process. A real estate names its own installed
+handler module. The generated catalog command above is illustrative; the demo
+does not run a supervisor or assert runner qualification.
 
 Zero lookback compares the archiver END with the processor's last END (SEM-04).
 A first run can match an old archiver success. An archiver completion during a

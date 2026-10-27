@@ -421,3 +421,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-408 | The site package is the infrastructure and keeps fixed what a JIL release runs within; a JIL release is the application's and travels on its own train through... | [docs/deployment-runbook.md](deployment-runbook.md), [docs/site-package.md](site-package.md), [docs/writing.md](writing.md) |
 | DL-409 | A lease renewal with no reply within ten seconds is a failed renewal | [docs/concurrency-model.md](concurrency-model.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-410 | A decompiled estate is a Python module that declares `estate()`, and `dsl41 build` renders it |  |
+| DL-411 | Slice 4 of DL-404's plan is built: one supported composition call and one packaged worker command |  |
