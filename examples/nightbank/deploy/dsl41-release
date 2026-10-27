@@ -65,10 +65,12 @@ pending hold again under that id, and the engine answers from its first
 decision; an applied hold that moved no revision held nothing new and is
 not the helper's. The helper releases each of its holds that is still held,
 a hold a schedule tick latched included, under a request id recorded before
-the send, so a release with no decision is sent again under that id. It
-keeps a hold when the run root's log shows an OFF_HOLD of the job from
-another request after the helper's hold: the hold there now is somebody
-else's. It never releases a hold it did not apply. DSL41_RELEASE_STOP_AFTER=seal-reply kills the
+the send, so a release with no decision is sent again under that id; a
+resend refused outright is settled by the run root's log. It keeps a hold
+when that log shows, after the helper's hold, an applied request of another
+that can move the job's hold (ON_HOLD, OFF_HOLD, FORCE_STARTJOB, ON_NOEXEC):
+the hold there now may be somebody else's. It never releases a hold it did
+not apply. DSL41_RELEASE_STOP_AFTER=seal-reply kills the
 helper after the seal exits 0 and before that is recorded; =seal kills it
 after it is recorded and before ACTIVE is written. The drill uses both, and
 nothing else should.
@@ -145,6 +147,9 @@ SEGMENT = "[0-9]" * 6 + ".jsonl"
 HORIZON = re.compile(
     r"was (-?\d+(?:\.\d+)?)s ago and the closing period's retry_horizon_us is (\d+)"
 )
+#: the request kinds that can move a job's hold: the two hold verbs, FORCE_STARTJOB, which
+#: clears it, and ON_NOEXEC, which supersedes it (job chart rows job.204 to job.207)
+HOLD_KINDS = ("ON_HOLD", "OFF_HOLD", "FORCE_STARTJOB", "ON_NOEXEC")
 #: the job states the drain waits out (deployment-runbook ss0, job recipe step 3)
 LIVE = ("STARTING", "RUNNING", "QUE_WAIT")
 #: the apply's steps, in order; each is recorded before the next acts
@@ -482,13 +487,13 @@ def service_pins(cfg: Config, request_id: str) -> dict[str, Any]:
     }
 
 
-def hold_history(cfg: Config, job: str, request_id: str) -> dict[str, Any]:
-    """Whether the run root's log holds the applied ON_HOLD of JOB under REQUEST_ID, and
-    the request ids of applied OFF_HOLDs of JOB after it, across the last three WAL
-    segments: an `input` names the verb, the job and the request id, and the `decision` at
-    its index says whether it applied (period-model ss2.3)."""
+def hold_history(cfg: Config, job: str) -> dict[str, Any]:
+    """The applied requests that can move JOB's hold, in the run root's log order across the
+    last three WAL segments: each `input` of a kind in HOLD_KINDS that names the job, whose
+    `decision` at its index applied, with the revision that decision gave the job
+    (period-model ss2.3)."""
     inputs: list[dict[str, Any]] = []
-    applied: set[tuple[str, int]] = set()
+    applied: dict[tuple[str, int], Any] = {}
     for segment in sorted((cfg.run_root / "wal").glob(SEGMENT))[-3:]:
         for line in segment.read_bytes().split(b"\n"):
             try:
@@ -496,20 +501,22 @@ def hold_history(cfg: Config, job: str, request_id: str) -> dict[str, Any]:
             except ValueError:
                 continue
             if record.get("rec") == "input" and (record.get("payload") or {}).get("job") == job:
-                if record.get("kind") in ("ON_HOLD", "OFF_HOLD"):
+                if record.get("kind") in HOLD_KINDS:
                     inputs.append(record | {"segment": segment.name})
             if record.get("rec") == "decision" and record.get("decision") == "applied":
-                applied.add((segment.name, int(record["index"])))
-    found = False
-    released_by: list[str] = []
-    for record in inputs:
-        if (record["segment"], int(record["seq"])) not in applied:
-            continue
-        if record["kind"] == "ON_HOLD" and record.get("request_id") == request_id:
-            found, released_by = True, []
-        elif found and record["kind"] == "OFF_HOLD":
-            released_by.append(str(record.get("request_id")))
-    return {"found": found, "released_by": released_by}
+                revisions = record.get("revisions") or {}
+                applied[(segment.name, int(record["index"]))] = revisions.get(f"job:{job}")
+    return {
+        "changes": [
+            {
+                "request_id": record.get("request_id"),
+                "kind": record["kind"],
+                "rev": applied[(record["segment"], int(record["seq"]))],
+            }
+            for record in inputs
+            if (record["segment"], int(record["seq"])) in applied
+        ]
+    }
 
 
 def service_seal(cfg: Config, name: str, request_id: str, actor: str) -> int:
@@ -541,8 +548,8 @@ def service(argv: list[str]) -> int:
     if action == "committed" and len(rest) == 1 and ids == rest:
         print(json.dumps(committed(cfg, rest[0])))
         return EXIT_OK
-    if action == "holds" and len(rest) == 2 and NAME.fullmatch(rest[0]) and ids == rest[1:]:
-        print(json.dumps(hold_history(cfg, rest[0], rest[1])))
+    if action == "holds" and len(rest) == 1 and NAME.fullmatch(rest[0]):
+        print(json.dumps(hold_history(cfg, rest[0])))
         return EXIT_OK
     if action == "pins" and len(rest) == 1 and ids == rest:
         print(json.dumps(service_pins(cfg, rest[0])))
@@ -550,7 +557,7 @@ def service(argv: list[str]) -> int:
     raise Stop(
         EXIT_REFUSED,
         "usage: service check NAME | changes FROM TO | seal NAME ID ACTOR | committed ID"
-        f" | holds JOB ID | pins ID, not {argv}",
+        f" | holds JOB | pins ID, not {argv}",
     )
 
 
@@ -833,7 +840,7 @@ class Apply:
         recorded before the send, so a resume sends a pending hold again under it."""
         for entry in self.record["holds"]:
             if entry["state"] == "pending":
-                self.send_hold(entry)
+                self.send_hold(entry, resend=True)
         timers = query(self.cfg, "timers")["timers"]
         mine = {entry["job"] for entry in self.record["holds"] if entry["state"] != "rejected"}
         scheduled = sorted({row["job"] for row in timers if row.get("kind") == "schedule"})
@@ -862,17 +869,25 @@ class Apply:
         taken = [entry["job"] for entry in self.record["holds"] if entry["state"] == "applied"]
         say(f"holds taken: {', '.join(taken) or 'none'}")
 
-    def send_hold(self, entry: dict[str, Any]) -> bool:
+    def send_hold(self, entry: dict[str, Any], *, resend: bool = False) -> bool:
         """The ON_HOLD of ENTRY under its recorded request id, expect, epoch and baseline; an
         exact resend is answered from the first decision, which settles whether the hold is
         the helper's. An applied answer that moved no revision of the job held nothing new (a
-        RUNNING job's hold is a no-op), so that hold is never the helper's to release."""
+        RUNNING job's hold is a no-op), so that hold is never the helper's to release. A
+        resend refused outright proves nothing about the first send: the run root's log
+        settles it."""
         code, answer = self.send_recorded("ON_HOLD", entry, "request_id")
+        rev = (answer.get("revisions") or {}).get(f"job:{entry['job']}")
+        if code == 2 and resend:
+            mine = [
+                c for c in self.hold_log(entry["job"]) if c["request_id"] == entry["request_id"]
+            ]
+            if mine:
+                code, rev = 0, mine[0]["rev"]
         if code == 2:
             entry |= {"state": "rejected", "reason": answer["error"]}
             self.step(self.record["step"])
             raise Stop(EXIT_REFUSED, f"the hold of {entry['job']} was refused: {answer['error']}")
-        rev = (answer.get("revisions") or {}).get(f"job:{entry['job']}")
         if code != 0:
             entry["state"] = "rejected"
         elif rev is None:
@@ -881,6 +896,10 @@ class Apply:
             entry |= {"state": "applied", "rev": rev}
         self.step(self.record["step"])
         return code == 0
+
+    def hold_log(self, job: str) -> list[dict[str, Any]]:
+        changes: list[dict[str, Any]] = service_json("holds", job)["changes"]
+        return changes
 
     def send_recorded(self, verb: str, entry: dict[str, Any], key: str) -> tuple[int, Any]:
         """VERB for ENTRY's job under the request id at KEY and the expect, epoch and baseline
@@ -1055,17 +1074,20 @@ class Apply:
         recorded before the send. A pending hold is settled first, and a release left without
         a decision is sent again under its id. A hold stays when the job is no longer held
         or no longer defined (a ghost keeps its row, period-model ss10), or when the run root's
-        log shows an OFF_HOLD of the job from another request after the helper's hold: the
-        hold there now is somebody else's. A hold the helper never applied is never released.
+        log shows, after the helper's hold, an applied request of another that can move the
+        job's hold. A hold the helper never applied is never released.
         The receipt's lists are the recorded states."""
         for entry in self.record["holds"]:
             if entry["state"] == "pending":
-                self.send_hold(entry)
+                self.send_hold(entry, resend=True)
         for entry in self.record["holds"]:
-            if entry["state"] == "applied":
-                self.settle_release(entry)
-            if entry["state"] == "releasing":
-                self.send_release(entry)
+            resend = entry["state"] == "releasing"
+            while entry["state"] in ("applied", "releasing"):
+                if entry["state"] == "applied":
+                    self.settle_release(entry)
+                if entry["state"] == "releasing":
+                    self.send_release(entry, resend=resend)
+                    resend = False
         released = [e["job"] for e in self.record["holds"] if e["state"] == "released"]
         kept = [e["job"] for e in self.record["holds"] if e["state"] == "kept"]
         for entry in (e for e in self.record["holds"] if e["state"] == "kept"):
@@ -1083,27 +1105,49 @@ class Apply:
         elif not row.get("on_hold"):
             reason = "the job is no longer held"
         else:
-            others = service_json("holds", job, entry["request_id"])
-            if not others["found"]:
+            log = self.hold_log(job)
+            ids = [change["request_id"] for change in log]
+            mine = {entry["request_id"], *entry.get("release_ids", [])}
+            if entry["request_id"] not in ids:
                 reason = "the run root's log does not show the helper's hold"
-            elif others["released_by"]:
-                reason = f"released since by request {', '.join(others['released_by'])}"
+            else:
+                after = log[ids.index(entry["request_id"]) + 1 :]
+                others = [
+                    f"{c['kind']} {c['request_id']}" for c in after if c["request_id"] not in mine
+                ]
+                if others:
+                    reason = f"its hold moved since, by request {', '.join(others)}"
         if reason is not None:
             entry |= {"state": "kept", "reason": reason}
         else:
+            release_id = str(uuid.uuid4())
             entry |= {
                 "state": "releasing",
-                "release_id": str(uuid.uuid4()),
+                "release_ids": [*entry.get("release_ids", []), release_id],
+                "release_id": release_id,
                 "release_id_expect": int(row["state_rev"]),
                 "release_id_epoch": int(answer["epoch"]),
                 "release_id_baseline": str(answer["baseline_id"]),
             }
         self.step(self.record["step"])
 
-    def send_release(self, entry: dict[str, Any]) -> None:
+    def send_release(self, entry: dict[str, Any], *, resend: bool = False) -> None:
+        """The recorded OFF_HOLD. A rejection, such as a tick that latched the job after the
+        expect was read, settles the release again under a new id, three sends in all,
+        before the hold is kept. A resend refused outright is settled by the run root's log:
+        an applied OFF_HOLD under the release id released the hold."""
         code, answer = self.send_recorded("OFF_HOLD", entry, "release_id")
+        attempts = int(entry.get("release_attempts", 1))
+        if code == 2 and resend:
+            log = self.hold_log(entry["job"])
+            released = any(
+                c["request_id"] == entry["release_id"] and c["kind"] == "OFF_HOLD" for c in log
+            )
+            code = 0 if released else 3
         if code == 0:
             entry["state"] = "released"
+        elif code == 3 and attempts < 3:
+            entry |= {"state": "applied", "release_attempts": attempts + 1}
         else:
             reason = answer.get("error") or answer.get("code") or answer.get("decision")
             entry |= {"state": "kept", "reason": f"OFF_HOLD exited {code}: {reason}"}
