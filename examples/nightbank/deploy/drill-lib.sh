@@ -225,8 +225,8 @@ activate() { # activate NAME
     if ! sudo test -f "$ACTIVE" || sudo test -L "$ACTIVE"; then fail "$ACTIVE is not a plain file"; fi
     [ "$(sudo cat "$ACTIVE")" = "$1" ] || fail "$ACTIVE does not name $1"
 }
-# A runtime before dsl41 1.13 has no `estate args`, and the current
-# launcher refuses it: a site that rolls back below 1.13 reinstalls the site
+# A runtime before dsl41 1.13.0 has no `estate args`, and the current
+# launcher refuses it: a site that rolls back below 1.13.0 reinstalls the site
 # package qualified with that release (DL-407). The drill's v1.7.0 steps
 # install that generation's launcher, kept as a fixture, at the launcher's
 # path, with ESTATE the active release; restore_launcher puts the current one

@@ -482,11 +482,10 @@ ESTATE_ARGS = (
 
 
 def test_the_seal_recipe_restates_the_launchers_options_after_the_manifests_words() -> None:
-    """The estate's words come from the manifest, as the launcher's do: `--for seal`
-    gives the files as `--next` and the timezone as `--next-timezone`. The site's
-    `-p` follows them, and the `--next-*` options after it are the launcher's
-    deployment options (a seal does not inherit them). job-check lints, then
-    rehearses, from the same manifest."""
+    """The estate's words come from the manifest through `--for seal`, as the
+    launcher's do. The site's `-p` follows them, and the `--next-*` options after it
+    are the launcher's deployment options (a seal does not inherit them). job-check
+    lints, then rehearses, from the same manifest."""
     seal = _lines("job-seal")
     assert seal[:2] == [line.format(verb="seal") for line in ESTATE_ARGS]
     assert seal[2].startswith(

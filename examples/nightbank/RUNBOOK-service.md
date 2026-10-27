@@ -22,6 +22,9 @@ The RPM is the packager's ([site package](../../docs/site-package.md)).
 (deployment-runbook §1), and recipe `operator-env` from
 [§0](../../docs/deployment-runbook.md#0-the-operator-path). `runner` has passwordless
 `sudo`. Three shells run the commands, as §0 assigns them; join again for a second one.
+The recipe reads `ESTATE` from `active` when you type it: until exercise 24 writes
+`active`, it prints a `cat` error, so type it again after exercise 24 and after any
+release switch.
 
 | Shell | Open it with | Runs |
 | --- | --- | --- |
@@ -106,8 +109,8 @@ The drill's `install` and `first-start` steps check the same.
 install -d -m 0755 /srv/dsl41 && cp -R examples/nightbank /srv/dsl41/nightbank
 install -d -m 0755 /srv/dsl41/nightbank/releases
 cp -R /srv/dsl41/nightbank/estate/small /srv/dsl41/nightbank/releases/small-r1
-chown -R root:root /srv/dsl41/nightbank && chmod -R go-w,a+rX /srv/dsl41/nightbank
 printf '%s\n' small-r1 >/srv/dsl41/nightbank/active
+chown -R root:root /srv/dsl41/nightbank && chmod -R go-w,a+rX /srv/dsl41/nightbank
 ```
 
    In the same shell, type recipe `service-install`, and `exit`. Its last line, the

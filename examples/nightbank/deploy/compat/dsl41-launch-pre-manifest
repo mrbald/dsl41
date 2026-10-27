@@ -2,8 +2,8 @@
 # dsl41-launch-pre-manifest -- a drill fixture, not an example to copy.
 #
 # The launcher generation before the release manifest (DL-407), for a
-# runtime before dsl41 1.13, which has no `estate args`. The current
-# launcher refuses such a runtime, and a site that rolls back below 1.13
+# runtime before dsl41 1.13.0, which has no `estate args`. The current
+# launcher refuses such a runtime, and a site that rolls back below 1.13.0
 # reinstalls the site package qualified with that release, this launcher
 # among it. The service drill does the same for its v1.7.0 steps and
 # restores the current launcher after them. ESTATE names one release

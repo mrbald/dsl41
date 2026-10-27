@@ -29,7 +29,9 @@ account, for example with `sudo -u dsl41 -H`. Send control-socket commands
 you in its receipts ([configure](#recipe-configure-an-estate)).
 
 The recipes name the launcher's configuration through these variables.
-Set them once per shell. The values are the example launcher's:
+Set them once per shell. The values are the example launcher's. `ESTATE`
+is the active release's directory, read from `ACTIVE` when you type the
+block, so type it again after a release switch:
 
 <!-- recipe: operator-env -->
 ```sh
@@ -205,8 +207,9 @@ sudo -u dsl41 /opt/dsl41/bin/dsl41-launch --print
    `/srv/dsl41/runs`, and whatever its jobs write. A job's data
    directories and its `std_out_file` targets must be the account's:
    nightbank's jobs write under `/srv/dsl41/nightbank/night`, which the
-   drill creates owned by the account. Put the estate checkout where the launcher's
-   `ESTATE` names it, owned by root and read-only to the account (§2). The
+   drill creates owned by the account. Install the estate's release under the
+   launcher's `ESTATE_RELEASES` and name it in `ACTIVE`, owned by root and
+   read-only to the account (§2). The
    access map must be owned by the account and writable by no one else,
    in a directory owned by root or the account and writable by no one
    else (access-model §4).
@@ -309,16 +312,15 @@ its block. Remove one by deleting its block. A job that a remaining
 condition still names is a lint error (L001).
 
 1. Commit the edit to the estate's repository and tag it. If it adds or
-   removes a file, edit the launcher's file list and the `--next` list
-   below to match, in the same order.
+   removes a file, edit the release's `estate.toml` to match: the launcher
+   and the blocks below take the file list from it (DL-407).
 2. Before the window, check the new tag in a checkout of its own, with
-   `ESTATE` pointing at that checkout. Fix every ERROR. Pass lint and
-   rehearse the launcher's `--timezone`, and its `--timezone-map` when it
-   has one. Without `--timezone`, both work in UTC: rule L023 checks DST
-   effects there (DL-316), and rehearse plays the schedules there. Pass
-   rehearse the launcher's `--semantics` too, when it sets any; lint takes
-   no `--semantics`. The example launcher passes `--timezone UTC` and no
-   `--semantics`:
+   `ESTATE` pointing at that checkout. Fix every ERROR. The blocks take
+   lint's and rehearse's `--timezone` and `--timezone-map` from the
+   manifest, and rehearse's `--semantics`; lint takes no `--semantics`.
+   Without a timezone, both work in UTC: rule L023 checks DST effects
+   there (DL-316), and rehearse plays the schedules there. The example
+   manifest sets `timezone = "UTC"` and no semantics:
 
 <!-- recipe: job-check -->
 ```sh
@@ -341,12 +343,11 @@ dsl41 rehearse "$@" -p "$PROPERTIES"
    (period-model §10.1, §10.3). A
    seal also refuses inside the retry horizon after the last operator
    request, a hold included (§2b); wait it out.
-4. Set `ESTATE` back to the launcher's value, the live checkout: the
-   seal records the paths it reads, and the opener reads the launcher's.
-   Swap the live checkout to the new tag (`git -C "$ESTATE" checkout
-   <tag>`) and seal at once. Between the swap and the seal, a crash
-   restart refuses with exit 2, because the files no longer match the
-   running catalog. The `--next-*` options restate the launcher's run
+4. Set `ESTATE` to the new release's directory, installed whole beside
+   the active one: the seal records the paths it reads, and the opener
+   reads the release that `ACTIVE` names. Seal at once, and after the seal
+   write the new release's name to `ACTIVE`, before step 5. The `--next-*`
+   options restate the launcher's run
    options; they do not inherit them (§6a):
 
 <!-- recipe: job-seal -->
