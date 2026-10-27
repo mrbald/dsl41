@@ -1270,9 +1270,13 @@ def decompile(
     *,
     disable: Collection[str] = (),
     report: list[str] | None = None,
+    permit_unknown: bool = False,
 ) -> str:
     """Emit a Python module whose estate() returns a builder for a catalog canonically equal to
-    this one. Importing the module builds nothing; run as a script it prints the JIL.
+    this one. Importing the module builds nothing; run as a script it prints the JIL (DL-410).
+
+    `permit_unknown` is the flag the catalog was lowered with; the module's script footer and its
+    header's `dsl41 build` hint carry it, so an estate with unknown attributes still renders.
 
     `disable` opts out of folds by code (FOLDS, DL-38); a bare string is one code and unknown
     codes are refused. `report` collects the fold inventory and the explicit-link diagnostics."""
@@ -1299,8 +1303,10 @@ def decompile(
     body += _decompile_records(catalog)
     body += _decompile_fold_wiring(catalog, graph, disabled, report)
     body += ["", "return c"]
+    flag = " --permit-unknown" if permit_unknown else ""
     lines: list[str] = [
-        "# Decompiled by dsl41 (phase 10). Write its JIL with: dsl41 build THIS_FILE -o FILE.jil",
+        f"# Decompiled by dsl41 (phase 10). Write its JIL with: dsl41 build{flag} THIS_FILE"
+        " -o FILE.jil",
         "from dsl41.dsl import CatalogBuilder",
         "",
         "",
@@ -1312,7 +1318,7 @@ def decompile(
         "    import sys",
         "",
         "    c = estate()",
-        "    c.build()",
+        "    c.build(permit_unknown=True)" if permit_unknown else "    c.build()",
         "    sys.stdout.write(c.to_jil())",
         "",
     ]

@@ -352,6 +352,7 @@ def decompile(
             catalog,
             disable=[code for chunk in no_fold for code in chunk.split(",")],
             report=fold_report,
+            permit_unknown=permit_unknown,
         )
     except DslError as exc:
         # a decompiler refusal is the same class as a lowering refusal: the input never became
@@ -391,43 +392,79 @@ def decompile(
 
 
 def _builder_from_module(module: Path) -> "CatalogBuilder":
-    """Import MODULE from its path and return what its estate() returns, or exit 2.
+    """Import MODULE from its path and return what its estate() returns, or exit 2 (DL-410).
 
-    The module's directory leads sys.path during the import, as it does for `python MODULE`, so
-    an estate may import its sibling modules. The import writes no bytecode beside the source."""
+    Until estate() returns, the module's directory leads sys.path, as it does for `python
+    MODULE`, so an estate may import its sibling modules, at import or inside estate(). Nothing
+    writes bytecode beside the source. The module is registered in sys.modules under a name no
+    real module has, so code that looks itself up there (a dataclass under postponed
+    annotations) works. Afterwards the module and every module newly imported from its
+    directory leave sys.modules, so a later load in the same process imports its own siblings."""
     import importlib.util
+    import os
     import sys
 
     from dsl41.dsl import CatalogBuilder
 
-    spec = importlib.util.spec_from_file_location(module.stem, module)
+    spec = importlib.util.spec_from_file_location(
+        f"dsl41_build_{module.stem}_{os.getpid()}", module
+    )
     if spec is None or spec.loader is None:
         raise typer.Exit(refuse(f"{module}: not a Python source file"))
     loaded = importlib.util.module_from_spec(spec)
-    directory = str(module.resolve().parent)
-    sys.path.insert(0, directory)
+    directory = module.resolve().parent
+    known = set(sys.modules)
+    sys.modules[spec.name] = loaded
+    sys.path.insert(0, str(directory))
     write_bytecode, sys.dont_write_bytecode = sys.dont_write_bytecode, True
     try:
-        spec.loader.exec_module(loaded)
-    except (Exception, SystemExit) as exc:
-        raise typer.Exit(
-            refuse(f"{module}: importing the module raised {type(exc).__name__}: {exc}")
-        ) from exc
+        try:
+            spec.loader.exec_module(loaded)
+        except (Exception, SystemExit) as exc:
+            raise typer.Exit(
+                refuse(f"{module}: importing the module raised {type(exc).__name__}: {exc}")
+            ) from exc
+        function = getattr(loaded, "estate", None)
+        if not callable(function):
+            raise typer.Exit(refuse(f"{module}: the module defines no estate() function"))
+        try:
+            builder = function()
+        except (Exception, SystemExit) as exc:
+            raise typer.Exit(
+                refuse(f"{module}: estate() raised {type(exc).__name__}: {exc}")
+            ) from exc
     finally:
         sys.dont_write_bytecode = write_bytecode
-        sys.path.remove(directory)
-    function = getattr(loaded, "estate", None)
-    if not callable(function):
-        raise typer.Exit(refuse(f"{module}: the module defines no estate() function"))
-    try:
-        builder = function()
-    except (Exception, SystemExit) as exc:
-        raise typer.Exit(refuse(f"{module}: estate() raised {type(exc).__name__}: {exc}")) from exc
+        sys.path.remove(str(directory))
+        for name in set(sys.modules) - known:
+            origin = getattr(sys.modules[name], "__file__", None)
+            if name == spec.name or (origin and Path(origin).resolve().is_relative_to(directory)):
+                del sys.modules[name]
     if not isinstance(builder, CatalogBuilder):
         raise typer.Exit(
             refuse(f"{module}: estate() returned {type(builder).__name__}, not a CatalogBuilder")
         )
     return builder
+
+
+def _jil_diff(current: bytes, data: bytes, fromfile: str, tofile: str) -> str:
+    """A unified diff of two JIL texts that marks a missing final newline, as diff(1) does, and
+    names a difference of line endings or trailing newlines alone (DL-410)."""
+    import difflib
+
+    lines: list[str] = []
+    for line in difflib.unified_diff(
+        current.decode("utf-8", errors="replace").splitlines(keepends=True),
+        data.decode("utf-8").splitlines(keepends=True),
+        fromfile=fromfile,
+        tofile=tofile,
+    ):
+        lines.append(line)
+        if not line.endswith("\n"):
+            lines.append("\n\\ No newline at end of file\n")
+    if current.replace(b"\r\n", b"\n").rstrip(b"\n") == data.replace(b"\r\n", b"\n").rstrip(b"\n"):
+        lines.append("The two differ only in line endings or trailing newlines.\n")
+    return "".join(lines)
 
 
 def _write_atomic(target: Path, data: bytes) -> None:
@@ -453,7 +490,11 @@ def build(
         ..., help="Python file that defines estate() and returns a CatalogBuilder."
     ),
     out: Path = typer.Option(
-        None, "--out", "-o", help="Write the JIL to this file. The file is replaced whole."
+        None,
+        "--out",
+        "-o",
+        help="Write the JIL to this file. It is replaced whole by a plain file;"
+        " a symlink there is replaced, not followed.",
     ),
     check: Path = typer.Option(
         None,
@@ -478,8 +519,6 @@ def build(
     CatalogBuilder, its JIL did not lower, or a file could not be read
     or written.
     """
-    import difflib
-
     from dsl41.ast_jil import JilParseError
     from dsl41.ir import LoweringError
 
@@ -506,13 +545,7 @@ def build(
     if current == data:
         typer.echo(f"{check} matches {module}")
         return
-    diff = difflib.unified_diff(
-        current.decode("utf-8", errors="replace").splitlines(keepends=True),
-        data.decode("utf-8").splitlines(keepends=True),
-        fromfile=str(check),
-        tofile=f"{module} estate()",
-    )
-    typer.echo("".join(diff), nl=False)
+    typer.echo(_jil_diff(current, data, str(check), f"{module} estate()"), nl=False)
     raise typer.Exit(1)
 
 
