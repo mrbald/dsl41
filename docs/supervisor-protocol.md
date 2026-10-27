@@ -661,7 +661,9 @@ clients ignore it like any unknown field.
   incarnation first, then the token (DL-150).
 - Engine defaults: `ttl_s = 60`, with a renewal every 20 s. This is the
   client's policy (DL-150). The supervisor's own default for an absent
-  `ttl_s` is the same 60 s.
+  `ttl_s` is the same 60 s. A renewal with no reply within 10 s fails. The
+  client then poisons the connection, as for any request whose reply may be
+  in flight, and the next renewal reconnects (DL-409).
 
 **Mutating verbs** (DL-80, DL-229). These require `incarnation` and
 `token`, and each signature line below names both. A foreign incarnation
