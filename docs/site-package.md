@@ -312,7 +312,9 @@ It owns `ESTATE_RELEASES` and `ACTIVE`, and it may replace `ACTIVE` in its direc
 The service account is a member of that group too, as the [configure recipe](deployment-runbook.md#recipe-configure-an-estate) requires.
 Through `sudo`, the identity may run `<prefix>/.venv/bin/dsl41 release service` as the service account, and `systemctl start dsl41-engine.service` as root.
 The verbs run that command by the launcher's `DSL41` path, so the grant matches whatever path the operator typed.
-They read the launcher at `<prefix>/bin/dsl41-launch`, beside the runtime they run on, and refuse one that anyone but root can write.
+They read the launcher at `<prefix>/bin/dsl41-launch`, beside the runtime they run on.
+They refuse it when anyone but root, or the account that runs the verb, can write it or a directory above it; a world-writable directory passes only with root as owner and the sticky bit set.
+They refuse to run on any runtime but the one the launcher's `DSL41` selects.
 The [sudoers file](../examples/nightbank/deploy/dsl41-release.sudoers) holds those two lines.
 The site package installs the sudoers file, and creates the identity, its group, the releases directory and `ACTIVE`'s directory.
 

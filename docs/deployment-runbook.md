@@ -436,17 +436,24 @@ cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release apply NAME
    | --- | --- | --- |
    | 0 | NAME is active in the next period, and every hold the apply took is released. | Verify (step 5). |
    | 1 | NAME is active, and some holds the apply took stay on. Each is printed with its reason and the `OFF_HOLD` command that releases it. | Verify (step 5). Release each printed hold once it is safe. A hold another operator changed may be theirs: agree with them first. |
-   | 2 | Refused, or the seal did not commit. Nothing was sealed and `ACTIVE` is as it was. The holds the apply took are released, so a job a tick latched under one of them starts; no apply stays recorded, and NAME's `.release/` keeps a `refused-` receipt. | Fix the cause the line names, and apply again. Files that need a change go in a new release under a new name. When the line names an apply already recorded, that apply stays: run `dsl41 release status` and resume it. |
-   | 3 | Stopped. An interrupt or a lost session stops it the same way. | Run `dsl41 release status` and do what it says. It shows a recorded apply and what `dsl41 release resume` will do; fix the cause, then resume. With no apply recorded, its `last apply` line says whether the last apply completed or sealed nothing. |
+   | 2 | Refused, or the seal did not commit. Nothing was sealed and `ACTIVE` is as it was. When the apply had started, the holds it took are released, so a job a tick latched under one of them starts, and NAME's `.release/` keeps a `refused-` receipt. A refusal before the apply starts (not prepared, already active, no engine, another apply holds the lock) takes no hold and leaves no receipt. | Fix the cause the line names, and apply again. Files that need a change go in a new release under a new name. Three refusals keep an apply that is already recorded, with its holds, and say so: an apply or a rollback while one is recorded, a resume whose release no longer passes the prepare check, and a rollback take-over whose target does not pass it or finds no engine. Run `dsl41 release status` and resume it. |
+   | 3 | Stopped. An interrupt or a lost session stops it the same way, and so does a refused apply whose own hold the engine would not release. | Run `dsl41 release status` and do what it says. It shows a recorded apply and what `dsl41 release resume` will do; fix the cause, then resume. With no apply recorded, its `last apply` line says whether the last apply completed or sealed nothing. |
    | 4 | The seal's outcome is unknown. The apply is recorded with its request id, and the scheduled jobs stay held. | Run `dsl41 release resume`. It reads the estate for that request id first, and retries under it, and under a new id only after a retry-horizon refusal. Do not seal by hand. |
 
-   A new apply, and a rollback, refuse while an apply is recorded. One
-   case differs: when the new period opened and its check failed (exit 3
-   at step 8), `dsl41 release resume` checks again, and
-   `dsl41 release rollback` takes the apply over. It releases that
-   apply's holds, writes a `rolled-back-` receipt with the problems,
-   clears the record, and applies the release the apply replaced, with
-   the exit codes above. `dsl41 release status` names both commands.
+   A new apply, and a rollback, refuse while an apply is recorded, until
+   its new period has opened. From then on (exit 3 at step 8 when the
+   check failed, or at step 9 when releasing the holds failed),
+   `dsl41 release resume` checks again and finishes, and
+   `dsl41 release rollback` takes the apply over. The take-over releases
+   no hold: one rename replaces the record with the apply of the release
+   the failed one replaced, and that apply owns the old holds, so the jobs
+   stay held through its drain and seal. It writes the old apply's
+   receipt, `verify-failed-<id>.json` with what did not match, or
+   `taken-over-<id>.json` when the check had passed. It ends with the
+   exit codes above and releases the holds at its end. If it is refused,
+   its abort releases the holds, the failed release stays active, and
+   `dsl41 release status` says so; `dsl41 release rollback` then tries
+   again. `dsl41 release status` names both commands.
 5. Verify. `dsl41 release status` names the active release, whether an
    engine answers, where a rollback goes, and how the last apply ended,
    with each hold it kept. An added or changed job answers with the
@@ -475,7 +482,9 @@ cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release rollback
    It applies the release that the active release's latest receipt names
    as its previous one, with the exit codes of step 4, and prints that
    target first. A second rollback therefore goes forward again: check the
-   target `dsl41 release status` names before you type it. A release
+   target `dsl41 release status` names before you type it. A rollback never
+   applies a release whose last apply failed its check after the open; it
+   names that receipt, and `dsl41 release apply NAME` retries it on purpose. A release
    installed by hand, or applied without these verbs, has no receipt, so
    rollback has no target: apply the earlier release by name, after
    `dsl41 release prepare --requalify NAME` if it was never prepared.

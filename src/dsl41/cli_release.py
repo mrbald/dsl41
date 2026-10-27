@@ -54,7 +54,7 @@ off; 1 the release is active and some of its holds stay on, each printed
 with the command that takes it off; 2 refused: nothing was sealed, ACTIVE
 is unchanged, this apply's holds are released and no apply stays recorded;
 3 stopped, with the apply recorded: `{CMD_STATUS}` says what
-`{RESUME}` will do; 4 the seal's outcome is unknown, with the apply
+`{CMD_RESUME}` will do; 4 the seal's outcome is unknown, with the apply
 recorded: run `{CMD_RESUME}`. An interrupt or a lost session
 stops it with exit 3, the apply recorded.
 """
@@ -97,7 +97,9 @@ def estate_prepare(
 
     Run it as the deployment identity.
 
-    Exit codes: 0 prepared; 2 refused, and nothing changed.
+    Exit codes: 0 prepared; 2 refused: prepare installs nothing, and
+    --requalify leaves prepared.json as it was, though a release never
+    prepared keeps the read-only inputs it was given; 3 interrupted.
     """
     if requalify and source_dir is not None:
         raise typer.BadParameter("--requalify takes no SOURCE_DIR.", param_hint="SOURCE_DIR")
