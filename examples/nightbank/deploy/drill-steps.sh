@@ -658,7 +658,8 @@ step_kill_supervisor() { # SIGKILL of the supervisor: restart, resume and lease 
 
 # a release's receipt, one field; the active release's by default
 receipt() { # receipt FIELD [RELEASE]
-    sudo jq -r --arg f "$1" '.[$f]' "$ESTATE_RELEASES/${2:-$RELEASE}/.release/applied.json"
+    local dir=$ESTATE_RELEASES/${2:-$RELEASE}/.release
+    sudo jq -r --arg f "$1" '.[$f]' "$dir/$(sudo cat "$dir/latest")"
 }
 # exactly FILE differs between the releases' inputs
 only_differs() { # only_differs FROM TO FILE
@@ -707,9 +708,10 @@ JIL
     spec_has RELEASE_ADDED_C "echo added" || fail "the added job has no definition"
     spec_has RELEASE_PROBE_C "echo changed v1" || fail "the changed job is not the new definition"
     [ "$(receipt previous)" = small-v1 ] || fail "the receipt does not name small-v1"
-    sudo jq -e '.holds == .released and (.holds | index("EMEA_EOD_B") != null)
-        and (.holds | index("APAC_EOD_B") == null)' "$ESTATE/.release/applied.json" >/dev/null ||
+    [ "$(receipt holds | jq -c '[.[].job]')" = "$(receipt released | jq -c .)" ] ||
         fail "the helper's holds: $(receipt holds), released: $(receipt released)"
+    receipt released | jq -e 'index("EMEA_EOD_B") != null and index("APAC_EOD_B") == null' \
+        >/dev/null || fail "the helper released $(receipt released)"
     [ "$(job_field EMEA_EOD_B on_hold)" = false ] || fail "the helper kept its hold"
     [ "$(job_field APAC_EOD_B on_hold)" = true ] || fail "the helper released a hold it did not take"
     request ON_HOLD EMEA_EOD_B
@@ -793,37 +795,47 @@ step_release_concurrent() { # a second apply is refused while the first holds th
 
 # the committed seals in ROOT
 seal_count() { sudo find "$ROOT/seals" -name '[0-9][0-9][0-9][0-9][0-9][0-9].json' | wc -l; }
-step_release_interrupted() { # the helper killed after the seal: status shows it, resume completes it
+# One apply of a copy of the estate's own inputs, killed at STOP: the record
+# keeps STEP, ACTIVE still names FROM, the seal committed once, and the
+# engine sealed and exited 3; `status` says what resume does, and the resume
+# completes with no second seal.
+interrupted_apply() { # interrupted_apply NAME FROM STOP STEP SAYS
     local src rc seals out
-    # the estate's own inputs again, so the release the steps leave active
-    # has the file set of the release the drill installed
-    src=$(release_source small-v6 "$NIGHTBANK/estate/${DRILL_ESTATE:-small}")
-    deploy prepare small-v6 "$src"
+    src=$(release_source "$1" "$NIGHTBANK/estate/${DRILL_ESTATE:-small}")
+    deploy prepare "$1" "$src"
     seals=$(seal_count)
     sudo systemctl reset-failed "$ENGINE" 2>/dev/null || true
     rc=0
-    (cd / && sudo -u "$DEPLOY_USER" -H env DSL41_RELEASE_STOP_AFTER=seal "$RELEASE_HELPER" \
-        apply small-v6) || rc=$?
-    [ "$rc" != 0 ] || fail "the helper was not stopped after the seal"
-    [ "$(sudo jq -r .step "$ESTATE_RELEASES/.apply.json")" = sealed ] || fail "the record is not at sealed"
-    [ "$(cat "$ACTIVE")" = small-v5 ] || fail "ACTIVE moved before the helper wrote it"
+    (cd / && sudo -u "$DEPLOY_USER" -H env DSL41_RELEASE_STOP_AFTER="$3" "$RELEASE_HELPER" \
+        apply "$1") || rc=$?
+    [ "$rc" != 0 ] || fail "the helper was not stopped at $3"
+    [ "$(sudo jq -r .step "$ESTATE_RELEASES/.apply.json")" = "$4" ] || fail "the record is not at $4"
+    [ "$(cat "$ACTIVE")" = "$2" ] || fail "ACTIVE moved before the helper wrote it"
     [ "$(seal_count)" = $((seals + 1)) ] || fail "the seal did not commit"
     wait_for 90 "$ENGINE is failed" is_state "$ENGINE" failed
     [ "$(prop "$ENGINE" ExecMainStatus)" = 3 ] || fail "exit $(prop "$ENGINE" ExecMainStatus), not 3"
     out=$(deploy status)
     echo "$out"
-    grep -qF 'apply: small-v6 after small-v5, at step sealed' <<<"$out" || fail "status does not show the step"
-    grep -qF 'will write ACTIVE, start the engine unit, verify, and release the holds' <<<"$out" ||
-        fail "status does not say what resume does"
+    grep -qF "apply: $1 after $2, at step $4" <<<"$out" || fail "status does not show the step"
+    grep -qF "$5" <<<"$out" || fail "status does not say what resume does"
     sudo systemctl reset-failed "$ENGINE" 2>/dev/null || true
-    deploy apply --resume small-v6
+    deploy apply --resume "$1"
     follow_active
-    [ "$RELEASE" = small-v6 ] || fail "ACTIVE names $RELEASE, not small-v6"
+    [ "$RELEASE" = "$1" ] || fail "ACTIVE names $RELEASE, not $1"
     [ "$(seal_count)" = $((seals + 1)) ] || fail "the resume sealed again"
     ! sudo test -e "$ESTATE_RELEASES/.apply.json" || fail "the record is still there"
     wait_up
+    ok "the apply killed at $3 resumed from its record with no second seal; $1 is active"
+}
+
+step_release_interrupted() { # the helper killed around the seal: status shows it, resume completes it
+    # the estate's own inputs, so the release the steps leave active has the
+    # file set of the release the drill installed
+    interrupted_apply small-v6 small-v5 seal-reply sealing \
+        'will read the estate for request id'
+    interrupted_apply small-v7 small-v6 seal sealed \
+        'will write ACTIVE, start the engine unit, verify, and release the holds'
     release_teardown
-    ok "the interrupted apply resumed from its record with no second seal; small-v6 is active"
 }
 
 # ss7 row 1, a patch marked resume-safe: stop the engine unit, flip, start
