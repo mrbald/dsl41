@@ -24434,7 +24434,6 @@ relitigate an entry; append a new one.
   on every async request (their callers read `SupervisorUnavailable` as a supervisor gone); an
   unbounded resend of a queued request; a log line on every timeout of an outage (one line per
   eleven seconds for as long as the freeze lasts).
-<<<<<<< HEAD
 - DL-410 A decompiled estate is a Python module that declares `estate()`, and `dsl41 build`
   renders it (2026-10-27; src/dsl41/dsl.py, src/dsl41/cli_compile.py, README "DSL -> JIL
   (build)", docs/authoring.md §1 and §5)
@@ -24457,8 +24456,6 @@ relitigate an entry; append a new one.
   module or a module in the manifest's files (rebuilding at launch breaks the durable-input
   contract and replay provenance); `equiv` on a .py through the shared catalog loader (every
   catalog verb, `run` included, would then import Python).
-||||||| parent of f2c3cb3 (file processing slice 4: add_file_processing_jobs is the supported composition of the two jobs, and python -m dsl41.file_processing_worker is the packaged command with its handler loaded before any claim; the example estate declares estate() (DL-411))
-=======
 - DL-411 Slice 4 of DL-404's plan is built: one supported composition call and one packaged
   worker command (2026-10-27; src/dsl41/file_processing_dsl.py,
   src/dsl41/file_processing_worker.py, docs/authoring.md §1.1,
@@ -24483,4 +24480,3 @@ relitigate an entry; append a new one.
   surface, so the helper owns their records' conditions, placement and commands.
   REJECTED: a console script (a pyproject entry, and `python -m` names the interpreter the
   commands already name); building argv inside the helper (hides wrappers and policy flags).
->>>>>>> f2c3cb3 (file processing slice 4: add_file_processing_jobs is the supported composition of the two jobs, and python -m dsl41.file_processing_worker is the packaged command with its handler loaded before any claim; the example estate declares estate() (DL-411))
