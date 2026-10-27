@@ -259,23 +259,56 @@ def test_build_imports_sibling_modules_and_restores_the_interpreter(
         directory = tmp_path / f"estate{index}"
         directory.mkdir()
         _write(directory, "train_shared.py", f"MACHINE = {machine!r}\n")
-        importing = "    from train_shared import MACHINE\n"
+        (directory / "train_pkg").mkdir()
+        _write(directory / "train_pkg", "__init__.py", "")
+        _write(directory / "train_pkg", "values.py", f"COMMAND = 'run_{machine}'\n")
+        importing = (
+            "    from train_shared import MACHINE\n    from train_pkg.values import COMMAND\n"
+        )
         module = _write(
             directory,
             "estate.py",
             "from dsl41.dsl import CatalogBuilder\n"
-            + (importing.strip() + "\n" if where == "at-import" else "")
+            + (importing.replace("    ", "") if where == "at-import" else "")
             + "\n\ndef estate():\n"
             + (importing if where == "inside-estate" else "")
-            + "    return CatalogBuilder().job('a', command='x', machine=MACHINE)\n",
+            + "    return CatalogBuilder().job('a', command=COMMAND, machine=MACHINE)\n",
         )
         result = runner.invoke(app, ["build", str(module), "--stdout"])
         assert result.exit_code == 0, result.stderr
-        assert f"machine: {machine}\n" in result.stdout
-        assert sorted(p.name for p in directory.iterdir()) == ["estate.py", "train_shared.py"]
+        assert f"command: run_{machine}\nmachine: {machine}\n" in result.stdout
+        assert sorted(p.name for p in directory.iterdir()) == [
+            "estate.py",
+            "train_pkg",
+            "train_shared.py",
+        ]
+        assert not (directory / "train_pkg" / "__pycache__").exists()
     assert sys.path == path_before
-    assert "train_shared" not in sys.modules
+    assert not {"train_shared", "train_pkg", "train_pkg.values"} & set(sys.modules)
     assert not [name for name in sys.modules if name.startswith("dsl41_build_")]
+
+
+def test_build_keeps_a_module_found_through_another_path_entry_below_the_estate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A project's `.venv` or `src` below the estate's folder is not the estate's sibling."""
+    library = tmp_path / "src"
+    (library / "train_lib").mkdir(parents=True)
+    _write(library / "train_lib", "__init__.py", "MACHINE = 'm1'\n")
+    monkeypatch.syspath_prepend(str(library))
+    module = _write(
+        tmp_path,
+        "estate.py",
+        "from dsl41.dsl import CatalogBuilder\nfrom train_lib import MACHINE\n\n\n"
+        "def estate():\n    return CatalogBuilder().job('a', command='x', machine=MACHINE)\n",
+    )
+    try:
+        result = runner.invoke(app, ["build", str(module), "--stdout"])
+        assert result.exit_code == 0, result.stderr
+        assert "machine: m1\n" in result.stdout
+        assert "train_lib" in sys.modules
+    finally:
+        sys.modules.pop("train_lib", None)
 
 
 def test_build_runs_a_dataclass_under_postponed_annotations(tmp_path: Path) -> None:
