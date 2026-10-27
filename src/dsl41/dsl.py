@@ -18,8 +18,9 @@ Contracts (DL-17):
   parallel() (DL-37) where at least two jobs each carry exactly s(p) for one in-catalog
   producer p, plus the unique join whose condition is the conjunction of the members'
   successes. Zero or ambiguous joins stay explicit. Everything else is an explicit
-  job(condition=...) call. The output is a runnable module whose rebuilt catalog has the
-  original's canonical form; run as a script it prints the rebuilt JIL.
+  job(condition=...) call. The output is a module whose estate() returns a CatalogBuilder for
+  the original's canonical form; importing it builds nothing, and run as a script it prints
+  the rebuilt JIL. `dsl41 build` writes that JIL from the module.
 - FW jobs round-trip through job(watch_file=...) kwargs.
 - Folds (DL-38) are the closed set FOLDS (T-001..T-007). Each is derived from graph shape or
   typed lanes alone, detected by exact shape, reconstructed canonical-hash-neutral, and backed
@@ -1270,7 +1271,8 @@ def decompile(
     disable: Collection[str] = (),
     report: list[str] | None = None,
 ) -> str:
-    """Emit a runnable Python module whose rebuilt catalog is canonically equal to this one.
+    """Emit a Python module whose estate() returns a builder for a catalog canonically equal to
+    this one. Importing the module builds nothing; run as a script it prints the JIL.
 
     `disable` opts out of folds by code (FOLDS, DL-38); a bare string is one code and unknown
     codes are refused. `report` collects the fold inventory and the explicit-link diagnostics."""
@@ -1293,21 +1295,24 @@ def decompile(
         )
     if graph is None:
         graph = derive_graph(catalog)
+    body = ["c = CatalogBuilder()"]
+    body += _decompile_records(catalog)
+    body += _decompile_fold_wiring(catalog, graph, disabled, report)
+    body += ["", "return c"]
     lines: list[str] = [
-        "# Decompiled by dsl41 (phase 10); executing this module rebuilds the catalog.",
+        "# Decompiled by dsl41 (phase 10). Write its JIL with: dsl41 build THIS_FILE -o FILE.jil",
         "from dsl41.dsl import CatalogBuilder",
         "",
-        "c = CatalogBuilder()",
-    ]
-    lines += _decompile_records(catalog)
-    lines += _decompile_fold_wiring(catalog, graph, disabled, report)
-    lines += [
         "",
-        "catalog = c.build()",
+        "def estate() -> CatalogBuilder:",
+        *(f"    {line}" if line else "" for line in body),
+        "",
         "",
         'if __name__ == "__main__":',
         "    import sys",
         "",
+        "    c = estate()",
+        "    c.build()",
         "    sys.stdout.write(c.to_jil())",
         "",
     ]

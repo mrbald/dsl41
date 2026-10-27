@@ -7,11 +7,11 @@ The rest of your track is under **Job author** in the
 
 ## 1. Write JIL or use the Python DSL
 
-Write JIL files directly, or use `CatalogBuilder` to emit JIL through `to_jil()`.
+Write JIL files directly, or write a Python module whose `estate()` function returns a `CatalogBuilder`.
 Every job in hand-written JIL needs `job_type`: `c` for CMD, `b` for BOX, or `f` for FW.
 The DSL sets this attribute.
 The DSL uses the same pipeline: it emits JIL, parses it, and lowers it into a catalog.
-The CLI has no `build` verb.
+`dsl41 build` turns the module into a JIL file.
 The engine and run root take JIL bytes only.
 
 The [README's DSL example](../README.md#dsl---jil-build) declares an estate:
@@ -19,16 +19,16 @@ The [README's DSL example](../README.md#dsl---jil-build) declares an estate:
 ```python
 from dsl41.dsl import CatalogBuilder
 
-b = CatalogBuilder()
-b.machine("prod1")
-with b.box("nightly"):
-    b.job("extract", command="/opt/etl/extract.sh", machine="prod1")
-    b.job("transform", command="/opt/etl/transform.sh", machine="prod1")
-    b.job("load", command="/opt/etl/load.sh", machine="prod1")
-b.sequence("extract", "transform", "load")
 
-jil_text = b.to_jil()   # JIL text, byte-for-byte what the front end accepts
-catalog = b.build()     # ...or parse+lower it through the real pipeline
+def estate() -> CatalogBuilder:
+    b = CatalogBuilder()
+    b.machine("prod1")
+    with b.box("nightly"):
+        b.job("extract", command="/opt/etl/extract.sh", machine="prod1")
+        b.job("transform", command="/opt/etl/transform.sh", machine="prod1")
+        b.job("load", command="/opt/etl/load.sh", machine="prod1")
+    b.sequence("extract", "transform", "load")
+    return b
 ```
 
 `machine()` declares a machine record.
@@ -48,7 +48,7 @@ Call it after `sequence()` or `parallel()`.
 Write conditions as strings using [§3](#3-write-conditions-with-explicit-grouping).
 `sequence()` and `parallel()` refuse to replace an existing condition.
 
-Before `to_jil()`, you can add a file watcher:
+Inside `estate()`, you can add a file watcher:
 
 ```python
 b.job(
@@ -57,15 +57,26 @@ b.job(
 )
 ```
 
-1. Save the README example as a Python file named after your estate (the commands below
-   call it catalog.py), with `print(jil_text)` at the end.
+`dsl41 build` imports the module, which runs its code, so use it only on modules you trust.
+It lowers the JIL through the compiler before it writes.
 
-2. Run it with a Python interpreter that can import `dsl41`.
+1. Save the README example as a Python file named after your estate (the commands below
+   call it catalog.py).
+
+2. Write the JIL.
 
    ```sh
-   python catalog.py > jobs.jil
+   dsl41 build catalog.py -o jobs.jil
    ```
 
+3. In CI, fail when the checked-in JIL is stale.
+   This step prints a diff, exits `1` on a difference, and writes nothing.
+
+   ```sh
+   dsl41 build catalog.py --check jobs.jil
+   ```
+
+`dsl41 build` exits `2` when the module has no `estate()`, when it raises, when `estate()` returns something else, or when the JIL does not lower.
 Then use the [checks in §4](#4-check-the-estate).
 
 The [examples index](../examples/README.md) links the worked estates.
@@ -287,11 +298,14 @@ Use [§6](#6-hand-over-for-rollout) to match the rollout profile.
 
 ## 5. Bring an existing AutoSys estate in
 
-`decompile` writes a runnable Python module over the [builders in §1](#1-write-jil-or-use-the-python-dsl).
-Its default `--check` runs the module and compares its canonical hash with the input.
+`decompile` writes a Python module over the [builders in §1](#1-write-jil-or-use-the-python-dsl), with the `estate()` function that §1 describes.
+Its default `--check` calls `estate()` and compares the catalog's canonical hash with the input.
 The canonical form is the compiler's normalized representation for comparison.
 This check compares canonical form rather than original bytes.
 The [fidelity contract](jil-statement-syntax.md#fidelity-tests-normative) defines byte preservation separately.
+
+Decompile the template JIL, with its `~{$NAME}~` placeholders, not a copy bound with `-p`.
+The module keeps placeholders as written, but it cannot recover them from bound values.
 
 1. Decompile the input catalog.
 
@@ -299,10 +313,10 @@ The [fidelity contract](jil-statement-syntax.md#fidelity-tests-normative) define
    dsl41 decompile old.jil -o estate.py
    ```
 
-2. Emit JIL using a Python environment that meets [§1's import requirement](#1-write-jil-or-use-the-python-dsl).
+2. Write the JIL from the module.
 
    ```sh
-   python estate.py > rebuilt.jil
+   dsl41 build estate.py -o rebuilt.jil
    ```
 
 3. Compare the rebuilt catalog with the input.

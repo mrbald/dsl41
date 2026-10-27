@@ -20,6 +20,7 @@ They do not establish that a separately installed wheel works.
 | `equiv` | `tests/test_equiv.py` |
 | `uc` | `tests/test_backend_uc.py` |
 | `decompile`, `folds` | `tests/test_dsl.py` |
+| `build` | `tests/test_build_cli.py` |
 | `minify` | `tests/test_minify.py` |
 | `resolve` | `tests/test_placeholders.py` |
 | `run` | `tests/test_runner_journal.py`, `tests/test_journal_replay.py`, `tests/test_nightbank_deploy.py` |

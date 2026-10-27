@@ -34,7 +34,7 @@ def test_estate_has_exactly_one_fw_and_two_explicit_cmds(tmp_path: Path) -> None
     assert all("PROCESSOR" not in line for line in emitted.splitlines() if ".sequence(" in line)
     namespace: dict[str, object] = {"__name__": "<file-processing-roundtrip>"}
     exec(compile(emitted, "<file-processing-roundtrip>", "exec"), namespace)
-    rebuilt = namespace["catalog"]
+    rebuilt = namespace["estate"]().build()  # type: ignore[operator]
     assert isinstance(rebuilt, CatalogIR)
     assert catalog_hash(rebuilt) == catalog_hash(catalog)
     assert equivalent_tier_a(catalog, rebuilt).equivalent

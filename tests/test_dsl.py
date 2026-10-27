@@ -64,9 +64,9 @@ def roundtrip(catalog: CatalogIR, *, disable: Collection[str] = ()) -> CatalogIR
     # footer (DL-37) resolves without firing
     namespace: dict[str, object] = {"__name__": "<decompiled>"}
     exec(compile(source, "<decompiled>", "exec"), namespace)  # noqa: S102
-    rebuilt = namespace["catalog"]
-    assert isinstance(rebuilt, CatalogIR)
-    return rebuilt
+    builder = namespace["estate"]()  # type: ignore[operator]
+    assert isinstance(builder, CatalogBuilder)
+    return builder.build()
 
 
 # --------------------------------------------------------------- round-trip property
@@ -795,7 +795,7 @@ def test_cli_decompile_stdout_and_roundtrip(tmp_path: Path) -> None:
     assert result.stdout.startswith("# Decompiled by dsl41")
     namespace: dict[str, object] = {"__name__": "<cli>"}
     exec(compile(result.stdout, "<cli>", "exec"), namespace)  # noqa: S102
-    rebuilt = namespace["catalog"]
+    rebuilt = namespace["estate"]().build()  # type: ignore[operator]
     assert isinstance(rebuilt, CatalogIR)
     original = lower_catalog([parse_file(CORPUS_DIR / "sem10_box_basic.jil")])
     assert catalog_hash(rebuilt) == catalog_hash(original)
@@ -838,9 +838,10 @@ def test_cli_decompile_check_failure_exits_1_but_still_writes_module(
     is what the deferred import actually picks up."""
     broken_source = (
         "from dsl41.dsl import CatalogBuilder\n\n"
-        "c = CatalogBuilder()\n"
-        "c.job('only_one_job', command='x', machine='m1')\n"
-        "catalog = c.build()\n"
+        "def estate():\n"
+        "    c = CatalogBuilder()\n"
+        "    c.job('only_one_job', command='x', machine='m1')\n"
+        "    return c\n"
     )
     monkeypatch.setattr("dsl41.dsl.decompile", lambda catalog, **kwargs: broken_source)
     target = tmp_path / "rebuilt.py"
