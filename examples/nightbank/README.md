@@ -70,8 +70,8 @@ CI, so the exercises are checked rather than remembered.
   files in catalog order, its timezone and its environments. `bin/nightbank
   up` and the service launcher both take the file list from it.
 - `deploy/` — the estate as a service: a launcher that holds the whole
-  `dsl41 run` line, two systemd units and a role map (deployment-runbook
-  §3, "A worked example").
+  `dsl41 run` line, two systemd units, a role map, and the release helper
+  with its sudo grant (deployment-runbook §3, "A worked example").
 
 On a service host the estate is an application release. Under
 `/srv/dsl41/nightbank/`, `releases/<name>/` holds one directory per
@@ -83,6 +83,17 @@ active release. The launcher takes the estate's files, layers and timezone from
 the active release's manifest through `dsl41 estate args`, so a JIL release
 never edits the launcher. The site's own properties file comes last, so
 its values override the application's.
+
+`deploy/dsl41-release` makes a release one command for the application's
+on-call. `prepare NAME DIR` installs DIR as release NAME and checks it with
+the installed runtime: lint, rehearse, and the launcher's job and grace
+ceiling. `apply NAME` takes it through the boundary window: hold, drain,
+seal, write `active`, start the engine, verify, release the holds. `rollback`
+applies the previous release the same way, and `status` shows each release's
+receipts and any apply that stopped part-way, with what `apply --resume`
+does. The helper runs as a deployment identity and changes no file the
+infrastructure owns. `deploy/dsl41-release.sudoers` is that identity's grant,
+and the helper's header lists the access it needs and its exit codes.
 
 Each night is one directory under `runs/` (data, logs, properties, control
 socket). The engine's own run root is `<run>/engine` inside it: the

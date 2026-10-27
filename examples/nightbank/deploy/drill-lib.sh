@@ -44,8 +44,25 @@ LONG_JOB=OPS_XINST_DEMO_C
 # the operator recipes the drill runs as written (deployment-runbook ss0)
 RUNBOOK=$REPO/docs/deployment-runbook.md
 
+# The release helper's deployment identity and its group: the steps that
+# release bind the login to ops in the map and make the group the map's
+# socket_group (DL-407, access-model ss4)
+DEPLOY_USER=nbdeploy
+DEPLOY_GROUP=nightbank-deploy
+RELEASE_HELPER=/opt/dsl41/bin/dsl41-release
+
 # Each offline estate keeps its own durable root (DL-389).
 if [ -n "${DRILL_ROOT-}" ]; then ROOT=$DRILL_ROOT; ANCHOR=$ROOT.anchor; SOCK=$ROOT/control.sock; fi
+
+# The release ACTIVE names, once one is active: the release helper moves it,
+# and every seal and every in-place edit is of the active release (DL-407).
+follow_active() {
+    if [ -f "$ACTIVE" ]; then
+        RELEASE=$(cat "$ACTIVE")
+        ESTATE=$ESTATE_RELEASES/$RELEASE
+    fi
+}
+follow_active
 
 ok() { echo "ok: $*"; }
 fail() {
@@ -207,15 +224,6 @@ next_args() {
     mapfile -t NEXT < <(jq -r '.argv[]' <<<"$out")
 }
 
-# A release directory, installed whole from DIR and root-owned, read-only
-# to the service account, as a release is never changed in place (DL-407).
-install_release() { # install_release NAME DIR
-    sudo test ! -e "$ESTATE_RELEASES/$1" || fail "$ESTATE_RELEASES/$1 already exists"
-    sudo install -d -m 0755 "$ESTATE_RELEASES"
-    sudo cp -R "$2" "$ESTATE_RELEASES/$1"
-    sudo chown -R root:root "$ESTATE_RELEASES/$1"
-    sudo chmod -R go-w,a+rX "$ESTATE_RELEASES/$1"
-}
 # ACTIVE names NAME: a plain file replaced by a rename, never a symlink,
 # so the opener reads the paths the seal read (DL-407).
 activate() { # activate NAME
@@ -494,9 +502,7 @@ force_start() { request FORCE_STARTJOB "$1"; }
 hold_scheduled() {
     local job
     local jobs=("${QUIESCE[@]}")
-    if [ "$RELEASE" = bank-r1 ]; then
-        jobs=(APAC_EOD_B EMEA_EOD_B AMER_EOD_B OPS_HEARTBEAT_C)
-    fi
+    case $RELEASE in bank-*) jobs=(APAC_EOD_B EMEA_EOD_B AMER_EOD_B OPS_HEARTBEAT_C) ;; esac
     for job in "${jobs[@]}"; do
         request ON_HOLD "$job"
     done
@@ -660,3 +666,112 @@ perimeter_count_exceeds() { # perimeter_count_exceeds REC FRAGMENT BEFORE
     [ "$(perimeter_count "$1" "$2")" -gt "$3" ]
 }
 job_not_running() { [ "$(job_status "$1")" != RUNNING ]; }
+
+# MAX_JOBS sized to JOBS, and the supervisor unit's TimeoutStopSec derived from
+# it by DL-401's line, 15 + 5 + MAX_GRACE_S + 2 + 8 x MAX_JOBS + 10 seconds: the
+# launcher's ceiling and the unit's limit move together, never one alone.
+size_ceiling() { # size_ceiling JOBS
+    local grace stop
+    grace=$(sed -n 's/^MAX_GRACE_S=//p' "$LAUNCH")
+    stop=$((15 + 5 + grace + 2 + 8 * $1 + 10))
+    sudo sed -i "s/^MAX_JOBS=.*/MAX_JOBS=$1/" "$LAUNCH"
+    sudo sed -i "s/^TimeoutStopSec=.*/TimeoutStopSec=$stop/" "/etc/systemd/system/$SUPERVISOR"
+    sudo systemctl daemon-reload
+    grep -qx "MAX_JOBS=$1" "$LAUNCH" || fail "the launcher does not declare MAX_JOBS=$1"
+    grep -qx "TimeoutStopSec=$stop" "/etc/systemd/system/$SUPERVISOR" ||
+        fail "$SUPERVISOR does not stop within ${stop}s"
+    ok "the ceiling is $1 jobs; $SUPERVISOR stops within ${stop}s"
+}
+
+# ---- the release helper (DL-407)
+
+# The helper as the deployment identity, from /, as an application on-call
+# runs it.
+deploy() { (cd / && sudo -u "$DEPLOY_USER" -H "$RELEASE_HELPER" "$@"); }
+
+# An apply, or a rollback, after which the steps follow ACTIVE. The engine
+# unit's start limit counts the drill's own starts, as `manual` says, and the
+# helper's start is one more.
+release_apply() { # release_apply NAME | release_apply rollback
+    sudo systemctl reset-failed "$ENGINE" 2>/dev/null || true
+    if [ "$1" = rollback ]; then deploy rollback; else deploy apply "$1"; fi
+    follow_active
+    [ "$1" = rollback ] || [ "$RELEASE" = "$1" ] || fail "ACTIVE names $RELEASE, not $1"
+    wait_up
+}
+
+# A release's inputs, copied from the directory FROM without its receipts,
+# into a directory of the drill's that the deployment identity can read.
+release_source() { # release_source NAME FROM -- prints the directory
+    local dir=$SCRATCH/release-sources/$1
+    mkdir -p "$SCRATCH/release-sources"
+    rm -rf "$dir"
+    sudo cp -R "$2" "$dir"
+    sudo rm -rf "$dir/.release"
+    sudo chown -R "$(id -un):$(id -gn)" "$dir"
+    chmod -R u+w,go+rX "$dir"
+    printf '%s\n' "$dir"
+}
+# the definition `query spec` answers for JOB holds TEXT
+spec_has() { # spec_has JOB TEXT
+    cli query spec -J "$1" -S "$SOCK" | jq -e --arg text "$2" '.["jil"] | contains($text)' >/dev/null
+}
+
+# The files the infrastructure owns, which a release never changes: the
+# launcher, both units and the runtime link.
+infra_state() {
+    sudo sha256sum "$LAUNCH" "/etc/systemd/system/$ENGINE" "/etc/systemd/system/$SUPERVISOR"
+    readlink "$VENV"
+}
+
+# The site's part of a release train: the deployment identity and its group,
+# the helper and its two sudo grants, and the releases directory and ACTIVE
+# that identity writes. The second call changes nothing.
+release_identity() {
+    getent group "$DEPLOY_GROUP" >/dev/null || sudo groupadd "$DEPLOY_GROUP"
+    id "$DEPLOY_USER" >/dev/null 2>&1 ||
+        sudo useradd -M -s /usr/sbin/nologin -g "$DEPLOY_GROUP" "$DEPLOY_USER"
+    sudo install -m 0755 "$REPO/examples/nightbank/deploy/dsl41-release" "$RELEASE_HELPER"
+    sudo install -m 0440 "$REPO/examples/nightbank/deploy/dsl41-release.sudoers" \
+        /etc/sudoers.d/dsl41-release
+    sudo visudo -cf /etc/sudoers.d/dsl41-release >/dev/null || fail "the sudoers example does not parse"
+    sudo install -d -m 0755 "$ESTATE_RELEASES"
+    sudo chown "$DEPLOY_USER:$DEPLOY_GROUP" "$ESTATE_RELEASES"
+    ! sudo test -e "$ACTIVE" || sudo chown "$DEPLOY_USER:$DEPLOY_GROUP" "$ACTIVE"
+    # the helper replaces ACTIVE by a rename in its directory; the sticky bit
+    # keeps every other entry there out of its reach
+    sudo chgrp "$DEPLOY_GROUP" "$(dirname "$ACTIVE")"
+    sudo chmod 1775 "$(dirname "$ACTIVE")"
+}
+
+# The rest of it for an apply: the map binds the deployment identity to ops
+# behind its socket group, and the engine restarts to arm the group. Each
+# step that releases calls this; the second call changes nothing.
+release_setup() {
+    release_identity
+    if sudo grep -q "^socket_group = \"$DEPLOY_GROUP\"$" "$MAP"; then return; fi
+    sudo systemctl stop "$ENGINE"
+    sudo cp -p "$MAP" "$SCRATCH/map.release.orig"
+    sudo sed -i "s/^# socket_group = .*/socket_group = \"$DEPLOY_GROUP\"/" "$MAP"
+    printf '\n[[binding]]\nsubject = "user:os/%s"\ntier = "ops"\n' "$DEPLOY_USER" |
+        sudo tee -a "$MAP" >/dev/null
+    sudo grep -q "^socket_group = \"$DEPLOY_GROUP\"$" "$MAP" || fail "the map names no socket_group"
+    sudo usermod -aG "$DEPLOY_GROUP" dsl41
+    sudo chgrp "$DEPLOY_GROUP" "$(dirname "$ROOT")"
+    sudo chmod 0710 "$(dirname "$ROOT")"
+    start_engine
+    deploy status >/dev/null || fail "the helper does not run as $DEPLOY_USER"
+    ok "$DEPLOY_USER runs the helper; the map binds it to ops behind $DEPLOY_GROUP"
+}
+
+# The map and the run roots' directory as they were, and the engine restarted
+# on them; the identity and the helper stay installed.
+release_teardown() {
+    sudo systemctl stop "$ENGINE"
+    sudo cp "$SCRATCH/map.release.orig" "$MAP"
+    sudo gpasswd -d dsl41 "$DEPLOY_GROUP" >/dev/null
+    sudo chgrp dsl41 "$(dirname "$ROOT")" "$ROOT"
+    sudo chmod 0700 "$(dirname "$ROOT")"
+    start_engine
+    [ "$(sudo stat -c '%a' "$SOCK")" = 600 ] || fail "the socket is not owner-only again"
+}
