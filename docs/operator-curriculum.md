@@ -175,6 +175,7 @@ The drill column records coverage outside the numbered course.
 
 | Task to read through | Existing drill coverage |
 | --- | --- |
+| [The job recipe's hand path, for a host without the helper](deployment-runbook.md#recipe-add-change-or-remove-a-job) | No drill; `tests/test_operator_recipes.py` runs `job-seal` and `job-open`'s command. |
 | [Upgrade dsl41, rows 3 and 4](deployment-runbook.md#7-upgrading-dsl41-itself) | Drill only: the `upgrade-coordinated*`, `upgrade-old-release` and `upgrade-state-machine*` steps. |
 | [Recover a torn opening whose head is `claimed`](deployment-runbook.md#recipe-recover-a-rolled-root-whose-opening-is-torn) | No drill; `tests/test_operator_recipes.py` runs the branch. Exercise 29 trains the `open` branch; [exercise 20](../examples/nightbank/RUNBOOK.md#20-reclaim-after-a-crashed-roll) trains the reclaim the branch falls back to. |
 

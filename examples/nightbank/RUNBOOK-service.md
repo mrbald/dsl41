@@ -11,7 +11,8 @@ Work through the [RUNBOOK](RUNBOOK.md)'s exercises 1 to 21 first: this page assu
 The host is a Rocky Linux 8 container with systemd as PID 1 and no network, from
 [`scripts/wargame.sh`](../../scripts/wargame.sh). Each exercise links the runbook blocks
 it uses, named as in recipe `service-install`; type them from there. A comment after a
-command gives what you see. §7's rows 3 and 4 are not trained here:
+command gives what you see. The job recipe's hand path, for a host without the release
+helper, and §7's rows 3 and 4 are not trained here:
 see the [operator curriculum](../../docs/operator-curriculum.md#4-read-through-the-tasks-the-course-does-not-train).
 The RPM is the packager's ([site package](../../docs/site-package.md)).
 
@@ -23,8 +24,9 @@ The RPM is the packager's ([site package](../../docs/site-package.md)).
 [§0](../../docs/deployment-runbook.md#0-the-operator-path). `runner` has passwordless
 `sudo`. Three shells run the commands, as §0 assigns them; join again for a second one.
 The recipe reads `ESTATE` from `active` when you type it: until exercise 24 writes
-`active`, it prints a `cat` error, so type it again after exercise 24 and after any
-release switch.
+`active`, it prints a `cat` error. Set it again after exercise 24 and after any release
+switch, with `ESTATE=$ESTATE_RELEASES/$(cat "$ACTIVE")`. After exercise 28, typing the
+whole recipe again also resets `RUN_ROOT` and `S` to the first root.
 
 | Shell | Open it with | Runs |
 | --- | --- | --- |
@@ -111,8 +113,8 @@ install -d -m 0755 /srv/dsl41 && cp -R examples/nightbank /srv/dsl41/nightbank
 chown -R root:root /srv/dsl41/nightbank && chmod -R go-w,a+rX /srv/dsl41/nightbank
 ```
 
-   In the same shell, type recipe `service-install`. Then create what the site package
-   would have created for the release train
+   In the same shell, type recipe `service-install`, then `set +eu`. Then create what
+   the site package would have created for the release train
    ([site-package §5](../../docs/site-package.md#5-ship-jil-releases-on-the-applications-train)):
    the deployment identity `nbdeploy` in its group, the releases directory it owns,
    `active`'s directory with its group and the sticky bit, and its `ops` binding in the
@@ -148,13 +150,15 @@ echo "OPS_XINST_DEMO_C late 45" | sudo -u dsl41 -H tee -a /srv/dsl41/nightbank/n
 
 4. As the deployment identity, prepare the small estate as the release `small-r1`, and
    name it in `active`. Prepare lints and rehearses with the night's properties, so the
-   night comes first. Then type recipe `service-print`:
+   night comes first:
 
 ```sh
 cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release prepare small-r1 /srv/dsl41/nightbank/estate/small
-# prepared /srv/dsl41/nightbank/releases/small-r1: 82 jobs, under dsl41 1.12.0
+# dsl41-release: prepared /srv/dsl41/nightbank/releases/small-r1: 82 jobs, under dsl41 1.12.0
 cd / && sudo -u nbdeploy sh -c 'printf "%s\n" small-r1 >/srv/dsl41/nightbank/active'
 ```
+
+   Then type recipe `service-print`.
 
    The printed command names the release's six files in its manifest's order, then
    `--timezone UTC` from the manifest, and ends
@@ -448,18 +452,16 @@ path, with `cd / && sudo -u nbdeploy -H` in front.
 ```sh
 cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release status
 cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release prepare small-r1 /srv/dsl41/nightbank/estate/small
-# exit 2: /srv/dsl41/nightbank/releases/small-r1 exists: a release is installed once
+# exit 2: dsl41-release: /srv/dsl41/nightbank/releases/small-r1 exists: a release is installed once
 cd / && sudo -u nbdeploy cp -R /srv/dsl41/nightbank/estate/small /srv/dsl41/nightbank/releases/small-copy
 cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release apply small-copy
-# exit 2: small-copy is not prepared: run `dsl41-release prepare` first
+# exit 2: dsl41-release: small-copy is not prepared: run `dsl41-release prepare` first
 cd / && sudo -u nbdeploy rm -rf /srv/dsl41/nightbank/releases/small-copy
 ```
 
    The status prints `active: small-r1`, `release small-r1: prepared … under dsl41
-   1.12.0` and `apply: none recorded`. Prepare also refuses, with exit 2, a release that
-   holds more jobs than the launcher's `MAX_JOBS`, and removes it. That ceiling is 107;
-   nightbank's estates are 82 jobs or more than 500, so this host does not show the
-   refusal.
+   1.12.0` and `apply: none recorded`. Prepare also refuses, with exit 2, a release
+   with more jobs than the launcher's `MAX_JOBS`, and removes it.
 2. Build the next release from the small estate's inputs. Add the job
    `OPS_RELEASE_PROBE_C` in a new file, shorten `OPS_SPOOL_C`'s command, add the file to
    the manifest, and prepare it as `small-r2`:
@@ -502,7 +504,8 @@ cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release apply small-r2
    `waiting 56.8s for the retry horizon, then sealing again`, and seals period 4 under a
    new request id. It ends `small-r2 is active in period 5`, with exit 0, about 70 s
    after the start.
-4. Read the result. Type recipe `operator-env` again, because `active` changed. Then
+4. Read the result. Set `ESTATE` again, because `active` changed:
+   `ESTATE=$ESTATE_RELEASES/$(cat "$ACTIVE")`. `RUN_ROOT` and `S` stay on `nightbank-01d`. Then
    read the status, the two jobs' definitions (recipe `job-verify`), the receipt, and
    the hold the helper released:
 
@@ -533,7 +536,9 @@ cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release rollback
    It prints `rolling back from small-r2 to small-r1` and `holds taken: EMEA_EOD_B`,
    waits out the retry horizon again, seals period 5, and ends
    `small-r1 is active in period 6`, with exit 0.
-7. Type recipe `operator-env` again, and read the removed job and the changed one.
+7. Set `ESTATE` again, because `active` changed:
+   `ESTATE=$ESTATE_RELEASES/$(cat "$ACTIVE")`. `RUN_ROOT` and `S` stay on `nightbank-01d`.
+   Read the removed job and the changed one.
    `OPS_RELEASE_PROBE_C` is a ghost: its row and its run stay, with no definition
    (recipe `job-verify-removed`):
 
@@ -550,13 +555,9 @@ cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release status
 8. Hold `EMEA_EOD_B` again, so the calendar starts nothing in the later exercises:
    `dsl41 sendevent ON_HOLD -J EMEA_EOD_B -S "$S"`.
 
-The apply and the rollback exited 0. Exit 2 would have meant a refusal, or a seal that
-did not commit: nothing sealed, `active` unchanged, and the hold the helper took released.
-Exit 3 would have left the apply recorded: `status` says what
-`apply --resume NAME` does. Exit 4 would have meant the seal's outcome is unknown: run
-`apply --resume NAME`, and never seal by hand.
-[The recipe's step 4](../../docs/deployment-runbook.md#recipe-add-change-or-remove-a-job)
-says what to do for each.
+The apply and the rollback exited 0. For any other exit, do what
+[the recipe's step 4](../../docs/deployment-runbook.md#recipe-add-change-or-remove-a-job)
+says for that code.
 
 The estate is in period 6 of `nightbank-01d`, under `small-r1`. The apply and the
 rollback left `000004.json` and `000005.json` in its `seals/`, and every scheduled job is
