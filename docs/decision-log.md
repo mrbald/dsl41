@@ -24480,3 +24480,40 @@ relitigate an entry; append a new one.
   surface, so the helper owns their records' conditions, placement and commands.
   REJECTED: a console script (a pyproject entry, and `python -m` names the interpreter the
   commands already name); building argv inside the helper (hides wrappers and policy flags).
+- DL-412 The release train is the dsl41 verb group `dsl41 release prepare|apply|resume|rollback|
+  status`; the example helper is gone (2026-10-27; owner ruling; src/dsl41/release.py,
+  src/dsl41/release_service.py, src/dsl41/cli_release.py, runbook §0's job recipe, site-package
+  §3 and §5)
+  THE RULE. The verbs run as the deployment identity. Their service side is the hidden
+  `dsl41 release service ACTION WORD...`, run through `sudo -n -u SERVICE_ACCOUNT -H DSL41`; it
+  takes release names, a request id or a job name, never a path or an option, runs only as
+  SERVICE_ACCOUNT, and claims `os/SERVICE_ACCOUNT` as every seal's actor itself. Both sides read
+  the launcher at `<prefix>/bin/dsl41-launch`, where `<prefix>/.venvs` holds their runtime, and
+  refuse it unless only root, or the running account, can write it; nothing else names one.
+  `vars` adds SERVICE_ACCOUNT and ENGINE_UNIT; the grant names `<prefix>/.venv/bin/dsl41
+  release service *`. The apply keeps DL-407's records, seal reads and hold ownership through
+  the WAL; `resume` finishes the recorded apply. Exit codes for apply, resume and rollback:
+  0 active with every hold the apply took released; 1 active with some kept, each printed with
+  its reason and its `OFF_HOLD` command; 2 refused, nothing sealed, holds released, no record,
+  and a `refused-` receipt when a record existed; 3 stopped with the record kept, SIGINT and
+  SIGHUP included; 4 the seal's outcome unknown. `rollback` may take over a recorded apply whose
+  new period opened (step opened or verified): it releases that apply's holds, writes a
+  `rolled-back-` receipt with `verify_failed` and the check's problems, clears the record, and
+  applies the release that apply replaced; `resume` checks again instead. Before the open,
+  `rollback` refuses and names `resume`. `status` shows the active release, the engine, the
+  rollback target, a recorded apply with what `resume` will do, and how the last apply ended.
+  The "not prepared" refusal names `prepare --requalify NAME`, which checks an installed
+  release in place; the service side refuses a symlink in a release. A job name follows the
+  engine's rule, `#` included. The horizon wait keys on the code `seal_retry_horizon` and hides
+  the refusal's text. The stop points around a committed seal are the test-only hook
+  `release.STOP_AFTER`; no environment variable reaches them.
+  THE REASON. The owner's ruling of 2026-10-27, "make it a verb", after an operator review found
+  an apply that failed its check after the open with no way out, a job name with `#` that
+  stopped every apply, kept holds behind exit 0, and refusals that named internal steps. The
+  group name is Astra's: each verb's object is a release, and `estate resume` would read as
+  resuming the estate. "Release the hold" stays, since each sentence names its object. Not in
+  production, so no shim keeps the old path.
+  REJECTED: `dsl41 estate` and `dsl41 train` (the object is a release); an `abandon` verb
+  (rollback's take-over is the way out); a shim; the whole verb as the service account (the
+  jobs' account would own the releases and ACTIVE); a launcher named by argument or environment
+  (it could name a DSL41 that runs as the service account); `status` exiting 3 on a record.

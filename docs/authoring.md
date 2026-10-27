@@ -433,7 +433,7 @@ from there.
 ### 6.1. Declare the estate in estate.toml
 
 The manifest, `estate.toml`, declares the estate's inputs once, beside its JIL (DL-407).
-The launcher, the release helper and your checks take the file list, the properties layers,
+The launcher, `dsl41 release` and your checks take the file list, the properties layers,
 the timezone and the semantic switches from it.
 This example declares four files, one layer for every environment and one more for `prod`:
 
@@ -470,7 +470,7 @@ dsl41 refuses an unknown key at any level, and a path that `files`, or the base 
 `requires_dsl41` accepts only `>=`, and compares the leading integers of the version, so a pre-release or dev build of X counts as X.
 
 The environment layers follow the base layers.
-The launcher and the release helper always pass the host's `ENVIRONMENT`, and `estate args` refuses an environment the manifest does not declare.
+The launcher and `dsl41 release` always pass the host's `ENVIRONMENT`, and `estate args` refuses an environment the manifest does not declare.
 Declare every environment a host's `ENVIRONMENT` names, with an empty table when it adds no layer.
 `[environments.uat]` above declares one that applies the base layers only.
 The site's own properties file comes after every layer, so the site's values win.

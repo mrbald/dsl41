@@ -1113,10 +1113,10 @@ def test_wargame_verbs_refuse_early_keep_work_and_tag_the_documented_image(
     assert "--tag localhost/dsl41-wargame:t " in log.read_text()
 
 
-# ---------------------------------------------------------- the release helper
+# ---------------------------------------------------------- the release verbs
 
-RELEASE_HELPER = DEPLOY / "dsl41-release"
 SUDOERS = DEPLOY / "dsl41-release.sudoers"
+RUNBOOK = NB.parents[1] / "docs" / "deployment-runbook.md"
 #: the drill's release steps (DL-407)
 RELEASE_STEPS = (
     "release",
@@ -1128,40 +1128,42 @@ RELEASE_STEPS = (
 )
 
 
-def test_the_sudoers_example_grants_the_helpers_service_mode_and_the_engine_start_only() -> None:
-    """DL-407: the deployment identity runs the helper's service-account part as the
-    units' user and starts the engine unit; the file grants those two commands and no
-    other, at the paths the launcher and the units name."""
+def test_the_sudoers_example_grants_the_service_side_and_the_engine_start_only() -> None:
+    """DL-407, DL-412: the deployment identity runs the release verbs' service side as the
+    units' user, through the launcher's DSL41 path, and starts the engine unit; the file
+    grants those two commands and no other. The launcher names the same account and unit."""
     lines = [line for line in SUDOERS.read_text().splitlines() if line and not line.startswith("#")]
-    (prefix,) = re.findall(r"^PREFIX=(\S+)$", LAUNCH.read_text(), re.M)
+    text = LAUNCH.read_text()
+    (prefix,) = re.findall(r"^PREFIX=(\S+)$", text, re.M)
+    (dsl41,) = re.findall(r"^DSL41=(\S+)$", text, re.M)
+    (account,) = re.findall(r"^SERVICE_ACCOUNT=(\S+)$", text, re.M)
+    (unit,) = re.findall(r"^ENGINE_UNIT=(\S+)$", text, re.M)
     (user,) = _unit("dsl41-engine.service")["Service"]["User"]
     assert _unit("dsl41-supervisor.service")["Service"]["User"] == [user]
+    assert dsl41 == "$PREFIX/.venv/bin/dsl41" and account == user
+    assert unit == "dsl41-engine.service" and (DEPLOY / unit).is_file()
     assert lines == [
-        f"nbdeploy ALL=({user}) NOPASSWD: {prefix}/bin/dsl41-release service *",
-        "nbdeploy ALL=(root) NOPASSWD: /usr/bin/systemctl start dsl41-engine.service",
+        f"nbdeploy ALL=({user}) NOPASSWD: {prefix}/.venv/bin/dsl41 release service *",
+        f"nbdeploy ALL=(root) NOPASSWD: /usr/bin/systemctl start {unit}",
     ]
-    text = RELEASE_HELPER.read_text()
-    assert f'SERVICE_ACCOUNT = "{user}"' in text
-    assert 'ENGINE_UNIT = "dsl41-engine.service"' in text
-    # the helper runs on the runtime the launcher's link selects
-    assert text.splitlines()[0] == f"#!{prefix}/.venv/bin/python -I"
-    assert os.access(RELEASE_HELPER, os.X_OK)
+    assert not (DEPLOY / "dsl41-release").exists()
 
 
-def test_the_helpers_exit_codes_are_the_table_its_header_prints() -> None:
-    """Each code the helper exits with is one row of its header's table, and each row
-    is a code it defines."""
-    text = RELEASE_HELPER.read_text()
-    header = text.split('"""', 2)[1]
-    table = header.split("Exit codes:\n", 1)[1]
-    rows = {int(code) for code in re.findall(r"^  (\d)  \S", table, re.M)}
-    defined = {int(code) for code in re.findall(r"^EXIT_[A-Z]+ = (\d)$", text, re.M)}
-    assert rows == defined == {0, 2, 3, 4}
-    exits = re.findall(r"(?:Stop\(|return |sys\.exit\()\s*(EXIT_[A-Z]+|\d)\b", text)
-    assert {name for name in exits if not name.isdigit()} <= {
-        name for name in re.findall(r"^(EXIT_[A-Z]+) = ", text, re.M)
+def test_the_release_exit_codes_are_the_runbooks_table() -> None:
+    """DL-412: each code the release verbs exit with is one row of the job recipe's exit
+    table, and each row is a code they define."""
+    from dsl41 import release_service
+
+    defined = {
+        value
+        for name, value in vars(release_service).items()
+        if name.startswith("EXIT_") and isinstance(value, int)
     }
-    assert {name for name in exits if name.isdigit()} == set()
+    assert defined == {0, 1, 2, 3, 4}
+    recipe = RUNBOOK.read_text().split("### Recipe: add, change or remove a job", 1)[1]
+    table = recipe.split("| Exit | What it means | What you do |", 1)[1].split("\n\n", 1)[0]
+    rows = {int(code) for code in re.findall(r"^\s*\| (\d) \|", table, re.M)}
+    assert rows == defined
 
 
 def test_the_launchers_vars_restate_the_engines_deployment_options_for_a_seal(
@@ -1194,12 +1196,14 @@ def test_the_launchers_vars_restate_the_engines_deployment_options_for_a_seal(
         "MAX_JOBS",
         "MAX_GRACE_S",
         "NEXT_PROFILE",
+        "SERVICE_ACCOUNT",
+        "ENGINE_UNIT",
     }
 
 
-def test_the_drill_runs_each_release_step_once_through_the_helper() -> None:
+def test_the_drill_runs_each_release_step_once_through_the_verbs() -> None:
     """The drill names each release step once, in --list and in the workflow, and each
-    step's body runs the installed helper; definition_probe goes through it too."""
+    step's body runs the installed release verbs; definition_probe goes through them too."""
     listed = subprocess.run(
         ["bash", str(DRILL_STEPS), "--list"], capture_output=True, text=True, timeout=60, check=True
     ).stdout.split()
@@ -1209,13 +1213,10 @@ def test_the_drill_runs_each_release_step_once_through_the_helper() -> None:
         body = re.search(rf"^step_{step.replace('-', '_')}\(\) \{{.*?^\}}$", text, re.M | re.S)
         assert body is not None, step
         assert re.search(r"\b(deploy|release_apply|interrupted_apply)\b", body.group()), step
-    # the service recipe the drill runs installs the helper and its grant
-    runbook = (NB.parents[1] / "docs" / "deployment-runbook.md").read_text()
+    # the service recipe the drill runs installs the verbs' grant; the verbs ship in dsl41
+    runbook = RUNBOOK.read_text()
     install = runbook.split("<!-- recipe: service-install -->", 1)[1].split("```", 2)[1]
-    assert (
-        "install -m 0755 examples/nightbank/deploy/dsl41-release /opt/dsl41/bin/dsl41-release"
-        in install.splitlines()
-    )
+    assert "/opt/dsl41/bin/dsl41-release" not in install
     assert (
         "install -m 0440 examples/nightbank/deploy/dsl41-release.sudoers"
         " /etc/sudoers.d/dsl41-release" in install.splitlines()

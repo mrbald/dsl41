@@ -37,8 +37,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
-import sys
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -1829,6 +1827,11 @@ def test_b2_an_applied_spawn_with_no_binding_refuses(short_root: Path) -> None:
                 ("query", "spec"),
                 ("supervise", "shutdown"),
                 ("host", "evict"),
+                ("release", "prepare"),
+                ("release", "apply"),
+                ("release", "resume"),
+                ("release", "rollback"),
+                ("release", "status"),
             },
         ),
     ],
@@ -1917,22 +1920,9 @@ def test_every_recipe_the_service_runbook_names_is_a_marked_block() -> None:
     assert not named - marked, f"no such recipe in the deployment runbook: {named - marked}"
 
 
-def test_every_release_helper_verb_the_service_runbook_types_exists() -> None:
-    """The service RUNBOOK's release exercise types the release helper,
-    `dsl41-release VERB`, which is no `dsl41` command, so the verb test above
-    does not reach it. Every verb the page types must be one the helper's
-    parser accepts (DL-407)."""
+def test_the_service_runbook_types_the_release_verbs_not_the_old_helper() -> None:
+    """The release exercises type `dsl41 release VERB`, which the verb test above resolves
+    (DL-412); the example helper `dsl41-release` is gone, and no page may type it."""
     text = (NB / "RUNBOOK-service.md").read_text()
-    typed = set(re.findall(r"\bdsl41-release\s+([a-z][a-z-]*)", text))
-    usage = subprocess.run(
-        [sys.executable, "-I", str(NB / "deploy" / "dsl41-release"), "--help"],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    choices = re.search(r"\{([a-z,]+)\}", usage)
-    assert choices, usage
-    # the extraction itself must keep working, through the rollback
-    assert {"prepare", "apply", "rollback", "status"} <= typed
-    unknown = typed - set(choices.group(1).split(","))
-    assert not unknown, f"RUNBOOK-service.md types helper verbs it has no command for: {unknown}"
+    assert not re.findall(r"\bdsl41-release\s+[a-z]", text)
+    assert not (NB / "deploy" / "dsl41-release").exists()

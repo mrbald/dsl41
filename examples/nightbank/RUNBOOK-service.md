@@ -11,8 +11,8 @@ Work through the [RUNBOOK](RUNBOOK.md)'s exercises 1 to 21 first: this page assu
 The host is a Rocky Linux 8 container with systemd as PID 1 and no network, from
 [`scripts/wargame.sh`](../../scripts/wargame.sh). Each exercise links the runbook blocks
 it uses, named as in recipe `service-install`; type them from there. A comment after a
-command gives what you see. The job recipe's hand path, for a host without the release
-helper, and §7's rows 3 and 4 are not trained here:
+command gives what you see. The job recipe's hand path, for a runtime without the release verbs,
+and §7's rows 3 and 4 are not trained here:
 see the [operator curriculum](../../docs/operator-curriculum.md#4-read-through-the-tasks-the-course-does-not-train).
 The RPM is the packager's ([site package](../../docs/site-package.md)).
 
@@ -153,8 +153,8 @@ echo "OPS_XINST_DEMO_C late 45" | sudo -u dsl41 -H tee -a /srv/dsl41/nightbank/n
    night comes first:
 
 ```sh
-cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release prepare small-r1 /srv/dsl41/nightbank/estate/small
-# dsl41-release: prepared /srv/dsl41/nightbank/releases/small-r1: 82 jobs, under dsl41 1.12.0
+cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release prepare small-r1 /srv/dsl41/nightbank/estate/small
+# prepared /srv/dsl41/nightbank/releases/small-r1: 82 jobs, under dsl41 …
 cd / && sudo -u nbdeploy sh -c 'printf "%s\n" small-r1 >/srv/dsl41/nightbank/active'
 ```
 
@@ -438,30 +438,33 @@ sole opening (DL-144). After step 7 the registry does not name the old root (DL-
 ## 30. Release a job change and roll it back
 
 Goal: prepare, apply and roll back a release that adds one job and changes another,
-with the release helper. Follow
+with the release verbs; resume an interrupted apply; read and release a hold the apply
+kept. Follow
 [the job recipe](../../docs/deployment-runbook.md#recipe-add-change-or-remove-a-job). The
-drill's `release` and `release-rollback` steps check the same.
+drill's `release`, `release-rollback` and `release-interrupted` steps check the same.
 
-You run the helper as the deployment identity that exercise 24 created, by its full
-path, with `cd / && sudo -u nbdeploy -H` in front.
+You run the release verbs as the deployment identity that exercise 24 created, with
+`cd / && sudo -u nbdeploy -H` in front. That shell has no `PATH` to the runtime, so the
+commands name `/opt/dsl41/.venv/bin/dsl41`.
 
-1. Read the helper's status, and meet two refusals: a second prepare under a name
-   already installed, and an apply of a directory that was never prepared. Remove that
-   directory after:
+1. Read the status, and meet two refusals: a second prepare under a name already
+   installed, and an apply of a directory that was never prepared. Remove that directory
+   after:
 
 ```sh
-cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release status
-cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release prepare small-r1 /srv/dsl41/nightbank/estate/small
-# exit 2: dsl41-release: /srv/dsl41/nightbank/releases/small-r1 exists: a release is installed once
+cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release status
+cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release prepare small-r1 /srv/dsl41/nightbank/estate/small
+# exit 2: /srv/dsl41/nightbank/releases/small-r1 is prepared already, and a prepared name is installed once.
 cd / && sudo -u nbdeploy cp -R /srv/dsl41/nightbank/estate/small /srv/dsl41/nightbank/releases/small-copy
-cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release apply small-copy
-# exit 2: dsl41-release: small-copy is not prepared: run `dsl41-release prepare` first
+cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release apply small-copy
+# exit 2: small-copy is installed but not prepared.
+#         run `dsl41 release prepare --requalify small-copy` to check it in place.
 cd / && sudo -u nbdeploy rm -rf /srv/dsl41/nightbank/releases/small-copy
 ```
 
-   The status prints `active: small-r1`, `release small-r1: prepared … under dsl41
-   1.12.0` and `apply: none recorded`. Prepare also refuses, with exit 2, a release
-   with more jobs than the launcher's `MAX_JOBS`, and removes it.
+   The status prints `active: small-r1.`, `engine: answers on …`, `recorded apply: none.`
+   and `last apply: none.`. Prepare also refuses, with exit 2, a release with more jobs
+   than the launcher's `MAX_JOBS`, and installs nothing.
 2. Build the next release from the small estate's inputs. Add the job
    `OPS_RELEASE_PROBE_C` in a new file, shorten `OPS_SPOOL_C`'s command, add the file to
    the manifest, and prepare it as `small-r2`:
@@ -481,44 +484,58 @@ JIL
 sed -i 's/^command: fakework OPS_SPOOL_C --sleep 240$/command: fakework OPS_SPOOL_C --sleep 120/' global.jil
 sed -i 's/"infra.jil"\]$/"infra.jil", "release.jil"]/' estate.toml
 diff -r /srv/dsl41/nightbank/estate/small /tmp/small-r2   # the files line, the OPS_SPOOL_C command, Only in /tmp/small-r2: release.jil
-cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release prepare small-r2 /tmp/small-r2
+cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release prepare small-r2 /tmp/small-r2
 ```
 
    Prepare prints lint's `L011 warn` for `OPS_RELEASE_PROBE_C`, a job with no schedule,
    condition or box, and `prepared …/small-r2: 83 jobs`. A warning refuses nothing. The
    prepared release's files are read-only, and `.release/prepared.json` records each
    file's sha256.
-3. Release one hold, so the apply has a scheduled job to hold, and apply `small-r2`:
+3. Release one hold, so the apply has a scheduled job to hold. Apply `small-r2`, and
+   press Ctrl-C once it prints its holds:
 
 ```sh
 dsl41 sendevent OFF_HOLD -J EMEA_EOD_B -S "$S"
-cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release apply small-r2
+cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release apply small-r2
+# holds taken: EMEA_EOD_B.
+# ^C
+# interrupted.
+# the apply of small-r2 is recorded.
+# run `dsl41 release resume` to finish it.
 ```
 
-   The helper prints `holds taken: EMEA_EOD_B`. An apply that takes a hold waits out the
-   retry horizon that hold started, about a minute. The hold is an operator request, and
-   a retry of it, composed under this period's baseline, cannot be answered after the
-   boundary; so a seal inside the horizon is refused
-   ([period-model §9](../../docs/period-model.md#9-retries-across-a-boundary)). The first
-   seal is refused with `seal_retry_horizon`. The helper prints
-   `waiting 56.8s for the retry horizon, then sealing again`, and seals period 4 under a
-   new request id. It ends `small-r2 is active in period 5`, with exit 0, about 70 s
-   after the start.
-4. Read the result. Set `ESTATE` again, because `active` changed:
-   `ESTATE=$ESTATE_RELEASES/$(cat "$ACTIVE")`. `RUN_ROOT` and `S` stay on `nightbank-01d`. Then
-   read the status, the two jobs' definitions (recipe `job-verify`), the receipt, and
-   the hold the helper released:
+   It exits 3. Nothing is sealed yet, and `EMEA_EOD_B` stays held. Read the status: it
+   prints `recorded apply: small-r2 over small-r1, …`, what `dsl41 release resume` will
+   do, and `holds taken by this apply: EMEA_EOD_B.`:
 
 ```sh
-cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release status
+cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release status
+cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release resume
+```
+
+   The resume takes the holds again, which keeps the one it took, and waits out the
+   retry horizon that hold started, about a minute. A retry of the hold, composed under
+   this period's baseline, cannot be answered after the boundary, so the seal refuses
+   inside the horizon
+   ([period-model §9](../../docs/period-model.md#9-retries-across-a-boundary)). The
+   resume prints one line for it, `waiting 56.8 s for the retry horizon of the last
+   operator request, then sealing.`, and seals period 4 under a new request id. It ends
+   `small-r2 is active in period 5.`, with exit 0, about 70 s after the start.
+4. Read the result. Set `ESTATE` again, because `active` changed:
+   `ESTATE=$ESTATE_RELEASES/$(cat "$ACTIVE")`. `RUN_ROOT` and `S` stay on `nightbank-01d`. Then
+   read the status, the two jobs' definitions (recipe `job-verify`), and the hold the
+   apply released:
+
+```sh
+cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release status
 dsl41 query spec -J OPS_RELEASE_PROBE_C -S "$S" | jq -r .jil   # release.jil's block, its variables resolved
 dsl41 query spec -J OPS_SPOOL_C -S "$S" | jq -r .jil | grep '^command'   # command: fakework OPS_SPOOL_C --sleep 120
-r=$ESTATE_RELEASES/small-r2/.release; jq -c '{previous, period, released, kept}' "$r/$(cat "$r/latest")"
 dsl41 query status --brief -S "$S" --job EMEA_EOD_B   # INACTIVE …, with no H
 ```
 
-   The status names `small-r2` active, applied after `small-r1` in period 5. The receipt
-   reads `{"previous":"small-r1","period":5,"released":["EMEA_EOD_B"],"kept":[]}`.
+   The status prints `active: small-r2, active since period 5.`,
+   ``rollback: `dsl41 release rollback` would apply small-r1.`` and
+   `last apply: small-r2 over small-r1, … completed; small-r2 became active in period 5.`
 5. Give the added job one run, so it has history for the rollback to keep:
 
 ```sh
@@ -527,15 +544,26 @@ sleep 12   # wait 12 s for the 5 s run
 dsl41 query status --brief -S "$S" --job OPS_RELEASE_PROBE_C   # SUCCESS … run 1 exit 0
 ```
 
-6. Roll back:
+6. Roll back. Release `EMEA_EOD_B` first, so the rollback holds it too, and hold it
+   again yourself while the rollback waits out the horizon, from a second shell:
 
 ```sh
-cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release rollback
+dsl41 sendevent OFF_HOLD -J EMEA_EOD_B -S "$S"
+cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release rollback
+# second shell, after `holds taken: EMEA_EOD_B.`:
+dsl41 sendevent OFF_HOLD -J EMEA_EOD_B -S "$S"
+dsl41 sendevent ON_HOLD -J EMEA_EOD_B -S "$S"
 ```
 
-   It prints `rolling back from small-r2 to small-r1` and `holds taken: EMEA_EOD_B`,
-   waits out the retry horizon again, seals period 5, and ends
-   `small-r1 is active in period 6`, with exit 0.
+   It prints `rolling back from small-r2 to small-r1.` before it acts, and
+   `holds taken: EMEA_EOD_B.`. It seals period 5. Your release and hold changed the
+   hold after the rollback took it, so the hold there now is yours, and the rollback
+   keeps it:
+   `EMEA_EOD_B stays on hold: another request changed its hold after this apply held it (…).`
+   The next line gives the `OFF_HOLD` command for it. It ends
+   `small-r1 is active in period 6.`, with exit 1: done, with a hold kept.
+   A rollback goes to the release the active one replaced, so a second rollback would
+   apply `small-r2` again.
 7. Set `ESTATE` again, because `active` changed:
    `ESTATE=$ESTATE_RELEASES/$(cat "$ACTIVE")`. `RUN_ROOT` and `S` stay on `nightbank-01d`.
    Read the removed job and the changed one.
@@ -547,25 +575,26 @@ dsl41 query spec -J OPS_RELEASE_PROBE_C -S "$S"   # exit 2: … "code": "unknown
 dsl41 query status --job OPS_RELEASE_PROBE_C -S "$S" | jq -c '.jobs[] | {status, job_type, run_number}'
 # {"status":"SUCCESS","job_type":null,"run_number":1}
 dsl41 query spec -J OPS_SPOOL_C -S "$S" | jq -r .jil | grep '^command'   # command: fakework OPS_SPOOL_C --sleep 240
-cd / && sudo -u nbdeploy -H /opt/dsl41/bin/dsl41-release status
+cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release status
 ```
 
-   The status names `small-r1` active, applied after `small-r2` in period 6, and
-   `apply: none recorded`.
-8. Hold `EMEA_EOD_B` again, so the calendar starts nothing in the later exercises:
-   `dsl41 sendevent ON_HOLD -J EMEA_EOD_B -S "$S"`.
+   The status names `small-r1` active since period 6, and its `last apply` line names
+   the kept hold of `EMEA_EOD_B` with the command that releases it.
+8. Leave `EMEA_EOD_B` held, so the calendar starts nothing in the later exercises: the
+   hold is the one you set in step 6.
 
-The apply and the rollback exited 0. For any other exit, do what
+The apply exited 3, the resume 0 and the rollback 1. For any other exit, do what
 [the recipe's step 4](../../docs/deployment-runbook.md#recipe-add-change-or-remove-a-job)
 says for that code.
 
-The estate is in period 6 of `nightbank-01d`, under `small-r1`. The apply and the
+The estate is in period 6 of `nightbank-01d`, under `small-r1`. The resume and the
 rollback left `000004.json` and `000005.json` in its `seals/`, and every scheduled job is
 held.
 
 *Why.* A release is a whole catalog that opens at a boundary; a running estate is never
-edited (DL-407). A removed job keeps its history (period-model §10). The helper
-releases only the holds its own requests applied (DL-407).
+edited (DL-407). A removed job keeps its history (period-model §10). An apply releases
+only the holds its own requests applied, and keeps one that somebody changed since
+(DL-407, DL-412).
 
 ## 31. Idle supervisor maintenance
 

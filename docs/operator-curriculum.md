@@ -117,7 +117,7 @@ An empty task cell marks training without a runbook recipe.
 | [27. Back up and restore](../examples/nightbank/RUNBOOK-service.md#27-back-up-and-restore) | Quiesce through each refusal, copy, and restore at the recorded paths. | [Back up and restore](deployment-runbook.md#2b-quiescent-backup-and-restore) |
 | [28. Upgrade dsl41, row 1 and row 2](../examples/nightbank/RUNBOOK-service.md#28-upgrade-dsl41-row-1-and-row-2) | Flip the runtime under a live job; roll to a fresh root with the open trigger; roll back. | [Upgrade dsl41](deployment-runbook.md#7-upgrading-dsl41-itself) |
 | [29. Recover a rolled root whose opening is torn](../examples/nightbank/RUNBOOK-service.md#29-recover-a-rolled-root-whose-opening-is-torn) | Recognise `missing segment record` and recover through the recipe's `open` branch. | [Recover a torn opening](deployment-runbook.md#recipe-recover-a-rolled-root-whose-opening-is-torn) |
-| [30. Release a job change and roll it back](../examples/nightbank/RUNBOOK-service.md#30-release-a-job-change-and-roll-it-back) | Prepare, apply and roll back a release with the release helper; read the receipt and the ghost job. | [Add, change or remove a job](deployment-runbook.md#recipe-add-change-or-remove-a-job) |
+| [30. Release a job change and roll it back](../examples/nightbank/RUNBOOK-service.md#30-release-a-job-change-and-roll-it-back) | Prepare, apply, resume and roll back a release with `dsl41 release`; read the status, a kept hold and the ghost job. | [Add, change or remove a job](deployment-runbook.md#recipe-add-change-or-remove-a-job) |
 | [31. Idle supervisor maintenance](../examples/nightbank/RUNBOOK-service.md#31-idle-supervisor-maintenance) | Recognise the refused manager stop and live-work refusal; terminate deliberately. | [Manual intervention](deployment-runbook.md#manual-intervention) |
 | [32. Break glass: evict the executor](../examples/nightbank/RUNBOOK-service.md#32-break-glass-evict-the-executor) | Read the gated eviction's refusal, force it with attribution, and see what remains. | [Manual intervention](deployment-runbook.md#manual-intervention) |
 | [33. Retire the estate](../examples/nightbank/RUNBOOK-service.md#33-retire-the-estate) | Seal, remove the units, check that nothing starts, and audit the kept history. | [Retire an estate](deployment-runbook.md#retiring-an-estate) |
@@ -175,7 +175,7 @@ The drill column records coverage outside the numbered course.
 
 | Task to read through | Existing drill coverage |
 | --- | --- |
-| [The job recipe's hand path, for a host without the helper](deployment-runbook.md#recipe-add-change-or-remove-a-job) | No drill; `tests/test_operator_recipes.py` runs `job-seal` and `job-open`'s command. |
+| [The job recipe's hand path, for a runtime without `dsl41 release`](deployment-runbook.md#recipe-add-change-or-remove-a-job) | No drill; `tests/test_operator_recipes.py` runs `job-seal` and `job-open`'s command. |
 | [Upgrade dsl41, rows 3 and 4](deployment-runbook.md#7-upgrading-dsl41-itself) | Drill only: the `upgrade-coordinated*`, `upgrade-old-release` and `upgrade-state-machine*` steps. |
 | [Recover a torn opening whose head is `claimed`](deployment-runbook.md#recipe-recover-a-rolled-root-whose-opening-is-torn) | No drill; `tests/test_operator_recipes.py` runs the branch. Exercise 29 trains the `open` branch; [exercise 20](../examples/nightbank/RUNBOOK.md#20-reclaim-after-a-crashed-roll) trains the reclaim the branch falls back to. |
 

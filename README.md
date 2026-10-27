@@ -881,6 +881,14 @@ Period boundary:
   application's one declaration of its catalog files, properties layers,
   timezone and semantic switches, and the builder behind `estate args`
   that turns it into one verb's arguments.
+- `src/dsl41/release.py`: the release train's verbs, `release prepare`,
+  `apply`, `resume`, `rollback` and `status`: the apply's record, each step
+  before it acts, the holds it owns through the run root's log, and the
+  receipts (DL-412).
+- `src/dsl41/release_service.py`: the release verbs' service side, run as
+  the service account through sudo, and what both sides read: the launcher
+  beside the runtime, `dsl41-launch vars`, the releases on disk, and the
+  run root's seal and hold records.
 - `src/dsl41/retention.py`: the retention floors and `estate prune`: what
   may never be deleted, computed from the root, with three verdicts
   (floored, held, prunable). The remover refuses a path that is not
@@ -892,7 +900,8 @@ CLI and scripts:
   order. The verbs live one module per domain: `cli_common.py` (shared
   options, the catalog loader, and the readings that turn an exception or a
   control answer into an exit code), `cli_compile.py`, `cli_run.py`,
-  `cli_control.py`, and `cli_estate.py`.
+  `cli_control.py`, `cli_estate.py`, and `cli_release.py`, the release
+  verbs' command line.
 - `src/dsl41/__main__.py`: `python -m dsl41`, which `serve` uses to spawn
   one `dsl41 ui` per browser session.
 - `src/dsl41/__init__.py`: the module map docstring. No exports.
@@ -1178,6 +1187,8 @@ Training estate:
   a real supervisor, and a check that every verb the RUNBOOK types exists.
 - `tests/test_nightbank_deploy.py`: the shipped launcher script and the
   systemd units beside it.
+- `tests/test_release.py`: the release verbs against a stub engine, `sudo`
+  and `systemctl`, on a site laid out as an install lays one out (DL-412).
 - `tests/test_operator_recipes.py`: the runbook's §0 recipes run as printed
   against a synthetic estate under the shipped launcher, content checks of
   the recipes only the service drill runs, and the reboot hold (DL-268).

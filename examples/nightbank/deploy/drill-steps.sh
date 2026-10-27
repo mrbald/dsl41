@@ -19,7 +19,7 @@
 # and restore of deployment-runbook ss2b, the signals of "What to watch",
 # the configure recipe,
 # the stop-and-recover recipe, a SIGKILL of the engine and of the
-# supervisor, the application's release train through dsl41-release, every
+# supervisor, the application's release train through `dsl41 release`, every
 # upgrade row of ss7 with its rollback, and ss0's retirement. The install,
 # the first start and the retirement run ss0's recipe blocks as the runbook
 # prints them (run_recipe).
@@ -652,7 +652,7 @@ step_kill_supervisor() { # SIGKILL of the supervisor: restart, resume and lease 
 }
 
 # The application's release train (DL-407): the deployment identity prepares,
-# applies and rolls back releases with dsl41-release, through the window of
+# applies and rolls back releases with `dsl41 release`, through the window of
 # deployment-runbook ss6a, and changes no file the infrastructure owns. The
 # steps run in order: each starts from the release the last one left active.
 
@@ -668,7 +668,7 @@ only_differs() { # only_differs FROM TO FILE
     [ "$out" = "Files $1/$3 and $2/$3 differ" ] || fail "the release changes more than $3: $out"
 }
 
-step_release() { # a prepared release that adds a job file and changes a job, applied by the helper
+step_release() { # a prepared release that adds a job file and changes a job, applied by dsl41 release
     local before src
     release_setup
     before=$(infra_state)
@@ -701,7 +701,7 @@ JIL
     sed -i 's/"probe.jil"\]$/"probe.jil", "added.jil"]/' "$src/estate.toml"
     grep -qF '"added.jil"]' "$src/estate.toml" || fail "the manifest edit did not apply"
     deploy prepare small-v2 "$src"
-    # one scheduled job the helper must hold and release itself; the request
+    # one scheduled job the apply must hold and release itself; the request
     # also makes the seal wait out the retry horizon
     request OFF_HOLD EMEA_EOD_B
     release_apply small-v2
@@ -710,11 +710,11 @@ JIL
     [ "$(receipt previous)" = small-v1 ] || fail "the receipt does not name small-v1"
     [ "$(receipt holds | jq -c '[.[] | select(.state == "released") | .job]')" = \
         "$(receipt released | jq -c .)" ] ||
-        fail "the helper's holds: $(receipt holds), released: $(receipt released)"
+        fail "the apply's holds: $(receipt holds), released: $(receipt released)"
     receipt released | jq -e 'index("EMEA_EOD_B") != null and index("APAC_EOD_B") == null' \
-        >/dev/null || fail "the helper released $(receipt released)"
-    [ "$(job_field EMEA_EOD_B on_hold)" = false ] || fail "the helper kept its hold"
-    [ "$(job_field APAC_EOD_B on_hold)" = true ] || fail "the helper released a hold it did not take"
+        >/dev/null || fail "the apply released $(receipt released)"
+    [ "$(job_field EMEA_EOD_B on_hold)" = false ] || fail "the apply kept its hold"
+    [ "$(job_field APAC_EOD_B on_hold)" = true ] || fail "the apply released a hold it did not take"
     request ON_HOLD EMEA_EOD_B
     # one run, so the job has history to keep when a release removes it
     force_start RELEASE_ADDED_C
@@ -807,20 +807,19 @@ interrupted_apply() { # interrupted_apply NAME FROM STOP STEP SAYS
     seals=$(seal_count)
     sudo systemctl reset-failed "$ENGINE" 2>/dev/null || true
     rc=0
-    (cd / && sudo -u "$DEPLOY_USER" -H env DSL41_RELEASE_STOP_AFTER="$3" "$RELEASE_HELPER" \
-        apply "$1") || rc=$?
-    [ "$rc" != 0 ] || fail "the helper was not stopped at $3"
+    deploy_stopped "$3" apply "$1" || rc=$?
+    [ "$rc" != 0 ] || fail "the apply was not stopped at $3"
     [ "$(sudo jq -r .step "$ESTATE_RELEASES/.apply.json")" = "$4" ] || fail "the record is not at $4"
-    [ "$(cat "$ACTIVE")" = "$2" ] || fail "ACTIVE moved before the helper wrote it"
+    [ "$(cat "$ACTIVE")" = "$2" ] || fail "ACTIVE moved before the apply wrote it"
     [ "$(seal_count)" = $((seals + 1)) ] || fail "the seal did not commit"
     wait_for 90 "$ENGINE is failed" is_state "$ENGINE" failed
     [ "$(prop "$ENGINE" ExecMainStatus)" = 3 ] || fail "exit $(prop "$ENGINE" ExecMainStatus), not 3"
     out=$(deploy status)
     echo "$out"
-    grep -qF "apply: $1 after $2, at step $4" <<<"$out" || fail "status does not show the step"
+    grep -qF "recorded apply: $1 over $2, started " <<<"$out" || fail "status does not show the apply"
     grep -qF "$5" <<<"$out" || fail "status does not say what resume does"
     sudo systemctl reset-failed "$ENGINE" 2>/dev/null || true
-    deploy apply --resume "$1"
+    deploy resume
     follow_active
     [ "$RELEASE" = "$1" ] || fail "ACTIVE names $RELEASE, not $1"
     [ "$(seal_count)" = $((seals + 1)) ] || fail "the resume sealed again"
@@ -829,13 +828,13 @@ interrupted_apply() { # interrupted_apply NAME FROM STOP STEP SAYS
     ok "the apply killed at $3 resumed from its record with no second seal; $1 is active"
 }
 
-step_release_interrupted() { # the helper killed around the seal: status shows it, resume completes it
+step_release_interrupted() { # the apply killed around the seal: status shows it, resume completes it
     # the estate's own inputs, so the release the steps leave active has the
     # file set of the release the drill installed
     interrupted_apply small-v6 small-v5 seal-reply sealing \
-        'will read the estate for request id'
+        'will ask the estate whether the seal under request id'
     interrupted_apply small-v7 small-v6 seal sealed \
-        'will write ACTIVE, start the engine unit, verify, and release the holds'
+        'will name small-v7 in ACTIVE, start the engine, check the new period, and release the holds'
     release_teardown
 }
 

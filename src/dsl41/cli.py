@@ -11,7 +11,9 @@ verbs live one file per domain (DL-137):
     cli_control.py  what an operator says to a RUNNING engine: sendevent, host, query, ui,
                     serve, supervise
     cli_estate.py   the period boundary and its surroundings: seal, audit, verify,
-                    estate reclaim, estate prune, estate quiesce
+                    estate reclaim, estate prune, estate quiesce, estate args
+    cli_release.py  the release train: release prepare, apply, resume, rollback, status,
+                    and the hidden release service the train runs through sudo
 
 Imports run one way: this file imports the verb modules, the verb modules import `cli_common`,
 and no library module imports any of them.
@@ -33,7 +35,7 @@ from __future__ import annotations
 
 import typer
 
-from dsl41 import cli_compile, cli_control, cli_estate, cli_run
+from dsl41 import cli_compile, cli_control, cli_estate, cli_release, cli_run, release_service
 from dsl41.cli_common import stops_on_statechart_error as stops
 
 app = typer.Typer(
@@ -96,3 +98,13 @@ estate_app.command("reclaim")(stops(cli_estate.estate_reclaim))
 estate_app.command("prune")(stops(cli_estate.estate_prune))
 estate_app.command("quiesce")(stops(cli_estate.estate_quiesce))
 estate_app.command("args")(cli_estate.estate_args)
+
+# the release train's verbs, their group and names in release_service (DL-412)
+release_app = typer.Typer(
+    no_args_is_help=True,
+    help="Prepare and apply estate releases.",
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+app.add_typer(release_app, name=release_service.GROUP, rich_help_panel="Periods and retention")
+for name, command, hidden in cli_release.COMMANDS:
+    release_app.command(name, hidden=hidden)(command)
