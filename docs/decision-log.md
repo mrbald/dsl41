@@ -24367,3 +24367,35 @@ relitigate an entry; append a new one.
   `packaging` for the version compare (a dependency for one operator); a relative MANIFEST
   (two spellings of one manifest print two path strings and two bundle hashes); the
   deployment options in the manifest (they describe the host, and a standby may differ).
+- DL-408 The site package is the infrastructure and keeps fixed what a JIL release runs within;
+  a JIL release is the application's and travels on its own train through the release helper
+  (2026-10-27; owner ruling; docs/site-package.md §5, docs/deployment-runbook.md §0 and §6,
+  docs/authoring.md §6.1, examples/nightbank/deploy/dsl41-release)
+  THE RULE. An estate changes in one of two cycles. The application train is in place: the
+  application's on-call prepares a release with `dsl41-release prepare`, applies it in one
+  window with `apply`, verifies it, and rolls it back with `rollback`, through the same window.
+  The infrastructure acts are a fresh run root, a physical roll and a new estate; each changes
+  the launcher's RUN_ROOT and the units, and the site package's owner runs it (runbook §6, §7).
+  The site package owns and keeps fixed the launcher (PREFIX, RUN_ROOT, ESTATE_ANCHOR,
+  ENVIRONMENT, PROPERTIES and the run options), the units, the access map, the releases
+  directory and ACTIVE's directory, created for the deployment identity and its group, the
+  helper and its sudoers file, and the ceiling, MAX_JOBS and MAX_GRACE_S, sized against the
+  supervisor unit's TimeoutStopSec (DL-401). Prepare refuses a release above the ceiling. The
+  application owns a release directory's contents, its manifest and its tag. The deployment
+  identity owns ESTATE_RELEASES and ACTIVE; the access map binds it to `ops` behind its
+  `socket_group`; through sudo it may run only the helper's `service` mode as the service
+  account and `systemctl start` of the engine unit. A runtime rollback below dsl41 1.13.0
+  reinstalls the site package qualified with that release, because the launcher refuses a
+  runtime without `dsl41 estate args`.
+  Limits. The helper's `service check` accepts a `NAME.new` or symlinked release directory when
+  the sudo `service` command is run by hand with a crafted name; that is unsupported, and it
+  launches, kills and writes nothing. When the drain times out, the helper releases its holds
+  and exits 2, and nothing is sealed.
+  THE REASON. The owner's ruling that dsl41 is infrastructure and the estate is application
+  config (DL-407). A JIL release changed files the site package owned, so the two had one
+  owner and one window; the contract lets the application release on its own schedule within
+  limits the infrastructure sized.
+  REJECTED: the helper as a dsl41 verb from the start (an example first, promoted once stable);
+  the ceiling declared in the manifest and checked against the launcher's (the units' limits
+  are the infrastructure's facts); one branch or tag per environment (layers in one repository,
+  one tag for every environment).
