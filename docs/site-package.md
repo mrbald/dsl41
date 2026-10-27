@@ -42,6 +42,7 @@ Choose the reference RPM or the offline recipe without RPM.
 Both prepare a candidate at its final path under the chosen prefix.
 The default prefix is `/opt/dsl41`.
 An operator activates a candidate through the `.venv` link.
+Before activation, run any check against a retained runtime with `python -B`, because a `.pyc` written into it makes activation refuse it ([rule](offline-installation.md#prepare-on-the-offline-host)).
 [DL-389](decision-log.md) defines the preparation and ownership rules.
 
 ### 2.1. Use or rebuild the reference RPM

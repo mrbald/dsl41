@@ -2484,10 +2484,11 @@ does not refuse a new release. Only the release note says whether resuming
 across the pair is safe. The **state-machine version** is different. One
 executable implements exactly one. A seal whose `next_period` names
 another is refused at readiness (period-model §2.1), and resume refuses a
-segment pinned to another. Check it in both venvs, whatever the note says:
+segment pinned to another. Run any check against a retained runtime with
+`python -B`. Check it in both venvs, whatever the note says:
 
 ```sh
-/opt/dsl41/.venvs/<runtime-id>/bin/python -c \
+/opt/dsl41/.venvs/<runtime-id>/bin/python -B -c \
     'from dsl41.runner_ledger import STATE_MACHINE_VERSION as v; print(v)'
 ```
 
