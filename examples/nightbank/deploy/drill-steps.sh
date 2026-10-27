@@ -783,7 +783,7 @@ step_upgrade_old_release() { # an estate on the old release, v1.7.0 from PyPI
     # the current launcher refuses a runtime without estate args (DL-407)
     rc=0
     refused=$(sudo -u dsl41 "$LAUNCH" --print 2>&1) || rc=$?
-    if [ "$rc" != 2 ] || ! grep -qF 'this launcher needs dsl41 1.13 or later' <<<"$refused"; then
+    if [ "$rc" != 2 ] || ! grep -qF 'this launcher needs dsl41 1.13.0 or later' <<<"$refused"; then
         fail "the current launcher on v$OLD_VERSION exited $rc: $refused"
     fi
     ok "the current launcher refuses v$OLD_VERSION and names the release it needs"

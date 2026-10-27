@@ -219,17 +219,27 @@ def test_the_printed_line_takes_the_manifests_order_and_ends_with_the_sites_laye
         ("../r1\n", "which is not one directory name"),
         ("..\n", "which is not one directory name"),
         ("r2\n", "holds no estate.toml: not a release"),
+        ("symlinked ACTIVE", "is a symlink: name the release in a plain file"),
+        ("symlinked release", "is a symlink: the opener must name the paths the seal named"),
     ],
 )
 def test_the_launcher_refuses_an_active_file_that_names_no_one_release(
     tmp_path: Path, active: str | None, says: str
 ) -> None:
-    """DL-407: ACTIVE holds one line, one directory name under ESTATE_RELEASES that
-    holds estate.toml. Anything else is the launcher's exit 2, before dsl41 runs."""
+    """DL-407: ACTIVE is a plain file holding one line, one directory name under
+    ESTATE_RELEASES that is no symlink and holds estate.toml. Anything else is the
+    launcher's exit 2, before dsl41 runs."""
     releases = _releases(tmp_path)
     path = Path(releases["ACTIVE"])
     if active is None:
         path.unlink()
+    elif active == "symlinked ACTIVE":
+        (tmp_path / "selector").write_text(f"{RELEASE}\n")
+        path.unlink()
+        path.symlink_to(tmp_path / "selector")
+    elif active == "symlinked release":
+        Path(releases["ESTATE_RELEASES"], "current").symlink_to(RELEASE)
+        path.write_text("current\n")
     else:
         path.write_text(active)
     launcher = _configured(tmp_path, DSL41=str(DSL41), RUN_ROOT=str(tmp_path / "nb"), **releases)
@@ -282,7 +292,7 @@ def _fake_dsl41(base: Path, body: str) -> Path:
     [
         (
             2,
-            "this launcher needs dsl41 1.13 or later;"
+            "this launcher needs dsl41 1.13.0 or later;"
             " a rollback below it reinstalls the site package qualified with that release",
         ),
         (1, "estate args --help exited 1: cannot tell whether it reads a manifest"),
@@ -293,16 +303,17 @@ def test_the_launcher_refuses_a_dsl41_without_estate_args(
 ) -> None:
     """DL-407: the launcher reads the manifest through `estate args`. A dsl41 whose
     parse of `estate args --help` exits 2 has no such verb, and any other failure
-    cannot tell: both refuse with exit 2, before the release is read (DL-402's probe)."""
+    cannot tell: both refuse with exit 2, before the release is read (DL-402's probe).
+    ACTIVE is missing here, so a refusal that read the release would say so instead."""
     fake = tmp_path / "fake-dsl41"
     fake.write_text(
         f'#!/bin/sh\n[ "$*" = "estate args --help" ] && exit {probe}\n'
         '[ "$*" = "run --supervisor attach --help" ] && exit 2\nexit 9\n'
     )
     fake.chmod(0o755)
-    launcher = _configured(
-        tmp_path, DSL41=str(fake), RUN_ROOT=str(tmp_path / "nb"), **_releases(tmp_path)
-    )
+    releases = _releases(tmp_path)
+    Path(releases["ACTIVE"]).unlink()
+    launcher = _configured(tmp_path, DSL41=str(fake), RUN_ROOT=str(tmp_path / "nb"), **releases)
     for mode in ("--print", "engine"):
         refused = _sh(launcher, mode)
         assert refused.returncode == 2 and refused.stdout == ""
@@ -900,7 +911,7 @@ COMPAT = DEPLOY / "compat" / "dsl41-launch-pre-manifest"
 
 
 def test_the_drill_runs_v1_7_0_under_the_pre_manifest_launcher_and_restores_the_current() -> None:
-    """DL-407: the current launcher refuses a dsl41 before 1.13, and a site that rolls
+    """DL-407: the current launcher refuses a dsl41 before 1.13.0, and a site that rolls
     back below it reinstalls that generation's launcher. The fixture is that launcher:
     it reads no manifest and names one release directory. The drill installs it for the
     v1.7.0 steps only, and the steps after them run the current launcher again."""
