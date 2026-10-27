@@ -1090,7 +1090,11 @@ survived while its work was failed would be a drain in name only.
 The three operator verbs are `activate`, `drain` and `evict`.
 `quarantined` is the leader's own state. The leader sets it on the fifth
 consecutive failed lease renewal, and clears it when the host answers
-again (DL-291).
+again (DL-291). A renewal with no reply within `_RENEW_TIMEOUT_S`, ten
+seconds, counts as failed (DL-409). So a supervisor that is frozen or hung,
+and still accepts the request, is quarantined 54 to 74 seconds after it
+stops: up to one 20-second renewal interval, then five deadlines with a
+one-second backoff between them.
 
 Two more rules come from the deadman (DL-95):
 

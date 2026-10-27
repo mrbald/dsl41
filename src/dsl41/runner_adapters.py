@@ -1351,6 +1351,9 @@ class SupervisorClient:
     _RENEW_EVERY_S = 20.0
     #: the short backoff after a failed renewal
     _RETRY_EVERY_S = 1.0
+    #: a renewal with no reply within this deadline is a failed renewal (DL-409): a frozen
+    #: supervisor still accepts the request, and only a deadline turns its silence into failures
+    _RENEW_TIMEOUT_S = 10.0
 
     def __init__(
         self,
@@ -1867,6 +1870,11 @@ class SupervisorClient:
         incumbency, not a label; a lapsed lease is free, but one another engine now holds refuses
         us, which is the fencing working); connection loss heals via _request's lazy reconnect.
 
+        A renewal with no reply within `_RENEW_TIMEOUT_S` fails (DL-409). The deadline covers the
+        whole renewal, the lazy reconnect included, and its cancel poisons the connection (DL-48),
+        so the next renewal reconnects. Each such failure before the host is reported unreachable
+        logs one line.
+
         Five consecutive failures report the host unreachable, loudly and once per outage
         (concurrency-model ss8). The loop continues: it is the one thing that renews the lease,
         so it keeps retrying on the short backoff, and its first success reports contact again,
@@ -1884,7 +1892,7 @@ class SupervisorClient:
             while not self._closed:
                 await asyncio.sleep(self._RENEW_EVERY_S if failures == 0 else self._RETRY_EVERY_S)
                 try:
-                    resp = await self._renew_once(ttl_s)
+                    resp = await asyncio.wait_for(self._renew_once(ttl_s), self._RENEW_TIMEOUT_S)
                     if resp.get("ok"):
                         if failures >= _UNREACHABLE_AFTER:
                             print(
@@ -1896,6 +1904,13 @@ class SupervisorClient:
                         continue
                 except SupervisorUnavailable:
                     pass
+                except TimeoutError:
+                    if failures < _UNREACHABLE_AFTER:  # past the report, the outage is known
+                        print(
+                            "dsl41: supervisor lease renewal had no reply within"
+                            f" {self._RENEW_TIMEOUT_S:g}s",
+                            file=sys.stderr,
+                        )
                 except StatechartError:
                     raise  # an assertion failure is not a failed renewal: below
                 except Exception as exc:  # noqa: BLE001 -- one bad renewal must not end renewal

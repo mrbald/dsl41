@@ -560,6 +560,87 @@ def _evict_bound(engine) -> float:
     return bound - waited
 
 
+def test_cm09_a_frozen_supervisor_quarantines_the_host_and_its_thaw_reinstates_it(
+    short_root: Path, monkeypatch
+) -> None:
+    """ss8 unreachability from a supervisor that is alive and silent (DL-409).
+
+    A stopped process keeps its socket: the kernel accepts the connection and
+    the RENEW, and no reply comes. Without a deadline the renewal waits for
+    ever, no failure is counted, and the host is never quarantined. With one,
+    five renewals fail and the leader quarantines the host. After SIGCONT the
+    same supervisor answers, and the first landed renewal reinstates it."""
+    monkeypatch.setattr(SupervisorClient, "_RENEW_EVERY_S", 0.2)
+    monkeypatch.setattr(SupervisorClient, "_RETRY_EVERY_S", 0.1)
+    monkeypatch.setattr(SupervisorClient, "_RENEW_TIMEOUT_S", 0.8)
+
+    async def scenario() -> tuple[list[str], int, int]:
+        run_root = short_root / "run"
+        run_root.mkdir(parents=True)
+        client = SupervisorClient(run_root)
+        await client.provision()
+        sup_pid = json.loads((run_root / "supervisor.pid").read_text())["pid"]
+        await client.acquire()
+        engine = start_run(
+            lower_source(HELD_JIL),
+            run_root,
+            clock=RealClock(),
+            adapters={
+                "CMD": SupervisedCommandAdapter(client, grace_seconds=2.0),
+                "FW": FileWatcherAdapter(),
+            },
+            deadman_s=client.supervisor_deadman_s,
+            hold_open=True,
+        )
+        genesis_contact = engine.oracle.store.host(LOCAL_EXECUTOR_ID).last_contact
+        client.on_contact = engine.note_executor_contact
+        client.on_unreachable = engine.note_executor_unreachable
+        loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
+        states: list[str] = []
+
+        async def await_state(state: str, why: str) -> None:
+            deadline = time.monotonic() + 30
+            while engine.oracle.store.host(LOCAL_EXECUTOR_ID).state != state:
+                assert time.monotonic() < deadline, why
+                await asyncio.sleep(0.05)
+            states.append(state)
+
+        try:
+            # the positive control: a renewal lands, so the loop is live and
+            # the supervisor answers inside the deadline before the freeze
+            deadline = time.monotonic() + 15
+            while engine.oracle.store.host(LOCAL_EXECUTOR_ID).last_contact == genesis_contact:
+                assert time.monotonic() < deadline, "no lease exchange stamped the routing row"
+                await asyncio.sleep(0.02)
+            states.append(engine.oracle.store.host(LOCAL_EXECUTOR_ID).state)
+            os.kill(sup_pid, signal.SIGSTOP)
+            await await_state("quarantined", "silent renewals never quarantined the host")
+            os.kill(sup_pid, signal.SIGCONT)
+            await await_state("active", "the thawed supervisor never reinstated the host")
+            # the same supervisor throughout: frozen and thawed, never replaced
+            now_pid = json.loads((run_root / "supervisor.pid").read_text())["pid"]
+            return states, sup_pid, now_pid
+        finally:
+            # a stopped supervisor would outlive the test and hold this run root
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(sup_pid, signal.SIGCONT)
+            loop.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await loop
+            engine.detach.stopping = True
+            await engine.shutdown()
+            if engine.journal is not None:
+                engine.journal.close()
+            with contextlib.suppress(Exception):
+                await client.shutdown()
+            await client.close()
+            wait_reaped(sup_pid)
+
+    states, frozen_pid, thawed_pid = asyncio.run(scenario())
+    assert states == ["active", "quarantined", "active"]
+    assert thawed_pid == frozen_pid
+
+
 def test_pr01c_a_foreign_root_is_refused_before_staging_or_supervisor(short_root: Path) -> None:
     """ss1.1: the CLI proves the root is claimable BEFORE it stages a
     bundle into it or starts a supervisor against it -- both are acts on an
