@@ -35,7 +35,7 @@ dsl41 and your services) and keep fixed what the application's JIL releases run 
 
 1. [docs/operator-curriculum.md](docs/operator-curriculum.md) - the operator course: the nightbank exercises in order, the service drills, what no drill trains, where to look on shift
 2. [docs/deployment-runbook.md §0](docs/deployment-runbook.md#0-the-operator-path) - the operator path: tasks, diagrams, recipes, monitoring and retirement; §2b backup and restore, §6a the period boundary, §8 scenarios
-3. [examples/nightbank/README.md](examples/nightbank/README.md) and its [RUNBOOK](examples/nightbank/RUNBOOK.md) - the training sandbox: numbered operator exercises on the real engine, run from a checkout with `uv run examples/nightbank/bin/nightbank up`; its [service runbook](examples/nightbank/RUNBOOK-service.md) holds exercises 22 to 32, the §0 service tasks typed by hand on a wargame host; `scripts/wargame.sh` supplies a disposable EL8 systemd container with `uv` for service exercises by hand, from an image that is also the service drill's base; its own container has no network; the drill runs the image in a container of its own
+3. [examples/nightbank/README.md](examples/nightbank/README.md) and its [RUNBOOK](examples/nightbank/RUNBOOK.md) - the training sandbox: numbered operator exercises on the real engine, run from a checkout with `uv run examples/nightbank/bin/nightbank up`; its [service runbook](examples/nightbank/RUNBOOK-service.md) holds exercises 22 to 33, the §0 service tasks typed by hand on a wargame host; `scripts/wargame.sh` supplies a disposable EL8 systemd container with `uv` for service exercises by hand, from an image that is also the service drill's base; its own container has no network; the drill runs the image in a container of its own
 4. [examples/file_processing/README.md](examples/file_processing/README.md) - the operator CLI and procedures of the file-processing block; [examples/dst-drill](examples/dst-drill/README.md) for the clock-change drill
 
 **Job author**: write an estate in JIL or the Python DSL, or bring an existing one in, and get it accepted.
@@ -597,7 +597,7 @@ the period boundary: sealing a night live and offline, opening the next
 period in place, the morning-after `audit` and `verify`, rolling to a fresh
 run root, break-glass reclaim, and retention. The
 [service runbook](examples/nightbank/RUNBOOK-service.md)'s exercises 22
-to 32 run the service tasks by hand on a `scripts/wargame.sh` host. The
+to 33 run the service tasks by hand on a `scripts/wargame.sh` host. The
 `deploy/` directory holds a launcher script and systemd units for running
 it as a service. The example is repo-only; it is not packaged.
 
