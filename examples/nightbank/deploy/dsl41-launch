@@ -92,7 +92,7 @@ ENVIRONMENT=wargame
 PROPERTIES=/srv/dsl41/nightbank/night/night.properties
 # The workload the units' limits were sized for: the supervisor unit's
 # TimeoutStopSec=900 covers 15 + 5 + MAX_GRACE_S + 2 + 8 x MAX_JOBS + 10
-# seconds (DL-401). `vars` prints them, and `dsl41 estate prepare` refuses
+# seconds (DL-401). `vars` prints them, and `dsl41 release prepare` refuses
 # a release above them (DL-407, DL-412).
 MAX_JOBS=107
 MAX_GRACE_S=10

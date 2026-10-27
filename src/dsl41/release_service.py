@@ -5,7 +5,9 @@ What reads or writes the run root, and lint and rehearse, run as the service acc
 `sudo`, as `dsl41 release service ACTION WORD...`: this module's `service`. It takes release
 names, a request id or a job name, never a path, an option or a command line. It finds the
 site's launcher from the runtime it runs on, never from its caller, and reads every path and
-run option through `dsl41-launch vars`.
+run option through `dsl41-launch vars`. A world-writable directory on the way to the launcher
+passes only when root owns it and its sticky bit is set, as sudo's secure-path rule has it
+(DL-412).
 
 The service side's reads of the run root are the deployment runbook's Day 2 reads (ss6a): the
 seal record at the end of a WAL segment and its sidecar, and the inputs that can move a job's
@@ -24,6 +26,7 @@ import shlex
 import stat
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -54,13 +57,12 @@ EXIT_UNKNOWN = 4
 #: one directory name under ESTATE_RELEASES, as the launcher reads ACTIVE (DL-407)
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,99}")
 REQUEST_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-#: a job name as the engine keeps it: one word of printable characters, `#` and an escaped
-#: colon included, that cannot read as an option (DL-412)
-JOB = re.compile(r"[^\s\-][^\s]{0,199}")
 #: the launcher's SERVICE_ACCOUNT, a login name, and ENGINE_UNIT, a service unit's name
 ACCOUNT = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,31}")
 UNIT = re.compile(r"[A-Za-z0-9:_.@-]{1,200}\.service")
 SEGMENT = "[0-9]" * 6 + ".jsonl"
+#: the seal arguments whose value is a file the manifest names (DL-407)
+INPUT_FLAGS = ("--next", "-p", "--next-timezone-map")
 #: the request kinds that can move a job's hold: the two hold verbs, FORCE_STARTJOB, which
 #: clears it, and ON_NOEXEC, which supersedes it (job chart rows job.204 to job.207)
 HOLD_KINDS = ("ON_HOLD", "OFF_HOLD", "FORCE_STARTJOB", "ON_NOEXEC")
@@ -128,11 +130,24 @@ class Config:
         return self.releases / ".apply.json"
 
 
-def launcher() -> Path:
+def trusted(info: os.stat_result) -> bool:
+    """Owned by root or this account, and writable by no one else. A world-writable directory
+    passes only when root owns it and its sticky bit is set, as /tmp: there no other account
+    can rename or remove an entry it does not own (DL-412)."""
+    if info.st_uid not in (0, os.geteuid()):
+        return False
+    if not info.st_mode & 0o022:
+        return True
+    return stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and bool(info.st_mode & stat.S_ISVTX)
+
+
+def launcher() -> tuple[Path, str]:
     """The site's launcher, `<prefix>/bin/dsl41-launch`, where `<prefix>/.venvs` holds the
-    runtime this process runs on (offline-installation's layout). No argument and no
-    environment variable names it, so a caller of the service side cannot name another one;
-    and it must be a plain file that only root, or this account, can write (DL-412)."""
+    runtime this process runs on (offline-installation's layout), and its text. No argument
+    and no environment variable names it. Every directory from the root down to it, and the
+    file, must be a real directory or file that only root, or this account, can write; the
+    text is read from the one descriptor whose identity matched that check, so what runs is
+    what was checked (DL-412)."""
     runtime = Path(os.path.realpath(sys.prefix))
     if runtime.parent.name != ".venvs":
         raise Stop(
@@ -142,6 +157,16 @@ def launcher() -> Path:
             "run the dsl41 that the launcher's DSL41 names.",
         )
     path = runtime.parent.parent / "bin" / "dsl41-launch"
+    reinstall = "ask the site package's owner to reinstall it."
+    for directory in reversed(path.parents):
+        info = directory.lstat()
+        if not stat.S_ISDIR(info.st_mode) or not trusted(info):
+            raise Stop(
+                EXIT_REFUSED,
+                f"{directory} must be a real directory that only root, or the account that runs"
+                f" it, can write, since it holds {path}.",
+                reinstall,
+            )
     try:
         info = path.lstat()
     except FileNotFoundError:
@@ -150,23 +175,33 @@ def launcher() -> Path:
             f"{path} is missing.",
             "ask the site package's owner to install the launcher there.",
         ) from None
-    if (
-        not stat.S_ISREG(info.st_mode)
-        or info.st_uid not in (0, os.geteuid())
-        or info.st_mode & 0o022
-    ):
+    if not stat.S_ISREG(info.st_mode) or not trusted(info):
         raise Stop(
             EXIT_REFUSED,
-            f"{path} must be a plain file that only root can write.",
-            "ask the site package's owner to reinstall it.",
+            f"{path} must be a plain file that only root, or the account that runs it, can write.",
+            reinstall,
         )
-    return path
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        opened = os.fstat(fd)
+        same = (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_uid)
+        if same != (info.st_dev, info.st_ino, info.st_mode, info.st_uid):
+            raise Stop(EXIT_REFUSED, f"{path} changed while it was checked.", reinstall)
+        chunks = []
+        while chunk := os.read(fd, 65536):
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    return path, b"".join(chunks).decode()
 
 
 def config() -> Config:
-    """The launcher's variables; a launcher that cannot give one refuses, exit 2."""
-    path = launcher()
-    done = subprocess.run([str(path), "vars"], capture_output=True, text=True, check=False)
+    """The launcher's variables; a launcher that cannot give one refuses, exit 2. The checked
+    text runs through `sh -s`, never the path (DL-412)."""
+    path, text = launcher()
+    done = subprocess.run(
+        ["/bin/sh", "-s", "vars"], input=text, capture_output=True, text=True, check=False
+    )
     owner = "ask the site package's owner to fix the launcher's CONFIGURATION."
     if done.returncode != 0:
         raise Stop(
@@ -200,6 +235,16 @@ def config() -> Config:
             f"`{path} vars` printed SERVICE_ACCOUNT={values['SERVICE_ACCOUNT']} and"
             f" ENGINE_UNIT={values['ENGINE_UNIT']}: a login name and a .service unit.",
             owner,
+        )
+    # the verbs run on the runtime the launcher selects, so prepare's version and the
+    # apply's are one (DL-412)
+    runtime = Path(os.path.realpath(sys.prefix))
+    selected = Path(os.path.realpath(values["DSL41"])).parent.parent
+    if selected != runtime:
+        raise Stop(
+            EXIT_REFUSED,
+            f"this dsl41 runs from {runtime}, and the launcher's DSL41 selects {selected}.",
+            f"run `{values['DSL41']} {GROUP} ...` instead.",
         )
     return Config(
         launcher=path,
@@ -241,6 +286,11 @@ def release_dir(cfg: Config, name: str) -> Path:
         )
     if not (path / "estate.toml").is_file():
         raise Stop(EXIT_REFUSED, f"{path} holds no estate.toml, so it is not a release.")
+    # prepare's copy holds no symlink, so one inside a release could only point a read or a
+    # seal outside it: every use of a release refuses it (DL-412)
+    links = sorted(str(file.relative_to(path)) for file in path.rglob("*") if file.is_symlink())
+    if links:
+        raise Stop(EXIT_REFUSED, f"{name} holds symlinks: {', '.join(links)}.")
     return path
 
 
@@ -297,12 +347,48 @@ def fsync_dir(path: Path) -> None:
 
 
 def file_digests(path: Path) -> dict[str, str]:
-    """The sha256 of every file of the release, its .release directory aside."""
+    """The sha256 of every file of the release, its .release directory aside, each read as a
+    release input."""
     return {
-        str(file.relative_to(path)): "sha256:" + hashlib.sha256(file.read_bytes()).hexdigest()
+        str(file.relative_to(path)): "sha256:" + hashlib.sha256(read_input(path, file)).hexdigest()
         for file in sorted(path.rglob("*"))
         if file.is_file() and ".release" not in file.relative_to(path).parts
     }
+
+
+def read_input(release: Path, file: Path) -> bytes:
+    """FILE's bytes, read as an input of RELEASE: its real path is inside the release, and it
+    is opened without following a symlink, as a plain file. Every service-side read of a
+    release goes through this, so a link the deployment identity plants reads nothing
+    outside the release (DL-412)."""
+    if not os.path.realpath(file).startswith(os.path.realpath(release) + os.sep):
+        raise Stop(EXIT_REFUSED, f"{file} is outside {release}.")
+    try:
+        fd = os.open(file, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as exc:
+        raise Stop(EXIT_REFUSED, f"{file} cannot be read as a release input: {exc.strerror}.")
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise Stop(EXIT_REFUSED, f"{file} is not a plain file.")
+        chunks = []
+        while chunk := os.read(fd, 65536):
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    return b"".join(chunks)
+
+
+def release_inputs(cfg: Config, path: Path) -> list[Path]:
+    """Every file the release's manifest names for this host, the manifest included, each
+    read once as a release input (DL-412)."""
+    from dsl41.estate_manifest import ArgsFor
+
+    argv = manifest_args(cfg, path, ArgsFor.seal)
+    named = [argv[i + 1] for i, word in enumerate(argv) if word in INPUT_FLAGS]
+    files = [path / "estate.toml", *(Path(word) for word in named)]
+    for file in files:
+        read_input(path, file)
+    return files
 
 
 def changed_files(path: Path, prepared: dict[str, Any]) -> list[str]:
@@ -314,9 +400,21 @@ def changed_files(path: Path, prepared: dict[str, Any]) -> list[str]:
 
 
 def check_prepared(cfg: Config, name: str) -> None:
-    """NAME is prepared under this runtime, and its files are the ones prepare checked."""
+    """NAME is prepared under this runtime, and its files are the ones prepare checked. The
+    deployment identity writes prepared.json, so a name in it outside the release refuses as
+    a symlink does (DL-412)."""
     path = release_dir(cfg, name)
     prepared = read_json(path / ".release" / "prepared.json")
+    root = os.path.realpath(path) + os.sep
+    outside = sorted(
+        str(file)
+        for file in (prepared or {}).get("files") or {}
+        if not os.path.realpath(path / str(file)).startswith(root)
+    )
+    if outside:
+        raise Stop(
+            EXIT_REFUSED, f"{name}'s prepared.json names files outside it: {', '.join(outside)}."
+        )
     if prepared is None:
         raise Stop(
             EXIT_REFUSED,
@@ -350,9 +448,7 @@ def service_check(cfg: Config, name: str) -> dict[str, Any]:
     from dsl41.period import CMD_GRACE_S
 
     path = release_dir(cfg, name)
-    links = sorted(str(file.relative_to(path)) for file in path.rglob("*") if file.is_symlink())
-    if links:
-        raise Stop(EXIT_REFUSED, f"{name} holds symlinks: {', '.join(links)}.")
+    release_inputs(cfg, path)
     lint = [cfg.dsl41, "lint", *manifest_args(cfg, path, ArgsFor.lint), "-p", cfg.properties]
     linted = subprocess.run(lint, capture_output=True, text=True, check=False)
     sys.stderr.write(linted.stdout + linted.stderr)
@@ -397,14 +493,29 @@ def service_changes(cfg: Config, before: str, after: str) -> dict[str, Any]:
 
     prints = []
     for name in (before, after):
-        argv = manifest_args(cfg, release_dir(cfg, name), ArgsFor.viz)
+        path = release_dir(cfg, name)
+        release_inputs(cfg, path)
+        argv = manifest_args(cfg, path, ArgsFor.viz)
         files = [Path(word) for word in argv if not word.startswith("-")]
         layers = [Path(argv[i + 1]) for i, word in enumerate(argv) if word == "-p"]
         files = [file for file in files if file not in layers]
-        try:
-            catalog = load_catalog_or_exit_2(files, False, [*layers, Path(cfg.properties)])
-        except typer.Exit:
-            raise Stop(EXIT_STOPPED, f"{name} does not load; the error is above.") from None
+        # the loader reads from a private copy of the inputs, each read as a release input, so
+        # a link planted after the check reads nothing outside the release (DL-412)
+        with tempfile.TemporaryDirectory(prefix="dsl41-release-") as scratch:
+            copy = Path(scratch)
+
+            def copied(file: Path, path: Path = path, copy: Path = copy) -> Path:
+                target = copy / file.relative_to(path)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(read_input(path, file))
+                return target
+
+            loaded = [copied(file) for file in files]
+            stacked = [copied(layer) for layer in layers]
+            try:
+                catalog = load_catalog_or_exit_2(loaded, False, [*stacked, Path(cfg.properties)])
+            except typer.Exit:
+                raise Stop(EXIT_STOPPED, f"{name} does not load; the error is above.") from None
         prints.append(job_fingerprints(catalog))
     old, new = prints
     return {
@@ -532,12 +643,26 @@ def service_seal(cfg: Config, name: str, request_id: str) -> int:
 
     check_prepared(cfg, name)
     path = release_dir(cfg, name)
+    release_inputs(cfg, path)
     argv = [cfg.dsl41, "seal", "--run-root", str(cfg.run_root)]
     argv += ["--estate-anchor", str(cfg.estate_anchor), *manifest_args(cfg, path, ArgsFor.seal)]
     argv += ["-p", cfg.properties, *cfg.next_profile]
     argv += ["--claimed-actor", f"os/{cfg.service_account}", "--request-id", request_id]
     say(f"seal: {shlex.join(argv)}")
     return subprocess.run(argv, check=False).returncode
+
+
+def engine_job_name(word: str) -> bool:
+    """Whether the engine would address a job by WORD: its own envelope rule, so a name the
+    engine holds is a name the service side reads the log for (DL-412)."""
+    from dsl41.runner_admission import addressed_key
+    from dsl41.runner_clock import EngineError
+
+    try:
+        addressed_key("ON_HOLD", {"job": word})
+    except EngineError:
+        return False
+    return True
 
 
 def service(words: list[str]) -> int:
@@ -563,7 +688,7 @@ def service(words: list[str]) -> int:
     if action == "committed" and len(rest) == 1 and ids == rest:
         print(json.dumps(committed(cfg, rest[0])))
         return EXIT_OK
-    if action == "holds" and len(rest) == 1 and JOB.fullmatch(rest[0]):
+    if action == "holds" and len(rest) == 1 and engine_job_name(rest[0]):
         print(json.dumps(hold_history(cfg, rest[0])))
         return EXIT_OK
     if action == "pins" and len(rest) == 1 and ids == rest:

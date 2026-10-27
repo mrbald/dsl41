@@ -25,7 +25,8 @@ the hold there now may be somebody else's. It never releases a hold it did not a
 
 Each finished apply leaves a receipt in its release's .release directory: applied-<request
 id>.json when it completed, which .release/latest names; refused-<apply id>.json when it sealed
-nothing; rolled-back-<request id>.json when a rollback took it over after its period opened.
+nothing; verify-failed-<request id>.json, or taken-over-<request id>.json when its check passed,
+when a rollback took it over after its period opened.
 """
 
 from __future__ import annotations
@@ -110,6 +111,8 @@ HORIZON = re.compile(
 HORIZON_FALLBACK_S = 10.0
 #: why a kept hold is kept; the first three leave the job on hold (DL-412)
 STILL_HELD = ("rejected", "moved", "not_in_log")
+#: every receipt a finished apply leaves, by outcome (DL-412)
+RECEIPTS = ("applied-*.json", "refused-*.json", "verify-failed-*.json", "taken-over-*.json")
 #: seconds between the drain's progress lines
 PROGRESS_S = 60.0
 
@@ -137,13 +140,15 @@ def now() -> str:
 
 
 def main(action: Callable[[], int], *, records: bool = False) -> int:
-    """Run one verb and return its exit code. A `Stop` prints its lines. For a verb that
-    records an apply, SIGINT and SIGHUP stop it with exit 3 and the record kept, and the line
-    names `resume` (DL-412)."""
+    """Run one verb and return its exit code. A `Stop` prints its lines. SIGINT and SIGHUP stop
+    any verb with exit 3; for one that records an apply the record is kept, and the line names
+    `resume`. A signal the caller ignores, as `nohup` ignores SIGHUP, stays ignored (DL-412)."""
     os.umask(0o022)
-    handlers = {}
-    if records:
-        handlers = {sig: signal.signal(sig, _interrupt) for sig in (signal.SIGINT, signal.SIGHUP)}
+    handlers = {
+        sig: signal.signal(sig, _interrupt)
+        for sig in (signal.SIGINT, signal.SIGHUP)
+        if signal.getsignal(sig) is not signal.SIG_IGN
+    }
     try:
         return action()
     except Stop as stop:
@@ -151,6 +156,9 @@ def main(action: Callable[[], int], *, records: bool = False) -> int:
             say(line)
         return stop.code
     except Interrupted:
+        if not records:
+            say("interrupted.")
+            return EXIT_STOPPED
         return interrupted()
     except Exception as exc:  # anything else stops here, with its record kept
         say(f"stopped by an unexpected error: {type(exc).__name__}: {exc}")
@@ -185,7 +193,7 @@ def interrupted() -> int:
 
 
 def as_service(cfg: Config, *args: str) -> list[str]:
-    return ["sudo", "-n", "-u", cfg.service_account, "-H", cfg.dsl41, GROUP, SERVICE, *args]
+    return ["sudo", "-n", "-u", cfg.service_account, "-H", cfg.dsl41, GROUP, SERVICE, "--", *args]
 
 
 def service_json(cfg: Config, *args: str) -> dict[str, Any]:
@@ -388,11 +396,13 @@ def query(cfg: Config, what: str, job: str | None = None) -> dict[str, Any]:
         text=True,
     )
     if done.returncode != 0:
+        said = done.stderr.strip()
+        detail = [f"`dsl41 query` said: {said}"] if said and "no engine" not in said else []
         raise Stop(
             EXIT_REFUSED,
-            f"no engine answers on {cfg.socket}: `dsl41 query {what}` exited"
-            f" {done.returncode}: {done.stderr.strip()}",
-            f"check the engine with `systemctl status {cfg.engine_unit}`.",
+            f"no engine answers on {cfg.socket}.",
+            *detail,
+            f"check `systemctl status {cfg.engine_unit}` and `journalctl -u {cfg.engine_unit}`.",
         )
     try:
         answer: dict[str, Any] = json.loads(done.stdout)
@@ -423,20 +433,43 @@ def send(cfg: Config, verb: str, job: str, *expect: str) -> tuple[int, dict[str,
     return done.returncode, answer
 
 
-def horizon_wait(output: str) -> float | None:
-    """The seconds a seal refused with `seal_retry_horizon` asks to wait, keyed on the
-    answer's code and never on its wording; None for any other answer (period-model ss9)."""
-    for line in output.splitlines():
+def horizon_wait(stdout: str, stderr: str) -> float | None:
+    """The seconds a seal refused inside the retry horizon asks to wait (period-model ss9),
+    or None for any other refusal. A live seal answers with the code `seal_retry_horizon`; an
+    offline one prints the gate's sentence on stderr. The wait comes from whichever came, and
+    a coded answer without the figures waits a fixed time (DL-412)."""
+    for line in stdout.splitlines():
         try:
             answer = json.loads(line)
         except ValueError:
             continue
         if isinstance(answer, dict) and answer.get("code") == HORIZON_CODE:
             found = HORIZON.search(str(answer.get("error", "")))
-            if found is None:
-                return HORIZON_FALLBACK_S
-            return int(found.group(2)) / 1e6 - float(found.group(1)) + 1.0
-    return None
+            return HORIZON_FALLBACK_S if found is None else horizon_seconds(found)
+    found = HORIZON.search(stderr)
+    return None if found is None else horizon_seconds(found)
+
+
+def horizon_seconds(found: re.Match[str]) -> float:
+    return int(found.group(2)) / 1e6 - float(found.group(1)) + 1.0
+
+
+def seal_refusal(done: subprocess.CompletedProcess[str]) -> str:
+    """The reason a seal gave for its refusal, for the line and the refused receipt: the
+    answer's `error`, or the seal's last line of its own (DL-412)."""
+    for line in done.stdout.splitlines():
+        try:
+            answer = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(answer, dict) and answer.get("error"):
+            return str(answer["error"]).rstrip(".")
+    own = [
+        line.strip()
+        for line in done.stderr.splitlines()
+        if line.strip() and not line.startswith(f"dsl41 {GROUP}:")
+    ]
+    return own[-1].rstrip(".") if own else f"it exited {done.returncode}"
 
 
 def still_held(entry: dict[str, Any]) -> bool:
@@ -503,6 +536,8 @@ class Apply:
         return Stop(EXIT_STOPPED, *lines)
 
     def run(self) -> int:
+        if self.record.get("takeover_of", {}).get("body") is not None:
+            self.finish_takeover()
         if self.record["step"] == ABORTING:
             return self.abort("a refused apply's holds are released now.")
         if self.at_or_before("drained"):
@@ -562,9 +597,32 @@ class Apply:
     ) -> dict[str, Any]:
         """The receipt of a finished apply, in its release's .release directory; an applied
         one is named by .release/latest."""
+        receipt = self.receipt_body(outcome, released, kept, **more)
+        directory = self.cfg.releases / self.name / ".release"
+        if outcome == "applied":
+            file = f"applied-{self.record['request_id']}.json"
+            write_json(directory / file, receipt)
+            write_text(directory / "latest", f"{file}\n")
+        elif outcome == "refused":
+            write_json(
+                directory / f"refused-{self.record.get('apply_id') or uuid.uuid4()}.json", receipt
+            )
+        return receipt
+
+    def receipt_body(
+        self, outcome: str, released: list[str], kept: list[str], **more: Any
+    ) -> dict[str, Any]:
         receipt = {
             key: self.record.get(key)
-            for key in ("previous", "request_id", "actor", "seal_actor", "holds", "started_at")
+            for key in (
+                "previous",
+                "request_id",
+                "actor",
+                "seal_actor",
+                "holds",
+                "started_at",
+                "takeover_of",
+            )
         }
         receipt |= {
             "name": self.name,
@@ -581,18 +639,8 @@ class Apply:
                 "seal": seal["seal"],
                 "source_bundle_hash": seal["source_bundle_hash"],
             }
-        directory = self.cfg.releases / self.name / ".release"
         if outcome == "applied":
             receipt["applied_at"] = receipt["finished_at"]
-            file = f"applied-{self.record['request_id']}.json"
-            write_json(directory / file, receipt)
-            write_text(directory / "latest", f"{file}\n")
-        elif outcome == "refused":
-            write_json(
-                directory / f"refused-{self.record.get('apply_id') or uuid.uuid4()}.json", receipt
-            )
-        else:
-            write_json(directory / f"rolled-back-{self.record['request_id']}.json", receipt)
         return receipt
 
     def clear(self) -> None:
@@ -735,8 +783,11 @@ class Apply:
                 f"{self.name} changes or removes {', '.join(moving)}, and each is armed or has a"
                 " pending timer.",
                 "a job the release changes or removes must be idle when the seal runs.",
-                "wait until it is, or disarm it with"
-                f" `dsl41 sendevent DISARM -J JOB -S {self.cfg.socket}`; then apply again.",
+                "wait until each is idle, or disarm it, then apply again:",
+                *(
+                    f"`dsl41 sendevent DISARM -J {shlex.quote(job)} -S {self.cfg.socket}`"
+                    for job in moving
+                ),
             )
 
     def read_estate(self) -> bool:
@@ -766,19 +817,18 @@ class Apply:
             )
             if done.returncode == EXIT_OK and STOP_AFTER == "seal-reply":
                 os.kill(os.getpid(), signal.SIGKILL)
-            wait = horizon_wait(done.stdout) if done.returncode == EXIT_REFUSED else None
+            refused = done.returncode == EXIT_REFUSED
+            wait = horizon_wait(done.stdout, done.stderr) if refused else None
             if wait is None:
                 sys.stderr.write(done.stdout + done.stderr)
             if self.read_estate():
                 return EXIT_OK, []
             if done.returncode == EXIT_OK:
                 raise Stop(EXIT_STOPPED, "the seal exited 0, and the estate shows no seal.")
-            if done.returncode == EXIT_REFUSED and done.stderr.startswith("sudo:"):
-                raise service_failed(self.cfg, "seal", done)
             if done.returncode != EXIT_REFUSED:
                 return done.returncode, []
             if wait is None:
-                return EXIT_REFUSED, ["the seal did not commit; its refusal is above."]
+                return EXIT_REFUSED, [f"the seal did not commit: {seal_refusal(done)}."]
             if time.monotonic() + wait > deadline:
                 return EXIT_REFUSED, [
                     f"the retry horizon of the last operator request outlasts --horizon-timeout"
@@ -880,7 +930,12 @@ class Apply:
         if problems:
             self.record["problems"] = problems
             self.step(self.record["step"])
-            raise Stop(EXIT_STOPPED, f"the new period's check failed: {'; '.join(problems)}.")
+            raise Stop(
+                EXIT_STOPPED,
+                f"the new period does not match the seal: roll back with `{CMD_ROLLBACK}`, or"
+                " resume to check again.",
+                f"what does not match: {'; '.join(problems)}.",
+            )
         self.record.pop("problems", None)
 
     def release_holds(self) -> tuple[list[str], list[str]]:
@@ -983,7 +1038,13 @@ class Apply:
 
     def abort(self, *reason: str) -> int:
         """Nothing was sealed: release this apply's holds, write a refused receipt and clear
-        the record (DL-412)."""
+        the record. A hold of its own the engine would not release keeps the record, exit 3,
+        and a resume tries again (DL-412)."""
+        reason = tuple(self.record.setdefault("abort_reason", list(reason)))
+        for entry in self.record["holds"]:
+            if entry["state"] == "kept" and entry.get("kept_because") == "rejected":
+                entry["state"] = "applied"
+                entry.pop("release_attempts", None)
         self.step(ABORTING)
         try:
             released, kept = self.release_holds()
@@ -996,6 +1057,19 @@ class Apply:
                 f"the apply of {self.name} is recorded.",
                 f"`{CMD_RESUME}` will {RESUME[ABORTING]}.",
             ) from exc
+        ours = [
+            e["job"]
+            for e in self.record["holds"]
+            if e["state"] == "kept" and e.get("kept_because") == "rejected"
+        ]
+        if ours:
+            raise Stop(
+                EXIT_STOPPED,
+                *reason,
+                f"the engine did not release this apply's hold of {', '.join(ours)}.",
+                f"the apply of {self.name} is recorded.",
+                f"`{CMD_RESUME}` will {RESUME[ABORTING]}.",
+            )
         receipt = self.write_receipt("refused", released, kept, reason=list(reason))
         self.clear()
         for line in reason:
@@ -1013,30 +1087,52 @@ class Apply:
             say(line)
         return EXIT_REFUSED
 
-    def give_up(self) -> None:
-        """A rollback's take-over of an apply whose new period opened: its holds are released, a
-        rolled-back receipt records the check's result and problems, and the record is
-        cleared (DL-412)."""
-        try:
-            released, kept = self.release_holds()
-        except (Stop, OSError, ValueError, KeyError) as exc:
-            raise self.stopped(exc) from exc
-        failed = self.record["step"] == "opened"
-        receipt = self.write_receipt(
-            "rolled_back",
-            released,
-            kept,
-            verify_failed=failed,
-            problems=list(self.record.get("problems") or []),
+    def take_over(self, target: str) -> int:
+        """A rollback's take-over of an apply whose new period opened (DL-412). It releases no
+        hold: one rename replaces this apply's record with the apply of TARGET, which owns
+        every hold this apply took and has not released, so the jobs stay held through the
+        rollback's drain and seal. The new record carries this apply's receipt to write,
+        verify-failed-<id>.json when its check found problems, taken-over-<id>.json when not.
+        There is never a moment with no record."""
+        rid = self.record["request_id"]
+        problems = list(self.record.get("problems") or [])
+        holds = self.record["holds"]
+        body = self.receipt_body(
+            "verify_failed" if problems else "taken_over",
+            [e["job"] for e in holds if e["state"] == "released"],
+            [e["job"] for e in holds if e["state"] == "kept"],
+            verify_failed=bool(problems),
+            problems=problems,
         )
-        self.clear()
-        for line in kept_lines(self.cfg, receipt["holds"]):
-            say(line)
-        say(f"the apply of {self.name} is given up; its receipt is {receipt_name(receipt)}.")
+        carried = []
+        for entry in (e for e in holds if e["state"] != "released"):
+            carried.append(entry | {"carried_from": rid})
+            if entry["state"] == "kept" and entry.get("kept_because") == "rejected":
+                carried[-1] |= {"state": "applied"}
+                carried[-1].pop("release_attempts", None)
+        name = f"{'verify-failed' if problems else 'taken-over'}-{rid}.json"
+        successor = new_record(
+            self.cfg,
+            target,
+            self.name,
+            holds=carried,
+            takeover_of={"release": self.name, "request_id": rid, "receipt": name, "body": body},
+        )
+        write_json(self.cfg.record, successor)
+        if STOP_AFTER == "takeover":
+            os.kill(os.getpid(), signal.SIGKILL)
+        return Apply(self.cfg, successor, self.waits).run()
 
-
-def receipt_name(receipt: dict[str, Any]) -> str:
-    return f"rolled-back-{receipt['request_id']}.json"
+    def finish_takeover(self) -> None:
+        """The receipt of the apply taken over, written once; then the apply of its target
+        runs as any apply does, with that apply's holds as its own."""
+        taken = self.record["takeover_of"]
+        path = self.cfg.releases / taken["release"] / ".release" / taken["receipt"]
+        if not path.exists():
+            write_json(path, taken["body"])
+        taken["body"] = None
+        self.step(self.record["step"])
+        say(f"the apply of {taken['release']} is taken over; its receipt is {taken['receipt']}.")
 
 
 def begin(cfg: Config, name: str, waits: Waits) -> int:
@@ -1046,19 +1142,27 @@ def begin(cfg: Config, name: str, waits: Waits) -> int:
     if previous == name:
         raise Stop(EXIT_REFUSED, f"{name} is already active.")
     query(cfg, "status")
-    record: dict[str, Any] = {
+    record = new_record(cfg, name, previous)
+    write_json(cfg.record, record)
+    return Apply(cfg, record, waits).run()
+
+
+def new_record(
+    cfg: Config, name: str, previous: str, holds: list[dict[str, Any]] | None = None, **more: Any
+) -> dict[str, Any]:
+    """The record of a new apply of NAME over PREVIOUS, before its first step."""
+    return {
         "candidate": name,
         "previous": previous,
         "step": STEPS[0],
         "apply_id": str(uuid.uuid4()),
         "request_id": None,
         "seal_actor": f"os/{cfg.service_account}",
-        "holds": [],
+        "holds": holds or [],
         "actor": f"{getpass.getuser()}@{socket.gethostname()}",
         "started_at": now(),
+        **more,
     }
-    write_json(cfg.record, record)
-    return Apply(cfg, record, waits).run()
 
 
 def recorded_refusal(record: dict[str, Any]) -> Stop:
@@ -1089,8 +1193,23 @@ def resume(waits: Waits) -> int:
                 f"`{CMD_STATUS}` shows how the last apply ended.",
             )
         if record["step"] in STEPS[: STEPS.index("sealing") + 1]:
-            check_prepared(cfg, record["candidate"])
+            with keeps_record(record):
+                check_prepared(cfg, record["candidate"])
         return Apply(cfg, record, waits).run()
+
+
+@contextmanager
+def keeps_record(record: dict[str, Any]) -> Iterator[None]:
+    """A refusal before a recorded apply goes on says that the apply stays recorded, with the
+    holds it took (DL-412)."""
+    try:
+        yield
+    except Stop as exc:
+        raise Stop(
+            exc.code,
+            *exc.lines,
+            f"the apply of {record['candidate']} stays recorded, with its holds.",
+        ) from exc
 
 
 def rollback(waits: Waits) -> int:
@@ -1109,11 +1228,11 @@ def rollback(waits: Waits) -> int:
                     f"run `{CMD_RESUME}` to finish it; `{CMD_STATUS}` says what it will do.",
                 )
             target = str(record["previous"])
-            check_prepared(cfg, target)
-            query(cfg, "status")
+            with keeps_record(record):
+                check_prepared(cfg, target)
+                query(cfg, "status")
             say(f"rolling back from {record['candidate']} to {target}.")
-            Apply(cfg, record, waits).give_up()
-            return begin(cfg, target, waits)
+            return Apply(cfg, record, waits).take_over(target)
         previous = read_active(cfg)
         found = rollback_target(cfg, previous)
         if found is None:
@@ -1122,16 +1241,52 @@ def rollback(waits: Waits) -> int:
                 f"no receipt of {previous} names the release it replaced.",
                 f"apply the earlier release by name: `{CMD_APPLY} NAME`.",
             )
+        failed = failed_check(cfg, found)
+        if failed is not None:
+            raise Stop(EXIT_REFUSED, failed_line(found, failed))
         say(f"rolling back from {previous} to {found}.")
         return begin(cfg, found, waits)
 
 
 def rollback_target(cfg: Config, active: str) -> str | None:
-    """The release ACTIVE's latest receipt replaced: a second rollback goes forward again."""
+    """The release ACTIVE's latest receipt replaced: a second rollback goes forward again.
+    When ACTIVE's newest receipt is a taken-over apply's, a rollback whose apply was refused,
+    it names the release to go back to (DL-412)."""
+    newest = newest_receipt(cfg, active)
+    if newest is not None and newest[1].get("outcome") in ("verify_failed", "taken_over"):
+        return str(newest[1]["previous"])
     latest = latest_receipt(cfg, active)
     if latest is None or not latest.get("previous"):
         return None
     return str(latest["previous"])
+
+
+def newest_receipt(cfg: Config, name: str) -> tuple[Path, dict[str, Any]] | None:
+    """NAME's receipt that finished last, of any outcome."""
+    newest: tuple[str, Path, dict[str, Any]] | None = None
+    for pattern in RECEIPTS:
+        for path in (cfg.releases / name / ".release").glob(pattern):
+            receipt = read_json(path) or {}
+            when = str(receipt.get("finished_at") or receipt.get("applied_at") or "")
+            if newest is None or when > newest[0]:
+                newest = (when, path, receipt)
+    return None if newest is None else (newest[1], newest[2])
+
+
+def failed_check(cfg: Config, name: str) -> Path | None:
+    """The receipt of NAME's last apply when its new period failed the check: a rollback
+    never applies such a release, which only `apply NAME` retries (DL-412)."""
+    newest = newest_receipt(cfg, name)
+    if newest is None or not newest[1].get("verify_failed"):
+        return None
+    return newest[0]
+
+
+def failed_line(name: str, receipt: Path) -> str:
+    return (
+        f"{name}'s last apply failed its check after the open ({receipt}), so a rollback does"
+        f" not apply it; to retry it on purpose, run `{CMD_APPLY} {name}`."
+    )
 
 
 # ------------------------------------------------------------------- status
@@ -1150,7 +1305,7 @@ def latest_receipt(cfg: Config, name: str) -> dict[str, Any] | None:
 def last_apply(cfg: Config) -> dict[str, Any] | None:
     """The receipt of the apply that finished last, of any release and any outcome."""
     receipts = []
-    for pattern in ("applied-*.json", "refused-*.json", "rolled-back-*.json"):
+    for pattern in RECEIPTS:
         for path in cfg.releases.glob(f"*/.release/{pattern}"):
             receipt = read_json(path)
             if receipt is not None:
@@ -1182,12 +1337,12 @@ def ending(receipt: dict[str, Any]) -> str:
     if outcome == "applied":
         return f"completed; {receipt['name']} became active in period {receipt.get('period')}"
     if outcome == "refused":
-        why = " ".join(receipt.get("reason") or [])
+        why = " ".join(receipt.get("reason") or []).rstrip(".")
         return f"refused, and nothing was sealed: {why}"
-    problems = "; ".join(receipt.get("problems") or [])
-    if receipt.get("verify_failed"):
-        return f"rolled back after its new period's check failed: {problems}"
-    return "rolled back after its new period opened"
+    if outcome == "verify_failed":
+        problems = "; ".join(receipt.get("problems") or [])
+        return f"its new period did not match the seal ({problems}), and a rollback took it over"
+    return "a rollback took it over after its new period opened"
 
 
 def status(fmt: str) -> int:
@@ -1216,11 +1371,13 @@ def status(fmt: str) -> int:
     if record is not None:
         record["resume"] = RESUME[record["step"]].format(**record)
     target = rollback_target(cfg, active) if active and record is None else None
+    failed = failed_check(cfg, target) if target else None
     report = {
         "active": active,
         "inactive": inactive,
         "engine": engine_answer(cfg),
-        "rollback_to": target,
+        "rollback_to": None if failed else target,
+        "rollback_refused": failed_line(str(target), failed) if failed else None,
         "apply": record,
         "last": last_apply(cfg),
         "releases": releases,
@@ -1241,6 +1398,9 @@ def status_lines(cfg: Config, report: dict[str, Any]) -> list[str]:
     else:
         receipt = latest_receipt(cfg, active)
         since = f", active since period {receipt.get('period')}" if receipt else ""
+        newest = newest_receipt(cfg, active)
+        if newest is not None and newest[1].get("outcome") in ("verify_failed", "taken_over"):
+            since += f"; its last apply did not finish, see {newest[0].name}"
         lines.append(f"active: {active}{since}.")
     engine = report["engine"]
     if engine["answers"]:
@@ -1250,7 +1410,9 @@ def status_lines(cfg: Config, report: dict[str, Any]) -> list[str]:
             f"engine: no answer on {cfg.socket}; check `systemctl status {cfg.engine_unit}`."
         )
     if record is None:
-        if report["rollback_to"]:
+        if report["rollback_refused"]:
+            lines.append(f"rollback: {report['rollback_refused']}")
+        elif report["rollback_to"]:
             lines.append(f"rollback: `{CMD_ROLLBACK}` would apply {report['rollback_to']}.")
         elif active is not None:
             lines.append("rollback: no receipt names an earlier release; apply one by name.")
@@ -1261,7 +1423,9 @@ def status_lines(cfg: Config, report: dict[str, Any]) -> list[str]:
             f" {record['started_at']} by {record.get('actor')}."
         )
         if record.get("problems"):
-            lines.append(f"  the new period's check failed: {'; '.join(record['problems'])}.")
+            lines.append(
+                f"  the new period does not match the seal: {'; '.join(record['problems'])}."
+            )
         lines.append(f"  `{CMD_RESUME}` will {record['resume']}.")
         if record["step"] in ("opened", "verified"):
             lines.append(
@@ -1270,8 +1434,15 @@ def status_lines(cfg: Config, report: dict[str, Any]) -> list[str]:
             )
         held = [e["job"] for e in record["holds"] if e["state"] in ("applied", "releasing")]
         pending = [e["job"] for e in record["holds"] if e["state"] == "pending"]
+        if record.get("takeover_of"):
+            taken = record["takeover_of"]
+            lines.append(
+                f"  it took over the apply of {taken['release']}, whose receipt is"
+                f" {taken['receipt']}."
+            )
         if held:
             lines.append(f"  holds taken by this apply: {', '.join(held)}.")
+        lines += [f"  {line}" for line in kept_lines(cfg, record["holds"])]
         if pending:
             lines.append(f"  hold sent, decision unknown: {', '.join(pending)}.")
     if last is None:

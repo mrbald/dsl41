@@ -24484,29 +24484,28 @@ relitigate an entry; append a new one.
   status`; the example helper is gone (2026-10-27; owner ruling; src/dsl41/release.py,
   src/dsl41/release_service.py, src/dsl41/cli_release.py, runbook §0's job recipe, site-package
   §3 and §5)
-  THE RULE. The verbs run as the deployment identity. Their service side is the hidden
-  `dsl41 release service ACTION WORD...`, run through `sudo -n -u SERVICE_ACCOUNT -H DSL41`; it
-  takes release names, a request id or a job name, never a path or an option, runs only as
-  SERVICE_ACCOUNT, and claims `os/SERVICE_ACCOUNT` as every seal's actor itself. Both sides read
-  the launcher at `<prefix>/bin/dsl41-launch`, where `<prefix>/.venvs` holds their runtime, and
-  refuse it unless only root, or the running account, can write it; nothing else names one.
-  `vars` adds SERVICE_ACCOUNT and ENGINE_UNIT; the grant names `<prefix>/.venv/bin/dsl41
-  release service *`. The apply keeps DL-407's records, seal reads and hold ownership through
-  the WAL; `resume` finishes the recorded apply. Exit codes for apply, resume and rollback:
-  0 active with every hold the apply took released; 1 active with some kept, each printed with
-  its reason and its `OFF_HOLD` command; 2 refused, nothing sealed, holds released, no record,
-  and a `refused-` receipt when a record existed; 3 stopped with the record kept, SIGINT and
-  SIGHUP included; 4 the seal's outcome unknown. `rollback` may take over a recorded apply whose
-  new period opened (step opened or verified): it releases that apply's holds, writes a
-  `rolled-back-` receipt with `verify_failed` and the check's problems, clears the record, and
-  applies the release that apply replaced; `resume` checks again instead. Before the open,
-  `rollback` refuses and names `resume`. `status` shows the active release, the engine, the
-  rollback target, a recorded apply with what `resume` will do, and how the last apply ended.
-  The "not prepared" refusal names `prepare --requalify NAME`, which checks an installed
-  release in place; the service side refuses a symlink in a release. A job name follows the
-  engine's rule, `#` included. The horizon wait keys on the code `seal_retry_horizon` and hides
-  the refusal's text. The stop points around a committed seal are the test-only hook
-  `release.STOP_AFTER`; no environment variable reaches them.
+  THE RULE. The verbs run as the deployment identity, on the runtime the launcher's DSL41
+  selects. Their service side, the hidden `dsl41 release service -- ACTION WORD...` run through
+  `sudo -n -u SERVICE_ACCOUNT -H DSL41`, takes release names, a request id or any job name the
+  engine addresses, runs only as SERVICE_ACCOUNT, claims `os/SERVICE_ACCOUNT` as the seal's
+  actor, and reads a release's inputs only inside it, by real path, without following a link.
+  Both sides read `<prefix>/bin/dsl41-launch`, beside the runtime under `<prefix>/.venvs`; it
+  and each directory above it are writable only by root or the running account (a world-
+  writable one passes when root owns it with the sticky bit), and its checked text runs
+  through `sh -s`. `vars` adds SERVICE_ACCOUNT and ENGINE_UNIT. The apply keeps DL-407's
+  records, seal reads and hold ownership through the WAL. Exit codes for apply, resume and
+  rollback: 0 active, every hold the apply took released; 1 active, some kept, each printed
+  with its `OFF_HOLD` command; 2 refused, nothing sealed, holds released, no record (a
+  refusal that keeps an apply already recorded says so; a hold of its own the engine will
+  not release keeps the record, exit 3); 3 stopped with the record kept, SIGINT and SIGHUP
+  included unless ignored; 4 outcome unknown. Once a recorded apply's new period opened,
+  `rollback` may take it over: it releases no hold, and one rename replaces the record with
+  the apply of the release it replaced, which owns the old holds and writes
+  `verify-failed-<id>.json` (or `taken-over-` when the check passed). Rollback never applies
+  a release whose newest receipt is `verify_failed`. `status` shows the active release, the
+  engine, the rollback target, a recorded apply and what `resume` does, and the last apply.
+  `prepare --requalify NAME` checks an installed release in place. The horizon wait reads the
+  live code or the offline sentence. The stop points are the test-only `release.STOP_AFTER`.
   THE REASON. The owner's ruling of 2026-10-27, "make it a verb", after an operator review found
   an apply that failed its check after the open with no way out, a job name with `#` that
   stopped every apply, kept holds behind exit 0, and refusals that named internal steps. The

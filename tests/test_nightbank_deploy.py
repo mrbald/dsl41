@@ -1160,6 +1160,13 @@ def test_the_release_exit_codes_are_the_runbooks_table() -> None:
         if name.startswith("EXIT_") and isinstance(value, int)
     }
     assert defined == {0, 1, 2, 3, 4}
+    # every exit the verbs take is one of those names, never a bare number
+    names = {name for name in vars(release_service) if name.startswith("EXIT_")}
+    for module in ("release.py", "release_service.py", "cli_release.py"):
+        text = (NB.parents[1] / "src" / "dsl41" / module).read_text()
+        exits = re.findall(r"(?:Stop\(|return |sys\.exit\(|Exit\()\s*(EXIT_[A-Z]+|\d)\b", text)
+        assert {name for name in exits if not name.isdigit()} <= names, module
+        assert {name for name in exits if name.isdigit()} == set(), module
     recipe = RUNBOOK.read_text().split("### Recipe: add, change or remove a job", 1)[1]
     table = recipe.split("| Exit | What it means | What you do |", 1)[1].split("\n\n", 1)[0]
     rows = {int(code) for code in re.findall(r"^\s*\| (\d) \|", table, re.M)}
