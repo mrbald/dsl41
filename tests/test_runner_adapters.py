@@ -1848,13 +1848,17 @@ class _FreezableSupervisor:
     a fresh token. While `frozen` it reads each request and never replies, which is what a stopped
     supervisor's peer sees: the kernel takes the connection and the bytes, and no answer comes.
     A frozen stub still answers once each command listed in `answer_while_frozen`. `delay_s`
-    holds the reply to each listed command that long. `push` writes to the connection the last
-    ACQUIRE came on, as the supervisor pushes to the lease holder."""
+    holds the reply to each listed command that long. `reply_once` answers the next request of
+    a command with the given reply instead. `push` writes to the connection the last ACQUIRE
+    came on, as the supervisor pushes to the lease holder."""
 
     def __init__(self) -> None:
         self.frozen = False
         self.answer_while_frozen: list[str] = []
         self.delay_s: dict[str, float] = {}
+        self.reply_once: dict[str, dict[str, Any]] = {}
+        self.incarnation = "inc-1"
+        self.requests: list[dict[str, Any]] = []
         self.connections = 0
         self.received: list[str] = []
         self.unanswered: list[str] = []
@@ -1871,16 +1875,20 @@ class _FreezableSupervisor:
         self.connections += 1
         try:
             while line := await reader.readline():
-                cmd = json.loads(line)["cmd"]
+                request = json.loads(line)
+                cmd = request["cmd"]
+                self.requests.append(request)
                 self.received.append(cmd)
                 if self.frozen:
                     if cmd not in self.answer_while_frozen:
                         self.unanswered.append(cmd)
                         continue
                     self.answer_while_frozen.remove(cmd)
-                resp: dict[str, Any] = {"ok": True, "incarnation": "inc-1"}
+                resp: dict[str, Any] = {"ok": True, "incarnation": self.incarnation}
                 await asyncio.sleep(self.delay_s.get(cmd, 0.0))
-                if cmd == "ACQUIRE":
+                if cmd in self.reply_once:
+                    resp = self.reply_once.pop(cmd)
+                elif cmd == "ACQUIRE":
                     self._token += 1
                     resp["token"] = self._token
                     self._holder = writer
@@ -2100,6 +2108,45 @@ def test_dl409_a_reconnect_cut_short_by_the_deadline_is_run_again_before_any_ren
     assert after_thaw[:2] == ["PING", "ACQUIRE"], after_thaw
     assert signalled["ok"]
     assert exited["run_id"] == "r1"
+
+
+def test_a_renew_refused_wrong_incarnation_reacquires_on_the_free_path(
+    short_root: Path, monkeypatch
+) -> None:
+    """DL-80: a RENEW answered `wrong_incarnation` means the supervisor restarted under the
+    client. The token and incarnation belong to the old one, so the renewal drops both and
+    re-ACQUIREs presenting neither: a replayed token could collide with the new incarnation's
+    counter. The fresh lease is then renewed."""
+    _shrink_renewal(monkeypatch, 5.0)
+
+    async def scenario() -> tuple[dict[str, Any], int | None, str | None]:
+        stub, server = await _serve_freezable(short_root)
+        client = SupervisorClient(short_root)
+        try:
+            await client.connect()
+            await client.acquire()
+            assert (client.token, client.incarnation) == (1, "inc-1")
+            mark = len(stub.requests)
+            stub.incarnation = "inc-2"
+            stub.reply_once["RENEW"] = {
+                "ok": False,
+                "error": "wrong_incarnation",
+                "incarnation": "inc-2",
+            }
+            await _until(
+                lambda: stub.answered[mark:].count("RENEW") >= 2, "the new lease was not renewed"
+            )
+            after = stub.requests[mark:]
+            assert [r["cmd"] for r in after[:3]] == ["RENEW", "ACQUIRE", "RENEW"], after
+            return after[1], client.token, client.incarnation
+        finally:
+            await client.close()
+            server.close()
+            await server.wait_closed()
+
+    reacquire, token, incarnation = asyncio.run(scenario())
+    assert reacquire["token"] is None and reacquire["incarnation"] is None, reacquire
+    assert (token, incarnation) == (2, "inc-2")
 
 
 def test_dl409_a_renewal_answered_inside_the_deadline_is_not_a_failure(
