@@ -40,7 +40,7 @@ dsl41 and your services) and keep fixed what the application's JIL releases run 
 
 **Job author**: write an estate in JIL or the Python DSL, or bring an existing one in, and get it accepted.
 
-1. [docs/authoring.md](docs/authoring.md) - the author guide: JIL or the Python DSL, what dsl41 accepts, conditions, lint, rehearse, viz, bringing an estate in, the rollout handoff and the estate manifest
+1. [docs/authoring.md](docs/authoring.md) - the author guide: JIL or the Python DSL, what dsl41 accepts, conditions, lint, rehearse, viz, bringing an estate in, the rollout handoff, the estate manifest and the interruption contract every job meets
 2. [Lint a catalog](#lint-a-catalog) - the rules L001-L023, and `rehearse` and `viz` under [CLI](#cli)
 3. [DSL -> JIL (build)](#dsl---jil-build) - the Python DSL builders (`job`, `box`, `sequence`, `parallel`) and `to_jil()`; [examples/file_processing/estate.py](examples/file_processing/estate.py) is a worked Python estate; `examples/nightbank`, `fulfilment`, `energy`, `media` and `dst-drill` hold worked JIL estates
 4. [JIL -> DSL (decompile)](#jil---dsl-decompile) and [Prove two catalogs equivalent](#prove-two-catalogs-equivalent) - bringing an existing estate in and checking a rewrite; [examples/README.md](examples/README.md) indexes the worked estates
