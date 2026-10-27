@@ -52,7 +52,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -76,6 +76,7 @@ from dsl41.runner_clock import RealClock
 from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, HostCommand, kill_allowance, skew_allowance
 from dsl41.runner_journal import read_journal
 from dsl41.runner_ledger import LOCK_NAME
+from dsl41.runner import Engine
 from dsl41.runner_startup import resume_run, start_run
 
 REDRIVE_DRIVER = Path(__file__).parent / "runner_redrive_driver.py"
@@ -408,6 +409,81 @@ def test_cm09_a_spawn_that_never_reached_the_host_is_redriven_at_resume(
 HELD_JIL = "insert_job: held\njob_type: c\ncommand: sleep 600\n"
 
 
+def _genesis_contact(engine: Engine) -> datetime | None:
+    return engine.oracle.store.host(LOCAL_EXECUTOR_ID).last_contact
+
+
+@contextlib.asynccontextmanager
+async def _held_estate(
+    client: SupervisorClient, run_root: Path
+) -> AsyncIterator[tuple[Engine, int]]:
+    """A supervisor provisioned for `run_root`, its lease held by `client`, and a held-open
+    engine running HELD_JIL with the client's contact and unreachable reports wired in. The
+    setup runs under the cleanup, so a failure in it leaves no detached supervisor holding the
+    run root. The cleanup resumes a stopped supervisor first."""
+    sup_pid: int | None = None
+    engine: Engine | None = None
+    loop: asyncio.Future[object] | None = None
+    try:
+        await client.provision()
+        sup_pid = json.loads((run_root / "supervisor.pid").read_text())["pid"]
+        await client.acquire()
+        engine = start_run(
+            lower_source(HELD_JIL),
+            run_root,
+            clock=RealClock(),
+            adapters={
+                "CMD": SupervisedCommandAdapter(client, grace_seconds=2.0),
+                "FW": FileWatcherAdapter(),
+            },
+            deadman_s=client.supervisor_deadman_s,
+            hold_open=True,  # what `dsl41 run` does: an idle estate is not a finished one
+        )
+        client.on_contact = engine.note_executor_contact
+        client.on_unreachable = engine.note_executor_unreachable
+        loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
+        yield engine, sup_pid
+    finally:
+        # nested, so a step that raises skips none of the later ones
+        try:
+            if sup_pid is not None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(sup_pid, signal.SIGCONT)  # a stopped one would never shut down
+            try:
+                if loop is not None:
+                    loop.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await loop
+            finally:
+                if engine is not None:
+                    try:
+                        engine.detach.stopping = True
+                        await engine.shutdown()
+                    finally:
+                        if engine.journal is not None:
+                            engine.journal.close()
+        finally:
+            try:
+                with contextlib.suppress(Exception):
+                    await client.shutdown()
+                await client.close()
+            finally:
+                if sup_pid is not None:
+                    _reap_supervisor(sup_pid)
+
+
+def _reap_supervisor(pid: int) -> None:
+    """Wait for the supervisor to exit after SHUTDOWN; one that did not is killed and reaped
+    before the failure is raised, so it never outlives the test."""
+    try:
+        wait_reaped(pid)
+    except AssertionError:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+        wait_reaped(pid)
+        raise
+
+
 def test_cm09_five_failed_renewals_quarantine_the_host_and_new_work_is_held(
     short_root: Path, monkeypatch
 ) -> None:
@@ -434,29 +510,12 @@ def test_cm09_five_failed_renewals_quarantine_the_host_and_new_work_is_held(
         run_root = short_root / "run"
         run_root.mkdir(parents=True)
         client = SupervisorClient(run_root, deadman_s=deadman)
-        await client.provision()
-        sup_pid = json.loads((run_root / "supervisor.pid").read_text())["pid"]
-        await client.acquire()
-        engine = start_run(
-            lower_source(HELD_JIL),
-            run_root,
-            clock=RealClock(),
-            adapters={
-                "CMD": SupervisedCommandAdapter(client, grace_seconds=2.0),
-                "FW": FileWatcherAdapter(),
-            },
-            deadman_s=client.supervisor_deadman_s,
-            hold_open=True,  # what `dsl41 run` does: an idle estate is not a finished one
-        )
-        genesis_contact = engine.oracle.store.host(LOCAL_EXECUTOR_ID).last_contact
-        client.on_contact = engine.note_executor_contact
-        client.on_unreachable = engine.note_executor_unreachable
-        loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
-        try:
+        async with _held_estate(client, run_root) as (engine, sup_pid):
+            genesis_contact = _genesis_contact(engine)
             assert client.supervisor_deadman_s == deadman  # read back off the live supervisor
             # A RENEW has to LAND before the kill, or `last_contact` is still
             # the genesis stamp and the bound below is arithmetic over a
-            # number no process produced. The wiring above happens after
+            # number no process produced. The harness wires the reports after
             # `acquire()`, so the only exchange that can stamp it is one of
             # the renewals -- wait for one rather than assume it.
             deadline = time.monotonic() + 15
@@ -465,7 +524,7 @@ def test_cm09_five_failed_renewals_quarantine_the_host_and_new_work_is_held(
                 await asyncio.sleep(0.02)
 
             killed_at = time.monotonic()
-            os.kill(json.loads((run_root / "supervisor.pid").read_text())["pid"], signal.SIGKILL)
+            os.kill(sup_pid, signal.SIGKILL)
             deadline = killed_at + 30
             while engine.oracle.store.host(LOCAL_EXECUTOR_ID).state != "quarantined":
                 assert time.monotonic() < deadline, (
@@ -496,20 +555,6 @@ def test_cm09_five_failed_renewals_quarantine_the_host_and_new_work_is_held(
             # side, not from the outbox
             published = engine.held_jobs()
             return row.model_dump(), status, published, _evict_bound(engine)
-        finally:
-            # a failure before the kill would otherwise leave a live supervisor
-            # holding this run root, which the next test would meet as a ghost
-            loop.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await loop
-            engine.detach.stopping = True
-            await engine.shutdown()
-            if engine.journal is not None:
-                engine.journal.close()
-            with contextlib.suppress(Exception):
-                await client.shutdown()
-            await client.close()
-            wait_reaped(sup_pid)
 
     row, status, published, remaining = asyncio.run(scenario())
     assert row["state"] == "quarantined"
@@ -569,43 +614,27 @@ def test_cm09_a_frozen_supervisor_quarantines_the_host_and_its_thaw_reinstates_i
     the RENEW, and no reply comes. Without a deadline the renewal waits for
     ever, no failure is counted, and the host is never quarantined. With one,
     five renewals fail and the leader quarantines the host. After SIGCONT the
-    same supervisor answers, and the first landed renewal reinstates it."""
+    same supervisor answers: the host is reinstated, and the lease is held
+    again under a fresh token."""
     monkeypatch.setattr(SupervisorClient, "_RENEW_EVERY_S", 0.2)
     monkeypatch.setattr(SupervisorClient, "_RETRY_EVERY_S", 0.1)
     monkeypatch.setattr(SupervisorClient, "_RENEW_TIMEOUT_S", 0.8)
 
-    async def scenario() -> tuple[list[str], int, int]:
+    async def scenario() -> tuple[list[str], int, int, dict]:
         run_root = short_root / "run"
         run_root.mkdir(parents=True)
         client = SupervisorClient(run_root)
-        await client.provision()
-        sup_pid = json.loads((run_root / "supervisor.pid").read_text())["pid"]
-        await client.acquire()
-        engine = start_run(
-            lower_source(HELD_JIL),
-            run_root,
-            clock=RealClock(),
-            adapters={
-                "CMD": SupervisedCommandAdapter(client, grace_seconds=2.0),
-                "FW": FileWatcherAdapter(),
-            },
-            deadman_s=client.supervisor_deadman_s,
-            hold_open=True,
-        )
-        genesis_contact = engine.oracle.store.host(LOCAL_EXECUTOR_ID).last_contact
-        client.on_contact = engine.note_executor_contact
-        client.on_unreachable = engine.note_executor_unreachable
-        loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
         states: list[str] = []
+        async with _held_estate(client, run_root) as (engine, sup_pid):
+            genesis_contact = _genesis_contact(engine)
 
-        async def await_state(state: str, why: str) -> None:
-            deadline = time.monotonic() + 30
-            while engine.oracle.store.host(LOCAL_EXECUTOR_ID).state != state:
-                assert time.monotonic() < deadline, why
-                await asyncio.sleep(0.05)
-            states.append(state)
+            async def await_state(state: str, why: str) -> None:
+                deadline = time.monotonic() + 30
+                while engine.oracle.store.host(LOCAL_EXECUTOR_ID).state != state:
+                    assert time.monotonic() < deadline, why
+                    await asyncio.sleep(0.05)
+                states.append(state)
 
-        try:
             # the positive control: a renewal lands, so the loop is live and
             # the supervisor answers inside the deadline before the freeze
             deadline = time.monotonic() + 15
@@ -613,32 +642,28 @@ def test_cm09_a_frozen_supervisor_quarantines_the_host_and_its_thaw_reinstates_i
                 assert time.monotonic() < deadline, "no lease exchange stamped the routing row"
                 await asyncio.sleep(0.02)
             states.append(engine.oracle.store.host(LOCAL_EXECUTOR_ID).state)
+            frozen_token = client.token
             os.kill(sup_pid, signal.SIGSTOP)
             await await_state("quarantined", "silent renewals never quarantined the host")
             os.kill(sup_pid, signal.SIGCONT)
+            # a reconnect's PING alone reinstates the host; the lease is held
+            # again only once its re-ACQUIRE lands with a fresh token
             await await_state("active", "the thawed supervisor never reinstated the host")
+            deadline = time.monotonic() + 15
+            while client.token == frozen_token:
+                assert time.monotonic() < deadline, "the lease was never re-acquired"
+                await asyncio.sleep(0.02)
+            # a well-formed run id this supervisor never saw: the token check
+            # comes first, so only a current token answers unknown_run
+            answer = await client.signal("00000000-0000-4000-8000-000000000000", "TERM")
             # the same supervisor throughout: frozen and thawed, never replaced
             now_pid = json.loads((run_root / "supervisor.pid").read_text())["pid"]
-            return states, sup_pid, now_pid
-        finally:
-            # a stopped supervisor would outlive the test and hold this run root
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(sup_pid, signal.SIGCONT)
-            loop.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await loop
-            engine.detach.stopping = True
-            await engine.shutdown()
-            if engine.journal is not None:
-                engine.journal.close()
-            with contextlib.suppress(Exception):
-                await client.shutdown()
-            await client.close()
-            wait_reaped(sup_pid)
+            return states, sup_pid, now_pid, answer
 
-    states, frozen_pid, thawed_pid = asyncio.run(scenario())
+    states, frozen_pid, thawed_pid, answer = asyncio.run(scenario())
     assert states == ["active", "quarantined", "active"]
     assert thawed_pid == frozen_pid
+    assert answer == {"ok": False, "error": "unknown_run"}, answer
 
 
 def test_pr01c_a_foreign_root_is_refused_before_staging_or_supervisor(short_root: Path) -> None:

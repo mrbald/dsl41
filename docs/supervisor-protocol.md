@@ -663,7 +663,9 @@ clients ignore it like any unknown field.
   client's policy (DL-150). The supervisor's own default for an absent
   `ttl_s` is the same 60 s. A renewal with no reply within 10 s fails. The
   client then poisons the connection, as for any request whose reply may be
-  in flight, and the next renewal reconnects (DL-409).
+  in flight, and the next renewal reconnects. A reconnect is done when its
+  re-`ACQUIRE` is answered; until then the client writes no other request on
+  the new connection (DL-409).
 
 **Mutating verbs** (DL-80, DL-229). These require `incarnation` and
 `token`, and each signature line below names both. A foreign incarnation

@@ -1408,10 +1408,14 @@ class SupervisorClient:
         self._renew_ttl_s = self._TTL_S
         self._lock = asyncio.Lock()
         self._reconnect_lock = asyncio.Lock()
+        #: set while a reconnect's sequence (PING, then the re-ACQUIRE) has no answer yet
+        self._reconnecting = False
         #: set by `close` before anything else; the lazy reconnect, a late connect, the renewal loop
         #: and the LIST net read it, so a closing client is never connected again
         self._closed = False
         self._pending: asyncio.Future[dict[str, Any]] | None = None
+        #: contacts reported through `on_contact`; the renewal loop reads it to start a new outage
+        self._contacts = 0
         self._exit_futures: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._listed_dead: dict[str, asyncio.Event] = {}
         self._list_task: asyncio.Task[None] | None = None
@@ -1590,12 +1594,18 @@ class SupervisorClient:
 
     # -- request / response / push demux ------------------------------------
 
+    def _ready(self) -> bool:
+        """The transport can write and no reconnect is part done. A reconnect is done only when its
+        whole sequence has an answer, the re-ACQUIRE included (DL-409): a connection with no lease
+        on it renews an orphaned lease, which takes no pushes and lets a deadman run."""
+        return self._writer is not None and not self.lost.is_set() and not self._reconnecting
+
     async def _ensure_connected(self) -> None:
         """Lazy reconnect (DL-48): a poisoned or lost connection heals on the next call."""
         if self._closed:
             raise SupervisorUnavailable("client closed")
-        if self._writer is not None and not self.lost.is_set():
-            return  # the transport can write: `_request`'s own question
+        if self._ready():
+            return
         if not await self.reconnect():
             raise SupervisorUnavailable("not connected")
 
@@ -1609,8 +1619,11 @@ class SupervisorClient:
         async with self._reconnect_lock:
             if self._closed:
                 return False
-            if self._writer is not None and not self.lost.is_set():
+            if self._ready():
                 return True  # another caller already reconnected
+            # until the sequence below has its answer, every request that may reconnect runs it
+            # again from the start, and none is written on this connection (DL-409)
+            self._reconnecting = True
             self._arm_list_recheck()
             if not await self._try_connect():
                 return False
@@ -1626,11 +1639,13 @@ class SupervisorClient:
                     )
                 except SupervisorUnavailable:
                     return False
+                self._reconnecting = False  # answered: the sequence is done
                 if not resp.get("ok"):
                     return False  # fenced out: another controller holds the lease
                 self.token = int(resp["token"])
                 self.incarnation = resp.get("incarnation")  # DL-80
                 self._keep_renewing()
+            self._reconnecting = False
             return True
 
     async def _request(self, obj: dict[str, Any], *, _connect: bool = True) -> dict[str, Any]:
@@ -1652,11 +1667,25 @@ class SupervisorClient:
             raise fatal from unavailable
 
     async def _exchange(self, obj: dict[str, Any], *, _connect: bool) -> dict[str, Any]:
-        if _connect:
-            await self._ensure_connected()
+        """A request that finds the stream lost, or a reconnect part done, once it holds the lock
+        has written nothing, so a request that may reconnect heals and is sent once more; a second
+        such finding raises (DL-409). A renewal's deadline poisons a stream whose supervisor is alive, and a SPAWN or
+        a SIGNAL queued behind it must not read that as a supervisor gone."""
+        for _attempt in range(2 if _connect else 1):
+            if _connect:
+                await self._ensure_connected()
+            resp = await self._send(obj, lazy=_connect)
+            if resp is not None:
+                return resp
+        raise SupervisorUnavailable("not connected")
+
+    async def _send(self, obj: dict[str, Any], *, lazy: bool) -> dict[str, Any] | None:
+        """Write one request and await its reply under the lock; None, with nothing written, when
+        the stream is lost by the time the lock is held. A request that may reconnect (`lazy`)
+        is not written either while a reconnect is part done: it waits for that sequence."""
         async with self._lock:
-            if self._writer is None or self.lost.is_set():
-                raise SupervisorUnavailable("not connected")
+            if self._writer is None or self.lost.is_set() or (lazy and self._reconnecting):
+                return None
             fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
             self._pending = fut
             try:
@@ -1860,6 +1889,7 @@ class SupervisorClient:
             self.supervisor_deadman_s = float(reported)
         if self.on_contact is not None:
             self.on_contact()
+        self._contacts += 1  # a reported contact re-arms the unreachable report (DL-409)
 
     async def _renew_loop(self, ttl_s: float) -> None:
         """Keep the lease alive (spec ss2: renew every 20s).
@@ -1873,7 +1903,8 @@ class SupervisorClient:
         A renewal with no reply within `_RENEW_TIMEOUT_S` fails (DL-409). The deadline covers the
         whole renewal, the lazy reconnect included, and its cancel poisons the connection (DL-48),
         so the next renewal reconnects. Each such failure before the host is reported unreachable
-        logs one line.
+        logs one line. A contact reported between failures, such as a reconnect's PING, has
+        reinstated the host, so the count starts again and the next five failures report again.
 
         Five consecutive failures report the host unreachable, loudly and once per outage
         (concurrency-model ss8). The loop continues: it is the one thing that renews the lease,
@@ -1888,9 +1919,11 @@ class SupervisorClient:
         goes to `_fail`, whether the renewal's own path met it or a callback into the engine
         did."""
         failures = 0
+        contacts = self._contacts
         try:
             while not self._closed:
                 await asyncio.sleep(self._RENEW_EVERY_S if failures == 0 else self._RETRY_EVERY_S)
+                timed_out = False
                 try:
                     resp = await asyncio.wait_for(self._renew_once(ttl_s), self._RENEW_TIMEOUT_S)
                     if resp.get("ok"):
@@ -1905,16 +1938,22 @@ class SupervisorClient:
                 except SupervisorUnavailable:
                     pass
                 except TimeoutError:
-                    if failures < _UNREACHABLE_AFTER:  # past the report, the outage is known
-                        print(
-                            "dsl41: supervisor lease renewal had no reply within"
-                            f" {self._RENEW_TIMEOUT_S:g}s",
-                            file=sys.stderr,
-                        )
+                    timed_out = True
                 except StatechartError:
                     raise  # an assertion failure is not a failed renewal: below
                 except Exception as exc:  # noqa: BLE001 -- one bad renewal must not end renewal
                     print(f"dsl41: supervisor lease renewal failed on {exc!r}", file=sys.stderr)
+                if self._contacts != contacts:
+                    # a contact reported since the last failure, such as a reconnect's PING,
+                    # reinstated the host: this failure starts a new outage (DL-409)
+                    contacts = self._contacts
+                    failures = 0
+                if timed_out and failures < _UNREACHABLE_AFTER:  # past it, the report said so
+                    print(
+                        "dsl41: supervisor lease renewal had no reply within"
+                        f" {self._RENEW_TIMEOUT_S:g}s",
+                        file=sys.stderr,
+                    )
                 failures += 1
                 if failures == _UNREACHABLE_AFTER:
                     # ss8: the leader has lost contact with this host. Signalled at the fifth
