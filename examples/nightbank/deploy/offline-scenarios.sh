@@ -21,11 +21,10 @@ maintenance_outcome() { # maintenance_outcome EXPECTED [EXTRA_ARGS...]
     MAINTENANCE_JSON=$(printf '%s\n' "$MAINTENANCE_REPLY" | sed -n 's/^[^{]*\({.*}\)$/\1/p')
 }
 seal_next() {
-    local next
-    mapfile -t next < <(next_args)
-    cli seal --run-root "$ROOT" --estate-anchor "$ANCHOR" "${next[@]}" -p "$PROPERTIES" \
+    next_args
+    cli seal --run-root "$ROOT" --estate-anchor "$ANCHOR" "${NEXT[@]}" -p "$PROPERTIES" \
         --next-detached --next-as-machine localhost --next-machine-policy strict \
-        --next-timezone UTC --force-seal --claimed-actor offline-drill
+        --force-seal --claimed-actor offline-drill
     wait_for 30 'the sealed engine exits' is_state "$ENGINE" failed
     start_engine
 }
@@ -260,7 +259,8 @@ use_estate() { # use_estate small|bank
     esac
     ANCHOR=$ROOT.anchor
     SOCK=$ROOT/control.sock
-    ESTATE=$NIGHTBANK/estate/$size
+    RELEASE=$size-r1
+    ESTATE=$ESTATE_RELEASES/$RELEASE
     export DRILL_ROOT=$ROOT DRILL_ESTATE=$size
 }
 bootstrap_estate() {
@@ -268,10 +268,12 @@ bootstrap_estate() {
         ROOT=/srv/dsl41/runs/nightbank-bank
         ANCHOR=$ROOT.anchor
         SOCK=$ROOT/control.sock
-        ESTATE=$NIGHTBANK/estate/bank
+        RELEASE=bank-r1
+        ESTATE=$ESTATE_RELEASES/$RELEASE
         provision_root "$ROOT"
         point_launcher "$ROOT" "$ANCHOR"
-        sudo sed -i "s|^ESTATE=.*|ESTATE=$ESTATE|" "$LAUNCH"
+        install_release "$RELEASE" "$NIGHTBANK/estate/bank"
+        activate "$RELEASE"
         # The shared install preparation also supplies the bank estate's incident table (DL-389).
         sudo cp "$ESTATE/incidents.conf" "$NIGHTBANK/night/incidents.conf"
         echo "$LONG_JOB late 45" | as_dsl41 tee -a "$NIGHTBANK/night/incidents.conf"
@@ -323,11 +325,12 @@ read -r storage_type storage_bytes <<<"$(findmnt -n -b -o FSTYPE,SIZE --mountpoi
 ROOT=/srv/dsl41-storage/run-$(date +%s)-$$
 ANCHOR=$ROOT.anchor
 SOCK=$ROOT/control.sock
-ESTATE=$NIGHTBANK/estate/small
+RELEASE=small-r1
+ESTATE=$ESTATE_RELEASES/$RELEASE
 sudo chown dsl41:dsl41 /srv/dsl41-storage
 provision_root "$ROOT"
 point_launcher "$ROOT" "$ANCHOR"
-sudo sed -i "s|^ESTATE=.*|ESTATE=$ESTATE|" "$LAUNCH"
+activate "$RELEASE"
 start_engine
 hold_scheduled
 # The existing WAL page must have too little room for the launch request (DL-389).

@@ -80,16 +80,22 @@ step_install() { # install dsl41, the nightbank estate, the launcher, the map an
     BUILD_B=$(tail -n 1 "$SCRATCH/prepare-ui.log")
     printf '%s\n' "$BUILD_B" >"$SCRATCH/build-b"
     flip "$BUILD_A"
+    # the example is root-owned and read-only to the service, as a checkout
+    # of a tag would be. The active release comes from its estate before the
+    # service recipe, whose last line prints the launcher's command and so
+    # reads the release's manifest (DL-407)
+    sudo install -d -m 0755 /srv/dsl41
+    sudo cp -R "$REPO/examples/nightbank" "$NIGHTBANK"
+    sudo chown -R root:root "$NIGHTBANK"
+    sudo chmod -R go-w,a+rX "$NIGHTBANK"
+    install_release "$RELEASE" "$NIGHTBANK/estate/${DRILL_ESTATE:-small}"
+    activate "$RELEASE"
     run_recipe service-install
     record_supervisor_exit
     assert_enablement enabled
     # ss1's link, through the symlink, so the recipes' bare dsl41 follows a flip
     sudo ln -sfn "$VENV/bin/dsl41" /usr/local/bin/dsl41
-    # the estate is root-owned and read-only to the service, as a checkout
-    # of a tag would be; the night's data is the service's
-    sudo cp -R "$REPO/examples/nightbank" "$NIGHTBANK"
-    sudo chown -R root:root "$NIGHTBANK"
-    sudo chmod -R go-w,a+rX "$NIGHTBANK"
+    # the night's data is the service's
     sudo install -d -o dsl41 -g dsl41 -m 0700 "$NIGHTBANK/night"
     # nightbank's own prepare_night: data directories, properties and
     # profile, the region anchors six hours out so no calendar fires. The
@@ -192,14 +198,15 @@ step_refusal() { # a changed estate is refused without a restart loop
 }
 
 step_sealed() { # a sealed engine stays stopped until the next period is opened
-    local next mark
-    mapfile -t next < <(next_args)
+    local mark
+    next_args
     mark=$(date +%s)
     # the drill's own FORCE_STARTJOB is inside the retry horizon, hence
-    # --force-seal; every --next-* restates the launcher's options
-    cli seal --run-root "$ROOT" "${next[@]}" -p "$PROPERTIES" \
+    # --force-seal; the manifest gives the estate's words, and every
+    # --next-* after them restates the launcher's options (DL-407)
+    cli seal --run-root "$ROOT" "${NEXT[@]}" -p "$PROPERTIES" \
         --next-detached --next-as-machine localhost --next-machine-policy strict \
-        --next-timezone UTC --force-seal --claimed-actor drill@nightbank
+        --force-seal --claimed-actor drill@nightbank
     assert_stays_stopped 3 "sealed period 1" "$mark"
     # "What to watch", the sealed-not-opened row: closed until the opener runs
     [ "$(run_recipe --as-dsl41 watch-sealed ESTATE_ANCHOR="$ANCHOR")" = closed ] ||
@@ -370,7 +377,7 @@ SOCKET_GROUP=nightbank-socket
 configure_restore() {
     local user
     [ ! -e "$SCRATCH/map.orig" ] || sudo cp "$SCRATCH/map.orig" "$MAP"
-    [ ! -e "$SCRATCH/launch.orig" ] || sudo cp "$SCRATCH/launch.orig" "$LAUNCH"
+    [ ! -e "$SCRATCH/manifest.orig" ] || sudo cp "$SCRATCH/manifest.orig" "$ESTATE/estate.toml"
     sudo chgrp dsl41 "$(dirname "$ROOT")" "$ROOT" 2>/dev/null || true
     sudo chmod 0700 "$(dirname "$ROOT")" 2>/dev/null || true
     sudo gpasswd -d dsl41 "$SOCKET_GROUP" >/dev/null 2>&1 || true
@@ -410,7 +417,7 @@ step_configure() { # configure recipe: identity, socket group, tiers, receipts, 
     sudo useradd -M -s /usr/sbin/nologin -G "$SOCKET_GROUP" dnobindu
     sudo useradd -M -s /usr/sbin/nologin dstranger
     sudo cp -p "$MAP" "$SCRATCH/map.orig"
-    sudo cp -p "$LAUNCH" "$SCRATCH/launch.orig"
+    sudo cp -p "$ESTATE/estate.toml" "$SCRATCH/manifest.orig"
     # with no socket_group, only the service account reaches the socket
     exits_as dopsu 2 query status --brief -S "$SOCK"
     grep -q 'Permission denied' <<<"$out" || fail "an ops member without the group: $out"
@@ -460,18 +467,20 @@ step_configure() { # configure recipe: identity, socket group, tiers, receipts, 
         perimeter_count_exceeds policy_reload_failed 'socket_group is fixed at arming' "$before"
     is_state "$ENGINE" active || fail "the refused reload stopped the engine"
     exits_as dopsu 0 query status --brief -S "$SOCK"
-    # execution profile: a changed option is a refusal on resume, exit 2
+    # execution profile: a changed option is a refusal on resume, exit 2.
+    # The timezone is the release manifest's (DL-407), edited in place as
+    # the refusal step edits a release's JIL
     sudo systemctl stop "$ENGINE"
     sudo cp "$SCRATCH/map.orig" "$MAP"
-    sudo sed -i 's|^        --timezone UTC|        --timezone America/New_York|' "$LAUNCH"
-    sudo grep -q 'America/New_York' "$LAUNCH" || fail "the launcher edit did not apply"
+    sudo sed -i 's|^timezone = "UTC"$|timezone = "America/New_York"|' "$ESTATE/estate.toml"
+    sudo grep -q 'America/New_York' "$ESTATE/estate.toml" || fail "the manifest edit did not apply"
     expect_refusal "runtime-profile mismatch"
     # put it all back
-    sudo cp "$SCRATCH/launch.orig" "$LAUNCH"
+    sudo cp "$SCRATCH/manifest.orig" "$ESTATE/estate.toml"
     configure_restore
     start_engine
     [ "$(sudo stat -c '%a' "$SOCK")" = 600 ] || fail "the socket is not owner-only again"
-    ok "the example's map and launcher are back; the socket is owner-only"
+    ok "the example's map and manifest are back; the socket is owner-only"
 }
 
 # deployment-runbook ss0's "Recipe: stop, restart, seal and recover", the
@@ -759,7 +768,7 @@ step_upgrade_coordinated_rollback() { # coordinated row's rollback: flip back, r
 # The old estate for ss7's state-machine row: v1.7.0 from PyPI, as runbook
 # ss1 installs a release that has no assets, on a new estate of its own.
 step_upgrade_old_release() { # an estate on the old release, v1.7.0 from PyPI
-    local mark line version
+    local mark line version rc refused
     ROOT=$ROLLBACK_ROOT
     SOCK=$ROOT/control.sock
     wait_for 60 "nothing is live under the supervisor" nothing_live "$ROOT"
@@ -771,6 +780,14 @@ step_upgrade_old_release() { # an estate on the old release, v1.7.0 from PyPI
     version=$(state_machine_version "$OLD_VENV")
     [ "$version" = 1 ] || fail "$OLD_VENV implements state-machine version $version"
     flip "$OLD_VENV"
+    # the current launcher refuses a runtime without estate args (DL-407)
+    rc=0
+    refused=$(sudo -u dsl41 "$LAUNCH" --print 2>&1) || rc=$?
+    if [ "$rc" != 2 ] || ! grep -qF 'this launcher needs dsl41 1.13 or later' <<<"$refused"; then
+        fail "the current launcher on v$OLD_VERSION exited $rc: $refused"
+    fi
+    ok "the current launcher refuses v$OLD_VERSION and names the release it needs"
+    install_old_launcher
     provision_root "$OLD_ROOT"
     point_launcher "$OLD_ROOT" "$OLD_ROOT.anchor"
     ROOT=$OLD_ROOT
@@ -801,6 +818,7 @@ step_upgrade_state_machine() { # state-machine row: v1.7.0 to this build, a new 
     flip "$BUILD_A"
     version=$(state_machine_version "$BUILD_A")
     [ "$version" != 1 ] || fail "$BUILD_A implements state-machine version 1 too"
+    restore_launcher
     provision_root "$NEW_ROOT"
     point_launcher "$NEW_ROOT" "$NEW_ROOT.anchor"
     ROOT=$NEW_ROOT
@@ -842,6 +860,7 @@ step_upgrade_state_machine_rollback() { # state-machine row's rollback: the old 
     sudo systemctl stop "$ENGINE"
     maintenance_stop
     flip "$OLD_VENV"
+    install_old_launcher
     point_launcher "$OLD_ROOT" "$OLD_ROOT.anchor"
     ROOT=$OLD_ROOT
     ANCHOR=$OLD_ROOT.anchor
@@ -863,6 +882,7 @@ step_upgrade_state_machine_rollback() { # state-machine row's rollback: the old 
     sudo systemctl stop "$ENGINE"
     incident_stop_supervisor "historical rollback complete; replace the old supervisor deliberately"
     flip "$BUILD_A"
+    restore_launcher
     point_launcher "$NEW_ROOT" "$NEW_ROOT.anchor"
     ROOT=$NEW_ROOT
     ANCHOR=$NEW_ROOT.anchor
@@ -884,7 +904,7 @@ step_upgrade_state_machine_rollback() { # state-machine row's rollback: the old 
 # of one whole set, the v1.7.0 estate: no kept anchor names its root, and
 # afterwards no kept anchor names a root that is gone.
 step_retire() { # retirement: the estate stays stopped after its units go, the history audits
-    local out unit anchor root named retained next list anchors
+    local out unit anchor root named retained list anchors
     ROOT=$NEW_ROOT
     ANCHOR=$NEW_ROOT.anchor
     SOCK=$ROOT/control.sock
@@ -897,11 +917,11 @@ step_retire() { # retirement: the estate stays stopped after its units go, the h
     wait_for 60 "nothing is live under the supervisor" nothing_live "$ROOT"
     # ss2b's live-seal branch this time: the engine ends failed with exit 3,
     # which retire-remove's reset-failed must clear
-    mapfile -t next < <(next_args)
+    next_args
     wait_out_retry_horizon
-    cli seal --run-root "$ROOT" --estate-anchor "$ANCHOR" "${next[@]}" -p "$PROPERTIES" \
+    cli seal --run-root "$ROOT" --estate-anchor "$ANCHOR" "${NEXT[@]}" -p "$PROPERTIES" \
         --next-detached --next-as-machine localhost --next-machine-policy strict \
-        --next-timezone UTC --claimed-actor drill@nightbank
+        --claimed-actor drill@nightbank
     wait_for 90 "$ENGINE is failed" is_state "$ENGINE" failed
     [ "$(prop "$ENGINE" ExecMainStatus)" = 3 ] || fail "exit $(prop "$ENGINE" ExecMainStatus), not 3"
     cli audit --run-root "$ROOT" --estate-anchor "$ANCHOR"
