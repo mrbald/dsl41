@@ -23,8 +23,8 @@ Every document is written for one of five readers and says so in its first
 paragraph, with the task the reader comes with:
 
 - **Packager**: builds the site package (the RPM or equivalent that installs
-  dsl41 and the site's services), and ships JIL releases on a schedule of
-  their own.
+  dsl41 and the site's services), and keeps fixed what the application's JIL
+  releases run within (DL-408).
 - **Operator**: starts, watches, recovers and retires the engine; drills and
   incidents.
 - **Job author**: writes an estate in JIL or in the Python DSL, or brings an

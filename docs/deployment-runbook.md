@@ -46,9 +46,12 @@ S=$RUN_ROOT/control.sock
 ```
 
 Some blocks are marked as recipes in this file's source.
-`tests/test_operator_recipes.py` runs the job recipe, the readiness wait
-and the retirement's audit and list as written, against a synthetic
-estate, with the engine unit's `ExecStart=` in place of `systemctl start`.
+`tests/test_operator_recipes.py` runs the job recipe's check block, its
+hand path's seal and open, the readiness wait and the retirement's audit
+and list as written, against a synthetic estate, with the engine unit's
+`ExecStart=` in place of `systemctl start`.
+`tests/test_release_helper.py` runs the release helper against a stub
+engine, and the service drill runs it on a host.
 It runs the sealed check and the torn-opening recipe where `jq` is
 installed. The service drill (§3's worked example) runs the service, hold,
 sealed-check and retirement recipes as written; CI checks their content
@@ -157,7 +160,7 @@ What has to happen?
 │
 ├── new JIL, properties or run options, and the history continues   TRANSITION
 │   ├── in the same run root                                         IN-PLACE TRANSITION
-│   │     seal, then start the engine unit: it opens period N+1 (§6a)
+│   │     dsl41-release apply: hold, drain, seal, start, verify (§0, §6a)
 │   └── in a fresh run root, same lineage and anchor                 PHYSICAL ROLL
 │         seal, audit, the open trigger, start (§6a, §7 row 2)
 │
@@ -173,7 +176,7 @@ with them every running command; drain before one (§8's OS-patching row).
 The enabled units then resume the root at boot. An in-place transition is not a new
 estate. It keeps the run root, the anchor and the state: holds, globals,
 latches and run numbers cross the seal (§6a). A new estate keeps none of
-them. §6's fresh-run-root cycle is a new estate too: its root gets an
+them. §6's fresh run root, an infrastructure act, is a new estate too: its root gets an
 anchor of its own.
 
 ### Recipe: install and start as a service
@@ -297,10 +300,14 @@ dsl41 query status --brief -S "$S"
    member's tier. Restart the engine unit after a `socket_group` change:
    a reload that names another group is refused (access-model §7). The
    web UI listens on loopback; front it with TLS and authentication (§4).
-3. **Execution profile.** The launcher's run options are the runtime
-   profile: `--detached`, `--as-machine`, `--machine-policy strict` and
-   `--timezone`, plus `--timezone-map`, `--deadman` and `--semantics` when
-   used (§3, §5; DL-252). `--as-machine` is the name the JIL's `machine:`
+3. **Execution profile.** The runtime profile has two halves (DL-252,
+   DL-407). The launcher's run options are the deployment half:
+   `--detached`, `--as-machine` and `--machine-policy strict`, plus
+   `--deadman` when used (§3, §5). The active release's manifest is the
+   interpretation half: `--timezone`, plus `--timezone-map` and
+   `--semantics` when used
+   ([authoring §6.1](authoring.md#61-declare-the-estate-in-estatetoml)).
+   `--as-machine` is the name the JIL's `machine:`
    values resolve to. `--timezone` is the base zone: the zone of every
    schedule that does not name its own. An estate that runs around the
    clock across regions is best run with UTC as its base zone. UTC has no
@@ -309,7 +316,9 @@ dsl41 query status --brief -S "$S"
    zone's changes: move its time out of the changing hour, or let the job
    name UTC itself (ir-design §9, L023).
    The resume gate refuses a changed profile with exit 2. Change one only
-   at a boundary, with the matching `--next-*` options (§6a).
+   at a boundary: a manifest change is a release
+   ([the job recipe](#recipe-add-change-or-remove-a-job)), and a launcher
+   change needs the matching `--next-*` options (§6a).
 4. **Access check.** After a start, as a member of the socket group with
    a binding, `dsl41 query status --brief -S "$S"` answers. As a member
    with no binding it is refused, and `perimeter.jsonl` gains an
@@ -373,8 +382,8 @@ dsl41 rehearse "$@" -p "$PROPERTIES"
    holds more jobs than the launcher's `MAX_JOBS`, or when the runtime's
    command grace is above `MAX_GRACE_S`. That ceiling is the packager's
    (site-package §5). A name is installed once, so a fixed release takes a
-   new name. After a dsl41 upgrade, apply refuses a release prepared under
-   the earlier version until
+   new name. After a runtime switch, apply refuses a release prepared
+   under another dsl41 version until
    `/opt/dsl41/bin/dsl41-release prepare --requalify NAME` has run the same
    checks again.
 3. In the window, apply the release. Never set
@@ -406,13 +415,13 @@ dsl41 rehearse "$@" -p "$PROPERTIES"
    9. It releases only the holds it applied itself, and keeps a hold an
       operator took or released since. It writes NAME's receipt.
 
-   A seal refused inside the retry horizon is sent again, under a new
-   request id, once the horizon it names has passed (period-model §9).
+   The helper sends a seal that the retry horizon refused again, under a
+   new request id, once the horizon it names has passed (period-model §9).
    Three options bound the waits, in seconds:
 
    | Option | Default | When it runs out |
    | --- | --- | --- |
-   | `--drain-timeout` | 600 | exit 2: the helper releases its holds, and nothing is sealed |
+   | `--drain-timeout` | 600 | nothing is sealed. Exit 2 when the helper has released its holds; exit 3, with the apply recorded for `--resume`, when that release fails |
    | `--horizon-timeout` | 300 | exit 2: the seal did not commit |
    | `--open-timeout` | 90 | exit 3: the apply stays recorded |
 
@@ -422,13 +431,14 @@ dsl41 rehearse "$@" -p "$PROPERTIES"
    | Exit | What it means | What you do |
    | --- | --- | --- |
    | 0 | NAME is active in the next period. | Verify (step 5). |
-   | 2 | Refused, or the seal did not commit. No apply is recorded, `ACTIVE` is unchanged, and the helper has released its holds. | Fix the cause the line names, and apply again. Files that need a change go in a new release under a new name. |
-   | 3 | Stopped. | Run `/opt/dsl41/bin/dsl41-release status`. When it shows a recorded apply, it says what `apply --resume NAME` will do: fix the cause, then run `/opt/dsl41/bin/dsl41-release apply --resume NAME`. When it shows none, nothing was held or sealed: fix the cause and apply again. |
-   | 4 | The seal's outcome is unknown. The apply is recorded with its request id. | Run `/opt/dsl41/bin/dsl41-release apply --resume NAME`. It reads the estate for that request id first, and retries only under it. Do not seal by hand. |
+   | 2 | Refused, or the seal did not commit. This invocation recorded nothing and changed nothing: `ACTIVE` is as it was, and the holds this invocation took are released. | Fix the cause the line names, and apply again. Files that need a change go in a new release under a new name. When the line names an apply already recorded, that apply stays: run `/opt/dsl41/bin/dsl41-release status` and resume it. |
+   | 3 | Stopped. | Run `/opt/dsl41/bin/dsl41-release status`. When it shows a recorded apply, it says what `apply --resume NAME` will do: fix the cause, then run `/opt/dsl41/bin/dsl41-release apply --resume NAME`. When it shows none, and NAME's latest receipt is this apply's, the apply completed and NAME is active. Otherwise nothing was held or sealed: fix the cause and apply again. |
+   | 4 | The seal's outcome is unknown. The apply is recorded with its request id. | Run `/opt/dsl41/bin/dsl41-release apply --resume NAME`. It reads the estate for that request id first, and retries under it, and under a new id only after a retry-horizon refusal. Do not seal by hand. |
 
    A new apply, and a rollback, refuse while an apply is recorded.
 5. Verify. `/opt/dsl41/bin/dsl41-release status` names the active release
-   and each release's receipts. An added or changed job answers with the
+   and each release's latest receipt and its count of applies. An added
+   or changed job answers with the
    definition this period loaded:
 
 <!-- recipe: job-verify -->
@@ -455,17 +465,20 @@ dsl41 query status --job "$JOB" -S "$S"
    as its previous one, with the exit codes of step 4. With no such
    receipt, apply the earlier release by name.
 
-A host without the helper takes the same window by hand: hold and drain
-(§6, steps 1 and 2), set `ESTATE` to the new release's directory,
-installed whole beside the active one, seal with the first block below,
-write the new release's name to `ACTIVE`, start the engine unit with the
-second block, verify as step 5 does, and release the holds with
-`OFF_HOLD`. Before that seal, a job you change or remove must
-show no `STARTING`, `RUNNING` or `QUE_WAIT`, `armed` false and no
-`pending_timers` in `dsl41 query status --job "$JOB" -S "$S"`, and the
-retry horizon after the last operator request must have passed (§2b). The
-`--next-*` options restate the launcher's run options; they do not
-inherit them (§6a):
+A host without the helper takes the same window by hand, in these
+steps. The hand path checks neither the ceiling nor the files prepare
+recorded.
+
+1. Hold the scheduled jobs and let running work finish (§6, steps 1
+   and 2).
+2. Check each job you change or remove:
+   `dsl41 query status --job "$JOB" -S "$S"` must show no `STARTING`,
+   `RUNNING` or `QUE_WAIT`, `armed` false and no `pending_timers`. Wait
+   out the retry horizon after the last operator request, a hold
+   included (§2b).
+3. Set `ESTATE` to the new release's directory, installed whole beside
+   the active one, and seal. The `--next-*` options restate the
+   launcher's run options; they do not inherit them (§6a):
 
 <!-- recipe: job-seal -->
 ```sh
@@ -475,16 +488,20 @@ dsl41 seal --run-root "$RUN_ROOT" --estate-anchor "$ESTATE_ANCHOR" "$@" -p "$PRO
     --next-detached --next-as-machine localhost --next-machine-policy strict
 ```
 
-The live engine exits 3, and the engine unit stays failed on purpose.
-Exit 4 is an unknown outcome: follow §6a's Day 2 before anything else.
-The launcher then passes `--resume`, and the engine opens period N+1 in
-the same run root under the new catalog; wait for it with the
-`wait-answers` block of the service recipe:
+   The live engine exits 3, and the engine unit stays failed on purpose.
+   Exit 4 is an unknown outcome: follow §6a's Day 2 before anything else.
+4. Write the new release's name to `ACTIVE`.
+5. Start the engine unit. The launcher passes `--resume`, and the engine
+   opens period N+1 in the same run root under the new catalog. Wait for
+   it with the `wait-answers` block of the service recipe:
 
 <!-- recipe: job-open -->
 ```sh
 systemctl start dsl41-engine.service
 ```
+
+6. Verify, as step 5 of the helper's path does.
+7. Release the holds with `OFF_HOLD`.
 
 ### Recipe: stop, restart, seal and recover
 
@@ -1585,7 +1602,7 @@ and this section does not cover recovering or replaying them.
 ## 3. Starting the engine
 
 ```sh
-dsl41 run /srv/dsl41/estate/*.jil \
+dsl41 run /srv/dsl41/nightbank/releases/<name>/*.jil \
     --run-root /srv/dsl41/runs/<id> \
     --detached \
     --as-machine <name-your-jils-use> \
@@ -2094,24 +2111,23 @@ therefore a restart, in one of the two cycles. An edit of the files under
 a running engine only sets the TUI's SPEC DRIFT flag (an advisory
 fingerprint check); it changes nothing live.
 
-**Before the window** (off the production run, any checkout):
+**Before the window** (off the production run): run the
+[job recipe's check block](#recipe-add-change-or-remove-a-job) with
+`ESTATE` set to the new release's directory. The manifest supplies the
+timezone, its map and the semantic switches (DL-407); lint takes no
+`--semantics`. Without a timezone, both work in UTC: rule L023 checks DST
+effects there (DL-316), and rehearse plays the schedules there. Review the
+diff visually with `viz`:
 
 ```sh
-dsl41 lint new-estate/*.jil -p site.properties \
-    --timezone <base-zone> [--timezone-map tz-aliases.json]  # gate on exit code
-dsl41 rehearse new-estate/*.jil -p rehearse.properties \
-    --timezone <base-zone> [--timezone-map tz-aliases.json] \
-    [--semantics NAME=VALUE]      # whole night, virtual clock
-dsl41 viz --format chart new-estate/*.jil -p site.properties  # review the diff visually
+args=$(dsl41 estate args "$ESTATE/estate.toml" --for viz --environment "$ENVIRONMENT")
+eval "set -- $args"
+dsl41 viz --format chart "$@" -p "$PROPERTIES"
 ```
 
-Pass lint and rehearse the engine's `--timezone`, and its `--timezone-map`
-when it has one. Without `--timezone`, both work in UTC: rule L023 checks
-DST effects there (DL-316), and rehearse plays the schedules there. Pass
-rehearse the engine's `--semantics` too, once per switch the profile sets;
-lint takes no `--semantics`. Rehearse costs little: it plays a full night
-in seconds, with the same oracle and scripted adapters. Fix everything here.
-The production window is for swapping files, not for finding problems.
+Rehearse costs little: it plays a full night in seconds, with the same
+oracle and scripted adapters. Fix everything here. The production window
+is for swapping files, not for finding problems.
 
 **The window, in order:**
 
@@ -2129,7 +2145,7 @@ The production window is for swapping files, not for finding problems.
    seal does not create one. An armed latch survives a seal on purpose:
    dropping it at the boundary would be a transition with no admitted
    input. So the operator's `OFF_HOLD` in the new period produces exactly
-   one start, which is the point of the hold. In the fresh-run-root cycle
+   one start, which is the point of the hold. In the fresh run root
    below, the state is thrown away. An operator who does not want that
    start sends `dsl41 sendevent DISARM -J job` (DL-158). It drops the
    latch and does nothing else. Send it before the `OFF_HOLD`, on either
@@ -2146,7 +2162,10 @@ The production window is for swapping files, not for finding problems.
    Refusal, uncertainty or unmanaged containment requires §3's incident
    procedure; an empty LIST does not prove completion. A job left running
    across a new baseline is a process the new catalog knows nothing about.
-5. **Swap the estate**: `git -C /srv/dsl41/estate checkout <new-tag>`.
+5. **Name the release**: as the deployment identity, prepare it with
+   `/opt/dsl41/bin/dsl41-release prepare NAME DIR`, and write NAME to
+   `ACTIVE`, as the service recipe's step 4 does. The launcher reads only
+   the release `ACTIVE` names.
 6. **New run root**: `dsl41 run ... --run-root /srv/dsl41/runs/<new-id>`,
    a fresh root with no `--resume`. Name run roots after the baseline: a
    date and the estate tag serve well. The old run root stays untouched,
@@ -2158,15 +2177,15 @@ The production window is for swapping files, not for finding problems.
    `sources.json` (files), run `dsl41 query plan -S $S` for the expected
    waves, and watch the first scheduled fire.
 
-**Rollback** is the same procedure with the previous tag and another
-fresh run root. If version control is ever in doubt, the old run root's
-`catalogs/` holds the post-placeholder JIL that baseline ran. It is byte
-for byte what ran, but with placeholders already resolved, so prefer the
-tag.
+**Rollback** is the same procedure with the previous release and
+another fresh run root. If that release is ever in doubt, the old run
+root's `catalogs/` holds the post-placeholder JIL that baseline ran. It is
+byte for byte what ran, but with placeholders already resolved, so prefer
+the release.
 
 ## 6a. The boundary — sealing a period and opening the next
 
-The in-place cycle of §6, as commands (DL-134; period-model §7 and
+The application train's boundary (§6), as commands (DL-134; period-model §7 and
 §11). It keeps the state: runtime globals, operator holds, `last_end_at`,
 armed latches, every box's `ran_members` and `run_number` all cross,
 because the boundary is a record, not a directory.
@@ -2176,7 +2195,8 @@ drain, stop the web UI. Then:
 
 ```sh
 dsl41 seal --run-root /srv/dsl41/runs/<id> \
-    --next /srv/dsl41/estate/first.jil --next /srv/dsl41/estate/second.jil \
+    --next /srv/dsl41/nightbank/releases/<name>/first.jil \
+    --next /srv/dsl41/nightbank/releases/<name>/second.jil \
     [-p site.properties] [--next-timezone …] [--claimed-actor you@host]
 ```
 
@@ -2240,7 +2260,7 @@ for the fields the engine wires, and for the two it cannot see,
 
 ```sh
 dsl41 run --resume --run-root /srv/dsl41/runs/<id> \
-    --detached --as-machine <name> /srv/dsl41/estate/*.jil
+    --detached --as-machine <machine> /srv/dsl41/nightbank/releases/<name>/*.jil
 ```
 
 **Attest.** Before a period's root can be archived or rolled away from,
@@ -2273,8 +2293,8 @@ of the same state-machine version audits under the current binary.
 A=/srv/dsl41/runs/<first>.anchor                 # whatever genesis used
 dsl41 audit --run-root /srv/dsl41/runs/<old> --estate-anchor $A
 dsl41 run --open-from $A --run-root /srv/dsl41/runs/<new> \
-    --detached --as-machine <name> -p site.properties \
-    /srv/dsl41/estate/*.jil
+    --detached --as-machine <machine> -p site.properties \
+    /srv/dsl41/nightbank/releases/<name>/*.jil
 ```
 
 The opener is a full launch line, as §5 says: the C2 files in their
@@ -2654,14 +2674,15 @@ If the genesis fails, fix the cause and start the unit again before you
 release the reboot hold.
 
 A new estate carries no state: holds, globals and latches start empty, as
-in §6's fresh-run-root cycle. Keep the old venv for as long as you retain
+in §6's fresh run root. Keep the old venv for as long as you retain
 the old estate's periods. The rollback is the old venv only, on the old
 estate. Stop both units and flip back. Point the launcher's `RUN_ROOT`
 and `ESTATE_ANCHOR` back at the old estate's, and both units'
 `RequiresMountsFor=` to match; run `systemctl daemon-reload` if a unit
-file changed. Keep the launcher otherwise as it is: it passes
-`--supervisor attach` only to a `dsl41` whose `run` accepts the option,
-so a release before DL-396 gets its supervisor as it always did (DL-402).
+file changed. A rollback to a runtime without `dsl41 estate args`,
+one before 1.13.0, reinstalls the site package qualified with that
+release, launcher and units included, because this launcher refuses such
+a runtime (DL-407). A rollback to 1.13.0 or later keeps the launcher.
 Then start the engine unit. `Requires=` starts the
 supervisor unit first, and the engine opens the old estate's next
 period. A rollback after a failed genesis still holds the estate down

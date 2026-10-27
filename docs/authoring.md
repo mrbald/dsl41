@@ -215,8 +215,8 @@ Choose the job names, event times and `--start` date for your estate.
 | `--cadence-policy PATH` | Supply JSON shaped as `{"schema_version":1,"policies":{"JOB":{"max_runs":2,"reason":"expected runs"}}}`; requires `--check-cadence`. |
 | `--sweep fail` | Replay with each upstream job's first run failing; requires `--check-cadence`. |
 | `--sweep flags` | Replay each global's tested values with and without reset; requires `--check-cadence`. |
-| `--timezone`, `--timezone-map` | Use the engine's timezone settings as described in [§6](#6-hand-over-for-rollout). |
-| `--semantics NAME=VALUE` | Follow the operator's [switch contract](runner-design.md#8a-semantic-switches). |
+| `--timezone`, `--timezone-map` | Use the manifest's timezone settings ([§6.1](#61-declare-the-estate-in-estatetoml)). |
+| `--semantics NAME=VALUE` | Use the manifest's switches; the [switch contract](runner-design.md#8a-semantic-switches). |
 | `--run-root PATH` | Also write the journal there; incompatible with a sweep. |
 | `--permit-unknown`, `-p/--properties` | Use the loading options described above and in [§2](#2-check-which-constructs-dsl41-accepts). |
 
@@ -347,14 +347,8 @@ See the [minify instructions](../README.md#de-identify-an-estate-minify) for its
 ## 6. Hand over for rollout
 
 Use the [gate procedure in §4.4](#44-run-the-checks-in-order) away from the production run.
-Match the engine's settings using the runbook's
-[Before the window commands](deployment-runbook.md#6-jil-rollout--updating-the-estate).
-Give `lint` and `rehearse` the engine's `--timezone` and its `--timezone-map` when it has one.
-Give `rehearse` `--semantics NAME=VALUE` once per switch the engine profile sets.
-The operator supplies those [switch values](runner-design.md#8a-semantic-switches).
-The runbook passes `site.properties` to `lint` and `viz`.
-It passes `rehearse.properties` to `rehearse`.
-Use [§4's properties option](#4-check-the-estate) for those bindings.
+The manifest declares the timezone, its map and the semantic switches ([§6.1](#61-declare-the-estate-in-estatetoml); DL-407).
+The runbook's [check block](deployment-runbook.md#recipe-add-change-or-remove-a-job) passes them to `lint` and `rehearse` through `dsl41 estate args`, with the site's properties file last.
 
 After the checks pass, commit and tag the estate edit under the
 [job-edit recipe](deployment-runbook.md#recipe-add-change-or-remove-a-job).
@@ -378,7 +372,7 @@ properties = ["base.properties"]
 timezone = "UTC"
 
 [semantics]
-# NAME = "VALUE", one line per switch the operator's profile sets
+# NAME = "VALUE", one line per switch the estate sets
 
 [environments.prod]
 properties = ["prod.properties"]
@@ -388,7 +382,7 @@ properties = ["prod.properties"]
 
 | Key | Required | What it holds |
 | --- | --- | --- |
-| `name` | yes | The estate's name; dsl41 uses it in messages only. |
+| `name` | yes | The estate's name; dsl41 does not use it. |
 | `requires_dsl41` | no | The lowest dsl41 version the estate needs, as `">=X.Y"` or `">=X.Y.Z"`. |
 | `files` | yes | The catalog files, in command-line order. |
 | `properties` | no | The properties layers every environment applies; a later layer overrides an earlier one. |
@@ -403,8 +397,9 @@ dsl41 refuses an unknown key at any level, and a path that `files`, or the base 
 `requires_dsl41` accepts only `>=`, and compares the leading integers of the version, so a pre-release or dev build of X counts as X.
 
 The environment layers follow the base layers.
-A manifest that declares environments needs one chosen; the launcher's `ENVIRONMENT` chooses it on each host.
-An environment with no layers of its own, `uat` above, applies the base layers only.
+The launcher and the release helper always pass the host's `ENVIRONMENT`, and `estate args` refuses an environment the manifest does not declare.
+Declare every environment a host's `ENVIRONMENT` names, with an empty table when it adds no layer.
+`[environments.uat]` above declares one that applies the base layers only.
 The site's own properties file comes after every layer, so the site's values win.
 One tag serves every environment.
 
@@ -412,7 +407,7 @@ One tag serves every environment.
 `VERB` is `run`, `seal`, `lint`, `rehearse` or `viz`.
 Give `--environment NAME` when the manifest declares environments, and `--format json` for `{"argv": [...]}`.
 `MANIFEST` must be an absolute path, because the bundle hash covers each path string as printed.
-For a manifest at `/work/payments/estate.toml` with no environments, `--for lint` prints the files, a `-p` per layer and the timezone:
+For the example above at `/work/payments/estate.toml`, `--for lint --environment uat` prints the files, a `-p` per layer and the timezone:
 
 ```text
 /work/payments/calendars.jil /work/payments/global.jil /work/payments/eod.jil /work/payments/reports.jil -p /work/payments/base.properties --timezone UTC
@@ -430,4 +425,4 @@ A manifest that `estate args` refuses fails that check, before the tag exists.
 This page leaves engine operation to the [operator track](deployment-runbook.md#0-the-operator-path),
 compiler internals to the [architect track](architecture.md),
 the descoped UC backend to [its specification](stonebranch-semantics.md) ([DL-288](decision-log.md)),
-and `--semantics` choices to the operator's [switch contract](runner-design.md#8a-semantic-switches).
+and the meaning of each `--semantics` switch to the [switch contract](runner-design.md#8a-semantic-switches).

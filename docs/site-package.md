@@ -133,7 +133,7 @@ Use this contents list for the site's RPM spec:
   Set each owned path's mode in the spec according to the table.
 - Never own run roots, `leader.lock`, anchors, the runtime prefix directory,
   generated runtimes or `.venv`.
-  Under the prefix, own only the launcher path listed below.
+  Under the prefix, own only the launcher and the release helper listed below.
 - Do not reload units, restart services or activate a runtime in any site-package scriptlet.
 - Preserve reviewed active files during upgrades until the site explicitly installs replacements.
   The [package-replaces-configuration rule](deployment-qualification.md#operator-error-matrix) says:
@@ -157,10 +157,10 @@ Use this contents list for the site's RPM spec:
 | `<prefix>/bin/dsl41-release`, mode `0755` | The release helper. Its first line names the launcher's `PREFIX`, and it reads every path and run option through `dsl41-launch vars`. | [Release helper](../examples/nightbank/deploy/dsl41-release); [service-install recipe](deployment-runbook.md#recipe-install-and-start-as-a-service); [DL-407](decision-log.md). |
 | `/etc/sudoers.d/dsl41-release`, owned by root, mode `0440` | Grants the deployment identity two commands: the helper's `service` mode as the service account, and `systemctl start dsl41-engine.service` as root. Check it with `visudo -cf`. | [Sudoers file](../examples/nightbank/deploy/dsl41-release.sudoers); [§5](#5-ship-jil-releases-on-the-applications-train). |
 | `ESTATE_RELEASES` directory | Owned by the deployment identity and its group, mode `0755`. The helper installs each release in it; a release's inputs are read-only to everyone. | [Release helper](../examples/nightbank/deploy/dsl41-release); [§5](#5-ship-jil-releases-on-the-applications-train). |
-| `ACTIVE`'s directory, and `ACTIVE` | The directory belongs to the deployment group, mode `1775`; the helper replaces `ACTIVE` by a rename there, and the sticky bit keeps the directory's other entries out of its reach. `ACTIVE` is a plain file owned by the deployment identity. | [Release helper](../examples/nightbank/deploy/dsl41-release); [launcher header](../examples/nightbank/deploy/dsl41-launch). |
+| `ACTIVE`'s directory, and `ACTIVE` | The directory is owned by root, with the deployment group and mode `1775`. The helper replaces `ACTIVE` by a rename there, and the sticky bit keeps entries owned by other users out of the helper's reach. `ACTIVE` is a plain file owned by the deployment identity. | [Release helper](../examples/nightbank/deploy/dsl41-release); [launcher header](../examples/nightbank/deploy/dsl41-launch). |
 | Run-root parent, outside the package payload | The site provisions this path on local durable storage. The example uses service-account ownership and mode `0700`. The service account writes run roots and anchors there. | [Service-install recipe](deployment-runbook.md#recipe-install-and-start-as-a-service); [host prerequisites](deployment-qualification.md#rehearsal-prerequisites); [spool contract](supervisor-protocol.md#3-spool-format-frozen). |
 
-The install recipe prescribes no owner or mode for properties files and no numeric mode for the estate directory.
+The install recipe prescribes no owner or mode for properties files.
 Choose those values in the site spec before building it.
 Manual starts count against the engine's start limit.
 The runbook's [worked example](deployment-runbook.md#a-worked-example-examplesnightbankdeploy)
@@ -182,8 +182,8 @@ The example hard-codes the default prefix in these assignments:
 Edit those assignments for another prefix.
 The RPM's prefix macro moves the runtime; it does not rewrite these templates.
 The launcher uses `ESTATE_RELEASES=/srv/dsl41/nightbank/releases` and `ACTIVE=/srv/dsl41/nightbank/active`.
-The runbook's §3, §6 and §6a examples use `/srv/dsl41/estate/`.
-Its install recipe tells the site to install a release under `ESTATE_RELEASES` and name it in `ACTIVE`.
+The runbook's examples use the same `ESTATE_RELEASES`.
+Its install recipe has the deployment identity prepare the first release with the helper and name it in `ACTIVE`.
 The launcher's separate `PROPERTIES` path is `/srv/dsl41/nightbank/night/night.properties`.
 
 The example map requires the root-owned directory in the table.
@@ -270,6 +270,7 @@ Keep its runtime-directory provisioning commands; those paths are outside the pa
 4. Check job data directories and output targets against the service-account ownership in the [service recipe, step 3](deployment-runbook.md#recipe-install-and-start-as-a-service).
 
 5. Follow the manager and launcher checks in the [service recipe, steps 2 and 4](deployment-runbook.md#recipe-install-and-start-as-a-service) to reload units, enable permitted boot starts and inspect the installed command.
+   Step 4 also prepares the first release and writes its name to `ACTIVE`; the launcher refuses to start without it.
 
 6. Follow the tested start and readiness commands in the [service recipe, step 5](deployment-runbook.md#recipe-install-and-start-as-a-service) to start the engine and wait for its answer.
 
@@ -296,7 +297,8 @@ A JIL release needs no change to `dsl41-offline`, its runtime or the site packag
 | The launcher's `RUN_ROOT` and `ESTATE_ANCHOR` | Site package | Only an infrastructure act changes them. The run roots and anchors themselves stay outside the payload ([§3](#3-build-the-site-package)). |
 | The engine and supervisor units | Site package | A release starts the engine unit and changes no unit. |
 | The access map | Site package | It binds the deployment identity, as the next paragraph says. |
-| The `ESTATE_RELEASES` directory, and `ACTIVE`'s directory | Site package creates them for the deployment identity and its group | The helper writes each release, its apply record and its lock under `ESTATE_RELEASES`, and replaces `ACTIVE`. |
+| The `ESTATE_RELEASES` directory | Site package creates it, owned by the deployment identity and its group | The helper writes each release, its apply record and its lock there. |
+| `ACTIVE`'s directory | Site package creates it, owned by root, with the deployment group and mode `1775` | The helper replaces `ACTIVE` there; the sticky bit keeps entries owned by other users out of its reach. |
 | `<prefix>/bin/dsl41-release` and `/etc/sudoers.d/dsl41-release` | Site package | The deployment identity's two sudo lines, and nothing more. |
 | `MAX_JOBS` and `MAX_GRACE_S` in the launcher | Site package | The ceiling below. |
 | A release directory's contents: its JIL, calendars and properties layers | Application | `prepare` installs them whole, read-only, and nothing changes them after. |
@@ -309,7 +311,7 @@ The helper sends `query` and `sendevent` as that identity, so the access map bin
 The service account is a member of that group too, as the [configure recipe](deployment-runbook.md#recipe-configure-an-estate) requires.
 Through `sudo`, the identity may run the helper's `service` mode as the service account, and `systemctl start dsl41-engine.service` as root.
 The [sudoers file](../examples/nightbank/deploy/dsl41-release.sudoers) holds those two lines.
-The service recipe installs the helper and the sudoers file; create the identity, its group, the releases directory and `ACTIVE`'s directory in the site package.
+The site package installs the helper and the sudoers file, and creates the identity, its group, the releases directory and `ACTIVE`'s directory.
 
 The ceiling is the workload the units' limits were sized for.
 The launcher declares `MAX_JOBS` and `MAX_GRACE_S`, and the helper's `prepare` refuses a release with more jobs than `MAX_JOBS`, or a runtime whose command grace is above `MAX_GRACE_S`.
@@ -340,8 +342,8 @@ A dsl41 upgrade also needs a verified candidate, rehearsal with the new executab
 Read the [release note described in §1](#1-what-a-dsl41-release-gives-you) and compare state-machine versions in both runtimes.
 Follow [runbook §7](deployment-runbook.md#7-upgrading-dsl41-itself) to choose the required root and supervisor treatment.
 Keep old runtimes while the periods they wrote remain retained.
-After a runtime switch, the helper's `apply` refuses a release prepared under the earlier version until `dsl41-release prepare --requalify NAME` passes.
-A runtime rollback below dsl41 1.13.0 reinstalls the site package qualified with that release.
+After a runtime switch, the helper's `apply` refuses a release prepared under another dsl41 version until `dsl41-release prepare --requalify NAME` passes.
+A site that rolls the runtime back below dsl41 1.13.0 reinstalls the site package qualified with that release.
 The launcher reads the manifest through `dsl41 estate args`, and it refuses to start a runtime without that verb.
 
 ## 6. Qualify the host
