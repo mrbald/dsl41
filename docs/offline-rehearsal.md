@@ -75,7 +75,7 @@ The offline target runs these checks:
 | EL8 reference RPM | Fresh, upgrade, reinstall, downgrade, failed `%post` and erase at default/alternate prefixes with base/UI; actual RPM dependency checks |
 | Delivery faults | Missing/changed wheel and changed template refuse before candidate creation |
 | Preparation faults | Concurrent preparation converges, synthetic partial candidate is retained and refused, unavailable pin leaves no receipt, bounded manufacture ENOSPC retains an incomplete runtime while the prior active receipt verifies |
-| Both Nightbank sizes | Genesis, same-root resume, live-work refusal, guarded manager stop/restart, engine-only runtime flip preserving the supervisor and command |
+| Both Nightbank sizes | Genesis, same-root resume, live-work refusal, engine-only runtime flip preserving the supervisor and command |
 | Exclusion and residuals | Concurrent installed startup preserves WAL; a frozen engine with expired lease still holds exclusion; unknown cgroup residue causes safe refusal/force uncertainty and retains exclusion until explicit fixture containment |
 | Deliberate termination | `--force=terminate`, supervisor exit 8, no writers, engine reconciliation without another attempt |
 | Definition boundaries | Add, change, remove and rollback a job; removed job is a ghost; exact request replay causes no duplicate file effect |

@@ -28,6 +28,25 @@ seal_next() {
     wait_for 30 'the sealed engine exits' is_state "$ENGINE" failed
     start_engine
 }
+# DL-416: a stop of the supervisor unit drains. Its ExecStop sends SIGTERM to the
+# supervisor alone, so the running command is not signalled and ends on its own in
+# SUCCESS, and the engine unit (Wants=) stays up through the drain.
+drain_probe() {
+    local eng run
+    force_start "$LONG_JOB"
+    wait_for 30 "$LONG_JOB is RUNNING" job_is "$LONG_JOB" RUNNING
+    eng=$(prop "$ENGINE" MainPID)
+    run=$(job_field "$LONG_JOB" run_number)
+    sudo systemctl stop --no-block "$SUPERVISOR"
+    wait_for 30 'the supervisor drains' is_state "$SUPERVISOR" deactivating
+    wait_for 60 "$LONG_JOB ends on its own" job_is "$LONG_JOB" SUCCESS
+    [ "$(job_field "$LONG_JOB" run_number)" = "$run" ] || fail 'the drain ran the job again'
+    wait_for 60 'the drained supervisor stops' is_state "$SUPERVISOR" inactive
+    [ "$(prop "$ENGINE" MainPID)" = "$eng" ] || fail 'the supervisor stop stopped the engine'
+    sudo systemctl start "$SUPERVISOR"
+    wait_up
+    ok "$size: a supervisor stop drained $LONG_JOB to SUCCESS with the engine up"
+}
 maintenance_probe() {
     local sup pid attempts run
     force_start "$LONG_JOB"
@@ -36,8 +55,6 @@ maintenance_probe() {
     pid=$(pgrep -f "fakework $LONG_JOB" | head -1)
     run=$(job_field "$LONG_JOB" run_number)
     attempts=$(sudo cat "$NIGHTBANK/night/data/state/$LONG_JOB.attempts")
-    if sudo systemctl stop "$SUPERVISOR"; then fail 'manager stop ignored RefuseManualStop'; fi
-    if sudo systemctl restart "$SUPERVISOR"; then fail 'manager restart ignored RefuseManualStop'; fi
     expect_exit 2 cli supervise shutdown --run-root "$ROOT"
     sudo systemctl stop "$ENGINE"
     expect_exit 2 cli supervise shutdown --run-root "$ROOT"
@@ -319,6 +336,7 @@ access_probe() {
     bash "$here/drill-steps.sh" configure
 }
 accept_estate() {
+    drain_probe
     maintenance_probe
     concurrent_engine_probe
     frozen_engine_probe
@@ -407,6 +425,7 @@ case ${1:-all} in
             access) access_probe;;
             backup) backup_probe;;
             maintenance)
+                drain_probe
                 maintenance_probe
                 concurrent_engine_probe
                 frozen_engine_probe

@@ -411,7 +411,7 @@ sudo journalctl -u dsl41-engine.service -o cat | tail -3   # …/wal/000004.json
 
 2. Step 1: recipe `torn-look`, in the service account's shell, prints
    `{"period_id":4,"root":"/srv/dsl41/runs/nightbank-01c","state":"open"}` and exits 0:
-   the supervisor `Requires=` started lists no runs.
+   the supervisor `Wants=` started lists no runs.
 3. Step 2, in your shell: recipe `hold-down`, and this exercise's step 1 `supervise
    shutdown` again. Wait 6 s, past `RestartSec` (2 s): the supervisor unit stays
    `inactive`, and `pgrep -u dsl41` prints nothing.
@@ -605,8 +605,8 @@ only the holds its own requests applied, and keeps one that somebody changed sin
 
 ## 31. Idle supervisor maintenance
 
-Goal: see that only the service account's guarded verb stops the supervisor, that it
-refuses live work, and what `--force=terminate` leaves. Follow
+Goal: see that the service account's guarded verb refuses live work, and what
+`--force=terminate` leaves. `systemctl stop` would drain the job instead (DL-416). Follow
 [§3's guarded maintenance](../../docs/deployment-runbook.md#3-starting-the-engine) and
 [§8's rows](../../docs/deployment-runbook.md#manual-intervention). The offline
 rehearsal's maintenance probe checks the same.
@@ -614,7 +614,6 @@ rehearsal's maintenance probe checks the same.
 ```sh
 dsl41 sendevent FORCE_STARTJOB -J OPS_XINST_DEMO_C -S "$S"
 sleep 3   # wait 3 s for the job to run
-sudo systemctl stop dsl41-supervisor.service   # exit 4: … Operation refused … (restart too)
 sudo -u dsl41 -H /opt/dsl41/.venv/bin/dsl41 supervise shutdown --run-root "$RUN_ROOT"
 # exit 2: cannot acquire lease: {"error": "lease_held", … "holder": "engine:/srv/dsl41/runs/nightbank-01d#…"}
 sudo systemctl stop dsl41-engine.service
@@ -631,8 +630,9 @@ wait 5 s more for the reconciliation: the job reads `TERMINATED`,
 still run 2, and `dsl41 journal "$RUN_ROOT"` prints
 `OPS_XINST_DEMO_C RUNNING->TERMINATED [injected STATUS]`.
 
-*Why.* `RefuseManualStop=yes` leaves the stop to the verb; exit 8 is completed
-maintenance, never restarted (DL-390, DL-399). The engine reconciles from the spool.
+*Why.* Guarded maintenance stops only an idle supervisor unless forced; exit 8 is
+completed maintenance, never restarted (DL-390, DL-416). The engine reconciles from the
+spool.
 
 ## 32. Break glass: evict the executor
 

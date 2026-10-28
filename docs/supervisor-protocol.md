@@ -4,7 +4,7 @@ Status: frozen. DL-42 item 3 freezes the spool format and the wrapper
 input spec, and DL-48 freezes the supervisor socket protocol. Entries
 that amend it include DL-80, DL-129, DL-150, DL-151, DL-210, DL-229,
 DL-291, DL-300, DL-325, DL-326, DL-328, DL-390, DL-392, DL-396,
-DL-399 and DL-401; each is cited where it applies. Each change to a frozen item needs a decision-log entry. This
+DL-399, DL-401 and DL-416; each is cited where it applies. Each change to a frozen item needs a decision-log entry. This
 document is the extraction boundary of the lifecycle tier (the five
 modules of §1). If a DL-42 trigger fires and the tier is extracted, this
 document is its public API.
@@ -13,7 +13,7 @@ The tier is deliberately dumb. It records process lifecycle facts
 durably and does nothing else.
 It has no conditions, no retries, no policy and no scheduling timers. Its
 time bounds are lifecycle bounds only (DL-150): the lease TTL, the
-legacy SHUTDOWN and guarded maintenance waits, the two-second output drain at teardown, the startup PING
+drain a host signal starts, the legacy SHUTDOWN and guarded maintenance waits, the two-second output drain at teardown, the startup PING
 probe and the optional deadman (all §5). A handled signal (SIGCHLD,
 SIGTERM, SIGINT) wakes the supervisor loop at delivery through its
 self-pipe, which is also the interpreter's wakeup fd. The loop also reaps
@@ -418,12 +418,9 @@ A held lock, a PING answer or a live recorded process refuses startup with
 exit 1 and the message `another supervisor owns this root`. A zombie
 (exited and unreaped) counts as absent: it holds no descriptor, no lock
 and no socket. Runtime `OSError` failures also exit 1, so that the service
-can retry. Configuration refusals exit 2. One of them is the stop guard
-(DL-399): a supervisor that is the MainPID of its `.service` unit reads
-that unit's RefuseManualStop once, before it takes the lock, and exits 2
-unless it is `yes`. The message names the unit and the directive. A
-supervisor in a service whose MainPID is another process (shape 2), or
-outside systemd, reads nothing.
+can retry. Configuration refusals exit 2: an invalid `--deadman-seconds`
+or `DSL41_DRAIN_S` (below), or a missing run root. The supervisor reads
+no stop guard from its unit (DL-416).
 
 A statechart error (`StatechartError`, an assertion failure of the process
 or lease chart) exits 7, `EXIT_STATECHART_ERROR` in `state_machine.py`
@@ -819,8 +816,8 @@ first. Then a stale or expired token answers
   refuses. Unmanaged supervisors have no qualified maintenance proof.
   The loaded unit must also include exit 8 in both SuccessExitStatus and
   RestartPreventExitStatus. A stale unit policy refuses before
-  termination starts. Admission does not read RefuseManualStop; startup
-  verifies it (DL-399). With `force: null`, active or indeterminate work
+  termination starts. Admission does not read RefuseManualStop (DL-399,
+  DL-416). With `force: null`, active or indeterminate work
   refuses without a signal. A refusal is
   `{ok: false, error: "maintenance_refused", detail}`; it writes no record
   and changes no state.
@@ -924,9 +921,9 @@ first. Then a stale or expired token answers
   deaths and record `signaled` or `exited` truthfully, never "parent
   lost". The supervisor waits for the wrappers, replies `{ok}`, exits, and
   unlinks the socket and the pid file. Both removals require the ownership
-  checks above (DL-210). SIGTERM and SIGINT start the same shutdown: Tier 2
-  sends SIGTERM during host shutdown. They are not a fallback for an
-  unanswered maintenance request (DL-390). Only SIGKILL, which cannot be handled, leaves the
+  checks above (DL-210). SIGTERM and SIGINT run the same wait after the
+  drain below. They are not a fallback for an unanswered maintenance
+  request (DL-390). Only SIGKILL, which cannot be handled, leaves the
   wrappers to their own EOF.
 
   Two bounds keep that wait finite (DL-150). First, the supervisor waits up
@@ -952,6 +949,76 @@ first. Then a stale or expired token answers
   the cleanup before it fails, the supervisor exits 1 (7 for a statechart
   error, DL-328), and each wrapper still alive runs §4 step 5 on its own
   (DL-300).
+
+**The drain** (DL-416). A SIGTERM or SIGINT while serving starts a
+drain (`supervisor_process.06`). The handler counts signals, and the
+loop reads the count before it dispatches any request, also between two
+requests of one read: a request read after a signal meets the drain. Two
+signals read at once take `.06` and then `.61`. Tier 2 sends SIGTERM on
+`systemctl stop` and during host shutdown; the example unit's
+`ExecStop=` sends it to the supervisor alone and waits for its exit,
+since `KillMode=control-group` would signal every command too. That
+helper stays in the unit's cgroup while it waits, so maintenance's idle
+proof leaves out exactly one process whose parent is PID 1 and whose
+argv is the launcher's `supervisor-stop` mode, with the `sleep` its
+wait loop runs. The drain admits no new work: SPAWN, SHUTDOWN and
+MAINTENANCE_STOP are refused `{ok: false, error: "draining"}`, and
+nothing is written for them; a refused SHUTDOWN leaves a counted signal
+alone. PING, LIST, the lease verbs and SIGNAL are served as while
+serving; PING and LIST show `process_state: draining`. The maintenance
+clients read a `draining` answer, or a PING that shows it, as a refusal:
+exit 2, "supervisor is draining; wait for the unit to stop". A run live
+at the signal runs on, and its wrapper records its own outcome. The
+drain ends at the end of the first loop pass in which no wrapper is
+live, or once its bound has passed (`.62`); the supervisor then runs
+SHUTDOWN's TERM/grace/KILL wait above and exits 0. A second SIGTERM or
+SIGINT runs that wait at once (`.61`). A signal held by an admitted
+maintenance operation does not drain: from `maintenance_uncertain` it
+runs the wait at once (`.48`).
+
+The deadman is sampled during a drain as while serving, and stops the
+supervisor in the same way (`.63`), so concurrency-model §8's eviction
+bound holds. The drain needs a leaseholder to last: the example engine
+unit has `Wants=`, not `Requires=`, so a stop of the supervisor unit
+leaves the engine up and renewing. A host shutdown stops the engine
+first (`After=`), so its drain has no leaseholder. With a deadman set,
+it ends at the deadman: the supervisor exits with no wait of its own,
+and each wrapper sends its command TERM, waits the grace and sends KILL
+on lifeline EOF, recording `terminated / parent lost` (DL-205). A host
+shutdown therefore ends a command within the deadman plus the command
+grace; with no deadman, within the drain's bound and the wait.
+
+The bound is `DSL41_DRAIN_S` in the supervisor's environment, in seconds,
+read once at start. It must be a finite number of 0 or more, or the
+supervisor exits 2; 0 runs the wait at the first loop pass. The default,
+840, is the example supervisor unit's `TimeoutStopSec` of 900 (DL-401)
+less 60 s for the wait that follows: 5 s for spawn records, the longest
+grace (10 s by default), 2 s, and the 2 s reply flush at teardown. A
+deployment that raises a grace or the bound raises `TimeoutStopSec`
+with it. `TimeoutStopSec` bounds the unit's `ExecStop=`; when it
+overruns, systemd sends SIGTERM to every process in the unit, the
+commands included, and a second `TimeoutStopSec` bounds that before
+SIGKILL. A hung supervisor is gone within twice `TimeoutStopSec`, 1800 s
+in the example unit.
+
+An engine meets the drain as a refused SPAWN. Nothing ran, so the engine
+holds that SPAWN and sends it again every second (one log line,
+`dsl41: <job>: SPAWN held: SPAWN refused: draining (None)`). Each resend
+passes the routing gate a fresh effect passes (concurrency-model §8): a
+host that routes nothing holds it unsent, and an evicted host ends the
+hold with nothing sent. The hold is bounded by the supervisor's return.
+An engine that attached to a unit's supervisor holds while its reconnects
+run: the drained supervisor gone and its successor not yet up. A
+successor that answers and refuses the reconnect, its PING or its
+re-ACQUIRE (`lease_held`), ends the hold. An engine that may fork its own
+supervisor has no unit to replace it, so the drained supervisor's exit
+ends the hold. Each end is the spawn's failure, as before the hold. A
+resend whose reply is lost may have reached a successor that then died:
+when the run's `receipt.json` exists, the engine sends nothing more and
+awaits the run as a duplicate's, through LIST and, with no supervisor,
+the spool. The client's lazy reconnect and re-ACQUIRE reach the
+successor, which takes the SPAWN
+(`dsl41: <job>: SPAWN accepted after the hold`).
 
 **Pushes.** When the supervisor reaps a wrapper, the connection that holds
 the current lease receives an async line

@@ -7,16 +7,12 @@
 # from dsl41-launch; this unit repeats only the run root, for
 # RequiresMountsFor=, and a test holds the two equal.
 [Unit]
-Description=dsl41 supervisor (nightbank example; stop: dsl41 estate quiesce or dsl41 supervise shutdown)
+Description=dsl41 supervisor (nightbank example; stop: systemctl stop drains, dsl41 estate quiesce seals)
 # an ownership refusal exits 1 and retries every RestartSec; no start limit
 # may turn that retry into a permanent failure (deployment-runbook ss3)
 StartLimitIntervalSec=0
 # the run root dsl41-launch names; no start before its file system is mounted
 RequiresMountsFor=/srv/dsl41/runs/nightbank-01
-# systemctl stop refuses: the stop is the service account's `dsl41 estate
-# quiesce` (the estate) or `dsl41 supervise shutdown` (this supervisor); host
-# shutdown still stops the unit (DL-390, DL-398).
-RefuseManualStop=yes
 
 [Service]
 Type=simple
@@ -25,11 +21,22 @@ Group=dsl41
 ExecStart=/opt/dsl41/bin/dsl41-launch supervisor
 # ready means a real LIST answer, not a socket file
 ExecStartPost=/opt/dsl41/bin/dsl41-launch supervisor-ready
+# a stop's SIGTERM goes to the supervisor alone, which drains; KillMode's
+# SIGTERM then reaches only what is left (DL-416)
+ExecStop=/opt/dsl41/bin/dsl41-launch supervisor-stop
 TimeoutStartSec=30
-# supervisor-protocol ss5: up to 5 s for a missing spawn.json, then the
-# longest per-run grace (10 s by default) plus 2 s, then a 2 s output
-# drain; raise this with any longer grace, or the final cgroup kill can
-# silence a wrapper before it records its command. A host stop during
+# supervisor-protocol ss5 "The drain": a stop's SIGTERM refuses new spawns and
+# waits up to DSL41_DRAIN_S for the live runs, then sends TERM, waits the
+# grace and sends KILL. 840 leaves 60 s of TimeoutStopSec for that wait:
+# up to 5 s for a missing spawn.json, the longest per-run grace (10 s by
+# default) plus 2 s, then a 2 s output drain. Raise TimeoutStopSec with any
+# longer grace or bound. TimeoutStopSec bounds ExecStop; when it overruns,
+# systemd sends SIGTERM to every process in the unit, the commands included,
+# and a second TimeoutStopSec bounds that before SIGKILL, so a hung
+# supervisor is gone within 1800 s (DL-416). A second SIGTERM skips the rest
+# of the drain: systemctl kill --signal=SIGTERM --kill-who=main.
+Environment=DSL41_DRAIN_S=840
+# A host stop during
 # forced maintenance is held until the operation ends, so this also covers
 # its bound_s, 15 + 5 + grace + 2 + 8 per live run + 10 s (DL-401), or the
 # stop timeout's kill lands mid-ladder. The small estate's 82 jobs all live
@@ -45,8 +52,8 @@ RestartSec=2
 RestartPreventExitStatus=2 7 8
 SuccessExitStatus=8
 LimitNOFILE=65536
-# stopping this unit ends its jobs: the commands take SIGTERM, the wrappers
-# ignore it and record what their commands did
+# after ExecStop, a stop's SIGTERM reaches what the drain and its wait left:
+# the wrappers ignore it and record what their commands did
 KillMode=control-group
 
 [Install]

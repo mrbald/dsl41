@@ -216,7 +216,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-202 | the browser suite gets a real per-test reset, and can be run in subsets |  |
 | DL-203 | the lint rule set is named in pyproject rather than inherited from ruff's default |  |
 | DL-204 | the explore page keeps its controls in two compact header rows |  |
-| DL-205 | ss14 B2 row 3 pins its instant instead of racing it `test_b2_a_restarted_supervisor_cannot_prove_the_seal` asserted the ss8 reconciliation refusal over a window... | [docs/blocks/supervisor.md](blocks/supervisor.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-205 | ss14 B2 row 3 pins its instant instead of racing it `test_b2_a_restarted_supervisor_cannot_prove_the_seal` asserted the ss8 reconciliation refusal over a window... | [docs/authoring.md](authoring.md), [docs/blocks/supervisor.md](blocks/supervisor.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-206 | the hats block holds the core's wiring stanza and nothing else |  |
 | DL-207 | `minify` emits a de-identified estate, and an unclassified attribute stops it |  |
 | DL-208 | `minify` takes `--properties` like every other catalog-consuming verb |  |
@@ -409,7 +409,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-396 | A detached launch names how it gets its supervisor: attach or spawn | [docs/blocks/supervisor.md](blocks/supervisor.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/runner-design.md](runner-design.md), [docs/site-package.md](site-package.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-397 | Offline manufacturing consumes bound release exports | [docs/offline-installation.md](offline-installation.md), [docs/offline-rehearsal.md](offline-rehearsal.md) |
 | DL-398 | One verb stops a shape 1 estate: `dsl41 estate quiesce` | [docs/deployment-runbook.md](deployment-runbook.md), [docs/site-package.md](site-package.md) |
-| DL-399 | Maintenance admission checks identity, containment and exit policy; the stop guard is checked at start | [docs/deployment-qualification.md](deployment-qualification.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/site-package.md](site-package.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-399 | Maintenance admission checks identity, containment and exit policy; the stop guard is checked at start | [docs/deployment-runbook.md](deployment-runbook.md), [docs/site-package.md](site-package.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-400 | A supervisor statechart error keeps exit 7 |  |
 | DL-401 | Maintenance is a queryable operation: admission answers at once, the loop runs it, `maintenance.json` records it | [docs/authoring.md](authoring.md), [docs/blocks/supervisor.md](blocks/supervisor.md), [docs/deployment-qualification.md](deployment-qualification.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/site-package.md](site-package.md), [docs/state-machines.md](state-machines.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-402 | The example launcher passes `--supervisor attach` only to a `dsl41` whose `run` accepts it; the supervisor logs the busctl read of its exit policy | [docs/deployment-runbook.md](deployment-runbook.md), [docs/site-package.md](site-package.md) |
@@ -424,7 +424,8 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-411 | Slice 4 of DL-404's plan is built: one supported composition call and one packaged worker command |  |
 | DL-412 | The release train is the dsl41 verb group `dsl41 release prepare\|apply\|resume\|rollback\| status`; the example helper is gone | [README.md](../README.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/site-package.md](site-package.md) |
 | DL-413 | `dsl41 estate build` assembles the release directory from a manifest and its Python modules, and `dsl41 estate diff` compares two releases by the seal's... | [docs/authoring.md](authoring.md) |
-| DL-414 | The supervisor unit keeps `RefuseManualStop=yes`; configuration management stops an estate with `dsl41 estate quiesce` | [docs/deployment-runbook.md](deployment-runbook.md) |
+| DL-414 | The supervisor unit keeps `RefuseManualStop=yes`; configuration management stops an estate with `dsl41 estate quiesce` |  |
 | DL-415 | Eleven workflow rules bind every agent session, and CI classifies a change as docs-only or code |  |
 | DL-418 | A decompiled estate may be a package with one module per JIL file, and `decompile --params` adds a `Params` dataclass | [README.md](../README.md), [docs/authoring.md](authoring.md) |
 | DL-417 | The file-processing example estate runs under the real engine and supervisor, with REARM as its activation, and the README's exercise runs it as printed |  |
+| DL-416 | A host signal drains the supervisor, and the stop guard is gone | [docs/authoring.md](authoring.md), [docs/deployment-qualification.md](deployment-qualification.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/site-package.md](site-package.md), [docs/state-machines.md](state-machines.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |

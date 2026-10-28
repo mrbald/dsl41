@@ -8,7 +8,11 @@
 # RequiresMountsFor=, and a test holds the two equal.
 [Unit]
 Description=dsl41 engine (nightbank example)
-Requires=dsl41-supervisor.service
+# Wants=, not Requires=: a stop of the supervisor unit leaves the engine up,
+# holding the spawns the drain refuses and renewing its lease, so the drain
+# keeps a leaseholder and its deadman does not fire (DL-416). After= starts
+# the supervisor first, and at host shutdown stops the engine first.
+Wants=dsl41-supervisor.service
 After=dsl41-supervisor.service
 # the run root dsl41-launch names; no start before its file system is
 # mounted, so an absent mount is never read as an empty root

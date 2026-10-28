@@ -24154,6 +24154,7 @@ relitigate an entry; append a new one.
   REJECTED: dropping the `busctl` path, because systemd 239 (RHEL 8, Oracle Linux 8) is a target
   (owner, 2026-10-25). Checking the exit policy on the forced path only: a stop verb that reports
   done while the service returns misleads on the default path too.
+  SUPERSEDED BY DL-416 for the stop guard: no start check reads it; admission's checks stand.
 - DL-400 A supervisor statechart error keeps exit 7 (2026-10-25; owner ruling; no code change)
   THE RULE. DL-325 stands for the supervisor. A statechart error in the supervisor prints its
   report and exits 7, and the unit does not restart it. The exit ends every job by lifeline EOF;
@@ -24577,6 +24578,7 @@ relitigate an entry; append a new one.
   legacy jobs are not idempotent. A bounded drain on SIGTERM now: deferred to the
   simplified-DSL direction, where it retires the guard; the supervisor stops admitting spawns,
   waits for live runs within `TimeoutStopSec`, then runs the ladder.
+  SUPERSEDED BY DL-416: the drain retires the guard, and the play stops the supervisor unit.
 - DL-415 Eleven workflow rules bind every agent session, and CI classifies a change as docs-only
   or code (2026-10-28; owner ruling after a Fable and Astra round of four; CLAUDE.md "Workflow
   rules", .github/workflows/ci.yml, scripts/prepush_checks.py, scripts/doc_deps.py,
@@ -24686,3 +24688,55 @@ relitigate an entry; append a new one.
   remains or after a run without progress; a backoff (the example has no timer); a box and
   recycler around the watcher (the helper keeps its jobs out of boxes); moving the operator CLI
   into the package now.
+- DL-416 A host signal drains the supervisor, and the stop guard is gone (2026-10-28; owner
+  ruling; src/dsl41/runner_supervisor.py, runner_adapters.py, runner_procid.py, runner.py,
+  cli_common.py, cli_estate.py; supervisor-protocol ss5, deployment-runbook ss0, ss3 and ss7,
+  authoring ss6.2, site-package.md, examples/nightbank/deploy)
+  THE RULE. A first SIGTERM or SIGINT moves a serving supervisor to `draining` (row .06). The
+  handler counts signals; the loop reads the count before each request it dispatches, and two
+  read at once take .06 then .61. SPAWN, SHUTDOWN and MAINTENANCE_STOP are refused `draining`
+  and write nothing; PING, LIST, the lease verbs and SIGNAL are served. A live run ends on its
+  own and records its own outcome. At the end of the first loop pass with no live wrapper, or
+  once `DSL41_DRAIN_S` (finite, 0 or more, else exit 2; default 840 = the unit's
+  `TimeoutStopSec` of 900 less 60 s for 5 s, the 10 s grace, 2 s and the 2 s flush) has passed,
+  the supervisor runs SHUTDOWN's wait and exits 0 (.62); a second signal runs it at once (.61).
+  The deadman is sampled as while serving (.63). Held maintenance signals keep .48. The
+  maintenance clients and `estate quiesce` read `draining` as a refusal: exit 2, "supervisor
+  is draining; wait for the unit to stop". The engine holds a SPAWN refused `draining` and
+  resends it every second. Each resend passes the ss8 routing gate: unsent while the host
+  routes nothing, ended unsent on eviction. The hold is bounded by the supervisor's return: an
+  attached engine holds while its reconnects run, and a successor that refuses the reconnect
+  (PING, or re-ACQUIRE `lease_held`) ends it; an engine that may fork its own supervisor ends it
+  at the drained supervisor's exit; either end is the spawn's failure. A resend whose reply is
+  lost, with the run's receipt on disk, is awaited as a duplicate's, through LIST and the
+  spool, and never resent. The example units: the supervisor drops `RefuseManualStop=yes`, sets
+  `DSL41_DRAIN_S=840` and gains `ExecStop=dsl41-launch supervisor-stop`, which sends SIGTERM to
+  MAINPID alone and waits; maintenance's idle proof leaves out that one helper (parent PID 1,
+  that argv) and its `sleep`. The engine has `Wants=`, not `Requires=`, so a supervisor stop
+  leaves it up, holding spawns and renewing the lease. A host shutdown stops the engine first:
+  with a deadman, the drain ends at it and each wrapper runs its own TERM, grace and KILL on
+  lifeline EOF (DL-205), so a command ends within the deadman plus the grace. A hung
+  supervisor is gone within twice `TimeoutStopSec`, 1800 s. The cm-stop play: the hold;
+  `systemctl stop dsl41-supervisor`, which drains; the engine stop; the patch; both starts;
+  the wait; the release. The period stays open; the sealed route, cm-seal, runs
+  `dsl41 estate quiesce` in place of the stops.
+  THE REASON. The owner's ruling of 2026-10-28. DL-414 deferred a bounded drain that would
+  retire the guard. The guard blocked one interrupter, a manual stop, while host shutdown ended
+  every command at once; now each stop by signal gets the same bounded wait. Every job meets
+  the interruption contract (authoring ss6.2), so a run the bound cuts short can run again.
+  The ExecStop is needed because a cgroup-wide SIGTERM defeats the drain; `KillMode=mixed`
+  would avoid it, but after a crash systemd would SIGKILL the wrappers before they record.
+  With `Requires=` the engine stopped first, and on a deadman host every drain ended at the
+  deadman. The hold is bounded, a resend passes the host gate, a lost resend reply is read
+  from the receipt and the spool, a counted signal is consumed before any dispatch, and the
+  clients read `draining` as a refusal.
+  WHAT IT NARROWS. DL-390's "Default shutdown refuses active or indeterminate work" holds for
+  the verb path only, `supervise shutdown` and `estate quiesce`; its unit no longer uses
+  `RefuseManualStop=yes`, and its host-shutdown path drains. DL-396's attach launch retries
+  behind `Wants=`. DL-390's and DL-396's texts stand.
+  REJECTED: `KillMode=mixed` (above; admission also checks control-group). SIGINT as an
+  immediate stop. The deadman held during a drain: a supervisor with no controller would
+  outlive concurrency-model ss8's eviction bound. The code `maintenance_in_progress` for the
+  drain: the maintenance client would watch an operation that does not exist. A refused
+  SPAWN as a failure: the run never started. An unbounded resend (DL-409). A seal inside the
+  drain play: the sealed route stays a recipe of its own.

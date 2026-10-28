@@ -150,8 +150,8 @@ Use this contents list for the site's RPM spec:
 | File or directory | Runner requirement or site choice | Where its rule lives |
 | --- | --- | --- |
 | `<prefix>/bin/dsl41-launch`, mode `0755` | The site chooses configuration paths, `ESTATE_RELEASES`, `ACTIVE`, `ENVIRONMENT`, the site's `-p` and machine settings; the estate's files, layers and timezone come from the active release's manifest through `dsl41 estate args`. Keep `--detached`, `--supervisor attach` with its compatibility probe, the `estate args` probe that refuses a dsl41 without the verb, explicit `--as-machine`, `--machine-policy strict`, `--access-map` and the opener logic. | [Launcher](../examples/nightbank/deploy/dsl41-launch); [starting the engine](deployment-runbook.md#3-starting-the-engine); DL-218 for command construction, DL-396 for attachment, DL-402 for the probe, DL-407 for the manifest in the [decision log](decision-log.md). |
-| `/etc/systemd/system/dsl41-engine.service`, mode `0644` | Keep `Requires=` and `After=` for the supervisor, `Restart=on-failure`, `RestartPreventExitStatus=2 3 6 7`, `StartLimitIntervalSec=300` and `StartLimitBurst=5`. The site chooses its account and paths. | [Engine unit](../examples/nightbank/deploy/dsl41-engine.service); [unit and exit policy](deployment-runbook.md#3-starting-the-engine); [DL-218](decision-log.md). |
-| `/etc/systemd/system/dsl41-supervisor.service`, mode `0644` | Keep a dedicated service cgroup, `RefuseManualStop=yes`, `SuccessExitStatus=8`, `RestartPreventExitStatus=2 7 8`, `Restart=always`, `StartLimitIntervalSec=0` and `KillMode=control-group`. Size `TimeoutStopSec` for the estate's maintenance bound. | [Supervisor unit](../examples/nightbank/deploy/dsl41-supervisor.service); [unit policy](deployment-runbook.md#3-starting-the-engine); DL-390 and DL-399 for containment and exit policy, DL-398 for guarded stop, DL-401 for the timeout in the [decision log](decision-log.md). |
+| `/etc/systemd/system/dsl41-engine.service`, mode `0644` | Keep `Wants=` and `After=` for the supervisor, never `Requires=`: a supervisor stop then leaves the engine holding spawns through the drain (DL-416). Keep `Restart=on-failure`, `RestartPreventExitStatus=2 3 6 7`, `StartLimitIntervalSec=300` and `StartLimitBurst=5`. The site chooses its account and paths. | [Engine unit](../examples/nightbank/deploy/dsl41-engine.service); [unit and exit policy](deployment-runbook.md#3-starting-the-engine); [DL-218](decision-log.md). |
+| `/etc/systemd/system/dsl41-supervisor.service`, mode `0644` | Keep a dedicated service cgroup, `SuccessExitStatus=8`, `RestartPreventExitStatus=2 7 8`, `Restart=always`, `StartLimitIntervalSec=0` and `KillMode=control-group`. Keep `ExecStop=` on the launcher's `supervisor-stop` mode. Choose the drain's bound, `Environment=DSL41_DRAIN_S`, and size `TimeoutStopSec` for it and for the estate's maintenance bound. | [Supervisor unit](../examples/nightbank/deploy/dsl41-supervisor.service); [unit policy](deployment-runbook.md#3-starting-the-engine); DL-390 and DL-399 for containment and exit policy, DL-398 for guarded stop, DL-401 for the timeout, DL-416 for the drain in the [decision log](decision-log.md). |
 | `/etc/dsl41/` | The example installs this directory owned by root with mode `0755`. | [Service-install recipe](deployment-runbook.md#recipe-install-and-start-as-a-service); [role-map contract](access-model.md#4-the-role-map). |
 | `/etc/dsl41/nightbank-access.toml` | The example map has mode `0600` and belongs to the engine's account. The runner requires a valid map when the launcher passes it. The site chooses principals, tiers and any socket group. | [Example map](../examples/nightbank/deploy/nightbank-access.toml); [role-map contract](access-model.md#4-the-role-map); [socket-group modes](access-model.md#8-filesystem-modes). |
 | Properties files named by `-p` | The site selects ownership and modes that let the service account read the files. The launcher must preserve every properties argument. | [Launcher configuration](../examples/nightbank/deploy/dsl41-launch); [estate configuration recipe](deployment-runbook.md#recipe-configure-an-estate). |
@@ -178,6 +178,7 @@ The example hard-codes the default prefix in these assignments:
 - `ExecStart=/opt/dsl41/bin/dsl41-launch engine` in the engine unit.
 - `ExecStart=/opt/dsl41/bin/dsl41-launch supervisor` in the supervisor unit.
 - `ExecStartPost=/opt/dsl41/bin/dsl41-launch supervisor-ready` in the supervisor unit.
+- `ExecStop=/opt/dsl41/bin/dsl41-launch supervisor-stop` in the supervisor unit.
 
 Edit those assignments for another prefix.
 The RPM's prefix macro moves the runtime; it does not rewrite these templates.
@@ -203,7 +204,9 @@ Without the trigger, the journal selects `--resume`; otherwise the launcher chec
 The launcher removes the trigger just before executing the engine.
 The release manifest names every estate file in order, and the launcher takes the list from it, never from a glob.
 The runner hashes that order, and a reorder refuses resume.
-Do not add `ExecStop` to the supervisor unit.
+The supervisor unit's `ExecStop` is the launcher's `supervisor-stop` mode and nothing else (DL-416).
+It sends a stop's SIGTERM to the supervisor alone, because `KillMode=control-group` would send it to every command and defeat the drain.
+`KillMode=mixed` is no substitute: after a supervisor crash systemd would SIGKILL the wrappers before they record.
 Do not tie its lifetime to the engine with `PartOf=` or `BindsTo=`.
 Never start its supervisor by hand.
 Never replace `leader.lock` in a running root.

@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+from dsl41 import runner_supervisor
 from dsl41.estate_manifest import load_manifest
 from dsl41.period import CMD_GRACE_S
 
@@ -597,6 +598,38 @@ def test_a_usage_error_is_a_configuration_refusal(args: tuple[str, ...]) -> None
     assert refused.stdout == ""
 
 
+def test_the_stop_mode_signals_the_main_process_alone_and_waits_for_its_exit(
+    tmp_path: Path,
+) -> None:
+    """The supervisor unit's ExecStop (DL-416): SIGTERM to MAINPID, then a wait until it is
+    gone, so the drain runs before KillMode's SIGTERM. With no MAINPID, or one already gone,
+    it sends nothing and exits 0."""
+    seen = tmp_path / "term"
+    main = subprocess.Popen(
+        ["sh", "-c", f"trap 'echo TERM > {seen}; exit 0' TERM; while :; do sleep 0.05; done"]
+    )
+    try:
+        stop = subprocess.Popen(
+            ["sh", str(LAUNCH), "supervisor-stop"], env={**os.environ, "MAINPID": str(main.pid)}
+        )
+        assert main.wait(timeout=30) == 0  # reaped here, so the mode's kill -0 ends
+        assert stop.wait(timeout=30) == 0
+        assert seen.read_text() == "TERM\n"
+    finally:
+        main.kill()
+        main.wait()
+    for env in ({}, {"MAINPID": str(main.pid)}):
+        done = subprocess.run(
+            ["sh", str(LAUNCH), "supervisor-stop"],
+            env={**{k: v for k, v in os.environ.items() if k != "MAINPID"}, **env},
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert (done.returncode, done.stdout, done.stderr) == (0, "", "")
+    assert _sh(LAUNCH, "--print", "supervisor-stop").returncode == 2
+
+
 @pytest.mark.parametrize("mode", ["engine", "supervisor", "supervisor-ready"])
 def test_a_missing_dsl41_is_a_configuration_refusal_not_a_crash(
     short_root: Path, mode: str
@@ -804,13 +837,15 @@ def _unit(name: str) -> dict[str, dict[str, list[str]]]:
 
 def test_the_units_take_the_documented_separate_service_shape() -> None:
     """deployment-runbook ss3, shape 1: the supervisor in its own unit, the
-    engine requiring it, and restart policies that never retry exit 2 (a
+    engine wanting it, and restart policies that never retry exit 2 (a
     configuration refusal) or, for the engine, exit 3 (a sealed period)."""
     engine = _unit("dsl41-engine.service")
     supervisor = _unit("dsl41-supervisor.service")
     assert set(engine) == set(supervisor) == {"Unit", "Service", "Install"}
 
-    assert engine["Unit"]["Requires"] == ["dsl41-supervisor.service"]
+    # DL-416: Wants=, so a stop of the supervisor unit leaves the engine up through the drain
+    assert engine["Unit"]["Wants"] == ["dsl41-supervisor.service"]
+    assert "Requires" not in engine["Unit"]
     assert engine["Unit"]["After"] == ["dsl41-supervisor.service"]
     assert "PartOf" not in supervisor["Unit"] and "BindsTo" not in supervisor["Unit"]
     assert engine["Service"]["ExecStart"] == ["/opt/dsl41/bin/dsl41-launch engine"]
@@ -835,12 +870,17 @@ def test_the_units_take_the_documented_separate_service_shape() -> None:
     # 7: a statechart error stops the supervisor too, until a fixed build
     assert supervisor["Service"]["RestartPreventExitStatus"][0].split() == ["2", "7", "8"]
     assert supervisor["Service"]["SuccessExitStatus"] == ["8"]
-    assert supervisor["Unit"]["RefuseManualStop"] == ["yes"]
+    # DL-416: a manager stop drains; no stop guard
+    assert "RefuseManualStop" not in supervisor["Unit"]
     assert supervisor["Service"]["KillMode"] == ["control-group"]
-    # supervisor-protocol ss5's shutdown waits: the missing-spawn.json wait,
-    # the longest grace plus 2 s, and the 2 s output drain
+    # supervisor-protocol ss5's drain, then its shutdown waits: the missing-spawn.json wait,
+    # the longest grace plus 2 s, and the 2 s output drain (DL-416)
     (stop,) = supervisor["Service"]["TimeoutStopSec"]
-    assert int(stop) >= 5 + CMD_GRACE_S + 2 + 2
+    (drain,) = supervisor["Service"]["Environment"]
+    name, _, drain_s = drain.partition("=")
+    assert name == runner_supervisor.DRAIN_ENV
+    assert float(drain_s) == runner_supervisor.DRAIN_S_DEFAULT
+    assert int(stop) >= float(drain_s) + 5 + CMD_GRACE_S + 2 + 2
     # DL-401: a host stop is held through forced maintenance, whose bound_s for the small
     # estate with every job live is 15 + 5 + grace + 2 + 8 per run + 10
     small = Path(__file__).resolve().parent.parent / "examples/nightbank/estate/small"

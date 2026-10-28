@@ -1198,6 +1198,12 @@ class Engine:
         against an absent supervisor and marking its job FAILURE."""
         self.inject_host(HostCommand(verb="quarantine", host_id=self.executor_id))
 
+    def host_state(self) -> str | None:
+        """This engine's executor's routing state (ss8), or None with no row: a held SPAWN's
+        resend passes the routing gate a fresh effect passes (DL-416)."""
+        row = self.oracle.store.host(self.executor_id)
+        return row.state if row is not None else None
+
     def note_executor_reachable(self) -> None:
         """Contact restored: the leader clears what it set and restores the state it interrupted
         (a drained host stays drained)."""
@@ -1924,6 +1930,7 @@ class Engine:
             run_id=run_id,
             barrier=self.barrier,
             fence=self.fence,
+            route=self.host_state,
         )
         result = await adapter.run(job_ir, run_number, ctx)
         # (job, run_number) ride along for the ss4 stale-completion gate

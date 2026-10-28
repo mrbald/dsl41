@@ -16,7 +16,7 @@ run what that unit's `ExecStart=` runs: the launcher's engine mode, which
 returns at once as a `Type=simple` start does. It runs as the invoking
 user. Before each start, when no supervisor answers on the root, the
 supervisor unit's `ExecStart=` runs first, the launcher's supervisor mode,
-as the engine unit's `Requires=` starts it; the engine attaches to it
+as the engine unit's `Wants=` starts it; the engine attaches to it
 (shape 1, DL-396). No service manager restarts that supervisor. The claim
 that systemd starts the units, and does not restart exit 2 or 3, is the
 drill's.
@@ -35,7 +35,7 @@ import pytest
 import typer
 
 from dsl41.cli import app
-from dsl41.period import RETRY_HORIZON_S
+from dsl41.period import CMD_GRACE_S, RETRY_HORIZON_S
 from test_nightbank_deploy import (
     DEPLOY,
     DRILL_LIB,
@@ -66,7 +66,7 @@ def _job(command: str) -> str:
 
 
 #: the recipes that are an Ansible play, fenced as YAML; the rest are POSIX shell
-PLAYS = {"cm-stop"}
+PLAYS = {"cm-stop", "cm-seal"}
 
 
 def _blocks() -> dict[tuple[str, str], str]:
@@ -169,7 +169,7 @@ class _Engine:
         self.supervisors: list[subprocess.Popen[bytes]] = []
 
     def supervisor_up(self) -> None:
-        """`Requires=`: the supervisor unit's ExecStart, unless a supervisor
+        """`Wants=`: the supervisor unit's ExecStart, unless a supervisor
         already answers on the root, then its `ExecStartPost=` readiness."""
         listed = subprocess.run(
             [str(DSL41), "supervise", "list", "--run-root", self.site["RUN_ROOT"]],
@@ -290,7 +290,7 @@ RUN_BY_DRILL = {
 #: compared, not run: the variables against the launcher, job-open against
 #: the engine unit's ExecStart (the stand-in runs that instead), and the
 #: configuration-management play against the units, the launcher and ss2b
-COMPARED = {"operator-env", "job-open", "cm-stop"}
+COMPARED = {"operator-env", "job-open", "cm-stop", "cm-seal"}
 
 
 def test_every_recipe_is_run_or_compared() -> None:
@@ -576,15 +576,85 @@ def _play_scripts(body: str) -> list[str]:
     return scripts
 
 
-def test_the_configuration_management_play_stops_with_the_verb_and_starts_the_units() -> None:
-    """DL-390, DL-398, DL-399: one play, its values the units' and the launcher's.
-    It never asks systemd to stop the supervisor unit (RefuseManualStop=yes). It
+def test_the_configuration_management_play_drains_and_starts_the_units() -> None:
+    """DL-416: one play, its values the units' and the launcher's. It takes the
+    reboot hold, stops the supervisor unit, which drains while the engine unit stays
+    up (`Wants=`, not `Requires=`), then stops the engine unit, patches, starts both
+    units, waits as wait-answers does, then releases the hold. It runs no dsl41 verb
+    but the readiness query. The recipe's table states the drain's bound as the unit
+    sets it, and a host shutdown's bound as the deadman plus the command grace."""
+    body = recipe("cm-stop")
+    lines = body.splitlines()
+    assert lines[0].startswith("- name: ") and lines[1] == "  hosts: nightbank"
+    assert [line for line in lines if line.startswith("-")] == [lines[0]]  # one play
+    assert "roles:" not in body and "systemctl" not in body and "quiesce" not in body
+    play_vars = dict(re.findall(r"^    (\w+): (\S+)$", body.split("\n  tasks:\n", 1)[0], re.M))
+    engine, supervisor = UNITS
+    assert play_vars["launcher"] == _directive(engine, "Service", "ExecStart").split()[0]
+    assert play_vars["service_account"] == _directive(engine, "Service", "User")
+    assert play_vars["engine_unit"] == engine == _launcher_value("ENGINE_UNIT")
+    assert play_vars["supervisor_unit"] == supervisor
+    assert _directive(engine, "Unit", "Wants") == supervisor
+    assert "Requires" not in _unit(engine)["Unit"]
+
+    tasks = _play_tasks(body)
+    names = [task.splitlines()[0].removeprefix("    - name: ") for task in tasks]
+    assert names == [
+        "Take the reboot hold",
+        "Stop the supervisor unit; it drains while the engine holds its spawns",
+        "Stop the engine unit",
+        "Placeholder for the site's patch step",
+        "Start the supervisor unit",
+        "Start the engine unit; it resumes the open period",
+        "Wait until the engine answers, as the wait-answers block does",
+        "Release the reboot hold",
+    ]
+    hold, drain, stop, patch, start_sup, start_eng, ready, release = tasks
+    loop = '      loop:\n        - "{{ %s }}"\n        - "{{ %s }}"\n'
+    assert "enabled: false" in hold and loop % ("engine_unit", "supervisor_unit") in hold
+    assert "enabled: true" in release and loop % ("supervisor_unit", "engine_unit") in release
+    assert 'name: "{{ supervisor_unit }}"\n        state: stopped' in drain
+    assert 'name: "{{ engine_unit }}"\n        state: stopped' in stop
+    assert "state: stopped" not in body.replace(drain, "").replace(stop, "")
+    assert "ansible.builtin.debug:" in patch
+    assert 'name: "{{ supervisor_unit }}"\n        state: started' in start_sup
+    assert 'name: "{{ engine_unit }}"\n        state: started' in start_eng
+
+    (drain_s,) = (
+        value.split("=", 1)[1]
+        for value in _unit(supervisor)["Service"]["Environment"]
+        if value.startswith("DSL41_DRAIN_S=")
+    )
+    table = RUNBOOK.read_text(encoding="utf-8").split("<!-- recipe: cm-stop -->", 1)[0]
+    rows = {
+        row.split(" | ")[0].removeprefix("| "): row.split(" | ")[1]
+        for row in table.rsplit("| Wait | Seconds | Source |", 1)[1].splitlines()[2:]
+        if row.startswith("| ")
+    }
+    assert rows == {
+        "the drain of the runs live at the supervisor stop, at most": drain_s,
+        "a host shutdown, at most: the deadman, then the wrapper's grace": (
+            f"deadman + {CMD_GRACE_S:g}"
+        ),
+    }
+
+    (query,) = _play_scripts(ready)
+    assert query.splitlines()[-1] == '"$DSL41" query status --brief -S "$RUN_ROOT/control.sock"'
+    assert '      become_user: "{{ service_account }}"' in ready
+    wait = recipe("wait-answers")
+    assert f"$(seq {play_vars['ready_retries']})" in wait
+    assert f"sleep {play_vars['ready_delay_s']}\n" in wait
+
+
+def test_the_sealed_play_stops_with_the_verb_and_starts_the_units() -> None:
+    """DL-398, DL-416: the sealed play, its values the units' and the launcher's.
+    It never asks systemd to stop the supervisor unit: the verb stops it. It
     takes the reboot hold and stops the engine unit before the verb, which checks
     both and performs neither (ss2b). The verb reruns on 2 and 3 and stops the
     play on any other code, 4 above all; the retries cover the retry horizon and
     the example estate's longest job. It starts the units, waits as wait-answers
     does, then releases the hold, as the stop recipe orders it."""
-    body = recipe("cm-stop")
+    body = recipe("cm-seal")
     lines = body.splitlines()
     assert lines[0].startswith("- name: ") and lines[1] == "  hosts: nightbank"
     assert [line for line in lines if line.startswith("-")] == [lines[0]]  # one play
@@ -647,7 +717,7 @@ def test_the_configuration_management_play_stops_with_the_verb_and_starts_the_un
     waited = int(play_vars["quiesce_retries"]) * int(play_vars["quiesce_delay_s"])
     assert waited >= RETRY_HORIZON_S + longest
     # the recipe's table states the two waits as their sources do
-    table = RUNBOOK.read_text(encoding="utf-8").split("<!-- recipe: cm-stop -->", 1)[0]
+    table = RUNBOOK.read_text(encoding="utf-8").split("<!-- recipe: cm-seal -->", 1)[0]
     rows = {
         row.split(" | ")[0].removeprefix("| "): row.split(" | ")[1]
         for row in table.rsplit("| Wait | Seconds | Source |", 1)[1].splitlines()[2:]
@@ -690,7 +760,7 @@ def test_the_process_diagram_names_what_the_units_launcher_and_cli_name() -> Non
     shown = re.findall(r"\b([A-Z][A-Za-z]+=.+?)(?=\s{2,}|$)", diagram, re.M)
     assert shown and set(shown) <= directives, set(shown) - directives
     for wanted in (
-        "Requires=dsl41-supervisor.service",
+        "Wants=dsl41-supervisor.service",
         "Restart=on-failure",
         "RestartPreventExitStatus=2 3 6 7",
         "Restart=always",

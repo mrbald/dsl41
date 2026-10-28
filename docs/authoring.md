@@ -570,7 +570,8 @@ These events end a running command:
 - a `job_terminator` or `box_terminator` cascade ([SEM-14](autosys-semantics.md#sem-14--box_terminator--job_terminator-vc));
 - the loss of the supervisor that started the command, by a crash, a `kill -9` or its deadman ([supervisor-protocol §4](supervisor-protocol.md#4-wrapper-behavior-frozen-semantics), step 5, and [§5](supervisor-protocol.md#5-supervisor-socket-protocol-frozen--phase-11f-dl-48), "The deadman");
 - the stop or loss of an engine that runs without a supervisor ([runner-design §15](runner-design.md#15-open-questions-e-series), E4);
-- a host shutdown or reboot: the service manager sends SIGTERM to the supervisor and to every command in its unit ([supervisor-protocol §5](supervisor-protocol.md#5-supervisor-socket-protocol-frozen--phase-11f-dl-48), `SHUTDOWN`);
+- a stop of the supervisor unit: the supervisor drains while the engine stays up, so a command still running at the drain's bound, 840 s in the example unit, gets SIGTERM, then SIGKILL after the grace ([supervisor-protocol §5](supervisor-protocol.md#5-supervisor-socket-protocol-frozen--phase-11f-dl-48), "The drain", DL-416);
+- a host shutdown or reboot: the engine stops first, so the drain has no leaseholder; with a deadman set it ends at the deadman, and the wrapper sends the command SIGTERM, then SIGKILL after the grace, recording `terminated / parent lost`; with none it runs to its bound ([supervisor-protocol §5](supervisor-protocol.md#5-supervisor-socket-protocol-frozen--phase-11f-dl-48), "The drain", DL-205, DL-416);
 - the operator's forced maintenance, `--force=terminate` (DL-390, DL-394).
 
 Under a supervisor with no deadman, an engine restart ends no command: the engine reattaches to the running commands ([runner-design §6a](runner-design.md#6a-process-lifecycle-tiers-dl-41a)).
@@ -585,7 +586,9 @@ The job ends its own helpers itself (DL-403).
 | Bound | Value | Source |
 | --- | --- | --- |
 | Command grace, from SIGTERM to SIGKILL | 10 s; no site setting changes it | `CMD_GRACE_S` in `src/dsl41/period.py`, pinned in each period's runtime profile as `cmd_grace_us` ([period-model §2.1](period-model.md#21-segment--the-first-record-of-every-segment)) |
-| Whole supervisor stop | 900 s in the example unit | `TimeoutStopSec` in the supervisor unit, which the site package sizes against `MAX_JOBS` and `MAX_GRACE_S` ([site-package §5](site-package.md#5-ship-jil-releases-on-the-applications-train), DL-401) |
+| Drain at a supervisor stop | 840 s in the example unit | `Environment=DSL41_DRAIN_S` in the supervisor unit ([supervisor-protocol §5](supervisor-protocol.md#5-supervisor-socket-protocol-frozen--phase-11f-dl-48), DL-416) |
+| Host shutdown with a deadman | the deadman plus the 10 s grace | `dsl41 run --deadman`, when the site sets one, and `CMD_GRACE_S` (DL-205, DL-416) |
+| Whole supervisor stop | 900 s in the example unit, 1800 s for a hung supervisor | `TimeoutStopSec` in the supervisor unit bounds its `ExecStop=`, the drain and the wait; when that overruns, systemd sends SIGTERM to every process in the unit and a second `TimeoutStopSec` bounds it before SIGKILL. The site package sizes it against `MAX_JOBS` and `MAX_GRACE_S` ([site-package §5](site-package.md#5-ship-jil-releases-on-the-applications-train), DL-401, DL-416) |
 
 Your SIGTERM cleanup has the command grace to finish.
 Ask the packager for your site's stop bound.
