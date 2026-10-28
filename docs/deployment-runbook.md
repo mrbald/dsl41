@@ -52,7 +52,7 @@ Some blocks are marked as recipes in this file's source.
 hand path's seal and open, the readiness wait and the retirement's audit
 and list as written, against a synthetic estate, with the engine unit's
 `ExecStart=` in place of `systemctl start`.
-`tests/test_release.py` runs `dsl41 release` against a stub
+`tests/test_release_*.py` run `dsl41 release` against a stub
 engine, and the service drill runs it on a host.
 `tests/test_operator_recipes.py` also runs the sealed check and the
 torn-opening recipe where `jq` is installed. The service drill (§3's worked example) runs the service, hold,
