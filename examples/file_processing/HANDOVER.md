@@ -281,8 +281,10 @@ sample output appears; it verifies reconciliation without replacing that output.
 These are distinct probes. They do not qualify power loss or arbitrary effects.
 
 The full repository suite, production review gates and actual runner/supervisor
-integration were not run under this prototype-only authorization. Continuous
-activation remains unresolved. Other limits are one local POSIX host, fixed
-processor identity/configuration per root, no schema migration, no retention/GC
-policy and no general operator recovery interface. The normal production workflow
-must qualify the chosen design before adoption.
+integration were not run under this prototype-only authorization. Since then,
+slices 1 to 4 were built (DL-404, DL-411). DL-417 runs the example estate under
+the real engine and supervisor through the README's exercise, with REARM as the
+example's activation; batch limits, resource waits and missed wakes stay
+unexercised there, and the operator interface beyond list, show and rule stays
+manual. Other limits are one local POSIX host, fixed processor
+identity/configuration per root, no schema migration and no retention/GC policy.
