@@ -5,8 +5,8 @@ They run as the site's deployment identity, which owns ESTATE_RELEASES and ACTIV
 `release_service.service`, by sudo as SERVICE_ACCOUNT, running `dsl41 release service` at the
 launcher's runtime path; the engine unit starts through `sudo -n systemctl start ENGINE_UNIT`.
 
-An apply holds ESTATE_RELEASES/.apply.lock for its whole life, and records each step in
-ESTATE_RELEASES/.apply.json before it acts. A stopped apply, an interrupted or killed one
+An apply holds .release/apply.lock beside ACTIVE for its whole life, and records each step in
+.release/apply.json there before it acts. A stopped apply, an interrupted or killed one
 included, resumes from that record and never from ACTIVE. Every seal claims the service
 account's actor, so a retry is the same envelope live or offline. Before it sends a seal again
 under a recorded request id, and after any seal that did not exit 0, it reads the estate for
@@ -37,7 +37,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import signal
 import socket
 import subprocess
@@ -54,7 +53,6 @@ from typing import Any
 
 from dsl41.release_service import (
     CMD_APPLY,
-    CMD_PREPARE,
     CMD_RESUME,
     CMD_ROLLBACK,
     CMD_STATUS,
@@ -64,18 +62,16 @@ from dsl41.release_service import (
     EXIT_STOPPED,
     EXIT_UNKNOWN,
     GROUP,
+    PREPARE,
     SERVICE,
     Config,
     Stop,
-    changed_files,
     check_prepared,
     checked_name,
     config,
-    file_digests,
     fsync_dir,
     read_active,
     read_json,
-    release_dir,
     say,
     write_json,
     write_text,
@@ -209,6 +205,19 @@ def service_json(cfg: Config, *args: str) -> dict[str, Any]:
     return answer
 
 
+def service_run(cfg: Config, *args: str, stdin: str | None = None) -> None:
+    """One service-side action; its lines pass through, and its refusal is this verb's,
+    exit 2."""
+    done = subprocess.run(
+        as_service(cfg, *args), input=stdin, capture_output=True, text=True, check=False
+    )
+    sys.stderr.write(done.stderr)
+    if done.returncode == EXIT_REFUSED and not done.stderr.startswith("sudo:"):
+        raise Stop(EXIT_REFUSED)
+    if done.returncode != 0:
+        raise service_failed(cfg, args[0], done)
+
+
 def service_failed(cfg: Config, what: str, done: subprocess.CompletedProcess[str]) -> Stop:
     """The line for a service-side command that failed; sudo's own refusal names the grant."""
     if done.stderr.startswith("sudo:"):
@@ -227,144 +236,32 @@ def service_failed(cfg: Config, what: str, done: subprocess.CompletedProcess[str
 # ------------------------------------------------------------------ prepare
 
 
-def make_read_only(path: Path) -> None:
-    """The release's inputs, readable by all and writable by none; its .release directory
-    stays the deployment identity's (DL-407)."""
-    for directory, _, files in os.walk(path, topdown=False):
-        here = Path(directory)
-        for file in files:
-            (here / file).chmod(0o444)
-        here.chmod(0o755 if here.name == ".release" else 0o555)
-
-
-def remove(path: Path) -> None:
-    """A refused release, read-only directories included."""
-    for directory, _, _ in os.walk(path):
-        Path(directory).chmod(0o755)
-    shutil.rmtree(path)
-
-
-def qualify(cfg: Config, name: str) -> dict[str, Any]:
-    """Lint and rehearse release NAME as the service account, and hold it to the
-    launcher's ceiling; the check's record, or a refusal."""
-    try:
-        check = service_json(cfg, "check", name)
-    except Stop as exc:
-        raise Stop(EXIT_REFUSED, *exc.lines) from exc
-    lines = []
-    if check["lint"]["exit"] != 0:
-        lines.append(f"lint exited {check['lint']['exit']}; its findings are above.")
-    elif check["rehearse"]["exit"] != 0:
-        lines.append(f"rehearse exited {check['rehearse']['exit']}; its error is above.")
-    elif check["jobs"] > cfg.max_jobs:
-        lines.append(
-            f"it holds {check['jobs']} jobs, above the site's ceiling of {cfg.max_jobs} (MAX_JOBS)."
-        )
-    if check["grace_s"] > cfg.max_grace_s:
-        lines.append(
-            f"the runtime's command grace, {check['grace_s']:g} s, is above the site's"
-            f" MAX_GRACE_S, {cfg.max_grace_s:g} s."
-        )
-        lines.append("every prepare refuses until that changes; ask the site package's owner.")
-    if lines:
-        raise Stop(EXIT_REFUSED, f"{name} is refused.", *lines)
-    return check
-
-
-def write_prepared(cfg: Config, name: str, source: str | None, check: dict[str, Any]) -> None:
-    path = cfg.releases / name
-    write_json(
-        path / ".release" / "prepared.json",
-        {
-            "name": name,
-            "source": source,
-            "prepared_at": now(),
-            "prepared_by": getpass.getuser(),
-            "environment": cfg.environment,
-            "max_jobs": cfg.max_jobs,
-            "max_grace_s": cfg.max_grace_s,
-            "files": file_digests(path),
-            **check,
-        },
-    )
-    say(f"prepared {path}: {check['jobs']} jobs, under dsl41 {check['dsl41_version']}.")
-
-
 def prepare(name: str, source: Path) -> int:
+    """The service side installs SOURCE as release NAME and checks it; the deployment
+    identity writes nothing under ESTATE_RELEASES (DL-412)."""
     cfg = config()
     checked_name(name)
-    target, staging = cfg.releases / name, cfg.releases / f"{name}.new"
-    for path in (target, staging):
-        if path.exists() or path.is_symlink():
-            if (path / ".release" / "prepared.json").is_file():
-                raise Stop(
-                    EXIT_REFUSED,
-                    f"{path} is prepared already, and a prepared name is installed once.",
-                    "prepare the inputs under a new name.",
-                )
-            raise Stop(
-                EXIT_REFUSED,
-                f"{path} exists and is not prepared.",
-                f"run `{CMD_PREPARE} --requalify {name}` to check it in place, or"
-                " prepare under a new name.",
-            )
-    if not (source / "estate.toml").is_file():
-        raise Stop(EXIT_REFUSED, f"{source} holds no estate.toml, so it is not a release.")
-    if (source / ".release").exists():
-        raise Stop(
-            EXIT_REFUSED, f"{source} holds .release: give a release's inputs, not a release."
-        )
-    shutil.copytree(source, staging)
-    staging.rename(target)
-    fsync_dir(cfg.releases)
-    try:
-        (target / ".release").mkdir()
-        make_read_only(target)
-        check = qualify(cfg, name)
-    except Stop as exc:
-        remove(target)
-        raise Stop(
-            exc.code, *exc.lines, f"nothing is installed under {name}, so the name is free again."
-        ) from exc
-    except BaseException:
-        remove(target)
-        raise
-    write_prepared(cfg, name, str(source.resolve()), check)
+    with refused_as_2():
+        service_run(cfg, PREPARE, name, os.path.abspath(source))
     return EXIT_OK
 
 
 def requalify(name: str) -> int:
-    """The checks again, on the installed release under this runtime, its files unchanged;
-    prepared.json is replaced only when they pass. A release installed but never prepared is
-    checked in place, its inputs made read-only first (DL-412)."""
+    """The service side checks installed release NAME again, sealing it first when it is not
+    sealed to the service account (DL-412)."""
     cfg = config()
-    path = release_dir(cfg, name)
-    earlier = read_json(path / ".release" / "prepared.json")
-    if earlier is None:
-        try:
-            (path / ".release").mkdir(exist_ok=True)
-            make_read_only(path)
-        except OSError as exc:
-            raise Stop(
-                EXIT_REFUSED,
-                f"cannot make {name}'s inputs read-only: {exc.strerror}: {exc.filename}.",
-                "the deployment identity must own the release's files.",
-            ) from exc
-    else:
-        moved = changed_files(path, earlier)
-        if moved:
-            raise Stop(
-                EXIT_REFUSED,
-                f"{name}'s files changed since prepare: {', '.join(moved)}.",
-                "prepare the fixed inputs under a new name.",
-            )
-    try:
-        check = qualify(cfg, name)
-    except Stop as exc:
-        kept = "prepared.json is unchanged." if earlier else f"{name} stays unprepared."
-        raise Stop(exc.code, *exc.lines, kept) from exc
-    write_prepared(cfg, name, earlier.get("source") if earlier else None, check)
+    with refused_as_2():
+        service_run(cfg, "requalify", checked_name(name))
     return EXIT_OK
+
+
+@contextmanager
+def refused_as_2() -> Iterator[None]:
+    """A prepare that could not reach the service side changed nothing: exit 2."""
+    try:
+        yield
+    except Stop as exc:
+        raise Stop(EXIT_REFUSED, *exc.lines) from exc
 
 
 # -------------------------------------------------------------------- apply
@@ -372,8 +269,9 @@ def requalify(name: str) -> int:
 
 @contextmanager
 def apply_lock(cfg: Config) -> Iterator[None]:
-    """ESTATE_RELEASES/.apply.lock, held for the whole apply; a held lock refuses."""
-    path = cfg.releases / ".apply.lock"
+    """.release/apply.lock beside ACTIVE, held for the whole apply; a held lock refuses."""
+    cfg.state.mkdir(mode=0o755, exist_ok=True)
+    path = cfg.lock
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
     try:
         try:
@@ -474,8 +372,11 @@ def seal_refusal(done: subprocess.CompletedProcess[str]) -> str:
 
 def still_held(entry: dict[str, Any]) -> bool:
     """A kept hold that leaves the job on hold; a kept entry that names no cause counts as
-    one (DL-412)."""
-    return entry["state"] == "kept" and entry.get("kept_because", "rejected") in STILL_HELD
+    one, and so does a ghost's hold carried from a taken-over apply (DL-412)."""
+    if entry["state"] != "kept":
+        return False
+    because = entry.get("kept_because", "rejected")
+    return because in STILL_HELD or (because == "undefined" and "carried_from" in entry)
 
 
 def kept_lines(cfg: Config, holds: list[dict[str, Any]]) -> list[str]:
@@ -529,10 +430,7 @@ class Apply:
         lines = [f"stopped: {cause[0]}", *cause[1:], f"the apply of {self.name} is recorded."]
         lines.append(f"`{CMD_RESUME}` will {RESUME[step].format(**self.record)}.")
         if step in ("opened", "verified"):
-            lines.append(
-                f"`{CMD_ROLLBACK}` would release this apply's holds instead, and roll"
-                f" back to {self.record['previous']}."
-            )
+            lines.append(takeover_line(self.record["previous"]))
         return Stop(EXIT_STOPPED, *lines)
 
     def run(self) -> int:
@@ -598,15 +496,8 @@ class Apply:
         """The receipt of a finished apply, in its release's .release directory; an applied
         one is named by .release/latest."""
         receipt = self.receipt_body(outcome, released, kept, **more)
-        directory = self.cfg.releases / self.name / ".release"
-        if outcome == "applied":
-            file = f"applied-{self.record['request_id']}.json"
-            write_json(directory / file, receipt)
-            write_text(directory / "latest", f"{file}\n")
-        elif outcome == "refused":
-            write_json(
-                directory / f"refused-{self.record.get('apply_id') or uuid.uuid4()}.json", receipt
-            )
+        receipt_id = self.record["request_id"] if outcome == "applied" else self.record["apply_id"]
+        send_receipt(self.cfg, self.name, outcome, str(receipt_id), receipt)
         return receipt
 
     def receipt_body(
@@ -645,7 +536,7 @@ class Apply:
 
     def clear(self) -> None:
         self.cfg.record.unlink()
-        fsync_dir(self.cfg.releases)
+        fsync_dir(self.cfg.state)
 
     def hold(self) -> None:
         """Hold every scheduled top-level job with a future tick that is not held; a hold
@@ -828,7 +719,10 @@ class Apply:
             if done.returncode != EXIT_REFUSED:
                 return done.returncode, []
             if wait is None:
-                return EXIT_REFUSED, [f"the seal did not commit: {seal_refusal(done)}."]
+                return EXIT_REFUSED, [
+                    "the seal did not commit.",
+                    f"the seal said: {seal_refusal(done)}.",
+                ]
             if time.monotonic() + wait > deadline:
                 return EXIT_REFUSED, [
                     f"the retry horizon of the last operator request outlasts --horizon-timeout"
@@ -949,6 +843,11 @@ class Apply:
         for entry in self.record["holds"]:
             if entry["state"] == "pending":
                 self.send_hold(entry, resend=True)
+            # a hold carried from a taken-over apply is settled again here: the rollback may
+            # have defined the job again, and a hold of the verb's own is released (DL-412)
+            if entry.get("carried_from") and entry["state"] == "kept":
+                entry["state"] = "applied"
+                entry.pop("release_attempts", None)
         for entry in self.record["holds"]:
             resend = entry["state"] == "releasing"
             while entry["state"] in ("applied", "releasing"):
@@ -1038,13 +937,9 @@ class Apply:
 
     def abort(self, *reason: str) -> int:
         """Nothing was sealed: release this apply's holds, write a refused receipt and clear
-        the record. A hold of its own the engine would not release keeps the record, exit 3,
-        and a resume tries again (DL-412)."""
+        the record; exit 2, or 1 when a hold stays on, each named with its reason and its
+        command, as a completed apply names one (DL-412)."""
         reason = tuple(self.record.setdefault("abort_reason", list(reason)))
-        for entry in self.record["holds"]:
-            if entry["state"] == "kept" and entry.get("kept_because") == "rejected":
-                entry["state"] = "applied"
-                entry.pop("release_attempts", None)
         self.step(ABORTING)
         try:
             released, kept = self.release_holds()
@@ -1057,19 +952,6 @@ class Apply:
                 f"the apply of {self.name} is recorded.",
                 f"`{CMD_RESUME}` will {RESUME[ABORTING]}.",
             ) from exc
-        ours = [
-            e["job"]
-            for e in self.record["holds"]
-            if e["state"] == "kept" and e.get("kept_because") == "rejected"
-        ]
-        if ours:
-            raise Stop(
-                EXIT_STOPPED,
-                *reason,
-                f"the engine did not release this apply's hold of {', '.join(ours)}.",
-                f"the apply of {self.name} is recorded.",
-                f"`{CMD_RESUME}` will {RESUME[ABORTING]}.",
-            )
         receipt = self.write_receipt("refused", released, kept, reason=list(reason))
         self.clear()
         for line in reason:
@@ -1083,9 +965,10 @@ class Apply:
                 f"this apply's holds are released: {', '.join(released)}; a start a tick"
                 " latched under one of them runs now."
             )
-        for line in kept_lines(self.cfg, receipt["holds"]):
+        lines = kept_lines(self.cfg, receipt["holds"])
+        for line in lines:
             say(line)
-        return EXIT_REFUSED
+        return EXIT_KEPT if lines else EXIT_REFUSED
 
     def take_over(self, target: str) -> int:
         """A rollback's take-over of an apply whose new period opened (DL-412). It releases no
@@ -1116,7 +999,13 @@ class Apply:
             target,
             self.name,
             holds=carried,
-            takeover_of={"release": self.name, "request_id": rid, "receipt": name, "body": body},
+            takeover_of={
+                "release": self.name,
+                "request_id": rid,
+                "kind": "verify-failed" if problems else "taken-over",
+                "receipt": name,
+                "body": body,
+            },
         )
         write_json(self.cfg.record, successor)
         if STOP_AFTER == "takeover":
@@ -1129,10 +1018,18 @@ class Apply:
         taken = self.record["takeover_of"]
         path = self.cfg.releases / taken["release"] / ".release" / taken["receipt"]
         if not path.exists():
-            write_json(path, taken["body"])
+            send_receipt(
+                self.cfg, taken["release"], taken["kind"], taken["request_id"], taken["body"]
+            )
         taken["body"] = None
         self.step(self.record["step"])
         say(f"the apply of {taken['release']} is taken over; its receipt is {taken['receipt']}.")
+
+
+def send_receipt(cfg: Config, name: str, kind: str, receipt_id: str, body: dict[str, Any]) -> None:
+    """The service side writes the receipt: nothing under a release is the deployment
+    identity's to write (DL-412)."""
+    service_run(cfg, "receipt", name, kind, receipt_id, stdin=json.dumps(body))
 
 
 def begin(cfg: Config, name: str, waits: Waits) -> int:
@@ -1284,8 +1181,16 @@ def failed_check(cfg: Config, name: str) -> Path | None:
 
 def failed_line(name: str, receipt: Path) -> str:
     return (
-        f"{name}'s last apply failed its check after the open ({receipt}), so a rollback does"
-        f" not apply it; to retry it on purpose, run `{CMD_APPLY} {name}`."
+        f"{name}'s last apply failed its check after the open ({receipt.name}), so a rollback"
+        f" does not apply it; to retry it on purpose, run `{CMD_APPLY} {name}`."
+    )
+
+
+def takeover_line(previous: str) -> str:
+    """What a rollback does with an apply whose new period opened (DL-412)."""
+    return (
+        f"`{CMD_ROLLBACK}` keeps this apply's holds and rolls back to {previous} under them;"
+        " the holds are released when that rollback ends."
     )
 
 
@@ -1377,7 +1282,11 @@ def status(fmt: str) -> int:
         "inactive": inactive,
         "engine": engine_answer(cfg),
         "rollback_to": None if failed else target,
-        "rollback_refused": failed_line(str(target), failed) if failed else None,
+        "rollback_refused": (
+            f"none, since {target}'s last apply failed its check ({failed.name})."
+            if failed
+            else None
+        ),
         "apply": record,
         "last": last_apply(cfg),
         "releases": releases,
@@ -1428,10 +1337,7 @@ def status_lines(cfg: Config, report: dict[str, Any]) -> list[str]:
             )
         lines.append(f"  `{CMD_RESUME}` will {record['resume']}.")
         if record["step"] in ("opened", "verified"):
-            lines.append(
-                f"  `{CMD_ROLLBACK}` would release this apply's holds instead, and roll"
-                f" back to {record['previous']}."
-            )
+            lines.append(f"  {takeover_line(record['previous'])}")
         held = [e["job"] for e in record["holds"] if e["state"] in ("applied", "releasing")]
         pending = [e["job"] for e in record["holds"] if e["state"] == "pending"]
         if record.get("takeover_of"):

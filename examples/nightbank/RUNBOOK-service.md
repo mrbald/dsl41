@@ -116,14 +116,14 @@ chown -R root:root /srv/dsl41/nightbank && chmod -R go-w,a+rX /srv/dsl41/nightba
    In the same shell, type recipe `service-install`, then `set +eu`. Then create what
    the site package would have created for the release train
    ([site-package §5](../../docs/site-package.md#5-ship-jil-releases-on-the-applications-train)):
-   the deployment identity `nbdeploy` in its group, the releases directory it owns,
-   `active`'s directory with its group and the sticky bit, and its `ops` binding in the
-   map. `exit` after the block:
+   the deployment identity `nbdeploy` in its group, the releases directory the service
+   account owns, `active`'s directory, root's with that group and the sticky bit, and the
+   `ops` binding in the map. `exit` after the block:
 
 ```sh
 groupadd nightbank-deploy
 useradd -M -s /usr/sbin/nologin -g nightbank-deploy nbdeploy
-install -d -o nbdeploy -g nightbank-deploy -m 0755 /srv/dsl41/nightbank/releases
+install -d -o dsl41 -g dsl41 -m 0755 /srv/dsl41/nightbank/releases
 chgrp nightbank-deploy /srv/dsl41/nightbank && chmod 1775 /srv/dsl41/nightbank
 printf '\n[[binding]]\nsubject = "user:os/nbdeploy"\ntier = "ops"\n' >>/etc/dsl41/nightbank-access.toml
 ```
@@ -448,18 +448,14 @@ You run the release verbs as the deployment identity that exercise 24 created, w
 commands name `/opt/dsl41/.venv/bin/dsl41`.
 
 1. Read the status, and meet two refusals: a second prepare under a name already
-   installed, and an apply of a directory that was never prepared. Remove that directory
-   after:
+   installed, and an apply of a name that was never prepared:
 
 ```sh
 cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release status
 cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release prepare small-r1 /srv/dsl41/nightbank/estate/small
 # exit 2: /srv/dsl41/nightbank/releases/small-r1 is prepared already, and a prepared name is installed once.
-cd / && sudo -u nbdeploy cp -R /srv/dsl41/nightbank/estate/small /srv/dsl41/nightbank/releases/small-copy
 cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release apply small-copy
-# exit 2: small-copy is installed but not prepared.
-#         run `dsl41 release prepare --requalify small-copy` to check it in place.
-cd / && sudo -u nbdeploy rm -rf /srv/dsl41/nightbank/releases/small-copy
+# exit 2: /srv/dsl41/nightbank/releases/small-copy holds no estate.toml, so it is not a release.
 ```
 
    The status prints `active: small-r1.`, `engine: answers on …`, `recorded apply: none.`

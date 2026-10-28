@@ -776,12 +776,12 @@ step_release_concurrent() { # a second apply is refused while the first holds th
     sudo systemctl reset-failed "$ENGINE" 2>/dev/null || true
     deploy apply small-v5 >"$SCRATCH/release-first.log" 2>&1 &
     first=$!
-    wait_for 60 "the first apply recorded itself" sudo test -e "$ESTATE_RELEASES/.apply.json"
+    wait_for 60 "the first apply recorded itself" sudo test -e "$APPLY_STATE/apply.json"
     rc=0
     out=$(deploy rollback 2>&1) || rc=$?
     echo "$out"
     [ "$rc" = 2 ] || fail "the second apply exited $rc, not 2"
-    grep -qE "another apply holds $ESTATE_RELEASES/.apply.lock: pid [0-9]+, $DEPLOY_USER@" <<<"$out" ||
+    grep -qE "another apply holds $APPLY_STATE/apply.lock: pid [0-9]+, $DEPLOY_USER@" <<<"$out" ||
         fail "the refusal does not name the holder"
     rc=0
     wait "$first" || rc=$?
@@ -809,7 +809,7 @@ interrupted_apply() { # interrupted_apply NAME FROM STOP STEP SAYS
     rc=0
     deploy_stopped "$3" apply "$1" || rc=$?
     [ "$rc" != 0 ] || fail "the apply was not stopped at $3"
-    [ "$(sudo jq -r .step "$ESTATE_RELEASES/.apply.json")" = "$4" ] || fail "the record is not at $4"
+    [ "$(sudo jq -r .step "$APPLY_STATE/apply.json")" = "$4" ] || fail "the record is not at $4"
     [ "$(cat "$ACTIVE")" = "$2" ] || fail "ACTIVE moved before the apply wrote it"
     [ "$(seal_count)" = $((seals + 1)) ] || fail "the seal did not commit"
     wait_for 90 "$ENGINE is failed" is_state "$ENGINE" failed
@@ -823,7 +823,7 @@ interrupted_apply() { # interrupted_apply NAME FROM STOP STEP SAYS
     follow_active
     [ "$RELEASE" = "$1" ] || fail "ACTIVE names $RELEASE, not $1"
     [ "$(seal_count)" = $((seals + 1)) ] || fail "the resume sealed again"
-    ! sudo test -e "$ESTATE_RELEASES/.apply.json" || fail "the record is still there"
+    ! sudo test -e "$APPLY_STATE/apply.json" || fail "the record is still there"
     wait_up
     ok "the apply killed at $3 resumed from its record with no second seal; $1 is active"
 }

@@ -24485,34 +24485,37 @@ relitigate an entry; append a new one.
   src/dsl41/release_service.py, src/dsl41/cli_release.py, runbook §0's job recipe, site-package
   §3 and §5)
   THE RULE. The verbs run as the deployment identity, on the runtime the launcher's DSL41
-  selects. Their service side, the hidden `dsl41 release service -- ACTION WORD...` run through
-  `sudo -n -u SERVICE_ACCOUNT -H DSL41`, takes release names, a request id or any job name the
-  engine addresses, runs only as SERVICE_ACCOUNT, claims `os/SERVICE_ACCOUNT` as the seal's
-  actor, and reads a release's inputs only inside it, by real path, without following a link.
-  Both sides read `<prefix>/bin/dsl41-launch`, beside the runtime under `<prefix>/.venvs`; it
-  and each directory above it are writable only by root or the running account (a world-
-  writable one passes when root owns it with the sticky bit), and its checked text runs
-  through `sh -s`. `vars` adds SERVICE_ACCOUNT and ENGINE_UNIT. The apply keeps DL-407's
-  records, seal reads and hold ownership through the WAL. Exit codes for apply, resume and
-  rollback: 0 active, every hold the apply took released; 1 active, some kept, each printed
-  with its `OFF_HOLD` command; 2 refused, nothing sealed, holds released, no record (a
-  refusal that keeps an apply already recorded says so; a hold of its own the engine will
-  not release keeps the record, exit 3); 3 stopped with the record kept, SIGINT and SIGHUP
-  included unless ignored; 4 outcome unknown. Once a recorded apply's new period opened,
-  `rollback` may take it over: it releases no hold, and one rename replaces the record with
-  the apply of the release it replaced, which owns the old holds and writes
-  `verify-failed-<id>.json` (or `taken-over-` when the check passed). Rollback never applies
-  a release whose newest receipt is `verify_failed`. `status` shows the active release, the
-  engine, the rollback target, a recorded apply and what `resume` does, and the last apply.
-  `prepare --requalify NAME` checks an installed release in place. The horizon wait reads the
-  live code or the offline sentence. The stop points are the test-only `release.STOP_AFTER`.
+  selects. Their service side, `dsl41 release service -- ACTION WORD...` through `sudo -n -u
+  SERVICE_ACCOUNT -H DSL41`, runs only as SERVICE_ACCOUNT and claims its actor. The deployment
+  identity never writes under a release: ESTATE_RELEASES is the service account's, 0755;
+  `prepare NAME DIR` has the service side copy DIR by descriptor, refusing links and anything
+  the caller could not read, into NAME as its own (dirs 0555, files 0444, .release 0755), lint
+  and rehearse it, and remove it on a refusal; requalify and the receipts are its writes too.
+  The apply record and lock live in .release beside ACTIVE. Every read refuses a release with
+  an entry others could change, then reads each input inside it without following a link. Both
+  sides read `<prefix>/bin/dsl41-launch` beside the runtime under `<prefix>/.venvs`, each
+  directory above it writable only by root or the running account (or root's with the sticky
+  bit), and run its checked text under its first line's /bin/sh, /bin/bash or `/usr/bin/env
+  bash`. `vars` adds SERVICE_ACCOUNT and ENGINE_UNIT. The apply keeps DL-407's records, seal
+  reads and WAL hold ownership. Exit codes for apply, resume and rollback: 0 active, every hold
+  it took released; 1 done, some kept, each with its `OFF_HOLD` command, an abort's included;
+  2 refused, nothing sealed, holds released, no record (a refusal that keeps a recorded apply
+  says so); 3 stopped, the record kept, SIGINT and SIGHUP included unless ignored; 4 outcome
+  unknown. Once a recorded apply's period opened, `rollback` takes it over: no hold is released,
+  one rename replaces the record with the apply of the release it replaced, which owns and
+  settles again every old hold and has `verify-failed-<id>.json` written (`taken-over-` when
+  the check passed). Rollback never applies a release whose newest receipt is `verify_failed`.
+  `status` shows the active release, the engine, the rollback target, a recorded apply and
+  what `resume` does, and the last apply. The horizon wait reads the live code or the offline
+  sentence. Test stop points: `release.STOP_AFTER` only.
   THE REASON. The owner's ruling of 2026-10-27, "make it a verb", after an operator review found
   an apply that failed its check after the open with no way out, a job name with `#` that
   stopped every apply, kept holds behind exit 0, and refusals that named internal steps. The
   group name is Astra's: each verb's object is a release, and `estate resume` would read as
-  resuming the estate. "Release the hold" stays, since each sentence names its object. Not in
-  production, so no shim keeps the old path.
+  resuming the estate. "Release the hold" stays. Not in production, so no shim. Path checks
+  left a swap window at the seal and lint's echo of a linked file; ownership closes both.
   REJECTED: `dsl41 estate` and `dsl41 train` (the object is a release); an `abandon` verb
   (rollback's take-over is the way out); a shim; the whole verb as the service account (the
-  jobs' account would own the releases and ACTIVE); a launcher named by argument or environment
-  (it could name a DSL41 that runs as the service account); `status` exiting 3 on a record.
+  jobs' account would own ACTIVE); a launcher named by argument or environment; `status`
+  exiting 3 on a record; comparing the bundle's digests with prepared.json (they hash the
+  post-placeholder text, not the files).

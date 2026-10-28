@@ -19,6 +19,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -288,6 +289,7 @@ class Site:
         # the launcher's DSL41 is the stub, inside the runtime it selects (DL-412)
         self.dsl41 = self.python.parent / "dsl41"
         shutil.copytree(SMALL, self.releases / "r1")
+        _seal(self.releases / "r1")
         self.active.write_text("r1\n")
         self.launcher = self.prefix / "bin" / "dsl41-launch"
         _configured(
@@ -407,7 +409,7 @@ class Site:
         assert done.returncode == 0, done.stderr
 
     def record(self) -> dict[str, Any] | None:
-        path = self.releases / ".apply.json"
+        path = self.active.parent / ".release" / "apply.json"
         return json.loads(path.read_text()) if path.exists() else None
 
     def receipt(self, name: str, kind: str = "applied") -> dict[str, Any]:
@@ -428,6 +430,15 @@ class Site:
 
     def seals(self) -> list[list[str]]:
         return [call for call in self.state()["calls"] if call[0] == "seal"]
+
+
+def _seal(release: Path) -> None:
+    """A release installed sealed, as the service side installs one: here the test's account
+    is the service account (DL-412)."""
+    for directory, _, files in os.walk(release, topdown=False):
+        for file in files:
+            os.chmod(Path(directory) / file, 0o444)
+        os.chmod(directory, 0o555)
 
 
 def _runtime(path: Path) -> Path:
@@ -486,7 +497,64 @@ def test_prepare_installs_a_read_only_release_with_its_qualification(site: Site)
     assert not os.access(release, os.W_OK)
     assert os.access(release / ".release", os.W_OK)
     # the check ran as the service account, through the launcher's DSL41
-    assert site.sudo_log() == ["dsl41 release service -- check v2"]
+    # the copy and the check ran as the service account, through the launcher's DSL41
+    assert site.sudo_log() == [f"dsl41 release service -- prepare v2 {site.base}/sources/v2"]
+
+
+def test_prepare_seals_the_release_to_the_service_account(site: Site) -> None:
+    """DL-412: the service side copies the inputs as its own, every directory 0555 and every
+    file 0444, and .release 0755; the deployment identity writes nothing under the release."""
+    source = site.source("v2")
+    done = site.run("prepare", "v2", str(source))
+    assert done.returncode == 0, done.stderr
+    release = site.releases / "v2"
+    for entry in [release, *release.rglob("*")]:
+        info = entry.lstat()
+        assert info.st_uid == os.geteuid(), entry
+        if entry.name == ".release":
+            assert stat.S_IMODE(info.st_mode) == 0o755
+        elif ".release" not in entry.relative_to(release).parts:
+            assert stat.S_IMODE(info.st_mode) == (0o555 if entry.is_dir() else 0o444), entry
+    assert not list(site.releases.glob(".*")) and not (site.releases / "v2.new").exists()
+    assert site.sudo_log() == [f"dsl41 release service -- prepare v2 {source}"]
+
+
+def test_prepare_copies_only_what_the_caller_can_read(site: Site) -> None:
+    """DL-412: the copy reads nothing the deployment identity could not read itself, and no
+    link; a refused copy leaves nothing behind."""
+    source = site.source("v2")
+    (source / "global.jil").chmod(0o000)
+    refused = site.run("prepare", "v2", str(source))
+    assert refused.returncode == 2
+    assert "global.jil is not readable by the deployment identity." in refused.stderr
+    (source / "global.jil").chmod(0o644)
+    (source / "linked.jil").symlink_to(source / "global.jil")
+    refused = site.run("prepare", "v2", str(source))
+    assert refused.returncode == 2
+    assert "the release's inputs hold a symlink: linked.jil." in refused.stderr
+    assert not (site.releases / "v2").exists()
+
+
+def test_a_release_whose_entry_others_could_replace_is_refused(site: Site) -> None:
+    """DL-412: a swap needs a writable entry; the verbs refuse a release that has one, and
+    `--requalify` seals it again."""
+    site.prepared("v2")
+    release = site.releases / "v2"
+    release.chmod(0o755)
+    (release / "global.jil").chmod(0o644)
+    refused = site.run("apply", "v2")
+    assert refused.returncode == 2, refused.stderr
+    assert "v2 is not sealed to the service account: ., global.jil can be changed" in (
+        refused.stderr
+    )
+    rid = "0" * 8 + "-0000-0000-0000-" + "0" * 12
+    refused = site.run("service", "seal", "v2", rid)
+    assert refused.returncode == 2 and "is not sealed to the service account" in refused.stderr
+    done = site.run("prepare", "--requalify", "v2")
+    assert done.returncode == 0, done.stderr
+    assert "v2 is sealed to the service account." in done.stderr
+    assert not os.access(release / "global.jil", os.W_OK)
+    assert site.run("apply", "v2").returncode == 0
 
 
 def test_prepare_refuses_a_name_that_exists_and_a_source_without_a_manifest(site: Site) -> None:
@@ -627,6 +695,8 @@ def test_apply_holds_drains_seals_selects_starts_verifies_and_releases_its_own_h
         "systemctl start dsl41-engine.service",
         f"dsl41 release service -- pins {rid}",
         *(f"dsl41 release service -- holds {hold['job']}" for hold in receipt["holds"]),
+        # the receipt is the service side's to write (DL-412)
+        f"dsl41 release service -- receipt v2 applied {rid}",
     ]
 
 
@@ -880,7 +950,11 @@ def test_a_seal_that_does_not_commit_promotes_nothing_and_releases_the_holds(
     site.edit(seal_outcomes=["refuse"])
     refused = site.run("apply", "v2")
     assert refused.returncode == 2, refused.stderr
-    assert "the seal did not commit: seal refuse." in refused.stderr
+    # the seal's own reason is a line of its own (DL-412)
+    assert (
+        "dsl41 release: the seal did not commit.\ndsl41 release: the seal said: seal refuse.\n"
+        in (refused.stderr)
+    )
     assert "v2 is not applied; nothing was sealed, and ACTIVE still names r1." in refused.stderr
     assert "this apply's holds are released: NB_B, NB_FREE_C;" in refused.stderr
     assert site.active.read_text() == "r1\n"
@@ -891,38 +965,33 @@ def test_a_seal_that_does_not_commit_promotes_nothing_and_releases_the_holds(
     receipt = json.loads(path.read_text())
     assert receipt["outcome"] == "refused" and receipt["released"] == ["NB_B", "NB_FREE_C"]
     # the seal's own reason is recorded, so `status` can say it later (DL-412)
-    assert receipt["reason"] == ["the seal did not commit: seal refuse."]
+    assert receipt["reason"] == ["the seal did not commit.", "the seal said: seal refuse."]
     shown = site.run("status").stdout
     assert "last apply: v2 over r1, started " in shown
     (line,) = [line for line in shown.splitlines() if line.startswith("last apply:")]
-    assert line.endswith(": refused, and nothing was sealed: the seal did not commit: seal refuse.")
+    assert line.endswith(
+        ": refused, and nothing was sealed: the seal did not commit. the seal said: seal refuse."
+    )
     state = site.state()
     assert [verb for verb, _ in state["sent"]] == ["ON_HOLD", "ON_HOLD", "OFF_HOLD", "OFF_HOLD"]
     assert ["start", "dsl41-engine.service"] not in state["systemctl"]
 
 
-def test_a_refused_apply_whose_hold_the_engine_will_not_release_stays_recorded(
-    site: Site,
-) -> None:
-    """DL-412: exit 2 promises the apply's holds are released. When the engine rejects the
-    release of one three times, the refused apply keeps its record, exit 3, and a resume
-    tries again before it clears the record."""
+def test_a_refused_apply_whose_hold_the_engine_will_not_release_names_it(site: Site) -> None:
+    """DL-412: an abort whose release of a hold is rejected three times records the hold
+    kept with its reason, clears the record and exits 1, as a completed apply does."""
     site.prepared("v2")
     site.edit(seal_outcomes=["refuse"], release_outcomes={"NB_FREE_C": [3, 3, 3]})
-    stopped = site.run("apply", "v2")
-    assert stopped.returncode == 3, stopped.stderr
-    assert "the seal did not commit: seal refuse." in stopped.stderr
-    assert "the engine did not release this apply's hold of NB_FREE_C." in stopped.stderr
-    record = site.record()
-    assert record is not None and record["step"] == "aborting"
-    assert not list((site.releases / "v2" / ".release").glob("refused-*.json"))
-    assert site.state()["jobs"]["NB_FREE_C"]["on_hold"] is True
-    resumed = site.run("resume")
-    assert resumed.returncode == 2, resumed.stderr
-    assert "the seal did not commit: seal refuse." in resumed.stderr
-    assert site.record() is None and site.state()["jobs"]["NB_FREE_C"]["on_hold"] is False
+    done = site.run("apply", "v2")
+    assert done.returncode == 1, done.stderr
+    assert "the seal said: seal refuse." in done.stderr
+    assert "NB_FREE_C stays on hold: the engine did not release it" in done.stderr
+    assert site.record() is None and site.state()["jobs"]["NB_FREE_C"]["on_hold"] is True
     (path,) = (site.releases / "v2" / ".release").glob("refused-*.json")
-    assert json.loads(path.read_text())["released"] == ["NB_B", "NB_FREE_C"]
+    receipt = json.loads(path.read_text())
+    assert receipt["released"] == ["NB_B"] and receipt["kept"] == ["NB_FREE_C"]
+    shown = site.run("status").stdout
+    assert "  NB_FREE_C stays on hold: the engine did not release it" in shown
 
 
 def test_a_seal_that_exits_2_after_it_committed_is_read_from_the_estate(site: Site) -> None:
@@ -1082,7 +1151,8 @@ def test_an_apply_refuses_up_front_when_no_engine_answers(site: Site) -> None:
 
 def test_a_second_apply_is_refused_while_the_first_holds_the_lock(site: Site) -> None:
     site.prepared("v2")
-    lock = site.releases / ".apply.lock"
+    (site.active.parent / ".release").mkdir(exist_ok=True)
+    lock = site.active.parent / ".release" / "apply.lock"
     fd = os.open(lock, os.O_RDWR | os.O_CREAT)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
@@ -1205,8 +1275,8 @@ def test_an_opened_bundle_the_seal_did_not_commit_stops_the_apply(site: Site) ->
     assert record["problems"][0] == "period 2's segment does not open the committed seal"
     assert [verb for verb, _ in site.state()["sent"]] == ["ON_HOLD", "ON_HOLD"]
     assert (
-        "`dsl41 release rollback` would release this apply's holds instead, and roll back"
-        " to r1." in stopped.stderr
+        "`dsl41 release rollback` keeps this apply's holds and rolls back to r1 under them;"
+        " the holds are released when that rollback ends." in stopped.stderr
     )
     # resume checks again, and stops again with the record kept
     again = site.run("resume")
@@ -1214,7 +1284,7 @@ def test_an_opened_bundle_the_seal_did_not_commit_stops_the_apply(site: Site) ->
     shown = site.run("status").stdout
     assert "  the new period does not match the seal: period 2's segment" in shown
     assert "  `dsl41 release resume` will check the new period again" in shown
-    assert "  `dsl41 release rollback` would release this apply's holds instead" in shown
+    assert "  `dsl41 release rollback` keeps this apply's holds and rolls back to r1" in shown
 
 
 def _failed_check(site: Site) -> dict[str, Any]:
@@ -1264,11 +1334,12 @@ def test_rollback_takes_over_an_apply_whose_check_failed(site: Site) -> None:
     assert not state["jobs"]["NB_FREE_C"]["on_hold"] and not state["jobs"]["NB_B"]["on_hold"]
     # a rollback never applies the release whose check failed; `apply NAME` retries it
     refusal = (
-        f"v2's last apply failed its check after the open ({path}), so a rollback does not"
-        " apply it; to retry it on purpose, run `dsl41 release apply v2`."
+        f"v2's last apply failed its check after the open ({path.name}), so a rollback does"
+        " not apply it; to retry it on purpose, run `dsl41 release apply v2`."
     )
     shown = site.run("status").stdout
-    assert f"rollback: {refusal}" in shown and "would apply v2" not in shown
+    assert f"rollback: none, since v2's last apply failed its check ({path.name})." in shown
+    assert "would apply v2" not in shown
     again = site.run("rollback")
     assert again.returncode == 2 and again.stderr == f"dsl41 release: {refusal}\n"
     assert site.active.read_text() == "v1\n" and len(site.seals()) == 3
@@ -1347,6 +1418,47 @@ def test_a_takeover_keeps_a_hold_the_engine_will_not_release(site: Site) -> None
     assert len(holds) == 2  # v1's apply and v2's; the rollback held nothing new
     shown = site.run("status").stdout
     assert "  NB_FREE_C stays on hold: the engine did not release it" in shown
+
+
+@pytest.mark.parametrize("restored", [True, False])
+def test_a_carried_ghost_hold_is_settled_again_by_the_rollback(site: Site, restored: bool) -> None:
+    """DL-412: a hold the failed apply kept because its release removed the job is the
+    rollback's own; once the rollback defines the job again it releases it, and while the
+    job stays a ghost it keeps the hold, names it and exits 1."""
+    site.prepared("v1")
+    assert site.run("apply", "v1").returncode == 0
+    site.prepared("v2")
+    state = site.state()
+    state["jobs"]["NB_Z_C"] = _job("CMD")
+    state["timers"].append({"due": "2026-10-28T02:00:00", "job": "NB_Z_C", "kind": "schedule"})
+    state["release_outcomes"] = {"NB_Z_C": [4]}
+    site.save(state)
+    # the apply of v2 holds the jobs, then v2 drops NB_FREE_C, and NB_Z_C's release is lost
+    site.edit(seal_outcomes=["unknown"])
+    assert site.run("apply", "v2").returncode == 4
+    state = site.state()
+    state["jobs"]["NB_FREE_C"]["job_type"] = None
+    site.save(state)
+    assert site.run("resume").returncode == 3
+    record = site.record()
+    assert record is not None and record["step"] == "verified"
+    (ghost,) = [hold for hold in record["holds"] if hold["job"] == "NB_FREE_C"]
+    assert ghost["state"] == "kept" and ghost["kept_because"] == "undefined"
+    if restored:
+        state = site.state()
+        state["jobs"]["NB_FREE_C"]["job_type"] = "CMD"
+        site.save(state)
+    back = site.run("rollback")
+    if restored:
+        assert back.returncode == 0, back.stderr
+        assert "NB_FREE_C" in site.receipt("v1")["released"]
+        assert site.state()["jobs"]["NB_FREE_C"]["on_hold"] is False
+    else:
+        assert back.returncode == 1, back.stderr
+        assert "NB_FREE_C stays on hold: the job is no longer defined." in back.stderr
+        assert site.receipt("v1")["kept"] == ["NB_FREE_C"]
+        shown = site.run("status").stdout
+        assert "  NB_FREE_C stays on hold: the job is no longer defined." in shown
 
 
 def test_rollback_takes_over_an_apply_stopped_after_its_check(site: Site) -> None:
@@ -1797,6 +1909,24 @@ def test_the_launcher_runs_from_the_text_that_was_checked(site: Site) -> None:
     site.launcher.chmod(0o644)
     shown = site.run("status")
     assert shown.returncode == 0, shown.stderr
+
+
+@pytest.mark.parametrize(
+    ("first", "runs"),
+    [("#!/bin/bash", True), ("#!/usr/bin/env bash", True), ("#!/usr/bin/python3", False)],
+)
+def test_the_launcher_runs_under_the_interpreter_its_first_line_names(
+    site: Site, first: str, runs: bool
+) -> None:
+    """DL-412: /bin/sh, /bin/bash or `/usr/bin/env bash`; any other first line refuses."""
+    text = site.launcher.read_text()
+    site.launcher.write_text(first + "\n" + text.split("\n", 1)[1])
+    shown = site.run("status")
+    if runs:
+        assert shown.returncode == 0, shown.stderr
+    else:
+        assert shown.returncode == 2
+        assert "it must name /bin/sh, /bin/bash or `/usr/bin/env bash`." in shown.stderr
 
 
 def test_a_launcher_without_the_verbs_vars_refuses(site: Site) -> None:

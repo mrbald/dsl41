@@ -106,10 +106,13 @@ storage                               owner and mode              written by
 /opt/dsl41/.venv -> .venvs/<id>      root                        explicit activation (§1, §7)
 /opt/dsl41/bin/dsl41-launch           root, 0755                  the installer; reviewed like code
 /etc/dsl41/nightbank-access.toml      dsl41, 0600                 the operator (§4)
-ESTATE_RELEASES/<name>                deployment identity; its    dsl41 release prepare (§0's job recipe)
-                                      inputs read-only to all
+ESTATE_RELEASES                       the service account, 0755   the site package
+ESTATE_RELEASES/<name>                the service account; 0555   dsl41 release prepare (§0's job recipe)
+                                      and 0444, .release 0755
 ACTIVE                                deployment identity         dsl41 release apply, or the installer
                                                                   before the first start
+.release/ beside ACTIVE               deployment identity         dsl41 release: the apply record
+                                                                  and its lock
 PROPERTIES                            readable by dsl41           the operator
 RUN_ROOT                              dsl41, 0700                 the engine, the supervisor, the wrappers
 job data and output directories       dsl41                       the jobs (the JIL names them)
@@ -217,8 +220,8 @@ systemctl enable dsl41-supervisor.service dsl41-engine.service
    directories and its `std_out_file` targets must be the account's:
    nightbank's jobs write under `/srv/dsl41/nightbank/night`, which the
    drill creates owned by the account. `ESTATE_RELEASES` belongs to the
-   deployment identity and its group, and a prepared release's inputs are
-   read-only to everyone
+   account, and each prepared release is the account's and read-only; the
+   deployment identity only reads them
    ([site-package §5](site-package.md#5-ship-jil-releases-on-the-applications-train)).
    The access map must be owned by the account and writable by no one else,
    in a directory owned by root or the account and writable by no one
@@ -378,8 +381,10 @@ dsl41 rehearse "$@" -p "$PROPERTIES"
 cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release prepare NAME DIR
 ```
 
-   Prepare copies `DIR` to `ESTATE_RELEASES/NAME` and makes its inputs
-   read-only. It lints the release with the installed runtime, the
+   Prepare has the service account copy `DIR` into
+   `ESTATE_RELEASES/NAME` as its own and read-only, so nobody else can
+   change it (DL-412). `DIR` and everything in it must be readable by the
+   deployment identity, and it may hold no symlink. It lints the release with the installed runtime, the
    launcher's `ENVIRONMENT` and the site's `PROPERTIES`, then rehearses it
    one day from now. It refuses the release with exit 2 when lint or
    rehearse exits nonzero, when the release holds more jobs than the
@@ -435,7 +440,7 @@ cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release apply NAME
    | Exit | What it means | What you do |
    | --- | --- | --- |
    | 0 | NAME is active in the next period, and every hold the apply took is released. | Verify (step 5). |
-   | 1 | NAME is active, and some holds the apply took stay on. Each is printed with its reason and the `OFF_HOLD` command that releases it. | Verify (step 5). Release each printed hold once it is safe. A hold another operator changed may be theirs: agree with them first. |
+   | 1 | Done, and some holds the apply took stay on: NAME is active, or the apply was refused and sealed nothing. Each kept hold is printed with its reason and the `OFF_HOLD` command that releases it. | When NAME is active, verify (step 5). Release each printed hold once it is safe. A hold another operator changed may be theirs: agree with them first. |
    | 2 | Refused, or the seal did not commit. Nothing was sealed and `ACTIVE` is as it was. When the apply had started, the holds it took are released, so a job a tick latched under one of them starts, and NAME's `.release/` keeps a `refused-` receipt. A refusal before the apply starts (not prepared, already active, no engine, another apply holds the lock) takes no hold and leaves no receipt. | Fix the cause the line names, and apply again. Files that need a change go in a new release under a new name. Three refusals keep an apply that is already recorded, with its holds, and say so: an apply or a rollback while one is recorded, a resume whose release no longer passes the prepare check, and a rollback take-over whose target does not pass it or finds no engine. Run `dsl41 release status` and resume it. |
    | 3 | Stopped. An interrupt or a lost session stops it the same way, and so does a refused apply whose own hold the engine would not release. | Run `dsl41 release status` and do what it says. It shows a recorded apply and what `dsl41 release resume` will do; fix the cause, then resume. With no apply recorded, its `last apply` line says whether the last apply completed or sealed nothing. |
    | 4 | The seal's outcome is unknown. The apply is recorded with its request id, and the scheduled jobs stay held. | Run `dsl41 release resume`. It reads the estate for that request id first, and retries under it, and under a new id only after a retry-horizon refusal. Do not seal by hand. |
