@@ -18,8 +18,7 @@ pathlib's form of the join is the string a verb hashes after typer turns the arg
 Path, so the printed path and the hashed path agree. A name with a `..` part is refused, so a
 release directory holds every input it names.
 A name not in normal form (a `.` part, `//`, a `/` at either end) is refused, so one file has
-one spelling, and so is a `.py` catalog file or layer: no Python enters a release (DL-410,
-DL-413).
+one spelling, and so is a `.py` name: no Python enters a release (DL-410, DL-413).
 """
 
 from __future__ import annotations
@@ -167,8 +166,8 @@ def parse_manifest(path: Path) -> Manifest:
 
     The manifest is read without following a symlink, as a regular file. Every name must be
     in normal form: relative, with no `.` or `..` part, no `//` and no `/` at its end, so one
-    file has one spelling. A catalog file or a layer may not be a `.py` file: a release takes
-    no Python, and `estate build --emit` renders a module (DL-410, DL-413)."""
+    file has one spelling. No name may be a `.py` file: a release takes no Python, and
+    `estate build --emit` renders a module (DL-410, DL-413)."""
     try:
         raw = read_regular(path)
     except OSError as exc:
@@ -193,6 +192,8 @@ def parse_manifest(path: Path) -> Manifest:
         (f"environments.{env}.properties", chosen.properties)
         for env, chosen in manifest.environments.items()
     ]
+    if manifest.timezone_map is not None:
+        inputs.append(("timezone_map", [manifest.timezone_map]))
     for key, names in inputs:
         for name in names:
             _relative(path, name)
@@ -201,8 +202,6 @@ def parse_manifest(path: Path) -> Manifest:
                     f"{path}: {key} names {name!r}, a Python file; a release takes no Python,"
                     f" so render it with 'dsl41 estate build --emit' (DL-410)"
                 )
-    if manifest.timezone_map is not None:
-        _relative(path, manifest.timezone_map)
     return manifest
 
 

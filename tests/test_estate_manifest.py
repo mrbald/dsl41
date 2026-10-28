@@ -523,13 +523,14 @@ def test_a_timezone_map_not_in_normal_form_is_refused(tmp_path: Path) -> None:
         ('"a.jil"]', '"a.py"]', "files"),
         ('properties = ["base.properties"]', 'properties = ["base.py"]', "properties"),
         ('"site.properties"]', '"site.py"]', "environments.prod.properties"),
+        ('timezone_map = "tz.map"', 'timezone_map = "tz.py"', "timezone_map"),
     ],
-    ids=["file", "base-layer", "environment-layer"],
+    ids=["file", "base-layer", "environment-layer", "timezone-map"],
 )
 def test_a_python_input_is_refused(tmp_path: Path, old: str, new: str, key: str) -> None:
     """DL-410, DL-413: no Python enters a release; `estate build --emit` renders a module."""
     manifest = _estate(tmp_path)
-    for name in ("a.py", "base.py", "site.py"):
+    for name in ("a.py", "base.py", "site.py", "tz.py"):
         (tmp_path / name).write_text("def estate(): ...\n")
     _edit(manifest, old, new)
     message = _refusal(manifest)
