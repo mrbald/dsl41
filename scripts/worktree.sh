@@ -2,9 +2,11 @@
 # Create a synced worktree for BRANCH and check its venv imports its own source.
 # The shell's VIRTUAL_ENV points at the main checkout; a sync that follows it
 # repoints the main editable install (worktree trap).
+# The synced .venv is an ignored file, so plain `wt remove` refuses the worktree.
 set -eu
 
-usage='usage: scripts/worktree.sh BRANCH [--base REF]'
+usage='usage: scripts/worktree.sh BRANCH [--base REF]
+Remove the worktree later with: wt remove --discard-ignored BRANCH'
 
 BASE=origin/main
 BRANCH=

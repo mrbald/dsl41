@@ -24586,7 +24586,9 @@ relitigate an entry; append a new one.
   one branch, worktree and writing agent per slice, created by `scripts/worktree.sh`; CI runs
   the suite only for a change outside `README.md`, `docs/**/*.md` and `examples/**/*.md`, and a
   docs-only change runs the docs gate; deterministic checks run in hooks and the tracked
-  pre-push script; force pushes carry a lease; force deletes are asked; conflicts are resolved
+  pre-push script, and for a docs-only change the docs gate stands in for the full suite in
+  the "Verification gates" section (DL-206 unchanged otherwise); force pushes carry a
+  lease; force deletes are asked; conflicts are resolved
   apart from staging; CI reruns once for a diagnosed transient cause; CLI tests use `cli_env`;
   a document rewrite runs `scripts/doc_deps.py`; a CLI model is called through
   `scripts/peer.sh`. CI's `classify` job computes the changed paths against the pull request's
@@ -24595,7 +24597,8 @@ relitigate an entry; append a new one.
   `docs` job runs the docs gate on every change: the four docs tests, every test file that
   names a changed Markdown path, its folder below the top level, or its basename, and the
   architecture gate. The matrix legs always start and skip per step, so the required check
-  names arrive.
+  names arrive. Branch protection on main requires `gitleaks`, `test (3.12)`, `test (3.13)`,
+  `goldens`, `coverage`, `explore-page` and `docs`, with linear history and no force push.
   THE REASON. Each rule names a mechanism rather than a memory: three CI failures on a stale
   decision index, two pushes of conflict markers, two closed stacked pull requests, a false
   coverage total, a repointed editable install and a codex run with no stdin each came from a

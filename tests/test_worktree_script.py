@@ -25,3 +25,5 @@ def test_worktree_refuses_a_missing_branch() -> None:
     done = run(path="/usr/bin:/bin")
     assert done.returncode == 64
     assert done.stderr.startswith("usage: scripts/worktree.sh BRANCH")
+    # the synced .venv is ignored, so removal needs the flag
+    assert "wt remove --discard-ignored" in done.stderr

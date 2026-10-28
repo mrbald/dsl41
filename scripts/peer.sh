@@ -3,8 +3,14 @@
 # Usage: scripts/peer.sh MODEL BRIEF OUT SECONDS [--resume THREAD] [--effort LEVEL]
 #        [--sandbox MODE]
 # Writes OUT.jsonl, OUT.err, OUT.thread and OUT.md. Run from inside a git repo.
-# Exit: 64 bad arguments or a brief without the no-other-model line, 65 not in a
-# git repo, 70 no agent message in the output.
+# SECONDS bounds the Codex run; a run cut short at that limit is a failure.
+# Exit:
+#   0  ok: OUT.md holds the last agent message.
+#   64 usage, or a brief without the phrase "call no other model".
+#   65 not in a git repo.
+#   70 no agent message in the output.
+#   71 codex failed or hit the time limit; OUT.md, if written, holds an incomplete
+#      message.
 set -u
 
 usage='usage: scripts/peer.sh MODEL BRIEF OUT SECONDS [--resume THREAD] [--effort LEVEL] [--sandbox MODE]'
@@ -37,6 +43,8 @@ fi
 case "$SECONDS_LIMIT" in
 '' | *[!0-9]*) echo "peer.sh: SECONDS must be a whole number." >&2; exit 64 ;;
 esac
+# alarm 0 would set no limit
+[ "$SECONDS_LIMIT" -gt 0 ] || { echo "peer.sh: SECONDS must be above zero." >&2; exit 64; }
 case "$SANDBOX" in
 read-only | workspace-write | danger-full-access) ;;
 *) echo "peer.sh: unknown sandbox mode $SANDBOX." >&2; exit 64 ;;
@@ -62,14 +70,22 @@ run() {
     fi
 }
 
+# An OUT.md or OUT.thread left by an earlier round must not pass for this one.
+rm -f "$OUT.md" "$OUT.thread"
+
 if [ -n "$RESUME" ]; then
-    run codex exec resume "$RESUME" --json -c "$effort_config" \
+    run codex exec resume "$RESUME" --json -m "$MODEL" -c "$effort_config" \
         -c "sandbox_mode=\"$SANDBOX\"" - <"$BRIEF" >"$OUT.jsonl" 2>"$OUT.err"
 else
     run codex exec --sandbox "$SANDBOX" --json -m "$MODEL" -c "$effort_config" \
         - <"$BRIEF" >"$OUT.jsonl" 2>"$OUT.err"
 fi
 status=$?
-[ "$status" -eq 0 ] || echo "peer.sh: codex exited $status; see $OUT.err." >&2
 
 python3 "$here/peer_extract.py" "$OUT.jsonl" "$OUT" ${RESUME:+--thread "$RESUME"}
+extracted=$?
+if [ "$status" -ne 0 ]; then
+    echo "peer.sh: codex exited $status; the review is incomplete; see $OUT.err." >&2
+    exit 71
+fi
+exit "$extracted"

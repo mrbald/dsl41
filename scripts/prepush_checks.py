@@ -104,7 +104,8 @@ def is_docs_path(path: str) -> bool:
 
 
 def is_docs_only(paths: list[str]) -> bool:
-    return all(is_docs_path(p) for p in paths)
+    """An empty change set is not docs-only: nothing proves the code is untouched."""
+    return bool(paths) and all(is_docs_path(p) for p in paths)
 
 
 def needles(path: str) -> set[str]:
@@ -116,6 +117,12 @@ def needles(path: str) -> set[str]:
     found.update("/".join(parts[:i]) + "/" for i in range(2, len(parts)))
     if parts[-1] != "README.md":
         found.add(parts[-1])
+    # A reader that builds the path from parts (`ROOT / "docs" / "blocks"`) names
+    # each component quoted. The top-level folder counts only when quoted, so a
+    # bare `docs/` in a comment still selects nothing.
+    if len(parts) > 1:
+        for name in parts if parts[-1] != "README.md" else parts[:-1]:
+            found.update((f'"{name}"', f"'{name}'"))
     return found
 
 

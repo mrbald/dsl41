@@ -101,17 +101,28 @@ def test_peer_refuses_outside_a_git_repo(tmp_path: Path) -> None:
     assert done.returncode == 65 and "git repo" in done.stderr
 
 
-def test_peer_runs_codex_with_the_documented_arguments(tmp_path: Path) -> None:
-    """A stub `codex` stands in; the call line and the extraction are checked."""
+def test_peer_refuses_a_zero_time_limit(tmp_path: Path) -> None:
+    brief = tmp_path / "brief.md"
+    brief.write_text(GOOD_BRIEF, encoding="utf-8")
+    done = peer(tmp_path, "m", str(brief), str(tmp_path / "out"), "0")
+    assert done.returncode == 64 and "above zero" in done.stderr
+
+
+STARTED = 'echo \'{"type":"thread.started","thread_id":"t-9"}\'\n'
+SAID_OK = 'echo \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n'
+
+
+def stub_codex(tmp_path: Path, body: str) -> tuple[Path, Path, dict[str, str]]:
+    """A git repo, a brief, and an environment whose `codex` is a stub running BODY.
+
+    The stub records its arguments in the file named by $SEEN and reads the brief.
+    """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     seen = tmp_path / "seen"
     stub = bin_dir / "codex"
     stub.write_text(
-        '#!/bin/sh\nprintf "%s\\n" "$@" > "$SEEN"\ncat > /dev/null\n'
-        'echo \'{"type":"thread.started","thread_id":"t-9"}\'\n'
-        'echo \'{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}\'\n',
-        encoding="utf-8",
+        '#!/bin/sh\nprintf "%s\\n" "$@" > "$SEEN"\ncat > /dev/null\n' + body, encoding="utf-8"
     )
     stub.chmod(0o755)
     brief = tmp_path / "brief.md"
@@ -120,6 +131,31 @@ def test_peer_runs_codex_with_the_documented_arguments(tmp_path: Path) -> None:
     repo.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "SEEN": str(seen)}
+    return repo, brief, env
+
+
+def test_peer_exits_71_when_codex_fails_after_an_agent_message(tmp_path: Path) -> None:
+    """An alarm kills Codex with 142; the interim message is kept but marked incomplete."""
+    repo, brief, env = stub_codex(tmp_path, STARTED + SAID_OK + "exit 142\n")
+    out = tmp_path / "out"
+    done = peer(repo, "gpt-x", str(brief), str(out), "60", env=env)
+    assert done.returncode == 71
+    assert "codex exited 142" in done.stderr and "incomplete" in done.stderr
+    assert (tmp_path / "out.md").read_text(encoding="utf-8") == "ok\n"
+
+
+def test_peer_removes_an_earlier_round_message(tmp_path: Path) -> None:
+    repo, brief, env = stub_codex(tmp_path, STARTED)
+    (tmp_path / "out.md").write_text("an earlier round\n", encoding="utf-8")
+    done = peer(repo, "gpt-x", str(brief), str(tmp_path / "out"), "60", env=env)
+    assert done.returncode == 70
+    assert not (tmp_path / "out.md").exists()
+
+
+def test_peer_runs_codex_with_the_documented_arguments(tmp_path: Path) -> None:
+    """A stub `codex` stands in; the call line and the extraction are checked."""
+    repo, brief, env = stub_codex(tmp_path, STARTED + SAID_OK)
+    seen = Path(env["SEEN"])
     out = tmp_path / "out"
     done = peer(repo, "gpt-x", str(brief), str(out), "60", env=env)
     assert done.returncode == 0, done.stderr
@@ -142,6 +178,8 @@ def test_peer_runs_codex_with_the_documented_arguments(tmp_path: Path) -> None:
         "resume",
         "t-9",
         "--json",
+        "-m",
+        "gpt-x",
         "-c",
         'model_reasoning_effort="high"',
         "-c",

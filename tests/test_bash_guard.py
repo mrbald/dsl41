@@ -77,6 +77,43 @@ def conflicted(tmp_path: Path) -> Path:
         "git push origin b -f",
         "git pull",
         "FOO=1 git pull --rebase",
+        # git options that hold "=" do not hide the command
+        "git -c user.name=x push --force origin b",
+        "git clean --exclude=foo -fdx",
+        # wrappers and an attached -C
+        "env git pull",
+        "env -u VIRTUAL_ENV git reset --hard",
+        "env -i A=1 git pull",
+        "command git pull",
+        "exec git pull",
+        "nice -n 5 git pull",
+        "caffeinate -i git pull",
+        "sudo -u me git pull",
+        "git -C. checkout x",
+        "git -Csub reset --hard",
+        "echo $(git pull)",
+        # quotes around a flag do not hide it
+        'git add "-A"',
+        "git add '--all'",
+        'git reset "--hard"',
+        # forced pushes: --force and a + refspec both override a lease
+        "git push origin +b",
+        "git push origin +HEAD:main",
+        "git push --force-with-lease origin +b",
+        "git push --force --force-with-lease origin b",
+        "git push --no-force-with-lease --force origin b",
+        "git push origin b:--force-with-lease --force",
+        # other ways to discard work or stage everything
+        "git switch --discard-changes main",
+        "git switch -f main",
+        "git restore --staged --worktree a.py",
+        "git restore -SW a.py",
+        "git add :/",
+        "git add *",
+        # a continued line is one command
+        "git push \\\n  --force origin b",
+        # a heredoc ends, and the next command is read
+        "cat > f.sh <<'EOF'\ngit status\nEOF\ngit pull",
     ],
 )
 def test_denied(command: str) -> None:
@@ -92,6 +129,15 @@ def test_denied(command: str) -> None:
         "git push origin --delete old",
         "git push origin :old",
         "gh pr merge 12 --rebase --delete-branch",
+        'git branch "-D" old',
+        "git branch --delete --force old",
+        "git branch -d -f old",
+        "git branch -df old",
+        "git -C. branch -D old",
+        'gh pr merge 12 "--delete-branch"',
+        "gh pr merge 5 -d --rebase",
+        "gh -R o/r pr merge 5 --delete-branch",
+        "gh --repo=o/r pr merge 5 --delete-branch",
     ],
 )
 def test_asked(command: str) -> None:
@@ -104,12 +150,30 @@ def test_asked(command: str) -> None:
     [
         "git status",
         "git push --force-with-lease --force-if-includes origin b",
-        "git push --force --force-with-lease origin b",
+        "git push --force-with-lease=b origin b",
         "git add src/a.py",
         'git commit -m "do not git checkout or git add -A"',
+        'git commit -m "first line\ngit checkout x\ngit add -A"',
+        "git commit -F - <<'EOF'\ngit checkout x\ngit pull\nEOF",
+        'git commit -F - <<"EOF"\ngit reset --hard\nEOF',
+        "cat > f.sh <<EOF\ngit pull\nEOF",
+        "cat > f.sh <<-EOF\n\tgit pull\n\tEOF\necho done",
         "git branch -d merged",
+        "git branch -f b HEAD",
         "gh pr merge 12 --rebase",
+        "gh -R o/r pr merge 12 --rebase",
         "echo hi",
+        "echo git pull",
+        "git clean -n",
+        "git clean -nd",
+        "git clean --dry-run -fdx",
+        "git restore --staged a.py",
+        "git restore -S a.py",
+        "git switch main",
+        "git switch -c new",
+        "git -c core.editor=true commit --author=a -m x",
+        "env -u VIRTUAL_ENV uv run pytest",
+        "git status 2>&1 | tail -3",
     ],
 )
 def test_allowed(command: str) -> None:
@@ -125,7 +189,15 @@ def test_other_tools_are_ignored() -> None:
 
 
 @pytest.mark.parametrize(
-    "command", ["git commit -m x", "git rebase --continue", "git cherry-pick --continue"]
+    "command",
+    [
+        "git commit -m x",
+        "git rebase --continue",
+        "git cherry-pick --continue",
+        "git commit --author=a -m x",
+        "git -c core.editor=true rebase --continue",
+        "env -u VIRTUAL_ENV git commit -m x",
+    ],
 )
 def test_unresolved_conflict_blocks_the_next_step(conflicted: Path, command: str) -> None:
     decision, reason = decide(command, conflicted)
