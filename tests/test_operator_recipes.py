@@ -35,6 +35,7 @@ import pytest
 import typer
 
 from dsl41.cli import app
+from dsl41.period import RETRY_HORIZON_S
 from test_nightbank_deploy import (
     DEPLOY,
     DRILL_LIB,
@@ -64,6 +65,10 @@ def _job(command: str) -> str:
     return f"\ninsert_job: {NEW}\njob_type: CMD\ncommand: {command}\nmachine: localhost\n"
 
 
+#: the recipes that are an Ansible play, fenced as YAML; the rest are POSIX shell
+PLAYS = {"cm-stop"}
+
+
 def _blocks() -> dict[tuple[str, str], str]:
     """Every marked block of the runbook: (kind, name) -> its body. The
     fence must open on the line after the marker; a name is used once."""
@@ -74,7 +79,7 @@ def _blocks() -> dict[tuple[str, str], str]:
         if match is None:
             continue
         kind, name = match.groups()
-        fence = "```sh" if kind == "recipe" else "```text"
+        fence = "```text" if kind == "diagram" else "```yaml" if name in PLAYS else "```sh"
         assert lines[number + 1] == fence, f"{RUNBOOK.name}:{number + 1}: no {fence} after it"
         end = lines.index("```", number + 2)
         assert (kind, name) not in found, f"{kind} {name} is marked twice"
@@ -282,8 +287,9 @@ RUN_BY_DRILL = {
     "retire-list",
 }
 #: compared, not run: the variables against the launcher, job-open against
-#: the engine unit's ExecStart (the stand-in runs that instead)
-COMPARED = {"operator-env", "job-open"}
+#: the engine unit's ExecStart (the stand-in runs that instead), and the
+#: configuration-management play against the units, the launcher and ss2b
+COMPARED = {"operator-env", "job-open", "cm-stop"}
 
 
 def test_every_recipe_is_run_or_compared() -> None:
@@ -294,9 +300,14 @@ def test_every_recipe_is_run_or_compared() -> None:
 
 
 def test_every_recipe_parses_as_shell() -> None:
+    """A play's own shell is each of its `shell: |` bodies."""
     for (kind, name), body in _blocks().items():
-        if kind == "recipe":
-            parsed = subprocess.run(["sh", "-n", "-c", body], capture_output=True, timeout=30)
+        if kind != "recipe":
+            continue
+        scripts = _play_scripts(body) if name in PLAYS else [body]
+        assert scripts, name
+        for script in scripts:
+            parsed = subprocess.run(["sh", "-n", "-c", script], capture_output=True, timeout=30)
             assert parsed.returncode == 0, name
 
 
@@ -507,6 +518,96 @@ def test_the_seal_recipe_restates_the_launchers_options_after_the_manifests_word
         *(line.format(verb="rehearse") for line in ESTATE_ARGS),
         'dsl41 rehearse "$@" -p "$PROPERTIES"',
     ]
+
+
+# ------------------------------------------------------------- the play
+
+
+def _play_tasks(body: str) -> list[str]:
+    """A play's tasks, each its own lines from its `- name:` on."""
+    tasks = re.split(r"^(?=    - name: )", body.split("\n  tasks:\n", 1)[1], flags=re.M)
+    return [task.rstrip("\n") + "\n" for task in tasks if task.strip()]
+
+
+def _play_scripts(body: str) -> list[str]:
+    """Each `shell: |` body of a play, its indent removed."""
+    found = re.findall(r"^( +)ansible\.builtin\.shell: \|\n((?:\1  .*\n)+)", body + "\n", re.M)
+    return [re.sub(rf"^{indent}  ", "", script, flags=re.M) for indent, script in found]
+
+
+def test_the_configuration_management_play_stops_with_the_verb_and_starts_the_units() -> None:
+    """DL-390, DL-398, DL-399: one play, its values the units' and the launcher's.
+    It never asks systemd to stop the supervisor unit (RefuseManualStop=yes). It
+    takes the reboot hold and stops the engine unit before the verb, which checks
+    both and performs neither (ss2b). The verb reruns on 2 and 3 and stops the
+    play on any other code, 4 above all; the retries cover the retry horizon and
+    the example estate's longest job. It starts the units, waits as wait-answers
+    does, then releases the hold, as the stop recipe orders it."""
+    body = recipe("cm-stop")
+    lines = body.splitlines()
+    assert lines[0].startswith("- name: ") and lines[1] == "  hosts: nightbank"
+    assert [line for line in lines if line.startswith("-")] == [lines[0]]  # one play
+    assert "roles:" not in body and "systemctl" not in body
+    play_vars = dict(re.findall(r"^    (\w+): (\S+)$", body.split("\n  tasks:\n", 1)[0], re.M))
+    engine, supervisor = UNITS
+    assert play_vars["launcher"] == _directive(engine, "Service", "ExecStart").split()[0]
+    assert {_directive(unit, "Service", "ExecStart").split()[0] for unit in UNITS} == {
+        play_vars["launcher"]
+    }
+    assert play_vars["service_account"] == _directive(engine, "Service", "User")
+    assert play_vars["engine_unit"] == engine == _launcher_value("ENGINE_UNIT")
+    assert play_vars["supervisor_unit"] == supervisor
+
+    tasks = _play_tasks(body)
+    names = [task.splitlines()[0].removeprefix("    - name: ") for task in tasks]
+    assert names == [
+        "Take the reboot hold",
+        "Stop the engine unit; the supervisor unit keeps running",
+        "Seal, audit and stop the supervisor with dsl41 estate quiesce",
+        "Placeholder for the site's patch step",
+        "Start the supervisor unit",
+        "Start the engine unit; it opens the sealed period's successor",
+        "Wait until the engine answers, as the wait-answers block does",
+        "Release the reboot hold",
+    ]
+    hold, stop, quiesce, patch, start_sup, start_eng, ready, release = tasks
+    loop = '      loop:\n        - "{{ %s }}"\n        - "{{ %s }}"\n'
+    assert "enabled: false" in hold and loop % ("engine_unit", "supervisor_unit") in hold
+    assert "enabled: true" in release and loop % ("supervisor_unit", "engine_unit") in release
+    assert 'name: "{{ engine_unit }}"\n        state: stopped' in stop
+    assert "state: stopped" not in body.replace(stop, "")
+    assert "ansible.builtin.debug:" in patch
+    assert 'name: "{{ supervisor_unit }}"\n        state: started' in start_sup
+    assert 'name: "{{ engine_unit }}"\n        state: started' in start_eng
+
+    (verb,) = _play_scripts(quiesce)
+    words = " ".join(verb.replace("\\\n", " ").split())
+    assert '"$LAUNCHER" vars' in words and 'eval "set -- $args $NEXT_PROFILE"' in words
+    assert (
+        '"$DSL41" estate args "$ESTATE/estate.toml" --for seal --environment "$ENVIRONMENT"'
+        in words
+    )
+    assert words.endswith(
+        '"$DSL41" estate quiesce --run-root "$RUN_ROOT" --estate-anchor "$ESTATE_ANCHOR"'
+        ' "$@" -p "$PROPERTIES"'
+    )
+    assert '      become_user: "{{ service_account }}"' in quiesce
+    assert "      until: quiesce.rc not in [2, 3]\n" in quiesce
+    assert "      failed_when: quiesce.rc != 0\n" in quiesce
+    longest = max(
+        float(seconds)
+        for path in (ROOT / "examples" / "nightbank" / "estate" / "small").glob("*.jil")
+        for seconds in re.findall(r"--sleep (\d+)", path.read_text())
+    )
+    waited = int(play_vars["quiesce_retries"]) * int(play_vars["quiesce_delay_s"])
+    assert waited >= RETRY_HORIZON_S + longest
+
+    (query,) = _play_scripts(ready)
+    assert query.splitlines()[-1] == '"$DSL41" query status --brief -S "$RUN_ROOT/control.sock"'
+    assert '      become_user: "{{ service_account }}"' in ready
+    wait = recipe("wait-answers")
+    assert f"$(seq {play_vars['ready_retries']})" in wait
+    assert f"sleep {play_vars['ready_delay_s']}\n" in wait
 
 
 # ------------------------------------------------------------- the diagrams

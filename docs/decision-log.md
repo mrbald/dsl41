@@ -24519,3 +24519,22 @@ relitigate an entry; append a new one.
   jobs' account would own ACTIVE); a launcher named by argument or environment; `status`
   exiting 3 on a record; comparing the bundle's digests with prepared.json (they hash the
   post-placeholder text, not the files).
+- DL-414 The supervisor unit keeps `RefuseManualStop=yes`; configuration management stops an
+  estate with `dsl41 estate quiesce` (2026-10-27; owner ruling; docs/deployment-runbook.md ss0
+  and ss8, deployment-qualification.md, README.md, tests/test_operator_recipes.py; design note
+  "RefuseManualStop: keep, drop, or reframe")
+  THE RULE. `RefuseManualStop=yes` stays on the supervisor unit (DL-390, DL-399). The supported
+  stop is `dsl41 estate quiesce` (DL-398). Configuration management runs the runbook's cm-stop
+  play: the reboot hold, the engine unit's stop, quiesce rerun on exit 2 and 3 and stopped on
+  any other, the site's patch, the start of both units, the readiness wait, the release of the
+  hold. Every job meets the interruption contract (authoring ss6.2, PR #213). Each play run
+  seals a period.
+  THE REASON. A supervisor stop by any route ends every running command with the TERM, grace,
+  KILL ladder and records the outcome; nothing survives a supervisor stop (DL-205). The guard
+  blocks one interrupter only, a manual or configuration-management `systemctl stop`, so the
+  interruption contract is the wider rule and the guard is a policy inside it. The convention
+  of a stateful service fits: a database is stopped for maintenance with its own stop verb.
+  REJECTED: dropping the guard with no drain: every patch night would kill mid-flight work, and
+  legacy jobs are not idempotent. A bounded drain on SIGTERM now: deferred to the
+  simplified-DSL direction, where it retires the guard; the supervisor stops admitting spawns,
+  waits for live runs within `TimeoutStopSec`, then runs the ladder.

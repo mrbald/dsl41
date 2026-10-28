@@ -423,3 +423,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-410 | A decompiled estate is a Python module that declares `estate()`, and `dsl41 build` renders it |  |
 | DL-411 | Slice 4 of DL-404's plan is built: one supported composition call and one packaged worker command |  |
 | DL-412 | The release train is the dsl41 verb group `dsl41 release prepare\|apply\|resume\|rollback\| status`; the example helper is gone | [README.md](../README.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/site-package.md](site-package.md) |
+| DL-414 | The supervisor unit keeps `RefuseManualStop=yes`; configuration management stops an estate with `dsl41 estate quiesce` |  |

@@ -58,6 +58,7 @@ engine, and the service drill runs it on a host.
 torn-opening recipe where `jq` is installed. The service drill (§3's worked example) runs the service, hold,
 sealed-check and retirement recipes as written; CI checks their content
 but does not run them. The variables block is compared with the launcher.
+The configuration-management play is checked by content; no drill runs it.
 
 ### Task index
 
@@ -68,6 +69,7 @@ but does not run them. The variables block is compared with the launcher.
 | configure identities, the execution profile, socket exposure and access | [the configure recipe](#recipe-configure-an-estate) |
 | add, change or remove a job | [the job recipe](#recipe-add-change-or-remove-a-job) |
 | stop, restart, seal or recover | [the stop recipe](#recipe-stop-restart-seal-and-recover) |
+| stop, patch and start from configuration management | [the configuration management recipe](#recipe-stop-patch-and-start-from-configuration-management) |
 | watch an estate | [what to watch](#what-to-watch) |
 | know the tested size and its limits | [capacity and limits](#capacity-and-limits) |
 | back up and restore | §2b |
@@ -608,6 +610,139 @@ it. It also drives the engine's own client through a supervisor outage
 that the engine outlives. That part edits the installed units for the
 drill only (`Wants=` for `Requires=` in the engine unit, `RestartSec=40`
 in the supervisor unit); it is not a supported configuration.
+
+### Recipe: stop, patch and start from configuration management
+
+A configuration-management play stops the estate with dsl41's own verb,
+never with `systemctl stop dsl41-supervisor.service`. The supervisor unit
+sets `RefuseManualStop=yes`, so systemd refuses a manual or
+configuration-management stop of it. A supervisor whose unit lacks that
+line refuses to start (§3; DL-390, DL-399). The guard keeps a routine stop
+from ending the commands the supervisor runs. The supported stop is
+`dsl41 estate quiesce`, run as the service account: it seals and audits
+the period, asks the supervisor for guarded maintenance, and refuses
+while a command still runs (§2b; DL-398).
+
+The verb never waits for a precondition. It exits 2 and names what to
+wait for, or exits 3 while an admitted maintenance still runs; the play
+runs it again for both. Its `delay` and `retries` cover the two waits a
+refusal names, one after the other: 30 s × 10 = 300 s. Size them for
+your estate's longest job.
+
+| Wait | Seconds | Source |
+| --- | --- | --- |
+| the closing period's retry horizon, from the last operator request | 60 | `RETRY_HORIZON_S` in `src/dsl41/period.py`; the verb's `horizon` stage (period-model §9; DL-398) |
+| the runs still live when the engine stops | 240 | the example estate's longest job, `OPS_SPOOL_C` (`--sleep 240`) in `examples/nightbank/estate/small/global.jil` |
+
+The play takes the reboot hold and stops the engine unit before the
+verb, because the verb checks these two root steps and performs neither
+(§2b). The hold keeps both units down through a reboot in the patch
+step. The play starts the units, waits until the engine answers, and
+then releases the hold, as the stop recipe's estate-stop bullet does. It
+reads every path from the launcher's `vars` mode; its own variables name
+the launcher, the units' `User=`, the two units and the waits. Each run
+seals the running period, and the start opens the next one (§6a). A
+patch that must not close a period follows the stop recipe's host-reboot
+bullet instead.
+
+<!-- recipe: cm-stop -->
+```yaml
+- name: Stop, patch and start a dsl41 estate
+  hosts: nightbank
+  become: true
+  vars:
+    launcher: /opt/dsl41/bin/dsl41-launch
+    service_account: dsl41
+    engine_unit: dsl41-engine.service
+    supervisor_unit: dsl41-supervisor.service
+    quiesce_delay_s: 30
+    quiesce_retries: 10
+    ready_delay_s: 1
+    ready_retries: 90
+  tasks:
+    - name: Take the reboot hold
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: false
+      loop:
+        - "{{ engine_unit }}"
+        - "{{ supervisor_unit }}"
+
+    - name: Stop the engine unit; the supervisor unit keeps running
+      ansible.builtin.systemd:
+        name: "{{ engine_unit }}"
+        state: stopped
+
+    - name: Seal, audit and stop the supervisor with dsl41 estate quiesce
+      become_user: "{{ service_account }}"
+      environment:
+        LAUNCHER: "{{ launcher }}"
+      ansible.builtin.shell: |
+        v=$("$LAUNCHER" vars) || exit 1
+        eval "$v"
+        ESTATE=$ESTATE_RELEASES/$(cat "$ACTIVE") || exit 1
+        args=$("$DSL41" estate args "$ESTATE/estate.toml" --for seal \
+            --environment "$ENVIRONMENT") || exit 1
+        eval "set -- $args $NEXT_PROFILE"
+        "$DSL41" estate quiesce --run-root "$RUN_ROOT" --estate-anchor "$ESTATE_ANCHOR" \
+            "$@" -p "$PROPERTIES"
+      register: quiesce
+      # 2 and 3 are reruns; 4 and 7 stop the play at once (DL-398, DL-401)
+      until: quiesce.rc not in [2, 3]
+      retries: "{{ quiesce_retries }}"
+      delay: "{{ quiesce_delay_s }}"
+      failed_when: quiesce.rc != 0
+
+    - name: Placeholder for the site's patch step
+      ansible.builtin.debug:
+        msg: Replace this task with the site's patch step.
+
+    - name: Start the supervisor unit
+      ansible.builtin.systemd:
+        name: "{{ supervisor_unit }}"
+        state: started
+
+    - name: Start the engine unit; it opens the sealed period's successor
+      ansible.builtin.systemd:
+        name: "{{ engine_unit }}"
+        state: started
+
+    - name: Wait until the engine answers, as the wait-answers block does
+      become_user: "{{ service_account }}"
+      environment:
+        LAUNCHER: "{{ launcher }}"
+      ansible.builtin.shell: |
+        v=$("$LAUNCHER" vars) || exit 1
+        eval "$v"
+        "$DSL41" query status --brief -S "$RUN_ROOT/control.sock"
+      register: answers
+      until: answers.rc == 0
+      retries: "{{ ready_retries }}"
+      delay: "{{ ready_delay_s }}"
+      changed_when: false
+
+    - name: Release the reboot hold
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+      loop:
+        - "{{ supervisor_unit }}"
+        - "{{ engine_unit }}"
+```
+
+When the play fails at the quiesce task, read the last `quiesce:` line
+of the task's output. It names the stage and the cause, and what the
+earlier stages made durable. A refusal that outlasts the retries is
+still a refusal: wait for what it names, or fix it, then run the play
+again. Exit 4 is an unknown outcome, and the play stops at once: read
+`maintenance.json`, the unit, the process and `supervisor.log` before
+anything else, and never run the play again blindly (§3). The play never
+passes `--force terminate`. When an operator passes it by hand, a host
+stop that arrives during that forced maintenance is held until the
+operation ends (§3; DL-401). When the play fails after the starts, do
+not run it again, since a rerun can seal the new period: read the engine
+unit's journal as the stop recipe's recovery bullets say, start the unit
+once the cause is fixed, then release the hold.
 
 ### Recipe: recover a rolled root whose opening is torn
 
@@ -2739,7 +2874,7 @@ speaks to the supervisor, not the engine, and leaves no WAL record.
 | --- | --- |
 | initial install, one host | §1 to §3 |
 | engine version upgrade | §7's questions pick one row. A `state_machine_version` change is always a new estate (period-model §2.1). A note that does not mark the release resume-safe, or is silent or unclear, opens the next period in a fresh run root at a boundary. A resume-safe release resumes the same root; it keeps the supervisor only when the note says the wrapper spec and the supervisor protocol did not change, and otherwise replaces both units together |
-| OS patching, host maintenance | `host drain` lets running work finish while the engine keeps leading (control-protocol §3). With one executor row the engine's own host is the executor, so patching that host is a stop and a resume (§3). A second executor is not built (DL-230): there is no flag for an `executor_id` (`--as-machine` names the machine identity only), and `journal` reads the one local executor |
+| OS patching, host maintenance | `host drain` lets running work finish while the engine keeps leading (control-protocol §3). With one executor row the engine's own host is the executor, so patching that host is a stop and a resume (§3). A window that configuration management drives stops the estate with [its play](#recipe-stop-patch-and-start-from-configuration-management). A second executor is not built (DL-230): there is no flag for an `executor_id` (`--as-machine` names the machine identity only), and `journal` reads the one local executor |
 | several estates on one host | each estate is its own run root, control socket, `serve` port and capacity pool; nothing is shared between them |
 | standby provisioning, readiness check | not built: follower mode and `standby check` (DL-230) |
 | estate decommission | §0's retirement procedure: disable the units, a final seal and audit, stop, keep the lineage under the site's retention decision, delete only whole sets (DL-268). There is no retire verb |
