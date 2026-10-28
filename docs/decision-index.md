@@ -425,3 +425,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-412 | The release train is the dsl41 verb group `dsl41 release prepare\|apply\|resume\|rollback\| status`; the example helper is gone | [README.md](../README.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/site-package.md](site-package.md) |
 | DL-413 | `dsl41 estate build` assembles the release directory from a manifest and its Python modules, and `dsl41 estate diff` compares two releases by the seal's... | [docs/authoring.md](authoring.md) |
 | DL-414 | The supervisor unit keeps `RefuseManualStop=yes`; configuration management stops an estate with `dsl41 estate quiesce` | [docs/deployment-runbook.md](deployment-runbook.md) |
+| DL-415 | Eleven workflow rules bind every agent session, and CI classifies a change as docs-only or code |  |

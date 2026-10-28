@@ -24577,3 +24577,32 @@ relitigate an entry; append a new one.
   legacy jobs are not idempotent. A bounded drain on SIGTERM now: deferred to the
   simplified-DSL direction, where it retires the guard; the supervisor stops admitting spawns,
   waits for live runs within `TimeoutStopSec`, then runs the ladder.
+- DL-415 Eleven workflow rules bind every agent session, and CI classifies a change as docs-only
+  or code (2026-10-28; owner ruling after a Fable and Astra round of four; CLAUDE.md "Workflow
+  rules", .github/workflows/ci.yml, scripts/prepush_checks.py, scripts/doc_deps.py,
+  scripts/worktree.sh, scripts/peer.sh, scripts/hooks/, .claude/settings.json,
+  tests/conftest.py `cli_env`)
+  THE RULE. CLAUDE.md ends with eleven rules: one open PR at a time, the tip of a merge train;
+  one branch, worktree and writing agent per slice, created by `scripts/worktree.sh`; CI runs
+  the suite only for a change outside `README.md`, `docs/**/*.md` and `examples/**/*.md`, and a
+  docs-only change runs the docs gate; deterministic checks run in hooks and the tracked
+  pre-push script; force pushes carry a lease; force deletes are asked; conflicts are resolved
+  apart from staging; CI reruns once for a diagnosed transient cause; CLI tests use `cli_env`;
+  a document rewrite runs `scripts/doc_deps.py`; a CLI model is called through
+  `scripts/peer.sh`. CI's `classify` job computes the changed paths against the pull request's
+  base or the pushed range and the suite jobs skip when every path is docs; a tag push, a
+  manual run, a call from release.yml, a rename, and a classify failure count as code. The
+  `docs` job runs the docs gate on every change: the four docs tests, every test file that
+  names a changed Markdown path, its folder below the top level, or its basename, and the
+  architecture gate. The matrix legs always start and skip per step, so the required check
+  names arrive.
+  THE REASON. Each rule names a mechanism rather than a memory: three CI failures on a stale
+  decision index, two pushes of conflict markers, two closed stacked pull requests, a false
+  coverage total, a repointed editable install and a codex run with no stdin each came from a
+  step an agent had to remember. A rule whose check a tool can run is a tool; the text keeps
+  only what no tool enforces. Classification in CI, with the suite jobs required, is the one
+  place a change that can move CI cannot pass without CI.
+  REJECTED: `[skip ci]` in commit messages with an admin merge: it leaves the required checks
+  unreported and trusts the author's classification. A job-level skip of the matrix job: a
+  skipped matrix reports one check and blocks the merge. A hook that runs pytest: every pytest
+  session rewrites the transition-hits file, so a hook would invalidate a coverage run.
