@@ -12,6 +12,7 @@ verbs live one file per domain (DL-137):
                     serve, supervise
     cli_estate.py   the period boundary and its surroundings: seal, audit, verify,
                     estate reclaim, estate prune, estate quiesce, estate args
+    cli_estate_build.py  the release an author hands over: estate build, estate diff
     cli_release.py  the release train: release prepare, apply, resume, rollback, status,
                     and the hidden release service the train runs through sudo
 
@@ -35,7 +36,15 @@ from __future__ import annotations
 
 import typer
 
-from dsl41 import cli_compile, cli_control, cli_estate, cli_release, cli_run, release_service
+from dsl41 import (
+    cli_compile,
+    cli_control,
+    cli_estate,
+    cli_estate_build,
+    cli_release,
+    cli_run,
+    release_service,
+)
 from dsl41.cli_common import stops_on_statechart_error as stops
 
 app = typer.Typer(
@@ -89,8 +98,9 @@ app.command(rich_help_panel="Periods and retention")(stops(cli_estate.verify))
 
 estate_app = typer.Typer(
     no_args_is_help=True,
-    help="Stop the estate, prune what retention allows, reclaim a stale claim, or print a"
-    " verb's arguments from the estate manifest (args).",
+    help="Stop the estate, prune what retention allows, reclaim a stale claim, print a"
+    " verb's arguments from the estate manifest (args), assemble a release directory (build),"
+    " or compare two releases (diff).",
     context_settings={"help_option_names": ["-h", "--help"]},
 )
 app.add_typer(estate_app, name="estate", rich_help_panel="Periods and retention")
@@ -98,6 +108,8 @@ estate_app.command("reclaim")(stops(cli_estate.estate_reclaim))
 estate_app.command("prune")(stops(cli_estate.estate_prune))
 estate_app.command("quiesce")(stops(cli_estate.estate_quiesce))
 estate_app.command("args")(cli_estate.estate_args)
+estate_app.command("build")(cli_estate_build.estate_build)
+estate_app.command("diff")(cli_estate_build.estate_diff)
 
 # the release train's verbs, their group and names in release_service (DL-412)
 release_app = typer.Typer(

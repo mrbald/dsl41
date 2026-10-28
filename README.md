@@ -372,7 +372,9 @@ def estate() -> CatalogBuilder:
 `dsl41 build` imports the module, which runs its code, so use it only on
 modules you trust. It calls `estate()`, lowers the JIL through the compiler,
 and writes it through a temporary file and a rename. `--check FILE` compares
-bytes and writes nothing; `--stdout` prints. `dsl41 run` and the run root
+bytes and writes nothing; `--stdout` prints. `dsl41 estate build DIR --emit
+jobs.jil=catalog.py -o OUT` assembles the release directory that `dsl41 release
+prepare` takes, with no Python in it. `dsl41 run` and the run root
 take JIL bytes only. In Python, the builder's `to_jil()` returns the JIL
 text, and its `build()` returns the in-process catalog.
 
@@ -589,6 +591,8 @@ The contract is
   and manifests, and writes its attestation. `verify` checks one.
 - `journal` replays a run's write-ahead log into the trace it produced,
   across period boundaries.
+- `estate diff OLD/estate.toml NEW/estate.toml` lists the jobs a release
+  adds, removes and changes by the seal classifier's test, before the window.
 - `estate prune` deletes what retention allows and refuses the rest.
   `--archive-inputs` writes an archive receipt, then deletes a period's
   inputs. That step is irreversible: the period can never be re-derived
@@ -900,8 +904,8 @@ CLI and scripts:
   order. The verbs live one module per domain: `cli_common.py` (shared
   options, the catalog loader, and the readings that turn an exception or a
   control answer into an exit code), `cli_compile.py`, `cli_run.py`,
-  `cli_control.py`, `cli_estate.py`, and `cli_release.py`, the release
-  verbs' command line.
+  `cli_control.py`, `cli_estate.py`, `cli_estate_build.py` (`estate build`
+  and `estate diff`), and `cli_release.py`, the release verbs' command line.
 - `src/dsl41/__main__.py`: `python -m dsl41`, which `serve` uses to spawn
   one `dsl41 ui` per browser session.
 - `src/dsl41/__init__.py`: the module map docstring. No exports.
@@ -1166,6 +1170,8 @@ Period boundary:
 - `tests/test_estate_manifest.py`: the manifest's refusals, each
   `estate args --for` form, and the printed arguments taken by `lint`,
   `rehearse`, and the `seal` and `run` parsers.
+- `tests/test_estate_build.py`: `estate build`'s release directory, its
+  refusals and `--check`, and `estate diff` in text and JSON.
 - `tests/test_restore_drill.py`: backup, delete, restore at the same path,
   and re-open over the nightbank estate.
 

@@ -22,6 +22,9 @@ checks on each input stay as a second line.
 The service side's reads of the run root are the deployment runbook's Day 2 reads (ss6a): the
 seal record at the end of a WAL segment and its sidecar, and the inputs that can move a job's
 hold, with their decisions.
+
+`manifest_catalog` and `catalog_changes` compare two releases for the apply, and two
+manifests for `estate diff` (DL-413).
 """
 
 from __future__ import annotations
@@ -41,7 +44,12 @@ import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from dsl41.ir import CatalogIR
 
 #: The release verbs' command group and names. Every operator line and the registration in
 #: cli.py are built from these, so a rename is one edit here (DL-412).
@@ -575,47 +583,95 @@ def manifest_args(cfg: Config, path: Path, verb: Any) -> list[str]:
         raise Stop(EXIT_REFUSED, f"{exc}.") from exc
 
 
+def manifest_catalog(
+    root: Path,
+    argv: list[str],
+    site: list[Path],
+    read: Callable[[Path], bytes] | None = None,
+) -> CatalogIR:
+    """The catalog that a manifest's viz arguments ARGV declare under ROOT, its own layers
+    first and the SITE layers after them. With READ, the loader reads a private copy of the
+    files and layers, each through READ; the SITE layers are read in place. A load that fails
+    exits as `load_catalog_or_exit_2` does. `service_changes` and `estate diff` load through
+    this one function (DL-412, DL-413)."""
+    from dsl41.cli_common import load_catalog_or_exit_2
+
+    files = [Path(word) for word in argv if not word.startswith("-")]
+    layers = [Path(argv[i + 1]) for i, word in enumerate(argv) if word == "-p"]
+    files = [file for file in files if file not in layers]
+    if read is None:
+        return load_catalog_or_exit_2(files, False, [*layers, *site])
+    with tempfile.TemporaryDirectory(prefix="dsl41-release-") as scratch:
+
+        def copied(file: Path) -> Path:
+            target = Path(scratch) / file.relative_to(root)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(read(file))
+            return target
+
+        loaded = [copied(file) for file in files]
+        stacked = [copied(layer) for layer in layers]
+        return load_catalog_or_exit_2(loaded, False, [*stacked, *site])
+
+
+#: The catalog's named collections, as `catalog_changes` reports them (DL-413).
+CATALOG_KINDS = {
+    "jobs": "jobs",
+    "calendars": "calendars",
+    "cycles": "cycles",
+    "resources": "resources",
+    "machines": "machines",
+    "globals": "globals_declared",
+    "external_instances": "external_instances",
+}
+
+
+def catalog_changes(old: CatalogIR, new: CatalogIR) -> dict[str, dict[str, list[str]]]:
+    """Per collection, the names NEW adds, removes and changes against OLD. A job is changed
+    when its fingerprint moves, the classifier's leaf test (period-model ss10.2); every other
+    entry by the same test on its own definition (DL-413)."""
+    from dsl41.period import definition_fingerprints, job_fingerprints
+
+    result = {}
+    for kind, field in CATALOG_KINDS.items():
+        if kind == "jobs":
+            was, now = job_fingerprints(old), job_fingerprints(new)
+        else:
+            was = definition_fingerprints(getattr(old, field))
+            now = definition_fingerprints(getattr(new, field))
+        result[kind] = {
+            "added": sorted(name for name in now if name not in was),
+            "removed": sorted(name for name in was if name not in now),
+            "changed": sorted(name for name in was if name in now and was[name] != now[name]),
+        }
+    return result
+
+
 def service_changes(cfg: Config, before: str, after: str) -> dict[str, Any]:
     """The jobs release AFTER changes or removes against release BEFORE, by the classifier's
     leaf test, a fingerprint of each resolved definition (period-model ss10.2)."""
     import typer
 
-    from dsl41.cli_common import load_catalog_or_exit_2
     from dsl41.estate_manifest import ArgsFor
-    from dsl41.period import job_fingerprints
 
-    prints = []
+    catalogs = []
     for name in (before, after):
         path = release_dir(cfg, name)
         require_sealed(cfg, name, path)
         release_inputs(cfg, path)
         argv = manifest_args(cfg, path, ArgsFor.viz)
-        files = [Path(word) for word in argv if not word.startswith("-")]
-        layers = [Path(argv[i + 1]) for i, word in enumerate(argv) if word == "-p"]
-        files = [file for file in files if file not in layers]
+
+        def read(file: Path, path: Path = path) -> bytes:
+            return read_input(path, file)
+
         # the loader reads from a private copy of the inputs, each read as a release input, so
         # a link planted after the check reads nothing outside the release (DL-412)
-        with tempfile.TemporaryDirectory(prefix="dsl41-release-") as scratch:
-            copy = Path(scratch)
-
-            def copied(file: Path, path: Path = path, copy: Path = copy) -> Path:
-                target = copy / file.relative_to(path)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(read_input(path, file))
-                return target
-
-            loaded = [copied(file) for file in files]
-            stacked = [copied(layer) for layer in layers]
-            try:
-                catalog = load_catalog_or_exit_2(loaded, False, [*stacked, Path(cfg.properties)])
-            except typer.Exit:
-                raise Stop(EXIT_STOPPED, f"{name} does not load; the error is above.") from None
-        prints.append(job_fingerprints(catalog))
-    old, new = prints
-    return {
-        "changed": sorted(job for job in old if job in new and old[job] != new[job]),
-        "removed": sorted(job for job in old if job not in new),
-    }
+        try:
+            catalogs.append(manifest_catalog(path, argv, [Path(cfg.properties)], read))
+        except typer.Exit:
+            raise Stop(EXIT_STOPPED, f"{name} does not load; the error is above.") from None
+    jobs = catalog_changes(*catalogs)["jobs"]
+    return {"changed": jobs["changed"], "removed": jobs["removed"]}
 
 
 def last_record(segment: Path) -> dict[str, Any] | None:

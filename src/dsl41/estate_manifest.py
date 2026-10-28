@@ -124,6 +124,19 @@ def load_manifest(path: Path) -> Manifest:
         raise ManifestError(
             f"{path}: give the manifest as an absolute path: the printed paths are hashed as given"
         )
+    manifest = parse_manifest(path)
+    _distinct(path, "files", manifest.files)
+    for env in [Environment(), *manifest.environments.values()]:
+        _distinct(path, "properties", [*manifest.properties, *env.properties])
+    if manifest.timezone_map is not None:
+        _join(path, manifest.timezone_map)
+    return manifest
+
+
+def parse_manifest(path: Path) -> Manifest:
+    """Parse and validate the manifest at `path` without looking for the files it names, or
+    raise ManifestError (DL-407). `estate build` reads a source directory with it, where an
+    emitted file does not exist yet (DL-413)."""
     try:
         raw = path.read_bytes()
     except OSError as exc:
@@ -143,12 +156,21 @@ def load_manifest(path: Path) -> Manifest:
         check_overrides(manifest.semantics)
     except ValueError as exc:
         raise ManifestError(f"{path}: semantics: {exc}") from exc
-    _distinct(path, "files", manifest.files)
-    for env in [Environment(), *manifest.environments.values()]:
-        _distinct(path, "properties", [*manifest.properties, *env.properties])
-    if manifest.timezone_map is not None:
-        _join(path, manifest.timezone_map)
     return manifest
+
+
+def manifest_names(path: Path, manifest: Manifest) -> list[str]:
+    """Every name the manifest at `path` gives, once each in first-mention order: the files,
+    the base layers, each environment's layers and the timezone map (DL-413). A name that is
+    absolute or has a `..` part is refused, as `load_manifest` refuses it."""
+    names = [*manifest.files, *manifest.properties]
+    for env in manifest.environments.values():
+        names += env.properties
+    if manifest.timezone_map is not None:
+        names.append(manifest.timezone_map)
+    for name in names:
+        _relative(path, name)
+    return list(dict.fromkeys(names))
 
 
 def _distinct(path: Path, key: str, names: list[str]) -> None:
@@ -161,12 +183,17 @@ def _distinct(path: Path, key: str, names: list[str]) -> None:
         seen.add(joined)
 
 
-def _join(path: Path, name: str) -> str:
-    """`name` joined to the manifest's directory, as the string every verb receives."""
+def _relative(path: Path, name: str) -> None:
+    """Refuse a name that is empty, absolute or has a `..` part (DL-407)."""
     if not name or Path(name).is_absolute() or ".." in Path(name).parts:
         raise ManifestError(
             f"{path}: {name!r} must be a path relative to the manifest, with no '..' part"
         )
+
+
+def _join(path: Path, name: str) -> str:
+    """`name` joined to the manifest's directory, as the string every verb receives."""
+    _relative(path, name)
     joined = path.parent / name
     if not joined.is_file():
         raise ManifestError(f"{path}: {name!r} is not a file under {path.parent}")

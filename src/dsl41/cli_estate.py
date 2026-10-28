@@ -4,7 +4,8 @@
 `audit` re-derives a closed period and writes its attestation, `verify` validates one;
 `estate reclaim` moves a stale successor claim out of the way and `estate prune` deletes what
 retention allows; `estate args` prints a verb's arguments from the estate manifest (DL-407).
-`cli.py` assembles the `estate` sub-app.
+`cli.py` assembles the `estate` sub-app, with `estate build` and `estate diff` from
+`cli_estate_build.py` (DL-413).
 """
 
 from __future__ import annotations
