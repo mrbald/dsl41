@@ -620,7 +620,12 @@ restart the supervisor unit while the engine unit keeps running, and the
 engine renew its lease on the new supervisor. It also drives the
 engine's own client through a longer outage: five failed renewals, then
 a renewal. That part sets `RestartSec=40` in the supervisor unit for the
-drill only; it is not a supported configuration.
+drill only; it is not a supported configuration. The `cm-stop` step runs
+the two plays below with `ansible-playbook`. The stop play runs with a job
+live and a 20 s drain bound, set for the drill only. The drill checks that
+the stop returns after the drain, the job ends at the bound, the engine
+stays up and holds a spawn, and the period stays open. The sealed play
+then runs with nothing live, and the drill checks that it seals the period.
 
 ### Recipe: stop, patch and start from configuration management
 

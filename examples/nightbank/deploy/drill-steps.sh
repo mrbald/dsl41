@@ -19,10 +19,11 @@
 # and restore of deployment-runbook ss2b, the signals of "What to watch",
 # the configure recipe,
 # the stop-and-recover recipe, a SIGKILL of the engine and of the
-# supervisor, the application's release train through `dsl41 release`, every
-# upgrade row of ss7 with its rollback, and ss0's retirement. The install,
-# the first start and the retirement run ss0's recipe blocks as the runbook
-# prints them (run_recipe).
+# supervisor, ss0's two configuration-management plays, the application's
+# release train through `dsl41 release`, every upgrade row of ss7 with its
+# rollback, and ss0's retirement. The install, the first start, the plays
+# and the retirement run ss0's recipe blocks as the runbook prints them
+# (run_recipe).
 # The two access-map refusals prove the same systemd claim as the changed
 # estate, and are pinned in tests/test_nightbank_deploy.py instead.
 set -euo pipefail
@@ -30,7 +31,7 @@ set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/drill-lib.sh"
 
 STEPS=(install first-start restart detached refusal sealed quiesce restore reboot
-    watch configure kill-engine kill-supervisor stop-recover
+    watch configure kill-engine kill-supervisor cm-stop stop-recover
     release release-rollback release-properties-only release-calendar-only
     release-concurrent release-interrupted
     upgrade-resume-safe upgrade-fresh-root upgrade-fresh-root-rollback
@@ -75,6 +76,8 @@ step_install() { # install dsl41, the nightbank estate, the launcher, the map an
             "$SCRATCH"/dist/dsl41-*.whl "$SCRATCH/exports" "$SCRATCH/bundle"
         python3.12 -m pip download --only-binary=:all: "dsl41==$OLD_VERSION" \
             --dest "$SCRATCH/historical-wheels"
+        python3.12 -m venv "$ANSIBLE"
+        "$ANSIBLE/bin/pip" install --quiet "ansible-core==$ANSIBLE_CORE"
     fi
     install_build base
     BUILD_A=$(tail -n 1 "$SCRATCH/prepare-base.log")
@@ -643,6 +646,179 @@ step_kill_supervisor() { # SIGKILL of the supervisor: restart, resume and lease 
     restore_units
     manual restart
     wait_up
+}
+
+# deployment-runbook ss0's two configuration-management plays, run by
+# ansible-playbook as the runbook prints them (DL-268, DL-416). cm-stop stops
+# the supervisor unit with a command live: the supervisor refuses SPAWN and
+# drains for DSL41_DRAIN_S, then TERMs what is left; the engine unit (Wants=)
+# stays up, holds the SPAWN the drain refuses and renews its lease; the
+# period stays open. A drill-only drop-in sets the bound to 20 s, so the
+# long job outlives it. cm-seal, with nothing live, seals the period through
+# `dsl41 estate quiesce`, and the start opens the next one.
+DRAIN_DROPIN=/etc/systemd/system/$SUPERVISOR.d/drill-drain.conf
+SUPERVISOR_EXIT=/var/lib/dsl41/drill-supervisor-exit
+cm_stop_cleanup() {
+    # a play still running is waited for: stopping it would leave the hold taken
+    if [ -n "${PLAY-}" ]; then
+        wait "$PLAY" || true
+        cat "$PLAY_LOG" || true
+    fi
+    sudo rm -f "$DRAIN_DROPIN"
+    sudo rmdir --ignore-fail-on-non-empty "$(dirname "$DRAIN_DROPIN")" 2>/dev/null || true
+    sudo systemctl daemon-reload || true
+}
+# the period the root is in: its newest segment
+current_period() { echo $(($(next_period "$ROOT") - 1)); }
+# the supervisor's own environment holds NAME=VALUE
+supervisor_env_has() { # supervisor_env_has NAME=VALUE
+    sudo cat "/proc/$(prop "$SUPERVISOR" MainPID)/environ" | tr '\0' '\n' |
+        grep -xF -- "$1" >/dev/null
+}
+# ROOT's supervisor.log after byte OFFSET has a line matching REGEX
+supervisor_says() { # supervisor_says OFFSET REGEX
+    sudo tail -c "+$(($1 + 1))" "$ROOT/supervisor.log" | grep -E -- "$2" >/dev/null
+}
+# LIST shows a live wrapper for JOB
+wrapper_live() { # wrapper_live JOB
+    cli supervise list --run-root "$ROOT" |
+        jq -e --arg job "$1" 'any(.runs[]; .job == $job and .wrapper_alive)' >/dev/null
+}
+# the lease moved past WAS while the supervisor still drains
+renewed_while_draining() { # renewed_while_draining WAS
+    lease_renewed_past "$1" && is_state "$SUPERVISOR" deactivating
+}
+step_cm_stop() { # the configuration-management plays: a drained stop, then a sealed stop
+    local drain=20 shipped was aligned t0 run short pids pid eng_pid eng_inv period seals
+    local exited stopping record status log_size
+    trap cm_stop_cleanup EXIT
+    PLAY_LOG=$SCRATCH/cm-stop.log
+    shipped=$(sed -n 's/^Environment=DSL41_DRAIN_S=//p' "/etc/systemd/system/$SUPERVISOR")
+    [ -n "$shipped" ] || fail "$SUPERVISOR sets no DSL41_DRAIN_S"
+    # the drill's bound takes effect at the supervisor's next start
+    wait_for 60 "nothing is live under the supervisor" nothing_live "$ROOT"
+    sudo install -d "$(dirname "$DRAIN_DROPIN")"
+    printf '[Service]\nEnvironment=DSL41_DRAIN_S=%s\n' "$drain" |
+        sudo tee "$DRAIN_DROPIN" >/dev/null
+    sudo systemctl daemon-reload
+    sudo systemctl restart "$SUPERVISOR"
+    wait_up
+    wait_for 60 "the engine holds the lease" lease_is_held
+    supervisor_env_has "DSL41_DRAIN_S=$drain" ||
+        fail "the supervisor's environment has no DSL41_DRAIN_S=$drain"
+    ok "the supervisor runs with DSL41_DRAIN_S=$drain (the unit ships $shipped)"
+    period=$(current_period)
+    seals=$(seal_count)
+    # The engine renews its lease every 20 s. The play starts 5 to 8 s after a
+    # renewal, so the next one falls inside the drain, after the stop began.
+    was=$(lease_field expires_at)
+    wait_for 30 "the lease renews" lease_renewed_past "$was"
+    aligned=$SECONDS
+    force_start "$LONG_JOB"
+    wait_for 8 "$LONG_JOB is RUNNING" job_is "$LONG_JOB" RUNNING
+    run=$(job_field "$LONG_JOB" run_number)
+    pids=$(pgrep -f "fakework $LONG_JOB") || fail "no $LONG_JOB process"
+    eng_pid=$(prop "$ENGINE" MainPID)
+    eng_inv=$(prop "$ENGINE" InvocationID)
+    log_size=$(supervisor_log_size "$ROOT")
+    as_dsl41 rm -f "$SUPERVISOR_EXIT"
+    ((SECONDS - aligned <= 8)) || fail "$LONG_JOB took $((SECONDS - aligned))s to start"
+    ((SECONDS - aligned >= 5)) || sleep $((5 - (SECONDS - aligned)))
+    # part 1: cm-stop, with $LONG_JOB live
+    t0=$(date +%s)
+    run_recipe --play cm-stop >"$PLAY_LOG" 2>&1 &
+    PLAY=$!
+    wait_for 15 "the play's stop leaves $SUPERVISOR draining" is_state "$SUPERVISOR" deactivating
+    was=$(lease_field expires_at)
+    [ -n "$was" ] || fail "the draining supervisor's LIST names no lease"
+    wait_for 10 "supervisor.log says the drain refuses SPAWN with a run live" supervisor_says \
+        "$log_size" '^supervisor: draining: SPAWN refused; [1-9][0-9]* live run\(s\)'
+    [ "$(prop "$ENGINE" MainPID)" = "$eng_pid" ] && is_state "$ENGINE" active ||
+        fail "the supervisor stop stopped the engine: $(prop "$ENGINE" ActiveState)"
+    wrapper_live "$LONG_JOB" || fail "LIST shows no live wrapper of $LONG_JOB in the drain"
+    for pid in $pids; do
+        sudo kill -0 "$pid" || fail "$LONG_JOB's $pid died at the supervisor stop"
+    done
+    job_is "$LONG_JOB" RUNNING || fail "in the drain: $LONG_JOB is $(job_status "$LONG_JOB")"
+    ok "$SUPERVISOR drains: $LONG_JOB runs on, and $ENGINE is up on pid $eng_pid"
+    short=$(job_field "$SHORT_JOB" run_number)
+    force_start "$SHORT_JOB"
+    wait_for 10 "the engine holds the SPAWN of $SHORT_JOB" \
+        journal_has "$ENGINE" "$t0" "dsl41: $SHORT_JOB: SPAWN held: "
+    wait_for 25 "the engine renewed its lease on the draining supervisor" \
+        renewed_while_draining "$was"
+    wait_for 60 "the drained supervisor exited" sudo test -s "$SUPERVISOR_EXIT"
+    exited=$(sudo stat -c %Y "$SUPERVISOR_EXIT")
+    [ "$(sudo cat "$SUPERVISOR_EXIT")" = 0 ] ||
+        fail "the drained supervisor exited $(sudo cat "$SUPERVISOR_EXIT"), not 0"
+    ((exited - t0 >= drain)) || fail "the supervisor exited $((exited - t0))s after the play began"
+    ((exited - t0 <= 60)) || fail "the supervisor took $((exited - t0))s to drain"
+    supervisor_says "$log_size" \
+        '^supervisor: drain ended: the bound passed with [1-9][0-9]* live run\(s\)' ||
+        fail "supervisor.log does not say the drain's bound passed"
+    ok "the supervisor exited 0, $((exited - t0))s after the play began, at the drain's bound"
+    # the play stops the engine only once the stop task returned
+    wait "$PLAY" || fail "the cm-stop play failed: $(tail -n 20 "$PLAY_LOG")"
+    PLAY=
+    cat "$PLAY_LOG"
+    stopping=$(journal_job_time "$ENGINE" "$t0" Stopping)
+    [ -n "$stopping" ] || fail "the $ENGINE journal has no Stopping line since the play began"
+    awk -v a="$stopping" -v b="$exited" 'BEGIN { exit !(a >= b) }' ||
+        fail "$ENGINE began stopping at $stopping, before the supervisor exited at $exited"
+    ok "$ENGINE stopped at $stopping, after the supervisor's exit at $exited"
+    # both units back, the hold released, the period open
+    is_state "$SUPERVISOR" active && is_state "$ENGINE" active ||
+        fail "after the play: $(prop "$SUPERVISOR" ActiveState), $(prop "$ENGINE" ActiveState)"
+    [ "$(prop "$ENGINE" InvocationID)" != "$eng_inv" ] || fail "the play did not restart $ENGINE"
+    assert_enablement enabled
+    wait_up
+    launch_line_since "$t0" | grep -q -- ' --resume$' || fail "the play's start was not a resume"
+    [ "$(current_period)" = "$period" ] ||
+        fail "the play moved the period from $period to $(current_period)"
+    [ "$(seal_count)" = "$seals" ] || fail "the play sealed"
+    [ "$(run_recipe --as-dsl41 watch-sealed ESTATE_ANCHOR="$ANCHOR")" = open ] ||
+        fail "the sealed check did not read open"
+    ok "both units are back and enabled; period $period is still open"
+    # the long job: cut at the bound, recorded TERMINATED, never run again
+    record=$ROOT/runs/$LONG_JOB.$run/status.json
+    status=$(sudo jq -c '{outcome, signal}' "$record") || fail "no $record"
+    [ "$(jq -r .outcome <<<"$status")" = signaled ] || fail "$record: $status"
+    (($(sudo stat -c %Y "$record") - t0 >= drain)) ||
+        fail "$record was written $(($(sudo stat -c %Y "$record") - t0))s after the play began"
+    wait_for 60 "the engine reads $LONG_JOB as TERMINATED" job_is "$LONG_JOB" TERMINATED
+    [ "$(job_field "$LONG_JOB" run_number)" = "$run" ] || fail "the play ran $LONG_JOB again"
+    ok "$LONG_JOB run $run: $status, written after the bound; the engine reads TERMINATED"
+    # the SPAWN held through the drain survives the engine's stop and runs (DL-416)
+    (wait_for 90 "the held $SHORT_JOB ran to SUCCESS after the play" \
+        ran_to_success "$SHORT_JOB" $((short + 1))) ||
+        fail "the held SPAWN of $SHORT_JOB is $(job_status "$SHORT_JOB")," \
+            "run $(job_field "$SHORT_JOB" run_number), not run $((short + 1)) in SUCCESS"
+    # the shipped bound again, from the supervisor's next start (cm-seal's)
+    sudo rm -f "$DRAIN_DROPIN"
+    sudo rmdir --ignore-fail-on-non-empty "$(dirname "$DRAIN_DROPIN")"
+    sudo systemctl daemon-reload
+    # part 2: cm-seal, with nothing live
+    wait_for 120 "nothing is live under the supervisor" nothing_live "$ROOT"
+    as_dsl41 rm -f "$SUPERVISOR_EXIT"
+    t0=$(date +%s)
+    run_recipe --play cm-seal >"$PLAY_LOG" 2>&1 ||
+        fail "the cm-seal play failed: $(tail -n 20 "$PLAY_LOG")"
+    cat "$PLAY_LOG"
+    [ "$(sudo cat "$SUPERVISOR_EXIT")" = 8 ] || fail "estate quiesce's supervisor did not exit 8"
+    [ "$(seal_count)" = $((seals + 1)) ] || fail "$(seal_count) seals in $ROOT, not $((seals + 1))"
+    is_state "$SUPERVISOR" active && is_state "$ENGINE" active ||
+        fail "after the play: $(prop "$SUPERVISOR" ActiveState), $(prop "$ENGINE" ActiveState)"
+    assert_enablement enabled
+    wait_up
+    launch_line_since "$t0" | grep -q -- ' --resume$' || fail "the opener was not a resume"
+    [ "$(current_period)" = $((period + 1)) ] ||
+        fail "the play left period $(current_period), not $((period + 1))"
+    [ "$(run_recipe --as-dsl41 watch-sealed ESTATE_ANCHOR="$ANCHOR")" = open ] ||
+        fail "the sealed check did not read open"
+    supervisor_env_has "DSL41_DRAIN_S=$shipped" ||
+        fail "the restarted supervisor's environment has no DSL41_DRAIN_S=$shipped"
+    ok "cm-seal sealed period $period and opened $((period + 1));" \
+        "both units are back, the drain bound ${shipped}s"
 }
 
 # The application's release train (DL-407): the deployment identity prepares,
