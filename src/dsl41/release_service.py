@@ -9,6 +9,16 @@ run option through `dsl41-launch vars`. A world-writable directory on the way to
 passes only when root owns it and its sticky bit is set, as sudo's secure-path rule has it
 (DL-412).
 
+The deployment identity never writes under a release, so no path check carries the trust
+(DL-412). ESTATE_RELEASES belongs to the service account, mode 0755. `prepare NAME DIR` has
+this side copy DIR, entry by entry through directory descriptors, refusing links and anything
+the deployment identity could not read itself, into NAME as the service account's own:
+directories 0555, files 0444, and .release 0755. It lints and rehearses that copy, and
+removes it on a refusal; `--requalify` and the receipts are this side's writes too. The
+deployment identity's apply record and lock live in .release beside ACTIVE. Every read
+refuses a release with an entry anyone else could change, and the real-path and no-follow
+checks on each input stay as a second line.
+
 The service side's reads of the run root are the deployment runbook's Day 2 reads (ss6a): the
 seal record at the end of a WAL segment and its sidecar, and the inputs that can move a job's
 hold, with their decisions.
@@ -23,11 +33,13 @@ import os
 import pwd
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -126,8 +138,18 @@ class Config:
         return str(self.run_root / "control.sock")
 
     @property
+    def state(self) -> Path:
+        """The deployment identity's own state, beside ACTIVE: the apply record and its lock;
+        it never writes under ESTATE_RELEASES (DL-412)."""
+        return self.active.parent / ".release"
+
+    @property
     def record(self) -> Path:
-        return self.releases / ".apply.json"
+        return self.state / "apply.json"
+
+    @property
+    def lock(self) -> Path:
+        return self.state / "apply.lock"
 
 
 def trusted(info: os.stat_result) -> bool:
@@ -195,12 +217,29 @@ def launcher() -> tuple[Path, str]:
     return path, b"".join(chunks).decode()
 
 
+#: the interpreters a launcher's first line may name, and how each runs the checked text
+INTERPRETERS = {
+    "#!/bin/sh": ["/bin/sh", "-s"],
+    "#!/bin/bash": ["/bin/bash", "-s"],
+    "#!/usr/bin/env bash": ["/usr/bin/env", "bash", "-s"],
+}
+
+
 def config() -> Config:
     """The launcher's variables; a launcher that cannot give one refuses, exit 2. The checked
-    text runs through `sh -s`, never the path (DL-412)."""
+    text runs, never the path, under the interpreter its first line names: /bin/sh, /bin/bash
+    or `/usr/bin/env bash`, and any other first line refuses (DL-412)."""
     path, text = launcher()
+    interpreter = INTERPRETERS.get(text.partition("\n")[0].strip())
+    if interpreter is None:
+        raise Stop(
+            EXIT_REFUSED,
+            f"{path} starts with {text.partition(chr(10))[0]!r}; it must name /bin/sh, /bin/bash"
+            " or `/usr/bin/env bash`.",
+            "ask the site package's owner to fix the launcher.",
+        )
     done = subprocess.run(
-        ["/bin/sh", "-s", "vars"], input=text, capture_output=True, text=True, check=False
+        [*interpreter, "vars"], input=text, capture_output=True, text=True, check=False
     )
     owner = "ask the site package's owner to fix the launcher's CONFIGURATION."
     if done.returncode != 0:
@@ -387,6 +426,8 @@ def release_inputs(cfg: Config, path: Path) -> list[Path]:
     named = [argv[i + 1] for i, word in enumerate(argv) if word in INPUT_FLAGS]
     files = [path / "estate.toml", *(Path(word) for word in named)]
     for file in files:
+        if ".release" in file.relative_to(path).parts:
+            raise Stop(EXIT_REFUSED, f"{file} is in .release, which holds no release input.")
         read_input(path, file)
     return files
 
@@ -435,6 +476,32 @@ def check_prepared(cfg: Config, name: str) -> None:
             f"{name}'s files changed since prepare: {', '.join(moved)}.",
             "prepare the fixed inputs under a new name.",
         )
+    require_sealed(cfg, name, path)
+
+
+def unsealed(cfg: Config, path: Path) -> list[str]:
+    """The entries of release PATH that anyone but root or the service account could change:
+    each belongs to one of them, an input is writable by no one, and .release, which holds
+    prepared.json and the receipts the service side writes, only by its owner (DL-412)."""
+    owners = {0, pwd.getpwnam(cfg.service_account).pw_uid}
+    found = []
+    for entry in [path, *path.rglob("*")]:
+        info = entry.lstat()
+        mask = 0o022 if ".release" in entry.relative_to(path).parts else 0o222
+        if info.st_uid not in owners or info.st_mode & mask:
+            found.append(str(entry.relative_to(path)) if entry != path else ".")
+    return sorted(found)
+
+
+def require_sealed(cfg: Config, name: str, path: Path) -> None:
+    found = unsealed(cfg, path)
+    if found:
+        raise Stop(
+            EXIT_REFUSED,
+            f"{name} is not sealed to the service account: {', '.join(found[:5])} can be"
+            " changed by others.",
+            f"run `{CMD_PREPARE} --requalify {name}` to seal it again.",
+        )
 
 
 # ------------------------------------------------------------- the service side
@@ -448,6 +515,7 @@ def service_check(cfg: Config, name: str) -> dict[str, Any]:
     from dsl41.period import CMD_GRACE_S
 
     path = release_dir(cfg, name)
+    require_sealed(cfg, name, path)
     release_inputs(cfg, path)
     lint = [cfg.dsl41, "lint", *manifest_args(cfg, path, ArgsFor.lint), "-p", cfg.properties]
     linted = subprocess.run(lint, capture_output=True, text=True, check=False)
@@ -494,6 +562,7 @@ def service_changes(cfg: Config, before: str, after: str) -> dict[str, Any]:
     prints = []
     for name in (before, after):
         path = release_dir(cfg, name)
+        require_sealed(cfg, name, path)
         release_inputs(cfg, path)
         argv = manifest_args(cfg, path, ArgsFor.viz)
         files = [Path(word) for word in argv if not word.startswith("-")]
@@ -665,6 +734,270 @@ def engine_job_name(word: str) -> bool:
     return True
 
 
+def caller() -> tuple[int, set[int]]:
+    """The deployment identity that ran sudo, by the uid and groups sudo records, or this
+    process when nothing ran it through sudo."""
+    uid = int(os.environ.get("SUDO_UID") or os.geteuid())
+    if "SUDO_UID" not in os.environ:
+        return uid, {os.getegid(), *os.getgroups()}
+    entry = pwd.getpwuid(uid)
+    return uid, set(os.getgrouplist(entry.pw_name, int(os.environ.get("SUDO_GID") or entry.pw_gid)))
+
+
+def readable_by(info: os.stat_result, who: tuple[int, set[int]]) -> bool:
+    """Whether WHO may read the entry, and search it when it is a directory."""
+    uid, groups = who
+    need = 0o5 if stat.S_ISDIR(info.st_mode) else 0o4
+    if info.st_uid == uid:
+        bits = info.st_mode >> 6
+    elif info.st_gid in groups:
+        bits = info.st_mode >> 3
+    else:
+        bits = info.st_mode
+    return bits & need == need
+
+
+def open_source(source: Path, who: tuple[int, set[int]]) -> int:
+    """SOURCE's directory descriptor, reached from / one component at a time without following
+    a link, each directory one the caller may search: the copy reads nothing the deployment
+    identity could not read itself (DL-412)."""
+    if not source.is_absolute():
+        raise Stop(EXIT_REFUSED, f"{source} is not an absolute path.")
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY
+    fd = os.open("/", flags)
+    try:
+        for part in source.parts[1:]:
+            if part in ("", ".", ".."):
+                raise Stop(EXIT_REFUSED, f"{source} must name its directory plainly.")
+            try:
+                inner = os.open(part, flags, dir_fd=fd)
+            except OSError as exc:
+                raise Stop(
+                    EXIT_REFUSED, f"{source} cannot be read as a release: {exc.strerror}."
+                ) from None
+            os.close(fd)
+            fd = inner
+            if not readable_by(os.fstat(fd), who):
+                raise Stop(EXIT_REFUSED, f"{source} is not readable by the deployment identity.")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def copy_tree(fd: int, target: Path, who: tuple[int, set[int]]) -> None:
+    """The tree under directory FD into TARGET, each entry opened relative to its directory's
+    descriptor without following a link, and readable by the caller."""
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    for entry in os.scandir(fd):
+        if entry.is_symlink():
+            raise Stop(EXIT_REFUSED, f"the release's inputs hold a symlink: {entry.name}.")
+        directory = entry.is_dir(follow_symlinks=False)
+        if not readable_by(entry.stat(follow_symlinks=False), who):
+            raise Stop(EXIT_REFUSED, f"{entry.name} is not readable by the deployment identity.")
+        try:
+            inner = os.open(entry.name, flags | (os.O_DIRECTORY if directory else 0), dir_fd=fd)
+        except OSError as exc:
+            raise Stop(EXIT_REFUSED, f"{entry.name} cannot be read: {exc.strerror}.") from None
+        try:
+            info = os.fstat(inner)
+            if not readable_by(info, who):
+                raise Stop(
+                    EXIT_REFUSED, f"{entry.name} is not readable by the deployment identity."
+                )
+            if directory:
+                os.mkdir(target / entry.name, 0o755)
+                copy_tree(inner, target / entry.name, who)
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise Stop(EXIT_REFUSED, f"the release's inputs hold a non-file: {entry.name}.")
+            with open(target / entry.name, "xb") as out:
+                while chunk := os.read(inner, 65536):
+                    out.write(chunk)
+                out.flush()
+                os.fsync(out.fileno())
+        finally:
+            os.close(inner)
+
+
+def install(cfg: Config, name: str, fd: int, target: Path) -> None:
+    """Copy the tree under FD to TARGET as the service account's: every input directory 0555
+    and every input file 0444; .release, for prepared.json and the receipts, 0755."""
+    who = caller()
+    os.mkdir(target, 0o755)
+    try:
+        copy_tree(fd, target, who)
+        (target / ".release").mkdir(exist_ok=True)
+        for directory, _, files in os.walk(target, topdown=False):
+            here = Path(directory)
+            if ".release" in here.relative_to(target).parts:
+                continue
+            for file in files:
+                (here / file).chmod(0o444)
+            here.chmod(0o555)
+        fsync_dir(cfg.releases)
+    except BaseException:
+        remove_tree(target)
+        raise
+
+
+def remove_tree(path: Path) -> None:
+    """A release the service side installed and refused or replaced."""
+    if not path.exists():
+        return
+    for directory, _, _ in os.walk(path):
+        Path(directory).chmod(0o755)
+    shutil.rmtree(path)
+
+
+def qualify(cfg: Config, name: str) -> dict[str, Any]:
+    """Lint and rehearse the installed release NAME, and hold it to the launcher's ceiling;
+    the check's record, or a refusal."""
+    check = service_check(cfg, name)
+    lines = []
+    if check["lint"]["exit"] != 0:
+        lines.append(f"lint exited {check['lint']['exit']}; its findings are above.")
+    elif check["rehearse"]["exit"] != 0:
+        lines.append(f"rehearse exited {check['rehearse']['exit']}; its error is above.")
+    elif check["jobs"] > cfg.max_jobs:
+        lines.append(
+            f"it holds {check['jobs']} jobs, above the site's ceiling of {cfg.max_jobs} (MAX_JOBS)."
+        )
+    if check["grace_s"] > cfg.max_grace_s:
+        lines.append(
+            f"the runtime's command grace, {check['grace_s']:g} s, is above the site's"
+            f" MAX_GRACE_S, {cfg.max_grace_s:g} s."
+        )
+        lines.append("every prepare refuses until that changes; ask the site package's owner.")
+    if lines:
+        raise Stop(EXIT_REFUSED, f"{name} is refused.", *lines)
+    return check
+
+
+def write_prepared(cfg: Config, name: str, source: str | None, check: dict[str, Any]) -> None:
+    path = cfg.releases / name
+    write_json(
+        path / ".release" / "prepared.json",
+        {
+            "name": name,
+            "source": source,
+            "prepared_at": datetime.now(UTC).isoformat(timespec="seconds"),
+            "prepared_by": os.environ.get("SUDO_USER") or pwd.getpwuid(os.geteuid()).pw_name,
+            "environment": cfg.environment,
+            "max_jobs": cfg.max_jobs,
+            "max_grace_s": cfg.max_grace_s,
+            "files": file_digests(path),
+            **check,
+        },
+    )
+    say(f"prepared {path}: {check['jobs']} jobs, under dsl41 {check['dsl41_version']}.")
+
+
+def service_prepare(cfg: Config, name: str, source: str) -> None:
+    """Install SOURCE as release NAME and check it, all as the service account: the
+    deployment identity never writes under a release. A refused release is removed, so its
+    name is free again (DL-412)."""
+    target = cfg.releases / checked_name(name)
+    if target.exists() or target.is_symlink():
+        if (target / ".release" / "prepared.json").is_file():
+            raise Stop(
+                EXIT_REFUSED,
+                f"{target} is prepared already, and a prepared name is installed once.",
+                "prepare the inputs under a new name.",
+            )
+        raise Stop(
+            EXIT_REFUSED,
+            f"{target} exists and is not prepared.",
+            f"run `{CMD_PREPARE} --requalify {name}` to check it in place, or prepare under a"
+            " new name.",
+        )
+    fd = open_source(Path(source), caller())
+    try:
+        if ".release" in os.listdir(fd):
+            raise Stop(
+                EXIT_REFUSED, f"{source} holds .release: give a release's inputs, not a release."
+            )
+        if "estate.toml" not in os.listdir(fd):
+            raise Stop(EXIT_REFUSED, f"{source} holds no estate.toml, so it is not a release.")
+        install(cfg, name, fd, target)
+    finally:
+        os.close(fd)
+    try:
+        check = qualify(cfg, name)
+    except BaseException as exc:
+        remove_tree(target)
+        if isinstance(exc, Stop):
+            raise Stop(
+                exc.code,
+                *exc.lines,
+                f"nothing is installed under {name}, so the name is free again.",
+            ) from exc
+        raise
+    write_prepared(cfg, name, source, check)
+
+
+def service_requalify(cfg: Config, name: str) -> None:
+    """The checks again on installed release NAME under this runtime, its files unchanged;
+    prepared.json is replaced only when they pass. A release not sealed to the service
+    account is copied to a sealed one and the old tree removed, its contents unchanged
+    (DL-412)."""
+    path = release_dir(cfg, name)
+    earlier = read_json(path / ".release" / "prepared.json")
+    if earlier is not None:
+        moved = changed_files(path, earlier)
+        if moved:
+            raise Stop(
+                EXIT_REFUSED,
+                f"{name}'s files changed since prepare: {', '.join(moved)}.",
+                "prepare the fixed inputs under a new name.",
+            )
+    if unsealed(cfg, path):
+        sealed, old = cfg.releases / f".{name}.sealed", cfg.releases / f".{name}.old"
+        for leftover in (sealed, old):
+            remove_tree(leftover)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
+        try:
+            install(cfg, name, fd, sealed)
+        finally:
+            os.close(fd)
+        path.rename(old)
+        sealed.rename(path)
+        fsync_dir(cfg.releases)
+        try:
+            remove_tree(old)
+        except OSError as exc:
+            say(f"the replaced tree stays at {old}: {exc.strerror}.")
+        say(f"{name} is sealed to the service account.")
+    try:
+        check = qualify(cfg, name)
+    except Stop as exc:
+        kept = "prepared.json is unchanged." if earlier else f"{name} stays unprepared."
+        raise Stop(exc.code, *exc.lines, kept) from exc
+    write_prepared(cfg, name, earlier.get("source") if earlier else None, check)
+
+
+#: the receipts the service side writes for the deployment identity, by kind (DL-412)
+RECEIPT_KINDS = ("applied", "refused", "verify-failed", "taken-over")
+
+
+def service_receipt(cfg: Config, name: str, kind: str, receipt_id: str) -> None:
+    """Write the receipt the deployment identity sends on stdin, one JSON object, as
+    NAME/.release/KIND-ID.json, and name an applied one in .release/latest: nothing under a
+    release is written by the deployment identity (DL-412)."""
+    path = release_dir(cfg, name)
+    text = sys.stdin.read(1 << 20)
+    try:
+        body = json.loads(text)
+    except ValueError:
+        raise Stop(EXIT_REFUSED, "the receipt is not JSON.") from None
+    if not isinstance(body, dict):
+        raise Stop(EXIT_REFUSED, "the receipt is not a JSON object.")
+    file = f"{kind}-{receipt_id}.json"
+    write_json(path / ".release" / file, body)
+    if kind == "applied":
+        write_text(path / ".release" / "latest", f"{file}\n")
+
+
 def service(words: list[str]) -> int:
     """`dsl41 release service ACTION WORD...`, as the service account only. Each read prints
     one JSON object; a seal exits with the seal's code; anything else refuses, exit 2."""
@@ -677,6 +1010,16 @@ def service(words: list[str]) -> int:
         )
     action, rest = (words[0], words[1:]) if words else ("", [])
     ids = [word for word in rest if REQUEST_ID.fullmatch(word)]
+    if action == "prepare" and len(rest) == 2:
+        service_prepare(cfg, rest[0], rest[1])
+        return EXIT_OK
+    if action == "requalify" and len(rest) == 1:
+        service_requalify(cfg, rest[0])
+        return EXIT_OK
+    if action == "receipt" and len(rest) == 3 and rest[1] in RECEIPT_KINDS:
+        if REQUEST_ID.fullmatch(rest[2]):
+            service_receipt(cfg, rest[0], rest[1], rest[2])
+            return EXIT_OK
     if action == "check" and len(rest) == 1:
         print(json.dumps(service_check(cfg, rest[0])))
         return EXIT_OK
@@ -696,6 +1039,7 @@ def service(words: list[str]) -> int:
         return EXIT_OK
     raise Stop(
         EXIT_REFUSED,
-        f"the service side takes check NAME, changes FROM TO, seal NAME ID, committed ID,"
-        f" holds JOB or pins ID, not {shlex.join(words) or 'nothing'}.",
+        "the service side takes prepare NAME DIR, requalify NAME, receipt NAME KIND ID, check"
+        " NAME, changes FROM TO, seal NAME ID, committed ID, holds JOB or pins ID, not"
+        f" {shlex.join(words) or 'nothing'}.",
     )

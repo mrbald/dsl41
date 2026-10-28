@@ -26,6 +26,8 @@ NIGHTBANK=/srv/dsl41/nightbank
 # the application's releases and the plain file naming the active one
 ESTATE_RELEASES=$NIGHTBANK/releases
 ACTIVE=$NIGHTBANK/active
+# the deployment identity's apply record and lock, beside ACTIVE (DL-412)
+APPLY_STATE=$NIGHTBANK/.release
 ENVIRONMENT=wargame
 # the release the install creates from the checkout's estate, and its path
 RELEASE=${DRILL_ESTATE:-small}-r1
@@ -741,19 +743,24 @@ infra_state() {
 }
 
 # The site's part of a release train that the service recipe leaves out: the
-# deployment identity and its group, and the releases directory and ACTIVE's
-# directory that group writes (the recipe installs the verbs' two sudo
-# grants; the verbs ship in dsl41). The second call changes nothing.
+# deployment identity and its group, the releases directory the service
+# account owns, and ACTIVE's directory that group writes (the recipe installs
+# the verbs' two sudo grants; the verbs ship in dsl41). The second call
+# changes nothing.
 release_identity() {
     getent group "$DEPLOY_GROUP" >/dev/null || sudo groupadd "$DEPLOY_GROUP"
     id "$DEPLOY_USER" >/dev/null 2>&1 ||
         sudo useradd -M -s /usr/sbin/nologin -g "$DEPLOY_GROUP" "$DEPLOY_USER"
     sudo test -f "$SUDOERS_GRANT" || fail "the service recipe did not install $SUDOERS_GRANT"
-    sudo install -d -m 0755 "$ESTATE_RELEASES"
-    sudo chown "$DEPLOY_USER:$DEPLOY_GROUP" "$ESTATE_RELEASES"
+    # ESTATE_RELEASES is the service account's: it installs each release as its own,
+    # and the deployment identity only reads it (DL-412)
+    sudo install -d -m 0755 -o dsl41 -g dsl41 "$ESTATE_RELEASES"
+    sudo chown dsl41:dsl41 "$ESTATE_RELEASES"
+    sudo chmod 0755 "$ESTATE_RELEASES"
     ! sudo test -e "$ACTIVE" || sudo chown "$DEPLOY_USER:$DEPLOY_GROUP" "$ACTIVE"
-    # the apply replaces ACTIVE by a rename in its directory; the sticky bit
-    # keeps every other entry there out of its reach
+    # the apply replaces ACTIVE by a rename in its directory, and keeps its
+    # record and lock there; the sticky bit keeps every other entry out of its
+    # reach
     sudo chgrp "$DEPLOY_GROUP" "$(dirname "$ACTIVE")"
     sudo chmod 1775 "$(dirname "$ACTIVE")"
 }

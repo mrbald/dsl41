@@ -50,8 +50,9 @@ _OPEN = typer.Option(
 #: the exit codes apply, resume and rollback share (DL-412)
 _APPLY_CODES = f"""
 Exit codes: 0 the release is active and every hold this apply took is
-off; 1 the release is active and some of its holds stay on, each printed
-with the command that takes it off; 2 refused: nothing was sealed, ACTIVE
+off; 1 done, and some holds this apply took stay on (the release is
+active, or a refusal sealed nothing), each printed with the command that
+releases it; 2 refused: nothing was sealed, ACTIVE
 is unchanged, this apply's holds are released and no apply stays recorded;
 3 stopped, with the apply recorded: `{CMD_STATUS}` says what
 `{CMD_RESUME}` will do; 4 the seal's outcome is unknown, with the apply
@@ -161,8 +162,9 @@ def estate_rollback(
     The target is the release the active release's latest receipt names, so a
     second rollback goes forward again. It prints the target before it acts.
     With an apply recorded whose new period opened, it takes that apply over:
-    it releases that apply's holds, writes its receipt, and rolls back to the
-    release it replaced.
+    it keeps that apply's holds, writes its receipt, and rolls back to the
+    release it replaced under them; the holds are released when that rollback
+    ends.
     """
     waits = release.Waits(drain_timeout, horizon_timeout, open_timeout)
     _run(lambda: release.rollback(waits), records=True)
