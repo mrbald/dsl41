@@ -24520,37 +24520,41 @@ relitigate an entry; append a new one.
   exiting 3 on a record; comparing the bundle's digests with prepared.json (they hash the
   post-placeholder text, not the files).
 - DL-413 `dsl41 estate build` assembles the release directory from a manifest and its Python
-  modules, and `dsl41 estate diff` compares two releases by the seal's classifier test
+  modules, and `dsl41 estate diff` compares two releases by the seal's definition test
   (2026-10-28; src/dsl41/cli_estate_build.py, src/dsl41/cli_common.py,
-  src/dsl41/release_service.py,
-  src/dsl41/estate_manifest.py, docs/authoring.md §6.1, README "DSL -> JIL (build)")
-  THE RULE. `estate build DIR -o OUT [--emit NAME=MODULE]... [--check]` reads DIR/estate.toml,
-  renders each emitted file through `dsl41 build`'s one loader, `cli_common.module_jil`, and
-  copies the manifest and every other file it names, layers and timezone map included, with
-  its name. It writes OUT.tmp, loads its
-  manifest for every declared environment, and renames it to OUT. It refuses with exit 2 a
-  named file that is missing in DIR and not emitted, an `--emit` that `files` does not name,
-  that repeats, or whose name DIR also holds (naming both), a symlink on a copied file's path, an OUT that exists and is not an empty
-  directory, a left-over OUT.tmp, and a module that does not render. `--check` builds in a
-  scratch directory, compares names and bytes with OUT, lists each difference and exits 1,
-  and writes nothing under OUT. No Python enters the release, and the manifest schema gains
-  no Python field. `estate diff OLD NEW [--environment E] [-p SITE]... [--format text|json]`
-  loads each catalog with its manifest's layers and then the site layers, through the loader
-  `service_changes` uses, `release_service.manifest_catalog`. A job is added, removed or
-  changed by `job_fingerprints`, the classifier's leaf test (period-model §10.2), so the
-  weekly review sees before the window what the seal will classify. Calendars, cycles,
-  resources, machines, globals and external instances are compared by the same test on their
-  own definitions. The profile is reported apart: the base zone (UTC when unset), the
-  timezone map's sha256, and each switch's effective value. It exits 0 with no difference, 1
-  with one, and 2 on a refusal. The release verbs' behaviour is unchanged.
+  src/dsl41/release_service.py, src/dsl41/estate_manifest.py, src/dsl41/classify.py,
+  docs/authoring.md §6.1, README "DSL -> JIL (build)")
+  THE RULE. Every manifest load reads estate.toml without following a symlink, as a regular
+  file, and refuses a name not in normal form (a `.` or `..` part, `//`, a `/` at either end)
+  and a `.py` file among `files` and the layers: no Python enters a release (DL-410).
+  `estate build DIR -o OUT [--emit NAME=MODULE]... [--check]` renders each emitted file through
+  `dsl41 build`'s loader, `cli_common.module_jil`, copies the manifest and every other file it
+  names with its name, each opened without following a symlink, writes OUT.tmp, loads its
+  manifest for every environment, renames it to OUT and syncs OUT's parent. It exits 2 on a
+  named file missing and not emitted; an `--emit` that `files` does not name, that repeats, or
+  whose name DIR also holds; a symlink on a copied path or an entry that is not a regular file;
+  an OUT that is not an empty directory or cannot be listed; a left-over OUT.tmp; a module that
+  does not render. `--check` builds in scratch, compares names and bytes with OUT through a
+  traversal that exits 2 on a directory it cannot list, exits 1 on a difference, and writes
+  nothing. `estate diff OLD NEW [--environment E] [-p SITE]... [--format text|json]
+  [--permit-unknown]` loads each catalog through `release_service.manifest_catalog`, the loader
+  `service_changes` uses, with the manifest's layers then the site's, and the manifest's profile:
+  base zone (UTC when unset), the alias table its map parses to, and its switches. It compares
+  them with `classify.node_values`, the seal's own test per node of period-model §10.2: jobs,
+  boxes, calendars, cycles, resources, machines, globals and external instances added, removed
+  or changed, the profile apart, and under each changed calendar and resource the jobs with an
+  edge to it (`ClassificationGraph.referrers`). The closure and the live classification
+  (running, armed, latent) stay the seal's. Exit 0 no difference, 1 a difference, 2 a refusal.
   THE REASON. The owner's ruling of 2026-10-27: the estate is maintained in Python, and the
   generated side stays thin. The design note "Decompile CLI: reconciled brainstorm" agreed the
-  handoff directory (D) and the diff for the release review (F). A diff that reported only the
-  three named kinds would exit 0 over a machine or global change.
-  REJECTED: a Python field in the manifest, or `dsl41 run` on a module (DL-410's reasons); a
-  second module loader for `estate build`; a second catalog loader for `estate diff`; an
-  absolute MANIFEST for `estate diff` (it hashes no path); removing a left-over OUT.tmp; an
-  emitted file winning over DIR's file of its name (one of the two would be silently dropped).
+  handoff directory (D) and the review diff (F). Review found a check passing over an
+  unreadable directory, a copied Python file, a manifest read through a link, two spellings of
+  one file, and whole-definition hashes reporting edits the seal ignores.
+  REJECTED: a Python field in the manifest, or `dsl41 run` on a module (DL-410); a second
+  module or catalog loader; whole-definition hashes for the non-job kinds; the dependency
+  closure in the diff (it needs the carried state); an absolute MANIFEST for `estate diff` (it
+  hashes no path); removing a left-over OUT.tmp; an emitted file winning over DIR's file of its
+  name (one of the two would be silently dropped).
 - DL-414 The supervisor unit keeps `RefuseManualStop=yes`; configuration management stops an
   estate with `dsl41 estate quiesce` (2026-10-27; owner ruling; docs/deployment-runbook.md ss0
   and ss8, deployment-qualification.md, README.md, tests/test_operator_recipes.py; design note

@@ -465,7 +465,8 @@ properties = ["prod.properties"]
 | `environments.NAME.properties` | no | The layers environment `NAME` applies after the base ones. |
 
 The order of `files` is part of the catalog's hash, so a reorder is a catalog change.
-Every name is a path relative to the manifest, with no `..` part, and names an existing file under the manifest's directory.
+Every name is a path relative to the manifest in normal form, with no `.` or `..` part, no `//` and no `/` at either end, and names an existing file under the manifest's directory.
+A catalog file or a layer may not be a `.py` file: no Python enters a release (DL-410, DL-413).
 dsl41 refuses an unknown key at any level, and a path that `files`, or the base and one environment's layers, name twice.
 `requires_dsl41` accepts only `>=`, and compares the leading integers of the version, so a pre-release or dev build of X counts as X.
 
@@ -498,9 +499,11 @@ It renders each `--emit` file as `dsl41 build` does, copies the manifest and eve
 It refuses a named file that is missing and not emitted, an `--emit` that `files` does not name or that is also a file in the directory, a symlink, and an `--out` that is not empty.
 No Python enters the release; `--check` compares with an existing directory and exits `1` on a difference.
 
-For the weekly release review, `dsl41 estate diff OLD/estate.toml NEW/estate.toml --environment prod -p SITE.properties` lists what the new release adds, removes and changes: jobs, calendars, cycles, resources, machines, globals and instances.
-A job counts as changed when the seal's classifier would count it changed, so the review sees the seal's answer before the window.
-The timezone, the timezone map and the semantic switches are listed apart.
+For the weekly release review, `dsl41 estate diff OLD/estate.toml NEW/estate.toml --environment prod -p SITE.properties` lists what the new release adds, removes and changes: jobs, boxes, calendars, cycles, resources, machines, globals and instances.
+It compares each record by the seal's own definition test, so a description edit on a machine is not a change.
+Under each changed calendar and resource it lists the jobs that name it.
+It does not follow a change through other records to the jobs it reaches, and it does not say whether a job is running, armed or latent: that classification is the seal's alone.
+The base zone, each timezone alias and each semantic switch are listed apart.
 It exits `0` with no difference and `1` with one; `--format json` prints one object for the ticket.
 
 ### 6.2. Write every job to survive interruption
