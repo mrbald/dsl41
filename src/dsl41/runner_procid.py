@@ -513,13 +513,14 @@ def _cmdline(pid: int) -> list[str] | None:
 
 
 def stop_helpers(members: set[int]) -> set[int]:
-    """The supervisor unit's ExecStop helper among `members`, with the `sleep` its wait loop
-    runs: exactly one process whose parent is PID 1 and whose argv is the launcher's
-    `supervisor-stop` mode (`dsl41-launch` ... `supervisor-stop`), and its `sleep` children.
-    A stop that overlaps maintenance keeps it in the unit's cgroup, and it is no residual
-    work (DL-416). With the helper found, a member that has left /proc since the cgroup was
-    read and is gone by kill(pid, 0), such as a `sleep` that ended, is counted with it. Two
-    such processes, or none, are no helper: an empty set."""
+    """The supervisor unit's ExecStop helper among `members`: exactly one process whose parent
+    is PID 1 and whose argv is the launcher's `supervisor-stop` mode (`dsl41-launch` ...
+    `supervisor-stop`). A stop that overlaps maintenance keeps it in the unit's cgroup, and
+    it is no residual work (DL-416). With the helper found, these count with it: every member
+    whose parent, field 4 of /proc/PID/stat, is the helper, in any state; every member in
+    state Z; and every member that has left /proc since the cgroup was read and is gone by
+    kill(pid, 0). Those are its wait loop's `sleep` children, running, ended unreaped, or
+    reaped. Two such helpers, or none, are no helper: an empty set."""
     helpers = []
     for pid in members:
         fields, argv = _linux_stat_fields(pid), _cmdline(pid)
@@ -532,14 +533,12 @@ def stop_helpers(members: set[int]) -> set[int]:
         return set()
     (helper,) = helpers
     found = {helper}
-    for pid in members:
-        fields, argv = _linux_stat_fields(pid), _cmdline(pid)
-        if fields is None or argv is None or len(fields) < 2 or fields[1] != str(helper):
-            continue
-        if argv and Path(argv[0]).name == "sleep":
-            found.add(pid)
     for pid in members - found:
-        if _linux_stat_fields(pid) is None and _gone(pid):
+        fields = _linux_stat_fields(pid)
+        if fields is None:
+            if _gone(pid):
+                found.add(pid)
+        elif fields[0] == "Z" or (len(fields) > 1 and fields[1] == str(helper)):
             found.add(pid)
     return found
 
