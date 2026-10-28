@@ -1965,6 +1965,18 @@ def test_the_launcher_runs_under_the_interpreter_its_first_line_names(
         assert "it must name /bin/sh, /bin/bash or `/usr/bin/env bash`." in shown.stderr
 
 
+def test_the_verbs_refuse_a_releases_directory_others_can_write(site: Site) -> None:
+    """DL-412: on the previous layout ESTATE_RELEASES was the deployment group's; the verbs
+    refuse it and name the fix."""
+    site.releases.chmod(0o775)
+    refused = site.run("status")
+    assert refused.returncode == 2
+    assert f"{site.releases} belongs to {ME} with mode 0775" in refused.stderr
+    assert f"run `chown {ME} {site.releases}` and `chmod 0755 {site.releases}` as root." in (
+        refused.stderr
+    )
+
+
 def test_a_launcher_without_the_verbs_vars_refuses(site: Site) -> None:
     text = site.launcher.read_text().replace('"ENGINE_UNIT=$ENGINE_UNIT"', "")
     site.launcher.write_text(text)
