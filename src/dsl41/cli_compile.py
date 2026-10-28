@@ -9,6 +9,8 @@ stated in `cli.py`.
 
 from __future__ import annotations
 
+import os
+from collections.abc import Callable
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
@@ -21,17 +23,21 @@ from dsl41.cli_common import (
     PROPERTIES,
     TIMEZONE_OPT,
     check_base_tz,
+    load_catalog_and_ast_or_exit_2,
     load_catalog_or_exit_2,
     load_tz_aliases,
+    module_builder,
     module_jil,
     parse_files_or_exit_2,
     refuse,
 )
-from dsl41.ir import CatalogIR
+from dsl41.ast_jil import JilFile
+from dsl41.ir import CatalogIR, LoweringError, lower_catalog
 from dsl41.lint import lint_catalog
 from dsl41.placeholders import PlaceholderError, load_properties, substitute
 
 if TYPE_CHECKING:  # type-only: equiv's runtime import stays deferred
+    from dsl41.dsl import CatalogBuilder
     from dsl41.minify import MinifyRefusal
     from dsl41.equiv import TierAResult, TierBCatalogResult, TierCResult
     from dsl41.viz import Direction
@@ -300,10 +306,112 @@ def uc(
         raise typer.Exit(1)
 
 
+def _decompile_package(
+    files: list[Path],
+    parsed: list[JilFile],
+    out: Path,
+    *,
+    disable: list[str],
+    report: list[str],
+    permit_unknown: bool,
+    params: dict[str, list[str]] | None,
+) -> Callable[[], CatalogBuilder]:
+    """Write the package under OUT and return a call that loads the written package and
+    returns its estate(), or exit 2 (DL-418)."""
+    from dsl41.dsl import DslError, decompile_package
+
+    names = [path.name for path in files]
+    folded = [name.casefold() for name in names]
+    repeated = [name for name, key in zip(names, folded) if folded.count(key) > 1]
+    if repeated:
+        # a case-insensitive file system holds one of `Feed.jil` and `feed.jil`
+        raise typer.Exit(
+            refuse(f"decompile refused: two inputs are named {' and '.join(repeated[:2])}")
+        )
+    alone: list[tuple[str, CatalogIR]] = []
+    for name, jil in zip(names, parsed):
+        try:
+            alone.append((name, lower_catalog([jil], permit_unknown=permit_unknown)))
+        except LoweringError as exc:
+            # lowering only adds the box tree check across files; a module builds its own boxes
+            raise typer.Exit(
+                refuse(
+                    exc,
+                    prefix=f"decompile refused: {name} does not lower alone, and one module per"
+                    " file keeps each box and its jobs in one file",
+                )
+            ) from exc
+    try:
+        sources = decompile_package(
+            alone, disable=disable, report=report, permit_unknown=permit_unknown, params=params
+        )
+    except DslError as exc:
+        raise typer.Exit(refuse(exc, prefix="decompile refused")) from exc
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        for file, source in sources.items():
+            _emit(source, out / file)
+    except OSError as exc:
+        raise typer.Exit(refuse(exc)) from exc
+
+    return lambda: module_builder(out)
+
+
+def _run_estate(source: str) -> CatalogBuilder:
+    """Run one emitted module's estate(). The module sits in sys.modules while it runs, so its
+    Params dataclass resolves its own module."""
+    import sys
+    import types
+
+    module = types.ModuleType("dsl41_decompiled")
+    sys.modules[module.__name__] = module
+    try:
+        exec(compile(source, "<decompiled>", "exec"), module.__dict__)  # noqa: S102
+        return module.estate()  # type: ignore[no-any-return]
+    finally:
+        del sys.modules[module.__name__]
+
+
+def _round_trip_check(
+    rebuild: Callable[[], CatalogBuilder], catalog: CatalogIR, permit_unknown: bool
+) -> None:
+    """Exit 1 when the emitted estate() does not rebuild CATALOG's canonical form (DL-37a)."""
+    from dsl41.equiv import catalog_hash, equivalent_tier_a
+
+    try:
+        rebuilt = rebuild().build(permit_unknown=permit_unknown)
+    except typer.Exit as exc:
+        # the loader printed why the written package does not load
+        typer.echo("round-trip check FAILED (a decompiler gap, not your input)", err=True)
+        raise typer.Exit(1) from exc
+    except Exception as exc:
+        typer.echo(
+            "round-trip check FAILED (a decompiler gap, not your input):"
+            f" the emitted module raised {type(exc).__name__}: {exc}",
+            err=True,
+        )
+        raise typer.Exit(1) from exc
+    if catalog_hash(rebuilt) != catalog_hash(catalog):
+        result = equivalent_tier_a(catalog, rebuilt)
+        divergence = "; ".join(f"{k}: {v}" for k, v in sorted(result.detail.items())) or (
+            "hash mismatch with no tier-a detail -- report this with the input"
+        )
+        typer.echo(
+            f"round-trip check FAILED (a decompiler gap, not your input): {divergence}",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+
 def decompile(
     files: list[Path] = CATALOG_FILES,
-    out: Path = typer.Option(
-        None, "--out", "-o", help="Write the Python module to this file instead of stdout."
+    out: str = typer.Option(
+        None,
+        "--out",
+        "-o",
+        help="Write the Python module to this file instead of stdout. A path that ends in /"
+        " or names a directory gets a package: one module per input file and an"
+        " __init__.py whose estate() composes them in the order given.",
     ),
     check: bool = typer.Option(
         True,
@@ -317,6 +425,12 @@ def decompile(
         help="Fold codes to disable, for example T-005. Repeatable;"
         " comma-separated lists accepted. 'dsl41 folds' lists the codes.",
     ),  # DL-38
+    params: bool = typer.Option(
+        False,
+        "--params",
+        help="Add a Params dataclass with one field per ~{$NAME}~ placeholder, and make"
+        " estate() take it. A field left None keeps its token.",
+    ),  # DL-418
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = typer.Option(
         None,
@@ -335,61 +449,62 @@ def decompile(
     catalog's canonical form equals the input's. With --check (the
     default), this command runs estate() and compares the two before you
     rely on it. The fold inventory and any construct left explicit are
-    reported on stderr.
+    reported on stderr. A package keeps each file's jobs in its own
+    module, folds within a file only, and leaves a condition on another
+    file's job as an explicit string; it refuses a box whose jobs are in
+    another file.
 
     Exit codes: 0 module written; 1 the check found a difference (the
     module is still written, and the difference is a decompiler bug
     worth reporting); 2 the input could not be read, parsed or lowered,
-    or the decompiler refused it (nothing to emit, or an unknown
-    --no-fold code).
+    or the decompiler refused it (nothing to emit, an unknown --no-fold
+    code, --params with -p, or a package from two files of one name or
+    a box split across files).
     """
-    from dsl41.dsl import DslError
+    from dsl41.dsl import DslError, placeholder_sites
     from dsl41.dsl import decompile as decompile_catalog
 
-    catalog = load_catalog_or_exit_2(files, permit_unknown, properties)
+    if params and properties:
+        raise typer.Exit(refuse("--params keeps the ~{$NAME}~ tokens, and -p binds them first"))
+    catalog, parsed, _ = load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)
+    sites = placeholder_sites(parsed) if params else None
+    disable = [code for chunk in no_fold for code in chunk.split(",")]
     fold_report: list[str] = []
-    try:
-        source = decompile_catalog(
-            catalog,
-            disable=[code for chunk in no_fold for code in chunk.split(",")],
+    target = None if out is None else Path(out)
+    rebuild: Callable[[], CatalogBuilder]
+    if target is not None and (out.endswith(("/", os.sep)) or target.is_dir()):
+        rebuild = _decompile_package(
+            files,
+            parsed,
+            target,
+            disable=disable,
             report=fold_report,
             permit_unknown=permit_unknown,
+            params=sites,
         )
-    except DslError as exc:
-        # a decompiler refusal is the same class as a lowering refusal: the input never became
-        # output (DL-37a)
-        raise typer.Exit(refuse(exc, prefix="decompile refused")) from exc
-    # Emit BEFORE checking (DL-37a): the module survives for inspection if the check fails.
-    _emit(source, out)
+    else:
+        try:
+            source = decompile_catalog(
+                catalog,
+                disable=disable,
+                report=fold_report,
+                permit_unknown=permit_unknown,
+                params=sites,
+            )
+        except DslError as exc:
+            # a decompiler refusal is the same class as a lowering refusal: the input never
+            # became output (DL-37a)
+            raise typer.Exit(refuse(exc, prefix="decompile refused")) from exc
+        # Emit BEFORE checking (DL-37a): the module survives for inspection if the check fails.
+        _emit(source, target)
+
+        def rebuild() -> CatalogBuilder:
+            return _run_estate(source)
+
     for line in fold_report:
         typer.echo(f"fold: {line}", err=True)
     if check:
-        from dsl41.equiv import catalog_hash, equivalent_tier_a
-
-        namespace: dict[str, object] = {"__name__": "<decompiled>"}
-        try:
-            exec(compile(source, "<decompiled>", "exec"), namespace)  # noqa: S102
-            rebuilt = namespace["estate"]().build(  # type: ignore[operator]
-                permit_unknown=permit_unknown
-            )
-        except Exception as exc:
-            typer.echo(
-                "round-trip check FAILED (a decompiler gap, not your input):"
-                f" the emitted module raised {type(exc).__name__}: {exc}",
-                err=True,
-            )
-            raise typer.Exit(1) from exc
-        assert isinstance(rebuilt, CatalogIR)
-        if catalog_hash(rebuilt) != catalog_hash(catalog):
-            result = equivalent_tier_a(catalog, rebuilt)
-            divergence = "; ".join(f"{k}: {v}" for k, v in sorted(result.detail.items())) or (
-                "hash mismatch with no tier-a detail -- report this with the input"
-            )
-            typer.echo(
-                f"round-trip check FAILED (a decompiler gap, not your input): {divergence}",
-                err=True,
-            )
-            raise typer.Exit(1)
+        _round_trip_check(rebuild, catalog, permit_unknown)
 
 
 def _jil_diff(current: bytes, data: bytes, fromfile: str, tofile: str) -> str:
@@ -430,24 +545,78 @@ def _write_atomic(target: Path, data: bytes) -> None:
         raise
 
 
+def _param_values(param: list[str]) -> dict[str, str] | None:
+    """Each `--param NAME=VALUE` as NAME to VALUE, None when none is given, or exit 2 (DL-418)."""
+    if not param:
+        return None
+    values: dict[str, str] = {}
+    for item in param:
+        name, sep, value = item.partition("=")
+        if not sep or not name:
+            raise typer.Exit(refuse(f"--param {item!r}: give NAME=VALUE, such as HOST=prod1"))
+        if name in values:
+            raise typer.Exit(refuse(f"--param {name}: given twice"))
+        values[name] = value
+    return values
+
+
+def _build_files(
+    module: Path, files: dict[str, bytes], out: Path | None, check: Path | None
+) -> None:
+    """Write each composed file under the directory OUT, or compare each with its namesake under
+    CHECK: exit 1 on a difference, 2 on a file that cannot be read or written (DL-418)."""
+    try:
+        if check is None:
+            assert out is not None
+            for name, data in files.items():
+                target = out / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                _write_atomic(target, data)
+                typer.echo(f"wrote {target}")
+            return
+        if not check.is_dir():
+            raise typer.Exit(
+                refuse(f"{module} declares {len(files)} files; --check takes a directory")
+            )
+        current = {name: (check / name).read_bytes() for name in files}
+    except OSError as exc:
+        raise typer.Exit(refuse(exc)) from exc
+    differs = [name for name, data in files.items() if current[name] != data]
+    for name in differs:
+        diff = _jil_diff(current[name], files[name], str(check / name), f"{module} {name}")
+        typer.echo(diff, nl=False)
+    if differs:
+        raise typer.Exit(1)
+    typer.echo(f"{check} matches {module}")
+
+
 def build(
     module: Path = typer.Argument(
-        ..., help="Python file that defines estate() and returns a CatalogBuilder."
+        ...,
+        help="Python file that defines estate() and returns a CatalogBuilder, or a package"
+        " directory whose estate() composes one module per JIL file.",
     ),
     out: Path = typer.Option(
         None,
         "--out",
         "-o",
-        help="Write the JIL to this file. It is replaced whole by a plain file;"
-        " a symlink there is replaced, not followed.",
+        help="Write the JIL to this file, or each composed file under this directory. A file"
+        " is replaced whole by a plain file; a symlink there is replaced, not followed.",
     ),
     check: Path = typer.Option(
         None,
         "--check",
-        help="Compare the JIL with this file instead of writing. A difference"
-        " prints a unified diff.",
+        help="Compare the JIL with this file, or each composed file with its namesake in this"
+        " directory, instead of writing. A difference prints a unified diff.",
     ),
     stdout: bool = typer.Option(False, "--stdout", help="Print the JIL instead of writing."),
+    param: list[str] = typer.Option(
+        [],
+        "--param",
+        metavar="NAME=VALUE",
+        help="Fill the ~{$NAME}~ placeholder through the module's Params, for a local check."
+        " Repeatable. A release binds placeholders through the manifest's layers.",
+    ),  # DL-418
     permit_unknown: bool = PERMIT_UNKNOWN,
 ) -> None:
     """Write the JIL that a Python module's estate() declares.
@@ -456,19 +625,26 @@ def build(
     on modules you trust. It calls estate(), parses and lowers the JIL
     through the compiler, and writes it. Give exactly one of --out,
     --check or --stdout. --out writes through a temporary file beside the
-    target and a rename. --check writes nothing.
+    target and a rename. --check writes nothing. When estate() composes
+    files, as a decompiled package does, the estate lowers whole, --out
+    and --check name a directory, and each file is written or compared
+    under its own name; --stdout prints the whole estate.
 
     Exit codes: 0 written, printed, or equal to the --check file; 1 the
     --check file differs; 2 MODULE could not be imported or has no
     estate(), estate() raised or returned something other than a
-    CatalogBuilder, its JIL did not lower, or a file could not be read
-    or written.
+    CatalogBuilder, its JIL did not lower, a --param does not fit the
+    module's Params, or a file could not be read or written.
     """
     if sum((out is not None, check is not None, stdout)) != 1:
         raise typer.Exit(refuse("give exactly one of --out, --check or --stdout"))
-    data = module_jil(module, permit_unknown)
+    rendered = module_jil(module, permit_unknown, _param_values(param))
+    data = rendered.whole
     if stdout:
         typer.echo(data.decode("utf-8"), nl=False)
+        return
+    if rendered.files:
+        _build_files(module, rendered.files, out, check)
         return
     try:
         if check is None:

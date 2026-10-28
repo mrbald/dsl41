@@ -12,10 +12,10 @@ import hashlib
 import json
 import os
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NoReturn
+from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn
 
 import typer
 
@@ -119,27 +119,36 @@ def load_catalog_or_exit_2(
 _EXIT_2_ERRORS = (JilParseError, LoweringError, PlaceholderError, OSError, UnicodeDecodeError)
 
 
-def _builder_from_module(module: Path) -> "CatalogBuilder":
+def module_builder(module: Path, params: "Mapping[str, str] | None" = None) -> "CatalogBuilder":
     """Import MODULE from its path and return what its estate() returns, or exit 2 (DL-410).
 
-    Until estate() returns, the module's directory leads sys.path, as it does for `python
-    MODULE`, so an estate may import its sibling modules, at import or inside estate(). Nothing
-    writes bytecode beside the source. The module is registered in sys.modules under a name no
-    real module has, so code that looks itself up there (a dataclass under postponed
-    annotations) works. Afterwards the module leaves sys.modules, and so does every module newly
-    imported through the directory's sys.path entry: a sibling file, or a sibling package and
-    its submodules. A later load in the same process then imports its own siblings. A module
-    found through another sys.path entry stays, even one below the directory, such as a
-    project's `.venv` or `src`."""
+    MODULE is a file or a package directory with an `__init__.py`, whose modules import each
+    other relatively (DL-418). Until estate() returns, the directory that holds MODULE leads
+    sys.path, as it does for `python MODULE`, so an estate may import its sibling modules, at
+    import or inside estate(). Nothing writes bytecode beside the source. The module is
+    registered in sys.modules under a name no real module has, so code that looks itself up
+    there (a dataclass under postponed annotations) works. Afterwards the module and its
+    submodules leave sys.modules, and so does every module newly imported through the
+    directory's sys.path entry: a sibling file, or a sibling package and its submodules. A later
+    load in the same process then imports its own siblings. A module found through another
+    sys.path entry stays, even one below the directory, such as a project's `.venv` or `src`.
+
+    With PARAMS, estate() is called with the module's `Params(**PARAMS)` (DL-418)."""
     import importlib.util
     import os
     import sys
 
     from dsl41.dsl import CatalogBuilder
 
-    spec = importlib.util.spec_from_file_location(
-        f"dsl41_build_{module.stem}_{os.getpid()}", module
-    )
+    name = f"dsl41_build_{module.name.replace('.', '_')}_{os.getpid()}"
+    if module.is_dir():
+        if not (module / "__init__.py").is_file():
+            raise typer.Exit(refuse(f"{module}: a directory with no __init__.py"))
+        spec = importlib.util.spec_from_file_location(
+            name, module / "__init__.py", submodule_search_locations=[str(module)]
+        )
+    else:
+        spec = importlib.util.spec_from_file_location(name, module)
     if spec is None or spec.loader is None:
         raise typer.Exit(refuse(f"{module}: not a Python source file"))
     loaded = importlib.util.module_from_spec(spec)
@@ -158,8 +167,9 @@ def _builder_from_module(module: Path) -> "CatalogBuilder":
         function = getattr(loaded, "estate", None)
         if not callable(function):
             raise typer.Exit(refuse(f"{module}: the module defines no estate() function"))
+        arguments = [] if params is None else [_params_value(module, loaded, params)]
         try:
-            builder = function()
+            builder = function(*arguments)
         except (Exception, SystemExit) as exc:
             raise typer.Exit(
                 refuse(f"{module}: estate() raised {type(exc).__name__}: {exc}")
@@ -167,17 +177,17 @@ def _builder_from_module(module: Path) -> "CatalogBuilder":
     finally:
         sys.dont_write_bytecode = write_bytecode
         sys.path.remove(str(directory))
-        for name in set(sys.modules) - known:
-            origin = getattr(sys.modules[name], "__file__", None)
-            top = directory / name.partition(".")[0]
-            if name == spec.name or (
+        for imported in set(sys.modules) - known:
+            origin = getattr(sys.modules[imported], "__file__", None)
+            top = directory / imported.partition(".")[0]
+            if imported.partition(".")[0] == spec.name or (
                 origin is not None
                 and (
                     Path(origin).resolve() == top.with_name(f"{top.name}.py")
                     or Path(origin).resolve().is_relative_to(top)
                 )
             ):
-                del sys.modules[name]
+                del sys.modules[imported]
     if not isinstance(builder, CatalogBuilder):
         raise typer.Exit(
             refuse(f"{module}: estate() returned {type(builder).__name__}, not a CatalogBuilder")
@@ -185,17 +195,46 @@ def _builder_from_module(module: Path) -> "CatalogBuilder":
     return builder
 
 
-def module_jil(module: Path, permit_unknown: bool) -> bytes:
+def _params_value(module: Path, loaded: object, params: "Mapping[str, str]") -> object:
+    """MODULE's `Params(**PARAMS)`, or exit 2 (DL-418)."""
+    factory = getattr(loaded, "Params", None)
+    if not isinstance(factory, type):
+        raise typer.Exit(refuse(f"{module}: --param needs a Params class, and there is none"))
+    try:
+        return factory(**params)
+    except TypeError as exc:
+        raise typer.Exit(refuse(f"{module}: --param does not fit Params: {exc}")) from exc
+
+
+class ModuleJil(NamedTuple):
+    """What a module's estate() declares, lowered once as one estate (DL-410, DL-418)."""
+
+    whole: bytes  # the estate's JIL
+    files: dict[str, bytes]  # each file's JIL when estate() composes files, else empty
+
+
+def module_jil(
+    module: Path, permit_unknown: bool, params: "Mapping[str, str] | None" = None
+) -> ModuleJil:
     """The JIL that MODULE's estate() declares, lowered through the compiler, or exit 2.
 
     `dsl41 build` and `estate build` both render a module through this one loader, which
-    imports MODULE once per call (DL-410, DL-413)."""
-    builder = _builder_from_module(module)
+    imports MODULE once per call (DL-410, DL-413). A composed estate lowers whole, and each of
+    its files renders apart (DL-418)."""
+    from dsl41.dsl import DslError
+
+    builder = module_builder(module, params)
     try:
         builder.build(permit_unknown=permit_unknown)
+        files = builder.file_jils()
     except (JilParseError, LoweringError) as exc:
         raise typer.Exit(refuse(exc, prefix=f"{module}: the built JIL does not lower")) from exc
-    return builder.to_jil().encode("utf-8")
+    except DslError as exc:
+        raise typer.Exit(refuse(exc, prefix=f"{module}")) from exc
+    return ModuleJil(
+        builder.to_jil().encode("utf-8"),
+        {name: text.encode("utf-8") for name, text in files.items()},
+    )
 
 
 def parse_files_or_exit_2(

@@ -209,6 +209,112 @@ def test_the_module_is_imported_once_by_each_verb_through_one_loader(tmp_path: P
     assert count.read_text() == "xxx"
 
 
+PACKAGE_INIT = """\
+from pathlib import Path
+
+from dsl41.dsl import CatalogBuilder
+
+from . import extract, load
+
+with Path(__file__).with_name("imports.txt").open("a") as handle:
+    handle.write("x")
+
+
+def estate() -> CatalogBuilder:
+    return CatalogBuilder.compose({"extract.jil": extract.estate(), "load.jil": load.estate()})
+"""
+
+
+def _package_source(base: Path) -> Path:
+    """The authoring directory with jobs.jil split in two files, each from one module of a
+    package whose __init__.py counts its imports (DL-418)."""
+    source = _source(base, MANIFEST.replace('"jobs.jil"]', '"extract.jil", "load.jil"]'))
+    package = source / "jobs"
+    package.mkdir()
+    (package / "__init__.py").write_text(PACKAGE_INIT)
+    for name, line in (
+        ("extract", 'b.job("extract", command="~{$ROOT}~/extract.sh", machine="m1")'),
+        (
+            "load",
+            'b.job("load", command="~{$ROOT}~/load.sh", machine="m1", condition="s(extract)")',
+        ),
+    ):
+        (package / f"{name}.py").write_text(
+            MODULE.split("    b.machine")[0]
+            + ("    b.machine('m1')\n" if name == "extract" else "")
+            + f"    {line}\n    return b\n"
+        )
+    return source
+
+
+def test_build_emits_each_file_of_a_package_and_imports_it_once(tmp_path: Path) -> None:
+    source = _package_source(tmp_path / "src")
+    package = source / "jobs"
+    out = tmp_path / "v1"
+    result = _invoke(
+        "estate", "build", str(source), "-o", str(out),
+        "--emit", f"extract.jil={package}", "--emit", f"load.jil={package}",
+    )  # fmt: skip
+    assert result.exit_code == 0, result.stderr
+    assert (package / "imports.txt").read_text() == "x"
+    files = _files(out)
+    assert sorted(files) == [
+        "calendars.jil",
+        "estate.toml",
+        "extract.jil",
+        "layers/base.properties",
+        "layers/prod.properties",
+        "load.jil",
+        "tz.map",
+    ]
+    assert files["load.jil"] == (
+        b"insert_job: load\njob_type: c\ncommand: ~{$ROOT}~/load.sh\nmachine: m1\n"
+        b"condition: s(extract)\n"
+    )
+    assert files["extract.jil"].startswith(b"insert_machine: m1\n")
+
+
+def test_build_imports_a_package_once_under_two_spellings_of_its_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _package_source(tmp_path / "src")
+    monkeypatch.chdir(source)
+    result = _invoke(
+        "estate", "build", str(source), "-o", str(tmp_path / "v1"),
+        "--emit", "extract.jil=jobs", "--emit", f"load.jil={source / 'jobs'}",
+    )  # fmt: skip
+    assert result.exit_code == 0, result.stderr
+    assert (source / "jobs" / "imports.txt").read_text() == "x"
+
+
+def test_build_refuses_a_name_the_package_does_not_compose(tmp_path: Path) -> None:
+    source = _package_source(tmp_path / "src")
+    for name in ("extract", "load"):
+        (source / f"{name}.jil").write_text(f"insert_job: {name}\njob_type: c\ncommand: x\n")
+    (source / "estate.toml").write_text(
+        MANIFEST.replace('"jobs.jil"]', '"extract.jil", "load.jil", "other.jil"]')
+    )
+    out = tmp_path / "v1"
+    result = _invoke(
+        "estate", "build", str(source), "-o", str(out), "--emit", f"other.jil={source / 'jobs'}"
+    )
+    assert result.exit_code == 2
+    assert (
+        f"--emit other.jil={source / 'jobs'}: {source / 'jobs'} composes extract.jil, load.jil"
+        in (result.stderr)
+    )
+    assert not out.exists()
+
+
+def test_build_refuses_param_because_the_layers_bind(tmp_path: Path) -> None:
+    source = _source(tmp_path / "src")
+    out = tmp_path / "v1"
+    result = _build(source, out, "--param", "ROOT=/opt/x")
+    assert result.exit_code == 2
+    assert "a release binds them through the manifest's layers" in result.stderr
+    assert not out.exists()
+
+
 def _layer_twice(source: Path) -> None:
     (source / "estate.toml").write_text(
         MANIFEST.replace(

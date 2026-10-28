@@ -33,12 +33,13 @@ Contracts (DL-17):
 
 from __future__ import annotations
 
+import dataclasses
 import keyword
 import re
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from typing import NamedTuple
 
-from dsl41.ast_jil import value_opens_comment
+from dsl41.ast_jil import JilFile, value_opens_comment
 from dsl41.conditions import (
     STATUS_LETTER,
     And,
@@ -219,6 +220,7 @@ class CatalogBuilder:
         self._declared: dict[str, bool] = {}  # job -> has explicit condition
         self._resourced: set[str] = set()  # jobs carrying a resources: attribute
         self._stmt_index: dict[str, int] = {}  # job -> index into _statements
+        self._files: dict[str, tuple[int, int]] = {}  # file -> its [start, stop) of _statements
 
     # ------------------------------------------------------------------ records
 
@@ -552,6 +554,86 @@ class CatalogBuilder:
             # unquote lanes for machine, resource and xinst too.
             return _check_value(key, f'"{rendered}"')
         return _check_value(key, rendered)
+
+    @classmethod
+    def compose(cls, files: Mapping[str, CatalogBuilder]) -> CatalogBuilder:
+        """One builder over several JIL files, in the mapping's order (DL-418).
+
+        Each value is one file's whole estate() result. `to_jil()` renders the estate and
+        `file_jils()` each file. A combinator called afterwards may amend any file's statements,
+        so wiring may cross files; a new statement belongs to no file and is refused there."""
+        if not files:
+            raise DslError("compose() needs at least one file")
+        whole = cls()
+        owner: dict[str, str] = {}
+        for name, part in files.items():
+            if not isinstance(part, CatalogBuilder):
+                raise DslError(f"compose() file {name!r} is a {type(part).__name__}")
+            parts = name.split("/")
+            if any(p in ("", ".", "..") for p in parts) or _CTRL_RE.search(name):
+                raise DslError(
+                    f"compose() file name {name!r} is not a relative name in normal form"
+                )
+            if part._box_stack or part._files:
+                raise DslError(f"compose() file {name!r} is inside a box context or composed")
+            for job in part._declared:
+                if job in owner:
+                    raise DslError(f"job {job!r} declared in {owner[job]} and in {name}")
+                owner[job] = name
+            offset = len(whole._statements)
+            whole._statements += part._statements
+            whole._declared |= part._declared
+            whole._resourced |= part._resourced
+            whole._stmt_index |= {job: offset + i for job, i in part._stmt_index.items()}
+            whole._files[name] = (offset, len(whole._statements))
+        return whole
+
+    def file_jils(self) -> dict[str, str]:
+        """Each composed file's JIL by name, in order; empty for a builder compose() did not make
+        (DL-418)."""
+        if self._files and max(stop for _, stop in self._files.values()) != len(self._statements):
+            raise DslError(
+                "a statement declared after compose() belongs to no file;"
+                " declare it in its file's estate()"
+            )
+        return {name: "\n".join(self._statements[a:b]) for name, (a, b) in self._files.items()}
+
+    def bind(self, params: object | None) -> CatalogBuilder:
+        """Fill each bound `~{$NAME}~` placeholder; an unbound one passes through (DL-418).
+
+        PARAMS is None, a dataclass instance or a mapping of NAME to a string or None; None binds
+        nothing. It is the text substitution `-p` runs before parsing (DL-19), so a value lands
+        as written, unescaped."""
+        from dsl41.placeholders import PlaceholderError, substitute
+
+        if params is None:
+            return self
+        if dataclasses.is_dataclass(params) and not isinstance(params, type):
+            values = {f.name: getattr(params, f.name) for f in dataclasses.fields(params)}
+        elif isinstance(params, Mapping):
+            values = dict(params)
+        else:
+            raise DslError(f"bind() takes a dataclass or a mapping, not {type(params).__name__}")
+        bindings: dict[str, str] = {}
+        for name, value in values.items():
+            if value is None:
+                continue
+            if not isinstance(value, str):
+                raise DslError(f"parameter {name!r} is a {type(value).__name__}, not a str")
+            bindings[name] = _check_ctrl(f"parameter {name}", value)
+
+        def fill(text: str) -> str:
+            try:
+                return substitute(text, bindings, permit_unresolved=True)[0]
+            except PlaceholderError as exc:
+                raise DslError(str(exc)) from exc
+
+        if bindings:
+            self._statements = [fill(statement) for statement in self._statements]
+            self._declared = {fill(job): v for job, v in self._declared.items()}
+            self._resourced = {fill(job) for job in self._resourced}
+            self._stmt_index = {fill(job): i for job, i in self._stmt_index.items()}
+        return self
 
     def to_jil(self) -> str:
         return "\n".join(self._statements)
@@ -1023,8 +1105,11 @@ def _fold_contends(
     return contends, resource_folded, notes
 
 
-def _explicit_reason(cond: Cond, jobs: Collection[str]) -> str:
-    """Reason class (DL-38) for a residual condition no fold claimed."""
+def _explicit_reason(
+    cond: Cond, jobs: Collection[str], elsewhere: Collection[str] | None = None
+) -> str:
+    """Reason class (DL-38) for a residual condition no fold claimed. ELSEWHERE, the jobs of a
+    package's other input files, splits an undefined job in two (DL-418)."""
     if isinstance(cond, (And, Or, Paren)):
         return "compound condition"
     if isinstance(cond, ExitCodeAtom):
@@ -1035,7 +1120,11 @@ def _explicit_reason(cond: Cond, jobs: Collection[str]) -> str:
         if cond.lookback is not None:
             return "lookback-qualified (Q2)"
         if cond.job.name not in jobs:
-            return "references an undefined job"
+            if elsewhere is None:
+                return "references an undefined job"
+            if cond.job.name in elsewhere:
+                return "references a job in another input file"
+            return "references a job in no input file"
         if cond.status == "NOTRUNNING":
             return "one-way or self n()"
         return "no qualifying chain or fan-out group"
@@ -1047,6 +1136,7 @@ def _explicit_notes(
     residual: dict[str, Cond | None],
     suppressed: set[str],
     noted: set[str],
+    elsewhere: Collection[str] | None,
 ) -> list[str]:
     """One note for every job whose residual condition stays explicit and has none yet
     (DL-38); the explicit-link worklist must be complete."""
@@ -1056,7 +1146,7 @@ def _explicit_notes(
         if cond is None or name in suppressed or name in noted:
             continue
         notes.append(
-            f"explicit: job {name!r} -- {_explicit_reason(cond, catalog.jobs)}"
+            f"explicit: job {name!r} -- {_explicit_reason(cond, catalog.jobs, elsewhere)}"
             f" ({cond_to_source(cond)})"
         )
     return notes
@@ -1144,6 +1234,7 @@ def _decompile_fold_wiring(
     graph: DerivedGraph,
     disabled: set[str],
     report: list[str] | None,
+    elsewhere: Collection[str] | None = None,
 ) -> list[str]:
     """Job and box emission, wiring, and the fold report (the `report` out-param).
 
@@ -1161,7 +1252,7 @@ def _decompile_fold_wiring(
     sched_vars, sched_defs = _fold_schedules(catalog, disabled)
     contends, resource_folded, contend_notes = _fold_contends(catalog, disabled)
     notes += contend_notes
-    notes += _explicit_notes(catalog, residual, suppressed, noted)
+    notes += _explicit_notes(catalog, residual, suppressed, noted, elsewhere)
 
     def emit_condition(name: str) -> Cond | None:
         return None if name in suppressed else residual[name]
@@ -1271,6 +1362,8 @@ def decompile(
     disable: Collection[str] = (),
     report: list[str] | None = None,
     permit_unknown: bool = False,
+    params: Mapping[str, Collection[str]] | None = None,
+    elsewhere: Collection[str] | None = None,
 ) -> str:
     """Emit a Python module whose estate() returns a builder for a catalog canonically equal to
     this one. Importing the module builds nothing; run as a script it prints the JIL (DL-410).
@@ -1279,7 +1372,11 @@ def decompile(
     header's `dsl41 build` hint carry it, so an estate with unknown attributes still renders.
 
     `disable` opts out of folds by code (FOLDS, DL-38); a bare string is one code and unknown
-    codes are refused. `report` collects the fold inventory and the explicit-link diagnostics."""
+    codes are refused. `report` collects the fold inventory and the explicit-link diagnostics.
+
+    `params`, placeholder name to the attributes it appears in (`placeholder_sites`), adds a
+    `Params` dataclass and makes the function `estate(params: Params | None = None)` (DL-418).
+    `elsewhere`, the jobs of a package's other files, names a reference to one in the report."""
     if isinstance(disable, str):  # a str is a Collection[str] of characters
         disable = (disable,)
     disabled = {code.strip().upper() for code in disable if code.strip()}
@@ -1301,16 +1398,13 @@ def decompile(
         graph = derive_graph(catalog)
     body = ["c = CatalogBuilder()"]
     body += _decompile_records(catalog)
-    body += _decompile_fold_wiring(catalog, graph, disabled, report)
-    body += ["", "return c"]
+    body += _decompile_fold_wiring(catalog, graph, disabled, report, elsewhere)
+    body += ["", "return c" if params is None else "return c.bind(params)"]
     flag = " --permit-unknown" if permit_unknown else ""
     lines: list[str] = [
         f"# Decompiled by dsl41 (phase 10). Write its JIL with: dsl41 build{flag} THIS_FILE"
         " -o FILE.jil",
-        "from dsl41.dsl import CatalogBuilder",
-        "",
-        "",
-        "def estate() -> CatalogBuilder:",
+        *_module_head(params),
         *(f"    {line}" if line else "" for line in body),
         "",
         "",
@@ -1323,3 +1417,155 @@ def decompile(
         "",
     ]
     return "\n".join(lines)
+
+
+# ------------------------------------------------------------- placeholders and packages
+
+
+def placeholder_sites(files: Iterable[JilFile]) -> dict[str, list[str]]:
+    """Each `~{$NAME}~` placeholder in FILES, sorted, with the attributes it appears in; a
+    statement's subject counts as its subcommand, such as `insert_job` (DL-418)."""
+    from dsl41.placeholders import PLACEHOLDER_RE
+
+    sites: dict[str, set[str]] = {}
+    for jil in files:
+        for stmt in jil.statements:
+            texts = [(stmt.subcommand.lower(), stmt.subject)]
+            if stmt.job_type_inline is not None:
+                texts.append(("job_type", stmt.job_type_inline))
+            texts += [(attr.key.lower(), attr.raw_value) for attr in stmt.attrs]
+            texts += [("date row", row) for row in stmt.date_lines]
+            for key, text in texts:
+                for name in PLACEHOLDER_RE.findall(text):
+                    sites.setdefault(name, set()).add(key)
+    return {name: sorted(sites[name]) for name in sorted(sites)}
+
+
+def _module_head(
+    params: Mapping[str, Collection[str]] | None, modules: Sequence[str] = ()
+) -> list[str]:
+    """The imports, MODULES as the package's own, and with PARAMS the `Params` dataclass: one
+    `str | None` field per placeholder, default None, under a comment naming the attributes
+    it binds; then the estate() line (DL-418)."""
+    if params is not None:
+        # a keyword cannot be a field; a leading `__` is name-mangled, so `Params(__X=...)`
+        # would not fit; a field named as a name the head reads shadows it, such as `str`
+        sample = "_SAMPLE_FIELD"
+        read = _names_read("\n".join([*_head_lines({sample: []}, modules), "    pass"]))
+        unfit = [
+            name
+            for name in params
+            if keyword.iskeyword(name) or name.startswith("__") or name in read - {sample}
+        ]
+        if unfit:
+            raise DslError(f"placeholder name(s) {', '.join(unfit)} cannot be Params fields")
+    return _head_lines(params, modules)
+
+
+def _head_lines(params: Mapping[str, Collection[str]] | None, modules: Sequence[str]) -> list[str]:
+    lines = ["from dataclasses import dataclass", ""] if params is not None else []
+    lines += ["from dsl41.dsl import CatalogBuilder", ""]
+    if modules:
+        lines += [*(f"from . import {module}" for module in modules), ""]
+    if params is None:
+        return [*lines, "", "def estate() -> CatalogBuilder:"]
+    lines += [
+        "",
+        "@dataclass(frozen=True)",
+        "class Params:",
+        '    """Values for the ~{$NAME}~ placeholders. A field left None keeps its token."""',
+    ]
+    for name, attributes in params.items():
+        lines += ["", f"    # binds {', '.join(attributes)}", f"    {name}: str | None = None"]
+    return [*lines, "", "", "def estate(params: Params | None = None) -> CatalogBuilder:"]
+
+
+def _names_read(source: str) -> set[str]:
+    """Every name SOURCE binds or reads: imports, definitions, arguments and loads."""
+    import ast
+
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, ast.alias):
+            names.add(node.asname or node.name)
+        elif isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.arg):
+            names.add(node.arg)
+    return names
+
+
+#: Names the package's __init__.py defines itself; a module named so gets the `jil_` prefix.
+_INIT_NAMES = frozenset({"CatalogBuilder", "Params", "dataclass", "estate", "files", "params"})
+
+
+def _module_names(files: Sequence[str]) -> list[str]:
+    """One distinct Python module name per JIL file name, from its stem (DL-418)."""
+    taken: set[str] = set()
+    names: list[str] = []
+    for file in files:
+        stem = file.rsplit("/", 1)[-1]
+        stem = stem[: -len(".jil")] if stem.lower().endswith(".jil") else stem
+        name = re.sub(r"\W", "_", stem, flags=re.ASCII)
+        if not name or name[0].isdigit() or name[0] == "_" or keyword.iskeyword(name):
+            name = f"jil_{name}"
+        if name in _INIT_NAMES:
+            name = f"jil_{name}"
+        # a case-insensitive file system holds one of `Feed.py` and `feed.py`
+        unique, n = name, 1
+        while unique.casefold() in taken:
+            n += 1
+            unique = f"{name}_{n}"
+        taken.add(unique.casefold())
+        names.append(unique)
+    return names
+
+
+def decompile_package(
+    files: Sequence[tuple[str, CatalogIR]],
+    *,
+    disable: Collection[str] = (),
+    report: list[str] | None = None,
+    permit_unknown: bool = False,
+    params: Mapping[str, Collection[str]] | None = None,
+) -> dict[str, str]:
+    """A package's sources by file name: one module per JIL file, then `__init__.py`, whose
+    estate() composes the modules' estates in FILES' order (DL-418).
+
+    FILES pairs each JIL file name with its catalog lowered alone, so a module builds its own
+    jobs and a condition on another file's job stays an explicit string. `params` puts the one
+    `Params` dataclass in `__init__.py`, whose estate() binds the composed builder."""
+    sources: dict[str, str] = {}
+    modules = _module_names([name for name, _ in files])
+    for (name, catalog), module in zip(files, modules):
+        lines: list[str] = []
+        elsewhere = {job for other, c in files if other != name for job in c.jobs}
+        sources[f"{module}.py"] = decompile(
+            catalog,
+            disable=disable,
+            report=lines,
+            permit_unknown=permit_unknown,
+            elsewhere=elsewhere,
+        )
+        if report is not None:
+            report += [f"{name}: {line}" for line in lines]
+    flag = " --permit-unknown" if permit_unknown else ""
+    entries = [
+        f"        {_py(name)}: {module}.estate()," for (name, _), module in zip(files, modules)
+    ]
+    composed = "CatalogBuilder.compose(files)"
+    sources["__init__.py"] = "\n".join(
+        [
+            f"# Decompiled by dsl41 (phase 10). Write its JIL with: dsl41 build{flag} THIS_PACKAGE"
+            " -o DIR",
+            *_module_head(params, modules),
+            "    files = {",
+            *entries,
+            "    }",
+            f"    return {composed}" if params is None else f"    return {composed}.bind(params)",
+            "",
+        ]
+    )
+    return sources

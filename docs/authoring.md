@@ -77,6 +77,27 @@ It lowers the JIL through the compiler before it writes.
    ```
 
 `dsl41 build` exits `2` when the module has no `estate()`, when it raises, when `estate()` returns something else, or when the JIL does not lower.
+
+An estate of several JIL files can be a package with one module per file (DL-418).
+Its `__init__.py` composes the modules in the manifest's `files` order:
+
+```python
+from dsl41.dsl import CatalogBuilder
+
+from . import calendars, eod
+
+
+def estate() -> CatalogBuilder:
+    files = {
+        "calendars.jil": calendars.estate(),
+        "eod.jil": eod.estate(),
+    }
+    return CatalogBuilder.compose(files)
+```
+
+`dsl41 build estate --out .` writes `calendars.jil` and `eod.jil`, and `dsl41 build estate --check .` compares both.
+The estate lowers as one catalog, so a job in `eod.jil` may name a job in `calendars.jil` in its condition.
+A job declared in two files is refused.
 Then use the [checks in §4](#4-check-the-estate).
 
 The [examples index](../examples/README.md) links the worked estates.
@@ -365,6 +386,36 @@ The [fidelity contract](jil-statement-syntax.md#fidelity-tests-normative) define
 
 Decompile the template JIL, with its `~{$NAME}~` placeholders, not a copy bound with `-p`.
 The module keeps placeholders as written, but it cannot recover them from bound values.
+`--params` adds a `Params` dataclass with one field per placeholder, and a comment above each field names the attributes it fills.
+`estate()` with no argument keeps every token.
+`dsl41 build estate.py --stdout --param HOST=prod1` fills `HOST` for a local look; a release fills placeholders through the manifest's layers, and `estate build` refuses `--param`.
+Decompile refuses a placeholder named as a Python keyword, starting with `__`, or named as a name the module itself uses, such as `str` or `Params`.
+
+Give several files, in the manifest's `files` order, and an output directory to get a package, one module per file ([§1](#1-write-jil-or-use-the-python-dsl)):
+
+1. Decompile the files.
+
+   ```sh
+   dsl41 decompile --params calendars.jil eod.jil -o estate/
+   ```
+
+2. Rewrite the JIL files once from the package.
+   They are equal to the inputs in canonical form, not byte for byte: the builder orders attributes its own way and drops comments.
+
+   ```sh
+   dsl41 build estate --out .
+   ```
+
+3. In CI, fail when a checked-in file is stale.
+
+   ```sh
+   dsl41 build estate --check .
+   ```
+
+Each module holds its own file's jobs and folds within that file.
+A condition on another file's job stays an explicit string.
+The package names each file by its base name, so a manifest name with a directory, such as `jobs/eod.jil`, does not fit it.
+Decompile refuses two inputs whose names differ only in case, and a box whose jobs are in another file.
 
 1. Decompile the input catalog.
 
@@ -495,6 +546,7 @@ It runs `estate args`, then `lint` and `rehearse` with the printed arguments and
 A manifest that `estate args` refuses fails that check, before the tag exists.
 
 When a file such as `eod.jil` comes from a Python module, `dsl41 estate build . --emit eod.jil=eod.py -o dist/v42` assembles the release directory, and `dsl41 release prepare v42 dist/v42` takes it (DL-413).
+With a package, `--emit eod.jil=estate` takes `eod.jil` from it; give one `--emit` per file the package renders.
 It renders each `--emit` file as `dsl41 build` does, copies the manifest and every other file it names, and loads the result for every environment.
 It refuses a named file that is missing and not emitted, an `--emit` that `files` does not name or that is also a file in the directory, a symlink, and an `--out` that is not empty.
 No Python enters the release; `--check` compares with an existing directory and exits `1` on a difference.
