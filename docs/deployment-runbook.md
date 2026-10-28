@@ -1224,6 +1224,24 @@ rm /etc/systemd/system/dsl41-engine.service /etc/systemd/system/dsl41-supervisor
    The launcher left in `/opt/dsl41/bin` starts nothing without a unit. A
    later estate on this host installs its own launcher and units (the
    service recipe).
+
+   Then remove the release train's sudoers grant, so the deployment
+   identity can no longer seal, prepare or start anything (DL-412). Keep a
+   copy with the others. The last line reads the grants the deployment
+   identity has left:
+
+<!-- recipe: retire-release -->
+```sh
+cp -p /etc/sudoers.d/dsl41-release "/srv/dsl41/retained/$(basename "$RUN_ROOT")"/
+rm /etc/sudoers.d/dsl41-release
+sudo -l -U nbdeploy
+```
+
+   It prints `User nbdeploy is not allowed to run sudo on <host>.` From then
+   on, each `dsl41 release` verb that needs the service account, such as
+   `prepare`, exits 2 with ``sudo did not run `…` as dsl41.`` and names
+   the missing grant. `dsl41 release status` only reads files, so it still
+   answers, with exit 0 and `engine: no answer on …`.
 5. Check that the estate stays stopped. These are read-only queries after
    the reload:
 
@@ -1245,8 +1263,11 @@ systemctl show -p LoadState -p ActiveState dsl41-supervisor.service
 6. Keep, under the site's retention decision: every run root the anchor's
    registry names, the anchor, the deployment inputs (the estate's tag,
    the properties, the access map and any timezone map, and the copies
-   above), and a venv of the state-machine version the periods ran (§7,
-   row 4). The retained history still audits:
+   above), the releases under `ESTATE_RELEASES`, `ACTIVE` with the
+   `.release/` beside it that holds the apply record and lock, and a venv
+   of the state-machine version the periods ran (§7, row 4). The
+   deployment identity and its group are the site's: they stay unless the
+   site removes them. The retained history still audits:
 
 <!-- recipe: retire-audit -->
 ```sh
