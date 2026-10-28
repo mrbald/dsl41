@@ -1195,8 +1195,42 @@ There is no retire verb. Retiring ends a lineage: nothing will open its
 next period. The procedure keeps the history by default; what to delete,
 and when, is the site's retention decision (§2a).
 
-1. Take §2b's reboot hold (`hold-down`: both units disabled), so a reboot
-   inside the procedure starts nothing. The units keep running. A
+1. As the deployment identity, read `dsl41 release status`. With an apply
+   recorded, run `dsl41 release resume` to its end, or
+   `dsl41 release rollback`, first
+   ([the job recipe](#recipe-add-change-or-remove-a-job)). Then remove the
+   release train's sudoers grant, so that no release verb can seal,
+   prepare or start anything as the service account or root during or
+   after the retirement (DL-412). Run the block in a root shell with
+   `RUN_ROOT` set, as in the operator variables. It keeps a copy of the
+   grant with the estate's other deployment inputs, as the record of what
+   the deployment identity could run; a later estate installs its own
+   grant through the service recipe, never from this copy. The last line
+   reads what the deployment identity may still run through sudo:
+
+<!-- recipe: retire-release -->
+```sh
+retained=/srv/dsl41/retained/$(basename "$RUN_ROOT")
+install -d -m 0755 /srv/dsl41/retained
+install -d -m 0700 "$retained"
+cp -p /etc/sudoers.d/dsl41-release "$retained"/
+rm /etc/sudoers.d/dsl41-release
+sudo -l -U nbdeploy
+```
+
+   No line it prints names `dsl41`. With no other grant, it prints
+   `User nbdeploy is not allowed to run sudo on <host>.` From then on,
+   `dsl41 release prepare`, with or without `--requalify`, exits 2 with
+   ``sudo did not run `…` as dsl41.`` and names the missing grant.
+   `apply`, `resume` and `rollback` refuse earlier, once the engine is
+   stopped, with `no engine answers on …`. `dsl41 release status` only
+   reads files, so it still answers, with exit 0. On a host where the
+   site package installed the grant and the units, keep them out of the
+   site package of the retired estate: a reinstall or an upgrade of it
+   installs them again.
+
+   Then take §2b's reboot hold (`hold-down`: both units disabled), so a
+   reboot inside the procedure starts nothing. The units keep running. A
    retirement never releases it.
 
 2. Hold the scheduled jobs, and let running work finish or end it (§6,
@@ -1224,24 +1258,6 @@ rm /etc/systemd/system/dsl41-engine.service /etc/systemd/system/dsl41-supervisor
    The launcher left in `/opt/dsl41/bin` starts nothing without a unit. A
    later estate on this host installs its own launcher and units (the
    service recipe).
-
-   Then remove the release train's sudoers grant, so the deployment
-   identity can no longer seal, prepare or start anything (DL-412). Keep a
-   copy with the others. The last line reads the grants the deployment
-   identity has left:
-
-<!-- recipe: retire-release -->
-```sh
-cp -p /etc/sudoers.d/dsl41-release "/srv/dsl41/retained/$(basename "$RUN_ROOT")"/
-rm /etc/sudoers.d/dsl41-release
-sudo -l -U nbdeploy
-```
-
-   It prints `User nbdeploy is not allowed to run sudo on <host>.` From then
-   on, each `dsl41 release` verb that needs the service account, such as
-   `prepare`, exits 2 with ``sudo did not run `…` as dsl41.`` and names
-   the missing grant. `dsl41 release status` only reads files, so it still
-   answers, with exit 0 and `engine: no answer on …`.
 5. Check that the estate stays stopped. These are read-only queries after
    the reload:
 
@@ -1265,9 +1281,12 @@ systemctl show -p LoadState -p ActiveState dsl41-supervisor.service
    the properties, the access map and any timezone map, and the copies
    above), the releases under `ESTATE_RELEASES`, `ACTIVE` with the
    `.release/` beside it that holds the apply record and lock, and a venv
-   of the state-machine version the periods ran (§7, row 4). The
-   deployment identity and its group are the site's: they stay unless the
-   site removes them. The retained history still audits:
+   of the state-machine version the periods ran (§7, row 4). `ACTIVE` and
+   `.release/` stay writable by the deployment identity. That is harmless
+   once the grant is gone: no unit runs the launcher that reads `ACTIVE`,
+   and no release verb reaches the service account. The deployment
+   identity and its group are the site's: they stay unless the site
+   removes them. The retained history still audits:
 
 <!-- recipe: retire-audit -->
 ```sh

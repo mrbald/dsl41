@@ -1111,6 +1111,23 @@ step_retire() { # retirement: the estate stays stopped after its units go, the h
     ROOT=$NEW_ROOT
     ANCHOR=$NEW_ROOT.anchor
     SOCK=$ROOT/control.sock
+    retained=/srv/dsl41/retained/${ROOT##*/}
+    # the release train goes first: with no apply recorded, the grant is
+    # removed, so no release verb can seal, prepare or start anything as the
+    # service account or root during the retirement (DL-412)
+    out=$(deploy status)
+    grep -qx 'recorded apply: none.' <<<"$out" || fail "an apply is recorded: $out"
+    out=$(run_recipe retire-release RUN_ROOT="$ROOT")
+    echo "$out"
+    grep -qx "User $DEPLOY_USER is not allowed to run sudo on .*" <<<"$out" ||
+        fail "retire-release printed: $out"
+    ! sudo test -e "$SUDOERS_GRANT" || fail "$SUDOERS_GRANT survived the retirement"
+    sudo test -f "$retained/${SUDOERS_GRANT##*/}" || fail "no copy of the grant in $retained"
+    out=$(deploy prepare --requalify "$RELEASE" 2>&1) && fail "dsl41 release reached its service side"
+    grep -qF "sudo did not run \`$DSL41 release service\` as dsl41." <<<"$out" ||
+        fail "the requalify refused for another reason: $out"
+    deploy status >/dev/null || fail "dsl41 release status does not read the estate"
+    ok "the release grant is gone: prepare refuses at sudo, status still reads"
     assert_enablement enabled
     take_hold
     for unit in "$ENGINE" "$SUPERVISOR"; do
@@ -1132,21 +1149,9 @@ step_retire() { # retirement: the estate stays stopped after its units go, the h
     assert_units_stay_stopped
     is_state "$ENGINE" failed || fail "$ENGINE: $(prop "$ENGINE" ActiveState)"
     run_recipe retire-remove RUN_ROOT="$ROOT"
-    retained=/srv/dsl41/retained/${ROOT##*/}
     for unit in "$ENGINE" "$SUPERVISOR" dsl41-launch nightbank-access.toml; do
         sudo test -f "$retained/$unit" || fail "no copy of $unit in $retained"
     done
-    # the release train's grant goes after the units: the deployment identity
-    # can no longer seal, prepare or start anything (DL-412)
-    out=$(run_recipe retire-release RUN_ROOT="$ROOT")
-    echo "$out"
-    grep -qx "User $DEPLOY_USER is not allowed to run sudo on .*" <<<"$out" ||
-        fail "retire-release printed: $out"
-    ! sudo test -e "$SUDOERS_GRANT" || fail "$SUDOERS_GRANT survived the retirement"
-    sudo test -f "$retained/${SUDOERS_GRANT##*/}" || fail "no copy of the grant in $retained"
-    ! deploy prepare --requalify "$RELEASE" || fail "dsl41 release reached its service side"
-    deploy status >/dev/null || fail "dsl41 release status no longer reads the retired estate"
-    ok "the release grant is gone: the deployment identity's verbs refuse, status still reads"
     out=$(run_recipe retire-check)
     echo "$out"
     [ "$out" = $'LoadState=not-found\nActiveState=inactive\nLoadState=not-found\nActiveState=inactive' ] ||

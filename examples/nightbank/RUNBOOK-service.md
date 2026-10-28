@@ -461,7 +461,8 @@ cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release apply small-copy
 
    The status prints `active: small-r1.`, `engine: answers on …`,
    `rollback: no receipt names an earlier release; apply one by name.`,
-   `recorded apply: none.` and `last apply: none.`. Prepare also refuses, with exit 2, a
+   `recorded apply: none.`, `last apply: none.` and
+   ``releases: 1 installed; `--format json` lists each.``. Prepare also refuses, with exit 2, a
    release with more jobs than the launcher's `MAX_JOBS`, and installs nothing.
 2. Build the next release from the small estate's inputs. Add the job
    `OPS_RELEASE_PROBE_C` in a new file, shorten `OPS_SPOOL_C`'s command, add the file to
@@ -511,20 +512,22 @@ cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release status
 cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release resume
 ```
 
-   The resume takes the holds again, which keeps the one it took, and waits out the
-   retry horizon that hold started, about a minute. A retry of the hold, composed under
-   this period's baseline, cannot be answered after the boundary, so the seal refuses
-   inside the horizon
-   ([period-model §9](../../docs/period-model.md#9-retries-across-a-boundary)). The
-   resume prints one line for it, and seals period 4 under a new request id:
+   The resume takes the holds again, which keeps the one it took. A retry of the hold,
+   composed under this period's baseline, cannot be answered after the boundary, so the
+   seal refuses inside the retry horizon
+   ([period-model §9](../../docs/period-model.md#9-retries-across-a-boundary)). If you
+   type the resume within about a minute of the apply's hold, it waits out the rest of
+   the horizon, prints one line for the wait, and seals period 4 under a new request id:
 
 ```
 waiting 45.0 s for the retry horizon of the last operator request, then sealing.
 ```
 
-   The wait is what is left of the period's 60 s retry horizon, counted from the apply's
-   hold: here the resume's first seal came 15 s after it. The resume ends
-   `small-r2 is active in period 5.`, with exit 0, about a minute after you type it.
+   The wait is what is left of the closing period's 60 s retry horizon, counted from the
+   last operator request, plus 1 s. Here that request was the apply's hold, and the
+   resume's first seal came 16 s after it. Typed later, the resume prints no wait line.
+   It ends `small-r2 is active in period 5.`, with exit 0; here that was 61 s after it
+   was typed.
 4. Read the result. Set `ESTATE` again, because `active` changed:
    `ESTATE=$ESTATE_RELEASES/$(cat "$ACTIVE")`. `RUN_ROOT` and `S` stay on `nightbank-01d`. Then
    read the status, the two jobs' definitions (recipe `job-verify`), and the hold the
@@ -674,8 +677,17 @@ Goal: end the lineage, keep its history, and leave nothing that starts. Follow
 [retiring an estate](../../docs/deployment-runbook.md#retiring-an-estate). The drill's
 `retire` step checks the same.
 
-1. Step 1: recipe `hold-down`; both units stay `active`.
-2. Steps 2 and 3: the jobs are held, and exercise 32's start has no process. Stop the
+1. Step 1: read the release train's status as the deployment identity, with
+   `cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release status`. It prints
+   `recorded apply: none.`, so no apply is left to finish.
+2. Step 1, in a root shell: set `RUN_ROOT=/srv/dsl41/runs/nightbank-01d` and type
+   recipe `retire-release`. It prints `User nbdeploy is not allowed to run sudo on …`.
+3. Ask for a release check as the deployment identity:
+   `cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release prepare --requalify small-r1`.
+   It exits 2 with
+   ``sudo did not run `/opt/dsl41/.venv/bin/dsl41 release service` as dsl41.``
+4. Step 1: recipe `hold-down`; both units stay `active`.
+5. Steps 2 and 3: the jobs are held, and exercise 32's start has no process. Stop the
    engine unit and run the `estate quiesce` command, after the horizon it names: it
    seals period 6. The seal carries the evicted row and the unlaunched start:
 
@@ -686,20 +698,15 @@ sudo jq -c '.executions[] | {job, kind}' "$RUN_ROOT/seals/000006.json"
 # {"job":"AMER_INV_MACROS_C","kind":"pending_spawn"}
 ```
 
-3. Step 4: in a root shell, set `RUN_ROOT` and type recipe `retire-remove`. Both
-   `reset-failed` lines print `Unit … not loaded`, and the `|| :` passes them. In the
-   same shell, type recipe `retire-release`. It prints
-   `User nbdeploy is not allowed to run sudo on …`. As the deployment identity,
-   `dsl41 release prepare --requalify small-r1` now exits 2:
-   ``sudo did not run `/opt/dsl41/.venv/bin/dsl41 release service` as dsl41.``
-   `dsl41 release status` still answers, with exit 0 and `engine: no answer on …`.
-4. Step 5: recipe `retire-check`, with `sudo`: each unit prints `LoadState=not-found`
+6. Step 4: in a root shell, set `RUN_ROOT` and type recipe `retire-remove`. Both
+   `reset-failed` lines print `Unit … not loaded`, and the `|| :` passes them.
+7. Step 5: recipe `retire-check`, with `sudo`: each unit prints `LoadState=not-found`
    and `ActiveState=inactive`. A stray `sudo systemctl start dsl41-engine.service` exits
    5, `Unit dsl41-engine.service not found`, and `pgrep -u dsl41` prints nothing.
-5. Steps 6 and 7, in the service account's shell: recipe `retire-audit` attests periods
+8. Steps 6 and 7, in the service account's shell: recipe `retire-audit` attests periods
    1 and 2 in `nightbank-01`, 3 in `-01b` and 4 to 6 in `-01d`. Recipe `retire-list` names
    those three roots, not exercise 29's damaged `nightbank-01c`.
-6. Leave the host. On your machine, run `scripts/wargame.sh dispose` and
+9. Leave the host. On your machine, run `scripts/wargame.sh dispose` and
    `rm -rf "$HOME/dsl41-delivery"`.
 
 *Why.* There is no retire verb: the final seal is the lineage's closing record, and the
