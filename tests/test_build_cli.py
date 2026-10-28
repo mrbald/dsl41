@@ -325,3 +325,298 @@ def test_build_runs_a_dataclass_under_postponed_annotations(tmp_path: Path) -> N
     assert result.exit_code == 0, result.stderr
     assert "insert_job: a\n" in result.stdout
     assert not [name for name in sys.modules if name.startswith("dsl41_build_")]
+
+
+# ------------------------------------------------- one module per file, and Params (DL-418)
+
+#: Two template files already in the builder's layout, so a round trip is byte-equal; other
+#: layouts are equal in canonical form only (see the corpus test below). b.jil's
+#: report waits on a.jil's check: a condition across files.
+TEMPLATE_A = (
+    "insert_machine: ~{$HOST}~\n\n"
+    "insert_job: ~{$PFX}~_box\njob_type: b\n\n"
+    "insert_job: ~{$PFX}~_load\njob_type: c\nbox_name: ~{$PFX}~_box\n"
+    "command: ~{$BIN}~/load.sh --day ~{$DAY}~\nmachine: ~{$HOST}~\n\n"
+    "insert_job: ~{$PFX}~_check\njob_type: c\nbox_name: ~{$PFX}~_box\n"
+    "command: ~{$BIN}~/check.sh\nmachine: ~{$HOST}~\ncondition: s(~{$PFX}~_load)\n"
+)
+TEMPLATE_B = (
+    "insert_job: report\njob_type: c\ncommand: ~{$BIN}~/report.sh ~{$DAY}~\n"
+    "machine: ~{$HOST}~\ncondition: s(~{$PFX}~_check)\n\n"
+    "insert_job: mail\njob_type: c\ncommand: mail.sh\nmachine: ~{$HOST}~\n"
+    "condition: s(report)\n"
+)
+
+
+def _templates(tmp_path: Path) -> tuple[Path, Path]:
+    return _write(tmp_path, "a.jil", TEMPLATE_A), _write(tmp_path, "b.jil", TEMPLATE_B)
+
+
+def _decompile(*args: str) -> None:
+    result = runner.invoke(app, ["decompile", *args])
+    assert result.exit_code == 0, result.stderr
+
+
+def test_decompile_writes_one_module_per_file_and_build_renders_each_file(
+    tmp_path: Path,
+) -> None:
+    a, b = _templates(tmp_path)
+    package = tmp_path / "pkg"
+    _decompile(str(b), str(a), "-o", f"{package}/")
+    assert sorted(p.name for p in package.iterdir()) == ["__init__.py", "a.py", "b.py"]
+    init = (package / "__init__.py").read_text(encoding="utf-8")
+    assert "        'b.jil': b.estate(),\n        'a.jil': a.estate(),\n" in init
+    assert "return CatalogBuilder.compose(files)\n" in init
+    assert "condition='s(~{$PFX}~_check)'" in (package / "b.py").read_text(encoding="utf-8")
+    checked = runner.invoke(app, ["build", str(package), "--check", str(tmp_path)])
+    assert checked.exit_code == 0, checked.stderr
+    out = tmp_path / "out"
+    assert runner.invoke(app, ["build", str(package), "--out", str(out)]).exit_code == 0
+    assert sorted(p.name for p in out.iterdir()) == ["a.jil", "b.jil"]
+    assert (out / "a.jil").read_text(encoding="utf-8") == TEMPLATE_A
+    assert (out / "b.jil").read_text(encoding="utf-8") == TEMPLATE_B
+    whole = runner.invoke(app, ["build", str(package), "--stdout"])
+    assert whole.stdout == TEMPLATE_B + "\n" + TEMPLATE_A
+    alone = runner.invoke(app, ["build", str(package / "b.py"), "--stdout"])
+    assert alone.exit_code == 0, alone.stderr
+    assert alone.stdout == TEMPLATE_B
+    assert not (package / "__pycache__").exists()
+    assert not [name for name in sys.modules if name.startswith("dsl41_build_")]
+
+
+def test_decompile_into_an_existing_directory_writes_a_package(tmp_path: Path) -> None:
+    a, b = _templates(tmp_path)
+    (tmp_path / "pkg").mkdir()
+    _decompile(str(a), str(b), "-o", str(tmp_path / "pkg"))
+    assert (tmp_path / "pkg" / "__init__.py").exists()
+
+
+def test_build_check_of_a_package_diffs_each_stale_file(tmp_path: Path) -> None:
+    a, b = _templates(tmp_path)
+    _decompile(str(a), str(b), "-o", f"{tmp_path / 'pkg'}/")
+    b.write_text(TEMPLATE_B.replace("mail.sh", "post.sh"), encoding="utf-8")
+    result = runner.invoke(app, ["build", str(tmp_path / "pkg"), "--check", str(tmp_path)])
+    assert result.exit_code == 1
+    assert (
+        f"--- {b}\n" in result.stdout and "-command: post.sh\n+command: mail.sh\n" in result.stdout
+    )
+    assert str(a) not in result.stdout
+    as_file = runner.invoke(app, ["build", str(tmp_path / "pkg"), "--check", str(b)])
+    assert as_file.exit_code == 2
+    assert "declares 2 files; --check takes a directory" in as_file.stderr
+    b.unlink()
+    missing = runner.invoke(app, ["build", str(tmp_path / "pkg"), "--check", str(tmp_path)])
+    assert missing.exit_code == 2
+
+
+def test_decompile_package_names_each_module_after_its_file(tmp_path: Path) -> None:
+    names = ["2nd-feed.jil", "estate.jil", "class.jil", "2nd_feed.jil"]
+    paths = [
+        _write(tmp_path, name, f"insert_job: j{i}\njob_type: c\ncommand: x\nmachine: m\n")
+        for i, name in enumerate(names)
+    ]
+    package = tmp_path / "pkg"
+    _decompile(*map(str, paths), "-o", f"{package}/")
+    init = (package / "__init__.py").read_text(encoding="utf-8")
+    for name, module in zip(names, ["jil_2nd_feed", "jil_estate", "jil_class", "jil_2nd_feed_2"]):
+        assert f"        {name!r}: {module}.estate(),\n" in init
+        assert (package / f"{module}.py").exists()
+    result = runner.invoke(app, ["build", str(package), "--check", str(tmp_path)])
+    assert result.exit_code == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("second", "name", "message"),
+    [
+        (
+            "insert_job: j\njob_type: c\ncommand: x\nmachine: m\nbox_name: box1\n",
+            "b.jil",
+            "b.jil does not lower alone, and one module per file keeps each box",
+        ),
+        (
+            "insert_job: j2\njob_type: c\ncommand: x\nmachine: m\n",
+            "a.jil",
+            "two inputs are named a.jil",
+        ),
+    ],
+    ids=["box-split", "same-name"],
+)
+def test_decompile_package_refusals(tmp_path: Path, second: str, name: str, message: str) -> None:
+    a = _write(tmp_path, "a.jil", "insert_job: box1\njob_type: b\n")
+    other = tmp_path / "x"
+    other.mkdir()
+    b = _write(other, name, second)
+    result = runner.invoke(app, ["decompile", str(a), str(b), "-o", f"{tmp_path / 'pkg'}/"])
+    assert result.exit_code == 2
+    assert message in result.stderr
+    assert not (tmp_path / "pkg").exists()
+
+
+def test_decompile_params_adds_a_dataclass_and_keeps_the_round_trip(tmp_path: Path) -> None:
+    a, _ = _templates(tmp_path)
+    module = tmp_path / "estate.py"
+    _decompile("--params", str(a), "-o", str(module))
+    source = module.read_text(encoding="utf-8")
+    assert (
+        "@dataclass(frozen=True)\nclass Params:\n"
+        '    """Values for the ~{$NAME}~ placeholders. A field left None keeps its token."""\n\n'
+        "    # binds command\n    BIN: str | None = None\n\n"
+        "    # binds command\n    DAY: str | None = None\n\n"
+        "    # binds insert_machine, machine\n    HOST: str | None = None\n\n"
+        "    # binds box_name, condition, insert_job\n    PFX: str | None = None\n"
+    ) in source
+    assert "def estate(params: Params | None = None) -> CatalogBuilder:\n" in source
+    assert "    return c.bind(params)\n" in source
+    plain = runner.invoke(app, ["build", str(module), "--stdout"])
+    assert plain.exit_code == 0, plain.stderr
+    assert plain.stdout == TEMPLATE_A
+    bound = runner.invoke(
+        app, ["build", str(module), "--stdout", "--param", "HOST=h1", "--param", "PFX=n"]
+    )
+    assert bound.exit_code == 0, bound.stderr
+    expected = TEMPLATE_A.replace("~{$HOST}~", "h1").replace("~{$PFX}~", "n")
+    assert bound.stdout == expected
+    assert "~{$BIN}~/load.sh --day ~{$DAY}~" in bound.stdout
+
+
+def test_decompile_params_puts_one_dataclass_in_the_package(tmp_path: Path) -> None:
+    a, b = _templates(tmp_path)
+    package = tmp_path / "pkg"
+    _decompile("--params", str(a), str(b), "-o", f"{package}/")
+    init = (package / "__init__.py").read_text(encoding="utf-8")
+    assert "class Params:" in init
+    assert "    return CatalogBuilder.compose(files).bind(params)\n" in init
+    assert "Params" not in (package / "a.py").read_text(encoding="utf-8")
+    out = tmp_path / "out"
+    result = runner.invoke(
+        app, ["build", str(package), "--out", str(out), "--param", "PFX=n", "--param", "DAY=1"]
+    )
+    assert result.exit_code == 0, result.stderr
+    assert (out / "b.jil").read_text(encoding="utf-8") == TEMPLATE_B.replace(
+        "~{$PFX}~", "n"
+    ).replace("~{$DAY}~", "1")
+    checked = runner.invoke(app, ["build", str(package), "--check", str(tmp_path)])
+    assert checked.exit_code == 0, checked.stderr
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["--param", "NOPE=1"], "--param does not fit Params"),
+        (["--param", "HOST"], "give NAME=VALUE"),
+        (["--param", "HOST=a", "--param", "HOST=b"], "--param HOST: given twice"),
+        (["--param", "HOST=a\nb"], "carries newline/control characters"),
+    ],
+    ids=["unknown", "form", "twice", "newline"],
+)
+def test_build_param_refusals(tmp_path: Path, args: list[str], message: str) -> None:
+    a, _ = _templates(tmp_path)
+    _decompile("--params", str(a), "-o", str(tmp_path / "estate.py"))
+    result = runner.invoke(app, ["build", str(tmp_path / "estate.py"), "--stdout", *args])
+    assert result.exit_code == 2
+    assert message in result.stderr
+
+
+def test_build_param_needs_a_params_class(tmp_path: Path) -> None:
+    module = _module(tmp_path)
+    result = runner.invoke(app, ["build", str(module), "--stdout", "--param", "HOST=h1"])
+    assert result.exit_code == 2
+    assert "--param needs a Params class" in result.stderr
+
+
+def test_decompile_params_refuses_properties(tmp_path: Path) -> None:
+    a, _ = _templates(tmp_path)
+    layer = _write(tmp_path, "base.properties", "HOST=h\nPFX=p\nBIN=b\nDAY=d\n")
+    result = runner.invoke(app, ["decompile", "--params", "-p", str(layer), str(a)])
+    assert result.exit_code == 2
+    assert "--params keeps the ~{$NAME}~ tokens, and -p binds them first" in result.stderr
+
+
+def test_a_corpus_package_renders_each_file_canonically_equal_not_byte_equal(
+    tmp_path: Path,
+) -> None:
+    """DL-418: the claim is canonical equality per file. These inputs carry comments and
+    another attribute order, so `--check` against them differs."""
+    inputs = [
+        CORPUS_DIR / name
+        for name in ("sem10_box_basic.jil", "comments_layout.jil", "sem08_globals.jil")
+    ]
+    package = tmp_path / "pkg"
+    _decompile(*map(str, inputs), "-o", f"{package}/")
+    out = tmp_path / "out"
+    assert runner.invoke(app, ["build", str(package), "--out", str(out)]).exit_code == 0
+    for path in inputs:
+        rendered = lower_catalog([parse_file(out / path.name)])
+        assert catalog_hash(rendered) == catalog_hash(lower_catalog([parse_file(path)]))
+    stale = runner.invoke(app, ["build", str(package), "--check", str(CORPUS_DIR)])
+    assert stale.exit_code == 1
+    assert runner.invoke(app, ["build", str(package), "--check", str(out)]).exit_code == 0
+
+
+def test_decompile_package_refuses_names_equal_ignoring_case(tmp_path: Path) -> None:
+    jobs = "insert_job: j{}\njob_type: c\ncommand: x\nmachine: m\n"
+    (tmp_path / "x").mkdir()
+    first = _write(tmp_path, "Feed.jil", jobs.format(1))
+    second = _write(tmp_path / "x", "feed.jil", jobs.format(2))
+    result = runner.invoke(app, ["decompile", str(first), str(second), "-o", f"{tmp_path}/pkg/"])
+    assert result.exit_code == 2
+    assert "two inputs are named Feed.jil and feed.jil" in result.stderr
+    assert not (tmp_path / "pkg").exists()
+
+
+@pytest.mark.parametrize("name", ["class", "str", "dataclass", "Params", "estate", "__HOST"])
+def test_decompile_params_refuses_a_name_that_cannot_be_a_field(tmp_path: Path, name: str) -> None:
+    jil = _write(
+        tmp_path, "a.jil", f"insert_job: j\njob_type: c\ncommand: x\nmachine: ~{{${name}}}~\n"
+    )
+    result = runner.invoke(app, ["decompile", "--params", str(jil)])
+    assert result.exit_code == 2
+    assert f"placeholder name(s) {name} cannot be Params fields" in result.stderr
+
+
+def test_decompile_package_names_a_reference_in_another_file_or_in_none(tmp_path: Path) -> None:
+    a = _write(tmp_path, "a.jil", "insert_job: a1\njob_type: c\ncommand: x\nmachine: m\n")
+    b = _write(
+        tmp_path,
+        "b.jil",
+        "insert_job: b1\njob_type: c\ncommand: x\nmachine: m\ncondition: s(a1)\n\n"
+        "insert_job: b2\njob_type: c\ncommand: x\nmachine: m\ncondition: s(gone)\n",
+    )
+    result = runner.invoke(app, ["decompile", str(a), str(b), "-o", f"{tmp_path}/pkg/"])
+    assert result.exit_code == 0, result.stderr
+    assert "b.jil: explicit: job 'b1' -- references a job in another input file" in result.stderr
+    assert "b.jil: explicit: job 'b2' -- references a job in no input file" in result.stderr
+
+
+def test_build_refuses_a_statement_declared_after_compose(tmp_path: Path) -> None:
+    module = _write(
+        tmp_path,
+        "estate.py",
+        "from dsl41.dsl import CatalogBuilder\n\n\ndef estate():\n"
+        "    part = CatalogBuilder().job('a', command='x', machine='m')\n"
+        "    c = CatalogBuilder.compose({'a.jil': part})\n"
+        "    return c.job('late', command='x', machine='m')\n",
+    )
+    result = runner.invoke(app, ["build", str(module), "--out", str(tmp_path / "out")])
+    assert result.exit_code == 2
+    assert "a statement declared after compose() belongs to no file" in result.stderr
+    assert not (tmp_path / "out").exists()
+
+
+def test_decompile_out_naming_a_file_writes_one_module(tmp_path: Path) -> None:
+    a, b = _templates(tmp_path)
+    target = _write(tmp_path, "estate.py", "stale\n")
+    _decompile(str(a), str(b), "-o", str(target))
+    assert "def estate() -> CatalogBuilder:" in target.read_text(encoding="utf-8")
+    result = runner.invoke(app, ["decompile", str(a), str(b), "-o", f"{target}/"])
+    assert result.exit_code == 2
+
+
+def test_decompile_params_accepts_a_builtin_name_the_module_does_not_read(tmp_path: Path) -> None:
+    jil = "insert_job: j\njob_type: c\ncommand: ~{$type}~\nmachine: ~{$id}~\n"
+    module = tmp_path / "estate.py"
+    _decompile("--params", str(_write(tmp_path, "a.jil", jil)), "-o", str(module))
+    assert "    id: str | None = None\n" in module.read_text(encoding="utf-8")
+    bound = runner.invoke(app, ["build", str(module), "--stdout", "--param", "id=m1"])
+    assert bound.exit_code == 0, bound.stderr
+    assert bound.stdout == jil.replace("~{$id}~", "m1")

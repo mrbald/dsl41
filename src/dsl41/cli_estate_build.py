@@ -40,6 +40,27 @@ def _emits(files: list[str], emit: list[str]) -> dict[str, Path]:
     return emitted
 
 
+def _rendered(emitted: dict[str, Path], permit_unknown: bool) -> dict[str, bytes]:
+    """Each emitted NAME's JIL, or exit 2. A module that composes files renders its file NAME
+    and is imported once for all the names it renders (DL-413, DL-418)."""
+    from dsl41.cli_common import ModuleJil, module_jil
+
+    rendered: dict[Path, ModuleJil] = {}
+    contents: dict[str, bytes] = {}
+    for name, module in emitted.items():
+        key = module.resolve()  # two spellings of one path import it once
+        if key not in rendered:
+            rendered[key] = module_jil(module, permit_unknown)
+        if not rendered[key].files:
+            contents[name] = rendered[key].whole
+        elif name in rendered[key].files:
+            contents[name] = rendered[key].files[name]
+        else:
+            listed = ", ".join(rendered[key].files)
+            raise typer.Exit(refuse(f"--emit {name}={module}: {module} composes {listed}"))
+    return contents
+
+
 def _source_files(source: Path, names: list[str]) -> dict[str, bytes]:
     """The bytes of each name under SOURCE, each opened without following a symlink, or exit 2
     on a symlink anywhere below SOURCE on its path, or on a name that is not a regular file
@@ -141,6 +162,7 @@ def estate_build(
         "--emit",
         metavar="NAME=MODULE",
         help="Render the manifest's file NAME from the Python MODULE, as 'dsl41 build' does."
+        " When MODULE composes files, as a decompiled package does, NAME is one of them."
         " Repeatable.",
     ),
     check: bool = typer.Option(
@@ -149,13 +171,17 @@ def estate_build(
         help="Compare the release with the existing --out directory instead of writing.",
     ),
     permit_unknown: bool = PERMIT_UNKNOWN,
+    param: list[str] = typer.Option([], "--param", hidden=True),  # DL-418
 ) -> None:
     """Assemble the release directory that 'dsl41 release prepare' takes.
 
     Each --emit renders one of the manifest's files from a Python
-    module, through the loader 'dsl41 build' uses. This command imports
-    each MODULE, so it executes that code: run it only on modules you
-    trust. Every other file the manifest names, layers and timezone map
+    module, through the loader 'dsl41 build' uses. A module that
+    composes files, such as a decompiled package, renders the file of
+    that name, and is imported once for every --emit that names it.
+    This command imports each MODULE, so it executes that code: run it
+    only on modules you trust. Placeholders stay as tokens: the
+    manifest's layers bind them. Every other file the manifest names, layers and timezone map
     included, is copied from DIRECTORY with its name, and so is
     estate.toml. An emitted name may not also be a file in DIRECTORY,
     and the manifest names no .py file, so no Python enters the
@@ -168,14 +194,21 @@ def estate_build(
     not emitted, an --emit names no manifest file or a file DIRECTORY
     holds, a copied file is a symlink or not a regular file, --out is
     not empty (or, under --check, not a directory), an entry under
-    --out cannot be read, OUT.tmp exists, or a module did not render.
+    --out cannot be read, OUT.tmp exists, a module did not render or
+    composes no file of its NAME, or --param is given.
     """  # DL-413
     import shutil
     import tempfile
 
-    from dsl41.cli_common import module_jil
     from dsl41.estate_manifest import manifest_names, parse_manifest
 
+    if param:
+        raise typer.Exit(
+            refuse(
+                "--param binds placeholders for 'dsl41 build' alone; a release binds them"
+                " through the manifest's layers"
+            )
+        )
     source = directory.absolute()
     try:
         manifest = parse_manifest(source / "estate.toml")
@@ -200,8 +233,7 @@ def estate_build(
         raise typer.Exit(refuse(exc)) from exc
     if not check and (stage.exists() or stage.is_symlink()):
         raise typer.Exit(refuse(f"{stage} exists; remove it, then build again"))
-    for name, module in emitted.items():
-        contents[name] = module_jil(module, permit_unknown)
+    contents |= _rendered(emitted, permit_unknown)
     environments = sorted(manifest.environments)
     try:
         if check:

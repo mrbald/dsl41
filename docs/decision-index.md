@@ -426,3 +426,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-413 | `dsl41 estate build` assembles the release directory from a manifest and its Python modules, and `dsl41 estate diff` compares two releases by the seal's... | [docs/authoring.md](authoring.md) |
 | DL-414 | The supervisor unit keeps `RefuseManualStop=yes`; configuration management stops an estate with `dsl41 estate quiesce` | [docs/deployment-runbook.md](deployment-runbook.md) |
 | DL-415 | Eleven workflow rules bind every agent session, and CI classifies a change as docs-only or code |  |
+| DL-418 | A decompiled estate may be a package with one module per JIL file, and `decompile --params` adds a `Params` dataclass | [README.md](../README.md), [docs/authoring.md](authoring.md) |

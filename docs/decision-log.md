@@ -24609,3 +24609,40 @@ relitigate an entry; append a new one.
   unreported and trusts the author's classification. A job-level skip of the matrix job: a
   skipped matrix reports one check and blocks the merge. A hook that runs pytest: every pytest
   session rewrites the transition-hits file, so a hook would invalidate a coverage run.
+- DL-418 A decompiled estate may be a package with one module per JIL file, and `decompile
+  --params` adds a `Params` dataclass (2026-10-28; owner ruling; src/dsl41/dsl.py,
+  src/dsl41/cli_compile.py, src/dsl41/cli_common.py, src/dsl41/cli_estate_build.py, README
+  "DSL -> JIL (build)", docs/authoring.md §1 and §5)
+  THE RULE. `decompile FILE... -o DIR/`, or an `-o` naming a directory, writes one module per
+  input file, named after its stem, and `__init__.py`, whose `estate()` returns
+  `CatalogBuilder.compose({NAME: module.estate(), ...})` keyed by base name in the order given;
+  the author gives the manifest's `files` order (DL-407), and a name with a directory part does
+  not fit. Each module is DL-410's shape, from its file lowered alone: it builds its own jobs,
+  folds within its file, and keeps a condition on another file's job as an explicit string.
+  Exit 2 refuses two inputs whose base names are equal ignoring case, and a box whose jobs are
+  in another file. The check loads the written package through `dsl41 build`'s loader and
+  compares canonical form (DL-37a): the rendered files equal the inputs canonically, not byte
+  for byte. A composed builder lowers whole; `file_jils()` renders each file and refuses a
+  statement declared after `compose()`. `dsl41 build` takes a package; when `estate()`
+  composes files, `--out DIR` writes and `--check DIR` compares `DIR/NAME` for each, and
+  `--stdout` prints the whole. `estate build --emit NAME=MODULE` renders such a module's file
+  NAME, importing it once per resolved path. `decompile --params` adds `Params`, a frozen
+  dataclass with one `str | None` field per distinct `~{$NAME}~`, default None, under a comment
+  naming the attributes it appears in; `estate(params: Params | None = None)` returns
+  `c.bind(params)`. A package has one `Params`, in `__init__.py`, binding the composed builder.
+  `bind()` runs `-p`'s text substitution (DL-19) for each field that is not None and leaves
+  every other token, so `estate()` keeps DL-410's tokens. `dsl41 build --param NAME=VALUE`
+  passes `Params(NAME=VALUE, ...)` for a local check; `estate build --param` exits 2, since a
+  release binds through the manifest's layers (DL-407). Exit 2 refuses `--params` with `-p`,
+  and a placeholder that is a keyword, starts with `__` or is a name the module's head reads.
+  THE REASON. The owner's ruling of 2026-10-28: the estate is maintained in Python, file by
+  file as its manifest lists them, and the generated side stays thin. Wiring per file keeps
+  each module a plain DL-410 module; `compose()` keeps each file's statements in one range, so
+  a combinator called after it may wire across files and amends the right file. Binding the
+  text reuses the release's own substitution.
+  REJECTED: the package resolving references across files (a module would not render alone,
+  and folds would need the other files); a box whose jobs are in another file (a box context
+  holds its members in one builder); a `Params` per module (a part importing the package's
+  cannot run as a script); a field per token in each literal (a thick module); `--check` taking
+  a list of files (a directory mirrors `--out`); a bare `--emit PACKAGE` (two forms of one
+  option); keys relative to a common root; a `__main__.py`.

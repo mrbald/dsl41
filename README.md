@@ -344,6 +344,20 @@ accepts comma-separated codes. Decompile the template JIL, not a bound copy:
 `-p` fills the `~{$NAME}~` placeholders first, and the module cannot recover
 them.
 
+```sh
+dsl41 decompile --params calendars.jil eod.jil -o estate/
+```
+
+An `-o` that ends in `/` or names a directory gets a package: one module per
+input file and an `__init__.py` whose `estate()` composes them in the order
+given; give the manifest's `files` order. Each module builds its own file's
+jobs; a condition on another file's job stays an explicit string. The package
+names each file by its base name, so a manifest name with a directory, such as
+`jobs/eod.jil`, is not supported, and `--emit` names the base name.
+`--params` adds a `Params` dataclass with one field per placeholder, each
+`None` by default, and `estate(params)` fills the fields that are set
+(DL-418).
+
 ### DSL -> JIL (build)
 
 ```sh
@@ -372,9 +386,13 @@ def estate() -> CatalogBuilder:
 `dsl41 build` imports the module, which runs its code, so use it only on
 modules you trust. It calls `estate()`, lowers the JIL through the compiler,
 and writes it through a temporary file and a rename. `--check FILE` compares
-bytes and writes nothing; `--stdout` prints. `dsl41 estate build DIR --emit
+bytes and writes nothing; `--stdout` prints. For a package, `--out DIR` writes
+and `--check DIR` compares one JIL per module under its file's name.
+`--param NAME=VALUE` fills a placeholder for a local check; a release fills
+them through the manifest's layers. `dsl41 estate build DIR --emit
 jobs.jil=catalog.py -o OUT` assembles the release directory that `dsl41 release
-prepare` takes, with no Python in it. `dsl41 run` and the run root
+prepare` takes, with no Python in it; with a package, `--emit eod.jil=estate`
+takes that file from it. `dsl41 run` and the run root
 take JIL bytes only. In Python, the builder's `to_jil()` returns the JIL
 text, and its `build()` returns the in-process catalog.
 

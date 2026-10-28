@@ -6,6 +6,8 @@ canonical form equals the original's.
 
 from __future__ import annotations
 
+import dataclasses
+import re
 from collections.abc import Collection
 from pathlib import Path
 
@@ -83,6 +85,21 @@ def test_whole_corpus_roundtrips_hash_equal() -> None:
 def test_each_corpus_file_roundtrips_hash_equal(path: Path) -> None:
     catalog = lower_catalog([parse_file(path)])
     assert catalog_hash(roundtrip(catalog)) == catalog_hash(catalog)
+
+
+@pytest.mark.parametrize("params", [[], ["--params"]], ids=["plain", "params"])
+def test_whole_corpus_as_a_package_roundtrips_hash_equal(tmp_path: Path, params: list[str]) -> None:
+    """DL-418: one module per corpus file, composed in order, rebuilds the whole catalog, through
+    decompile's own check and through `dsl41 build` on the package."""
+    package = tmp_path / "pkg"
+    files = [str(p) for p in LOWERABLE_CORPUS]
+    result = runner.invoke(app, ["decompile", *params, *files, "-o", f"{package}/"])
+    assert result.exit_code == 0, result.stderr
+    assert len(list(package.glob("*.py"))) == len(files) + 1
+    built = runner.invoke(app, ["build", str(package), "--stdout"])
+    assert built.exit_code == 0, built.stderr
+    catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
+    assert catalog_hash(lower_source(built.stdout)) == catalog_hash(catalog)
 
 
 def test_roundtrip_preserves_annotations_and_passthrough_verbatim() -> None:
@@ -2340,3 +2357,101 @@ def test_dl40_decompile_accepts_bare_string_disable() -> None:
     )
     catalog = lower_source(jil)
     assert decompile(catalog, disable="T-005") == decompile(catalog, disable=("T-005",))
+
+
+# ------------------------------------------------------- compose() and bind() (DL-418)
+
+
+def _part(*jobs: str, condition: str | None = None) -> CatalogBuilder:
+    builder = CatalogBuilder()
+    for job in jobs:
+        builder.job(job, command="x", machine="m", condition=condition)
+    return builder
+
+
+def test_compose_renders_each_file_and_lowers_whole() -> None:
+    composed = CatalogBuilder.compose(
+        {"a.jil": _part("a1", "a2"), "sub/b.jil": _part("b1", condition="s(a2)")}
+    )
+    files = composed.file_jils()
+    assert list(files) == ["a.jil", "sub/b.jil"]
+    assert (
+        files["sub/b.jil"]
+        == "insert_job: b1\njob_type: c\ncommand: x\nmachine: m\ncondition: s(a2)\n"
+    )
+    assert composed.to_jil() == files["a.jil"] + "\n" + files["sub/b.jil"]
+    assert set(composed.build().jobs) == {"a1", "a2", "b1"}
+    assert CatalogBuilder().file_jils() == {}
+
+
+def test_wiring_after_compose_amends_the_file_that_holds_the_job() -> None:
+    composed = CatalogBuilder.compose({"a.jil": _part("a1"), "b.jil": _part("b1")})
+    composed.sequence("a1", "b1")
+    files = composed.file_jils()
+    assert "condition" not in files["a.jil"]
+    assert files["b.jil"].endswith("condition: s(a1)\n")
+
+
+@pytest.mark.parametrize(
+    ("files", "message"),
+    [
+        ({}, "needs at least one file"),
+        ({"a.jil": _part("j"), "b.jil": _part("j")}, "job 'j' declared in a.jil and in b.jil"),
+        ({"../a.jil": _part("j")}, "not a relative name in normal form"),
+        ({"/a.jil": _part("j")}, "not a relative name in normal form"),
+        ({"a.jil": "c.job('j')"}, "compose() file 'a.jil' is a str"),
+        (
+            {"a.jil": CatalogBuilder.compose({"b.jil": _part("j")})},
+            "inside a box context or composed",
+        ),
+    ],
+    ids=["empty", "twice", "dotdot", "absolute", "not-a-builder", "nested"],
+)
+def test_compose_refusals(files: dict[str, object], message: str) -> None:
+    with pytest.raises(DslError, match=re.escape(message)):
+        CatalogBuilder.compose(files)  # type: ignore[arg-type]
+
+
+def test_file_jils_refuses_a_statement_declared_after_compose() -> None:
+    composed = CatalogBuilder.compose({"a.jil": _part("a1")})
+    composed.job("late", command="x", machine="m")
+    with pytest.raises(DslError, match="belongs to no file"):
+        composed.file_jils()
+
+
+def test_bind_fills_bound_tokens_and_passes_the_rest_through() -> None:
+    @dataclasses.dataclass
+    class Params:
+        PFX: str | None = None
+        HOST: str | None = None
+
+    def template() -> CatalogBuilder:
+        return CatalogBuilder().job(
+            "~{$PFX}~_load", command="~{$BIN}~/load.sh", machine="~{$HOST}~"
+        )
+
+    assert template().bind(None).to_jil() == template().to_jil()
+    assert template().bind(Params()).to_jil() == template().to_jil()
+    bound = template().bind(Params(PFX="n"))
+    assert bound.to_jil() == (
+        "insert_job: n_load\njob_type: c\ncommand: ~{$BIN}~/load.sh\nmachine: ~{$HOST}~\n"
+    )
+    assert "machine: h\n" in template().bind({"HOST": "h"}).to_jil()
+    # the bound names are the ones a later combinator wires
+    bound.job("~{$PFX}~_next", command="x", machine="m").bind(Params(PFX="n"))
+    assert bound.sequence("n_load", "n_next").to_jil().endswith("condition: s(n_load)\n")
+
+
+@pytest.mark.parametrize(
+    ("params", "message"),
+    [
+        ({"HOST": 1}, "parameter 'HOST' is a int, not a str"),
+        ({"HOST": "a\nb"}, "carries newline/control characters"),
+        ({"HOST": "~{$B}~", "B": "~{$HOST}~"}, "did not converge"),
+        (["HOST"], "takes a dataclass or a mapping"),
+    ],
+    ids=["not-str", "newline", "loop", "list"],
+)
+def test_bind_refusals(params: object, message: str) -> None:
+    with pytest.raises(DslError, match=re.escape(message)):
+        CatalogBuilder().job("j", command="x", machine="~{$HOST}~").bind(params)
