@@ -238,3 +238,45 @@ its updates propagate here automatically. If `~/.hats` does not resolve,
 the core is not linked on this machine (see the hats repo's README).
 This block is managed by `hats init`; keep project text outside the markers.
 <!-- /hats:core -->
+
+## Workflow rules
+
+1. Keep one open PR: the tip of the merge train. Other branches wait with
+   no PR. When the tip merges, fetch, rebase the next branch onto
+   `origin/main`, run its gates, open its PR. Announce parallel work before
+   it starts and list it in the train order.
+2. One branch, one worktree, one writing agent per slice. Create worktrees
+   with `scripts/worktree.sh BRANCH`. Edit the decision log and the todo on
+   the tip only. Before a branch's final gates and after each rebase: stage
+   new documents, render the decision index, stage it.
+3. CI runs the suite only for a change outside `README.md`, `docs/**/*.md`
+   and `examples/**/*.md`; a docs-only PR merges on its docs job. Locally a
+   docs-only change runs `scripts/prepush_checks.py --docs` instead of the
+   suite. Other gates and reviews stand.
+4. Hooks run ruff, ruff format and mypy on each edited Python file and the
+   index render on each edited docs page. The pre-push guard runs
+   `scripts/prepush_checks.py`. The gate agent runs the gates in
+   `docs/agent-workflow.md` not completed at their scope. Reserve the
+   checkout against other pytest sessions from coverage erase through the
+   transition report.
+5. Force-push only your own rebased branch, never main:
+   `git push --force-with-lease --force-if-includes origin BRANCH`. If only
+   the forced update is blocked, push as `BRANCH-v2`, close the old PR, open
+   its replacement.
+6. Ask before `git branch -D`, `git worktree remove --force`,
+   `git push --delete` and `gh pr merge --delete-branch`. Remove worktrees
+   with `wt remove`.
+7. Resolve a conflict and inspect the files. In a later command, run
+   `git diff --check` and, for Markdown, `uv run pytest -q
+   tests/test_docs_hygiene.py`. Stage explicit paths after both pass. Run
+   `git diff --cached --check` before `--continue`.
+8. Read the failed CI step. Rerun once for a diagnosed transient cause:
+   `gh run rerun ID --failed`. Investigate everything else. Split a test
+   file over five minutes on one worker when its tests can run apart.
+9. CLI tests use the `cli_env` fixture and strip ANSI, unless colour or
+   width is under test.
+10. After rewriting a document, run `scripts/doc_deps.py`, inspect its
+    matches, fix every affected consumer before the gates.
+11. Call a CLI model through `scripts/peer.sh MODEL BRIEF OUT SECONDS`.
+    After a timeout, confirm its children have stopped before reusing the
+    worktree.

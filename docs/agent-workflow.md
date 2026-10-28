@@ -26,8 +26,8 @@ agent or peer, plus returned identity when exposed.
 If identity is not exposed, record that gap; selection is not server verification.
 Do not silently substitute another model if the requested one is unavailable.
 
-No pre-push guard is shipped by this repository.
-Git hooks do not travel with a clone.
+The pre-push guard is `scripts/prepush_checks.py`, installed by hand into
+`.git/hooks/pre-push`. Git hooks do not travel with a clone.
 Verify any locally required guard and its source before relying on it.
 Public-repo hygiene still requires reading changed files line by line.
 Never use a guard's absence or a clean secret scan as evidence that estate-derived
