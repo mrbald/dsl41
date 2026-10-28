@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -205,7 +206,31 @@ def test_other_tools_are_ignored() -> None:
 )
 def test_unresolved_conflict_blocks_the_next_step(conflicted: Path, command: str) -> None:
     decision, reason = decide(command, conflicted)
-    assert decision == "deny" and "a.txt" in reason and "conflict marker" in reason
+    assert decision == "deny" and "a.txt" in reason and "conflict marker" in reason, (
+        explain_silence(command, conflicted)
+    )
+
+
+def explain_silence(command: str, repo: Path) -> str:
+    """What the guard saw: the trace of a run, the repository state, the file."""
+    payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(repo)}
+    trace = subprocess.run(
+        ["sh", "-x", str(GUARD)],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True, check=False
+    )
+    git_env = {k: v for k, v in os.environ.items() if k.startswith("GIT")}
+    return (
+        f"stdout: {trace.stdout}\ntrace: {trace.stderr[-3000:]}\n"
+        f"status: {status.stdout}{status.stderr}\n"
+        f"a.txt: {(repo / 'a.txt').read_text(encoding='utf-8')!r}\nenv: {git_env}"
+    )
 
 
 def test_resolved_conflict_lets_the_commit_go_on(conflicted: Path) -> None:
