@@ -656,8 +656,9 @@ and the design in
 jobs with `add_file_processing_jobs` and deploys
 `python -m dsl41.file_processing_worker` with their own handler
 ([authoring §1.1](docs/authoring.md#11-add-file-processing-to-an-estate)).
-The handler and operator CLIs under `examples/` are samples. Composition
-through the real runner is not yet qualified.
+The handler and operator CLIs under `examples/` are samples. The README's
+exercise runs the example estate under the real engine and supervisor on one
+host, through a stop and an operator's rejection.
 
 ## Implementation memo
 

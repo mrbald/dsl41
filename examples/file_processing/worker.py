@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import stat
 import tempfile
+import time
 
 from dsl41.file_processing import (
     Completed,
@@ -26,9 +27,11 @@ __all__ = [
     "EXIT_REFUSED",
     "EXIT_STOPPED",
     "CountsHandler",
+    "HeldCountsHandler",
     "count_json",
     "counts_handler",
     "count_text",
+    "held_counts_handler",
     "main",
 ]
 
@@ -114,6 +117,34 @@ class CountsHandler:
 def counts_handler(root: Path) -> CountsHandler:
     """The deployed worker's factory: --handler examples.file_processing.worker:counts_handler."""
     return CountsHandler(root / "output")
+
+
+class HeldCountsHandler(CountsHandler):
+    """CountsHandler that records each call and, after its output, waits while a hold exists.
+
+    Each process call first appends the processing key as one line to the calls file, an
+    independent witness of how often the business function ran. A stop during the wait
+    leaves the effect in place and the claim RUNNING: the case reconciliation must complete
+    without a second call (README "Exercise").
+    """
+
+    def __init__(self, output: Path, hold: Path, calls: Path) -> None:
+        super().__init__(output)
+        self.hold = hold
+        self.calls = calls
+
+    def process(self, item: WorkItem) -> Result:
+        with self.calls.open("a") as stream:
+            stream.write(f"{item.processing_key}\n")
+        result = super().process(item)
+        while self.hold.exists():
+            time.sleep(0.1)
+        return result
+
+
+def held_counts_handler(root: Path) -> HeldCountsHandler:
+    """--handler examples.file_processing.worker:held_counts_handler: ROOT/hold, ROOT/calls."""
+    return HeldCountsHandler(root / "output", root / "hold", root / "calls")
 
 
 def main() -> None:

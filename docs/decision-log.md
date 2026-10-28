@@ -24646,3 +24646,43 @@ relitigate an entry; append a new one.
   cannot run as a script); a field per token in each literal (a thick module); `--check` taking
   a list of files (a directory mirrors `--out`); a bare `--emit PACKAGE` (two forms of one
   option); keys relative to a common root; a `__main__.py`.
+- DL-417 The file-processing example estate runs under the real engine and supervisor, with
+  REARM as its activation, and the README's exercise runs it as printed (2026-10-28;
+  examples/file_processing/estate.py, rearm.py, worker.py, README.md, HANDOVER.md;
+  tests/test_file_processing_runner.py)
+  THE RULE. `estate(..., rearm=SOCKET)` adds REARM, a CMD job on `s(ARCHIVER, 0) & d(PROCESSOR, 0)`:
+  after the archiver's success and the processor's end, whatever that end was. It runs
+  `examples.file_processing.rearm`, which removes the ready signal, publishes it again when work is
+  pending, and sends STARTJOB to the watcher. Work is pending when a delivery waits in the inbox,
+  when the ledger holds more RUNNING claims than at REARM's previous run, or when it holds READY or
+  RUNNING work and no UNKNOWN work and the cycle made progress: more terminal rows or fewer RUNNING
+  claims than at that run. REARM keeps the counts in `ROOT/rearm.json`; a ledger restored from
+  backup takes its removal. A run without progress (a handler that never completes, an unloadable
+  handler, a refusal, a busy lock, an UNKNOWN row) starts the watch with no signal, so its work
+  waits for the next delivery or an operator's run. The counts also see no progress when two runs in
+  a row stop mid-run and the second returns one claim and takes another; that work waits for the
+  next delivery, and nothing is lost. After a manual processor run, the next archiver success starts
+  REARM beside the processor; one extra cycle with a no-op archiver follows. The removal comes
+  before the checks, so a delivery published before them starts the next cycle and one published
+  after them comes with its own signal. Without `rearm` the estate keeps the watcher and the two
+  jobs. The watch stays down until an operator sends STARTJOB to the watcher when the archiver
+  fails, when REARM fails (its STARTJOB finds no engine socket, say), or when a supervisor stop ends
+  REARM. `--resume` starts nothing by itself; it re-arms only when the stopped processor's end,
+  recorded at resume, completes REARM's condition. On a host without the systemd units the exercise
+  stops the engine with SIGTERM, then the supervisor with SIGTERM; on a service host `dsl41 estate
+  quiesce` stays the supported stop (DL-414). `held_counts_handler` records each call in
+  `ROOT/calls` and holds after its effect while `ROOT/hold` exists. The sample operator CLI stays in
+  `examples/`. The exercise covers repeated arrivals, a long handler, a stop and resume, a toxic
+  delivery and a ruling. It does not cover batch limits, resource waits or missed wakes, which
+  HANDOVER's slice 5 also names.
+  THE REASON. The contract leaves activation to the estate author (DL-404), and the helper refuses a
+  box (DL-411), so the example re-arms its watcher with STARTJOB. A REARM on the archiver's success
+  re-armed during the processor run, and a delivery archived then stayed READY: `s(ARCHIVER, 0)` was
+  false after the processor ended. Republishing after a run that made no progress, or for an UNKNOWN
+  row that stops every processor run, would launch a cycle every few seconds without bound; launches
+  are external effects. `supervise shutdown` refuses without Linux service containment (DL-390), and
+  a supervisor stop by any route ends every running command (DL-414).
+  REJECTED: stating the stranded-delivery window as a limit; republishing while an UNKNOWN row
+  remains or after a run without progress; a backoff (the example has no timer); a box and
+  recycler around the watcher (the helper keeps its jobs out of boxes); moving the operator CLI
+  into the package now.

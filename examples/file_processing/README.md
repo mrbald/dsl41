@@ -5,8 +5,11 @@ Slices 1 to 4 of [HANDOVER.md](HANDOVER.md) are built. The authoring API is
 `add_file_processing_jobs` and the worker command
 `python -m dsl41.file_processing_worker`; the job author's guide shows both
 ([authoring §1.1](../../docs/authoring.md#11-add-file-processing-to-an-estate)).
-Slice 5 (scheduler composition through the real runner) and slice 6
-(qualification) are not built. It adds no compiler or scheduler behavior.
+The [exercise](#exercise-run-the-estate-under-the-runner) runs the example estate
+under the real engine and supervisor on one host (DL-417): repeated arrivals, a
+long handler, a supervisor stop and resume, a toxic delivery and an operator's
+ruling. It does not exercise what slice 5 also names: batch limits, resource
+waits and missed wakes. It adds no compiler or scheduler behavior.
 The worker imports the existing statechart executor, but no scheduler.
 The Python estate uses ordinary `CatalogBuilder.job` calls.
 
@@ -307,10 +310,11 @@ A busy lock makes either recipe exit nonzero without running the repair, as
   is known to exist; then enable activation. Receipts admitted after the backup
   are lost from the ledger. Their TODOs become `TODO has no ledger work`
   refusals; move them out of `todo/`. Their objects stay as harmless orphans. The
-  producer must redeliver those files under new basenames.
-  Without a backup, the root cannot be recovered; start a new root.
+  producer must redeliver those files under new basenames. If the estate uses the
+  example's REARM, remove `ROOT/rearm.json` too: its counts belong to the lost
+  ledger. Without a backup, the root cannot be recovered; start a new root.
 
-## Python estate and one-cycle watcher
+## Python estate and its activation
 
 Import `add_file_processing_jobs` from `dsl41.file_processing_dsl` to add exactly
 two command jobs to an existing builder. The helper is separate from the
@@ -323,29 +327,56 @@ lists the helper's refusals, the host command and the worker's exit codes.
 
 `estate` in [estate.py](estate.py) demonstrates exactly one literal-path FW plus
 ARCHIVER and PROCESSOR. ARCHIVER depends on watcher success. PROCESSOR uses
-`s(ARCHIVER,0)`. There is no TODO watcher. The ready signal path is an explicit
-one-cycle demonstration input. Publish the complete inbox deliveries before
-publishing that signal. The FW watches a literal file and size stability; it
-does not discover a glob or directory queue. How the jobs run again is the
-estate author's choice: a timed archiver sweep, a rearm, or an operator's manual
-run (CONTRACT.md, "Activation is external"). The workers and the helper assume
-none of them.
+`s(ARCHIVER,0)`. There is no TODO watcher. The FW watches a ready signal, a
+literal file, for size stability; it does not discover a glob or directory
+queue. Publish the complete inbox deliveries before publishing that signal.
+How the jobs run again is the estate author's choice: a timed archiver sweep, a
+rearm, or an operator's manual run (CONTRACT.md, "Activation is external"). The
+workers and the helper assume none of them.
 
-The CLI catalog loader accepts JIL. Generate a temporary JIL artifact through
-the normal Python builder pipeline; direct `.py` CLI loading is not supported:
+The example's choice is a rearm (DL-417). With `--rearm` naming the engine's
+control socket, the estate adds a fourth job, REARM, on
+`s(ARCHIVER, 0) & d(PROCESSOR, 0)`: it runs after the archiver's success and the
+processor's end, whatever that end was. It runs [rearm.py](rearm.py), which
+removes the ready signal, publishes it again when work is pending, and sends
+STARTJOB to INBOX_FW. Work is pending when a delivery waits in the inbox, when the
+ledger holds more `RUNNING` claims than at REARM's previous run, or when it holds
+`READY` or `RUNNING` work and no `UNKNOWN` work and the cycle made progress: a row
+reached a terminal state, or a claim was resolved, since REARM's previous run. REARM keeps the counts it compares in
+`ROOT/rearm.json`. So a delivery that lands while the processor runs, a processor
+stopped mid-run, and a reconciliation that proved `RetrySafe` each start the next
+cycle. The watch is down from the watcher's success to REARM's run; a signal
+published then stays in place and the inbox check covers it.
 
-```sh
-.venv/bin/python -m examples.file_processing.estate \
-  --root "$root" --ready-signal "$root/ready.signal" \
-  --python "$PWD/.venv/bin/python" > "$root/estate.jil"
-.venv/bin/dsl41 run "$root/estate.jil"
-```
+After a manual processor run, such as the exercise's FORCE_STARTJOB, the
+processor's end already satisfies REARM's condition. The next archiver success
+then starts REARM beside the processor, and one extra cycle runs with a no-op
+archiver. Nothing is lost; REARM runs again after the processor ends.
 
-The process job names the sample handler as
-`--handler examples.file_processing.worker:counts_handler`, so the repository
+After a processor run without progress (a handler that never completes, an
+unloadable `--handler`, a refusal, a busy lock, or an `UNKNOWN` row awaiting a
+ruling), REARM starts the watch but publishes no signal. The waiting work starts
+no cycle until the next delivery or an operator's run, so a failure never cycles
+without bound. The counts in `rearm.json` also see no progress when two runs in a
+row stop mid-run and the second returns one claim and takes another; that work
+waits for the next delivery too. Nothing is lost.
+
+These cases leave the watch down until an operator sends
+`dsl41 sendevent STARTJOB -J INBOX_FW`:
+- an archiver that fails, so no processor runs;
+- a REARM that fails, for example because the engine was stopped while it ran and
+  its STARTJOB found no socket;
+- a REARM ended by a supervisor stop.
+
+`--resume` starts nothing by itself. It re-arms only when the stopped processor's
+end, recorded at resume, completes REARM's condition, as in the exercise. Without
+`--rearm` the estate has three jobs and one cycle.
+
+The CLI catalog loader accepts JIL, so the module prints the estate as JIL;
+`dsl41 run` does not load a `.py` file. The process job names the sample handler
+as `--handler examples.file_processing.worker:counts_handler`, so the repository
 root must be importable by that process. A real estate names its own installed
-handler module. The generated catalog command above is illustrative; the demo
-does not run a supervisor or assert runner qualification.
+handler module.
 
 Zero lookback compares the archiver END with the processor's last END (SEM-04).
 A first run can match an old archiver success. An archiver completion during a
@@ -375,3 +406,301 @@ selection, outbox recovery, UNKNOWN refusal, handover corruption, foreign
 staging entries, lost-ledger evidence, DSL round trips and the oracle backlog gap.
 They do not qualify power-loss behavior, network filesystems, distributed use,
 continuous signalling or arbitrary external-effect reconciliation.
+
+## Exercise: run the estate under the runner
+
+This exercise is for an operator. It runs the example estate under `dsl41 run`
+and its supervisor on one POSIX host, stops both while the processor is
+mid-run, resumes, and rules one toxic delivery `REJECTED`. You are done when
+every work row is terminal and the handler ran once for each row.
+
+Work from the repository root after `uv sync --frozen --extra dev`, with
+`.venv/bin` first on `PATH`, so `python` and `dsl41` are the locked ones. Set
+`work` to a new, empty directory with a short path, for example
+`work=$(mktemp -d /tmp/dsl41-fp.XXXXXX)`: a control socket path must fit in
+104 bytes. Type each block into one shell, in order. A `#` line after a command
+is what that command prints, standard output and error together. `…` stands for
+text that changes from run to run, such as times, ids and paths. A command with
+no `#` line prints nothing. Every command exits 0 unless its first `#` line says
+`exit N:`. A block marked *repeat* waits for the runner: type it again until it
+prints what is shown. A wait is a few seconds.
+[test_file_processing_runner.py](../../tests/test_file_processing_runner.py)
+runs every block as printed here.
+
+### 1. Variables, the estate and the first deliveries
+
+<!-- exercise: variables -->
+```sh
+root=$work/root
+RUN_ROOT=$work/run
+S=$RUN_ROOT/control.sock
+```
+
+The estate uses the held handler. Each call appends its work key to
+`$root/calls`; after it publishes its output, it waits while `$root/hold` exists.
+The hold keeps the first processor run alive until you stop it.
+
+<!-- exercise: estate -->
+```sh
+mkdir "$root" "$root/inbox"
+python -m examples.file_processing.estate --root "$root" --ready-signal "$root/ready.signal" \
+  --handler examples.file_processing.worker:held_counts_handler --rearm "$S" >"$work/estate.jil"
+printf 'one\n' >"$root/inbox/001-a.txt"
+printf '[1,2]\n' >"$root/inbox/002-b.json"
+touch "$root/hold"
+```
+
+Nothing runs yet, so nothing reads these files while you write them. Later
+deliveries are written beside the inbox and renamed into it, as a producer must.
+
+### 2. Start the engine and the first cycle
+
+`--detached` runs the commands under a supervisor that the engine starts.
+
+<!-- exercise: start -->
+```sh
+dsl41 run "$work/estate.jil" --run-root "$RUN_ROOT" --detached --as-machine localhost \
+  >"$work/engine.log" 2>&1 &
+echo $! >"$work/engine.pid"
+```
+
+*Repeat* until the engine answers:
+
+<!-- exercise: started repeat -->
+```sh
+dsl41 query status --brief -J INBOX_FW -S "$S"
+# INBOX_FW … INACTIVE … run 0 …
+```
+
+Publish the signal and start the watcher. The `sending:` line holds the values a
+safe retry needs.
+
+<!-- exercise: first-cycle -->
+```sh
+echo ready >"$root/ready.signal"
+dsl41 sendevent STARTJOB -J INBOX_FW -S "$S"
+# sending: …
+# {…"decision": "applied"…"kind": "STARTJOB"…}
+```
+
+*Repeat* until the first item's output exists. The processor is then waiting on
+the hold, and the watch is down until REARM runs after it.
+
+<!-- exercise: holding repeat -->
+```sh
+ls "$root/output"
+# e2655ccff9fd0788f8676a41e9f7cb78cd1122fca579a099e8b340b4b702687f.json
+dsl41 query status --brief -J PROCESSOR -S "$S"
+# PROCESSOR … RUNNING … run 1 …
+dsl41 query status --brief -J INBOX_FW -S "$S"
+# INBOX_FW … SUCCESS … run 1 …
+```
+
+### 3. Stop the engine, then the supervisor
+
+The engine goes first, as in `dsl41 estate quiesce`. Its detached jobs keep
+running under the supervisor.
+
+<!-- exercise: stop-engine -->
+```sh
+kill -TERM "$(cat "$work/engine.pid")"
+```
+
+*Repeat* until the engine has printed its reattach line:
+
+<!-- exercise: engine-stopped repeat -->
+```sh
+cat "$work/engine.log"
+# engine up; control socket: …/control.sock
+# stopping: jobs continue under the supervisor (detached, ss6a)
+# detached: reattach with `…`
+```
+
+Now stop the supervisor with SIGTERM. A supervisor stop by any route ends every
+running command (DL-414). On a service host the supported stop is
+`dsl41 estate quiesce`, whose maintenance stage needs Linux service containment;
+SIGTERM is the stop this host has.
+
+<!-- exercise: stop-supervisor -->
+```sh
+kill -TERM "$(dsl41 supervise list --run-root "$RUN_ROOT" | sed 's/.*"supervisor_pid": \([0-9]*\).*/\1/')"
+```
+
+*Repeat* until the supervisor is gone:
+
+<!-- exercise: supervisor-stopped repeat -->
+```sh
+dsl41 supervise list --run-root "$RUN_ROOT"
+# exit 2: no supervisor at …/supervisor.sock
+```
+
+The first item's output exists and the handler ran once, but the claim is still
+`RUNNING`: the effect happened and the ledger does not know it. The second item
+is `READY`. Release the hold, so the next run does not wait on it.
+
+<!-- exercise: interrupted -->
+```sh
+python -m examples.file_processing.operate --root "$root" list
+# [{"attempt": 1, …"name": "001-a.txt"…"state": "RUNNING", "todo": true…}, {"attempt": 0, …"name": "002-b.json"…"state": "READY", "todo": true…}]
+cat "$root/calls"
+# e2655ccff9fd0788f8676a41e9f7cb78cd1122fca579a099e8b340b4b702687f
+rm "$root/hold"
+```
+
+### 4. Resume
+
+<!-- exercise: resume -->
+```sh
+dsl41 run --resume "$work/estate.jil" --run-root "$RUN_ROOT" --detached --as-machine localhost \
+  >"$work/resume.log" 2>&1 &
+echo $! >"$work/engine.pid"
+```
+
+The engine records the stopped processor run as `TERMINATED`. That end completes
+REARM's condition. REARM finds work pending and publishes the signal again, and
+the next cycle recovers the work. *Repeat* until the processor's second run has
+succeeded and REARM has started the third watch:
+
+<!-- exercise: resumed repeat -->
+```sh
+dsl41 query status --brief -J PROCESSOR -S "$S"
+# PROCESSOR … SUCCESS … run 2 … exit 0 …
+dsl41 query status --brief -J INBOX_FW -S "$S"
+# INBOX_FW … RUNNING … run 3 …
+```
+
+The reconciler found the first output and recorded it as the completion: rows
+`.04` and `.05` carry origin `reconciler`. The handler ran once more, for the
+second item only.
+
+<!-- exercise: recovered -->
+```sh
+cat "$RUN_ROOT/logs/PROCESSOR.2.out"
+# {"completed": 2, "duplicates": 0, "reconciled": 1, "remaining": 0, "selected": 2, "stopped": false, "unknown": 0}
+python -m examples.file_processing.operate --root "$root" show --key e2655ccff9fd0788f8676a41e9f7cb78cd1122fca579a099e8b340b4b702687f
+# {"decisions": [{…"chart_row": "file_process.01"…"state": "RUNNING"…}, {…"chart_row": "file_process.04"…"origin": "reconciler"…"state": "UNKNOWN"…}, {…"chart_row": "file_process.05"…"origin": "reconciler"…"state": "DONE"…}], "work": {"attempt": 1, …"state": "DONE", "todo": false…}}
+cat "$root/calls"
+# e2655ccff9fd0788f8676a41e9f7cb78cd1122fca579a099e8b340b4b702687f
+# 0f4e46db9c5790070c51a1033536d8a01a2efe460cae74be8194256fb3176509
+```
+
+If REARM had failed or been stopped, the watch would stay down: send
+`dsl41 sendevent STARTJOB -J INBOX_FW -S "$S"` yourself.
+
+### 5. A toxic delivery
+
+`003-bad.json` is toxic: the handler counts JSON arrays, and this is an object.
+
+<!-- exercise: second-cycle -->
+```sh
+printf '{"records": 1}\n' >"$work/003-bad.json"
+mv "$work/003-bad.json" "$root/inbox/"
+printf 'four\nlines\n' >"$work/004-c.txt"
+mv "$work/004-c.txt" "$root/inbox/"
+echo ready >"$root/ready.signal"
+```
+
+*Repeat* until the processor has stopped and REARM has run:
+
+<!-- exercise: second-cycle-done repeat -->
+```sh
+dsl41 query status --brief -J PROCESSOR -S "$S"
+# PROCESSOR … FAILURE … run 3 … exit 1 …
+dsl41 query status --brief -J REARM -S "$S"
+# REARM … SUCCESS … run 3 …
+```
+
+The run stopped at the toxic item, and the fourth waits behind it. REARM saw the
+`UNKNOWN` row and published no signal: the watch waits for the next delivery.
+
+<!-- exercise: stuck -->
+```sh
+cat "$RUN_ROOT/logs/PROCESSOR.3.out"
+# {"completed": 0, "duplicates": 0, "reconciled": 0, "remaining": 2, "selected": 1, "stopped": true, "unknown": 1}
+python -m examples.file_processing.operate --root "$root" list
+# […"reason": "ValueError: sample JSON input must be a records array"…"name": "003-bad.json"…"state": "UNKNOWN", "todo": true, "work_key": "…"}, {"attempt": 0, …"name": "004-c.txt"…"state": "READY", "todo": true…}]
+dsl41 query status --brief -J INBOX_FW -S "$S"
+# INBOX_FW … RUNNING … run 4 …
+```
+
+### 6. Reject the toxic delivery and drain the queue
+
+Read the attempt from `list` just before the ruling. Rejection records that no
+further attempt will be made; it proves nothing about the business effect.
+
+<!-- exercise: reject -->
+```sh
+python -m examples.file_processing.operate --root "$root" rule --key 25f9613fabfc0863bf754408d22f83f6353b4f6e91410c5042663634b440a803 \
+  --event rejected --expect-state UNKNOWN --expect-attempt 1 --reason "toxic input"
+# {…"chart_row": "file_process.09", …"origin": "operator", "prior_state": "UNKNOWN", "reason": "toxic input", "state": "REJECTED"…}
+```
+
+`s(ARCHIVER,0)` is false now: the processor ended after the archiver. Run the
+processor by hand, one of the contract's activations:
+
+<!-- exercise: drain -->
+```sh
+dsl41 sendevent FORCE_STARTJOB -J PROCESSOR -S "$S"
+# sending: …
+# {…"decision": "applied"…"kind": "FORCE_STARTJOB"…}
+```
+
+*Repeat* until the processor succeeds:
+
+<!-- exercise: drained repeat -->
+```sh
+dsl41 query status --brief -J PROCESSOR -S "$S"
+# PROCESSOR … SUCCESS … run 4 … exit 0 …
+```
+
+Every row is terminal, the handler ran once per row, and the inbox and the TODO
+directory are empty:
+
+<!-- exercise: done -->
+```sh
+python -m examples.file_processing.operate --root "$root" list
+# [{"attempt": 1, …"state": "DONE", "todo": false…}, {"attempt": 1, …"state": "DONE", "todo": false…}, {"attempt": 1, …"state": "REJECTED", "todo": false…}, {"attempt": 1, …"state": "DONE", "todo": false…}]
+cat "$root/calls"
+# e2655ccff9fd0788f8676a41e9f7cb78cd1122fca579a099e8b340b4b702687f
+# 0f4e46db9c5790070c51a1033536d8a01a2efe460cae74be8194256fb3176509
+# 25f9613fabfc0863bf754408d22f83f6353b4f6e91410c5042663634b440a803
+# 79d7f8ee70b83191500c18726ee4dae4fd46c09d75613f93c3ef4c8f14858381
+ls "$root/output"
+# 0f4e46db9c5790070c51a1033536d8a01a2efe460cae74be8194256fb3176509.json
+# 79d7f8ee70b83191500c18726ee4dae4fd46c09d75613f93c3ef4c8f14858381.json
+# e2655ccff9fd0788f8676a41e9f7cb78cd1122fca579a099e8b340b4b702687f.json
+ls -A "$root/inbox"
+ls "$root/todo"
+```
+
+### 7. Stop
+
+Stop the engine, then the supervisor, as in step 3.
+
+<!-- exercise: stop-engine-again -->
+```sh
+kill -TERM "$(cat "$work/engine.pid")"
+```
+
+*Repeat* until the engine has printed its reattach line:
+
+<!-- exercise: engine-stopped-again repeat -->
+```sh
+tail -n 1 "$work/resume.log"
+# detached: reattach with `…`
+```
+
+<!-- exercise: stop-supervisor-again -->
+```sh
+kill -TERM "$(dsl41 supervise list --run-root "$RUN_ROOT" | sed 's/.*"supervisor_pid": \([0-9]*\).*/\1/')"
+```
+
+*Repeat* until the supervisor is gone:
+
+<!-- exercise: supervisor-stopped-again repeat -->
+```sh
+dsl41 supervise list --run-root "$RUN_ROOT"
+# exit 2: no supervisor at …/supervisor.sock
+```
+
+Remove `$work` when you are done.
