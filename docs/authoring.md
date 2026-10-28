@@ -466,7 +466,7 @@ properties = ["prod.properties"]
 
 The order of `files` is part of the catalog's hash, so a reorder is a catalog change.
 Every name is a path relative to the manifest in normal form, with no `.` or `..` part, no `//` and no `/` at either end, and names an existing file under the manifest's directory.
-A catalog file or a layer may not be a `.py` file: no Python enters a release (DL-410, DL-413).
+No name may be a `.py` file: no Python enters a release (DL-410, DL-413).
 dsl41 refuses an unknown key at any level, and a path that `files`, or the base and one environment's layers, name twice.
 `requires_dsl41` accepts only `>=`, and compares the leading integers of the version, so a pre-release or dev build of X counts as X.
 

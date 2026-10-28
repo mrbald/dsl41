@@ -24526,7 +24526,7 @@ relitigate an entry; append a new one.
   docs/authoring.md §6.1, README "DSL -> JIL (build)")
   THE RULE. Every manifest load reads estate.toml without following a symlink, as a regular
   file, and refuses a name not in normal form (a `.` or `..` part, `//`, a `/` at either end)
-  and a `.py` file among `files` and the layers: no Python enters a release (DL-410).
+  and any `.py` name, timezone map included: no Python enters a release (DL-410).
   `estate build DIR -o OUT [--emit NAME=MODULE]... [--check]` renders each emitted file through
   `dsl41 build`'s loader, `cli_common.module_jil`, copies the manifest and every other file it
   names with its name, each opened without following a symlink, writes OUT.tmp, loads its
