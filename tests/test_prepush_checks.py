@@ -141,6 +141,10 @@ def test_needles_skip_a_readme_basename() -> None:
     assert prepush.needles("docs/blocks/README.md") == {
         "docs/blocks/README.md",
         "docs/blocks/",
+        '"docs"',
+        "'docs'",
+        '"blocks"',
+        "'blocks'",
     }
     assert "guide.md" in prepush.needles("docs/guide.md")
 
@@ -154,6 +158,39 @@ def test_a_top_level_folder_name_selects_no_test(repo: Path) -> None:
     assert "tests/test_mentions_docs.py" not in pytest_line
     assert "tests/test_decision_log.py" in pytest_line
     assert "arch_check.py" in result.stdout
+
+
+def _pytest_line(repo: Path) -> str:
+    return next(ln for ln in _run(repo, "--dry-run").stdout.splitlines() if "pytest" in ln)
+
+
+def test_a_reader_building_the_path_from_quoted_parts_is_selected(repo: Path) -> None:
+    _write(repo, "tests/test_parts.py", 'CARDS = ROOT / "docs" / "blocks"\n')
+    _write(repo, "docs/blocks/x.md", "# X\n")
+    assert "tests/test_parts.py" in _pytest_line(repo)
+
+
+def test_a_reader_globbing_the_top_level_folder_is_selected(repo: Path) -> None:
+    _write(repo, "tests/test_single.py", "FILES = sorted((ROOT / 'docs').glob('*.md'))\n")
+    _write(repo, "docs/guide.md", "# Guide\n\nMore.\n")
+    assert "tests/test_single.py" in _pytest_line(repo)
+
+
+def test_a_bare_folder_in_a_comment_selects_nothing(repo: Path) -> None:
+    _write(repo, "tests/test_comment.py", "# the files under docs/ are not read here\n")
+    _write(repo, "docs/blocks/x.md", "# X\n")
+    assert "tests/test_comment.py" not in _pytest_line(repo)
+
+
+def test_needles_quote_each_component_in_both_styles() -> None:
+    found = prepush.needles("docs/blocks/x.md")
+    assert {'"docs"', "'docs'", '"blocks"', "'blocks'"} <= found
+    assert "docs/" not in found
+
+
+def test_an_empty_change_set_is_code(repo: Path) -> None:
+    assert prepush.is_docs_only([]) is False
+    assert _run(repo, "--classify").stdout.strip() == "code=true"
 
 
 def test_an_unresolvable_base_is_refused(repo: Path) -> None:

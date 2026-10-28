@@ -85,12 +85,31 @@ def test_a_removed_sentence_and_marker_are_items(repo: Path) -> None:
     assert "<!-- steps:start --> -> README.md:2" in result.stdout
 
 
-def test_a_removed_table_header_cell_is_an_item(repo: Path) -> None:
+def test_a_removed_long_table_header_cell_is_an_item(repo: Path) -> None:
+    header = "Person who runs each release step"
+    _write(repo, "docs/guide.md", GUIDE.replace("| Step | Owner |", f"| Step | {header} |"))
+    _git(repo, "add", "docs/guide.md")
+    _git(repo, "commit", "-q", "-m", "long header")
+    _git(repo, "tag", "long")
+    _write(repo, "docs/other.md", f"Ask the {header} first.\n")
+    _git(repo, "add", "docs/other.md")
+    _write(repo, "docs/guide.md", GUIDE.replace("| Step | Owner |", "| Step | Who |"))
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--base", "long"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert f"{header} -> docs/other.md:1" in result.stdout
+
+
+def test_a_short_table_header_cell_is_below_the_floor(repo: Path) -> None:
     _write(repo, "docs/other.md", "Ask the Owner first.\n")
     _git(repo, "add", "docs/other.md")
     _write(repo, "docs/guide.md", GUIDE.replace("| Step | Owner |", "| Step | Who |"))
     result = _run(repo)
-    assert "Owner -> docs/other.md:1" in result.stdout
+    assert "Owner -> " not in result.stdout
 
 
 def test_an_edit_nobody_cites_has_no_hit(repo: Path) -> None:

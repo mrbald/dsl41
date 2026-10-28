@@ -21,7 +21,10 @@
 # scripts/prepush_checks.py on every change. A pull request compares with
 # its base branch, a branch push with the commit it replaced; a tag push, a
 # manual run and a call from release.yml always count as code. A classify
-# failure leaves its output empty, which also counts as code.
+# failure leaves its output empty, which also counts as code. A change to
+# scripts/prepush_checks.py or anything under .github/ counts as code without
+# asking the script, so a pull request never classifies itself with its own
+# classifier.
 
 name: tests
 
@@ -65,8 +68,11 @@ jobs:
           fi
           code="code=true"
           if [ -n "$base" ]; then
-            git diff --name-only --no-renames "$base...HEAD"
-            code=$(python3 scripts/prepush_checks.py --classify --base "$base") || code="code=true"
+            changed=$(git diff --name-only --no-renames "$base...HEAD")
+            echo "$changed"
+            if ! grep -Eq '^(scripts/prepush_checks\.py|\.github/)' <<< "$changed"; then
+              code=$(python3 scripts/prepush_checks.py --classify --base "$base") || code="code=true"
+            fi
           else
             base="HEAD~1"
           fi

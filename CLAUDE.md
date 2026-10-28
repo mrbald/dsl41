@@ -124,7 +124,8 @@ Use `docs/agent-workflow.md` for CLI recipes and review handoffs.
 
 ## Verification gates
 
-Before claiming any work is done: run the full test suite, ruff, and mypy. For
+Before claiming any work is done: run the full test suite (the docs gate for a
+docs-only change, rule 3 below), ruff, and mypy. For
 browser/UI work, verify in Chromium AND WebKit (and Firefox where relevant) --
 never declare a UI feature working from one engine. For interactive features,
 exercise the actual interaction (right-click, keyboard, resize), not just page
@@ -254,18 +255,18 @@ This block is managed by `hats init`; keep project text outside the markers.
    docs-only change runs `scripts/prepush_checks.py --docs` instead of the
    suite. Other gates and reviews stand.
 4. Hooks run ruff, ruff format and mypy on each edited Python file and the
-   index render on each edited docs page. The pre-push guard runs
-   `scripts/prepush_checks.py`. The gate agent runs the gates in
-   `docs/agent-workflow.md` not completed at their scope. Reserve the
-   checkout against other pytest sessions from coverage erase through the
-   transition report.
+   index render on each edited docs page. Install `scripts/prepush_checks.py`
+   as the pre-push hook. The gate agent runs the gates in
+   `docs/agent-workflow.md` that no hook ran over the whole tree. Run one
+   pytest session per checkout at a time, the coverage run alone from erase
+   to report.
 5. Force-push only your own rebased branch, never main:
    `git push --force-with-lease --force-if-includes origin BRANCH`. If only
    the forced update is blocked, push as `BRANCH-v2`, close the old PR, open
    its replacement.
 6. Ask before `git branch -D`, `git worktree remove --force`,
    `git push --delete` and `gh pr merge --delete-branch`. Remove worktrees
-   with `wt remove`.
+   with `wt remove --discard-ignored`.
 7. Resolve a conflict and inspect the files. In a later command, run
    `git diff --check` and, for Markdown, `uv run pytest -q
    tests/test_docs_hygiene.py`. Stage explicit paths after both pass. Run
@@ -277,6 +278,6 @@ This block is managed by `hats init`; keep project text outside the markers.
    width is under test.
 10. After rewriting a document, run `scripts/doc_deps.py`, inspect its
     matches, fix every affected consumer before the gates.
-11. Call a CLI model through `scripts/peer.sh MODEL BRIEF OUT SECONDS`.
-    After a timeout, confirm its children have stopped before reusing the
-    worktree.
+11. Call a CLI model through `scripts/peer.sh MODEL BRIEF OUT SECONDS`; the
+    brief says "call no other model". A verdict needs exit 0. After a
+    timeout, confirm its children have stopped before reusing the worktree.

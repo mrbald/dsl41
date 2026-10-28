@@ -6,8 +6,8 @@
 For each Markdown file (default: those changed since the merge base with
 REF, committed or in the working tree), the old side of every removed or
 changed line yields items: heading text, its GitHub anchor as `#anchor`,
-HTML comments, table header cells, and each sentence of 25 or more
-characters. `git grep -F` finds each item in the other tracked files, the
+HTML comments, and each sentence or table cell (header cells included)
+of 25 or more characters. `git grep -F` finds each item in the other tracked files, the
 decision log excepted, and the hits print as `ITEM -> file:line`, grouped by
 the file that changed. Version tokens on added lines are then compared with
 `[project] version` in pyproject.toml.
@@ -34,7 +34,6 @@ MIN_SENTENCE = 25
 
 _HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*#*\s*$")
 _COMMENT = re.compile(r"<!--.*?-->")
-_TABLE_SEPARATOR = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 _LINE_MARKER = re.compile(r"^\s*(?:[-*+>]|\d+\.)\s+")
 _VERSION = re.compile(r"(?<![\d.])\d+\.\d+\.\d+(?!\.?\d)")
@@ -51,7 +50,7 @@ def table_cells(line: str) -> list[str]:
 
 
 def items_from_line(lines: list[str], index: int) -> set[str]:
-    """The searchable items one old line holds; `lines` gives table context."""
+    """The searchable items one old line holds."""
     line = lines[index]
     found = set(_COMMENT.findall(line))
     heading = _HEADING.match(line)
@@ -60,9 +59,6 @@ def items_from_line(lines: list[str], index: int) -> set[str]:
         return found
     if line.lstrip().startswith("|"):
         cells = table_cells(line)
-        next_line = lines[index + 1] if index + 1 < len(lines) else ""
-        if _TABLE_SEPARATOR.match(next_line):
-            found.update(cells)
         found.update(c for c in cells if len(c) >= MIN_SENTENCE)
         return found
     text = _COMMENT.sub("", _LINE_MARKER.sub("", line)).strip()
