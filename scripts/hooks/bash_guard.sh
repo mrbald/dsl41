@@ -41,7 +41,11 @@ WRAPPERS = {
     "nice": {"-n", "--adjustment"},
     "caffeinate": {"-t", "-w"},
     "sudo": {"-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T", "-R"},
+    "timeout": {"-s", "--signal", "-k", "--kill-after"},
+    "xargs": {"-n", "-P", "-I", "-L", "-s", "-d", "-a", "-E"},
 }
+# wrapper: positional words before the command, such as the timeout duration
+POSITIONAL = {"timeout": 1}
 GIT_ARG = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"}
 
 
@@ -104,6 +108,7 @@ def unwrap(words):
                 break
             if opt in takes and words:
                 words.pop(0)
+        del words[: POSITIONAL.get(head, 0)]
     return words
 
 
@@ -254,6 +259,12 @@ while IFS="$TAB" read -r where seg; do
     "git switch "*)
         if has "$seg" "--discard-changes|--force|$(short f)"; then
             emit deny "git switch --discard-changes discards work: commit or move the changes first."
+            exit 0
+        fi
+        ;;
+    "git stash "*)
+        if has "$seg" "drop|clear"; then
+            emit deny "git stash drop and clear discard work: apply or keep the stash."
             exit 0
         fi
         ;;
