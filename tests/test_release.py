@@ -578,14 +578,21 @@ def test_prepare_refuses_a_name_that_exists_and_a_source_without_a_manifest(site
 
 
 def test_prepare_names_its_missing_argument(site: Site) -> None:
-    """DL-412: a usage error names the argument it lacks."""
-    missing = site.run("prepare", "v2")
+    """DL-412: a usage error names the argument it lacks, in a sentence of the verb's own
+    that no terminal setting changes."""
+    plain = {"NO_COLOR": "1", "TERM": "dumb"}
+
+    def text(done: subprocess.CompletedProcess[str]) -> str:
+        return re.sub(r"\x1b\[[0-9;]*m", "", done.stderr)
+
+    missing = site.run("prepare", "v2", env=plain)
     assert missing.returncode == 2
-    assert "SOURCE_DIR" in missing.stderr and "unless --requalify" in missing.stderr
-    both = site.run("prepare", "--requalify", "v2", str(site.source("v2")))
-    assert both.returncode == 2 and "--requalify takes no SOURCE_DIR" in both.stderr
-    nothing = site.run("apply")
-    assert nothing.returncode == 2 and "Missing argument" in nothing.stderr
+    assert text(missing) == "dsl41 release: SOURCE_DIR is required unless --requalify is given.\n"
+    both = site.run("prepare", "--requalify", "v2", str(site.source("v2")), env=plain)
+    assert both.returncode == 2
+    assert text(both) == "dsl41 release: --requalify takes no SOURCE_DIR.\n"
+    nothing = site.run("apply", env=plain)
+    assert nothing.returncode == 2 and "Missing argument" in text(nothing)
 
 
 @pytest.mark.parametrize(

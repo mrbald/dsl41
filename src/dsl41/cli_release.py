@@ -102,13 +102,13 @@ def estate_prepare(
     --requalify leaves prepared.json as it was, though a release never
     prepared keeps the read-only inputs it was given; 3 interrupted.
     """
+    # the refusal is the verb's own sentence, the same on every terminal (DL-412)
     if requalify and source_dir is not None:
-        raise typer.BadParameter("--requalify takes no SOURCE_DIR.", param_hint="SOURCE_DIR")
+        release_service.say("--requalify takes no SOURCE_DIR.")
+        raise typer.Exit(release_service.EXIT_REFUSED)
     if not requalify and source_dir is None:
-        raise typer.BadParameter(
-            "the directory that holds estate.toml is required unless --requalify is given.",
-            param_hint="SOURCE_DIR",
-        )
+        release_service.say("SOURCE_DIR is required unless --requalify is given.")
+        raise typer.Exit(release_service.EXIT_REFUSED)
     if requalify:
         _run(lambda: release.requalify(name))
     _run(lambda: release.prepare(name, source_dir))
