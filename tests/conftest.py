@@ -46,11 +46,11 @@ def _restore_recursion_limit():
 
 @pytest.fixture
 def cli_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A plain terminal for a CLI test: no colour, no cursor control, 200 columns.
-    The help text and error panels of typer and rich then read the same under a
-    terminal, CI and a pty. A test that asserts colour or a given width sets its own."""
+    """A plain terminal for a CLI test: no colour and 200 columns. The help text
+    and error panels of typer and rich then read the same under a terminal and in
+    CI. TERM stays as it is: rich answers 80 columns to a dumb terminal whatever
+    COLUMNS says. A test that asserts colour or a given width sets its own."""
     monkeypatch.setenv("NO_COLOR", "1")
-    monkeypatch.setenv("TERM", "dumb")
     monkeypatch.setenv("COLUMNS", "200")
     monkeypatch.delenv("FORCE_COLOR", raising=False)
     monkeypatch.delenv("CLICOLOR_FORCE", raising=False)
