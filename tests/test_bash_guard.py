@@ -55,10 +55,17 @@ def conflicted(tmp_path: Path) -> Path:
     git(repo, "switch", "-q", "main")
     (repo / "a.txt").write_text("main\n", encoding="utf-8")
     git(repo, "commit", "-q", "-am", "main")
+    # git checks the committer identity before a merge touches the tree, so the
+    # merge carries the same identity as the commits.
     merge = subprocess.run(
-        ["git", "merge", "other"], cwd=repo, capture_output=True, text=True, check=False
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "merge", "other"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    assert merge.returncode != 0
+    assert merge.returncode == 1, merge.stderr
+    assert (repo / "a.txt").read_text(encoding="utf-8").startswith("<<<<<<< ")
     return repo
 
 
