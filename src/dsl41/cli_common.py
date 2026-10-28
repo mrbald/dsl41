@@ -28,6 +28,7 @@ from dsl41.state_machine import EXIT_STATECHART_ERROR, StatechartError
 
 if TYPE_CHECKING:
     from dsl41.boundary import EstateWalk, Lineage
+    from dsl41.dsl import CatalogBuilder
     from dsl41.runner_adapters import SupervisorConn
     from dsl41.runner_clock import EngineError
 
@@ -116,6 +117,85 @@ def load_catalog_or_exit_2(
 #: The exit-2 class: every way an input can fail to reach the tool (DL-75). `LoweringError` is
 #: in the tuple because the catalog door lowers; the read and parse half cannot raise it.
 _EXIT_2_ERRORS = (JilParseError, LoweringError, PlaceholderError, OSError, UnicodeDecodeError)
+
+
+def _builder_from_module(module: Path) -> "CatalogBuilder":
+    """Import MODULE from its path and return what its estate() returns, or exit 2 (DL-410).
+
+    Until estate() returns, the module's directory leads sys.path, as it does for `python
+    MODULE`, so an estate may import its sibling modules, at import or inside estate(). Nothing
+    writes bytecode beside the source. The module is registered in sys.modules under a name no
+    real module has, so code that looks itself up there (a dataclass under postponed
+    annotations) works. Afterwards the module leaves sys.modules, and so does every module newly
+    imported through the directory's sys.path entry: a sibling file, or a sibling package and
+    its submodules. A later load in the same process then imports its own siblings. A module
+    found through another sys.path entry stays, even one below the directory, such as a
+    project's `.venv` or `src`."""
+    import importlib.util
+    import os
+    import sys
+
+    from dsl41.dsl import CatalogBuilder
+
+    spec = importlib.util.spec_from_file_location(
+        f"dsl41_build_{module.stem}_{os.getpid()}", module
+    )
+    if spec is None or spec.loader is None:
+        raise typer.Exit(refuse(f"{module}: not a Python source file"))
+    loaded = importlib.util.module_from_spec(spec)
+    directory = module.resolve().parent
+    known = set(sys.modules)
+    sys.modules[spec.name] = loaded
+    sys.path.insert(0, str(directory))
+    write_bytecode, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+    try:
+        try:
+            spec.loader.exec_module(loaded)
+        except (Exception, SystemExit) as exc:
+            raise typer.Exit(
+                refuse(f"{module}: importing the module raised {type(exc).__name__}: {exc}")
+            ) from exc
+        function = getattr(loaded, "estate", None)
+        if not callable(function):
+            raise typer.Exit(refuse(f"{module}: the module defines no estate() function"))
+        try:
+            builder = function()
+        except (Exception, SystemExit) as exc:
+            raise typer.Exit(
+                refuse(f"{module}: estate() raised {type(exc).__name__}: {exc}")
+            ) from exc
+    finally:
+        sys.dont_write_bytecode = write_bytecode
+        sys.path.remove(str(directory))
+        for name in set(sys.modules) - known:
+            origin = getattr(sys.modules[name], "__file__", None)
+            top = directory / name.partition(".")[0]
+            if name == spec.name or (
+                origin is not None
+                and (
+                    Path(origin).resolve() == top.with_name(f"{top.name}.py")
+                    or Path(origin).resolve().is_relative_to(top)
+                )
+            ):
+                del sys.modules[name]
+    if not isinstance(builder, CatalogBuilder):
+        raise typer.Exit(
+            refuse(f"{module}: estate() returned {type(builder).__name__}, not a CatalogBuilder")
+        )
+    return builder
+
+
+def module_jil(module: Path, permit_unknown: bool) -> bytes:
+    """The JIL that MODULE's estate() declares, lowered through the compiler, or exit 2.
+
+    `dsl41 build` and `estate build` both render a module through this one loader, which
+    imports MODULE once per call (DL-410, DL-413)."""
+    builder = _builder_from_module(module)
+    try:
+        builder.build(permit_unknown=permit_unknown)
+    except (JilParseError, LoweringError) as exc:
+        raise typer.Exit(refuse(exc, prefix=f"{module}: the built JIL does not lower")) from exc
+    return builder.to_jil().encode("utf-8")
 
 
 def parse_files_or_exit_2(

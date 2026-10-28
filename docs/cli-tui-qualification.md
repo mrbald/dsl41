@@ -36,6 +36,7 @@ They do not establish that a separately installed wheel works.
 | `seal`, `audit`, `verify` | `tests/test_estate.py`, `tests/test_estate_wide.py`, `tests/test_nightbank_boundary.py` |
 | `estate prune`, `estate reclaim` | `tests/test_retention.py`, `tests/test_estate_wide.py` |
 | `estate args` | `tests/test_estate_manifest.py` |
+| `estate build`, `estate diff` | `tests/test_estate_build.py` |
 
 Release qualification must run the installed executable outside the source checkout.
 It must exercise both a core-only install and an install with the `ui` extra.

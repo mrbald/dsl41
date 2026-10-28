@@ -493,6 +493,16 @@ Run the runbook's [check block](deployment-runbook.md#recipe-add-change-or-remov
 It runs `estate args`, then `lint` and `rehearse` with the printed arguments and the site's properties file.
 A manifest that `estate args` refuses fails that check, before the tag exists.
 
+When a file such as `eod.jil` comes from a Python module, `dsl41 estate build . --emit eod.jil=eod.py -o dist/v42` assembles the release directory, and `dsl41 release prepare v42 dist/v42` takes it (DL-413).
+It renders each `--emit` file as `dsl41 build` does, copies the manifest and every other file it names, and loads the result for every environment.
+It refuses a named file that is missing and not emitted, an `--emit` that `files` does not name or that is also a file in the directory, a symlink, and an `--out` that is not empty.
+No Python enters the release; `--check` compares with an existing directory and exits `1` on a difference.
+
+For the weekly release review, `dsl41 estate diff OLD/estate.toml NEW/estate.toml --environment prod -p SITE.properties` lists what the new release adds, removes and changes: jobs, calendars, cycles, resources, machines, globals and instances.
+A job counts as changed when the seal's classifier would count it changed, so the review sees the seal's answer before the window.
+The timezone, the timezone map and the semantic switches are listed apart.
+It exits `0` with no difference and `1` with one; `--format json` prints one object for the ticket.
+
 ### 6.2. Write every job to survive interruption
 
 dsl41 may end any job while its command runs.
