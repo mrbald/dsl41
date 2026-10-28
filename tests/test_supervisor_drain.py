@@ -627,12 +627,12 @@ def test_a_held_spawn_waits_out_a_quarantine_and_ends_unsent_on_eviction(
             gate.touch()
             assert await asyncio.to_thread(first.wait, 30) == 0
             host["state"] = "quarantined"
-            sent = len(attempts)
             second = await asyncio.to_thread(start_supervisor, short_root)
             seen = host["reads"]
             while host["reads"] < seen + 5:  # five passes of the gate with a supervisor up
                 await asyncio.sleep(0.01)
-            assert len(attempts) <= sent + 1 and not task.done()
+            # with a supervisor up and the host quarantined, no resend was written
+            assert not (short_root / "runs" / "k.1").exists() and not task.done()
             host["state"] = "evicted"
             return await asyncio.wait_for(task, timeout=30.0)
         finally:
@@ -753,31 +753,44 @@ def test_the_stop_helper_alone_is_no_residual_work(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """The unit's ExecStop helper waits in the cgroup for the supervisor's exit: one process
-    whose parent is PID 1 and whose argv is the launcher's `supervisor-stop`, with its
-    `sleep`. The idle proof leaves it out; two such processes, a wrong parent or another
-    argv leave everything in (DL-416)."""
+    whose parent is PID 1 and whose argv is the launcher's `supervisor-stop`. The idle proof
+    leaves it out, with every child of it in any state (a live `sleep`, an ended one not yet
+    reaped) and every zombie; two such processes, a wrong parent or another argv leave
+    everything in (DL-416)."""
     from types import SimpleNamespace
 
     from dsl41 import runner_procid as procid
 
     me = os.getpid()
     launcher = ["/bin/sh", "/opt/dsl41/bin/dsl41-launch", "supervisor-stop"]
-    table: dict[int, tuple[str, list[str]]] = {
-        101: ("1", launcher),
-        102: ("101", ["sleep", "0.2"]),
-        103: ("101", ["cat"]),
-        104: ("7", launcher),
-        106: ("1", ["/bin/sh", "other"]),
-        107: ("1", ["/bin/other-launcher", "supervisor-stop"]),
-        108: ("1", []),
+    # an ended `sleep` of the helper, not yet reaped: a real zombie, read as the helper's child
+    zombie = subprocess.Popen(["true"])
+    os.waitid(os.P_PID, zombie.pid, os.WEXITED | os.WNOWAIT)
+    table: dict[int, tuple[str, str, list[str]]] = {
+        101: ("S", "1", launcher),
+        102: ("S", "101", ["sleep", "0.2"]),
+        103: ("S", "7", ["cat"]),
+        104: ("S", "7", launcher),
+        106: ("S", "1", ["/bin/sh", "other"]),
+        107: ("S", "1", ["/bin/other-launcher", "supervisor-stop"]),
+        108: ("S", "1", []),
+        109: ("Z", "7", []),
+        zombie.pid: ("Z", "101", []),
     }
     # the supervisor imports runner_procid as a top-level module too: patch both copies
     for module in {procid, sys.modules[runner_supervisor.stop_helpers.__module__]}:
         monkeypatch.setattr(
-            module, "_linux_stat_fields", lambda pid: ["S", table[pid][0]] if pid in table else None
+            module,
+            "_linux_stat_fields",
+            lambda pid: list(table[pid][:2]) if pid in table else None,
         )
-        monkeypatch.setattr(module, "_cmdline", lambda pid: table[pid][1] if pid in table else None)
-    assert procid.stop_helpers({me, 101, 102, 103, 104, 106, 107, 108}) == {101, 102}
+        monkeypatch.setattr(module, "_cmdline", lambda pid: table[pid][2] if pid in table else None)
+    try:
+        everyone = {me, 101, 102, 103, 104, 106, 107, 108, 109, zombie.pid}
+        assert procid.stop_helpers(everyone) == {101, 102, 109, zombie.pid}
+        assert not procid._gone(zombie.pid)  # counted as the helper's child, not as gone
+    finally:
+        zombie.wait()
     # a sample member gone from /proc by the time it is read, the helper's ended `sleep`,
     # is gone with the helper present, and stays a member without it
     gone = subprocess.Popen(["true"])
@@ -787,7 +800,7 @@ def test_the_stop_helper_alone_is_no_residual_work(
     assert procid._gone(gone.pid) and not procid._gone(me)
     if os.getuid() != 0:
         assert not procid._gone(1)  # alive and not ours: EPERM is no proof of absence
-    table[105] = ("1", ["/x/dsl41-launch", "supervisor-stop"])
+    table[105] = ("S", "1", ["/x/dsl41-launch", "supervisor-stop"])
     assert procid.stop_helpers({me, 101, 105}) == set()
     assert procid.stop_helpers({me, 104}) == set()
 
