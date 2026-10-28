@@ -746,8 +746,9 @@ seal follows §6a's Day 2. An unknown maintenance, or a unit that came
 back, needs `maintenance.json`, the unit, the process and
 `supervisor.log` read before anything else (§3). Exit 7 is a statechart
 error: stop, and report the `dsl41: statechart error` lines in the
-task's stderr. The verb never exits 1. A 1 is the play's own guard, and
-its stderr names the launcher, `ACTIVE` or `estate args`.
+task's stderr. A 1 is the play's own guard, whose stderr names the
+launcher, `ACTIVE` or `estate args`, or a traceback from the verb: read
+the task's stderr.
 
 A failure at the patch step or at the supervisor start leaves the estate
 stopped and the period sealed. Fix the cause and run the play again: the
