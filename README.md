@@ -1187,8 +1187,11 @@ Training estate:
   a real supervisor, and a check that every verb the RUNBOOK types exists.
 - `tests/test_nightbank_deploy.py`: the shipped launcher script and the
   systemd units beside it.
-- `tests/test_release.py`: the release verbs against a stub engine, `sudo`
-  and `systemctl`, on a site laid out as an install lays one out (DL-412).
+- `tests/test_release_prepare.py`, `tests/test_release_apply.py`,
+  `tests/test_release_rollback.py` and `tests/test_release_status.py`: the
+  release verbs against a stub engine, `sudo` and `systemctl`, on a site laid
+  out as an install lays one out, which `tests/release_site.py` builds
+  (DL-412).
 - `tests/test_operator_recipes.py`: the runbook's §0 recipes run as printed
   against a synthetic estate under the shipped launcher, content checks of
   the recipes only the service drill runs, and the reboot hold (DL-268).
