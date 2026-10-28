@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from dsl41.classify import Baseline
     from dsl41.ir import CatalogIR
 
 #: The release verbs' command group and names. Every operator line and the registration in
@@ -588,6 +589,8 @@ def manifest_catalog(
     argv: list[str],
     site: list[Path],
     read: Callable[[Path], bytes] | None = None,
+    *,
+    permit_unknown: bool = False,
 ) -> CatalogIR:
     """The catalog that a manifest's viz arguments ARGV declare under ROOT, its own layers
     first and the SITE layers after them. With READ, the loader reads a private copy of the
@@ -600,7 +603,7 @@ def manifest_catalog(
     layers = [Path(argv[i + 1]) for i, word in enumerate(argv) if word == "-p"]
     files = [file for file in files if file not in layers]
     if read is None:
-        return load_catalog_or_exit_2(files, False, [*layers, *site])
+        return load_catalog_or_exit_2(files, permit_unknown, [*layers, *site])
     with tempfile.TemporaryDirectory(prefix="dsl41-release-") as scratch:
 
         def copied(file: Path) -> Path:
@@ -611,39 +614,73 @@ def manifest_catalog(
 
         loaded = [copied(file) for file in files]
         stacked = [copied(layer) for layer in layers]
-        return load_catalog_or_exit_2(loaded, False, [*stacked, *site])
+        return load_catalog_or_exit_2(loaded, permit_unknown, [*stacked, *site])
 
 
-#: The catalog's named collections, as `catalog_changes` reports them (DL-413).
-CATALOG_KINDS = {
-    "jobs": "jobs",
-    "calendars": "calendars",
-    "cycles": "cycles",
-    "resources": "resources",
-    "machines": "machines",
-    "globals": "globals_declared",
-    "external_instances": "external_instances",
+#: The seal's node prefixes (classify, period-model ss10.2) and the kind each is reported as.
+NODE_KINDS = {
+    "job:": "jobs",
+    "box:": "boxes",
+    "calendar:": "calendars",
+    "cycle:": "cycles",
+    "resource:": "resources",
+    "machine:": "machines",
+    "global:": "globals",
+    "xinst:": "external_instances",
 }
 
 
-def catalog_changes(old: CatalogIR, new: CatalogIR) -> dict[str, dict[str, list[str]]]:
-    """Per collection, the names NEW adds, removes and changes against OLD. A job is changed
-    when its fingerprint moves, the classifier's leaf test (period-model ss10.2); every other
-    entry by the same test on its own definition (DL-413)."""
-    from dsl41.period import definition_fingerprints, job_fingerprints
+def catalog_changes(old: Baseline, new: Baseline) -> dict[str, Any]:
+    """What NEW adds, removes and changes against OLD, by the seal's own test on each node,
+    `classify.node_values` (period-model ss10.2): a job by its fingerprint, a machine by the
+    fields resolution reads, a calendar by its date set, and so on. Under each changed calendar
+    and resource, `referenced_by` names the jobs that name it on either side. The profile
+    holds the base zone, each timezone alias and each switch that moved. The dependency
+    closure and the live classification stay the seal's (DL-413)."""
+    from dsl41.classify import PROFILE, SWITCH, ClassificationGraph, node_values
 
-    result = {}
-    for kind, field in CATALOG_KINDS.items():
-        if kind == "jobs":
-            was, now = job_fingerprints(old), job_fingerprints(new)
-        else:
-            was = definition_fingerprints(getattr(old, field))
-            now = definition_fingerprints(getattr(new, field))
-        result[kind] = {
-            "added": sorted(name for name in now if name not in was),
-            "removed": sorted(name for name in was if name not in now),
-            "changed": sorted(name for name in was if name in now and was[name] != now[name]),
+    was, now = node_values(old), node_values(new)
+    result: dict[str, Any] = {
+        kind: {"added": [], "removed": [], "changed": []} for kind in NODE_KINDS.values()
+    }
+    for node in sorted(set(was) | set(now)):
+        prefix, _, name = node.partition(":")
+        kind = NODE_KINDS.get(prefix + ":")
+        if kind is not None and was.get(node) != now.get(node):
+            group = "added" if node not in was else "removed" if node not in now else "changed"
+            result[kind][group].append(name)
+    graph = ClassificationGraph(old, new)
+    for kind, prefix in (("calendars", "calendar:"), ("resources", "resource:")):
+        result[kind]["referenced_by"] = {
+            name: sorted(
+                referrer.partition(":")[2]
+                for referrer in graph.referrers(prefix + name)
+                if referrer.startswith("job:")
+            )
+            for name in result[kind]["changed"]
         }
+    profile: dict[str, Any] = {}
+    zone = PROFILE + "default_tz"
+    if was[zone] != now[zone]:
+        profile["timezone"] = {"old": was[zone], "new": now[zone]}
+    # the map is the alias table as parsed, so a comment or a reordering is not a change
+    aliases_was = dict(was[PROFILE + "tz_aliases"])
+    aliases_now = dict(now[PROFILE + "tz_aliases"])
+    aliases = {
+        alias: {"old": aliases_was.get(alias), "new": aliases_now.get(alias)}
+        for alias in sorted(aliases_was.keys() | aliases_now.keys())
+        if aliases_was.get(alias) != aliases_now.get(alias)
+    }
+    if aliases:
+        profile["timezone_map"] = aliases
+    switches = {
+        node.removeprefix(SWITCH): {"old": was[node], "new": now[node]}
+        for node in sorted(was)
+        if node.startswith(SWITCH) and was[node] != now[node]
+    }
+    if switches:
+        profile["semantics"] = switches
+    result["profile"] = profile
     return result
 
 
@@ -652,6 +689,7 @@ def service_changes(cfg: Config, before: str, after: str) -> dict[str, Any]:
     leaf test, a fingerprint of each resolved definition (period-model ss10.2)."""
     import typer
 
+    from dsl41.classify import Baseline
     from dsl41.estate_manifest import ArgsFor
 
     catalogs = []
@@ -670,7 +708,8 @@ def service_changes(cfg: Config, before: str, after: str) -> dict[str, Any]:
             catalogs.append(manifest_catalog(path, argv, [Path(cfg.properties)], read))
         except typer.Exit:
             raise Stop(EXIT_STOPPED, f"{name} does not load; the error is above.") from None
-    jobs = catalog_changes(*catalogs)["jobs"]
+    old, new = catalogs
+    jobs = catalog_changes(Baseline(catalog=old), Baseline(catalog=new))["jobs"]
     return {"changed": jobs["changed"], "removed": jobs["removed"]}
 
 

@@ -339,7 +339,7 @@ def _capacity(units: Callable[[], int | None]) -> int | None:
         return None
 
 
-def _node_values(side: Baseline) -> dict[str, Any]:
+def node_values(side: Baseline) -> dict[str, Any]:
     """Every node's value under one baseline, per ss10.2's "changed when" column.
 
     A node absent from a side has no entry, so a removal compares against `None`.
@@ -424,7 +424,7 @@ class ClassificationGraph:
             for name, carried_job in carried.jobs.items():
                 for resource_node in _held_resources(carried_job.row):
                     self._edge(JOB + name, resource_node)
-        before, after = _node_values(closing), _node_values(opening)
+        before, after = node_values(closing), node_values(opening)
         self.changed: frozenset[str] = frozenset(
             node for node in set(before) | set(after) if before.get(node) != after.get(node)
         )
@@ -541,6 +541,10 @@ class ClassificationGraph:
     def reverse(self, node: str) -> frozenset[str]:
         """What depends on `node`, transitively, `node` included: the boundary-truth question."""
         return self._walk(node, self._rdeps)
+
+    def referrers(self, node: str) -> frozenset[str]:
+        """The nodes with an edge to `node` on either side: what names it directly (DL-413)."""
+        return frozenset(self._rdeps.get(node, ()))
 
     def moved(self, node: str) -> tuple[str, ...]:
         """The changed nodes inside `node`'s forward closure, sorted."""

@@ -152,23 +152,11 @@ def job_fingerprints(catalog: CatalogIR) -> dict[str, str]:
 
     It answers "did this job's definition move", not "changed how"; `classify.py` builds that
     classification and names this the leaf test (period-model ss10.2, ss15; DL-131)."""
-    return definition_fingerprints(catalog.jobs)
-
-
-def definition_fingerprints(entries: Mapping[str, BaseModel | str]) -> dict[str, str]:
-    """The leaf test of `job_fingerprints` on any named catalog collection: the sha256 of each
-    entry's span-free JSON. `estate diff` reads calendars, resources and the rest with it
-    (DL-413)."""
     return {
         name: hashlib.sha256(
-            json.dumps(
-                _strip_spans(
-                    entry.model_dump(mode="json") if isinstance(entry, BaseModel) else entry
-                ),
-                sort_keys=True,
-            ).encode("utf-8")
+            json.dumps(_strip_spans(job_ir.model_dump(mode="json")), sort_keys=True).encode("utf-8")
         ).hexdigest()
-        for name, entry in entries.items()
+        for name, job_ir in catalog.jobs.items()
     }
 
 

@@ -17,11 +17,17 @@ Nothing resolves a symlink or normalises the path beyond pathlib's join, because
 pathlib's form of the join is the string a verb hashes after typer turns the argument into a
 Path, so the printed path and the hashed path agree. A name with a `..` part is refused, so a
 release directory holds every input it names.
+A name not in normal form (a `.` part, `//`, a `/` at either end) is refused, so one file has
+one spelling, and so is a `.py` catalog file or layer: no Python enters a release (DL-410,
+DL-413).
 """
 
 from __future__ import annotations
 
+import errno
+import os
 import re
+import stat
 import tomllib
 from enum import Enum
 from pathlib import Path
@@ -116,9 +122,9 @@ def _validation_sentence(path: Path, exc: ValidationError) -> str:
 def load_manifest(path: Path) -> Manifest:
     """Parse and validate the manifest at `path`, or raise ManifestError (DL-407).
 
-    Every name must be relative, free of `..`, and an existing file under the manifest's
-    directory, every environment's layers included, so a manifest that refuses for one
-    environment refuses for all. A joined path repeated among the files, or among the base
+    Every name must be in normal form (`parse_manifest`) and an existing file under the
+    manifest's directory, every environment's layers included, so a manifest that refuses for
+    one environment refuses for all. A joined path repeated among the files, or among the base
     layers and one environment's, is refused."""
     if not path.is_absolute():
         raise ManifestError(
@@ -133,12 +139,38 @@ def load_manifest(path: Path) -> Manifest:
     return manifest
 
 
+def read_regular(path: Path) -> bytes:
+    """PATH's bytes, opened without following a symlink and without blocking on a FIFO, or
+    ManifestError when PATH is a symlink or not a regular file; any other failure is the
+    OSError (DL-413)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP and path.is_symlink():
+            raise ManifestError(f"{path}: a symlink, not a file; copy the file in") from exc
+        raise
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ManifestError(f"{path}: not a regular file")
+        chunks = []
+        while chunk := os.read(fd, 65536):
+            chunks.append(chunk)
+    finally:
+        os.close(fd)
+    return b"".join(chunks)
+
+
 def parse_manifest(path: Path) -> Manifest:
     """Parse and validate the manifest at `path` without looking for the files it names, or
     raise ManifestError (DL-407). `estate build` reads a source directory with it, where an
-    emitted file does not exist yet (DL-413)."""
+    emitted file does not exist yet (DL-413).
+
+    The manifest is read without following a symlink, as a regular file. Every name must be
+    in normal form: relative, with no `.` or `..` part, no `//` and no `/` at its end, so one
+    file has one spelling. A catalog file or a layer may not be a `.py` file: a release takes
+    no Python, and `estate build --emit` renders a module (DL-410, DL-413)."""
     try:
-        raw = path.read_bytes()
+        raw = read_regular(path)
     except OSError as exc:
         raise ManifestError(f"{path}: cannot read the manifest: {exc.strerror}") from exc
     try:
@@ -156,20 +188,33 @@ def parse_manifest(path: Path) -> Manifest:
         check_overrides(manifest.semantics)
     except ValueError as exc:
         raise ManifestError(f"{path}: semantics: {exc}") from exc
+    inputs = [("files", manifest.files), ("properties", manifest.properties)]
+    inputs += [
+        (f"environments.{env}.properties", chosen.properties)
+        for env, chosen in manifest.environments.items()
+    ]
+    for key, names in inputs:
+        for name in names:
+            _relative(path, name)
+            if name.endswith(".py"):
+                raise ManifestError(
+                    f"{path}: {key} names {name!r}, a Python file; a release takes no Python,"
+                    f" so render it with 'dsl41 estate build --emit' (DL-410)"
+                )
+    if manifest.timezone_map is not None:
+        _relative(path, manifest.timezone_map)
     return manifest
 
 
-def manifest_names(path: Path, manifest: Manifest) -> list[str]:
-    """Every name the manifest at `path` gives, once each in first-mention order: the files,
-    the base layers, each environment's layers and the timezone map (DL-413). A name that is
-    absolute or has a `..` part is refused, as `load_manifest` refuses it."""
+def manifest_names(manifest: Manifest) -> list[str]:
+    """Every name the manifest gives, once each in first-mention order: the files, the base
+    layers, each environment's layers and the timezone map (DL-413). `parse_manifest` has
+    refused a name not in normal form, so one file has one name here."""
     names = [*manifest.files, *manifest.properties]
     for env in manifest.environments.values():
         names += env.properties
     if manifest.timezone_map is not None:
         names.append(manifest.timezone_map)
-    for name in names:
-        _relative(path, name)
     return list(dict.fromkeys(names))
 
 
@@ -184,16 +229,17 @@ def _distinct(path: Path, key: str, names: list[str]) -> None:
 
 
 def _relative(path: Path, name: str) -> None:
-    """Refuse a name that is empty, absolute or has a `..` part (DL-407)."""
-    if not name or Path(name).is_absolute() or ".." in Path(name).parts:
+    """Refuse a name that is not in normal form: empty or absolute, with a `.` or `..` part, a
+    `//`, or a `/` at its end (DL-407, DL-413)."""
+    if any(part in ("", ".", "..") for part in name.split("/")):
         raise ManifestError(
-            f"{path}: {name!r} must be a path relative to the manifest, with no '..' part"
+            f"{path}: {name!r} must be a path relative to the manifest, with no '..' part,"
+            " no '.' part, no '//' and no '/' at either end"
         )
 
 
 def _join(path: Path, name: str) -> str:
     """`name` joined to the manifest's directory, as the string every verb receives."""
-    _relative(path, name)
     joined = path.parent / name
     if not joined.is_file():
         raise ManifestError(f"{path}: {name!r} is not a file under {path.parent}")

@@ -1,20 +1,25 @@
 """`dsl41 estate build` and `dsl41 estate diff` (DL-413).
 
 The source directory is corpus-shaped and synthetic: a manifest with two environments, a
-calendar file and a layer copied as they are, and jobs.jil rendered from a Python module that
-sits beside them and never enters the release. Every refusal asserts the fragment that only
-its own rule prints, and leaves no release and no OUT.tmp behind.
+calendar file, two layers and a timezone map copied as they are, and jobs.jil rendered from a
+Python module that sits beside them and never enters the release. Every refusal asserts the
+fragment that only its own rule prints, and leaves no release and no OUT.tmp behind. The diff
+tests compare what the seal's classifier compares, one kind at a time.
 """
 
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from dsl41.cli import app
+
+from release_site import Site, site_at
 
 runner = CliRunner()
 
@@ -23,6 +28,7 @@ name = "demo"
 files = ["calendars.jil", "jobs.jil"]
 properties = ["layers/base.properties"]
 timezone = "UTC"
+timezone_map = "tz.map"
 
 [semantics]
 
@@ -56,12 +62,14 @@ def _invoke(*args: str):
 
 
 def _source(base: Path, manifest: str = MANIFEST) -> Path:
-    """The authoring directory: the manifest, the calendars, two layers and the module."""
+    """The authoring directory: the manifest, the calendars, two layers, the map and the
+    module."""
     (base / "layers").mkdir(parents=True)
     (base / "estate.toml").write_text(manifest)
     (base / "calendars.jil").write_text(CALENDARS)
     (base / "layers" / "base.properties").write_text("ROOT=/opt/demo\n")
     (base / "layers" / "prod.properties").write_text("ROOT=/opt/prod\n")
+    (base / "tz.map").write_text("ZRH Europe/Zurich\n")
     (base / "catalog.py").write_text(MODULE)
     return base
 
@@ -84,7 +92,7 @@ def _files(root: Path) -> dict[str, bytes]:
 # ------------------------------------------------------------- estate build
 
 
-def test_build_writes_the_release_prepare_takes(tmp_path: Path) -> None:
+def test_build_writes_the_manifest_files_and_the_rendered_jil(tmp_path: Path) -> None:
     source = _source(tmp_path / "src")
     out = tmp_path / "dist" / "v1"
     out.parent.mkdir()
@@ -99,10 +107,12 @@ def test_build_writes_the_release_prepare_takes(tmp_path: Path) -> None:
         "jobs.jil",
         "layers/base.properties",
         "layers/prod.properties",
+        "tz.map",
     ]
     assert files["jobs.jil"].decode() == built.stdout
     assert files["estate.toml"] == (source / "estate.toml").read_bytes()
     assert files["layers/prod.properties"] == b"ROOT=/opt/prod\n"
+    assert files["tz.map"] == b"ZRH Europe/Zurich\n"
     assert not (tmp_path / "dist" / "v1.tmp").exists()
     for environment in ("prod", "uat"):
         args = _invoke(
@@ -110,6 +120,46 @@ def test_build_writes_the_release_prepare_takes(tmp_path: Path) -> None:
             "--environment", environment,
         )  # fmt: skip
         assert args.exit_code == 0, args.stderr
+        assert f"--timezone-map {out}/tz.map" in args.stdout
+
+
+ADDED_MODULE = """\
+from dsl41.dsl import CatalogBuilder
+
+
+def estate() -> CatalogBuilder:
+    b = CatalogBuilder()
+    b.job("NB_ADDED_C", command="echo added", machine="localhost", owner="dsl41")
+    return b
+"""
+
+
+@pytest.fixture
+def site(tmp_path: Path) -> Iterator[Site]:
+    yield from site_at(tmp_path)
+
+
+def test_release_prepare_takes_the_built_directory(site: Site) -> None:
+    """DL-412, DL-413: the handoff the authoring guide gives, on the release tests' stub site:
+    `estate build` renders one file of the nightbank small estate from Python, and `dsl41
+    release prepare` copies, lints and rehearses the result, with no Python in it."""
+    source = site.source("v2")
+    (source / "added.py").write_text(ADDED_MODULE)
+    manifest = source / "estate.toml"
+    manifest.write_text(manifest.read_text().replace('"infra.jil"]', '"infra.jil", "added.jil"]'))
+    out = site.base / "dist" / "v2"
+    out.parent.mkdir()
+    built = _invoke(
+        "estate", "build", str(source), "-o", str(out), "--emit", f"added.jil={source / 'added.py'}"
+    )
+    assert built.exit_code == 0, built.stderr
+    done = site.run("prepare", "v2", str(out))
+    assert done.returncode == 0, done.stderr
+    prepared = site.receipt("v2", "prepared")
+    assert prepared["lint"]["exit"] == 0 and prepared["rehearse"]["exit"] == 0
+    assert "added.jil" in prepared["files"]
+    assert not [name for name in prepared["files"] if name.endswith(".py")]
+    assert b"NB_ADDED_C" in (site.releases / "v2" / "added.jil").read_bytes()
 
 
 def test_build_fills_an_empty_out_directory(tmp_path: Path) -> None:
@@ -182,9 +232,23 @@ def _layer_twice(source: Path) -> None:
             "unknown key python",
         ),
         (
+            lambda s: (s / "estate.toml").write_text(
+                MANIFEST.replace('"jobs.jil"]', '"jobs.jil", "catalog.py"]')
+            ),
+            (),
+            "files names 'catalog.py', a Python file; a release takes no Python",
+        ),
+        (
             lambda s: (s / "estate.toml").write_text(MANIFEST.replace("layers/", "../")),
             (),
             "must be a path relative to the manifest, with no '..' part",
+        ),
+        (
+            lambda s: (s / "estate.toml").write_text(
+                MANIFEST.replace('"calendars.jil"', '"./calendars.jil"')
+            ),
+            (),
+            "'./calendars.jil' must be a path relative to the manifest",
         ),
         (None, ("--emit", "other.jil=x.py"), "--emit other.jil: the manifest's files do not"),
         (None, ("--emit", "jobs.jil"), "give NAME=MODULE"),
@@ -199,7 +263,9 @@ def _layer_twice(source: Path) -> None:
     ids=[
         "missing",
         "python-key",
+        "python-file",
         "dotdot",
+        "not-normal",
         "emit-unnamed",
         "emit-form",
         "emit-twice",
@@ -229,8 +295,17 @@ def test_a_layer_named_by_base_and_environment_refuses_at_validation(tmp_path: P
     assert "twice" in result.stderr
 
 
-@pytest.mark.parametrize("linked", ["layers/base.properties", "layers", "estate.toml"])
-def test_build_refuses_a_symlinked_input(tmp_path: Path, linked: str) -> None:
+@pytest.mark.parametrize(
+    ("linked", "fragment"),
+    [
+        ("layers/base.properties", "layers/base.properties: a symlink, not a file"),
+        ("tz.map", "tz.map: a symlink, not a file"),
+        ("layers", "layers: a symlink; copy the files in"),
+        ("estate.toml", "estate.toml: a symlink, not a file"),
+    ],
+    ids=["layer", "timezone-map", "directory", "manifest"],
+)
+def test_build_refuses_a_symlinked_input(tmp_path: Path, linked: str, fragment: str) -> None:
     source = _source(tmp_path / "src")
     real = tmp_path / "real"
     (source / linked).rename(real)
@@ -238,8 +313,17 @@ def test_build_refuses_a_symlinked_input(tmp_path: Path, linked: str) -> None:
     out = tmp_path / "v1"
     result = _build(source, out)
     assert result.exit_code == 2
-    assert f"{source / linked} is a symlink; copy the file in" in result.stderr
+    assert f"{source}/{fragment}" in result.stderr
     assert not out.exists()
+
+
+def test_build_refuses_a_fifo_without_blocking(tmp_path: Path) -> None:
+    source = _source(tmp_path / "src")
+    (source / "calendars.jil").unlink()
+    os.mkfifo(source / "calendars.jil")
+    result = _build(source, tmp_path / "v1")
+    assert result.exit_code == 2
+    assert f"{source}/calendars.jil: not a regular file" in result.stderr
 
 
 def test_build_refuses_a_non_empty_out(tmp_path: Path) -> None:
@@ -260,6 +344,24 @@ def test_build_refuses_a_file_at_out(tmp_path: Path) -> None:
     assert result.exit_code == 2 and "is not an empty directory" in result.stderr
 
 
+def test_build_refuses_an_out_it_cannot_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source(tmp_path / "src")
+    out = tmp_path / "v1"
+    out.mkdir()
+    listdir = os.listdir
+
+    def refuse_out(path: object = ".") -> list[str]:
+        if Path(str(path)) == out:
+            raise PermissionError(13, "Permission denied", str(path))
+        return listdir(path)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "listdir", refuse_out)
+    result = _build(source, out)
+    assert result.exit_code == 2 and "Permission denied" in result.stderr
+
+
 def test_build_refuses_a_left_over_tmp(tmp_path: Path) -> None:
     source = _source(tmp_path / "src")
     (tmp_path / "v1.tmp").mkdir()
@@ -270,14 +372,14 @@ def test_build_refuses_a_left_over_tmp(tmp_path: Path) -> None:
 
 def test_build_refuses_an_unreadable_input(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = _source(tmp_path / "src")
-    read_bytes = Path.read_bytes
+    real_open = os.open
 
-    def refuse_calendars(path: Path) -> bytes:
-        if path.name == "calendars.jil":
+    def refuse_calendars(path: object, flags: int, *args: int, **kwargs: object) -> int:
+        if Path(str(path)).name == "calendars.jil":
             raise PermissionError(13, "Permission denied", str(path))
-        return read_bytes(path)
+        return real_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(Path, "read_bytes", refuse_calendars)
+    monkeypatch.setattr(os, "open", refuse_calendars)
     result = _build(source, tmp_path / "v1")
     assert result.exit_code == 2 and "Permission denied" in result.stderr
 
@@ -309,6 +411,8 @@ def test_check_lists_each_difference_and_exits_1(tmp_path: Path) -> None:
     (out / "jobs.jil").write_text("stale\n")
     (out / "calendars.jil").unlink()
     (out / "notes.txt").write_text("extra\n")
+    (out / "hidden").mkdir()
+    (out / "hidden" / "extra.py").write_text("x = 1\n")
     (out / "layers" / "prod.properties").unlink()
     (out / "layers" / "prod.properties").symlink_to(source / "layers" / "prod.properties")
     before = _files(out)
@@ -316,11 +420,34 @@ def test_check_lists_each_difference_and_exits_1(tmp_path: Path) -> None:
     assert result.exit_code == 1
     assert result.stdout.splitlines() == [
         "missing  calendars.jil",
+        "extra    hidden/extra.py",
         "differs  jobs.jil",
         "differs  layers/prod.properties",
         "extra    notes.txt",
     ]
     assert _files(out) == before
+
+
+def test_check_refuses_a_directory_it_cannot_list(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable directory under OUT may hide an extra file, so the check refuses rather
+    than report a match (DL-413)."""
+    source = _source(tmp_path / "src")
+    out = tmp_path / "v1"
+    assert _build(source, out).exit_code == 0
+    (out / "hidden").mkdir()
+    scandir = os.scandir
+
+    def refuse_hidden(path: object = ".") -> object:
+        if Path(str(path)) == out / "hidden":
+            raise PermissionError(13, "Permission denied", str(path))
+        return scandir(path)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(os, "scandir", refuse_hidden)
+    result = _build(source, out, "--check")
+    assert result.exit_code == 2 and f"Permission denied: '{out}/hidden'" in result.stderr
+    assert result.stdout == ""
 
 
 def test_check_refuses_a_missing_out(tmp_path: Path) -> None:
@@ -339,6 +466,8 @@ insert_job: keep
 job_type: c
 command: ~{$ROOT}~/keep.sh
 machine: m1
+date_conditions: 1
+start_times: "02:00"
 run_calendar: holidays
 
 insert_job: edited
@@ -360,6 +489,8 @@ insert_job: keep
 job_type: c
 command: ~{$ROOT}~/keep.sh
 machine: m1
+date_conditions: 1
+start_times: "02:00"
 run_calendar: holidays
 
 insert_job: edited
@@ -373,6 +504,8 @@ command: ~{$ROOT}~/fresh.sh
 machine: m1
 """
 
+NONE: dict[str, list[str]] = {"added": [], "removed": [], "changed": []}
+
 
 def _release(base: Path, jobs: str, calendars: str = CALENDARS, extra: str = "") -> Path:
     """A release directory with its manifest; returns the manifest's path."""
@@ -382,6 +515,7 @@ def _release(base: Path, jobs: str, calendars: str = CALENDARS, extra: str = "")
     (base / "jobs.jil").write_text(jobs)
     (base / "layers" / "base.properties").write_text("ROOT=/opt/demo\n")
     (base / "layers" / "prod.properties").write_text("ROOT=/opt/prod\n")
+    (base / "tz.map").write_text("ZRH Europe/Zurich\n")
     return base / "estate.toml"
 
 
@@ -396,6 +530,12 @@ def _pair(tmp_path: Path) -> tuple[Path, Path]:
     return old, new
 
 
+def _json(old: Path, new: Path, *extra: str) -> tuple[int, dict[str, object]]:
+    result = _invoke("estate", "diff", str(old), str(new), "--format", "json", *extra)
+    assert result.exit_code in (0, 1), result.stderr
+    return result.exit_code, json.loads(result.stdout)
+
+
 def test_diff_text_has_one_section_per_kind(tmp_path: Path) -> None:
     old, new = _pair(tmp_path)
     result = _invoke("estate", "diff", str(old), str(new), "--environment", "prod")
@@ -407,6 +547,7 @@ def test_diff_text_has_one_section_per_kind(tmp_path: Path) -> None:
         "  changed edited\n"
         "calendars\n"
         "  changed holidays\n"
+        "    referenced by keep\n"
         "profile\n"
         "  semantics ice-lookback: true -> ordinary\n"
     )
@@ -414,19 +555,22 @@ def test_diff_text_has_one_section_per_kind(tmp_path: Path) -> None:
 
 def test_diff_json_is_one_object(tmp_path: Path) -> None:
     old, new = _pair(tmp_path)
-    result = _invoke(
-        "estate", "diff", str(old), str(new), "--environment", "uat", "--format", "json"
-    )
-    assert result.exit_code == 1, result.stderr
-    none: dict[str, list[str]] = {"added": [], "removed": [], "changed": []}
-    assert json.loads(result.stdout) == {
+    code, doc = _json(old, new, "--environment", "uat")
+    assert code == 1
+    assert doc == {
         "jobs": {"added": ["fresh"], "removed": ["gone"], "changed": ["edited"]},
-        "calendars": {"added": [], "removed": [], "changed": ["holidays"]},
-        "cycles": none,
-        "resources": none,
-        "machines": none,
-        "globals": none,
-        "external_instances": none,
+        "boxes": NONE,
+        "calendars": {
+            "added": [],
+            "removed": [],
+            "changed": ["holidays"],
+            "referenced_by": {"holidays": ["keep"]},
+        },
+        "cycles": NONE,
+        "resources": {**NONE, "referenced_by": {}},
+        "machines": NONE,
+        "globals": NONE,
+        "external_instances": NONE,
         "profile": {"semantics": {"ice-lookback": {"old": "true", "new": "ordinary"}}},
     }
 
@@ -435,9 +579,62 @@ def test_diff_of_a_release_with_itself_is_empty(tmp_path: Path) -> None:
     old = _release(tmp_path / "r1", OLD_JOBS)
     text = _invoke("estate", "diff", str(old), str(old), "--environment", "prod")
     assert text.exit_code == 0 and text.stdout == "no difference\n"
-    doc = _invoke("estate", "diff", str(old), str(old), "--environment", "prod", "--format", "json")
-    assert doc.exit_code == 0
-    assert json.loads(doc.stdout)["profile"] == {}
+    code, doc = _json(old, old, "--environment", "prod")
+    assert code == 0 and doc["profile"] == {}
+
+
+MACHINE = "insert_machine: m1\ntype: a\nmax_load: 10\n\n"
+RESOURCE = "insert_resource: POOL\nres_type: R\namount: 1\n\n"
+CYCLE = "cycle: cyc_q\nstart_date: 03/28/2026\nend_date: 04/02/2026\n\n"
+XINST = "insert_xinst: PRD\nxtype: a\nxmachine: prd.example.com\n\n"
+
+
+@pytest.mark.parametrize(
+    ("old_extra", "new_extra", "kind", "expected"),
+    [
+        (MACHINE, MACHINE.replace("10", "20"), "machines", {**NONE, "changed": ["m1"]}),
+        (RESOURCE, RESOURCE.replace("amount: 1", "amount: 2"), "resources", None),
+        ("", "", "globals", {**NONE, "changed": ["LIMIT"]}),
+        ("", CYCLE, "cycles", {**NONE, "added": ["cyc_q"]}),
+        (XINST, "", "external_instances", {**NONE, "removed": ["PRD"]}),
+    ],
+    ids=["machine", "resource", "global", "cycle", "external-instance"],
+)
+def test_diff_reports_each_kind_by_the_seals_node_test(
+    tmp_path: Path, old_extra: str, new_extra: str, kind: str, expected: object
+) -> None:
+    new_jobs = OLD_JOBS.replace("value: 5", "value: 6") if kind == "globals" else OLD_JOBS
+    old = _release(tmp_path / "r1", old_extra + OLD_JOBS)
+    new = _release(tmp_path / "r2", new_extra + new_jobs)
+    code, doc = _json(old, new, "--environment", "uat")
+    assert code == 1
+    if expected is None:
+        expected = {**NONE, "changed": ["POOL"], "referenced_by": {"POOL": []}}
+    assert doc[kind] == expected
+    others = [name for name, groups in doc.items() if name not in (kind, "profile")]
+    for other in others:
+        assert not any(doc[other][group] for group in ("added", "removed", "changed"))  # type: ignore[index]
+
+
+def test_a_respelling_the_seal_ignores_is_no_difference(tmp_path: Path) -> None:
+    """A machine's description, or its type in another case, moves no node the seal reads."""
+    old = _release(tmp_path / "r1", MACHINE + OLD_JOBS)
+    new = _release(
+        tmp_path / "r2", MACHINE.replace("type: a", 'type: A\ndescription: "rack 4"') + OLD_JOBS
+    )
+    result = _invoke("estate", "diff", str(old), str(new), "--environment", "uat")
+    assert result.exit_code == 0 and result.stdout == "no difference\n"
+
+
+def test_a_changed_resource_lists_the_jobs_that_name_it(tmp_path: Path) -> None:
+    holder = OLD_JOBS.replace(
+        "~{$ROOT}~/edited.sh\n", "~{$ROOT}~/edited.sh\nresources: (POOL, QUANTITY=1, FREE=A)\n"
+    )
+    old = _release(tmp_path / "r1", RESOURCE + holder)
+    new = _release(tmp_path / "r2", RESOURCE.replace("amount: 1", "amount: 2") + holder)
+    result = _invoke("estate", "diff", str(old), str(new), "--environment", "uat")
+    assert result.exit_code == 1
+    assert result.stdout == "resources\n  changed POOL\n    referenced by edited\n"
 
 
 def test_diff_reads_a_resolved_definition_through_the_environment_layers(tmp_path: Path) -> None:
@@ -454,44 +651,64 @@ def test_diff_reads_a_resolved_definition_through_the_environment_layers(tmp_pat
 
 
 def test_diff_applies_the_site_layers_last(tmp_path: Path) -> None:
-    old = _release(tmp_path / "r1", OLD_JOBS.replace("~{$ROOT}~/gone", "~{$SITE}~/gone"))
-    new = _release(tmp_path / "r2", OLD_JOBS)
-    unbound = _invoke("estate", "diff", str(old), str(new), "--environment", "uat")
-    assert unbound.exit_code == 2 and "SITE" in unbound.stderr
-    site = tmp_path / "site.properties"
-    site.write_text("SITE=/opt/demo\n")
-    bound = _invoke("estate", "diff", str(old), str(new), "--environment", "uat", "-p", str(site))
-    assert bound.exit_code == 0, bound.stdout + bound.stderr
-
-
-def test_diff_reports_the_timezone_and_the_map_contents(tmp_path: Path) -> None:
+    """The two releases' prod layers set ROOT apart, and a site layer that sets it too wins
+    over both, so the difference goes away."""
     old = _release(tmp_path / "r1", OLD_JOBS)
     new = _release(tmp_path / "r2", OLD_JOBS)
-    (old.parent / "tz.map").write_text("ZRH Europe/Zurich\n")
-    (new.parent / "tz.map").write_text("ZRH Europe/Berlin\n")
-    old.write_text(old.read_text().replace('timezone = "UTC"', 'timezone_map = "tz.map"'))
-    new.write_text(
-        new.read_text().replace(
-            'timezone = "UTC"', 'timezone = "Europe/Zurich"\ntimezone_map = "tz.map"'
-        )
+    (new.parent / "layers" / "prod.properties").write_text("ROOT=/srv/prod\n")
+    site = tmp_path / "site.properties"
+    site.write_text("ROOT=/site\n")
+    apart = _invoke("estate", "diff", str(old), str(new), "--environment", "prod")
+    assert apart.exit_code == 1
+    same = _invoke("estate", "diff", str(old), str(new), "--environment", "prod", "-p", str(site))
+    assert same.exit_code == 0, same.stdout + same.stderr
+
+
+def test_diff_reports_the_timezone_and_each_alias(tmp_path: Path) -> None:
+    old = _release(tmp_path / "r1", OLD_JOBS)
+    new = _release(tmp_path / "r2", OLD_JOBS)
+    (new.parent / "tz.map").write_text(
+        "Entry Type Zone\n----- ---- ----\nZRH zone Europe/Berlin\nNYC zone America/New_York\n"
     )
+    new.write_text(new.read_text().replace('timezone = "UTC"', 'timezone = "Europe/Zurich"'))
     result = _invoke("estate", "diff", str(old), str(new), "--environment", "prod")
     assert result.exit_code == 1
-    lines = result.stdout.splitlines()
-    assert lines[:2] == ["profile", "  timezone: UTC -> Europe/Zurich"]
-    assert lines[2].startswith("  timezone_map: sha256:") and len(lines) == 3
+    assert result.stdout == (
+        "profile\n"
+        "  timezone: UTC -> Europe/Zurich\n"
+        "  timezone_map nyc: none -> America/New_York\n"
+        "  timezone_map zrh: Europe/Zurich -> Europe/Berlin\n"
+    )
 
 
-def test_diff_reports_a_map_added(tmp_path: Path) -> None:
+def test_a_reformatted_map_and_an_explicit_utc_are_no_difference(tmp_path: Path) -> None:
     old = _release(tmp_path / "r1", OLD_JOBS)
     new = _release(tmp_path / "r2", OLD_JOBS)
-    (new.parent / "tz.map").write_text("ZRH Europe/Zurich\n")
-    new.write_text(new.read_text().replace('timezone = "UTC"', 'timezone_map = "tz.map"'))
-    result = _invoke(
-        "estate", "diff", str(old), str(new), "--environment", "prod", "--format", "json"
+    old.write_text(old.read_text().replace('timezone = "UTC"\n', ""))
+    (new.parent / "tz.map").write_text(
+        "Entry Type Zone\n----- ---- ----\nZRH   zone   Europe/Zurich\n"
     )
-    profile = json.loads(result.stdout)["profile"]
-    assert result.exit_code == 1 and profile["timezone_map"]["old"] == "none"
+    result = _invoke("estate", "diff", str(old), str(new), "--environment", "prod")
+    assert result.exit_code == 0 and result.stdout == "no difference\n"
+
+
+def test_diff_refuses_a_map_that_does_not_parse(tmp_path: Path) -> None:
+    old, new = _pair(tmp_path)
+    (new.parent / "tz.map").write_text("ZRH\n")
+    result = _invoke("estate", "diff", str(old), str(new), "--environment", "prod")
+    assert result.exit_code == 2 and f"--timezone-map {new.parent}/tz.map" in result.stderr
+
+
+def test_diff_takes_permit_unknown(tmp_path: Path) -> None:
+    unknown = OLD_JOBS.replace("run_calendar: holidays\n", "run_calendar: holidays\nfancy: 1\n")
+    old = _release(tmp_path / "r1", unknown)
+    new = _release(tmp_path / "r2", unknown)
+    refused = _invoke("estate", "diff", str(old), str(new), "--environment", "uat")
+    assert refused.exit_code == 2 and "fancy" in refused.stderr
+    taken = _invoke(
+        "estate", "diff", str(old), str(new), "--environment", "uat", "--permit-unknown"
+    )
+    assert taken.exit_code == 0, taken.stderr
 
 
 @pytest.mark.parametrize(

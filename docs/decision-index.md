@@ -420,7 +420,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-407 | The estate manifest, `estate.toml`, is the application's one declaration of its estate inputs; `dsl41 estate args` is the one builder of the verbs' arguments | [docs/authoring.md](authoring.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/site-package.md](site-package.md) |
 | DL-408 | The site package is the infrastructure and keeps fixed what a JIL release runs within; a JIL release is the application's and travels on its own train through... | [docs/deployment-runbook.md](deployment-runbook.md), [docs/site-package.md](site-package.md), [docs/writing.md](writing.md) |
 | DL-409 | A lease renewal with no reply within ten seconds is a failed renewal | [docs/concurrency-model.md](concurrency-model.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
-| DL-410 | A decompiled estate is a Python module that declares `estate()`, and `dsl41 build` renders it |  |
+| DL-410 | A decompiled estate is a Python module that declares `estate()`, and `dsl41 build` renders it | [docs/authoring.md](authoring.md) |
 | DL-411 | Slice 4 of DL-404's plan is built: one supported composition call and one packaged worker command |  |
 | DL-412 | The release train is the dsl41 verb group `dsl41 release prepare\|apply\|resume\|rollback\| status`; the example helper is gone | [README.md](../README.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/site-package.md](site-package.md) |
 | DL-413 | `dsl41 estate build` assembles the release directory from a manifest and its Python modules, and `dsl41 estate diff` compares two releases by the seal's... | [docs/authoring.md](authoring.md) |

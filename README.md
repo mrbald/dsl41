@@ -591,8 +591,8 @@ The contract is
   and manifests, and writes its attestation. `verify` checks one.
 - `journal` replays a run's write-ahead log into the trace it produced,
   across period boundaries.
-- `estate diff OLD/estate.toml NEW/estate.toml` lists the jobs a release
-  adds, removes and changes by the seal classifier's test, before the window.
+- `estate diff OLD/estate.toml NEW/estate.toml` lists the records a release
+  adds, removes and changes by the seal's definition test, before the window.
 - `estate prune` deletes what retention allows and refuses the rest.
   `--archive-inputs` writes an archive receipt, then deletes a period's
   inputs. That step is irreversible: the period can never be re-derived

@@ -10,6 +10,7 @@ it stands.
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import shutil
 from datetime import UTC, datetime
@@ -243,7 +244,7 @@ def test_a_directory_named_as_a_file_is_refused(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("old", "new", "fragment"),
     [
-        ('"a.jil"]', '"a.jil", "./a.jil"]', "files names {d}/a.jil twice"),
+        ('"a.jil"]', '"a.jil", "a.jil"]', "files names {d}/a.jil twice"),
         ('["prod.properties"', '["base.properties"', "properties names {d}/base.properties twice"),
         (
             '"prod.properties", "site.properties"]',
@@ -488,3 +489,64 @@ def test_every_printed_option_is_one_the_verb_declares(
     printed = {word for word in _printed(nightbank_release, verb) if word.startswith("-")}
     assert printed == options
     assert printed <= declared
+
+
+# ------------------------------------------------------------- DL-413: normal form, no Python
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["./a.jil", "sub//a.jil", "sub/", "sub/./a.jil", "."],
+    ids=["dot-slash", "double-slash", "trailing-slash", "inner-dot", "dot"],
+)
+def test_a_name_not_in_normal_form_is_refused(tmp_path: Path, name: str) -> None:
+    """DL-413: one file has one spelling, so `estate build --check` and the layer list see
+    one name for it."""
+    manifest = _estate(tmp_path)
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "a.jil").write_text("")
+    _edit(manifest, '"a.jil"]', f'"{name}"]')
+    assert f"{name!r} must be a path relative to the manifest, with no '..' part, no '.'" in (
+        _refusal(manifest)
+    )
+
+
+def test_a_timezone_map_not_in_normal_form_is_refused(tmp_path: Path) -> None:
+    manifest = _estate(tmp_path)
+    _edit(manifest, 'timezone_map = "tz.map"', 'timezone_map = "./tz.map"')
+    assert "'./tz.map' must be a path relative to the manifest" in _refusal(manifest)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "key"),
+    [
+        ('"a.jil"]', '"a.py"]', "files"),
+        ('properties = ["base.properties"]', 'properties = ["base.py"]', "properties"),
+        ('"site.properties"]', '"site.py"]', "environments.prod.properties"),
+    ],
+    ids=["file", "base-layer", "environment-layer"],
+)
+def test_a_python_input_is_refused(tmp_path: Path, old: str, new: str, key: str) -> None:
+    """DL-410, DL-413: no Python enters a release; `estate build --emit` renders a module."""
+    manifest = _estate(tmp_path)
+    for name in ("a.py", "base.py", "site.py"):
+        (tmp_path / name).write_text("def estate(): ...\n")
+    _edit(manifest, old, new)
+    message = _refusal(manifest)
+    assert f"{key} names '{new.split(chr(34))[-2]}', a Python file; a release takes no Python" in (
+        message
+    )
+
+
+def test_a_symlinked_manifest_is_refused_before_it_is_read(tmp_path: Path) -> None:
+    real = _estate(tmp_path / "real")
+    link = tmp_path / "real" / "linked.toml"
+    link.symlink_to(real)
+    assert "a symlink, not a file" in _refusal(link)
+
+
+def test_a_fifo_manifest_is_refused_without_blocking(tmp_path: Path) -> None:
+    _estate(tmp_path)
+    fifo = tmp_path / "fifo.toml"
+    os.mkfifo(fifo)
+    assert "not a regular file" in _refusal(fifo)
