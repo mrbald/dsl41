@@ -1223,11 +1223,13 @@ sudo -l -U nbdeploy
    `dsl41 release prepare`, with or without `--requalify`, exits 2 with
    ``sudo did not run `…` as dsl41.`` and names the missing grant.
    `apply`, `resume` and `rollback` refuse earlier, once the engine is
-   stopped, with `no engine answers on …`. `dsl41 release status` only
-   reads files, so it still answers, with exit 0. On a host where the
-   site package installed the grant and the units, keep them out of the
-   site package of the retired estate: a reinstall or an upgrade of it
-   installs them again.
+   stopped, with `no engine answers on …`. While the engine still
+   answers, an `apply` typed in this window takes its holds, stops at
+   the sudo refusal with exit 3 and leaves a recorded apply; it seals
+   nothing and starts nothing. `dsl41 release status` only reads files,
+   so it still answers, with exit 0. On a host where the site package
+   installed the grant and the units, erase that package or rebuild it
+   without them: a reinstall or an upgrade of it installs them again.
 
    Then take §2b's reboot hold (`hold-down`: both units disabled), so a
    reboot inside the procedure starts nothing. The units keep running. A
