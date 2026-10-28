@@ -45,6 +45,10 @@ QUIESCE=(APAC_EOD_B EMEA_EOD_B AMER_EOD_B OPS_HEARTBEAT_C OPS_MONTHLY_ATTRIB_C O
 LONG_JOB=OPS_XINST_DEMO_C
 # the operator recipes the drill runs as written (deployment-runbook ss0)
 RUNBOOK=$REPO/docs/deployment-runbook.md
+# the runner of ss0's configuration-management plays, a venv the install step
+# fills from PyPI while the drill is connected (DL-389, DL-416)
+ANSIBLE=$SCRATCH/ansible
+ANSIBLE_CORE=2.20.10
 
 # The release verbs' deployment identity and its group: the steps that
 # release bind the login to ops in the map and make the group the map's
@@ -78,14 +82,15 @@ as_dsl41() { (cd / && sudo -u dsl41 -H env PATH="$VENV/bin:/usr/local/bin:/usr/s
 cli() { as_dsl41 "$DSL41" "$@"; }
 
 # The commands of the runbook block marked `<!-- recipe: NAME -->`, the
-# `sh` fence on the line after the marker (DL-268). The drill runs the text
-# an operator reads, so the two cannot drift; a missing block fails.
+# `sh` fence on the line after the marker, or the `yaml` fence of a play
+# (DL-268). The drill runs the text an operator reads, so the two cannot
+# drift; a missing block fails.
 recipe() { # recipe NAME
     local body
     body=$(awk -v mark="<!-- recipe: $1 -->" '
         want == 2 && /^```$/ { exit }
         want == 2 { print; next }
-        want == 1 { if ($0 == "```sh") { want = 2; next } exit }
+        want == 1 { if ($0 == "```sh" || $0 == "```yaml") { want = 2; next } exit }
         $0 == mark { want = 1 }' "$RUNBOOK")
     [ -n "$body" ] || fail "no recipe '$1' in $RUNBOOK"
     printf '%s\n' "$body"
@@ -96,12 +101,16 @@ recipe() { # recipe NAME
 # variables named. The block goes to stderr first, so the step log shows
 # what ran. --no-errexit is for a block whose commands report a state in
 # their exit codes (systemctl is-active); the caller reads its stdout.
-run_recipe() { # run_recipe [--as-dsl41] [--no-errexit] NAME [VAR=VALUE...]
-    local as=root errexit=-e name body
+# --play runs a play with ansible-playbook as the drill's user, from /, on
+# this host as the play's `nightbank` group; the play's own vars are the
+# site's, so it takes no VAR=VALUE.
+run_recipe() { # run_recipe [--as-dsl41] [--no-errexit] [--play] NAME [VAR=VALUE...]
+    local as=root errexit=-e play=0 name body python
     while :; do
         case $1 in
             --as-dsl41) as=dsl41 ;;
             --no-errexit) errexit=+e ;;
+            --play) play=1 ;;
             *) break ;;
         esac
         shift
@@ -110,7 +119,20 @@ run_recipe() { # run_recipe [--as-dsl41] [--no-errexit] NAME [VAR=VALUE...]
     shift
     body=$(recipe "$name")
     printf 'recipe %s:\n  | %s\n' "$name" "${body//$'\n'/$'\n  | '}" >&2
-    if [ "$as" = root ]; then
+    if [ "$play" = 1 ]; then
+        [ "$#" = 0 ] || fail "the play $name takes no variables: $*"
+        [ -x "$ANSIBLE/bin/ansible-playbook" ] || fail "no ansible-playbook in $ANSIBLE"
+        # ansible-core runs its modules on Python 3.9 or later; EL8's default is 3.6
+        python=$(command -v python3.12) || fail "no python3.12 for the play's modules"
+        printf '[nightbank]\nlocalhost ansible_connection=local ansible_python_interpreter=%s\n' \
+            "$python" >"$SCRATCH/inventory"
+        printf '%s\n' "$body" >"$SCRATCH/$name.yml"
+        # pipelining hands each module to the become user on stdin, so no
+        # temporary file has to be readable by the service account
+        (cd / && env LC_ALL=C.UTF-8 ANSIBLE_PIPELINING=1 ANSIBLE_NOCOLOR=1 \
+            ANSIBLE_RETRY_FILES_ENABLED=0 "$ANSIBLE/bin/ansible-playbook" \
+            -i "$SCRATCH/inventory" "$SCRATCH/$name.yml")
+    elif [ "$as" = root ]; then
         (cd "$REPO" && sudo env "$@" bash "$errexit" -u -o pipefail -c "$body")
     else
         as_dsl41 env "$@" bash "$errexit" -u -o pipefail -c "$body"
@@ -583,6 +605,16 @@ journal_job() { # journal_job UNIT EPOCH Started|Stopping
     [ -n "$description" ] || fail "$1 has no Description to match its journal by"
     sudo journalctl -u "$1" --since "@$2" -o cat --no-pager | grep -F -- "$3 " |
         grep -F -- "$description" >/dev/null
+}
+# the Unix time of the first such line, matched as journal_job matches it;
+# empty when there is none
+journal_job_time() { # journal_job_time UNIT EPOCH Started|Stopping
+    local description
+    description=$(prop "$1" Description)
+    [ -n "$description" ] || fail "$1 has no Description to match its journal by"
+    sudo journalctl -u "$1" --since "@$2" -o short-unix --no-pager |
+        awk -v verb=" $3 " -v d="$description" \
+            'index($0, verb) && index($0, d) && t == "" { t = $1 } END { print t }'
 }
 
 # a client command run as another login, with the venv the launcher uses

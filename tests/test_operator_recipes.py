@@ -5,8 +5,8 @@ A block in docs/deployment-runbook.md whose fence follows a
 wait, the sealed check, the torn-opening recipe and the retirement's
 audit and list run here, as
 the runbook prints them, against a synthetic estate under the shipped
-launcher. The service, removal and stop-check recipes need systemd: the
-service drill runs them (drill-steps.sh's `run_recipe`), and the tests
+launcher. The service, removal and stop-check recipes and the two
+configuration-management plays need systemd: the service drill runs them (drill-steps.sh's `run_recipe`), and the tests
 below check their content, since CI never dispatches the drill. Every
 marked recipe is run here, run by the drill, or compared, and a test
 holds that partition.
@@ -286,11 +286,14 @@ RUN_BY_DRILL = {
     "retire-check",
     "retire-audit",
     "retire-list",
+    # the plays, through ansible-playbook; the tests below also compare them
+    # against the units, the launcher and ss2b
+    "cm-stop",
+    "cm-seal",
 }
-#: compared, not run: the variables against the launcher, job-open against
-#: the engine unit's ExecStart (the stand-in runs that instead), and the
-#: configuration-management play against the units, the launcher and ss2b
-COMPARED = {"operator-env", "job-open", "cm-stop", "cm-seal"}
+#: compared, not run: the variables against the launcher, and job-open against
+#: the engine unit's ExecStart (the stand-in runs that instead)
+COMPARED = {"operator-env", "job-open"}
 
 
 def test_every_recipe_is_run_or_compared() -> None:
