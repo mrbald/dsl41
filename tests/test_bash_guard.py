@@ -110,6 +110,10 @@ def conflicted(tmp_path: Path) -> Path:
         "git restore -SW a.py",
         "git add :/",
         "git add *",
+        "git stash drop",
+        "git stash clear",
+        "timeout 60 git push -f origin b",
+        "xargs -n 1 git pull",
         # a continued line is one command
         "git push \\\n  --force origin b",
         # a heredoc ends, and the next command is read
