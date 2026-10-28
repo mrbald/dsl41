@@ -24529,9 +24529,12 @@ relitigate an entry; append a new one.
   any other, the site's patch, the start of both units, the readiness wait, the release of the
   hold. Every job meets the interruption contract (authoring ss6.2, PR #213). Each play run
   seals a period.
-  THE REASON. A supervisor stop by any route ends every running command with the TERM, grace,
-  KILL ladder and records the outcome; nothing survives a supervisor stop (DL-205). The guard
-  blocks one interrupter only, a manual or configuration-management `systemctl stop`, so the
+  THE REASON. A supervisor stop by any route ends every running command: the supervisor's own
+  ladder, the service manager's SIGTERM to the unit, or each wrapper's TERM, grace and KILL on
+  lifeline EOF; nothing survives a supervisor stop (DL-48, DL-400). The wrapper records the
+  outcome, except when the manager's final cgroup kill ends a wrapper first; authoring ss6.2
+  records that run as FAILURE (E7). The guard blocks one interrupter only, a manual or
+  configuration-management `systemctl stop` or `restart` of the supervisor unit, so the
   interruption contract is the wider rule and the guard is a policy inside it. The convention
   of a stateful service fits: a database is stopped for maintenance with its own stop verb.
   REJECTED: dropping the guard with no drain: every patch night would kill mid-flight work, and

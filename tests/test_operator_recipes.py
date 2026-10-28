@@ -307,6 +307,8 @@ def test_every_recipe_parses_as_shell() -> None:
         scripts = _play_scripts(body) if name in PLAYS else [body]
         assert scripts, name
         for script in scripts:
+            # Ansible templates a shell body; the play passes its values as environment
+            assert not re.search(r"\{[{%#]", script), name
             parsed = subprocess.run(["sh", "-n", "-c", script], capture_output=True, timeout=30)
             assert parsed.returncode == 0, name
 
@@ -530,9 +532,27 @@ def _play_tasks(body: str) -> list[str]:
 
 
 def _play_scripts(body: str) -> list[str]:
-    """Each `shell: |` body of a play, its indent removed."""
-    found = re.findall(r"^( +)ansible\.builtin\.shell: \|\n((?:\1  .*\n)+)", body + "\n", re.M)
-    return [re.sub(rf"^{indent}  ", "", script, flags=re.M) for indent, script in found]
+    """Each `shell: |` body of a play, its indent removed. A YAML literal block runs to the
+    first line indented no deeper than its key, blank lines included; the line that ends it
+    must be a sibling key or the end of the play, so a malformed line cannot cut it short."""
+    lines = body.splitlines()
+    scripts = []
+    for number, line in enumerate(lines):
+        match = re.match(r"^( +)ansible\.builtin\.shell: \|$", line)
+        if match is None:
+            continue
+        inner = match.group(1) + "  "
+        end = number + 1
+        while end < len(lines) and (lines[end].startswith(inner) or not lines[end].strip()):
+            end += 1
+        block = lines[number + 1 : end]
+        while block and not block[-1].strip():
+            block.pop()
+        assert block, f"line {number + 1}: an empty shell body"
+        if end < len(lines):
+            assert re.match(rf"^({match.group(1)}\w+:|    - name: )", lines[end]), lines[end]
+        scripts.append("\n".join(text.removeprefix(inner) for text in block) + "\n")
+    return scripts
 
 
 def test_the_configuration_management_play_stops_with_the_verb_and_starts_the_units() -> None:
@@ -590,7 +610,11 @@ def test_the_configuration_management_play_stops_with_the_verb_and_starts_the_un
     assert words.endswith(
         '"$DSL41" estate quiesce --run-root "$RUN_ROOT" --estate-anchor "$ESTATE_ANCHOR"'
         ' "$@" -p "$PROPERTIES"'
+        ' --engine-unit "$PLAY_ENGINE_UNIT" --supervisor-unit "$PLAY_SUPERVISOR_UNIT"'
     )
+    # the verb checks the play's units, not its defaults; `vars` prints ENGINE_UNIT itself
+    assert '        PLAY_ENGINE_UNIT: "{{ engine_unit }}"\n' in quiesce
+    assert '        PLAY_SUPERVISOR_UNIT: "{{ supervisor_unit }}"\n' in quiesce
     assert '      become_user: "{{ service_account }}"' in quiesce
     assert "      until: quiesce.rc not in [2, 3]\n" in quiesce
     assert "      failed_when: quiesce.rc != 0\n" in quiesce
@@ -601,6 +625,19 @@ def test_the_configuration_management_play_stops_with_the_verb_and_starts_the_un
     )
     waited = int(play_vars["quiesce_retries"]) * int(play_vars["quiesce_delay_s"])
     assert waited >= RETRY_HORIZON_S + longest
+    # the recipe's table states the two waits as their sources do
+    table = RUNBOOK.read_text(encoding="utf-8").split("<!-- recipe: cm-stop -->", 1)[0]
+    rows = {
+        row.split(" | ")[0].removeprefix("| "): row.split(" | ")[1]
+        for row in table.rsplit("| Wait | Seconds | Source |", 1)[1].splitlines()[2:]
+        if row.startswith("| ")
+    }
+    assert rows == {
+        "the closing period's retry horizon, from the last operator request": (
+            f"{RETRY_HORIZON_S:g}"
+        ),
+        "the runs still live when the engine stops": f"{longest:g}",
+    }
 
     (query,) = _play_scripts(ready)
     assert query.splitlines()[-1] == '"$DSL41" query status --brief -S "$RUN_ROOT/control.sock"'
