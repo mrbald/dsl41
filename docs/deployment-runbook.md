@@ -621,13 +621,13 @@ line refuses to start (§3; DL-390, DL-399). The guard keeps a routine stop
 from ending the commands the supervisor runs. The supported stop is
 `dsl41 estate quiesce`, run as the service account: it seals and audits
 the period, asks the supervisor for guarded maintenance, and refuses
-while a command still runs (§2b; DL-398).
+while a command still runs (§2b; DL-398, DL-414).
 
 The verb never waits for a precondition. It exits 2 and names what to
 wait for, or exits 3 while an admitted maintenance still runs; the play
 runs it again for both. Its `delay` and `retries` cover the two waits a
-refusal names, one after the other: 30 s × 10 = 300 s. Size them for
-your estate's longest job.
+refusal names, together: 30 s × 10 = 300 s. Size them for your
+estate's longest job.
 
 | Wait | Seconds | Source |
 | --- | --- | --- |
@@ -677,6 +677,8 @@ bullet instead.
       become_user: "{{ service_account }}"
       environment:
         LAUNCHER: "{{ launcher }}"
+        PLAY_ENGINE_UNIT: "{{ engine_unit }}"
+        PLAY_SUPERVISOR_UNIT: "{{ supervisor_unit }}"
       ansible.builtin.shell: |
         v=$("$LAUNCHER" vars) || exit 1
         eval "$v"
@@ -685,7 +687,8 @@ bullet instead.
             --environment "$ENVIRONMENT") || exit 1
         eval "set -- $args $NEXT_PROFILE"
         "$DSL41" estate quiesce --run-root "$RUN_ROOT" --estate-anchor "$ESTATE_ANCHOR" \
-            "$@" -p "$PROPERTIES"
+            "$@" -p "$PROPERTIES" \
+            --engine-unit "$PLAY_ENGINE_UNIT" --supervisor-unit "$PLAY_SUPERVISOR_UNIT"
       register: quiesce
       # 2 and 3 are reruns; 4 and 7 stop the play at once (DL-398, DL-401)
       until: quiesce.rc not in [2, 3]
@@ -734,15 +737,27 @@ When the play fails at the quiesce task, read the last `quiesce:` line
 of the task's output. It names the stage and the cause, and what the
 earlier stages made durable. A refusal that outlasts the retries is
 still a refusal: wait for what it names, or fix it, then run the play
-again. Exit 4 is an unknown outcome, and the play stops at once: read
-`maintenance.json`, the unit, the process and `supervisor.log` before
-anything else, and never run the play again blindly (§3). The play never
-passes `--force terminate`. When an operator passes it by hand, a host
-stop that arrives during that forced maintenance is held until the
-operation ends (§3; DL-401). When the play fails after the starts, do
-not run it again, since a rerun can seal the new period: read the engine
-unit's journal as the stop recipe's recovery bullets say, start the unit
-once the cause is fixed, then release the hold.
+again. Some exit-2 refusals are not waits, such as an option error or a
+unit that is not loaded. The play retries them for the full window too.
+An option error prints no `quiesce:` line; read the task's stderr. Exit
+4 is an unknown outcome, and the play stops at once; never run it again
+blindly. Follow the stage the last `quiesce:` line names. An unknown
+seal follows §6a's Day 2. An unknown maintenance, or a unit that came
+back, needs `maintenance.json`, the unit, the process and
+`supervisor.log` read before anything else (§3). Exit 7 is a statechart
+error: stop, and report the `dsl41: statechart error` lines in the
+task's stderr. The verb never exits 1. A 1 is the play's own guard, and
+its stderr names the launcher, `ACTIVE` or `estate args`.
+
+A failure at the patch step or at the supervisor start leaves the estate
+stopped and the period sealed. Fix the cause and run the play again: the
+verb exits 0 on a stopped estate. When the play fails at the engine
+start or the wait, do not run it again, since a rerun can seal the new
+period: read the engine unit's journal as the stop recipe's recovery
+bullets say, start the unit once the cause is fixed, then release the
+hold. The play never passes `--force terminate`. When an operator passes
+it by hand, a host stop that arrives during that forced maintenance is
+held until the operation ends (§3; DL-401).
 
 ### Recipe: recover a rolled root whose opening is torn
 
