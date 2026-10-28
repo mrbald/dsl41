@@ -1853,6 +1853,42 @@ def test_the_verbs_run_only_on_the_runtime_the_launcher_selects(site: Site) -> N
     )
 
 
+def _receipt(site: Site, name: str) -> subprocess.CompletedProcess[str]:
+    rid = "0" * 8 + "-0000-0000-0000-" + "0" * 12
+    return subprocess.run(
+        site.command("service", "--", "receipt", name, "applied", rid),
+        input='{"outcome": "applied"}',
+        capture_output=True,
+        text=True,
+        env=site.environ(),
+    )
+
+
+def test_a_receipt_is_refused_for_a_release_others_could_change(site: Site) -> None:
+    """DL-412: the service side writes into .release only of a release sealed to it."""
+    site.prepared("v2")
+    assert _receipt(site, "v2").returncode == 0
+    assert (site.releases / "v2" / ".release" / "latest").read_text().startswith("applied-")
+    (site.releases / "v2").chmod(0o755)
+    refused = _receipt(site, "v2")
+    assert refused.returncode == 2 and "v2 is not sealed to the service account" in (refused.stderr)
+
+
+def test_a_receipt_is_refused_through_a_symlinked_release_directory(site: Site) -> None:
+    """DL-412: a .release that is a link reaches nothing: the write goes through the
+    directory's own descriptor, opened without following a link."""
+    site.prepared("v2")
+    release, elsewhere = site.releases / "v2", site.base / "elsewhere"
+    elsewhere.mkdir()
+    release.chmod(0o755)
+    shutil.rmtree(release / ".release")
+    (release / ".release").symlink_to(elsewhere)
+    release.chmod(0o555)
+    refused = _receipt(site, "v2")
+    assert refused.returncode == 2, refused.stderr
+    assert list(elsewhere.iterdir()) == []
+
+
 def test_a_missing_grant_names_the_sudoers_file(site: Site) -> None:
     """DL-412: sudo's own refusal is read as a grant to fix, not as a failed check."""
     _script(
