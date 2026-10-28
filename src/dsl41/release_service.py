@@ -874,21 +874,63 @@ def qualify(cfg: Config, name: str) -> dict[str, Any]:
     return check
 
 
+def write_in_release(cfg: Config, name: str, file: str, text: str) -> None:
+    """Write FILE into release NAME's .release as the service account. The release must be
+    sealed, its .release the service account's own; the write goes through .release's
+    directory descriptor, opened without following a link, as a temporary file renamed over
+    FILE, so a swap after the check cannot redirect it (DL-412)."""
+    path = release_dir(cfg, name)
+    require_sealed(cfg, name, path)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        top = os.open(path, flags)
+    except OSError as exc:
+        raise Stop(EXIT_REFUSED, f"{path} cannot be opened: {exc.strerror}.") from None
+    try:
+        try:
+            fd = os.open(".release", flags, dir_fd=top)
+        except OSError as exc:
+            raise Stop(EXIT_REFUSED, f"{path}/.release cannot be opened: {exc.strerror}.") from None
+    finally:
+        os.close(top)
+    try:
+        if os.fstat(fd).st_uid != os.geteuid():
+            raise Stop(EXIT_REFUSED, f"{path}/.release is not the service account's.")
+        temp = f".{file}.{os.getpid()}"
+        out = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=fd)
+        try:
+            os.write(out, text.encode())
+            os.fsync(out)
+        finally:
+            os.close(out)
+        os.rename(temp, file, src_dir_fd=fd, dst_dir_fd=fd)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def write_prepared(cfg: Config, name: str, source: str | None, check: dict[str, Any]) -> None:
     path = cfg.releases / name
-    write_json(
-        path / ".release" / "prepared.json",
-        {
-            "name": name,
-            "source": source,
-            "prepared_at": datetime.now(UTC).isoformat(timespec="seconds"),
-            "prepared_by": os.environ.get("SUDO_USER") or pwd.getpwuid(os.geteuid()).pw_name,
-            "environment": cfg.environment,
-            "max_jobs": cfg.max_jobs,
-            "max_grace_s": cfg.max_grace_s,
-            "files": file_digests(path),
-            **check,
-        },
+    write_in_release(
+        cfg,
+        name,
+        "prepared.json",
+        json.dumps(
+            {
+                "name": name,
+                "source": source,
+                "prepared_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                "prepared_by": os.environ.get("SUDO_USER") or pwd.getpwuid(os.geteuid()).pw_name,
+                "environment": cfg.environment,
+                "max_jobs": cfg.max_jobs,
+                "max_grace_s": cfg.max_grace_s,
+                "files": file_digests(path),
+                **check,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
     )
     say(f"prepared {path}: {check['jobs']} jobs, under dsl41 {check['dsl41_version']}.")
 
@@ -984,7 +1026,6 @@ def service_receipt(cfg: Config, name: str, kind: str, receipt_id: str) -> None:
     """Write the receipt the deployment identity sends on stdin, one JSON object, as
     NAME/.release/KIND-ID.json, and name an applied one in .release/latest: nothing under a
     release is written by the deployment identity (DL-412)."""
-    path = release_dir(cfg, name)
     text = sys.stdin.read(1 << 20)
     try:
         body = json.loads(text)
@@ -993,9 +1034,9 @@ def service_receipt(cfg: Config, name: str, kind: str, receipt_id: str) -> None:
     if not isinstance(body, dict):
         raise Stop(EXIT_REFUSED, "the receipt is not a JSON object.")
     file = f"{kind}-{receipt_id}.json"
-    write_json(path / ".release" / file, body)
+    write_in_release(cfg, name, file, json.dumps(body, indent=2, sort_keys=True) + "\n")
     if kind == "applied":
-        write_text(path / ".release" / "latest", f"{file}\n")
+        write_in_release(cfg, name, "latest", f"{file}\n")
 
 
 def service(words: list[str]) -> int:
