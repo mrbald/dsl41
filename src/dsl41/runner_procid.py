@@ -517,7 +517,9 @@ def stop_helpers(members: set[int]) -> set[int]:
     runs: exactly one process whose parent is PID 1 and whose argv is the launcher's
     `supervisor-stop` mode (`dsl41-launch` ... `supervisor-stop`), and its `sleep` children.
     A stop that overlaps maintenance keeps it in the unit's cgroup, and it is no residual
-    work (DL-416). Two such processes, or none, are no helper: an empty set."""
+    work (DL-416). With the helper found, a member that has left /proc since the cgroup was
+    read and is gone by kill(pid, 0), such as a `sleep` that ended, is counted with it. Two
+    such processes, or none, are no helper: an empty set."""
     helpers = []
     for pid in members:
         fields, argv = _linux_stat_fields(pid), _cmdline(pid)
@@ -536,7 +538,21 @@ def stop_helpers(members: set[int]) -> set[int]:
             continue
         if argv and Path(argv[0]).name == "sleep":
             found.add(pid)
+    for pid in members - found:
+        if _linux_stat_fields(pid) is None and _gone(pid):
+            found.add(pid)
     return found
+
+
+def _gone(pid: int) -> bool:
+    """kill(pid, 0) proves the pid absent; any other answer is not proof."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def _linux_zombie(fields: list[str]) -> bool:

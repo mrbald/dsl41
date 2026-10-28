@@ -208,9 +208,9 @@ def test_the_engine_holds_a_spawn_through_the_drain_and_sends_it_to_the_next_sup
         drained, absent = asyncio.Event(), asyncio.Event()
         spawn = client.spawn
 
-        async def recorded(spec: dict[str, Any]) -> dict[str, Any]:
+        async def recorded(spec: dict[str, Any], *gate: Any) -> dict[str, Any]:
             try:
-                return await spawn(spec)
+                return await spawn(spec, *gate)
             except SupervisorUnavailable as exc:
                 refusals.append(type(exc))
                 if refusals.count(SupervisorDraining) >= 2:
@@ -381,9 +381,9 @@ def _held_scenario(
         drained, absent = asyncio.Event(), asyncio.Event()
         spawn = client.spawn
 
-        async def recorded(spec: dict[str, Any]) -> dict[str, Any]:
+        async def recorded(spec: dict[str, Any], *gate: Any) -> dict[str, Any]:
             try:
-                return await spawn(spec)
+                return await spawn(spec, *gate)
             except SupervisorUnavailable as exc:
                 refusals.append(type(exc).__name__)
                 (drained if isinstance(exc, SupervisorDraining) else absent).set()
@@ -603,9 +603,9 @@ def test_a_held_spawn_waits_out_a_quarantine_and_ends_unsent_on_eviction(
         drained = asyncio.Event()
         spawn = client.spawn
 
-        async def recorded(spec: dict[str, Any]) -> dict[str, Any]:
+        async def recorded(spec: dict[str, Any], *gate: Any) -> dict[str, Any]:
             try:
-                return await spawn(spec)
+                return await spawn(spec, *gate)
             except SupervisorUnavailable as exc:
                 attempts.append(type(exc).__name__)
                 if isinstance(exc, SupervisorDraining):
@@ -672,9 +672,9 @@ def test_a_resend_whose_reply_is_lost_is_read_from_the_spool(
         drained = asyncio.Event()
         spawn = client.spawn
 
-        async def recorded(spec: dict[str, Any]) -> dict[str, Any]:
+        async def recorded(spec: dict[str, Any], *gate: Any) -> dict[str, Any]:
             try:
-                await spawn(spec)
+                await spawn(spec, *gate)
             except SupervisorUnavailable as exc:
                 attempts.append(type(exc).__name__)
                 if isinstance(exc, SupervisorDraining):
@@ -778,6 +778,15 @@ def test_the_stop_helper_alone_is_no_residual_work(
         )
         monkeypatch.setattr(module, "_cmdline", lambda pid: table[pid][1] if pid in table else None)
     assert procid.stop_helpers({me, 101, 102, 103, 104, 106, 107, 108}) == {101, 102}
+    # a sample member gone from /proc by the time it is read, the helper's ended `sleep`,
+    # is gone with the helper present, and stays a member without it
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    assert procid.stop_helpers({me, 101, gone.pid}) == {101, gone.pid}
+    assert procid.stop_helpers({me, gone.pid}) == set()
+    assert procid._gone(gone.pid) and not procid._gone(me)
+    if os.getuid() != 0:
+        assert not procid._gone(1)  # alive and not ours: EPERM is no proof of absence
     table[105] = ("1", ["/x/dsl41-launch", "supervisor-stop"])
     assert procid.stop_helpers({me, 101, 105}) == set()
     assert procid.stop_helpers({me, 104}) == set()
@@ -836,10 +845,10 @@ def test_a_first_spawn_whose_reply_is_lost_fails_as_before(
         spawn = client.spawn
         script: list[BaseException] = [ReplyLost("lost")]
 
-        async def lossy(spec: dict[str, Any]) -> dict[str, Any]:
+        async def lossy(spec: dict[str, Any], *gate: Any) -> dict[str, Any]:
             if script:
                 raise script.pop(0)
-            return await spawn(spec)
+            return await spawn(spec, *gate)
 
         monkeypatch.setattr(client, "spawn", lossy)
         monkeypatch.setattr(SupervisedCommandAdapter, "_HOLD_RETRY_S", 0.01)
@@ -873,3 +882,78 @@ def test_the_cmdline_is_split_on_nul(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(procid.Path, "read_bytes", lambda _self: b"/bin/sh\0x\0")
     assert procid._cmdline(1) == ["/bin/sh", "x"]
+
+
+def test_an_eviction_during_the_resends_reconnect_sends_nothing(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The routing gate runs under the client's lock after the reconnect, just before the
+    write: a host evicted while the resend awaits its reconnect to a returned supervisor ends
+    the hold with nothing written, and nothing runs (concurrency-model ss8, DL-416)."""
+    monkeypatch.setattr(SupervisedCommandAdapter, "_HOLD_RETRY_S", 0.05)
+    first = start_supervisor(short_root, env=_env("120"))
+    second: subprocess.Popen[bytes] | None = None
+    gate = short_root / "gate"
+    job = lower_source("insert_job: k\njob_type: c\ncommand: exit 0\n").jobs["k"]
+    host = {"state": "active"}
+
+    async def scenario() -> object:
+        nonlocal second
+        client = SupervisorClient(short_root)
+        await client.connect()
+        await client.acquire()
+        drained = asyncio.Event()
+        armed = False
+        spawn = client.spawn
+        ensure = client._ensure_connected
+        task: asyncio.Task[object] | None = None
+
+        async def recorded(spec: dict[str, Any], *gate_: Any) -> dict[str, Any]:
+            try:
+                return await spawn(spec, *gate_)
+            except SupervisorDraining:
+                drained.set()
+                raise
+
+        async def evicting() -> None:
+            # lands while the resend awaits its reconnect to the returned supervisor
+            if armed and asyncio.current_task() is task:
+                if (short_root / "supervisor.sock").exists():
+                    host["state"] = "evicted"
+            await ensure()
+
+        live = _spec(short_root / "runs" / "j.1", _gated(gate))
+        assert (await client.spawn(live))["ok"] is True
+        monkeypatch.setattr(client, "spawn", recorded)
+        monkeypatch.setattr(client, "_ensure_connected", evicting)
+        first.send_signal(signal.SIGTERM)
+        await asyncio.to_thread(wait_for, lambda: _state(short_root) == "draining")
+        adapter = SupervisedCommandAdapter(client, grace_seconds=1.0)
+        ctx = AdapterContext(
+            clock=RealClock(),
+            run_root=short_root,
+            run_id=str(uuid.uuid4()),
+            route=lambda: host["state"],
+        )
+        task = asyncio.create_task(adapter.run(job, 1, ctx))
+        try:
+            await asyncio.wait_for(drained.wait(), timeout=20.0)
+            gate.touch()
+            assert await asyncio.to_thread(first.wait, 30) == 0
+            armed = True
+            second = await asyncio.to_thread(start_supervisor, short_root)
+            return await asyncio.wait_for(task, timeout=30.0)
+        finally:
+            if not task.done():
+                task.cancel()
+            await client.close()
+
+    try:
+        result = asyncio.run(scenario())
+        assert isinstance(result, Failed), result
+        assert "evicted while the SPAWN was held; nothing was sent" in result.cause
+        assert not (short_root / "runs" / "k.1").exists()
+    finally:
+        teardown_supervisor(short_root, first)
+        if second is not None:
+            teardown_supervisor(short_root, second)

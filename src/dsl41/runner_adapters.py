@@ -923,6 +923,14 @@ class SupervisorRefused(SupervisorUnavailable):
     (DL-396)."""
 
 
+class _Unrouted(Exception):
+    """A held SPAWN's host routes no new work now: the resend is not written (DL-416)."""
+
+
+class _Evicted(Exception):
+    """A held SPAWN's host was evicted: the hold ends with nothing written (DL-416)."""
+
+
 class ReplyLost(SupervisorUnavailable):
     """The request was written, or partly written, and its reply never came: the supervisor may
     have acted on it. A subclass, so every `except SupervisorUnavailable` covers it; a held
@@ -1402,6 +1410,9 @@ class SupervisorClient:
         #: why the last reconnect failed when a supervisor answered and refused it: its PING
         #: or its re-ACQUIRE (`lease_held`); None after a reconnect that succeeded (DL-416)
         self.refusal: str | None = None
+        #: a held SPAWN's check, by run_id, run under the lock just before its request is
+        #: written, after any reconnect: what it raises aborts the SPAWN unsent (DL-416)
+        self._spawn_gates: dict[str, Callable[[], None]] = {}
         self.sock_path = run_root / "supervisor.sock"
         # per-INCARNATION (DL-79): it authorizes nothing, since incumbency is proved with the
         # current token. LIST and the lease_held refusal use it to name WHICH engine holds the
@@ -1714,6 +1725,9 @@ class SupervisorClient:
         async with self._lock:
             if self._writer is None or self.lost.is_set() or (lazy and self._reconnecting):
                 return None
+            spec = obj.get("spec") if self._spawn_gates and obj.get("cmd") == "SPAWN" else None
+            if isinstance(spec, dict) and (gate := self._spawn_gates.get(str(spec.get("run_id")))):
+                gate()
             fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
             self._pending = fut
             try:
@@ -2030,8 +2044,18 @@ class SupervisorClient:
             self.incarnation = resp.get("incarnation")  # DL-80
         return resp
 
-    async def spawn(self, spec: dict[str, Any]) -> dict[str, Any]:
-        resp = await self._request({"cmd": "SPAWN", "spec": spec})
+    async def spawn(
+        self, spec: dict[str, Any], gate: Callable[[], None] | None = None
+    ) -> dict[str, Any]:
+        """SPAWN one spec. `gate` runs under the lock just before the request is written, after
+        any reconnect; what it raises aborts the SPAWN with nothing written (DL-416)."""
+        if gate is not None:
+            self._spawn_gates[spec["run_id"]] = gate
+        try:
+            resp = await self._request({"cmd": "SPAWN", "spec": spec})
+        finally:
+            if gate is not None:
+                self._spawn_gates.pop(spec["run_id"], None)
         if not resp.get("ok"):
             # ss11a gives SPAWN refusals of its own (collision, in_progress, indeterminate); an
             # operator reading the job's cause finds which one, not a transport story
@@ -2238,17 +2262,22 @@ class SupervisedCommandAdapter:
         run as a duplicate's, through LIST and, with no supervisor, the spool; otherwise it goes
         on. One line names the hold and one its end."""
         held = False
-        while True:
-            state = ctx.route() if held and ctx.route is not None else "active"
+
+        def routed() -> None:
+            # ss8's gate, read under the client's lock after any reconnect, just before the write
+            state = ctx.route() if ctx.route is not None else "active"
             if state == "evicted":
-                raise SupervisorUnavailable(
-                    "the host was evicted while the SPAWN was held; nothing was sent"
-                )
+                raise _Evicted("the host was evicted while the SPAWN was held; nothing was sent")
             if state != "active":
-                await asyncio.sleep(self._HOLD_RETRY_S)
-                continue
+                raise _Unrouted(state)
+
+        while True:
             try:
-                reply = await self.client.spawn(spec)
+                reply = await (self.client.spawn(spec, routed) if held else self.client.spawn(spec))
+            except _Unrouted:
+                pass
+            except _Evicted as exc:
+                raise SupervisorUnavailable(str(exc)) from exc
             except SupervisorDraining as exc:
                 if not held:
                     print(f"dsl41: {spec['job']}: SPAWN held: {exc}", file=sys.stderr)
