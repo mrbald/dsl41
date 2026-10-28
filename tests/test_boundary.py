@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import json
 import os
+import types
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -5527,7 +5528,9 @@ def test_an_input_arriving_during_the_supervisor_proof_is_drained_before_the_sna
     assert boundary.seal.state.globals["LATE"].value == "in"  # drained, then sealed
 
 
-def test_inputs_that_never_stop_arriving_during_the_proof_time_out(tmp_path: Path) -> None:
+def test_inputs_that_never_stop_arriving_during_the_proof_time_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The counterpart to the single latecomer above: if a NEW input lands on
     every pass -- drained, then another arrives during the very next proof --
     the estate never reaches quiescence with an empty queue at once, and the
@@ -5535,7 +5538,11 @@ def test_inputs_that_never_stop_arriving_during_the_proof_time_out(tmp_path: Pat
     (period-model ss8)."""
     run_root = tmp_path / "run"
     engine = _genesis(run_root)
-    engine.QUIESCE_WAIT_S = 0.05  # the wait is real; the refusal is what ends it
+    # the seal's deadlines read `time.monotonic`; this test owns that clock, and each supervisor
+    # proof advances it one second, so the refusal never depends on how fast the machine is
+    now = [0.0]
+    monkeypatch.setattr("dsl41.runner.time", types.SimpleNamespace(monotonic=lambda: now[0]))
+    engine.QUIESCE_WAIT_S = 3.0
 
     class _NeverSettles(_StubSupervisor):
         def __init__(self) -> None:
@@ -5544,6 +5551,7 @@ def test_inputs_that_never_stop_arriving_during_the_proof_time_out(tmp_path: Pat
 
         async def list_runs(self) -> SupervisorListReply:
             self.calls += 1  # every call re-arms the queue: nothing ever settles
+            now[0] += 1.0
             engine.inject(
                 Event(at=T0, kind="SET_GLOBAL", payload={"name": "LATE", "value": str(self.calls)})
             )

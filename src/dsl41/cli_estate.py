@@ -1728,9 +1728,9 @@ class _Quiesce:
         targets = _root_periods(root)
         if not targets:
             raise self.refuse("audit", f"{root}: no closed period to audit")
-        already = all(read_attestation(root, period) is not None for period in targets)
         anchor = EstateAnchor(self.request.estate_anchor or default_anchor_dir(root))
         try:
+            already = all(read_attestation(root, period) is not None for period in targets)
             outstanding = _attest_each([(p, root) for p in targets], anchor, name_root=False)
         except EngineError as exc:
             raise self.refuse("audit", str(exc)) from exc
