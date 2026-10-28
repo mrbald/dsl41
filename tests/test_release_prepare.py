@@ -385,6 +385,41 @@ def test_a_release_input_is_read_inside_the_release_without_following_a_link(
     assert "cannot be read as a release input" in refused.value.lines[0]
 
 
+def test_an_unsearchable_source_path_names_the_account_that_must_read_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DL-412: a source the service account cannot reach is refused with the cause to act on;
+    a source that is not there is refused without it."""
+    import errno
+
+    from dsl41.release_service import Stop, open_source
+
+    source = tmp_path / "src"
+    source.mkdir()
+    who = (os.geteuid(), {os.getegid()})
+    real_open = os.open
+
+    def denied(path: object, flags: int, *, dir_fd: int | None = None) -> int:
+        if dir_fd is not None and path == "src":
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES))
+        return real_open(path, flags, dir_fd=dir_fd)  # type: ignore[arg-type]
+
+    with monkeypatch.context() as patch:
+        patch.setattr("dsl41.release_service.os.open", denied)
+        with pytest.raises(Stop) as refused:
+            open_source(source, who)
+    assert refused.value.code == 2
+    assert refused.value.lines[0] == (
+        f"{source} cannot be read as a release: Permission denied"
+        "; the service account must be able to read every directory on its path."
+    )
+    with pytest.raises(Stop) as missing:
+        open_source(tmp_path / "absent", who)
+    assert missing.value.lines[0] == (
+        f"{tmp_path / 'absent'} cannot be read as a release: No such file or directory."
+    )
+
+
 def _receipt(site: Site, name: str) -> subprocess.CompletedProcess[str]:
     rid = "0" * 8 + "-0000-0000-0000-" + "0" * 12
     return subprocess.run(

@@ -892,8 +892,13 @@ def open_source(source: Path, who: tuple[int, set[int]]) -> int:
             try:
                 inner = os.open(part, flags, dir_fd=fd)
             except OSError as exc:
+                hint = (
+                    "; the service account must be able to read every directory on its path"
+                    if isinstance(exc, PermissionError)
+                    else ""
+                )
                 raise Stop(
-                    EXIT_REFUSED, f"{source} cannot be read as a release: {exc.strerror}."
+                    EXIT_REFUSED, f"{source} cannot be read as a release: {exc.strerror}{hint}."
                 ) from None
             os.close(fd)
             fd = inner

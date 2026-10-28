@@ -395,7 +395,9 @@ cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release prepare NAME DIR
    Prepare has the service account copy `DIR` into
    `ESTATE_RELEASES/NAME` as its own and read-only, so nobody else can
    change it (DL-412). `DIR` and everything in it must be readable by the
-   deployment identity, and it may hold no symlink. It lints the release with the installed runtime, the
+   deployment identity, and it may hold no symlink. The service account opens
+   `DIR` too, so `DIR` and its parents must be readable by that account: a
+   directory under a home directory it cannot search is refused. It lints the release with the installed runtime, the
    launcher's `ENVIRONMENT` and the site's `PROPERTIES`, then rehearses it
    one day from now. It refuses the release with exit 2 when lint or
    rehearse exits nonzero, when the release holds more jobs than the
