@@ -467,16 +467,22 @@ def test_the_retirement_unit_recipes_name_each_shipped_unit() -> None:
 
 
 def test_the_retirement_removes_the_grant_the_service_recipe_installs() -> None:
-    """DL-412: retire-release keeps a copy of the release train's sudoers grant
-    beside the units' copies, removes that one file, and reads what the
-    deployment identity may still run."""
+    """DL-412: retire-release makes retire-remove's retained directory, keeps a
+    copy of the release train's sudoers grant in it, removes that one file
+    after the copy, and reads what the grant's user may still run."""
     lines = _lines("service-install")
     (install,) = [line for line in lines if line.startswith("install ") and "sudoers" in line]
-    grant = install.split()[-1]
+    source, grant = install.split()[-2:]
+    users = {line.split()[0] for line in (ROOT / source).read_text().splitlines()}
+    (user,) = users - {"#"}
+    retain = [
+        line for line in _lines("retire-remove") if not line.startswith(("cp ", "systemctl", "rm "))
+    ]
     assert _lines("retire-release") == [
-        f'cp -p {grant} "/srv/dsl41/retained/$(basename "$RUN_ROOT")"/',
+        *retain,
+        f'cp -p {grant} "$retained"/',
         f"rm {grant}",
-        "sudo -l -U nbdeploy",
+        f"sudo -l -U {user}",
     ]
 
 
