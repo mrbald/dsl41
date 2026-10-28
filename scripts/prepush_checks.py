@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
@@ -70,13 +71,24 @@ def git(root: Path | None, *args: str) -> str:
     return out.stdout
 
 
+#: git routes a hook's child commands through these; a hook run from a linked
+#: worktree would otherwise read the main checkout's index and tree.
+_GIT_ROUTING = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX", "GIT_COMMON_DIR")
+
+
 def repo_root() -> Path:
     if shutil.which("git") is None:
         raise Refusal("git is not available")
+    for name in _GIT_ROUTING:
+        os.environ.pop(name, None)
     try:
-        return Path(git(None, "rev-parse", "--show-toplevel").strip())
+        root = Path(git(None, "rev-parse", "--show-toplevel").strip())
     except subprocess.CalledProcessError as exc:
         raise Refusal("not inside a git repository") from exc
+    here = Path.cwd().resolve()
+    if root.resolve() not in (here, *here.parents):
+        raise Refusal("the repository found is not the current directory's")
+    return root
 
 
 def resolve(root: Path, base: str) -> str:

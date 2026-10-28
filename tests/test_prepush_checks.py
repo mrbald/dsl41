@@ -236,3 +236,18 @@ def test_a_stale_index_is_detected(repo: Path) -> None:
     _index_repo(repo)
     _write(repo, "docs/decision-index.md", "# Decision index\n")
     assert prepush.index_stale(repo)
+
+
+def test_a_hook_run_from_a_linked_worktree_checks_its_own_tree(
+    repo: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    """git exports its routing variables to a hook; pointed at another checkout they
+    make every path look changed, so the script drops them."""
+    # outside the fixture repository, or its directory would itself be an untracked path
+    other = tmp_path_factory.mktemp("other")
+    _git(other, "init", "-q", "-b", "main")
+    env = {**os.environ, "GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other)}
+    _write(repo, "README.md", "# Project, edited\n")
+    result = _run(repo, "--classify", env=env)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "code=false"
