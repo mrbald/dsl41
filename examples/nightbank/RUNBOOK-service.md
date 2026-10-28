@@ -687,7 +687,12 @@ sudo jq -c '.executions[] | {job, kind}' "$RUN_ROOT/seals/000006.json"
 ```
 
 3. Step 4: in a root shell, set `RUN_ROOT` and type recipe `retire-remove`. Both
-   `reset-failed` lines print `Unit … not loaded`, and the `|| :` passes them.
+   `reset-failed` lines print `Unit … not loaded`, and the `|| :` passes them. In the
+   same shell, type recipe `retire-release`. It prints
+   `User nbdeploy is not allowed to run sudo on …`. As the deployment identity,
+   `dsl41 release prepare --requalify small-r1` now exits 2:
+   ``sudo did not run `/opt/dsl41/.venv/bin/dsl41 release service` as dsl41.``
+   `dsl41 release status` still answers, with exit 0 and `engine: no answer on …`.
 4. Step 5: recipe `retire-check`, with `sudo`: each unit prints `LoadState=not-found`
    and `ActiveState=inactive`. A stray `sudo systemctl start dsl41-engine.service` exits
    5, `Unit dsl41-engine.service not found`, and `pgrep -u dsl41` prints nothing.

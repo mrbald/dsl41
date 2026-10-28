@@ -1136,6 +1136,17 @@ step_retire() { # retirement: the estate stays stopped after its units go, the h
     for unit in "$ENGINE" "$SUPERVISOR" dsl41-launch nightbank-access.toml; do
         sudo test -f "$retained/$unit" || fail "no copy of $unit in $retained"
     done
+    # the release train's grant goes after the units: the deployment identity
+    # can no longer seal, prepare or start anything (DL-412)
+    out=$(run_recipe retire-release RUN_ROOT="$ROOT")
+    echo "$out"
+    grep -qx "User $DEPLOY_USER is not allowed to run sudo on .*" <<<"$out" ||
+        fail "retire-release printed: $out"
+    ! sudo test -e "$SUDOERS_GRANT" || fail "$SUDOERS_GRANT survived the retirement"
+    sudo test -f "$retained/${SUDOERS_GRANT##*/}" || fail "no copy of the grant in $retained"
+    ! deploy prepare --requalify "$RELEASE" || fail "dsl41 release reached its service side"
+    deploy status >/dev/null || fail "dsl41 release status no longer reads the retired estate"
+    ok "the release grant is gone: the deployment identity's verbs refuse, status still reads"
     out=$(run_recipe retire-check)
     echo "$out"
     [ "$out" = $'LoadState=not-found\nActiveState=inactive\nLoadState=not-found\nActiveState=inactive' ] ||
