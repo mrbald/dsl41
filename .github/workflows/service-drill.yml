@@ -10,7 +10,8 @@
 # a host reboot that the enabled units resume from, the signals of "What to
 # watch" (with a violation injected into the engine unit), the configure
 # and stop-and-recover recipes of ss0, a SIGKILL of the engine and of the
-# supervisor, and the four upgrade rows of ss7 with their rollbacks
+# supervisor, ss0's two configuration-management plays run by
+# ansible-playbook (DL-416), and the four upgrade rows of ss7 with their rollbacks
 # (DL-266). Rows 1 to 3 run with two installs of one build: their
 # mechanics, not a qualified version pair. Row 4 runs from v1.7.0 on PyPI
 # to the build under test. The install, the first start and a final
@@ -91,6 +92,9 @@ jobs:
 
       - name: a SIGKILL of the supervisor is restarted, the engine resumes, and the lease renews
         run: bash examples/nightbank/deploy/drill-steps.sh kill-supervisor
+
+      - name: the cm-stop play drains the supervisor with a job live and keeps the period open; cm-seal seals it
+        run: bash examples/nightbank/deploy/drill-steps.sh cm-stop
 
       - name: stop and recover from a crash loop, replay a request, rerun a job
         run: bash examples/nightbank/deploy/drill-steps.sh stop-recover
