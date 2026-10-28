@@ -713,10 +713,14 @@ release_apply() { # release_apply NAME | release_apply rollback
 }
 
 # A release's inputs, copied from the directory FROM without its receipts,
-# into a directory of the drill's that the deployment identity can read.
+# into a directory of the drill's that the deployment identity and the service
+# account can both read. It is not under SCRATCH: $RUNNER_TEMP is in a home
+# directory the service account cannot search, and `release prepare` has that
+# account open the source.
+INPUTS=/srv/dsl41/drill-inputs
 release_source() { # release_source NAME FROM -- prints the directory
-    local dir=$SCRATCH/release-sources/$1
-    mkdir -p "$SCRATCH/release-sources"
+    local dir=$INPUTS/$1
+    sudo install -d -o "$(id -un)" -g "$(id -gn)" -m 0755 "$INPUTS"
     rm -rf "$dir"
     sudo cp -R "$2" "$dir"
     sudo rm -rf "$dir/.release"

@@ -486,6 +486,9 @@ diff -r /srv/dsl41/nightbank/estate/small /tmp/small-r2   # the files line, the 
 cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release prepare small-r2 /tmp/small-r2
 ```
 
+   The source directory and its parents must be readable by the service account, which
+   opens them. A directory under a home directory it cannot search is refused.
+
    Prepare prints lint's `L011 warn` for `OPS_RELEASE_PROBE_C`, a job with no schedule,
    condition or box, and `prepared …/small-r2: 83 jobs`. A warning refuses nothing. The
    prepared release's files are read-only, and `.release/prepared.json` records each
