@@ -54,7 +54,7 @@ wheel=$(basename "$out"/dist/dsl41-*.whl) base="localhost/dsl41-wargame-base:$(b
 podman run --rm --volume "$PWD:/src:ro" --volume "$out:/out" "$base" env PYTHON=python3.12 \
     bash /src/scripts/offline/build-wheelhouse.sh "/out/dist/$wheel" /out/inputs /out/bundle
 podman run --rm --network none --volume "$out:/out:ro" "$base" env PYTHON=python3.12 \
-    bash /out/bundle/tools/qualify.sh /out/bundle /tmp/qualification   # ok: installed 1.12.0 ui …
+    bash /out/bundle/tools/qualify.sh /out/bundle /tmp/qualification   # ok: installed 1.13.0 ui …
 ```
 
 2. Deliver before the host runs, and read the refusal. Then start the host (the start
@@ -79,7 +79,7 @@ drill's `install` step checks the same.
 
 ```sh
 bundle=/delivery/bundle prefix=/opt/dsl41
-PYTHON=python3.12 bash "$bundle/tools/prepare.sh" "$bundle" "$prefix" base   # …/.venvs/1.12.0-base-<hash>
+PYTHON=python3.12 bash "$bundle/tools/prepare.sh" "$bundle" "$prefix" base   # …/.venvs/1.13.0-base-<hash>
 /opt/dsl41/.venv/bin/dsl41 --help   # No such file or directory
 ```
 
@@ -87,7 +87,7 @@ PYTHON=python3.12 bash "$bundle/tools/prepare.sh" "$bundle" "$prefix" base   # �
    again, which verifies the candidate, and replaces the link. Read it, and `exit`:
 
 ```sh
-readlink /opt/dsl41/.venv                             # .venvs/1.12.0-base-<hash>
+readlink /opt/dsl41/.venv                             # .venvs/1.13.0-base-<hash>
 jq -r .profile /opt/dsl41/.venv/.dsl41/receipt.json   # base
 /opt/dsl41/.venv/bin/python -B -c 'from dsl41.runner_ledger import STATE_MACHINE_VERSION as v; print(v)'   # 24
 ```
@@ -351,7 +351,7 @@ pgrep -f 'fakework OPS_XINST_DEMO_C'; systemctl show -p MainPID --value dsl41-su
 2. Run row 1's three commands. For the activation, set `bundle=/delivery/bundle` in a
    root shell and type §1's block with its `profile=base` line changed to `profile=ui`.
    After the start, wait with recipe `wait-answers`. The launch line ends `--resume`, the
-   engine runs from `.venvs/1.12.0-ui-…`, and both processes live on. Roll back the same
+   engine runs from `.venvs/1.13.0-ui-…`, and both processes live on. Roll back the same
    way, with §1's block as printed (`profile=base`); within two minutes the job reads
    `SUCCESS`.
 3. Row 2: check that `dsl41 supervise list` shows no live wrapper, take recipe

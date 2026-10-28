@@ -51,7 +51,7 @@ target environment:
 ```sh
 uv build --wheel --out-dir /tmp/dsl41-release-dist
 bash scripts/export-release-inputs.sh \
-    /tmp/dsl41-release-dist/dsl41-1.12.0-py3-none-any.whl /tmp/dsl41-release-inputs
+    /tmp/dsl41-release-dist/dsl41-1.13.0-py3-none-any.whl /tmp/dsl41-release-inputs
 ```
 
 The exports directory must be new.
@@ -76,7 +76,7 @@ The builder has no wheel-build or dependency-export fallback.
 PYTHON=/usr/bin/python3.12
 export PYTHON
 bash scripts/offline/build-wheelhouse.sh \
-    /path/to/dsl41-1.12.0-py3-none-any.whl /path/to/dsl41-release-inputs \
+    /path/to/dsl41-1.13.0-py3-none-any.whl /path/to/dsl41-release-inputs \
     /tmp/dsl41-offline-bundle
 bash scripts/offline/qualify.sh \
     /tmp/dsl41-offline-bundle /tmp/dsl41-offline-qualification
@@ -214,7 +214,7 @@ mkdir -p /tmp/dsl41-rpmbuild/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
 cp /tmp/dsl41-rpm-source/*.tar.gz /tmp/dsl41-rpmbuild/SOURCES/
 rpmbuild -bb scripts/offline/dsl41-offline.spec \
     --define '_topdir /tmp/dsl41-rpmbuild' \
-    --define 'dsl41_version 1.12.0'
+    --define 'dsl41_version 1.13.0'
 ```
 
 Set `--define 'dsl41_prefix /srv/dsl41'` for a different prefix.
