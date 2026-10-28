@@ -334,6 +334,51 @@ def _supervised(
     return result, conn
 
 
+_DRAINING = "supervisor is draining; wait for the unit to stop"
+_LEASE = {"ok": True, "incarnation": "a" * 32, "token": 3}
+
+
+def test_supervise_shutdown_refuses_a_draining_supervisor_before_the_lease(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """DL-416: PING shows the drain. Exit 2, the one sentence, and nothing sent but PING."""
+    draining = {**_SERVING, "process_state": "draining"}
+    result, conn = _supervised(monkeypatch, tmp_path, [draining])
+    assert result.exit_code == 2
+    assert _DRAINING in result.output
+    assert [r["cmd"] for r in conn.sent] == ["PING"]
+
+
+def test_supervise_shutdown_reads_a_draining_refusal_as_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """DL-416: the drain began after PING, so MAINTENANCE_STOP is refused `draining`: exit 2."""
+    refused = {"ok": False, "error": "draining"}
+    result, conn = _supervised(monkeypatch, tmp_path, [_SERVING, _LEASE, refused])
+    assert result.exit_code == 2
+    assert _DRAINING in result.output
+    assert [r["cmd"] for r in conn.sent] == ["PING", "ACQUIRE", "MAINTENANCE_STOP"]
+
+
+def test_supervise_shutdown_reads_a_lost_reply_and_a_drain_as_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """DL-416: the reply is lost and the PING after the reconnect shows `draining`. A draining
+    supervisor admitted nothing, since an admitted operation holds every signal: exit 2."""
+    draining = {**_SERVING, "process_state": "draining"}
+    script = [_SERVING, _LEASE, OSError("lost"), _LEASE, draining]
+    result, conn = _supervised(monkeypatch, tmp_path, script)
+    assert result.exit_code == 2
+    assert _DRAINING in result.output
+    assert [r["cmd"] for r in conn.sent] == [
+        "PING",
+        "ACQUIRE",
+        "MAINTENANCE_STOP",
+        "ACQUIRE",
+        "PING",
+    ]
+
+
 def test_supervise_shutdown_stops_when_the_lease_is_refused(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

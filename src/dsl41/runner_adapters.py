@@ -186,6 +186,9 @@ class AdapterContext:
     #: spool the journal never sees. An append after leadership was lost is evidence written by a
     #: non-leader, so this adapter re-proves before every line (PR-03).
     fence: Proof | None = None
+    #: the routing state of the executor the run is bound to (concurrency-model ss8), read
+    #: before each resend of a held SPAWN; None outside an engine (DL-416)
+    route: Callable[[], str | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -914,10 +917,22 @@ class SupervisorUnavailable(RuntimeError):
 
 
 class SupervisorRefused(SupervisorUnavailable):
-    """The supervisor answered and refused: PING with an error, such as `unsupported_version`, or
-    a lease ACQUIRE another controller holds. A subclass, so every `except SupervisorUnavailable`
+    """The supervisor answered and refused: PING with an error, such as `unsupported_version`, a
+    lease ACQUIRE another controller holds, or a SPAWN. A subclass, so every `except SupervisorUnavailable`
     covers it; an attach launch tells it from absence, because a retry cannot fix a refusal
     (DL-396)."""
+
+
+class ReplyLost(SupervisorUnavailable):
+    """The request was written, or partly written, and its reply never came: the supervisor may
+    have acted on it. A subclass, so every `except SupervisorUnavailable` covers it; a held
+    SPAWN's resend reads the spool before any further resend (DL-416)."""
+
+
+class SupervisorDraining(SupervisorRefused):
+    """A SPAWN refused `draining`: a host signal stopped the supervisor's admissions, and it stops
+    once its runs end (supervisor-protocol ss5, DL-416). Nothing ran, so the SPAWN is held and sent
+    again until a supervisor accepts it."""
 
 
 class SpawnInProgress(SupervisorUnavailable):
@@ -1380,6 +1395,13 @@ class SupervisorClient:
         #: which the leader turns into a quarantine); the renewal loop keeps retrying and reports
         #: contact again when the supervisor answers
         self.on_unreachable: Callable[[], None] | None = None
+        #: whether a service manager replaces a supervisor that exits: True once `connect`
+        #: attached (shape 1's unit); a client that `provision` may fork for has none to wait
+        #: for (DL-416)
+        self.successor = False
+        #: why the last reconnect failed when a supervisor answered and refused it: its PING
+        #: or its re-ACQUIRE (`lease_held`); None after a reconnect that succeeded (DL-416)
+        self.refusal: str | None = None
         self.sock_path = run_root / "supervisor.sock"
         # per-INCARNATION (DL-79): it authorizes nothing, since incumbency is proved with the
         # current token. LIST and the lease_held refusal use it to name WHICH engine holds the
@@ -1492,6 +1514,7 @@ class SupervisorClient:
         resp = await self._ping_new_connection()
         if resp is None:
             raise SupervisorUnavailable(f"no supervisor answers on {self.sock_path}")
+        self.successor = True
         if not resp.get("ok"):
             error = resp.get("error")
             why = (
@@ -1528,6 +1551,8 @@ class SupervisorClient:
 
     async def _try_connect(self) -> bool:
         resp = await self._ping_new_connection()
+        if resp is not None and not resp.get("ok"):
+            self.refusal = f"PING refused: {resp.get('error')}"
         return resp is not None and bool(resp.get("ok"))
 
     async def _ping_new_connection(self) -> dict[str, Any] | None:
@@ -1641,11 +1666,14 @@ class SupervisorClient:
                     return False
                 self._reconnecting = False  # answered: the sequence is done
                 if not resp.get("ok"):
-                    return False  # fenced out: another controller holds the lease
+                    # fenced out: another controller holds the lease
+                    self.refusal = f"re-ACQUIRE refused: {resp.get('error')}"
+                    return False
                 self.token = int(resp["token"])
                 self.incarnation = resp.get("incarnation")  # DL-80
                 self._keep_renewing()
             self._reconnecting = False
+            self.refusal = None
             return True
 
     async def _request(self, obj: dict[str, Any], *, _connect: bool = True) -> dict[str, Any]:
@@ -1704,7 +1732,7 @@ class SupervisorClient:
                 return await fut  # the reader resolves it, or _on_lost fails it
             except OSError as exc:
                 self._pending = None
-                raise SupervisorUnavailable(str(exc)) from exc
+                raise ReplyLost(str(exc)) from exc
             except asyncio.CancelledError:
                 # poison-on-cancel (DL-48): the reply may be in flight, or the request only
                 # partially written; with no correlation ids the stream is unknowable, so the
@@ -1775,7 +1803,7 @@ class SupervisorClient:
             return
         lost.set()
         if self._pending is not None and not self._pending.done():
-            self._pending.set_exception(SupervisorUnavailable("connection lost"))
+            self._pending.set_exception(ReplyLost("connection lost"))
         self._pending = None
         if self.phase() != "closed":  # nothing posts to a closed client
             self._post(EOF)
@@ -2010,7 +2038,9 @@ class SupervisorClient:
             refusal = f"SPAWN refused: {resp.get('error')} ({resp.get('detail')})"
             if resp.get("error") == "in_progress":
                 raise SpawnInProgress(refusal)
-            raise SupervisorUnavailable(refusal)
+            if resp.get("error") == "draining":
+                raise SupervisorDraining(refusal)
+            raise SupervisorRefused(refusal)
         return resp
 
     async def signal(self, run_id: str, sig: str) -> dict[str, Any]:
@@ -2128,9 +2158,15 @@ class SupervisedCommandAdapter:
             reply: dict[str, Any] = {}
             listed_dead = False
             try:
-                reply = await self.client.spawn(spec)
-                recheck = bool(reply.get("duplicate"))
-                listed_dead = recheck and not await self._listed_alive(run_id)
+                held = await self._spawn_held(spec, ctx, run_dir)
+                if held is None:
+                    # a resend's reply was lost and the spool shows the run: it is awaited as
+                    # a duplicate's, through LIST and, with no supervisor, the spool (DL-416)
+                    recheck = True
+                else:
+                    reply = held
+                    recheck = bool(reply.get("duplicate"))
+                    listed_dead = recheck and not await self._listed_alive(run_id)
             except SpawnInProgress:
                 # ss11a: the wrapper for THIS run_id is already forked; there is nothing to spawn
                 # or fail, so await its outcome like any other run of ours, with no wrapper_pid to
@@ -2180,6 +2216,60 @@ class SupervisedCommandAdapter:
         except asyncio.CancelledError:
             await self._on_cancel(run_id, ctx, forget_exit=False)
             raise
+
+    #: how often a held SPAWN is sent again (DL-416)
+    _HOLD_RETRY_S = 1.0
+
+    async def _spawn_held(
+        self, spec: dict[str, Any], ctx: AdapterContext, run_dir: Path
+    ) -> dict[str, Any] | None:
+        """SPAWN, held while the supervisor drains (DL-416). A `draining` refusal starts nothing,
+        so the SPAWN is sent again every `_HOLD_RETRY_S` until a supervisor accepts it or refuses
+        it otherwise. Each resend passes the routing gate a fresh effect passes
+        (concurrency-model ss8): a host that routes nothing holds it unsent, and an evicted host
+        ends the hold with nothing sent. The hold is bounded by the supervisor's return. Under a
+        unit (the client attached), no supervisor answering is the drained one gone and its
+        successor not yet up, so the hold goes on while the client's reconnects run; a successor
+        that answers and refuses the reconnect, its PING or its re-ACQUIRE (`lease_held`), ends
+        it. With no unit to replace the supervisor (the client may fork one), the drained
+        supervisor's exit ends it. Each end raises, which the caller records as the spawn's
+        failure. A resend whose reply is lost may have reached a supervisor that died: when the
+        spool shows the run (its receipt), the hold ends with None, and the caller awaits the
+        run as a duplicate's, through LIST and, with no supervisor, the spool; otherwise it goes
+        on. One line names the hold and one its end."""
+        held = False
+        while True:
+            state = ctx.route() if held and ctx.route is not None else "active"
+            if state == "evicted":
+                raise SupervisorUnavailable(
+                    "the host was evicted while the SPAWN was held; nothing was sent"
+                )
+            if state != "active":
+                await asyncio.sleep(self._HOLD_RETRY_S)
+                continue
+            try:
+                reply = await self.client.spawn(spec)
+            except SupervisorDraining as exc:
+                if not held:
+                    print(f"dsl41: {spec['job']}: SPAWN held: {exc}", file=sys.stderr)
+                held = True
+            except (SpawnInProgress, SupervisorRefused):
+                raise
+            except ReplyLost:
+                if not held:
+                    raise
+                if (run_dir / "receipt.json").exists():
+                    return None
+            except SupervisorUnavailable as exc:
+                if not held or not self.client.successor:
+                    raise
+                if self.client.refusal is not None:
+                    raise SupervisorRefused(self.client.refusal) from exc
+            else:
+                if held:
+                    print(f"dsl41: {spec['job']}: SPAWN accepted after the hold", file=sys.stderr)
+                return reply
+            await asyncio.sleep(self._HOLD_RETRY_S)
 
     async def _on_cancel(self, run_id: str, ctx: AdapterContext, *, forget_exit: bool) -> None:
         """The ss3 cancel split (DL-96). Case b (detach-stop): the job continues under the

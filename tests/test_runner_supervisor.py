@@ -3415,13 +3415,14 @@ def test_a_second_shutdown_request_in_one_loop_pass_does_nothing_more(
     monkeypatch.setattr(sup, "_reap", lambda: reaps.append(sup.state))
     sup._bind()
     try:
-        sup._shutdown_requested = True
-        sup._orderly_shutdown(runner_supervisor.TERM)
+        sup._orderly_shutdown(runner_supervisor.TERM)  # .06, the drain
+        sup._signals = 1
+        sup._orderly_shutdown(runner_supervisor.TERM)  # .61, the wait at once
         assert sup.state == "stopped" and reaps and set(reaps) == {"shutting_down"}
         ran = len(reaps)
-        sup._shutdown_requested = True  # a signal during the shutdown
+        sup._signals = 1  # a signal during the shutdown
         sup._orderly_shutdown(runner_supervisor.TERM)
-        assert sup.state == "stopped" and not sup._shutdown_requested
+        assert sup.state == "stopped" and not sup._signals
         assert len(reaps) == ran  # no second wait
     finally:
         sup._teardown()
@@ -3443,8 +3444,9 @@ def test_an_error_during_shutdown_still_unlinks_what_was_published(
     monkeypatch.setattr(sup, "_reap", broken_reap)
     sup._bind()
     assert sup.state == "serving"
+    sup._orderly_shutdown(runner_supervisor.TERM)  # .06, the drain
     with pytest.raises(OSError, match="synthetic reap failure"):
-        sup._orderly_shutdown(runner_supervisor.TERM)
+        sup._orderly_shutdown(runner_supervisor.TERM)  # .61, the wait at once
     assert sup.state == "shutting_down"
     sup._teardown()
     assert sup.state == "closed"
@@ -3642,7 +3644,7 @@ def test_a_signal_latched_before_a_shutdown_whose_wait_fails_is_that_shutdowns(
         "supervisor_process.32",
     ]
     assert "supervisor_process.06" not in rig.taken and "supervisor_process.36" not in rig.taken
-    assert rig.failures == 0 and not rig.sup._shutdown_requested
+    assert rig.failures == 0 and not rig.sup._signals
     assert rig.seen_in_wait is not None and rig.seen_in_wait[1] == {
         "ok": False,
         "error": _SYNTHETIC,

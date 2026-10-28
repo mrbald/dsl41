@@ -981,7 +981,7 @@ async def _serve_run(
                 supervisor=supervisor,
             )
         except SupervisorAbsent as exc:
-            # exit 1, not a refusal's 2: the engine unit retries it behind `Requires=` until its
+            # exit 1, not a refusal's 2: the engine unit retries it behind `Wants=` until its
             # supervisor unit answers (DL-396)
             typer.echo(
                 f"{exc}; --supervisor attach starts none: start the supervisor service", err=True

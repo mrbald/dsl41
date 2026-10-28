@@ -138,7 +138,7 @@ step_first_start() { # first start is a genesis, beside a supervisor in its own 
     [ "$active" = $'active\nactive' ] || fail "service-start printed: $active"
     run_recipe --as-dsl41 wait-answers S="$SOCK"
     wait_up
-    is_state "$SUPERVISOR" active || fail "Requires= did not start $SUPERVISOR"
+    is_state "$SUPERVISOR" active || fail "Wants= did not start $SUPERVISOR"
     line=$(launch_line_since "$mark")
     echo "$line"
     [[ $line != *--resume* ]] || fail "the first start was a resume"
@@ -254,7 +254,7 @@ step_restore() { # a copy of the root and the anchor, restored at the recorded p
     ok "the restored lineage audits from its anchor"
     mark=$(date +%s)
     start_engine
-    is_state "$SUPERVISOR" active || fail "Requires= did not start $SUPERVISOR"
+    is_state "$SUPERVISOR" active || fail "Wants= did not start $SUPERVISOR"
     launch_line_since "$mark" | grep -q -- ' --resume$' || fail "the opener was not a resume"
     sudo test -e "$ROOT/wal/000003.jsonl" || fail "period 3 did not open in the restored root"
     held=$(cli query status --job APAC_EOD_B -S "$SOCK" | jq -r '.jobs.APAC_EOD_B.on_hold')
@@ -574,40 +574,36 @@ step_kill_engine() { # SIGKILL of the engine: systemd restarts it and the run re
 }
 
 # deployment-runbook ss0 and ss3: a SIGKILL of the supervisor's main
-# process. Part 1 runs the shipped units: systemd restarts the supervisor and
-# Requires= carries the restart to the engine, which resumes and takes a lease
-# that renews. Part 2 is a drill-only edit of the installed units, not a
-# supported configuration (the runbook requires Requires=): Wants= for
-# Requires= in the engine unit, and RestartSec=40 in the supervisor unit.
-# It keeps the engine up through the outage to drive the engine's own
-# client: it reports the host unreachable after five failed renewals and
-# renews again when the supervisor returns (the renewal loop never ends
-# while the client is open). The shipped units never reach that path.
+# process. Part 1 runs the shipped units: systemd restarts the supervisor,
+# the engine unit (Wants=, DL-416) keeps running, and its lease renews on the
+# new supervisor. Part 2 is a drill-only edit of the installed units, not a
+# supported configuration: RestartSec=40 in the supervisor unit. The longer
+# outage drives the engine's own client: it reports the host unreachable
+# after five failed renewals and renews again when the supervisor returns
+# (the renewal loop never ends while the client is open).
 kill_supervisor_cleanup() {
     restore_units 2>/dev/null || true
 }
 step_kill_supervisor() { # SIGKILL of the supervisor: restart, resume and lease renewal
-    local sup eng_inv eng_pid holder was mark run restarts
+    local sup eng_inv eng_pid holder was mark run
     trap kill_supervisor_cleanup EXIT
     # part 1: the shipped units
     force_start "$LONG_JOB"
     wait_for 60 "$LONG_JOB is RUNNING" job_is "$LONG_JOB" RUNNING
     run=$(job_field "$LONG_JOB" run_number)
     sup=$(prop "$SUPERVISOR" MainPID)
+    eng_pid=$(prop "$ENGINE" MainPID)
     eng_inv=$(prop "$ENGINE" InvocationID)
-    restarts=$(prop "$ENGINE" NRestarts)
     mark=$(date +%s)
     sudo kill -KILL "$sup"
     wait_for 60 "systemd restarted the supervisor" unit_replaced "$SUPERVISOR" "$sup"
     journal_has "$SUPERVISOR" "$mark" 'status=9/KILL' || fail "the journal does not say status=9/KILL"
     wait_for 30 "the supervisor unit's journal records the new start" \
         journal_job "$SUPERVISOR" "$mark" Started
-    wait_for 90 "the engine unit began a new invocation" engine_reinvoked "$eng_inv"
-    # a stop job from Requires=, not the unit's own on-failure restart
-    journal_job "$ENGINE" "$mark" Stopping || fail "no stop of the engine unit in its journal"
-    [ "$(prop "$ENGINE" NRestarts)" -le "$restarts" ] || fail "the engine unit restarted itself"
+    # Wants=, not Requires=: the engine unit is neither stopped nor restarted (DL-416)
+    [ "$(prop "$ENGINE" MainPID)" = "$eng_pid" ] && [ "$(prop "$ENGINE" InvocationID)" = "$eng_inv" ] ||
+        fail "the engine was restarted"
     wait_up
-    launch_line_since "$mark" | grep -q -- ' --resume$' || fail "the engine did not resume"
     wait_for 60 "the engine holds the lease" lease_is_held
     was=$(lease_field expires_at)
     wait_for 60 "the lease renews" lease_renewed_past "$was"
@@ -616,10 +612,8 @@ step_kill_supervisor() { # SIGKILL of the supervisor: restart, resume and lease 
     run=$(job_field "$SHORT_JOB" run_number)
     force_start "$SHORT_JOB"
     wait_for 60 "$SHORT_JOB ran on the new supervisor" ran_to_success "$SHORT_JOB" $((run + 1))
-    ok "the supervisor restarted and ended its command; the engine resumed and its lease renews"
-    # part 2: the engine outlives the supervisor's outage
-    sudo sed -i 's/^Requires=dsl41-supervisor.service/Wants=dsl41-supervisor.service/' \
-        "/etc/systemd/system/$ENGINE"
+    ok "the supervisor restarted and ended its command; the engine stayed up and its lease renews"
+    # part 2: the engine outlives a longer outage
     sudo install -d "/etc/systemd/system/$SUPERVISOR.d"
     printf '[Service]\nRestartSec=40\n' | sudo tee "/etc/systemd/system/$SUPERVISOR.d/drill.conf" >/dev/null
     sudo systemctl daemon-reload
@@ -944,7 +938,7 @@ flip_both_units() { # flip_both_units BUILD
     flip "$1"
     mark=$(date +%s)
     start_engine
-    is_state "$SUPERVISOR" active || fail "Requires= did not start $SUPERVISOR"
+    is_state "$SUPERVISOR" active || fail "Wants= did not start $SUPERVISOR"
     launch_line_since "$mark" | grep -q -- ' --resume$' || fail "the engine did not resume $ROOT"
     [ "$(prop "$SUPERVISOR" MainPID)" != "$sup_pid" ] || fail "the supervisor was not replaced"
     on_build "$ENGINE" "$1"
@@ -1028,7 +1022,7 @@ step_upgrade_state_machine() { # state-machine row: v1.7.0 to this build, a new 
     SOCK=$ROOT/control.sock
     mark=$(date +%s)
     start_engine
-    is_state "$SUPERVISOR" active || fail "Requires= did not start $SUPERVISOR"
+    is_state "$SUPERVISOR" active || fail "Wants= did not start $SUPERVISOR"
     line=$(launch_line_since "$mark")
     [[ $line != *--resume* ]] || fail "the new estate's first start was a resume"
     ok "this build (state-machine version $version) leads the new estate $ROOT"
@@ -1070,7 +1064,7 @@ step_upgrade_state_machine_rollback() { # state-machine row's rollback: the old 
     SOCK=$ROOT/control.sock
     mark=$(date +%s)
     start_engine
-    is_state "$SUPERVISOR" active || fail "Requires= did not start $SUPERVISOR"
+    is_state "$SUPERVISOR" active || fail "Wants= did not start $SUPERVISOR"
     line=$(launch_line_since "$mark")
     echo "$line"
     [[ $line == *" --run-root $ROOT "* && $line == *" --resume" ]] ||

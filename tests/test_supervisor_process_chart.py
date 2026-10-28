@@ -43,6 +43,7 @@ PROCESS: dict[str, frozenset[str]] = {
     "starting": frozenset({"process", "open", "starting"}),
     "bound": frozenset({"process", "open", "bound"}),
     "serving": frozenset({"process", "open", "up", "serving"}),
+    "draining": frozenset({"process", "open", "up", "draining"}),
     "shutting_down": frozenset({"process", "open", "up", "shutting_down"}),
     "stopped": frozenset({"process", "ended", "stopped"}),
     "refused": frozenset({"process", "ended", "refused"}),
@@ -135,8 +136,12 @@ def _partitions() -> dict[str, dict[str, Any]]:
 
 
 WITNESSES: dict[str, sc.Builder] = {
-    **{phase: _witness(phase) for phase in PROCESS if phase != "serving"},
-    **{f"serving/{lease}": _witness("serving", lease) for lease in LEASE_PHASES},
+    **{phase: _witness(phase) for phase in PROCESS if phase not in ("serving", "draining")},
+    **{
+        f"{phase}/{lease}": _witness(phase, lease)
+        for phase in ("serving", "draining")
+        for lease in LEASE_PHASES
+    },
 }
 ABSTRACTION = sc.Abstraction(witnesses=WITNESSES, partitions=_partitions())
 
@@ -148,6 +153,7 @@ def _row(number: str) -> str:
 #: the teardown row of each phase but closed, by what the phase owns
 _TEARDOWN = {
     "serving": "31",
+    "draining": "31",
     "shutting_down": "31",
     "stopped": "32",
     "bound": "33",
@@ -165,6 +171,7 @@ _EVENTS = (
     runner_supervisor.START,
     runner_supervisor.PUBLISH,
     runner_supervisor.TERM,
+    runner_supervisor.DRAIN_ENDED,
     runner_supervisor.DRAINED,
     runner_supervisor.PASS_ENDED,
     runner_supervisor.DEADMAN,
@@ -189,13 +196,16 @@ def _section_5(witness: str, event: str, label: str) -> str:
     otherwise; publishing serves. A mutating verb checks the incarnation
     first, then the token of an unexpired (live or orphaned) lease: SPAWN and
     SIGNAL then do their work while serving, and SHUTDOWN shuts down. A
-    signal shuts down a serving process, runs the wait again after an
+    signal starts the drain of a serving process, runs the wait again after an
     errored SHUTDOWN, and does nothing once stopped; the end of that pass runs
-    the wait again too. The wait's end stops the process, whichever way it
-    ended. The deadman stops a serving process. Teardown closes, by one row
-    per class of what the state owns: the published socket from serving,
-    shutting_down and stopped, the private one from bound, and nothing from
-    starting and refused. A closed process takes nothing."""
+    the wait again too. A drain refuses SPAWN, SHUTDOWN and MAINTENANCE_STOP
+    `draining` and fences SIGNAL as serving does; a second signal or the
+    drain's end runs the wait, and the deadman stops it (DL-416). The wait's
+    end stops the process, whichever way it ended. The deadman stops a serving
+    process. Teardown closes, by one row per class of what the state owns: the
+    published socket from serving, draining, shutting_down and stopped, the
+    private one from bound, and nothing from starting and refused. A closed
+    process takes nothing."""
     phase, _, lease = witness.partition("/")
     if phase == "closed":
         return "ignored in closed"
@@ -206,12 +216,25 @@ def _section_5(witness: str, event: str, label: str) -> str:
             return "refused maintenance_uncertain"
         if phase in ("maintenance_stopping", "maintenance_completing"):
             return "refused maintenance_in_progress"
+        if phase == "draining" and event != "SIGNAL":
+            return "refused draining"
         if label in ("foreign", "none"):
             return "refused wrong_incarnation"
         if label == "stale" or lease not in ("live", "orphaned"):
             return "refused stale_token"
+        if phase == "draining":
+            return _row("67")
         return _row(
             {"SPAWN": "13", "SIGNAL": "14", "SHUTDOWN": "05", "MAINTENANCE_STOP": "37"}[event]
+        )
+    if phase == "draining":
+        return _row(
+            {
+                runner_supervisor.TERM: "61",
+                runner_supervisor.DRAIN_ENDED: "62",
+                runner_supervisor.DEADMAN: "63",
+                runner_supervisor.TEARDOWN: "31",
+            }[event]
         )
     if event == runner_supervisor.TERM:
         return _row(
@@ -263,9 +286,16 @@ def test_the_completeness_table_is_section_5() -> None:
         ("shutting_down", "drained"),
         ("shutting_down", "pass_ended"),
         ("serving", "deadman"),
+        ("draining", "term"),
+        ("draining", "drain_ended"),
+        ("draining", "deadman"),
         *((phase, "teardown") for phase in PROCESS),
         *(("closed", event) for event in _EVENTS),
-        *(("serving", verb) for verb in ("SPAWN", "SIGNAL", "SHUTDOWN", "MAINTENANCE_STOP")),
+        *(
+            (phase, verb)
+            for phase in ("serving", "draining")
+            for verb in ("SPAWN", "SIGNAL", "SHUTDOWN", "MAINTENANCE_STOP")
+        ),
         *(
             (phase, verb)
             for phase in (
@@ -293,9 +323,11 @@ def test_the_completeness_table_is_section_5() -> None:
     # 1+1, deadman 4+1, teardown 10, each verb four leases by four
     # credentials, and each verb in closed by four credentials; DL-401 adds each
     # verb in the two maintaining phases by four credentials (32) and maintenance_pass
-    # in them and in closed (3)
-    assert len(WITNESSES) == 15
-    assert len(table) == 187
+    # in them and in closed (3); DL-416 adds draining by four leases: term, drain_ended,
+    # deadman and teardown (16), each verb by four credentials (64), drain_ended in
+    # closed (1)
+    assert len(WITNESSES) == 19
+    assert len(table) == 268
 
 
 _OUT_OF_ORDER = {
@@ -391,6 +423,10 @@ def test_every_event_the_supervisor_posts_is_in_the_alphabet(
     for verb in ("SPAWN", "SIGNAL", "SHUTDOWN"):
         request = {"v": 1, "cmd": verb, "spec": {}, **stale}
         sup._dispatch(conn, json.dumps(request).encode("utf-8"))
+    sup._orderly_shutdown(runner_supervisor.TERM)  # 06, the drain
+    assert sup.state == "draining"
+    sup._orderly_shutdown(runner_supervisor.DRAIN_ENDED)  # 62, then the wait
+    assert sup.state == "stopped"
     stand(sup, "shutting_down")
     sup._orderly_shutdown(runner_supervisor.PASS_ENDED)  # 12, then the wait
     sup._orderly_shutdown(runner_supervisor.TERM)  # 09
@@ -550,8 +586,8 @@ def test_a_statechart_error_in_teardown_exits_7_with_the_report(
     made: list[Any] = []
 
     class Recorded(runner_supervisor.Supervisor):
-        def __init__(self, run_root: str, *, deadman_s: float | None = None) -> None:
-            super().__init__(run_root, deadman_s=deadman_s)
+        def __init__(self, run_root: str, **kwargs: Any) -> None:
+            super().__init__(run_root, **kwargs)
             made.append(self)
 
     monkeypatch.setattr(runner_supervisor, "Supervisor", Recorded)
@@ -618,12 +654,13 @@ def test_teardown_is_a_row_per_source_state_in_three_ownership_classes() -> None
         (_row("12"), "shutting_down", runner_supervisor.PASS_ENDED, "internal"),
         (_row("36"), "shutting_down", runner_supervisor.TERM, "internal"),
     ]
-    assert len(CHART.rows) == 48
+    assert len(CHART.rows) == 57
     assert {row.id for row in CHART.rows} & RETIRED == set()  # a retired id stays out (DL-364)
     ctx = runner_supervisor.Context("process", runner_supervisor.Event("x"), frozenset(), None)
     intents = {name: action(ctx).intents for name, action in CHART.actions.items()}
     assert intents == {
         "refuse": (runner_supervisor.REFUSE,),
+        "hold": (runner_supervisor.HOLD,),
         "drain": (runner_supervisor.DRAIN,),
         "retry": (runner_supervisor.FLUSH, runner_supervisor.DRAIN),
         "advance": (runner_supervisor.ADVANCE,),
@@ -651,7 +688,10 @@ _DECLARED: dict[str, tuple[str, list[str]]] = {
     "refused|teardown|": (_row("35"), []),
     "shutting_down|term|": (_row("36"), _RETRY),
     "shutting_down|pass_ended|": (_row("12"), _RETRY),
+    **{f"serving/{lease}|term|": (_row("06"), [runner_supervisor.HOLD]) for lease in LEASE_PHASES},
 }
+#: the declared cells that move elsewhere than at the base: a signal drains (DL-416)
+_MOVED = {f"serving/{lease}|term|": sorted(PROCESS["draining"]) for lease in LEASE_PHASES}
 
 
 def _cell(witness: str, event: str, payload: Any) -> dict[str, Any]:
@@ -672,19 +712,20 @@ def _cell(witness: str, event: str, payload: Any) -> dict[str, Any]:
     }
 
 
-def test_every_cell_answers_as_before_but_the_declared_eleven() -> None:
+def test_every_cell_answers_as_before_but_the_declared_fifteen() -> None:
     """All 220 cells, ten witnesses by every event and partition: 124 raise
     as before, and every other cell keeps its outcome count, kind, ignored
-    rows, refusal codes, intents and configuration. The eleven declared
-    cells keep their kind and configuration and take the new row with its
-    intents: the teardown cells report what the state owns, and both retry
-    cells report the flush before the drain. The 22 cells of `closed`, each
+    rows, refusal codes, intents and configuration. The fifteen declared
+    cells keep their kind and take the new row with its intents: the teardown
+    cells report what the state owns, and both retry cells report the flush
+    before the drain. Each keeps its configuration, except a signal while
+    serving, which starts the drain (DL-416). The 22 cells of `closed`, each
     recorded with a retired root row as its one ignored row, keep everything
     but the row: the final state ignores the event with no row (DL-380)."""
     partitions = _partitions()
     assert len(_AT_BASE) == 220
     assert sum(1 for cell in _AT_BASE.values() if "raises" in cell) == 124
-    assert set(_DECLARED) <= set(_AT_BASE) and len(_DECLARED) == 11
+    assert set(_DECLARED) <= set(_AT_BASE) and len(_DECLARED) == 15
     closed = [cell for cell in _AT_BASE if cell.startswith("closed|")]
     assert len(closed) == 22
     for cell, recorded in _AT_BASE.items():
@@ -693,6 +734,8 @@ def test_every_cell_answers_as_before_but_the_declared_eleven() -> None:
         if cell in _DECLARED:
             row, expected["intents"] = _DECLARED[cell]
             expected["rows"] = [row]
+        if cell in _MOVED:
+            expected["active"] = _MOVED[cell]
         if cell in closed:
             assert recorded["rows"] == recorded["ignored"] and set(recorded["rows"]) <= RETIRED
             expected["rows"] = expected["ignored"] = []
@@ -700,7 +743,7 @@ def test_every_cell_answers_as_before_but_the_declared_eleven() -> None:
         assert _cell(witness, event, payload) == expected, cell
 
 
-@pytest.mark.parametrize("phase", ["serving", "shutting_down", "stopped"])
+@pytest.mark.parametrize("phase", ["serving", "draining", "shutting_down", "stopped"])
 def test_teardown_from_a_published_state_unlinks_the_published_socket_and_pid_only(
     short_root: Path, phase: str
 ) -> None:
@@ -710,7 +753,9 @@ def test_teardown_from_a_published_state_unlinks_the_published_socket_and_pid_on
     sup = runner_supervisor.Supervisor(str(short_root))
     sup._bind()
     if phase != "serving":
-        sup._process(runner_supervisor.TERM)  # .06; the wait is not run here
+        sup._process(runner_supervisor.TERM)  # .06
+    if phase in ("shutting_down", "stopped"):
+        sup._process(runner_supervisor.TERM)  # .61; the wait is not run here
     if phase == "stopped":
         sup._process(runner_supervisor.DRAINED, runner_supervisor.REAPED)
     assert sup.state == phase
@@ -785,15 +830,17 @@ def test_a_refused_shutdown_keeps_a_latched_signal(
     queued_supervisor: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A SIGTERM latched before a SHUTDOWN with a stale token: the refusal
-    leaves the latch set, so the loop's TERM still shuts down from serving
-    (.06) and the wait ends it (.07)."""
+    leaves the latch set, so the loop's TERM still drains from serving
+    (.06), and the drain's end runs the wait (.62) that ends it (.07)."""
     fence = _Fence(queued_supervisor, monkeypatch, "SHUTDOWN")
     fence.sup._on_term_signal(runner_supervisor.signal.SIGTERM, None)
     assert fence.ask(incarnation=fence.sup.incarnation, token=fence.token + 1) == _STALE
-    assert fence.sup._shutdown_requested and fence.sup.state == "serving"
+    assert fence.sup._signals and fence.sup.state == "serving"
     fence.sup._orderly_shutdown(runner_supervisor.TERM)
-    assert fence.rows == [fence.stale_row, _row("06"), _row("07")]
-    assert fence.sup.state == "stopped" and not fence.sup._shutdown_requested
+    assert fence.sup.state == "draining"
+    fence.sup._orderly_shutdown(runner_supervisor.DRAIN_ENDED)
+    assert fence.rows == [fence.stale_row, _row("06"), _row("62"), _row("07")]
+    assert fence.sup.state == "stopped" and not fence.sup._signals
 
 
 def test_a_signal_during_a_successful_shutdown_wait_is_a_no_op_at_stopped(
@@ -809,17 +856,17 @@ def test_a_signal_during_a_successful_shutdown_wait_is_a_no_op_at_stopped(
     wait = fence.sup._shutdown_wait
 
     def latching_wait() -> None:
-        assert not fence.sup._shutdown_requested  # cleared before the wait
+        assert not fence.sup._signals  # cleared before the wait
         waits.append(fence.sup.state)
         fence.sup._on_term_signal(runner_supervisor.signal.SIGTERM, None)
         wait()
 
     monkeypatch.setattr(fence.sup, "_shutdown_wait", latching_wait)
     assert fence.current() == {"ok": True}
-    assert fence.sup.state == "stopped" and fence.sup._shutdown_requested
+    assert fence.sup.state == "stopped" and fence.sup._signals
     fence.sup._orderly_shutdown(runner_supervisor.TERM)
     assert fence.rows == [fence.passing_row, _row("07"), _row("09")]
-    assert waits == ["shutting_down"] and not fence.sup._shutdown_requested
+    assert waits == ["shutting_down"] and not fence.sup._signals
 
 
 def test_a_signal_between_the_retry_s_flush_and_its_wait_stays_latched_for_stopped(
@@ -833,7 +880,8 @@ def test_a_signal_between_the_retry_s_flush_and_its_wait_stays_latched_for_stopp
     sup, connect = queued_supervisor
     connect()
     monkeypatch.setattr(sup, "_reap", lambda: None)
-    sup._process(runner_supervisor.TERM)  # .06: the wait that errs is not run here
+    sup._process(runner_supervisor.TERM)  # .06: the drain
+    sup._process(runner_supervisor.TERM)  # .61: the wait that errs is not run here
     assert sup.state == "shutting_down"
     rows: list[str] = []
     dispatch = sup._machines.dispatch
@@ -861,7 +909,7 @@ def test_a_signal_between_the_retry_s_flush_and_its_wait_stays_latched_for_stopp
     monkeypatch.setattr(sup, "_writable", latching)
     monkeypatch.setattr(sup, "_shutdown_wait", counted)
     sup._orderly_shutdown(runner_supervisor.PASS_ENDED)
-    assert sup._shutdown_requested and sup.state == "stopped"
+    assert sup._signals and sup.state == "stopped"
     sup._orderly_shutdown(runner_supervisor.TERM)
     assert rows == [_row("12"), _row("07"), _row("09")]
-    assert waits == ["shutting_down"] and not sup._shutdown_requested
+    assert waits == ["shutting_down"] and not sup._signals

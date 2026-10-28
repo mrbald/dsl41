@@ -162,41 +162,6 @@ def _own_systemd_cgroup() -> tuple[str, str, str]:
     return controllers, group, unit
 
 
-def stop_guard_refusal() -> str | None:
-    """Shape 1's start check (DL-399): a supervisor that is the main process of its `.service`
-    unit needs `RefuseManualStop=yes` there, or a manual `systemctl stop` ends every job. The
-    refusal text, or None. Off Linux, outside a service cgroup, as a unit's non-main process
-    (shape 2) or when the manager cannot be read, there is nothing to verify."""
-    if not sys.platform.startswith("linux"):
-        return None
-    try:
-        _, _, unit = _own_systemd_cgroup()
-        output = subprocess.run(
-            [
-                "systemctl",
-                "show",
-                unit,
-                "--no-pager",
-                "--property=MainPID",
-                "--property=RefuseManualStop",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=5.0,
-        ).stdout
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return None
-    properties = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
-    if properties.get("MainPID") != str(os.getpid()) or properties.get("RefuseManualStop") == "yes":
-        return None
-    return (
-        f"{unit} runs this supervisor as its main process without RefuseManualStop=yes:"
-        " a manual stop would end every job; add it to the unit's [Unit] section and"
-        " reload (deployment-runbook ss3, DL-399)"
-    )
-
-
 @dataclass(frozen=True)
 class ServiceContainment:
     """The qualified Linux systemd hierarchy, including its complete subtree (DL-390)."""
@@ -231,7 +196,7 @@ class ServiceContainment:
         return proof
 
     def verify_manager(self) -> None:
-        # Identity, containment and exit policy; the stop guard is checked at start (DL-399).
+        # Identity, containment and exit policy; no stop guard (DL-399, DL-416).
         # All manager reads share one bound; helpers are reaped before sampling (DL-390).
         deadline = time.monotonic() + 5.0
 
@@ -536,6 +501,42 @@ def _linux_stat_fields(pid: int) -> list[str] | None:
     except OSError:
         return None
     return raw.rsplit(")", 1)[1].split()
+
+
+def _cmdline(pid: int) -> list[str] | None:
+    """The argv of a live Linux process, or None when it cannot be read."""
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
+        return None
+    return raw.decode("utf-8", "replace").split("\0")[:-1]
+
+
+def stop_helpers(members: set[int]) -> set[int]:
+    """The supervisor unit's ExecStop helper among `members`, with the `sleep` its wait loop
+    runs: exactly one process whose parent is PID 1 and whose argv is the launcher's
+    `supervisor-stop` mode (`dsl41-launch` ... `supervisor-stop`), and its `sleep` children.
+    A stop that overlaps maintenance keeps it in the unit's cgroup, and it is no residual
+    work (DL-416). Two such processes, or none, are no helper: an empty set."""
+    helpers = []
+    for pid in members:
+        fields, argv = _linux_stat_fields(pid), _cmdline(pid)
+        if fields is None or argv is None or len(fields) < 2 or fields[1] != "1":
+            continue
+        if argv and argv[-1] == "supervisor-stop":
+            if any(Path(word).name == "dsl41-launch" for word in argv):
+                helpers.append(pid)
+    if len(helpers) != 1:
+        return set()
+    (helper,) = helpers
+    found = {helper}
+    for pid in members:
+        fields, argv = _linux_stat_fields(pid), _cmdline(pid)
+        if fields is None or argv is None or len(fields) < 2 or fields[1] != str(helper):
+            continue
+        if argv and Path(argv[0]).name == "sleep":
+            found.add(pid)
+    return found
 
 
 def _linux_zombie(fields: list[str]) -> bool:

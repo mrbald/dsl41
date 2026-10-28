@@ -26,6 +26,7 @@
 #   dsl41-launch engine              exec `dsl41 run` on the configured root
 #   dsl41-launch supervisor          exec `dsl41 supervise start` on that root
 #   dsl41-launch supervisor-ready    wait until the supervisor answers LIST
+#   dsl41-launch supervisor-stop     SIGTERM the unit's MAINPID and wait for its exit
 #   dsl41-launch --print [MODE]      print MODE's command, shell-quoted, and
 #                                    run no estate command (MODE defaults to
 #                                    engine; it runs the --supervisor probe)
@@ -308,7 +309,8 @@ refuse() {
 }
 
 usage() {
-    refuse "usage: dsl41-launch [--print] [engine|supervisor|supervisor-ready] | dsl41-launch vars"
+    refuse "usage: dsl41-launch [--print] [engine|supervisor|supervisor-ready|supervisor-stop]\
+ | dsl41-launch vars"
 }
 
 print=0
@@ -335,6 +337,20 @@ case $mode in
         printf 'dsl41-launch: no supervisor answered on %s after %s tries\n' \
             "$RUN_ROOT" "$attempt" >&2
         exit 1
+        ;;
+    supervisor-stop)
+        [ "$print" -eq 0 ] || usage
+        # The unit's ExecStop. KillMode=control-group sends a stop's SIGTERM to every
+        # process in the unit, the commands included; this sends it to the supervisor
+        # alone and waits while it drains and stops its runs, so systemd's SIGTERM
+        # reaches only what is left (DL-416). systemd runs it after the supervisor
+        # exited on its own too; then MAINPID is empty or gone, and nothing is sent.
+        [ -n "${MAINPID-}" ] || exit 0
+        kill -TERM "$MAINPID" 2>/dev/null || exit 0
+        while kill -0 "$MAINPID" 2>/dev/null; do
+            sleep 0.2
+        done
+        exit 0
         ;;
     vars)
         [ "$print" -eq 0 ] || usage

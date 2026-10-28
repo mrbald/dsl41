@@ -721,63 +721,67 @@ Clock: monotonic. Time events: deadman.
 
 ```mermaid
 stateDiagram-v2
-    state "process" as s10
-    state s10 {
-        [*] --> s9
-        state "open" as s9
-        state s9 {
-            [*] --> s14
-            state "starting" as s14
+    state "process" as s11
+    state s11 {
+        [*] --> s10
+        state "open" as s10
+        state s10 {
+            [*] --> s15
+            state "starting" as s15
             state "bound" as s0
-            state "up" as s16
-            state s16 {
-                [*] --> s12
-                state "serving" as s12
-                state "shutting_down" as s13
-                state "maintenance_checking" as s4
-                state "maintaining" as s3
-                state s3 {
-                    [*] --> s7
-                    state "maintenance_stopping" as s7
-                    state "maintenance_completing" as s6
+            state "up" as s17
+            state s17 {
+                [*] --> s13
+                state "serving" as s13
+                state "draining" as s2
+                state "shutting_down" as s14
+                state "maintenance_checking" as s5
+                state "maintaining" as s4
+                state s4 {
+                    [*] --> s8
+                    state "maintenance_stopping" as s8
+                    state "maintenance_completing" as s7
                 }
-                state "maintenance_uncertain" as s8
+                state "maintenance_uncertain" as s9
             }
         }
-        state "ended" as s2
-        state s2 {
-            [*] --> s15
-            state "stopped" as s15
-            state "refused" as s11
-            state "maintenance_completed" as s5
+        state "ended" as s3
+        state s3 {
+            [*] --> s16
+            state "stopped" as s16
+            state "refused" as s12
+            state "maintenance_completed" as s6
         }
         state "closed" as s1
         s1 --> [*]
     }
-    s14 --> s11 : supervisor_process.01 start [lock_held] / refuse
-    s14 --> s11 : supervisor_process.02 start [owner_live] / refuse
-    s14 --> s0 : supervisor_process.03 start [free]
-    s0 --> s12 : supervisor_process.04 publish
-    s12 --> s13 : supervisor_process.05 SHUTDOWN [credentials]
-    s12 --> s13 : supervisor_process.06 term / drain
-    s13 --> s15 : supervisor_process.07 drained
-    s12 --> s15 : supervisor_process.08 deadman
-    s16 --> s1 : supervisor_process.31 teardown / unlink_published
-    s15 --> s1 : supervisor_process.32 teardown / unlink_published
+    s15 --> s12 : supervisor_process.01 start [lock_held] / refuse
+    s15 --> s12 : supervisor_process.02 start [owner_live] / refuse
+    s15 --> s0 : supervisor_process.03 start [free]
+    s0 --> s13 : supervisor_process.04 publish
+    s13 --> s14 : supervisor_process.05 SHUTDOWN [credentials]
+    s13 --> s2 : supervisor_process.06 term / hold
+    s14 --> s16 : supervisor_process.07 drained
+    s13 --> s16 : supervisor_process.08 deadman
+    s17 --> s1 : supervisor_process.31 teardown / unlink_published
+    s16 --> s1 : supervisor_process.32 teardown / unlink_published
     s0 --> s1 : supervisor_process.33 teardown / unlink_private
-    s14 --> s1 : supervisor_process.34 teardown
-    s11 --> s1 : supervisor_process.35 teardown
-    s12 --> s4 : supervisor_process.37 MAINTENANCE_STOP [credentials]
-    s4 --> s12 : supervisor_process.40 maintenance_refused
-    s4 --> s7 : supervisor_process.41 maintenance_stopping
-    s4 --> s6 : supervisor_process.42 maintenance_idle
-    s7 --> s6 : supervisor_process.43 maintenance_idle
-    s7 --> s8 : supervisor_process.44 maintenance_uncertain
-    s6 --> s8 : supervisor_process.45 maintenance_uncertain
-    s6 --> s5 : supervisor_process.46 maintenance_finished
-    s5 --> s1 : supervisor_process.47 teardown
-    s8 --> s13 : supervisor_process.48 term / drain
-    s8 --> s15 : supervisor_process.49 deadman
+    s15 --> s1 : supervisor_process.34 teardown
+    s12 --> s1 : supervisor_process.35 teardown
+    s13 --> s5 : supervisor_process.37 MAINTENANCE_STOP [credentials]
+    s5 --> s13 : supervisor_process.40 maintenance_refused
+    s5 --> s8 : supervisor_process.41 maintenance_stopping
+    s5 --> s7 : supervisor_process.42 maintenance_idle
+    s8 --> s7 : supervisor_process.43 maintenance_idle
+    s8 --> s9 : supervisor_process.44 maintenance_uncertain
+    s7 --> s9 : supervisor_process.45 maintenance_uncertain
+    s7 --> s6 : supervisor_process.46 maintenance_finished
+    s6 --> s1 : supervisor_process.47 teardown
+    s9 --> s14 : supervisor_process.48 term / drain
+    s9 --> s16 : supervisor_process.49 deadman
+    s2 --> s14 : supervisor_process.61 term / drain
+    s2 --> s14 : supervisor_process.62 drain_ended / drain
+    s2 --> s16 : supervisor_process.63 deadman
 ```
 
 | Id | Source | Event | Guard | Action | Target | Kind | Cite |
@@ -787,7 +791,7 @@ stateDiagram-v2
 | supervisor_process.03 | starting | start | free |  | bound | external | supervisor-protocol ss5, DL-210 |
 | supervisor_process.04 | bound | publish |  | The private socket listens with mode 0600, supervisor.pid is written, and the socket is renamed to supervisor.sock. | serving | external | supervisor-protocol ss5, DL-210, DL-275 |
 | supervisor_process.05 | serving | SHUTDOWN | credentials |  | shutting_down | external | supervisor-protocol ss5 SHUTDOWN, DL-80 |
-| supervisor_process.06 | serving | term |  | drain | shutting_down | external | supervisor-protocol ss5 SHUTDOWN, DL-275, DL-300 |
+| supervisor_process.06 | serving | term |  | hold | draining | external | supervisor-protocol ss5 The drain, DL-416 |
 | supervisor_process.07 | shutting_down | drained |  | The shutdown's wait ended: every wrapper reaped, or the last-resort bound passed and every survivor's group was killed. | stopped | external | supervisor-protocol ss5 SHUTDOWN, DL-48, DL-150 |
 | supervisor_process.08 | serving | deadman |  | A deadman is set and no live leaseholder for that many seconds, the supervisor logs the reason first. | stopped | external | supervisor-protocol ss5 The deadman, DL-95 |
 | supervisor_process.09 | stopped | term |  | A signal latched during a shutdown that already ran in this loop pass. Nothing runs. |  | internal | supervisor-protocol ss5 SHUTDOWN |
@@ -830,6 +834,15 @@ stateDiagram-v2
 | supervisor_process.58 | maintaining | SIGNAL |  |  |  | refusal maintenance_in_progress | supervisor-protocol ss5, DL-401 |
 | supervisor_process.59 | maintaining | SHUTDOWN |  |  |  | refusal maintenance_in_progress | supervisor-protocol ss5, DL-401 |
 | supervisor_process.60 | maintaining | MAINTENANCE_STOP |  |  |  | refusal maintenance_in_progress | supervisor-protocol ss5, DL-401 |
+| supervisor_process.61 | draining | term |  | drain | shutting_down | external | supervisor-protocol ss5 The drain, DL-416 |
+| supervisor_process.62 | draining | drain_ended |  | drain | shutting_down | external | supervisor-protocol ss5 The drain, DL-416 |
+| supervisor_process.63 | draining | deadman |  | The deadman bounds a drain as it bounds serving: eviction's bound (concurrency-model ss8) holds. | stopped | external | supervisor-protocol ss5 The deadman, DL-95, DL-416 |
+| supervisor_process.64 | draining | SPAWN |  |  |  | refusal draining | supervisor-protocol ss5 The drain, DL-416 |
+| supervisor_process.65 | draining | SHUTDOWN |  |  |  | refusal draining | supervisor-protocol ss5 The drain, DL-416 |
+| supervisor_process.66 | draining | MAINTENANCE_STOP |  |  |  | refusal draining | supervisor-protocol ss5 The drain, DL-416 |
+| supervisor_process.67 | draining | SIGNAL | credentials |  |  | internal | supervisor-protocol ss5 The drain, DL-80, DL-416 |
+| supervisor_process.68 | draining | SIGNAL | foreign |  |  | refusal wrong_incarnation | supervisor-protocol ss5 The drain, DL-80, DL-416 |
+| supervisor_process.69 | draining | SIGNAL | stale |  |  | refusal stale_token | supervisor-protocol ss5 The drain, DL-80, DL-416 |
 
 | State | In | Entry | Exit | Defers | Waits |
 | --- | --- | --- | --- | --- | --- |
@@ -839,6 +852,7 @@ stateDiagram-v2
 | bound | open/stage |  |  |  |  |
 | up | open/stage |  |  |  |  |
 | serving | up/service |  |  |  |  |
+| draining | up/service |  |  |  |  |
 | shutting_down | up/service |  |  |  |  |
 | maintenance_checking | up/service |  |  |  |  |
 | maintaining | up/service |  |  |  |  |
@@ -860,6 +874,7 @@ stateDiagram-v2
 | foreign | guard | The request names no incarnation or another one: the supervisor it knew is gone, so it must re-acquire and reconcile (DL-80). |
 | stale | guard | This incarnation without credentials: the token is stale or the lease is not held, so the request is refused stale_token (ss5). With `foreign` and `credentials` this partitions every request. |
 | refuse | action | Exit 1: another supervisor owns this root, teardown releases only what this process took. |
+| hold | action | Start the drain: refuse every SPAWN `draining`, keep answering the lease verbs, LIST, PING and SIGNAL, and run the shutdown's wait once no wrapper is live or `DSL41_DRAIN_S` has passed (DL-416). |
 | drain | action | Run the shutdown's wait: up to 5 s for missing spawn records, TERM each live command group, KILL each after its grace, and KILL every survivor after the longest grace plus 2 s. Lifelines stay open until each wrapper exits (DL-48, DL-150). |
 | retry | action | An error ended the SHUTDOWN's wait: send the queued replies first, that SHUTDOWN's `internal:` answer among them, then run the wait once more (DL-300). |
 | advance | action | Run the forced ladder to its next pause: up to 5 s for missing spawn records, TERM each verified command group, and KILL each member that outlives its run's grace, until every wrapper is reaped and every group has left containment. Passing the operation's bound is uncertain (DL-394, DL-401). |

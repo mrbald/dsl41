@@ -34,6 +34,7 @@ from dsl41.cli_common import (
     check_base_tz,
     command_outcome,
     confirmed_resume_refusal,
+    DRAINING,
     IN_PROGRESS,
     guarded_maintenance,
     lineage_of,
@@ -1633,6 +1634,8 @@ class _Quiesce:
         except (OSError, ValueError, EngineError) as exc:
             listing = {"ok": False, "error": str(exc)}
         if listing.get("ok") is True:
+            if listing.get("process_state") == "draining":
+                raise self.refuse("supervisor", DRAINING)
             self.supervisor_pid = listing.get("supervisor_pid")
             self.listing = listing
             live = [run for run in listing.get("runs", []) if run.get("wrapper_alive")]
@@ -1844,6 +1847,8 @@ class _Quiesce:
     def _maintenance_remedy(self, reply: dict[str, Any]) -> str:
         """A refusal's cause and its own next move."""
         error, detail = reply.get("error"), str(reply.get("detail") or "")
+        if error == "draining" or detail == DRAINING:
+            return DRAINING
         if error == "lease_held":
             return (
                 f"the supervisor's lease is held by {reply.get('holder')} until"

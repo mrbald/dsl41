@@ -511,6 +511,8 @@ def command_outcome(
 
 #: how long past the supervisor's own bound a client watches an admitted operation (DL-401)
 MAINTENANCE_MARGIN_S = 2.0
+#: exit 2: a host signal started the supervisor's drain, which refuses maintenance (DL-416)
+DRAINING = "supervisor is draining; wait for the unit to stop"
 #: exit 3: the wait ended on an operation that still runs (DL-401)
 IN_PROGRESS = "in progress; it finishes on its own; read maintenance.json or run this again"
 #: the process states of an admitted operation, running or uncertain (DL-401)
@@ -685,6 +687,9 @@ def _lost_reply(
     except (OSError, ValueError, EngineError):
         pass  # no supervisor answers: maintenance.json decides
     if ping.get("ok") is True and ping.get("incarnation") == incarnation:
+        if ping.get("process_state") == "draining":
+            # an admitted operation holds every signal, so a draining one admitted nothing
+            return 2, DRAINING, None
         if ping.get("process_state") == "serving":
             record = read_maintenance_record(sock_path.parent)
             if record is None or record["incarnation"] != incarnation:
@@ -751,6 +756,11 @@ def guarded_maintenance(
                 sock_path.parent, ping.get("incarnation"), sleep=sleep, probe=probe
             )
             return _settled(code, reason, record, sock_path)
+        if ping.get("ok") is True and ping.get("process_state") == "draining":
+            return refuse(DRAINING, prefix=f"supervisor {sock_path}"), {
+                "ok": False,
+                "error": "draining",
+            }
         acq = conn.send({"cmd": "ACQUIRE", "controller_id": controller_id, "ttl_s": 60})
         if not acq.get("ok"):
             return refuse(f"cannot acquire lease: {json.dumps(acq, sort_keys=True)}"), acq
@@ -781,6 +791,11 @@ def guarded_maintenance(
                 sleep=sleep,
             )
         else:
+            if resp.get("ok") is False and resp.get("error") == "draining":
+                # the drain began after the PING; nothing was admitted (DL-416)
+                if on_refusal is not None:
+                    on_refusal(incarnation, token)
+                return refuse(DRAINING, prefix=f"supervisor {sock_path}"), resp
             if resp.get("ok") is False and resp.get("error") in _MAINTENANCE_REFUSALS:
                 if on_refusal is not None:
                     on_refusal(incarnation, token)

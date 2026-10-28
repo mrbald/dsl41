@@ -70,6 +70,7 @@ The configuration-management play is checked by content; no drill runs it.
 | add, change or remove a job | [the job recipe](#recipe-add-change-or-remove-a-job) |
 | stop, restart, seal or recover | [the stop recipe](#recipe-stop-restart-seal-and-recover) |
 | stop, patch and start from configuration management | [the configuration management recipe](#recipe-stop-patch-and-start-from-configuration-management) |
+| seal, patch and start from configuration management | [the sealed configuration management recipe](#recipe-seal-patch-and-start-from-configuration-management) |
 | watch an estate | [what to watch](#what-to-watch) |
 | know the tested size and its limits | [capacity and limits](#capacity-and-limits) |
 | back up and restore | §2b |
@@ -89,13 +90,14 @@ systemd
 ├── dsl41-supervisor.service    User=dsl41  Restart=always  RestartPreventExitStatus=2 7 8
 │     ExecStart=/opt/dsl41/bin/dsl41-launch supervisor
 │     ExecStartPost=/opt/dsl41/bin/dsl41-launch supervisor-ready
+│     ExecStop=/opt/dsl41/bin/dsl41-launch supervisor-stop
 │     └── dsl41 supervise start --run-root RUN_ROOT                 the supervisor
 │           ├── owns RUN_ROOT/supervisor.sock, supervisor.pid, supervisor.lock, supervisor.log
 │           └── one wrapper per detached run, and the run's command, in this unit's cgroup;
 │               they write RUN_ROOT/runs/ and the job's output
 │
 └── dsl41-engine.service        User=dsl41  Restart=on-failure  RestartPreventExitStatus=2 3 6 7
-      Requires=dsl41-supervisor.service  After=dsl41-supervisor.service
+      Wants=dsl41-supervisor.service  After=dsl41-supervisor.service
       ExecStart=/opt/dsl41/bin/dsl41-launch engine
       └── dsl41 run ... --run-root RUN_ROOT --estate-anchor ESTATE_ANCHOR --detached --supervisor attach   the engine
             ├── holds RUN_ROOT/leader.lock and ESTATE_ANCHOR/anchor.lock for its whole life
@@ -123,8 +125,10 @@ ESTATE_ANCHOR                         dsl41, 0700                 the engine, or
 
 An offline `dsl41 seal` takes both locks itself while no engine runs (§6a).
 Stopping the engine unit leaves the supervisor unit and its runs alone.
-Stopping the supervisor unit ends every command it still runs, and the
-engine unit's `Requires=` stops the engine unit with it.
+Stopping the supervisor unit drains it: it starts no new command, lets
+the running ones end within `DSL41_DRAIN_S`, then ends the rest (DL-416).
+The engine unit has `Wants=`, not `Requires=`, so it keeps running: it
+holds the spawns the drain refuses and renews its lease (DL-416).
 
 ### Which move
 
@@ -142,7 +146,7 @@ What has to happen?
 ├── the host must reboot (an OS patch)                               HOST REBOOT
 │     hold the scheduled jobs and drain (§6 steps 1 and 2), then reboot
 │     the enabled units start at boot and the engine resumes the same root
-│     no seal and no reboot hold; nothing that still ran survives
+│     no seal and no reboot hold; the supervisor drains, then ends the rest
 │
 ├── nothing may run or write, even across a reboot                   ESTATE STOP
 │   (a backup, a retirement, upgrade rows 2 and 4)
@@ -178,8 +182,9 @@ What has to happen?
 
 An engine stop is not an estate stop. Detached commands outlive the
 engine on purpose (runner-design §6a), so `systemctl stop
-dsl41-engine.service` stops no job. A host reboot stops both units, and
-with them every running command; drain before one (§8's OS-patching row).
+dsl41-engine.service` stops no job. A host reboot stops both units. The
+supervisor drains for up to `DSL41_DRAIN_S`, then ends every command
+still running; hold and drain before one (§8's OS-patching row).
 The enabled units then resume the root at boot. An in-place transition is not a new
 estate. It keeps the run root, the anchor and the state: holds, globals,
 latches and run numbers cross the seal (§6a). A new estate keeps none of
@@ -254,7 +259,7 @@ systemctl is-active dsl41-supervisor.service dsl41-engine.service
    The new root and empty lock are provisioned before either unit starts.
    A preexisting root makes the provisioning step refuse; inspect it.
    Never create a replacement lock in a running root (§3).
-   `Requires=` starts the supervisor unit first, and both lines print
+   `Wants=` starts the supervisor unit first, and both lines print
    `active`. That is not readiness: a unit that refuses with exit 2 a
    second later printed `active` too. The first start is a genesis: the
    launcher passes no `--resume`, and dsl41 creates the estate in the run
@@ -542,7 +547,7 @@ systemctl start dsl41-engine.service
   Detached runs keep running under the supervisor unit. Schedule ticks
   that fall while the engine is down are dropped and journaled, not fired
   late (§5). A host reboot is not an engine stop: it stops the supervisor
-  unit too and ends every running command.
+  unit too, which drains and then ends every command still running.
 - **Host reboot.** Hold the scheduled jobs and let running work finish
   (§6, steps 1 and 2), then reboot. The enabled units start at boot, and
   the launcher resumes the same root. No seal, and no reboot hold.
@@ -604,24 +609,132 @@ loop that the start limit ends, a replayed request and a new rerun
 (`stop-recover`), a SIGKILL of the engine (`kill-engine`) and a SIGKILL
 of the supervisor (`kill-supervisor`). The refusal, seal, reboot and
 estate-stop bullets are the `refusal`, `sealed`, `reboot` and `quiesce`
-steps'. After a SIGKILL of the supervisor the drill sees `Requires=`
-restart the engine unit with it, which resumes, takes a lease and renews
-it. It also drives the engine's own client through a supervisor outage
-that the engine outlives. That part edits the installed units for the
-drill only (`Wants=` for `Requires=` in the engine unit, `RestartSec=40`
-in the supervisor unit); it is not a supported configuration.
+steps'. After a SIGKILL of the supervisor the drill sees systemd
+restart the supervisor unit while the engine unit keeps running, and the
+engine renew its lease on the new supervisor. It also drives the
+engine's own client through a longer outage: five failed renewals, then
+a renewal. That part sets `RestartSec=40` in the supervisor unit for the
+drill only; it is not a supported configuration.
 
 ### Recipe: stop, patch and start from configuration management
 
-A configuration-management play stops the estate with dsl41's own verb,
-never with `systemctl stop dsl41-supervisor.service`. The supervisor unit
-sets `RefuseManualStop=yes`, so systemd refuses a manual or
-configuration-management stop of it. A supervisor whose unit lacks that
-line refuses to start (§3; DL-390, DL-399). The guard keeps a routine stop
-from ending the commands the supervisor runs. The supported stop is
-`dsl41 estate quiesce`, run as the service account: it seals and audits
-the period, asks the supervisor for guarded maintenance, and refuses
-while a command still runs (§2b; DL-398, DL-414).
+A configuration-management play stops the estate with
+`systemctl stop dsl41-supervisor.service`. The supervisor drains: it
+starts no new command, lets the running ones end within
+`DSL41_DRAIN_S`, then sends TERM, waits the grace, sends KILL to what is
+left, and exits 0 (supervisor-protocol §5; DL-416). The engine unit has
+`Wants=`, not `Requires=`, so it keeps running through the drain: it
+holds the spawns the drain refuses and renews its lease, so the
+supervisor's deadman does not cut the drain short. The play stops the
+engine unit after the supervisor has exited. Every job meets the
+interruption contract (authoring §6.2), so a job the drain's bound cuts
+short can run again. The period stays open: the start resumes it. A
+site that wants the period to end at the patch follows the
+[sealed recipe](#recipe-seal-patch-and-start-from-configuration-management)
+instead.
+
+| Wait | Seconds | Source |
+| --- | --- | --- |
+| the drain of the runs live at the supervisor stop, at most | 840 | `Environment=DSL41_DRAIN_S` in `examples/nightbank/deploy/dsl41-supervisor.service` (supervisor-protocol §5; DL-416) |
+| a host shutdown, at most: the deadman, then the wrapper's grace | deadman + 10 | `dsl41 run --deadman`, when the site sets one; `CMD_GRACE_S` in `src/dsl41/period.py` (supervisor-protocol §5, DL-205) |
+
+A host shutdown is not this play. It stops the engine unit first, by
+`After=`, so the drain has no leaseholder. With a deadman set, the drain
+ends at the deadman: the supervisor exits, and each wrapper sends its
+command TERM, waits the grace and sends KILL on lifeline EOF, recording
+`terminated / parent lost` (DL-205). With no deadman, the drain runs to
+its bound.
+
+The stop task returns when the supervisor has exited, within the unit's
+`TimeoutStopSec`. The play takes the reboot hold first; it keeps both
+units down through a reboot in the patch step. The play starts the
+units, waits until the engine answers, and then releases the hold. Its
+variables name the launcher, the units' `User=`, the two units and the
+wait.
+
+<!-- recipe: cm-stop -->
+```yaml
+- name: Stop, patch and start a dsl41 estate
+  hosts: nightbank
+  become: true
+  vars:
+    launcher: /opt/dsl41/bin/dsl41-launch
+    service_account: dsl41
+    engine_unit: dsl41-engine.service
+    supervisor_unit: dsl41-supervisor.service
+    ready_delay_s: 1
+    ready_retries: 90
+  tasks:
+    - name: Take the reboot hold
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: false
+      loop:
+        - "{{ engine_unit }}"
+        - "{{ supervisor_unit }}"
+
+    - name: Stop the supervisor unit; it drains while the engine holds its spawns
+      ansible.builtin.systemd:
+        name: "{{ supervisor_unit }}"
+        state: stopped
+
+    - name: Stop the engine unit
+      ansible.builtin.systemd:
+        name: "{{ engine_unit }}"
+        state: stopped
+
+    - name: Placeholder for the site's patch step
+      ansible.builtin.debug:
+        msg: Replace this task with the site's patch step.
+
+    - name: Start the supervisor unit
+      ansible.builtin.systemd:
+        name: "{{ supervisor_unit }}"
+        state: started
+
+    - name: Start the engine unit; it resumes the open period
+      ansible.builtin.systemd:
+        name: "{{ engine_unit }}"
+        state: started
+
+    - name: Wait until the engine answers, as the wait-answers block does
+      become_user: "{{ service_account }}"
+      environment:
+        LAUNCHER: "{{ launcher }}"
+      ansible.builtin.shell: |
+        v=$("$LAUNCHER" vars) || exit 1
+        eval "$v"
+        "$DSL41" query status --brief -S "$RUN_ROOT/control.sock"
+      register: answers
+      until: answers.rc == 0
+      retries: "{{ ready_retries }}"
+      delay: "{{ ready_delay_s }}"
+      changed_when: false
+
+    - name: Release the reboot hold
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+      loop:
+        - "{{ supervisor_unit }}"
+        - "{{ engine_unit }}"
+```
+
+A failure at the supervisor stop leaves the unit failed or still
+stopping, and the engine running: read `supervisor.log` and the unit's
+journal before anything else (§3). A failure at the patch step or at the
+supervisor start leaves the estate stopped; fix the cause and run the
+play again. When the play
+fails at the engine start or the wait, read the engine unit's journal as
+the stop recipe's recovery bullets say, start the unit once the cause is
+fixed, then release the hold.
+
+### Recipe: seal, patch and start from configuration management
+
+This play ends the period at the patch. It runs `dsl41 estate quiesce`
+in place of the supervisor stop, as the service account: the verb seals
+and audits the period, asks the supervisor for guarded maintenance, and
+refuses while a command still runs (§2b; DL-398). It does not drain.
 
 The verb never waits for a precondition. It exits 2 and names what to
 wait for, or exits 3 while an admitted maintenance still runs; the play
@@ -641,13 +754,11 @@ step. The play starts the units, waits until the engine answers, and
 then releases the hold, as the stop recipe's estate-stop bullet does. It
 reads every path from the launcher's `vars` mode; its own variables name
 the launcher, the units' `User=`, the two units and the waits. Each run
-seals the running period, and the start opens the next one (§6a). A
-patch that must not close a period follows the stop recipe's host-reboot
-bullet instead.
+seals the running period, and the start opens the next one (§6a).
 
-<!-- recipe: cm-stop -->
+<!-- recipe: cm-seal -->
 ```yaml
-- name: Stop, patch and start a dsl41 estate
+- name: Seal, patch and start a dsl41 estate
   hosts: nightbank
   become: true
   vars:
@@ -793,7 +904,7 @@ ends with `<root>/wal/<N>.jsonl: missing segment record`. Set
    cover that case, and no other supported path does.
 2. Take §2b's reboot hold and stop the engine. Under shape 1, use §3's
    guarded maintenance as the service account against `"$RUN_ROOT"`.
-   Require exit 0; a manager stop of the protected supervisor unit refuses.
+   Require exit 0; a manager stop would drain instead (DL-416).
    On refusal or uncertainty, preserve evidence and follow §3's explicit
    incident procedure. Under shape 2, guarded maintenance refuses; an
    incident stop needs an independently verified whole-process scope.
@@ -1752,7 +1863,7 @@ outside any service manager. The service drill runs shape 1's steps
 copies the root and the anchor, deletes them, and restores them at the
 recorded paths. It then audits the lineage and opens the next period.
 Under shape 1, start a restored estate with `systemctl start
-dsl41-engine.service`. Its `Requires=` starts the supervisor unit first.
+dsl41-engine.service`. Its `Wants=` starts the supervisor unit first.
 Release the reboot hold once the copy is done, or once the restored estate
 runs. If the start fails, fix the cause, start again, and then release it.
 
@@ -1922,10 +2033,15 @@ The example unit
 `examples/nightbank/deploy/dsl41-supervisor.service` is a complete
 shape-1 supervisor unit; copy it and edit its paths. Its
 `ExecStartPost=` waits for a real LIST answer through the launcher's
-`supervisor-ready` mode.
+`supervisor-ready` mode. Its `ExecStop=`, the launcher's
+`supervisor-stop` mode, sends a stop's SIGTERM to the supervisor alone
+and waits for its exit, so the drain runs before `KillMode=control-group`
+signals every process left in the unit (DL-416).
 
-Order the engine unit after this unit and require its successful start:
-`After=dsl41-supervisor.service` and `Requires=dsl41-supervisor.service`.
+Order the engine unit after this unit and pull it in:
+`After=dsl41-supervisor.service` and `Wants=dsl41-supervisor.service`.
+Not `Requires=`: a stop of the supervisor unit must leave the engine up,
+holding refused spawns and renewing its lease through the drain (DL-416).
 The engine attaches to this supervisor and never starts its own: pass
 `run --detached --supervisor attach`, as the example launcher does
 (DL-396). An engine that finds no supervisor answering forks nothing and
@@ -1939,27 +2055,49 @@ runs in your session, outside the unit's cgroup, and guarded maintenance
 refuses it.
 Do not add `PartOf=` or `BindsTo=` from the supervisor to the engine.
 Keep the engine's existing restart and resume rules above. Set the
-supervisor's `TimeoutStopSec` to cover its longest command grace plus the
-documented shutdown waits (`supervisor-protocol.md` §5); the service
-manager's final cgroup kill can otherwise silence a wrapper before it
-records the command's ending. A host stop that arrives during forced
+supervisor's `TimeoutStopSec` to cover the drain's bound, `DSL41_DRAIN_S`,
+plus its longest command grace and the documented shutdown waits
+(`supervisor-protocol.md` §5): the example's 840 s leaves 60 s of 900 for
+them (DL-416). When `ExecStop=` overruns `TimeoutStopSec`, systemd
+sends SIGTERM to every process in the unit, the commands included, and
+SIGKILL after a second `TimeoutStopSec`; the wait is then cut short. A
+host stop
+that arrives during forced
 maintenance is held until the operation ends, so also cover the
 operation's `bound_s`: 15 + 5 + the longest grace + 2 + 8 s per live run
 + 10 s (DL-401). The example unit's 900 s is the small estate's 82 jobs
 all live at the default 10 s grace, 15 + 5 + 10 + 2 + 8 × 82 + 10 =
 698 s, rounded up; size another estate by the same line.
 
+**The drain (DL-416).** `systemctl stop` and `systemctl restart` of the
+supervisor unit, and host shutdown, run its `ExecStop=`, which sends the
+supervisor alone a SIGTERM and waits for its exit. The SIGTERM starts the
+drain: SPAWN is refused `draining`, and the live runs end on their own
+within `DSL41_DRAIN_S`, set by the unit's `Environment=` line. The
+supervisor then sends TERM, waits the grace, sends KILL to what is left,
+and exits 0. A second SIGTERM skips the rest of the drain. `systemctl
+stop` blocks, so send it from another shell once `dsl41 supervise list`
+shows `process_state` `draining`:
+`systemctl kill --kill-who=main --signal=SIGTERM dsl41-supervisor.service`.
+`--kill-who=main` matters: without it systemd signals every process in
+the unit, and the commands would take the SIGTERM themselves. The
+supervisor counts signals, so a second one sent before it read the first
+still runs the wait. A running engine holds each SPAWN it is refused and
+sends it to the next supervisor, while its host routes new work and the
+supervisor can return (supervisor-protocol §5). A `restart` therefore
+drains, then starts a supervisor with no command running.
+`dsl41 supervise shutdown` and `dsl41 estate quiesce` against a draining
+supervisor exit 2: "supervisor is draining; wait for the unit to stop".
+
 **Guarded maintenance (DL-390).** Install and reload the supervisor unit
-before using a new runtime: `[Unit] RefuseManualStop=yes`, and
-`[Service] SuccessExitStatus=8` with `RestartPreventExitStatus=2 7 8`.
-Keep `Restart=always`, `KillMode=control-group` and the stop timeout.
-Manual manager stop and restart refuse. Routine engine restart remains
-available. The supervisor checks the stop guard when it starts: as its
-unit's main process without `RefuseManualStop=yes`, it exits 2, naming
-the unit and the directive, and the unit stays down (DL-399). Maintenance
-admission checks the unit's identity, containment and exit policy. Dependency shutdown during host shutdown still stops the unit.
-Do not add an `ExecStop` safety command: its refusal does not veto a
-systemd stop, which still kills remaining processes.
+before using a new runtime: `[Service] SuccessExitStatus=8` with
+`RestartPreventExitStatus=2 7 8`. Keep `Restart=always`,
+`KillMode=control-group`, the drain's `Environment=` and the stop timeout.
+Routine engine restart remains available. Maintenance admission checks
+the unit's identity, containment and exit policy (DL-399).
+Keep the drain's `ExecStop=` and add no other: an `ExecStop` that
+refuses does not veto a systemd stop, which still kills remaining
+processes.
 
 Stop the engine, then run as the service account:
 
@@ -1968,11 +2106,11 @@ systemctl stop dsl41-engine.service
 sudo -u dsl41 /opt/dsl41/.venv/bin/dsl41 supervise shutdown --run-root <root>
 ```
 
-That stops the supervisor and leaves the period open. To stop the whole
-estate, sealed and audited, run `dsl41 estate quiesce` instead (§2b,
-DL-398): it sends this request after the seal and the audit, then checks
-both units and the writers. Both are the supervisor unit's stop, which
-its `Description=` names.
+That stops the supervisor and leaves the period open. It refuses while a
+command runs, unless `--force terminate`; `systemctl stop` drains
+instead. To stop the whole estate, sealed and audited, run `dsl41 estate
+quiesce` instead (§2b, DL-398): it sends this request after the seal and
+the audit, then checks both units and the writers.
 
 Default shutdown refuses active or indeterminate work without signals.
 The server holds the existing engine lock through teardown and requires
@@ -2030,13 +2168,13 @@ unit's MainPID, ControlGroup and remaining processes. Decide explicitly
 that ending every process in this supervisor unit is acceptable. This is
 an incident stop, with possible unobservable job outcomes, not maintenance
 completion. For the example unit, a root operator can temporarily remove
-the manager guard and restart policy:
+the restart policy and stop the unit. An uncertain supervisor runs its
+stop at once; a serving one drains first, and a second SIGTERM skips the
+drain (above):
 
 ```sh
 install -d /run/systemd/system/dsl41-supervisor.service.d
 cat >/run/systemd/system/dsl41-supervisor.service.d/90-incident-stop.conf <<'EOF'
-[Unit]
-RefuseManualStop=no
 [Service]
 Restart=no
 EOF
@@ -2697,6 +2835,13 @@ changed units, and start. The original directory remains usable for
 rollback until the retained-estate policy permits its separate removal.
 A process started before activation keeps its original interpreter.
 
+**A release with the stop guard.** v1.12.0 checks the stop guard when its
+supervisor starts (DL-399), and DL-416 removed it from the example unit.
+Under a unit without `RefuseManualStop=yes`, a v1.12.0 supervisor exits 2
+and the unit stays down. Before a rollback to it, add a drop-in with
+`[Unit] RefuseManualStop=yes`, reload, and remove it when you leave that
+release. Under the drop-in `systemctl stop` refuses, as it did then.
+
 **What moves with a release.** `catalog_hash` v2 excludes
 `meta.tool_version`, and `dsl41_version` is not on the `segment` record,
 so a release does not move a period's pins (DL-133; period-model §1.1).
@@ -2833,7 +2978,7 @@ exists, the engine mode passes `--open-from ESTATE_ANCHOR`. The launcher
 removes the trigger just before it runs dsl41, so every later start of
 the unit resumes the new root. The engine's journal says
 `opened period N in <new root>`. The opener runs inside the engine unit,
-and `Requires=` starts the supervisor unit on the new root first. Under
+and `Wants=` starts the supervisor unit on the new root first. Under
 shape 2 the opener starts its supervisor inside the engine unit, as every
 shape-2 start does. A shape-2 wrapper must carry the same one-shot open
 mode as the example launcher, and its refusal of a genesis against an
@@ -2866,7 +3011,7 @@ set -eu
 systemctl stop dsl41-engine.service
 sudo -u dsl41 /opt/dsl41/.venv/bin/dsl41 supervise shutdown --run-root <root> || exit "$?"
 # activate the verified candidate with the atomic link replacement in §1
-systemctl start dsl41-engine.service     # Requires= starts the supervisor first
+systemctl start dsl41-engine.service     # Wants= starts the supervisor first
 ```
 
 Release the holds with `OFF_HOLD` once the engine answers. The rollback is
@@ -2906,7 +3051,7 @@ file changed. A rollback to a runtime without `dsl41 estate args`,
 one before 1.13.0, reinstalls the site package qualified with that
 release, launcher and units included, because this launcher refuses such
 a runtime (DL-407). A rollback to 1.13.0 or later keeps the launcher.
-Then start the engine unit. `Requires=` starts the
+Then start the engine unit. `Wants=` starts the
 supervisor unit first, and the engine opens the old estate's next
 period. A rollback after a failed genesis still holds the estate down
 across reboots: once the old estate answers, release the hold with

@@ -492,7 +492,9 @@ def test_the_supervisor_exits_7_when_its_construction_meets_one(
     from dsl41 import runner_supervisor
 
     class Failing:
-        def __init__(self, run_root: str, deadman_s: float | None = None) -> None:
+        def __init__(
+            self, run_root: str, deadman_s: float | None = None, drain_s: float = 0.0
+        ) -> None:
             raise runner_supervisor.StatechartError("supervisor_lease: restore refused")
 
     monkeypatch.setattr(runner_supervisor, "Supervisor", Failing)
@@ -508,7 +510,9 @@ def test_the_supervisor_exits_7_with_the_report_under_one_prefix(
     from dsl41 import runner_supervisor
 
     class Stopping:
-        def __init__(self, run_root: str, deadman_s: float | None = None) -> None:
+        def __init__(
+            self, run_root: str, deadman_s: float | None = None, drain_s: float = 0.0
+        ) -> None:
             pass
 
         def run(self) -> int:

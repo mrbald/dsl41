@@ -304,7 +304,7 @@ incident_stop_supervisor() { # incident_stop_supervisor EXPLICIT_REASON
     echo "INCIDENT STOP: $1; command outcomes can be unknown" >&2
     sudo systemctl stop "$ENGINE"
     sudo install -d /run/systemd/system/dsl41-supervisor.service.d
-    printf '[Unit]\nRefuseManualStop=no\n[Service]\nRestart=no\n' |
+    printf '[Service]\nRestart=no\n' |
         sudo tee /run/systemd/system/dsl41-supervisor.service.d/90-incident-stop.conf >/dev/null
     sudo systemctl daemon-reload
     sudo systemctl stop "$SUPERVISOR"
@@ -603,10 +603,6 @@ unit_replaced() { # unit_replaced UNIT PID
     now=$(prop "$1" MainPID)
     [ "$now" != 0 ] && [ "$now" != "$2" ] && is_state "$1" active
 }
-# the engine unit began a new invocation since INVOCATION and is active
-engine_reinvoked() { # engine_reinvoked INVOCATION
-    [ "$(prop "$ENGINE" InvocationID)" != "$1" ] && is_state "$ENGINE" active
-}
 # the engine unit has a new main process since PID, or gave up
 engine_moved_on() { # engine_moved_on PID
     local now
@@ -641,11 +637,9 @@ stream_shows_failure() { # stream_shows_failure FILE JOB
         | length >= 1' "$1" >/dev/null 2>&1
 }
 
-# put the units back the way the install left them: the engine's
-# Requires= and no drop-ins, then reload. The caller restarts what it needs.
+# put the units back the way the install left them: no drop-ins, then
+# reload. The caller restarts what it needs.
 restore_units() {
-    sudo sed -i 's/^Wants=dsl41-supervisor.service/Requires=dsl41-supervisor.service/' \
-        "/etc/systemd/system/$ENGINE"
     sudo rm -rf "/etc/systemd/system/$ENGINE.d" "/etc/systemd/system/$SUPERVISOR.d"
     sudo systemctl daemon-reload
 }

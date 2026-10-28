@@ -204,15 +204,15 @@ def test_sv_subreaper_is_a_linux_prctl_and_best_effort(monkeypatch: pytest.Monke
 
 def test_sv_signal_handlers_swallow_a_full_wake_up_pipe(queued_supervisor) -> None:
     """The handlers only note the signal. When the self-pipe is full, the
-    SIGTERM latch is still set, nothing raises and nothing is added to the
+    SIGTERM count still rises, nothing raises and nothing is added to the
     pipe; with room in the pipe the bytes arrive."""
     sup, _ = queued_supervisor
     sup._on_chld_signal(signal.SIGCHLD, None)
     sup._on_term_signal(signal.SIGTERM, None)
     assert os.read(sup._chld_r, 8) == b"ct"
-    assert sup._shutdown_requested is True
+    assert sup._signals == 1
 
-    sup._shutdown_requested = False
+    sup._signals = 0
     filled = 0
     try:
         while True:
@@ -221,7 +221,7 @@ def test_sv_signal_handlers_swallow_a_full_wake_up_pipe(queued_supervisor) -> No
         pass
     sup._on_chld_signal(signal.SIGCHLD, None)
     sup._on_term_signal(signal.SIGTERM, None)
-    assert sup._shutdown_requested is True
+    assert sup._signals == 1
     drained = b""
     try:
         while True:
@@ -766,7 +766,8 @@ def test_sv_shutdown_schedule_for_a_wrapper_that_never_records(
     sup._bind()
     try:
         run = _fake_run(sup, "rid", short_root / "runs" / "j.1", lifeline_w=lifeline_w)
-        sup._orderly_shutdown(rs.TERM)
+        sup._orderly_shutdown(rs.TERM)  # .06, the drain
+        sup._orderly_shutdown(rs.TERM)  # .61, the wait at once
         assert sup.state == "stopped" and run.killed
         # TERM after the 5 s record wait, KILL at TERM + grace (1 s), KILL again
         # past TERM + grace + 2 s

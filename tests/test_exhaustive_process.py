@@ -356,6 +356,8 @@ _POINTS = (
     ("bound", "enter"),
     ("serving", "enter"),
     ("serving", "reap"),
+    ("draining", "enter"),
+    ("draining", "reap"),
     ("shutting_down", "enter"),
     ("shutting_down", "reap"),
     ("stopped", "enter"),
@@ -654,9 +656,10 @@ def test_every_process_event_at_every_reached_point_takes_a_declared_transition(
 ) -> None:
     """supervisor_process. Each case is one in-process `Supervisor.run()`
     that delivers one event at one point of the run. The points: on entering
-    each of the seven states (`starting` is before `run`), and at the first
-    reap in `serving` (the loop's tick), `shutting_down` (the shutdown's
-    wait) and `stopped` (the end of the loop pass that stopped it). The
+    each of the eight states (`starting` is before `run`), and at the first
+    reap in `serving` (the loop's tick), `draining` (the drain's tick, DL-416),
+    `shutting_down` (the shutdown's wait) and `stopped` (the end of the loop
+    pass that stopped it). The
     events: none; SIGTERM, through the handler the process installs; SIGCHLD;
     a SHUTDOWN from a client that took the lease; a SHUTDOWN with a stale
     token; the deadman falling due; an error; and an error with a SIGTERM
@@ -746,6 +749,19 @@ def test_every_process_event_at_every_reached_point_takes_a_declared_transition(
     left = {("row", row, "") for row in fence}
     left |= {("guard", row, outcome) for row in fence for outcome in ("true", "false")}
     left -= {("guard", "supervisor_process.19", "false")}
+    # A drain in the walk has no live run, so it ends at the first pass, before the
+    # deadman is sampled (63); its requests are SHUTDOWNs (65). Every cell of the drain's
+    # rows is in test_supervisor_process_chart.py's table. Real supervisors in
+    # test_supervisor_drain.py take the deadman (63), SPAWN (64), MAINTENANCE_STOP (66)
+    # and a credentialed SIGNAL (67); a foreign or stale SIGNAL (68, 69) is the chart
+    # table's alone (DL-416).
+    drain = {f"supervisor_process.{n}" for n in (63, 64, 66, 67, 68, 69)}
+    left |= {("row", row, "") for row in drain}
+    left |= {
+        ("guard", f"supervisor_process.{n}", outcome)
+        for n in (67, 68, 69)
+        for outcome in ("true", "false")
+    }
     left |= {
         ("ignored", "closed", event)
         for event in state_machine.alphabet(runner_supervisor.SUPERVISOR_PROCESS)

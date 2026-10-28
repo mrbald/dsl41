@@ -72,7 +72,7 @@ import uuid
 from collections import deque
 from collections.abc import Iterator
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 
 # DL-72: the durability helpers and the (pid, start-time) PID-reuse guard live in the
 # sibling stdlib-only runner_procid, shared with the wrapper. sys.path[0] is this
@@ -101,7 +101,7 @@ if TYPE_CHECKING:
         flock_existing,
         verify_lock_path,
         ServiceContainment,
-        stop_guard_refusal,
+        stop_helpers,
         proc_is_zombie,
         proc_start_token,
         start_tokens_match,
@@ -145,7 +145,7 @@ else:
         flock_existing,
         verify_lock_path,
         ServiceContainment,
-        stop_guard_refusal,
+        stop_helpers,
         proc_is_zombie,
         proc_start_token,
         start_tokens_match,
@@ -179,6 +179,13 @@ if _PROCID_DIR_ADDED:
     sys.path.remove(_PROCID_DIR)
 
 PROTOCOL_VERSION = 1
+
+#: the environment variable that bounds the drain a host signal starts, in seconds (DL-416)
+DRAIN_ENV = "DSL41_DRAIN_S"
+#: The drain's default: the supervisor unit's TimeoutStopSec of 900 s (DL-401) less 60 s
+#: for the wait that follows, which needs 5 s for spawn records, the longest grace, 2 s
+#: and the 2 s reply flush: 19 s at the 10 s default grace (DL-416).
+DRAIN_S_DEFAULT = 840.0
 
 # DL-210: limits are per connection. One reply may cross the output bound.
 REQUEST_LINE_LIMIT = 2**20
@@ -510,6 +517,7 @@ type ProcessState = Literal[
     "starting",
     "bound",
     "serving",
+    "draining",
     "shutting_down",
     "stopped",
     "refused",
@@ -969,11 +977,13 @@ SUPERVISOR_LEASE = Statechart(
 #   - SPAWN, SIGNAL and SHUTDOWN from the dispatch belt, which runs only while
 #     `serving`: the fence, after a due `expire` is posted to the lease;
 #   - `term`, when the loop consumes a latched SIGTERM or SIGINT;
+#   - `drain_ended`, at the end of a loop pass in `draining` with no wrapper live or
+#     the drain's bound passed (DL-416);
 #   - `drained`, when the shutdown's wait ends: every wrapper reaped, or the bound passed;
 #   - `pass_ended`, at the end of a loop pass that an errored SHUTDOWN wait left in
 #     `shutting_down`, with no signal latched;
 #   - `deadman`, produced by sampling the deadman's deadline at the end of each loop
-#     pass while `serving`, posted only when due;
+#     pass while `serving` or `draining`, posted only when due;
 #   - `teardown`, once, from `_teardown`, unless the process is closed. Teardown then
 #     sends replies for up to 2 s, drops every connection, carries out the row's unlink,
 #     and closes the open lifelines and the lock. After an error that ended startup or
@@ -986,7 +996,7 @@ SUPERVISOR_LEASE = Statechart(
 #
 # Ties: nothing is concurrent, since the loop is single-threaded, every wait blocks it
 # and a signal handler only latches. Within a pass the latch is read before the
-# end-of-pass `pass_ended` and before the deadman is sampled.
+# end-of-pass `pass_ended`, before `drain_ended` and before the deadman is sampled.
 #
 # Unreachable cells: a mutating verb is posted only while `serving`, and each
 # lifecycle fact only from the states above. The final `closed` ignores every event
@@ -998,6 +1008,8 @@ _PROCESS = "process"
 START = "start"
 PUBLISH = "publish"
 TERM = "term"
+#: the end of a drain: no wrapper live, or the drain's bound passed (DL-416)
+DRAIN_ENDED = "drain_ended"
 DRAINED = "drained"
 PASS_ENDED = "pass_ended"
 DEADMAN = "deadman"
@@ -1009,7 +1021,7 @@ MAINTENANCE_UNCERTAIN = "maintenance_uncertain"
 MAINTENANCE_FINISHED = "maintenance_finished"
 #: the end of a loop pass of an admitted operation (DL-401)
 MAINTENANCE_PASS = "maintenance_pass"
-_MAINTENANCE_PHASES = (
+_MAINTENANCE_PHASES: tuple[ProcessState, ...] = (
     "maintenance_checking",
     "maintenance_stopping",
     "maintenance_uncertain",
@@ -1025,6 +1037,7 @@ REAPED = "reaped"
 PAST_BOUND = "past_bound"
 #: the intents of the process chart's actions
 REFUSE = "refuse"
+HOLD = "hold"
 FLUSH = "flush"
 DRAIN = "drain"
 UNLINK_PUBLISHED = "unlink_published"
@@ -1032,11 +1045,12 @@ UNLINK_PRIVATE = "unlink_private"
 ADVANCE = "advance"
 COMPLETE = "complete"
 #: the leaf states of SUPERVISOR_PROCESS.
-_PROCESS_PHASES = frozenset(
+_PROCESS_PHASES: frozenset[ProcessState] = frozenset(
     {
         "starting",
         "bound",
         "serving",
+        "draining",
         "shutting_down",
         "stopped",
         "refused",
@@ -1073,6 +1087,13 @@ def _free(ctx: Context) -> bool:
 def _refuse(_ctx: Context) -> Effects:
     """Exit 1: another supervisor owns this root; teardown releases only what this process took."""
     return Effects(intents=(REFUSE,))
+
+
+def _hold(_ctx: Context) -> Effects:
+    """Start the drain: refuse every SPAWN `draining`, keep answering the lease verbs, LIST,
+    PING and SIGNAL, and run the shutdown's wait once no wrapper is live or `DSL41_DRAIN_S`
+    has passed (DL-416)."""
+    return Effects(intents=(HOLD,))
 
 
 def _drain(_ctx: Context) -> Effects:
@@ -1121,7 +1142,7 @@ def _unlink_private(_ctx: Context) -> Effects:
 
 _ONLY = "the supervisor posts {event} only {where}"
 _VERBS = (
-    "a mutating verb is dispatched only while serving: no request is read before"
+    "a mutating verb is dispatched only while serving or draining: no request is read before"
     " publish, the shutdown runs inside its own dispatch, and teardown drops every"
     " connection after the move to closed"
 )
@@ -1131,20 +1152,25 @@ _PROCESS_UNREACHABLE: dict[str, tuple[tuple[str, ...], str]] = {
     TERM: (
         ("starting", "bound", "refused"),
         _ONLY.format(
-            event=TERM, where="from the serving loop, in serving, shutting_down or stopped"
+            event=TERM,
+            where="from the serving loop, in serving, draining, shutting_down or stopped",
         ),
     ),
+    DRAIN_ENDED: (
+        ("starting", "bound", "serving", "shutting_down", "ended"),
+        _ONLY.format(event=DRAIN_ENDED, where="at the end of a loop pass, in draining"),
+    ),
     DRAINED: (
-        ("starting", "bound", "serving", "ended"),
+        ("starting", "bound", "serving", "draining", "ended"),
         _ONLY.format(event=DRAINED, where="when a wait ends, in shutting_down"),
     ),
     PASS_ENDED: (
-        ("starting", "bound", "serving", "ended"),
+        ("starting", "bound", "serving", "draining", "ended"),
         _ONLY.format(event=PASS_ENDED, where="in shutting_down"),
     ),
     DEADMAN: (
         ("starting", "bound", "shutting_down", "ended"),
-        _ONLY.format(event=DEADMAN, where="in serving"),
+        _ONLY.format(event=DEADMAN, where="in serving or draining"),
     ),
     **{verb: (("starting", "bound", "shutting_down", "ended"), _VERBS) for verb in _MUTATING},
 }
@@ -1166,7 +1192,7 @@ _PROCESS_UNREACHABLE[MAINTENANCE_PASS] = (
     tuple(sorted(_PROCESS_PHASES - {"maintenance_stopping", "maintenance_completing", "closed"})),
     "the loop posts maintenance_pass only while an admitted operation runs (DL-401)",
 )
-for _event in (START, PUBLISH, DRAINED, PASS_ENDED, *_MUTATING):
+for _event in (START, PUBLISH, DRAIN_ENDED, DRAINED, PASS_ENDED, *_MUTATING):
     _states, _reason = _PROCESS_UNREACHABLE[_event]
     _extra = set(_MAINTENANCE_PHASES)
     if _event in _MUTATING:
@@ -1194,6 +1220,7 @@ _HELD_WHILE_MAINTAINING = tuple(
 #: teardown, a row per source state in three ownership classes; 10 and 11 are out of use
 #: (DL-378). Rows 37 to 60 are guarded maintenance (DL-390): admission answers in the
 #: request, and 55 and 56 run the admitted operation one loop pass at a time (DL-401).
+#: Rows 61 to 69 are the drain a host signal starts (DL-416).
 #: A fence refusal is answered with its code, and with the incarnation for
 #: wrong_incarnation.
 #: SIGKILL ends the process in any state and runs no code, so no row is taken for it:
@@ -1224,6 +1251,7 @@ SUPERVISOR_PROCESS = Statechart(
                                                 "serving",
                                                 (
                                                     State("serving"),
+                                                    State("draining"),
                                                     State("shutting_down"),
                                                     State("maintenance_checking"),
                                                     State(
@@ -1317,9 +1345,9 @@ SUPERVISOR_PROCESS = Statechart(
             "supervisor_process.06",
             "serving",
             TERM,
-            "shutting_down",
-            action="drain",
-            cite=f"{_SP5} SHUTDOWN, DL-275, DL-300",
+            "draining",
+            action="hold",
+            cite=f"{_SP5} The drain, DL-416",
         ),
         Row(
             "supervisor_process.07",
@@ -1625,6 +1653,71 @@ SUPERVISOR_PROCESS = Statechart(
             )
             for number, verb in enumerate(_MUTATING, 57)
         ),
+        Row(
+            "supervisor_process.61",
+            "draining",
+            TERM,
+            "shutting_down",
+            action="drain",
+            cite=f"{_SP5} The drain, DL-416",
+            note="A second SIGTERM or SIGINT: the shutdown's wait runs at once.",
+        ),
+        Row(
+            "supervisor_process.62",
+            "draining",
+            DRAIN_ENDED,
+            "shutting_down",
+            action="drain",
+            cite=f"{_SP5} The drain, DL-416",
+        ),
+        Row(
+            "supervisor_process.63",
+            "draining",
+            DEADMAN,
+            "stopped",
+            cite=f"{_SP5} The deadman, DL-95, DL-416",
+            note=(
+                "The deadman bounds a drain as it bounds serving: eviction's bound"
+                " (concurrency-model ss8) holds."
+            ),
+        ),
+        *(
+            Row(
+                f"supervisor_process.{number}",
+                "draining",
+                verb,
+                kind="refusal",
+                code="draining",
+                cite=f"{_SP5} The drain, DL-416",
+            )
+            for number, verb in enumerate(("SPAWN", "SHUTDOWN", "MAINTENANCE_STOP"), 64)
+        ),
+        Row(
+            "supervisor_process.67",
+            "draining",
+            "SIGNAL",
+            guard="credentials",
+            kind="internal",
+            cite=f"{_SP5} The drain, DL-80, DL-416",
+        ),
+        Row(
+            "supervisor_process.68",
+            "draining",
+            "SIGNAL",
+            guard="foreign",
+            kind="refusal",
+            code="wrong_incarnation",
+            cite=f"{_SP5} The drain, DL-80, DL-416",
+        ),
+        Row(
+            "supervisor_process.69",
+            "draining",
+            "SIGNAL",
+            guard="stale",
+            kind="refusal",
+            code="stale_token",
+            cite=f"{_SP5} The drain, DL-80, DL-416",
+        ),
     ),
     guards={
         "lock_held": _lock_held,
@@ -1636,6 +1729,7 @@ SUPERVISOR_PROCESS = Statechart(
     },
     actions={
         "refuse": _refuse,
+        "hold": _hold,
         "drain": _drain,
         "retry": _retry,
         "advance": _advance,
@@ -1661,11 +1755,17 @@ class Supervisor:
     single-controller lease. A single-threaded selectors loop (SIGCHLD self-pipe, listen
     socket, client sockets), as in the wrapper."""
 
-    def __init__(self, run_root: str, *, deadman_s: float | None = None) -> None:
+    def __init__(
+        self, run_root: str, *, deadman_s: float | None = None, drain_s: float = DRAIN_S_DEFAULT
+    ) -> None:
         self.run_root = run_root
         #: ss8's T_deadman in seconds. None: this supervisor tolerates an absent
         #: controller forever (DL-79), so its run root is reroutable only by force.
         self.deadman_s = deadman_s
+        #: the drain's bound in seconds, `DSL41_DRAIN_S` (DL-416)
+        self.drain_s = drain_s
+        #: the monotonic instant the drain's bound passes; set when the drain starts
+        self._drain_until = float("inf")
         #: monotonic instant since which there has been no LIVE leaseholder, or None while
         #: one is live. It is armed at bind, so a supervisor nobody leases also dies.
         self._unleased_since: float | None = None
@@ -1705,9 +1805,11 @@ class Supervisor:
         os.set_blocking(self._chld_w, False)
         #: the wakeup fd `_install_signals` replaced (-1: none); None before it installs one
         self._prior_wakeup_fd: int | None = None
-        #: SIGTERM or SIGINT arrived. The handler sets only this and the loop takes the
-        #: transition: a handler writing `state` could interrupt another write of it.
-        self._shutdown_requested = False
+        #: The SIGTERMs and SIGINTs the loop has not read: the first starts the drain, a
+        #: second ends it, also when both arrive before the loop reads either (DL-416).
+        #: The handler only counts and the loop takes the transition: a handler writing
+        #: `state` could interrupt another write of it.
+        self._signals = 0
         self._backlog_bytes = _test_limit("DSL41_SUPERVISOR_TEST_BACKLOG_BYTES", BACKLOG_BYTES)
         self._request_line_limit = _test_limit(
             "DSL41_SUPERVISOR_TEST_REQUEST_LINE_LIMIT", REQUEST_LINE_LIMIT
@@ -1717,8 +1819,9 @@ class Supervisor:
     @property
     def state(self) -> ProcessState:
         """The active leaf of SUPERVISOR_PROCESS."""
-        (phase,) = self._machines.active(_PROCESS) & _PROCESS_PHASES
-        return cast(ProcessState, phase)
+        active = self._machines.active(_PROCESS)
+        (phase,) = [phase for phase in _PROCESS_PHASES if phase in active]
+        return phase
 
     def _process(self, name: str, payload: Any = None) -> Outcome:
         """Post one event to SUPERVISOR_PROCESS and give its row's outcome."""
@@ -1727,13 +1830,13 @@ class Supervisor:
 
     @property
     def _running(self) -> bool:
-        """Serve normally, run an admitted maintenance operation, or provide diagnostics
-        while uncertain (DL-390, DL-401).
+        """Serve normally, drain, run an admitted maintenance operation, or provide
+        diagnostics while uncertain (DL-390, DL-401, DL-416).
 
-        A running or uncertain operation refuses every mutating verb through the chart.
-        Legacy shutting_down dispatches nothing, including after a failed wait.
+        A drain, and a running or uncertain operation, refuse run mutations through the
+        chart. Legacy shutting_down dispatches nothing, including after a failed wait.
         """
-        return self.state in ("serving", "maintenance_uncertain") or self._maintaining
+        return self.state in ("serving", "draining", "maintenance_uncertain") or self._maintaining
 
     @property
     def _maintaining(self) -> bool:
@@ -1742,11 +1845,11 @@ class Supervisor:
 
     def _pause(self) -> float:
         """The loop's select timeout: the pause the running operation asked for, else the
-        one-second reap tick."""
+        one-second reap tick, cut to the drain's bound while draining."""
         if self._maintaining:
             assert self._maintenance is not None  # admission sets it before maintaining
             return self._maintenance.pause
-        return 1.0
+        return max(0.0, min(1.0, self._drain_until - time.monotonic()))
 
     # -- startup ------------------------------------------------------------
 
@@ -1915,8 +2018,8 @@ class Supervisor:
 
     def _install_signals(self) -> None:
         signal.signal(signal.SIGCHLD, self._on_chld_signal)
-        # Host TERM/INT uses the legacy bounded drain (DL-390). Wrappers retain their
-        # lifelines through that wait; SIGKILL leaves them to lifeline EOF.
+        # Host TERM/INT drains, then runs the bounded TERM/grace/KILL wait (DL-416).
+        # Wrappers retain their lifelines through both; SIGKILL leaves them to lifeline EOF.
         signal.signal(signal.SIGTERM, self._on_term_signal)
         signal.signal(signal.SIGINT, self._on_term_signal)
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
@@ -1933,7 +2036,7 @@ class Supervisor:
             pass
 
     def _on_term_signal(self, _signum: int, _frame: object) -> None:
-        self._shutdown_requested = True
+        self._signals += 1
         try:
             os.write(self._chld_w, b"t")
         except OSError:
@@ -1972,7 +2075,7 @@ class Supervisor:
                     elif tag == "chld":
                         self._drain_chld()
                         self._reap()
-                        if self._shutdown_requested and not self._maintaining:
+                        if self._signals and not self._maintaining:
                             self._orderly_shutdown(TERM)
                     elif tag == "conn":  # pragma: no branch -- no other tag is registered
                         if mask & selectors.EVENT_WRITE:
@@ -1986,8 +2089,10 @@ class Supervisor:
                     # an admitted operation runs to its outcome; a latched signal waits
                     # for it (DL-401)
                     self._maintenance_pass()
-                elif self._shutdown_requested:
+                elif self._signals:
                     self._orderly_shutdown(TERM)
+                elif self.state == "draining" and self._drain_over():
+                    self._orderly_shutdown(DRAIN_ENDED)
                 elif self.state == "shutting_down":
                     # an error ended a SHUTDOWN's wait: run it once more rather than leave
                     # wrappers to lifeline EOF; a second error ends the loop, exit 1
@@ -1998,6 +2103,23 @@ class Supervisor:
         finally:
             self._teardown()
         return exit_status
+
+    def _take_signals(self) -> None:
+        """A signal latched while serving or draining moves the chart before the next request is
+        dispatched, so no request read after a stop signal is admitted as if none came: a SPAWN
+        then meets the drain, and a SHUTDOWN is refused `draining` and clears nothing (DL-416).
+        A maintenance phase holds the latch for its own outcome (DL-401)."""
+        if self._signals and self.state in ("serving", "draining"):
+            self._orderly_shutdown(TERM)
+
+    def _drain_over(self) -> bool:
+        """The drain ends when no wrapper is live or its bound has passed (DL-416)."""
+        live = sum(1 for r in self.runs.values() if r.wrapper_rc is None)
+        if live and time.monotonic() < self._drain_until:
+            return False
+        reason = f"the bound passed with {live} live run(s)" if live else "no live run"
+        print(f"supervisor: drain ended: {reason}", file=sys.stderr, flush=True)
+        return True
 
     # -- deadman (ss8) ------------------------------------------------------
 
@@ -2116,8 +2238,11 @@ class Supervisor:
             line, conn.buf = conn.buf.split(b"\n", 1)
             if conn.discarding:
                 conn.discarding = False
-            else:
-                self._dispatch(conn, line)
+                continue
+            self._take_signals()
+            if not self._running:
+                return
+            self._dispatch(conn, line)
 
     def _connected(self, conn: _Conn) -> bool:
         return self._conns.get(conn.sock.fileno()) is conn
@@ -2800,6 +2925,8 @@ class Supervisor:
         self._reap()
         members = proof.members()
         verify_lock_path(self._maintenance_lock_fd, os.path.join(self.run_root, "leader.lock"))
+        # the unit's ExecStop helper waits in the cgroup for this exit (DL-416)
+        members -= stop_helpers(members)
         return not any(run.wrapper_rc is None for run in self.runs.values()) and members == {
             os.getpid()
         }
@@ -3129,7 +3256,7 @@ class Supervisor:
         # supervisor_process.05 moved to shutting_down: a signal latched before now is this
         # shutdown's; one latched during the wait finds it stopped (.09), or retries a wait
         # that errs (.36)
-        self._shutdown_requested = False
+        self._signals = 0
         # ss5 order: wait for wrappers FIRST, reply {ok}, exit, unlink (DL-48)
         try:
             self._shutdown_wait()
@@ -3148,13 +3275,26 @@ class Supervisor:
         return {"ok": True}
 
     def _orderly_shutdown(self, trigger: str) -> None:
-        """The loop's shutdown. `trigger` is TERM, a latched signal the loop consumes, or
-        PASS_ENDED, the end of a pass in which an error ended a SHUTDOWN's wait. The row
-        taken reports what runs, in order: the wait from serving (supervisor_process.06);
-        the queued replies and then the wait once more from shutting_down (.12, .36);
-        nothing from stopped (.09)."""
-        self._shutdown_requested = False
+        """The loop's shutdown. `trigger` is TERM, a latched signal the loop consumes,
+        DRAIN_ENDED, the end of a drain, or PASS_ENDED, the end of a pass in which an error
+        ended a SHUTDOWN's wait. The row taken reports what runs, in order: the drain from
+        serving (supervisor_process.06); the wait from draining (.61, .62); the queued
+        replies and then the wait once more from shutting_down (.12, .36); nothing from
+        stopped (.09). Two signals read at once take .06 and then .61."""
+        pending = self._signals
+        self._signals -= pending
         intents = self._process(trigger).intents
+        if HOLD in intents:
+            self._drain_until = time.monotonic() + self.drain_s
+            live = sum(1 for r in self.runs.values() if r.wrapper_rc is None)
+            print(
+                f"supervisor: draining: SPAWN refused; {live} live run(s); the stop runs"
+                f" when none is live or in {self.drain_s:g} s, or at a second signal",
+                file=sys.stderr,
+                flush=True,
+            )
+            if pending > 1:
+                intents = self._process(TERM).intents
         if FLUSH in intents:
             for conn in list(self._conns.values()):
                 self._writable(conn, resume=False)
@@ -3523,13 +3663,15 @@ def main(argv: list[str] | None = None) -> int:
     if not os.path.isdir(args.run_root):
         print(f"supervisor: run-root {args.run_root!r} does not exist", file=sys.stderr)
         return 2
-    # a unit that runs this supervisor must refuse a manual stop (DL-399)
-    refusal = stop_guard_refusal()
-    if refusal is not None:
-        print(f"supervisor: {refusal}", file=sys.stderr)
+    try:
+        drain_s = float(os.environ.get(DRAIN_ENV, DRAIN_S_DEFAULT))
+    except ValueError:
+        drain_s = float("nan")
+    if not (math.isfinite(drain_s) and drain_s >= 0):
+        print(f"supervisor: {DRAIN_ENV} must be a finite number of 0 or more", file=sys.stderr)
         return 2
     try:
-        supervisor = Supervisor(args.run_root, deadman_s=args.deadman_seconds)
+        supervisor = Supervisor(args.run_root, deadman_s=args.deadman_seconds, drain_s=drain_s)
     except ValueError as exc:
         print(f"supervisor: {exc}", file=sys.stderr)
         return 2

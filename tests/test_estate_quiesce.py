@@ -1153,6 +1153,65 @@ def test_a_lost_reply_that_was_never_admitted_names_it(
     assert cmds.count("MAINTENANCE_STOP") == 1 and cmds[-2:] == ["ACQUIRE", "PING"]
 
 
+def test_a_draining_supervisor_refuses_the_verb_before_the_seal(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, host: QuiesceHost
+) -> None:
+    """DL-416: a host signal is draining the supervisor. The verb refuses at the supervisor
+    stage with exit 2 and the one sentence, before the seal and with nothing sent but LIST."""
+    run_root, next_jil = _stopped_root(short_root)
+    supervisor = FakeSupervisor(run_root)
+    real_send = supervisor.send
+
+    def send(request: dict[str, Any]) -> dict[str, Any]:
+        return {**real_send(request), "process_state": "draining"}
+
+    supervisor.send = send  # type: ignore[method-assign]
+    _use(monkeypatch, host, connect=supervisor.connect)
+    result = _quiesce(run_root, next_jil)
+    assert result.exit_code == 2, result.output
+    assert (
+        "quiesce: supervisor: refused: supervisor is draining; wait for the unit to stop"
+        in result.output
+    )
+    assert "seal" not in _stages(result.output)
+    assert [request["cmd"] for request in supervisor.sent] == ["LIST"]
+
+
+@pytest.mark.parametrize("lost", [False, True])
+def test_a_drain_that_begins_before_maintenance_is_a_refusal(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, host: QuiesceHost, lost: bool
+) -> None:
+    """DL-416: the drain begins after the supervisor stage. MAINTENANCE_STOP is refused
+    `draining`, or its reply is lost and PING shows `draining`; either is exit 2 with the one
+    sentence, since a draining supervisor admits nothing, never 4."""
+    run_root, next_jil = _stopped_root(short_root)
+    supervisor = FakeSupervisor(run_root)
+    real_send = supervisor.send
+    draining = False
+
+    def send(request: dict[str, Any]) -> dict[str, Any]:
+        nonlocal draining
+        if request["cmd"] == "MAINTENANCE_STOP":
+            supervisor.sent.append(request)
+            draining = True
+            if lost:
+                raise OSError("synthetic lost reply")
+            return {"ok": False, "error": "draining"}
+        answer = real_send(request)
+        return {**answer, "process_state": "draining"} if draining else answer
+
+    supervisor.send = send  # type: ignore[method-assign]
+    _use(monkeypatch, host, connect=supervisor.connect)
+    result = _quiesce(run_root, next_jil)
+    assert result.exit_code == 2, result.output
+    assert (
+        "quiesce: maintenance: refused: supervisor is draining; wait for the unit to stop"
+        in result.output
+    )
+    cmds = [request["cmd"] for request in supervisor.sent]
+    assert cmds.count("MAINTENANCE_STOP") == 1
+
+
 def test_a_later_supervisor_ended_by_its_deadman_voids_the_record_for_the_rerun(
     short_root: Path, monkeypatch: pytest.MonkeyPatch, host: QuiesceHost
 ) -> None:
