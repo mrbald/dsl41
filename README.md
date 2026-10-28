@@ -34,7 +34,7 @@ dsl41 and your services) and keep fixed what the application's JIL releases run 
 **Operator**: start, watch, recover and retire the engine; drills and incidents.
 
 1. [docs/operator-curriculum.md](docs/operator-curriculum.md) - the operator course: the nightbank exercises in order, the service drills, what no drill trains, where to look on shift
-2. [docs/deployment-runbook.md §0](docs/deployment-runbook.md#0-the-operator-path) - the operator path: tasks, diagrams, recipes, monitoring and retirement; §2b backup and restore, §6a the period boundary, §8 scenarios
+2. [docs/deployment-runbook.md §0](docs/deployment-runbook.md#0-the-operator-path) - the operator path: tasks, diagrams, recipes, a configuration-management play for a patch window, monitoring and retirement; §2b backup and restore, §6a the period boundary, §8 scenarios
 3. [examples/nightbank/README.md](examples/nightbank/README.md) and its [RUNBOOK](examples/nightbank/RUNBOOK.md) - the training sandbox: numbered operator exercises on the real engine, run from a checkout with `uv run examples/nightbank/bin/nightbank up`; its [service runbook](examples/nightbank/RUNBOOK-service.md) holds exercises 22 to 33, the §0 service tasks typed by hand on a wargame host; `scripts/wargame.sh` supplies a disposable EL8 systemd container with `uv` for service exercises by hand, from an image that is also the service drill's base; its own container has no network; the drill runs the image in a container of its own
 4. [examples/file_processing/README.md](examples/file_processing/README.md) - the operator CLI and procedures of the file-processing block; [examples/dst-drill](examples/dst-drill/README.md) for the clock-change drill
 
