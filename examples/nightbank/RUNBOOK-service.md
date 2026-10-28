@@ -454,13 +454,15 @@ commands name `/opt/dsl41/.venv/bin/dsl41`.
 cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release status
 cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release prepare small-r1 /srv/dsl41/nightbank/estate/small
 # exit 2: /srv/dsl41/nightbank/releases/small-r1 is prepared already, and a prepared name is installed once.
+# prepare the inputs under a new name.
 cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release apply small-copy
 # exit 2: /srv/dsl41/nightbank/releases/small-copy holds no estate.toml, so it is not a release.
 ```
 
-   The status prints `active: small-r1.`, `engine: answers on …`, `recorded apply: none.`
-   and `last apply: none.`. Prepare also refuses, with exit 2, a release with more jobs
-   than the launcher's `MAX_JOBS`, and installs nothing.
+   The status prints `active: small-r1.`, `engine: answers on …`,
+   `rollback: no receipt names an earlier release; apply one by name.`,
+   `recorded apply: none.` and `last apply: none.`. Prepare also refuses, with exit 2, a
+   release with more jobs than the launcher's `MAX_JOBS`, and installs nothing.
 2. Build the next release from the small estate's inputs. Add the job
    `OPS_RELEASE_PROBE_C` in a new file, shorten `OPS_SPOOL_C`'s command, add the file to
    the manifest, and prepare it as `small-r2`:
@@ -514,9 +516,15 @@ cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release resume
    this period's baseline, cannot be answered after the boundary, so the seal refuses
    inside the horizon
    ([period-model §9](../../docs/period-model.md#9-retries-across-a-boundary)). The
-   resume prints one line for it, `waiting 56.8 s for the retry horizon of the last
-   operator request, then sealing.`, and seals period 4 under a new request id. It ends
-   `small-r2 is active in period 5.`, with exit 0, about 70 s after the start.
+   resume prints one line for it, and seals period 4 under a new request id:
+
+```
+waiting 45.0 s for the retry horizon of the last operator request, then sealing.
+```
+
+   The wait is what is left of the period's 60 s retry horizon, counted from the apply's
+   hold: here the resume's first seal came 15 s after it. The resume ends
+   `small-r2 is active in period 5.`, with exit 0, about a minute after you type it.
 4. Read the result. Set `ESTATE` again, because `active` changed:
    `ESTATE=$ESTATE_RELEASES/$(cat "$ACTIVE")`. `RUN_ROOT` and `S` stay on `nightbank-01d`. Then
    read the status, the two jobs' definitions (recipe `job-verify`), and the hold the
