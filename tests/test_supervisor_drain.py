@@ -775,18 +775,23 @@ def test_the_stop_helper_alone_is_no_residual_work(
         107: ("S", "1", ["/bin/other-launcher", "supervisor-stop"]),
         108: ("S", "1", []),
         109: ("Z", "7", []),
+        110: ("Z", "7", ["worker"]),
         zombie.pid: ("Z", "101", []),
     }
+    #: field 20: 110's main thread exited while three worker threads run, so it is live
+    threads = {110: "3"}
     # the supervisor imports runner_procid as a top-level module too: patch both copies
     for module in {procid, sys.modules[runner_supervisor.stop_helpers.__module__]}:
         monkeypatch.setattr(
             module,
             "_linux_stat_fields",
-            lambda pid: list(table[pid][:2]) if pid in table else None,
+            lambda pid: (
+                [*table[pid][:2], *["0"] * 15, threads.get(pid, "1")] if pid in table else None
+            ),
         )
         monkeypatch.setattr(module, "_cmdline", lambda pid: table[pid][2] if pid in table else None)
     try:
-        everyone = {me, 101, 102, 103, 104, 106, 107, 108, 109, zombie.pid}
+        everyone = {me, 101, 102, 103, 104, 106, 107, 108, 109, 110, zombie.pid}
         assert procid.stop_helpers(everyone) == {101, 102, 109, zombie.pid}
         assert not procid._gone(zombie.pid)  # counted as the helper's child, not as gone
     finally:

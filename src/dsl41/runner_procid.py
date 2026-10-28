@@ -517,10 +517,11 @@ def stop_helpers(members: set[int]) -> set[int]:
     is PID 1 and whose argv is the launcher's `supervisor-stop` mode (`dsl41-launch` ...
     `supervisor-stop`). A stop that overlaps maintenance keeps it in the unit's cgroup, and
     it is no residual work (DL-416). With the helper found, these count with it: every member
-    whose parent, field 4 of /proc/PID/stat, is the helper, in any state; every member in
-    state Z; and every member that has left /proc since the cgroup was read and is gone by
-    kill(pid, 0). Those are its wait loop's `sleep` children, running, ended unreaped, or
-    reaped. Two such helpers, or none, are no helper: an empty set."""
+    whose parent, field 4 of /proc/PID/stat, is the helper, in any state; every zombie as
+    `_linux_zombie` reads it, so a live process whose main thread exited stays; and every
+    member that has left /proc since the cgroup was read and is gone by kill(pid, 0). Those
+    are its wait loop's `sleep` children, running, ended unreaped, or reaped. Two such
+    helpers, or none, are no helper: an empty set."""
     helpers = []
     for pid in members:
         fields, argv = _linux_stat_fields(pid), _cmdline(pid)
@@ -538,7 +539,7 @@ def stop_helpers(members: set[int]) -> set[int]:
         if fields is None:
             if _gone(pid):
                 found.add(pid)
-        elif fields[0] == "Z" or (len(fields) > 1 and fields[1] == str(helper)):
+        elif _linux_zombie(fields) or (len(fields) > 1 and fields[1] == str(helper)):
             found.add(pid)
     return found
 
