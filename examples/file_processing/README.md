@@ -456,11 +456,14 @@ deliveries are written beside the inbox and renamed into it, as a producer must.
 ### 2. Start the engine and the first cycle
 
 `--detached` runs the commands under a supervisor that the engine starts.
+`DSL41_DRAIN_S=5` is in the environment that supervisor inherits. It is the
+supervisor's drain bound (DL-416), set short here so that step 3's stop cuts
+the held item within seconds; a service unit sets 840 s.
 
 <!-- exercise: start -->
 ```sh
-dsl41 run "$work/estate.jil" --run-root "$RUN_ROOT" --detached --as-machine localhost \
-  >"$work/engine.log" 2>&1 &
+DSL41_DRAIN_S=5 dsl41 run "$work/estate.jil" --run-root "$RUN_ROOT" --detached \
+  --as-machine localhost >"$work/engine.log" 2>&1 &
 echo $! >"$work/engine.pid"
 ```
 
@@ -516,10 +519,13 @@ cat "$work/engine.log"
 # detached: reattach with `…`
 ```
 
-Now stop the supervisor with SIGTERM. A supervisor stop by any route ends every
-running command (DL-414). On a service host the supported stop is
-`dsl41 estate quiesce`, whose maintenance stage needs Linux service containment;
-SIGTERM is the stop this host has.
+Now stop the supervisor with SIGTERM. It drains (DL-416): it starts no new
+command and lets the running ones end within its bound, `DSL41_DRAIN_S`. The
+processor waits on the hold, so it outlives the bound: after 5 s the supervisor
+sends it TERM, and the processor run ends `TERMINATED`. On a service host,
+`dsl41 estate quiesce` stops the estate and seals the period, and its
+maintenance stage needs Linux service containment; SIGTERM is the stop this
+host has.
 
 <!-- exercise: stop-supervisor -->
 ```sh
@@ -551,8 +557,8 @@ rm "$root/hold"
 
 <!-- exercise: resume -->
 ```sh
-dsl41 run --resume "$work/estate.jil" --run-root "$RUN_ROOT" --detached --as-machine localhost \
-  >"$work/resume.log" 2>&1 &
+DSL41_DRAIN_S=5 dsl41 run --resume "$work/estate.jil" --run-root "$RUN_ROOT" --detached \
+  --as-machine localhost >"$work/resume.log" 2>&1 &
 echo $! >"$work/engine.pid"
 ```
 
