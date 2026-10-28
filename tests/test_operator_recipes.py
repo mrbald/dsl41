@@ -404,6 +404,11 @@ def test_the_service_install_recipe_installs_what_the_units_and_launcher_name() 
     assert any(line.startswith("useradd ") and line.endswith(f" {user}") for line in lines)
     launch_path = _directive(UNITS[0], "Service", "ExecStart").split()[0]
     assert f"install -D -m 0755 examples/nightbank/deploy/dsl41-launch {launch_path}" in lines
+    chain = [str(parent) for parent in reversed(Path(launch_path).parents)][1:]
+    assert f"install -d -o root -g root -m 0755 {' '.join(chain)}" in lines
+    assert lines.index(f"install -d -o root -g root -m 0755 {' '.join(chain)}") < lines.index(
+        f"install -D -m 0755 examples/nightbank/deploy/dsl41-launch {launch_path}"
+    )
     runs = str(Path(_launcher_value("RUN_ROOT")).parent)
     assert f"install -d -o {user} -g {user} -m 0700 {runs}" in lines
     assert str(Path(_launcher_value("ESTATE_ANCHOR")).parent) == runs

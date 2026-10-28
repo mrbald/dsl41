@@ -198,13 +198,17 @@ anchor of its own.
 2. Review the versioned deployment kit staged with the candidate (§1).
    The recipe below uses the matching release checkout's examples.
    Create the service account and its writable
-   directories, and install the launcher, the access map and the units:
+   directories, and install the launcher, the access map and the units.
+   `install -d` sets the owner and mode of a directory that exists too, so the first
+   `install` line makes `/opt`, `/opt/dsl41` and `/opt/dsl41/bin` the root-owned chain
+   that `dsl41 release` requires of the launcher's path (DL-412):
 
 <!-- recipe: service-install -->
 ```sh
 set -eu
 useradd --system --user-group --create-home --home-dir /var/lib/dsl41 \
     --shell /usr/sbin/nologin dsl41
+install -d -o root -g root -m 0755 /opt /opt/dsl41 /opt/dsl41/bin
 install -D -m 0755 examples/nightbank/deploy/dsl41-launch /opt/dsl41/bin/dsl41-launch
 install -d -m 0755 /srv/dsl41
 install -d -o dsl41 -g dsl41 -m 0700 /srv/dsl41/runs
