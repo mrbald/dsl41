@@ -225,7 +225,7 @@ INTERPRETERS = {
 }
 
 
-def config() -> Config:
+def config(*, releases: bool = True) -> Config:
     """The launcher's variables; a launcher that cannot give one refuses, exit 2. The checked
     text runs, never the path, under the interpreter its first line names: /bin/sh, /bin/bash
     or `/usr/bin/env bash`, and any other first line refuses (DL-412)."""
@@ -285,6 +285,8 @@ def config() -> Config:
             f"this dsl41 runs from {runtime}, and the launcher's DSL41 selects {selected}.",
             f"run `{values['DSL41']} {GROUP} ...` instead.",
         )
+    if releases:
+        require_releases(Path(values["ESTATE_RELEASES"]), values["SERVICE_ACCOUNT"])
     return Config(
         launcher=path,
         dsl41=values["DSL41"],
@@ -303,6 +305,29 @@ def config() -> Config:
 
 
 # ----------------------------------------------------------- releases on disk
+
+
+def require_releases(releases: Path, account: str) -> None:
+    """ESTATE_RELEASES is a real directory of the service account's that no one else can
+    write, so no other account can swap two releases while a seal reads one (DL-412)."""
+    try:
+        info = releases.lstat()
+        owner = pwd.getpwnam(account).pw_uid
+    except (OSError, KeyError) as exc:
+        raise Stop(
+            EXIT_REFUSED, f"{releases} or the account {account} is missing: {exc}."
+        ) from None
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != owner or info.st_mode & 0o022:
+        try:
+            found = pwd.getpwuid(info.st_uid).pw_name
+        except KeyError:
+            found = str(info.st_uid)
+        raise Stop(
+            EXIT_REFUSED,
+            f"{releases} belongs to {found} with mode {stat.S_IMODE(info.st_mode):04o}, not to"
+            f" {account} and writable by it alone: run `chown {account} {releases}` and"
+            f" `chmod 0755 {releases}` as root.",
+        )
 
 
 def checked_name(name: str) -> str:
@@ -1042,13 +1067,15 @@ def service_receipt(cfg: Config, name: str, kind: str, receipt_id: str) -> None:
 def service(words: list[str]) -> int:
     """`dsl41 release service ACTION WORD...`, as the service account only. Each read prints
     one JSON object; a seal exits with the seal's code; anything else refuses, exit 2."""
-    cfg = config()
+    # a wrong account is refused first, in its own words, then the releases directory
+    cfg = config(releases=False)
     account = pwd.getpwuid(os.geteuid()).pw_name
     if account != cfg.service_account:
         raise Stop(
             EXIT_REFUSED,
             f"the service side runs as {cfg.service_account}, not as {account}.",
         )
+    require_releases(cfg.releases, cfg.service_account)
     action, rest = (words[0], words[1:]) if words else ("", [])
     ids = [word for word in rest if REQUEST_ID.fullmatch(word)]
     if action == "prepare" and len(rest) == 2:
