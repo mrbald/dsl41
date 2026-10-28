@@ -32,6 +32,7 @@ from typer.testing import CliRunner
 from dsl41 import cli_estate
 from dsl41 import runner_procid as procid
 from dsl41.cli import app
+from dsl41.period import attestation_path
 from dsl41.cli_estate import ENGINE_UNIT, SUPERVISOR_UNIT, QuiesceHost
 from dsl41.runner_adapters import SupervisorConn
 
@@ -527,6 +528,55 @@ def test_a_next_file_that_does_not_load_still_ends_the_seal_stage(
     result = _quiesce(run_root, short_root / "missing.jil")
     assert result.exit_code == 2, result.output
     assert "quiesce: seal: refused: exited 2" in result.output
+
+
+def _audited_root_with_live_run(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, host: QuiesceHost
+) -> tuple[Path, Path]:
+    """A root the verb has sealed and attested, whose maintenance refused live work."""
+    run_root, next_jil = _stopped_root(short_root)
+    supervisor = FakeSupervisor(run_root)
+    supervisor.runs = [
+        {"run_id": "r-1", "job": "a", "run_number": 1, "wrapper_pid": 4242, "wrapper_alive": True}
+    ]
+    _use(monkeypatch, host, connect=supervisor.connect)
+    first = _quiesce(run_root, next_jil)
+    assert _stages(first.output)["audit"] == "ok", first.output
+    return run_root, next_jil
+
+
+def _assert_audit_refusal(result: Any, attestation: Path) -> None:
+    assert result.exit_code == 2, result.output
+    assert "Traceback" not in result.output
+    assert _stages(result.output)["audit"] == "refused"
+    assert f"quiesce: audit: refused: {attestation}" in result.output
+    assert "maintenance" not in _stages(result.output)
+    assert _lock_is_free(attestation.parents[1])
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode 000 file")
+def test_an_unreadable_attestation_refuses_at_audit_with_one_sentence(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, host: QuiesceHost
+) -> None:
+    run_root, next_jil = _audited_root_with_live_run(short_root, monkeypatch, host)
+    attestation = attestation_path(run_root, 1)
+    attestation.chmod(0o000)
+    try:
+        result = _quiesce(run_root, next_jil)
+    finally:
+        attestation.chmod(0o644)
+    _assert_audit_refusal(result, attestation)
+    assert "unreadable" in result.output
+
+
+def test_an_attestation_that_does_not_parse_refuses_at_audit_with_one_sentence(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, host: QuiesceHost
+) -> None:
+    run_root, next_jil = _audited_root_with_live_run(short_root, monkeypatch, host)
+    attestation = attestation_path(run_root, 1)
+    attestation.write_text("{not json")
+    result = _quiesce(run_root, next_jil)
+    _assert_audit_refusal(result, attestation)
 
 
 def test_the_writers_stage_names_a_remaining_process(
