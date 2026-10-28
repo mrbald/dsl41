@@ -1680,8 +1680,8 @@ def test_seal_takes_the_next_period_s_switches() -> None:
         _next_profile(None, None, [], "strict", False, None, ["ice-lookback=maybe"])
 
 
-def test_the_help_lists_every_switch() -> None:
-    result = CliRunner().invoke(app, ["run", "--help"], env={"COLUMNS": "200"})
+def test_the_help_lists_every_switch(cli_env: None) -> None:
+    result = CliRunner().invoke(app, ["run", "--help"])
     assert result.exit_code == 0
     for name, switch in semantics.REGISTRY.items():
         assert name in result.stdout
