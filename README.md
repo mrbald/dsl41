@@ -1212,9 +1212,12 @@ Training estate:
 - `tests/test_nightbank_deploy.py`: the shipped launcher script and the
   systemd units beside it.
 - `tests/test_release_prepare.py`, `tests/test_release_apply.py`,
-  `tests/test_release_rollback.py` and `tests/test_release_status.py`: the
-  release verbs against a stub engine, `sudo` and `systemctl`, on a site laid
-  out as an install lays one out, which `tests/release_site.py` builds
+  `tests/test_release_apply_holds.py`, `tests/test_release_apply_answers.py`,
+  `tests/test_release_apply_seal.py`, `tests/test_release_apply_horizon.py`,
+  `tests/test_release_rollback.py`, `tests/test_release_rollback_takeover.py`,
+  `tests/test_release_rollback_holds.py` and `tests/test_release_status.py`:
+  the release verbs against a stub engine, `sudo` and `systemctl`, on a site
+  laid out as an install lays one out, which `tests/release_site.py` builds
   (DL-412).
 - `tests/test_operator_recipes.py`: the runbook's §0 recipes run as printed
   against a synthetic estate under the shipped launcher, content checks of
