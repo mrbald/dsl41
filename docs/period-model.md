@@ -12,20 +12,22 @@ defect of the same rank as a wrong mechanism.
 
 ## 0. The problem
 
-Without periods, a run root carries four lifetimes (§1 names them) and makes
-them end together. An estate change is then stop, swap, and a **new run
-root**. A new run root is a new log, a new baseline and a fresh oracle. So
-every release silently resets every runtime global, every operator hold,
-every `last_end_at` that lookback reads, every `armed` latch, every box's
+§1's table names six units, each with its own lifetime: a seal is kept
+forever, and an execution lasts as long as its run. A run root without
+periods ties the estate, the period and the segment to one directory, so
+they end together, and an estate change is stop, swap, and a **new run
+root**. A new run root is a new log, a new baseline and a fresh
+oracle. It resets every runtime global, every operator hold, every
+`last_end_at` that lookback reads, every `armed` latch, every box's
 `ran_members` and every `run_number`. That reset is correct at a cycle
-boundary and wrong in the middle of one. Nothing in that model says which of
-the two an operator is doing. A directory would be doing a job that belongs
-to a record.
+boundary and wrong in the middle of one, and a directory cannot say which of
+the two an operator is doing. A record can: the seal (§3) closes a period and
+commits the next one, in the same root or in a new one.
 
 ## 0a. Revision history
 
-Each change of meaning to a frozen item is a decision-log entry, cited where
-it applies (DL-225).
+The decision log holds this document's history. Each change of meaning to a
+frozen item is an entry, cited where it applies (DL-225).
 
 ## 1. Identities
 
@@ -448,19 +450,19 @@ stale network path among them can stall a resume. The foreign-estate refusal
 (§11 step 2) comes first. There is no override. This model has no verb that
 moves a lineage to another path.
 
-**Re-find trigger: a shared store** (the withdrawn HA plan's S8a, DL-189).
+**Re-find trigger: a shared store** (S8a, DL-189).
 If one is built, it **replaces** both this anchor and root leadership as the
 sole authority. One transaction consumes `expected_head_digest`, advances
 the head and allocates the term. Keeping the file anchor beside the store
-would be two leadership truths. The withdrawn HA plan's §2 ACQUIRE (DL-189)
-then gains a lineage-head predicate.
+would be two leadership truths. The store's ACQUIRE (§2 of the HA plan,
+DL-189) then gains a lineage-head predicate.
 
 ## 2. Records
 
-This model adds three record kinds to `docs/runner-design.md` §7's list:
-`segment`, `seal` and `decision`. Three kinds are retired: `header` (a
-once-per-log header cannot describe a log made of segments), and `result`
-plus standalone `effect` (§2.3).
+This model defines three of the record kinds `docs/runner-design.md` §7
+lists: `segment`, `seal` and `decision`. Three kinds are retired:
+`header` (a once-per-log header cannot describe a log made of segments), and
+`result` plus standalone `effect` (§2.3).
 
 **Retired means refused by name (DL-138).** Nothing writes one and nothing
 reads one. A journal that opens with a `header`, or that carries a `result`
@@ -488,14 +490,16 @@ a complete replay.
  "at": "2026-08-18T02:00:00.000000"}
 ```
 
+In this document's JSON examples, a value the text does not fix is
+illustrative. In particular, `state_machine_version` is the
+`STATE_MACHINE_VERSION` of the build that writes the record
+(`runner_ledger.py`); the examples show 1.
+
 The record has exactly these keys. A reader refuses an unknown key, then a
 missing one, then a mistyped one. `first_index` is at least 1.
 `opens_from_seal` is null or exactly `{period_id, digest}` (DL-132). The
 reader checks `catalog_hash_version` before the rest of the schema
 (DL-138).
-
-There is **no** `catalog_hash_v1` field. Version 1 is a retired dialect
-(DL-138), and no `segment` records one.
 
 `dsl41_version` is **not** on `segment`. It is per process and already rides
 on `leader` (`runner-design.md` §7). Keeping it here would break PR-07's
@@ -779,23 +783,22 @@ refuses an effect without a generation, a SPAWN without a `run_id`, and a
 `run_id` outside the uuid4 grammar.
 
 `legacy_batch` is on **every** decision and is **required false**. `true` is
-a retired dialect: it named a batch folded from separate legacy fsyncs. A
-record that carries it is refused, naming DL-138. A missing flag, or one
-with a non-boolean value, is **malformed** and refused as its own distinct
-error. An absent flag is not a false one; a reader that defaulted it would
-accept a record no writer of this estate wrote. One validator decides the
-three cases, so every consumer that parses a `decision` inherits them.
+a retired dialect. A record that carries it is refused, naming DL-138. A
+missing flag, or one with a non-boolean value, is **malformed** and refused
+as its own distinct error. An absent flag is not a false one; a reader that
+defaulted it would accept a record no writer of this estate wrote. One
+validator decides the three cases, so every consumer that parses a
+`decision` inherits them.
 
 The record carries `index`, not `seq`. `seq` is the subscribe cursor, and a
 decision shares its attempt's number (DL-89). `decision` is an unsequenced,
 at-least-once record on the subscribe stream.
 
-**The record is a wire break, so the protocol is v3.** The subscribe stream
-(`control-protocol.md` §5) carries `decision` and `effect_result` records,
-and no `result` or standalone `effect` record. A client that waits for
-`rec == "effect"` sees no intents, so the change is not additive (DL-118).
-The engine refuses v2, on the precedent DL-90 set for v1: removed, not
-deprecated (DL-118). There is no
+**The protocol is v3.** The subscribe stream (`control-protocol.md` §5)
+carries `decision` and `effect_result` records, and no `result` or
+standalone `effect` record. A client that waits for `rec == "effect"` sees
+no intents, so the stream is not compatible with v2. The engine refuses
+every version but v3, v1 and v2 included (DL-90, DL-118). There is no
 compatibility projection, because it would be a second record shape for one
 fact.
 
@@ -806,12 +809,12 @@ codes a rejection may store are an append-only set
 (`runner_codes.STORED_CODES`). A decision without `code` reads as null. The
 reader treats a stored code as opaque: it never requires one and never
 checks it against the registry. A replay derives nothing from it, so it
-changes no state and needs no `state_machine_version` bump. An exact retry
-and `original_decision` answer the stored code. This field is additive.
-One stored code is not a gate's verdict:
-`engine_apply_faulted` quarantines an input whose apply raised while its
-time half applied alone (`concurrency-model.md` §4). Like every rejection,
-it replays as its time half alone on any build of the same
+changes no state, and a new stored code needs no `state_machine_version`
+bump. The field is additive (DL-272). An exact retry and
+`original_decision` answer the stored code. One stored code is not a gate's
+verdict: `engine_apply_faulted` quarantines an input whose apply raised
+while its time half applied alone (`concurrency-model.md` §4). Like every
+rejection, it replays as its time half alone on any build of the same
 `state_machine_version`.
 
 There is deliberately **no transition record**. A period opens because a
@@ -963,9 +966,7 @@ and the sidecar (§11). A live seal through the control socket and an offline
 seal from the CLI are the same kind of boundary: a request that carries an
 id its caller minted. The field does not tell them apart. Audit could do so
 only through a `leader` record, and that record carries epoch, time, pid,
-host and version, and nothing that names the process's mode. There is no
-`adopt` value: the estate-adoption path is retired (DL-138), and the derived
-adoption `request_id` with it.
+host and version, and nothing that names the process's mode.
 
 `request_fingerprint` is **derived** over the envelope, and audit recomputes
 it.
@@ -1162,7 +1163,7 @@ host row. A→B→A moves the revision twice, and the seal carries it (PR-16b).
 | `_trace`, `_emitted`, `_queue`, the `queue_scan` instance | transient or derived |
 | `_dispatched` | **derived, and its reconstruction is normative.** See the note below |
 | `_referencers`, `_bucket_cap` | derived from the catalog |
-| `Scheduler._next`, `_CalCache` | replaced by the §6 watermark |
+| `Scheduler._next`, `_CalCache` | the §6 watermark stands in for them |
 | `spec_drift` | disk state |
 
 **The host row's `deadman_us`.** DL-95: *"read back from the host, never
@@ -1245,10 +1246,12 @@ commits. That takes milliseconds, and the sealer waits (PR-27).
 **There is no `terminating` kind.** Carrying one, while the seal refuses
 under a KILL ladder without proof, would set two obligations that no
 implementation could both pass. The gate wins. An unresolved KILL ladder is
-a few seconds of `grace_seconds` plus a signal. The sealer **waits it out**,
-within §8's bound (DL-312).
-It does not snapshot a half-run ladder whose remaining grace deadline it
-would then have to carry.
+a few seconds of `grace_seconds` plus a signal. The sealer **waits it out**
+for at most 30 seconds (`QUIESCE_WAIT_S`, §8, DL-312). A ladder still
+unresolved when that wait ends refuses the seal with `seal_not_quiescent`,
+before any sidecar byte.
+The sealer never snapshots a half-run ladder whose remaining grace deadline
+it would then have to carry.
 
 The gate does not cover a **resume gap** that a seal makes easier to reach.
 `_apply_kill` records `applied` when the cancellation is delivered, and the
@@ -1654,6 +1657,15 @@ decides the mode, not a flag:
   `candidate.json` included, because two install paths would be two places
   for the same crash window. Then it exits. It may not replay rows, observe
   "terminal" and seal.
+
+  A detached period needs its supervisor, and `--supervisor` says how the
+  offline sealer reaches it (DL-396). `attach`, the default, connects to the
+  running supervisor and refuses with exit 2 when none answers. `spawn`
+  starts one, with the period's pinned deadman, when none answers; it is the
+  development path. An exact retry of a committed boundary (`--request-id`)
+  is answered from the lineage on disk before the wiring, so it needs no
+  supervisor. A live seal ignores the option, and a tethered period has no
+  supervisor to reach.
 
 **Exit codes.** The `seal` command exits:
 
@@ -2157,8 +2169,8 @@ profile fields included:
 So a live CMD's forward closure reaches `cmd_grace_us`. A C2 that changes
 only the grace cannot commit over the CMD and then kill the C1 run with
 C2's ladder. The profile edges run in the same direction as every other
-edge, job → field. An implementation with reversed edges reached no profile
-field from any job and still passed every listed obligation (PR-37a).
+edge, job → field. With the edges reversed, no job reaches any profile
+field; PR-37a tests the direction.
 `retry_horizon_us` has no incoming edge from any job.
 
 **Two questions, two directions.** The R gate asks *"is anything live job J
@@ -2173,7 +2185,8 @@ computed. Neither substitutes for the other.
 - live FW whose watch parameters changed → R (an FW run is in-engine)
 - box membership changed while the box is executing → R
 - member changed while its box is executing, member INACTIVE → **R**. A would
-  let the member start under C2 inside the box's C1 execution. E19 closes here.
+  let the member start under C2 inside the box's C1 execution. This row
+  settles E19 (`runner-design.md` §15).
 - `armed` with changed schedule or condition → A: "the C1 trigger survives under
   C2 gating"
 - a resource C2 lowers below carried `consumed + held` → A: "admission refuses
@@ -2270,15 +2283,20 @@ crashed before its first seal would have no path back.
    writes no decision and mints no id; the only record it has appended is
    its `leader` record, as any refused resume does.
 
-   A run root that an earlier build resumed may hold a watch it relaunched
-   with no identity: a `watch.jsonl` start line with `run_id: null` for a
-   start whose decision was missing. At this build's first resume of such
-   a root, while that run directory is present, the plan mints an id for
-   the run and resume refuses the root by name as a WAL/spool identity
-   split (DL-118). The refusal fires whether the watch completed or not.
-   It writes no decision, so the build that wrote the log can still open
-   it. Such roots are reset, not migrated, under the pre-production
-   reset clause (`protocol-evolution.md` §5, DL-138).
+   Spool evidence for a planned run must name the `run_id` that the plan
+   mints for it. A `watch.jsonl` start line with `run_id: null`, or with
+   another id, is a WAL/spool identity split, and resume refuses the root
+   by name (DL-118). The refusal fires whether the watch completed or not,
+   and it writes no decision.
+
+   One root shape meets this refusal at its first resume by this build: a
+   root that an earlier build resumed, holding a watch that build relaunched
+   with no identity (a start line with `run_id: null`) for a start whose
+   decision was missing. The refusal fires while that run directory is
+   present. Because it writes no decision, the build that wrote the log can
+   still open such a root. Such a root is reset, not migrated, under the
+   pre-production reset clause (`protocol-evolution.md` §5, DL-138,
+   DL-315).
 7. Run the reconciliation ladder (`runner-design.md` §7). It includes the
    re-drive of a live wrapper under a terminal row, whatever its KILL
    effect's recorded state (PR-33).
@@ -2353,10 +2371,8 @@ request fingerprint.
 
 **`source` is `request` on every boundary (DL-138).** It has one legal value,
 so there is nothing to derive. Audit checks that the record and the sidecar
-agree on it, and refuses a disagreement (PR-47b). There is no `adopt` value,
-no `catalog_hash_v1` on the period-1 `segment` and no `adopted_from` on the
-sentinel; they belonged to the retired estate-adoption path. So the sentinel
-is not an audit input.
+agree on it, and refuses a disagreement (PR-47b). The sentinel is not an
+audit input.
 
 Everything else is re-derived. `request_fingerprint` comes from the
 envelope. `forced_gate` comes from the pinned horizon, the WAL and T. The
@@ -2468,25 +2484,16 @@ admission is still refused under both locks, and what the command staged or
 wired before it may remain. `resume_run` repeats the rule under both locks
 in every case.
 
-**There is no legacy adoption (DL-138).** No `dsl41 estate adopt` verb
-fences a run root written before this model, translates its `header`
-journal into `wal/000001.jsonl`, or seals period 1 in one step. The path has no
-producer and no estate to consume. There is likewise no `adopting` head state, no
-`adopt` seal source, no `catalog_hash_v1`, no `adopted_from` on the sentinel
-and no `legacy_batch: true` fold.
-
-What stands in its place is a refusal, not a repair. Each of these is
-refused **by name**, citing DL-138, by the owner that meets it: a
-`journal.jsonl` that opens with a `header`, a `catalog_hash_version` of 1, a
-`result` or standalone `effect` record, a `manifest/manifest.json` layout,
-and an on-disk head state of `adopting`. So a run root written before the
-period model is neither adoptable nor readable. There is no supported path
-from one into a lineage.
-
-`docs/protocol-evolution.md` is the contract for this retirement: the
-compatibility matrix per protocol, the lifecycle by which a new dialect
-enters service, the absence gate a retirement has to meet, and the
-pre-production reset clause under which this retirement meets that gate.
+**A run root written before this model is refused, not adopted (DL-138).**
+Each of these is refused **by name**, citing DL-138, by the owner that meets
+it: a `journal.jsonl` that opens with a `header`, a `catalog_hash_version`
+of 1, a `result` or standalone `effect` record, a `legacy_batch: true`
+decision, a `manifest/manifest.json` layout, and an on-disk head state of
+`adopting`. There is no `dsl41 estate adopt` verb and no supported path
+from such a root into a lineage. `docs/protocol-evolution.md` is the
+contract for retired dialects: the compatibility matrix per protocol, the
+lifecycle by which a new dialect enters service, the absence gate a
+retirement has to meet, and the pre-production reset clause.
 
 **Subscribers** (`control-protocol.md` §5, v3): a client that asks for an
 index below the earliest retained record receives an explicit gap marker.
@@ -2651,11 +2658,9 @@ directory), the same `run_id` presented against a different
 
 ### 12a. The archive — PR-Q3's answer (DL-144)
 
-**Yes, conditionally, by explicit policy.** A seal-only archive may stand in
-for pruned inputs. This is a decision, not a deduction: the text above
-allows either answer, and "never" is rejected as policy rather than argued
-away. An archived period drops to §11's **attestation-verified** tier and
-stays there.
+**A seal-only archive may stand in for pruned inputs, by explicit policy
+(DL-144).** An archived period drops to §11's **attestation-verified** tier
+and stays there.
 
 **The receipt is the point of no return.** `seals/<period_id>.archive.json`
 is a §3.2-family artifact: `artifact_format_version`, canonical
@@ -3044,7 +3049,13 @@ and is active whole.
 
 ## 14. The worked estate
 
-`examples/nightbank` carries three scenarios.
+Three scenarios take the example estate `examples/nightbank` across a
+boundary. A, B, and C's roll and reclaim rows run over that estate in
+`tests/test_nightbank_boundary.py`. C's other rows (PR-01, PR-03, PR-45,
+PR-30a) run on unit fixtures in `tests/test_boundary.py`, with PR-03's read
+and stream halves in `tests/test_control_branches.py` and
+`tests/test_runner_control.py`, and PR-45's roll rows in
+`tests/test_estate.py`.
 
 **A — the quiet boundary** (smoke). The night runs to completion under C1. A
 global is set, an operator hold is placed, and a depletable is consumed.
@@ -3119,37 +3130,34 @@ refusal.
 - a crash in period 1 before any seal (PR-45);
 - a lost `seal` response on both sides of the record (PR-30a).
 
-## 15. Amendments
+## 15. Where the model lives outside this document
 
-Where the period model lives outside this document:
+Other documents and modules hold parts of this model. The rule stays the one
+stated above; the row names where else it is stated or built.
 
 | document or module | what it holds from this model |
 | --- | --- |
-| `concurrency-model.md` §2 | the log is one **estate** of period-bounded segments, not one run root; `baseline_id` is per period |
-| `concurrency-model.md` §4/§5 | the atomic `decision` record in place of `result` + `effect`; CM-17 closes on the file substrate |
+| `concurrency-model.md` §2 | the log is one **estate** of period-bounded segments, not one run root; `baseline_id` names the period |
+| `concurrency-model.md` §4, §5 | the atomic `decision` record (§2.3), which meets CM-17 on the file substrate; `run_id` is bound before the attempt, and `plan_effects` mints it (DL-118, DL-121), in place of DL-96's deferral |
 | `concurrency-model.md` §7 | leader eligibility reads the current period's pins; `next_epoch` reads the seal; **`catalog_hash` is v2, with `meta.tool_version` excluded** |
 | `concurrency-model.md` §11 | the catalog is immutable **per period** |
-| `control-protocol.md` | **v3**: `baseline_id` is the period's; the `seal` verb; the `host` cmd's `route` verb and the `routes` query with the `route:` namespace *(pending — §2.2)*; `decision` in the subscribe stream; the gap marker; exact-retry expiry |
-| `runner_admission.py` | `Attempt.host` as `HostCommand \| RouteCommand`; the `route:` namespace in `RuntimeState.revision()` *(pending — §2.2)* |
-| `supervisor-protocol.md` §3/§5 | `receipt.json` `{artifact_format_version, run_id, spec_fingerprint, received_at}`, `reply.json` `{artifact_format_version, run_id, wrapper_pid, spawned_at}` and the `run_id` index entry `{artifact_format_version, run_id, job, run_number}` in the spool, each §3.2-canonical and liturgy-written; the supervisor creates a detached run's directory; SPAWN idempotency is directory-backed (§11a) and outlives `LIST` presence and supervisor restart; the `run_id` grammar is enforced at the wire |
-| `runner_adapters.py` FW | append-only `watch.jsonl`: a `start` line on dispatch, then one line per poll |
-| `runner_adapters.py` CMD / `runner_effects.py` | `run_id` is minted in `plan_effects` and carried on the SPAWN effect; the adapter reads it from the effect and does not mint it |
-| `concurrency-model.md` §5 | `run_id` is bound before the attempt (DL-96's deviation does not apply) |
+| `control-protocol.md` | **v3**: `baseline_id` names the period; the `seal` verb; `decision` in the subscribe stream; the gap marker; exact-retry expiry. The `host` cmd's `route` verb, the `routes` query and the `route:` namespace are specified in §2.2 and not built; `runner_admission.py` is where `Attempt.host` becomes `HostCommand \| RouteCommand` and `RuntimeState.revision()` gains the `route:` namespace |
+| `CLAUDE.md` | the read-first list that names this document |
+| `supervisor-protocol.md` §3, §5 | `receipt.json` `{artifact_format_version, run_id, spec_fingerprint, received_at}`, `reply.json` `{artifact_format_version, run_id, wrapper_pid, spawned_at}` and the `run_id` index entry `{artifact_format_version, run_id, job, run_number}` in the spool, each §3.2-canonical and liturgy-written; the supervisor creates a detached run's directory; SPAWN idempotency is directory-backed (§11a) and outlives `LIST` presence and supervisor restart; the `run_id` grammar is enforced at the wire |
 | `runner-design.md` §7 | record kinds; resume from a seal; the ladder re-drives a live wrapper under a terminal row, whatever the KILL effect's state (PR-33) |
-| `deployment-runbook.md` §6/§7 | seal→swap→open in place; latches cross a seal; an upgrade keeps state |
-| the withdrawn HA plan (DL-189) | its requirements from this model: ACQUIRE gains a lineage-head predicate, the store replaces the anchor, and routes are carried state. The requirements stand wherever a shared store is built |
-| `runner_ledger.py` | `LeaderLock` generalized to the anchor |
-| `capacity.py`, `oracle_state.py` | §5 |
-| `runner_supervisor.py` | completed-run tombstones (PR-36) |
-| `runner_history.py`, `cli_run.py`'s `journal` | period-aware |
-| `period.py` | `job_fingerprints`, §10.2's leaf test (DL-131); a pure analysis pass may not import a private name out of a runner module |
-| `protocol-evolution.md` | (DL-138) the compatibility matrix per protocol, the lifecycle by which a dialect enters service, the retirement gate, the pre-production reset clause, and the tombstone-registry rule |
-| `retention.py` | the `archive-inputs` class, the receipt, the permanent floors and the itemized eligibility (§12a, DL-144); `estate prune --archive-inputs` |
-| `period.py` | `ArchiveReceipt`, `seals/<period>.archive.json` and its readers (§12a) |
 | `deployment-runbook.md` §2a | the archive is an operator verb with an order in front of it: attest, prune tombstones, then archive; and it cannot be undone |
-| `citation-index.md` | the `PR-\d{2}[a-z]?` row, and a `PR-Q\d` row for §16's open questions (DL-135); the PR row states what a retired row cites (DL-138) |
-| `CLAUDE.md` | read-first list |
-| `estate.py`'s roll | (DL-358) PR-01's loser names the holder of the claim it met: a roll that meets another root's `claimed` head refuses with `claimed(claim_id, target_root)` |
+| `deployment-runbook.md` §6, §7 | seal, swap and open in place; latches cross a seal; an upgrade keeps state |
+| `protocol-evolution.md` | (DL-138) the compatibility matrix per protocol, the lifecycle by which a dialect enters service, the retirement gate, the pre-production reset clause, and the tombstone-registry rule |
+| `citation-index.md` | the `PR-\d{2}[a-z]?` row, with what a retired row cites, and the `PR-Q\d` row for §16's open questions (DL-135, DL-138) |
+| `runner_ledger.py` | `LeaderLock`, whose pattern the anchor lock uses (§1.3) |
+| `runner_effects.py`, `runner_adapters.py` | `plan_effects` mints `run_id` on the SPAWN effect, and the CMD adapter reads it from the effect and does not mint it; the FW adapter writes the append-only `watch.jsonl`: a `start` line on dispatch, then one line per poll (§3.5) |
+| `runner_supervisor.py` | completed-run tombstones (§11a, PR-36) |
+| `capacity.py`, `oracle_state.py` | §5 |
+| `runner_history.py`, `cli_run.py`'s `journal` | run history and replay across periods (§11) |
+| `period.py` | `job_fingerprints`, §10.2's leaf test (DL-131); a pure analysis pass may not import a private name out of a runner module; `ArchiveReceipt`, `seals/<period>.archive.json` and its readers (§12a) |
+| `retention.py` | the `archive-inputs` class, the receipt, the permanent floors and the itemized eligibility (§12a, DL-144); `estate prune --archive-inputs` |
+| `estate.py`'s roll | PR-01's loser names the holder of the claim it met: a roll that meets another root's `claimed` head refuses with `claimed(claim_id, target_root)` (DL-358) |
+| a shared store, if one is built | ACQUIRE gains a lineage-head predicate, the store replaces the anchor, and routes are carried state (§1.3, DL-189) |
 
 ## 16. Open questions
 
@@ -3157,17 +3165,15 @@ Where the period model lives outside this document:
   single-site until a store replaces the anchor. No plan cites it: the HA
   plan is withdrawn (DL-189).
 
-Closed, kept because the decision log and the code cite them:
+Settled, each with the rule that answers it:
 
 - **PR-Q1**: `retry_horizon_us` is a `RuntimeProfile` field, durable in the
   period manifest, so audit re-derives `forced_gate` under any later ambient
-  setting (PR-47e). The gate is soft.
+  setting (PR-47e). The gate is soft (§9).
 - **PR-Q2**: there is no size roll; to roll, seal (I1).
-- **PR-Q3**: closed by policy, not by deduction (DL-144). A seal-only
-  archive may stand in for pruned inputs under §12a's `archive-inputs`
-  class, with a durable receipt before any deletion, an itemized eligibility
-  list, three artifacts on a permanent floor, and readers that name the gap.
-  §11's "verified" is two named tiers, and an archived period stands at
-  *attestation-verified*. E20 (`docs/runner-design.md` §15) closes with it.
+- **PR-Q3**: a seal-only archive may stand in for pruned inputs under
+  §12a's `archive-inputs` class, by policy (DL-144). An archived period
+  stands at §11's *attestation-verified* tier. E20
+  (`docs/runner-design.md` §15) is the same question.
 - **PR-Q4**: audit runs the interpreter that produced the period, and old
   versions stay installable (§11).
