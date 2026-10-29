@@ -2235,7 +2235,8 @@ def _own_note(gone_pid):
 def test_a_shutdown_rerun_without_a_socket_reads_the_record(tmp_path, state):
     """No socket and a record: the record's operation decides, and only for the supervisor
     the start note names (DL-401). An exited supervisor whose record says completed, named
-    by a well-formed note, is 0. A missing, empty, partial or unparsable note is no
+    by a well-formed note, is 0, of this boot or an earlier one: a completed record is final
+    (DL-420). A missing, empty, partial or unparsable note is no
     evidence, and a note or pid record naming a later supervisor is one that ended outside
     maintenance: 4, never the old record's 0. So is anything the record cannot prove."""
     import subprocess
@@ -2270,13 +2271,56 @@ def test_a_shutdown_rerun_without_a_socket_reads_the_record(tmp_path, state):
         note.write_text(json.dumps({**later, "version": 2}))
     assert rs.read_maintenance_record(tmp_path)["future_field"] == "ignored"
     result = CliRunner().invoke(app, ["supervise", "shutdown", "--run-root", str(tmp_path)])
-    assert result.exit_code == (0 if state == "completed" else 4), result.output
-    if state == "completed":
+    final = state in ("completed", "later_boot")
+    assert result.exit_code == (0 if final else 4), result.output
+    if final:
         assert set(json.loads(result.output)) == set(record)
     if state.startswith("later_") and state != "later_boot":
         assert "ended outside maintenance: not a maintenance outcome" in result.output
     plain = CliRunner().invoke(app, ["supervise", "list", "--run-root", str(tmp_path)])
     assert plain.exit_code == 2 and "no supervisor at" in plain.output
+
+
+def test_a_record_of_another_boot_still_in_progress_is_no_outcome(tmp_path):
+    """DL-420: only a completed record outlives a reboot. One that still says admitted names
+    an operation the reboot cut short: 4, "names another boot"."""
+    import subprocess
+
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    record = _record(gone.pid, "ticks:1", "admitted")
+    record["boot_id"] = "another-boot"
+    (tmp_path / rs.MAINTENANCE_RECORD).write_text(json.dumps(record))
+    (tmp_path / "supervisor.lock").write_text(_own_note(gone.pid))
+    result = CliRunner().invoke(app, ["supervise", "shutdown", "--run-root", str(tmp_path)])
+    assert result.exit_code == 4, result.output
+    assert "maintenance.json names another boot" in result.output
+
+
+@pytest.mark.parametrize("unknown", ["record", "host"])
+def test_an_unknown_boot_proves_no_reboot_and_the_exit_decides(tmp_path, monkeypatch, unknown):
+    """DL-420: a completed record skips the exit check only when two known boot ids differ.
+    With either side unknown nothing is proved: the supervisor the record names is alive, so
+    the outcome cannot be observed, 4, never the reboot's 0."""
+    import subprocess
+
+    live = subprocess.Popen(["sleep", "60"])
+    try:
+        start = procid.proc_start_token(live.pid)
+        assert start is not None
+        record = _record(live.pid, start, "completed")
+        if unknown == "record":
+            record["boot_id"] = "unknown"
+        else:
+            monkeypatch.setattr(procid, "current_boot_id", lambda: "unknown")
+        (tmp_path / rs.MAINTENANCE_RECORD).write_text(json.dumps(record))
+        (tmp_path / "supervisor.lock").write_text(_own_note(live.pid))
+        result = CliRunner().invoke(app, ["supervise", "shutdown", "--run-root", str(tmp_path)])
+    finally:
+        live.kill()
+        live.wait()
+    assert result.exit_code == 4, result.output
+    assert f"the supervisor (pid {live.pid}) is alive" in result.output
 
 
 def test_an_interrupted_start_note_is_no_evidence(short_root, monkeypatch):

@@ -12,27 +12,32 @@ from pathlib import Path
 
 import typer
 
-from dsl41 import release, release_service
+from dsl41 import release
+from dsl41.release import Waits
 from dsl41.release_service import (
     APPLY,
     CMD_RESUME,
     CMD_STATUS,
+    EXIT_REFUSED,
     PREPARE,
     RESUME,
     ROLLBACK,
     SERVICE,
     STATUS,
+    say,
+    service,
 )
 
+#: each bound's default is `release.Waits`'s, the one source (DL-420)
 _DRAIN = typer.Option(
-    600.0,
+    Waits.drain_s,
     "--drain-timeout",
     metavar="SECONDS",
     help="How long to wait for running jobs to finish. When it runs out, nothing is sealed,"
     " this apply's holds are released, and the verb exits 2.",
 )
 _HORIZON = typer.Option(
-    300.0,
+    Waits.horizon_s,
     "--horizon-timeout",
     metavar="SECONDS",
     help="How long to wait out the retry horizon of the last operator request, this apply's"
@@ -40,7 +45,7 @@ _HORIZON = typer.Option(
     " runs out, nothing is sealed and the verb exits 2.",
 )
 _OPEN = typer.Option(
-    90.0,
+    Waits.open_s,
     "--open-timeout",
     metavar="SECONDS",
     help="How long to wait for the sealed engine to exit and the new one to answer. When it"
@@ -74,7 +79,7 @@ def _run(action: Callable[[], int], *, records: bool = False) -> None:
     raise typer.Exit(release.main(action, records=records))
 
 
-def estate_prepare(
+def release_prepare(
     name: str = typer.Argument(..., help="The release's name."),
     source_dir: Path = typer.Argument(
         None,
@@ -104,17 +109,17 @@ def estate_prepare(
     """
     # the refusal is the verb's own sentence, the same on every terminal (DL-412)
     if requalify and source_dir is not None:
-        release_service.say("--requalify takes no SOURCE_DIR.")
-        raise typer.Exit(release_service.EXIT_REFUSED)
+        say("--requalify takes no SOURCE_DIR.")
+        raise typer.Exit(EXIT_REFUSED)
     if not requalify and source_dir is None:
-        release_service.say("SOURCE_DIR is required unless --requalify is given.")
-        raise typer.Exit(release_service.EXIT_REFUSED)
+        say("SOURCE_DIR is required unless --requalify is given.")
+        raise typer.Exit(EXIT_REFUSED)
     if requalify:
         _run(lambda: release.requalify(name))
     _run(lambda: release.prepare(name, source_dir))
 
 
-def estate_apply(
+def release_apply(
     name: str = typer.Argument(..., help="The prepared release to apply."),
     drain_timeout: float = _DRAIN,
     horizon_timeout: float = _HORIZON,
@@ -127,14 +132,14 @@ def estate_apply(
     the new period, and releases its own holds. It never releases a hold it
     did not apply. Run it as the deployment identity.
     """
-    waits = release.Waits(drain_timeout, horizon_timeout, open_timeout)
+    waits = Waits(drain_timeout, horizon_timeout, open_timeout)
     _run(lambda: release.apply(name, waits), records=True)
 
 
-_with_codes(estate_apply)
+_with_codes(release_apply)
 
 
-def estate_resume(
+def release_resume(
     drain_timeout: float = _DRAIN,
     horizon_timeout: float = _HORIZON,
     open_timeout: float = _OPEN,
@@ -145,14 +150,14 @@ def estate_resume(
     request id is read in the estate first. The status verb says what it
     will do.
     """
-    waits = release.Waits(drain_timeout, horizon_timeout, open_timeout)
+    waits = Waits(drain_timeout, horizon_timeout, open_timeout)
     _run(lambda: release.resume(waits), records=True)
 
 
-_with_codes(estate_resume)
+_with_codes(release_resume)
 
 
-def estate_rollback(
+def release_rollback(
     drain_timeout: float = _DRAIN,
     horizon_timeout: float = _HORIZON,
     open_timeout: float = _OPEN,
@@ -166,14 +171,14 @@ def estate_rollback(
     release it replaced under them; the holds are released when that rollback
     ends.
     """
-    waits = release.Waits(drain_timeout, horizon_timeout, open_timeout)
+    waits = Waits(drain_timeout, horizon_timeout, open_timeout)
     _run(lambda: release.rollback(waits), records=True)
 
 
-_with_codes(estate_rollback)
+_with_codes(release_rollback)
 
 
-def estate_status(
+def release_status(
     output: StatusFormat = typer.Option(
         StatusFormat.text, "--format", metavar="FORMAT", help="text or json."
     ),
@@ -189,22 +194,22 @@ def estate_status(
     _run(lambda: release.status(output.value))
 
 
-def estate_service(
+def release_service(
     words: list[str] = typer.Argument(None, metavar="ACTION WORD..."),
 ) -> None:
     """The service account's side of the release verbs, run through sudo.
 
     Exit codes: 0 done; 2 refused; a seal exits with the seal's own code.
     """
-    _run(lambda: release_service.service(list(words or [])))
+    _run(lambda: service(list(words or [])))
 
 
 #: the verbs in `--help` order, each under its name, and whether it is hidden (DL-412)
 COMMANDS = (
-    (PREPARE, estate_prepare, False),
-    (APPLY, estate_apply, False),
-    (RESUME, estate_resume, False),
-    (ROLLBACK, estate_rollback, False),
-    (STATUS, estate_status, False),
-    (SERVICE, estate_service, True),
+    (PREPARE, release_prepare, False),
+    (APPLY, release_apply, False),
+    (RESUME, release_resume, False),
+    (ROLLBACK, release_rollback, False),
+    (STATUS, release_status, False),
+    (SERVICE, release_service, True),
 )

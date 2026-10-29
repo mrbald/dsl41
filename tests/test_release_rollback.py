@@ -43,7 +43,7 @@ def test_rollback_takes_over_an_apply_whose_check_failed(site: Site) -> None:
     (path,) = (site.releases / "v2" / ".release").glob("verify-failed-*.json")
     assert path.name == f"verify-failed-{record['request_id']}.json"
     failed = json.loads(path.read_text())
-    assert failed["outcome"] == "verify_failed" and failed["verify_failed"] is True
+    assert failed["outcome"] == "verify_failed" and "verify_failed" not in failed
     assert failed["problems"] == record["problems"] and failed["released"] == []
     assert not list((site.releases / "v2" / ".release").glob("rolled-back-*"))
     assert not (site.releases / "v2" / ".release" / "latest").exists()
@@ -193,7 +193,7 @@ def test_a_carried_ghost_hold_is_settled_again_by_the_rollback(site: Site, resto
 
 def test_rollback_takes_over_an_apply_stopped_after_its_check(site: Site) -> None:
     """DL-412: an apply stopped while releasing its holds, its check passed, is taken over the
-    same way; its receipt is taken-over-<id>, with verify_failed false."""
+    same way; its receipt is taken-over-<id>, its outcome taken_over (DL-420)."""
     site.prepared("v1")
     assert site.run("apply", "v1").returncode == 0
     site.prepared("v2")
@@ -204,7 +204,7 @@ def test_rollback_takes_over_an_apply_stopped_after_its_check(site: Site) -> Non
     assert back.returncode == 0, back.stderr
     (path,) = (site.releases / "v2" / ".release").glob("taken-over-*.json")
     given_up = json.loads(path.read_text())
-    assert given_up["verify_failed"] is False and given_up["problems"] == []
+    assert "verify_failed" not in given_up and given_up["problems"] == []
     assert given_up["outcome"] == "taken_over" and given_up["released"] == ["NB_B"]
     assert site.active.read_text() == "v1\n" and site.record() is None
     # the take-off in flight is sent again under its id and answered from its decision
@@ -240,3 +240,45 @@ def test_rollback_applies_the_previous_release_and_keeps_every_receipt(site: Sit
     assert len(site.seals()) == 3
     # v1's latest receipt names v2 now, so a second rollback goes forward again
     assert site.run("rollback").returncode == 0 and site.active.read_text() == "v2\n"
+
+
+def test_status_names_no_release_for_a_hold_the_rollback_owns_mid_drain(site: Site) -> None:
+    """DL-412, DL-420: an apply stopped at `verified` kept NB_B (its release was rejected three
+    times). The rollback takes it over and owns NB_B. While that rollback drains, `status`
+    prints the taken-over receipt but no OFF_HOLD command for NB_B: the rollback settles it."""
+    import signal
+    import subprocess
+    import time
+
+    site.prepared("v1")
+    assert site.run("apply", "v1").returncode == 0
+    site.prepared("v2")
+    site.edit(release_outcomes={"NB_B": [3, 3, 3], "NB_FREE_C": [4]})
+    assert site.run("apply", "v2").returncode == 3
+    record = site.record()
+    assert record is not None and record["step"] == "verified"
+    (kept,) = [hold for hold in record["holds"] if hold["job"] == "NB_B"]
+    assert kept["state"] == "kept" and kept["kept_because"] == "rejected"
+    state = site.state()
+    state["jobs"]["NB_IDLE_C"]["status"] = "RUNNING"
+    site.save(state)
+    rollback = subprocess.Popen(
+        site.command("rollback"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=site.environ(),
+    )
+    try:
+        deadline = time.monotonic() + 120
+        while (site.record() or {}).get("step") != "held":
+            assert rollback.poll() is None and time.monotonic() < deadline
+            time.sleep(0.1)
+        shown = site.run("status").stdout
+    finally:
+        rollback.send_signal(signal.SIGINT)
+        _, stderr = rollback.communicate(timeout=120)
+    assert rollback.returncode == 3, stderr
+    assert "  holds taken by this apply: NB_B" in shown
+    assert "last apply: v2 over v1" in shown and "a rollback took it over" in shown
+    assert "NB_B stays on hold" not in shown and "OFF_HOLD -J NB_B" not in shown

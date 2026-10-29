@@ -315,7 +315,7 @@ def _leaf_status(
     return "RUNNING", None
 
 
-def _attempt_index(record: Mapping[str, Any]) -> int | None:
+def attempt_index(record: Mapping[str, Any]) -> int | None:
     """A record's attempt number, read exactly: `seq` on an input, `index` on the `decision` that
     answers it (runner-design ss7). None when the field is absent or not an int (`true` is not
     1, as `period.check_segment_record` applies).
@@ -346,7 +346,7 @@ def _rejected_attempts(records: list[dict[str, Any]]) -> set[int]:
     for record in records:
         if record.get("rec") != "decision" or record.get("decision") != "rejected":
             continue
-        index = _attempt_index(record)
+        index = attempt_index(record)
         if index is not None:
             rejected.add(index)
     return rejected
@@ -362,7 +362,7 @@ def _decided_attempts(records: list[dict[str, Any]]) -> set[int]:
     for record in records:
         if record.get("rec") != "decision":
             continue
-        index = _attempt_index(record)
+        index = attempt_index(record)
         if index is not None:
             decided.add(index)
     return decided
@@ -415,7 +415,7 @@ def _index_leaves(
             dispatch_by_key[key] = record
             last_run_number[d_job] = d_run
         elif rec == "input" and record.get("kind") == "STATUS":
-            index = _attempt_index(record)
+            index = attempt_index(record)
             if index in rejected:
                 # the ss4 gate rejected this one, durably or on the replay's re-run (DL-156), and
                 # the oracle never saw it, so neither does the row: a late `exit 0` the engine

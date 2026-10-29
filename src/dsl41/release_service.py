@@ -19,12 +19,14 @@ deployment identity's apply record and lock live in .release beside ACTIVE. Ever
 refuses a release with an entry anyone else could change, and the real-path and no-follow
 checks on each input stay as a second line.
 
-The service side's reads of the run root are the deployment runbook's Day 2 reads (ss6a): the
-seal record at the end of a WAL segment and its sidecar, and the inputs that can move a job's
-hold, with their decisions.
+The service side reads the run root through the readers the engine's resume and `dsl41
+journal` use (DL-139, DL-420): the lineage proof for a committed seal, the opening proof for
+the period it opened, the period manifest and its bundle, and the WAL for the inputs that can
+move a job's hold, with their decisions. Evidence it cannot read stops the verb; it is never
+read as absent.
 
-`manifest_catalog` and `catalog_changes` compare two releases for the apply, and two
-manifests for `estate diff` (DL-413).
+The apply compares two releases through `estate_manifest.manifest_catalog` and
+`classify.catalog_changes`, as `estate diff` does (DL-413).
 """
 
 from __future__ import annotations
@@ -40,17 +42,15 @@ import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
+from dsl41.runner_procid import durable_write, fsync_dir
 
-    from dsl41.classify import Baseline
-    from dsl41.ir import CatalogIR
+if TYPE_CHECKING:
+    from dsl41.estate_manifest import EstateInputs
 
 #: The release verbs' command group and names. Every operator line and the registration in
 #: cli.py are built from these, so a rename is one edit here (DL-412).
@@ -81,9 +81,6 @@ REQUEST_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
 #: the launcher's SERVICE_ACCOUNT, a login name, and ENGINE_UNIT, a service unit's name
 ACCOUNT = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]{0,31}")
 UNIT = re.compile(r"[A-Za-z0-9:_.@-]{1,200}\.service")
-SEGMENT = "[0-9]" * 6 + ".jsonl"
-#: the seal arguments whose value is a file the manifest names (DL-407)
-INPUT_FLAGS = ("--next", "-p", "--next-timezone-map")
 #: the request kinds that can move a job's hold: the two hold verbs, FORCE_STARTJOB, which
 #: clears it, and ON_NOEXEC, which supersedes it (job chart rows job.204 to job.207)
 HOLD_KINDS = ("ON_HOLD", "OFF_HOLD", "FORCE_STARTJOB", "ON_NOEXEC")
@@ -398,25 +395,8 @@ def write_json(path: Path, value: dict[str, Any]) -> None:
 
 
 def write_text(path: Path, text: str) -> None:
-    """Write `text` beside `path` and rename it over, both durable."""
-    temp = path.with_name(f".{path.name}.{os.getpid()}")
-    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
-    try:
-        os.write(fd, text.encode())
-        os.fchmod(fd, 0o644)
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    os.replace(temp, path)
-    fsync_dir(path.parent)
-
-
-def fsync_dir(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
+    """Write `text` over `path` by the durability liturgy, mode 0644 (DL-41a, DL-151)."""
+    durable_write(str(path), text.encode(), mode=0o644)
 
 
 def file_digests(path: Path) -> dict[str, str]:
@@ -451,19 +431,15 @@ def read_input(release: Path, file: Path) -> bytes:
     return b"".join(chunks)
 
 
-def release_inputs(cfg: Config, path: Path) -> list[Path]:
-    """Every file the release's manifest names for this host, the manifest included, each
-    read once as a release input (DL-412)."""
-    from dsl41.estate_manifest import ArgsFor
-
-    argv = manifest_args(cfg, path, ArgsFor.seal)
-    named = [argv[i + 1] for i, word in enumerate(argv) if word in INPUT_FLAGS]
-    files = [path / "estate.toml", *(Path(word) for word in named)]
-    for file in files:
+def release_inputs(cfg: Config, path: Path) -> EstateInputs:
+    """The estate the release's manifest declares for this host, resolved once, after every
+    file it names, the manifest included, is read once as a release input (DL-412, DL-420)."""
+    inputs = manifest_inputs(cfg, path)
+    for file in [path / "estate.toml", *(Path(name) for name in inputs.inputs())]:
         if ".release" in file.relative_to(path).parts:
             raise Stop(EXIT_REFUSED, f"{file} is in .release, which holds no release input.")
         read_input(path, file)
-    return files
+    return inputs
 
 
 def changed_files(path: Path, prepared: dict[str, Any]) -> list[str]:
@@ -584,104 +560,14 @@ def manifest_args(cfg: Config, path: Path, verb: Any) -> list[str]:
         raise Stop(EXIT_REFUSED, f"{exc}.") from exc
 
 
-def manifest_catalog(
-    root: Path,
-    argv: list[str],
-    site: list[Path],
-    read: Callable[[Path], bytes] | None = None,
-    *,
-    permit_unknown: bool = False,
-) -> CatalogIR:
-    """The catalog that a manifest's viz arguments ARGV declare under ROOT, its own layers
-    first and the SITE layers after them. With READ, the loader reads a private copy of the
-    files and layers, each through READ; the SITE layers are read in place. A load that fails
-    exits as `load_catalog_or_exit_2` does. `service_changes` and `estate diff` load through
-    this one function (DL-412, DL-413)."""
-    from dsl41.cli_common import load_catalog_or_exit_2
+def manifest_inputs(cfg: Config, path: Path) -> EstateInputs:
+    """The estate the release's manifest declares under the launcher's ENVIRONMENT."""
+    from dsl41.estate_manifest import ManifestError, resolve_manifest
 
-    files = [Path(word) for word in argv if not word.startswith("-")]
-    layers = [Path(argv[i + 1]) for i, word in enumerate(argv) if word == "-p"]
-    files = [file for file in files if file not in layers]
-    if read is None:
-        return load_catalog_or_exit_2(files, permit_unknown, [*layers, *site])
-    with tempfile.TemporaryDirectory(prefix="dsl41-release-") as scratch:
-
-        def copied(file: Path) -> Path:
-            target = Path(scratch) / file.relative_to(root)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(read(file))
-            return target
-
-        loaded = [copied(file) for file in files]
-        stacked = [copied(layer) for layer in layers]
-        return load_catalog_or_exit_2(loaded, permit_unknown, [*stacked, *site])
-
-
-#: The seal's node prefixes (classify, period-model ss10.2) and the kind each is reported as.
-NODE_KINDS = {
-    "job:": "jobs",
-    "box:": "boxes",
-    "calendar:": "calendars",
-    "cycle:": "cycles",
-    "resource:": "resources",
-    "machine:": "machines",
-    "global:": "globals",
-    "xinst:": "external_instances",
-}
-
-
-def catalog_changes(old: Baseline, new: Baseline) -> dict[str, Any]:
-    """What NEW adds, removes and changes against OLD, by the seal's own test on each node,
-    `classify.node_values` (period-model ss10.2): a job by its fingerprint, a machine by the
-    fields resolution reads, a calendar by its date set, and so on. Under each changed calendar
-    and resource, `referenced_by` names the jobs that name it on either side. The profile
-    holds the base zone, each timezone alias and each switch that moved. The dependency
-    closure and the live classification stay the seal's (DL-413)."""
-    from dsl41.classify import PROFILE, SWITCH, ClassificationGraph, node_values
-
-    was, now = node_values(old), node_values(new)
-    result: dict[str, Any] = {
-        kind: {"added": [], "removed": [], "changed": []} for kind in NODE_KINDS.values()
-    }
-    for node in sorted(set(was) | set(now)):
-        prefix, _, name = node.partition(":")
-        kind = NODE_KINDS.get(prefix + ":")
-        if kind is not None and was.get(node) != now.get(node):
-            group = "added" if node not in was else "removed" if node not in now else "changed"
-            result[kind][group].append(name)
-    graph = ClassificationGraph(old, new)
-    for kind, prefix in (("calendars", "calendar:"), ("resources", "resource:")):
-        result[kind]["referenced_by"] = {
-            name: sorted(
-                referrer.partition(":")[2]
-                for referrer in graph.referrers(prefix + name)
-                if referrer.startswith("job:")
-            )
-            for name in result[kind]["changed"]
-        }
-    profile: dict[str, Any] = {}
-    zone = PROFILE + "default_tz"
-    if was[zone] != now[zone]:
-        profile["timezone"] = {"old": was[zone], "new": now[zone]}
-    # the map is the alias table as parsed, so a comment or a reordering is not a change
-    aliases_was = dict(was[PROFILE + "tz_aliases"])
-    aliases_now = dict(now[PROFILE + "tz_aliases"])
-    aliases = {
-        alias: {"old": aliases_was.get(alias), "new": aliases_now.get(alias)}
-        for alias in sorted(aliases_was.keys() | aliases_now.keys())
-        if aliases_was.get(alias) != aliases_now.get(alias)
-    }
-    if aliases:
-        profile["timezone_map"] = aliases
-    switches = {
-        node.removeprefix(SWITCH): {"old": was[node], "new": now[node]}
-        for node in sorted(was)
-        if node.startswith(SWITCH) and was[node] != now[node]
-    }
-    if switches:
-        profile["semantics"] = switches
-    result["profile"] = profile
-    return result
+    try:
+        return resolve_manifest(path / "estate.toml", cfg.environment)
+    except ManifestError as exc:
+        raise Stop(EXIT_REFUSED, f"{exc}.") from exc
 
 
 def service_changes(cfg: Config, before: str, after: str) -> dict[str, Any]:
@@ -689,15 +575,14 @@ def service_changes(cfg: Config, before: str, after: str) -> dict[str, Any]:
     leaf test, a fingerprint of each resolved definition (period-model ss10.2)."""
     import typer
 
-    from dsl41.classify import Baseline
-    from dsl41.estate_manifest import ArgsFor
+    from dsl41.classify import Baseline, catalog_changes
+    from dsl41.estate_manifest import manifest_catalog
 
     catalogs = []
     for name in (before, after):
         path = release_dir(cfg, name)
         require_sealed(cfg, name, path)
-        release_inputs(cfg, path)
-        argv = manifest_args(cfg, path, ArgsFor.viz)
+        inputs = release_inputs(cfg, path)
 
         def read(file: Path, path: Path = path) -> bytes:
             return read_input(path, file)
@@ -705,7 +590,7 @@ def service_changes(cfg: Config, before: str, after: str) -> dict[str, Any]:
         # the loader reads from a private copy of the inputs, each read as a release input, so
         # a link planted after the check reads nothing outside the release (DL-412)
         try:
-            catalogs.append(manifest_catalog(path, argv, [Path(cfg.properties)], read))
+            catalogs.append(manifest_catalog(inputs, [Path(cfg.properties)], read))
         except typer.Exit:
             raise Stop(EXIT_STOPPED, f"{name} does not load; the error is above.") from None
     old, new = catalogs
@@ -713,105 +598,138 @@ def service_changes(cfg: Config, before: str, after: str) -> dict[str, Any]:
     return {"changed": jobs["changed"], "removed": jobs["removed"]}
 
 
-def last_record(segment: Path) -> dict[str, Any] | None:
-    """The last whole record of a WAL segment; a torn final append is no record."""
-    with segment.open("rb") as stream:
-        stream.seek(max(segment.stat().st_size - 65536, 0))
-        lines = [line for line in stream.read().split(b"\n") if line]
-    for line in reversed(lines[-2:]):
-        try:
-            record = json.loads(line)
-        except ValueError:
-            continue
-        return record if isinstance(record, dict) else None
-    return None
-
-
 def committed(cfg: Config, request_id: str) -> dict[str, Any]:
-    """Whether the seal REQUEST_ID committed, read as deployment-runbook ss6a Day 2 reads
-    it: a `seal` record at the end of a WAL segment, the commit point, and its sidecar
-    seals/<N>.json (period-model ss2.2). Never ACTIVE."""
-    for segment in sorted((cfg.run_root / "wal").glob(SEGMENT))[-2:]:
-        record = last_record(segment)
-        if record is None or record.get("rec") != "seal":
-            continue
-        if record.get("request_id") != request_id:
-            continue
-        sidecar = cfg.run_root / "seals" / f"{segment.stem}.json"
-        seal = json.loads(sidecar.read_text())
-        nxt = seal["next_period"]
-        return {
-            "committed": True,
-            "seal": str(sidecar),
-            "period": int(record["period_id"]),
-            "epoch": int(seal["epoch"]),
-            "actor": record.get("claimed_actor"),
-            "next_period": int(nxt["period_id"]),
-            "next_baseline": nxt["baseline_id"],
-            "source_bundle_hash": nxt["source_bundle_hash"],
-        }
-    return {"committed": False}
+    """Whether the seal REQUEST_ID committed, by the lineage proof the engine's resume and
+    `dsl41 seal` read, `cli_common.lineage_of`: the `seal` record or the opening's link, each
+    checked against the sidecar's digest (period-model ss2.2, ss11). Never ACTIVE. A lineage
+    that cannot be read stops the verb: unreadable evidence is not absence (DL-420)."""
+    from dsl41.cli_common import lineage_of
+    from dsl41.period import seal_path
+
+    lineage = lineage_of(cfg.run_root)
+    if lineage is None:
+        raise Stop(
+            EXIT_STOPPED,
+            f"the lineage of {cfg.run_root} cannot be read, so whether the seal under request id"
+            f" {request_id} committed is unknown.",
+        )
+    seal = lineage.seal
+    if seal is None or seal.boundary_request.request_id != request_id:
+        return {"committed": False}
+    return {
+        "committed": True,
+        "seal": str(seal_path(cfg.run_root, seal.period_id)),
+        "period": seal.period_id,
+        "epoch": seal.epoch,
+        "actor": seal.boundary_request.claimed_actor,
+        "next_period": seal.next_period.period_id,
+        "next_baseline": seal.next_period.baseline_id,
+        "source_bundle_hash": seal.next_period.source_bundle_hash,
+    }
 
 
 def service_pins(cfg: Config, request_id: str) -> dict[str, Any]:
-    """What the opener wrote for the period the seal REQUEST_ID committed: the segment's
-    opening record and leader records, the period's manifest, and the paths its bundle was
-    read from."""
+    """What the opener wrote for the period the seal REQUEST_ID committed, read by the
+    package's readers: whether its segment opens that seal (`runner_history.prove_opening`;
+    the lineage proof already tied its link to the seal), its leader epochs, the bundle its
+    manifest pins (`period.read_period_manifest`) and the paths that bundle was read from
+    (`period.bundle_sources`). A manifest or bundle that cannot be read is named under
+    `unreadable`, apart from one that is absent; a segment that cannot be read stops the verb,
+    exit 3 (DL-420)."""
+    from dsl41.period import bundle_sources, read_period_manifest, wal_path
+    from dsl41.runner_clock import EngineError
+    from dsl41.runner_history import RunHistoryError, prove_opening
+    from dsl41.runner_journal import read_journal
+
     seal = committed(cfg, request_id)
     if not seal["committed"]:
         raise Stop(
             EXIT_STOPPED, f"no committed seal in {cfg.run_root} has request id {request_id}."
         )
-    period = seal["next_period"]
-    segment = cfg.run_root / "wal" / f"{period:06d}.jsonl"
-    opening, epochs = None, []
-    if segment.is_file():
-        for line in segment.read_bytes().split(b"\n"):
-            try:
-                record = json.loads(line)
-            except ValueError:
-                continue
-            if record.get("rec") == "segment" and opening is None:
-                opening = record
-            if record.get("rec") == "leader":
-                epochs.append(int(record["epoch"]))
-    manifest = cfg.run_root / "periods" / f"{period:06d}" / "manifest.json"
-    address = json.loads(manifest.read_text())["source_bundle_hash"]
-    bundle = cfg.run_root / "catalogs" / str(address).split(":")[-1] / "sources.json"
-    return seal | {
-        "segment": opening,
-        "leader_epoch": max(epochs, default=None),
-        "manifest_source_bundle_hash": address,
-        "sources": [entry["path"] for entry in json.loads(bundle.read_text())["sources"]],
+    root, period = cfg.run_root, seal["next_period"]
+    pins: dict[str, Any] = seal | {
+        "opened": False,
+        "opening_refusal": None,
+        "leader_epoch": None,
+        "manifest_source_bundle_hash": None,
+        "sources": [],
+        "unreadable": [],
     }
+    segment = wal_path(root, period)
+    try:
+        records = read_journal(segment)
+    except FileNotFoundError:
+        records = []
+    except (OSError, EngineError) as exc:
+        raise Stop(EXIT_STOPPED, f"{segment} cannot be read: {exc}.") from exc
+    if records:
+        pins["opened"] = True
+        try:
+            prove_opening(root, records[0])
+        except RunHistoryError as exc:
+            pins["opening_refusal"] = str(exc)
+        epochs = [int(record["epoch"]) for record in records if record.get("rec") == "leader"]
+        pins["leader_epoch"] = max(epochs, default=None)
+    try:
+        manifest = read_period_manifest(root, period)
+    except EngineError as exc:
+        manifest = None
+        pins["unreadable"].append(f"period {period}'s manifest cannot be read: {exc}")
+    if manifest is not None:
+        pins["manifest_source_bundle_hash"] = manifest.source_bundle_hash
+        try:
+            sources = bundle_sources(root, manifest.source_bundle_hash)
+        except EngineError as exc:
+            sources = []
+            pins["unreadable"].append(f"period {period}'s bundle cannot be read: {exc}")
+        pins["sources"] = [source.path for source in sources]
+    return pins
 
 
 def hold_history(cfg: Config, job: str) -> dict[str, Any]:
-    """The requests that can move JOB's hold, in the run root's log order across the last
-    three WAL segments: each `input` of a kind in HOLD_KINDS that names the job, `applied`
-    with the revision its `decision` gave the job, or `undecided` while no decision follows
-    it, since recovery may still apply it (period-model ss2.3). A rejected one is left
-    out."""
-    inputs: list[dict[str, Any]] = []
-    applied: dict[tuple[str, int], Any] = {}
-    decided: set[tuple[str, int]] = set()
-    for segment in sorted((cfg.run_root / "wal").glob(SEGMENT))[-3:]:
-        for line in segment.read_bytes().split(b"\n"):
-            try:
-                record = json.loads(line)
-            except ValueError:
-                continue
+    """The requests that can move JOB's hold, in the run root's log order across its last
+    three WAL segments, read by `runner_journal.read_journal`: each `input` of a kind in
+    HOLD_KINDS that names the job, `applied` with the revision its `decision` gave the job, or
+    `undecided` while no decision follows it, since recovery may still apply it (period-model
+    ss2.3). An input and its decision join on `runner_history.attempt_index`. A rejected one is
+    left out. A segment that cannot be read, or an input or decision without its attempt
+    number, stops the verb (DL-420)."""
+    from dsl41.period import wal_path, wal_segments
+    from dsl41.runner_clock import EngineError
+    from dsl41.runner_history import attempt_index
+    from dsl41.runner_journal import read_journal
+
+    try:
+        logs = [
+            (number, read_journal(wal_path(cfg.run_root, number)))
+            for number in wal_segments(cfg.run_root)[-3:]
+        ]
+    except (OSError, EngineError) as exc:
+        raise Stop(EXIT_STOPPED, f"the log of {cfg.run_root} cannot be read: {exc}.") from exc
+    inputs: list[tuple[tuple[int, int | None], dict[str, Any]]] = []
+    applied: dict[tuple[int, int | None], Any] = {}
+    decided: set[tuple[int, int | None]] = set()
+    for number, records in logs:
+        for position, record in enumerate(records, 1):
+            key = (number, attempt_index(record))
+            if key[1] is None and record.get("rec") in ("input", "decision"):
+                # an attempt number is the join's key, so a record without one is unreadable
+                # evidence, never a key (DL-420)
+                raise Stop(
+                    EXIT_STOPPED,
+                    f"{wal_path(cfg.run_root, number)} line {position}: an {record['rec']}"
+                    " record without its attempt number, so the requests that moved the hold"
+                    f" of {job} cannot be read.",
+                )
             if record.get("rec") == "input" and (record.get("payload") or {}).get("job") == job:
                 if record.get("kind") in HOLD_KINDS:
-                    inputs.append(record | {"segment": segment.name})
+                    inputs.append((key, record))
             if record.get("rec") == "decision":
-                decided.add((segment.name, int(record["index"])))
+                decided.add(key)
                 if record.get("decision") == "applied":
-                    revisions = record.get("revisions") or {}
-                    applied[(segment.name, int(record["index"]))] = revisions.get(f"job:{job}")
+                    applied[key] = (record.get("revisions") or {}).get(f"job:{job}")
     changes = []
-    for record in inputs:
-        key = (record["segment"], int(record["seq"]))
+    for key, record in inputs:
         if key in decided and key not in applied:
             continue
         change = {"request_id": record.get("request_id"), "kind": record["kind"]}
@@ -1021,15 +939,7 @@ def write_in_release(cfg: Config, name: str, file: str, text: str) -> None:
     try:
         if os.fstat(fd).st_uid != os.geteuid():
             raise Stop(EXIT_REFUSED, f"{path}/.release is not the service account's.")
-        temp = f".{file}.{os.getpid()}"
-        out = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=fd)
-        try:
-            os.write(out, text.encode())
-            os.fsync(out)
-        finally:
-            os.close(out)
-        os.rename(temp, file, src_dir_fd=fd, dst_dir_fd=fd)
-        os.fsync(fd)
+        durable_write(file, text.encode(), mode=0o644, dir_fd=fd)
     finally:
         os.close(fd)
 
@@ -1143,8 +1053,15 @@ def service_requalify(cfg: Config, name: str) -> None:
     write_prepared(cfg, name, earlier.get("source") if earlier else None, check)
 
 
-#: the receipts the service side writes for the deployment identity, by kind (DL-412)
-RECEIPT_KINDS = ("applied", "refused", "verify-failed", "taken-over")
+#: Each receipt a finished apply leaves, by kind, with the outcome its body records. The
+#: service side writes it as `KIND-ID.json`, so the kind is the file's prefix (DL-412).
+RECEIPT_OUTCOMES = {
+    "applied": "applied",
+    "refused": "refused",
+    "verify-failed": "verify_failed",
+    "taken-over": "taken_over",
+}
+RECEIPT_KINDS = tuple(RECEIPT_OUTCOMES)
 
 
 def service_receipt(cfg: Config, name: str, kind: str, receipt_id: str) -> None:

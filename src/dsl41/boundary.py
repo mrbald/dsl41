@@ -46,7 +46,7 @@ import uuid
 
 from collections.abc import Callable, Hashable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Final, Literal, TypeVar
 
@@ -1820,8 +1820,44 @@ def externally_requested_attempts(records: Sequence[Mapping[str, Any]]) -> list[
     ]
 
 
+class RetryHorizonRefused(EngineError):
+    """ss9's gate refused, code `seal_retry_horizon`. `left_us` is the time left until the
+    horizon ends, at the refusal: the live answer and the offline seal's answer line carry it
+    under FIELD, the wire name's one spelling, so a client reads the wait from the field and
+    never from the prose (control-protocol ss3, DL-420)."""
+
+    FIELD = "retry_horizon_left_us"
+
+    def __init__(self, message: str, *, left_us: int) -> None:
+        super().__init__(message, code="seal_retry_horizon")
+        self.left_us = left_us
+
+    def answer(self) -> dict[str, Any]:
+        """The refusal as the control answer spells it, the field included."""
+        return {"ok": False, "code": self.code, "error": str(self), "refused": True} | {
+            self.FIELD: self.left_us
+        }
+
+
+def retry_horizon_end(records: Sequence[Mapping[str, Any]], horizon_us: int) -> datetime | None:
+    """The instant ss9's retry horizon ends: the last externally requested attempt with a
+    durable decision, plus `horizon_us`; None when there is none (age = infinity). The one
+    computation the gate and `estate quiesce` read; the release verbs read the gate's refusal
+    (DL-420). The journal's `at` is naive UTC, as `Host.now` is (runner_clock)."""
+    attempts = externally_requested_attempts(records)
+    if not attempts:
+        return None
+    last = max(datetime.fromisoformat(str(attempt["at"])) for attempt in attempts)
+    return last + timedelta(microseconds=horizon_us)
+
+
 def retry_horizon_gate(
-    records: Sequence[Mapping[str, Any]], *, horizon_us: int, at: datetime, force_seal: bool
+    records: Sequence[Mapping[str, Any]],
+    *,
+    horizon_us: int,
+    at: datetime,
+    force_seal: bool,
+    now: datetime | None = None,
 ) -> ForcedGate | None:
     """ss9's soft gate, and ss3.1's truth table for it.
 
@@ -1831,21 +1867,20 @@ def retry_horizon_gate(
     refuses and `force_seal: true` commits with the gate's output recorded.
 
     The caller reads the horizon from the closing period's committed manifest (PR-47e); the
-    staged C2 profile has no say."""
-    attempts = externally_requested_attempts(records)
-    if not attempts:
+    staged C2 profile has no say. The decision is taken at AT, the cutoff; a refusal's time
+    left is measured at NOW, the engine's clock as it refuses (AT when not given), and is
+    never below zero (DL-420)."""
+    end = retry_horizon_end(records, horizon_us)
+    if end is None or at >= end:
         return None
-    last = max(datetime.fromisoformat(str(attempt["at"])) for attempt in attempts)
-    observed_age_us = round((at - last).total_seconds() * 1_000_000)
-    if observed_age_us >= horizon_us:
-        return None
+    observed_age_us = horizon_us + (at - end) // timedelta(microseconds=1)
     if not force_seal:
-        raise EngineError(
+        raise RetryHorizonRefused(
             f"the last externally requested attempt was {observed_age_us / 1_000_000:.3f}s ago"
             f" and the closing period's retry_horizon_us is {horizon_us}: a retry composed"
             " under this baseline can no longer be answered after the boundary."
             " Wait it out, or seal with --force-seal (period-model ss9)",
-            code="seal_retry_horizon",
+            left_us=max((end - (now or at)) // timedelta(microseconds=1), 0),
         )
     return ForcedGate(
         gate="retry_horizon", horizon_us=horizon_us, observed_age_us=max(observed_age_us, 0)

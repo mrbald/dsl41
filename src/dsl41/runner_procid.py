@@ -346,12 +346,13 @@ def mkdir_durable(path: str) -> None:
         _sync(os.path.dirname(probe) or ".")
 
 
-def fsync_dir(path: "str | os.PathLike[str]") -> None:
-    """Fsync a directory so a create, rename or unlink survives power loss.
+def fsync_dir(path: "str | os.PathLike[str]", *, nofollow: bool = False) -> None:
+    """Fsync a directory so a create, rename or unlink survives power loss; with `nofollow`,
+    a symlink or a non-directory at PATH refuses (O_NOFOLLOW | O_DIRECTORY).
 
     The one implementation (DL-137, DL-178k); the DL-42 licence for a Tier-0/1 copy
     covers none."""
-    fd = os.open(path, os.O_RDONLY)
+    fd = os.open(path, os.O_RDONLY | (os.O_DIRECTORY | os.O_NOFOLLOW if nofollow else 0))
     try:
         os.fsync(fd)
     finally:
@@ -382,34 +383,40 @@ def write_all(fd: int, data: bytes) -> None:
         written += count
 
 
-def durable_write(path: str, data: bytes) -> None:
+def durable_write(path: str, data: bytes, *, mode: int = 0o600, dir_fd: int | None = None) -> None:
     """The DL-41a durability liturgy: same-dir temp file, fsync(file), rename,
-    fsync(directory). Requires a local filesystem."""
+    fsync(directory). Requires a local filesystem. The file gets MODE whatever the umask,
+    owner-only by default. With DIR_FD, PATH is a name in that open directory and every step
+    goes through the descriptor, so a swap of the directory cannot redirect the write."""
     directory = os.path.dirname(path) or "."
     tmp = os.path.join(directory, f".{os.path.basename(path)}.{os.getpid()}.tmp")
+    at: dict[str, int] = {} if dir_fd is None else {"dir_fd": dir_fd}
     try:
-        os.unlink(tmp)  # a failed EARLIER attempt by this pid; O_EXCL would wedge the retry
+        os.unlink(tmp, **at)  # a failed EARLIER attempt by this pid; O_EXCL would wedge the retry
     except FileNotFoundError:
         pass
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)  # owner-only, not umask's call
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode, **at)
     try:
         try:
+            os.fchmod(fd, mode)
             write_all(fd, data)
             os.fsync(fd)
         finally:
             os.close(fd)
-        os.rename(tmp, path)
+        if dir_fd is None:
+            os.rename(tmp, path)
+        else:
+            os.rename(tmp, path, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
     except BaseException:
         try:
-            os.unlink(tmp)  # never leave a half-written temp to wedge or mislead
+            os.unlink(tmp, **at)  # never leave a half-written temp to wedge or mislead
         except FileNotFoundError:
             pass
         raise
-    dfd = os.open(directory, os.O_RDONLY)
-    try:
-        os.fsync(dfd)
-    finally:
-        os.close(dfd)
+    if dir_fd is None:
+        fsync_dir(directory)
+    else:
+        os.fsync(dir_fd)
 
 
 def durable_create(path: str, data: bytes) -> None:

@@ -78,7 +78,7 @@ from typing import Any, Final, Literal, cast, get_args
 
 from pydantic import ValidationError
 
-from dsl41.boundary import SealRequest
+from dsl41.boundary import RetryHorizonRefused, SealRequest
 from dsl41.canon import is_scalar_json, is_scalar_string, is_wire_int
 from dsl41.conditions import GlobalAtom, iter_atoms
 from dsl41.ir import ExecSpec, FwSpec, JobIR
@@ -658,6 +658,9 @@ class ControlServer:
                 # additive (ss2: consumers ignore unknown fields): the client tells its own
                 # running boundary from another's
                 answer["in_flight_request_id"] = exc.in_flight_request_id
+            if isinstance(exc, RetryHorizonRefused):
+                # additive as above: the client reads its wait from the field (DL-420)
+                answer[exc.FIELD] = exc.left_us
             return answer
         except TimeoutError:
             return _failure(
