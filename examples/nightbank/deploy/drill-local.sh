@@ -66,8 +66,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# 2 CPUs and 3 GB bound the container, so it leaves room in the podman VM
-podman run --detach --name "$name" --systemd=always --cpus 2 --memory 3g \
+# 2 CPUs and 3 GB bound the container, so it leaves room in the podman VM.
+# The cm-stop step reads the supervisor's /proc/PID/environ under sudo; on
+# rootless podman the container's root lacks CAP_SYS_PTRACE, which root on
+# the runner VM has.
+podman run --detach --name "$name" --systemd=always --cap-add SYS_PTRACE \
+    --cpus 2 --memory 3g \
     --volume "$tree:/src:ro" "$image" >/dev/null
 for _ in $(seq 60); do
     state=$(podman exec "$name" systemctl is-system-running 2>/dev/null || true)
