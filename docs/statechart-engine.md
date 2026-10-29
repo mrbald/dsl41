@@ -29,8 +29,9 @@ revision per committed input" is a transaction guarantee, not a row.
 The executor raises hard errors, in production too, among them `AmbiguousTransition` (§3),
 `ReentrantDispatch` (§5) and `UnhandledEvent` (§10). Each is a bug that would corrupt state, not
 a check to note. No machine reports a broken transition: DL-292's violation channel is retired
-(DL-353), and `dsl41 run --on-transition-violation` is accepted and inert until the next major
-release.
+(DL-353), and a broken transition is a statechart error the executor raises.
+`dsl41 run --on-transition-violation` is accepted, prints one deprecation line and changes
+nothing; the next major release removes it (DL-353).
 
 ## 2. Elements
 
@@ -126,7 +127,7 @@ items.
 A macrostep is iterative on one executor worklist and never recursive.
 
 1. Pop an item: an external event, a released event, a chained event, or a continuation.
-   Guards run now.
+   Its guards run at the pop.
 2. Select and execute, as in §3 and §4.
 3. Items an action reports (§8) go to the front of the worklist, in reported order
    (depth-first). The target's completion transition is itself a chained item. It is placed
@@ -216,7 +217,7 @@ whose generation is stale before selection. A time event without a generation is
 by rows; a stale one takes its declared row.
 
 Ties between a time event and another item at the same instant are pinned by the machine's
-declaration, in the entry that converted it (§16).
+declaration, under its entry (§16).
 
 ## 8. Chaining and continuations
 
@@ -260,8 +261,9 @@ lowering accepts evaluates. A cascade that does not end takes items instead. The
 counts a root dispatch's items, and the item that reaches the cap for the estate's job count, four
 times its square, at least 100,000 and at most 400,000, raises `CascadeDepthError`, an
 `OracleError`; the input is refused or quarantined as any input whose apply raises (DL-351). The
-ceiling keeps a cascade that does not end within half the engine's lease lapse at every measured
-size. `classify._TruthOracle` builds only the oracle's reads (`OracleReads`), to read conditions.
+ceiling bounds a cascade that does not end to half the engine's lease lapse at every measured
+estate size, up to 1,000 jobs. `classify._TruthOracle` builds only the oracle's reads
+(`OracleReads`), to read conditions.
 
 ## 9. Wait states
 
@@ -551,9 +553,9 @@ The representation of a deferred queue inside the oracle (its place in the store
 projection, concurrency-model §3; the seal format), its dry apply, and the handling of a fault at
 release under DL-292 and DL-320 are ruled by the entry that first makes an oracle machine defer.
 That entry narrows concurrency-model §4, DL-292 and DL-320 and says so. DL-292's violation channel
-is retired (DL-353). Until that entry, no oracle machine defers. A fork of the state owner carries
-its deferred queues into DL-320's dry apply, so an event the trial releases is released on the twin
-only (DL-339).
+is retired (DL-353). No oracle machine defers until that entry exists. A fork of the state owner
+carries its deferred queues into DL-320's dry apply, so an event the trial releases is released on
+the twin only (DL-339).
 
 `STATE_MACHINE_VERSION` and the artifact formats are reviewed on every slice that changes a
 derivation (the VERSIONS paragraph of DL-320).
@@ -612,21 +614,21 @@ prose in its `note`, which the generated table shows in the action column.
 
 ## 15. The executor
 
-The executor is built here, not adopted. It is standard library only and one module.
+The executor is built in this repository, not adopted. It is standard library only and one
+module.
 `src/dsl41/state_machine.py` holds the declarations, the executor and its hit recording
 (DL-356). The module imports nothing from its package, so the supervisor tier loads it by
 path, with its own directory on `sys.path`, as it loads `canon.py`. It is deterministic and has
 no clock. It does no I/O in production; under the test variable `DSL41_TRANSITION_HITS` it
 records the coverage items it hits (§13).
 
-The prior-art check covered python-statemachine, transitions, sismic, miros and pysm. In those
-libraries it found no deferral with override and no standard-library fit. Vocabulary and semantic
-tests are borrowed from sismic and python-statemachine v3's SCXML conformance suite as references
-only.
+None of python-statemachine, transitions, sismic, miros and pysm offers deferral with override,
+and none fits the standard library (DL-324). The vocabulary and the semantic tests take sismic and
+python-statemachine v3's SCXML conformance suite as references only.
 
 ## 16. Machines and acceptance
 
-Each machine has its decision-log entry: `supervisor_lease` (DL-326), `seal_boundary` (DL-327),
+Each machine's entry rules its declaration: `supervisor_lease` (DL-326), `seal_boundary` (DL-327),
 `supervisor_process` (DL-328), `subscription` (DL-329), `supervisor_client` (DL-330), `effect`
 (DL-331), `host` (DL-333), `admission` (DL-334), `runtime_assembly` (DL-335), `anchor_head` and
 `period_row` (DL-336), the oracle's `job` (DL-337), and its queue scan's `queue_scan` (DL-372).
@@ -669,10 +671,9 @@ readiness lookup stops the engine as one from the loop does, and in replay names
 executor from construction, and the configuration carries the phase's leaf and the group above
 it. An install and a test's witness rebuild the executor from the phase and the rows; a fork
 copies it (DL-339). A verb the phase does not allow is a refusal row with a code, read before any
-work of the verb; the verb raises the class and text it raised before its conversion, an
-`OracleError` or a `ValueError` (DL-335). A
-cell with no row is a statechart error that stops the tier at the verb that meets it; the
-constructor meets the genesis cells.
+work of the verb. Each refusal preserves the exception class and message fixed by DL-335, an
+`OracleError` or a `ValueError`. A cell with no row is a statechart error that stops the tier at the
+verb that meets it; the constructor meets the genesis cells.
 
 `anchor_head` and `period_row` (DL-336) run on an executor per move, built from `anchor.json` read
 under the anchor lock; the head's tag and each row's flags are the instances' configurations, and
@@ -684,16 +685,16 @@ in the roll and in `estate reclaim` it reaches the CLI's stop, exit 7.
 
 A machine is accepted when:
 
-- the old decision code is deleted;
+- the decision code it replaces is deleted;
 - `well_formed` and §10 pass;
 - the generated completeness test exists;
 - the coverage gate passes;
-- existing tests pass unchanged;
+- the existing tests pass unchanged;
 - protocol and output are unchanged, or the entry says what changes and why;
 - for oracle-tier machines also: fork isolation, replay, seal and reopen, and per-input
-  revision equality against the old implementation.
+  revision equality against the decision code it replaces.
 
-Each slice is a semantic-class change. Each has its own decision-log entry.
+Each slice is a semantic-class change with its own decision-log entry.
 
 The oracle's composite `job` chart (DL-337) drives the job rows. Its families each have an entry:
 STATUS (DL-341), the start attempt (DL-342), KILLJOB and the TIMER input (DL-343), the flag inputs
@@ -705,13 +706,14 @@ the timers), `oracle_cascade.py` (the cascade's moments), `oracle_writers.py` (e
 writes and the status writes) and `oracle.py` (the inputs, the hook and the checks), with the
 payloads in `oracle_facts.py` and `oracle_intents.py`. The engine, every replay, preflight and
 equiv build it (DL-351). The golden digests (`tests/oracle_goldens.py`, over the inputs in
-`tests/oracle_inputs.py`) hold the answers of the decision code the chart replaced, over the sample
-of the old-versus-new harness (DL-338). The code and the harness are deleted (DL-352). The oracle
-reproduces the digests; a golden that changes is a DL-235 decision. The job has no transition table,
-the store checks no write against one, and the chart is registered (DL-353). Each row that carries
-the `unreachable` mark (§13) states its reason, and `docs/state-machines.md` lists them all. Among
-them are job.312, since the admission the oracle builds carries no previous end, and job.314, since
-a live status never stands on held units (DL-353).
+`tests/oracle_inputs.py`) hold the answers of the decision code the chart replaced, over the
+sample of the harness that compared the two (DL-338). Neither that code nor that harness is in the
+tree (DL-352). The oracle reproduces the digests; a golden that changes is a DL-235 decision. The
+job has no transition table, the store checks no write against one, and the chart is registered
+(DL-353). Each row that carries the `unreachable` mark (§13) states its reason, and
+`docs/state-machines.md` lists them all. Among them are job.312, since the admission the oracle
+builds carries no previous end, and job.314, since a live status never stands on held units
+(DL-353).
 
 ## 17. Names
 
@@ -719,6 +721,7 @@ a live status never stands on held units (DL-353).
 - A transient state is left by its completion transition, whose payload is the completing
   microstep's (§4, §8).
 - A wait state awaits a reply or a time event (§9). Deferral is optional.
-- SEM-33's `run_window` deferral is a "window-postponed start" in new prose. Its identifiers,
-  its cause strings and the `RUN_WINDOW_DEFER` trace line stay, because they are the trace
-  contract.
+- New prose calls SEM-33's `run_window` deferral a "window-postponed start" (DL-324). Existing
+  prose, such as `docs/autosys-semantics.md`'s SEM-33 and `docs/simulation-coverage.md`, still
+  calls it a deferred start. Its identifiers, its cause strings and the `RUN_WINDOW_DEFER` trace
+  line keep their names, because they are the trace contract.
