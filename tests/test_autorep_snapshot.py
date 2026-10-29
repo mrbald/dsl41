@@ -221,9 +221,11 @@ def test_converted_fixture_native_viewer_import(tmp_path: Path, engine: str) -> 
             with page.expect_file_chooser() as chooser:
                 page.locator("#snapshot-import").click()
             chooser.value.set_files(str(output))
-            page.wait_for_function("() => snapshotLoaded && !snapshotPending")
+            page.wait_for_function("() => loadedSnapshot && !snapshotPending")
             assert page.locator("#snapshot-error").is_hidden()
-            assert page.evaluate("() => Object.fromEntries(snapshotNodes)") == EXPECTED_EXAMPLE
+            assert (
+                page.evaluate("() => Object.fromEntries(loadedSnapshot.nodes)") == EXPECTED_EXAMPLE
+            )
             assert "External matches: 1" in page.inner_text("#snapshot-buckets")
             assert "Unknown IDs: 0" in page.inner_text("#snapshot-buckets")
             page.locator("#snapshot-preset").select_option("autosys")
