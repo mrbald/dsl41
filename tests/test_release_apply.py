@@ -54,8 +54,14 @@ def test_apply_holds_drains_seals_selects_starts_verifies_and_releases_its_own_h
         "--estate-anchor",
         f"{site.root}.anchor",
     ]
-    nexts = [seal[i + 1] for i, word in enumerate(seal) if word == "--next"]
-    assert nexts[-1] == f"{site.releases / 'v2'}/added.jil" and len(nexts) == 7
+    # the release's manifest under the launcher's environment, then the site's layer (DL-422)
+    assert seal[5:9] == [
+        "--manifest",
+        f"{site.releases / 'v2'}/estate.toml",
+        "--environment",
+        "wargame",
+    ]
+    assert "--next" not in seal
     tail = seal[seal.index("-p") :]
     assert tail[:2] == ["-p", str(site.base / "night" / "night.properties")]
     assert tail[2:6] == [
@@ -406,7 +412,7 @@ def test_an_unknown_seal_keeps_its_record_and_resume_reads_the_estate_then_retri
     # a plain apply and a rollback are refused while one is recorded before its period opened
     again = site.run("apply", "v2")
     assert again.returncode == 2 and "`dsl41 release resume` to finish it" in again.stderr
-    back = site.run("rollback")
+    back = site.run("rollback", "r1")
     assert back.returncode == 2 and "its new period has not opened" in back.stderr
     resumed = site.run("resume")
     assert resumed.returncode == 0, resumed.stderr
@@ -551,7 +557,7 @@ def test_a_second_apply_is_refused_while_the_first_holds_the_lock(site: Site) ->
         fcntl.flock(fd, fcntl.LOCK_EX)
         os.write(fd, b"pid 1, nbdeploy@host, since then\n")
         refused = site.run("apply", "v2")
-        rollback = site.run("rollback")
+        rollback = site.run("rollback", "r1")
     finally:
         os.close(fd)
     assert refused.returncode == 2
@@ -616,7 +622,7 @@ def test_an_opened_bundle_the_seal_did_not_commit_stops_the_apply(site: Site) ->
     # the first line names the action; the problems follow (DL-412)
     assert (
         "dsl41 release: stopped: the new period does not match the seal: roll back with"
-        " `dsl41 release rollback`, or resume to check again.\n" in stopped.stderr
+        " `dsl41 release rollback r1`, or resume to check again.\n" in stopped.stderr
     )
     assert "what does not match: period 2's segment does not open the committed seal" in (
         stopped.stderr
@@ -627,7 +633,7 @@ def test_an_opened_bundle_the_seal_did_not_commit_stops_the_apply(site: Site) ->
     assert record["problems"][0] == "period 2's segment does not open the committed seal"
     assert [verb for verb, _ in site.state()["sent"]] == ["ON_HOLD", "ON_HOLD"]
     assert (
-        "`dsl41 release rollback` keeps this apply's holds and rolls back to r1 under them;"
+        "`dsl41 release rollback r1` keeps this apply's holds and rolls back to r1 under them;"
         " the holds are released when that rollback ends." in stopped.stderr
     )
     # resume checks again, and stops again with the record kept
@@ -636,14 +642,14 @@ def test_an_opened_bundle_the_seal_did_not_commit_stops_the_apply(site: Site) ->
     shown = site.run("status").stdout
     assert "  the new period does not match the seal: period 2's segment" in shown
     assert "  `dsl41 release resume` will check the new period again" in shown
-    assert "  `dsl41 release rollback` keeps this apply's holds and rolls back to r1" in shown
+    assert "  `dsl41 release rollback r1` keeps this apply's holds and rolls back to r1" in shown
 
 
 def test_apply_refuses_an_unprepared_changed_or_active_release(site: Site) -> None:
     shutil.copytree(SMALL, site.releases / "raw")
     refused = site.run("apply", "raw")
     assert refused.returncode == 2 and "raw is installed but not prepared." in refused.stderr
-    assert "run `dsl41 release prepare --requalify raw` to check it in place." in refused.stderr
+    assert "run `dsl41 release requalify raw` to check it in place." in refused.stderr
     site.prepared("v2")
     site.active.write_text("v2\n")
     refused = site.run("apply", "v2")

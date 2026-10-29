@@ -30,16 +30,16 @@ They do not establish that a separately installed wheel works.
 | `runs` | `tests/test_run_history.py` |
 | `query` | `tests/test_runner_control.py`, `tests/test_cli_control_branches.py`, `tests/test_subscriber_bound.py` |
 | `sendevent` | `tests/test_runner_control.py`, `tests/test_cli_control_branches.py`; complete TUI recovery reconstruction in `tests/test_tui_recovery_cli.py` |
-| `release-held` | `tests/test_runner_control.py`, `tests/test_cli_control_branches.py` |
+| `off-hold-all` | `tests/test_runner_control.py`, `tests/test_cli_control_branches.py` |
 | `host` | `tests/test_runner_control.py`, `tests/test_cli_control_branches.py`; actor recovery pin in `tests/test_tui_recovery_cli.py` |
 | `ui`, `serve` | `tests/test_runner_serve.py`; real PTY and served sessions in `tests/test_tui_recovery_drivers.py` |
 | `supervise` | `tests/test_runner_supervisor.py`, `tests/test_cli_control_branches.py` |
 | `seal`, `audit`, `verify` | `tests/test_estate.py`, `tests/test_estate_wide.py`, `tests/test_nightbank_boundary.py` |
 | `estate prune`, `estate reclaim` | `tests/test_retention.py`, `tests/test_estate_wide.py` |
 | `estate quiesce` | `tests/test_estate_quiesce.py` |
-| `estate args` | `tests/test_estate_manifest.py` |
+| `--manifest` on `lint`, `rehearse`, `run`, `seal`, `viz`, `estate quiesce` | `tests/test_estate_manifest.py` |
 | `estate build`, `estate diff` | `tests/test_estate_build.py` |
-| `release prepare`, `release apply`, `release resume`, `release rollback`, `release status` | `tests/test_release_prepare.py`, `tests/test_release_apply.py`, `tests/test_release_rollback.py`, `tests/test_release_status.py` |
+| `release prepare`, `release requalify`, `release apply`, `release resume`, `release rollback`, `release status` | `tests/test_release_prepare.py`, `tests/test_release_apply.py`, `tests/test_release_rollback.py`, `tests/test_release_status.py` |
 
 Release qualification must run the installed executable outside the source checkout.
 It must exercise both a core-only install and an install with the `ui` extra.

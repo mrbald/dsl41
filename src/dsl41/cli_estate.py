@@ -3,39 +3,43 @@
 `seal` closes the running period and commits the next, live or offline (period-model ss7);
 `audit` re-derives a closed period and writes its attestation, `verify` validates one;
 `estate reclaim` moves a stale successor claim out of the way and `estate prune` deletes what
-retention allows; `estate args` prints a verb's arguments from the estate manifest (DL-407).
-`cli.py` assembles the `estate` sub-app, with `estate build` and `estate diff` from
-`cli_estate_build.py` (DL-413).
+retention allows. `seal` and `estate quiesce` take the next estate from `--next` or from the
+estate manifest through `--manifest` (DL-422). `cli.py` assembles the `estate` sub-app, with
+`estate build` and `estate diff` from `cli_estate_build.py` (DL-413).
 """
 
 from __future__ import annotations
 
 import asyncio
 import errno
+import functools
 import json
 import os
-import shlex
 import subprocess
 import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import typer
 
 from dsl41.cli_common import (
+    ENVIRONMENT_OPT,
+    MANIFEST_OPT,
     PERMIT_UNKNOWN,
     PROPERTIES,
+    EstateArgs,
     SupervisorChoice,
     check_base_tz,
+    check_estate_args,
     command_outcome,
     confirmed_resume_refusal,
     DRAINING,
     IN_PROGRESS,
+    estate_args,
     guarded_maintenance,
     lineage_of,
     ping_probe,
@@ -52,7 +56,6 @@ from dsl41.cli_common import (
     supervisor_exited,
     walk_estate_or_exit_2,
 )
-from dsl41.estate_manifest import ArgsFor, ManifestError, build_args
 from dsl41.period import ARCHIVE_CLASS
 from dsl41.runner_clock import RealClock
 from dsl41.runner_ledger import LOCK_NAME, LeaderLock
@@ -100,9 +103,10 @@ _ACTOR_OPT = typer.Option(
 
 # The options `seal` and `estate quiesce` share: both seal the running period into the next one.
 NEXT_FILES_OPT = typer.Option(
-    ...,
+    None,
     "--next",
-    help="JIL files of the next period's estate. Repeatable; the order is part of the bundle hash.",
+    help="JIL files of the next period's estate. Repeatable; the order is part of the bundle"
+    " hash. Give them or --manifest.",
 )
 FORCE_SEAL_OPT = typer.Option(
     False,
@@ -226,8 +230,8 @@ def seal(
     force_seal: bool = FORCE_SEAL_OPT,
     claimed_actor: str = _ACTOR_OPT,
     request_id: str = REQUEST_ID_OPT,
-    next_timezone: str = NEXT_TIMEZONE_OPT,
-    next_timezone_map: Path = NEXT_TIMEZONE_MAP_OPT,
+    next_timezone: str | None = NEXT_TIMEZONE_OPT,
+    next_timezone_map: Path | None = NEXT_TIMEZONE_MAP_OPT,
     next_as_machine: list[str] = NEXT_AS_MACHINE_OPT,
     next_machine_policy: str = NEXT_MACHINE_POLICY_OPT,
     next_detached: bool = NEXT_DETACHED_OPT,
@@ -244,10 +248,14 @@ def seal(
     ),  # DL-396
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
+    manifest: Path | None = MANIFEST_OPT,
+    environment: str | None = ENVIRONMENT_OPT,
 ) -> None:
     """Close the running period and commit the next estate.
 
-    --next names the JIL files of the next period. Who leads the run
+    --next names the JIL files of the next period, or --manifest names
+    the estate manifest that declares them with their layers, timezone,
+    map and switches; -p adds layers after the manifest's. Who leads the run
     root decides how the seal happens. Live: an engine leads it, so
     this command stages the next catalog and asks the engine over the
     control socket; the engine runs the cutoff and exits with code 3.
@@ -273,6 +281,16 @@ def seal(
     from dsl41.runner_control import claimed_actor as default_actor
     from dsl41.runner_ledger import acquire_run_root
 
+    next_files, properties, next_timezone, next_timezone_map, next_semantics = estate_args(
+        manifest,
+        environment,
+        next_files,
+        properties,
+        next_timezone,
+        next_timezone_map,
+        next_semantics,
+        files_word="--next",
+    )
     profile = _next_profile(
         next_timezone,
         next_timezone_map,
@@ -1441,13 +1459,22 @@ class _HeldLeaderLock(LeaderLock):
 
 
 @dataclass(frozen=True)
+class _NextPeriod:
+    """What the seal stage stages: the files, the profile and the `-p` layers."""
+
+    files: list[Path]
+    profile: RuntimeProfile
+    properties: list[Path]
+
+
+@dataclass(frozen=True)
 class _QuiesceRequest:
     run_root: Path
     estate_anchor: Path | None
-    next_files: list[Path]
-    profile: RuntimeProfile
+    #: called by the seal stage only, after its already-sealed shortcut: a rerun after the
+    #: seal reads no manifest and no candidate file (DL-422)
+    next_period: Callable[[], _NextPeriod]
     permit_unknown: bool
-    properties: list[Path] | None
     force_seal: bool
     actor: str
     request_id: str | None
@@ -1703,14 +1730,15 @@ class _Quiesce:
             )
             return
         r = self.request
+        candidate = r.next_period()
         code = asyncio.run(
             _offline_seal(
                 r.run_root,
                 r.estate_anchor,
-                r.next_files,
-                r.profile,
+                candidate.files,
+                candidate.profile,
                 r.permit_unknown,
-                r.properties,
+                candidate.properties,
                 r.force_seal,
                 r.actor,
                 r.request_id,
@@ -1943,7 +1971,7 @@ def estate_quiesce(
     run_root: Path = _RUN_ROOT_OPT,
     estate_anchor: Path = _ANCHOR_OPT,
     next_files: list[Path] = typer.Option(
-        ...,
+        None,
         "--next",
         help=f"{NEXT_FILES_OPT.help} A rerun after the seal reads no file and ignores them.",
     ),
@@ -1970,6 +1998,8 @@ def estate_quiesce(
     ),
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
+    manifest: Path | None = MANIFEST_OPT,
+    environment: str | None = ENVIRONMENT_OPT,
 ) -> None:
     """Stop a shape 1 estate: seal, audit and guarded maintenance in one verb.
 
@@ -1995,22 +2025,40 @@ def estate_quiesce(
 
     if force is not None and force != "terminate":
         raise typer.Exit(refuse("--force takes one value: terminate"))
-    profile = _next_profile(
+    given = EstateArgs(
+        list(next_files or []),
+        list(properties or []),
         next_timezone,
         next_timezone_map,
-        next_as_machine,
-        next_machine_policy,
-        next_detached,
-        next_deadman,
-        next_semantics,
+        list(next_semantics or []),
     )
+    check_estate_args(manifest, environment, given, files_word="--next")
+
+    @functools.cache
+    def next_period() -> _NextPeriod:
+        files, layers, timezone, timezone_map, semantics = estate_args(
+            manifest, environment, *given, files_word="--next"
+        )
+        profile = _next_profile(
+            timezone,
+            timezone_map,
+            next_as_machine,
+            next_machine_policy,
+            next_detached,
+            next_deadman,
+            semantics,
+        )
+        return _NextPeriod(files, profile, layers)
+
+    if manifest is None:
+        # the command line's next period is checked before any stage, as `seal` checks it; a
+        # manifest is read in the seal stage, after its already-sealed shortcut (DL-422)
+        next_period()
     request = _QuiesceRequest(
         run_root=run_root,
         estate_anchor=estate_anchor,
-        next_files=next_files,
-        profile=profile,
+        next_period=next_period,
         permit_unknown=permit_unknown,
-        properties=properties,
         force_seal=force_seal,
         actor=claimed_actor or default_actor(),
         request_id=request_id,
@@ -2019,58 +2067,3 @@ def estate_quiesce(
         supervisor_unit=supervisor_unit,
     )
     raise typer.Exit(_Quiesce(request, QUIESCE_HOST).run())
-
-
-class ArgsFormat(str, Enum):
-    """`estate args --format`: one shell-quoted line, or a JSON document (DL-407)."""
-
-    line = "line"
-    json = "json"
-
-
-def estate_args(
-    manifest: Path = typer.Argument(
-        ..., help="The estate manifest, estate.toml, in the release directory."
-    ),
-    verb: ArgsFor = typer.Option(
-        ...,
-        "--for",
-        metavar="VERB",
-        help="The verb to build arguments for: run, seal, lint, rehearse or viz.",
-    ),
-    environment: str = typer.Option(
-        None,
-        "--environment",
-        help="The environment whose properties layers follow the manifest's own. Required when"
-        " the manifest declares environments.",
-    ),
-    output: ArgsFormat = typer.Option(
-        ArgsFormat.line,
-        "--format",
-        metavar="FORMAT",
-        help='line: one shell-quoted line. json: {"argv": [...]}.',
-    ),
-) -> None:
-    """Print the arguments one verb takes for the estate a manifest declares.
-
-    The manifest is the application's one declaration of its catalog
-    files, properties layers, timezone and semantic switches: the
-    interpretation half of the runtime profile. The deployment half
-    stays with the launcher: --detached, --deadman, --as-machine and
-    --machine-policy, which every seal restates as --next-*, because an
-    omitted --next-* option takes its default. Add those and --run-root
-    after the printed arguments.
-
-    Give MANIFEST as an absolute path. Paths are the manifest's names
-    joined to its directory, unresolved, because the bundle hash covers
-    the path strings.
-
-    Exit codes: 0 the arguments are printed; 2 the manifest is relative,
-    cannot be read or validated, or the environment is missing or not
-    declared.
-    """  # DL-407, period-model ss1.1
-    try:
-        argv = build_args(manifest, verb, environment)
-    except ManifestError as exc:
-        raise typer.Exit(refuse(exc)) from exc
-    typer.echo(shlex.join(argv) if output is ArgsFormat.line else json.dumps({"argv": argv}))

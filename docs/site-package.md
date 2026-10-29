@@ -150,7 +150,7 @@ Use this contents list for the site's RPM spec:
 
 | File or directory | Runner requirement or site choice | Where its rule lives |
 | --- | --- | --- |
-| `<prefix>/bin/dsl41-launch`, mode `0755`, in `<prefix>/bin`, `<prefix>` and every directory above them, each owned by root or the service account and writable by no one else (`/opt` is `root:root`, `0755`) | The site chooses configuration paths, `ESTATE_RELEASES`, `ACTIVE`, `ENVIRONMENT`, the site's `-p` and machine settings; the estate's files, layers and timezone come from the active release's manifest through `dsl41 estate args`. Keep `--detached`, `--supervisor attach` with its compatibility probe, the `estate args` probe that refuses a dsl41 without the verb, explicit `--as-machine`, `--machine-policy strict`, `--access-map` and the opener logic. | [Launcher](../examples/nightbank/deploy/dsl41-launch); [starting the engine](deployment-runbook.md#3-starting-the-engine); DL-218 for command construction, DL-396 for attachment, DL-402 for the probe, DL-407 for the manifest, DL-412 for the directory chain `dsl41 release` checks in the [decision log](decision-log.md). |
+| `<prefix>/bin/dsl41-launch`, mode `0755`, in `<prefix>/bin`, `<prefix>` and every directory above them, each owned by root or the service account and writable by no one else (`/opt` is `root:root`, `0755`) | The site chooses configuration paths, `ESTATE_RELEASES`, `ACTIVE`, `ENVIRONMENT`, the site's `-p` and machine settings; the estate's files, layers and timezone come from the active release's manifest, which the launcher passes to `run` through `--manifest`. Keep `--detached`, `--supervisor attach` with its compatibility probe, the `--manifest` probe that refuses a dsl41 without the option, explicit `--as-machine`, `--machine-policy strict`, `--access-map` and the opener logic. | [Launcher](../examples/nightbank/deploy/dsl41-launch); [starting the engine](deployment-runbook.md#3-starting-the-engine); DL-218 for command construction, DL-396 for attachment, DL-402 for the probe, DL-407 and DL-422 for the manifest, DL-412 for the directory chain `dsl41 release` checks in the [decision log](decision-log.md). |
 | `/etc/systemd/system/dsl41-engine.service`, mode `0644` | Keep `Wants=` and `After=` for the supervisor, never `Requires=`: a supervisor stop then leaves the engine holding spawns through the drain (DL-416). Keep `Restart=on-failure`, `RestartPreventExitStatus=2 3 6 7`, `StartLimitIntervalSec=300` and `StartLimitBurst=5`. The site chooses its account and paths. | [Engine unit](../examples/nightbank/deploy/dsl41-engine.service); [unit and exit policy](deployment-runbook.md#3-starting-the-engine); [DL-218](decision-log.md). |
 | `/etc/systemd/system/dsl41-supervisor.service`, mode `0644` | Keep a dedicated service cgroup, `SuccessExitStatus=8`, `RestartPreventExitStatus=2 7 8`, `Restart=always`, `StartLimitIntervalSec=0` and `KillMode=control-group`. Keep `ExecStop=` on the launcher's `supervisor-stop` mode. Choose the drain's bound, `Environment=DSL41_DRAIN_S`, and size `TimeoutStopSec` for it and for the estate's maintenance bound. | [Supervisor unit](../examples/nightbank/deploy/dsl41-supervisor.service); [unit policy](deployment-runbook.md#3-starting-the-engine); DL-390 and DL-399 for containment and exit policy, DL-398 for guarded stop, DL-401 for the timeout, DL-416 for the drain in the [decision log](decision-log.md). |
 | `/etc/dsl41/` | The example installs this directory owned by root with mode `0755`. | [Service-install recipe](deployment-runbook.md#recipe-install-and-start-as-a-service); [role-map contract](access-model.md#4-the-role-map). |
@@ -298,7 +298,7 @@ A JIL release needs no change to `dsl41-offline`, its runtime or the site packag
 
 | Part | Owner | Rule |
 | --- | --- | --- |
-| The launcher, with its `PREFIX`, `ENVIRONMENT`, `PROPERTIES` and run options | Site package | A release never edits the launcher; the launcher reads the active release's manifest through `dsl41 estate args`. |
+| The launcher, with its `PREFIX`, `ENVIRONMENT`, `PROPERTIES` and run options | Site package | A release never edits the launcher; the launcher passes the active release's manifest to `run` through `--manifest`. |
 | The launcher's `RUN_ROOT` and `ESTATE_ANCHOR` | Site package | Only an infrastructure act changes them. The run roots and anchors themselves stay outside the payload ([§3](#3-build-the-site-package)). |
 | The engine and supervisor units | Site package | A release starts the engine unit and changes no unit. |
 | The access map | Site package | It binds the deployment identity, as the next paragraph says. |
@@ -352,9 +352,11 @@ A dsl41 upgrade also needs a verified candidate, rehearsal with the new executab
 Read the [release note described in §1](#1-what-a-dsl41-release-gives-you) and compare state-machine versions in both runtimes.
 Follow [runbook §7](deployment-runbook.md#7-upgrading-dsl41-itself) to choose the required root and supervisor treatment.
 Keep old runtimes while the periods they wrote remain retained.
-After a runtime switch, `dsl41 release apply` refuses a release prepared under another dsl41 version until `dsl41 release prepare --requalify NAME` passes.
-A site that rolls the runtime back below dsl41 1.13.0 reinstalls the site package qualified with that release.
-The launcher reads the manifest through `dsl41 estate args`, and it refuses to start a runtime without that verb.
+After a runtime switch, `dsl41 release apply` refuses a release prepared under another dsl41 version until `dsl41 release requalify NAME` passes.
+A site that rolls the runtime back below dsl41 1.14.0 reinstalls the site package qualified with that release.
+The launcher passes the manifest to `run` through `--manifest`, and it refuses to start a runtime before 1.14.0, which has no such option (DL-422).
+A runtime switch whose release note names a launcher change installs the launcher that ships with the runtime in the same window: stop, flip, install the launcher, `dsl41 release requalify NAME`, start; the 1.13.0 to 1.14.0 switch is one.
+A rollback below 1.14.0 is that window with the older site package and no `requalify` in the window; the older runtime's `release apply` checks the release it applies against its own version, and its refusal names its own form of the check, `release prepare --requalify NAME`.
 
 ## 6. Qualify the host
 

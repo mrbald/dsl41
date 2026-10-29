@@ -472,7 +472,7 @@ See the [minify instructions](../README.md#de-identify-an-estate-minify) for its
 
 Use the [gate procedure in §4.4](#44-run-the-checks-in-order) away from the production run.
 The manifest declares the timezone, its map and the semantic switches ([§6.1](#61-declare-the-estate-in-estatetoml); DL-407).
-The runbook's [check block](deployment-runbook.md#recipe-add-change-or-remove-a-job) passes them to `lint` and `rehearse` through `dsl41 estate args`, with the site's properties file last.
+The runbook's [check block](deployment-runbook.md#recipe-add-change-or-remove-a-job) passes it to `lint` and `rehearse` through `--manifest`, with the site's properties file after the manifest's layers.
 
 After the checks pass, commit and tag the estate edit under the
 [job-edit recipe](deployment-runbook.md#recipe-add-change-or-remove-a-job).
@@ -490,7 +490,7 @@ This example declares four files, one layer for every environment and one more f
 
 ```toml
 name = "payments"
-requires_dsl41 = ">=1.13"
+requires_dsl41 = ">=1.14"
 files = ["calendars.jil", "global.jil", "eod.jil", "reports.jil"]
 properties = ["base.properties"]
 timezone = "UTC"
@@ -522,28 +522,21 @@ dsl41 refuses an unknown key at any level, and a path that `files`, or the base 
 `requires_dsl41` accepts only `>=`, and compares the leading integers of the version, so a pre-release or dev build of X counts as X.
 
 The environment layers follow the base layers.
-The launcher and `dsl41 release` always pass the host's `ENVIRONMENT`, and `estate args` refuses an environment the manifest does not declare.
+The launcher and `dsl41 release` always pass the host's `ENVIRONMENT`, and `--manifest` refuses an environment the manifest does not declare.
 Declare every environment a host's `ENVIRONMENT` names, with an empty table when it adds no layer.
 `[environments.uat]` above declares one that applies the base layers only.
 The site's own properties file comes after every layer, so the site's values win.
 One tag serves every environment.
 
-`dsl41 estate args MANIFEST --for VERB` prints the arguments the manifest gives one verb, as one shell-quoted line.
-`VERB` is `run`, `seal`, `lint`, `rehearse` or `viz`.
-Give `--environment NAME` when the manifest declares environments, and `--format json` for `{"argv": [...]}`.
-`MANIFEST` must be an absolute path, because the bundle hash covers each path string as printed.
-For the example above at `/work/payments/estate.toml`, `--for lint --environment uat` prints the files, a `-p` per layer and the timezone:
-
-```text
-/work/payments/calendars.jil /work/payments/global.jil /work/payments/eod.jil /work/payments/reports.jil -p /work/payments/base.properties --timezone UTC
-```
-
-`--for rehearse` adds `--semantics` per switch, `--for viz` stops after the layers, and `--for seal` prints the `--next` forms.
-The command exits `0` after printing, or `2` with one sentence that names the refusal.
+Every verb that reads the estate takes the manifest directly: `dsl41 lint --manifest /work/payments/estate.toml --environment uat -p site.properties`, and the same option on `rehearse`, `run`, `seal`, `viz` and `estate quiesce` (DL-422).
+`MANIFEST` must be an absolute path, because the bundle hash covers each path string as the manifest's directory joins it.
+The manifest supplies the files, the layers, the timezone, its map and the switches, so the verb refuses those on the command line beside `--manifest`; `-p` adds the site's layers after the manifest's.
+For the example above, `lint --manifest /work/payments/estate.toml --environment uat` lints the four files with `base.properties` and `UTC`.
+A refusal is one sentence and exit `2`.
 
 Run the runbook's [check block](deployment-runbook.md#recipe-add-change-or-remove-a-job) in CI on the commit you are about to tag.
-It runs `estate args`, then `lint` and `rehearse` with the printed arguments and the site's properties file.
-A manifest that `estate args` refuses fails that check, before the tag exists.
+It runs `lint` and `rehearse` with `--manifest` and the site's properties file.
+A manifest the option refuses fails that check, before the tag exists.
 
 When a file such as `eod.jil` comes from a Python module, `dsl41 estate build . --emit eod.jil=eod.py -o dist/v42` assembles the release directory, and `dsl41 release prepare v42 dist/v42` takes it (DL-413).
 With a package, `--emit eod.jil=estate` takes `eod.jil` from it; give one `--emit` per file the package renders.

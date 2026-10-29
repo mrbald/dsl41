@@ -13,9 +13,11 @@
 # supervisor, ss0's two configuration-management plays run by
 # ansible-playbook (DL-416), and the four upgrade rows of ss7 with their rollbacks
 # (DL-266). Rows 1 to 3 run with two installs of one build: their
-# mechanics, not a qualified version pair. Row 4 runs from v1.7.0 on PyPI
-# to the build under test. The install, the first start and a final
-# retirement run ss0's recipe blocks as the runbook prints them (DL-268).
+# mechanics, not a qualified version pair. Row 2 also runs from 1.13.0 on
+# PyPI to the build under test and back, with the launcher each runtime
+# ships (DL-422). Row 4 runs from v1.7.0 on PyPI to the build under test.
+# The install, the first start and a final retirement run ss0's recipe
+# blocks as the runbook prints them (DL-268).
 #
 # Manual only (workflow_dispatch). It is not part of the default gate. It
 # passed every step on GitHub's Ubuntu 24.04 runner at b6b8a55 on
@@ -131,6 +133,9 @@ jobs:
 
       - name: the coordinated row's rollback replaces both units again
         run: bash examples/nightbank/deploy/drill-steps.sh upgrade-coordinated-rollback
+
+      - name: the silent-note row from 1.13.0 to this build and back, with the launcher
+        run: bash examples/nightbank/deploy/drill-steps.sh upgrade-prior-release
 
       - name: an estate on the old release, v1.7.0 from PyPI
         run: bash examples/nightbank/deploy/drill-steps.sh upgrade-old-release

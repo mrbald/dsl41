@@ -79,35 +79,35 @@ def test_sendevent_refuses_an_event_that_addresses_nothing(
     assert engine.requests == []
 
 
-# --------------------------------------------------------------- release-held
+# --------------------------------------------------------------- off-hold-all
 
 
-def test_release_held_stops_when_the_status_read_is_refused(
+def test_off_hold_all_stops_when_the_status_read_is_refused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     engine = _engine(monkeypatch, status={"ok": False, "error": "no status for you"})
-    result = _run("release-held")
+    result = _run("off-hold-all")
     assert result.exit_code == 2
     assert "no status for you" in result.output
     assert len(engine.requests) == 1
 
 
-def test_release_held_stops_when_the_status_carries_no_read_header(
+def test_off_hold_all_stops_when_the_status_carries_no_read_header(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     engine = _engine(monkeypatch, status={"ok": True, "jobs": {"j": {"on_hold": True}}})
-    result = _run("release-held")
+    result = _run("off-hold-all")
     assert result.exit_code == 2
     assert "the engine answered no read header" in result.output
     assert len(engine.requests) == 1
 
 
-def test_release_held_with_a_header_and_nothing_held_says_so(
+def test_off_hold_all_with_a_header_and_nothing_held_says_so(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The counterpart of the two refusals above: a complete answer proceeds."""
     _engine(monkeypatch, status={"ok": True, "jobs": {"j": {"on_hold": False}}, **_HEADER})
-    result = _run("release-held")
+    result = _run("off-hold-all")
     assert result.exit_code == 0
     assert "no jobs held" in result.output
 

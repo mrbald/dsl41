@@ -1,7 +1,7 @@
-"""The release train's verbs (DL-407, DL-412): prepare, apply, resume, rollback and status,
-run as the site's deployment identity, and the hidden service side, which they run as the
-service account through sudo. The logic is release.py's and release_service.py's; this file is
-the command line, and COMMANDS is what cli.py registers under release_service.GROUP."""
+"""The release train's verbs (DL-407, DL-412): prepare, requalify, apply, resume, rollback and
+status, run as the site's deployment identity, and the hidden service side, which they run as
+the service account through sudo. The logic is release.py's and release_service.py's; this
+file is the command line, and COMMANDS is what cli.py registers under release_service.GROUP."""
 
 from __future__ import annotations
 
@@ -18,13 +18,12 @@ from dsl41.release_service import (
     APPLY,
     CMD_RESUME,
     CMD_STATUS,
-    EXIT_REFUSED,
     PREPARE,
+    REQUALIFY,
     RESUME,
     ROLLBACK,
     SERVICE,
     STATUS,
-    say,
     service,
 )
 
@@ -82,14 +81,8 @@ def _run(action: Callable[[], int], *, records: bool = False) -> None:
 def release_prepare(
     name: str = typer.Argument(..., help="The release's name."),
     source_dir: Path = typer.Argument(
-        None,
+        ...,
         help="The directory that holds the release's inputs and its estate.toml.",
-    ),
-    requalify: bool = typer.Option(
-        False,
-        "--requalify",
-        help="Check the installed release NAME in place, under this runtime, and take no"
-        " SOURCE_DIR.",
     ),
 ) -> None:
     """Install a release under ESTATE_RELEASES, read-only, once it passes the checks.
@@ -97,26 +90,33 @@ def release_prepare(
     Copies SOURCE_DIR to ESTATE_RELEASES/NAME. Lints and rehearses it as the
     service account, with the launcher's ENVIRONMENT and the site's PROPERTIES,
     and holds it to the launcher's MAX_JOBS and MAX_GRACE_S. A refused release is
-    removed, so its name is free again. --requalify runs the same checks on an
-    installed release, after a runtime switch or for a release that was never
-    prepared, and records them when they pass.
+    removed, so its name is free again. A release already installed is checked in
+    place by `release requalify`.
 
     Run it as the deployment identity.
 
-    Exit codes: 0 prepared; 2 refused: prepare installs nothing, and
-    --requalify leaves prepared.json as it was, though a release never
-    prepared keeps the read-only inputs it was given; 3 interrupted.
+    Exit codes: 0 prepared; 2 refused, nothing installed; 3 interrupted.
     """
-    # the refusal is the verb's own sentence, the same on every terminal (DL-412)
-    if requalify and source_dir is not None:
-        say("--requalify takes no SOURCE_DIR.")
-        raise typer.Exit(EXIT_REFUSED)
-    if not requalify and source_dir is None:
-        say("SOURCE_DIR is required unless --requalify is given.")
-        raise typer.Exit(EXIT_REFUSED)
-    if requalify:
-        _run(lambda: release.requalify(name))
     _run(lambda: release.prepare(name, source_dir))
+
+
+def release_requalify(
+    name: str = typer.Argument(..., help="The installed release."),
+) -> None:
+    """Check the installed release NAME in place, under this runtime.
+
+    Runs prepare's checks on a release already under ESTATE_RELEASES, after a
+    runtime switch or for a release installed by hand, and records them when
+    they pass. Apply refuses a release prepared under another dsl41 version
+    until this has run.
+
+    Run it as the deployment identity.
+
+    Exit codes: 0 checked and recorded; 2 refused: prepared.json stays as it
+    was, and a release never prepared keeps the read-only inputs it was given;
+    3 interrupted.
+    """
+    _run(lambda: release.requalify(name))
 
 
 def release_apply(
@@ -158,21 +158,24 @@ _with_codes(release_resume)
 
 
 def release_rollback(
+    name: str = typer.Argument(
+        ..., help="The release to roll back to: the one `release status` names."
+    ),
     drain_timeout: float = _DRAIN,
     horizon_timeout: float = _HORIZON,
     open_timeout: float = _OPEN,
 ) -> None:
-    """Apply the release the active one replaced, by the same window.
+    """Apply NAME, the release the active one replaced, by the same window.
 
-    The target is the release the active release's latest receipt names, so a
-    second rollback goes forward again. It prints the target before it acts.
-    With an apply recorded whose new period opened, it takes that apply over:
-    it keeps that apply's holds, writes its receipt, and rolls back to the
-    release it replaced under them; the holds are released when that rollback
-    ends.
+    NAME must be the release `release status` names as the rollback's target: the one
+    the active release's latest receipt names as its previous. Any other name is refused
+    with the target printed; `release apply NAME` applies a release by name. With an apply
+    recorded whose new period opened, NAME is the release that apply replaced, and the
+    rollback takes that apply over: it keeps that apply's holds, writes its receipt, and
+    rolls back under them; the holds are released when that rollback ends.
     """
     waits = Waits(drain_timeout, horizon_timeout, open_timeout)
-    _run(lambda: release.rollback(waits), records=True)
+    _run(lambda: release.rollback(name, waits), records=True)
 
 
 _with_codes(release_rollback)
@@ -207,6 +210,7 @@ def release_service(
 #: the verbs in `--help` order, each under its name, and whether it is hidden (DL-412)
 COMMANDS = (
     (PREPARE, release_prepare, False),
+    (REQUALIFY, release_requalify, False),
     (APPLY, release_apply, False),
     (RESUME, release_resume, False),
     (ROLLBACK, release_rollback, False),

@@ -79,10 +79,10 @@ release, installed whole and never changed: its JIL, calendars, properties
 layers and `estate.toml`. A release directory is never a symlink, because
 the bundle hash covers each input's path string and the opener must name the
 paths the seal named. `active` is a plain text file whose one line names the
-active release. The launcher takes the estate's files, layers and timezone from
-the active release's manifest through `dsl41 estate args`, so a JIL release
-never edits the launcher. The site's own properties file comes last, so
-its values override the application's.
+active release. The launcher passes the active release's manifest to
+`run` through `--manifest`, so a JIL release never edits the launcher. The
+site's own properties file comes last, so its values override the
+application's.
 
 `dsl41 release` makes a release one command for the application's on-call
 (DL-412). `prepare NAME DIR` installs DIR as release NAME and checks it with

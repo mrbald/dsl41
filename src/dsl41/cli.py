@@ -11,9 +11,10 @@ verbs live one file per domain (DL-137):
     cli_control.py  what an operator says to a RUNNING engine: sendevent, host, query, ui,
                     serve, supervise
     cli_estate.py   the period boundary and its surroundings: seal, audit, verify,
-                    estate reclaim, estate prune, estate quiesce, estate args
+                    estate reclaim, estate prune, estate quiesce
     cli_estate_build.py  the release an author hands over: estate build, estate diff
-    cli_release.py  the release train: release prepare, apply, resume, rollback, status,
+    cli_release.py  the release train: release prepare, requalify, apply, resume, rollback,
+                    status,
                     and the hidden release service the train runs through sudo
 
 Imports run one way: this file imports the verb modules, the verb modules import `cli_common`,
@@ -87,7 +88,7 @@ app.command(rich_help_panel="Run an estate")(stops(cli_run.journal))
 app.command(rich_help_panel="Run an estate")(stops(cli_run.runs))
 app.command(rich_help_panel="Control a running engine")(cli_control.query)
 app.command(rich_help_panel="Control a running engine")(cli_control.sendevent)
-app.command(rich_help_panel="Control a running engine")(cli_control.release_held)
+app.command(rich_help_panel="Control a running engine")(cli_control.off_hold_all)
 app.command(rich_help_panel="Control a running engine")(cli_control.host)
 app.command(rich_help_panel="Control a running engine")(cli_control.ui)
 app.command(rich_help_panel="Control a running engine")(cli_control.serve)
@@ -98,16 +99,14 @@ app.command(rich_help_panel="Periods and retention")(stops(cli_estate.verify))
 
 estate_app = typer.Typer(
     no_args_is_help=True,
-    help="Stop the estate, prune what retention allows, reclaim a stale claim, print a"
-    " verb's arguments from the estate manifest (args), assemble a release directory (build),"
-    " or compare two releases (diff).",
+    help="Stop the estate, prune what retention allows, reclaim a stale claim, assemble a"
+    " release directory (build), or compare two releases (diff).",
     context_settings={"help_option_names": ["-h", "--help"]},
 )
 app.add_typer(estate_app, name="estate", rich_help_panel="Periods and retention")
 estate_app.command("reclaim")(stops(cli_estate.estate_reclaim))
 estate_app.command("prune")(stops(cli_estate.estate_prune))
 estate_app.command("quiesce")(stops(cli_estate.estate_quiesce))
-estate_app.command("args")(cli_estate.estate_args)
 estate_app.command("build")(cli_estate_build.estate_build)
 estate_app.command("diff")(cli_estate_build.estate_diff)
 

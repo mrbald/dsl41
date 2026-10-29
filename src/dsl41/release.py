@@ -1,4 +1,5 @@
-"""The release train's verbs: prepare, apply, resume, rollback and status (DL-407, DL-412).
+"""The release train's verbs: prepare, requalify, apply, resume, rollback and status (DL-407,
+DL-412).
 
 They run as the site's deployment identity, which owns ESTATE_RELEASES and ACTIVE and sends
 `query` and `sendevent` itself. What runs as the service account goes through
@@ -850,8 +851,8 @@ class Apply:
             self.step(self.record["step"])
             raise Stop(
                 EXIT_STOPPED,
-                f"the new period does not match the seal: roll back with `{CMD_ROLLBACK}`, or"
-                " resume to check again.",
+                "the new period does not match the seal: roll back with"
+                f" `{CMD_ROLLBACK} {self.record['previous']}`, or resume to check again.",
                 f"what does not match: {'; '.join(problems)}.",
             )
         self.record.pop("problems", None)
@@ -1130,10 +1131,11 @@ def keeps_record(record: dict[str, Any]) -> Iterator[None]:
         ) from exc
 
 
-def rollback(waits: Waits) -> int:
-    """The apply of the release the active release's latest receipt names as its previous
-    one. With an apply recorded whose new period opened, the rollback takes it over first,
-    to the release that apply replaced (DL-412)."""
+def rollback(name: str, waits: Waits) -> int:
+    """The apply of NAME, the release the active release's latest receipt names as its previous
+    one; any other NAME is refused with the target printed. With an apply recorded whose new
+    period opened, the rollback takes it over first, and NAME is the release that apply
+    replaced (DL-412, DL-423)."""
     cfg = config()
     with apply_lock(cfg):
         record = read_json(cfg.record)
@@ -1146,6 +1148,14 @@ def rollback(waits: Waits) -> int:
                     f"run `{CMD_RESUME}` to finish it; `{CMD_STATUS}` says what it will do.",
                 )
             target = str(record["previous"])
+            if name != target:
+                raise Stop(
+                    EXIT_REFUSED,
+                    f"an apply of {record['candidate']} is recorded with its new period open; a"
+                    f" rollback goes to {target}, the release it replaced, not to {name}.",
+                    f"run `{CMD_ROLLBACK} {target}` to take it over, or `{CMD_RESUME}` to finish"
+                    " it.",
+                )
             with keeps_record(record):
                 check_prepared(cfg, target)
                 query(cfg, "status")
@@ -1162,6 +1172,13 @@ def rollback(waits: Waits) -> int:
         failed = failed_check(cfg, found)
         if failed is not None:
             raise Stop(EXIT_REFUSED, failed_line(found, failed))
+        if name != found:
+            raise Stop(
+                EXIT_REFUSED,
+                f"{name} is not the rollback's target: the latest receipt of {previous} names"
+                f" {found}.",
+                f"run `{CMD_ROLLBACK} {found}`, or `{CMD_APPLY} {name}` to apply {name} by name.",
+            )
         say(f"rolling back from {previous} to {found}.")
         return begin(cfg, found, waits)
 
@@ -1213,8 +1230,8 @@ def failed_line(name: str, receipt: Path) -> str:
 def takeover_line(previous: str) -> str:
     """What a rollback does with an apply whose new period opened (DL-412)."""
     return (
-        f"`{CMD_ROLLBACK}` keeps this apply's holds and rolls back to {previous} under them;"
-        " the holds are released when that rollback ends."
+        f"`{CMD_ROLLBACK} {previous}` keeps this apply's holds and rolls back to {previous}"
+        " under them; the holds are released when that rollback ends."
     )
 
 
@@ -1328,7 +1345,10 @@ def status_lines(cfg: Config, report: dict[str, Any]) -> list[str]:
         if report["rollback_refused"]:
             lines.append(f"rollback: {report['rollback_refused']}")
         elif report["rollback_to"]:
-            lines.append(f"rollback: `{CMD_ROLLBACK}` would apply {report['rollback_to']}.")
+            lines.append(
+                f"rollback: `{CMD_ROLLBACK} {report['rollback_to']}` would apply"
+                f" {report['rollback_to']}."
+            )
         elif active is not None:
             lines.append("rollback: no receipt names an earlier release; apply one by name.")
         lines.append("recorded apply: none.")

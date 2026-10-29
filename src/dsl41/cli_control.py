@@ -30,7 +30,7 @@ from dsl41.runner_access import REQUIRED_TIER, Tier
 # ------------------------------------------------------------ the control plane
 #
 # Exit codes: 0 a clean answer (an `ok` response), 2 the command never reached the engine
-# (unreachable socket, unreadable answer, refusal). `run`'s 1 belongs to the engine. `release-held`
+# (unreachable socket, unreadable answer, refusal). `run`'s 1 belongs to the engine. `off-hold-all`
 # is the one aggregate: its 1 means "some per-job decision was not applied", with the detail on the
 # per-job lines (DL-181).
 #
@@ -214,7 +214,7 @@ def sendevent(
     _mutate(socket_path, request)
 
 
-def release_held(
+def off_hold_all(
     socket_path: Path = _SOCKET_OPT,
     dry_run: bool = typer.Option(False, "--dry-run", help="List the held jobs and send nothing."),
 ) -> None:
@@ -248,8 +248,8 @@ def release_held(
         raise typer.Exit(2)
     baseline, epoch = header
     rows = response.get("jobs", {})
-    # on_hold is the job-verb latch, NOT DL-94's `held` run-state in the same row; the name
-    # `release-held` stays (DL-181)
+    # on_hold is the job-verb latch, NOT DL-94's held run-state in the same row; the sweep is named
+    # for the event it sends and its scope (DL-423)
     held = sorted(name for name, row in rows.items() if row.get("on_hold"))
     if not held:
         typer.echo("no jobs held")

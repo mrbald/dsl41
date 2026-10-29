@@ -2,7 +2,7 @@
 
 Status: **frozen (DL-231).** Design DL-146; rules from DL-147, DL-148,
 DL-149, DL-150, DL-151, DL-152, DL-158, DL-256, DL-272, DL-275, DL-311,
-DL-314 and DL-421. This
+DL-314, DL-421, DL-422 and DL-423. This
 document is the design of record for `runner_access.py`, the control-plane
 gate and the served web TUI. A change to a frozen item requires a
 decision-log entry, as in `docs/control-protocol.md`. The authentication
@@ -569,26 +569,27 @@ tiers enforce nothing, §2):
 - Read-shaped: `query *`, `host list`, `supervise list`, `journal`,
   `runs`, `verify`, offline `rehearse`, `release status` (it reads
   `ACTIVE`, the releases, the apply record and the receipts, and sends
-  `query`; DL-421), and every pure-compiler verb, `estate args`, `estate
-  diff` and `estate build` among them (args and diff write nothing; build
-  writes its `--out` directory and runs the author's modules as `build`
-  does; DL-421).
-- Ops: `sendevent`, `release-held` (a sweep of `sendevent OFF_HOLD`
-  requests, so ops by composition; DL-311), `host
+  `query`; DL-421), and every pure-compiler verb, `estate diff` and
+  `estate build` among them (diff writes nothing; build writes its `--out`
+  directory and runs the author's modules as `build` does; DL-421,
+  DL-422).
+- Ops: `sendevent`, `off-hold-all` (a sweep of `sendevent
+  OFF_HOLD` requests, so ops by composition; DL-311, DL-423), `host
   activate`/`drain`/`evict` and `supervise shutdown`.
 - Adm: `run`, `serve`, `audit` (it writes attestations and registry
   state), `seal` (it stages C2 files before the ops verb; staging may
   later be split from committing), `estate prune`, `estate reclaim`,
   `supervise start` (it creates the run root and writes the supervisor
-  log there; DL-311), `release prepare`, `--requalify` included (it
-  stages the release that `ACTIVE` and the seal later select, as `seal`
-  stages C2 files; DL-421), `release apply`, `release resume` and
-  `release rollback` (ops socket verbs, the seal and the write of
-  `ACTIVE`, so adm by composition; DL-421), `estate quiesce` (seal, audit
-  and `supervise shutdown`, so adm by composition; DL-421), and `release
-  service` (the seal and its writes under `ESTATE_RELEASES`, so adm by
-  composition; it runs only as the service account, and the deployment
-  identity reaches it through the door of §2 alone; DL-421).
+  log there; DL-311), `release prepare` and `release requalify` (each
+  stages or re-records the release that `ACTIVE` and the seal later
+  select, as `seal` stages C2 files; DL-421, DL-423), `release apply`,
+  `release resume` and `release rollback` (ops socket verbs, the seal and
+  the write of `ACTIVE`, so adm by composition; DL-421, DL-423), `estate
+  quiesce` (seal, audit and `supervise shutdown`, so adm by composition;
+  DL-421), and `release service` (the seal and its writes under
+  `ESTATE_RELEASES`, so adm by composition; it runs only as the service
+  account, and the deployment identity reaches it through the door of §2
+  alone; DL-421).
 
 `supervise shutdown` is ops-shaped: it operates and configures nothing.
 Its only door is the owner-`0600` supervisor socket (§2). So the

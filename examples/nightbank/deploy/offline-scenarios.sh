@@ -263,12 +263,12 @@ JIL
     release_apply "$size-p3"
     expect_exit 2 cli query spec -J OFFLINE_EFFECT_C -S "$SOCK"
     [ "$(job_field OFFLINE_EFFECT_C job_type)" = null ] || fail 'removed definition is not a ghost'
-    release_apply rollback
+    release_apply rollback "$size-p2"
     [ "$RELEASE" = "$size-p2" ] || fail "the rollback activated $RELEASE"
     force_start OFFLINE_EFFECT_C
     wait_for 30 'definition rollback ran' ran_to_success OFFLINE_EFFECT_C 3
     [ "$(sudo cat "$effect")" = $'v1\nv2\nv2' ] || fail 'definition effects differ'
-    release_apply rollback
+    release_apply rollback "$size-p3"
     [ "$RELEASE" = "$size-p3" ] || fail "the second rollback activated $RELEASE"
     release_teardown
     cli audit --estate-anchor "$ANCHOR"

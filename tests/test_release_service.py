@@ -220,7 +220,9 @@ def _verified(tmp_path: Path, pins: dict[str, Any], monkeypatch: pytest.MonkeyPa
     cfg.state.mkdir()
     monkeypatch.setattr(release, "service_json", lambda *_: pins)
     apply = release.Apply(
-        cfg, {"candidate": "v2", "request_id": RID, "step": "opened"}, release.Waits()
+        cfg,
+        {"candidate": "v2", "previous": "v1", "request_id": RID, "step": "opened"},
+        release.Waits(),
     )
     with pytest.raises(Stop):
         apply.verify()

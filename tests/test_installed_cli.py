@@ -54,7 +54,7 @@ def invoke(cli: Path, work: Path, *args: str) -> subprocess.CompletedProcess[str
                 "runs",
                 "query",
                 "sendevent",
-                "release-held",
+                "off-hold-all",
                 "host",
                 "ui",
                 "serve",
