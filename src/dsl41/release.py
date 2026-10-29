@@ -564,7 +564,8 @@ class Apply:
 
     def hold(self) -> None:
         """Hold every scheduled top-level job with a future tick that is not held; a hold
-        that was there before stays and is never released here (deployment-runbook ss6).
+        that was there before stays and is never released here (deployment-runbook ss0, the job
+        recipe's apply step 9).
         A hold is the apply's when its own request applied: the request id is composed and
         recorded before the send, so a resume sends a pending hold again under it."""
         for entry in self.record["holds"]:

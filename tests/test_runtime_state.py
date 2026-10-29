@@ -18,12 +18,12 @@ Four groups:
     fields it must change AND the fields it must leave alone; a verb that
     quietly clears a sibling field is the exact failure the generic
     `update(**fields)` it replaces made invisible.
-  * **the inventory is accounted for** (ss3). `_box_ran` moved onto the box row,
-    `_run_started_at` turned out to be write-only and is gone, and DL-120 moved
-    the capacity state too -- the reservations and the waiter ranks onto the
-    rows, the spent units under the owner. Nothing of ss3's inventory is
-    outside the rows now, and the invariants that used to justify the
-    exception are tested here rather than asserted in prose.
+  * **the inventory is accounted for** (ss3, "The state inventory"). Authoritative state
+    outside `JobRuntime` must move under `RuntimeState` or carry a tested invariant. A box's
+    record of which members ran is `JobRuntime.ran_members` on the box row. No run-start time is kept outside the row. The capacity pool and its waiter order are under the owner (DL-120): the
+    reservations and the waiter ranks on the rows, the spent units under the owner. The
+    invariants that used to justify leaving the pool outside are tested here rather than
+    asserted in prose.
   * **the revision is the projection's** (CM-02/CM-03). One increment per
     entity per input, and only when the SEMANTIC projection moved -- checked
     both as worked cases and as a property over a widened generator, whose
@@ -284,11 +284,11 @@ _POOL_JIL = (
 
 
 def _pool_invariants(o: Oracle) -> list[str]:
-    """The two invariants that used to LET `_CapacityPool` stay outside the
-    rows, and that DL-120 turned into properties of the rows themselves: the
-    queue is exactly the QUE_WAIT jobs, and only a starting or running job
-    holds units. Read through the pool's pure surface, which is now the only
-    surface it has."""
+    """The two invariants that used to LET the capacity pool (`_CapacityPool`) stay outside
+    the rows, and that DL-120 turned into properties of the rows themselves (ss3, "The state
+    inventory": the pool and its waiter order are under the owner): the queue is exactly
+    the QUE_WAIT jobs, and only a starting or running job holds units. Read through the
+    pool's pure surface, which is now the only surface it has."""
     broken = []
     queued = {j for j, rt in o.store.job.items() if rt.status == "QUE_WAIT"}
     waiters = o._pool.sorted_waiters(o.store.job)
@@ -366,9 +366,10 @@ def test_the_waiter_order_is_the_order_of_the_que_wait_transitions() -> None:
 
 
 def test_box_membership_bookkeeping_lives_on_the_box_row() -> None:
-    """`_box_ran` was a loose map beside the rows; it is `JobRuntime.ran_members`
-    now, so SEM-10's at-most-once bookkeeping is projected with the entity it
-    describes instead of needing an invariant of its own."""
+    """ss3, "The state inventory": a box's record of which members ran is
+    `JobRuntime.ran_members` on the box row, so
+    SEM-10's at-most-once bookkeeping is projected with the entity it describes instead of
+    needing an invariant of its own."""
     o = Oracle(
         lower_source(
             "insert_job: bx\njob_type: b\n\n"

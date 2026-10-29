@@ -735,7 +735,8 @@ class Engine:
     def _seal_exit(self, pending: _PendingSeal, name: str, payload: object = None) -> SealExit:
         """Post a `committed` or `exception` exit of the boundary; return the `SealExit` that the
         final state's entry reports. An entry's intents join the outcome of the row that entered
-        it (statechart-engine ss4), so the post's one outcome carries it."""
+        it (statechart-engine ss4 entry actions, ss5 step 5), so the post's one outcome carries
+        it."""
         (exit_,) = self._machines.dispatch(pending, ChartEvent(name, payload))[0].intents
         assert isinstance(exit_, SealExit)  # every final state's entry reports one
         return exit_

@@ -26,11 +26,11 @@ regions, has a block of its own under its name. A composite with one region grou
 inside its parent's block, so a grouping state never splits the ways into one target. That
 block names each such composite's members on a line `group = {member, member}`. The
 region a row moves is the innermost one that holds its source and every target, a containing
-endpoint included (statechart-engine.md §4). A row is in the block that holds that region. A
-row between two regions of one composite is refused, as `well_formed` refuses it (§3). A row
-from the chart's root leaves every region and enters each again; its line is in the block of
-its targets' top-level region. Blocks follow the declaration order, parents first, unless
-`READING_ORDERS` gives the chart one.
+endpoint included (DL-325; statechart-engine.md §4 for the exit and entry order). A row is in
+the block that holds that region. A row between two regions of one composite is refused, as
+`well_formed` refuses it (§3). A row from the chart's root leaves every region and enters each
+again; its line is in the block of its targets' top-level region. Blocks follow the declaration
+order, parents first, unless `READING_ORDERS` gives the chart one.
 
 A row's note is the row's `note`. It is printed only when the whole line fits in `LINE`
 columns. A note that names a row id (`job.196`, or the short `.10`) is dropped: the view
@@ -278,9 +278,10 @@ def _moved(
     edges: Sequence[Edge],
 ) -> Region:
     """The region a row moves: the innermost one holding its source and every target, a
-    containing endpoint included (statechart-engine.md §4). A row between two regions of one
-    composite is refused, as `well_formed` refuses it (§3). A row from the root leaves every
-    region; the view places it in its targets' top-level region."""
+    containing endpoint included (DL-325; statechart-engine.md §4 for the exit and entry order).
+    A row between two regions of one composite is refused, as `well_formed` refuses it (§3). A
+    row from the root leaves every region; the view places it in its targets' top-level
+    region."""
     paths, owners = enclosing
     ends = [edge.target for edge in edges]
     if row.source != chart.root.name:

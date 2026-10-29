@@ -53,7 +53,8 @@ from dsl41.state_machine import Event as ChartEvent
 from dsl41.state_machine import Outcome, StatechartError
 
 #: The id of the engine's own executor. One engine per run root owns one local executor
-#: (control-protocol ss2's socket probe enforces it), so the id is a constant.
+#: (`leader.lock` enforces it, control-protocol ss2; the socket probe refuses to start when a
+#: live engine answers), so the id is a constant.
 LOCAL_EXECUTOR_ID = "local"
 
 #: ss8's verbs, in two sets. `HOST_VERBS` is the operator's and what the wire accepts.

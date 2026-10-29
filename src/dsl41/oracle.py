@@ -14,14 +14,14 @@ Interpreter decisions (each has a trace test; PENDING items keep switches):
   KILLJOB. The oracle emits only derived transitions: STARTING/RUNNING on start, bypass-SUCCESS
   for ON_NOEXEC (SEM-22), TERMINATED for terminator cascades (SEM-14), and box folds
   (SEM-11/12).
-- One feed(event) drains a same-timestamp FIFO cascade queue: the injected event, then its
-  consequences in deterministic order (jobs in catalog order, insertion sequence as tie-break).
-  ir-design ss7's "(event kind priority, insertion order)" holds degenerately: the cascade is
-  never a mixed-kind queue. Timers the oracle schedules (run_window reschedules, SLA deadlines)
-  fire inside the next feed() whose `at` reaches them; feed times are non-decreasing. Two
-  shell-facing extensions (runner-design ss3): next_timer_due() peeks the heap, and
-  advance(now) fires due timers with no external event. Bisimulation pins feed-only ==
-  advance+feed.
+- One feed(event) drains the input queue in FIFO order, the injected event first. Only that
+  queue is FIFO. A move's consequences go to the front of the executor worklist and run depth
+  first, jobs in catalog order within one reported list (DL-350; docs/statechart-engine.md
+  ss5). ir-design ss7 is the event surface. Timers the oracle schedules (run_window
+  reschedules, SLA deadlines) fire inside the next feed() whose `at` reaches them; feed
+  times are non-decreasing. Two shell-facing extensions (runner-design ss3): next_timer_due()
+  peeks the heap, and advance(now) fires due timers with no external event. Bisimulation pins
+  feed-only == advance+feed.
 - Re-evaluation is edge-triggered (DL-13): a transition, SET_GLOBAL or ON_ICE wakes exactly the
   jobs whose `condition` references the changed entity. A self-referencing condition may
   re-trigger its own job (L010's concern, not the oracle's).
