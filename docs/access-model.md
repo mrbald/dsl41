@@ -1,8 +1,8 @@
 # Access model — three tiers at the perimeter
 
-Status: **frozen (DL-231; design DL-146, amended by DL-147, DL-148, DL-149,
-DL-150, DL-151, DL-152, DL-158, DL-256, DL-272, DL-275, DL-311
-and DL-314).** This
+Status: **frozen (DL-231).** Design DL-146; rules from DL-147, DL-148,
+DL-149, DL-150, DL-151, DL-152, DL-158, DL-256, DL-272, DL-275, DL-311
+and DL-314. This
 document is the design of record for `runner_access.py`, the control-plane
 gate and the served web TUI. A change to a frozen item requires a
 decision-log entry, as in `docs/control-protocol.md`. The authentication
@@ -210,7 +210,7 @@ applies exact modes: `0700` for directories and `0600` for files. Group
 and other bits never widen, but owner bits can change: a `0400` file
 gains owner write. The pass follows a symlink child to its target,
 wherever that points. Both are the owner's own artifacts, inside a root
-that was `0700` until that moment.
+that is `0700` until the grant.
 
 ## 5. The enforcement point
 
@@ -244,10 +244,10 @@ Per request:
    routing and the lineage proof (control-protocol §2, DL-148). A
    perimeter denial is sent before either.
 6. Admitted: stamp the authenticated principal and continue to the
-   existing dispatcher unchanged.
+   dispatcher unchanged.
 
 Enforcement is outside the wire contract. It adds no envelope field, no
-v4, no dialect event and no tombstone. Refusals reuse the existing
+v4, no dialect event and no tombstone. Refusals use the
 `ok: false, refused: true` vocabulary.
 
 ## 6. Receipts: the perimeter journal
@@ -452,9 +452,9 @@ deliberately. Arming has two modes, and the map chooses:
   gid (§4), and arming applies it here (DL-152). The group gets
   execute-only traversal and no listing. `control.sock` becomes `0660`.
   Its owner stays the run-root owner, and its group becomes
-  `socket_group`. The `0700` root was the fence for its children:
-  `logs/` and `runs/` are created under the process umask, `0755` by
-  default. So arming first **tightens every direct child to owner-only**:
+  `socket_group`. At `0700` the root alone fences its children; at
+  `0710` it does not: `logs/` and `runs/` are created under the process
+  umask, `0755` by default. So arming first **tightens every direct child to owner-only**:
   `0700` for directories and `0600` for files. These are exact modes:
   group and other bits never widen, owner bits can change, and for a
   symlink child the target changes (§4). Later artifacts land inside
