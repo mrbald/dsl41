@@ -3,11 +3,13 @@
 `dsl41 release prepare|apply|resume|rollback|status` run as the site's deployment identity.
 What reads or writes the run root, and lint and rehearse, run as the service account through
 `sudo`, as `dsl41 release service ACTION WORD...`: this module's `service`. It takes release
-names, a request id or a job name, never a path, an option or a command line. It finds the
-site's launcher from the runtime it runs on, never from its caller, and reads every path and
-run option through `dsl41-launch vars`. A world-writable directory on the way to the launcher
-passes only when root owns it and its sticky bit is set, as sudo's secure-path rule has it
-(DL-412).
+names, a request id, a job name or prepare's source directory, never an option or a command
+line. It finds the site's launcher from the runtime it runs on, never from its caller, and
+reads every path and run option through `dsl41-launch vars`. A world-writable directory on
+the way to the launcher passes only when root owns it and its sticky bit is set, as sudo's
+secure-path rule has it (DL-412). The sudoers grant reaches `service` and the checks it calls
+on its arguments, and nothing else, so together they are the door of access-model ss2 and
+part of the access boundary (DL-421).
 
 The deployment identity never writes under a release, so no path check carries the trust
 (DL-412). ESTATE_RELEASES belongs to the service account, mode 0755. `prepare NAME DIR` has

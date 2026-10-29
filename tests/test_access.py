@@ -224,6 +224,23 @@ def test_access_verb_table_completeness_gate() -> None:
     assert required_tier(None) is None
 
 
+def test_access_service_door_lists_every_action_the_dispatcher_accepts() -> None:
+    """ss2/ss12.12: the actions ss2 lists for the release train's door are exactly the ones
+    `release_service.service` accepts (DL-421). A new action fails here until ss2 names it."""
+    import inspect
+
+    from dsl41 import release_service
+
+    source = inspect.getsource(release_service.service)
+    assert "action in" not in source, "an action branch the gate cannot read"
+    accepted = set(re.findall(r'action == "(\w+)"', source))
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "access-model.md").read_text()
+    listed = re.search(r"The dispatcher\s+accepts \w+ actions:\s+([^.]+)\.", doc)
+    assert listed, "ss2 lost its action list"
+    assert accepted, "the gate lost sight of release_service.service"
+    assert accepted == set(re.split(r",\s*|\s+and\s+", " ".join(listed.group(1).split())))
+
+
 def test_the_query_surface_forwards_exactly_the_read_verbs() -> None:
     """`cli_control._QUERY_VERBS` is DERIVED from the tier map (DL-152).
 
