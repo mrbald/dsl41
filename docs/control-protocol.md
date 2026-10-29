@@ -1,17 +1,18 @@
 # Control protocol — the engine's public contract
 
-Status: frozen at **v3** (DL-118). Amended by DL-133, DL-135, DL-146,
-DL-147, DL-148, DL-150, DL-151, DL-158, DL-189, DL-216, DL-217, DL-256,
-DL-264, DL-267, DL-272, DL-292, DL-295, DL-297 and DL-353. This document is
-normative for the control plane of `docs/runner-design.md` §10, as
+Status: frozen at **v3** (DL-118). Entries that rule parts of it include
+DL-133, DL-135, DL-146, DL-147, DL-148, DL-150, DL-151, DL-158, DL-172,
+DL-189, DL-216, DL-217, DL-228, DL-233, DL-256, DL-264, DL-267, DL-272,
+DL-274, DL-292, DL-295, DL-297 and DL-353. This document is normative for
+the control plane of `docs/runner-design.md` §10, as
 `docs/supervisor-protocol.md` is normative for the lifecycle tier of
 runner-design §6a. A change to a frozen item requires a decision-log
-entry. Each amendment is cited where it applies.
+entry. Each entry is cited where it applies.
 
-**Older versions are refused, not deprecated.** Every request names the
-protocol version (DL-90), and the engine accepts only v3 (DL-118). It
-answers a request that names no version or any other version, v1 or v2
-included, with a refusal naming the version it speaks.
+**The engine accepts v3 only.** Every request names the protocol version
+(DL-90), and the engine accepts only v3 (DL-118). It answers a request
+that names no version or any other version, v1 and v2 included, with a
+refusal naming the version it speaks.
 
 The two protocols sit on opposite sides of the engine:
 
@@ -117,7 +118,8 @@ socket file rather than failing on it. The `leader.lock` flock is what
 keeps two engines apart. It enforces one engine per run root
 (`docs/concurrency-model.md` §1, DL-100). The engine takes it before it
 opens anything, so the probe runs after the lock is held. The probe
-cleans up a stale socket file and is a second refusal door; see §7.
+cleans up a stale socket file and is a second refusal door: it refuses
+to start when a live engine answers it.
 
 **The version handshake** is `"v": 3` on every request (DL-90, DL-118).
 
@@ -138,14 +140,15 @@ carries `refused`, whatever its code.
 A rejected answer's `code` is the one its `decision` record stores
 (`docs/period-model.md` §2.3). An exact retry is answered from that
 record, so it answers the same code as the first answer. A `decision`
-written before DL-272 stores no code, and an answer replayed from it
-omits the field. A client must tolerate a missing `code`.
+record may store no code: one written before DL-272 has none. An answer
+replayed from it omits the field, so a client must tolerate a missing
+`code`.
 
 `code` is an additive field: consumers ignore what they do not know
 (above), so a client that does not read it keeps working. A code is
 never renamed in place; a new code, or a retired one, is a decision-log
-entry. One code is retired, and this engine never answers it:
-`transition_violation` (DL-353).
+entry. `transition_violation` is a retired code, and this engine never
+answers it (DL-353).
 
 The client action says what a client does next:
 
@@ -311,10 +314,10 @@ fingerprint, so the same verb at two revisions is two commands.
 decision** (DL-217). When the id already holds one, the refusal adds
 `"original_decision": {index, request_id, decision, reason, code, revisions}`,
 the decision's own fields. `code` is the stored one. It is null on an
-application and on a decision written before DL-272. The answer stays a
-refusal of this request: `ok: false`, `refused: true`, and the read
-header of the engine that answered. The nested decision belongs to the
-earlier command and is never this request's outcome. An id admitted but
+application and on a decision that stores no code (§2, DL-272). The
+answer stays a refusal of this request: `ok: false`, `refused: true`, and
+the read header of the engine that answered. The nested decision belongs to
+the earlier command and is never this request's outcome. An id admitted but
 not yet decided carries no `original_decision`. The `seal` verb keeps its
 own retry route (below) and never carries the field.
 
@@ -463,9 +466,8 @@ shape and the same four outcomes as every host verb.
 `RuntimeState` route storage and no `route:` namespace. The shipped table
 is the one implicit row period-model §3.3 describes, projected from the
 single local executor at revision 0. The unit that adds the storage
-builds this. No plan schedules that unit: the HA plan that named it is
-withdrawn (DL-189). The wire is written here first, so that unit
-implements a shape rather than inventing one.
+builds this, and no plan schedules that unit (DL-189). The wire is
+written here so that unit implements a shape rather than inventing one.
 
 `host` is a **separate `cmd`** because the verb sets are separate things.
 Each `sendevent` verb names one oracle `EventKind`. A host verb
@@ -528,8 +530,8 @@ entity. Making `expect` optional would turn the one command with no
 precondition into a door every other command could slip through. So the
 envelope parser takes "this command addresses no row" as an explicit
 input and rejects an `expect` that arrives anyway. What counts is the KEY
-(DL-151): `"expect": null` is an `expect` and not its absence, and the
-seal door refuses it. That refusal sits just behind the retry route
+(DL-150, DL-151): `"expect": null` is an `expect` and not its absence,
+and the seal door refuses it. That refusal sits just behind the retry route
 below, which answers a committed seal whatever rides beside it.
 
 **Its decision is a `seal` record, not a `decision` record.** Before the
@@ -935,12 +937,13 @@ what it missed.
 
 ## 7. Known gaps (recorded, not fixed — DL-78)
 
-These are limits of the frozen protocol. Items 1 and 4 are not gaps and
-keep their numbers for citations. Adding a second host or a non-local
-controller has to address each open one (`docs/decision-log.md` DL-78).
+Items 2 and 3 are limits of the frozen protocol. Items 1 and 4 are not
+gaps: each names the rule that covers it, and keeps its number for
+citations. Adding a second host or a non-local controller has to address
+each open item (`docs/decision-log.md` DL-78).
 
-1. **Version handshake.** Not a gap: every request names its version
-   (§2; DL-90, DL-118).
+1. **Version handshake.** Every request names its version (§2; DL-90,
+   DL-118).
 2. **No authentication or authorization — on an estate with no access
    map.** There the socket's `0600` mode plus filesystem ownership is the
    entire access-control model. Any process running as the invoking user
@@ -960,5 +963,6 @@ controller has to address each open one (`docs/decision-log.md` DL-78).
    single-engine guarantee rests on a local `flock` (§2, DL-100).
    A non-local controller would need both a transport and a replacement
    for that guarantee.
-4. **Error codes.** Not a gap: every `ok: false` answer carries a stable
-   `code` beside the prose `error` (§2, DL-272).
+4. **Error codes.** Every `ok: false` answer carries a stable `code`
+   beside the prose `error`, except a retry answered from a stored
+   decision that holds no code (§2, DL-272).

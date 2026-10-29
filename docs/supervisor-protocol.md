@@ -2,9 +2,11 @@
 
 Status: frozen. DL-42 item 3 freezes the spool format and the wrapper
 input spec, and DL-48 freezes the supervisor socket protocol. Entries
-that amend it include DL-80, DL-129, DL-150, DL-151, DL-210, DL-229,
-DL-291, DL-300, DL-325, DL-326, DL-328, DL-390, DL-392, DL-396,
-DL-399, DL-401 and DL-416; each is cited where it applies. Each change to a frozen item needs a decision-log entry. This
+that rule parts of it include DL-80, DL-95, DL-129, DL-150, DL-151,
+DL-205, DL-210, DL-226, DL-227, DL-229, DL-291, DL-300, DL-322, DL-325,
+DL-326, DL-328, DL-390, DL-392, DL-394, DL-396, DL-399, DL-401, DL-409
+and DL-416; each is cited where it applies.
+Each change to a frozen item needs a decision-log entry. This
 document is the extraction boundary of the lifecycle tier (the five
 modules of §1). If a DL-42 trigger fires and the tier is extracted, this
 document is its public API.
@@ -590,14 +592,14 @@ DL-326).
 Both read verbs add `maintenance: {force, bound_s, started_at}` from a
 maintenance admission on, while the operation runs or stays uncertain
 (DL-401). The field is additive: a client that ignores it reads the
-answer as before.
+rest of the answer unchanged.
 
 `deadman_s` (DL-95) is in both read verbs: the interval this
 supervisor was started with, or `null`. A client reads it back rather than
 assume it, because a reattaching engine meets a supervisor it did not
 start. `docs/concurrency-model.md` §8's eviction bound has to describe the
-host, not some engine's launch options. The field is additive: older
-clients ignore it like any unknown field.
+host, not some engine's launch options. The field is additive: a
+client that does not read it ignores it like any unknown field.
 
 **Lease verbs** (single controller, observers are unlimited):
 
@@ -791,13 +793,13 @@ first. Then a stale or expired token answers
   `{ok: false, error: "bad_signal"}`, checked before `run_id`.
 - `MAINTENANCE_STOP {incarnation, token, force}` (DL-390, DL-401): guarded
   maintenance. The request carries `"v": 2`, the verb's own version. A
-  `"v": 1` MAINTENANCE_STOP, which answered only at completion, is retired:
-  it is refused `unsupported_version` with a `detail` that names DL-401.
+  `"v": 1` MAINTENANCE_STOP is refused `unsupported_version` with a
+  `detail` that names DL-401.
   `force` is `null` or `"terminate"`; any other value refuses.
   The CLI's `supervise shutdown` uses this verb, including with
-  `--force=terminate`. An older supervisor refuses the verb or its
-  version, and the CLI exits 2. The CLI never retries through `SHUTDOWN`
-  or a signal.
+  `--force=terminate`. When a supervisor answers `unknown_verb` or
+  `unsupported_version`, the CLI exits 2. The CLI never retries through
+  `SHUTDOWN` or a signal.
 
   **Admission** is answered in the request. Before changing process
   state, the server opens the **existing** `leader.lock`, without creation
@@ -812,15 +814,16 @@ first. Then a stale or expired token answers
   cache can evict completed runs. Maintenance requires positive process
   observation within a verified dedicated Linux systemd service cgroup.
   Its MainPID must be this supervisor and its ControlGroup must match the
-  observed membership. Shared, delegated or unobservable containment
-  refuses. Unmanaged supervisors have no qualified maintenance proof.
-  The loaded unit must also include exit 8 in both SuccessExitStatus and
-  RestartPreventExitStatus. A stale unit policy refuses before
-  termination starts. Admission does not read RefuseManualStop (DL-399,
-  DL-416). With `force: null`, active or indeterminate work
-  refuses without a signal. A refusal is
-  `{ok: false, error: "maintenance_refused", detail}`; it writes no record
-  and changes no state.
+  observed membership. The unit must have `Delegate=no` and
+  `KillMode=control-group` (DL-390, DL-399, DL-416). Shared, delegated or
+  unobservable containment refuses. Unmanaged supervisors have no
+  qualified maintenance proof. The loaded unit must also include exit 8 in
+  both SuccessExitStatus and RestartPreventExitStatus. A stale unit policy
+  refuses before termination starts. Admission does not read
+  RefuseManualStop (DL-399, DL-416). With `force: null`, active or
+  indeterminate work refuses without a signal. A refusal is `{ok: false,
+  error: "maintenance_refused", detail}`; it writes no record and changes
+  no state.
 
   An admitted operation first writes `maintenance.json` with `state:
   "admitted"`. A failed write refuses. The answer is then `{ok: true,
@@ -861,8 +864,10 @@ first. Then a stale or expired token answers
   teardown fails, after admission, the operation is uncertain. The
   supervisor writes `state: "uncertain"` with the `detail`, and logs it.
   It retains its lifelines and engine exclusion for diagnosis. It refuses
-  further run mutations: SPAWN, SIGNAL, SHUTDOWN and another
-  MAINTENANCE_STOP. Lease operations remain available. A held signal then
+  further run mutations, SPAWN, SIGNAL, SHUTDOWN and another
+  MAINTENANCE_STOP, with `{ok: false, error: "maintenance_uncertain"}`
+  (`supervisor_process.51` to `.54`, DL-390); the client reads that
+  refusal as 4. Lease operations remain available. A held signal then
   starts the legacy shutdown, and the deadman applies again.
   PING and LIST expose `process_state`, including `maintenance_stopping`,
   `maintenance_completing` and `maintenance_uncertain`. From admission on
@@ -1012,7 +1017,7 @@ run: the drained supervisor gone and its successor not yet up. A
 successor that answers and refuses the reconnect, its PING or its
 re-ACQUIRE (`lease_held`), ends the hold. An engine that may fork its own
 supervisor has no unit to replace it, so the drained supervisor's exit
-ends the hold. Each end is the spawn's failure, as before the hold. A
+ends the hold. Each end fails the spawn. A
 resend whose reply is lost may have reached a successor that then died:
 when the run's `receipt.json` exists, the engine sends nothing more and
 awaits the run as a duplicate's, through LIST and, with no supervisor,
