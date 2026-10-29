@@ -1,9 +1,9 @@
 # Protocol evolution — how a dialect enters service, and how it leaves
 
-Status: **normative (DL-138; amended by DL-147, DL-150, DL-151, DL-157,
-DL-158, DL-168, DL-170, DL-217, DL-227, DL-263 and DL-401).** A change to what this
-document fixes requires a decision-log entry. Each amendment is cited where
-it applies.
+Status: **normative (DL-138).** Entries that rule parts of it include
+DL-144, DL-146, DL-147, DL-150, DL-151, DL-157, DL-158, DL-168, DL-170,
+DL-217, DL-227, DL-252, DL-263 and DL-401. A change to what this document
+fixes requires a decision-log entry. Each entry is cited where it applies.
 
 This document is the contract for every versioned protocol and every durable
 artifact in the runner. It answers four questions:
@@ -237,23 +237,23 @@ line on the same connection is read normally. `subscribe` is the one request
 that outlives its answer: it owns its connection until hangup
 (`control-protocol.md` §5). That instance ends with the connection.
 
-**MAINTENANCE_STOP's version 2 is a new dialect, and v 1 retired with it**
-(DL-401). Version 1 answered only at completion, and version 2 answers at
-admission. A version 1 client would read an admission answer as an unknown
-completion, so the answer changes how a reply is classified, and the verb
-took a new version rather than an added field. The version is per verb, so
-no other verb's clients change. §2's four steps landed in one release, which
-§2 allows for a wire row: the CLI that sends the verb ships with the
-supervisor. A v 1 request is refused `unsupported_version` with a `detail`
-naming DL-401, which a v 1 client already reads as a refusal: exit 2,
-nothing changed. A v 2 client meeting an older supervisor gets
-`unsupported_version` too and exits 2.
+**MAINTENANCE_STOP's version 2 is its own dialect, and v 1 is retired**
+(DL-401). Version 2 answers at admission. A client that expects an answer
+only at completion would read an admission answer as an unknown completion.
+So the answer changes how a reply is classified, and the verb carries a
+version of its own rather than an added field. The version is per verb, so
+no other verb's clients are affected. §2 allows its four steps in one
+release for a wire row, and this one takes them so: the CLI that sends the
+verb ships with the supervisor. A v 1 request is refused
+`unsupported_version` with a `detail` naming DL-401, which a v 1 client
+reads as a refusal: exit 2, nothing changed. A v 2 request that a
+supervisor refuses `unsupported_version` also exits 2.
 
 **An additive answer field is not a new dialect** (DL-217). The basis is
 `control-protocol.md` §2: consumers must ignore unknown fields. Every current
-client therefore reads an answer with an added field the same as before. The
-change takes no version bump and none of §2's four steps. An example is
-`original_decision` on a `sendevent` or `host` collision refusal
+client therefore reads an answer with an added field as it reads one
+without it. The change takes no version bump and none of §2's four steps.
+An example is `original_decision` on a `sendevent` or `host` collision refusal
 (`control-protocol.md` §3). It nests the earlier decision under its own key,
 so a client that ignores it still reads the refusal as a refusal. Two tests
 in `tests/test_recovery.py` hold this:
@@ -341,9 +341,9 @@ neither.
 
 A transformation, if one is ever needed, is **its own decision-log entry**,
 with its own lineage record and its own verification proof. The retired
-estate-adoption path shows the shape: a fenced source, a translated target,
-a proof that the translation is lossless against the retained original, and
-a recovery matrix over every crash point.
+estate-adoption path is an example of such a shape: a fenced source, a
+translated target, a proof that the translation is lossless against the
+retained original, and a recovery matrix over every crash point.
 
 **An in-place rewrite of an immutable digest-bound artifact is never
 permitted.** The WAL, the seal sidecar and the attestation are bound by
@@ -371,10 +371,10 @@ ever written. It does not by itself prove it. An entry that shows only the
 first has shown that no estate would notice, not that there is nothing to
 find.
 
-**DL-138 is the first use of this clause. Once production exists, it is the
-last.** An entry that uses the clause must state the condition it claims, so
-a later reader can check the claim rather than infer it. DL-138 states both
-halves (§8): no dsl41 estate existed in production on 2026-08-21, so no
+**DL-138 uses this clause. Once an estate runs in production, no entry can
+use it.** An entry that uses the clause must state the condition it claims,
+so a later reader can check the claim rather than infer it. DL-138 states
+both halves (§8): no dsl41 estate ran in production on 2026-08-21, so no
 instance of any of the seven retired dialects could exist anywhere.
 
 A reset makes pre-reset roots unreadable. That is its cost, and the entry
@@ -432,7 +432,7 @@ perimeter journal, by construction, because no engine dispatches it
 showing that nothing reads the artifact for a decision. "We did not add one"
 is not a construction.
 
-## 8. The first executed retirement
+## 8. The DL-138 retirement
 
 DL-138 retires seven dialects, under the reset clause of §5 (DL-150).
 §5 records the condition DL-138 states.
