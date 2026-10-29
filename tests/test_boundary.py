@@ -851,6 +851,29 @@ def test_pr30_a_recent_attempt_refuses_unforced_and_records_the_gate_when_forced
         assert gate.gate == "retry_horizon" and gate.observed_age_us == 2_000_000
 
 
+def test_dl420_the_refusal_names_the_wait_left_at_its_own_instant() -> None:
+    """The decision is taken at the cutoff; the time left is measured when the gate refuses,
+    against the engine's clock, and never below zero."""
+    from dsl41.boundary import RetryHorizonRefused
+
+    records = [_attempt(1, T0, expect={"job:a": 1}), _decision(1)]
+    cutoff = T0 + timedelta(seconds=10)
+    for now, left in ((None, 50_000_000), (cutoff + timedelta(seconds=5), 45_000_000)):
+        with pytest.raises(RetryHorizonRefused) as refused:
+            retry_horizon_gate(records, horizon_us=60_000_000, at=cutoff, force_seal=False, now=now)
+        assert refused.value.left_us == left
+        assert "was 10.000s ago" in str(refused.value)
+    with pytest.raises(RetryHorizonRefused) as late:
+        retry_horizon_gate(
+            records,
+            horizon_us=60_000_000,
+            at=cutoff,
+            force_seal=False,
+            now=T0 + timedelta(seconds=90),
+        )
+    assert late.value.left_us == 0
+
+
 def test_an_admitted_attempt_with_no_durable_decision_does_not_hold_the_gate() -> None:
     records = [_attempt(1, T0, expect={"job:a": 1})]  # admitted, undecided
     at = T0 + timedelta(seconds=2)
@@ -4273,6 +4296,32 @@ def test_pr47e_audit_derives_the_forced_gate_from_the_closing_manifests_horizon(
     assert RETRY_HORIZON_S * 1_000_000 < gate.observed_age_us < gate.horizon_us
     attestation = audit_period(run_root, 1, anchor=EstateAnchor(default_anchor_dir(run_root)))
     assert attestation.seal_digest == seal.digest
+
+
+def test_dl420_time_spent_proving_quiescence_shortens_the_reported_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate decides at the cutoff T, but the refusal reports the wait left when it is
+    made: five seconds spent in the ss8 proof, on the engine's own clock, come off it. Under
+    the virtual clock nothing else moves time."""
+    from dsl41.boundary import RetryHorizonRefused
+
+    run_root = tmp_path / "run"
+    engine = _genesis(run_root, profile=_horizon(60))
+    _external_attempt_then(engine, age_s=10)
+    staged = _stage(run_root, C2_JIL)
+    proof = engine._supervisor_proof
+
+    async def slow_proof(estate: Any) -> None:
+        await proof(estate)
+        await engine.clock.wait_until(engine.clock.now() + timedelta(seconds=5))
+
+    monkeypatch.setattr(engine, "_supervisor_proof", slow_proof)
+    refusal = asyncio.run(_refusal(engine, _request(engine, staged)))
+    _close(engine)
+    assert isinstance(refusal, RetryHorizonRefused)
+    assert "was 10.000s ago" in str(refusal)
+    assert refusal.left_us == 45_000_000
 
 
 @pytest.mark.parametrize(("c1_s", "c2_s", "commits"), [(60, 1, False), (1, 60, True)])

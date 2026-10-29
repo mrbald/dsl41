@@ -8,7 +8,11 @@
     "src/dsl41/runner.py:_next_work": 51,
     "src/dsl41/viz.py:_render_chart": 66
   },
-  "changelog_phrases": {},
+  "changelog_phrases": {
+    "src/dsl41/job_chart.py": 1,
+    "src/dsl41/oracle_state.py": 1,
+    "src/dsl41/release.py": 2
+  },
   "long_functions": {
     "src/dsl41/ast_jil.py:scan": 278,
     "src/dsl41/attest.py:rederive_seal": 197,

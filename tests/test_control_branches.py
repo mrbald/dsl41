@@ -269,6 +269,34 @@ def test_a_seal_nothing_drains_is_unknown_and_a_second_one_is_refused(
     asyncio.run(scenario())
 
 
+def test_a_retry_horizon_refusal_carries_the_time_left(short_root: Path) -> None:
+    """ss3, DL-420: a `seal_retry_horizon` refusal adds `retry_horizon_left_us`, the time
+    left until the horizon ends, so a client reads its wait from a field and never from the
+    prose. The field is additive."""
+    from dsl41.boundary import RetryHorizonRefused
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", _ONE_JOB)
+
+        async def refused(request: object) -> object:
+            raise RetryHorizonRefused("the horizon holds", left_us=1_500_000)
+
+        engine.submit_seal = refused  # type: ignore[method-assign,assignment]
+        try:
+            answer = _body(await _control_call(server.path, _seal_wire(engine)), engine)
+            assert answer == {
+                "ok": False,
+                "code": "seal_retry_horizon",
+                "refused": True,
+                "error": "the horizon holds",
+                "retry_horizon_left_us": 1_500_000,
+            }
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
 def test_a_seal_reads_claimed_actor_as_a_string_or_not_at_all(short_root: Path) -> None:
     """ss3: `claimed_actor` is typed only when present, and absence is legal
     (it is defaulted). A number is refused before anything is parsed."""

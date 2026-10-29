@@ -2,8 +2,8 @@
 
 `estate build` assembles a release directory from a manifest, its files and the Python modules
 that render some of them, through `cli_common.module_jil`. `estate diff` compares two releases
-through `release_service.manifest_catalog` and `catalog_changes`, as the seal's classifier
-would. `cli.py` registers both in the `estate` sub-app.
+through `estate_manifest.manifest_catalog` and `classify.catalog_changes`, as the seal's
+classifier would. `cli.py` registers both in the `estate` sub-app.
 """
 
 from __future__ import annotations
@@ -17,7 +17,8 @@ from typing import TYPE_CHECKING, Any
 import typer
 
 from dsl41.cli_common import PERMIT_UNKNOWN, PROPERTIES, load_tz_aliases, refuse
-from dsl41.estate_manifest import ArgsFor, ManifestError, build_args
+from dsl41.estate_manifest import EstateInputs, ManifestError, resolve_manifest
+from dsl41.runner_procid import fsync_dir
 
 if TYPE_CHECKING:
     from dsl41.classify import Baseline
@@ -102,7 +103,7 @@ def _assemble(stage: Path, contents: dict[str, bytes], environments: list[str]) 
             os.fsync(handle.fileno())
     chosen: list[str | None] = [*environments] or [None]
     for environment in chosen:
-        build_args(stage / "estate.toml", ArgsFor.run, environment)
+        resolve_manifest(stage / "estate.toml", environment)
 
 
 def _entries(root: Path) -> dict[str, os.DirEntry[str]]:
@@ -137,14 +138,6 @@ def _tree_differences(target: Path, contents: dict[str, bytes]) -> list[str]:
         ):
             lines.append(f"differs  {name}")
     return lines
-
-
-def _fsync_dir(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
 
 
 def estate_build(
@@ -248,7 +241,7 @@ def estate_build(
             except BaseException:
                 shutil.rmtree(stage, ignore_errors=True)
                 raise
-            _fsync_dir(target.parent)
+            fsync_dir(target.parent)
     except (ManifestError, OSError) as exc:
         raise typer.Exit(refuse(exc)) from exc
     if not check:
@@ -268,21 +261,19 @@ class DiffFormat(str, Enum):
     json = "json"
 
 
-def _baseline(path: Path, catalog: CatalogIR) -> Baseline:
-    """CATALOG with the interpretation profile the manifest at PATH declares: its base zone,
-    the alias table its timezone map parses to, and its switches. The launcher's half takes
-    its defaults on both sides, so only the manifest can move the profile (DL-407, DL-413)."""
+def _baseline(inputs: EstateInputs, catalog: CatalogIR) -> Baseline:
+    """CATALOG with the interpretation profile INPUTS declare: the base zone, the alias table
+    the timezone map parses to, and the switches. The launcher's half takes its defaults on
+    both sides, so only the manifest can move the profile (DL-407, DL-413)."""
     from dsl41.classify import Baseline
-    from dsl41.estate_manifest import load_manifest
     from dsl41.period import runtime_profile_from_cli
     from dsl41.semantics import check_overrides
 
-    manifest = load_manifest(path)
-    tz_map = None if manifest.timezone_map is None else path.parent / manifest.timezone_map
+    tz_map = None if inputs.timezone_map is None else Path(inputs.timezone_map)
     profile = runtime_profile_from_cli(
-        timezone=manifest.timezone,
+        timezone=inputs.timezone,
         tz_aliases=load_tz_aliases(tz_map),
-        semantics=check_overrides(manifest.semantics),
+        semantics=check_overrides(dict(inputs.semantics)),
     )
     return Baseline(catalog=catalog, profile=profile)
 
@@ -348,18 +339,17 @@ def estate_diff(
     invalid, the environment is missing or not declared, the timezone
     map does not parse, or a catalog does not load.
     """  # DL-413, period-model ss10.2
-    from dsl41.release_service import catalog_changes, manifest_catalog
+    from dsl41.classify import catalog_changes
+    from dsl41.estate_manifest import manifest_catalog
 
     sides = []
     for path in (old.absolute(), new.absolute()):
         try:
-            argv = build_args(path, ArgsFor.viz, environment)
+            inputs = resolve_manifest(path, environment)
         except ManifestError as exc:
             raise typer.Exit(refuse(exc)) from exc
-        catalog = manifest_catalog(
-            path.parent, argv, properties or [], permit_unknown=permit_unknown
-        )
-        sides.append(_baseline(path, catalog))
+        catalog = manifest_catalog(inputs, properties or [], permit_unknown=permit_unknown)
+        sides.append(_baseline(inputs, catalog))
     changes = catalog_changes(*sides)
     if output is DiffFormat.json:
         typer.echo(json.dumps(changes))

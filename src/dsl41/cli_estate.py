@@ -20,7 +20,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -47,6 +47,7 @@ from dsl41.cli_common import (
     resume_target_period,
     say_next,
     settle_maintenance,
+    UNIT_DOWN,
     statechart_report,
     supervisor_exited,
     walk_estate_or_exit_2,
@@ -710,6 +711,17 @@ async def _close_engine(engine: "Engine") -> None:
         engine.journal.close()
 
 
+def refuse_seal(outcome: BaseException) -> int:
+    """An offline seal that did not commit: the refusal on stderr, exit 2. A retry-horizon
+    refusal also prints its answer on stdout, the line a live seal prints, so a client reads
+    the wait from its field (DL-420)."""
+    from dsl41.boundary import RetryHorizonRefused
+
+    if isinstance(outcome, RetryHorizonRefused):
+        typer.echo(json.dumps(outcome.answer(), sort_keys=True))
+    return refuse(outcome)
+
+
 async def _drive_boundary(
     engine: "Engine", request: "SealRequest", run_root: Path, estate_anchor: "Path | None"
 ) -> int:
@@ -769,7 +781,7 @@ async def _drive_boundary(
     elif outcome is not None:
         # ss7 publishes 0/2/4/7 for this verb and nothing else (DL-145): whatever exception said
         # so, the boundary did NOT commit and C1 is still open
-        code = refuse(outcome)
+        code = refuse_seal(outcome)
     else:
         typer.echo("the engine loop returned without a boundary", err=True)
     with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -1307,9 +1319,6 @@ SystemctlReader = Callable[[list[str]], str]
 ENGINE_UNIT = "dsl41-engine.service"
 SUPERVISOR_UNIT = "dsl41-supervisor.service"
 
-#: ActiveState values of a unit that is down; `failed` is a sealed engine's exit 3
-_UNIT_DOWN = ("inactive", "failed")
-
 
 def read_systemctl(argv: list[str]) -> str:
     """The real reader. `systemctl show` needs no privilege."""
@@ -1554,7 +1563,7 @@ class _Quiesce:
     def engine(self) -> None:
         unit = self.request.engine_unit
         props = self._unit("engine", unit)
-        if props.get("ActiveState") not in _UNIT_DOWN:
+        if props.get("ActiveState") not in UNIT_DOWN:
             raise self.refuse(
                 "engine",
                 f"{unit} is {props.get('ActiveState')}/{props.get('SubState')};"
@@ -1656,7 +1665,7 @@ class _Quiesce:
 
     def horizon(self) -> None:
         """period-model ss9's retry horizon, read before the seal so the refusal names its end."""
-        from dsl41.boundary import externally_requested_attempts
+        from dsl41.boundary import retry_horizon_end
         from dsl41.period import estate_wal
         from dsl41.runner_clock import EngineError
         from dsl41.runner_journal import read_journal
@@ -1667,15 +1676,12 @@ class _Quiesce:
         root = self.request.run_root
         try:
             horizon_us = _closing_manifest(root).runtime_profile.retry_horizon_us
-            attempts = externally_requested_attempts(read_journal(estate_wal(root)))
+            end = retry_horizon_end(read_journal(estate_wal(root)), horizon_us)
         except (OSError, ValueError, EngineError) as exc:
             raise self.refuse("horizon", str(exc)) from exc
-        if not attempts:
+        if end is None:
             self.say("horizon", "ok: no operator request in this period")
             return
-        # the journal's `at` and `Host.now` are both naive UTC (runner_clock)
-        last = max(datetime.fromisoformat(str(attempt["at"])) for attempt in attempts)
-        end = last + timedelta(microseconds=horizon_us)
         stamp = f"{end.isoformat(timespec='seconds')} UTC"
         if self.host.now() >= end:
             self.say("horizon", f"ok: ended at {stamp}")
@@ -1762,7 +1768,7 @@ class _Quiesce:
             self.say("maintenance", "skipped: no supervisor")
             return
         if self.supervisor_pid is None or self.listing.get("process_state") != "serving":
-            self._settle(record)
+            self._settle()
             return
         sock = root / "supervisor.sock"
         try:
@@ -1794,55 +1800,34 @@ class _Quiesce:
             raise self.refuse("maintenance", _UNKNOWN_MAINTENANCE, 4)
         raise self.refuse("maintenance", self._maintenance_remedy(reply or {}))
 
-    def _settle(self, record: dict[str, Any] | None) -> None:
-        """A rerun meets an admitted operation. The owner rule runs first: the record must name
-        the supervisor LIST shows, or with none answering, the one the start note names; any
-        other record is not a maintenance outcome, 4 (DL-401). Then an exited supervisor whose
-        record says completed is skipped, a live one is watched for the rest of its bound, and
-        uncertain is 4."""
-        from dsl41.runner_supervisor import record_owner_problem
+    def _settle(self) -> None:
+        """A rerun meets an admitted operation, settled by `settle_maintenance`, the one
+        completion rule of every maintenance client: the owner rule first (the record must name
+        the supervisor LIST shows, or with none answering, the root's last), the boot (a record
+        of another boot counts only when it says completed), then the exit and the record's
+        state; uncertain is 4 (DL-401, DL-420). Settled at its first look, with no wait, the
+        operation had completed before this rerun."""
+        waits: list[float] = []
 
-        if record is None:
-            raise self.refuse(
-                "maintenance",
-                f"the supervisor is {self.listing.get('process_state')} and no maintenance.json"
-                f" names it; {_UNKNOWN_MAINTENANCE}",
-                4,
-            )
-        pid = record["supervisor_pid"]
-        incarnation = self.listing.get("incarnation")
-        if incarnation is None:
-            problem = record_owner_problem(self.request.run_root, record)
-        elif record["incarnation"] != incarnation:
-            problem = "maintenance.json names another supervisor than the one LIST shows"
-        else:
-            problem = None
-        if problem is not None:
-            raise self.refuse("maintenance", f"{problem}; {_UNKNOWN_MAINTENANCE}", 4)
+        def sleep(seconds: float) -> None:
+            waits.append(seconds)
+            self.host.sleep(seconds)
+
         try:
-            if record["state"] == "completed" and supervisor_exited(
-                pid, record["supervisor_start_time"]
-            ):
-                self.exited_pid = pid
-                self.say(
-                    "maintenance",
-                    f"skipped: already completed; the supervisor (pid {pid}) exited",
-                )
-                return
-            code, reason, _ = settle_maintenance(
+            code, reason, record = settle_maintenance(
                 self.request.run_root,
-                incarnation,
-                sleep=self.host.sleep,
+                self.listing.get("incarnation"),
+                sleep=sleep,
                 probe=ping_probe(self.request.run_root / "supervisor.sock", self.host.connect),
             )
         except (OSError, ValueError) as exc:
-            code, reason = 4, str(exc)
+            code, reason, record = 4, str(exc), None
         if code == 3:
             raise self.refuse("maintenance", reason, 3)
-        if code != 0:
+        if code != 0 or record is None:
             raise self.refuse("maintenance", f"{reason}; {_UNKNOWN_MAINTENANCE}", 4)
-        self.exited_pid = pid
-        self.say("maintenance", f"ok: {reason}")
+        self.exited_pid = record["supervisor_pid"]
+        self.say("maintenance", f"skipped: already {reason}" if not waits else f"ok: {reason}")
 
     def _maintenance_remedy(self, reply: dict[str, Any]) -> str:
         """A refusal's cause and its own next move."""
@@ -1902,7 +1887,7 @@ class _Quiesce:
             props = self._unit("units", unit)
             active, sub = props.get("ActiveState"), props.get("SubState")
             state = f"{unit} is {active}/{sub}"
-            if active in _UNIT_DOWN and sub in ("dead", "failed"):
+            if active in UNIT_DOWN and sub in ("dead", "failed"):
                 continue
             if active == "deactivating" or (
                 unit == self.request.supervisor_unit

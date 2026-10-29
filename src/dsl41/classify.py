@@ -402,6 +402,72 @@ def node_values(side: Baseline) -> dict[str, Any]:
     return values
 
 
+#: The node prefixes `estate diff` reports, and the kind each is reported as (DL-413).
+NODE_KINDS: Final = {
+    JOB: "jobs",
+    BOX: "boxes",
+    CALENDAR: "calendars",
+    CYCLE: "cycles",
+    RESOURCE: "resources",
+    MACHINE: "machines",
+    GLOBAL: "globals",
+    XINST: "external_instances",
+}
+
+
+def catalog_changes(old: Baseline, new: Baseline) -> dict[str, Any]:
+    """What NEW adds, removes and changes against OLD, by the seal's own test on each node,
+    `node_values` (period-model ss10.2): a job by its fingerprint, a machine by the fields
+    resolution reads, a calendar by its date set, and so on. Under each changed calendar and
+    resource, `referenced_by` names the jobs that name it on either side. The profile holds the
+    base zone, each timezone alias and each switch that moved. The dependency closure and the
+    live classification stay the seal's (DL-413)."""
+    was, now = node_values(old), node_values(new)
+    result: dict[str, Any] = {
+        kind: {"added": [], "removed": [], "changed": []} for kind in NODE_KINDS.values()
+    }
+    for node in sorted(set(was) | set(now)):
+        prefix, _, name = node.partition(":")
+        kind = NODE_KINDS.get(prefix + ":")
+        if kind is not None and was.get(node) != now.get(node):
+            group = "added" if node not in was else "removed" if node not in now else "changed"
+            result[kind][group].append(name)
+    graph = ClassificationGraph(old, new)
+    for prefix in (CALENDAR, RESOURCE):
+        kind = NODE_KINDS[prefix]
+        result[kind]["referenced_by"] = {
+            name: sorted(
+                referrer.removeprefix(JOB)
+                for referrer in graph.referrers(prefix + name)
+                if referrer.startswith(JOB)
+            )
+            for name in result[kind]["changed"]
+        }
+    profile: dict[str, Any] = {}
+    zone = PROFILE + "default_tz"
+    if was[zone] != now[zone]:
+        profile["timezone"] = {"old": was[zone], "new": now[zone]}
+    # the map is the alias table as parsed, so a comment or a reordering is not a change
+    aliases_was = dict(was[PROFILE + "tz_aliases"])
+    aliases_now = dict(now[PROFILE + "tz_aliases"])
+    aliases = {
+        alias: {"old": aliases_was.get(alias), "new": aliases_now.get(alias)}
+        for alias in sorted(aliases_was.keys() | aliases_now.keys())
+        if aliases_was.get(alias) != aliases_now.get(alias)
+    }
+    if aliases:
+        profile["timezone_map"] = aliases
+    switches = {
+        node.removeprefix(SWITCH): {"old": was[node], "new": now[node]}
+        for node in sorted(was)
+        if node.startswith(SWITCH) and was[node] != now[node]
+    }
+    if switches:
+        profile["semantics"] = switches
+    result["profile"] = profile
+    return result
+
+
 class ClassificationGraph:
     """ss10.2's graph over both baselines: the edges of C1 and C2 together, and the moved nodes.
 

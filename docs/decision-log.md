@@ -24757,3 +24757,39 @@ relitigate an entry; append a new one.
   activation refuse it, is refined by the check. A check run through the link without `-B`
   writes a matching cache, and a repeat accepts it. The advice to run checks with `python -B`
   stays, so that nothing writes into a retained runtime.
+- DL-420 The architecture review at a8a9968 lands: each release concept has one home, the
+  service side reads the run root through the package's readers, and the horizon refusal
+  carries its wait as a field (2026-10-29; src/dsl41/release.py, release_service.py,
+  cli_release.py, estate_manifest.py, classify.py, cli_estate_build.py, boundary.py, runner.py,
+  runner_control.py, cli_estate.py, cli_common.py, runner_procid.py, runner_history.py,
+  file_processing.py; control-protocol ss3; deployment-runbook ss8; tests/release_root.py)
+  ACTED. (1) The service side reads the run root with the engine's readers: `lineage_of`,
+  `prove_opening`, `read_period_manifest`, `bundle_sources` and `read_journal`. (2) Evidence
+  it cannot read, an input or decision without its attempt number included, stops the verb
+  with exit 3 or is named; it is never read as absent or joined on nothing. (3)
+  `boundary.retry_horizon_end` is the one horizon computation, for the gate and `estate
+  quiesce`. (4) The gate decides at the cutoff; its `RetryHorizonRefused` carries
+  `retry_horizon_left_us`, the wait left on the engine's clock as it refuses, never below zero.
+  (5) The release waits by that field on the live answer and the offline answer line; the
+  sentence is unchanged and unparsed. (6) The release reads `LIVE_OR_QUEUED` and
+  `cli_common.UNIT_DOWN`. (7) `RECEIPT_OUTCOMES` is the one receipt table, and `verify_failed`
+  is no longer written. (8) `runner_procid` is the one durability home; `durable_write` sets
+  the given mode whatever the umask, so receipts and `latest` are exactly 0644, and a short
+  write lands whole (DL-151). (9) `resolve_manifest` returns `EstateInputs`, which every
+  reader uses once; no verb reads the manifest (DL-407). (10) `catalog_changes` sits in
+  classify.py, and `estate_manifest.manifest_catalog` is the one catalog loader. (11)
+  `release.query` is the one query wrapper, and an answer that is not JSON still refuses. (12)
+  `newest_receipt` is the one scanner, `Waits` holds the defaults, and the commands are
+  `release_*`. (13) A take-over re-opens every carried kept hold for the successor to settle.
+  (14) While that successor is recorded, `status` prints no release command for a hold it
+  carries. (15) Quiesce settles maintenance only through `settle_maintenance`. (16) A
+  completed record is final, so a rerun after a reboot exits 0; the boot check holds only a
+  record in progress. (17) The four changelog phrases state present facts.
+  LIMIT. The verbs refuse a runtime other than the launcher's, so an engine without the field
+  appears only across a skewed install; there a live refusal waits the fixed 10 s, and an
+  older offline seal reads as a plain refusal.
+  DECLINED. The verbs keep `dsl41 query` and `sendevent` as subprocesses: the train is the
+  operator's own commands, replayable by hand. DL-361's `_HANDLERS` table waits for the owner.
+  The explore page's snapshot globals are a slice of their own.
+  FOR THE OWNER. Whether the apply becomes a declared chart, and whether the verbs move to the
+  in-process control client.

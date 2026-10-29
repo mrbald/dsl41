@@ -454,15 +454,28 @@ def test_a_horizon_refusal_is_known_by_its_code_not_its_wording(site: Site) -> N
     assert site.record() is None and site.active.read_text() == "r1\n"
 
 
-def test_an_offline_horizon_refusal_on_stderr_is_waited_out(site: Site) -> None:
-    """DL-412: an offline seal prints the gate's sentence on stderr, not a coded answer; the
-    apply reads the wait from it and seals again. The stub renders that sentence through the
-    gate and `refuse` themselves."""
+def test_an_offline_horizon_refusal_is_waited_out_by_its_answer_line(site: Site) -> None:
+    """DL-412, DL-420: an offline seal prints the gate's sentence on stderr and its answer line,
+    code and time left, on stdout; the apply reads the wait from the field and seals again. The
+    stub renders both through the gate and `refuse_seal` themselves."""
     site.prepared("v2")
     site.edit(seal_outcomes=["horizon-offline"])
     done = site.run("apply", "v2")
     assert done.returncode == 0, done.stderr
     assert "waiting 1.5 s for the retry horizon of the last operator request" in done.stderr
+    first, second = [call[call.index("--request-id") + 1] for call in site.seals()]
+    assert first != second == site.receipt("v2")["request_id"]
+
+
+def test_a_horizon_wait_is_read_from_its_field_not_its_prose(site: Site) -> None:
+    """DL-420: the refusal's prose names a 30 s old attempt under a 60 s horizon, and its
+    `retry_horizon_left_us` field says 0.2 s are left. The apply waits by the field."""
+    site.prepared("v2")
+    site.edit(seal_outcomes=["horizon-misworded"])
+    done = site.run("apply", "v2")
+    assert done.returncode == 0, done.stderr
+    assert "waiting 1.2 s for the retry horizon of the last operator request" in done.stderr
+    assert "31.0 s" not in done.stderr
     first, second = [call[call.index("--request-id") + 1] for call in site.seals()]
     assert first != second == site.receipt("v2")["request_id"]
 
@@ -676,3 +689,25 @@ def test_a_resume_refused_before_it_acts_says_its_apply_stays_recorded(site: Sit
     assert "v2's files changed since prepare: global.jil." in refused.stderr
     assert "the apply of v2 stays recorded, with its holds." in refused.stderr
     assert site.record() is not None
+
+
+def test_a_log_record_without_its_attempt_number_stops_the_release_of_holds(site: Site) -> None:
+    """DL-420: an attempt number is the join between a request and its decision. Another
+    operator's ON_HOLD without `seq` and a decision without `index` must not join on nothing
+    and hide that hold: the history refuses them as unreadable, the apply stops with its
+    record, exit 3, and no OFF_HOLD is sent."""
+    site.prepared("v2")
+    site.edit(seal_outcomes=["unknown"])
+    assert site.run("apply", "v2").returncode == 4
+    segment = site.root / "wal" / "000001.jsonl"
+    with segment.open("a") as stream:
+        other = {"rec": "input", "kind": "ON_HOLD", "request_id": "x", "payload": {"job": "NB_B"}}
+        stream.write(json.dumps(other) + "\n")
+        undone = {"rec": "decision", "decision": "rejected", "legacy_batch": False}
+        stream.write(json.dumps(undone) + "\n")
+    resumed = site.run("resume")
+    assert resumed.returncode == 3, resumed.stderr
+    assert "without its attempt number" in resumed.stderr
+    assert [verb for verb, _ in site.state()["sent"] if verb == "OFF_HOLD"] == []
+    record = site.record()
+    assert record is not None and record["step"] == "verified"

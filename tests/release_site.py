@@ -5,7 +5,9 @@ Each test lays out a site the way offline-installation installs one: a runtime u
 <prefix>/bin/dsl41-launch with only its CONFIGURATION values replaced. `sudo` and `systemctl`
 are stubs on PATH, and the launcher's DSL41 is a stub engine that keeps its state in one JSON
 file: it answers `query`, `sendevent` and `seal`, and hands `release`, `lint` and `rehearse` to
-the runtime's dsl41. The service drill runs the same verbs against systemd and a real engine.
+the runtime's dsl41. Its run root holds what a real engine writes (tests/release_root.py), so
+the service side reads it with the package's own readers. The service drill runs the same
+verbs against systemd and a real engine.
 """
 
 from __future__ import annotations
@@ -22,9 +24,11 @@ from pathlib import Path
 from typing import Any
 
 
+from release_root import genesis
 from test_nightbank_deploy import NB, _configured, _night
 
 SMALL = NB / "estate" / "small"
+TESTS = Path(__file__).resolve().parent
 ME = pwd.getpwuid(os.geteuid()).pw_name
 #: the runtime's entry, with the test-only hook set from its first argument (DL-412)
 ENTRY = """import sys
@@ -36,12 +40,13 @@ app(args=sys.argv[2:], prog_name="dsl41")
 
 #: the stub engine: its state is state.json beside it (see the module docstring)
 STUB_DSL41 = r"""
-import hashlib, json, os, sys, uuid
+import json, os, sys, uuid
 from pathlib import Path
 
 HERE = Path("@STUB@")
 STATE = HERE / "state.json"
 REAL = os.environ["RELEASE_TEST_DSL41"]
+sys.path.insert(0, "@TESTS@")
 args = sys.argv[1:]
 if args[:1] in (["release"], ["lint"], ["rehearse"]):
     with (HERE / "forwarded.log").open("a") as log:
@@ -117,7 +122,8 @@ if args[0] == "sendevent":
     if forced == 3 or (expect is not None and int(expect) != row["state_rev"]):
         answer = {"ok": False, "decision": "rejected", "request_id": rid, "error": "it moved"}
         state["decisions"][rid] = [3, answer]
-        append(wal, {"rec": "decision", "index": state["index"], "decision": "rejected"})
+        rejected = {"rec": "decision", "index": state["index"], "decision": "rejected"}
+        append(wal, rejected | {"legacy_batch": False})
         save()
         print(json.dumps(answer))
         sys.exit(3)
@@ -131,7 +137,7 @@ if args[0] == "sendevent":
     answer["revisions"] = {} if noop else {f"job:{job}": row["state_rev"]}
     state["decisions"][rid] = [0, answer]
     decision = {"rec": "decision", "index": state["index"], "decision": "applied"}
-    append(wal, decision | {"revisions": answer["revisions"]})
+    append(wal, decision | {"revisions": answer["revisions"], "legacy_batch": False})
     lost = (verb == "ON_HOLD" and job in state["send_unknown"]) or forced == 4
     if verb == "ON_HOLD" and job in state["send_unknown"]:
         state["send_unknown"].remove(job)
@@ -153,22 +159,27 @@ if args[0] == "seal":
             sys.exit(0)  # an exact retry of a committed boundary is answered from it (DL-151)
     outcome = state["seal_outcomes"].pop(0) if state["seal_outcomes"] else "commit"
     state["seal_requests"].append(rid)
-    if outcome in ("horizon", "horizon-unworded"):
+    if outcome in ("horizon", "horizon-misworded"):  # the live answer, built by the refusal
+        from dsl41.boundary import RetryHorizonRefused
+
         save()
+        ago, left = ("59.500", 500_000) if outcome == "horizon" else ("30.000", 200_000)
         error = (
-            "the last externally requested attempt was 59.500s ago and the closing period's"
+            f"the last externally requested attempt was {ago}s ago and the closing period's"
             " retry_horizon_us is 60000000: a retry composed under this baseline can no"
             " longer be answered after the boundary. Wait it out, or seal with --force-seal"
         )
-        if outcome == "horizon-unworded":
-            error = "a retry horizon"
-        print(json.dumps({"ok": False, "code": "seal_retry_horizon", "error": error}))
+        print(json.dumps(RetryHorizonRefused(error, left_us=left).answer()))
         sys.exit(2)
-    if outcome == "horizon-offline":  # the offline seal's own refusal, rendered by its code
+    if outcome == "horizon-unworded":  # a coded answer without the time left
+        save()
+        print(json.dumps({"ok": False, "code": "seal_retry_horizon", "error": "a retry horizon"}))
+        sys.exit(2)
+    if outcome == "horizon-offline":  # the offline seal's own refusal and answer line
         from datetime import UTC, datetime, timedelta
 
         from dsl41.boundary import retry_horizon_gate
-        from dsl41.cli_common import refuse
+        from dsl41.cli_estate import refuse_seal
         from dsl41.runner_clock import EngineError
 
         at = datetime.now(UTC)
@@ -182,31 +193,24 @@ if args[0] == "seal":
             )
         except EngineError as exc:
             save()
-            sys.exit(refuse(exc))
+            sys.exit(refuse_seal(exc))
         raise SystemExit("stub dsl41: the gate passed")
     if outcome in ("refuse", "unknown"):
         save()
         print(f"seal {outcome}", file=sys.stderr)
         sys.exit(2 if outcome == "refuse" else 4)
-    files = [args[i + 1] for i, word in enumerate(args) if word == "--next"]
-    address = "sha256:" + hashlib.sha256("\0".join(files).encode()).hexdigest()
-    closing, period = state["period"], state["period"] + 1
-    baseline = f"baseline-{period}"
-    nxt = {"period_id": period, "baseline_id": baseline, "source_bundle_hash": address}
-    seal = {"epoch": state["epoch"], "boundary_request": {"request_id": rid}, "next_period": nxt}
-    (root / "seals").mkdir(parents=True, exist_ok=True)
-    (root / "seals" / f"{closing:06d}.json").write_text(json.dumps(seal))
-    opened = state["opened_hash"] or address
-    manifest = root / "periods" / f"{period:06d}"
-    manifest.mkdir(parents=True)
-    (manifest / "manifest.json").write_text(json.dumps({"source_bundle_hash": opened}))
-    bundle = root / "catalogs" / opened.split(":")[-1]
-    bundle.mkdir(parents=True, exist_ok=True)
-    sources = [{"path": path} for path in files]
-    (bundle / "sources.json").write_text(json.dumps({"sources": sources}))
-    record = {"rec": "seal", "period_id": closing, "request_id": rid, "next_period_id": period}
-    append(root / "wal" / f"{closing:06d}.jsonl", record | {"claimed_actor": state["actor"] or actor})
-    state["next"] = {"period": period, "baseline": baseline, "hash": opened, "closing": closing}
+    import release_root
+
+    state["next"] = release_root.seal(
+        root,
+        state["period"],
+        request_id=rid,
+        actor=state["actor"] or actor,
+        epoch=state["epoch"],
+        closes_at_index=state["index"],
+        files=[args[i + 1] for i, word in enumerate(args) if word == "--next"],
+        opened_hash=state["opened_hash"],
+    )
     state["up"] = False
     save()
     sys.exit({"commit": 0, "commit-unknown": 4, "commit-refused": 2}[outcome])
@@ -217,29 +221,20 @@ STUB_SYSTEMCTL = r"""
 import json, sys
 from pathlib import Path
 
+sys.path.insert(0, "@TESTS@")
+
 state_path = Path(sys.argv[0]).resolve().parents[1] / "stub" / "state.json"
 state = json.loads(state_path.read_text())
 state["systemctl"].append(sys.argv[1:])
 if sys.argv[1] == "show":
     print("active" if state["up"] else "failed")
 elif sys.argv[1:] == ["start", "dsl41-engine.service"] and not state["start_fails"]:
+    import release_root
+
     nxt = state["next"]
     state["up"], state["period"], state["baseline"] = True, nxt["period"], nxt["baseline"]
     state["epoch"] += 1
-    segment = Path(state["run_root"]) / "wal" / f"{nxt['period']:06d}.jsonl"
-    segment.write_text(
-        json.dumps(
-            {
-                "rec": "segment",
-                "baseline_id": nxt["baseline"],
-                "source_bundle_hash": nxt["hash"],
-                "opens_from_seal": {"period_id": nxt["closing"], "digest": "sha256:x"},
-            }
-        )
-        + "\n"
-        + json.dumps({"rec": "leader", "epoch": state["epoch"]})
-        + "\n"
-    )
+    release_root.open_next(Path(state["run_root"]), nxt["closing"], state["epoch"])
 else:
     state_path.write_text(json.dumps(state))
     sys.exit(1)
@@ -296,9 +291,10 @@ class Site:
         ).rename(self.launcher)
         _script(
             self.dsl41,
-            STUB_DSL41.replace("@STUB@", str(self.stub)),
+            STUB_DSL41.replace("@STUB@", str(self.stub)).replace("@TESTS@", str(TESTS)),
         )
-        _script(base / "path" / "systemctl", STUB_SYSTEMCTL)
+        _script(base / "path" / "systemctl", STUB_SYSTEMCTL.replace("@TESTS@", str(TESTS)))
+        genesis(self.root)
         _script(base / "path" / "sudo", STUB_SUDO)
         self.save(
             {

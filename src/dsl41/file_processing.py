@@ -27,6 +27,7 @@ from types import MappingProxyType
 from typing import Literal, NoReturn, Protocol
 
 from dsl41.file_processing_charts import ARCHIVE, PROCESS, state_after, transition
+from dsl41.runner_procid import fsync_dir
 from dsl41.state_machine import StatechartError
 
 
@@ -232,14 +233,6 @@ def _verified_object(root: Path, content_hash: str) -> Path:
     return path
 
 
-def _sync_dir(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
 @contextmanager
 def _lock(root: Path, role: str) -> Iterator[None]:
     fd = os.open(root / f"{role}.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -401,7 +394,7 @@ def _open(root: Path, processor_id: str) -> sqlite3.Connection:
                 db.execute("INSERT INTO identity VALUES (?)", (processor_id,))
             elif len(rows) != 1 or rows[0][0] != processor_id:
                 raise ProtocolError("root belongs to a different processor identity")
-        _sync_dir(root)
+        fsync_dir(root, nofollow=True)
         return db
     except sqlite3.DatabaseError as exc:
         db.close()
@@ -423,7 +416,7 @@ def _layout(root: Path, processor_id: str) -> None:
         if not stat.S_ISDIR(path.lstat().st_mode):
             raise ProtocolError(f"not a real directory: {path}")
     for path in (root, *published):
-        _sync_dir(path)
+        fsync_dir(path, nofollow=True)
 
 
 def _todo(processor_id: str, row: sqlite3.Row) -> dict[str, object]:
@@ -470,7 +463,7 @@ def _validate_todo(path: Path, processor_id: str, row: sqlite3.Row) -> None:
 
 def _remove(path: Path) -> None:
     path.unlink(missing_ok=True)
-    _sync_dir(path.parent)
+    fsync_dir(path.parent, nofollow=True)
 
 
 def _publish_todo(
@@ -494,7 +487,7 @@ def _publish_todo(
             if _terminal(row["state"]):
                 _remove(target)
             else:
-                _sync_dir(target.parent)
+                fsync_dir(target.parent, nofollow=True)
             return
         if _terminal(row["state"]):
             return
@@ -507,7 +500,7 @@ def _publish_todo(
                 os.fsync(stream.fileno())
             failpoint("todo_staged")
             os.link(temp, target)
-            _sync_dir(target.parent)
+            fsync_dir(target.parent, nofollow=True)
         finally:
             temp.unlink(missing_ok=True)
 
@@ -560,7 +553,7 @@ def _cleanup_receipt(
             raise ProtocolError(f"archived inbox file changed: {source}")
         _remove(source)
     else:
-        _sync_dir(source.parent)
+        fsync_dir(source.parent, nofollow=True)
     failpoint("source_unlinked")
     with _write(db):
         db.execute("UPDATE receipts SET cleaned=1 WHERE seq=?", (row["seq"],))
@@ -587,7 +580,7 @@ def _object(root: Path, source: Path, failpoint: Failpoint) -> str:
         except FileExistsError:
             if _hash(target) != content_hash:
                 raise ProtocolError(f"corrupt existing object: {target}") from None
-        _sync_dir(target.parent)
+        fsync_dir(target.parent, nofollow=True)
         return content_hash
     finally:
         temp.unlink(missing_ok=True)
