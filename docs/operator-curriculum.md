@@ -181,6 +181,9 @@ The drill column records coverage outside the numbered course.
 
 ## 5. On shift, choose the source for the situation
 
+Use [incident triage](incident-triage.md)
+to find a job's cause, send an intervention or escalate a dsl41 fault.
+
 Use the [runbook's §0 task index](deployment-runbook.md#task-index)
 to find the task's recipe, monitoring guidance or retirement procedure.
 
