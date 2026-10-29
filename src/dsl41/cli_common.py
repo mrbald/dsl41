@@ -519,6 +519,9 @@ IN_PROGRESS = "in progress; it finishes on its own; read maintenance.json or run
 _OPERATION_STATES = frozenset(
     {"maintenance_stopping", "maintenance_completing", "maintenance_uncertain"}
 )
+#: ActiveState values of a service unit that is down; `failed` is a sealed engine's exit 3.
+#: `estate quiesce` and the release verbs read a unit's state by this one set (DL-420).
+UNIT_DOWN = ("inactive", "failed")
 #: the process states of an operation still being run (DL-401)
 _RUNNING_STATES = frozenset({"maintenance_stopping", "maintenance_completing"})
 #: the refusals after which nothing changed: exit 2 (DL-390)
@@ -575,7 +578,10 @@ def settle_maintenance(
     the wait ends; 4 when the outcome cannot be observed: the record says uncertain, is
     missing or unreadable, does not say completed after the exit, or names no supervisor
     this caller can tie it to. `incarnation` is the supervisor the caller knows; None takes
-    the record's own, which must then name the root's last supervisor. `within_s` replaces
+    the record's own, which must then name the root's last supervisor. A record of another
+    boot is 4 unless it says completed. A completed record is final: when both boot ids are
+    known and differ, the reboot ended its supervisor, so it is 0 at the first look; when
+    either is unknown, nothing is proved and the exit decides (DL-420). `within_s` replaces
     the rest of the recorded bound. 3 needs `probe`, one PING, to answer with this operation
     still running; a live identity that answers nothing is 4, since nothing more is
     scheduled. Returns the code, its reason and the last record read. Sends nothing else."""
@@ -585,12 +591,17 @@ def settle_maintenance(
     record = read_maintenance_record(run_root)
     if record is None or incarnation not in (None, record["incarnation"]):
         return 4, "no maintenance.json names this supervisor", record
-    if record["boot_id"] != current_boot_id():
+    boot, here = record["boot_id"], current_boot_id()
+    if boot != here and record["state"] != "completed":
         return 4, "maintenance.json names another boot", record
+    # a reboot is proved only by two known boot ids that differ (DL-420)
+    rebooted = boot != here and "unknown" not in (boot, here) and bool(boot and here)
     if incarnation is None and (problem := record_owner_problem(run_root, record)) is not None:
         return 4, problem, record
     incarnation = record["incarnation"]
     pid, start = record["supervisor_pid"], record["supervisor_start_time"]
+    if rebooted:
+        return 0, f"completed; the supervisor (pid {pid}) exited", record
     deadline = time.monotonic() + (_left_of(record) if within_s is None else within_s)
     while True:
         exited = supervisor_exited(pid, start)

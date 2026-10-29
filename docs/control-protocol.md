@@ -566,6 +566,12 @@ flight included; a retry is never attached to it. The refusal adds
 client can tell its own boundary, still running, from another's. The field
 is additive: consumers ignore unknown fields (§2), and no version moves.
 
+**The retry horizon's wait** (DL-420). A `seal` refused `seal_retry_horizon`
+adds `retry_horizon_left_us`, the microseconds left until the horizon ends at
+the refusal, so a client reads its wait from the field and never from the
+prose. An offline `dsl41 seal` prints the same answer line on stdout. The
+field is additive, as above.
+
 **An uncommitted seal request is unseen.** A request that crashed before
 its record left nothing behind, so its retry is a fresh request that
 attempts the boundary again. Only a committed seal is ever deduplicated.

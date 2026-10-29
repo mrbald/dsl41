@@ -902,6 +902,7 @@ class Engine:
             horizon_us=estate.manifest.runtime_profile.retry_horizon_us,
             at=at,
             force_seal=request.force_seal,
+            now=self.clock.now(),
         )
         self._machines.dispatch(pending, ChartEvent(QUIESCED))
         return commit_boundary(  # step 8

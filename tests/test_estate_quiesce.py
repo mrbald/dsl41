@@ -1024,6 +1024,30 @@ def test_a_rerun_after_completion_skips_maintenance(
     assert "MAINTENANCE_STOP" not in [request["cmd"] for request in supervisor.sent]
 
 
+def test_a_rerun_after_a_reboot_skips_a_completed_maintenance(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, host: QuiesceHost
+) -> None:
+    """DL-420: a completed record is final. A rerun on a host rebooted since the operation
+    reads it as completed and exits 0, as deployment-runbook ss8 promises for a rerun on a
+    stopped estate; the boot check holds only a record still in progress."""
+    from dsl41 import runner_procid
+
+    run_root, next_jil, supervisor = _sealed_and_refused(short_root, monkeypatch, host)
+    release = short_root / "release"
+    proc, _record = _operating(run_root, release, "admitted")
+    release.touch()
+    proc.wait(timeout=30)
+    supervisor.up = False
+    supervisor.sent.clear()
+    monkeypatch.setattr(runner_procid, "current_boot_id", lambda: "a-later-boot")
+    result = _quiesce(run_root, next_jil)
+    assert result.exit_code == 0, result.output
+    assert f"quiesce: maintenance: skipped: already completed; the supervisor (pid {proc.pid})" in (
+        result.output
+    )
+    assert "MAINTENANCE_STOP" not in [request["cmd"] for request in supervisor.sent]
+
+
 @pytest.mark.parametrize("case", ["uncertain", "unknown_version", "exited_admitted", "no_record"])
 def test_a_rerun_that_cannot_prove_the_outcome_refuses(
     short_root: Path, monkeypatch: pytest.MonkeyPatch, host: QuiesceHost, case: str

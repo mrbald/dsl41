@@ -1,9 +1,11 @@
 """The estate manifest, `estate.toml`: an application's one declaration of its estate inputs.
 
 The manifest names the catalog files in command-line order, the properties layers, the base
-timezone and its map, and the semantic switches. `build_args` turns it into the argument list of
-one verb, and `dsl41 estate args` prints that list (DL-407). The verbs keep their own parsers
-and never read the manifest.
+timezone and its map, and the semantic switches. `resolve_manifest` reads it once into
+`EstateInputs` for one environment; `build_args` renders that value as the argument list of one
+verb, and `dsl41 estate args` prints that list (DL-407). The verbs keep their own parsers and
+never read the manifest; the release's service side and `estate diff` read the value itself,
+and `manifest_catalog` loads its catalog (DL-413).
 
 The manifest carries the interpretation half of the runtime profile: files, layers, timezone,
 timezone map and semantics. The launcher carries the deployment half (`--detached`,
@@ -28,13 +30,19 @@ import os
 import re
 import stat
 import tomllib
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from dsl41.ir import tool_version
 from dsl41.semantics import check_overrides
+
+if TYPE_CHECKING:
+    from dsl41.ir import CatalogIR
 
 
 class ManifestError(ValueError):
@@ -245,18 +253,28 @@ def _join(path: Path, name: str) -> str:
     return str(joined)
 
 
-def _each(flag: str, values: list[str]) -> list[str]:
-    return [word for value in values for word in (flag, value)]
+@dataclass(frozen=True)
+class EstateInputs:
+    """The estate a manifest declares for one environment, each path the manifest's directory
+    joined to its name as given (DL-407): the catalog files in command-line order, the layers
+    (the base ones, then the environment's), the base timezone, the timezone map and the
+    semantic switches."""
+
+    manifest: Path
+    files: tuple[str, ...]
+    layers: tuple[str, ...]
+    timezone: str | None
+    timezone_map: str | None
+    semantics: Mapping[str, str]
+
+    def inputs(self) -> list[str]:
+        """Every file the estate reads, the manifest aside: files, layers, then the map."""
+        return [*self.files, *self.layers, *([self.timezone_map] if self.timezone_map else [])]
 
 
-def build_args(path: Path, verb: ArgsFor, environment: str | None = None) -> list[str]:
-    """The argument list `verb` takes for the estate the manifest at `path` declares (DL-407).
-
-    run and rehearse get the positional files, `-p` per layer, `--timezone`, `--timezone-map`
-    and `--semantics NAME=VALUE` each; seal gets the same as `--next FILE` each, `-p` each and
-    the `--next-` options; lint stops before the semantics, and viz after the layers. The layers
-    are the manifest's `properties`, then the chosen environment's; a manifest that declares
-    environments needs one chosen. The deployment half of the profile is the launcher's."""
+def resolve_manifest(path: Path, environment: str | None = None) -> EstateInputs:
+    """The estate the manifest at `path` declares under `environment`, read once, or
+    ManifestError (DL-407). A manifest that declares environments needs one chosen."""
     manifest = load_manifest(path)
     layers = list(manifest.properties)
     if environment is None and manifest.environments:
@@ -270,19 +288,74 @@ def build_args(path: Path, verb: ArgsFor, environment: str | None = None) -> lis
                 f"{path}: no environment {environment!r}; the manifest declares {declared}"
             )
         layers += chosen.properties
-    files = [_join(path, name) for name in manifest.files]
+    return EstateInputs(
+        manifest=path,
+        files=tuple(_join(path, name) for name in manifest.files),
+        layers=tuple(_join(path, layer) for layer in layers),
+        timezone=manifest.timezone,
+        timezone_map=None if manifest.timezone_map is None else _join(path, manifest.timezone_map),
+        semantics=dict(manifest.semantics),
+    )
+
+
+def _each(flag: str, values: list[str] | tuple[str, ...]) -> list[str]:
+    return [word for value in values for word in (flag, value)]
+
+
+def build_args(path: Path, verb: ArgsFor, environment: str | None = None) -> list[str]:
+    """The argument list `verb` takes for the estate the manifest at `path` declares (DL-407).
+
+    run and rehearse get the positional files, `-p` per layer, `--timezone`, `--timezone-map`
+    and `--semantics NAME=VALUE` each; seal gets the same as `--next FILE` each, `-p` each and
+    the `--next-` options; lint stops before the semantics, and viz after the layers. The layers
+    are the manifest's `properties`, then the chosen environment's; a manifest that declares
+    environments needs one chosen. The deployment half of the profile is the launcher's."""
+    inputs = resolve_manifest(path, environment)
     if verb is ArgsFor.seal:
-        argv, prefix = _each("--next", files), "--next-"
+        argv, prefix = _each("--next", inputs.files), "--next-"
     else:
-        argv, prefix = files, "--"
-    argv += _each("-p", [_join(path, layer) for layer in layers])
+        argv, prefix = list(inputs.files), "--"
+    argv += _each("-p", inputs.layers)
     if verb is ArgsFor.viz:
         return argv
-    if manifest.timezone is not None:
-        argv += [f"{prefix}timezone", manifest.timezone]
-    if manifest.timezone_map is not None:
-        argv += [f"{prefix}timezone-map", _join(path, manifest.timezone_map)]
+    if inputs.timezone is not None:
+        argv += [f"{prefix}timezone", inputs.timezone]
+    if inputs.timezone_map is not None:
+        argv += [f"{prefix}timezone-map", inputs.timezone_map]
     if verb is ArgsFor.lint:
         return argv
-    pairs = [f"{name}={value}" for name, value in manifest.semantics.items()]
+    pairs = [f"{name}={value}" for name, value in inputs.semantics.items()]
     return argv + _each(f"{prefix}semantics", pairs)
+
+
+def manifest_catalog(
+    inputs: EstateInputs,
+    site: list[Path],
+    read: Callable[[Path], bytes] | None = None,
+    *,
+    permit_unknown: bool = False,
+) -> CatalogIR:
+    """The catalog INPUTS declare, its own layers first and the SITE layers after them. With
+    READ, the loader reads a private copy of the files and layers, each through READ; the SITE
+    layers are read in place. A load that fails exits as `load_catalog_or_exit_2` does. The
+    release's service side and `estate diff` load through this one function (DL-412, DL-413)."""
+    import tempfile
+
+    from dsl41.cli_common import load_catalog_or_exit_2
+
+    files = [Path(file) for file in inputs.files]
+    layers = [Path(layer) for layer in inputs.layers]
+    if read is None:
+        return load_catalog_or_exit_2(files, permit_unknown, [*layers, *site])
+    root = inputs.manifest.parent
+    with tempfile.TemporaryDirectory(prefix="dsl41-release-") as scratch:
+
+        def copied(file: Path) -> Path:
+            target = Path(scratch) / file.relative_to(root)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(read(file))
+            return target
+
+        loaded = [copied(file) for file in files]
+        stacked = [copied(layer) for layer in layers]
+        return load_catalog_or_exit_2(loaded, permit_unknown, [*stacked, *site])
