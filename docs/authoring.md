@@ -475,11 +475,11 @@ The manifest declares the timezone, its map and the semantic switches ([§6.1](#
 The runbook's [check block](deployment-runbook.md#recipe-add-change-or-remove-a-job) passes it to `lint` and `rehearse` through `--manifest`, with the site's properties file after the manifest's layers.
 
 After the checks pass, commit and tag the estate edit under the
-[job-edit recipe](deployment-runbook.md#recipe-add-change-or-remove-a-job).
+[job recipe](deployment-runbook.md#recipe-add-change-or-remove-a-job).
 The tag holds the estate's manifest ([§6.1](#61-declare-the-estate-in-estatetoml)).
 Give the operator the checked, tagged estate for the rollout window.
-The operator follows [deployment-runbook §6](deployment-runbook.md#6-jil-rollout--updating-the-estate)
-from there.
+The operator rolls it out by the same recipe: `dsl41 release prepare`, then `dsl41 release apply` in the same run root.
+[Deployment-runbook §6](deployment-runbook.md#6-jil-rollout--updating-the-estate) explains the two cycles an estate changes in.
 
 ### 6.1. Declare the estate in estate.toml
 
@@ -537,6 +537,8 @@ A refusal is one sentence and exit `2`.
 Run the runbook's [check block](deployment-runbook.md#recipe-add-change-or-remove-a-job) in CI on the commit you are about to tag.
 It runs `lint` and `rehearse` with `--manifest` and the site's properties file.
 A manifest the option refuses fails that check, before the tag exists.
+The operator runs the same block again on the tag, in a checkout of its own, before the window ([the job recipe's step 2](deployment-runbook.md#recipe-add-change-or-remove-a-job)).
+These are two checks, not two rules: your CI run gates the tag, and the operator's run gates the window.
 
 When a file such as `eod.jil` comes from a Python module, `dsl41 estate build . --emit eod.jil=eod.py -o dist/v42` assembles the release directory, and `dsl41 release prepare v42 dist/v42` takes it (DL-413).
 With a package, `--emit eod.jil=estate` takes `eod.jil` from it; give one `--emit` per file the package renders.

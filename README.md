@@ -28,7 +28,7 @@ dsl41 and your services) and keep fixed what the application's JIL releases run 
 1. [docs/site-package.md](docs/site-package.md) - the packager guide: what a release gives you, the reference RPM or the offline recipe, what the site adds, install and first start, the infrastructure contract for the application's JIL releases, qualification
 2. [docs/offline-installation.md](docs/offline-installation.md) - the release inputs, the reference RPM, what the package owns
 3. [docs/deployment-runbook.md §1](docs/deployment-runbook.md#1-install) to §3 - install, filesystem layout, starting the engine; the launcher and units are the example under [examples/nightbank/deploy](examples/nightbank/deploy)
-4. [docs/deployment-runbook.md §6](docs/deployment-runbook.md#6-jil-rollout--updating-the-estate) - the JIL rollout cycles; §7 upgrades of dsl41 itself
+4. [docs/deployment-runbook.md, the job recipe](docs/deployment-runbook.md#recipe-add-change-or-remove-a-job) - the application's train for a JIL release; [§6](docs/deployment-runbook.md#6-jil-rollout--updating-the-estate) explains the two rollout cycles; §7 upgrades of dsl41 itself
 5. [docs/deployment-qualification.md](docs/deployment-qualification.md) and [docs/offline-rehearsal.md](docs/offline-rehearsal.md) - qualifying a target and rehearsing the exact wheel
 
 **Operator**: start, watch, recover and retire the engine; drills and incidents.
@@ -45,7 +45,7 @@ dsl41 and your services) and keep fixed what the application's JIL releases run 
 3. [DSL -> JIL (build)](#dsl---jil-build) - the Python DSL builders (`job`, `box`, `sequence`, `parallel`) and `to_jil()`; [examples/file_processing/estate.py](examples/file_processing/estate.py) is a worked Python estate; `examples/nightbank`, `fulfilment`, `energy`, `media` and `dst-drill` hold worked JIL estates
 4. [JIL -> DSL (decompile)](#jil---dsl-decompile) and [Prove two catalogs equivalent](#prove-two-catalogs-equivalent) - bringing an existing estate in and checking a rewrite; [examples/README.md](examples/README.md) indexes the worked estates
 5. [docs/autosys-semantics.md](docs/autosys-semantics.md) - the meaning of JIL (SEM entries); [docs/simulation-coverage.md](docs/simulation-coverage.md) - what the runner models, refuses, or assumes; [docs/jil-statement-syntax.md](docs/jil-statement-syntax.md) - the statement scanner spec
-6. [docs/deployment-runbook.md §6](docs/deployment-runbook.md#6-jil-rollout--updating-the-estate) - how an accepted estate reaches the engine
+6. [docs/deployment-runbook.md, the job recipe](docs/deployment-runbook.md#recipe-add-change-or-remove-a-job) - how an accepted estate reaches the engine: `dsl41 release` in the same run root; [§6](docs/deployment-runbook.md#6-jil-rollout--updating-the-estate) explains the two rollout cycles
 
 **Architect**: the design and the implementation.
 
@@ -74,12 +74,8 @@ They are reference, cited from the pages above, not reading.
 
 ## Status
 
-The compiler and the runner are built and tested. Three designed items are
-not built: the remote relay and shared store that multihost execution needs
-([docs/concurrency-model.md](docs/concurrency-model.md)
-§7), rich UC condition forms with write-path verification (they need a live
-controller), and the decompiler's custom-pattern option (`--patterns`). The
-open questions that need a live instance are listed under
+The compiler and the runner are built and tested. The designed items that
+are not built, and the open questions, are listed under
 [What is not built](#what-is-not-built). The UC backend is descoped until
 further notice (DL-288): it stays built and tested, and gets no new work.
 
@@ -141,8 +137,12 @@ dsl41 lint --timezone America/New_York jobs.jil   # base zone for L023
 ```
 
 The rules are L001-L023: IR-F rules, truth-table rules, graph rules over the
-derived graph, and dangling-name rules. `--strict` is the migration gate. Do
-not ship a catalog that lints dirty.
+derived graph, and dangling-name rules. `--strict` is the migration gate: an
+estate brought in under
+[authoring §5](docs/authoring.md#5-bring-an-existing-autosys-estate-in)
+always lints with it, and a site may require it for every estate.
+`dsl41 release prepare` lints without `--strict`: an ERROR refuses the
+release, and a WARN refuses nothing.
 
 L023 warns when a DST change moves, drops or doubles a schedule time of the
 job's zone, and prints what the runner does. A job's own `timezone` decides the zone, else `--timezone` (UTC by
@@ -441,7 +441,7 @@ dsl41 rehearse jobs.jil --format summary        # virtual clock: a day in second
 dsl41 rehearse jobs.jil --check-cadence         # run counts vs cadence bounds; exit 3 on deviation
 dsl41 rehearse jobs.jil --check-cadence --sweep fail  # + per-producer failure replays
 dsl41 rehearse jobs.jil --check-cadence --sweep flags # + per-flag replays of global-gated jobs
-dsl41 off-hold-all -S ./run1/control.sock       # take every held job off hold
+dsl41 off-hold-all -S ./run1/control.sock       # OFF_HOLD every job on operator hold
 dsl41 serve -S ./run1/control.sock              # the same TUI over the web
 ```
 
@@ -464,8 +464,11 @@ ask first, naming the box members and the revision they act on. F1 opens
 the help panel.
 
 `host drain` is the maintenance verb: new work stops being dispatched to
-that execution host, and work already running finishes. Held jobs are not
-failed and not moved. A job is rerun elsewhere only after the host is
+that execution host, and work already running finishes. A job the drain
+keeps from dispatch is held, and `host activate` dispatches it. That
+dispatch hold is not an operator hold: `sendevent ON_HOLD` sets an operator
+hold, and `sendevent OFF_HOLD` or `off-hold-all` releases it. Held jobs are
+not failed and not moved. A job is rerun elsewhere only after the host is
 evicted, which needs proof that the old executor is dead
 ([docs/concurrency-model.md](docs/concurrency-model.md)
 §8). `query status` marks a held job, because a held job otherwise reads
@@ -576,6 +579,41 @@ proxy layer. dsl41 has none of its own here. The control socket is mode
 0600 from birth (0660 when an access map names a socket group), so `serve`
 only reaches what its own user can already reach directly. It does not
 widen access; it makes existing access reachable from a browser.
+
+### Release an estate
+
+```sh
+dsl41 release prepare NAME DIR   # check DIR and install it as release NAME
+dsl41 release apply NAME         # roll NAME out in one window
+dsl41 release status             # the active release and how the last apply ended
+dsl41 release rollback NAME      # apply NAME, the release the active one replaced
+```
+
+`dsl41 release` ships an estate edit on the application's train. It applies
+a checked release to the running estate in one window, in the same run
+root. Run every verb as the deployment identity; its sudo grant lets the
+verbs act as the service account (DL-421). The
+[job recipe](docs/deployment-runbook.md#recipe-add-change-or-remove-a-job)
+gives the steps, the exit codes and the waits.
+
+- `release prepare NAME DIR` installs a copy of `DIR` as
+  `ESTATE_RELEASES/NAME`, read-only, once it passes lint, rehearse and the
+  launcher's `MAX_JOBS` and `MAX_GRACE_S` limits.
+- `release requalify NAME` runs prepare's checks again on an installed
+  release, after a runtime switch or for a release installed by hand
+  (DL-423).
+- `release apply NAME` holds the scheduled jobs, waits for running jobs to
+  finish, seals the period into `NAME`, writes `NAME` to `ACTIVE`, starts
+  the engine unit, checks the new period and releases its own holds.
+- `release resume` finishes a recorded apply from the step it reached.
+- `release rollback NAME` applies `NAME` by the same window. `NAME` must be
+  the release the active one replaced, as `release status` names it
+  (DL-423).
+- `release status` shows the active release, whether an engine answers,
+  where a rollback goes, and how the last apply ended.
+
+Every verb that checks or seals a release reads its `estate.toml` through
+`--manifest` (DL-422).
 
 ### Run history
 
@@ -1229,6 +1267,12 @@ Training estate:
   are designed in
   [docs/concurrency-model.md](docs/concurrency-model.md)
   §7.
+- Follower mode, `standby check` and the multi-executor rig (DL-230). They
+  wait for the relay above.
+- The `route` verb, which maps an affinity role to an executor. Its wire is
+  specified in [docs/period-model.md](docs/period-model.md) §2.2.
+- The HTTP and WebSocket gateway that [docs/gateway.md](docs/gateway.md)
+  proposes.
 - Rich UC condition forms, the live OpenAPI pull, write-path verification,
   and the generated client (U3b). They need a live controller. UC work is
   descoped until further notice (DL-288).
@@ -1238,7 +1282,7 @@ Training estate:
 Open questions run on documented defaults marked `# PENDING: <label>` in
 the code. The AutoSys questions Q3c, Q3d, Q6, Q8b-Q8d, Q10, Q13, Q14, Q15 and Q16 need
 a live AutoSys instance; Q6, Q13 and Q14 have no code switch. The resource-manager questions
-Qr2-Qr4 are stated in DL-50; DL-247 narrows Qr2. Qr6 is decided: dsl41
+Qr2-Qr5 are stated in DL-50; DL-247 narrows Qr2. Qr6 is decided: dsl41
 keeps its default, and the `queued-recheck` switch selects the vendor's
 readings (DL-257). The UC questions
 U1, U3b and U6b are descoped (DL-288); U1 and U3b would need a live
