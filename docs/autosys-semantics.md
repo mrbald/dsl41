@@ -108,7 +108,7 @@ Syntax: `s(job, hhhh.mm)` (or escaped colon `hhhh\:mm`).
   "the job for which the condition is coded for" names the dependent as the anchor. The
   `test_sem04_zero_lookback_*` tests pin the anchor in both directions. A dependent that
   never ended has no anchor, and the qualifier is satisfied (Q2b, DL-58). **[V]** Source:
-  Broadcom community thread 760251, CA support best answer: "This is working as designed.
+  Broadcom community thread 760251, a vendor staff answer: "This is working as designed.
   When a new job is inserted it has no initial/previous end time."; the thread's reporter
   observed the epoch-0 effect as modeled. In a box override, the box itself is the evaluator
   and the anchor.
@@ -122,7 +122,7 @@ Syntax: `s(job, hhhh.mm)` (or escaped colon `hhhh\:mm`).
   never to `value()` global-variable atoms**. **[V]** The condition grammar has no lookback
   slot on `v()`, so the parser refuses one. Linter rule L003 (error) states the same rule;
   it cannot fire, because the global atom model has no lookback field.
-- The largest finite lookback is `9998.59`, about 416.58 days. **[V]** Source: "condition
+- The largest finite lookback is `9998.59`, about 416.6 days. **[V]** Source: "condition
   Attribute", AutoSys 24.2: "0-9998 for hhhh when specifying hours and minutes (for example,
   9998.59)". A bare `9999` means indefinite. dsl41 also accepts `9999.00` to `9999.59`, and the
   same values in the `9999\:mm` spelling, as finite windows. That input is accepted but
@@ -772,12 +772,12 @@ ACTIVATED"; "Maintains jobs with additional starting conditions in the ACTIVATED
 additional dependencies are met"; ACTIVATED is "the job itself is waiting to start". The
 governing rule is a continuously evaluated AND: "All defined starting conditions must be true
 for a job to start" (Start Conditions, 12.0). The held-across-tick case is documented as
-start-on-release (SEM-21). The standalone case (thread 734033, CA's Mark Hanson, with
+start-on-release (SEM-21). The standalone case (thread 734033, vendor staff, with
 reproduced tests for both start_times and run_calendar): "There is a STARTJOB event associated
 with the start_time or run_calendar … The STARTJOB event being processed satisfies the
 start_times/run_calendar dependency", and a start "resets" it; the log line
 `CAUAJM_I_40162 starting conditions have not been met` is the armed tick's signature. The
-no-expiry boundary (thread 801986, Broadcom employee): "no set limit to how long [the job]
+no-expiry boundary (thread 801986, vendor staff): "no set limit to how long [the job]
 would wait … it will run immediately after the next time [the predecessor] completes
 successfully, regardless of how far in the future that is", reset only by a (force-)start or
 a JIL update. **[V]**
@@ -1112,7 +1112,7 @@ non_workday: {O|S|N|W|P}
   literal **`all`** (= every day). Condition token case preserved as authored (`{MNTHD#1}`
   next to `workd#1` in one file, no normalization). Condition grouping written with
   **braces** `{…}` where TechDocs shows parens (both accepted as synonyms). The **`WORKD#L`**
-  last-ordinal in use (#L = from-end-1, extended uniformly across the ordinal families).
+  last-ordinal in use (#L = from-end-1; SEM-37 lists the families that accept it).
   `holiday: S` carried **without** holcal (against the 12.1 prompt-flow wording; S consumes no
   holiday set, but O/N/W/P keep the requirement). Standard-calendar rows stamped
   `mm/dd/yyyy 00:00:00` (**HH:MM:SS** tails). Cycle records as name/description plus repeated
@@ -1146,7 +1146,8 @@ anchor digit is 1–7. An ordinal or anchor outside its family's range is a loud
 Token inventory (naming conventions: `#nn` forward ordinal, `Mnn` backward ordinal, `X`
 prefix/infix exclusion, `#L` last). The doc page spells `#L` only in the cycle families. The
 export sample uses `WORKD#L` **[F]** (DL-60), so `#L` (= from-end-1) is accepted in every
-ordinal family below.
+ordinal family below except `CYCP`, where `CYCP#L` is refused as an unknown token (DL-60;
+the family table `autocal._FAMILIES`).
 
 | family | include | exclude | meaning |
 |---|---|---|---|
@@ -1331,7 +1332,7 @@ Two indexing modes **[V]**: `CYCLE` is union membership, "includes dates that fa
 of the periods defined in the cycle". The `#`-forms index **each period independently**:
 "CYCL#nnn — includes the nnn th day of each period in the cycle". The CWEEK, CWRK and Cddd
 families do the same (SEM-37). "Week of a period" anchors to **consecutive 7-day chunks from each period's
-first day** (Q8e, DL-58). Source: a Broadcom community worked example by Broadcom staff. A
+first day** (Q8e, DL-58). Source: a Broadcom community worked example by vendor staff. A
 quarterly cycle with `condition: CWEEK#01 | CWEEK#02` schedules "the first 14 days in every
 quarter": period-start chunks, not calendar weeks. The short last chunk follows from the
 arithmetic; no source works it.
@@ -1501,15 +1502,15 @@ ordinary vs lookback atoms on an iced job follow different tables, DL-243
 (SEM-20/SEM-05, Q10 residue: `test_sem20_ordinary_atoms_on_an_iced_job_follow_the_vendor_table`,
 `test_sem20_lookback_atoms_on_an_iced_job_stay_true`,
 `test_sem20_ordinary_atom_on_an_undefined_iced_lookalike_stays_false`,
-`test_sem20_ordinary_atom_on_a_live_iced_job_reads_the_real_in_flight_status` (despite its
-name, the test pins DL-254's ignore),
+`test_sem20_ordinary_atom_on_a_live_iced_job_reads_the_real_in_flight_status` (the name is
+stale; the test pins DL-254's ignore),
 `test_sem20_off_ice_later_reads_the_real_status_not_the_vendor_table`) ·
 ON_ICE, ON_HOLD and ON_NOEXEC on a STARTING or RUNNING job, and ON_NOEXEC on an iced job, are
 ignored with one EVENT_IGNORED line and no planned effect, as is ON_NOEXEC on a box holding
 an iced, live or queued job; ON_NOEXEC dequeues a QUE_WAIT job to INACTIVE, clears a hold,
 and on a box cascades INACTIVE and flags every level, DL-254 (SEM-20/21/22:
 `test_sem20_on_ice_on_a_live_job_is_ignored`,
-`test_ice_on_a_running_job_takes_effect_at_completion` (despite its name, the test pins
+`test_ice_on_a_running_job_takes_effect_at_completion` (the name is stale; the test pins
 DL-254's ignore),
 `test_sem21_on_hold_on_a_live_job_is_ignored`,
 `test_sem21_events_on_a_completed_job_still_apply`,
@@ -1582,10 +1583,14 @@ pinned by the condition, derive and control-plane suites, not by an oracle trace
 oracle tests are listed as T15 above. SEM-30 and
 SEM-31 are lowering rules, pinned in the IR suite (`test_sem30_*`, `test_sem31_*`). SEM-35 is
 pinned by the timezone suite's `test_resolve_timezone_*` and the scheduler suite's
-`test_preflight_timezone_*` families, which carry no `sem35` in their names, and by T33c in
-the oracle suite for the re-basing of `run_window`. SEM-36..39 are calendar rules, pinned in the autocal suite
-(`test_sem36_*`..`test_sem39_*`). T34a/b's own `test_sem34a/b_*` cover must_complete only; the
-must_start half is pinned by `test_must_start_alarm_fires_when_no_run_began_by_deadline` and
+`test_preflight_timezone_*` families, by T33c in the oracle suite for the re-basing of
+`run_window`, and by four tests that resolve a map-only zone or the base zone:
+`test_sem35_default_tz_resolves_through_the_alias_map_like_a_job_timezone` (oracle suite),
+`test_sem35_the_engine_resolves_a_map_only_zone_through_its_scheduler_map` and
+`test_sem35_a_supplied_map_outranks_the_unique_city_default` (runner suite), and
+`test_sem35_every_replay_of_a_map_only_zone_reads_the_periods_own_table` (boundary suite).
+SEM-36..39 are calendar rules, pinned in the autocal suite (`test_sem36_*`..`test_sem39_*`).
+T34a/b's own `test_sem34a/b_*` cover must_complete only; the must_start half is pinned by `test_must_start_alarm_fires_when_no_run_began_by_deadline` and
 `test_must_start_alarm_quiet_when_the_run_began_in_time`. Two oracle non-goals have no trace
 test: SEM-16's definition-time mutation of a running box, and SEM-17's ACTIVATED label.
 SEM-16's depletion rule has its tests above. The label's state effect is pinned under SEM-10
@@ -1600,27 +1605,28 @@ code holds a provisional default, it carries a `# PENDING: Qn` marker.
 each open question.
 
 - Q1 (SEM-03): closed (DL-53). Conditions evaluate flat, left to right (SEM-03).
-- Q2 (SEM-04): closed, in two parts. Q2a (DL-54): lookback `0` anchors to the dependent
-  job's own last end. Q2b (DL-58): a dependent that never ended has no anchor, and the
-  qualifier is satisfied. SEM-04 holds both rules and their citations.
-- Q3 (SEM-32): closed (DL-54, DL-58). Arm-and-wait with no expiry; the rule, its citations
-  and its pins are in SEM-32. Two residues stay open:
-  - **Q3c** (DL-58): does a member's latch survive into the next box run? Thread 801986's
-    aside says it may. The pin is box-run scope (`SCHED_DISARM`; `# PENDING: Q3c`,
-    oracle_writers.py). One live box test decides it.
+- Q2 (SEM-04): closed. Q2a (DL-54): lookback `0` anchors to the dependent job's own last
+  end. Q2b (DL-58): a dependent that never ended has no anchor, and the qualifier is
+  satisfied.
+- Q3 (SEM-32): closed (DL-54, DL-58). An eligible scheduled tick blocked at a releasable
+  gate (a false `condition`, or ON_HOLD) arms the job, and the arm has no expiry. A tick on a
+  live job, at ON_ICE, or in a box that is not RUNNING does not arm. SEM-32 holds the rule and
+  its pins. Two residues stay open:
+  - **Q3c** (DL-58): does a member's latch survive into the next box run? The pin is
+    box-run scope (`SCHED_DISARM`; `# PENDING: Q3c`, oracle_writers.py). One live box test
+    decides it.
   - **Q3d** (DL-69): does ON_ICE discard a latched tick? The pin is that a pre-existing arm
     survives ice (`# PENDING: Q3d`, oracle_writers.py). The runbook's discriminator decides it.
-- Q4 (§5 `n_retrys`): closed (DL-53). `n_retrys` restarts a job after FAILURE only, not after
-  TERMINATED, and only for application failures (TechDocs 12.0.01, quoted in §5). System and
-  network failures restart under the scheduler's `MaxRestartTrys` parameter. Neither the oracle
-  nor the runner models retries; preflight WARNs on `n_retrys > 0`.
-- Q5 (do queued events survive a scheduler restart): closed (DL-53). Yes. No TechDocs sentence
-  states it; the answer is a deliberate inference from the architecture. `ujo_event` "Records
-  events that the scheduler has not yet processed" (Events reference, 12.1). "The event server
-  (database) stores all the objects", and on start the scheduler "continually scans the
-  database for events to process" (Architecture, 12.1). So no queued event lives only in
-  memory. KB 11013 corroborates it: queued events run after a multi-hour outage on a plain
-  restart. The oracle's event-queue model needs no change.
+- Q4 (§5 `n_retrys`): closed (DL-53). `n_retrys` restarts a job after an application
+  FAILURE only (§5). Neither the oracle nor the runner models retries; preflight WARNs on
+  `n_retrys > 0`.
+- Q5 (do queued events survive a scheduler restart): closed (DL-53). Yes. No TechDocs
+  sentence states it; the answer is an inference from three quoted premises. `ujo_event`
+  "Records events that the scheduler has not yet processed" (Events reference, 12.1). "The
+  event server (database) stores all the objects", and on start the scheduler "continually
+  scans the database for events to process" (Architecture, 12.1). So no queued event lives
+  only in memory. KB 11013 corroborates it: queued events run after a multi-hour outage on a
+  plain restart. The oracle's event-queue model needs no change.
 - Q6 (SEM-12): open, narrowed (DL-58). The question: box_success referencing a member that
   is ON_ICE; does the "not scheduled" clause apply ("condition not met if the specified job
   is not scheduled")? The `condition:`-atom half is cited (KB 438836: a local ON_ICE
@@ -1633,9 +1639,9 @@ each open question.
   and a box start that leaves no member in the run (SEM-11, Q15). Under a flip, a box whose
   box_success names a member that is iced at its start stays RUNNING, the literal "not
   scheduled" reading.
-- Q7 (SEM-09): closed (DL-58). SEM-09 holds the composition rule (KB 408778).
-  `ir.exit_is_success` implements it, shared with the UC twin (M31); `test_dl33_exit_is_success_*`
-  and `test_sem09*` pin it.
+- Q7 (SEM-09): closed (DL-58). SEM-09 holds the composition rule. `ir.exit_is_success`
+  implements it for the oracle and the UC twin (M31); `test_dl33_exit_is_success_*` and
+  `test_sem09*` pin it.
 - Q8 (SEM-37/38/39, DL-57): extended-calendar generation corners. Every Q8 item closes
   mechanically on any live instance: define the calendar, let autocal materialize the
   schedule, and diff the vendor date set against `dsl41`'s generator.
@@ -1656,10 +1662,10 @@ each open question.
     NOT the date-conditions (`# PENDING: Q8c`). W/P walk to a workday without a re-check of
     the target's holiday-ness (their worked examples exist only under `holiday:`). The O
     filters are verified (thread 778062: an autocal preview under non_workday O excluded the
-    workday dates, with CA confirming "Behavior is not changed … production documentation
-    was wrong"; the "workdays only" rendering of O's text on some pages is the known-bad
-    one). N's doc text differs across eras (11.3.5: "next day, even when also a non-workday";
-    12.1: "next workday…", the implemented pin). A 2012 community report (thread 825395:
+    workday dates, with vendor staff confirming "Behavior is not changed … production
+    documentation was wrong"; the "workdays only" rendering of O's text on some pages is the
+    known-bad one). N's doc text differs across eras (11.3.5: "next day, even when also a
+    non-workday"; 12.1: "next workday…", the implemented pin). A 2012 community report (thread 825395:
     consecutive holidays under holiday-N, the second holiday missing from the output) hints
     that the holiday-N target can be re-processed in 11.x; that cross-stage re-entry corner,
     shared with Q8a's residue, stays open against the current-doc single-shot pin.
@@ -1679,16 +1685,14 @@ each open question.
     (`# PENDING: Q8d`, pinned in `test_q8d_*`). An empty or whitespace `condition:` value
     reads as absent (the SEM-36 empty-value convention) and falls back to the DAILY default.
   - **Q8e**: closed (DL-58). CWEEK counts consecutive 7-day chunks from each period's first
-    day (SEM-39). CWRK is the nth workday of a period, a count, not a week selector. A
-    period's last chunk may be short.
+    day, and the last chunk may be short (SEM-39). CWRK counts workdays, not weeks.
   - The defective tokens (SEM-37: `WORKDXnn`, `CWEK#n`/`#L`/`Mn`/`Xn`) are refused outright
     with no default and no switch. There is nothing to implement until the doc text is fixed
     or a live instance defines them.
-- Q9 (SEM-36, DL-57): closed (DL-60) on one `autocal_asc` export sample, at **[F]**, the
-  weakest evidence tier in this dossier. SEM-36 and SEM-37 hold the format rules. A synthetic
-  clone of the sample's shapes is pinned end to end (`test_q9_*`, including byte-identical
-  F1). On a live instance, KB 29387's `autocal_asc -e ALL -E file` would re-verify the format
-  byte for byte.
+- Q9 (SEM-36, DL-57): closed (DL-60) at **[F]**, on one `autocal_asc` export sample. SEM-36
+  and SEM-37 hold the format rules; `test_q9_*` pins a synthetic clone of the sample end to
+  end, F1 included. On a live instance, KB 29387's `autocal_asc -e ALL -E file` re-verifies
+  the format byte for byte.
 - Q10 (SEM-05/SEM-20, DL-243): open, pinned default. Two vendor pages read a
   LOOKBACK-qualified atom against an iced predecessor differently. The "condition Attribute"
   page (AutoSys 24.2) addresses it directly: "If the predecessor job being evaluated for the
@@ -1703,22 +1707,19 @@ each open question.
   selectable without a code change (DL-252): `--semantics ice-lookback=ordinary` drops the
   qualifier and applies the ordinary ON_ICE table to the lookback atom too. The register row
   `event:ON_ICE#lookback atom` names the switch.
-- Q11 (SEM-37, DL-250): closed (DL-259). A WEKR token selects a week of the year, with weeks
-  that start on the anchor day; the digits run 1 = Monday to 7 = Sunday (SEM-37). How the
-  days before the first anchor day count is a chosen default, not a verified fact. The
-  default `first-full` puts them in no week, and `--semantics wekr-first-week=partial` makes
-  them week 1. A live instance generating `WEKR1#02` for 2014 would settle the choice:
-  January 13–19 under `first-full`, January 6–12 under `partial`.
-- Q12 (§5 `resources` row, DL-287): descoped (DL-288). The question: what the vendor does with
-  FREE=Y or FREE=A on a depletable resource. "resources Attribute" documents FREE as "Optional
-  for renewable virtual resources only", with the same text in every version from 11.3.6 to
-  24.2, and no known vendor source says more. The vendor might reject the definition, ignore
-  the code, or free the units. No default is pinned: preflight refuses FREE=Y and FREE=A on a
-  depletable and accepts FREE=N, which matches the depletable default. The oracle applies the
-  code to a direct caller (DL-50). The refusal is loud, so no estate the runner runs depends
-  on the answer. If the case is ever needed, the runbook's Q12 protocol settles it. It checks
-  whether jil accepts each FREE code, and whether a QUANTITY=2 job runs after the FREE=A job
-  ends and after the FREE=Y job fails.
+- Q11 (SEM-37, DL-250): closed (DL-259). SEM-37 holds the WEKR reading. How the days
+  before the first anchor day count is a chosen default, not a verified fact: the default,
+  `first-full`, puts them in no week, and `--semantics wekr-first-week=partial` makes them week 1.
+  A live
+  instance generating `WEKR1#02` for 2014 settles it: January 13–19 under `first-full`,
+  January 6–12 under `partial`.
+- Q12 (§5 `resources` row, DL-287): descoped (DL-288). What the vendor does with FREE=Y or
+  FREE=A on a depletable resource is unknown: "resources Attribute" documents FREE for
+  renewable resources only, with the same text in every version from 11.3.6 to 24.2. No default is
+  pinned. Preflight refuses FREE=Y and FREE=A on a
+  depletable and accepts FREE=N, the depletable default, so no estate the runner runs depends
+  on the answer. The oracle applies the code to a direct caller (DL-50). If the case is ever
+  needed, the runbook's Q12 protocol settles it.
 - Q13 (SEM-18): open. What CHANGE_STATUS RUNNING does to a box. "sendevent
   Command -- Change the Status of a Job" (AutoSys 24.2) states a permission check: "If you
   issue the sendevent command to change the status of a box to the RUNNING status, AutoSys
@@ -1816,10 +1817,10 @@ caveat), KB 92872 (box_success evaluation trigger), KB 280764 (adjust+S worked v
 KB 442457 (literal AND in an estate calendar; CAUAJM_W_10119/10120 exhausted-calendar
 warnings), KB 29387 (autocal_asc export/import commands), KB 14195 (ujo_calendar
 materialization, 365 days), KB 135770 (job_depends via the Application Server); community
-threads 760251 (Q2b, CA support), 734033 (Q3a/E11, CA's Mark Hanson worked examples), 801986
-(Q3b no-expiry + the Q3c box aside, Broadcom staff), 778062 (non_workday-O preview +
+threads 760251 (Q2b, vendor staff), 734033 (Q3a/E11, vendor staff worked examples), 801986
+(Q3b no-expiry + the Q3c box aside, vendor staff), 778062 (non_workday-O preview +
 "documentation was wrong" correction), 825395 (2012 consecutive-holiday-N community report),
-and the CWEEK quarterly worked example (Q8e, Broadcom staff). Secondary corroboration: legacy
+and the CWEEK quarterly worked example (Q8e, vendor staff). Secondary corroboration: legacy
 CA User Guide excerpts and practitioner references (on_hold/on_ice operational behavior,
 state definitions). The public 4.5 user guide and the 11.3.6 user and admin guides contain
 no keyword grammar (SEM-37 lineage note).

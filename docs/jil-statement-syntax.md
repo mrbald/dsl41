@@ -28,10 +28,11 @@ default there.
    lowering. Both estate spellings therefore converge on the semantic catalog key, and each
    JIL-emitting path re-escapes. The `hh:mm` time lane is the same shape (DL-251): the vendor's
    own documented spelling escapes every colon instead of quoting the whole value
-   (`start_times: 10\:00, 14\:00`), and `ir.Time.parse` unescapes `\:` for `start_times`,
-   `run_window`, `must_start_times` and `must_complete_times` the same way. Other value lanes
-   stay verbatim in IR. [?] Whether the engine unescapes `\:` inside general values (command,
-   std_*_file) is not known; value lanes stay escaped until a live instance gives the answer.
+   (`start_times: 10\:00, 14\:00`). Lowering unescapes `\:` the same way in all four `hh:mm`
+   lanes, `start_times`, `run_window`, `must_start_times` and `must_complete_times`, through
+   the shared helper `ir._parse_hhmm` (DL-253). Other value lanes stay verbatim in IR. [?]
+   Whether the engine unescapes `\:` inside general values (command, std_*_file) is not
+   known; value lanes stay escaped until a live instance gives the answer.
 3. **Statement boundary**: a line whose key is a subcommand starts a new statement. The
    recognized set follows the TechDocs 12.1 JIL subcommand pages (DL-29): `insert_job`,
    `update_job`, `delete_job`, `rename_job`, `delete_box`,
@@ -43,9 +44,8 @@ default there.
    `delete_monbro`, `insert_job_type`, `update_job_type`, `delete_job_type`,
    `insert_connectionprofile`, `update_connectionprofile`, `delete_connectionprofile`; plus
    the autocal_asc calendar-export statements `calendar`, `cycle`, `extended_calendar` (rule
-   11, DL-36) and the accepted `ext_calendar` spelling (DL-57). The list holds the verbs
-   found so far; it is not a proof of completeness (DL-29, DL-245). All attribute lines that
-   follow belong to this statement
+   11, DL-36) and the accepted `ext_calendar` spelling (DL-57). The list is not a proof of
+   completeness (DL-29, DL-245). All attribute lines that follow belong to this statement
    until the next subcommand or EOF. An attribute line before the first statement is a
    scanner error. Unknown keys are attributes, never boundaries (forward compatibility).
    There is one exception: a key that matches the subcommand shape
