@@ -537,8 +537,8 @@ A refusal is one sentence and exit `2`.
 Run the runbook's [check block](deployment-runbook.md#recipe-add-change-or-remove-a-job) in CI on the commit you are about to tag.
 It runs `lint` and `rehearse` with `--manifest` and the site's properties file.
 A manifest the option refuses fails that check, before the tag exists.
-The operator runs the same block again on the tag, in a checkout of its own, before the window ([the job recipe's step 2](deployment-runbook.md#recipe-add-change-or-remove-a-job)).
-These are two checks, not two rules: your CI run gates the tag, and the operator's run gates the window.
+Before the window, the operator runs the block again on the tag, then `dsl41 release prepare` runs `lint` and `rehearse` again as the service account ([the job recipe's step 2](deployment-runbook.md#recipe-add-change-or-remove-a-job)).
+Prepare's run is the one apply enforces: apply refuses a release whose files are not the ones prepare checked.
 
 When a file such as `eod.jil` comes from a Python module, `dsl41 estate build . --emit eod.jil=eod.py -o dist/v42` assembles the release directory, and `dsl41 release prepare v42 dist/v42` takes it (DL-413).
 With a package, `--emit eod.jil=estate` takes `eod.jil` from it; give one `--emit` per file the package renders.
