@@ -1,10 +1,10 @@
 # Runner design — executing IR-F with AutoSys semantics
 
-Status: the design is frozen (DL-41); a frozen item changes only through a
-decision-log entry. Decisions E1 (prod grade), E2 (both time domains), and
-E3 (web behind proxy/tunnel) are closed. Every tier is built (§14). This
-document is normative for the runner in the same way that ir-design.md is
-normative for the compiler.
+Status: frozen (DL-41); a frozen item changes only through a decision-log
+entry. This document is normative for the runner in the same way that
+ir-design.md is normative for the compiler. The runner is prod grade (E1,
+§7), runs in two time domains (E2, §9), and serves the web behind a proxy
+or a tunnel (E3, §11). Every tier this document describes is built (§14).
 
 ## 1. Mission and scope
 
@@ -113,18 +113,28 @@ steps:
    run `feed()` / `advance()`. The oracle runs a cascade of instant
    starts on its executor's worklist, iteratively, and stops a cascade that
    does not end at an item cap set by the estate's job count (DL-351).
-4. Act on emitted events per the dispatch table. Journal the dispatch
-   records.
+4. Plan an effect for each emitted event the dispatch table names, and
+   record the plan in the attempt's `decision` record
+   (`runner_effects.plan_effects`; `docs/concurrency-model.md` §4 step 7).
+5. Drain the outbox: apply every pending effect in admission order
+   (`Engine._dispatch`). Journal the dispatch records.
 
-Dispatch table (emitted event → side effect):
+Dispatch table (emitted event → effect → what applying it does):
 
-| emitted                                   | side effect                     |
-|-------------------------------------------|---------------------------------|
-| `STATUS STARTING`, job_type CMD           | spawn LocalCommandAdapter task  |
-| `STATUS STARTING`, job_type FW            | spawn FileWatcherAdapter task   |
-| terminal status, job has a live task      | cancel the adapter task (see below) |
-| `MUST_START_ALARM` / `MUST_COMPLETE_ALARM`| none; they reach the operator through the trace and the UI |
-| anything on a BOX                         | none (folds are oracle logic)   |
+| emitted                                   | effect | applying it                     |
+|-------------------------------------------|--------|---------------------------------|
+| `STATUS STARTING`, job_type CMD           | SPAWN  | start a LocalCommandAdapter task, or a SupervisedCommandAdapter task under `run --detached` |
+| `STATUS STARTING`, job_type FW            | SPAWN  | start a FileWatcherAdapter task |
+| terminal status, job has a live task      | KILL   | cancel the adapter task (see below) |
+| `MUST_START_ALARM` / `MUST_COMPLETE_ALARM`| none   | none; they reach the operator through the trace and the UI |
+| anything on a BOX                         | none   | none (folds are oracle logic)   |
+
+An effect is applied only after its decision is durable. The outbox gates
+of `docs/concurrency-model.md` §5 run first: an effect the job's row has
+moved past is retired, and a SPAWN whose host routes no new work stays
+pending (concurrency-model §8). The supervised adapter's wrapper is a
+child of the §6a Tier 1 supervisor; the local adapter's wrapper is the
+engine's child, and the FW adapter starts no process.
 
 The terminal-status row makes KILLJOB and term_run_time work with no
 adapter timeout logic: the oracle decides, the shell kills. The shell's own
@@ -417,8 +427,8 @@ test_supervisor_spawn_keeps_each_lifeline_write_end_in_one_process).
 **Containment honesty:** pgid kill does not catch `setsid`/double-fork
 escapees (`sh -c 'daemon & '`). Vendor agents share this limitation, and
 supervisord's group-stop flags are the same group kill. A per-run cgroup
-would attribute such a helper to its run; by the owner's ruling it is a
-stated limit, not a hardening to build (DL-403): a forced stop that meets
+would attribute such a helper to its run; it is a stated limit, not a
+hardening to build (DL-403): a forced stop that meets
 one ends `uncertain` and names it, the whole-estate stop under systemd
 kills the unit's cgroup regardless, and a job that must end its own
 helpers ends them itself. A `--scope` option is not built.
@@ -746,7 +756,7 @@ refusals.
      signalled either (DL-322).
    - A SUPERVISED run whose durable effect bound a `run_id` and whose spool
      holds neither `spawn.json` nor `status.json` → the SPAWN is
-     **replayed** (DL-129): period-model §11a made it idempotent, so the
+     **replayed** (DL-129): period-model §11a makes it idempotent, so the
      supervisor's directory answers first-application, duplicate,
      in-progress, or indeterminate/collision, and the run happens once,
      resumes, or fails naming the supervisor's own reason (PR-36a).
@@ -1126,7 +1136,7 @@ frozen inventory; what follows is what each is for.
   file, not a clock), `global <name>` / `globals <names>` — a named
   global's value and its revision, inserting nothing (DL-87), `hosts [ids]`
   — the routing table's rows, and `plan` (acyclic estates only). The
-  status response also carries per-job `job_type`/`box_name` (the ss11
+  status response also carries per-job `job_type`/`box_name` (the §11
   tree), `started_by` — the trace cause of the most recent actual start
   — `state_rev` (the revision an `expect` may name, DL-87), `held` (the
   oracle started it and its executor routes no new effect, DL-94), plus,
@@ -1186,8 +1196,9 @@ run" and confirms under `run --ui`, "detach" under `dsl41 ui`. A crashed
 TUI exits non-zero in both postures (DL-187).
 `dsl41 serve --socket <path>` wraps textual-serve around the same app. Web
 posture (E3): textual-serve ships no auth. Deploy it behind a reverse
-proxy or SSH tunnel. This posture is documented in README deployment
-notes, not built.
+proxy or an SSH tunnel; the README's deployment notes show both, and
+`docs/access-model.md` §9 is the web tier. dsl41 builds no web
+authentication of its own.
 
 Scope fence (DL-42): the dashboard of *meaning* — conditions, boxes,
 explain, sendevent — is dsl41's and stays here. The §6a supervisor tier,
@@ -1295,47 +1306,44 @@ the split cannot decay into a second name for one file.
 - `runner_access.py`: the control-socket access perimeter
   (`docs/access-model.md`).
 
-Runner CLI verbs live in `cli_run.py` (`run`, `rehearse`, `journal`,
-`runs`) and `cli_control.py` (`sendevent`, `release-held`, `host`, `ui`, `serve`,
-`query`, `supervise`), the five-module CLI split of DL-137, assembled by `cli.py`.
-The period verbs are `cli_estate.py`'s.
+The CLI keeps one module per domain (DL-137). `cli.py` builds the app and
+registers every verb; `cli_common.py` holds the shared options and exit-code
+readings, and `cli_compile.py` the compiler verbs. The runner and its
+estates use these:
 
-Module docstrings name the runner's six build phases by label, 11a to 11f
-(DL-41, DL-41a). All six are built. The labels map to these parts: 11a,
-the engine loop and the bisimulation suite; 11b, the wrapper, adapters,
-WAL and resume; 11c, the scheduler, preflight and control socket with the
-headless verbs, `rehearse` and a minimal `query` client (DL-45); 11d, the
-Textual TUI; 11e, `serve`; 11f, the supervisor tier (§6a Tier 1, frozen in
-`docs/supervisor-protocol.md`, the extraction boundary of DL-42).
+- `cli_run.py`: `run`, `rehearse`, `journal`, `runs`.
+- `cli_control.py`: `sendevent`, `release-held`, `host`, `ui`, `serve`,
+  `query`, `supervise`.
+- `cli_estate.py`: the period verbs `seal`, `audit`, `verify`, and
+  `estate reclaim`, `estate prune`, `estate quiesce`, `estate args`.
+- `cli_estate_build.py`: `estate build` and `estate diff`.
+- `cli_release.py`: the release train, `release prepare`, `apply`,
+  `resume`, `rollback` and `status`.
+
+Module docstrings name the runner's build phases 11a to 11f; DL-41 and
+DL-41a map them to parts.
 
 ## 15. Open questions (E-series)
 
 The house rule applies: implemented defaults are marked `# PENDING: En` in
-code. None is guess-resolved.
+code. None is guess-resolved. A settled entry keeps its token and states
+its rule, with the entry or section that holds it.
 
-- **E4** — jobs that survive engine restarts: closed (DL-41a, DL-48). Never
-  non-child adoption. The supervisor keeps parenthood alive, so survival is
-  reattachment (`run --detached`), to a supervisor the engine started or
-  one it attaches to (§6a, DL-396). On the default tethered path, engine
-  death terminates jobs, and resume uses §7's reconciliation ladder.
+- **E4** — jobs that survive engine restarts are reattached, never adopted
+  as non-children (DL-41a, DL-48). The supervisor keeps parenthood alive
+  (`run --detached`), whether the engine started it or attaches to it
+  (§6a, DL-396). On the default tethered path, engine death terminates
+  jobs, and resume uses §7's reconciliation ladder.
 - **E5** — profile sourcing failure semantics [?]. Default: the job fails
   with sh's exit code (§6).
-- **E6** — FW steady-size semantics: decided (DL-258), via the
-  `fw-existence` switch (§8a). Default `stable`: two stable polls, like a
-  job with a minimum size. `immediate`, the vendor reading, applies only
-  to a job with no `watch_file_min_size`; a job with a minimum size always
-  needs the steady-size rule. The "watch_interval Attribute" page says:
-  "If you are monitoring for the existence of a file (not the size) and
-  the file already exists when the job runs, the job completes
-  immediately. The watch_interval attribute is ignored." The
-  "watch_file_min_size Attribute" page: "If you do not specify the
-  watch_file_min_size attribute in your job definition, the job completes
-  if the file exists (the default)." DEFAULT WATCH_INTERVAL STAYS OPEN
-  [?]: the same "watch_interval Attribute" page (AutoSys 24.2) gives
-  "Default: 60", but on an agent, "Define a File Watcher Job" says a job
-  with no watch_interval checks the file every 30 seconds. The adapter's
-  60s default stays pinned until a decision resolves that disagreement
-  (DL-250).
+- **E6** — FW steady-size semantics are the `fw-existence` switch (§8a,
+  DL-258): default `stable`, two stable polls; `immediate`, the vendor
+  reading, applies only to a job with no `watch_file_min_size`. The default
+  `watch_interval` stays open [?]: the "watch_interval Attribute" page
+  (AutoSys 24.2) gives "Default: 60", but on an agent, "Define a File
+  Watcher Job" says a job with no watch_interval checks the file every 30
+  seconds. The adapter's 60 s default stays pinned until a decision
+  resolves that disagreement (DL-250).
 - **E7** — verdict for an unobservable exit status (§7). Default: FAILURE
   with cause `exit_status_unobservable`. TERMINATED is reserved for kills
   that actually happened. The vendor's "Lost Control" is the same
@@ -1375,47 +1383,31 @@ code. None is guess-resolved.
   event-processor outage that spans a start_times tick is unverified [?].
   A live instance decides fire-late vs skip.
 - **E10** — schedule interpretation defaults (DL-45, DL-155, DL-260). The
-  no-timezone clock half is [V]. Jobs without a per-job
-  `timezone` read their times in the run-level `--timezone` base zone,
-  with UTC as the default. The vendor uses the AutoSys server's zone, which
-  a migrated estate must set explicitly: "The start event for jobs with
-  time-based starting conditions that do not specify a time zone is
-  scheduled based on the time zone under which the scheduler is running"
-  (TechDocs 12.0.01, timezone attribute page). The oracle exposes the same
-  rule as a `default_tz` constructor knob; with none set, the engine clock
-  plays the scheduler's zone. The DST half is decided (DL-260): the
-  vendor's rules are the default, and the PEP 495 fold=0 reading is
-  selectable as `dst-start-times=fold0` (§8a). TechDocs 12.1
-  and 24.2 document the rules. "Standard Time Changes": jobs whose
-  start_time is "between 1:00 and 1:59" run "during the second (standard
-  time) hour", and "Jobs for which the start_mins attribute is set run in
-  both hours." "Daylight Time Changes": an absolute start in the missing
-  hour runs "during the first minute of the next hour" (2:05 runs at
-  3:00:05). "If you schedule a job to run more than once during the
-  missing hour (for example, at 2:05 and 2:25), only the first scheduled
-  job run occurs." Relative (start_mins) jobs "run as expected", so a
-  start_mins tick in the missing hour does not exist. The rules apply to
-  the change shape DL-249 detects: 02:00-02:59 missing for one hour, or
-  01:00-01:59 repeated for one hour. Other shapes keep fold=0 under both
-  values; that is unverified, and the register carries it. Calendar row
-  times (E11) keep fold=0 too. One half stays open [?], behind its
-  `# PENDING: E10` marker in `runner_scheduler.py`: absent
-  `days_of_week` = every day.
-- **E11** — closed (DL-56, DL-58): `run_calendar` with neither
-  `start_times` nor `start_mins` is a valid vendor shape. The job fires at
-  the calendar row's own time-of-day (`mm/dd/yyyy HH:MM`), and at 00:00
-  when neither the row nor the job supplies a time. Job-level
-  `start_times` overrides row times. Source: thread 734033, CA support's
-  worked examples ("the job will attempt to start based on the dates and
-  times in the calendar" and "if the date in the calendar has no time …
-  00:00"), with two estate JILs accepted in-thread. §5 implements row-time
-  firing. Corroboration (DL-58): an exhausted calendar logs
-  `CAUAJM_W_10119/10120`, and the job silently stops being scheduled, the
-  DL-56 dormancy pin. The vendor's 365-day materialization horizon
-  (KB 14195) additionally drops yearly jobs whose next occurrence lies
-  >366 days out (KB 442457). That is a vendor operational artifact
-  (resolution: regenerate the calendar) deliberately NOT replicated: the
-  generator computes occurrences directly.
+  no-timezone clock half is [V]. Jobs without a per-job `timezone` read
+  their times in the run-level `--timezone` base zone, with UTC as the
+  default. The vendor uses the AutoSys server's zone, which a migrated
+  estate must set explicitly: "The start event for jobs with time-based
+  starting conditions that do not specify a time zone is scheduled based on
+  the time zone under which the scheduler is running" (TechDocs 12.0.01,
+  timezone attribute page). The oracle exposes the same rule as a
+  `default_tz` constructor knob; with none set, the engine clock plays the
+  scheduler's zone. The DST half is the `dst-start-times` switch (§8a,
+  DL-260): the vendor's rules are the default, and the PEP 495 fold=0
+  reading is selectable. The rules apply to the change shape DL-249
+  detects; other shapes keep fold=0 under both values, which is unverified,
+  and the register carries it. Calendar row times (E11) keep fold=0 too.
+  One half stays open [?], behind its `# PENDING: E10` marker in
+  `runner_scheduler.py`: absent `days_of_week` = every day.
+- **E11** — a `run_calendar` job with neither `start_times` nor
+  `start_mins` is a valid vendor shape (DL-56, DL-58). It fires at the
+  calendar row's own time of day, and at 00:00 when neither the row nor the
+  job supplies a time; job-level `start_times` override row times (§5).
+  Vendor staff gave the worked examples in thread 734033. An exhausted
+  calendar makes the job dormant (DL-56); the vendor logs
+  `CAUAJM_W_10119/10120` for it (DL-58). The vendor's 365-day
+  materialization horizon (KB 14195) drops a yearly job whose next
+  occurrence lies more than 366 days out (KB 442457); the generator
+  computes occurrences directly and does not.
 - **E12** to **E15** — withdrawn with the HA plan (DL-189). Not open.
 - **E16** — seal cadence. Every boundary is an operator act (automatic
   sealing on a timer is a period-model §12 non-goal) and costs a restart,
@@ -1428,10 +1420,10 @@ code. None is guess-resolved.
   acknowledgement before the period opens, or reporting it is enough. The
   classification and every A assumption are carried in the seal
   (period-model §3.1), so the record exists either way. Open (DL-230).
-- **E19** — closed by period-model §10.3 (PR-42): a member changed while
-  its box executes is R, even when the member is INACTIVE.
-- **E20** — closed by period-model §12a (DL-144), by policy: a seal-only
-  archive may stand in for pruned inputs.
+- **E19** — a member changed while its box executes is R, even when the
+  member is INACTIVE (period-model §10.3, PR-42).
+- **E20** — a seal-only archive may stand in for pruned inputs
+  (period-model §12a, DL-144).
 - **E21** — whether a follower can run on the file substrate by tailing
   the WAL another process appends. The WAL is append-only and
   line-framed, so the proposal is yes. Open; waits for follower mode
@@ -1440,13 +1432,13 @@ code. None is guess-resolved.
   run-history surface (`autorep -r`, and the average-run-time notion
   behind its runtime alarms). A dossier question with a citation sweep in
   front of it [?] (DL-230).
-- **E23** — closed by period-model §11: audit runs the interpreter that
-  produced the period and old versions stay installable; an SM bump is
-  not a transition (period-model §2.1).
+- **E23** — audit runs the interpreter that produced the period, and old
+  versions stay installable; a state-machine bump is not a transition
+  (period-model §11 and §2.1).
 - Inherited from the oracle: Q3 (SEM-32 arm-and-wait, DL-58; the Q3c
   box-arm-scope residue is oracle-side) and Q4 (n_retrys, DL-53, kept
   deliberately unmodeled by scope decision). The runner implements the
-  documented oracle defaults and adds no new switch. The ss10 status
+  documented oracle defaults and adds no new switch. The §10 status
   response carries the `armed` latch per job (DL-54).
 - Inherited from the dossier (DL-57, DL-58): Q8b/Q8c/Q8d, the remaining
   extended-calendar generation corners, each a pinned deterministic

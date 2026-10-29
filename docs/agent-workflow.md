@@ -93,7 +93,8 @@ most missed branches first, then the package total. It is a report, not a gate.
 The transition gate reads `.transition-hits.json`, which the test run writes at
 the repository root. It exits 1 when a required item has no recorded hit: a row
 without a mark, a choice branch, each outcome of an unmarked row's or a
-branch's guard, or the defer or the release of a deferred event. A false
+branch's guard, the defer or the release of a deferred event, or the implicit
+ignore of an event in a final state. A false
 outcome declared unreachable is not required. It also exits 1 when a forbidden
 item was hit: a false outcome declared unreachable, or a marked row or its
 guard's true outcome (the mark is stale or wrong), or when the hits file is not JSON or
@@ -103,9 +104,11 @@ Under xdist the controller writes that file from every worker's hits.
 The golden replay runs the oracle over the whole harness sample, about a minute,
 and names the first run, entry and component that differ from
 `tests/oracle_goldens.txt`; CI runs it as its own `goldens` job (DL-351).
-Keep this list aligned with `.github/workflows/ci.yml`. The one CI check not in
-it is `systemd-analyze verify` over `examples/nightbank/deploy/*.service`
-(DL-218); it needs Linux.
+Keep this list aligned with `.github/workflows/ci.yml`. CI also runs what this
+list does not: the `docs` job, `systemd-analyze verify` over
+`examples/nightbank/deploy/*.service` (DL-218, Linux only), the
+`explore-page` browser job, and the `audit`, `secrets`, `release`,
+`dst-drill` and `service-drill` workflows.
 The workflow examples lane is opt-in and needs a container engine (DL-236):
 `WORKFLOW_CONTEXT=<context> uv run pytest -q -o faulthandler_timeout=0 examples/workflows/tests`.
 `scripts/arch_check.py --spec-status` prints every specification with its spec
