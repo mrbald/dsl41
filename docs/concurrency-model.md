@@ -1,10 +1,11 @@
 # Concurrency model — the frozen contract
 
 Status: frozen (DL-84). Entries that amend it include DL-86, DL-90,
-DL-94, DL-95, DL-96, DL-97, DL-100, DL-101, DL-102, DL-103, DL-109, DL-111, DL-112,
-DL-118, DL-120, DL-130, DL-133, DL-138, DL-147, DL-150, DL-151, DL-210, DL-232,
-DL-234, DL-272, DL-274, DL-284, DL-292, DL-293, DL-297 and DL-353. Each is cited
-where it applies. Each change to a frozen item needs a decision-log entry.
+DL-94, DL-95, DL-96, DL-97, DL-100, DL-101, DL-102, DL-103, DL-109, DL-111,
+DL-112, DL-118, DL-120, DL-130, DL-133, DL-138, DL-147, DL-150, DL-151,
+DL-210, DL-232, DL-234, DL-272, DL-274, DL-284, DL-292, DL-293, DL-297 and
+DL-353. DL-44, DL-98, DL-129 and DL-132 rule on §5. Each is cited where it
+applies. Each change to a frozen item needs a decision-log entry.
 
 This document is normative for every input that reaches the oracle and
 every effect that leaves the engine. `docs/control-protocol.md` is
@@ -12,8 +13,8 @@ normative for the control plane in the same way, and
 `docs/supervisor-protocol.md` for the lifecycle tier. This document is
 stage S0 of §10.
 
-Proving ground: `examples/nightbank`. Each property here is a property of
-that estate under injected faults, not a claim in prose. CM-14 and CM-09
+Proving ground: `examples/nightbank`. Every property here is a property of
+that estate under injected faults, not an assertion in prose. CM-14 and CM-09
 are checked over the real 82-job night under seeded interleavings of every
 fault one host can suffer (DL-109). Where the mechanism is the kernel's,
 two OS processes, or one process and the kernel, hold the property:
@@ -192,14 +193,13 @@ digest.
 **The state inventory.** Authoritative state outside `JobRuntime` must
 either move under `RuntimeState` or carry a frozen and **tested**
 invariant that each change to it comes with a projected entity change.
-An untested invariant here is what this document exists to remove. Four
-pieces of state could sit outside: `_CapacityPool`, its waiter order,
-`_box_ran` and `_run_started_at`. Each is settled:
+An untested invariant here is what this document exists to remove. The
+state that could sit outside the rows is placed this way:
 
-- `_box_ran` is `JobRuntime.ran_members` on the box row, projected with
-  the entity it describes (DL-86).
-- `_run_started_at` does not exist. It would be write-only, and it is not
-  state (DL-86).
+- A box's record of which members ran is `JobRuntime.ran_members` on the
+  box row, projected with the entity it describes (DL-86).
+- No run-start time is kept outside the row: it would be write-only, and
+  it is not state (DL-86).
 - The capacity pool and its waiter order are under the owner (DL-120).
   Leaving them outside is valid only while replay starts at genesis, and a
   seal does not. A pool that summed units held by live runs with units
@@ -416,11 +416,9 @@ Now change one thing at a time:
 
 Step 4's batch, "`TimeAdvanced(at)` + `InputAttempt`", is one record, not
 two (DL-111). The `input` line's own `at` is the time observation, and
-`Journal.admit` makes a single `_write` call. That is the stronger form of
-what step 4 asks for. The code says so where it lives ("one line, so the
-batch it carries cannot be torn in half by a crash"). §1 says the same
-(DL-100): atomic multi-record commit is the one-line attempt record. The
-`advance` record is a different thing: a time observation with no verb,
+`Journal.admit` makes a single `_write` call, so a crash cannot tear the
+batch in half. §1 rests on this (DL-100): atomic multi-record commit is the
+one-line attempt record. The `advance` record is a different thing: a time observation with no verb,
 the other half of the input alphabet (DL-44).
 
 **Replay is two-pass.** `ApplyResult` is appended *after*
@@ -540,9 +538,10 @@ the run where the obvious guard fails. It is held by
    recorded, and that pending entry *is* the held set. Nothing launches.
 4. `KILLJOB j`. The job goes TERMINATED. **`run_number` does not move.**
    `transition` writes `status`, `status_at`, `last_end_at` and maybe
-   `exit_code`. The only writer of `run_number` in the store is
-   `start_run`. The row is now TERMINATED at run 1, the same 1 that
-   `e2:SPAWN:j.1` names. The kill plans no effect of its own: a job with
+   `exit_code`. Within a period, the only writer of `run_number` in the
+   store is `start_run`; a period's opening installs carried rows as the
+   seal holds them (period-model §7, DL-132). The row is now TERMINATED
+   at run 1, the same 1 that `e2:SPAWN:j.1` names. The kill plans no effect of its own: a job with
    no *live* run needs no kill.
 5. The dispatch pass after the kill reaches `superseded_reason` before
    the routing gate, while the host is still drained (DL-234). It is the
@@ -568,7 +567,7 @@ no live wrapper to ask, and falls through to the spool.
 | `status.json` | outcome | why |
 | --- | --- | --- |
 | `outcome: terminated` / `signaled` | `applied` | the signal landed |
-| `outcome: exited` | `retired` | the run ended on its own first |
+| `outcome: exited`, `spawn_failed`, or one this build does not recognise | `retired` | the spool records no recognised kill (DL-98) |
 | absent | `indeterminate` | nothing observed it (E7) |
 
 Two outcomes cannot express the third row. `state_of` reads back
@@ -596,13 +595,18 @@ start (DL-80), the epoch by election (§7). Nothing needs SHUTDOWN as an
 effect: the shutdown path speaks to the supervisor directly and leaves no
 intent for an outbox to carry.
 
-The SPAWN `run_id` is bound before the attempt (DL-118). The seal needed
-the binding, so a SPAWN's `run_id` is minted in the step-7 decision
-transaction, rides in the durable effect, and the wrapper spec carries it
-(period-model §2.3, PR-36a). Locally `(job, run_number)` is the identity
-too. `runs/<job>.<run_number>` is created with `mkdir()` and no
+The SPAWN `run_id` is bound before the attempt (DL-118). A SPAWN's
+`run_id` is minted in the step-7 decision transaction, rides in the durable
+effect, and the wrapper spec carries it (period-model §2.3, PR-36a).
+Locally `(job, run_number)` is the identity too. A tethered command run's
+`runs/<job>.<run_number>` is created by the engine with `mkdir()` and no
 `exist_ok`, so a second spawn of one run fails loudly rather than
-doubling.
+doubling. Under `run --detached` the supervisor creates it on receipt, and
+a second SPAWN of one `run_id` is answered from its index and receipt,
+never forked again (DL-129, period-model §11a). An FW watch
+spawns no process: its dispatch opens the run directory whether or not it
+exists, and its `watch.jsonl` decides whether the watch already started,
+since a re-dispatched watch is an idempotent read (DL-44 item 7, DL-129).
 
 **A pending SPAWN is re-driven at resume** (DL-102; §7 below). A pending
 intent that the previous leader recorded and never delivered is
@@ -639,8 +643,7 @@ them.
 
 There is no client-supplied `at`. A future stamp would be a timer
 fast-forward, and a backdated one would break monotonicity. `epoch` is
-required, on one host too. Adding it after the CLI and TUI had migrated
-would be a second wire break (DL-90). Election allocates it (§7). The wire is **v3**
+required, on one host too (DL-90). Election allocates it (§7). The wire is **v3**
 (`docs/control-protocol.md`). v1 and v2 are retired and refused by
 version. `expect` names only the addressed entity, with keys namespaced
 `job:` / `global:` / `host:` (DL-93). `claimed_actor` is a client hint.
@@ -878,7 +881,7 @@ relocated or reordered estate is still a different estate
 never inferred. **The gate recomputes under the recipe the log itself
 names**: a `segment` pins v2. Eligibility is two pins, both exact.
 
-**Version 1 is retired** (DL-138). The `header` record and `catalog_hash`
+**Version 1 is refused** (DL-138). The `header` record and `catalog_hash`
 version 1 are retired dialects, refused by name at one dispatcher
 (`docs/protocol-evolution.md`). The gate reads one recipe, and a record
 naming version 1 is refused rather than compared. Nothing reads as
@@ -1025,8 +1028,8 @@ credential. It overwrites `claimed_actor` with the canonical spelling
 before the row is written, so `forced_by` holds an authenticated identity
 on an armed estate (DL-146, DL-147). On an unconfigured estate it remains
 the bare claim. The word "claimed" stays, because arming is optional. The
-web session's per-user identity is still open, under
-`web-session-principal-v2` (`docs/access-model.md` §3, §9).
+web session's per-user identity is open, under
+`web-session-principal-v2` (`docs/access-model.md` §9, §11).
 
 **A one-host table makes half this section unreproducible.** The example
 above is written against `local`. `register_host` has one caller,
@@ -1051,7 +1054,7 @@ only start from quarantined. Leaving it set would falsify that invariant.
 That is harmless while a reinstatement does nothing to a row that is not
 quarantined, and dangerous for the next transition anyone writes.
 
-Four rules settled by the code that implements this section (DL-94):
+Four more rules hold for this section (DL-94):
 
 **Precondition 1 is the `quarantined` state, not a probe.** "Unreachable
 from the leader" has one durable form: the row the leader writes when a
@@ -1147,28 +1150,28 @@ supervisor and lifecycle tiers.
 Obligations. Tests are named `test_cmNN_*`, after the house convention
 `test_semXX_*`.
 
-| # | obligation | cost |
+| # | obligation | held by |
 | --- | --- | --- |
-| CM-01 | structural owner gate | landed (DL-82/83). Enforced by `scripts/arch_check.py`, not by a `test_cm01_*`: a gate over the model's AST is the only form this obligation has |
-| CM-02 | cardinality: one increment per entity per committed input | landed (DL-87) |
-| CM-03 | corroborating property, generator widened | landed (DL-87) |
-| CM-04 | timers fire before the gate (`term_run_time` fixture) | landed (DL-89) |
-| CM-05 | dedup precedes admission: a retry advances no logical time | landed (DL-89) |
-| CM-06 | retry / fingerprint / eviction, incl. `outcome_unavailable` | retry and fingerprint landed (DL-90). The `outcome_unavailable` answer exists (DL-96) and has no consumer: its caller would be the relay, which is not built (DL-97, DL-284). Every eviction precondition landed (DL-97) and is pinned by the CM-11 tests |
-| CM-07 | two-pass replay, incl. admitted-without-result | landed (DL-89) |
-| CM-08 | bisimulation unchanged | landed: every SEM trace runs through both interpreters. No `test_cm08_*` of its own: the obligation is that the existing suite stays green |
-| CM-09 | at-least-once delivery **and** at-most-once application; superseded effects retired; quarantine holds | application and supersession landed (DL-96); quarantine holds landed (DL-97); local delivery landed (DL-102: the barrier re-drives a pending SPAWN and a pending KILL). Both are proved again against real processes (DL-112): an engine that really died in the outbox window, and a quarantine set by renewals that really failed. Remote delivery waits on the relay |
-| CM-10 | the deadman fires: an unleased supervisor exits and its wrappers die | landed (DL-95) |
-| CM-11 | `evict` refused before the bound, permitted after; `--force` recorded with its claimed principal | landed (DL-94/95/97). Every precondition is produced, not built by hand, and real processes produce them end to end (DL-112): a deadman read back off a live supervisor, a `last_contact` stamped by a real lease exchange, a quarantine no test wrote by hand |
-| CM-12 | a returning evicted host is refused and self-fences | the refusal landed (DL-97); the self-fencing is the relay's act and waits with it |
-| CM-13 | drain: `passive` routes nothing new and finishes what is running | landed (DL-94) |
-| CM-14 | no `(job, run_number)` runs twice, over seeded interleavings | **single-host half landed** (DL-108, DL-109): 48 seeded interleavings over the four-job fixture and 16 over nightbank's real 82-job night. They cover failover, a spawn decided and never acted on, duplicated and stale completions, quarantine and drain: every fault one host can suffer, each asserted to fire. Between two OS processes the mutex is refused, and an engine that loses its lock file stops before the work rather than after it (DL-112). The remaining half is §0's "host reroute", which needs a host to reroute TO. It closes with the relay (DL-97/DL-103) |
+| CM-01 | structural owner gate | `scripts/arch_check.py` (DL-82/83), not a `test_cm01_*`: a gate over the model's AST is the only form this obligation has |
+| CM-02 | cardinality: one increment per entity per committed input | `test_cm02_*` (DL-87) |
+| CM-03 | corroborating property, generator widened | `test_cm03_*` (DL-87) |
+| CM-04 | timers fire before the gate (`term_run_time` fixture) | `test_cm04_*` (DL-89) |
+| CM-05 | dedup precedes admission: a retry advances no logical time | `test_cm05_*` (DL-89) |
+| CM-06 | retry / fingerprint / eviction, incl. `outcome_unavailable` | retry and fingerprint: `tests/test_admission.py` and `tests/test_preconditions.py`, among them `test_the_index_answers_an_exact_retry_and_nothing_else`, `test_the_fingerprint_separates_the_logs_and_the_commands` and `test_the_fingerprint_makes_two_revisions_two_commands`, beside the `test_cm06_*` tests (DL-90). The `outcome_unavailable` answer exists (DL-96) and has no consumer: its caller would be the relay, which is not built (DL-97, DL-284). The CM-11 tests pin every eviction precondition (DL-97) |
+| CM-07 | two-pass replay, incl. admitted-without-result | `test_cm07_*` (DL-89) |
+| CM-08 | bisimulation unchanged | every SEM trace runs through both interpreters. No `test_cm08_*` of its own: the obligation is that the existing suite stays green |
+| CM-09 | at-least-once delivery **and** at-most-once application; superseded effects retired; quarantine holds | `test_cm09_*`: application and supersession (DL-96), quarantine holds (DL-97), local delivery (DL-102: the barrier re-drives a pending SPAWN and a pending KILL). Real processes prove both again (DL-112): an engine that really died in the outbox window, and a quarantine set by renewals that really failed. Remote delivery waits on the relay |
+| CM-10 | the deadman fires: an unleased supervisor exits and its wrappers die | `test_cm10_*` (DL-95) |
+| CM-11 | `evict` refused before the bound, permitted after; `--force` recorded with its claimed principal | `test_cm11_*` (DL-94/95/97). Every precondition is produced, not built by hand, and real processes produce them end to end (DL-112): a deadman read back off a live supervisor, a `last_contact` stamped by a real lease exchange, a quarantine no test wrote by hand |
+| CM-12 | a returning evicted host is refused and self-fences | `test_cm12_*` for the refusal (DL-97); the self-fencing is the relay's act and waits with it |
+| CM-13 | drain: `passive` routes nothing new and finishes what is running | `test_cm13_*` (DL-94) |
+| CM-14 | no `(job, run_number)` runs twice, over seeded interleavings | `test_cm14_*` for the single-host half (DL-108, DL-109): 48 seeded interleavings over the four-job fixture and 16 over nightbank's real 82-job night. They cover failover, a spawn decided and never acted on, duplicated and stale completions, quarantine and drain: every fault one host can suffer, each asserted to fire. Between two OS processes the mutex is refused, and an engine that loses its lock file stops before the work rather than after it (DL-112). The other half is §0's "host reroute", which needs a host to reroute TO. It waits for the relay (DL-97/DL-103) |
 
-CM-01–CM-14 are this document's. The withdrawn HA plan (DL-189) drafted
-CM-15–CM-23 for the second host and the second site. One of them holds
-already: CM-17, a decision and the effects it implies commit together or
-not at all. DL-118's single `decision` record holds it on the file
-substrate, and `docs/period-model.md` PR-35 pins it.
+CM-01–CM-14 are this document's obligations. The withdrawn HA plan
+(DL-189) drafted CM-15–CM-23 for the second host and the second site. One
+of them holds: CM-17, a decision and the effects it implies commit
+together or not at all. DL-118's single `decision` record holds it on the
+file substrate, and `docs/period-model.md` PR-35 pins it.
 
 Pause, drift and thundering-herd tests are **not mandatory** until their
 clock model, client count, attempt limits and pass criteria are
@@ -1176,46 +1179,40 @@ specified. An unspecified chaos test is a flake generator.
 
 ## 10. Stage order
 
-```
-S0  this document: storage, auth, envelope + ApplyResult types, effect
-    contract, relay + barrier, admission order, projection + inventory
-H   the model harness — before the code it validates
-S1b RuntimeState: frozen rows, private maps, timers WITH ordering, inventory
-S1c state_rev + input transaction + read verbs
-S2  typed frontiers, atomic admission, decision index, two-pass replay
-S3  mandatory preconditions + protocol v2 (retired and refused; the wire is v3, DL-118)
-S4  CLI / TUI          ∥   S5  host identity, effects, deadman,
-                              host states + evict (S5a-d)
-S6  ledger + election (S6a-c, DL-99: election, the fence, the barrier)
-S7  failover / partition / double-run matrix over nightbank
-```
+The stage tokens name the parts of this model that code and tests cite.
+Every stage is built; the order below is normative.
 
-The sub-stages, each named in code or tests: S5a, S5b, S5c and S5d
-(DL-93); S6a, S6b and S6c (DL-99); S7a, S7b and S7c (DL-108, DL-109,
-DL-112).
+| token | part |
+| --- | --- |
+| S0 | this document: storage, auth, envelope and `ApplyResult` types, effect contract, relay and barrier, admission order, projection and inventory |
+| H | the model harness (§9), built before the code it validates |
+| S1b | `RuntimeState`: frozen rows, private maps, timers with ordering, inventory |
+| S1c | `state_rev`, the input transaction, the read verbs |
+| S2 | typed frontiers, atomic admission, decision index, two-pass replay |
+| S3 | mandatory preconditions |
+| S4 | the CLI and the TUI |
+| S5 (S5a, S5b, S5c, S5d) | host identity, effects, deadman, host states and `evict` (DL-93) |
+| S6 (S6a, S6b, S6c) | ledger and election: election, the fence, the barrier (DL-99) |
+| S7 (S7a, S7b, S7c) | the failover, partition and double-run matrix over nightbank (DL-108, DL-109, DL-112) |
 
-S5 holds neither the relay nor the barrier: both rest on election or on
-a second host (DL-97). The barrier is built in S6, and no stage builds
-the relay; S0 holds its contract. The relay's trigger is a **second
-execution host** (DL-97, DL-103), not S6: nothing in election, the fence
-or the barrier produces a second machine or answers §7's open question
-of how mutually authenticated principals are named, issued and rotated.
-The barrier S6c built is the local half: it reconciles every host in the
-routing table, and that table has one row. What S6 hands the relay is an
-epoch that is allocated, monotone, and re-checked on every append, so "a
-relay rejects any dispatch carrying an epoch below the highest it has
-seen" names a value that moves rather than a constant.
+The order is S0, H, S1b, S1c, S2, S3, then S4 ∥ S5, then S6, then S7. H
+comes before the code it validates.
 
-Two dependencies are pinned here: S2
-persists `InputAttempt`, so the envelope and `ApplyResult` types must be
-frozen first (S0); and S2's admission and S5's effects both depend on
-storage, election and relay contracts, which is why those are S0 text and
-not S6 discoveries.
+Two prerequisites are pinned. S2 persists `InputAttempt`, so the envelope
+and `ApplyResult` types are frozen first, in S0. S2's admission and S5's
+effects both depend on the storage, election and relay contracts, so those
+contracts are S0 text, not S6 discoveries.
 
-Single-owner rules: `oracle.py` through S1b→S1c, `runner.py`'s loop
-through S2→S3. **S4 ∥ S5 is the only file-disjoint pair.** The `host`
-verb ships in S5, not S4, because it is meaningless before the routing
-table exists. Everything else is sequential.
+One owner holds each shared file while its stages are open: `oracle.py`
+through S1b→S1c, and `runner.py`'s loop through S2→S3. **S4 ∥ S5 is the
+only file-disjoint pair**; every other stage is sequential. The `host`
+verb belongs to S5, not S4, because it means nothing before the routing
+table exists.
+
+S5 holds neither the relay nor the barrier: both rest on election or on a
+second host (DL-97). S6 builds the barrier, and no stage builds the relay;
+S0 holds its contract. The relay's trigger is a second execution host
+(§7, DL-97, DL-103).
 
 ## 11. Deliberately not versioned
 
