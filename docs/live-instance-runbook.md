@@ -8,8 +8,8 @@ and to the live-instance route in CLAUDE.md.
 
 Scope: the questions here are the AutoSys ones. Q10 and Q11 have no
 protocol here; §9 names the observation that would settle each. Two
-groups sit outside the scope. U1, U3b and U6b are descoped (DL-288); they
-would need a Universal Controller instance, not an AE box.
+groups sit outside the scope. U1, U3b and U6b need a Universal Controller
+instance, not an AE box, and DL-288 puts them out of scope.
 docs/stonebranch-semantics.md Part III states all three, and
 docs/uc-edge-schema.md states U3b's write-path test. The runner's own
 parity defaults E5, E6, E7, E9 and E10 have no probe here
@@ -35,8 +35,9 @@ Ground rules (corpus hygiene per CLAUDE.md and LICENSING.md):
   amendment, a DL entry, and trace or fixture tests. Do not record where,
   when or by whom the probe ran, or what access it needed.
 - A resolution retires the item's `# PENDING:` marker, if it has one
-  (DL-06). The items with a marker are Q3c, Q3d, Q8b, Q8c, Q8d, Q15, Q16
-  and E8. Q6, Q12, Q13, Q14, Q17, the SEM-20 box clause and rule 5 carry
+  (DL-06). One provisional row of the coverage register claims each
+  marker site (DL-209). The items with a marker are Q3c, Q3d, Q8b, Q8c,
+  Q8d, Q15, Q16 and E8. Q6, Q12, Q13, Q14, Q17, the SEM-20 box clause and rule 5 carry
   none.
 - A semantic switch stays selectable after its question is settled
   (DL-252). The answer sets the switch's `autosys` value in the registry
@@ -73,10 +74,10 @@ URL patterns:
 | KB 135770 | job_depends/forecast go through the Application Server (not client-side reimplementation) |
 | KB 230562 | E8, spawn-time only, not a mid-run kill (DL-226): spawn-path signal-9 abort reported as agent `State FAILED … Status(Aborted, Signal 9)` |
 | KB 186017 | Calendar regeneration mechanics (DL-56/57 dormancy corroboration) |
-| Thread 760251 | Q2b: CA support — newly inserted job has no previous end time; s(A,0) satisfied |
-| Thread 734033 | Q3a + E11: CA support — STARTJOB satisfies the time dependency, a start resets it; run_calendar row-time firing worked examples |
+| Thread 760251 | Q2b: vendor staff — newly inserted job has no previous end time; s(A,0) satisfied |
+| Thread 734033 | Q3a + E11: vendor staff — STARTJOB satisfies the time dependency, a start resets it; run_calendar row-time firing worked examples |
 | Thread 801986 | Q3b: no-expiry latch; the Q3c box aside ("starts after the next time its parent box starts") |
-| Thread 778062 | Q8c: non_workday O empirical preview + CA "behavior is not changed … documentation was wrong" |
+| Thread 778062 | Q8c: non_workday O empirical preview + vendor staff "behavior is not changed … documentation was wrong" |
 | Thread 825395 | Q8c: 2012 consecutive-holiday-N community report (second holiday missing from output) |
 | TechDocs 12.1 Define Extended Calendars | Q8a holiday-action precedence quote; action code definitions; adjust prompt wording; preview flow |
 | TechDocs 24.2 Manage Job Status | Stale-status philosophy ("most recent completion … regardless of when"), ACTIVATED-on-box-start, INACTIVE-at-insert |
@@ -120,8 +121,7 @@ Q9 is closed from one export sample (DL-60). SEM-36/37 carry the
 verdicts: `extended_calendar:` spelling, fixed attribute order with
 empty-valued keys, `workday: all`, braces as grouping, `WORKD#L`,
 `holiday: S` without holcal, and `HH:MM:SS` row tails. They sit at the
-**[F]** tier, so a byte-exact check is still worth running. It is
-read-only:
+**[F]** tier, so a byte-exact check is still worth running. It is read-only:
 
 ```
 autocal_asc -s ALL -E dsl41_std_export.txt
@@ -284,8 +284,8 @@ dsl41_q6_box -d` in each case. Cleanup: run
 
 ### Q12 — FREE on a depletable resource (~3 minutes, runs up to four short jobs)
 
-Q12 is descoped (DL-288). The protocol stays for anyone who needs the
-case. "resources Attribute" (AutoSys 24.2) documents FREE as "Optional
+Q12 is out of scope (DL-288). The protocol is here for a reader who
+needs the case. "resources Attribute" (AutoSys 24.2) documents FREE as "Optional
 for renewable virtual resources only". dsl41's preflight refuses FREE=Y
 and FREE=A on a depletable and accepts FREE=N (DL-287). The oracle
 applies the code. This probe reads what the vendor does from job
@@ -824,8 +824,8 @@ The pin "a pre-existing arm survives ON_ICE/OFF_ICE untouched" (SEM-32,
 DL-54) is uncited. Q3d (DL-69) is the open question (`# PENDING: Q3d`,
 oracle_writers.py), and the pin is the deterministic default until this probe
 runs. If the vendor instead discards the queued start on ice, ON_ICE is
-the vendor's latch-*discharge* verb. The vendor sendevent set has no
-other, and dsl41's own `DISARM` control (DL-158) has no vendor
+the vendor's only way to drop a latched tick: the vendor sendevent set
+has no other, and dsl41's own `DISARM` control (DL-158) has no vendor
 counterpart. Same shape as Q3c, standalone job, about 3 minutes:
 
 ```
@@ -857,9 +857,10 @@ and dsl41's pin holds. Note the tension with SEM-20's "conditions must
 reoccur": the tick, not the condition, is what carried over. If it does
 not run, ice discards the queued start. Then amend SEM-20/SEM-32, clear
 `armed` in the oracle's ON_ICE handler (`SCHED_DISARM` trace record),
-and rewrite the note on discharge verbs in step 4 of exercise 13 in
-`examples/nightbank/RUNBOOK.md`: ON_ICE becomes the vendor's discharge,
-with its downstream-satisfaction cost stated. Delete both jobs the same
+and rewrite the sentence in step 4 of exercise 13 in
+`examples/nightbank/RUNBOOK.md` that names the `DISARM` verb: ON_ICE
+becomes the vendor's way to drop a latched tick, with its
+downstream-satisfaction cost stated. Delete both jobs the same
 day, because the schedule ticks daily: `jil <<< "delete_job: dsl41_q3ice"`
 and `jil <<< "delete_job: dsl41_q3ice_gate"`.
 

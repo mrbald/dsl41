@@ -220,7 +220,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-206 | the hats block holds the core's wiring stanza and nothing else |  |
 | DL-207 | `minify` emits a de-identified estate, and an unclassified attribute stops it |  |
 | DL-208 | `minify` takes `--properties` like every other catalog-consuming verb |  |
-| DL-209 | Simulation closure by classification: the coverage register (S1 of five) |  |
+| DL-209 | Simulation closure by classification: the coverage register (S1 of five) | [docs/live-instance-runbook.md](live-instance-runbook.md) |
 | DL-210 | Production readiness, first slice: the supervisor survives its clients and its service manager; the TUI survives a period roll | [docs/architecture.md](architecture.md), [docs/blocks/spawn-idempotency.md](blocks/spawn-idempotency.md), [docs/blocks/supervisor.md](blocks/supervisor.md), [docs/concurrency-model.md](concurrency-model.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/runner-design.md](runner-design.md), [docs/state-machines.md](state-machines.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-211 | CI measures coverage once, on the interpreter where measuring is free; the two spin tests stop spinning | [docs/agent-workflow.md](agent-workflow.md), [docs/blocks/engine-loop.md](blocks/engine-loop.md) |
 | DL-212 | Preflight names the day the scheduler names: the base zone is the fallback before UTC | [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
@@ -403,7 +403,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-390 | Maintenance is a guarded supervisor operation | [docs/authoring.md](authoring.md), [docs/blocks/supervisor.md](blocks/supervisor.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/offline-rehearsal.md](offline-rehearsal.md), [docs/site-package.md](site-package.md), [docs/state-machines.md](state-machines.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-391 | TUI mutations retain their exact recovery envelope | [docs/cli-tui-qualification.md](cli-tui-qualification.md) |
 | DL-392 | Blocking supervisor requests have one monotonic deadline | [docs/supervisor-protocol.md](supervisor-protocol.md) |
-| DL-393 | TUI recovery pins the running Python launch path |  |
+| DL-393 | TUI recovery pins the running Python launch path | [docs/cli-tui-qualification.md](cli-tui-qualification.md) |
 | DL-394 | Forced maintenance waits for each whole command group | [docs/authoring.md](authoring.md), [docs/state-machines.md](state-machines.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-395 | Opus reviews multi-file changes, Astra joins semantic and integration ones, Sol builds bounded edge code, and Fable only advises | [docs/agent-workflow.md](agent-workflow.md) |
 | DL-396 | A detached launch names how it gets its supervisor: attach or spawn | [docs/blocks/supervisor.md](blocks/supervisor.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md), [docs/site-package.md](site-package.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
@@ -422,10 +422,11 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-409 | A lease renewal with no reply within ten seconds is a failed renewal | [docs/concurrency-model.md](concurrency-model.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-410 | A decompiled estate is a Python module that declares `estate()`, and `dsl41 build` renders it | [docs/authoring.md](authoring.md) |
 | DL-411 | Slice 4 of DL-404's plan is built: one supported composition call and one packaged worker command |  |
-| DL-412 | The release train is the dsl41 verb group `dsl41 release prepare\|apply\|resume\|rollback\| status`; the example helper is gone | [README.md](../README.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/site-package.md](site-package.md) |
+| DL-412 | The release train is the dsl41 verb group `dsl41 release prepare\|apply\|resume\|rollback\| status`; the example helper is gone | [README.md](../README.md), [docs/deployment-qualification.md](deployment-qualification.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/site-package.md](site-package.md) |
 | DL-413 | `dsl41 estate build` assembles the release directory from a manifest and its Python modules, and `dsl41 estate diff` compares two releases by the seal's... | [docs/authoring.md](authoring.md) |
 | DL-414 | The supervisor unit keeps `RefuseManualStop=yes`; configuration management stops an estate with `dsl41 estate quiesce` |  |
 | DL-415 | Eleven workflow rules bind every agent session, and CI classifies a change as docs-only or code |  |
 | DL-418 | A decompiled estate may be a package with one module per JIL file, and `decompile --params` adds a `Params` dataclass | [README.md](../README.md), [docs/authoring.md](authoring.md) |
 | DL-417 | The file-processing example estate runs under the real engine and supervisor, with REARM as its activation, and the README's exercise runs it as printed |  |
 | DL-416 | A host signal drains the supervisor, and the stop guard is gone | [docs/authoring.md](authoring.md), [docs/deployment-qualification.md](deployment-qualification.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/site-package.md](site-package.md), [docs/state-machines.md](state-machines.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-419 | A retained runtime's bytecode cache is checked against its retained source, and a matching cache is accepted | [docs/offline-installation.md](offline-installation.md), [docs/site-package.md](site-package.md) |

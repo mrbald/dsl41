@@ -42,7 +42,8 @@ Choose the reference RPM or the offline recipe without RPM.
 Both prepare a candidate at its final path under the chosen prefix.
 The default prefix is `/opt/dsl41`.
 An operator activates a candidate through the `.venv` link.
-Before activation, run any check against a retained runtime with `python -B`, because a `.pyc` written into it makes activation refuse it ([rule](offline-installation.md#prepare-on-the-offline-host)).
+Run any check against a retained runtime with `python -B`, so that nothing writes into it.
+A repeated preparation refuses a bytecode cache with no source, one that names another source, one whose decoded code differs from a compile of its retained source, and one that does not decode, and accepts a matching cache (DL-419; [rule](offline-installation.md#prepare-on-the-offline-host)).
 [DL-389](decision-log.md) defines the preparation and ownership rules.
 
 ### 2.1. Use or rebuild the reference RPM
@@ -174,11 +175,12 @@ The runbook calls the launcher the place that names the root; the units repeat i
 
 The example hard-codes the default prefix in these assignments:
 
-- `DSL41=/opt/dsl41/.venv/bin/dsl41` in the launcher.
+- `PREFIX=/opt/dsl41` in the launcher, from which it sets `DSL41=$PREFIX/.venv/bin/dsl41`.
 - `ExecStart=/opt/dsl41/bin/dsl41-launch engine` in the engine unit.
 - `ExecStart=/opt/dsl41/bin/dsl41-launch supervisor` in the supervisor unit.
 - `ExecStartPost=/opt/dsl41/bin/dsl41-launch supervisor-ready` in the supervisor unit.
 - `ExecStop=/opt/dsl41/bin/dsl41-launch supervisor-stop` in the supervisor unit.
+- `/opt/dsl41/.venv/bin/dsl41 release service *` in `dsl41-release.sudoers`.
 
 Edit those assignments for another prefix.
 The RPM's prefix macro moves the runtime; it does not rewrite these templates.
@@ -232,7 +234,7 @@ flowchart TB
         estate[Tagged estate directory]
         map[Access map]
         properties[Properties files]
-        engine_unit -->|requires and follows| supervisor_unit
+        engine_unit -->|wants and follows| supervisor_unit
         engine_unit --> launcher
         supervisor_unit --> launcher
         launcher -->|engine mode| engine
@@ -383,10 +385,10 @@ Container results do not qualify host boot, mounts, kernel upgrades, SELinux pol
 The installation, runbook and qualification pages give no SELinux policy or context guidance.
 Use the [real-host evidence requirements](deployment-qualification.md#evidence-lanes) for host properties.
 ARM64 runs and emulation do not qualify native x86_64 acceptance.
-The [service-drill report](deployment-runbook.md#a-worked-example-examplesnightbankdeploy) records Ubuntu 24.04 runs on x86_64 and ARM64.
-It says that no other distribution or systemd version has been observed.
-The [offline rehearsal](offline-rehearsal.md) also runs services in Rocky Linux 8 containers.
-These coverage statements conflict; neither establishes qualification of another host.
+The [service-drill report](deployment-runbook.md#a-worked-example-examplesnightbankdeploy) records the `drill` job of `.github/workflows/service-drill.yml` on an Ubuntu 24.04 x86_64 runner and the local drill on ARM64.
+The `offline` job of that workflow and of `.github/workflows/release.yml` runs the [offline rehearsal](offline-rehearsal.md) in an Ubuntu 24.04 container and in a Rocky Linux 8 container, each on a native x86-64 worker, with systemd as PID 1 in the container.
+The Rocky Linux 8 lane qualifies the offline installation, the reference RPM and the service checks on that distribution's userland and its systemd.
+No other distribution or systemd version is observed, and no lane qualifies another host.
 
 ## 7. Follow the other tracks for engine work
 

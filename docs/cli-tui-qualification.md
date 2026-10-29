@@ -4,7 +4,8 @@ This inventory maps the public entry points to executable checks.
 It distinguishes source tests from installed-command and display checks.
 A listed test is evidence for its assertions, not for every option or deployment.
 The control and recovery rules are in `control-protocol.md` §3,
-`runner-design.md` §11, `access-model.md` §9, and DL-391.
+`runner-design.md` §11, DL-391, and `access-model.md` §§0, 3 and 5
+for the actor rules and §9 for the served TUI.
 
 ## CLI inventory
 
@@ -12,7 +13,7 @@ The command registry is `src/dsl41/cli.py`.
 These source tests invoke Typer or the command implementation.
 They do not establish that a separately installed wheel works.
 
-| Public command | Existing source checks |
+| Public command | Source checks |
 | --- | --- |
 | `lint` | `tests/test_lint.py` |
 | `report` | `tests/test_backend_uc.py` |
@@ -35,12 +36,22 @@ They do not establish that a separately installed wheel works.
 | `supervise` | `tests/test_runner_supervisor.py`, `tests/test_cli_control_branches.py` |
 | `seal`, `audit`, `verify` | `tests/test_estate.py`, `tests/test_estate_wide.py`, `tests/test_nightbank_boundary.py` |
 | `estate prune`, `estate reclaim` | `tests/test_retention.py`, `tests/test_estate_wide.py` |
+| `estate quiesce` | `tests/test_estate_quiesce.py` |
 | `estate args` | `tests/test_estate_manifest.py` |
 | `estate build`, `estate diff` | `tests/test_estate_build.py` |
+| `release prepare`, `release apply`, `release resume`, `release rollback`, `release status` | `tests/test_release_prepare.py`, `tests/test_release_apply.py`, `tests/test_release_rollback.py`, `tests/test_release_status.py` |
 
 Release qualification must run the installed executable outside the source checkout.
 It must exercise both a core-only install and an install with the `ui` extra.
 A source import and `python -m dsl41` are different evidence.
+
+Three test files run an installed executable.
+`tests/test_installed_cli.py` runs the executable named by `DSL41_INSTALLED_EXECUTABLE`.
+It checks the public help, usage refusals, mutation outcomes with no resend, and the refusal of a socket with the wrong permissions.
+`tests/test_installed_tui_recovery.py` installs the wheel named by `DSL41_RELEASE_WHEEL` offline, under the interpreter named by `DSL41_RECOVERY_PYTHON`, with the UI dependency wheels from `DSL41_RECOVERY_WHEELHOUSE` (default: the wheel's directory).
+It runs a complete recovery command from that install (DL-393).
+`tests/test_tui_recovery_drivers.py` runs the executable named by `DSL41_TUI_EXECUTABLE` or `DSL41_INSTALLED_EXECUTABLE`, and `python -m dsl41` when neither is set.
+The first two skip when their variables are unset.
 
 ## TUI interaction inventory
 

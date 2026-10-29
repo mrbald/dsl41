@@ -60,6 +60,7 @@ The following overrides are explicit site inputs:
 | `DSL41_REUSE_DELIVERY` | Existing delivery directory for a diagnostic repeat on the same target tuple |
 | `DSL41_REHEARSAL_SCOPE=maintenance` | Run all package/fault cells and the focused installed maintenance probes; this is not full acceptance |
 | `DRILL_KEEP=1` | Keep the disposable container after diagnostics |
+| `DSL41_REQUIRE_NATIVE_X86=1` | Refuse a Podman host that is not amd64 and run the capability check for native x86-64; both workflows set it |
 
 An image or delivery override is part of the evidence.
 A diagnostic repeat does not qualify a changed source wheel.
@@ -98,14 +99,15 @@ The frozen-engine case expires the 60-second supervisor lease while the engine
 keeps its file lock; it then resumes the same process.
 The residual fixture is explicitly contained through the incident procedure.
 
-The existing exhaustive service drill remains available through
-`drill-local.sh` and the `exhaustive` workflow lane.
+The exhaustive service drill runs through `drill-local.sh` and the
+`exhaustive` workflow lane.
 It includes crash-loop recovery, engine and supervisor SIGKILL, access-map
-changes, historical state-machine upgrade and rollback, and retirement.
-Its historical runtime is downloaded during connected setup.
+changes, state-machine upgrade from an old release and rollback to it,
+and retirement.
+The old release is downloaded during connected setup.
 An old supervisor has no maintenance verb.
-Only that named historical path uses the explicit guarded incident-stop
-procedure; there is no maintenance fallback.
+Only the upgrade from that release and the rollback to it use the explicit
+guarded incident-stop procedure; there is no maintenance fallback.
 The reboot step stages stop and target-start ordering in a container.
 It does not reboot the host.
 
@@ -118,7 +120,7 @@ entering the target containers.
 The release workflow archives qualified target bundles and the EL8
 default-prefix/base revision-1 RPM beside the release checksums.
 The failed-scriptlet fixture RPM is excluded.
-Publication still requires the existing tag and environment approval.
+Publication requires the tag and the environment approval.
 
 Evidence survives a failed run: capability output, full RPM or portable logs,
 fault logs, service journals, unit state, container inspection and durable
