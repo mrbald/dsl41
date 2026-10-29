@@ -131,7 +131,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-118 | the atomic `decision` record and control-protocol v3 | [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/effect-outbox.md](blocks/effect-outbox.md), [docs/blocks/fw-observation.md](blocks/fw-observation.md), [docs/blocks/subscription.md](blocks/subscription.md), [docs/concurrency-model.md](concurrency-model.md), [docs/control-protocol.md](control-protocol.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md), [docs/state-machines.md](state-machines.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-119 | the seal artifact and the canonical form |  |
 | DL-120 | capacity decomposed | [docs/blocks/capacity.md](blocks/capacity.md), [docs/concurrency-model.md](concurrency-model.md), [docs/state-machines.md](state-machines.md) |
-| DL-121 | `run_id` is minted in the effect; SPAWN idempotency is durable; FW has a spool |  |
+| DL-121 | `run_id` is minted in the effect; SPAWN idempotency is durable; FW has a spool | [docs/period-model.md](period-model.md) |
 | DL-122 | `catalog_hash` v2, `source_bundle_hash`, `RuntimeProfile` |  |
 | DL-123 | classification, latches, the retry horizon | [docs/period-model.md](period-model.md) |
 | DL-124 | the seal operation |  |
@@ -406,7 +406,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-393 | TUI recovery pins the running Python launch path |  |
 | DL-394 | Forced maintenance waits for each whole command group | [docs/authoring.md](authoring.md), [docs/state-machines.md](state-machines.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-395 | Opus reviews multi-file changes, Astra joins semantic and integration ones, Sol builds bounded edge code, and Fable only advises | [docs/agent-workflow.md](agent-workflow.md) |
-| DL-396 | A detached launch names how it gets its supervisor: attach or spawn | [docs/blocks/supervisor.md](blocks/supervisor.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/runner-design.md](runner-design.md), [docs/site-package.md](site-package.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
+| DL-396 | A detached launch names how it gets its supervisor: attach or spawn | [docs/blocks/supervisor.md](blocks/supervisor.md), [docs/deployment-runbook.md](deployment-runbook.md), [docs/period-model.md](period-model.md), [docs/runner-design.md](runner-design.md), [docs/site-package.md](site-package.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
 | DL-397 | Offline manufacturing consumes bound release exports | [docs/offline-installation.md](offline-installation.md), [docs/offline-rehearsal.md](offline-rehearsal.md) |
 | DL-398 | One verb stops a shape 1 estate: `dsl41 estate quiesce` | [docs/deployment-runbook.md](deployment-runbook.md), [docs/site-package.md](site-package.md) |
 | DL-399 | Maintenance admission checks identity, containment and exit policy; the stop guard is checked at start | [docs/deployment-runbook.md](deployment-runbook.md), [docs/site-package.md](site-package.md), [docs/supervisor-protocol.md](supervisor-protocol.md) |
