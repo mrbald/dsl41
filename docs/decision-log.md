@@ -24740,3 +24740,20 @@ relitigate an entry; append a new one.
   drain: the maintenance client would watch an operation that does not exist. A refused
   SPAWN as a failure: the run never started. An unbounded resend (DL-409). A seal inside the
   drain play: the sealed route stays a recipe of its own.
+- DL-419 A retained runtime's bytecode cache is checked against its retained source, and a
+  matching cache is accepted (2026-10-29; scripts/offline/bundle.py `check_bytecode`;
+  tests/test_offline_packaging.py; docs/site-package.md §2, docs/offline-installation.md)
+  THE RULE. A repeated preparation checks each `.pyc` in a retained runtime. In a `__pycache__`
+  directory the name must be `<module>.cpython-312.pyc`, `.opt-1.pyc` or `.opt-2.pyc`; a
+  `module.pyc` beside its source is also checked. It refuses a cache with no source, a cache that
+  names a source other than the retained file (by the `.venv` link or the resolved path), and a
+  cache whose decoded code differs from a compile of that source, and a cache that does not
+  decode (the preparation exits on the decoding error). The 16-byte header is not compared. A
+  matching cache is accepted. `test_offline_prepare_repeat_checks_installed_integrity` pins the
+  refusal of a cache that does not decode; two tests pin acceptance:
+  `test_offline_repeat_accepts_ordinary_bytecode_cache` and
+  `test_offline_repeat_after_active_link_invocation`. No test pins blanket tamper detection.
+  THE REASON. The older statement, that any `.pyc` written into a retained runtime makes
+  activation refuse it, is refined by the check. A check run through the link without `-B`
+  writes a matching cache, and a repeat accepts it. The advice to run checks with `python -B`
+  stays, so that nothing writes into a retained runtime.

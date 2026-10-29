@@ -147,8 +147,11 @@ Repeating preparation verifies the delivery identity, the system Python
 executable, every installed non-cache file and symlink, and every retained
 asset against that receipt.
 Generated Python bytecode must match its source.
+A repeat checks each bytecode cache: in a `__pycache__` directory its name must be `<module>.cpython-312.pyc`, `.opt-1.pyc` or `.opt-2.pyc`, and a `module.pyc` beside its source is checked too.
+It refuses a cache with no source, a cache that names another source, a cache whose decoded code differs from a compile of its retained source, and a cache that does not decode; the 16-byte header is not compared.
+It accepts a matching cache that names its source by path or through the `.venv` link (DL-419).
 Nothing writes into a retained runtime after its receipt is taken.
-Run any process that imports from it outside the launcher, a root check included, with `python -B` or `PYTHONDONTWRITEBYTECODE=1`, because a `.pyc` written through the `.venv` link makes the next activation refuse the runtime.
+Run any process that imports from it outside the launcher, a root check included, with `python -B` or `PYTHONDONTWRITEBYTECODE=1`, so that nothing writes into it.
 The repeat also runs `pip check` and the installed-code smoke tests.
 It never repairs an existing candidate.
 

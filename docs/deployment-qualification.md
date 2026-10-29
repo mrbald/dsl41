@@ -40,7 +40,7 @@ fresh mutation id, signal fallback or unattended retry.
 | Successful maintenance restarts itself | Exit 8 plus reloaded unit exclusions | Supervisor stays inactive; engine is already stopped. |
 | Reboot ends a maintenance window | Disable both units before stopping | Hold remains through reboot. Release only after the intended recovery. |
 | Unresponsive supervisor | No safe observation or answer | Explicit incident procedure acknowledges termination; it is not successful maintenance. |
-| Definition add/change/remove before a boundary | Resume/catalog gates and staged seal | Read refused input; roll forward or restore definitions using the documented rollback row. |
+| Definition add/change/remove before a boundary | Definitions move through `dsl41 release`. `release prepare` lints and rehearses the release. `release apply` refuses a release that was not prepared with this dsl41 version or whose files changed, then seals the period into it (DL-412). A resume refuses a catalog whose hash differs from the open period's. | Read the refused input. `release resume` finishes a recorded apply; `release rollback` applies the release the active one replaced. |
 | Interrupted seal or physical open | Durable lineage and sentinel checks | Retry the identical operation as documented; no fabricated genesis or second external effect. |
 | Backup omits anchor or live writers | Quiescence and full lineage inventory | Restore at recorded paths and audit before opening; compare durable records. |
 | Runtime rollback cannot read retained estate | State-machine and protocol compatibility gates | Audit with retained original runtime; use a new estate when required. |
