@@ -159,7 +159,9 @@ What has to happen?
 │     it refuses while a command runs, unless --force terminate
 │
 ├── the engine unit failed with exit 3                               SEALED, NOT OPENED
-│     the period is sealed and the next one waits; nothing runs until it opens
+│     the period is sealed and the next one waits; no new run starts until it opens
+│     a detached run started before the seal keeps running under the supervisor:
+│     read `dsl41 supervise list --run-root …` before any maintenance (period-model §7)
 │     open it in place (start the engine unit) or in a fresh root (§7 row 2)
 │     an enabled engine unit opens it in place at the next boot
 │
@@ -168,7 +170,9 @@ What has to happen?
 │     deploy a release that fixes the fault, then start the unit (§7)
 │
 ├── the engine or supervisor unit failed with exit 7                 STATECHART ERROR
-│     a declared state machine hit an assertion failure; nothing of it was journaled (§3)
+│     a declared state machine hit an assertion failure; the failed step was not journaled (§3)
+│     a durable write made before it stays, such as a `seal` record:
+│     read the WAL's last record and `seals/` before anything else (§6a, Day 2)
 │     a supervisor's exit 7 ends every command it still runs, with no drain (§3)
 │     report the `dsl41: statechart error` lines, deploy a fixed release, start the unit (§7)
 │
@@ -368,7 +372,10 @@ window under `tmux` or `screen`, so a dropped connection does not end it.
 Below, `NAME` is a release's name, one directory under `ESTATE_RELEASES`,
 and `JOB` is a job's name.
 
-1. Commit the edit to the estate's repository and tag it. If it adds or
+1. Commit the edit to the estate's repository and tag it. The author's CI
+   runs the check block on the commit before the tag
+   ([authoring §6.1](authoring.md#61-declare-the-estate-in-estatetoml));
+   step 2 runs it again on the tag. If it adds or
    removes a file, edit the release's `estate.toml` to match: the launcher
    and `dsl41 release` take the file list from it (DL-407).
 2. Before the window, check the new tag in a checkout of its own, with
@@ -558,7 +565,12 @@ systemctl start dsl41-engine.service
   unit too, which drains and then ends every command still running.
 - **Host reboot.** Hold the scheduled jobs and let running work finish
   (§6, steps 1 and 2), then reboot. The enabled units start at boot, and
-  the launcher resumes the same root. No seal, and no reboot hold.
+  the launcher resumes the same root. No seal, and no reboot hold. The
+  holds are journaled state and come back with the resume
+  (runner-design §7): once `query status --brief -S $S` answers, release
+  the holds this window took with `OFF_HOLD`, as the job recipe's step 7
+  does. A hold another operator took or changed is theirs: agree with
+  them first.
 - **Estate stop.** For a window that must outlast a reboot: take §2b's
   reboot hold, then follow §2b's shape-1 steps: stop the engine unit, then
   run `dsl41 estate quiesce` as the service account. It seals and audits
@@ -1046,7 +1058,7 @@ endpoint; feed these into the site's monitoring.
 | Signal | Read it with | What it means |
 | --- | --- | --- |
 | engine unit | `systemctl show -p ActiveState -p ExecMainStatus -p NRestarts dsl41-engine.service` | `active` runs. `failed` with status 2 is a configuration refusal; the journal names it. `failed` with status 3 is a sealed period (next row); it lasts until the next start, and an enabled unit starts at boot. `failed` with status 6 is a time-half stop (§3); the journal says `engine stopped:` and names the input and the fault. `failed` with status 7 is a statechart error (§3; next rows). A rising `NRestarts` is crash restarts (exit 1); the journal says `engine failed:` and why |
-| sealed, not opened | the check below, on `ESTATE_ANCHOR/anchor.json` | `closed`: a period is sealed and the next is not open, so nothing runs. Alert when it stays `closed` past the window. `open` is normal. `claimed` is an opener at work, or one that crashed (§6a, Day 2) |
+| sealed, not opened | the check below, on `ESTATE_ANCHOR/anchor.json` | `closed`: a period is sealed and the next is not open, so no new run starts; a detached run started before the seal keeps running under the supervisor, and `supervise list` shows it (period-model §7). Alert when it stays `closed` past the window. `open` is normal. `claimed` is an opener at work, or one that crashed (§6a, Day 2) |
 | supervisor unit | `systemctl show -p ActiveState -p NRestarts dsl41-supervisor.service`; `dsl41 supervise list --run-root "$RUN_ROOT"` | the list answers `"ok": true` while the supervisor is up, and shows each run's `wrapper_alive`. A restart of this unit ended the commands it ran. `failed` with status 7 is a statechart error (§3) |
 | supervisor log | `$RUN_ROOT/supervisor.log`; `journalctl -u dsl41-supervisor.service` | the supervisor's own output, and the unit's starts and stops |
 | leader | `$RUN_ROOT/leader.lock` holds the last leader's `pid`, `host`, `epoch` and `since`; compare `pid` with `systemctl show -p MainPID --value dsl41-engine.service` | the note stays after the engine exits, so it says who led, not who leads. Never probe the lock with `flock`: an engine that starts while a probe holds it refuses with exit 2. Never delete or replace the file: the engine re-checks it before every append and stops when it changed |
@@ -2513,8 +2525,12 @@ is for swapping files, not for finding problems.
    and every live filewatch as a row with no due time. Take the
    `kind=schedule` rows and drop the ones that name a box member. "Already
    fired today" is not an exemption: a job with several `start_times`, or
-   with `start_mins`, fires again. A hold satisfies nothing downstream;
-   `ON_ICE` would, because it marks the job satisfied at once. A tick that
+   with `start_mins`, fires again. A hold changes no atom: a held job's atoms
+   read its last status (SEM-21).
+   `ON_ICE` satisfies a dependent's `s()`, `d()` and `n()` atoms and, under
+   the default `ice-lookback=true` (runner-design §8a), every atom with a
+   lookback qualifier; an ordinary `f()`, `t()` or `exitcode()` atom on an
+   iced job reads false (SEM-05, SEM-20). A tick that
    lands on a held job latches (flag `A` in `query status --brief`).
    Latches are run-root state and die with the old run root (DL-133); a
    seal does not create one. An armed latch survives a seal on purpose:
@@ -2566,20 +2582,26 @@ armed latches, every box's `ran_members` and `run_number` all cross,
 because the boundary is a record, not a directory.
 
 **Seal.** First take steps 1 to 3 of §6's window: quiesce triggers,
-drain, stop the web UI. Then:
+drain, stop the web UI. Then, with §0's variables and `ESTATE` set to the
+prepared successor release's directory:
 
 ```sh
-dsl41 seal --run-root /srv/dsl41/runs/<id> \
-    --next /srv/dsl41/nightbank/releases/<name>/first.jil \
-    --next /srv/dsl41/nightbank/releases/<name>/second.jil \
-    [-p site.properties] [--next-timezone …] [--claimed-actor you@host]
+dsl41 seal --run-root "$RUN_ROOT" --estate-anchor "$ESTATE_ANCHOR" \
+    --manifest "$ESTATE/estate.toml" --environment "$ENVIRONMENT" -p "$PROPERTIES" \
+    --next-detached --next-as-machine localhost --next-machine-policy strict
 ```
 
-`--next` is an option, not the positional file list `dsl41 run` takes:
-name it once per file. A shell glob after one `--next` is refused as an
-extra argument, so expand the estate yourself. The order is part of
-`source_bundle_hash`, so use the order `dsl41 run` will open the period
-with.
+The manifest supplies the files, the layers, the timezone, its map and the
+semantic switches (DL-407), and `--environment` is required when it
+declares environments. Beside `--manifest`, the seal refuses
+`--next-timezone`, `--next-timezone-map` and `--next-semantics`; the
+`--next-*` options that remain are the deployment half of the next
+period's profile: `--next-detached`, `--next-deadman`, `--next-as-machine`
+and `--next-machine-policy`. Without a manifest, name each file
+with `--next`, once per file: it is an option, not the positional file
+list `dsl41 run` takes, and a shell glob after one `--next` is refused as
+an extra argument. The order is part of `source_bundle_hash`, so use the
+order `dsl41 run` will open the period with.
 
 `seal` has two entry modes, and the lock decides which, not a flag. An
 engine that holds `leader.lock` is a live engine. The CLI stages C2 and
@@ -2611,7 +2633,8 @@ The `--next-*` options describe the period about to open:
 as a catalog change does. That is the model's rule, and the opener
 enforces it (see "Open, in place" below).
 
-**They do not inherit C1. State the whole profile every time.** An omitted
+**They do not inherit C1. State the whole profile every time**: the
+deployment half beside a manifest, all of it in `--next` mode. An omitted
 `--next-*` takes its own default, not the running period's value: no
 `--next-timezone` means UTC, no `--next-as-machine` means no declared
 machine, and no `--next-detached` means tethered. A seal of a detached
@@ -2634,8 +2657,10 @@ for the fields the engine wires, and for the two it cannot see,
 `--next-as-machine` and `--next-machine-policy` (DL-151).
 
 ```sh
-dsl41 run --resume --run-root /srv/dsl41/runs/<id> \
-    --detached --as-machine <machine> /srv/dsl41/nightbank/releases/<name>/*.jil
+dsl41 run --resume --run-root "$RUN_ROOT" --estate-anchor "$ESTATE_ANCHOR" \
+    --manifest "$ESTATE/estate.toml" --environment "$ENVIRONMENT" -p "$PROPERTIES" \
+    --detached --supervisor attach --as-machine localhost --machine-policy strict \
+    --access-map /etc/dsl41/nightbank-access.toml
 ```
 
 **Attest.** Before a period's root can be archived or rolled away from,
@@ -2732,8 +2757,8 @@ retired dialect: what each protocol tolerates, how long its instances
 live, and what must be true before a reader may drop a dialect.
 
 The `estate` group's verbs are `reclaim` (below), `prune` (§2a),
-`quiesce` (§2b), `args` (§0's job recipe), and `build` and `diff`
-([authoring](authoring.md); DL-413).
+`quiesce` (§2b), and `build` and `diff`
+([authoring](authoring.md); DL-413, DL-422).
 
 A roll that is refused after it wrote the target root's sentinel leaves
 that directory owned by the claim it was attempting. Period-model §1.1's
@@ -3165,7 +3190,7 @@ speaks to the supervisor, not the engine, and leaves no WAL record.
 | --- | --- | --- | --- |
 | status correction | `CHANGE_STATUS` | no: it is history | takes `expect`; a ghost is legal for `JOB^INST` (SEM-07) |
 | force a run | `FORCE_STARTJOB` | no | |
-| hold or ice for a window | `ON_HOLD`, `ON_ICE` | yes | an iced predecessor satisfies its dependents' atoms, a held one does not (SEM-05) |
+| hold or ice for a window | `ON_HOLD`, `ON_ICE` | yes | an iced predecessor satisfies `s()`, `d()`, `n()` and, under the default `ice-lookback=true`, every lookback-qualified atom, not an ordinary `f()`, `t()` or `exitcode()` atom (SEM-05, SEM-20); a hold changes no atom: a held job's atoms read its last status (SEM-21) |
 | kill a runaway | `KILLJOB` | no | kill members, not boxes |
 | set a global | `SET_GLOBAL` | by another set | survives a boundary |
 | drain or activate an executor | `host drain`, `host activate` | yes | asserts nothing about reachability |
