@@ -74,8 +74,8 @@ They are reference, cited from the pages above, not reading.
 
 ## Status
 
-The compiler and the runner are built and tested. The designed items that
-are not built, and the open questions, are listed under
+The compiler and the runner are built and tested. The items that are
+specified and not built, and the open questions, are listed under
 [What is not built](#what-is-not-built). The UC backend is descoped until
 further notice (DL-288): it stays built and tested, and gets no new work.
 
@@ -141,8 +141,8 @@ derived graph, and dangling-name rules. `--strict` is the migration gate: an
 estate brought in under
 [authoring §5](docs/authoring.md#5-bring-an-existing-autosys-estate-in)
 always lints with it, and a site may require it for every estate.
-`dsl41 release prepare` lints without `--strict`: an ERROR refuses the
-release, and a WARN refuses nothing.
+`dsl41 release prepare` lints without `--strict`: an `error` finding
+refuses the release, and a `warn` finding refuses nothing.
 
 L023 warns when a DST change moves, drops or doubles a schedule time of the
 job's zone, and prints what the runner does. A job's own `timezone` decides the zone, else `--timezone` (UTC by
@@ -465,14 +465,14 @@ the help panel.
 
 `host drain` is the maintenance verb: new work stops being dispatched to
 that execution host, and work already running finishes. A job the drain
-keeps from dispatch is held, and `host activate` dispatches it. That
-dispatch hold is not an operator hold: `sendevent ON_HOLD` sets an operator
-hold, and `sendevent OFF_HOLD` or `off-hold-all` releases it. Held jobs are
-not failed and not moved. A job is rerun elsewhere only after the host is
-evicted, which needs proof that the old executor is dead
+keeps from dispatch shows as `held` in `query status`, and `host activate`
+dispatches it again. An operator hold is `on_hold`: `sendevent ON_HOLD`
+sets it, and `sendevent OFF_HOLD` or `off-hold-all` releases it. Jobs the
+drain holds are not failed and not moved. A job is rerun elsewhere only
+after the host is evicted, which needs proof that the old executor is dead
 ([docs/concurrency-model.md](docs/concurrency-model.md)
-§8). `query status` marks a held job, because a held job otherwise reads
-RUNNING with no process behind it.
+§8). The `held` mark matters because a held job reads RUNNING with no
+process behind it.
 
 The scheduler obeys `run_calendar` and `exclude_calendar`. Standard
 calendar day sets apply on the job's local day, run minus exclude. A
@@ -583,10 +583,12 @@ widen access; it makes existing access reachable from a browser.
 ### Release an estate
 
 ```sh
-dsl41 release prepare NAME DIR   # check DIR and install it as release NAME
-dsl41 release apply NAME         # roll NAME out in one window
-dsl41 release status             # the active release and how the last apply ended
-dsl41 release rollback NAME      # apply NAME, the release the active one replaced
+dsl41 release prepare NAME DIR
+dsl41 release requalify NAME
+dsl41 release apply NAME
+dsl41 release resume
+dsl41 release rollback NAME
+dsl41 release status
 ```
 
 `dsl41 release` ships an estate edit on the application's train. It applies
@@ -597,9 +599,10 @@ verbs act as the service account (DL-421). The
 gives the steps, the exit codes and the waits.
 
 - `release prepare NAME DIR` installs a copy of `DIR` as
-  `ESTATE_RELEASES/NAME`, read-only, once it passes lint, rehearse and the
-  launcher's `MAX_JOBS` and `MAX_GRACE_S` limits.
-- `release requalify NAME` runs prepare's checks again on an installed
+  `ESTATE_RELEASES/NAME`, read-only, once it passes lint and rehearse. It
+  checks the release's job count against the launcher's `MAX_JOBS`, and
+  the runtime's command grace against `MAX_GRACE_S`.
+- `release requalify NAME` runs prepare's checks on an installed
   release, after a runtime switch or for a release installed by hand
   (DL-423).
 - `release apply NAME` holds the scheduled jobs, waits for running jobs to
@@ -612,8 +615,8 @@ gives the steps, the exit codes and the waits.
 - `release status` shows the active release, whether an engine answers,
   where a rollback goes, and how the last apply ended.
 
-Every verb that checks or seals a release reads its `estate.toml` through
-`--manifest` (DL-422).
+Prepare and requalify run `lint` and `rehearse` with `--manifest`, and
+apply's seal passes it (DL-422). The release verbs take no `--manifest`.
 
 ### Run history
 
@@ -1269,8 +1272,14 @@ Training estate:
   §7.
 - Follower mode, `standby check` and the multi-executor rig (DL-230). They
   wait for the relay above.
-- The `route` verb, which maps an affinity role to an executor. Its wire is
-  specified in [docs/period-model.md](docs/period-model.md) §2.2.
+- The `route` verb, which maps an affinity role to an executor, and the
+  `routes` query, which reads that map. Their wire is specified in
+  [docs/period-model.md](docs/period-model.md) §2.2.
+- Resume's `--trust-unaudited-seal` override, for a seal with no
+  attestation whose inputs are corrupt or pruned. It is specified in
+  [docs/period-model.md](docs/period-model.md) §11.
+- Fingerprints on tombstones (DL-111). They are specified in
+  [docs/concurrency-model.md](docs/concurrency-model.md) §5.
 - The HTTP and WebSocket gateway that [docs/gateway.md](docs/gateway.md)
   proposes.
 - Rich UC condition forms, the live OpenAPI pull, write-path verification,

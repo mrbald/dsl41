@@ -32,6 +32,8 @@ A dashed node or edge in the diagrams below is specified only.
 | TUI and web TUI | built | [runner-design §11](runner-design.md#11-ui--one-textual-app-terminal-and-web-e3) |
 | Periods: seal, lineage anchor, audit, retention | built | README Status; [period-model](period-model.md) |
 | Remote relay and shared store for more than one job host | specified only | [concurrency-model §7](concurrency-model.md#7-leadership-relay-takeover) |
+| Follower mode, `standby check` and the multi-executor rig | specified only; they wait for the relay | README What is not built; DL-230 |
+| The `route` verb and the `routes` query | specified only | README What is not built; [period-model §2.2](period-model.md#22-seal--the-last-record-of-a-periods-last-segment) |
 | HTTP and WebSocket gateway in front of the control socket | specified only; status proposed | [gateway](gateway.md); DL-273 |
 | Authentication of a web session | outside dsl41: a reverse proxy or an ssh tunnel provides it | [runner-design §11](runner-design.md#11-ui--one-textual-app-terminal-and-web-e3); [access-model §9](access-model.md#9-the-web-tier) |
 
