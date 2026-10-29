@@ -167,9 +167,9 @@ def test_pr36_the_write_order_is_mkdir_index_receipt_spawn_reply(sup_root: Path,
 
 
 def test_pr36_the_three_files_are_canonical_and_versioned(sup_root: Path, sups) -> None:
-    """ss3.2-canonical bytes, and the shared `artifact_format_version` (the
-    ss15 amendment): the index entry, the receipt and the reply are read by
-    audit, so their bytes are the canonical form and nothing else."""
+    """ss3.2-canonical bytes, and the shared `artifact_format_version` (ss15): the index entry,
+    the receipt and the reply are read by audit, so their bytes are the canonical form and
+    nothing else."""
     root = sup_root
     spec = _spec(root, "j", 1, "true")
     reply = sups().spawn_run(spec)

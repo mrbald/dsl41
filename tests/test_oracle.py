@@ -7206,10 +7206,10 @@ def test_determinism_same_script_twice_yields_identical_traces() -> None:
 
 
 def test_cascade_order_two_consumers_of_one_producer_start_in_catalog_order() -> None:
-    """ir-design ss7: same-timestamp cascades are ordered deterministically
-    by catalog order (insertion sequence as the tie-break). Both consumers
-    fire at the same instant; the one declared first in the JIL begins
-    starting first."""
+    """DL-350, ir-design ss7: a move's consequences go to the front of the executor
+    worklist and run depth first (docs/statechart-engine.md ss5), jobs in catalog
+    order within one reported list. Both consumers fire at the same instant; the one
+    declared first in the JIL begins starting first."""
     text = (
         "insert_job: prod_casc\njob_type: c\ncommand: x\nmachine: m1\n\n"
         "insert_job: consumer1_casc\njob_type: c\ncommand: y\nmachine: m1\ncondition: s(prod_casc)\n\n"
