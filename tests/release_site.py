@@ -475,3 +475,17 @@ def site_at(tmp_path: Path) -> Iterator[Site]:
     for directory, dirs, _ in os.walk(tmp_path):
         for name in dirs:
             os.chmod(Path(directory) / name, 0o755)
+
+
+def failed_check(site: Site) -> dict[str, Any]:
+    """v1 active, then an apply of v2 whose new period does not match its seal: exit 3 at
+    step opened, with NB_B and NB_FREE_C held by it. The record."""
+    site.prepared("v1")
+    assert site.run("apply", "v1").returncode == 0
+    site.prepared("v2")
+    site.edit(opened_hash="sha256:" + "0" * 64)
+    assert site.run("apply", "v2").returncode == 3
+    record = site.record()
+    assert record is not None and record["step"] == "opened"
+    site.edit(opened_hash=None)
+    return record

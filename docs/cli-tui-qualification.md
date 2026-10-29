@@ -39,7 +39,7 @@ They do not establish that a separately installed wheel works.
 | `estate quiesce` | `tests/test_estate_quiesce.py` |
 | `--manifest` on `lint`, `rehearse`, `run`, `seal`, `viz`, `estate quiesce` | `tests/test_estate_manifest.py` |
 | `estate build`, `estate diff` | `tests/test_estate_build.py` |
-| `release prepare`, `release requalify`, `release apply`, `release resume`, `release rollback`, `release status` | `tests/test_release_prepare.py`, `tests/test_release_apply.py`, `tests/test_release_rollback.py`, `tests/test_release_status.py` |
+| `release prepare`, `release requalify`, `release apply`, `release resume`, `release rollback`, `release status` | `tests/test_release_prepare.py`, `tests/test_release_apply.py`, `tests/test_release_apply_holds.py`, `tests/test_release_apply_answers.py`, `tests/test_release_apply_seal.py`, `tests/test_release_apply_horizon.py`, `tests/test_release_rollback.py`, `tests/test_release_rollback_takeover.py`, `tests/test_release_rollback_holds.py`, `tests/test_release_status.py` |
 
 Release qualification must run the installed executable outside the source checkout.
 It must exercise both a core-only install and an install with the `ui` extra.
