@@ -39,7 +39,7 @@ the wire vocabulary, and the three clients.
   TUI of runner-design §11 (`dsl41 run --ui`, `dsl41 ui`, `dsl41 serve`).
 - **sync client** (`roundtrip`): one-shot blocking request/response for
   callers outside an event loop. Drives `dsl41 sendevent`, `dsl41 host`,
-  `dsl41 query`, `dsl41 release-held` and the live `dsl41 seal`.
+  `dsl41 query`, `dsl41 off-hold-all` (DL-423) and the live `dsl41 seal`.
 - **blocking subscription client** (`subscribe_lines`, DL-172): one
   connection held open for the life of a `subscribe`. It yields the ack
   and then journal records, and drives `dsl41 query subscribe`. It lets a

@@ -2,10 +2,10 @@
 
 The manifest names the catalog files in command-line order, the properties layers, the base
 timezone and its map, and the semantic switches. `resolve_manifest` reads it once into
-`EstateInputs` for one environment; `build_args` renders that value as the argument list of one
-verb, and `dsl41 estate args` prints that list (DL-407). The verbs keep their own parsers and
-never read the manifest; the release's service side and `estate diff` read the value itself,
-and `manifest_catalog` loads its catalog (DL-413).
+`EstateInputs` for one environment. The verbs that read an estate take it through `--manifest`,
+which `cli_common.estate_args` expands into the verb's own parameters before its one loader
+(DL-422); the release's service side and `estate diff` read the value itself, and
+`manifest_catalog` loads its catalog (DL-413).
 
 The manifest carries the interpretation half of the runtime profile: files, layers, timezone,
 timezone map and semantics. The launcher carries the deployment half (`--detached`,
@@ -16,8 +16,8 @@ The manifest is given as an absolute path, and each name is joined to its direct
 Nothing resolves a symlink or normalises the path beyond pathlib's join, because
 `source_bundle_hash` frames each input's path string as given (period-model ss1.1): the seal's
 `--next` paths and the opener's paths must be the same strings whatever the working directory.
-pathlib's form of the join is the string a verb hashes after typer turns the argument into a
-Path, so the printed path and the hashed path agree. A name with a `..` part is refused, so a
+pathlib's form of the join is the string a verb hashes after typer turns an argument into a
+Path, so the two spellings of one input hash alike. A name with a `..` part is refused, so a
 release directory holds every input it names.
 A name not in normal form (a `.` part, `//`, a `/` at either end) is refused, so one file has
 one spelling, and so is a `.py` name: no Python enters a release (DL-410, DL-413).
@@ -32,7 +32,6 @@ import stat
 import tomllib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -47,16 +46,6 @@ if TYPE_CHECKING:
 
 class ManifestError(ValueError):
     """A manifest that cannot declare an estate: one sentence that names the manifest."""
-
-
-class ArgsFor(str, Enum):
-    """The verbs `estate args` builds for (DL-407)."""
-
-    run = "run"
-    seal = "seal"
-    lint = "lint"
-    rehearse = "rehearse"
-    viz = "viz"
 
 
 class _Strict(BaseModel):
@@ -133,10 +122,7 @@ def load_manifest(path: Path) -> Manifest:
     manifest's directory, every environment's layers included, so a manifest that refuses for
     one environment refuses for all. A joined path repeated among the files, or among the base
     layers and one environment's, is refused."""
-    if not path.is_absolute():
-        raise ManifestError(
-            f"{path}: give the manifest as an absolute path: the printed paths are hashed as given"
-        )
+    check_absolute(path)
     manifest = parse_manifest(path)
     _distinct(path, "files", manifest.files)
     for env in [Environment(), *manifest.environments.values()]:
@@ -144,6 +130,15 @@ def load_manifest(path: Path) -> Manifest:
     if manifest.timezone_map is not None:
         _join(path, manifest.timezone_map)
     return manifest
+
+
+def check_absolute(path: Path) -> None:
+    """Refuse a relative manifest path: two spellings of one manifest would join two path
+    strings, and the bundle hash covers each path as given (DL-407, period-model ss1.1)."""
+    if not path.is_absolute():
+        raise ManifestError(
+            f"{path}: give the manifest as an absolute path: the joined paths are hashed as given"
+        )
 
 
 def read_regular(path: Path) -> bytes:
@@ -296,36 +291,6 @@ def resolve_manifest(path: Path, environment: str | None = None) -> EstateInputs
         timezone_map=None if manifest.timezone_map is None else _join(path, manifest.timezone_map),
         semantics=dict(manifest.semantics),
     )
-
-
-def _each(flag: str, values: list[str] | tuple[str, ...]) -> list[str]:
-    return [word for value in values for word in (flag, value)]
-
-
-def build_args(path: Path, verb: ArgsFor, environment: str | None = None) -> list[str]:
-    """The argument list `verb` takes for the estate the manifest at `path` declares (DL-407).
-
-    run and rehearse get the positional files, `-p` per layer, `--timezone`, `--timezone-map`
-    and `--semantics NAME=VALUE` each; seal gets the same as `--next FILE` each, `-p` each and
-    the `--next-` options; lint stops before the semantics, and viz after the layers. The layers
-    are the manifest's `properties`, then the chosen environment's; a manifest that declares
-    environments needs one chosen. The deployment half of the profile is the launcher's."""
-    inputs = resolve_manifest(path, environment)
-    if verb is ArgsFor.seal:
-        argv, prefix = _each("--next", inputs.files), "--next-"
-    else:
-        argv, prefix = list(inputs.files), "--"
-    argv += _each("-p", inputs.layers)
-    if verb is ArgsFor.viz:
-        return argv
-    if inputs.timezone is not None:
-        argv += [f"{prefix}timezone", inputs.timezone]
-    if inputs.timezone_map is not None:
-        argv += [f"{prefix}timezone-map", inputs.timezone_map]
-    if verb is ArgsFor.lint:
-        return argv
-    pairs = [f"{name}={value}" for name, value in inputs.semantics.items()]
-    return argv + _each(f"{prefix}semantics", pairs)
 
 
 def manifest_catalog(

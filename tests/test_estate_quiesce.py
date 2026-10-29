@@ -32,7 +32,7 @@ from typer.testing import CliRunner
 from dsl41 import cli_estate
 from dsl41 import runner_procid as procid
 from dsl41.cli import app
-from dsl41.period import attestation_path
+from dsl41.period import attestation_path, bundle_sources, read_period_manifest
 from dsl41.cli_estate import ENGINE_UNIT, SUPERVISOR_UNIT, QuiesceHost
 from dsl41.runner_adapters import SupervisorConn
 
@@ -528,6 +528,56 @@ def test_a_next_file_that_does_not_load_still_ends_the_seal_stage(
     result = _quiesce(run_root, short_root / "missing.jil")
     assert result.exit_code == 2, result.output
     assert "quiesce: seal: refused: exited 2" in result.output
+
+
+def test_a_manifest_the_seal_stage_refuses_ends_it_with_nothing_staged(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, host: QuiesceHost
+) -> None:
+    """DL-422: a manifest that names a missing file is refused inside the seal stage, as a
+    `--next` file that does not load is; the verb exits 2 and no period is staged."""
+    run_root, _ = _stopped_root(short_root)
+    release = short_root / "release"
+    release.mkdir()
+    (release / "estate.toml").write_text('name = "next"\nfiles = ["missing.jil"]\n')
+    _use(monkeypatch, host, connect=FakeSupervisor(run_root).connect)
+    argv = ["estate", "quiesce", "--run-root", str(run_root)]
+    argv += ["--manifest", str(release / "estate.toml")]
+    result = CliRunner().invoke(app, argv, catch_exceptions=False)
+    assert result.exit_code == 2, result.output
+    assert "quiesce: seal: refused: exited 2" in result.output
+    assert "missing.jil" in result.output
+    assert read_period_manifest(run_root, 2) is None
+
+
+def test_a_manifest_is_read_in_the_seal_stage_and_a_rerun_reads_none(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, host: QuiesceHost
+) -> None:
+    """DL-422: `--manifest` resolves inside the seal stage, after its already-sealed shortcut.
+    The seal stages the manifest's files in its order, and once the period is sealed a rerun
+    stops the estate with the candidate inputs gone."""
+    run_root, _ = _stopped_root(short_root)
+    release = short_root / "release"
+    release.mkdir()
+    (release / "b.jil").write_text("insert_job: b\njob_type: c\ncommand: echo two\n")
+    (release / "a.jil").write_text(JIL)
+    (release / "estate.toml").write_text('name = "next"\nfiles = ["b.jil", "a.jil"]\n')
+    supervisor = FakeSupervisor(run_root)
+    _use(monkeypatch, host, connect=supervisor.connect)
+    argv = ["estate", "quiesce", "--run-root", str(run_root)]
+    argv += ["--manifest", str(release / "estate.toml")]
+    stopped = CliRunner().invoke(app, argv, catch_exceptions=False)
+    assert stopped.exit_code == 0, stopped.output
+    assert _stages(stopped.output)["seal"] == "ok"
+    opening = read_period_manifest(run_root, 2)
+    assert opening is not None
+    sources = bundle_sources(run_root, opening.source_bundle_hash)
+    assert [source.path for source in sources] == [str(release / "b.jil"), str(release / "a.jil")]
+
+    for name in ("a.jil", "b.jil", "estate.toml"):
+        (release / name).unlink()
+    again = CliRunner().invoke(app, argv, catch_exceptions=False)
+    assert again.exit_code == 0, again.output
+    assert _stages(again.output)["seal"] == "skipped"
 
 
 def _audited_root_with_live_run(

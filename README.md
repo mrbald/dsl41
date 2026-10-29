@@ -441,7 +441,7 @@ dsl41 rehearse jobs.jil --format summary        # virtual clock: a day in second
 dsl41 rehearse jobs.jil --check-cadence         # run counts vs cadence bounds; exit 3 on deviation
 dsl41 rehearse jobs.jil --check-cadence --sweep fail  # + per-producer failure replays
 dsl41 rehearse jobs.jil --check-cadence --sweep flags # + per-flag replays of global-gated jobs
-dsl41 release-held -S ./run1/control.sock       # estate-wide OFF_HOLD sweep
+dsl41 off-hold-all -S ./run1/control.sock       # take every held job off hold
 dsl41 serve -S ./run1/control.sock              # the same TUI over the web
 ```
 
@@ -902,10 +902,9 @@ Period boundary:
   lineage's next period in a fresh root.
 - `src/dsl41/estate_manifest.py`: the estate manifest, `estate.toml`: the
   application's one declaration of its catalog files, properties layers,
-  timezone and semantic switches, and the builder behind `estate args`
-  that turns it into one verb's arguments.
+  timezone and semantic switches, read by the verbs' `--manifest` option.
 - `src/dsl41/release.py`: the release train's verbs, `release prepare`,
-  `apply`, `resume`, `rollback` and `status`: the apply's record, each step
+  `requalify`, `apply`, `resume`, `rollback` and `status`: the apply's record, each step
   before it acts, the holds it owns through the run root's log, and the
   receipts (DL-412).
 - `src/dsl41/release_service.py`: the release verbs' service side, run as
@@ -1186,9 +1185,9 @@ Period boundary:
   the structural guards, and the prune flags.
 - `tests/test_estate_wide.py`: `audit`, `journal`, `runs`, and
   `estate prune` over a lineage rather than one root.
-- `tests/test_estate_manifest.py`: the manifest's refusals, each
-  `estate args --for` form, and the printed arguments taken by `lint`,
-  `rehearse`, and the `seal` and `run` parsers.
+- `tests/test_estate_manifest.py`: the manifest's refusals and the
+  `--manifest` option on each verb that reads the estate, against explicit
+  arguments.
 - `tests/test_estate_build.py`: `estate build`'s release directory, its
   refusals and `--check`, and `estate diff` in text and JSON.
 - `tests/test_restore_drill.py`: backup, delete, restore at the same path,

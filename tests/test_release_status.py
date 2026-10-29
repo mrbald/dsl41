@@ -85,7 +85,7 @@ def test_status_shows_the_active_release_the_engine_the_rollback_and_the_last_ap
         f"engine: no answer on {site.root}/control.sock; check"
         " `systemctl status dsl41-engine.service`."
     )
-    assert lines[2] == "rollback: `dsl41 release rollback` would apply r1."
+    assert lines[2] == "rollback: `dsl41 release rollback r1` would apply r1."
     assert lines[3] == "recorded apply: none."
     assert lines[4].startswith("last apply: v2 over r1, started ")
     assert lines[4].endswith(": completed; v2 became active in period 2.")

@@ -1,4 +1,4 @@
-"""DL-407, DL-412: `dsl41 release prepare` and `--requalify`, and the service side's refusals. The site and the stub engine are tests/release_site.py's."""
+"""DL-407, DL-412: `dsl41 release prepare` and `release requalify`, and the service side's refusals. The site and the stub engine are tests/release_site.py's."""
 
 from __future__ import annotations
 
@@ -33,11 +33,15 @@ def test_prepare_installs_a_read_only_release_with_its_qualification(site: Site)
     assert prepared["dsl41_version"] and prepared["environment"] == "wargame"
     assert set(prepared["files"]) >= {"estate.toml", "global.jil", "added.jil"}
     assert prepared["files"]["added.jil"].startswith("sha256:")
-    assert prepared["lint"]["argv"][:2] == [str(site.dsl41), "lint"]
-    assert f"{release}/added.jil" in prepared["rehearse"]["argv"]
-    assert prepared["rehearse"]["argv"][-4:] == [
-        "-p",
-        str(site.base / "night" / "night.properties"),
+    # the release's manifest under the launcher's environment, then the site's layer (DL-422)
+    estate = ["--manifest", f"{release}/estate.toml", "--environment", "wargame"]
+    night = ["-p", str(site.base / "night" / "night.properties")]
+    assert prepared["lint"]["argv"] == [str(site.dsl41), "lint", *estate, *night]
+    assert prepared["rehearse"]["argv"] == [
+        str(site.dsl41),
+        "rehearse",
+        *estate,
+        *night,
         "--format",
         "json",
     ]
@@ -85,7 +89,7 @@ def test_prepare_copies_only_what_the_caller_can_read(site: Site) -> None:
 
 def test_a_release_whose_entry_others_could_replace_is_refused(site: Site) -> None:
     """DL-412: a swap needs a writable entry; the verbs refuse a release that has one, and
-    `--requalify` seals it again."""
+    `requalify` seals it again."""
     site.prepared("v2")
     release = site.releases / "v2"
     release.chmod(0o755)
@@ -98,7 +102,7 @@ def test_a_release_whose_entry_others_could_replace_is_refused(site: Site) -> No
     rid = "0" * 8 + "-0000-0000-0000-" + "0" * 12
     refused = site.run("service", "seal", "v2", rid)
     assert refused.returncode == 2 and "is not sealed to the service account" in refused.stderr
-    done = site.run("prepare", "--requalify", "v2")
+    done = site.run("requalify", "v2")
     assert done.returncode == 0, done.stderr
     assert "v2 is sealed to the service account." in done.stderr
     assert not os.access(release / "global.jil", os.W_OK)
@@ -106,7 +110,7 @@ def test_a_release_whose_entry_others_could_replace_is_refused(site: Site) -> No
 
 
 def test_prepare_refuses_a_name_that_exists_and_a_source_without_a_manifest(site: Site) -> None:
-    """A prepared name is installed once; a name installed by hand points at --requalify."""
+    """A prepared name is installed once; a name installed by hand points at requalify."""
     site.prepared("v1")
     refused = site.run("prepare", "v1", str(site.source("again")))
     assert refused.returncode == 2
@@ -114,7 +118,7 @@ def test_prepare_refuses_a_name_that_exists_and_a_source_without_a_manifest(site
     refused = site.run("prepare", "r1", str(site.source("again2")))
     assert refused.returncode == 2
     assert f"{site.releases / 'r1'} exists and is not prepared" in refused.stderr
-    assert "`dsl41 release prepare --requalify r1`" in refused.stderr
+    assert "`dsl41 release requalify r1`" in refused.stderr
     empty = site.base / "empty"
     empty.mkdir()
     refused = site.run("prepare", "v9", str(empty))
@@ -125,20 +129,20 @@ def test_prepare_refuses_a_name_that_exists_and_a_source_without_a_manifest(site
     assert sorted(path.name for path in site.releases.iterdir()) == ["r1", "v1"]
 
 
-def test_prepare_names_its_missing_argument(site: Site) -> None:
-    """DL-412: a usage error names the argument it lacks, in a sentence of the verb's own
-    that no terminal setting changes."""
+def test_prepare_and_requalify_name_their_missing_argument(site: Site) -> None:
+    """DL-412, DL-423: a usage error names the argument it lacks; prepare needs its
+    SOURCE_DIR, and requalify takes only NAME."""
     plain = {"NO_COLOR": "1", "TERM": "dumb"}
 
     def text(done: subprocess.CompletedProcess[str]) -> str:
         return re.sub(r"\x1b\[[0-9;]*m", "", done.stderr)
 
     missing = site.run("prepare", "v2", env=plain)
-    assert missing.returncode == 2
-    assert text(missing) == "dsl41 release: SOURCE_DIR is required unless --requalify is given.\n"
-    both = site.run("prepare", "--requalify", "v2", str(site.source("v2")), env=plain)
-    assert both.returncode == 2
-    assert text(both) == "dsl41 release: --requalify takes no SOURCE_DIR.\n"
+    assert missing.returncode == 2 and "Missing argument 'source_dir'" in text(missing)
+    nameless = site.run("requalify", env=plain)
+    assert nameless.returncode == 2 and "Missing argument 'name'" in text(nameless)
+    extra = site.run("requalify", "v2", "extra", env=plain)
+    assert extra.returncode == 2 and "unexpected extra argument" in text(extra)
     nothing = site.run("apply", env=plain)
     assert nothing.returncode == 2 and "Missing argument" in text(nothing)
 
@@ -186,7 +190,7 @@ def test_prepare_refuses_a_release_that_holds_a_symlink(site: Site) -> None:
     raw = site.releases / "raw"
     shutil.copytree(SMALL, raw)
     (raw / "link.jil").symlink_to(raw / "global.jil")
-    refused = site.run("prepare", "--requalify", "raw")
+    refused = site.run("requalify", "raw")
     assert refused.returncode == 2 and "raw holds symlinks: link.jil." in refused.stderr
     assert not (raw / ".release" / "prepared.json").exists()
 
@@ -199,16 +203,16 @@ def test_apply_refuses_another_runtime_until_requalify(site: Site) -> None:
     prepared.write_text(json.dumps(json.loads(prepared.read_text()) | {"dsl41_version": "0.0.1"}))
     refused = site.run("apply", "v2")
     assert refused.returncode == 2 and "was prepared under dsl41 0.0.1" in refused.stderr
-    assert "run `dsl41 release prepare --requalify v2` to check it again." in refused.stderr
+    assert "run `dsl41 release requalify v2` to check it again." in refused.stderr
     before = {path: path.read_bytes() for path in release.rglob("*.jil")}
-    usage = site.run("prepare", "--requalify", "v2", str(site.source("other")))
+    usage = site.run("requalify", "v2", "extra")
     assert usage.returncode == 2
     (site.stub / "lint.exit").write_text("1")
-    refused = site.run("prepare", "--requalify", "v2")
+    refused = site.run("requalify", "v2")
     assert refused.returncode == 2 and "lint exited 1" in refused.stderr
     assert json.loads(prepared.read_text())["dsl41_version"] == "0.0.1"
     (site.stub / "lint.exit").unlink()
-    done = site.run("prepare", "--requalify", "v2")
+    done = site.run("requalify", "v2")
     assert done.returncode == 0, done.stderr
     assert {path: path.read_bytes() for path in release.rglob("*.jil")} == before
     assert not os.access(release / "global.jil", os.W_OK)
@@ -219,17 +223,17 @@ def test_apply_refuses_another_runtime_until_requalify(site: Site) -> None:
 
 
 def test_requalify_checks_a_release_installed_but_never_prepared_in_place(site: Site) -> None:
-    """DL-412: the refusal of an unprepared installed release names --requalify, and
-    --requalify checks it where it is, its inputs made read-only, its files unchanged."""
+    """DL-412: the refusal of an unprepared installed release names requalify, and
+    requalify checks it where it is, its inputs made read-only, its files unchanged."""
     raw = site.releases / "raw"
     shutil.copytree(SMALL, raw)
     before = {path.name: path.read_bytes() for path in raw.glob("*.jil")}
     (site.stub / "lint.exit").write_text("1")
-    refused = site.run("prepare", "--requalify", "raw")
+    refused = site.run("requalify", "raw")
     assert refused.returncode == 2 and "raw stays unprepared." in refused.stderr
     assert not (raw / ".release" / "prepared.json").exists()
     (site.stub / "lint.exit").unlink()
-    done = site.run("prepare", "--requalify", "raw")
+    done = site.run("requalify", "raw")
     assert done.returncode == 0, done.stderr
     prepared = site.receipt("raw", "prepared")
     assert prepared["source"] is None and set(prepared["files"]) >= set(before)
