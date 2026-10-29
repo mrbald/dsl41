@@ -19,10 +19,14 @@ import typer
 
 from dsl41.cli_common import (
     CATALOG_FILES,
+    ENVIRONMENT_OPT,
+    ESTATE_FILES,
+    MANIFEST_OPT,
     PERMIT_UNKNOWN,
     PROPERTIES,
     TIMEZONE_OPT,
     check_base_tz,
+    estate_args,
     load_catalog_and_ast_or_exit_2,
     load_catalog_or_exit_2,
     load_tz_aliases,
@@ -56,7 +60,7 @@ def _emit(body: str, out: "Path | None") -> None:
 
 
 def lint(
-    files: list[Path] = CATALOG_FILES,
+    files: list[Path] = ESTATE_FILES,
     strict: bool = typer.Option(False, "--strict", help="Also fail on warnings."),
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
@@ -66,18 +70,21 @@ def lint(
         help="Rule codes to leave out of the report and the exit code, for"
         " example L005. Repeatable; comma-separated lists accepted.",
     ),  # DL-23
-    timezone: str = TIMEZONE_OPT,
-    timezone_map: Path = typer.Option(
+    timezone: str | None = TIMEZONE_OPT,
+    timezone_map: Path | None = typer.Option(
         None,
         "--timezone-map",
         help="Used only by L023. File that maps AutoSys timezone names to zones: the"
         " output of 'autotimezone -l', or plain 'name zone' lines. Without it, an unknown"
         " city name is read as the one matching zoneinfo city, without a warning.",
     ),  # SEM-35/DL-62
+    manifest: Path | None = MANIFEST_OPT,
+    environment: str | None = ENVIRONMENT_OPT,
 ) -> None:
     """Check JIL files and report linter findings.
 
-    All FILES form one catalog. Each finding names its rule, file and line.
+    All FILES form one catalog, or --manifest names the estate manifest
+    that declares them. Each finding names its rule, file and line.
     --timezone and --timezone-map read as in 'dsl41 run'; only L023 (a time
     in a DST gap or overlap hour) uses them.
 
@@ -87,6 +94,9 @@ def lint(
     """
     from dsl41.lint import RULE_CODES
 
+    files, properties, timezone, timezone_map, _ = estate_args(
+        manifest, environment, files, properties, timezone, timezone_map
+    )
     codes = {
         code.strip().upper() for value in suppress for code in value.split(",") if code.strip()
     }
@@ -804,7 +814,7 @@ def _refuse_undeliverable_viz_flags(*, fixed_scale: bool) -> None:
 
 
 def viz(
-    files: list[Path] = CATALOG_FILES,
+    files: list[Path] = ESTATE_FILES,
     output_format: VizFormat = typer.Option(
         VizFormat.report,
         "--format",
@@ -858,10 +868,13 @@ def viz(
     whole_graph: bool = typer.Option(False, "--whole-graph", hidden=True),
     html: bool = typer.Option(False, "--html", hidden=True),
     explore: bool = typer.Option(False, "--explore", hidden=True),
+    manifest: Path | None = MANIFEST_OPT,
+    environment: str | None = ENVIRONMENT_OPT,
 ) -> None:
     """Draw the dependency graph as Markdown, Mermaid or an HTML page.
 
-    All FILES form one catalog. --format picks the output. The shaping
+    All FILES form one catalog, or --manifest names the estate manifest
+    that declares them with their layers. --format picks the output. The shaping
     options (--collapse-threshold, --direction, --include-singletons,
     --elk, --fixed-scale) apply where the chosen format can honour them
     and are refused where it cannot.
@@ -872,6 +885,7 @@ def viz(
     # Design: DL-75
     from dsl41.viz import DEFAULT_COLLAPSE_THRESHOLD, to_markdown, to_mermaid
 
+    files, properties, *_ = estate_args(manifest, environment, files, properties)
     _refuse_removed_viz_flags(whole_graph, html, explore)
     # The Enum is the closed set; `Direction | auto` is the same set the
     # renderers take (a test keeps the two equal).

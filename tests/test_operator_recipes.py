@@ -519,35 +519,29 @@ def test_the_job_recipe_opens_through_the_engine_units_exec_start() -> None:
     ]
 
 
-#: how a recipe takes the estate's words for VERB from the release's manifest (DL-407)
-ESTATE_ARGS = (
-    'args=$(dsl41 estate args "$ESTATE/estate.toml" --for {verb} --environment "$ENVIRONMENT")',
-    'eval "set -- $args"',
-)
+#: how a recipe names the release's manifest and the site's layer to a verb (DL-422)
+MANIFEST_WORDS = '--manifest "$ESTATE/estate.toml" --environment "$ENVIRONMENT" -p "$PROPERTIES"'
 
 
-def test_the_seal_recipe_restates_the_launchers_options_after_the_manifests_words() -> None:
-    """The estate's words come from the manifest through `--for seal`, as the
-    launcher's do. The site's `-p` follows them, and the `--next-*` options after it
-    are the launcher's deployment options (a seal does not inherit them). job-check
-    lints, then rehearses, from the same manifest."""
-    seal = _lines("job-seal")
-    assert seal[:2] == [line.format(verb="seal") for line in ESTATE_ARGS]
-    assert seal[2].startswith(
-        'dsl41 seal --run-root "$RUN_ROOT" --estate-anchor "$ESTATE_ANCHOR" "$@" -p "$PROPERTIES" '
+def test_the_seal_recipe_restates_the_launchers_options_after_the_manifest() -> None:
+    """The verb takes the release's manifest through `--manifest`, as the launcher's
+    `run` does. The site's `-p` follows it, and the `--next-*` options after it are the
+    launcher's deployment options (a seal does not inherit them). job-check lints, then
+    rehearses, from the same manifest."""
+    (seal,) = _lines("job-seal")
+    assert seal.startswith(
+        f'dsl41 seal --run-root "$RUN_ROOT" --estate-anchor "$ESTATE_ANCHOR" {MANIFEST_WORDS} '
     )
-    assert "$ESTATE/" not in seal[2] and "--next-timezone" not in seal[2]
+    assert "--next-timezone" not in seal and "--next " not in seal
     launch = LAUNCH.read_text()
     assert not re.search(r"^\s+--timezone", launch, re.M)  # the manifest's, not the launcher's
     for option in ("--detached", "--as-machine", "--machine-policy"):
         (value,) = re.findall(rf"^\s+{option}(?: (\S+))? \\$", launch, re.M)
         spelled = f"--next-{option[2:]}" + (f" {value}" if value else "")
-        assert spelled in seal[2], spelled
+        assert spelled in seal, spelled
     assert _lines("job-check") == [
-        *(line.format(verb="lint") for line in ESTATE_ARGS),
-        'dsl41 lint "$@" -p "$PROPERTIES"',
-        *(line.format(verb="rehearse") for line in ESTATE_ARGS),
-        'dsl41 rehearse "$@" -p "$PROPERTIES"',
+        f"dsl41 lint {MANIFEST_WORDS}",
+        f"dsl41 rehearse {MANIFEST_WORDS}",
     ]
 
 
@@ -701,15 +695,11 @@ def test_the_sealed_play_stops_with_the_verb_and_starts_the_units() -> None:
 
     (verb,) = _play_scripts(quiesce)
     words = " ".join(verb.replace("\\\n", " ").split())
-    assert '"$LAUNCHER" vars' in words and 'eval "set -- $args $NEXT_PROFILE"' in words
-    assert (
-        '"$DSL41" estate args "$ESTATE/estate.toml" --for seal --environment "$ENVIRONMENT"'
-        in words
-    )
+    assert '"$LAUNCHER" vars' in words and 'eval "set -- $NEXT_PROFILE"' in words
     assert words.endswith(
         '"$DSL41" estate quiesce --run-root "$RUN_ROOT" --estate-anchor "$ESTATE_ANCHOR"'
-        ' "$@" -p "$PROPERTIES"'
-        ' --engine-unit "$PLAY_ENGINE_UNIT" --supervisor-unit "$PLAY_SUPERVISOR_UNIT"'
+        f" {MANIFEST_WORDS} "
+        '"$@" --engine-unit "$PLAY_ENGINE_UNIT" --supervisor-unit "$PLAY_SUPERVISOR_UNIT"'
     )
     # the verb checks the play's units, not its defaults; `vars` prints ENGINE_UNIT itself
     assert '        PLAY_ENGINE_UNIT: "{{ engine_unit }}"\n' in quiesce

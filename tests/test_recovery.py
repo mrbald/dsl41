@@ -601,7 +601,7 @@ def test_each_pin_replaces_only_its_own_read_value(short_root: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_release_held_names_the_one_job_retry_with_its_pins(short_root: Path) -> None:
+def test_off_hold_all_names_the_one_job_retry_with_its_pins(short_root: Path) -> None:
     """Each per-job id is fresh, so a sweep cannot be retried as a sweep.
     Both lines name the one-job `sendevent OFF_HOLD --job <name>` with that
     job's own revision."""
@@ -610,7 +610,7 @@ def test_release_held_names_the_one_job_retry_with_its_pins(short_root: Path) ->
     async def scenario() -> None:
         server = await _fake_engine(path, _hang_up)
         try:
-            swept = await asyncio.to_thread(cli, "release-held", "--socket", str(path))
+            swept = await asyncio.to_thread(cli, "off-hold-all", "--socket", str(path))
         finally:
             server.close()
             await server.wait_closed()

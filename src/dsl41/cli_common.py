@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn
 import typer
 
 from dsl41.ast_jil import JilFile, JilParseError, parse
+from dsl41.estate_manifest import ManifestError, check_absolute, resolve_manifest
 from dsl41.ir import CatalogIR, LoweringError, lower_catalog
 from dsl41.timezones import parse_timezone_map, resolve_timezone
 from dsl41.placeholders import PlaceholderError, load_properties, substitute
@@ -39,7 +40,7 @@ if TYPE_CHECKING:
 CATALOG_FILES = typer.Argument(
     ...,
     help="JIL files and autocal calendar exports. Together they form one catalog.",
-)
+)  # a verb that also reads a manifest takes ESTATE_FILES below (DL-422)
 
 PERMIT_UNKNOWN = typer.Option(
     False,
@@ -83,6 +84,110 @@ SEMANTICS_OPT = typer.Option(
     " resume must repeat it. The section on semantic switches in"
     " docs/runner-design.md explains each one. Switches: " + help_text(),
 )  # runner-design ss8a, DL-252
+
+
+#: The catalog of a verb that also reads an estate manifest: optional, because `--manifest`
+#: supplies it instead (DL-422). Every other verb keeps CATALOG_FILES, which is required.
+ESTATE_FILES = typer.Argument(
+    None,
+    metavar="[FILES]...",
+    show_default=False,
+    help="JIL files and autocal calendar exports. Together they form one catalog."
+    " Give them or --manifest.",
+)
+
+MANIFEST_OPT = typer.Option(
+    None,
+    "--manifest",
+    metavar="PATH",
+    help="The estate manifest, estate.toml, as an absolute path. It supplies the files, the"
+    " properties layers, the timezone, its map and the semantic switches, so give none of them"
+    " beside it; -p adds layers after the manifest's.",
+)  # DL-422
+
+ENVIRONMENT_OPT = typer.Option(
+    None,
+    "--environment",
+    metavar="NAME",
+    help="The manifest's environment, whose properties layers follow the manifest's own."
+    " Needs --manifest; required when the manifest declares environments.",
+)  # DL-422
+
+
+class EstateArgs(NamedTuple):
+    """A verb's estate inputs as its own parameters hold them: the files, the `-p` layers in
+    order, the base timezone, the timezone map and the semantic switches as NAME=VALUE."""
+
+    files: list[Path]
+    properties: list[Path]
+    timezone: str | None
+    timezone_map: Path | None
+    semantics: list[str]
+
+
+def check_estate_args(
+    manifest: Path | None,
+    environment: str | None,
+    given: EstateArgs,
+    *,
+    files_word: str = "FILES",
+) -> None:
+    """The refusals of `--manifest` that read no file, each one sentence and exit 2 (DL-422).
+
+    Beside `--manifest`, the files and every interpretation option are refused outright, whether
+    or not the manifest sets the value: an omitted field is an authoritative default, and a
+    command-line value would give the opener a profile the seal did not state."""
+    if manifest is None:
+        if environment is not None:
+            raise typer.Exit(refuse("--environment needs --manifest."))
+        if not given.files:
+            raise typer.Exit(refuse(f"give {files_word} or --manifest."))
+        return
+    interpretation = (given.timezone, given.timezone_map)
+    if given.files or given.semantics or any(value is not None for value in interpretation):
+        raise typer.Exit(
+            refuse("--manifest supplies the files and the interpretation options; give either.")
+        )
+    try:
+        check_absolute(manifest)
+    except ManifestError as exc:
+        raise typer.Exit(refuse(exc)) from exc
+
+
+def estate_args(
+    manifest: Path | None,
+    environment: str | None,
+    files: "list[Path] | None",
+    properties: "list[Path] | None",
+    timezone: str | None = None,
+    timezone_map: Path | None = None,
+    semantics: "list[str] | None" = None,
+    *,
+    files_word: str = "FILES",
+) -> EstateArgs:
+    """The estate inputs a verb loads: as the command line gave them, or, with MANIFEST, the
+    ones it declares under ENVIRONMENT, its layers first and the command line's `-p` after them
+    (DL-422). The expansion sets the verb's own parameters, so its one loader, parser and hash
+    see a manifest's estate as they see the same inputs typed out. Each path is the manifest's
+    directory joined to the name, unresolved (DL-407, period-model ss1.1). A refusal is one
+    sentence and exit 2, before the verb writes anything."""
+    given = EstateArgs(
+        list(files or []), list(properties or []), timezone, timezone_map, list(semantics or [])
+    )
+    check_estate_args(manifest, environment, given, files_word=files_word)
+    if manifest is None:
+        return given
+    try:
+        inputs = resolve_manifest(manifest, environment)
+    except ManifestError as exc:
+        raise typer.Exit(refuse(exc)) from exc
+    return EstateArgs(
+        files=[Path(file) for file in inputs.files],
+        properties=[*(Path(layer) for layer in inputs.layers), *given.properties],
+        timezone=inputs.timezone,
+        timezone_map=None if inputs.timezone_map is None else Path(inputs.timezone_map),
+        semantics=[f"{name}={value}" for name, value in inputs.semantics.items()],
+    )
 
 
 class SupervisorChoice(str, Enum):
@@ -459,7 +564,7 @@ def command_outcome(
     period is still open.
 
     `retry_command` names the command an exact retry is sent as when it is not the one typed:
-    `release-held` sends one OFF_HOLD per job, and its retry is the one-job `sendevent` (DL-217).
+    `off-hold-all` sends one OFF_HOLD per job, and its retry is the one-job `sendevent` (DL-217).
     """
     import json as json_mod
 

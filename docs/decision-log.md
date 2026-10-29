@@ -10946,7 +10946,7 @@ relitigate an entry; append a new one.
   in citation-index and README caught up to L021 and the README names
   release-held/--summary. Hardened: adapter.park refuses a bare
   string, park:true refuses a contradictory duration, non-object
-  scenario tops refuse readably. Declined: renaming release-held (the
+  scenario tops refuse readably. Declined: renaming release-held [SUPERSEDED BY DL-423] (the
   DL-94 held field is a different plane) and the wait_for-around-
   sendevent house idiom (pre-existing, not this slice's).
 - DL-181 L022, the under-fire twin (2026-08-28, same feedback thread
@@ -17047,7 +17047,7 @@ relitigate an entry; append a new one.
   resource definition".
   NAMES. The existing `dsl41 release-held` command sends OFF_HOLD to
   held jobs (DL-181). It is unrelated to held resource units and to
-  RELEASE_RESOURCE, and the two read alike. The name stays; the
+  RELEASE_RESOURCE, and the two read alike. The name stays [SUPERSEDED BY DL-423]; the
   possible confusion is recorded here.
   EXAMPLE. The media example's one-slot `MEDIA_ENCODE` requests now
   state `FREE=A`: its failed-rendition drill waits for the other two
@@ -24338,6 +24338,7 @@ relitigate an entry; append a new one.
 - DL-407 The estate manifest, `estate.toml`, is the application's one declaration of its
   estate inputs; `dsl41 estate args` is the one builder of the verbs' arguments (2026-10-26;
   owner ruling; src/dsl41/estate_manifest.py, src/dsl41/cli_estate.py, period-model §1.1)
+  [the one builder is SUPERSEDED BY DL-422, the manifest stays]
   THE RULE. An application declares its estate once, in `estate.toml` beside its JIL: the
   catalog files in command-line order, the properties layers, the base timezone and its map,
   the semantic switches, and per environment the layers applied after the base ones. That
@@ -24351,7 +24352,8 @@ relitigate an entry; append a new one.
   as JSON. It exits 2 with one sentence on a refusal: a relative MANIFEST, an invalid
   manifest, or an environment undeclared or, when the manifest declares any, not chosen. The
   hash model and the parsers and options of run, seal, lint, rehearse and viz are unchanged;
-  no verb reads the manifest. Each path is the absolute manifest's directory joined to the
+  no verb reads the manifest [SUPERSEDED BY DL-422: the verbs take `--manifest`]. Each path
+  is the absolute manifest's directory joined to the
   name, with no symlink resolution and no normalisation beyond the join, because
   `source_bundle_hash` frames each path string as given (§1.1): the seal's `--next` paths and
   the opener's paths come out as the same strings from any working directory. The optional
@@ -24365,6 +24367,7 @@ relitigate an entry; append a new one.
   opening refuses.
   REJECTED: a `current` symlink to the active release (it changes the hashed path strings);
   reading the manifest inside `run` or `seal` (a second input path to the same parsers);
+  [SUPERSEDED BY DL-422: expanded before the one loader]
   `packaging` for the version compare (a dependency for one operator); a relative MANIFEST
   (two spellings of one manifest print two path strings and two bundle hashes); the
   deployment options in the manifest (they describe the host, and a standby may differ).
@@ -24391,6 +24394,7 @@ relitigate an entry; append a new one.
   helper's `service` mode as the service account and `systemctl start` of the engine unit. A
   site that rolls the runtime back below dsl41 1.13.0 reinstalls the site package qualified
   with that release, because the launcher refuses a runtime without `dsl41 estate args`.
+  [SUPERSEDED BY DL-422: the line is 1.14.0 and `--manifest`]
   THE REASON. The owner's ruling that dsl41 is infrastructure and the estate is application
   config (DL-407). A JIL release changed files the site package owned, so the two had one
   owner and one window; the contract lets the application release on its own schedule within
@@ -24485,6 +24489,7 @@ relitigate an entry; append a new one.
   status`; the example helper is gone (2026-10-27; owner ruling; src/dsl41/release.py,
   src/dsl41/release_service.py, src/dsl41/cli_release.py, runbook §0's job recipe, site-package
   §3 and §5)
+  [SUPERSEDED BY DL-423 for the shapes: `rollback NAME`, `requalify NAME` replace `--requalify`]
   THE RULE. The verbs run as the deployment identity, on the runtime the launcher's DSL41
   selects. Their service side, `dsl41 release service -- ACTION WORD...` through `sudo -n -u
   SERVICE_ACCOUNT -H DSL41`, runs only as SERVICE_ACCOUNT and claims its actor. The deployment
@@ -24776,7 +24781,8 @@ relitigate an entry; append a new one.
   is no longer written. (8) `runner_procid` is the one durability home; `durable_write` sets
   the given mode whatever the umask, so receipts and `latest` are exactly 0644, and a short
   write lands whole (DL-151). (9) `resolve_manifest` returns `EstateInputs`, which every
-  reader uses once; no verb reads the manifest (DL-407). (10) `catalog_changes` sits in
+  reader uses once; no verb reads the manifest (DL-407) [SUPERSEDED BY DL-422]. (10)
+  `catalog_changes` sits in
   classify.py, and `estate_manifest.manifest_catalog` is the one catalog loader. (11)
   `release.query` is the one query wrapper, and an answer that is not JSON still refuses. (12)
   `newest_receipt` is the one scanner, `Waits` holds the defaults, and the commands are
@@ -24832,3 +24838,69 @@ relitigate an entry; append a new one.
   perimeter journal to the WAL and the receipt and set the door outside the gate instead of inside
   adm; Astra limited the take-over to an opened period and tied attribution to the inputs the
   requests produce.
+- DL-422 The six estate verbs read the manifest through `--manifest`; `estate args` and its
+  `eval` are gone (2026-10-29; src/dsl41/cli_common.py, cli_compile.py, cli_run.py,
+  cli_estate.py, estate_manifest.py, release_service.py; examples/nightbank/deploy/dsl41-launch;
+  authoring §6.1, deployment-runbook, site-package, access-model §10)
+  THE RULE. `lint`, `rehearse`, `run`, `seal`, `viz` and `estate quiesce` take `--manifest PATH`
+  with `--environment NAME`. The option supplies exactly what the printer printed for that verb:
+  the files in manifest order, the base and environment property layers, and for every verb but
+  viz the timezone and timezone map, and for rehearse, run, seal and quiesce the semantics. PATH
+  is absolute, refused otherwise (DL-407's hash reason). Beside `--manifest`, the positional files
+  (`--next` for seal and quiesce) and every interpretation option, timezone, timezone map,
+  semantics and their `--next-*` twins, are refused outright, whether or not the manifest sets a
+  value: an omitted field is an authoritative default that `estate diff` and the service seal use,
+  and a command-line value would give the opener a profile the seal did not state. `-p` stays
+  additive, after the manifest's layers. Neither files nor `--manifest` is refused too. Each
+  refusal is one sentence, exit 2, before any write. A quiesce rerun after its seal still reads no
+  candidate file: the option is resolved inside the seal step, after the already-sealed shortcut.
+  WHY. DL-407 rejected reading the manifest inside the verbs as a second input path to the
+  parsers, and the printer plus `eval "set -- $args"` was the price: a runbook block an operator
+  cannot read, and the estate's inputs restated by a shell step. The option expands into the
+  verb's own parameters before its one loader, so the parsers keep one path; the per-verb tests
+  pin each verb's inputs against literal expectations, and one test seals and opens the same
+  inputs by both spellings and compares the bundle hash and the profile. DL-407's one-builder
+  sentence, its REJECTED clause, DL-408's launcher sentence and DL-420 (9) carry the marks. The
+  manifest's format, the hash model and the path join are unchanged.
+  THE LAUNCHER AND THE SITE. The launcher passes the pair to `run` and probes by exit code, `run
+  --manifest /dev/null --help`, refusing a runtime before 1.14.0 with its own sentence; `--print`
+  prints the pair, not the file list, and `run` refuses a bad manifest at start with exit 2, which
+  the engine unit's RestartPreventExitStatus keeps from looping. The 1.13.0 to 1.14.0 window gains
+  one step, the launcher: stop, flip the runtime, install the launcher, `release requalify` the
+  active release, start; a rollback to a runtime before 1.14.0 reinstalls the site package
+  qualified with that release, launcher included. The service drill rehearses that window and its
+  rollback in one row, runbook §7 row 2 both ways, the silent-note row, with the 1.13.0 launcher
+  kept as a compat fixture; the row is this tag's, re-pointed or retired at the next, and a real
+  site selects its row through §7's whole tree once 1.14.0's note exists. A quiesce under a
+  runtime without `--manifest`, v1.7.0 or 1.13.0, seals from words a fixture expands.
+  REJECTED: `--estate` as the name (`--estate-anchor` is another file and a substring trap);
+  keeping `estate args` one tag with a notice (two builders, and the cut moves to the next tag);
+  letting the command line override a manifest value. Tier rows: `estate args` leaves §10; the
+  six verbs keep their tiers.
+- DL-423 Release verbs read from their command line: `rollback NAME`, `requalify NAME`, and the
+  OFF_HOLD sweep is `off-hold-all` (2026-10-29; src/dsl41/cli_release.py, release.py,
+  release_service.py, cli_control.py; deployment-runbook, access-model §10)
+  ROLLBACK NAME. The target was computed from the active release's latest receipt and printed as
+  the verb acted, so a second rollback went forward again and the runbook had to say "check status
+  first". NAME is now required and must be that computed target; any other name is refused under
+  the apply lock, before any service call or take-over write, with the target printed and the
+  escape named: `release apply NAME` applies a prepared release by name and never takes over a
+  recorded apply. With an apply recorded whose period opened, NAME must be the release that apply
+  replaced; the refusal names it and `release resume`, which finishes the recorded apply. A
+  mismatch leaves ACTIVE, the record and the holds as they were. `release status` keeps naming the
+  target: status is the read, rollback NAME the act.
+  REQUALIFY NAME. `prepare --requalify NAME` changed the verb's shape by a flag (no SOURCE_DIR)
+  while the service door already split `requalify` from `prepare`. It is its own verb; prepare
+  takes NAME and SOURCE_DIR, both required. Tier adm by composition, prepare's reason (DL-421);
+  the §10 rows follow.
+  OFF-HOLD-ALL. DL-180 declined renaming `release-held` and the resource entry kept it; both
+  predate `dsl41 release` (DL-412), under which `release apply` holds jobs and `release-held` un-
+  holds them in one window under opposite tiers. The sweep is `off-hold-all`: the event it sends
+  and its scope, so the name states its effect; `sendevent OFF_HOLD` stays the one-job act. No
+  alias. DL-94's objection does not bite: the name carries no "held". `oracle_state.release_held`
+  and its resource callers are not this verb and keep their names.
+  KEPT: `release service`, hidden, one sudoers line, explained by DL-421's door; a rename would
+  churn every site's sudoers for a reading only its author meets. REJECTED: an optional NAME
+  defaulting to the computed target (the hidden path this closes); `--force` or `--to` on rollback
+  (apply NAME is the escape); `off-hold` (reads as a verb missing its job); an alias for one tag.
+  Reviewed as a plan with the Fable advisor and Astra, three rounds, before the build.

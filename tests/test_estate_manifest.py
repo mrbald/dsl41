@@ -1,30 +1,40 @@
-"""The estate manifest and `dsl41 estate args` (DL-407).
+"""The estate manifest and the verbs' `--manifest` option (DL-407, DL-422).
 
 House style follows test_estate.py: every refusal asserts the message fragment that only its own
-rule produces, and every gate has a passing counterpart beside it. The round trip feeds the
-printed arguments to the real `lint` and `rehearse` on the nightbank small estate, and to
-`seal`'s and `run`'s own parsers, because the claim is that the verbs take the printed list as
-it stands.
+rule produces, and every gate has a passing counterpart beside it. Each verb's test reads back
+what the verb itself took in (lint's and viz's loaded catalog, rehearse's and run's profile,
+seal's bundle) against literal expectations, never against a second builder of the same
+arguments. One test seals and opens the same inputs by both spellings and compares the bundle
+hash and the runtime profile.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import shlex
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
-import typer.main
 from typer.testing import CliRunner
 
-from dsl41 import estate_manifest
+from dsl41 import cli_compile, cli_run, estate_manifest
+from dsl41.boundary import read_seal
 from dsl41.cli import app
-from dsl41.estate_manifest import ArgsFor, ManifestError, build_args, load_manifest
+from dsl41.estate_manifest import ManifestError, load_manifest, resolve_manifest
+from dsl41.period import (
+    Manifest,
+    bundle_sources,
+    read_period_manifest,
+    runtime_profile_from_cli,
+    wal_path,
+)
 
+from test_estate import _native_root
 from test_nightbank_example import SMALL, _launcher
+from test_runner_leadership import engine
 
 runner = CliRunner()
 
@@ -63,98 +73,544 @@ def _invoke(*args: str):
     return runner.invoke(app, list(args), catch_exceptions=False)
 
 
-# ------------------------------------------------------------- the five forms
+# ------------------------------------------------------------- each verb's inputs
+
+#: The verbs' estate: job b reads one value from each layer, so the command it ends up with
+#: names the layer that won each key. The base layer sets all three, the environment two, the
+#: site's `-p` one.
+JIL_A = "insert_job: a\njob_type: c\ncommand: sleep 600\n"
+JIL_B = "insert_job: b\njob_type: c\ncommand: echo ~{$BASE}~ ~{$ENV}~ ~{$SITE}~\n"
+VERB_MANIFEST = """\
+name = "verbs"
+files = ["b.jil", "a.jil"]
+properties = ["base.properties"]
+timezone = "Europe/Zurich"
+timezone_map = "tz.map"
+
+[semantics]
+dst-start-times = "fold0"
+queued-recheck = "1"
+
+[environments.prod]
+properties = ["prod.properties"]
+
+[environments.dev]
+properties = []
+"""
 
 
-def test_each_for_form_builds_its_verbs_arguments(tmp_path: Path) -> None:
-    manifest = _estate(tmp_path / "rel")
-    d = str(tmp_path / "rel")
-    files = [f"{d}/b.jil", f"{d}/a.jil"]
-    layers = ["-p", f"{d}/base.properties"]
-    sems = ["queued-recheck=1", "dst-start-times=fold0"]
-    run = [
-        *files,
-        *layers,
-        "--timezone",
-        "Europe/Zurich",
-        "--timezone-map",
-        f"{d}/tz.map",
-        "--semantics",
-        sems[0],
-        "--semantics",
-        sems[1],
-    ]
-    assert build_args(manifest, ArgsFor.run, "dev") == run
-    assert build_args(manifest, ArgsFor.rehearse, "dev") == run
-    assert build_args(manifest, ArgsFor.lint, "dev") == run[:8]
-    assert build_args(manifest, ArgsFor.viz, "dev") == run[:4]
-    assert build_args(manifest, ArgsFor.seal, "dev") == [
-        "--next",
-        files[0],
-        "--next",
-        files[1],
-        *layers,
-        "--next-timezone",
-        "Europe/Zurich",
-        "--next-timezone-map",
-        f"{d}/tz.map",
-        "--next-semantics",
-        sems[0],
-        "--next-semantics",
-        sems[1],
-    ]
+def _release(base: Path, text: str = VERB_MANIFEST) -> tuple[Path, Path]:
+    """A release directory holding the verbs' estate, and a site properties file outside it.
+    Returns (manifest, site layer)."""
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "a.jil").write_text(JIL_A)
+    (base / "b.jil").write_text(JIL_B)
+    (base / "base.properties").write_text("BASE=base\nENV=base\nSITE=base\n")
+    (base / "prod.properties").write_text("ENV=prod\nSITE=prod\n")
+    (base / "tz.map").write_text("ZRH Europe/Zurich\n")
+    (base / "estate.toml").write_text(text)
+    site = base.parent / "site.properties"
+    site.write_text("SITE=site\n")
+    return base / "estate.toml", site
 
 
-def test_optional_keys_left_out_add_no_option(tmp_path: Path) -> None:
-    manifest = _estate(tmp_path, 'name = "bare"\nfiles = ["a.jil"]\n')
-    file = str(tmp_path / "a.jil")
-    for verb in ArgsFor:
-        assert build_args(manifest, verb) == (["--next", file] if verb is ArgsFor.seal else [file])
+def _manifest_words(manifest: Path, site: Path, environment: str = "prod") -> list[str]:
+    return ["--manifest", str(manifest), "--environment", environment, "-p", str(site)]
 
 
-def test_environment_layers_follow_the_manifests_own_in_order(tmp_path: Path) -> None:
-    manifest = _estate(tmp_path)
-    d = str(tmp_path)
-    argv = build_args(manifest, ArgsFor.viz, "prod")
-    assert argv[2:] == [
-        "-p",
-        f"{d}/base.properties",
-        "-p",
-        f"{d}/prod.properties",
-        "-p",
-        f"{d}/site.properties",
-    ]
-    # an environment with no layers of its own keeps the base layers only
-    assert build_args(manifest, ArgsFor.viz, "dev")[2:] == ["-p", f"{d}/base.properties"]
+class _Loads:
+    """Every catalog a verb loaded: the files and the `-p` layers, as path strings, and the
+    loaded catalog."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, module: Any, name: str) -> None:
+        self.calls: list[tuple[list[str], list[str]]] = []
+        self.catalogs: list[Any] = []
+        real = getattr(module, name)
+
+        def load(files: Any, permit_unknown: bool, properties: Any = None) -> Any:
+            self.calls.append(([str(f) for f in files], [str(p) for p in properties or []]))
+            loaded = real(files, permit_unknown, properties)
+            self.catalogs.append(loaded[0] if isinstance(loaded, tuple) else loaded)
+            return loaded
+
+        monkeypatch.setattr(module, name, load)
+
+    def command(self, job: str) -> str:
+        [catalog] = self.catalogs
+        return str(catalog.jobs[job].exec_.command)
 
 
-def test_paths_are_joined_as_given_without_resolving_symlinks(tmp_path: Path) -> None:
-    """period-model ss1.1 hashes the path string, so a symlinked release directory must stay
-    in the printed path."""
-    real = _estate(tmp_path / "releases" / "r1").parent
-    link = tmp_path / "current"
-    link.symlink_to(real)
-    argv = build_args(link / "estate.toml", ArgsFor.viz, "dev")
-    assert argv[0] == str(link / "b.jil")
-    assert str(real) not in " ".join(argv)
-
-
-def test_a_relative_manifest_path_is_refused(
+def test_lint_takes_the_files_layers_timezone_and_map_from_the_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Two spellings of one manifest would print two path strings and two bundle hashes."""
-    _estate(tmp_path / "rel")
+    manifest, site = _release(tmp_path / "with space")
+    d = tmp_path / "with space"
+    loads = _Loads(monkeypatch, cli_compile, "load_catalog_or_exit_2")
+    seen: dict[str, Any] = {}
+    real_lint = cli_compile.lint_catalog
+
+    def lint_catalog(catalog: Any, **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        return real_lint(catalog, **kwargs)
+
+    monkeypatch.setattr(cli_compile, "lint_catalog", lint_catalog)
+    result = _invoke("lint", *_manifest_words(manifest, site))
+    assert result.exit_code == 0, result.output
+    assert loads.calls == [
+        (
+            [f"{d}/b.jil", f"{d}/a.jil"],
+            [f"{d}/base.properties", f"{d}/prod.properties", str(site)],
+        )
+    ]
+    assert loads.command("b") == "echo base prod site"
+    assert seen == {"base_tz": "Europe/Zurich", "tz_aliases": {"zrh": "Europe/Zurich"}}
+
+
+def test_an_environment_with_no_layers_keeps_the_base_layers_then_the_site(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, site = _release(tmp_path / "rel")
+    loads = _Loads(monkeypatch, cli_compile, "load_catalog_or_exit_2")
+    result = _invoke("lint", *_manifest_words(manifest, site, "dev"))
+    assert result.exit_code == 0, result.output
+    assert loads.calls[0][1] == [str(tmp_path / "rel" / "base.properties"), str(site)]
+    assert loads.command("b") == "echo base base site"
+
+
+def test_viz_takes_the_files_and_layers_from_the_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, site = _release(tmp_path / "rel")
+    d = tmp_path / "rel"
+    loads = _Loads(monkeypatch, cli_compile, "load_catalog_or_exit_2")
+    result = _invoke("viz", "--format", "chart", *_manifest_words(manifest, site))
+    assert result.exit_code == 0, result.output
+    assert loads.calls == [
+        (
+            [f"{d}/b.jil", f"{d}/a.jil"],
+            [f"{d}/base.properties", f"{d}/prod.properties", str(site)],
+        )
+    ]
+    assert loads.command("b") == "echo base prod site"
+
+
+def _expected_profile(**deployment: Any) -> Any:
+    """The profile the verbs' estate pins: VERB_MANIFEST's zone, map and switches, typed out."""
+    return runtime_profile_from_cli(
+        timezone="Europe/Zurich",
+        tz_aliases={"zrh": "Europe/Zurich"},
+        semantics={"dst-start-times": "fold0", "queued-recheck": "1"},
+        **deployment,
+    )
+
+
+def test_rehearse_pins_the_manifests_profile_and_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, site = _release(tmp_path / "rel")
+    d = tmp_path / "rel"
+    loads = _Loads(monkeypatch, cli_run, "load_catalog_and_ast_or_exit_2")
+    root = tmp_path / "root"
+    result = _invoke(
+        "rehearse",
+        *_manifest_words(manifest, site),
+        "--run-root",
+        str(root),
+        "--start",
+        "2026-01-06T00:00:00",
+        "--hours",
+        "1",
+    )
+    assert result.exit_code == 0, result.output
+    assert loads.calls[0][1] == [f"{d}/base.properties", f"{d}/prod.properties", str(site)]
+    pinned = read_period_manifest(root)
+    assert pinned is not None
+    assert pinned.runtime_profile == _expected_profile()
+    sources = bundle_sources(root, pinned.source_bundle_hash)
+    assert [source.path for source in sources] == [f"{d}/b.jil", f"{d}/a.jil"]
+    assert "command: echo base prod site" in sources[0].text
+
+
+def test_run_takes_the_manifests_profile_and_keeps_its_deployment_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, site = _release(tmp_path / "rel")
+    d = tmp_path / "rel"
+    loads = _Loads(monkeypatch, cli_run, "load_catalog_and_ast_or_exit_2")
+    served: dict[str, Any] = {}
+
+    async def serve(catalog: Any, run_root: Path, resume: bool, warns: Any, **kwargs: Any) -> int:
+        served.update(kwargs, run_root=run_root)
+        return 0
+
+    monkeypatch.setattr(cli_run, "_serve_run", serve)
+    root = tmp_path / "root"
+    result = _invoke(
+        "run",
+        *_manifest_words(manifest, site),
+        "--run-root",
+        str(root),
+        "--as-machine",
+        "localhost",
+    )
+    assert result.exit_code == 0, result.output
+    assert loads.calls[0][0] == [f"{d}/b.jil", f"{d}/a.jil"]
+    assert loads.calls[0][1] == [f"{d}/base.properties", f"{d}/prod.properties", str(site)]
+    assert loads.command("b") == "echo base prod site"
+    assert served["profile"] == _expected_profile(as_machine=["localhost"])
+    assert served["run_root"] == root
+
+
+def test_a_manifest_that_omits_an_option_leaves_the_verbs_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An omitted field is the default, as an omitted option is: no zone, no map, no switch."""
+    manifest, _ = _release(tmp_path / "rel", 'name = "bare"\nfiles = ["a.jil"]\n')
+    served: dict[str, Any] = {}
+
+    async def serve(*args: Any, **kwargs: Any) -> int:
+        served.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(cli_run, "_serve_run", serve)
+    result = _invoke("run", "--manifest", str(manifest), "--run-root", str(tmp_path / "root"))
+    assert result.exit_code == 0, result.output
+    assert served["profile"] == runtime_profile_from_cli()
+    loads = _Loads(monkeypatch, cli_compile, "load_catalog_or_exit_2")
+    assert _invoke("lint", "--manifest", str(manifest)).exit_code == 0
+    assert loads.calls == [([str(tmp_path / "rel" / "a.jil")], [])]
+
+
+def _staged(root: Path) -> Manifest:
+    """The manifest of the period ROOT's seal committed."""
+    staged = read_period_manifest(root, 2)
+    assert staged is not None
+    return staged
+
+
+def test_seal_stages_the_manifests_files_layers_and_profile(tmp_path: Path) -> None:
+    manifest, site = _release(tmp_path / "rel")
+    d = tmp_path / "rel"
+    root = tmp_path / "root"
+    _native_root(root, d / "a.jil")
+    sealed = _invoke(
+        "seal",
+        "--run-root",
+        str(root),
+        *_manifest_words(manifest, site),
+        "--next-as-machine",
+        "localhost",
+    )
+    assert sealed.exit_code == 0, sealed.output
+    staged = _staged(root)
+    assert staged.runtime_profile == _expected_profile(as_machine=["localhost"])
+    assert read_seal(root, 1).next_period.source_bundle_hash == staged.source_bundle_hash
+    sources = bundle_sources(root, staged.source_bundle_hash)
+    assert [source.path for source in sources] == [f"{d}/b.jil", f"{d}/a.jil"]
+    assert "command: echo base prod site" in sources[0].text
+
+
+def test_the_paths_are_the_manifests_directory_joined_as_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """period-model ss1.1 hashes each path string, so a symlinked release directory stays in the
+    path the verb loads, and a name with a space reaches it as one path."""
+    real = tmp_path / "releases" / "r 1"
+    manifest, site = _release(real)
+    link = tmp_path / "current"
+    link.symlink_to(real)
+    loads = _Loads(monkeypatch, cli_compile, "load_catalog_or_exit_2")
+    result = _invoke("lint", *_manifest_words(link / manifest.name, site))
+    assert result.exit_code == 0, result.output
+    files, layers = loads.calls[0]
+    assert files == [str(link / "b.jil"), str(link / "a.jil")]
+    assert layers[:2] == [str(link / "base.properties"), str(link / "prod.properties")]
+    assert str(real) not in " ".join(files + layers)
+
+
+# ------------------------------------------------------------- the refusals
+
+
+#: Each verb with what it needs besides the estate, and the options `--manifest` replaces.
+VERBS: dict[str, tuple[list[str], list[list[str]]]] = {
+    "lint": ([], [["FILE"], ["--timezone", "UTC"], ["--timezone-map", "MAP"]]),
+    "viz": (["-o", "OUT"], [["FILE"]]),
+    "rehearse": (
+        ["--run-root", "ROOT"],
+        [["FILE"], ["--timezone", "UTC"], ["--timezone-map", "MAP"], ["--semantics", "S"]],
+    ),
+    "run": (
+        ["--run-root", "ROOT"],
+        [["FILE"], ["--timezone", "UTC"], ["--timezone-map", "MAP"], ["--semantics", "S"]],
+    ),
+    "seal": (
+        ["--run-root", "ROOT"],
+        [
+            ["--next", "FILE"],
+            ["--next-timezone", "UTC"],
+            ["--next-timezone-map", "MAP"],
+            ["--next-semantics", "S"],
+        ],
+    ),
+    "estate quiesce": (
+        ["--run-root", "ROOT"],
+        [
+            ["--next", "FILE"],
+            ["--next-timezone", "UTC"],
+            ["--next-timezone-map", "MAP"],
+            ["--next-semantics", "S"],
+        ],
+    ),
+}
+
+
+BARE_MANIFEST = """\
+name = "bare"
+files = ["b.jil", "a.jil"]
+
+[environments.prod]
+properties = ["prod.properties"]
+"""
+
+
+def _refused_before_any_write(
+    tmp_path: Path, verb: str, words: list[str], sentence: str, text: str = VERB_MANIFEST
+) -> None:
+    """VERB with WORDS exits 2 with SENTENCE as its one line, and nothing appears on disk."""
+    release = tmp_path / "rel"
+    manifest, _ = _release(release, text)
+    before = sorted(str(path) for path in tmp_path.rglob("*"))
+    extra, _ = VERBS[verb]
+    names = {
+        "FILE": str(release / "a.jil"),
+        "MAP": str(release / "tz.map"),
+        "S": "dst-start-times=fold0",
+        "ROOT": str(tmp_path / "root"),
+        "OUT": str(tmp_path / "out.md"),
+        "MANIFEST": str(manifest),
+    }
+    argv = [names.get(word, word) for word in [*verb.split(), *extra, *words]]
+    result = _invoke(*argv)
+    assert result.exit_code == 2, result.output
+    assert result.stdout == ""
+    assert result.stderr == sentence + "\n"
+    assert sorted(str(path) for path in tmp_path.rglob("*")) == before
+
+
+@pytest.mark.parametrize(
+    ("verb", "beside"),
+    [(verb, words) for verb, (_, replaced) in VERBS.items() for words in replaced],
+    ids=[
+        f"{verb.split()[-1]}-{words[0].lstrip('-').lower()}"
+        for verb, (_, replaced) in VERBS.items()
+        for words in replaced
+    ],
+)
+def test_the_files_and_interpretation_options_are_refused_beside_the_manifest(
+    tmp_path: Path, verb: str, beside: list[str]
+) -> None:
+    """Refused whether or not the manifest sets the value: a command-line value would give the
+    opener a profile the seal did not state (DL-422)."""
+    _refused_before_any_write(
+        tmp_path,
+        verb,
+        ["--manifest", "MANIFEST", "--environment", "prod", *beside],
+        "--manifest supplies the files and the interpretation options; give either.",
+    )
+
+
+@pytest.mark.parametrize(
+    ("verb", "beside"),
+    [
+        (verb, words)
+        for verb, (_, replaced) in VERBS.items()
+        for words in replaced
+        if words[0] not in ("FILE", "--next")
+    ],
+    ids=[
+        f"{verb.split()[-1]}-{words[0].lstrip('-').lower()}"
+        for verb, (_, replaced) in VERBS.items()
+        for words in replaced
+        if words[0] not in ("FILE", "--next")
+    ],
+)
+def test_an_interpretation_option_is_refused_beside_a_manifest_that_omits_the_field(
+    tmp_path: Path, verb: str, beside: list[str]
+) -> None:
+    """The omitted field is the manifest's authoritative default, so the option is refused as
+    it is beside a manifest that sets the value (DL-422)."""
+    _refused_before_any_write(
+        tmp_path,
+        verb,
+        ["--manifest", "MANIFEST", "--environment", "prod", *beside],
+        "--manifest supplies the files and the interpretation options; give either.",
+        BARE_MANIFEST,
+    )
+
+
+@pytest.mark.parametrize("verb", list(VERBS))
+def test_an_environment_without_a_manifest_is_refused(tmp_path: Path, verb: str) -> None:
+    files = ["--next", "FILE"] if verb in ("seal", "estate quiesce") else ["FILE"]
+    _refused_before_any_write(
+        tmp_path, verb, [*files, "--environment", "prod"], "--environment needs --manifest."
+    )
+
+
+@pytest.mark.parametrize("verb", list(VERBS))
+def test_neither_files_nor_a_manifest_is_refused(tmp_path: Path, verb: str) -> None:
+    word = "--next" if verb in ("seal", "estate quiesce") else "FILES"
+    _refused_before_any_write(tmp_path, verb, [], f"give {word} or --manifest.")
+
+
+@pytest.mark.parametrize("verb", [verb for verb in VERBS if verb != "estate quiesce"])
+@pytest.mark.parametrize(
+    ("environment", "fragment"),
+    [
+        ([], "choose an environment; the manifest declares dev, prod"),
+        (["--environment", "qa"], "no environment 'qa'; the manifest declares dev, prod"),
+    ],
+    ids=["unchosen", "undeclared"],
+)
+def test_an_environment_the_manifest_does_not_resolve_is_refused(
+    tmp_path: Path, verb: str, environment: list[str], fragment: str
+) -> None:
+    """resolve_manifest's own sentence; quiesce reads the manifest in its seal stage."""
+    manifest = tmp_path / "rel" / "estate.toml"
+    _refused_before_any_write(
+        tmp_path, verb, ["--manifest", "MANIFEST", *environment], f"{manifest}: {fragment}"
+    )
+
+
+@pytest.mark.parametrize("verb", list(VERBS))
+def test_a_relative_manifest_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verb: str
+) -> None:
+    """Two spellings of one manifest would join two path strings and two bundle hashes."""
     monkeypatch.chdir(tmp_path)
-    assert "give the manifest as an absolute path" in _refusal(Path("rel/estate.toml"), env="dev")
-    assert build_args(tmp_path / "rel" / "estate.toml", ArgsFor.viz, "dev")
+    _refused_before_any_write(
+        tmp_path,
+        verb,
+        ["--manifest", "rel/estate.toml", "--environment", "prod"],
+        "rel/estate.toml: give the manifest as an absolute path: the joined paths are hashed"
+        " as given",
+    )
 
 
-# ------------------------------------------------------------- refusals
+def test_an_invalid_manifest_is_the_verbs_refusal(tmp_path: Path) -> None:
+    manifest, site = _release(tmp_path / "rel")
+    manifest.write_text('owner = "ops"\n' + manifest.read_text())
+    result = _invoke("lint", *_manifest_words(manifest, site))
+    assert result.exit_code == 2
+    assert result.stderr == f"{manifest}: unknown key owner\n"
 
 
-def _refusal(manifest: Path, verb: ArgsFor = ArgsFor.run, env: str | None = None) -> str:
+# ------------------------------------------------------------- one estate, two spellings
+
+
+def test_a_manifest_and_its_explicit_arguments_seal_and_open_the_same_period(
+    short_root: Path,
+) -> None:
+    """Root A seals through `--manifest`, root B through the same inputs typed out. Both stage
+    one bundle hash and one profile, and each root opens under the other spelling, so the
+    opener's path strings agree with the seal's (DL-422, period-model ss1.1)."""
+    manifest, site = _release(short_root / "rel")
+    d = short_root / "rel"
+    files = [d / "b.jil", d / "a.jil"]
+    layers = ["-p", f"{d}/base.properties", "-p", f"{d}/prod.properties", "-p", str(site)]
+    zone = ["timezone", "Europe/Zurich", "timezone-map", f"{d}/tz.map"]
+    switches = ["semantics", "dst-start-times=fold0", "semantics", "queued-recheck=1"]
+    options = [*zone, *switches]
+
+    def spelled(prefix: str) -> list[str]:
+        return [f"{prefix}{word}" if i % 2 == 0 else word for i, word in enumerate(options)]
+
+    roots = {"a": short_root / "a", "b": short_root / "b"}
+    for root in roots.values():
+        _native_root(root, d / "a.jil")
+    by_manifest = _invoke("seal", "--run-root", str(roots["a"]), *_manifest_words(manifest, site))
+    assert by_manifest.exit_code == 0, by_manifest.output
+    next_files = [word for file in files for word in ("--next", str(file))]
+    by_hand = _invoke(
+        "seal", "--run-root", str(roots["b"]), *next_files, *layers, *spelled("--next-")
+    )
+    assert by_hand.exit_code == 0, by_hand.output
+    staged_a, staged_b = _staged(roots["a"]), _staged(roots["b"])
+    assert staged_a.source_bundle_hash == staged_b.source_bundle_hash
+    assert staged_a.runtime_profile == staged_b.runtime_profile == _expected_profile()
+    sealed_a, sealed_b = read_seal(roots["a"], 1).next_period, read_seal(roots["b"], 1).next_period
+    assert sealed_a.source_bundle_hash == sealed_b.source_bundle_hash
+    assert sealed_a.catalog_hash == sealed_b.catalog_hash
+    assert sealed_a.runtime_hash == sealed_b.runtime_hash
+
+    # each root opens under the other spelling
+    openers = {
+        "a": ([*layers, *spelled("--")], files),
+        "b": (_manifest_words(manifest, site), []),
+    }
+    for name, (extra, opener_files) in openers.items():
+        with engine(short_root, run_root=roots[name], resume=True, extra=extra, files=opener_files):
+            pass
+        assert wal_path(roots[name], 2).exists(), f"period 2 did not open in root {name}"
+
+
+# ------------------------------------------------------------- the nightbank release
+
+
+@pytest.fixture(scope="module")
+def nightbank_release(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The small estate copied into a release directory beside its manifest, with the night's
+    properties prepared by the launcher's own `prepare_night` at a fixed anchor. The prod layer
+    restates one of the night's values, so it reaches the verbs without changing the estate."""
+    base = tmp_path_factory.mktemp("release")
+    _launcher().prepare_night(
+        base, "small", anchor_utc=datetime(2026, 1, 6, 0, 5, tzinfo=UTC), incidents=False
+    )
+    names = [Path(path).name for path in SMALL]
+    for path in SMALL:
+        shutil.copy(path, base)
+    (base / "prod.properties").write_text((base / "night.properties").read_text().splitlines()[0])
+    (base / "tz-aliases").write_text("ZRH Europe/Zurich\n")
+    manifest = base / "estate.toml"
+    manifest.write_text(
+        'name = "nightbank-small"\n'
+        f"files = {json.dumps(names)}\n"
+        'properties = ["night.properties"]\n'
+        'timezone = "UTC"\n'
+        'timezone_map = "tz-aliases"\n'
+        '[semantics]\ndst-start-times = "fold0"\n'
+        '[environments.prod]\nproperties = ["prod.properties"]\n'
+    )
+    return manifest
+
+
+def test_the_nightbank_release_lints_clean_through_its_manifest(nightbank_release: Path) -> None:
+    result = _invoke("lint", "--manifest", str(nightbank_release), "--environment", "prod")
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == ""
+
+
+def test_the_nightbank_release_rehearses_through_its_manifest(nightbank_release: Path) -> None:
+    result = _invoke(
+        "rehearse",
+        "--manifest",
+        str(nightbank_release),
+        "--environment",
+        "prod",
+        "--start",
+        "2026-01-06T00:00:00",
+        "--hours",
+        "1",
+    )
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert "APAC_EOD_B" in result.stdout
+
+
+# ------------------------------------------------------------- manifest validation
+
+
+def _refusal(manifest: Path, env: str | None = None) -> str:
     with pytest.raises(ManifestError) as caught:
-        build_args(manifest, verb, env)
+        resolve_manifest(manifest, env)
     message = str(caught.value)
     assert message.startswith(f"{manifest}: ") and "\n" not in message
     return message
@@ -262,7 +718,7 @@ def test_a_repeated_path_is_refused(tmp_path: Path, old: str, new: str, fragment
         "[environments.dev]\nproperties = []",
         '[environments.dev]\nproperties = ["site.properties"]',
     )
-    assert build_args(manifest, ArgsFor.viz, "dev")
+    assert resolve_manifest(manifest, "dev")
     _edit(manifest, old, new)
     # every environment is checked, so the build for dev refuses a repeat in prod too
     assert fragment.format(d=tmp_path) in _refusal(manifest, env="dev")
@@ -274,7 +730,7 @@ def test_an_undeclared_or_missing_environment_is_refused(tmp_path: Path) -> None
     assert "choose an environment; the manifest declares dev, prod" in _refusal(manifest)
     bare = _estate(tmp_path / "bare", 'name = "x"\nfiles = ["a.jil"]\n')
     assert "no environment 'prod'; the manifest declares none" in _refusal(bare, env="prod")
-    assert build_args(bare, ArgsFor.viz) == [str(tmp_path / "bare" / "a.jil")]
+    assert resolve_manifest(bare).files == (str(tmp_path / "bare" / "a.jil"),)
 
 
 @pytest.mark.parametrize(
@@ -320,7 +776,7 @@ def test_requires_dsl41_met(
     monkeypatch.setattr(estate_manifest, "tool_version", lambda: installed)
     manifest = _estate(tmp_path)
     _edit(manifest, 'requires_dsl41 = ">=0.1"', f'requires_dsl41 = "{requirement}"')
-    assert build_args(manifest, ArgsFor.viz, "dev")
+    assert resolve_manifest(manifest, "dev")
 
 
 @pytest.mark.parametrize(
@@ -335,160 +791,6 @@ def test_bad_semantics_are_refused(tmp_path: Path, old: str, new: str, fragment:
     _edit(manifest, old, new)
     message = _refusal(manifest)
     assert "semantics: " in message and fragment in message
-
-
-# ------------------------------------------------------------- the CLI
-
-
-def test_cli_line_and_json_carry_the_same_argv(tmp_path: Path) -> None:
-    (tmp_path / "with space").mkdir()
-    manifest = _estate(tmp_path / "with space")
-    for verb in ArgsFor:
-        line = _invoke(
-            "estate", "args", str(manifest), "--for", verb.value, "--environment", "prod"
-        )
-        doc = _invoke(
-            "estate",
-            "args",
-            str(manifest),
-            "--for",
-            verb.value,
-            "--environment",
-            "prod",
-            "--format",
-            "json",
-        )
-        assert line.exit_code == 0 and doc.exit_code == 0, line.stderr + doc.stderr
-        argv = json.loads(doc.stdout)["argv"]
-        assert argv == build_args(manifest, verb, "prod")
-        assert shlex.split(line.stdout) == argv
-        assert line.stdout.count("\n") == 1
-
-
-@pytest.mark.parametrize(
-    ("args", "fragment"),
-    [
-        (["--environment", "qa"], "no environment 'qa'"),
-        ([], "choose an environment"),
-        (["--environment", "dev"], "unknown key owner"),
-        (["--environment", "dev"], "give the manifest as an absolute path"),
-    ],
-    ids=["environment", "no-environment", "schema", "relative"],
-)
-def test_cli_refuses_with_exit_2_and_one_line(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args: list[str], fragment: str
-) -> None:
-    manifest = _estate(tmp_path)
-    if fragment.startswith("unknown key"):
-        _edit(manifest, 'name = "demo"', 'name = "demo"\nowner = "ops"')
-    if fragment.startswith("give"):
-        monkeypatch.chdir(tmp_path)
-        manifest = Path("estate.toml")
-    result = _invoke("estate", "args", str(manifest), "--for", "run", *args)
-    assert result.exit_code == 2
-    assert result.stdout == ""
-    assert fragment in result.stderr and result.stderr.count("\n") == 1
-
-
-# ------------------------------------------------------------- the round trip
-
-
-@pytest.fixture(scope="module")
-def nightbank_release(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """The small estate copied into a release directory beside its manifest, with the night's
-    properties prepared by the launcher's own `prepare_night` at a fixed anchor. The prod layer
-    restates one of the night's values, so it reaches the verbs without changing the estate."""
-    base = tmp_path_factory.mktemp("release")
-    _launcher().prepare_night(
-        base, "small", anchor_utc=datetime(2026, 1, 6, 0, 5, tzinfo=UTC), incidents=False
-    )
-    names = [Path(path).name for path in SMALL]
-    for path in SMALL:
-        shutil.copy(path, base)
-    (base / "prod.properties").write_text((base / "night.properties").read_text().splitlines()[0])
-    (base / "tz-aliases").write_text("ZRH Europe/Zurich\n")
-    manifest = base / "estate.toml"
-    manifest.write_text(
-        'name = "nightbank-small"\n'
-        f"files = {json.dumps(names)}\n"
-        'properties = ["night.properties"]\n'
-        'timezone = "UTC"\n'
-        'timezone_map = "tz-aliases"\n'
-        '[semantics]\ndst-start-times = "fold0"\n'
-        '[environments.prod]\nproperties = ["prod.properties"]\n'
-    )
-    return manifest
-
-
-def _printed(manifest: Path, verb: str) -> list[str]:
-    result = _invoke("estate", "args", str(manifest), "--for", verb, "--environment", "prod")
-    assert result.exit_code == 0, result.stderr
-    return shlex.split(result.stdout)
-
-
-def test_the_printed_lint_arguments_lint_clean(nightbank_release: Path) -> None:
-    result = _invoke("lint", *_printed(nightbank_release, "lint"))
-    assert result.exit_code == 0, result.stdout + result.stderr
-    assert result.stdout.strip() == ""
-
-
-def test_the_printed_rehearse_arguments_rehearse(nightbank_release: Path) -> None:
-    argv = _printed(nightbank_release, "rehearse")
-    result = _invoke("rehearse", *argv, "--start", "2026-01-06T00:00:00", "--hours", "1")
-    assert result.exit_code == 0, result.stdout + result.stderr
-    assert "APAC_EOD_B" in result.stdout
-
-
-@pytest.mark.parametrize(
-    ("verb", "extra", "keys"),
-    [
-        (
-            "seal",
-            ["--run-root", "r"],
-            ("next_files", "next_timezone", "next_timezone_map", "next_semantics"),
-        ),
-        ("run", ["--run-root", "r"], ("files", "timezone", "timezone_map", "semantics")),
-    ],
-)
-def test_the_printed_seal_and_run_arguments_parse(
-    nightbank_release: Path, verb: str, extra: list[str], keys: tuple[str, str, str, str]
-) -> None:
-    """A dry parse through the verb's own parser: a full seal needs a live estate root, and the
-    claim here is only that the parser takes the printed list as it stands."""
-    command = typer.main.get_command(app).commands[verb]  # type: ignore[attr-defined]
-    params = command.make_context(verb, [*_printed(nightbank_release, verb), *extra]).params
-    files, timezone, timezone_map, semantics = (params[key] for key in keys)
-    release = nightbank_release.parent
-    assert list(files) == [str(release / Path(p).name) for p in SMALL]
-    assert list(params["properties"]) == [
-        str(release / "night.properties"),
-        str(release / "prod.properties"),
-    ]
-    assert timezone == "UTC"
-    assert timezone_map == str(release / "tz-aliases")
-    assert list(semantics) == ["dst-start-times=fold0"]
-
-
-@pytest.mark.parametrize(
-    ("verb", "options"),
-    [
-        ("run", {"-p", "--timezone", "--timezone-map", "--semantics"}),
-        ("rehearse", {"-p", "--timezone", "--timezone-map", "--semantics"}),
-        ("lint", {"-p", "--timezone", "--timezone-map"}),
-        ("viz", {"-p"}),
-        ("seal", {"--next", "-p", "--next-timezone", "--next-timezone-map", "--next-semantics"}),
-    ],
-)
-def test_every_printed_option_is_one_the_verb_declares(
-    nightbank_release: Path, verb: str, options: set[str]
-) -> None:
-    """Every option word the builder prints is among the verb's own declared option names, and
-    the fixture reaches every option the form can print."""
-    command = typer.main.get_command(app).commands[verb]  # type: ignore[attr-defined]
-    declared = {opt for param in command.params for opt in param.opts}
-    printed = {word for word in _printed(nightbank_release, verb) if word.startswith("-")}
-    assert printed == options
-    assert printed <= declared
 
 
 # ------------------------------------------------------------- DL-413: normal form, no Python

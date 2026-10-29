@@ -1312,13 +1312,13 @@ readings, and `cli_compile.py` the compiler verbs. The runner and its
 estates use these:
 
 - `cli_run.py`: `run`, `rehearse`, `journal`, `runs`.
-- `cli_control.py`: `sendevent`, `release-held`, `host`, `ui`, `serve`,
+- `cli_control.py`: `sendevent`, `off-hold-all`, `host`, `ui`, `serve`,
   `query`, `supervise`.
 - `cli_estate.py`: the period verbs `seal`, `audit`, `verify`, and
-  `estate reclaim`, `estate prune`, `estate quiesce`, `estate args`.
+  `estate reclaim`, `estate prune`, `estate quiesce`.
 - `cli_estate_build.py`: `estate build` and `estate diff`.
-- `cli_release.py`: the release train, `release prepare`, `apply`,
-  `resume`, `rollback` and `status`.
+- `cli_release.py`: the release train, `release prepare`, `requalify`,
+  `apply`, `resume`, `rollback` and `status`.
 
 Module docstrings name the runner's build phases 11a to 11f; DL-41 and
 DL-41a map them to parts.

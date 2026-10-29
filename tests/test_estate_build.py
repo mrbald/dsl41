@@ -115,12 +115,10 @@ def test_build_writes_the_manifest_files_and_the_rendered_jil(tmp_path: Path) ->
     assert files["tz.map"] == b"ZRH Europe/Zurich\n"
     assert not (tmp_path / "dist" / "v1.tmp").exists()
     for environment in ("prod", "uat"):
-        args = _invoke(
-            "estate", "args", str(out / "estate.toml"), "--for", "lint",
-            "--environment", environment,
-        )  # fmt: skip
-        assert args.exit_code == 0, args.stderr
-        assert f"--timezone-map {out}/tz.map" in args.stdout
+        linted = _invoke(
+            "lint", "--manifest", str(out / "estate.toml"), "--environment", environment
+        )
+        assert linted.exit_code == 0, linted.stdout + linted.stderr
 
 
 ADDED_MODULE = """\

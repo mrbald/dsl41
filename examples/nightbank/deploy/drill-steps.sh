@@ -35,7 +35,7 @@ STEPS=(install first-start restart detached refusal sealed quiesce restore reboo
     release release-rollback release-properties-only release-calendar-only
     release-concurrent release-interrupted
     upgrade-resume-safe upgrade-fresh-root upgrade-fresh-root-rollback
-    upgrade-coordinated upgrade-coordinated-rollback
+    upgrade-coordinated upgrade-coordinated-rollback upgrade-prior-release
     upgrade-old-release upgrade-state-machine upgrade-state-machine-rollback retire)
 # runs after the steps whatever they did; not part of --list
 FINALLY=diagnostics
@@ -49,10 +49,20 @@ BUILD_B=$(cat "$SCRATCH/build-b" 2>/dev/null || true)
 # implements state-machine version 1
 OLD_VERSION=1.7.0
 OLD_VENV=/opt/dsl41/.venvs/historical-$OLD_VERSION
+# the runtime before --manifest, 1.13.0 from PyPI, for the row that crosses
+# the launcher's window to this build and back (DL-422)
+PRIOR_VERSION=1.13.0
+PRIOR_VENV=/opt/dsl41/.venvs/historical-$PRIOR_VERSION
 # the roots the upgrade rows move the launcher to: row 2's roll, and the
 # fresh root of its rollback
 ROLLED_ROOT=/srv/dsl41/runs/nightbank-01b
 ROLLBACK_ROOT=/srv/dsl41/runs/nightbank-01c
+# the roots of the 1.13.0 row's four rolls: onto 1.13.0, up to this build,
+# back to 1.13.0, and forward again for the later steps
+PRIOR_IN_ROOT=/srv/dsl41/runs/nightbank-01d
+PRIOR_UP_ROOT=/srv/dsl41/runs/nightbank-01e
+PRIOR_DOWN_ROOT=/srv/dsl41/runs/nightbank-01f
+PRIOR_OUT_ROOT=/srv/dsl41/runs/nightbank-01g
 OLD_ROOT=/srv/dsl41/runs/nightbank-old
 NEW_ROOT=/srv/dsl41/runs/nightbank-02
 BACKUP=/srv/dsl41/backup
@@ -75,6 +85,8 @@ step_install() { # install dsl41, the nightbank estate, the launcher, the map an
         PYTHON=python3.12 bash "$REPO/scripts/offline/build-wheelhouse.sh" \
             "$SCRATCH"/dist/dsl41-*.whl "$SCRATCH/exports" "$SCRATCH/bundle"
         python3.12 -m pip download --only-binary=:all: "dsl41==$OLD_VERSION" \
+            --dest "$SCRATCH/historical-wheels"
+        python3.12 -m pip download --only-binary=:all: "dsl41==$PRIOR_VERSION" \
             --dest "$SCRATCH/historical-wheels"
         python3.12 -m venv "$ANSIBLE"
         "$ANSIBLE/bin/pip" install --quiet "ansible-core==$ANSIBLE_CORE"
@@ -896,7 +908,7 @@ JIL
 step_release_rollback() { # rollback to v1 by the same path; the removed job stays a ghost
     local before rc
     before=$(infra_state)
-    release_apply rollback
+    release_apply rollback small-v1
     [ "$RELEASE" = small-v1 ] || fail "the rollback activated $RELEASE"
     [ "$(receipt previous)" = small-v2 ] || fail "the receipt does not name small-v2"
     rc=0
@@ -948,7 +960,7 @@ step_release_concurrent() { # a second apply is refused while the first holds th
     first=$!
     wait_for 60 "the first apply recorded itself" sudo test -e "$APPLY_STATE/apply.json"
     rc=0
-    out=$(deploy rollback 2>&1) || rc=$?
+    out=$(deploy rollback small-v3 2>&1) || rc=$?
     echo "$out"
     [ "$rc" = 2 ] || fail "the second apply exited $rc, not 2"
     grep -qE "another apply holds $APPLY_STATE/apply.lock: pid [0-9]+, $DEPLOY_USER@" <<<"$out" ||
@@ -1057,12 +1069,15 @@ next_period() { # next_period ROOT
     newest=${newest##*/}
     echo $((10#${newest%.jsonl} + 1))
 }
-roll_into_fresh_root() { # roll_into_fresh_root NEW_ROOT BUILD PERIOD
-    local new=$1 build=$2 period=$3 mark line
+# WINDOW, when given, is a command the window runs between the flip and the
+# start, such as the launcher of the runtime and a requalify (DL-422).
+roll_into_fresh_root() { # roll_into_fresh_root NEW_ROOT BUILD PERIOD [WINDOW]
+    local new=$1 build=$2 period=$3 window=${4-} mark line
     wait_for 60 "nothing is live under the supervisor" nothing_live "$ROOT"
     take_hold
     quiesce_shape1
     flip "$build"
+    [ -z "$window" ] || "$window"
     provision_root "$new"
     point_launcher "$new" "$ANCHOR"
     as_dsl41 touch "$new.open-from"
@@ -1138,11 +1153,62 @@ step_upgrade_coordinated_rollback() { # coordinated row's rollback: flip back, r
     flip_both_units "$BUILD_A"
 }
 
+# ss7 row 2 across the launcher's window (DL-422): from 1.13.0 on PyPI, the
+# runtime before --manifest, to this build and back. Row 2 is the one ss7's
+# questions pick while this build's release note is silent; the row is this
+# tag's, re-pointed or retired at the next. The upgrade installs this
+# build's launcher and requalifies the active release between the flip and
+# the start; the rollback reinstalls the 1.13.0 launcher, kept as a compat
+# fixture, and requalifies nothing. Each start is proven by the running
+# executable. Every switch of the row is row 2's roll into a fresh root,
+# the move onto 1.13.0 and the move back to this build at the end too, so
+# no runtime resumes a root another runtime wrote.
+candidate_window() {
+    local rc=0 refused
+    # the 1.13.0 launcher refuses this build at its probe, before any root
+    refused=$(sudo -u dsl41 "$LAUNCH" --print 2>&1) || rc=$?
+    if [ "$rc" != 2 ] || ! grep -qF 'this launcher needs dsl41 1.13.0 or later' <<<"$refused"; then
+        fail "the 1.13.0 launcher on this build exited $rc: $refused"
+    fi
+    ok "the 1.13.0 launcher refuses this build and names the release it needs"
+    restore_launcher
+    deploy requalify "$RELEASE"
+}
+prior_window() {
+    install_old_launcher dsl41-launch-1.13
+}
+
+step_upgrade_prior_release() { # silent-note row from 1.13.0 to this build and back, with the launcher
+    local candidate version prior
+    ROOT=$ROLLBACK_ROOT
+    SOCK=$ROOT/control.sock
+    candidate=$(jq -r .version "$SCRATCH/bundle/manifest.json")
+    sudo python3.12 -m venv "$PRIOR_VENV"
+    sudo "$PRIOR_VENV/bin/pip" install --quiet --no-index --find-links "$SCRATCH/historical-wheels" "dsl41==$PRIOR_VERSION"
+    sudo "$PRIOR_VENV/bin/pip" check
+    version=$(state_machine_version "$BUILD_A")
+    prior=$(state_machine_version "$PRIOR_VENV")
+    [ "$prior" = "$version" ] ||
+        fail "$PRIOR_VERSION implements state-machine version $prior and this build $version: that is row 4; re-point or retire the row"
+    # onto 1.13.0 under its own launcher: the rollback direction's roll
+    roll_into_fresh_root "$PRIOR_IN_ROOT" "$PRIOR_VENV" "$(next_period "$ROOT")" prior_window
+    on_runtime "$PRIOR_VENV" "$PRIOR_VERSION"
+    # the upgrade, row 2: the window's launcher and requalify sit between the flip and the start
+    roll_into_fresh_root "$PRIOR_UP_ROOT" "$BUILD_A" "$(next_period "$ROOT")" candidate_window
+    on_runtime "$BUILD_A" "$candidate"
+    # the rollback, row 2's: the 1.13.0 venv in another fresh root, its launcher back
+    roll_into_fresh_root "$PRIOR_DOWN_ROOT" "$PRIOR_VENV" "$(next_period "$ROOT")" prior_window
+    on_runtime "$PRIOR_VENV" "$PRIOR_VERSION"
+    # forward again by the same roll, for the later steps
+    roll_into_fresh_root "$PRIOR_OUT_ROOT" "$BUILD_A" "$(next_period "$ROOT")" candidate_window
+    on_runtime "$BUILD_A" "$candidate"
+}
+
 # The old estate for ss7's state-machine row: v1.7.0 from PyPI, as runbook
 # ss1 installs a release that has no assets, on a new estate of its own.
 step_upgrade_old_release() { # an estate on the old release, v1.7.0 from PyPI
     local mark line version rc refused
-    ROOT=$ROLLBACK_ROOT
+    ROOT=$PRIOR_OUT_ROOT
     SOCK=$ROOT/control.sock
     wait_for 60 "nothing is live under the supervisor" nothing_live "$ROOT"
     sudo systemctl stop "$ENGINE"
@@ -1153,14 +1219,14 @@ step_upgrade_old_release() { # an estate on the old release, v1.7.0 from PyPI
     version=$(state_machine_version "$OLD_VENV")
     [ "$version" = 1 ] || fail "$OLD_VENV implements state-machine version $version"
     flip "$OLD_VENV"
-    # the current launcher refuses a runtime without estate args (DL-407)
+    # the current launcher refuses a runtime without --manifest (DL-422)
     rc=0
     refused=$(sudo -u dsl41 "$LAUNCH" --print 2>&1) || rc=$?
-    if [ "$rc" != 2 ] || ! grep -qF 'this launcher needs dsl41 1.13.0 or later' <<<"$refused"; then
+    if [ "$rc" != 2 ] || ! grep -qF 'this launcher needs dsl41 1.14.0 or later' <<<"$refused"; then
         fail "the current launcher on v$OLD_VERSION exited $rc: $refused"
     fi
     ok "the current launcher refuses v$OLD_VERSION and names the release it needs"
-    install_old_launcher
+    install_old_launcher dsl41-launch-pre-manifest
     provision_root "$OLD_ROOT"
     point_launcher "$OLD_ROOT" "$OLD_ROOT.anchor"
     ROOT=$OLD_ROOT
@@ -1233,7 +1299,7 @@ step_upgrade_state_machine_rollback() { # state-machine row's rollback: the old 
     sudo systemctl stop "$ENGINE"
     maintenance_stop
     flip "$OLD_VENV"
-    install_old_launcher
+    install_old_launcher dsl41-launch-pre-manifest
     point_launcher "$OLD_ROOT" "$OLD_ROOT.anchor"
     ROOT=$OLD_ROOT
     ANCHOR=$OLD_ROOT.anchor
@@ -1293,7 +1359,7 @@ step_retire() { # retirement: the estate stays stopped after its units go, the h
         fail "retire-release printed: $out"
     ! sudo test -e "$SUDOERS_GRANT" || fail "$SUDOERS_GRANT survived the retirement"
     sudo test -f "$retained/${SUDOERS_GRANT##*/}" || fail "no copy of the grant in $retained"
-    out=$(deploy prepare --requalify "$RELEASE" 2>&1) && fail "dsl41 release reached its service side"
+    out=$(deploy requalify "$RELEASE" 2>&1) && fail "dsl41 release reached its service side"
     grep -qF "sudo did not run \`$DSL41 release service\` as dsl41." <<<"$out" ||
         fail "the requalify refused for another reason: $out"
     deploy status >/dev/null || fail "dsl41 release status does not read the estate"

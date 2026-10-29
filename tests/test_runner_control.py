@@ -1513,13 +1513,13 @@ def test_cli_run_subprocess_sendevent_and_query_end_to_end(short_root: Path) -> 
         close_pipes(proc)
 
 
-def _release_held_cli(sock_path: Path, *args: str) -> subprocess.CompletedProcess:
+def _off_hold_all_cli(sock_path: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         [
             sys.executable,
             "-c",
             "from dsl41.cli import app; app()",
-            "release-held",
+            "off-hold-all",
             *args,
             "--socket",
             str(sock_path),
@@ -1530,7 +1530,7 @@ def _release_held_cli(sock_path: Path, *args: str) -> subprocess.CompletedProces
     )
 
 
-def test_cli_release_held_sweeps_every_held_job(short_root: Path) -> None:
+def test_cli_off_hold_all_sweeps_every_held_job(short_root: Path) -> None:
     """DL-180 (2): the estate-wide OFF_HOLD. One status read, then one
     ordinary per-job envelope per held job -- the unheld job is untouched,
     --dry-run only lists, and the empty sweep says so and exits 0."""
@@ -1575,11 +1575,11 @@ def test_cli_release_held_sweeps_every_held_job(short_root: Path) -> None:
 
         wait_for(both_held, timeout_s=5.0)
 
-        listed = _release_held_cli(sock_path, "--dry-run")
+        listed = _off_hold_all_cli(sock_path, "--dry-run")
         assert listed.returncode == 0, listed.stderr
         assert listed.stdout.split() == ["held_one", "held_two"]
 
-        swept = _release_held_cli(sock_path)
+        swept = _off_hold_all_cli(sock_path)
         assert swept.returncode == 0, swept.stderr
         assert "-- held_one" in swept.stdout
         assert "-- held_two" in swept.stdout
@@ -1595,7 +1595,7 @@ def test_cli_release_held_sweeps_every_held_job(short_root: Path) -> None:
 
         wait_for(released, timeout_s=5.0)
 
-        empty = _release_held_cli(sock_path)
+        empty = _off_hold_all_cli(sock_path)
         assert empty.returncode == 0, empty.stderr
         assert "no jobs held" in empty.stdout
     finally:

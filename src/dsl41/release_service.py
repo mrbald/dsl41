@@ -1,8 +1,8 @@
 """The release train's service side, and what both sides of it read (DL-407, DL-412).
 
-`dsl41 release prepare|apply|resume|rollback|status` run as the site's deployment identity.
-What reads or writes the run root, and lint and rehearse, run as the service account through
-`sudo`, as `dsl41 release service ACTION WORD...`: this module's `service`. It takes release
+`dsl41 release prepare|requalify|apply|resume|rollback|status` run as the site's deployment
+identity. What reads or writes the run root, and lint and rehearse, run as the service account
+through `sudo`, as `dsl41 release service ACTION WORD...`: this module's `service`. It takes release
 names, a request id, a job name or prepare's source directory, never an option or a command
 line. It finds the site's launcher from the runtime it runs on, never from its caller, and
 reads every path and run option through `dsl41-launch vars`. A world-writable directory on
@@ -16,7 +16,7 @@ The deployment identity never writes under a release, so no path check carries t
 this side copy DIR, entry by entry through directory descriptors, refusing links and anything
 the deployment identity could not read itself, into NAME as the service account's own:
 directories 0555, files 0444, and .release 0755. It lints and rehearses that copy, and
-removes it on a refusal; `--requalify` and the receipts are this side's writes too. The
+removes it on a refusal; `requalify` and the receipts are this side's writes too. The
 deployment identity's apply record and lock live in .release beside ACTIVE. Every read
 refuses a release with an entry anyone else could change, and the real-path and no-follow
 checks on each input stay as a second line.
@@ -57,8 +57,9 @@ if TYPE_CHECKING:
 #: The release verbs' command group and names. Every operator line and the registration in
 #: cli.py are built from these, so a rename is one edit here (DL-412).
 GROUP = "release"
-PREPARE, APPLY, RESUME, ROLLBACK, STATUS, SERVICE = (
+PREPARE, REQUALIFY, APPLY, RESUME, ROLLBACK, STATUS, SERVICE = (
     "prepare",
+    "requalify",
     "apply",
     "resume",
     "rollback",
@@ -66,6 +67,7 @@ PREPARE, APPLY, RESUME, ROLLBACK, STATUS, SERVICE = (
     "service",
 )
 CMD_PREPARE = f"dsl41 {GROUP} {PREPARE}"
+CMD_REQUALIFY = f"dsl41 {GROUP} {REQUALIFY}"
 CMD_APPLY = f"dsl41 {GROUP} {APPLY}"
 CMD_RESUME = f"dsl41 {GROUP} {RESUME}"
 CMD_ROLLBACK = f"dsl41 {GROUP} {ROLLBACK}"
@@ -472,14 +474,14 @@ def check_prepared(cfg: Config, name: str) -> None:
         raise Stop(
             EXIT_REFUSED,
             f"{name} is installed but not prepared.",
-            f"run `{CMD_PREPARE} --requalify {name}` to check it in place.",
+            f"run `{CMD_REQUALIFY} {name}` to check it in place.",
         )
     if prepared.get("dsl41_version") != runtime_version():
         raise Stop(
             EXIT_REFUSED,
             f"{name} was prepared under dsl41 {prepared.get('dsl41_version')}, and this runtime"
             f" is dsl41 {runtime_version()}.",
-            f"run `{CMD_PREPARE} --requalify {name}` to check it again.",
+            f"run `{CMD_REQUALIFY} {name}` to check it again.",
         )
     moved = changed_files(path, prepared)
     if moved:
@@ -512,7 +514,7 @@ def require_sealed(cfg: Config, name: str, path: Path) -> None:
             EXIT_REFUSED,
             f"{name} is not sealed to the service account: {', '.join(found[:5])} can be"
             " changed by others.",
-            f"run `{CMD_PREPARE} --requalify {name}` to seal it again.",
+            f"run `{CMD_REQUALIFY} {name}` to seal it again.",
         )
 
 
@@ -522,21 +524,22 @@ def require_sealed(cfg: Config, name: str, path: Path) -> None:
 def service_check(cfg: Config, name: str) -> dict[str, Any]:
     """Lint and rehearse the release: what ran, its exit codes, its job count and the
     runtime's command grace. A release that holds a symlink is refused, since prepare's copy
-    holds none (DL-412); rehearse runs only after lint passes, so an error prints once."""
-    from dsl41.estate_manifest import ArgsFor
+    holds none (DL-412); rehearse runs only after lint passes, so an error prints once. Both
+    read the release's manifest through `--manifest`, the site's properties after its layers
+    (DL-422)."""
     from dsl41.period import CMD_GRACE_S
 
     path = release_dir(cfg, name)
     require_sealed(cfg, name, path)
     release_inputs(cfg, path)
-    lint = [cfg.dsl41, "lint", *manifest_args(cfg, path, ArgsFor.lint), "-p", cfg.properties]
+    estate = manifest_option(cfg, path)
+    lint = [cfg.dsl41, "lint", *estate, "-p", cfg.properties]
     linted = subprocess.run(lint, capture_output=True, text=True, check=False)
     sys.stderr.write(linted.stdout + linted.stderr)
     rehearsed: dict[str, Any] | None = None
     jobs = None
     if linted.returncode == 0:
-        rehearse = [cfg.dsl41, "rehearse", *manifest_args(cfg, path, ArgsFor.rehearse)]
-        rehearse += ["-p", cfg.properties, "--format", "json"]
+        rehearse = [cfg.dsl41, "rehearse", *estate, "-p", cfg.properties, "--format", "json"]
         played = subprocess.run(rehearse, capture_output=True, text=True, check=False)
         sys.stderr.write(played.stderr)
         rehearsed = {"argv": rehearse, "exit": played.returncode}
@@ -552,14 +555,9 @@ def service_check(cfg: Config, name: str) -> dict[str, Any]:
     }
 
 
-def manifest_args(cfg: Config, path: Path, verb: Any) -> list[str]:
-    """VERB's arguments from the release's manifest, under the launcher's ENVIRONMENT."""
-    from dsl41.estate_manifest import ManifestError, build_args
-
-    try:
-        return build_args(path / "estate.toml", verb, cfg.environment)
-    except ManifestError as exc:
-        raise Stop(EXIT_REFUSED, f"{exc}.") from exc
+def manifest_option(cfg: Config, path: Path) -> list[str]:
+    """The release's manifest under the launcher's ENVIRONMENT, as the verbs take it (DL-422)."""
+    return ["--manifest", str(path / "estate.toml"), "--environment", cfg.environment]
 
 
 def manifest_inputs(cfg: Config, path: Path) -> EstateInputs:
@@ -748,13 +746,11 @@ def service_seal(cfg: Config, name: str, request_id: str) -> int:
     with its files unchanged, so a hand-run seal is held to what prepare checked. The actor it
     claims is the service account's, as the engine records it for a live seal (access-model
     ss3); no caller chooses it (DL-412)."""
-    from dsl41.estate_manifest import ArgsFor
-
     check_prepared(cfg, name)
     path = release_dir(cfg, name)
     release_inputs(cfg, path)
     argv = [cfg.dsl41, "seal", "--run-root", str(cfg.run_root)]
-    argv += ["--estate-anchor", str(cfg.estate_anchor), *manifest_args(cfg, path, ArgsFor.seal)]
+    argv += ["--estate-anchor", str(cfg.estate_anchor), *manifest_option(cfg, path)]
     argv += ["-p", cfg.properties, *cfg.next_profile]
     argv += ["--claimed-actor", f"os/{cfg.service_account}", "--request-id", request_id]
     say(f"seal: {shlex.join(argv)}")
@@ -987,8 +983,7 @@ def service_prepare(cfg: Config, name: str, source: str) -> None:
         raise Stop(
             EXIT_REFUSED,
             f"{target} exists and is not prepared.",
-            f"run `{CMD_PREPARE} --requalify {name}` to check it in place, or prepare under a"
-            " new name.",
+            f"run `{CMD_REQUALIFY} {name}` to check it in place, or prepare under a new name.",
         )
     fd = open_source(Path(source), caller())
     try:

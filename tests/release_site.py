@@ -204,7 +204,10 @@ if args[0] == "seal":
         print(f"seal {outcome}", file=sys.stderr)
         sys.exit(2 if outcome == "refuse" else 4)
     import release_root
+    from dsl41.estate_manifest import resolve_manifest
 
+    # the files the seal stages: the manifest's, as `seal --manifest` reads them (DL-422)
+    estate = resolve_manifest(Path(opt("--manifest")), opt("--environment"))
     state["next"] = release_root.seal(
         root,
         state["period"],
@@ -212,7 +215,7 @@ if args[0] == "seal":
         actor=state["actor"] or actor,
         epoch=state["epoch"],
         closes_at_index=state["index"],
-        files=[args[i + 1] for i, word in enumerate(args) if word == "--next"],
+        files=list(estate.files),
         opened_hash=state["opened_hash"],
     )
     state["up"] = False

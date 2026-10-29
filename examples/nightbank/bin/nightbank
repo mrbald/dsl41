@@ -22,8 +22,6 @@ from zoneinfo import ZoneInfo
 
 import typer
 
-from dsl41.estate_manifest import ArgsFor, ManifestError, build_args
-
 app = typer.Typer(add_completion=False, help=__doc__)
 
 BASE = Path(__file__).resolve().parent.parent
@@ -75,13 +73,9 @@ def write_kv(path: Path, kv: dict[str, str]) -> None:
 
 
 def estate_args(estate: str) -> list[str]:
-    """The estate's `dsl41 run` arguments, from its manifest, as the service launcher
-    takes them (DL-407)."""
-    try:
-        return build_args(BASE / "estate" / estate / "estate.toml", ArgsFor.run, "sandbox")
-    except ManifestError as exc:
-        typer.echo(f"nightbank: {exc}", err=True)
-        raise typer.Exit(2) from exc
+    """The estate's manifest as `dsl41 run` takes it, as the service launcher passes it
+    (DL-422); `run` refuses a bad manifest with exit 2."""
+    return ["--manifest", str(BASE / "estate" / estate / "estate.toml"), "--environment", "sandbox"]
 
 
 def _socket_alive(sock: Path) -> bool:

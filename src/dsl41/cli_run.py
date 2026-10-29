@@ -19,6 +19,9 @@ import typer
 from dsl41.ast_jil import JilFile, render_statement
 from dsl41.boundary import PeriodSealed
 from dsl41.cli_common import (
+    ENVIRONMENT_OPT,
+    ESTATE_FILES,
+    MANIFEST_OPT,
     PERMIT_UNKNOWN,
     PROPERTIES,
     SEMANTICS_OPT,
@@ -27,6 +30,7 @@ from dsl41.cli_common import (
     SupervisorChoice,
     check_base_tz,
     confirmed_resume_refusal,
+    estate_args,
     import_tui_or_exit_2,
     load_catalog_and_ast_or_exit_2,
     load_catalog_or_exit_2,
@@ -174,7 +178,7 @@ class OnViolation(str, Enum):
 
 def run(
     ctx: typer.Context,
-    files: list[Path] = typer.Argument(..., help="JIL files forming the estate."),
+    files: list[Path] = ESTATE_FILES,
     run_root: Path = typer.Option(
         ...,
         "--run-root",
@@ -243,8 +247,8 @@ def run(
         " its own hostname.",
         # DL-52
     ),
-    timezone: str = TIMEZONE_OPT,
-    timezone_map: Path = TIMEZONE_MAP_OPT,
+    timezone: str | None = TIMEZONE_OPT,
+    timezone_map: Path | None = TIMEZONE_MAP_OPT,
     semantics: list[str] = SEMANTICS_OPT,
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
@@ -265,8 +269,13 @@ def run(
         " transition, so the option changes nothing. Given, it prints a"
         " deprecation line.",
     ),
+    manifest: Path | None = MANIFEST_OPT,
+    environment: str | None = ENVIRONMENT_OPT,
 ) -> None:
     """Run an estate on this machine with real processes and a wall clock.
+
+    FILES form the estate, or --manifest names the estate manifest that
+    declares them with their layers, timezone, map and switches.
 
     The engine schedules jobs by calendar, starts real processes,
     journals every input, and listens on a control socket under
@@ -293,6 +302,9 @@ def run(
 
     from datetime import UTC, datetime
 
+    files, properties, timezone, timezone_map, semantics = estate_args(
+        manifest, environment, files, properties, timezone, timezone_map, semantics
+    )
     if on_violation is not None:
         typer.echo(INERT_VIOLATION_OPTION, err=True)
     if ui:
@@ -1446,7 +1458,7 @@ def _rehearsal_engine(
 
 
 def rehearse(
-    files: list[Path] = typer.Argument(..., help="JIL files forming the estate."),
+    files: list[Path] = ESTATE_FILES,
     scenario: Path = typer.Option(
         None,
         "--scenario",
@@ -1492,20 +1504,23 @@ def rehearse(
         " Repeatable. Needs --check-cadence. Cannot be combined with"
         " --run-root.",
     ),
-    timezone: str = TIMEZONE_OPT,
-    timezone_map: Path = TIMEZONE_MAP_OPT,
+    timezone: str | None = TIMEZONE_OPT,
+    timezone_map: Path | None = TIMEZONE_MAP_OPT,
     semantics: list[str] = SEMANTICS_OPT,
     run_root: Path = typer.Option(
         None, "--run-root", help="Also write the journal under this directory."
     ),
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
+    manifest: Path | None = MANIFEST_OPT,
+    environment: str | None = ENVIRONMENT_OPT,
 ) -> None:
     r"""Play an estate under a virtual clock and print what would happen.
 
     Rehearsal runs the same engine as 'run' with scripted job outcomes,
     so a 24-hour estate plays in seconds. The printed trace shows what
-    production would do.
+    production would do. FILES form the estate, or --manifest names the
+    estate manifest that declares them, as for 'run'.
 
     Scenario file (JSON, every key optional):
       {"adapter": {"default": \[duration_s, exit_code]
@@ -1555,6 +1570,9 @@ def rehearse(
     from dsl41.runner_scheduler import Scheduler
     from dsl41.semantics import resolve as resolve_switches
 
+    files, properties, timezone, timezone_map, semantics = estate_args(
+        manifest, environment, files, properties, timezone, timezone_map, semantics
+    )
     if cadence_policy is not None and not check_cadence:
         raise typer.Exit(refuse("--cadence-policy requires --check-cadence"))
     sweeps = list(sweep or [])

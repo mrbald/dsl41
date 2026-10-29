@@ -132,7 +132,8 @@ class RunProcess:
         self.jil = base / "estate.jil"
         if not self.jil.exists():
             self.jil.write_text(jil_text)
-        self.files = [str(path) for path in (files or [self.jil])]
+        # an empty `files` is a launch whose options name the estate, such as `--manifest`
+        self.files = [str(path) for path in ([self.jil] if files is None else files)]
         argv = [sys.executable, "-m", "dsl41", "run", "--run-root", str(self.run_root)]
         if resume:
             argv.append("--resume")

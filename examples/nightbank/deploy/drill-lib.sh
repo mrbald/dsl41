@@ -237,16 +237,56 @@ expect_refusal() { # expect_refusal FRAGMENT
     launch_line_since "$mark" | grep -q -- ' --resume$' || fail "the refused start was not a resume"
 }
 
-# The seal's estate words for the release in ESTATE, from its manifest
-# (DL-407), into the array NEXT; the caller adds the site's -p and the
-# launcher's --next-* options. The drill's own build prints them: the
-# v1.7.0 venv of the old-release rows has no `estate args`.
+# The seal's estate for the release in ESTATE, into the array NEXT; the
+# caller adds the site's -p and the launcher's --next-* options. The active
+# runtime, the one `cli` runs, decides by its parse, as the launcher's probe
+# does (DL-402): 0 takes the manifest through --manifest (DL-422); 2 is a
+# runtime before 1.14.0, v1.7.0 or 1.13.0 on their rows, which takes the
+# words manifest_seal_words expands; any other code stops the drill.
 next_args() {
-    local out
-    out=$(as_dsl41 "$(cat "$SCRATCH/build-a")/bin/dsl41" estate args "$ESTATE/estate.toml" \
-        --for seal --environment "$ENVIRONMENT" --format json) ||
-        fail "estate args refused $ESTATE/estate.toml"
-    mapfile -t NEXT < <(jq -r '.argv[]' <<<"$out")
+    local probe=0 out
+    cli seal --manifest /dev/null --help >/dev/null 2>&1 || probe=$?
+    case $probe in
+        0) NEXT=(--manifest "$ESTATE/estate.toml" --environment "$ENVIRONMENT") ;;
+        2)
+            out=$(manifest_seal_words "$ESTATE/estate.toml" "$ENVIRONMENT") ||
+                fail "cannot expand $ESTATE/estate.toml"
+            mapfile -t NEXT <<<"$out"
+            ;;
+        *) fail "$DSL41 seal --manifest /dev/null --help exited $probe: cannot tell its seal's words" ;;
+    esac
+}
+
+# A historical-runtime fixture (DL-422): for a runtime before 1.14.0, which
+# has no --manifest, the seal's words for MANIFEST under ENVIRONMENT, one
+# per line, as `dsl41 estate args --for seal` printed them: --next per file
+# in the manifest's order, -p per layer (the manifest's, then the
+# environment's), then --next-timezone, --next-timezone-map and
+# --next-semantics NAME=VALUE for each one the manifest sets. Each path is
+# the manifest's directory joined to the name, unresolved. It checks
+# nothing: the current runtime checks the drill's manifests.
+manifest_seal_words() { # manifest_seal_words MANIFEST ENVIRONMENT
+    as_dsl41 python3.12 -I - "$1" "$2" <<'PY'
+import sys
+import tomllib
+from pathlib import Path
+
+manifest, environment = Path(sys.argv[1]), sys.argv[2]
+table = tomllib.loads(manifest.read_text(encoding="utf-8"))
+chosen = table.get("environments", {}).get(environment, {})
+words = []
+for name in table["files"]:
+    words += ["--next", str(manifest.parent / name)]
+for name in [*table.get("properties", []), *chosen.get("properties", [])]:
+    words += ["-p", str(manifest.parent / name)]
+if "timezone" in table:
+    words += ["--next-timezone", table["timezone"]]
+if "timezone_map" in table:
+    words += ["--next-timezone-map", str(manifest.parent / table["timezone_map"])]
+for name, value in table.get("semantics", {}).items():
+    words += ["--next-semantics", f"{name}={value}"]
+print("\n".join(words))
+PY
 }
 
 # ACTIVE names NAME: a plain file replaced by a rename, never a symlink,
@@ -258,21 +298,27 @@ activate() { # activate NAME
     if ! sudo test -f "$ACTIVE" || sudo test -L "$ACTIVE"; then fail "$ACTIVE is not a plain file"; fi
     [ "$(sudo cat "$ACTIVE")" = "$1" ] || fail "$ACTIVE does not name $1"
 }
-# A runtime before dsl41 1.13.0 has no `estate args`, and the current
-# launcher refuses it: a site that rolls back below 1.13.0 reinstalls the site
-# package qualified with that release (DL-407). The drill's v1.7.0 steps
-# install that generation's launcher, kept as a fixture, at the launcher's
-# path, with ESTATE the active release; restore_launcher puts the current one
-# back. Each is followed by point_launcher, which names the root.
-install_old_launcher() {
-    sudo install -m 0755 "$REPO/examples/nightbank/deploy/compat/dsl41-launch-pre-manifest" "$LAUNCH"
-    sudo sed -i "s|^ESTATE=.*|ESTATE=$ESTATE|" "$LAUNCH"
-    grep -qxF "ESTATE=$ESTATE" "$LAUNCH" || fail "the old launcher does not name $ESTATE"
-    ! grep -qF ' estate args --help' "$LAUNCH" || fail "$LAUNCH is not the pre-manifest launcher"
+# A runtime before dsl41 1.14.0 has no --manifest, and the current launcher
+# refuses it: a site that rolls back below 1.14.0 reinstalls the site package
+# qualified with that release (DL-422). The drill's old-runtime steps install
+# that generation's launcher, kept as a fixture under compat/, at the
+# launcher's path; restore_launcher puts the current one back. Each is
+# followed by point_launcher, which names the root. The pre-manifest
+# fixture, v1.7.0's, names one release directory, set here to ESTATE, the
+# active release; the 1.13 fixture reads the manifest through `estate args`.
+install_old_launcher() { # install_old_launcher FIXTURE
+    sudo install -m 0755 "$REPO/examples/nightbank/deploy/compat/$1" "$LAUNCH"
+    if [ "$1" = dsl41-launch-pre-manifest ]; then
+        sudo sed -i "s|^ESTATE=.*|ESTATE=$ESTATE|" "$LAUNCH"
+        grep -qxF "ESTATE=$ESTATE" "$LAUNCH" || fail "the old launcher does not name $ESTATE"
+        ! grep -qF ' estate args --help' "$LAUNCH" || fail "$LAUNCH is not the pre-manifest launcher"
+    else
+        grep -qF ' estate args --help' "$LAUNCH" || fail "$LAUNCH is not the 1.13 launcher"
+    fi
 }
 restore_launcher() {
     sudo install -m 0755 "$REPO/examples/nightbank/deploy/dsl41-launch" "$LAUNCH"
-    grep -qF ' estate args --help' "$LAUNCH" || fail "$LAUNCH is not the current launcher"
+    grep -qF ' --manifest ' "$LAUNCH" || fail "$LAUNCH is not the current launcher"
 }
 
 # Prepare at the final path; activation remains an explicit atomic link (DL-389).
@@ -283,7 +329,8 @@ install_build() { # install_build base|ui
 }
 
 flip() { # flip CANDIDATE
-    [ -f "$1/.dsl41/receipt.json" ] || [ "$1" = "${OLD_VENV-}" ] ||
+    # the historical venvs are pip installs from PyPI, with no receipt
+    [ -f "$1/.dsl41/receipt.json" ] || [ "$1" = "${OLD_VENV-}" ] || [ "$1" = "${PRIOR_VENV-}" ] ||
         fail "no completed runtime receipt: $1"
     sudo test ! -e "$VENV" || sudo test -L "$VENV" || fail "$VENV is a real directory"
     sudo ln -s ".venvs/${1##*/}" "$VENV.next.$$"
@@ -338,6 +385,18 @@ incident_stop_supervisor() { # incident_stop_supervisor EXPLICIT_REASON
 # UNIT's main process runs from VENV_DIR: its interpreter is that venv's
 on_build() { # on_build UNIT VENV_DIR
     sudo grep -qF "$2/" "/proc/$(prop "$1" MainPID)/cmdline" || fail "$1 does not run from $2"
+}
+
+# The engine unit's running executable, not only an answering engine: its
+# main process runs from VENV_DIR, that venv's dsl41 is VERSION, and then the
+# engine answers a status query (DL-422).
+on_runtime() { # on_runtime VENV_DIR VERSION
+    local found
+    on_build "$ENGINE" "$1"
+    found=$("$1/bin/python" -I -c 'from importlib.metadata import version; print(version("dsl41"))')
+    [ "$found" = "$2" ] || fail "$1 is dsl41 $found, not $2"
+    wait_up
+    ok "$ENGINE runs dsl41 $2 from $1 and answers"
 }
 
 # the state-machine version a venv implements
@@ -736,9 +795,9 @@ app(args=["release", *sys.argv[2:]], prog_name="dsl41")
 # An apply, or a rollback, after which the steps follow ACTIVE. The engine
 # unit's start limit counts the drill's own starts, as `manual` says, and the
 # apply's start is one more.
-release_apply() { # release_apply NAME | release_apply rollback
+release_apply() { # release_apply NAME | release_apply rollback NAME
     sudo systemctl reset-failed "$ENGINE" 2>/dev/null || true
-    if [ "$1" = rollback ]; then deploy rollback; else deploy apply "$1"; fi
+    if [ "$1" = rollback ]; then deploy rollback "$2"; else deploy apply "$1"; fi
     follow_active
     [ "$1" = rollback ] || [ "$RELEASE" = "$1" ] || fail "ACTIVE names $RELEASE, not $1"
     wait_up

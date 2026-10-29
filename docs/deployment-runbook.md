@@ -248,7 +248,8 @@ systemctl enable dsl41-supervisor.service dsl41-engine.service
    `ACTIVE`, a plain file the deployment identity owns. The launcher
    refuses to start without it (DL-407).
    `dsl41-launch --print` shows the command the engine unit will run. It
-   names every estate file, in order, every `-p` and every run option:
+   names the active release's manifest, the environment, every `-p` and
+   every run option:
 
 <!-- recipe: service-print -->
 ```sh
@@ -380,12 +381,8 @@ and `JOB` is a job's name.
 
 <!-- recipe: job-check -->
 ```sh
-args=$(dsl41 estate args "$ESTATE/estate.toml" --for lint --environment "$ENVIRONMENT")
-eval "set -- $args"
-dsl41 lint "$@" -p "$PROPERTIES"
-args=$(dsl41 estate args "$ESTATE/estate.toml" --for rehearse --environment "$ENVIRONMENT")
-eval "set -- $args"
-dsl41 rehearse "$@" -p "$PROPERTIES"
+dsl41 lint --manifest "$ESTATE/estate.toml" --environment "$ENVIRONMENT" -p "$PROPERTIES"
+dsl41 rehearse --manifest "$ESTATE/estate.toml" --environment "$ENVIRONMENT" -p "$PROPERTIES"
 ```
 
    Then prepare the release from the tag's directory, `DIR` below, which
@@ -410,7 +407,7 @@ cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release prepare NAME DIR
    refused prepare installs nothing, so its name can be used again. A
    prepared name is installed once, so a fixed release takes a new name.
    After a runtime switch, apply refuses a release prepared under another
-   dsl41 version until `dsl41 release prepare --requalify NAME` has run
+   dsl41 version until `dsl41 release requalify NAME` has run
    the same checks again. The same command checks a release installed
    by hand, where it is.
 3. In the window, apply the release:
@@ -466,7 +463,8 @@ cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release apply NAME
    its new period has opened. From then on (exit 3 at step 8 when the
    check failed, or at step 9 when releasing the holds failed),
    `dsl41 release resume` checks again and finishes, and
-   `dsl41 release rollback` takes the apply over. The take-over releases
+   `dsl41 release rollback NAME` takes the apply over, with NAME the
+   release that apply replaced. The take-over releases
    no hold: one rename replaces the record with the apply of the release
    the failed one replaced, and that apply owns the old holds, so the jobs
    stay held through its drain and seal. It writes the old apply's
@@ -474,8 +472,8 @@ cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release apply NAME
    `taken-over-<id>.json` when the check had passed. It ends with the
    exit codes above and releases the holds at its end. If it is refused,
    its abort releases the holds, the failed release stays active, and
-   `dsl41 release status` says so; `dsl41 release rollback` then tries
-   again. `dsl41 release status` names both commands.
+   `dsl41 release status` says so; `dsl41 release rollback NAME` then
+   tries again. `dsl41 release status` names both commands.
 5. Verify. `dsl41 release status` names the active release, whether an
    engine answers, where a rollback goes, and how the last apply ended,
    with each hold it kept. An added or changed job answers with the
@@ -498,18 +496,19 @@ dsl41 query status --job "$JOB" -S "$S"
 6. Roll back with the same window:
 
 ```sh
-cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release rollback
+cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release rollback NAME
 ```
 
-   It applies the release that the active release's latest receipt names
-   as its previous one, with the exit codes of step 4, and prints that
-   target first. A second rollback therefore goes forward again: check the
-   target `dsl41 release status` names before you type it. A rollback never
-   applies a release whose last apply failed its check after the open; it
-   names that receipt, and `dsl41 release apply NAME` retries it on purpose. A release
-   installed by hand, or applied without these verbs, has no receipt, so
-   rollback has no target: apply the earlier release by name, after
-   `dsl41 release prepare --requalify NAME` if it was never prepared.
+   It applies NAME, which must be the release that the active release's
+   latest receipt names as its previous one, with the exit codes of step
+   4; any other name is refused with the target printed. `dsl41 release
+   status` names the target, so read it, then type it; a second rollback
+   goes forward again, by name. A rollback never applies a release whose
+   last apply failed its check after the open; it names that receipt, and
+   `dsl41 release apply NAME` retries it on purpose. A release installed
+   by hand, or applied without these verbs, has no receipt, so rollback
+   has no target: apply the earlier release by name, after
+   `dsl41 release requalify NAME` if it was never prepared.
 
 A host whose runtime predates `dsl41 release` takes the same window by
 hand, in these steps. The hand path checks neither the ceiling nor the
@@ -528,9 +527,8 @@ files prepare recorded.
 
 <!-- recipe: job-seal -->
 ```sh
-args=$(dsl41 estate args "$ESTATE/estate.toml" --for seal --environment "$ENVIRONMENT")
-eval "set -- $args"
-dsl41 seal --run-root "$RUN_ROOT" --estate-anchor "$ESTATE_ANCHOR" "$@" -p "$PROPERTIES" \
+dsl41 seal --run-root "$RUN_ROOT" --estate-anchor "$ESTATE_ANCHOR" \
+    --manifest "$ESTATE/estate.toml" --environment "$ENVIRONMENT" -p "$PROPERTIES" \
     --next-detached --next-as-machine localhost --next-machine-policy strict
 ```
 
@@ -808,12 +806,10 @@ seals the running period, and the start opens the next one (§6a).
         v=$("$LAUNCHER" vars) || exit 1
         eval "$v"
         ESTATE=$ESTATE_RELEASES/$(cat "$ACTIVE") || exit 1
-        args=$("$DSL41" estate args "$ESTATE/estate.toml" --for seal \
-            --environment "$ENVIRONMENT") || exit 1
-        eval "set -- $args $NEXT_PROFILE"
+        eval "set -- $NEXT_PROFILE"
         "$DSL41" estate quiesce --run-root "$RUN_ROOT" --estate-anchor "$ESTATE_ANCHOR" \
-            "$@" -p "$PROPERTIES" \
-            --engine-unit "$PLAY_ENGINE_UNIT" --supervisor-unit "$PLAY_SUPERVISOR_UNIT"
+            --manifest "$ESTATE/estate.toml" --environment "$ENVIRONMENT" -p "$PROPERTIES" \
+            "$@" --engine-unit "$PLAY_ENGINE_UNIT" --supervisor-unit "$PLAY_SUPERVISOR_UNIT"
       register: quiesce
       # 2 and 3 are reruns; 4 and 7 stop the play at once (DL-398, DL-401)
       until: quiesce.rc not in [2, 3]
@@ -872,8 +868,10 @@ back, needs `maintenance.json`, the unit, the process and
 `supervisor.log` read before anything else (§3). Exit 7 is a statechart
 error: stop, and report the `dsl41: statechart error` lines in the
 task's stderr. A 1 is the play's own guard, whose stderr names the
-launcher, `ACTIVE` or `estate args`, or a traceback from the verb: read
-the task's stderr.
+launcher or `ACTIVE`, or a traceback from the verb: read the task's
+stderr. A manifest the seal stage refuses is a 2 like a rerun, so the
+play retries it for the window; the `quiesce: seal:` line names the
+refusal (DL-422).
 
 A failure at the patch step or at the supervisor start leaves the estate
 stopped and the period sealed. Fix the cause and run the play again: the
@@ -1320,7 +1318,7 @@ and when, is the site's retention decision (§2a).
 
 1. As the deployment identity, read `dsl41 release status`. With an apply
    recorded, run `dsl41 release resume` to its end, or
-   `dsl41 release rollback`, first
+   `dsl41 release rollback NAME`, first
    ([the job recipe](#recipe-add-change-or-remove-a-job)). Then remove the
    release train's sudoers grant, so that no release verb can seal,
    prepare or start anything as the service account or root during or
@@ -1343,7 +1341,7 @@ sudo -l -U nbdeploy
 
    No line it prints names `dsl41`. With no other grant, it prints
    `User nbdeploy is not allowed to run sudo on <host>.` From then on,
-   `dsl41 release prepare`, with or without `--requalify`, exits 2 with
+   `dsl41 release prepare` and `dsl41 release requalify` exit 2 with
    ``sudo did not run `…` as dsl41.`` and names the missing grant.
    `apply`, `resume` and `rollback` refuse earlier, once the engine is
    stopped, with `no engine answers on …`. While the engine still
@@ -1798,10 +1796,9 @@ steps, then one verb as the service account (DL-398):
    options for the next period (§6a; the job recipe's seal shows them):
 
 ```sh
-args=$(dsl41 estate args "$ESTATE/estate.toml" --for seal --environment "$ENVIRONMENT")
-eval "set -- $args"
 sudo -u dsl41 -H /opt/dsl41/.venv/bin/dsl41 estate quiesce \
-    --run-root "$RUN_ROOT" --estate-anchor "$ESTATE_ANCHOR" "$@" -p "$PROPERTIES" \
+    --run-root "$RUN_ROOT" --estate-anchor "$ESTATE_ANCHOR" \
+    --manifest "$ESTATE/estate.toml" --environment "$ENVIRONMENT" -p "$PROPERTIES" \
     --next-detached --next-as-machine localhost --next-machine-policy strict
 ```
 
@@ -2499,9 +2496,8 @@ effects there (DL-316), and rehearse plays the schedules there. Review the
 diff visually with `viz`:
 
 ```sh
-args=$(dsl41 estate args "$ESTATE/estate.toml" --for viz --environment "$ENVIRONMENT")
-eval "set -- $args"
-dsl41 viz --format chart "$@" -p "$PROPERTIES"
+dsl41 viz --format chart --manifest "$ESTATE/estate.toml" --environment "$ENVIRONMENT" \
+    -p "$PROPERTIES"
 ```
 
 Rehearse costs little: it plays a full night in seconds, with the same
@@ -2845,9 +2841,18 @@ on a timer.
 Each prepared runtime has its final path under `/opt/dsl41/.venvs/`.
 `/opt/dsl41/.venv` is the active symlink. Prepare and verify the candidate
 with §1 before the maintenance window. Rehearse the current estate with
-its installed executable, using the launcher's ordered files, properties,
-timezone, timezone map and semantics. Read the compatibility table below
-before switching. Atomic activation uses §1's link replacement.
+its installed executable through the active release's manifest, with the
+site's properties file after it, as the launcher runs it: `dsl41 rehearse
+--manifest PATH --environment NAME -p PROPERTIES`, the values `dsl41-launch
+vars` prints (DL-422). Read the compatibility table below before switching.
+Atomic activation uses §1's link replacement.
+When the release note names a launcher change, as 1.14.0's does, install
+the launcher that ships with the runtime in the same window, then
+`dsl41 release requalify NAME` for the active release (DL-422). A rollback
+below 1.14.0 reinstalls the site package qualified with that release and
+runs no `requalify` in the window: that runtime's `release apply` checks
+the release it applies against its own version, and its refusal names its
+own form of the check, `release prepare --requalify NAME`.
 
 Never install into the active link or move a backing venv. To adopt this
 layout from an existing `/opt/dsl41/venv` installation, leave that directory
@@ -3035,7 +3040,10 @@ new venv. The holds cross the roll; release them with `OFF_HOLD` once the
 engine answers. The rollback is the same procedure with the old venv and
 another fresh root. The service drill runs this row and its rollback
 (`upgrade-fresh-root`, `upgrade-fresh-root-rollback`) with two installs
-of one build.
+of one build, and once more from 1.13.0 on PyPI to the build under test
+and back (`upgrade-prior-release`), with the launcher each runtime ships
+and, in the upgrade direction, the requalify between the flip and the
+start (DL-422).
 
 **Row 3, resume-safe, with a wrapper spec or supervisor protocol
 change.** The engine and the supervisor are deployed together, never one
@@ -3085,10 +3093,9 @@ the old estate's periods. The rollback is the old venv only, on the old
 estate. Stop both units and flip back. Point the launcher's `RUN_ROOT`
 and `ESTATE_ANCHOR` back at the old estate's, and both units'
 `RequiresMountsFor=` to match; run `systemctl daemon-reload` if a unit
-file changed. This launcher refuses a runtime before 1.13.0, which has no
-`dsl41 estate args` (DL-407). A rollback to such a runtime reinstalls
-the site package qualified with that release, launcher and units
-included; a rollback to 1.13.0 or later keeps the launcher.
+file changed. This launcher refuses a runtime before 1.14.0, which has no
+`--manifest` (DL-422). A rollback to such a runtime reinstalls the site
+package qualified with that release, launcher and units included.
 Then start the engine unit. `Wants=` starts the
 supervisor unit first, and the engine opens the old estate's next
 period. A rollback after a failed genesis still holds the estate down
@@ -3125,7 +3132,7 @@ speaks to the supervisor, not the engine, and leaves no WAL record.
 | --- | --- |
 | initial JIL release | `dsl41 release prepare NAME DIR`, then write NAME to `ACTIVE` before the first start; native genesis opens period 1, and there is no opening seal (§3; DL-407) |
 | incremental change, emergency hotfix mid-cycle | `dsl41 release prepare NAME DIR`, then `dsl41 release apply NAME` ([the job recipe](#recipe-add-change-or-remove-a-job)): seal, classified diff, open under the new catalog (§6a; DL-131, DL-133). The R-gate refuses only while something in the changed closure is live. Tethered mode drains, because a transition is a restart |
-| rollback | `dsl41 release rollback`: a transition back to the previous release (§6a). A fresh run root is an infrastructure act (§6) |
+| rollback | `dsl41 release rollback NAME`: a transition back to the previous release (§6a). A fresh run root is an infrastructure act (§6) |
 | calendar or holiday change | `dsl41 release prepare NAME DIR`, then `dsl41 release apply NAME`: a catalog change, so firing dates move, the hash moves and §6a applies |
 | properties or placeholder change | `dsl41 release prepare NAME DIR`, then `dsl41 release apply NAME`, for a release whose own layer changes: a catalog change, because it changes the post-placeholder JIL, so the hash moves and §6a applies |
 | affinity role remap | not built: the `route` verb is specified in period-model §2.2 |

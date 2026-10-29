@@ -544,7 +544,7 @@ dsl41 query status --brief -S "$S" --job EMEA_EOD_B   # INACTIVE …, with no H
 ```
 
    The status prints `active: small-r2, active since period 5.`,
-   ``rollback: `dsl41 release rollback` would apply small-r1.`` and
+   ``rollback: `dsl41 release rollback small-r1` would apply small-r1.`` and
    `last apply: small-r2 over small-r1, … completed; small-r2 became active in period 5.`
 5. Give the added job one run, so it has history for the rollback to keep:
 
@@ -559,7 +559,7 @@ dsl41 query status --brief -S "$S" --job OPS_RELEASE_PROBE_C   # SUCCESS … run
 
 ```sh
 dsl41 sendevent OFF_HOLD -J EMEA_EOD_B -S "$S"
-cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release rollback
+cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release rollback small-r1
 # second shell, after `holds taken: EMEA_EOD_B.`:
 dsl41 sendevent OFF_HOLD -J EMEA_EOD_B -S "$S"
 dsl41 sendevent ON_HOLD -J EMEA_EOD_B -S "$S"
@@ -686,7 +686,7 @@ Goal: end the lineage, keep its history, and leave nothing that starts. Follow
 2. Step 1, in a root shell: set `RUN_ROOT=/srv/dsl41/runs/nightbank-01d` and type
    recipe `retire-release`. It prints `User nbdeploy is not allowed to run sudo on …`.
 3. Ask for a release check as the deployment identity:
-   `cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release prepare --requalify small-r1`.
+   `cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release requalify small-r1`.
    It exits 2 with
    ``sudo did not run `/opt/dsl41/.venv/bin/dsl41 release service` as dsl41.``
 4. Step 1: recipe `hold-down`; both units stay `active`.

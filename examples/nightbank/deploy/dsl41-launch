@@ -15,9 +15,10 @@
 # estate.toml. A release directory is never a symlink: the bundle hash covers
 # each input's path string, so the opener must name the same paths the seal
 # named (period-model ss1.1). ACTIVE is a plain text file, not a symlink, whose
-# one line names the active release. The engine mode takes the estate's files, layers, timezone and
-# semantics from the active release's manifest through `dsl41 estate args`,
-# so a JIL release never edits this file. The site's own properties file,
+# one line names the active release. The engine mode passes the active
+# release's manifest to `run` through `--manifest`, which supplies the
+# estate's files, layers, timezone and semantics (DL-422), so a JIL release
+# never edits this file. The site's own properties file,
 # PROPERTIES, follows the manifest's layers as one more -p, so the site's
 # values override the application's. A missing, symlinked, empty or
 # multi-line ACTIVE, or a release that is a symlink or holds no estate.toml,
@@ -102,7 +103,7 @@ MAX_GRACE_S=10
 SERVICE_ACCOUNT=dsl41
 ENGINE_UNIT=dsl41-engine.service
 
-# The engine's options after the estate's words, shell-quoted; a SUPERVISOR
+# The engine's options after the manifest, shell-quoted; a SUPERVISOR
 # mode follows --detached. Their deployment half, --detached, --deadman,
 # --as-machine and --machine-policy, is what every seal restates as --next-*,
 # because an omitted --next-* option takes its default; `vars` prints it in
@@ -132,22 +133,20 @@ engine_command() {
         2) supervisor= ;;
         *) refuse "$DSL41 run --supervisor attach --help exited $probe: cannot tell attach from spawn" ;;
     esac
-    # The estate's words come from the active release's manifest, in its
-    # order, which is hashed (DL-407). A runtime without `estate args` is
-    # before 1.13.0, and a rollback to it brings the launcher of its site
-    # package; the parse decides by exit code, as for --supervisor (DL-402).
+    # The estate is the active release's manifest, which `run` reads through
+    # --manifest (DL-422). A runtime without the option is before 1.14.0,
+    # and a rollback to it brings the launcher of its site package; the
+    # parse decides by exit code, as for --supervisor (DL-402).
     probe=0
-    "$DSL41" estate args --help >/dev/null 2>&1 || probe=$?
+    "$DSL41" run --manifest /dev/null --help >/dev/null 2>&1 || probe=$?
     case $probe in
         0) ;;
-        2) refuse "this launcher needs dsl41 1.13.0 or later; a rollback below it reinstalls the site package qualified with that release" ;;
-        *) refuse "$DSL41 estate args --help exited $probe: cannot tell whether it reads a manifest" ;;
+        2) refuse "this launcher needs dsl41 1.14.0 or later; a rollback below it reinstalls the site package qualified with that release" ;;
+        *) refuse "$DSL41 run --manifest /dev/null --help exited $probe: cannot tell whether it reads a manifest" ;;
     esac
     release=$(active_release) || exit $?
     ESTATE=$ESTATE_RELEASES/$release
-    estate=$("$DSL41" estate args "$ESTATE/estate.toml" --for run \
-        --environment "$ENVIRONMENT") ||
-        refuse "$DSL41 estate args exited $? for $ESTATE/estate.toml"
+    estate=$(quote_all --manifest "$ESTATE/estate.toml" --environment "$ENVIRONMENT")
     options=$(run_options "$supervisor")
     eval "set -- $options"
     opener=$(root_opener) || exit $?
