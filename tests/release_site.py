@@ -60,7 +60,11 @@ state["calls"].append(args)
 
 
 def save():
-    STATE.write_text(json.dumps(state))
+    # One reader at a time sees a whole state: the stub and the test both write it while the
+    # verb under test runs `dsl41 query`, so the write lands by rename, never by truncation.
+    tmp = STATE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state))
+    os.replace(tmp, STATE)
 
 
 def opt(name):
@@ -218,7 +222,7 @@ raise SystemExit(f"stub dsl41: unexpected {args}")
 """
 
 STUB_SYSTEMCTL = r"""
-import json, sys
+import json, os, sys
 from pathlib import Path
 
 sys.path.insert(0, "@TESTS@")
@@ -226,6 +230,14 @@ sys.path.insert(0, "@TESTS@")
 state_path = Path(sys.argv[0]).resolve().parents[1] / "stub" / "state.json"
 state = json.loads(state_path.read_text())
 state["systemctl"].append(sys.argv[1:])
+
+
+def save():
+    # The state lands by rename, never by truncation (see STUB_DSL41's save).
+    tmp = state_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state))
+    os.replace(tmp, state_path)
+
 if sys.argv[1] == "show":
     print("active" if state["up"] else "failed")
 elif sys.argv[1:] == ["start", "dsl41-engine.service"] and not state["start_fails"]:
@@ -236,9 +248,9 @@ elif sys.argv[1:] == ["start", "dsl41-engine.service"] and not state["start_fail
     state["epoch"] += 1
     release_root.open_next(Path(state["run_root"]), nxt["closing"], state["epoch"])
 else:
-    state_path.write_text(json.dumps(state))
+    save()
     sys.exit(1)
-state_path.write_text(json.dumps(state))
+save()
 """
 
 #: sudo without its options, each call logged; the grants are the drill's to check
@@ -343,7 +355,10 @@ class Site:
         return loaded
 
     def save(self, state: dict[str, Any]) -> None:
-        (self.stub / "state.json").write_text(json.dumps(state))
+        # The stub's reader may run concurrently; the write lands by rename (see STUB_DSL41).
+        tmp = self.stub / "state.json.tmp"
+        tmp.write_text(json.dumps(state))
+        os.replace(tmp, self.stub / "state.json")
 
     def edit(self, **values: Any) -> None:
         self.save(self.state() | values)
