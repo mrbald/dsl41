@@ -134,7 +134,8 @@ def _reversible(ctx: Context) -> bool:
 
 
 # -- the entry actions of the finals: each reports the one `SealExit` of its state. Its intent
-# joins the outcome of the row that entered the state (statechart-engine ss4).
+# joins the outcome of the row that entered the state (statechart-engine ss4 entry actions, ss5
+# step 5).
 
 
 def _answer(_ctx: Context) -> Effects:

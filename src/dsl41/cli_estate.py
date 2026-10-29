@@ -700,8 +700,9 @@ async def _close_engine(engine: "Engine") -> None:
     """Give back what an offline sealer took, whatever became of the boundary: the engine's loop
     and its journal.
 
-    The teardown is a detach-stop (runner-design ss6a case b): a run the closing period carries
-    live keeps running under the supervisor, and the next period reattaches to it (PR-30b)."""
+    The teardown is a detach-stop: a run the closing period carries live keeps running under
+    the supervisor, and the next period reattaches to it (runner-design ss6a: the wrappers'
+    parent is the supervisor, so on restart the engine reattaches and LISTs; PR-30b)."""
     import contextlib
 
     engine.detach.stopping = True

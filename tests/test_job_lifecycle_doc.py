@@ -419,8 +419,9 @@ def test_supervisor_lease_names_its_groups_members() -> None:
 
 
 def test_a_row_from_the_root_is_under_its_target_top_level_region() -> None:
-    """The engine leaves every region and enters each again (statechart-engine.md §4); the
-    view prints the line once, under the target's top-level region."""
+    """The engine leaves every region and enters each again (statechart-engine.md §4, the exit
+    and entry order; DL-325, the region a row moves); the view prints the line once, under the
+    target's top-level region."""
     reset = replace(DOOR, rows=(*DOOR.rows, Row("door.31", "door", "reset", "closed")))
     view = rjl.sort_chart(reset)
     assert rjl._blocks(view.shown["0"])[0] == "closed = door + reset"

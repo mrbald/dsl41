@@ -1,7 +1,7 @@
 """JIL statement-level AST: hand scanner and preserve/canonical renderers.
 
 Normative spec: docs/jil-statement-syntax.md (rules 0-12, 4b included, fidelity tests F1-F4)
-and docs/ir-design.md ss2 (model sketches, loss policy). Nothing is interpreted here:
+and docs/ir-design.md ss2 (model sketches) and ss1 (loss policy). Nothing is interpreted here:
 `condition` is a RawAttr like any other, and expression parsing is lowering's job.
 
 Fidelity: `render(parse(text)) == text` byte for byte in preserve mode; canonical mode is a
@@ -25,7 +25,7 @@ Scanner rules, each pinned by a fixture or unit test:
 - A full-line block comment must close at end of line, and so must a multi-line trailing
   comment: text after `*/` on the closing line is an error.
 - Subcommand-shaped unknown keys (rule 3, DL-18): an attribute-position key matching
-  (insert|update|delete|override)_* that is not a recognized subcommand is an error, because a
+  (insert|update|delete|override|rename)_* that is not a recognized subcommand is an error, because a
   missed statement boundary folding into the previous statement is structural loss.
 - Calendar exports (rule 11, DL-36): the autocal_asc statements (`calendar`, `cycle`,
   `extended_calendar`) are recognized boundaries. A standard `calendar:` body may carry bare
