@@ -55,10 +55,13 @@ and list as written, against a synthetic estate, with the engine unit's
 `tests/test_release_*.py` run `dsl41 release` against a stub
 engine, and the service drill runs it on a host.
 `tests/test_operator_recipes.py` also runs the sealed check and the
-torn-opening recipe where `jq` is installed. The service drill (§3's worked example) runs the service, hold,
-sealed-check and retirement recipes as written; CI checks their content
-but does not run them. The variables block is compared with the launcher.
-The configuration-management play is checked by content; no drill runs it.
+torn-opening recipe where `jq` is installed. The service drill (§3's
+worked example) runs the service, hold, sealed-check and retirement
+recipes as written, and its `cm-stop` step runs both
+configuration-management plays with `ansible-playbook` (DL-416). Of
+the drill's recipes, CI runs the readiness wait, the sealed check and the
+retirement's audit and list (above); it checks the rest by content only.
+The variables block is compared with the launcher.
 
 ### Task index
 
@@ -166,7 +169,7 @@ What has to happen?
 │
 ├── the engine or supervisor unit failed with exit 7                 STATECHART ERROR
 │     a declared state machine hit an assertion failure; nothing of it was journaled (§3)
-│     a supervisor's exit ended every command it ran, as its other exits do (§0)
+│     a supervisor's exit 7 ends every command it still runs, with no drain (§3)
 │     report the `dsl41: statechart error` lines, deploy a fixed release, start the unit (§7)
 │
 ├── new JIL, properties or run options, and the history continues   TRANSITION
@@ -397,9 +400,10 @@ cd / && sudo -u nbdeploy -H /opt/dsl41/.venv/bin/dsl41 release prepare NAME DIR
    change it (DL-412). `DIR` and everything in it must be readable by the
    deployment identity, and it may hold no symlink. The service account opens
    `DIR` too, so `DIR` and its parents must be readable by that account: a
-   directory under a home directory it cannot search is refused. It lints the release with the installed runtime, the
-   launcher's `ENVIRONMENT` and the site's `PROPERTIES`, then rehearses it
-   one day from now. It refuses the release with exit 2 when lint or
+   directory under a home directory it cannot search is refused. It lints
+   the release with the installed runtime, the launcher's `ENVIRONMENT`
+   and the site's `PROPERTIES`, then rehearses the 24 hours that start
+   now. It refuses the release with exit 2 when lint or
    rehearse exits nonzero, when the release holds more jobs than the
    launcher's `MAX_JOBS`, or when the runtime's command grace is above
    `MAX_GRACE_S`. That ceiling is the packager's (site-package §5). A
@@ -586,13 +590,12 @@ systemctl start dsl41-engine.service
   (§7), then start the unit. The journal is clean, so the release resumes
   it.
   A refusal that names a watch's `watch.jsonl` reporting `run_id None`
-  against a durable effect is an identity split on a root an earlier
-  build resumed: that build launched a watch with no identity for a start
-  whose decision was missing. It fires at this build's first resume while
-  that run directory is present, whether the watch completed or not. The
-  refused resume writes no decision, so the earlier build can still open
-  the root. There is no migration: reset the root (period-model §11,
-  step 6a; DL-315).
+  against a durable effect is an identity split: an older build launched
+  a watch with no identity for a start whose decision was missing. Resume
+  refuses while that run directory is present, whether the watch
+  completed or not. The refused resume writes no decision, so the older
+  build can still open the root. There is no migration: reset the root
+  (period-model §11, step 6a; DL-315).
   A rolled root that refuses with `missing segment record` has
   [its own recipe](#recipe-recover-a-rolled-root-whose-opening-is-torn).
 - **Recover a lost answer: replay the request.** `sendevent` and `host`
@@ -1050,9 +1053,9 @@ endpoint; feed these into the site's monitoring.
 | supervisor log | `$RUN_ROOT/supervisor.log`; `journalctl -u dsl41-supervisor.service` | the supervisor's own output, and the unit's starts and stops |
 | leader | `$RUN_ROOT/leader.lock` holds the last leader's `pid`, `host`, `epoch` and `since`; compare `pid` with `systemctl show -p MainPID --value dsl41-engine.service` | the note stays after the engine exits, so it says who led, not who leads. Never probe the lock with `flock`: an engine that starts while a probe holds it refuses with exit 2. Never delete or replace the file: the engine re-checks it before every append and stops when it changed |
 | control socket | `dsl41 query status --brief -S "$S"` | exit 0: the leader answers. Exit 2: no engine, or a refusal |
-| failures and alarms | `dsl41 query subscribe -S "$S"` as the wake-up; then `dsl41 query trace --since N -S "$S"` with the last `last_seq` read. The trace is per period and its `seq` restarts at 1: set the cursor to 0 when the answer's `baseline_id` changes, or when `last_seq` is below the cursor, as the TUI does (DL-210) | the stream carries journal records: a run's end arrives as an `input` record of kind `STATUS` from the `adapter` source. The trace names what it did: a transition to `FAILURE` or `TERMINATED`, or a `MUST_START_ALARM` or `MUST_COMPLETE_ALARM` entry (SEM-34). A trace an older build wrote may carry a `TRANSITION_VIOLATION` entry, a move that broke a declared transition table. The current build writes none (DL-353), and the TUI shows an old one as an alert |
+| failures and alarms | `dsl41 query subscribe -S "$S"` as the wake-up; then `dsl41 query trace --since N -S "$S"` with the last `last_seq` read. The trace is per period and its `seq` restarts at 1: set the cursor to 0 when the answer's `baseline_id` changes, or when `last_seq` is below the cursor, as the TUI does (DL-210) | the stream carries journal records: a run's end arrives as an `input` record of kind `STATUS` from the `adapter` source. The trace names what it did: a transition to `FAILURE` or `TERMINATED`, or a `MUST_START_ALARM` or `MUST_COMPLETE_ALARM` entry (SEM-34). This build writes no `TRANSITION_VIOLATION` entry (DL-353). A trace an older build wrote may carry one, a move that broke a declared transition table, and the TUI shows it as an alert |
 | quarantined inputs | `journalctl -u dsl41-engine.service`; `dsl41 query subscribe -S "$S"`; `dsl41 journal "$RUN_ROOT"` | alert on any journal line that begins `dsl41: input quarantined`, and on a `decision` record with `"code": "engine_apply_faulted"` on the stream. Applying an engine-made input raised, so the engine logged it rejected and applied only its time half. The line names the input's kind, job, run and the fault. The input's own effect is lost: a quarantined completion leaves its run RUNNING, and a quarantined tick is a missed start. `dsl41 journal` prints a `rejected input` line for it. Report the fault, then settle the row with `sendevent` (concurrency-model §4) |
-| statechart errors | `journalctl -u dsl41-engine.service` for the engine; `$RUN_ROOT/supervisor.log` for the supervisor, whose stderr `supervise start` points there | alert on any line that begins `dsl41: statechart error`. A declared state machine hit an assertion failure: two enabled rows, an event nobody handles, or a call into its executor from inside a step. The tier stopped at once and exits 7. A durable write already made stays, such as a `seal` record (period-model §7). The lines name the machine, the instance, its states, the item, its ancestry, the candidates, the deferred queue and the last microsteps; report them whole (docs/statechart-engine.md §5). A supervisor that exits 7 ends every command it ran, by lifeline EOF, as any stop of the supervisor unit does (§0), and stays down |
+| statechart errors | `journalctl -u dsl41-engine.service` for the engine; `$RUN_ROOT/supervisor.log` for the supervisor, whose stderr `supervise start` points there | alert on any line that begins `dsl41: statechart error`. A declared state machine hit an assertion failure: two enabled rows, an event nobody handles, or a call into its executor from inside a step. The tier stopped at once and exits 7. A durable write already made stays, such as a `seal` record (period-model §7). The lines name the machine, the instance, its states, the item, its ancestry, the candidates, the deferred queue and the last microsteps; report them whole (docs/statechart-engine.md §5). A supervisor that exits 7 ends every command it still runs, by lifeline EOF and with no drain, and stays down |
 | free space | `df -P "$RUN_ROOT" "$ESTATE_ANCHOR"`, and every file system a job's `std_out_file` or `std_err_file` writes to | see "when a write fails" below |
 | perimeter receipts | `$RUN_ROOT/perimeter.jsonl`, when the access map is armed | alert on `access_denied` and `policy_reload_failed` records. `stream_revoked` marks a stream that a reload closed (access-model §6, §7) |
 
@@ -1071,9 +1074,9 @@ a subscribe line over the budget.
 **A row left live with nothing behind it.** After a restart, a job can
 stand RUNNING or STARTING with no live run and nothing held: `dsl41 query
 status` shows the row with `"held": false`, and no process or watch runs
-for it. That is the state the engine was in before the restart, when the
-run's start was retired and an operator then set the row live, for
-example KILLJOB on a held start followed by `CHANGE_STATUS RUNNING`. A
+for it. The row got there before the restart: the run's start was
+retired, and an operator then set the row live, for example KILLJOB on a
+held start followed by `CHANGE_STATUS RUNNING`. A
 restart launches nothing for such a run and does not fail it, a tethered
 command included (runner-design §7, DL-315). End it with KILLJOB
 or `CHANGE_STATUS`, or start a new run with FORCE_STARTJOB.
@@ -1133,11 +1136,8 @@ an I/O error:
 
 This section states the size dsl41 was measured at (DL-317), and what that
 size costs. All of it was measured on one macOS host (Apple M3 Pro, Python
-3.14); Linux is not measured. The compressed figures come from build
-55541f3, measured on 2026-10-10, which includes DL-310. The real-clock
-figures come from build b6b8a55, measured on 2026-10-09 and 2026-10-10.
-`examples/soak/` holds the estate and the scripts, and its README says how
-to repeat each measurement.
+3.14); Linux is not measured. `examples/soak/` holds the estate and the
+scripts, and its README says how to repeat each measurement.
 
 **The tested size.** 200 jobs on one machine whose `max_load` admits 20
 runs at once. In a day the estate starts about 980 jobs: 900 command runs
@@ -1173,8 +1173,9 @@ costs that much more. The audit was timed as a command and includes it.
 A seal resets the trace, the decision index, the outbox and the engine's
 three lists. A live seal stops the engine with exit 3, and the next period
 starts in a new process. The soak line counts the three lists under the
-keys `drops`, `deduped` and `refusals`. `drops` stayed empty: it counts rejected engine inputs, such as a stale
-completion or a quarantined input. `deduped` and `refusals` count operator
+keys `drops`, `deduped` and `refusals`. `drops` counts rejected engine
+inputs, such as a stale completion or a quarantined input, and stayed
+empty in these runs. `deduped` and `refusals` count operator
 traffic, not launches. A retried request adds one to `deduped`, and a
 refused request adds one to `refusals` (the engine's `refused_inputs`). A
 restart empties both, because the WAL does not hold them.
@@ -1202,13 +1203,11 @@ The running peak includes the harness's own `trace` call from the start of
 the period, once a day, which builds the whole trace as one answer. A TUI's
 first connect does the same.
 
-**The real clock.** Both real-clock runs used build b6b8a55, before
-DL-310. At a day's age DL-310 saves about 0.15 s a day of planning and at
-most about 2 s a day of the sampler's own `trace` calls, so the real-clock
-CPU below is up to about 7% high for a build that includes DL-310. The
-other real-clock figures do not depend on it. The first soak ran for 30
-minutes from 14:21 UTC, a quiet part of the estate's day, and started 11
-runs:
+**The real clock.** The real-clock CPU figures leave out DL-310's
+saving: about 0.15 s a day of planning at a day's age, and at most about
+2 s a day of the sampler's own `trace` calls. They are up to about 7%
+above the current build's. The other real-clock figures do not depend on
+it. A 30-minute soak in a quiet part of the estate's day started 11 runs:
 
 | 30 minutes, real clock | Measured |
 | --- | --- |
@@ -1220,10 +1219,10 @@ runs:
 | live seal, then audit, as commands | 0.48 s, 0.44 s |
 | run directory per command run | 5 spool files (20 KiB on disk) and 2 log files |
 
-**A day on the real clock.** The 24-hour soak ran on the same host from
-2026-10-09 15:01 UTC to 2026-10-10 16:30 UTC and started 717 command runs.
-The host slept twice, for about 1.5 h and 9 h, so the engine was awake for
-14.9 h. Each rate per day below is awake time scaled to 24 h.
+**A day on the real clock.** A soak of about 25.5 h started 717 command
+runs. The host slept for about 10.5 h of it, so the engine was awake for
+14.9 h.
+Each rate per day below is awake time scaled to 24 h.
 
 | 24 hours, real clock | Measured | From |
 | --- | --- | --- |
@@ -1238,26 +1237,28 @@ The host slept twice, for about 1.5 h and 9 h, so the engine was awake for
 | live seal, engine exit, audit, as commands | 0.56 s, 1.6 s, 0.90 s | `stop.jsonl` |
 
 The engine CPU includes the sampler's two control calls a minute. macOS
-takes resident pages back while the host sleeps: just after the 9-hour
-sleep the engine read 11 MiB and the supervisor 7 MiB, so the low values
-are not use. The samples counted `lsof` rows, which include the working
-directory and mapped files; `sample.py` counts descriptors only. A
-constant count still shows that no descriptor leaked.
+takes resident pages back while the host sleeps, so the resident-set
+values read just after a sleep (11 MiB for the engine, 7 MiB for the
+supervisor) are not use. The open-files rows count `lsof` rows, which
+include the working directory and mapped files; `sample.py` counts
+descriptors only. A constant count shows that no descriptor leaked.
 
-**A host suspend.** The host slept from 00:29 to 09:30 UTC, and the engine
-process slept with it. No restart happened, so nothing was resumed. At the
-wake the engine fired every tick that fell in the sleep: about 185 ticks of
-some 66 jobs, each stamped at its own due time, and all applied. None was
-dropped.
-That is the rule for a live engine that stalls (E9, runner-design §15); a
-restart drops missed ticks instead. Each of those jobs started once,
-however many of its ticks fell in the sleep. About 115 runs started in the
-first 10 minutes. 59 runs waited in `QUE_WAIT` at the wake, and 4 after 13
-minutes. One `trace` call that began at the wake took 14 s; the next took
-11 ms. The engine went on scheduling until the stop. The two short wakes
-before it, at 17:48 and 18:32 UTC, also started runs. To drop the missed
-ticks instead of running them late, stop the engine before a planned pause
-of the host and resume it after.
+**A host suspend.** An engine process that sleeps with its host is not
+restarted, so nothing is resumed. At the wake it fires every tick that
+fell in the sleep, each stamped at its own due time, and drops none. That
+is the rule for a live engine that stalls (E9, runner-design §15); a
+restart drops missed ticks instead. After a 9-hour sleep in that soak,
+each job started once, however many of its ticks fell in the sleep:
+
+| At the wake, 200 jobs | Measured |
+| --- | --- |
+| ticks fired | about 185, of some 66 jobs |
+| runs started in the first 10 minutes | about 115 |
+| runs in `QUE_WAIT` | 59 at the wake, 4 after 13 minutes |
+| one `trace` call that began at the wake | 14 s; the next took 11 ms |
+
+To drop the missed ticks instead of running them late, stop the engine
+before a planned pause of the host and resume it after.
 
 **Disk.** Each command run leaves a spool directory under `runs/` with four
 files, an entry in `runs/.by_run_id`, and its two log files. The 24-hour
@@ -1977,10 +1978,11 @@ Decisions to make once, per site:
   an automatic retry or signal fallback.
 - **Faulting commands.** A command whose apply raises is refused with
   `apply_faulted` before it is journaled (concurrency-model §4).
-  `--on-transition-violation` is inert (DL-353) and is removed at the
-  next major release: every state machine is a declared statechart, and a
-  gap in one is a statechart error (exit 7). Given, the option prints one
-  deprecation line and changes nothing; remove it from the launcher.
+  `--on-transition-violation` is inert and deprecated, and leaves at the
+  next major release (DL-353): every state machine is a declared
+  statechart, and a gap in one is a statechart error (exit 7). Given, the
+  option prints one deprecation line and changes nothing; remove it from
+  the launcher.
 - **Faults in engine-made inputs.** The engine applies each input it made
   itself on a copy of its state first (concurrency-model §4). If a tick, a
   completion or a routing observation raises there and the timers due at
@@ -2002,8 +2004,8 @@ Decisions to make once, per site:
   refusal (below) that a retry cannot fix. Exit 3 is a sealed engine: the
   next period is opened by an operator, not by a restart loop (§6a;
   DL-134). A unit that lists 2 alone restart-loops at every boundary.
-  Exit 5 is retired and stays unused (DL-353), so a unit that still
-  lists it is harmless. Exit 6 is a time-half stop: the timers due at an
+  Exit 5 is retired and stays unused (DL-353), so a unit that lists it
+  is harmless. Exit 6 is a time-half stop: the timers due at an
   engine-made input raised, so every restart would stop the same way. Exit 7 is a
   statechart error: a bug in a declared state machine, which every
   restart of the same release may meet again. A
@@ -2203,9 +2205,11 @@ new units protect an old supervisor without the maintenance verb.
 Unmanaged shape 2 needs an independently verified whole-process scope;
 there is no automatic signal fallback or claim of safe idle shutdown.
 
-Crash, deadman and host-shutdown behavior is unchanged. A deadman exit
-restarts on purpose. Ownership refusal exits 1 and retries after two
-seconds without a start limit. Configuration refusal 2 and statechart
+Guarded maintenance does not change the crash and deadman paths, or a
+host shutdown (DL-390); a host shutdown stops the supervisor unit as any
+stop does, with the drain (DL-416). A deadman exit restarts on purpose.
+Ownership refusal exits 1 and retries after two seconds without a start
+limit. Configuration refusal 2 and statechart
 failure 7 do not restart. A legacy shutdown wait that fails twice exits 1.
 Its wrappers then end as on a supervisor crash. Restarting a supervisor
 never resurrects commands; the engine reconciles the spool.
@@ -2261,9 +2265,9 @@ Exit codes:
   before any durable write of the input. The `dsl41: statechart error`
   lines on stderr carry the report. The engine stays down until a release
   that fixes the bug is deployed (§7). The supervisor exits 7 for the same
-  error, and its unit does not restart it either. Like any stop of the
-  supervisor, it ends every command it still runs: "Stopping the
-  supervisor unit ends every command it still runs" (§0).
+  error, and its unit does not restart it either. That exit does not
+  drain: every command it still runs ends by lifeline EOF, as on a
+  supervisor crash.
 - 8: supervisor only, successful guarded maintenance. The supervisor unit
   treats it as success and does not restart. The maintenance CLI reports
   its own completion/refusal/in-progress/uncertainty as 0/2/3/4 (§3,
@@ -2317,8 +2321,10 @@ loop, and a sealed engine that stays stopped until the next period is
 opened. It also covers §2b's shape-1 quiescence and a restore at the
 recorded paths, a host reboot that the enabled units resume from (§0),
 the signals of "What to watch", §0's configure and stop-and-recover
-recipes, a SIGKILL of the engine and of the supervisor, and §7's four
-upgrade rows with their rollbacks (DL-266). It installs and first
+recipes, a SIGKILL of the engine and of the supervisor (DL-303), §0's two
+configuration-management plays (DL-416), `dsl41 release` applies,
+rollbacks and an interrupted apply (DL-412), and §7's four upgrade rows
+with their rollbacks (DL-266). It installs and first
 starts the units with §0's service recipe, and ends with §0's retirement
 procedure, both read from this file (DL-268). The access-map refusals,
 their messages and what they leave
@@ -2329,17 +2335,19 @@ step at a time. `drill-local.sh` runs the same steps on a workstation, in
 a podman container with systemd as PID 1 on Ubuntu 24.04, as an
 unprivileged user with passwordless sudo, as the runner runs them
 (DL-271). It runs the host's architecture, so on Apple silicon it is
-arm64, not the runner's x86_64.
-The drill passed every step on GitHub's Ubuntu 24.04 x86_64 runner at
-b6b8a55 (2026-10-09, DL-308). These steps also passed in
-`drill-local.sh` on arm64 at a2db2ae (2026-10-09, Ubuntu 24.04, systemd
-255): `watch`, `configure`, `kill-engine`, `kill-supervisor`,
-`stop-recover`, the three rollback steps, `sealed`, `upgrade-fresh-root`,
-`upgrade-coordinated`, `upgrade-old-release` and `upgrade-state-machine`
-(DL-303). No other distribution or
-systemd version has been observed. The drill is not part of the default
-gate: dispatch it again after a change to the units, the launcher or the
-drill.
+arm64, not the runner's x86_64. These steps run on Ubuntu 24.04 only.
+The workflow's `drill` job runs them on GitHub's Ubuntu 24.04 x86_64
+runner (DL-308), on the `all` and `exhaustive` lanes. Its `offline` job,
+on the `all` and `offline` lanes, runs the
+[offline rehearsal](offline-rehearsal.md) in Ubuntu 24.04 and Rocky
+Linux 8 containers on native x86_64. The release workflow runs the same
+matrix before it publishes (DL-389). Those lanes qualify the offline
+installation, the EL8 reference RPM and the service checks the
+rehearsal lists, in containers. They do not run the steps above, and a
+container does not qualify host boot, mounts or kernel upgrades
+([site-package §6](site-package.md#6-qualify-the-host)). The drill is
+not part of the default gate: dispatch it again after a change to the
+units, the launcher or the drill.
 
 ## 4. UI surfaces
 
@@ -2650,10 +2658,11 @@ digest, its binding to the seal it names, and the chain it claims. A
 rolled root can do that, and cannot do a full audit. An audit of a period
 whose state-machine version differs from this binary's needs the dsl41
 version that produced it (§7's venv-per-version pattern). The refusal
-names the version only when the seal reads. A v1.7.0 seal does not read
-under this build, and the refusal says `the bytes are not in ss3.2
-canonical form (corrupt bytes, or a seal written by a build with a
-different record shape -- DL-154)`, which names neither the version nor
+names the version only when the seal reads. A seal an older release
+wrote in another record shape does not read, a v1.7.0 seal among them,
+and the refusal says `the bytes are not in ss3.2 canonical form
+(corrupt bytes, or a seal written by a build with a different record
+shape -- DL-154)`, which names neither the version nor
 the shape. To tell, audit the same root with the kept old venv: if that
 passes, the old venv is the one to use. A period run by an older release
 of the same state-machine version audits under the current binary.
@@ -2726,7 +2735,9 @@ nights it holds. `docs/protocol-evolution.md` is the contract for a
 retired dialect: what each protocol tolerates, how long its instances
 live, and what must be true before a reader may drop a dialect.
 
-The `estate` group's verbs are `reclaim` (below) and `prune` (§2a).
+The `estate` group's verbs are `reclaim` (below), `prune` (§2a),
+`quiesce` (§2b), `args` (§0's job recipe), and `build` and `diff`
+([authoring](authoring.md); DL-413).
 
 A roll that is refused after it wrote the target root's sentinel leaves
 that directory owned by the claim it was attempting. Period-model §1.1's
@@ -2811,9 +2822,10 @@ keeps refusing while the torn segment stays; follow
 [the torn-opening recipe](#recipe-recover-a-rolled-root-whose-opening-is-torn).
 
 *A command on a rolled root refuses, naming an anchor.* The anchor is the
-lineage's, not the root's. Five verbs take it as
+lineage's, not the root's. Six verbs take it as
 `--estate-anchor /srv/dsl41/runs/<first>.anchor`: `run --resume`,
-`seal`, `audit`, `estate prune` and `estate reclaim`, which requires it.
+`seal`, `audit`, `estate quiesce`, `estate prune` and `estate reclaim`,
+which requires it.
 `run --open-from` takes it as its value. The other readers are
 addressed by root or by socket and take no anchor option. Put it in the unit
 file beside the run root. To read the estate rather than one of its
@@ -2846,12 +2858,12 @@ changed units, and start. The original directory remains usable for
 rollback until the retained-estate policy permits its separate removal.
 A process started before activation keeps its original interpreter.
 
-**A release with the stop guard.** v1.12.0 checks the stop guard when its
-supervisor starts (DL-399), and DL-416 removed it from the example unit.
-Under a unit without `RefuseManualStop=yes`, a v1.12.0 supervisor exits 2
-and the unit stays down. Before a rollback to it, add a drop-in with
-`[Unit] RefuseManualStop=yes`, reload, and remove it when you leave that
-release. Under the drop-in `systemctl stop` refuses, as it did then.
+**A rollback to v1.12.0.** A v1.12.0 supervisor checks the stop guard
+when it starts (DL-399). The example unit has no stop guard (DL-416), so
+under it a v1.12.0 supervisor exits 2 and the unit stays down. Before a
+rollback to v1.12.0, add a drop-in with `[Unit] RefuseManualStop=yes`,
+reload, and remove it when you leave that release. Under the drop-in
+`systemctl stop` of the supervisor unit refuses.
 
 **What moves with a release.** `catalog_hash` v2 excludes
 `meta.tool_version`, and `dsl41_version` is not on the `segment` record,
@@ -2863,7 +2875,21 @@ across the pair is safe. The **state-machine version** is different. One
 executable implements exactly one. A seal whose `next_period` names
 another is refused at readiness (period-model §2.1), and resume refuses a
 segment pinned to another. Run any check against a retained runtime with
-`python -B`. Check it in both venvs, whatever the note says:
+`python -B`, so it writes no bytecode cache. A repeat preparation, as
+§1's activation block runs, verifies an existing candidate, and checks
+every `.pyc` in it (DL-419; [offline installation](offline-installation.md)):
+
+- Inside `__pycache__`, a cache name must be `<module>.cpython-312.pyc`,
+  `<module>.cpython-312.opt-1.pyc` or `<module>.cpython-312.opt-2.pyc`.
+  Any other name, such as another interpreter's tag, is refused. A
+  `<module>.pyc` beside its source is checked too.
+- A cache is refused when it has no source, when it names a source other
+  than the retained file, or when its decoded code differs from a compile
+  of that source. Its 16-byte header is not compared.
+- A cache that matches its source is accepted. The check does not promise
+  to refuse every tampered cache.
+
+Check the version in both venvs, whatever the note says:
 
 ```sh
 /opt/dsl41/.venvs/<runtime-id>/bin/python -B -c \
@@ -2913,10 +2939,11 @@ near 720 jobs a dense one can reach it, and is then refused or
 quarantined. A log that an older build wrote can hold such an input;
 resume then stops with a replay fault that names it. The dry
 apply runs on the engine's loop, so a long cascade also stops the lease's
-renewal (§3, the deadman). On an M-series laptop a cascade that does not
-end stops in about 4.5 s at 200 jobs and 15 to 17 s at 400 to 1,000 jobs,
-under half the lease's lapse; a legitimate dense cascade takes about 7 s
-at 400 jobs, 33 s at 700 and 90 s at 1,000. The log is not corrupt.
+renewal (§3, the deadman). On an Apple M-series laptop, a cascade that
+does not end stops at the cap in about 4.5 s at 200 jobs and 15 to 17 s at
+400 to 1,000 jobs, under half the lease's lapse. A legitimate dense
+cascade takes about 7 s at 400 jobs, 33 s at 700 and 90 s at 1,000. The
+log is not corrupt.
 Report it with the message. A deep condition can still pass
 Python's recursion limit, with the message `RecursionError: an instant
 cascade passed the recursion limit of N; its first start was JOB (CAUSE)`.
@@ -2956,8 +2983,8 @@ systemctl stop dsl41-engine.service
 systemctl start dsl41-engine.service     # the launcher passes --resume
 ```
 
-The rollback is the same three commands with the old venv. Up to 1.8.0,
-no release pair qualifies for this row. The service drill
+The rollback is the same three commands with the old venv. No release
+pair up to 1.8.0 qualifies for this row. The service drill
 (`drill-steps.sh upgrade-resume-safe`) runs these commands with two
 installs of one build. That proves the mechanics, not that any version
 pair is resume-safe.
@@ -3058,17 +3085,16 @@ the old estate's periods. The rollback is the old venv only, on the old
 estate. Stop both units and flip back. Point the launcher's `RUN_ROOT`
 and `ESTATE_ANCHOR` back at the old estate's, and both units'
 `RequiresMountsFor=` to match; run `systemctl daemon-reload` if a unit
-file changed. A rollback to a runtime without `dsl41 estate args`,
-one before 1.13.0, reinstalls the site package qualified with that
-release, launcher and units included, because this launcher refuses such
-a runtime (DL-407). A rollback to 1.13.0 or later keeps the launcher.
+file changed. This launcher refuses a runtime before 1.13.0, which has no
+`dsl41 estate args` (DL-407). A rollback to such a runtime reinstalls
+the site package qualified with that release, launcher and units
+included; a rollback to 1.13.0 or later keeps the launcher.
 Then start the engine unit. `Wants=` starts the
 supervisor unit first, and the engine opens the old estate's next
 period. A rollback after a failed genesis still holds the estate down
 across reboots: once the old estate answers, release the hold with
 `hold-release` (§2b), or the next boot leaves it stopped. The service
-drill runs this row from v1.7.0, installed from PyPI, to the build under
-test
+drill runs this row from v1.7.0 to the build under test
 (`upgrade-old-release`, `upgrade-state-machine`), and then the rollback
 to the old estate and back to the new one
 (`upgrade-state-machine-rollback`).
