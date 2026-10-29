@@ -4385,7 +4385,7 @@ def test_snapshot_minimal_file_input_raw_values_and_metadata(driven_snapshot: Dr
             "buffer": b'{"nodes":{"P":{"state":"queued"}}}',
         }
     )
-    d.page.wait_for_function("() => snapshotLoaded && !snapshotPending")
+    d.page.wait_for_function("() => loadedSnapshot && !snapshotPending")
     assert _snapshot_marker(d, "P") == "neutral"
     raw = {
         "source": ["example", {"__proto__": {"retained": True}}],
@@ -4406,10 +4406,12 @@ def test_snapshot_minimal_file_input_raw_values_and_metadata(driven_snapshot: Dr
     _import_snapshot(d, raw)
     assert d.page.locator("#snapshot-error").is_hidden()
     assert (
-        json.loads(d.page.evaluate("() => JSON.stringify(Object.fromEntries(snapshotNodes))"))
+        json.loads(
+            d.page.evaluate("() => JSON.stringify(Object.fromEntries(loadedSnapshot.nodes))")
+        )
         == raw["nodes"]
     )
-    assert json.loads(d.page.evaluate("JSON.stringify(snapshotMetadata)")) == {
+    assert json.loads(d.page.evaluate("loadedSnapshot.metadataText")) == {
         k: v for k, v in raw.items() if k != "nodes"
     }
     assert "Unknown IDs: 1" in d.page.inner_text("#snapshot-buckets")
@@ -4447,10 +4449,10 @@ def test_snapshot_invalid_candidate_is_atomic(driven_snapshot: Driven, invalid: 
     """DL-385: malformed entries cannot partially replace a prior valid observation set."""
     d = driven_snapshot
     _import_snapshot(d, {"nodes": {"P": {"state": "SU"}, "Q": {"state": "RU"}}})
-    before = d.page.evaluate("() => [...snapshotNodes]")
+    before = d.page.evaluate("() => [...loadedSnapshot.nodes]")
     _import_snapshot(d, invalid)
     assert d.page.locator("#snapshot-error").is_visible()
-    assert d.page.evaluate("() => [...snapshotNodes]") == before
+    assert d.page.evaluate("() => [...loadedSnapshot.nodes]") == before
     assert _snapshot_marker(d, "P") == "neutral"
     assert d.page.inner_text("#snapshot-notice") == "Previous snapshot kept."
     _import_snapshot(d, {"nodes": {"Q": {"state": ""}}})
@@ -4465,6 +4467,29 @@ def test_snapshot_invalid_candidate_is_atomic(driven_snapshot: Driven, invalid: 
     assert d.errors == []
 
 
+def test_snapshot_clear_reports_none_and_second_import_replaces_first(
+    driven_snapshot: Driven,
+) -> None:
+    """DL-385: Clear drops the one retained snapshot; the next import is the only one shown."""
+    d = driven_snapshot
+    _import_snapshot(d, {"nodes": {"P": {"state": "first"}}})
+    assert _snapshot_marker(d, "P") == "neutral"
+    d.page.locator("#snapshot-clear").click()
+    assert d.page.evaluate("() => loadedSnapshot") is None
+    assert d.page.inner_text("#snapshot-notice") == "No snapshot loaded."
+    assert d.page.locator("#snapshot-data").is_hidden()
+    assert d.page.locator("#snapshot-clear").is_disabled()
+    assert d.page.inner_text("#snapshot-import") == "Import JSON…"
+    assert _snapshot_marker(d, "P") == ""
+    _import_snapshot(d, {"nodes": {"Q": {"state": "second"}}})
+    assert d.page.evaluate("() => [...loadedSnapshot.nodes.keys()]") == ["Q"]
+    assert d.page.locator("#snapshot-data").is_visible()
+    assert d.page.inner_text("#snapshot-import") == "Replace JSON…"
+    assert _snapshot_marker(d, "P") == ""
+    assert _snapshot_marker(d, "Q") == "neutral"
+    assert d.errors == []
+
+
 def test_snapshot_duplicate_keys_exact_external_join_and_ineligible_ids(
     driven_snapshot: Driven,
 ) -> None:
@@ -4475,7 +4500,7 @@ def test_snapshot_duplicate_keys_exact_external_join_and_ineligible_ids(
     assert "emitted ID" in d.page.inner_text("#d-rows")
     edge_id = d.page.evaluate("() => cy.edges().not('.lock')[0].id()")
     _import_snapshot(d, '{"nodes":{"P":{"state":"first"},"P":{"state":"x","state":"last"}}}')
-    assert d.page.evaluate("() => snapshotNodes.get('P').state") == "last"
+    assert d.page.evaluate("() => loadedSnapshot.nodes.get('P').state") == "last"
     _import_snapshot(
         d,
         {
@@ -4523,7 +4548,7 @@ def test_snapshot_read_generations_clear_errors_and_hidden_preference(
     d.page.wait_for_function("() => !snapshotPending")
     d.page.evaluate("() => {snapshotReads.get('old.json').reject(new Error('stale error'));}")
     assert d.page.locator("#snapshot-error").is_hidden()
-    assert d.page.evaluate("() => [...snapshotNodes.keys()]") == ["Q"]
+    assert d.page.evaluate("() => [...loadedSnapshot.nodes.keys()]") == ["Q"]
     _choose_snapshot(d, "", "old-success.json")
     _choose_snapshot(d, "", "latest.json")
     d.page.evaluate(
@@ -4533,8 +4558,8 @@ def test_snapshot_read_generations_clear_errors_and_hidden_preference(
     d.page.evaluate(
         '() => {snapshotReads.get(\'old-success.json\').resolve(\'{"nodes":{"P":{"state":"stale"}}}\');}'
     )
-    assert d.page.evaluate("() => snapshotNodes.get('Q').state") == "latest"
-    assert not d.page.evaluate("() => snapshotNodes.has('P')")
+    assert d.page.evaluate("() => loadedSnapshot.nodes.get('Q').state") == "latest"
+    assert not d.page.evaluate("() => loadedSnapshot.nodes.has('P')")
     _choose_snapshot(d, "", "old2.json")
     _choose_snapshot(d, "", "bad.json")
     d.page.evaluate("() => {snapshotReads.get('bad.json').resolve('{');}")
@@ -4542,7 +4567,7 @@ def test_snapshot_read_generations_clear_errors_and_hidden_preference(
     error = d.page.inner_text("#snapshot-error")
     d.page.evaluate("() => {snapshotReads.get('old2.json').resolve('{\"nodes\":{}}');}")
     assert d.page.inner_text("#snapshot-error") == error
-    assert d.page.evaluate("() => [...snapshotNodes.keys()]") == ["Q"]
+    assert d.page.evaluate("() => [...loadedSnapshot.nodes.keys()]") == ["Q"]
     _choose_snapshot(d, "", "hidden.json")
     assert d.page.locator("#snapshot-error").is_hidden()
     d.page.locator("#snapshot-shown").uncheck()
@@ -4561,7 +4586,7 @@ def test_snapshot_read_generations_clear_errors_and_hidden_preference(
             ' else r.resolve(\'{"nodes":{"P":{"state":"late"}}}\');}',
             {"name": name, "reject": reject},
         )
-        assert d.page.evaluate("() => snapshotNodes.size") == 0
+        assert d.page.evaluate("() => loadedSnapshot") is None
         assert d.page.locator("#snapshot-error").is_hidden()
         assert not d.page.locator("#snapshot-shown").is_checked()
         assert d.page.locator("#snapshot-preset").input_value() == "autosys"
@@ -4930,7 +4955,7 @@ def test_snapshot_native_display_failure_retains_prior_model_and_ui(
         )
     _import_snapshot(d, deep)
     assert "text-display capacity" in d.page.inner_text("#snapshot-error")
-    assert d.page.evaluate("() => snapshotNodes.get('P').state") == "prior"
+    assert d.page.evaluate("() => loadedSnapshot.nodes.get('P').state") == "prior"
     assert d.page.inner_text("#snapshot-coverage") == coverage
     assert d.page.inner_html("#snapshot-results") == results
     assert _snapshot_invariants(d) == before
@@ -4956,7 +4981,7 @@ def test_snapshot_real_tab_order_and_long_text_stay_inside_panel(driven_snapshot
             "buffer": b'{"nodes":{"P":{"state":"known"}}}',
         }
     )
-    d.page.wait_for_function("() => snapshotLoaded && !snapshotPending")
+    d.page.wait_for_function("() => loadedSnapshot && !snapshotPending")
     d.page.locator("#snapshot-import").focus()
     for expected in (
         "snapshot-clear",
