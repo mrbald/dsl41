@@ -415,12 +415,13 @@ class Oracle:                             # one concrete interpreter, no protoco
 `Event`, `TraceEntry`, `RuntimeState` and its rows live in `oracle_state.py`; the interpreter
 in `oracle.py` imports them and `oracle_state.py` imports nothing from it (DL-91).
 
-- Deterministic: single logical clock. One `feed()` first fires every timer due at or before
-  its stamp, in time order, and drains each cascade; the injected event goes second. Within a
-  cascade the queue is FIFO: the event, then its consequences in insertion order, jobs in
-  catalog order. Feed times must be non-decreasing. A cascade is never a mixed-kind queue, so
-  the (event kind priority, insertion order) tie-break has no observable cross-kind half to
-  define.
+- Deterministic: single logical clock. Feed times must be non-decreasing. One `feed()` first
+  fires every timer due at or before its stamp, in time order, and runs each one's cascade to
+  the end; the injected event goes second. Within one feed, only the input queue is FIFO: it
+  holds the due timers and the injected event. A move's consequences go to the front of the
+  executor's worklist, in the order the row reports them, and run depth first: each
+  consequence's whole cascade runs before the next one starts (DL-350, `statechart-engine.md`
+  §5). A move wakes its referencers in catalog order (DL-13).
 - Box status is derived state, recomputed on member transitions (SEM-11/12/15 rules).
 - Every SEM trace test (dossier §8) is `(catalog, event script, expected trace)`, written one
   test per behavior. Tier (c) scripts come from the caller; `equiv_scripts()` is a seeded
@@ -439,14 +440,16 @@ in `oracle.py` imports them and `oracle_state.py` imports nothing from it (DL-91
 - IR-F serializes as JSON: `json.dumps(catalog.model_dump(mode="json"), sort_keys=True,
   indent=2)` plus a trailing newline, with an explicit version field `ir_version: "0.3"`. One
   catalog is one file. The output is deterministic (diff-able in git). A change to the IR-F
-  shape bumps the version; `scripts/arch_check.py` pins the schema hash to it. In 0.3 an
-  absolute must time is a `MustTime`, whose hour runs to 71 (DL-253).
+  shape bumps the version; `scripts/arch_check.py` pins the schema hash to it. An absolute
+  must time is a `MustTime`, whose hour runs to 71 (DL-253).
 - `ir.dump_catalog` / `ir.load_catalog` are the REFERENCE SPELLING of that sentence, and the
   round-trip test in `tests/test_ir.py` holds them to it (DL-193). No CLI verb reads or
   writes an IR-F file: `dsl41 run` consumes JIL bytes only,
   because JIL is the input of record (DL-51) and the run root stores the byte-exact
-  post-placeholder JIL bundle (DL-130). The Python DSL is the bridge: `to_jil()` renders a
-  module to JIL, and a decompiled module writes it on stdout.
+  post-placeholder JIL bundle (DL-130). The Python DSL is the bridge:
+  `CatalogBuilder.to_jil()` renders a builder's statements as JIL, and `dsl41 build MODULE`
+  writes the JIL that the module's `estate()` declares (DL-410). A decompiled module also writes its
+  JIL on stdout when run as a script.
 - `sys_id`-free: all identity is by name. The UC backend owns the name→sys_id/retainSysIds
   strategy (UCS-12) and keeps it out of the IR.
 - Hashing: `equiv.catalog_hash = sha256(canonical IR-F JSON)`. The equivalence CLI uses it to
@@ -489,34 +492,33 @@ SEM/M row:
 
 ## 10. Design decisions D1–D4
 
-The numbers are cited in the sources and stay.
-
 - D1: `Cond` is shared between `condition` and `box_success/box_failure`. Layer-G derives
   edges from box-override refs, classed M15 for a reference transitively inside the box and
   M16 for a non-member, global, or cross-instance one (§5 pass 5).
-- D2: the DSL surface, the last of the DL-03 phases. `dsl41 decompile` emits a
-  runnable builder module over IR-F. The flow verbs are `job()`, `box()`, `sequence()`,
+- D2: the DSL surface (DL-03). `dsl41 decompile` emits a runnable builder module over
+  IR-F. The flow verbs are `job()`, `box()`, `sequence()`,
   `parallel()`, `mutex()` and `contend()`, beside
   the declaration verbs (`global_()`, `machine()`, `resource()`, `xinst()`, the calendar
   family). The fold registry is closed at T-001–T-007 (DL-38). The surface is extracted from
   corpus patterns, never designed ahead of them.
 - D3: UC record emission. The base subset is emitted (U3a, DL-55: CREATE-ONLY records per
   docs/uc-edge-schema.md). Rich condition forms need U3b (a live controller's
-  openapi.json). D3 is open on U3b alone, not on a design decision. U3b is open and
-  descoped with the UC backend (DL-288).
+  openapi.json). D3 is open on U3b alone, and U3b is descoped with the UC backend
+  (DL-288).
 - D4: the UC twin shares `Event` and `TraceEntry` with the AutoSys oracle, so one comparator
   reads both traces.
 
 ## 11. Impact ledger: where Q1/Q2/Q3 live
 
-- Q1 (precedence): one lark rule, left-associative at equal precedence, and canonical sort
-  stability (DL-53); §3. The IR models carry nothing for it.
-- Q2 (lookback-0 anchor): a zero lookback anchors to the dependent job's own last end,
-  `JobRuntime.last_end_at`, threaded through the evaluator (Q2a, DL-54). When the dependent
-  has never ended, the zero-lookback qualifier is satisfied; the producer's status must still
-  match (Q2b, DL-58). The IR models carry nothing for it.
-- Q3 (time trigger with false conditions): arm-and-wait, with no expiry (DL-54, DL-58). The
-  oracle holds it in `JobRuntime.armed` and the releasable-gate latch; L019 flags the
-  UC-side gap. There is no `ScheduleBlock` switch, because nothing suggests the behavior is
-  configurable. The residue is Q3c, the arm's scope inside a box: the pinned default is that
-  a member's unconsumed arm ends with the box run, until a live instance settles it.
+The rules are in `autosys-semantics.md` (SEM-03, SEM-04, SEM-32; Q1 to Q3 in its §9). This
+section names where the code holds them.
+
+- Q1 (precedence, DL-53): one lark rule (§3) and the canonical form's stable operand sort
+  (§6). The IR models carry nothing for it.
+- Q2 (lookback-0 anchor): the oracle reads the dependent's `JobRuntime.last_end_at` (Q2a,
+  DL-54). A dependent that never ended satisfies the qualifier, and the producer's status
+  must still match (Q2b, DL-58). The IR models carry nothing for it.
+- Q3 (arm-and-wait, DL-54, DL-58): the oracle holds the arm in `JobRuntime.armed`, and L019
+  flags the UC-side gap. `ScheduleBlock` has no switch for it, because nothing suggests the
+  behavior is configurable. The residue is Q3c: a member's unconsumed arm ends with the box
+  run, until a live instance settles it.
