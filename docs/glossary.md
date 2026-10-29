@@ -178,9 +178,10 @@ See [access-model.md §1](access-model.md#1-the-model),
 
 ### period
 
-One release cycle of an estate: one catalog, one runtime profile and one
-state-machine version. It is named by `period_id` and `baseline_id`, lives in
-one segment and ends with a seal.
+One stretch of an estate's run under one catalog, one runtime profile and
+one state-machine version. It is named by `period_id` and `baseline_id`,
+lives in one segment and ends with a seal; opening its successor starts a
+new segment, even when the catalog and runtime profile are unchanged.
 See [period-model.md §1](period-model.md#1-identities).
 
 ### preflight
