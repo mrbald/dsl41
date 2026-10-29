@@ -599,9 +599,9 @@ dsl41 query status --socket $S --job AMER_MKT_FX_C   # still SUCCESS (run 2, if 
 every box's `ran_members` and every `run_number` cross the boundary,
 because the boundary is a record and not a new directory
 (`docs/period-model.md` §3.3). What does not cross is the catalog and the
-launch options — those ARE the new period. The old
-`deployment-runbook.md` §6 sentence "latches die with the old baseline" is
-true only of the fresh-run-root cycle and is corrected there.
+launch options — those ARE the new period. An armed latch crosses a
+seal; a fresh run root drops it. `deployment-runbook.md` §6 says
+"Latches are run-root state and die with the old run root".
 
 ## 17. The morning after — audit, verify, the attested row
 
