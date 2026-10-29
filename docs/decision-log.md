@@ -24793,3 +24793,42 @@ relitigate an entry; append a new one.
   The explore page's snapshot globals are a slice of their own.
   FOR THE OWNER. Whether the apply becomes a declared chart, and whether the verbs move to the
   in-process control client.
+- DL-421 access-model: the release and estate verbs get their tiers, and the release train's
+  sudo grant is a door of its own, outside the gate (2026-10-29; docs/access-model.md §2,
+  §10 and §12; src/dsl41/release_service.py; tests/test_access.py)
+  THE TIERS. §10 named no tier for the verbs DL-407, DL-412 and DL-413 added. By DL-311's two
+  tests, composition and what a verb writes: `estate args`, `estate diff` and `estate build` are
+  read-shaped, pure-compiler verbs; args and diff write nothing, and build writes its `--out`
+  directory and runs the author's own modules as `build` does. `release status` is read-shaped: it
+  reads ACTIVE, the releases, the apply record and the receipts, and sends `query` only. `release
+  prepare`, `--requalify` included, is adm: it stages the release that ACTIVE and the seal later
+  select, as the `seal` verb stages C2 files. `release apply`, `resume` and `rollback` are adm by
+  composition, ops socket verbs plus the seal and the write of ACTIVE. `estate quiesce` is adm by
+  composition, seal, audit and `supervise shutdown`. `release service` is adm by composition, the
+  seal and its writes under ESTATE_RELEASES; it runs only as the service account. The rows
+  describe the verbs; the only enforcement stays filesystem access (§2).
+  THE DOOR. The deployment identity that runs `dsl41 release` can neither read the run root nor
+  write under a release. It holds a sudoers grant: `dsl41 release service *` as the service
+  account, and `systemctl start` of the engine unit as root (DL-412). That grant is a door of its
+  own, outside the gate: sudo and the service dispatcher decide what it admits, as the kernel
+  decides the filesystem path. The role map, the three tiers and §11's rule govern the guarded
+  doors only. The dispatcher accepts nine actions, each with a fixed shape: names, request ids and
+  a job name it checks; prepare's source directory, read only where the deployment identity could;
+  and a receipt's JSON body, stored as given. The grant's service line reaches
+  `release_service.service` and the checks it calls on its arguments, so a change there changes
+  the door with no sudoers edit and takes the semantic review class; §12's obligation 12 pins the
+  action list to the dispatcher. Revoking the door is removing the grant. It lands at the next
+  service call, not at a reload; an apply caught between calls stops with exit 3 and its record
+  kept, for an account that holds the grant to resume it, or to roll it back once its period has
+  opened. The identity's tier on the wire is the map's, and §7 revokes it. Attribution: the WAL
+  inputs the apply's hold and release requests produce carry the actor the gate wrote,
+  `os/<name>`, under the request id the apply recorded for each; a request the gate denies or the
+  engine refuses produces none; the seal claims `os/<service account>` under its own id; the
+  release receipt, once written, holds the ids of the holds it settled and of the seal that
+  committed. The perimeter journal records each ops admission and each denial by realm and name,
+  without an id. The root act is outside the model.
+  REVIEW. Found by the spec review of access-model.md (2026-10-29); one Opus reviewer and one
+  Astra pass, since §2 and §10 are frozen (DL-231, DL-225). Opus moved the attribution from the
+  perimeter journal to the WAL and the receipt and set the door outside the gate instead of inside
+  adm; Astra limited the take-over to an opened period and tied attribution to the inputs the
+  requests produce.

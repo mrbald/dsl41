@@ -1,8 +1,8 @@
 # Access model — three tiers at the perimeter
 
 Status: **frozen (DL-231).** Design DL-146; rules from DL-147, DL-148,
-DL-149, DL-150, DL-151, DL-152, DL-158, DL-256, DL-272, DL-275, DL-311
-and DL-314. This
+DL-149, DL-150, DL-151, DL-152, DL-158, DL-256, DL-272, DL-275, DL-311,
+DL-314 and DL-421. This
 document is the design of record for `runner_access.py`, the control-plane
 gate and the served web TUI. A change to a frozen item requires a
 decision-log entry, as in `docs/control-protocol.md`. The authentication
@@ -75,6 +75,32 @@ Not guarded, by ruling:
   opens to `0710` traversal too (§8). `supervise shutdown` can kill every
   managed command, and it stays an owner-only act. It may later move
   behind the same gate; nothing in this model blocks that.
+- **The release train's service side is a door of its own** (DL-421). The
+  deployment identity that runs `dsl41 release` can neither read the run
+  root nor write under a release. It holds a sudoers grant: `dsl41 release
+  service *` as the service account, and `systemctl start` of the engine
+  unit as root (DL-412). Sudo and the service dispatcher decide what that
+  door admits, as the kernel decides the filesystem path above. The role
+  map, the tiers and §11 govern the guarded doors only. The dispatcher
+  accepts nine actions: prepare, requalify, receipt, check, changes, seal,
+  committed, holds and pins. Each has a fixed shape: release names,
+  request ids and a job name, which the service side checks; prepare's
+  source directory, which it reads only where the deployment identity
+  could; and a receipt's JSON body, which it stores as given. The grant's
+  service line reaches `release_service.service` and the checks it calls
+  on its arguments, so a change there changes the door with no sudoers
+  edit and takes the semantic review class; §12's obligation 12 pins the
+  action list. Revoking the door is removing the grant. It lands at the
+  next service call, not at a reload; an apply caught between calls stops
+  with its record kept, for an account that holds the grant to resume it,
+  or to roll it back once its period has opened. The identity's tier on
+  the wire is the map's, and §7 revokes it. The WAL inputs the apply's
+  hold and release requests produce carry the actor the gate wrote,
+  `os/<name>` (§3), under the request id the apply recorded for each; a
+  request the gate denies or the engine refuses produces none. The seal
+  claims `os/<service account>` under its own id. The release receipt,
+  once written, holds the ids of the holds it settled and of the seal
+  that committed. The root act, starting one unit, is outside this model.
 
 ## 3. Local authentication: kernel peer credentials
 
@@ -541,15 +567,28 @@ CLI semantic tiers (the only enforcement is filesystem access, and these
 tiers enforce nothing, §2):
 
 - Read-shaped: `query *`, `host list`, `supervise list`, `journal`,
-  `runs`, `verify`, offline `rehearse`, and every pure-compiler verb.
+  `runs`, `verify`, offline `rehearse`, `release status` (it reads
+  `ACTIVE`, the releases, the apply record and the receipts, and sends
+  `query`; DL-421), and every pure-compiler verb, `estate args`, `estate
+  diff` and `estate build` among them (args and diff write nothing; build
+  writes its `--out` directory and runs the author's modules as `build`
+  does; DL-421).
 - Ops: `sendevent`, `release-held` (a sweep of `sendevent OFF_HOLD`
   requests, so ops by composition; DL-311), `host
   activate`/`drain`/`evict` and `supervise shutdown`.
 - Adm: `run`, `serve`, `audit` (it writes attestations and registry
   state), `seal` (it stages C2 files before the ops verb; staging may
-  later be split from committing), `estate prune`, `estate reclaim`, and
+  later be split from committing), `estate prune`, `estate reclaim`,
   `supervise start` (it creates the run root and writes the supervisor
-  log there; DL-311).
+  log there; DL-311), `release prepare`, `--requalify` included (it
+  stages the release that `ACTIVE` and the seal later select, as `seal`
+  stages C2 files; DL-421), `release apply`, `release resume` and
+  `release rollback` (ops socket verbs, the seal and the write of
+  `ACTIVE`, so adm by composition; DL-421), `estate quiesce` (seal, audit
+  and `supervise shutdown`, so adm by composition; DL-421), and `release
+  service` (the seal and its writes under `ESTATE_RELEASES`, so adm by
+  composition; it runs only as the service account, and the deployment
+  identity reaches it through the door of §2 alone; DL-421).
 
 `supervise shutdown` is ops-shaped: it operates and configures nothing.
 Its only door is the owner-`0600` supervisor socket (§2). So the
@@ -609,3 +648,6 @@ Tests are named `test_access_*`. These obligations hold (DL-146):
 11. `runner_access.py` is under CI's 100% branch-coverage gate
     (`[tool.coverage.report]`). A test exercises every refusal arm; no
     arm is only claimed.
+12. The door of §2: the actions §2 lists are exactly the ones
+    `release_service.service` accepts, as obligation 4 holds the socket
+    table to the dispatcher (DL-421).
