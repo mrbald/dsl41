@@ -54,6 +54,11 @@ Graph-rule readings:
   and reports a time whose result is not one instant at its written wall time. The message
   prints what the runner computes and says so where the docs mark the change shape unverified.
   It never changes what the runner does.
+- L024 and L025 read the idempotence sidecar (DL-424), which lint receives as `exceptions`; with
+  None both are inert. L024 is an info finding per job the file names, so an operator sees
+  every job whose interrupted attempt waits for a decision; info never fails `--strict`. L025
+  is an error for a name in the file that the catalog does not define or defines as a box or a
+  file watcher.
 """
 
 from __future__ import annotations
@@ -78,6 +83,7 @@ from dsl41.conditions import (
     lookback_pitfalls,
 )
 from dsl41.derive import DerivedGraph, derive_graph, local_job, local_producer, start_gates
+from dsl41.idempotence import EXCEPTIONS_FILE, Exceptions
 from dsl41.ir import (
     TIME_CLUSTER,
     CatalogIR,
@@ -1493,6 +1499,60 @@ def rule_l023(
     return out
 
 
+# --------------------------------------------------------------- the idempotence sidecar
+
+
+#: Job types with no attempt to interrupt: a box has no process, a file watcher resumes from its
+#: own log (DL-424).
+NO_ATTEMPT_TYPES: frozenset[str] = frozenset({"BOX", "FW"})
+
+
+def rule_l024(catalog: CatalogIR, exceptions: Exceptions | None = None) -> list[Violation]:
+    """One info per job the exceptions file names and the catalog defines (DL-424)."""
+    if exceptions is None:
+        return []
+    out: list[Violation] = []
+    for job in catalog.jobs.values():
+        reason = exceptions.reason(job.name)
+        if reason is None or job.job_type in NO_ATTEMPT_TYPES:
+            continue
+        out.append(
+            Violation(
+                code="L024",
+                severity="info",
+                message=(
+                    f"job {job.name!r} is declared non-idempotent ({reason}): an interrupted"
+                    " attempt waits for the operator"
+                ),
+                jobs=[job.name],
+                span=job.span,
+                detail=job.name,
+            )
+        )
+    return out
+
+
+def rule_l025(catalog: CatalogIR, exceptions: Exceptions | None = None) -> list[Violation]:
+    """One error per name in the exceptions file that the catalog does not define, or defines
+    as a box or a file watcher, which have no attempt to interrupt (DL-424)."""
+    if exceptions is None:
+        return []
+    out: list[Violation] = []
+    for name in exceptions.names:
+        job = catalog.jobs.get(name)
+        if job is None:
+            message = f"{EXCEPTIONS_FILE} names {name!r}, which the estate does not define"
+        elif job.job_type in NO_ATTEMPT_TYPES:
+            message = (
+                f"{EXCEPTIONS_FILE}: {name!r} names a box or a file watcher; only command jobs"
+                " can be declared"
+            )
+        else:
+            continue
+        out.append(Violation(code="L025", severity="error", message=message, detail=name))
+    return out
+
+
 # ------------------------------------------------------------------------------ registry
 
 RuleFn = Callable[[CatalogIR], list[Violation]]
@@ -1514,6 +1574,8 @@ RULES: tuple[tuple[str, RuleFn], ...] = (
     ("L019", rule_l019),
     ("L020", rule_l020),
     ("L023", rule_l023),
+    ("L024", rule_l024),
+    ("L025", rule_l025),
 )
 
 GRAPH_RULES: tuple[tuple[str, GraphRuleFn], ...] = (
@@ -1542,12 +1604,14 @@ def lint_catalog(
     base_tz: str | None = None,
     tz_aliases: Mapping[str, str] | None = None,
     today: date | None = None,
+    exceptions: Exceptions | None = None,
 ) -> LintReport:
     """Run every registered rule: IR-F rules first, then graph rules, each in code order.
 
     The derived graph is computed once unless the caller passes it. `base_tz`, `tz_aliases`
     and `today` reach L023 only: the zone for a schedule without `timezone` (UTC when None),
-    the `--timezone-map` table, and the reference date.
+    the `--timezone-map` table, and the reference date. `exceptions` reaches L024 and L025 only;
+    with None both are inert.
     """
     if graph is None:
         graph = derive_graph(catalog)
@@ -1557,6 +1621,10 @@ def lint_catalog(
             violations.extend(
                 rule_l023(catalog, base_tz=base_tz, tz_aliases=tz_aliases, today=today)
             )
+        elif code == "L024":
+            violations.extend(rule_l024(catalog, exceptions))
+        elif code == "L025":
+            violations.extend(rule_l025(catalog, exceptions))
         else:
             violations.extend(rule(catalog))
     for _code, graph_rule in GRAPH_RULES:
