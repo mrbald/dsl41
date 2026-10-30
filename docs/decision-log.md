@@ -842,6 +842,7 @@ relitigate an entry; append a new one.
   across restarts. Residual accepted matrix: -9 of a wrapper alone or
   of a whole tree at once -> detected at resume, reported truthfully
   (E7), never guessed.
+  NARROWED BY DL-424: (1) to (5) and (7), the wrapper shim, stay; (6) and (8) are retired.
 - DL-42 Lifecycle tier spin-off: extract-on-trigger, not now (2026-07-11;
   immediate repo+pipeline+package extraction was considered; two
   independent reviews converged on the same verdict). Decisions: (1) The niche is REAL but
@@ -893,6 +894,7 @@ relitigate an entry; append a new one.
   (before/after spawn.json, post-fork pre-exec, post-wait pre-write,
   post-write pre-reap, ENOSPC, stale socket, spoofed spawn.json,
   boot_id flip).
+  NARROWED BY DL-424: (3), the wrapper's boundary and spool format, stays; the tier retires.
 - DL-43 Phase 11a landed: engine determinism pins (2026-07-11; found and
   decided during implementation, all within DL-41's frame; runner.py's
   module docstring is normative detail). Decisions: (1) The engine's event
@@ -1421,6 +1423,7 @@ relitigate an entry; append a new one.
   hardening); the unbounded request-line buffer and the blocking spec write
   are same-uid-only surfaces, theoretical; the _refuse_if_live unlink race
   is unreachable while the engine is the only spawner.
+  SUPERSEDED BY DL-424: the supervisor tier and detached mode are retired in 2.0.0.
 - DL-49 insert_machine virtual/real pools + runner machine resolution
   (2026-07-12).
   Two coupled fixes for a `dsl41 run` refusal ("machine X is not this
@@ -3125,6 +3128,7 @@ relitigate an entry; append a new one.
   `test_lease_held_reacquire_and_fencing_monotonicity` pinned exactly the
   removed behaviour and now presents the token where it used to present
   the label alone.
+  SUPERSEDED BY DL-424: the supervisor lease and its fencing are retired in 2.0.0.
 
 - DL-80 the supervisor lease carries an incarnation id (2026-08-14; raised
   by the user reviewing DL-79 the same day, and it is a hole DL-79 itself
@@ -3168,6 +3172,7 @@ relitigate an entry; append a new one.
   client does, so the existing protocol tests keep their original intent;
   `test_mutating_verbs_require_a_token` now pins both gates separately.
   1860 -> 1861 passed, 4 skipped.
+  SUPERSEDED BY DL-424: the supervisor lease and its incarnation id are retired in 2.0.0.
 
 - DL-81 an explicit start against a live job is no longer silent
   (2026-08-14; DL-64's remaining corner, shipped standalone because it is
@@ -3344,6 +3349,7 @@ relitigate an entry; append a new one.
   and both S2's admission and S5's effects depend on storage, election and
   relay contracts, which is why those are S0 text rather than S6
   discoveries.
+  NARROWED BY DL-424: host lifecycle, epoch and outbox retired; request-id dedup and `expect` stay.
 - DL-85 the model harness lands before the code it validates, and an
   adapter call turns out not to be an effect application (2026-08-14;
   stage H of the phase-12 programme, `tests/model_harness.py` +
@@ -3978,6 +3984,7 @@ relitigate an entry; append a new one.
   here — the sweep that grew is a distinct concern and pulling it out is an
   architecture change, which gets its own commit rather than riding inside
   a slice.
+  SUPERSEDED BY DL-424: the routing table and its operator verbs are retired in 2.0.0.
 - DL-95 the deadman: one interval, one exit, and the two producers the
   eviction bound was missing (2026-08-15; stage S5b, DL-93's second slice).
   Closes CM-10 and makes CM-11's bound computable from real state. The
@@ -4033,6 +4040,7 @@ relitigate an entry; append a new one.
   two validations. Extraction is an architecture change and gets its own
   commit — `_running_deadman` came out of `_serve_run` because it names a
   concern, not to buy back lines.
+  SUPERSEDED BY DL-424: the deadman is retired in 2.0.0.
 - DL-96 the effect outbox: intent before the attempt, and the orphaned run
   that proves why (2026-08-15; stage S5c, DL-93's third slice). Closes
   CM-09's application half and CM-06's `outcome_unavailable`. §5's four
@@ -4323,6 +4331,7 @@ relitigate an entry; append a new one.
   (runner.py 1389 -> 1454 lines, over the advisory note, and DL-98 already
   declined the same finding for cli.py on the same grounds: splitting it is
   its own commit with its own seam argument).
+  NARROWED BY DL-424: the `leader.lock` flock stays; the epoch and its election are retired.
 - DL-101 the fence: every append re-proves leadership (2026-08-15; stage
   S6b, DL-99's second slice). ss7 carries the amendment; this entry is the
   shape.
@@ -4359,6 +4368,7 @@ relitigate an entry; append a new one.
   adopted them.
   Mutation-tested: with the check disabled all three fence tests red.
   2051 -> 2054 passed; ruff, mypy, arch_check blocking checks clean.
+  NARROWED BY DL-424: the epoch proof is retired in 2.0.0; the lock re-check before an append stays.
 - DL-102 the takeover barrier, and the start that gets re-driven rather than
   failed (2026-08-15; stage S6c, DL-99's third slice, closing S6). ss7 and
   runner-design ss7 carry the amendments; this entry is the shape. Closes
@@ -4399,6 +4409,7 @@ relitigate an entry; append a new one.
   drain's held work and nobody had met it, because the `activate` that
   released it was itself an input. Also mutation-tested.
   2054 -> 2057 passed; ruff, mypy, arch_check blocking checks clean.
+  SUPERSEDED BY DL-424: the takeover barrier and host reconciliation are retired in 2.0.0.
 - DL-103 S6 closes, and the relay's trigger did not fire (2026-08-15;
   stage close-out). ss10 carries the amendment. Three slices landed --
   DL-100 election, DL-101 the fence, DL-102 the barrier -- and ss1's five
@@ -4978,6 +4989,7 @@ relitigate an entry; append a new one.
   broken implementation pass is a defect of the same rank as a wrong mechanism.
   DL-115..DL-127 below are the decisions the document contains, stated once
   each so they are citable; the document carries the reasons.
+  SUPERSEDED BY DL-424: periods, seals, the carry, lineage and the roll are retired in 2.0.0.
 - DL-115 the directory is not the baseline (2026-08-20; period-model §1). Five
   identities: estate (`estate_id`, uuid4 at genesis), estate root (a path, and
   only a path), period (`period_id`, `baseline_id`; one catalog + one runtime
@@ -4991,6 +5003,7 @@ relitigate an entry; append a new one.
   else → refuse. Rolling the estate root is optional archival hygiene: the seal
   and opening are byte-identical whether the next period continues in place or
   opens a fresh root (PR-24).
+  SUPERSEDED BY DL-424: periods are retired in 2.0.0; a run root is period 1 for its whole life.
 - DL-116 the lineage fence (2026-08-20; period-model §1.3). Four head states
   `open | closed | claimed | adopting` in an anchor at a path outside any
   archivable root; `claim_successor` is a CAS idempotent on `claim_id =
@@ -5004,6 +5017,7 @@ relitigate an entry; append a new one.
   and head; two leadership truths is the failure mode. The anchor's `periods`
   map is the archive registry; a period's row is inserted when a root first
   owns it, provisional until its segment is durable.
+  SUPERSEDED BY DL-424: the lineage fence is retired in 2.0.0; the `leader.lock` flock stays.
 - DL-117 `baseline_id` is the period's, and derived (2026-08-20; period-model
   §3.4, §4). Every transition derives `baseline_id = sha256(estate_id,
   period_id, stage_digest)`; a command composed under C1 is refused after C2
@@ -5015,6 +5029,7 @@ relitigate an entry; append a new one.
   and profile identity; the engine derives `period_id = current + 1`,
   `segment_no = period_id`, `baseline_id`, `clock_domain = current`, and
   `first_index = closes_at_index + 1` after the cutoff.
+  SUPERSEDED BY DL-424: periods and their `baseline_id` are retired in 2.0.0.
 - DL-118 the atomic `decision` record and control-protocol v3 (2026-08-20;
   period-model §2). `result` plus standalone `effect` records become one
   `decision` line carrying the decision, revisions and effects in admission
@@ -5042,6 +5057,7 @@ relitigate an entry; append a new one.
   checkpoint reproducible from its opening checkpoint and its period's inputs
   — "verified" means re-derived by `audit`, not self-consistent; `verify`
   (attestation binding) is a different verb; attestation N requires N−1.
+  NARROWED BY DL-424: the seal artifact is retired in 2.0.0; the canonical form stays.
 - DL-120 capacity decomposed (2026-08-20; period-model §5). DL-86's move
   finished: `CapacityReservation {bucket, units > 0, release_policy}` and
   `waiter_seq` live on `JobRuntime`; `consumed` (≥ 0, ghost buckets survive a
@@ -5089,6 +5105,7 @@ relitigate an entry; append a new one.
   against the **closing** period's `retry_horizon_us`; naming a horizon
   weakens `control-protocol.md` §3's unbounded exact-retry promise (no wire
   change, this entry).
+  NARROWED BY DL-424: boundary classification retired in 2.0.0; `retry_horizon_us` is dormant.
 - DL-124 the seal operation (2026-08-20; period-model §6–§8). `dsl41 seal` in
   live mode (control verb; the engine seals in its single-writer loop and
   exits 3) or offline mode (takes both locks, runs the recovery barrier);
@@ -5103,6 +5120,7 @@ relitigate an entry; append a new one.
   `abort_boundary` runs on every exit inside it. The cutoff watermark is
   `scheduler_admitted_through: T`; C1 owns ticks ≤ T. **A transition may not
   change `state_machine_version`**: an SM bump stays a new estate.
+  SUPERSEDED BY DL-424: the seal operation is retired in 2.0.0.
 - DL-125 adoption (2026-08-20; period-model §11). `dsl41 estate adopt`: take
   both locks, mint `estate_id`, reconstruct legacy state read-only, phase-1
   readiness, then fence (hard-link, sentinel over `journal.jsonl`), then
@@ -5115,6 +5133,7 @@ relitigate an entry; append a new one.
   SUPERSEDED BY DL-138: adoption from a legacy estate is ruled out and the
   whole `dsl41 estate adopt` path is stripped. This entry stays for its
   citations and for the shape a migration would have to take.
+  SUPERSEDED BY DL-424: adoption is retired in 2.0.0.
 - DL-126 `deadman_s` leaves the host semantic projection (2026-08-20;
   concurrency-model §3 amended by period-model §3.3). It joins `last_contact`
   in `_UNPROJECTED_HOST`: it is observed liveness configuration read back from
@@ -5124,6 +5143,7 @@ relitigate an entry; append a new one.
   is null until the host re-registers in a new period, and a null deadman is
   not evictable except by force. An evicted host's return stays the relay's
   (CM-12); this spec records nothing for it.
+  SUPERSEDED BY DL-424: the deadman and the host projection are retired in 2.0.0.
 - DL-127 retention floors (2026-08-20; period-model §11a, §12). Policy is a
   business decision; the floors are not: never prune the sentinel, anchor,
   active claim, the opening and closing sidecars, current and committed-next
@@ -5132,6 +5152,7 @@ relitigate an entry; append a new one.
   gates the rest), the spool of any live or carried execution, or any SPAWN
   tombstone whose effect can still be replayed — deleting one authorizes a
   spawn.
+  SUPERSEDED BY DL-424: retention floors are retired in 2.0.0; the store keeps 90 days of journal.
 - DL-128 canonical form: "control character" is Unicode Cc (2026-08-20;
   period-model §3.2 amended at build of `canon.py`). The frozen text said
   "every other control character `\u00XX`" and the first implementation read
@@ -5177,6 +5198,7 @@ relitigate an entry; append a new one.
   signal must NAME the run; and the watch fold refuses a line of unknown
   kind or foreign identity. The
   per-poll anchor-fence re-check and the §6 seal barrier are not built here.
+  NARROWED BY DL-424: the supervisor is retired in 2.0.0; the watch keeps its evidence log.
 - DL-130 a period gets its name, its inputs and its launch options
   (2026-08-20; period-model ss1.1 and ss2.1, built as PR-07a / PR-08a /
   PR-08c / PR-15 / PR-15a / PR-22's first half). Four things land together
@@ -5248,6 +5270,7 @@ relitigate an entry; append a new one.
   same reason. Out of scope by construction: the seal, `wal/`, the sentinel, the
   anchor, `periods/.staging/` and adoption. 2325 -> 2410 passed; ruff,
   mypy and arch_check clean.
+  NARROWED BY DL-424: periods are retired in 2.0.0; `estate.toml` stays the input declaration.
 - DL-131 the classifier reads a graph nobody had, in two directions
   (2026-08-20; period-model ss10, built as PR-37, PR-37a, PR-38..PR-44).
   `classify.py` answers one question per boundary: C1 is open and holds
@@ -5323,6 +5346,7 @@ relitigate an entry; append a new one.
   review pass found no blocker and one leaking test -- a SEM-05 arm whose
   two cases were both false under the rule and without it -- rebuilt so
   that removing the ice branch from the interpreter reds it.
+  SUPERSEDED BY DL-424: the classifier is retired in 2.0.0.
 - DL-132 the period writes itself down: one sidecar, and the two functions
   over it (2026-08-20; period-model ss3 and ss4, built as PR-05b, PR-05c,
   PR-07's opening half, PR-08, PR-08d, PR-10a..PR-14, PR-18a, PR-19a,
@@ -5453,6 +5477,7 @@ relitigate an entry; append a new one.
   would let a later carry overwrite an R before the model ever saw it --
   so `close_runtime` refuses on `Classification.refused` and on duplicate
   verdicts, on the classifier's own object.
+  NARROWED BY DL-424: the period boundary is retired in 2.0.0; a run root keeps its manifest.
 
 - DL-133 the period gets a boundary: the anchor, the cutoff, and the three
   writes that end a period (2026-08-20; period-model ss1.1, ss1.2, ss1.3,
@@ -5706,6 +5731,7 @@ relitigate an entry; append a new one.
   already-raised corpses keeps `shutdown` from raising the same failure a
   second time to the caller who just observed it -- teardown collects,
   it does not repeat.
+  SUPERSEDED BY DL-424: the anchor, the cutoff and the boundary writes are retired in 2.0.0.
 - DL-134 the estate gets its verbs: the seal an operator runs, the proof
   that lets a root be archived, and the two ways a root joins a lineage
   (2026-08-20; period-model ss1.3, ss7, ss8, ss11 and ss13's PR-01c,
@@ -5982,6 +6008,7 @@ relitigate an entry; append a new one.
   `attested` row over a merely-visible checkpoint survives a power cut
   the checkpoint does not. The idempotent early return fsyncs the
   observed checkpoint on the same rule.
+  SUPERSEDED BY DL-424: the estate verbs are retired in 2.0.0; `reread` and `update` replace them.
 - DL-135 what may never be deleted, and the subscriber that stopped
   losing a period (2026-08-20; period-model ss11a, ss12 and ss13's PR-36b,
   PR-36c and PR-49's backfill half, built as build unit U8). DL-134 left
@@ -7270,6 +7297,7 @@ relitigate an entry; append a new one.
   more -- the `held` verdicts that used to cite it now cite DL-144 and
   say which dependency is in the way. ops-model ss11's E20 closes with
   it.
+  SUPERSEDED BY DL-424: the archive is retired in 2.0.0.
 - DL-145 the review after the reset: what seven units of building left
   behind (2026-08-22; the DL-75 architecture review over the
   DL-138..DL-144 drift -- 22,296 lines since arch-review/2026-08-21 --
@@ -13406,6 +13434,7 @@ relitigate an entry; append a new one.
   Left alone, deliberately: per-run cgroup scopes, the wrapper's
   parent-lost path, and the supervisor's client-visible protocol version,
   which is unchanged.
+  SUPERSEDED BY DL-424: the supervisor and the period roll are retired in 2.0.0.
 - DL-211 CI measures coverage once, on the interpreter where measuring is
   free; the two spin tests stop spinning (2026-09-18)
   The DL-209 merge's `tests` run on main was cancelled by the job's
@@ -13868,6 +13897,7 @@ relitigate an entry; append a new one.
   It asserts what the CLI does today with a configured map that is missing
   or malformed on the resume path: exit 2, naming the map, before the root
   is read or written.
+  SUPERSEDED BY DL-424: the two-unit example and the service drill are retired in 2.0.0.
 
 - DL-219 A restoration drill: quiescent backup and restore, over the real
   machinery, at a fixed path (2026-09-28)
@@ -13917,6 +13947,7 @@ relitigate an entry; append a new one.
   `root` to the `--run-root` actually passed, only the estate id. Whether
   resume should compare and refuse is undecided; no test here pins the
   current, unrefused behavior as something to preserve.
+  SUPERSEDED BY DL-424: the drill and the lineage it exercised are retired in 2.0.0.
 
 - DL-220 Two mypy flags, not `strict`: `warn_return_any` and
   `disallow_any_generics`, and `list_runs()` returns a typed reply (2026-09-28)
@@ -14216,6 +14247,7 @@ relitigate an entry; append a new one.
   was cut.
   Also here: `tests/test_nightbank_deploy.py`'s `base` fixture folds into
   the shared `short_root`, the copy DL-221 named as the next to fold.
+  SUPERSEDED BY DL-424: the service drill and the release rehearsal are retired in 2.0.0.
 
 - DL-224 `run --resume` refuses a root its anchor does not name; DL-219's
   open item closes (2026-09-30)
@@ -19208,6 +19240,7 @@ relitigate an entry; append a new one.
   noted the wrong reason for "come back due". All are fixed here, and the
   reviewer confirmed them. Its note that the spec-review skill still names
   stonebranch-semantics.md is out of scope: that skill is instruction text.
+  NARROWED BY DL-424: the UC backend is removed in 2.0.0; the Q12 descoping stands.
 - DL-289 Runner state machines get transition tables, and a gate requires
   every transition to be taken by a test
   (2026-10-08; src/dsl41/state_machine.py, src/dsl41/machines.py,
@@ -19326,6 +19359,7 @@ relitigate an entry; append a new one.
   stale test docstrings, a repeat test that could not fail, and wording on
   the tolerance. All are fixed and confirmed by the reviewer that raised
   them.
+  SUPERSEDED BY DL-424: the anchor head and the period row are retired in 2.0.0.
 - DL-291 The supervisor tier is three state machines, and lease renewal
   never stops while the client is open
   (2026-10-08; src/dsl41/runner_supervisor.py, src/dsl41/runner_adapters.py,
@@ -19397,6 +19431,7 @@ relitigate an entry; append a new one.
   found a loop that an unexpected error still ended, and an unguarded
   second teardown. Both found stale wording. All are fixed, over three
   rounds, and confirmed by the reviewer that raised them.
+  SUPERSEDED BY DL-424: the supervisor tier is retired in 2.0.0.
 - DL-292 A control input is dry-applied before it is admitted, a transition
   violation has one channel and one policy, and a replayed fault names its
   input
@@ -20019,6 +20054,7 @@ relitigate an entry; append a new one.
   confirmed by the reviewer. The runbook is not a frozen contract, and the
   two new recipe sentences were proven by the drill and checked against
   src/dsl41/runner_access.py, so no second-vendor pass ran.
+  SUPERSEDED BY DL-424: the service drill is retired in 2.0.0.
 - DL-304 A box whose start leaves no member in the run completes at its
   start; an iced member is out only when nothing inside it runs; a nested
   re-trigger loop is refused (state machine 19)
@@ -20300,6 +20336,7 @@ relitigate an entry; append a new one.
   line, a ranking rule that would rank tied machines, a card that missed
   its row's open finding, and loose wording in the runbook's drill
   paragraph. All are fixed and confirmed by the reviewer.
+  SUPERSEDED BY DL-424: the service drill is retired in 2.0.0.
 - DL-309 A completed box keeps its status through an iced member, and the
   walk from a job up to its boxes is bound to their runs (state machine 20)
   (2026-10-09; src/dsl41/oracle.py, oracle_state.py, semantics.py,
@@ -21092,6 +21129,7 @@ relitigate an entry; append a new one.
   two copies until `supervisor_process` converts. An action that raised inside the belt would end
   with a traceback rather than the exit-7 report; it cannot happen with this chart, and it is a
   stated limit until the supervisor's other machines convert.
+  SUPERSEDED BY DL-424: the supervisor's lease is retired in 2.0.0.
 - DL-327 The seal boundary runs on the statechart executor; a statechart error in a seal stops
   the engine with exit 7
   (2026-10-11; src/dsl41/runner_seal.py (new), src/dsl41/runner.py, src/dsl41/cli_estate.py;
@@ -21146,6 +21184,7 @@ relitigate an entry; append a new one.
   would answer `internal_error` to a statechart error raised while a request starts its instance; no
   such error can arise here (an identity key, no entry action), and the subscription slice, which
   lives on the belt, fixes the belt.
+  SUPERSEDED BY DL-424: the seal boundary is retired in 2.0.0.
 - DL-328 The supervisor's lifecycle runs on the statechart executor; the fence rule has one copy
   (2026-10-11; src/dsl41/runner_supervisor.py; docs/supervisor-protocol.md §1;
   docs/statechart-engine.md §16)
@@ -21207,6 +21246,7 @@ relitigate an entry; append a new one.
   is a candidate for the executor's next revision. runner_supervisor.py is over the size advisory; a
   sibling module would change the extraction set §1 lists, and the fence guards are shared, so it
   stays whole for now. The executor's history in an error report now holds both machines.
+  SUPERSEDED BY DL-424: the supervisor's lifecycle is retired in 2.0.0.
 - DL-329 The subscribe feed runs on the statechart executor; a statechart error in a control handler
   stops the engine with exit 7
   (2026-10-12; src/dsl41/runner_journal.py, src/dsl41/runner_control.py, src/dsl41/cli_run.py,
@@ -21314,6 +21354,7 @@ relitigate an entry; append a new one.
   close awaits tasks that have already handed their error over, and the transport's wait and the
   exit future a push resolves cannot raise one.
   OPEN. runner_adapters.py is over the size advisory; the chart could move to a sibling module.
+  SUPERSEDED BY DL-424: the supervisor client is retired in 2.0.0.
 
 - DL-331 The effect runs on the statechart executor: one instance per open effect, forgotten at its
   outcome
@@ -21364,6 +21405,7 @@ relitigate an entry; append a new one.
   OPEN. The per-effect cost above: the executor could cache each row's domain and exit top; that
   refinement comes before the oracle's conversion, which will post far more. runner_journal.py is
   over the size advisory.
+  SUPERSEDED BY DL-424: the effect outbox is retired in 2.0.0.
 
 - DL-332 The statechart executor plans each external row once per chart
   (2026-10-12; src/dsl41/state_machine.py)
@@ -21445,6 +21487,7 @@ relitigate an entry; append a new one.
   OPEN. oracle_state.py is over the size advisory. Every gate check and every fork builds a new
   executor restored from the rows: one instance today, DL-325's cheap-fork question for the job
   machines.
+  SUPERSEDED BY DL-424: the host routing row is retired in 2.0.0.
 
 - DL-334 The admission of one request id runs on the statechart executor: the instance is the
   in-flight window, from the attempt line to the decision
@@ -21492,6 +21535,7 @@ relitigate an entry; append a new one.
   COST. Replaying a period's index costs about 18 microseconds per input, up from 6: at the target
   load, a thirty-day replay's index pass goes from a tenth of a second to a third.
   OPEN. runner_admission.py is over the size advisory.
+  NARROWED BY DL-424: request-id admission stays; its epoch and host checks are retired in 2.0.0.
 
 - DL-335 The state owner's assembly runs on the statechart executor; the executor gains a
   selection read
@@ -21580,6 +21624,7 @@ relitigate an entry; append a new one.
   CHECKS. STATE_MACHINE_VERSION is unchanged: the anchor's shape and every derivation stay. The
   strict test variable and the run option no longer apply to these machines.
   OPEN. boundary.py is over the size advisory; the risk map's open anchor items stand.
+  SUPERSEDED BY DL-424: the anchor's head and period rows are retired in 2.0.0.
 
 - DL-337 The composite job statechart, declared and checked against the three job tables,
   not yet driven
@@ -23440,6 +23485,7 @@ relitigate an entry; append a new one.
   oracle state from an identical log. The client and lease charts derive nothing from the log:
   they are the transport's and the supervisor's state. Admission replays from the WAL, but its
   guards answer every input as before. No configuration of these charts is persisted.
+  SUPERSEDED BY DL-424: the supervisor client is retired in 2.0.0.
 - DL-375 A rule of `host` is written once at the source the hierarchy gives it, and the gate
   reads the chart with the engine's selection read: host.08 and host.09 are one internal row,
   host.25, on `routed`; `host_move` is `Executor.resolve` on the store's instance, and the
@@ -23484,6 +23530,7 @@ relitigate an entry; append a new one.
   oracle state from an identical log. The merged row is internal: as before, the apply writes
   nothing and no revision moves. The gate's verdict is the same for every input, and no stored
   `HostState` changes.
+  SUPERSEDED BY DL-424: the host row is retired in 2.0.0.
 - DL-376 Every write of `host` is an intent the chart reports: each leaf's entry action reports
   the state write, the moving rows' actions report the row's other writes, and the apply carries
   out the outcome's intents in order after the dispatch; the leaf ladder of `apply_host_command`
@@ -23543,6 +23590,7 @@ relitigate an entry; append a new one.
   name moves: the store, the seal and the LIST answer carry `HostState` values
   (protocol-evolution §6), which are unchanged; the intents and the event's payload are never
   stored, and the actor was already journaled with the input.
+  SUPERSEDED BY DL-424: the host row and its intents are retired in 2.0.0.
 - DL-377 The seal boundary's exit is its final state's entry action: `sealed`, `aborted` and
   `stopped` each report the one `SealExit` of their state, and `stopped` notes DL-274's flag
   only in doubt; seal_boundary.05 and .07 are one row, .13, under `stops`; `_past_ponr` calls
@@ -23599,6 +23647,7 @@ relitigate an entry; append a new one.
   LIMIT. The transition gate does not count each stop cause's truth separately: a lost fence
   alone can make `stops` true. The pinned cell table holds both causes, and a mutant of `stops`
   that drops either cause fails it.
+  SUPERSEDED BY DL-424: the seal boundary is retired in 2.0.0.
 - DL-378 Teardown's ownership is the chart's: a teardown row per source state, in three ownership
   classes, each row reporting its class's unlink; the start verdict is one named function posted
   once; the retry of an errored SHUTDOWN wait is two internal rows that report the flush before the
@@ -23952,6 +24001,7 @@ relitigate an entry; append a new one.
   Bootstrap provisions the lock only while both units are stopped and disabled.
   Unresponsive maintenance preserves evidence and requires incident diagnosis;
   it never authorizes an automatic force, manager kill or lock-file replacement.
+  SUPERSEDED BY DL-424: maintenance as a supervisor operation is retired in 2.0.0.
 - DL-391 TUI mutations retain their exact recovery envelope (2026-10-19).
   Each mutation is constructed once from its frozen selection and confirmation.
   Before sending, the UI displays a complete shell-quoted recovery command.
@@ -23971,6 +24021,7 @@ relitigate an entry; append a new one.
   A maintenance timeout after delivery remains uncertain (exit 4), with no
   automatic resend or signal fallback. Positive completion still requires
   the separate, bounded process-exit observation under DL-390.
+  SUPERSEDED BY DL-424: supervisor requests are retired in 2.0.0.
 - DL-393 TUI recovery pins the running Python launch path (2026-10-19).
   Capture the interpreter when the TUI module loads. Resolve its parent
   directory, but retain the interpreter filename rather than following a
@@ -24001,6 +24052,7 @@ relitigate an entry; append a new one.
   ends uncertain, and no unverified process is signalled. Samples are at
   least 0.25 seconds apart, and each KILL takes its own sample first. A
   longer interval only widens that lost-identity window, which ends uncertain.
+  SUPERSEDED BY DL-424: forced maintenance is retired in 2.0.0.
 - DL-395 Opus reviews multi-file changes, Astra joins semantic and integration ones, Sol builds
   bounded edge code, and Fable only advises (2026-10-21; CLAUDE.md "Boss and peer work" and
   "Self-review"; docs/agent-workflow.md; .claude/skills/chart-simplify and spec-review)
@@ -24073,6 +24125,7 @@ relitigate an entry; append a new one.
   REJECTED: a `RuntimeProfile` field, because who started the supervisor does not change what a
   period runs, and a field would move the pin and its hash for an operational choice. A default
   of `attach` for `run`, because shape 2 and development rely on the engine starting its own.
+  SUPERSEDED BY DL-424: detached launches are retired in 2.0.0.
 - DL-397 Offline manufacturing consumes bound release exports (2026-10-25).
   This narrows DL-215's --frozen release export to --locked and adds
   release-inputs.json to the candidate and checksummed release assets.
@@ -24092,6 +24145,7 @@ relitigate an entry; append a new one.
   uv is absent from PATH. Existing diagnostic delivery reuse remains explicit.
   DL-389's target checks, binary-wheel hashes, preparation, receipts, retention
   and separate activation rules remain in force.
+  NARROWED BY DL-424: release exports are retired in 2.0.0; offline manufacturing is decided later.
 - DL-398 One verb stops a shape 1 estate: `dsl41 estate quiesce` (2026-10-25;
   src/dsl41/cli_estate.py, cli_common.py, cli_control.py, cli.py;
   examples/nightbank/deploy/drill-lib.sh, dsl41-supervisor.service; docs/deployment-runbook.md
@@ -24130,6 +24184,7 @@ relitigate an entry; append a new one.
   REJECTED: performing the root steps, which needs root. A sleep or a poll for the horizon or
   `RestartSec`: a refusal and a rerun say the same and cannot hang. A second exclusion beside
   `leader.lock`. Holding the lock through maintenance, which the supervisor refuses as held.
+  SUPERSEDED BY DL-424: `estate quiesce` is retired in 2.0.0; `engine stop` drains.
 - DL-399 Maintenance admission checks identity, containment and exit policy; the stop guard is
   checked at start (2026-10-25; src/dsl41/runner_procid.py, runner_supervisor.py;
   docs/supervisor-protocol.md ss5, deployment-runbook.md ss3, deployment-qualification.md)
@@ -24155,6 +24210,7 @@ relitigate an entry; append a new one.
   (owner, 2026-10-25). Checking the exit policy on the forced path only: a stop verb that reports
   done while the service returns misleads on the default path too.
   SUPERSEDED BY DL-416 for the stop guard: no start check reads it; admission's checks stand.
+  SUPERSEDED BY DL-424: maintenance admission is retired in 2.0.0.
 - DL-400 A supervisor statechart error keeps exit 7 (2026-10-25; owner ruling; no code change)
   THE RULE. DL-325 stands for the supervisor. A statechart error in the supervisor prints its
   report and exits 7, and the unit does not restart it. The exit ends every job by lifeline EOF;
@@ -24167,6 +24223,7 @@ relitigate an entry; append a new one.
   REJECTED: a degraded mode that refuses SPAWN and lease changes, keeps the lifelines and SIGNAL,
   and exits 7 after the last job. It keeps kill authority in a controller whose own control logic
   has just been proven wrong, and it adds a lifecycle outside the declared chart.
+  SUPERSEDED BY DL-424: the supervisor's statechart error is retired in 2.0.0.
 - DL-401 Maintenance is a queryable operation: admission answers at once, the loop runs it,
   `maintenance.json` records it (2026-10-25; src/dsl41/runner_supervisor.py, cli_common.py,
   cli_control.py, cli_estate.py, runner_adapters.py; docs/supervisor-protocol.md ss5,
@@ -24206,6 +24263,7 @@ relitigate an entry; append a new one.
   admission only. Both texts stand; DL-394 stands whole.
   REJECTED: a hard cap at `bound_s`: under slow sends it ended forced stops uncertain before
   KILL. A new state for "admitted". A resend after a lost reply.
+  SUPERSEDED BY DL-424: maintenance as an operation is retired in 2.0.0.
 - DL-402 The example launcher passes `--supervisor attach` only to a `dsl41` whose `run` accepts
   it; the supervisor logs the busctl read of its exit policy (2026-10-25;
   examples/nightbank/deploy/dsl41-launch, drill-lib.sh, drill-steps.sh, drill-local.sh;
@@ -24232,6 +24290,7 @@ relitigate an entry; append a new one.
   REJECTED: an operator's launcher edit at each flip, which the runbook would have to teach.
   Matching `run --help` text, which fails open. A line for every busctl read: the maintenance
   ladder reads the policy on each poll.
+  SUPERSEDED BY DL-424: the example launcher and `--supervisor attach` are retired in 2.0.0.
 - DL-403 A `setsid` escapee is a stated limit of process-group containment, not a hardening to
   build (2026-10-25; owner ruling; docs/runner-design.md ss6a; no code change)
   THE RULE. The runner contains a command by its process group: the wrapper gives each command
@@ -24439,6 +24498,7 @@ relitigate an entry; append a new one.
   on every async request (their callers read `SupervisorUnavailable` as a supervisor gone); an
   unbounded resend of a queued request; a log line on every timeout of an outage (one line per
   eleven seconds for as long as the freeze lasts).
+  SUPERSEDED BY DL-424: lease renewal is retired in 2.0.0.
 - DL-410 A decompiled estate is a Python module that declares `estate()`, and `dsl41 build`
   renders it (2026-10-27; src/dsl41/dsl.py, src/dsl41/cli_compile.py, README "DSL -> JIL
   (build)", docs/authoring.md §1 and §5)
@@ -24525,6 +24585,7 @@ relitigate an entry; append a new one.
   jobs' account would own ACTIVE); a launcher named by argument or environment; `status`
   exiting 3 on a record; comparing the bundle's digests with prepared.json (they hash the
   post-placeholder text, not the files).
+  SUPERSEDED BY DL-424: the release train is retired in 2.0.0; `reread` and `update` replace it.
 - DL-413 `dsl41 estate build` assembles the release directory from a manifest and its Python
   modules, and `dsl41 estate diff` compares two releases by the seal's definition test
   (2026-10-28; src/dsl41/cli_estate_build.py, src/dsl41/cli_common.py,
@@ -24561,6 +24622,7 @@ relitigate an entry; append a new one.
   closure in the diff (it needs the carried state); an absolute MANIFEST for `estate diff` (it
   hashes no path); removing a left-over OUT.tmp; an emitted file winning over DIR's file of its
   name (one of the two would be silently dropped).
+  SUPERSEDED BY DL-424: `estate build` is retired in 2.0.0.
 - DL-414 The supervisor unit keeps `RefuseManualStop=yes`; configuration management stops an
   estate with `dsl41 estate quiesce` (2026-10-27; owner ruling; docs/deployment-runbook.md ss0
   and ss8, deployment-qualification.md, README.md, tests/test_operator_recipes.py; design note
@@ -24584,6 +24646,7 @@ relitigate an entry; append a new one.
   simplified-DSL direction, where it retires the guard; the supervisor stops admitting spawns,
   waits for live runs within `TimeoutStopSec`, then runs the ladder.
   SUPERSEDED BY DL-416: the drain retires the guard, and the play stops the supervisor unit.
+  SUPERSEDED BY DL-424: the supervisor unit is retired in 2.0.0.
 - DL-415 Eleven workflow rules bind every agent session, and CI classifies a change as docs-only
   or code (2026-10-28; owner ruling after a Fable and Astra round of four; CLAUDE.md "Workflow
   rules", .github/workflows/ci.yml, scripts/prepush_checks.py, scripts/doc_deps.py,
@@ -24745,6 +24808,7 @@ relitigate an entry; append a new one.
   drain: the maintenance client would watch an operation that does not exist. A refused
   SPAWN as a failure: the run never started. An unbounded resend (DL-409). A seal inside the
   drain play: the sealed route stays a recipe of its own.
+  SUPERSEDED BY DL-424: the supervisor is retired in 2.0.0; a host signal drains the engine.
 - DL-419 A retained runtime's bytecode cache is checked against its retained source, and a
   matching cache is accepted (2026-10-29; scripts/offline/bundle.py `check_bytecode`;
   tests/test_offline_packaging.py; docs/site-package.md §2, docs/offline-installation.md)
@@ -24838,6 +24902,7 @@ relitigate an entry; append a new one.
   perimeter journal to the WAL and the receipt and set the door outside the gate instead of inside
   adm; Astra limited the take-over to an opened period and tied attribution to the inputs the
   requests produce.
+  NARROWED BY DL-424: the tier model stays; the release and estate verbs it tiered are retired.
 - DL-422 The six estate verbs read the manifest through `--manifest`; `estate args` and its
   `eval` are gone (2026-10-29; src/dsl41/cli_common.py, cli_compile.py, cli_run.py,
   cli_estate.py, estate_manifest.py, release_service.py; examples/nightbank/deploy/dsl41-launch;
@@ -24877,6 +24942,7 @@ relitigate an entry; append a new one.
   keeping `estate args` one tag with a notice (two builders, and the cut moves to the next tag);
   letting the command line override a manifest value. Tier rows: `estate args` leaves §10; the
   six verbs keep their tiers.
+  SUPERSEDED BY DL-424: the estate verbs are retired in 2.0.0.
 - DL-423 Release verbs read from their command line: `rollback NAME`, `requalify NAME`, and the
   OFF_HOLD sweep is `off-hold-all` (2026-10-29; src/dsl41/cli_release.py, release.py,
   release_service.py, cli_control.py; deployment-runbook, access-model §10)
@@ -24904,3 +24970,64 @@ relitigate an entry; append a new one.
   defaulting to the computed target (the hidden path this closes); `--force` or `--to` on rollback
   (apply NAME is the escape); `off-hold` (reads as a verb missing its job); an alias for one tag.
   Reviewed as a plan with the Fable advisor and Astra, three rounds, before the build.
+  NARROWED BY DL-424: the release verbs are retired in 2.0.0; the off-hold-all naming stands.
+- DL-424 The 2.0.0 charter: three things, a production ceiling, and the owner's rulings
+  (2026-10-30; the owner's reset of 2026-10-29; slice 0 is PR #246). This entry is the normative
+  text until `docs/charter.md` lands in the docs slice and cites it.
+  THE RESET. The 1.x operational shell was beyond what one operator can run. dsl41 does three
+  things: understand and chart an AutoSys estate (JIL or the DSL); run it in one always-on engine
+  with AutoSys semantics, the oracle the only semantics authority; make the engine's stops small
+  and safe through one interaction between the engine's state machine and each running job's.
+  Nothing else belongs. Three rulings are narrowed: DL-41 (1) "no adapter retries" still forbids
+  retrying an outcome; a new attempt for an interrupted run is no retry of an outcome. DL-41a's E7
+  covers only an unobserved exit no interruption rule reaches; an unobserved interrupted attempt
+  follows the interruption rule below. DL-84's at-most-once holds per request and per attempt on
+  one box (`leader.lock`, DL-100, request-id dedup); a run may launch again after an interruption,
+  which idempotence makes safe; epoch, hosts and outbox retire.
+  THE CEILING. One box runs the engine and every job; a standby is started by hand after the
+  active box is confirmed down; 100 to 200 jobs, at most 20 running, 1 to 5 launches a day each.
+  An engine stop asks every running job to stop, aborts after the grace, exits; the same attempt
+  path serves an upgrade, an operator stop, and a redeploy that changes or removes a running job
+  (the owner's ruling), which stops only those jobs while the engine stays RUNNING. Default grace:
+  10 s after TERM, 5 s to confirm after KILL, configurable per engine. A crash kills the jobs with
+  the engine (tethered, DL-41a); the wrapper records each exit it observes. On restart an
+  interrupted attempt, stopped or with no record, of an idempotent job reruns for the same run with
+  the same invocation (`DSL41_JOB`, `DSL41_RUN_NUMBER`, `DSL41_SCHEDULED_AT`); the oracle is told
+  nothing, so no box fails and no condition fires. Idempotence is required; exceptions are named
+  in `non-idempotent.toml`; an interrupted attempt of a named job is FAILURE and ON_HOLD with the
+  evidence; FORCE_STARTJOB clears the hold (DL-243). A redeploy is `reread` (a per-job diff on
+  canonical definitions with referenced calendars, machines, resources and estate-wide settings;
+  a token) then `update TOKEN` (exactly that plan against the revision `reread` saw); unchanged
+  jobs are untouched; a structural edit of a RUNNING box refuses; a changed box with the same
+  members is swapped in place. Durability: one SQLite file per engine (append-only journal of
+  inputs, configuration history, snapshots), 90-day journal retention behind the latest snapshot,
+  a foreign state version refuses to start; missed ticks stay skip-and-report (DL-45); one socket,
+  three tiers (DL-146), one TUI, one systemd unit whose stop is the drain.
+  NOT INCLUDED. HA; a second executor host; a supervisor outliving the engine; periods, seals,
+  lineage, attestation; automatic standby; another scheduler as a target; retries of application
+  failures (DL-53). A design that needs one of these waits for a new entry.
+  STATE MACHINES. Declared (table and generated transition test) when any holds: re-entry;
+  interleaving where order decides; durable state a restart resumes into; a verb legal only in
+  some states. Linear when all hold: forward only, one driver, continue or stop, restart from top.
+  STAYS. The wrapper shim and its spool (DL-41a (1) to (5) and (7), DL-42 (3),
+  `docs/wrapper-protocol.md`); the decision record and request-id retry (DL-118); capacity and
+  its ghost buckets (DL-120); the canonical form (DL-119, DL-128); `run_id` and the watch's
+  evidence log (DL-121, DL-129); the hashes and `RuntimeProfile` (DL-122, dormant fields kept);
+  `estate.toml` (DL-130); the three access tiers (DL-146); the Q12 descoping (DL-288); the
+  subscribe feed and the executor (DL-329, DL-332); the UI envelope rules (DL-391, DL-393).
+  RETIRED, each entry marked: the supervisor tier, detached mode, lease, incarnation, deadman,
+  maintenance, the supervisor charts and their drills (DL-41a (6) and (8), DL-42 (4), DL-48,
+  DL-79, DL-80, DL-95, DL-210, DL-223, DL-291, DL-303, DL-308, DL-326, DL-328, DL-330, DL-374,
+  DL-390, DL-392, DL-394, DL-396, DL-398 to DL-402, DL-409, DL-414, DL-416); hosts, epoch and
+  outbox (DL-84 for those parts, DL-94, DL-100 to DL-102 beyond the flock, DL-331, DL-333,
+  DL-334's epoch part, DL-375, DL-376); periods, seals, carry, lineage, classification,
+  attestation, retention floors, archive and roll (DL-114 to DL-117, DL-123 to DL-127, DL-131 to
+  DL-134, DL-144, DL-290, DL-327, DL-336, DL-377); the release train and estate verbs (DL-397's
+  exports, DL-412, DL-413, DL-421 for those verbs, DL-422, DL-423 for the verbs); the deployment
+  example and drills (DL-218, DL-219); the UC backend (DL-288's "built and shipped").
+  REJECTED. Finishing a changed running job under its old definition, and refusing to remove a
+  running job without a flag (both add a second stop path; the owner chose one path, a graceful
+  wait flag being phase 2); per-job grace now; an AutoSys RESTART status (its meaning is "could
+  not start"; a job-chart state); a per-command idempotence rig (the engine cannot see inside a
+  job); snapshot migrations in 2.0 (a drained engine carries no work; the old binary drains
+  first); a scratch rewrite (the compiler, the oracle tier, the wrapper and procid are the asset).
