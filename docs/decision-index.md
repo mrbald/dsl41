@@ -435,3 +435,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-422 | The six estate verbs read the manifest through `--manifest`; `estate args` and its `eval` are gone | [docs/access-model.md](access-model.md), [docs/authoring.md](authoring.md) |
 | DL-423 | Release verbs read from their command line: `rollback NAME`, `requalify NAME`, and the OFF_HOLD sweep is `off-hold-all` | [docs/access-model.md](access-model.md), [docs/control-protocol.md](control-protocol.md) |
 | DL-424 | The 2.0.0 charter: three things, a production ceiling, and the owner's rulings | [docs/ir-design.md](ir-design.md) |
+| DL-425 | Hosts, effects and the epoch leave the engine; the dispatch record precedes the launch |  |
