@@ -300,7 +300,7 @@ def _cause_template(node: ast.expr, enclosing: str) -> str:
 #: Where an adapter result is CONSTRUCTED. Held to the package by
 #: `test_no_other_module_builds_an_adapter_outcome`: a hard-coded file list
 #: that nothing checks is a domain that shrinks when the code moves.
-OUTCOME_FILES = ("runner_adapters.py", "runner_startup.py")
+OUTCOME_FILES = ("runner_adapters.py", "runner_attempts.py", "runner_startup.py")
 
 
 def _outcome_templates() -> set[str]:

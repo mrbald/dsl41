@@ -3501,6 +3501,24 @@ ADAPTER_ROWS: tuple[Row, ...] = (
     ),
     _row(
         surface="adapter_outcome",
+        member="Failed=wrapper_spawn_failed",
+        klass=SUPPORTED,
+        cite="runner_attempts.oracle_input_for, DL-424",
+        effect="an attempt whose spawn failed, launched or not, feeds FAILURE; the attempt's"
+        " outcome keeps the error and the wrapper's record as evidence",
+        trigger="Failed=wrapper_spawn_failed",
+    ),
+    _row(
+        surface="adapter_outcome",
+        member="Failed=interrupted",
+        klass=SUPPORTED,
+        cite="runner_attempts.follow_up_plan, DL-424",
+        effect="an interrupted attempt of a job named in non-idempotent.toml feeds FAILURE"
+        " before the job is put ON_HOLD with the evidence",
+        trigger="Failed=interrupted",
+    ),
+    _row(
+        surface="adapter_outcome",
         member="Terminated=<dynamic:outcome_from_status>",
         klass=SUPPORTED,
         cite="runner_adapters.outcome_from_status, DL-41a",

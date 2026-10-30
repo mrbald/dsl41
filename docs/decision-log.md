@@ -25064,3 +25064,37 @@ relitigate an entry; append a new one.
   REJECTED: intents inside the decision record (an outbox again); failing every untraced start at
   resume (the pre-outbox rule DL-315 replaced); a `runner_lock.py` (the version gates live beside
   the lock in `runner_ledger.py`). Reviewed by an Opus reviewer (three rounds) and Astra (two).
+- DL-426 The attempt and engine lifecycle tiers; an attempt settles only when its plan is done
+  (2026-10-30; slice 2b core of the v2 train under DL-424; `runner_attempts.py`; ENGINE_LIFECYCLE
+  and ATTEMPT registered in `machines.MACHINES` with their views and the `attempts` card).
+  THE RECORD. One function turns the wrapper's `status.json` into an `ExitRecord`: an exit or a
+  signal while this attempt's ladder runs is `stopped{cause}`; before any stop, an exit is
+  `natural{exit_code}` and a signal `natural{signal}`; the lifeline kill is `stopped{lifeline}`;
+  a wrapper that never launched or aborted its own launch is `spawn_failed`, `launched` kept as
+  evidence. No record: the tier posts `wrapper_gone` only when the wrapper exited and the command
+  is dead by procid, else `stop{wrapper_lost}`. The wrapper is unchanged (DL-357).
+  THE PLAN. Every outcome commits a follow-up plan with it: `complete` feeds the completion;
+  `none` when the job left the catalog or the oracle's current run is not this one in STARTING or
+  RUNNING; `hold` for a marked job (FAILURE `interrupted`, ON_HOLD with the evidence, signal or
+  exit code from the nested `observed` included); `rerun` otherwise, naming the replacement
+  attempt `<job>.<run>.<n>` with its spool under `runs/<job>.<run>/<n>/`. A run has at most
+  `MAX_ATTEMPTS_PER_RUN = 5` attempts; the fifth interruption holds the job with the limit named.
+  SETTLEMENT. An attempt is settled when its plan is done, which the wiring reports with
+  `plan_done`: at once for `none` and for a `rerun` whose dispatch waits for the restart, after the
+  last step otherwise. `all_attempts_settled` is posted only in DRAINING and only from that count.
+  THE STOP. The ladder is a task per attempt, never awaited by the loop; the `record_timeout`
+  generation is read right after the macrostep. A ladder that raises reports `ladder_failed` and
+  arms no timer; a timeout first re-reads the spool (a late `spawn.json` gets its ladder, a late
+  `status.json` its record) and then verifies the command dead, else reports `command_survived`.
+  Either leaves the attempt in STOPPING, unsettled: the drain ends unclean at the deadline and the
+  restart settles it from the spool with the pid verified. A stop that cannot be carried out never
+  becomes a rerun beside a live command.
+  STATED LIMITS. A wrapper killed between its `Popen` and `spawn.json` leaves a command the engine
+  cannot name; a process group whose leader died while members live counts as dead. Both need an
+  unsupported job shape or a hostile operator; under the systemd unit the cgroup ends the
+  survivors at the next stop; neither corrupts durable state or launches anything a plan did not
+  name. The `attempts` card lists them.
+  REJECTED: natural outcomes for a TERM-trapping command that exits during a stop (FAILURE would
+  cascade through `failure()`, which the engine-level attempt exists to prevent); an unbounded
+  rerun of a wrapper that keeps dying with no record; a `wrapper_gone` from the leader's death
+  alone when the ladder could still run. Reviewed by an Opus reviewer and Astra, two rounds each.

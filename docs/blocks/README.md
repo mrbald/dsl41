@@ -87,6 +87,8 @@ Engine:
   four states, drain, quarantine and eviction.
 - [Control subscription](subscription.md): one `subscribe` feed, from its
   backfill to its end.
+- [Attempts and the engine stop](attempts.md): one launch from its dispatch
+  to its outcome, and the engine's drain.
 - Seal and lineage (`seal-and-lineage.md`, retired in 2.0.0): the anchor head, the period
   registry row and the engine's seal phases.
 
@@ -116,3 +118,5 @@ that explains it.
 | effect (retired in 2.0.0) | Effect outbox (`effect-outbox.md`, retired in 2.0.0) |
 | [subscription](../state-machines.md#subscription) | [Control subscription](subscription.md) |
 | seal_boundary (retired in 2.0.0) | Seal and lineage (`seal-and-lineage.md`, retired in 2.0.0) |
+| [engine_lifecycle](../state-machines.md#engine_lifecycle) | [Attempts](attempts.md) |
+| [attempt](../state-machines.md#attempt) | [Attempts](attempts.md) |
