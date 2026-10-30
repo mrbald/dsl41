@@ -29,7 +29,7 @@ the other three.
 **Job author**: write an estate in JIL or the Python DSL, or bring an existing one in, and get it accepted.
 
 1. [docs/authoring.md](docs/authoring.md) - the author guide: JIL or the Python DSL, what dsl41 accepts, conditions, lint, rehearse, viz, bringing an estate in, the estate manifest and the interruption contract every job meets
-2. [Lint a catalog](#lint-a-catalog) - the rules L001-L023, and `rehearse` and `viz` under [CLI](#cli)
+2. [Lint a catalog](#lint-a-catalog) - the rules L001-L025, and `rehearse` and `viz` under [CLI](#cli)
 3. [DSL -> JIL (build)](#dsl---jil-build) - the Python DSL builders (`job`, `box`, `sequence`, `parallel`) and `to_jil()`; [examples/file_processing/estate.py](examples/file_processing/estate.py) is a worked Python estate; `examples/nightbank`, `fulfilment` and `media` hold worked JIL estates
 4. [JIL -> DSL (decompile)](#jil---dsl-decompile) and [Prove two catalogs equivalent](#prove-two-catalogs-equivalent) - bringing an existing estate in and checking a rewrite; [examples/README.md](examples/README.md) indexes the worked estates
 5. [docs/autosys-semantics.md](docs/autosys-semantics.md) - the meaning of JIL (SEM entries); [docs/simulation-coverage.md](docs/simulation-coverage.md) - what the runner models, refuses, or assumes; [docs/jil-statement-syntax.md](docs/jil-statement-syntax.md) - the statement scanner spec
@@ -117,7 +117,7 @@ dsl41 lint --strict jobs.jil globals.jil   # warnings fail too
 dsl41 lint --timezone America/New_York jobs.jil   # base zone for L023
 ```
 
-The rules are L001-L023: IR-F rules, truth-table rules, graph rules over the
+The rules are L001-L025: IR-F rules, truth-table rules, graph rules over the
 derived graph, and dangling-name rules. `--strict` is the migration gate: an
 estate brought in under
 [authoring §5](docs/authoring.md#5-bring-an-existing-autosys-estate-in)
@@ -540,7 +540,7 @@ Front end and IR:
 - `src/dsl41/ir.py`: the IR-F Pydantic entity models and AST-to-IR-F
   lowering. Unknown attributes are refused unless `permit_unknown` is set.
   Calendar and cycle repeat-key lanes keep real autocal exports loadable.
-- `src/dsl41/lint.py`: the Violation model and rules L001-L023.
+- `src/dsl41/lint.py`: the Violation model and rules L001-L025.
 - `src/dsl41/derive.py`: IR-F to IR-G. Seven analysis passes produce the
   edges, mutex pairs, box tree, same-cycle detection, and the M01-M36
   mapping-row classification.
@@ -694,6 +694,10 @@ Runner:
   append-only configuration history, snapshots and pruning, under one
   writer with synchronous commits; `MemoryStore` is its in-memory twin for
   rehearsal and tests.
+- `src/dsl41/idempotence.py`: the 2.x idempotence declaration, not yet wired:
+  `non-idempotent.toml` in the manifest's directory names the jobs whose interrupted
+  attempt waits for the operator, with its canonical bytes for the reload
+  token, and the four `DSL41_*` variables every launch exports.
 - `src/dsl41/runner_ledger.py`: leadership over one run root: the flock
   held for the process lifetime, the epoch allocated by appending under
   it, and the eligibility gate on the opening record.
