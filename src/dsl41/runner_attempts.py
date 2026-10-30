@@ -1,10 +1,13 @@
-"""The 2.x attempt and engine lifecycle tiers (DL-424), not yet wired into the engine.
+"""The 2.x attempt and engine lifecycle tiers (DL-424, DL-426).
 
-An attempt is one launch of a run. The attempt tier keeps one `engine_charts.ATTEMPT` instance
-per attempt id on the executor it is given, posts the events the adapter's observations imply,
-and carries out the chart's intents through an injected `Processes`. The engine tier keeps the
-one `engine_charts.ENGINE_LIFECYCLE` instance and carries out its intents through an injected
-`EngineEffects`. Neither tier reads a clock or touches a process itself.
+An attempt is one launch of a run. Its durable identity is the `run_id` its `dispatch` record
+binds, a uuid4 (DL-118); its ordinal `n` counts the attempts of one run from 1 and names its
+spool directory and its display (`attempt_id`). The attempt tier keeps one
+`engine_charts.ATTEMPT` instance per run id on the executor it is given, posts the events the
+adapter's observations imply, and carries out the chart's intents through an injected
+`Processes`. The engine tier keeps the one `engine_charts.ENGINE_LIFECYCLE` instance and carries
+out its intents through an injected `EngineEffects`. Neither tier reads a clock or touches a
+process itself; the engine (`runner.Engine`) is both injections.
 
 The pure parts are here too: the translation of the wrapper's `status.json` into an
 `ExitRecord` (`exit_record_from_status`), the verdict for a wrapper that left no record
@@ -19,6 +22,7 @@ again (the drain's stop of every attempt) never re-enters the executor.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -73,6 +77,9 @@ LIVE_STATUSES: Final = frozenset({"STARTING", "RUNNING"})
 #: The most attempts one run gets: an interrupted attempt numbered this or above is held, not
 #: replaced, so the engine replaces an interrupted attempt at most four times (DL-424).
 MAX_ATTEMPTS_PER_RUN: Final = 5
+#: The cause of a stop the oracle decided: a KILLJOB, a `term_run_time`, a run the oracle ended.
+#: Its outcome gets plan `none`: the oracle has ended the run (DL-424).
+ORACLE_KILL: Final = "oracle_kill"
 #: The attempt states that are not settled.
 UNSETTLED: Final = frozenset({"SPAWNING", "RUNNING", "STOPPING"})
 _ATTEMPT_STATES: Final = frozenset({*UNSETTLED, "ENDED"})
@@ -83,7 +90,8 @@ _ENGINE_STATES: Final = frozenset({"STARTING", "RUNNING", "DRAINING", "STOPPED"}
 
 
 def attempt_id(job: str, run_number: int, n: int) -> str:
-    """The attempt id `<job>.<run>.<n>`; `n` counts from 1 within one run."""
+    """An attempt's display name `<job>.<run>.<n>`; `n` counts from 1 within one run. The
+    attempt's identity is its run id, never this name (DL-118)."""
     return f"{job}.{run_number}.{n}"
 
 
@@ -227,6 +235,11 @@ def oracle_input_for(outcome: AttemptOutcome) -> AdapterResult | None:
 
 # -- the interruption rule
 
+#: What a held interrupted attempt feeds the oracle, with `hold: true` beside it: a FAILURE with
+#: cause `interrupted` that holds the job in the same transition (DL-424). A literal cause, so
+#: the simulation register derives it (DL-209).
+HOLD_INPUT: Final = Failed("interrupted")
+
 FEED_STATUS: Final = "feed_status"
 SET_ON_HOLD: Final = "set_on_hold"
 DISPATCH: Final = "dispatch"
@@ -247,12 +260,23 @@ class Interrupted:
     signal: int | None
     exit_code: int | None
     limit: int | None = None
+    #: the attempt's run id; `attempt` is its display name
+    run_id: str | None = None
+
+
+@dataclass(frozen=True)
+class Replacement:
+    """The attempt a `rerun` plan dispatches: its run id, minted when the plan is chosen so the
+    plan names it before it can run, and its ordinal."""
+
+    run_id: str
+    ordinal: int
 
 
 @dataclass(frozen=True)
 class FollowUpStep:
     """One effect of a plan. `detail` is what it needs: the oracle input of `feed_status`, the
-    evidence of `set_on_hold`, the replacement attempt id of `dispatch`. `done_seq` is the
+    evidence of `set_on_hold`, the `Replacement` of `dispatch`. `done_seq` is the
     journal sequence of the transaction that performed it, None until then."""
 
     effect: str
@@ -281,6 +305,8 @@ def follow_up_plan(
     in_catalog: bool,
     live_run: tuple[int, str] | None,
     marked: bool,
+    run_id: str | None = None,
+    mint: Callable[[], str] = lambda: str(uuid.uuid4()),
 ) -> FollowUp:
     """The interruption rule (DL-424), as a plan for the outcome of attempt `attempt` of run
     `run_number` of `job`.
@@ -290,20 +316,25 @@ def follow_up_plan(
     `live_run` is the oracle's current (run number, status) for the job, or None.
 
     natural: `complete`, feed the completion. spawn_failed: `complete`, feed its FAILURE.
-    stopped or unobservable: `none` when the job left the catalog, or when the oracle's current
-    run is not this run in STARTING or RUNNING, because the oracle's own end stands. Else
-    `hold` for a marked job, and for attempt `MAX_ATTEMPTS_PER_RUN` or above: FAILURE with
-    cause `interrupted`, then ON_HOLD with the evidence, which names the limit in the second
-    case. Else `rerun`: one dispatch of the next attempt of the same run.
+    stopped or unobservable: `none` when the job left the catalog, when the stop was the
+    oracle's own kill (`oracle_kill`), or when the oracle's current run is not this run in
+    STARTING or RUNNING, because the oracle's own end stands. Else `hold` for a marked job, and
+    for attempt `MAX_ATTEMPTS_PER_RUN` or above: one step, a FAILURE with cause `interrupted`
+    that holds the job in the same transition, with the evidence, which names the limit in the
+    second case. Else `rerun`: one dispatch of the next attempt of the same run, under a run id `mint`
+    gives. `run_id` is the interrupted attempt's own, which the evidence carries.
     """
     if outcome.kind in ("natural", "spawn_failed"):
         return FollowUp("complete", (FollowUpStep(FEED_STATUS, oracle_input_for(outcome)),))
-    if not in_catalog:
+    if not in_catalog or outcome.cause == ORACLE_KILL:
+        # the oracle ended the run itself; nothing follows, whatever its row says now
         return FollowUp("none")
     if live_run is None or live_run[0] != run_number or live_run[1] not in LIVE_STATUSES:
         return FollowUp("none")
     this = attempt_id(job, run_number, attempt)
     limited = attempt >= MAX_ATTEMPTS_PER_RUN
+    # PENDING: E7 -- an unobservable attempt takes this rule; the FAILURE it feeds is a marked
+    # job's `interrupted`, never `exit_status_unobservable` (DL-424 narrows E7)
     if marked or limited:
         record = outcome.record or ExitRecord()
         observed = record.observed or {}
@@ -320,12 +351,12 @@ def follow_up_plan(
             sig,
             code,
             MAX_ATTEMPTS_PER_RUN if limited else None,
+            run_id,
         )
-        return FollowUp(
-            "hold",
-            (FollowUpStep(FEED_STATUS, Failed("interrupted")), FollowUpStep(SET_ON_HOLD, evidence)),
-        )
-    return FollowUp("rerun", (FollowUpStep(DISPATCH, attempt_id(job, run_number, attempt + 1)),))
+        # one oracle transition: the FAILURE holds the job before its own start or a dependent's
+        # is evaluated, so a marked job never runs again on its own failure (DL-424)
+        return FollowUp("hold", (FollowUpStep(SET_ON_HOLD, evidence),))
+    return FollowUp("rerun", (FollowUpStep(DISPATCH, Replacement(mint(), attempt + 1)),))
 
 
 def _wire_int(value: object) -> int | None:
@@ -374,10 +405,15 @@ class _Attempt:
     spawn: Mapping[str, Any] | None = None
     ladder: asyncio.Task[None] | None = None
     plan_done: bool = False
+    #: its group still had a live member after the ladder's KILL
+    survived: bool = False
+    #: its ladder raised: the stop was not carried out, so its group is unproven
+    failed: bool = False
 
 
 class AttemptTier:
-    """One `ATTEMPT` instance per attempt id, on `machines`, keyed by this tier and the id.
+    """One `ATTEMPT` instance per attempt, on `machines`, keyed by this tier and the attempt's
+    run id.
 
     The methods are the adapter's observations. A ladder runs as a task of its own, so a stop
     returns at once and the ladders of many attempts run together. `on_settled` is called after
@@ -399,9 +435,14 @@ class AttemptTier:
         self.machines = machines if machines is not None else Executor()
         self.command_alive = command_alive
         self.on_settled: Callable[[], None] | None = None
+        #: called when an attempt's ladder ended: the wiring may forget it now
+        self.on_ladder_done: Callable[[str], None] | None = None
         #: records that came after their attempt ended: evidence, never an outcome (DL-424)
         self.late_records: dict[str, list[ExitRecord]] = {}
         self._attempts: dict[str, _Attempt] = {}
+        #: attempts a restart found closing whose group it could not prove gone: no instance,
+        #: unsettled until `group_gone` (DL-426)
+        self._adopted_held: set[str] = set()
 
     def key(self, attempt: str) -> tuple[AttemptTier, str]:
         """The executor's key of an attempt: this tier and the id."""
@@ -422,13 +463,64 @@ class AttemptTier:
         return record.outcome
 
     def unsettled(self) -> tuple[str, ...]:
-        """The attempts not yet ENDED, and the ENDED ones whose plan is not done, in dispatch
-        order."""
-        return tuple(
-            a
-            for a, known in self._attempts.items()
-            if self.state(a) in UNSETTLED or not known.plan_done
+        """The attempts not yet ENDED, and the ENDED ones whose plan is not done, whose ladder
+        still runs, or whose group is held (`held`), in dispatch order; then the held attempts
+        a restart adopted."""
+        live = tuple(a for a in self._attempts if self.is_unsettled(a))
+        return live + tuple(sorted(self._adopted_held))
+
+    def is_unsettled(self, attempt: str) -> bool:
+        """Whether an attempt this tier instantiated is not ENDED, or its plan is not done, or
+        its ladder still runs, or its group is held."""
+        return (
+            self.state(attempt) in UNSETTLED
+            or not self._known(attempt).plan_done
+            or self.ladder_running(attempt)
+            or self.held(attempt)
         )
+
+    def survived(self, attempt: str) -> bool:
+        """Whether the attempt's group still had a live member after its ladder's KILL."""
+        return self._known(attempt).survived
+
+    def held(self, attempt: str) -> bool:
+        """Whether the group of an attempt this tier instantiated may still live with no stop
+        left to end it: it outlived its ladder's KILL, or its ladder raised. Such an attempt
+        does not settle and is not forgotten until `group_gone` (DL-426). One a restart
+        adopted held (`adopt_held`) has no instance; it is unsettled all the same."""
+        known = self._attempts.get(attempt)
+        return known is not None and (known.survived or known.failed)
+
+    def group(self, attempt: str) -> tuple[int, str] | None:
+        """The command group the attempt's `spawn.json` names, or None."""
+        return command_group(self._known(attempt).spawn)
+
+    def adopt_held(self, attempt: str) -> None:
+        """A restart found the attempt closing and could not prove its group gone (`held`)."""
+        self._adopted_held.add(attempt)
+
+    def group_gone(self, attempt: str) -> None:
+        """The held attempt's group has no live member left. An adopted one is released. A
+        stopping one has its record timeout read once more, which ends it now that its
+        command is dead; an ended one may settle (`on_ladder_done`)."""
+        if attempt in self._adopted_held:
+            self._adopted_held.discard(attempt)
+            return
+        known = self._known(attempt)
+        known.survived = known.failed = False
+        if self.state(attempt) == "STOPPING":
+            self.record_timeout(
+                attempt, self.machines.generation(self.key(attempt), RECORD_TIMEOUT)
+            )
+
+    def ladder_running(self, attempt: str) -> bool:
+        """Whether a ladder started for the attempt has not ended yet."""
+        ladder = self._known(attempt).ladder
+        return ladder is not None and not ladder.done()
+
+    def knows(self, attempt: str) -> bool:
+        """Whether `attempt` was dispatched here and not forgotten."""
+        return attempt in self._attempts
 
     def plan_done(self, attempt: str) -> None:
         """The wiring says the attempt's follow-up plan is done, which settles an ENDED attempt.
@@ -441,9 +533,9 @@ class AttemptTier:
 
     # -- the observations
 
-    def dispatch(self, job: str, run_number: int, n: int) -> str:
-        """Start the attempt's instance before anything spawns; answers its id."""
-        attempt = attempt_id(job, run_number, n)
+    def dispatch(self, attempt: str) -> str:
+        """Start the instance of the attempt with run id `attempt` before anything spawns;
+        answers the id."""
         self.machines.start(self.key(attempt), ATTEMPT, AttemptRecord())
         self._attempts[attempt] = _Attempt()
         self.machines.run()
@@ -528,15 +620,18 @@ class AttemptTier:
                 return
             group = command_group(known.spawn)
             if group is not None and self.command_alive(*group):
+                known.survived = True
                 self.processes.command_survived(attempt)
                 return
         self._post(attempt, Event(RECORD_TIMEOUT, generation=generation))
 
     def forget(self, attempt: str) -> None:
         """Drop an ended attempt whose wrapper has exited, so no later observation can come. An
-        attempt whose plan is not done is refused: it is still unsettled."""
-        if not self._known(attempt).plan_done:
-            raise ValueError(f"attempt {attempt!r}: its plan is not done, so it is unsettled")
+        attempt whose plan is not done, whose ladder still runs, or whose group is held, is
+        refused: it is still unsettled."""
+        known = self._known(attempt)
+        if not known.plan_done or self.ladder_running(attempt) or self.held(attempt):
+            raise ValueError(f"attempt {attempt!r}: its plan or its ladder is not done")
         self.machines.forget(self.key(attempt))
         del self._attempts[attempt]
 
@@ -568,7 +663,8 @@ class AttemptTier:
             elif name == ARM_RECORD_TIMEOUT:
                 pass  # the stop's ladder arms the timer at its KILL (_start_stop)
             elif name == RECORD_OUTCOME:
-                self._cancel_ladder(attempt)
+                # the record ends the attempt's observation, never its group's cleanup: a
+                # started ladder runs on to its closing KILL (DL-426)
                 self.processes.record_outcome(attempt, intent.detail)
             elif name == CANCEL_RECORD_TIMEOUT:
                 self.processes.cancel_timer(attempt)
@@ -594,25 +690,34 @@ class AttemptTier:
         self.processes.arm_timer(attempt, generation, self.grace_kill_s)
 
     async def _ladder(self, attempt: str, pgid: int, token: str, generation: int) -> None:
-        """Run the ladder, then arm `record_timeout` at its KILL. A ladder that raises arms
-        nothing: the stop was not carried out, so the attempt stays STOPPING and unsettled, and
-        `_ladder_done` reports the failure. Nothing is armed for an attempt already ended or
-        forgotten."""
+        """Run the ladder to its end, then arm `record_timeout` at its KILL. A ladder that raises
+        arms nothing: the stop was not carried out, so the attempt stays STOPPING and unsettled,
+        and `_ladder_done` reports the failure. An attempt that ended while the ladder ran gets
+        no timer; a group of it that still has a live member after the KILL has survived its
+        stop (`Processes.command_survived`) and keeps the attempt unsettled."""
         await self.processes.ladder(pgid, token, self.grace_term_s)
-        if attempt in self._attempts and self.state(attempt) != "ENDED":
+        known = self._attempts[attempt]
+        if self.state(attempt) != "ENDED":
             self.processes.arm_timer(attempt, generation, self.grace_kill_s)
+        elif self.command_alive(pgid, token):
+            known.survived = True
+            self.processes.command_survived(attempt)
 
     def _ladder_done(self, attempt: str, task: asyncio.Task[None]) -> None:
-        """Retrieve a finished ladder's failure and report it; a cancelled ladder has none."""
-        error = None if task.cancelled() else task.exception()
+        """Retrieve a finished ladder's failure and report it: a ladder that raised leaves its
+        group unproven, so the attempt is held (`held`). The attempt may be settled now
+        (`on_ladder_done`, `on_settled`). A cancelled ladder ended nothing: the engine is
+        leaving, and the restart finishes it (DL-426)."""
+        if task.cancelled():
+            return
+        error = task.exception()
         if error is not None:
+            self._attempts[attempt].failed = True
             self.processes.ladder_failed(attempt, error)
-
-    def _cancel_ladder(self, attempt: str) -> None:
-        """An ended attempt's ladder sends nothing more: its group may be gone and reused."""
-        ladder = self._attempts[attempt].ladder
-        if ladder is not None and not ladder.done():
-            ladder.cancel()
+        if self.on_ladder_done is not None:
+            self.on_ladder_done(attempt)
+        if self.on_settled is not None:
+            self.on_settled()
 
 
 # -- the engine lifecycle tier

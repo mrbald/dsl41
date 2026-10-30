@@ -25175,3 +25175,43 @@ relitigate an entry; append a new one.
   with a dispatch record and no directory is rerun under the attempt rule, not FAILURE). REJECTED:
   the wire `seq` as the store seq; a dispatch inside the admission's append; a pruned store
   replayed from seq 0. Reviewed by an Opus reviewer (two rounds) and Astra (four, owner-approved).
+- DL-429 The attempt and engine lifecycle tiers run the engine's stops; `engine stop`; the
+  interruption hold is one oracle transition (2026-10-30; slice 2b wiring of the v2 train under
+  DL-424; DL-426's tiers wired through `runner_stops.py`; one catalog hash,
+  `reload_diff.catalog_hash_v2`). THE ATTEMPT. Its identity is the dispatch's uuid4 `run_id`
+  (DL-118); the ordinal names the spool `runs/<job>.<run>/<n>/`, `DSL41_ATTEMPT` and the display and
+  rides beside the uuid in `dispatch` (with `after`, the replaced stop's cause) and in a rerun. The
+  adapter posts the four observations with procid's verdict, each spool record checked against the
+  run id. The ladder signals the recorded pgid while its leader matches the start token, closes with
+  SIGKILL when the leader is gone and the group lives (DL-226), runs to its end whatever record
+  arrives, and reports `command_survived` on a live member. A stop before the spec kills the wrapper
+  (DL-359); after it, without `spawn.json`, it closes the lifeline. Oracle kills (KILLJOB,
+  `term_run_time`, an INACTIVE overwrite) are `stop{oracle_kill}`, plan `none`: nothing is launched
+  on a CHANGE_STATUS. A plan step is stamped max(the `outcome`'s recorded end, the admission
+  frontier): a deadline inside an outage loses to an earlier completion, time never runs backwards.
+  THE HOLD. A marked job's interruption is one oracle transition: the engine-made STATUS FAILURE
+  `interrupted` carries `hold: true` and the oracle sets ON_HOLD before it evaluates any start (row
+  job.239; ON_HOLD on a STARTING job is ignored, DL-254); an ordinary hold remains (SEM-21, DL-243).
+  THE DRAIN. SIGTERM, `engine_stop` (adm; `dsl41 engine stop [--wait]`) and the abort deadline are
+  single-writer steps; a later mutation is rejected `engine_draining`, its time half applied.
+  DRAINING ticks, records STARTING as `dispatch_pending`, dispatches nothing, stops every attempt
+  with `engine_stop`, answers every queued request before STOPPED. Only the lifecycle writes
+  `clean_shutdown` or `unclean_shutdown` (record, then a covering snapshot); exit 0, or 1 on a
+  failed write; SIGTERM in STARTING is `shutdown_during_startup`. `--wait` returns when the socket
+  is gone and `leader.lock` is free, resending the stop while the lock is held. One systemd unit
+  under `examples/nightbank/deploy/`. ONE GUARD. A job's next run dispatches only when no attempt of
+  it is unsettled; the decided start stays `dispatch_pending` and is released when the attempt
+  settles. An attempt whose group may still live with no stop left (it survived its KILL, its ladder
+  raised, a restart cannot prove it gone) is held: unsettled, named in `unsettled` and `stops`, the
+  drain ends unclean, the group polled until gone. A restart signals only a leader alive with its
+  start token; a dead leader with live members is held, never signalled. RESTART. An attempt stays
+  open until its ladder is done (`outcome` says `ladder: running`, a `ladder_done` follow-up closes
+  it) and carries the first stop it took (the shutdown record's `stops` is the last word), so step 5
+  adopts it with that cause, never reads the drain's own TERM as natural, re-reads the spool on
+  every "dead" verdict before `unobservable`, and fails the start on a fault. Step 6 runs plans in
+  seq order. A crash in DRAINING is `drain_interrupted`. LIMIT: a leader that exits on its own while
+  its members live reads as dead (the vendor's reading). THE WIRE. `status` gains `attempt` and
+  `interrupted`; `dispatch` gains `after`, `outcome` `ladder`, the drain and shutdown records
+  `unsettled` and `stops`; §5 names them. REJECTED: two stop paths for oracle kills; `{"cmd":
+  "engine", "verb": "stop"}`; a recovered completion stamped with the restart's clock (an outage
+  deadline would TERMINATE a success). Opus three rounds, Astra six, owner-approved past the cap.

@@ -32,7 +32,7 @@ from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import ApplyResult, Attempt, Frontiers, fingerprint
 from dsl41.runner_clock import EngineError, VirtualClock
-from dsl41.runner_config import catalog_hash
+from dsl41.reload_diff import catalog_hash_v2 as catalog_hash
 from dsl41.runner_journal import (
     BackfillRefused,
     Journal,

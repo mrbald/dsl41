@@ -555,6 +555,7 @@ for the tier it falls under. It is not a second classification axis.
 | --- | --- | --- |
 | `status`, `trace`, `explain`, `spec`, `deps`, `timers`, `plan`, `global`, `globals`, `subscribe` | — | read |
 | `sendevent` | the externally injectable verbs (control-protocol §3): `STARTJOB`, `FORCE_STARTJOB`, `KILLJOB`, `ON_ICE`/`OFF_ICE`, `ON_HOLD`/`OFF_HOLD`, `ON_NOEXEC`/`OFF_NOEXEC`, `DISARM` (DL-158), `RELEASE_RESOURCE` (DL-256), `SET_GLOBAL`, `CHANGE_STATUS`. The internal EventKinds (`STATUS`, `TIMER`, the alarms) have no wire door: the dispatcher refuses them like any unknown verb | ops |
+| `engine_stop` (`dsl41 engine stop`: drains the engine and ends its process) | — | adm |
 
 CLI semantic tiers (the only enforcement is filesystem access, and these
 tiers enforce nothing, §2):
@@ -569,7 +570,8 @@ tiers enforce nothing, §2):
 - Ops: `sendevent`, `off-hold-all` (a sweep of `sendevent
   OFF_HOLD` requests, so ops by composition; DL-311, DL-423), `host
   activate`/`drain`/`evict` and `supervise shutdown`.
-- Adm: `run`, `serve`, `audit` (it writes attestations and registry
+- Adm: `run`, `engine stop` (the socket's `engine_stop`, the systemd unit's
+  `ExecStop`), `serve`, `audit` (it writes attestations and registry
   state), `seal` (it stages C2 files before the ops verb; staging may
   later be split from committing), `estate prune`, `estate reclaim`,
   `supervise start` (it creates the run root and writes the supervisor

@@ -19,7 +19,7 @@ It does need the run directory on a local filesystem (supervisor-protocol §3 (`
 - Output: `spawn.json`, then `status.json`, in `run_dir` (§3 (`supervisor-protocol.md`, retired in 2.0.0)). The outcome vocabulary is `WrapperOutcome`.
 - Exit code: a notification only, never the outcome (§4 (`supervisor-protocol.md`, retired in 2.0.0) step 6).
 - Spawners: `LocalCommandAdapter` in [tethered](../glossary.md#tethered) mode, where the engine holds the write end, and `Supervisor._spawn_wrapper` in [detached](../glossary.md#detached) mode. Both engine-side spec builders, in `LocalCommandAdapter` and `SupervisedCommandAdapter`, use `_build_run_spec`; the supervisor takes the spec off the wire and fills only `lifeline_fd`.
-- Readers: `load_json`, `outcome_from_status` and `resolve_spool` in `src/dsl41/runner_adapters.py`.
+- Readers: `load_json`, `spool_record` and `outcome_from_status` in `src/dsl41/runner_adapters.py`, and the attempt tier (`src/dsl41/runner_attempts.py`).
 - `DSL41_WRAPPER_TEST_PAUSE` names pause points for the kill-matrix tests. It is inert when unset.
 
 ## States
@@ -70,15 +70,15 @@ flowchart TD
 
 - `src/dsl41/runner_wrapper.py`: the shim.
 - `src/dsl41/runner_procid.py`: the liturgy, the boot id, start-time tokens and the quiet group kill.
-- `src/dsl41/runner_adapters.py`: the tethered spawner, the spec builder, the outcome mapping and the spool ladder.
+- `src/dsl41/runner_adapters.py`: the tethered spawner, the spec builder, the outcome mapping and the stop ladder.
 
 ## Tests
 
 - Boundary: `test_wrapper_imports_are_stdlib_only`, `test_wrapper_records_under_pythonsafepath`.
 - Recording: `test_wrapper_records_natural_exit_and_appends_stdout`, `test_wrapper_survives_external_group_kill_and_records_signal`, `test_wrapper_survives_sigusr1_and_sigusr2_and_still_records`, `test_wrapper_refuses_mistyped_spec_field_before_spawning`.
 - Parent loss: `test_wrapper_graceful_sigterm_reaches_command_on_parent_loss`, `test_lifeline_write_end_leaks_nowhere`, `test_sigkill_engine_midrun_then_resume`.
-- Kill matrix: `test_kill_before_spawn_record_is_unobservable_and_never_signals`, `test_kill_after_spawn_record_survivor_killed_at_resume`, `test_kill_between_wait_and_status_write_is_unobservable`, `test_kill_between_status_write_and_reap_preserves_outcome`, `test_resume_kill_reaches_a_member_that_ignores_sigterm`.
-- Identity: `test_spoofed_spawn_json_never_signals_innocents`, `test_boot_id_flip_voids_liveness_and_resolves_from_records`.
+- The restart's reading of the spool: `test_a_live_wrapper_gets_its_window_to_record`, `test_a_live_wrapper_that_never_records_gets_the_ladder`, `test_the_spool_record_names_how_the_attempt_ended`, `test_a_crash_while_draining_is_reported_at_the_restart`.
+- Identity: `test_a_kill_refuses_a_spawn_record_naming_a_stranger`, `test_a_record_that_names_another_run_tuple_is_read_as_absent`, `test_a_group_recorded_under_another_boot_is_dead`.
 - Write failures: `test_rc3_a_spawn_that_cannot_be_recorded_kills_what_it_started`, `test_rc3_a_status_that_cannot_be_written_never_reports_an_outcome`, `test_rc3_a_full_disk_at_spawn_leaves_no_record_and_exits_three`.
 - Outcome mapping: `test_m3_malformed_status_records_map_truthfully`.
 

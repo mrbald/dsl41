@@ -240,11 +240,10 @@ def test_a_run_still_running_at_the_end_of_the_journal_gets_a_null_duration() ->
 
 
 def test_reconcile_completion_with_no_true_ended_at_stays_incomplete() -> None:
-    """(DL-113 decision 3, E7): `runner_startup._inject_completion`
-    only writes `ended_at` into the payload when `resolve_spool` returned a
-    real one. Verdict FAILURE `exit_status_unobservable` is TRUE, but the
-    event's own `at` is only when the engine noticed at resume -- never the
-    row's ended_at."""
+    """(DL-113 decision 3): a restart's plan step writes `ended_at` into the
+    payload only when the attempt's status.json carried a real one. A
+    reconcile FAILURE with none is TRUE, but the event's own `at` is only
+    when the engine noticed at resume -- never the row's ended_at."""
     records = [
         _header(),
         _dispatch("j1", 1, run_dir=None, started_at=T0),
@@ -266,9 +265,9 @@ def test_reconcile_completion_with_no_true_ended_at_stays_incomplete() -> None:
 
 
 def test_reconcile_completion_with_a_true_ended_at_gets_its_real_duration() -> None:
-    """The OTHER resume-ladder branch: status.json existed, so
-    `resolve_spool` returned a real end and `_inject_completion` carried it
-    in the payload -- this run is complete, on the journal clock."""
+    """The OTHER restart branch: status.json existed, so the plan step
+    carried its real end in the payload -- this run is complete, on the
+    journal clock."""
     records = [
         _header(),
         _dispatch("j1", 1, run_dir=None, started_at=T0),

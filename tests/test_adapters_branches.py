@@ -13,9 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import signal
 import socket
-import subprocess
 import sys
 import threading
 from collections.abc import Iterator
@@ -25,23 +23,16 @@ from typing import Any
 
 import pytest
 
-from dsl41 import runner_adapters as _adapters
-from dsl41 import runner_procid as _procid
 from dsl41.canon import ARTIFACT_FORMAT_VERSION
 from dsl41.ir import JobIR, lower_source
 from dsl41.runner_adapters import (
     WATCH_LOG,
     AdapterContext,
-    Failed,
     FileWatcherAdapter,
-    LocalCommandAdapter,
-    Terminated,
     _build_run_spec,
-    _named,
     job_log_paths,
     load_json,
     read_watch_log,
-    resolve_spool,
 )
 from dsl41.runner_clock import EngineError, VirtualClock
 
@@ -58,36 +49,6 @@ def _cmd_job(name: str = "j") -> JobIR:
 def _fw_job(watch_file: Path, *, extra: str = "") -> JobIR:
     text = f"insert_job: w\njob_type: f\nwatch_file: {watch_file}\nwatch_interval: 30\n{extra}"
     return lower_source(text).jobs["w"]
-
-
-class _FakeMonotonic:
-    """A `time` stand-in whose `monotonic` advances by a fixed step per call."""
-
-    def __init__(self, step: float) -> None:
-        self.step = step
-        self.now = 0.0
-
-    def monotonic(self) -> float:
-        self.now += self.step
-        return self.now
-
-
-def _patch_monotonic(monkeypatch: pytest.MonkeyPatch, step: float) -> None:
-    monkeypatch.setattr(_adapters, "time", _FakeMonotonic(step))
-
-
-def _reaped_pid() -> int:
-    """An id that named a process that has been reaped: no live process or group has it, and
-    a signal sent to it by mistake finds nothing."""
-    child = subprocess.Popen([sys.executable, "-c", "pass"])
-    child.wait()
-    return child.pid
-
-
-# ------------------------------------------------------------ SealBarrier
-
-
-# ---------------------------------------------------------- _build_run_spec
 
 
 def test_build_run_spec_refuses_a_missing_run_root(tmp_path: Path) -> None:
@@ -127,208 +88,6 @@ def test_job_log_paths_take_the_job_own_files_or_fall_back_to_the_convention(
         "insert_job: j\njob_type: c\ncommand: x\nstd_out_file: /o.log\nstd_err_file: /e.log\n"
     ).jobs["j"]
     assert job_log_paths(own, 2, tmp_path) == ("/o.log", "/e.log")
-
-
-# ------------------------------------------------------ LocalCommandAdapter
-
-
-def test_local_adapter_runs_a_command_with_no_journal(tmp_path: Path) -> None:
-    job = lower_source("insert_job: j\njob_type: c\ncommand: exit 5\n").jobs["j"]
-    ctx = AdapterContext(clock=VirtualClock(start=T0), run_root=tmp_path)
-    result = asyncio.run(LocalCommandAdapter(grace_seconds=1.0).run(job, 1, ctx))
-    assert result == 5
-
-
-def test_local_adapter_reports_unobservable_when_the_wrapper_leaves_no_record(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    stub = tmp_path / "wrapper_stub.py"
-    stub.write_text("import sys\nsys.stdin.buffer.read()\nsys.exit(3)\n")
-    monkeypatch.setattr(_adapters, "_WRAPPER_PATH", stub)
-    ctx = AdapterContext(clock=VirtualClock(start=T0), run_root=tmp_path)
-    result = asyncio.run(LocalCommandAdapter(grace_seconds=1.0).run(_cmd_job(), 1, ctx))
-    assert isinstance(result, Failed)
-    assert "exit_status_unobservable" in result.cause
-    assert "rc=3" in result.cause
-
-
-class _BrokenStdin:
-    def write(self, data: bytes) -> None:
-        raise BrokenPipeError(32, "Broken pipe")
-
-    async def drain(self) -> None:
-        raise AssertionError("the write already failed")
-
-    def close(self) -> None:
-        raise AssertionError("a failed write is not followed by a close")
-
-
-class _WaitedProc:
-    """A wrapper process that died while reading its spec."""
-
-    pid = 4242
-    returncode: int | None = 1
-
-    def __init__(self) -> None:
-        self.stdin = _BrokenStdin()
-        self.waited = 0
-
-    async def wait(self) -> int:
-        self.waited += 1
-        return 1
-
-
-def test_local_adapter_fails_the_job_when_the_wrapper_dies_reading_its_spec(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    proc = _WaitedProc()
-
-    async def fake_exec(*args: Any, **kwargs: Any) -> _WaitedProc:
-        return proc
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
-    ctx = AdapterContext(clock=VirtualClock(start=T0), run_root=tmp_path)
-    result = asyncio.run(LocalCommandAdapter(grace_seconds=1.0).run(_cmd_job(), 1, ctx))
-    assert isinstance(result, Failed)
-    assert result.cause.startswith("wrapper spawn failed: ")
-    assert proc.waited == 1
-
-
-class _KillProc:
-    """A wrapper process that ends when the test says so."""
-
-    stdin = None
-    returncode: int | None = None
-
-    def __init__(self, ended: asyncio.Event) -> None:
-        self.ended = ended
-        self.waited = 0
-
-    async def wait(self) -> int:
-        self.waited += 1
-        await self.ended.wait()
-        return 0
-
-
-def _record_signals(monkeypatch: pytest.MonkeyPatch, *, on: dict[int, asyncio.Event]) -> list:
-    """Replace `killpg_quiet` with a recorder. A signal listed in `on` also ends the process."""
-    sent: list[tuple[int, int]] = []
-
-    def killpg(pgid: int, sig: int) -> None:
-        sent.append((pgid, sig))
-        if sig in on:
-            on[sig].set()
-
-    monkeypatch.setattr(_procid, "killpg_quiet", killpg)
-    return sent
-
-
-def test_kill_gives_up_without_signalling_when_no_spawn_record_ever_appears(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _patch_monotonic(monkeypatch, 2.0)  # the 5 s record wait is spent in three probes
-    sent = _record_signals(monkeypatch, on={})
-    run_dir = tmp_path / "j.1"
-    run_dir.mkdir()
-
-    async def scenario() -> _KillProc:
-        proc = _KillProc(asyncio.Event())  # never ends
-        await LocalCommandAdapter(grace_seconds=0.05)._kill(run_dir, proc, "rid")  # type: ignore[arg-type]
-        return proc
-
-    proc = asyncio.run(scenario())
-    assert sent == []
-    assert proc.waited == 1  # it waited for the wrapper, bounded, and left it to its own record
-
-
-def test_kill_does_not_signal_a_group_whose_leader_fails_the_identity_check(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    sent = _record_signals(monkeypatch, on={})
-    leader = _reaped_pid()
-    probes: list[tuple[int, str]] = []
-
-    def verify(pid: int, token: str) -> bool:
-        probes.append((pid, token))
-        return False
-
-    monkeypatch.setattr(_procid, "verify_alive", verify)
-    run_dir = tmp_path / "j.1"
-    run_dir.mkdir()
-    (run_dir / "spawn.json").write_text(
-        json.dumps(
-            {
-                "run_id": "rid",
-                "command_pid": leader,
-                "command_pgid": leader,
-                "command_start_time": "ticks:9",
-            }
-        )
-    )
-
-    async def scenario() -> _KillProc:
-        ended = asyncio.Event()
-        ended.set()
-        proc = _KillProc(ended)
-        await LocalCommandAdapter(grace_seconds=0.05)._kill(run_dir, proc, "rid")  # type: ignore[arg-type]
-        return proc
-
-    proc = asyncio.run(scenario())
-    assert probes == [(leader, "ticks:9")]
-    assert sent == []
-    assert proc.waited == 1
-
-
-def _kill_with_a_live_leader(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, ends_on: int | None
-) -> tuple[list, _KillProc, int]:
-    """Run `_kill` on a record whose leader verifies alive. The process ends on `ends_on`."""
-    monkeypatch.setattr(_procid, "verify_alive", lambda pid, token: True)
-    leader, pgid = _reaped_pid(), _reaped_pid()
-    run_dir = tmp_path / "j.1"
-    run_dir.mkdir()
-    (run_dir / "spawn.json").write_text(
-        json.dumps(
-            {
-                "run_id": "rid",
-                "command_pid": leader,
-                "command_pgid": pgid,
-                "command_start_time": "ticks:9",
-            }
-        )
-    )
-
-    async def scenario() -> tuple[list, _KillProc, int]:
-        ended = asyncio.Event()
-        sent = _record_signals(monkeypatch, on={} if ends_on is None else {ends_on: ended})
-        proc = _KillProc(ended)
-        # bounded: a `_kill` that never sends the signal the process waits for fails here
-        await asyncio.wait_for(
-            LocalCommandAdapter(grace_seconds=0.05)._kill(run_dir, proc, "rid"),  # type: ignore[arg-type]
-            10,
-        )
-        return sent, proc, pgid
-
-    return asyncio.run(scenario())
-
-
-def test_kill_stops_at_sigterm_when_the_group_honours_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    sent, proc, pgid = _kill_with_a_live_leader(tmp_path, monkeypatch, ends_on=signal.SIGTERM)
-    assert sent == [(pgid, signal.SIGTERM)]
-    assert proc.waited == 2  # the grace wait, then the final wait
-
-
-def test_kill_escalates_to_sigkill_when_the_wrapper_outlives_the_grace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    sent, proc, pgid = _kill_with_a_live_leader(tmp_path, monkeypatch, ends_on=signal.SIGKILL)
-    assert sent == [(pgid, signal.SIGTERM), (pgid, signal.SIGKILL)]
-    assert proc.waited == 2
-
-
-# ------------------------------------------------------------ read_watch_log
 
 
 def _start(**over: Any) -> dict[str, Any]:
@@ -664,51 +423,7 @@ class _SignalClient:
 _NOT_READY = {"ok": False, "error": "not_ready"}
 
 
-# ----------------------------------------------------- _named, resolve_spool
-
-
-def test_named_returns_a_status_that_names_the_run_and_refuses_a_stranger() -> None:
-    status = {"run_id": "rid", "outcome": "exited", "exit_code": 0}
-    assert _named(status, "rid", "j", 1) is status
-    with pytest.raises(EngineError, match="refusing to consume a stranger's fate"):
-        _named(status, "other", "j", 1)
-
-
-def _spool(run_dir: Path, name: str, doc: dict[str, Any]) -> None:
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / name).write_text(json.dumps(doc))
-
-
-_IDENT = {"job": "j", "run_number": 1}
-
-
-def _spawn_doc() -> dict[str, Any]:
-    """A spawn record whose wrapper and command ids name reaped processes."""
-    command = _reaped_pid()
-    return {
-        **_IDENT,
-        "run_id": "rid",
-        "boot_id": "boot-A",
-        "wrapper_pid": _reaped_pid(),
-        "wrapper_start_time": "ticks:1",
-        "command_pid": command,
-        "command_pgid": command,
-        "command_start_time": "ticks:2",
-    }
-
-
-@pytest.mark.parametrize("missing", [None, "absent"])
-def test_resolve_spool_reads_a_missing_run_directory_as_a_lost_dispatch(
-    tmp_path: Path, missing: str | None
-) -> None:
-    """ss7's first rung: no run directory means the dispatch never reached the
-    host, whether the WAL named none or the one it named is gone."""
-    run_dir = None if missing is None else tmp_path / missing
-    result, ended_at = asyncio.run(
-        resolve_spool("j", 1, run_dir, "boot-A", settle_seconds=0.0, grace_seconds=0.0)
-    )
-    assert result == Failed("dispatch lost to engine crash (run directory missing)")
-    assert ended_at is None
+# ------------------------------------------------------------- load_json
 
 
 def test_load_json_reads_a_spool_version_it_does_not_implement_as_unreadable(
@@ -724,157 +439,3 @@ def test_load_json_reads_a_spool_version_it_does_not_implement_as_unreadable(
     assert load_json(path) == {"version": 1, "outcome": "exited", "exit_code": 0}
     path.write_text(json.dumps({"outcome": "exited", "exit_code": 0}))
     assert load_json(path) == {"outcome": "exited", "exit_code": 0}
-
-
-@pytest.mark.parametrize("name", ["spawn.json", "status.json"])
-def test_resolve_spool_refuses_a_record_that_names_another_run(tmp_path: Path, name: str) -> None:
-    run_dir = tmp_path / "j.1"
-    _spool(run_dir, name, {**_spawn_doc(), "run_id": "someone-else"})
-    with pytest.raises(EngineError, match=rf"the spool's {name} reports run_id 'someone-else'"):
-        asyncio.run(
-            resolve_spool(
-                "j",
-                1,
-                run_dir,
-                "boot-A",
-                settle_seconds=0.0,
-                grace_seconds=0.0,
-                expected_run_id="rid",
-            )
-        )
-
-
-def test_resolve_spool_reads_a_status_written_as_the_wrapper_died(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run_dir = tmp_path / "j.1"
-    spawn = _spawn_doc()
-    _spool(run_dir, "spawn.json", spawn)
-    sent = _record_signals(monkeypatch, on={})
-    probes: list[int] = []
-
-    def verify(pid: int, token: str) -> bool:
-        probes.append(pid)
-        if len(probes) == 1:
-            return True  # the wrapper is alive when the ladder meets it
-        _spool(
-            run_dir,
-            "status.json",
-            {**_IDENT, "run_id": "rid", "outcome": "exited", "exit_code": 4},
-        )
-        return False  # it records, then dies
-
-    monkeypatch.setattr(_procid, "verify_alive", verify)
-    result = asyncio.run(
-        resolve_spool(
-            "j",
-            1,
-            run_dir,
-            "boot-A",
-            settle_seconds=5.0,
-            grace_seconds=5.0,
-            expected_run_id="rid",
-        )
-    )
-    assert result == (4, None)
-    assert probes == [spawn["wrapper_pid"]] * 2
-    assert sent == []
-
-
-def test_resolve_spool_reads_a_status_written_before_the_first_wrapper_check(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The wrapper records and dies between the ladder's first read and its
-    first liveness check, so that check already finds it dead (a zombie
-    counts as dead). The ladder reads once more before it turns to the
-    command: the record is there, and nothing is signalled."""
-    run_dir = tmp_path / "j.1"
-    spawn = _spawn_doc()
-    _spool(run_dir, "spawn.json", spawn)
-    sent = _record_signals(monkeypatch, on={})
-    probes: list[int] = []
-
-    def verify(pid: int, token: str) -> bool:
-        probes.append(pid)
-        _spool(
-            run_dir,
-            "status.json",
-            {**_IDENT, "run_id": "rid", "outcome": "exited", "exit_code": 4},
-        )
-        return False  # recorded and died before the first check
-
-    monkeypatch.setattr(_procid, "verify_alive", verify)
-    result = asyncio.run(
-        resolve_spool(
-            "j",
-            1,
-            run_dir,
-            "boot-A",
-            settle_seconds=5.0,
-            grace_seconds=5.0,
-            expected_run_id="rid",
-        )
-    )
-    assert result == (4, None)
-    assert probes == [spawn["wrapper_pid"]]  # the command was never checked
-    assert sent == []
-
-
-def test_resolve_spool_kills_a_surviving_group_when_the_wrapper_never_records(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    run_dir = tmp_path / "j.1"
-    spawn = _spawn_doc()
-    _spool(run_dir, "spawn.json", spawn)
-    sent = _record_signals(monkeypatch, on={})
-    monkeypatch.setattr(_procid, "verify_alive", lambda pid, token: True)
-    result, ended_at = asyncio.run(
-        resolve_spool(
-            "j",
-            1,
-            run_dir,
-            "boot-A",
-            settle_seconds=0.05,
-            grace_seconds=0.15,
-            expected_run_id="rid",
-        )
-    )
-    assert result == Terminated("wrapper lost; killed at resume")
-    assert ended_at is None
-    pgid = spawn["command_pgid"]
-    assert sent == [(pgid, signal.SIGTERM), (pgid, signal.SIGKILL)]
-
-
-def test_resolve_spool_cancelled_in_the_grace_still_sends_the_sigkill(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A cancel after the ladder's SIGTERM must not leave a group that ignores
-    TERM alive: the SIGKILL goes out on the way out (DL-359)."""
-    run_dir = tmp_path / "j.1"
-    spawn = _spawn_doc()
-    _spool(run_dir, "spawn.json", spawn)
-    pgid = spawn["command_pgid"]
-
-    async def scenario() -> list:
-        termed = asyncio.Event()
-        sent = _record_signals(monkeypatch, on={signal.SIGTERM: termed})
-        # the wrapper is gone, the command lives on through the whole grace
-        monkeypatch.setattr(_procid, "verify_alive", lambda pid, token: pid == pgid)
-        task = asyncio.create_task(
-            resolve_spool(
-                "j",
-                1,
-                run_dir,
-                "boot-A",
-                settle_seconds=0.05,
-                grace_seconds=60.0,
-                expected_run_id="rid",
-            )
-        )
-        await asyncio.wait_for(termed.wait(), timeout=10.0)
-        task.cancel()  # the ladder is in its grace wait
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(task, timeout=10.0)
-        return sent
-
-    assert asyncio.run(scenario()) == [(pgid, signal.SIGTERM), (pgid, signal.SIGKILL)]

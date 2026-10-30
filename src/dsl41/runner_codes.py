@@ -58,6 +58,9 @@ Code = Literal[
     "engine_apply_faulted",
     # an engine refusal that carries no code of its own
     "engine_error",
+    # stored on a rejected decision: a mutation admitted after `stop_requested`
+    # (spec-wiring 2b)
+    "engine_draining",
 ]
 
 #: every code, for the table test and the decision writer
@@ -71,6 +74,7 @@ STORED_CODES: frozenset[str] = frozenset(
         "precondition_failed",
         "stale_completion",
         "engine_apply_faulted",
+        "engine_draining",
     }
 )
 

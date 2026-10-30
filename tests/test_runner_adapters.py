@@ -47,6 +47,7 @@ from dsl41.runner_adapters import (
     AdapterResult,
     Failed,
     FileWatcherAdapter,
+    Launch,
     LocalCommandAdapter,
     Terminated,
     spool_names_run,
@@ -86,10 +87,12 @@ def _live_status(text: str, result: object) -> dict:
     return {k: v for k, v in event.payload.items() if k not in ("job", "run_number")}
 
 
-def _resumed_status(run_root: Path, text: str, result: object, monkeypatch) -> dict:
-    """What the restart's settle step records for the same result: the open attempt's
-    `outcome` carries the STATUS fields the result maps to."""
-    from dsl41 import runner_startup
+def _resumed_status(run_root: Path, text: str, status: dict) -> dict:
+    """What the restart's step 5 feeds for the same record: the open attempt goes through the
+    attempt chart with `status` as its `status.json`, and its plan's feed step carries the
+    STATUS fields the record maps to."""
+    import json
+
     from dsl41.runner_adapters import FakeAdapter
     from dsl41.runner_journal import read_records
     from dsl41.runner_startup import resume_run
@@ -101,35 +104,38 @@ def _resumed_status(run_root: Path, text: str, result: object, monkeypatch) -> d
         adapters={"CMD": FakeAdapter(default=None)},  # parks the run: open at the restart
     )
 
-    async def _resolve(*_a: Any, **_kw: Any) -> Any:
-        return result, None
-
     async def scenario() -> None:
         engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "j"}))
         await engine.run_until_quiescent(T0)
         await engine.shutdown()
         assert engine.journal is not None
         engine.journal.close()
-        with monkeypatch.context() as mp:
-            mp.setattr(runner_startup, "resolve_spool", _resolve)
-            resumed = await resume_run(
-                lower_source(text),
-                run_root,
-                clock=VirtualClock(start=T0),
-                adapters={"CMD": FakeAdapter(default=None)},
-            )
+        [dispatch] = [r.payload for _, r in read_records(run_root) if r.kind == "dispatch"]
+        spool = Path(dispatch["spool"])
+        spool.mkdir(parents=True)
+        identity = {"version": 1, "run_id": dispatch["attempt"], "job": "j", "run_number": 1}
+        (spool / "status.json").write_text(json.dumps({**identity, **status}))
+        resumed = await resume_run(
+            lower_source(text),
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+        )
         await resumed.shutdown()
         assert resumed.journal is not None
         resumed.journal.close()
 
     asyncio.run(scenario())
-    [outcome] = [r.payload for _, r in read_records(run_root) if r.kind == "outcome"]
-    return dict(outcome["status"])
+    [plan] = [
+        r.payload
+        for _, r in read_records(run_root)
+        if r.kind == "follow_up" and r.payload["event"] == "plan"
+    ]
+    [step] = plan["steps"]
+    return {k: v for k, v in step["payload"].items() if k not in ("job", "run_number")}
 
 
-def test_one_adapter_result_is_reported_the_same_live_and_at_resume(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_one_adapter_result_is_reported_the_same_live_and_at_resume(tmp_path: Path) -> None:
     """DL-145. Turning an `AdapterResult` into the STATUS input's payload
     had two bodies, and they did not agree.
 
@@ -139,23 +145,32 @@ def test_one_adapter_result_is_reported_the_same_live_and_at_resume(
     fabricating a fate for a run nobody read, on the one path where a run's
     fate is being recovered rather than observed.
 
-    One body now (`runner_adapters.status_payload`), driven here through
-    both call sites over the same three results."""
-    from dsl41.runner_adapters import status_payload
+    One body now (`runner_adapters.status_payload`), driven here through the
+    live call site and the restart's attempt chart over the same records. The
+    restart reads a wrapper record only through `outcome_from_status`, so an
+    unclassifiable result has no door there any more."""
+    from dsl41.runner_adapters import outcome_from_status, status_payload
 
     text = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
-    for index, result in enumerate((0, 7, Terminated("wrapper lost"), Failed("unobservable"))):
-        expected = status_payload(result, where="pin")  # type: ignore[arg-type]
+    records = (
+        {"outcome": "exited", "exit_code": 0},
+        {"outcome": "exited", "exit_code": 7},
+        {"outcome": "signaled", "signal": 9},
+        {"outcome": "terminated", "cause": "wrapper lost"},
+        {"outcome": "spawn_failed", "error": "EMFILE"},
+    )
+    for index, record in enumerate(records):
+        result = outcome_from_status(record)
+        if record["outcome"] == "spawn_failed":
+            result = Failed("wrapper_spawn_failed")  # the attempt's spawn_failed mapping
+        expected = status_payload(result, where="pin")
         live = _live_status(text, result)
-        resumed = _resumed_status(tmp_path / f"root{index}", text, result, monkeypatch)
-        assert live == expected == resumed, result
+        resumed = _resumed_status(tmp_path / f"root{index}", text, record)
+        assert live == expected == resumed, record
 
-    # and the fourth case refuses on BOTH, naming the run it could not
-    # report on: the resume copy used to answer FAILURE here
+    # and the fourth case refuses, naming the run it could not report on
     with pytest.raises(EngineError, match="adapter for 'j' returned"):
         _live_status(text, "not an adapter result")
-    with pytest.raises(EngineError, match="the spool ladder for j.1 returned"):
-        _resumed_status(tmp_path / "root-bad", text, "not an adapter result", monkeypatch)
 
 
 # --------------------------------------------------------------- 1. RealClock
@@ -416,6 +431,18 @@ def test_killjob_mid_run_terminates_and_no_completion_overwrites_it(tmp_path: Pa
     assert status["signal"] == signal.SIGTERM
 
 
+def _launch() -> Launch:
+    """A launch whose reports go nowhere: the DL-356 tests read the process and the spool."""
+
+    class _Ignored:
+        def spawn_recorded(self, *_: Any) -> None: ...
+        def status_recorded(self, *_: Any) -> None: ...
+        def spawn_failed(self, *_: Any) -> None: ...
+        def wrapper_exited(self, *_: Any) -> None: ...
+
+    return Launch(_Ignored())
+
+
 def test_dl356_a_kill_before_the_adapter_first_runs_spawns_nothing(tmp_path: Path) -> None:
     """A cancel that lands before the adapter task's first step never enters
     `run`: no run directory, no wrapper, nothing for a kill step to stop.
@@ -425,7 +452,7 @@ def test_dl356_a_kill_before_the_adapter_first_runs_spawns_nothing(tmp_path: Pat
     ctx = AdapterContext(clock=RealClock(), run_root=tmp_path, run_id="rid-early")
 
     async def scenario() -> None:
-        task = asyncio.create_task(LocalCommandAdapter().run(job, 1, ctx))
+        task = asyncio.create_task(LocalCommandAdapter().observe(job, 1, ctx, _launch()))
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -448,7 +475,7 @@ def test_dl356_a_kill_before_the_spec_is_handed_over_prevents_the_launch(
     the spec overfills the pipe buffer, so the test holds it open instead."""
     job = lower_source("insert_job: j\njob_type: c\ncommand: sleep 30\n").jobs["j"]
     ctx = AdapterContext(clock=RealClock(), run_root=tmp_path, run_id="rid-drain")
-    run_dir = tmp_path / "runs" / "j.1"
+    run_dir = tmp_path / "runs" / "j.1" / "1"
     procs: list[asyncio.subprocess.Process] = []
     real_exec = asyncio.create_subprocess_exec
 
@@ -466,7 +493,9 @@ def test_dl356_a_kill_before_the_spec_is_handed_over_prevents_the_launch(
 
         monkeypatch.setattr(asyncio, "create_subprocess_exec", recording_exec)
         monkeypatch.setattr(asyncio.StreamWriter, "drain", held_drain)
-        task = asyncio.create_task(LocalCommandAdapter(grace_seconds=1.0).run(job, 1, ctx))
+        task = asyncio.create_task(
+            LocalCommandAdapter(grace_seconds=1.0).observe(job, 1, ctx, _launch())
+        )
         try:
             await asyncio.wait_for(in_drain.wait(), timeout=20.0)
             task.cancel()
@@ -814,28 +843,19 @@ def test_pr36a_the_wrapper_spec_carries_the_decision_minted_run_id(tmp_path: Pat
 
 def test_a_kill_refuses_a_spawn_record_naming_a_stranger(tmp_path: Path) -> None:
     """DL-118 at the sharpest edge: the spawn record names the process group
-    the kill will signal, and the pid-reuse token proves that group is
+    the stop ladder will signal, and the pid-reuse token proves that group is
     ALIVE, not that it is ours. A spoofed record with a live foreign token
-    would aim the kill at a stranger's processes -- refused on identity
-    before any process field is read."""
-    from dsl41.runner_adapters import LocalCommandAdapter
+    would aim the ladder at a stranger's processes -- refused on identity
+    before any process field is read, wherever the tier reads the spool."""
+    from dsl41.runner_adapters import spool_record
 
     run_dir = tmp_path / "j.1"
     run_dir.mkdir()
     (run_dir / "spawn.json").write_text(
         json.dumps({"run_id": "rid-else", "command_pid": os.getpid(), "command_pgid": os.getpid()})
     )
-
-    class _Proc:
-        stdin = None
-        returncode: int | None = None
-
-    async def scenario() -> None:
-        adapter = LocalCommandAdapter(grace_seconds=0.1)
-        with pytest.raises(EngineError, match="stranger's process group"):
-            await adapter._kill(run_dir, _Proc(), "rid-wal")  # type: ignore[arg-type]
-
-    asyncio.run(scenario())
+    with pytest.raises(EngineError, match="stranger's record"):
+        spool_record(run_dir / "spawn.json", "rid-wal")
 
 
 def test_spool_names_run_checks_only_the_dimensions_given() -> None:
