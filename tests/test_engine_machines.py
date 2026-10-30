@@ -20,6 +20,7 @@ from dsl41.runner_admission import (
     Attempt,
     DecisionIndex,
 )
+from dsl41.runner_store import MemoryStore, Record
 from dsl41.runner_journal import Journal
 from dsl41.state_machine import (
     HITS_ENV,
@@ -77,7 +78,7 @@ def test_a_request_id_moves_unseen_admitted_decided() -> None:
 
 
 def test_a_feed_moves_backfill_live_closed(tmp_path: Path) -> None:
-    journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
+    journal = Journal(MemoryStore())
     try:
         feed = journal.subscribe(Executor())
         assert feed.state == "backfill"
@@ -92,15 +93,17 @@ def test_a_feed_moves_backfill_live_closed(tmp_path: Path) -> None:
 
 
 def test_an_overflowed_feed_is_removed_and_its_unsubscribe_takes_nothing(tmp_path: Path) -> None:
-    journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
+    journal = Journal(MemoryStore())
     try:
         reasons: list[str] = []
         machines = Executor()
         feed = journal.subscribe(machines, reasons.append, budget=1)
-        record = {"rec": "preflight", "items": [{"message": "x" * 100}]}
-        journal._write(record)  # an empty backlog takes one record
+        record = Record(
+            datetime(2026, 7, 1, 8, 0), "preflight", None, None, {"items": [{"message": "x" * 100}]}
+        )
+        journal.append(record)  # an empty backlog takes one record
         assert feed.state == "backfill"
-        journal._write(record)  # the second does not fit: the journal drops the feed
+        journal.append(record)  # the second does not fit: the journal drops the feed
         assert feed.state == "removed" and feed.overflow is not None
         with pytest.raises(StatechartError, match="no instance"):
             machines.active(feed)  # forgotten once it rests in `removed`

@@ -52,7 +52,7 @@ from dsl41 import simulation_register_rows as rows_mod
 from dsl41.conditions import Lookback, parse_condition
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, EventKind, JobStatus, ReleasePolicy
-from dsl41.run_root import RuntimeProfile
+from dsl41.runner_config import RuntimeProfile
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.simulation_register import (
     FREE_SURFACES,
@@ -354,13 +354,8 @@ LITERAL_ALT_EXCLUDED = frozenset(
         "runner_preflight.MachineVerdict",  # machine_verdict
         "oracle_state.EventSource",  # event_source
         "autocal.ActionCategory",  # cal_action, whose members are its pairs
-        "run_root.MachinePolicy",  # profile_alt:machine_policy=*
-        "run_root.RuntimeProfile.execution_mode",  # profile_alt:execution_mode=*
+        "runner_config.MachinePolicy",  # profile_alt:machine_policy=*
         "timezones.DstStartTimes",  # profile_alt:semantics.dst-start-times=*
-        # the run-root sentinel is part of the on-disk layout, closed by its own
-        # obligations (DL-209)
-        "run_root.Sentinel.rec",
-        "run_root.Sentinel.see",
         # the LIST reply's `ok` flag (supervisor-protocol ss5): a frozen
         # supervisor-contract vocabulary, same rationale as the other two
         # protocol discriminators above (DL-220)
@@ -371,7 +366,7 @@ LITERAL_ALT_EXCLUDED = frozenset(
 
 LITERAL_ALT_MODULES = (
     "ir",
-    "run_root",
+    "runner_config",
     "conditions",
     "oracle_state",
     "oracle",
@@ -1362,8 +1357,8 @@ CITED_MODULES = (
     "oracle_facts",
     "oracle_schedule",
     "oracle_state",
-    "run_root",
     "runner_adapters",
+    "runner_config",
     "runner_preflight",
     "runner_scheduler",
     "runner_startup",

@@ -52,6 +52,9 @@ symlinked `/tmp/r` are one directory.
   parity).
 - `grace_seconds`: the SIGTERM→SIGKILL escalation window for the
   parent-loss kill. The spawner uses the same value for its own kills.
+- `env`, optional: an object of strings the command gets on top of the
+  wrapper's environment, the invocation the attempt's `dispatch` record
+  holds. Any other value is the spec refusal.
 
 Every key above is required except `lifeline_fd`, which the
 spawner fills (DL-150). `version`, `run_number` and `lifeline_fd` are integers,

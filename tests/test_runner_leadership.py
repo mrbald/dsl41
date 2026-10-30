@@ -189,7 +189,7 @@ def test_cm14_a_second_engine_is_refused_the_run_root_and_the_first_is_untouched
     by pid, that the first is still serving its control socket afterwards,
     and that the refused engine appended nothing."""
     with engine(short_root) as first:
-        journal = first.run_root / "journal.jsonl"
+        journal = first.run_root
         before = len(read_journal(journal))
         second = cli(
             "run",
@@ -267,7 +267,7 @@ def test_cm14_an_engine_that_cannot_prove_it_leads_stops_dispatching(
         socket_path = str(live.run_root / "control.sock")
         started = cli("sendevent", "STARTJOB", "--job", "proof", "--socket", socket_path)
         assert started.returncode == 0, started.stderr
-        wait_for(lambda: (live.run_root / "runs" / "proof.1" / "spawn.json").exists())
+        wait_for(lambda: (live.run_root / "runs" / "proof.1" / "1" / "spawn.json").exists())
 
         lock = live.run_root / LOCK_NAME
         assert lock.exists()
@@ -284,7 +284,7 @@ def test_cm14_an_engine_that_cannot_prove_it_leads_stops_dispatching(
         assert "no decision" in sent.stderr
         assert "--request-id" in sent.stderr
     assert sorted(p.name for p in (live.run_root / "runs").iterdir()) == ["proof.1"]
-    records = read_journal(live.run_root / "journal.jsonl")
+    records = read_journal(live.run_root)
     jobs = [r["payload"].get("job") for r in records if r.get("rec") == "input"]
     assert jobs == ["proof"]  # admitted, then nothing: `after` never entered the log
     dispatched = [r["job"] for r in records if r.get("rec") == "dispatch"]
@@ -316,7 +316,7 @@ def test_cm09_a_spawn_that_never_reached_the_host_is_redriven_at_resume(
     assert driver.returncode == CRASH_CODE, driver.stderr
 
     # the fault fired: the start is decided and was never dispatched
-    records = read_journal(run_root / "journal.jsonl")
+    records = read_journal(run_root)
     assert [r["decision"] for r in records if r.get("rec") == "decision"] == ["applied"]
     assert not [r for r in records if r.get("rec") == "dispatch"]
     # nothing anywhere on the host: `runs/` is the scaffolding every run root
@@ -351,30 +351,19 @@ def test_cm09_a_spawn_that_never_reached_the_host_is_redriven_at_resume(
     assert run_dirs == ["lost.1"]
     assert (run_root / "logs" / "lost.1.out").read_text().strip() == "re-driven"
     dispatched = [
-        (r["job"], r["run_number"])
-        for r in read_journal(run_root / "journal.jsonl")
-        if r.get("rec") == "dispatch"
+        (r["job"], r["run_number"]) for r in read_journal(run_root) if r.get("rec") == "dispatch"
     ]
     assert dispatched == [("lost", 1)]
 
 
-def test_pr01c_a_foreign_root_is_refused_before_staging(short_root: Path) -> None:
-    """ss1.1: the CLI proves the root is claimable BEFORE it stages a
-    bundle into it, an act on an estate this process may turn out not to
-    lead. A used root without
-    `--resume` gets the same early refusal."""
+def test_pr01c_a_foreign_root_is_refused_before_anything_is_written(short_root: Path) -> None:
+    """ss1.1: the CLI proves the root is claimable before it writes into it. A 1.x root is
+    refused by name, with no store made in it (a used 2.0.0 root resumes: test_cli_run.py)."""
     foreign = short_root / "foreign"
     (foreign / "wal").mkdir(parents=True)
     jil = short_root / "estate.jil"
     jil.write_text(IDLE_JIL)
     result = cli("run", "--run-root", str(foreign), str(jil))
     assert result.returncode == 2
-    assert "not an unused root" in result.stderr
-    assert not (foreign / "catalogs").exists()  # nothing was staged into it
-    assert not (foreign / "periods").exists()
-    used = short_root / "used"
-    used.mkdir()
-    (used / "journal.jsonl").write_text('{"rec": "header"}\n')  # any estate, any dialect
-    again = cli("run", "--run-root", str(used), str(jil))
-    assert again.returncode == 2
-    assert "already holds an estate" in again.stderr
+    assert "a 1.x run root" in result.stderr
+    assert not (foreign / "engine.db").exists()  # nothing was written into it

@@ -1006,7 +1006,7 @@ def test_access_run_installs_signal_handlers_before_the_socket_binds(
     import signal as signal_mod
 
     from dsl41 import cli_run
-    from dsl41.run_root import RuntimeProfile
+    from dsl41.runner_config import RuntimeProfile
     from dsl41.runner_clock import EngineError
 
     sigs = (signal_mod.SIGINT, signal_mod.SIGTERM, signal_mod.SIGHUP)

@@ -136,7 +136,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-123 | classification, latches, the retry horizon |  |
 | DL-124 | the seal operation |  |
 | DL-125 | adoption |  |
-| DL-126 | `deadman_s` leaves the host semantic projection | [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-126 | `deadman_s` leaves the host semantic projection |  |
 | DL-127 | retention floors |  |
 | DL-128 | canonical form: "control character" is Unicode Cc |  |
 | DL-129 | SPAWN idempotency outlives the supervisor, and the watch keeps a log | [docs/blocks/fw-observation.md](blocks/fw-observation.md), [docs/runner-design.md](runner-design.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
@@ -434,7 +434,8 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-421 | access-model: the release and estate verbs get their tiers, and the release train's sudo grant is a door of its own, outside the gate | [docs/access-model.md](access-model.md) |
 | DL-422 | The six estate verbs read the manifest through `--manifest`; `estate args` and its `eval` are gone | [docs/access-model.md](access-model.md), [docs/authoring.md](authoring.md) |
 | DL-423 | Release verbs read from their command line: `rollback NAME`, `requalify NAME`, and the OFF_HOLD sweep is `off-hold-all` | [docs/access-model.md](access-model.md), [docs/control-protocol.md](control-protocol.md) |
-| DL-424 | The 2.0.0 charter: three things, a production ceiling, and the owner's rulings | [docs/blocks/attempts.md](blocks/attempts.md), [docs/ir-design.md](ir-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-424 | The 2.0.0 charter: three things, a production ceiling, and the owner's rulings | [docs/blocks/attempts.md](blocks/attempts.md), [docs/control-protocol.md](control-protocol.md), [docs/ir-design.md](ir-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
 | DL-425 | Hosts, effects and the epoch leave the engine; the dispatch record precedes the launch |  |
 | DL-426 | The attempt and engine lifecycle tiers; an attempt settles only when its plan is done |  |
 | DL-427 | The update machine, its admission and its application, unwired; one update in flight |  |
+| DL-428 | The store replaces the journal; `run` resumes by default; the segment record is cut |  |

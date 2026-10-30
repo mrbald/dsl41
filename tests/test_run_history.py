@@ -18,9 +18,10 @@ a real spool.
 
 from __future__ import annotations
 
+from contextlib import closing
+
 import asyncio
 import json
-import shutil
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -35,7 +36,6 @@ from dsl41.ast_jil import parse
 from dsl41.cli import app
 from dsl41.ir import lower_catalog, lower_source
 from dsl41.oracle_state import Event, TraceEntry
-from dsl41.run_root import runtime_profile_from_cli, stage_period, wal_path
 from dsl41.runner_adapters import LocalCommandAdapter
 from dsl41.runner_admission import ApplyResult
 from dsl41.runner_clock import EngineError, RealClock
@@ -442,24 +442,6 @@ def test_leaf_row_carries_its_box_name_from_the_catalog() -> None:
     assert row.box_name == "b1"
 
 
-def test_history_and_resume_refuse_one_corrupt_dispatch_with_one_text() -> None:
-    """One question, one answer (DL-139). "Which run_id did this run's dispatch bind" is
-    decided at `runner_journal.dispatched_runs` for every reader, so history's spool read and
-    resume cannot disagree about a record -- nor about what they tell the operator."""
-    corrupt = _dispatch("j1", 1, run_dir=None, started_at=T0, run_id="not-a-uuid")
-    records = [_header(), _applied(1), corrupt]
-    refusals = []
-    for read in (
-        lambda: runner_history._read_all_spool(records),
-        lambda: dispatched_runs(records),
-    ):
-        with pytest.raises(EngineError) as caught:
-            read()
-        refusals.append(str(caught.value))
-    assert len(set(refusals)) == 1, refusals
-    assert "dispatch j1.1" in refusals[0] and "ss11a" in refusals[0]
-
-
 def test_a_well_formed_dispatch_still_folds_its_row_and_binds_its_run_id() -> None:
     """The control for the refusal above: a log this estate wrote folds its row, and the
     dispatch binds the run's id."""
@@ -664,24 +646,19 @@ def test_an_open_run_prefers_spools_started_at_with_no_ended_at_to_mix(tmp_path:
 async def _run_real_and_manifest(
     text: str, run_root: Path, jobs: list[str], *, file: str = "estate.jil"
 ) -> None:
-    """Stage the period the way `dsl41 run` does (`boundary.stage_period`:
-    the content-addressed input bundle), then start_run -- which installs
-    `periods/000001/manifest.json` -- inject STARTJOB for every named job,
-    run to quiescence, shut down and close the journal. The shared shape
-    every read_run_root integration scenario below needs. Real subprocesses
-    (`command: exit N`), the test_runner_adapters.py pattern."""
+    """Start the run the way `dsl41 run` does -- start_run records the configuration row,
+    the catalog the history reads back -- inject STARTJOB for every named job, run to
+    quiescence, shut down and close the store. The shared shape every read_run_root
+    integration scenario below needs. Real subprocesses (`command: exit N`), the
+    test_runner_adapters.py pattern."""
     jil = parse(text, file=file)
     catalog = lower_catalog([jil], permit_unknown=False)
     clock = RealClock()
-    # the staged profile must BE the wiring below (the DL-130 gate refuses
-    # a fiction): grace 2s, exactly what the adapter runs
-    staged = stage_period(run_root, [jil], catalog, runtime_profile_from_cli(cmd_grace_s=2.0))
     engine = start_run(
         catalog,
         run_root,
         clock=clock,
         adapters={"CMD": LocalCommandAdapter(grace_seconds=2.0)},
-        staged=staged,
     )
     now = clock.now()
     for job in jobs:
@@ -713,82 +690,48 @@ def test_read_run_root_end_to_end_leaf_and_box_rows(tmp_path: Path) -> None:
     assert by_job["b1"].started_at <= by_job["j1"].started_at
 
 
-def test_read_run_root_degrades_rather_than_refusing_when_there_is_no_manifest(
-    tmp_path: Path,
-) -> None:
-    """(DL-113 decision 5): stored inputs are DL-66 and then DL-130, so a
-    run root predating both has none and retention prunes them -- exactly
-    the old roots a history tool exists to read. The rows come back, and
-    every one says `records_only` so nothing reads like a complete row."""
+def test_read_run_root_reads_the_catalog_from_the_configuration_row(tmp_path: Path) -> None:
+    """(DL-113 decision 5, DL-424): the store's configuration row carries the canonical
+    catalog the engine ran, so every root this binary wrote folds at full fidelity, with
+    nothing staged beside it and no estate file named."""
     text = "insert_job: j1\njob_type: c\ncommand: exit 0\nmachine: m1\n"
     run_root = tmp_path / "run"
-
-    async def scenario() -> None:
-        jil = parse(text, file="estate.jil")
-        catalog = lower_catalog([jil], permit_unknown=False)
-        clock = RealClock()
-        engine = start_run(
-            catalog, run_root, clock=clock, adapters={"CMD": LocalCommandAdapter(grace_seconds=2.0)}
-        )
-        engine.inject(Event(at=clock.now(), kind="STARTJOB", payload={"job": "j1"}))
-        await engine.run_until_quiescent(datetime.max)
-        await engine.shutdown()
-        assert engine.journal is not None
-        engine.journal.close()
-
-    asyncio.run(scenario())  # deliberately unstaged: no bundle, no manifest
+    asyncio.run(_run_real_and_manifest(text, run_root, ["j1"]))
     [row] = read_run_root(run_root)
     assert row.job == "j1"
-    assert row.fidelity == "records_only"
-    assert row.job_hash is None  # no catalog to fingerprint against
-    assert row.box_name is None and row.started_by is None
-    assert row.status == "SUCCESS"  # a plain exit 0 still reads correctly
+    assert row.fidelity == "full"
+    assert row.job_hash is not None
+    assert row.started_by is not None
+    assert row.status == "SUCCESS"
 
 
-def test_a_manifest_belonging_to_another_journal_still_refuses(tmp_path: Path) -> None:
-    """(DL-113 decision 5): a MISSING manifest is a missing fact and degrades;
-    a manifest whose catalog_hash disagrees with the segment is a WRONG one,
-    and reading a run against another run's estate is the silent semantic
-    drift runner-design ss7 refuses everywhere else."""
+def test_an_unreadable_configuration_row_refuses_naming_the_root(tmp_path: Path) -> None:
+    """(DL-113 decision 5): a configuration that does not read is a WRONG fact, not a missing
+    one, and reading a run against a catalog it may not have run is the silent semantic drift
+    runner-design ss7 refuses everywhere else."""
+    import sqlite3
+
     run_root = tmp_path / "run"
     asyncio.run(
         _run_real_and_manifest(
             "insert_job: j1\njob_type: c\ncommand: exit 0\nmachine: m1\n", run_root, ["j1"]
         )
     )
-    manifest = run_root / "periods" / "000001" / "manifest.json"
-    payload = json.loads(manifest.read_text())
-    payload["catalog_hash"] = "sha256:" + "0" * 64
-    manifest.write_text(json.dumps(payload))
-    # the full PR-22 agreement fires now (peer-review round: not one field)
-    with pytest.raises(RunHistoryError, match="not this segment's|not this journal's"):
+    with closing(sqlite3.connect(run_root / "engine.db", isolation_level=None)) as db:
+        db.execute("UPDATE configs SET data = ?", (b'{"catalog": 1}',))
+    with pytest.raises(RunHistoryError, match="unreadable configuration row") as refused:
         read_run_root(run_root)
+    assert str(run_root) in str(refused.value)
 
 
-def test_d9_a_retired_manifest_layout_refuses_by_name(tmp_path: Path) -> None:
-    """D9 (DL-138), discriminated ON THE FILE.
-
-    A root holding `manifest/manifest.json` where `periods/<id>/manifest.json`
-    is absent is DL-66's retired run-root layout and refuses BY NAME. A
-    `manifest/` directory WITHOUT that file is unknown residue and refuses
-    generically. The two are different states and an operator needs to be
-    told which one is on the disk."""
-    text = "insert_job: j1\njob_type: c\ncommand: exit 0\nmachine: m1\n"
-    run_root = tmp_path / "run"
-    asyncio.run(_run_real_and_manifest(text, run_root, ["j1"]))
-    shutil.rmtree(run_root / "periods")
-    (run_root / "manifest").mkdir()
-
-    with pytest.raises(RunHistoryError, match="no manifest.json inside") as residue:
-        read_run_root(run_root)
-    assert "DL-138" not in str(residue.value)
-
-    (run_root / "manifest" / "manifest.json").write_text(
-        json.dumps({"catalog_hash": "h1", "sources": []})
-    )
-    with pytest.raises(RunHistoryError, match="RETIRED") as retired:
-        read_run_root(run_root)
-    assert "DL-138" in str(retired.value)
+def test_a_1x_run_root_is_refused_by_name(tmp_path: Path) -> None:
+    """A 1.x root holds `journal.jsonl` and `wal/` and no store: history names it rather than
+    calling it unreadable (docs/protocol-evolution.md ss6)."""
+    (tmp_path / "wal").mkdir()
+    with pytest.raises(RunHistoryError, match="a 1.x run root"):
+        read_run_root(tmp_path)
+    with pytest.raises(RunHistoryError, match="not a run root"):
+        read_run_root(tmp_path / "nothing")
 
 
 async def _resume_real(jil: Path, run_root: Path, jobs: list[str]) -> None:
@@ -915,13 +858,11 @@ async def _run_then_late_completion(run_root: Path, source: str) -> None:
     jil = parse("insert_job: j1\njob_type: c\ncommand: exit 1\nmachine: m1\n", file="estate.jil")
     catalog = lower_catalog([jil], permit_unknown=False)
     clock = RealClock()
-    staged = stage_period(run_root, [jil], catalog, runtime_profile_from_cli(cmd_grace_s=2.0))
     engine = start_run(
         catalog,
         run_root,
         clock=clock,
         adapters={"CMD": LocalCommandAdapter(grace_seconds=2.0)},
-        staged=staged,
     )
     engine.inject(Event(at=clock.now(), kind="STARTJOB", payload={"job": "j1"}))
     await engine.run_until_quiescent(datetime.max)
@@ -940,7 +881,7 @@ async def _run_then_late_completion(run_root: Path, source: str) -> None:
 
 
 def _verdicts(run_root: Path) -> list[tuple[str, str | None]]:
-    records = read_journal(wal_path(run_root, 1))
+    records = read_journal(run_root)
     return [(r["decision"], r.get("reason")) for r in records if r.get("rec") == "decision"]
 
 
@@ -989,13 +930,11 @@ async def _killed_run_then_late_completion(run_root: Path) -> None:
     jil = parse("insert_job: j1\njob_type: c\ncommand: sleep 20\nmachine: m1\n", file="estate.jil")
     catalog = lower_catalog([jil], permit_unknown=False)
     clock = RealClock()
-    staged = stage_period(run_root, [jil], catalog, runtime_profile_from_cli(cmd_grace_s=2.0))
     engine = start_run(
         catalog,
         run_root,
         clock=clock,
         adapters={"CMD": LocalCommandAdapter(grace_seconds=2.0)},
-        staged=staged,
     )
     engine.inject(Event(at=clock.now(), kind="STARTJOB", payload={"job": "j1"}))
     # The kill must find a run to kill. The adapter's `dispatch` record and
@@ -1039,7 +978,7 @@ async def _kill_once_spawned(
     Runs beside the engine's own loop: the journal is not read (its dispatch
     record is buffered until a later flushing write) and the loop is not
     stepped (a real-domain horizon call blocks on the live task)."""
-    spawn = run_root / "runs" / f"{job}.{run_number}" / "spawn.json"
+    spawn = run_root / "runs" / f"{job}.{run_number}" / "1" / "spawn.json"
     deadline = time.monotonic() + timeout_s
     while not spawn.exists():
         assert time.monotonic() < deadline, f"{job} never spawned within {timeout_s}s"
@@ -1047,25 +986,22 @@ async def _kill_once_spawned(
     engine.inject(Event(at=clock.now(), kind="KILLJOB", payload={"job": job}))
 
 
-def test_a_lost_rejection_is_recovered_by_the_replayed_gate_and_still_skipped(
-    tmp_path: Path,
-) -> None:
-    """DL-156, the full-fidelity half. The killed run's late `exit 0` was
-    admitted and its rejection was never written; replay re-decides it
-    through the same gate (`Replay.recovered`) and the fold takes that
-    verdict instead of throwing it away. No new authority is exercised: the
-    engine's own gate, deterministic over the engine's own records. Before
-    DL-156 this exact root read SUCCESS 0 for a killed run."""
+def test_a_store_that_lost_a_rejection_refuses_rather_than_folds(tmp_path: Path) -> None:
+    """DL-156's crash window no longer exists: an attempt and its decision are one store
+    transaction. A store that holds the killed run's late `exit 0` without its rejection
+    disagrees with itself, and the full-fidelity read refuses it, naming the root, rather
+    than re-deciding it."""
     run_root = tmp_path / "run"
     asyncio.run(_killed_run_then_late_completion(run_root))
     assert ("rejected", "job already terminal") in _verdicts(run_root)
-    _lose_the_decision_for(run_root, "adapter")
-    assert ("rejected", "job already terminal") not in _verdicts(run_root)  # the crash is real
-
     [row] = read_run_root(run_root)
-    assert row.status == "TERMINATED"  # the pre-completion truth, not SUCCESS
-    assert row.exit_code is None
-    assert row.undecided is False  # the replayed gate DID decide it
+    assert (row.status, row.exit_code, row.undecided) == ("TERMINATED", None, False)
+    _lose_the_decision_for(run_root, "adapter")
+    assert ("rejected", "job already terminal") not in _verdicts(run_root)
+
+    with pytest.raises(RunHistoryError, match="has no decision") as refused:
+        read_run_root(run_root)
+    assert str(run_root) in str(refused.value)
 
 
 def test_records_only_refuses_to_let_an_undecided_completion_decide(tmp_path: Path) -> None:
@@ -1077,7 +1013,7 @@ def test_records_only_refuses_to_let_an_undecided_completion_decide(tmp_path: Pa
     asyncio.run(_killed_run_then_late_completion(run_root))
     _lose_the_decision_for(run_root, "adapter")
 
-    records = read_journal(wal_path(run_root, 1))
+    records = read_journal(run_root)
     [row] = fold_run_rows(records)
     assert row.fidelity == "records_only"
     assert row.undecided is True
@@ -1085,59 +1021,30 @@ def test_records_only_refuses_to_let_an_undecided_completion_decide(tmp_path: Pa
     assert row.exit_code is None
 
 
-def test_a_recovered_application_still_decides_the_row(tmp_path: Path) -> None:
-    """The union is of REJECTIONS only. A control CHANGE_STATUS is never
-    stale-gated (SEM-01 parity), so the gate's re-run over the crash window
-    ADMITS it and the completion decides the row exactly as a durable
-    application would -- a blanket skip of every recovered verdict would
-    fail here. Records alone still refuse the same completion."""
+def test_a_restart_refuses_a_store_that_lost_a_verdict(tmp_path: Path) -> None:
+    """The restart's half of the same rule: a store holding an attempt with no decision is
+    refused before anything is written, and the records alone still refuse to let the
+    undecided completion decide its row."""
     run_root = tmp_path / "run"
     asyncio.run(_run_then_late_completion(run_root, "control"))
     _lose_the_decision_for(run_root, "control")
-
-    [row] = read_run_root(run_root)
-    assert row.status == "SUCCESS"
-    assert row.exit_code == 0
-    assert row.undecided is False
-
-    records = read_journal(wal_path(run_root, 1))
-    [records_only] = fold_run_rows(records)
-    assert records_only.status == "FAILURE"  # the pre-completion truth
-    assert records_only.exit_code == 1
-    assert records_only.undecided is True
-
-
-def test_a_resume_commits_a_lost_verdict_so_the_records_decide_the_row(tmp_path: Path) -> None:
-    """A resume writes the decision the crash lost (DL-315). The
-    late control `exit 0` lost its application; after one resume the log
-    holds that decision, so records alone decide the row as the gate did,
-    and no run is marked undecided. A commit kept in memory only would
-    leave the records-only row at its pre-completion FAILURE, flagged."""
-    run_root = tmp_path / "run"
-    asyncio.run(_run_then_late_completion(run_root, "control"))
-    _lose_the_decision_for(run_root, "control")
-    [lost] = fold_run_rows(read_journal(wal_path(run_root, 1)))
+    [lost] = fold_run_rows(read_journal(run_root))
     assert (lost.status, lost.undecided) == ("FAILURE", True)
 
     async def resume() -> None:
         jil = parse(
             "insert_job: j1\njob_type: c\ncommand: exit 1\nmachine: m1\n", file="estate.jil"
         )
-        engine = await resume_run(
+        await resume_run(
             lower_catalog([jil], permit_unknown=False),
             run_root,
             clock=RealClock(),
             adapters={"CMD": LocalCommandAdapter(grace_seconds=2.0)},
             settle_seconds=0.0,
         )
-        await engine.shutdown()
-        assert engine.journal is not None
-        engine.journal.close()
 
-    asyncio.run(resume())
-    [records_only] = fold_run_rows(read_journal(wal_path(run_root, 1)))
-    assert (records_only.status, records_only.exit_code) == ("SUCCESS", 0)
-    assert records_only.undecided is False
+    with pytest.raises(EngineError, match="has no decision"):
+        asyncio.run(resume())
 
 
 def test_a_decided_completion_never_marks_its_row_undecided(tmp_path: Path) -> None:
@@ -1151,7 +1058,7 @@ def test_a_decided_completion_never_marks_its_row_undecided(tmp_path: Path) -> N
     [row] = read_run_root(run_root)
     assert (row.status, row.exit_code, row.undecided) == ("FAILURE", 1, False)
 
-    records = read_journal(wal_path(run_root, 1))
+    records = read_journal(run_root)
     [records_only] = fold_run_rows(records)
     assert (records_only.status, records_only.exit_code) == ("FAILURE", 1)
     assert records_only.undecided is False
@@ -1197,69 +1104,258 @@ def test_a_decided_row_with_a_later_undecided_completion_keeps_status_and_flags(
 # ---------------------------------------- 5. the replay version gate
 
 
-def test_replay_refuses_a_segment_naming_a_foreign_state_machine_version(
-    tmp_path: Path,
-) -> None:
-    """period-model ss2.1: one executable implements one state machine, so a
-    foreign binary "cannot lead OR replay". The LEAD half
-    (`runner_ledger.check_leader_eligibility`) runs on resume only; without
-    the replay half a v999 log replayed in silence and the trace narrated
-    transitions this build's semantics invented."""
-    foreign = dict(_header())
-    foreign["state_machine_version"] = 999
-    with pytest.raises(RunHistoryError, match="state_machine_version 999"):
-        replay_trace(tmp_path, [foreign], lower_source(_SOLO_JIL))
+def test_history_refuses_a_store_naming_a_foreign_state_version(tmp_path: Path) -> None:
+    """period-model ss2.1: one executable implements one state machine, so a foreign binary
+    "cannot lead OR replay". Without the replay half a foreign store replayed in silence and
+    the trace narrated transitions this build's semantics invented."""
+    import sqlite3
 
-
-def test_replay_accepts_the_state_machine_version_this_build_derives(tmp_path: Path) -> None:
-    # replay reads the period's runtime profile from a manifest bound to the
-    # segment (DL-252), so the header is the one that manifest names
-    from dsl41.run_root import _SHARED_FIELDS, genesis_manifest, write_period_manifest
-
-    catalog = lower_source(_SOLO_JIL)
-    manifest = genesis_manifest(
-        catalog, clock_domain="real", state_machine_version=STATE_MACHINE_VERSION
-    )
-    write_period_manifest(tmp_path, manifest)
-    header = {**_header(), **{name: getattr(manifest, name) for name in _SHARED_FIELDS}}
-    replayed = replay_trace(tmp_path, [header], catalog)
-    assert replayed.trace == []
-    assert replayed.recovered == []
-
-
-def test_dsl41_journal_refuses_a_foreign_state_machine_version(tmp_path: Path) -> None:
-    """The same gate on the other replay door. `dsl41 journal` builds its
-    catalog from the bundle the segment pins, so a version bump alone leaves
-    every other check green and the trace would print.
-
-    Only the SEGMENT is edited. `period.Sentinel` does not carry the version
-    at all, so the sentinel cannot refuse on one; what guards the other
-    doors is PR-22's manifest-vs-segment agreement, which a segment-only
-    edit trips first. Editing the segment alone therefore isolates this
-    gate on the one reader that has no other."""
     run_root = tmp_path / "run"
     asyncio.run(_run_real_and_manifest(_SOLO_JIL, run_root, ["j1"]))
-    segment = wal_path(run_root, 1)
-    lines = segment.read_text().splitlines()
-    opening = json.loads(lines[0])
-    opening["state_machine_version"] = 999
-    lines[0] = json.dumps(opening, sort_keys=True)
-    segment.write_text("\n".join(lines) + "\n")
-
-    result = CliRunner().invoke(app, ["journal", str(segment)])
+    with closing(sqlite3.connect(run_root / "engine.db", isolation_level=None)) as db:
+        db.execute("UPDATE meta SET value = '999' WHERE key = 'state_version'")
+    with pytest.raises(RunHistoryError, match="state version 999"):
+        read_run_root(run_root)
+    result = CliRunner().invoke(app, ["journal", str(run_root)])
     assert result.exit_code == 2
-    assert "state_machine_version 999" in result.output
+    assert "state version 999" in result.output
+
+
+def test_replay_trace_reads_the_configuration_s_profile(tmp_path: Path) -> None:
+    """The trace is replayed under the configuration's own profile and catalog (DL-252), and
+    an empty store replays to the empty trace."""
+    from dsl41.runner_config import Configuration, RuntimeProfile
+    from dsl41.runner_store import MemoryStore
+
+    configuration = Configuration(catalog=lower_source(_SOLO_JIL), profile=RuntimeProfile())
+    assert replay_trace(MemoryStore(), configuration, "here") == []
+
+
+def test_a_pruned_store_replays_its_trace_from_the_latest_snapshot(tmp_path: Path) -> None:
+    """A store whose oldest rows the retention pruned replays from its latest snapshot: the
+    trace covers what follows it, and the configuration row stands in for the pruned
+    opening."""
+    from dsl41.runner_config import EngineSettings
+
+    run_root = tmp_path / "run"
+
+    async def scenario() -> None:
+        jil = parse(_SOLO_JIL, file="estate.jil")
+        clock = RealClock()
+        engine = start_run(
+            lower_catalog([jil], permit_unknown=False),
+            run_root,
+            clock=clock,
+            adapters={"CMD": LocalCommandAdapter(grace_seconds=2.0)},
+            settings=EngineSettings(retention_days=1),
+        )
+        engine.inject(Event(at=clock.now(), kind="STARTJOB", payload={"job": "j1"}))
+        await engine.run_until_quiescent(datetime.max)
+        assert engine.journal is not None
+        engine.journal.store.prune_before(10**6, datetime(2999, 1, 1))  # nothing to keep yet
+        engine.take_snapshot()
+        engine.journal.store.prune_before(10**6, datetime(2999, 1, 1))
+        await engine.shutdown()
+        engine.journal.close()
+
+    asyncio.run(scenario())
+    assert all(r["rec"] != "segment" for r in read_journal(run_root))  # the head is gone
+    assert read_run_root(run_root) == []  # nothing to fold, and nothing refused
+
+
+def test_runs_that_began_before_the_snapshot_of_a_pruned_store_read_partial(
+    tmp_path: Path,
+) -> None:
+    """Decision 6: the retention pruned only the opening, so a box run and its members are
+    retained, but the replay starts at the snapshot taken after they ended and the trace holds
+    none of them. The snapshot's rows anchor the fold: the box reads FAILURE, the member the
+    term_run_time killed (no STATUS input) reads TERMINATED, never RUNNING, and each row says
+    `partial`."""
+    from store_surgery import rows
+
+    from dsl41.runner_adapters import FakeAdapter
+    from dsl41.runner_clock import VirtualClock
+    from dsl41.runner_store import SqliteStore
+
+    text = (
+        "insert_job: x\njob_type: b\n\n"
+        "insert_job: a\njob_type: c\ncommand: x\nmachine: m1\nbox_name: x\n\n"
+        "insert_job: c\njob_type: c\ncommand: y\nmachine: m1\nbox_name: x\n"
+        "term_run_time: 1\n"
+    )
+    run_root = tmp_path / "run"
+
+    async def scenario() -> None:
+        engine = start_run(
+            lower_source(text),
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter({("a", 1): (30.0, 1)}, default=None)},
+        )
+        engine.inject(Event(at=T0, kind="SET_GLOBAL", payload={"name": "G", "value": "v"}))
+        engine.inject(Event(at=T0 + timedelta(minutes=1), kind="STARTJOB", payload={"job": "x"}))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=5))
+        assert {job: rt.status for job, rt in engine.oracle.store.job.items()} == {
+            "x": "FAILURE",
+            "a": "FAILURE",
+            "c": "TERMINATED",
+        }
+        engine.take_snapshot()
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+
+    asyncio.run(scenario())
+    [start] = [
+        seq
+        for seq, kind, body in rows(run_root)
+        if kind == "input" and body.get("kind") == "STARTJOB"
+    ]
+    with closing(SqliteStore(run_root / "engine.db")) as store:
+        store.prune_before(start, datetime(2999, 1, 1))  # the opening and the global only
+    by_job = {row.job: row for row in read_run_root(run_root)}
+    assert {job: (row.status, row.fidelity) for job, row in by_job.items()} == {
+        "x": ("FAILURE", "partial"),
+        "a": ("FAILURE", "partial"),
+        "c": ("TERMINATED", "partial"),
+    }
+    assert by_job["c"].ended_at is not None
+    result = CliRunner().invoke(app, ["runs", str(run_root)])
+    assert result.exit_code == 0, result.output
+    assert "fidelity=partial" in result.output
+
+
+def test_every_retained_box_run_keeps_its_row_after_a_prune(tmp_path: Path) -> None:
+    """Decision 6: the snapshot carries the run history, so a retained box run that began
+    before it keeps its row. Box `b` and its one-minute member `j` run twice on day 2, five
+    minutes apart; the snapshot's own retention prunes day 1's opening. All four runs keep
+    their rows, each `partial`, with the statuses the snapshot recorded."""
+    from dsl41.runner_adapters import FakeAdapter
+    from dsl41.runner_clock import VirtualClock
+    from dsl41.runner_config import EngineSettings
+
+    text = (
+        "insert_job: b\njob_type: b\n\n"
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\nbox_name: b\n"
+        "term_run_time: 1\n"
+    )
+    run_root = tmp_path / "run"
+    day2 = T0 + timedelta(days=1)
+
+    async def scenario() -> None:
+        engine = start_run(
+            lower_source(text),
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+            settings=EngineSettings(retention_days=1, snapshot_interval_s=10**6),
+        )
+        for minutes in (0, 5):
+            at = day2 + timedelta(minutes=minutes)
+            engine.inject(Event(at=at, kind="STARTJOB", payload={"job": "b"}))
+        await engine.run_until_quiescent(day2 + timedelta(minutes=20))
+        engine.take_snapshot()
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+
+    asyncio.run(scenario())
+    assert all(r["rec"] != "segment" for r in read_journal(run_root))  # the opening is pruned
+    rows = {
+        (row.job, row.run_number): (row.status, row.fidelity) for row in read_run_root(run_root)
+    }
+    assert rows == {
+        ("b", 1): ("FAILURE", "partial"),
+        ("b", 2): ("FAILURE", "partial"),
+        ("j", 1): ("TERMINATED", "partial"),
+        ("j", 2): ("TERMINATED", "partial"),
+    }
+
+
+def test_a_run_after_a_restart_whose_history_retention_emptied_is_numbered_after_it(
+    tmp_path: Path,
+) -> None:
+    """Decision 6: retention can empty a job's run history while the snapshot's rows still hold
+    its run number. The next run after a restart is numbered from the row, so the second box
+    run reads as run 2, and nothing is dropped."""
+    from dsl41.runner_adapters import FakeAdapter
+    from dsl41.runner_clock import VirtualClock
+    from dsl41.runner_config import EngineSettings
+
+    text = (
+        "insert_job: b\njob_type: b\n\n"
+        "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\nbox_name: b\n"
+        "term_run_time: 1\n"
+    )
+    run_root = tmp_path / "run"
+    settings = EngineSettings(retention_days=1, snapshot_interval_s=10**6)
+
+    async def first() -> None:
+        engine = start_run(
+            lower_source(text),
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+            settings=settings,
+        )
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "b"}))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=5))
+        engine.inject(
+            Event(at=T0 + timedelta(days=2), kind="SET_GLOBAL", payload={"name": "G", "value": "v"})
+        )
+        await engine.run_until_quiescent(T0 + timedelta(days=2))
+        engine.take_snapshot()  # run 1 ended outside the window: the history keeps nothing
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+
+    asyncio.run(first())
+
+    async def second() -> None:
+        restart = T0 + timedelta(days=2, minutes=1)
+        engine = await resume_run(
+            lower_source(text),
+            run_root,
+            clock=VirtualClock(start=restart),
+            adapters={"CMD": FakeAdapter(default=None)},
+            settings=settings,
+        )
+        await engine.run_until_quiescent(restart)
+        engine.inject(Event(at=restart, kind="STARTJOB", payload={"job": "b"}))
+        await engine.run_until_quiescent(restart + timedelta(minutes=5))
+        engine.take_snapshot()
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+
+    asyncio.run(second())
+    rows = {(row.job, row.run_number): row.status for row in read_run_root(run_root)}
+    # run 1's records and history are outside the window; run 2 is whole and numbered after it
+    assert rows == {("b", 2): "FAILURE", ("j", 2): "TERMINATED"}
+
+
+def test_a_run_that_ended_before_the_anchor_with_no_trace_of_how_reads_unknown() -> None:
+    """Decision 6: a later run had started by the snapshot, so the earlier one ended, and no
+    retained record says how. The fold says UNKNOWN, not RUNNING."""
+    from dsl41.oracle_state import JobRuntime
+
+    records = [_header(), _dispatch("j1", 1, run_dir=None, started_at=T0)]
+    records.append(_dispatch("j1", 2, run_dir=None, started_at=T0 + timedelta(minutes=5)))
+    anchor = {"j1": JobRuntime(status="RUNNING", status_at=T0, run_number=2)}
+    catalog = lower_source(_SOLO_JIL)
+    first, second = fold_run_rows(records, catalog=catalog, anchor=anchor)
+    assert (first.status, first.fidelity) == ("UNKNOWN", "partial")
+    assert (second.status, second.fidelity) == ("RUNNING", "partial")
 
 
 # ------------------------------------------ peer-review round-1 pins (DL-136)
 
 
-def test_read_run_root_names_the_root_when_a_decision_is_corrupt(tmp_path: Path) -> None:
-    """DL-139 at the I/O shell: the shared reader's refusal reaches an
-    operator as this module's own error, naming the root -- `dsl41 runs`
-    reads several roots in one command, and "dispatch j1.1" alone does not
-    say whose. Restored, the same root folds the same rows."""
-    from dsl41.run_root import wal_path
+def test_read_run_root_names_the_root_when_a_record_is_corrupt(tmp_path: Path) -> None:
+    """DL-139 at the I/O shell: the shared reader's refusal reaches an operator as this
+    module's own error, naming the root -- `dsl41 runs` reads several roots in one command.
+    Restored, the same root folds the same rows."""
+    from store_surgery import rows, update
 
     run_root = tmp_path / "run"
     asyncio.run(
@@ -1268,28 +1364,13 @@ def test_read_run_root_names_the_root_when_a_decision_is_corrupt(tmp_path: Path)
         )
     )
     clean = read_run_root(run_root)
-    wal = wal_path(run_root, 1)
-    saved = wal.read_text()
-    lines = saved.splitlines()
-    for position, line in enumerate(lines):
-        record = json.loads(line)
-        if record.get("rec") == "dispatch":
-            record["run_id"] = "not-a-uuid"
-            lines[position] = json.dumps(record)
-            break
-    else:  # pragma: no cover - the run above always dispatches
-        raise AssertionError("the WAL holds no dispatch record")
-    wal.write_text("\n".join(lines) + "\n")
+    [(seq, saved)] = [(seq, body) for seq, kind, body in rows(run_root) if kind == "decision"][:1]
+    update(run_root, seq, {**saved, "decision": "maybe"})
     with pytest.raises(RunHistoryError) as refused:
         read_run_root(run_root)
     assert str(run_root) in str(refused.value)
-    assert "ss11a" in str(refused.value)
-    wal.write_text(saved)
+    update(run_root, seq, saved)
     assert read_run_root(run_root) == clean
-
-    # (a missing OLDEST segment is not a hole: it is DL-135's legitimate
-    # pruned-history gap. The missing-MIDDLE refusal is pinned where the
-    # shared reader lives: tests/test_retention.py's backfill chain pin.)
 
 
 def test_a_cascaded_inactive_closes_the_members_run_as_an_injected_one_does() -> None:
@@ -1356,26 +1437,6 @@ def test_an_operator_status_after_an_undispatched_start_does_not_rewrite_the_ear
     [row] = fold_run_rows(records, catalog=catalog, trace=oracle.trace())
     assert (row.run_number, row.status) == (1, "SUCCESS")
     assert row.ended_at == T0 + timedelta(minutes=1)
-
-
-def test_history_refuses_a_replacement_manifest_sharing_catalog_hash(tmp_path: Path) -> None:
-    """PR-22 at the reader: a self-consistent replacement manifest sharing
-    catalog_hash but not baseline_id is foreign -- the FULL agreement
-    check runs, not one field."""
-    import uuid as uuid_mod
-
-    from genesis_harness import _close, _genesis
-
-    from dsl41.run_root import read_period_manifest, write_period_manifest
-
-    run_root = tmp_path / "run"
-    _close(_genesis(run_root))
-    manifest = read_period_manifest(run_root, 1)
-    assert manifest is not None
-    forged = manifest.model_copy(update={"baseline_id": str(uuid_mod.uuid4())})
-    write_period_manifest(run_root, forged)
-    with pytest.raises(RunHistoryError, match="disagrees with the journal's segment record"):
-        read_run_root(run_root)
 
 
 def test_a_file_watch_run_gets_a_row_like_a_command() -> None:

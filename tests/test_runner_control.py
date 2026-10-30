@@ -387,12 +387,12 @@ def test_every_accepted_control_event_is_journaled_with_source_control(short_roo
             await _sendevent(server.path, "SET_GLOBAL", name="G1", value="v1")
 
             async def all_seen() -> bool:
-                records = read_journal(run_root / "journal.jsonl")
+                records = read_journal(run_root)
                 kinds = [r["kind"] for r in records if r.get("rec") == "input"]
                 return "ON_HOLD" in kinds and "OFF_HOLD" in kinds and "SET_GLOBAL" in kinds
 
             await _wait_for_async(all_seen)
-            records = read_journal(run_root / "journal.jsonl")
+            records = read_journal(run_root)
             control_inputs = [
                 r
                 for r in records
@@ -471,7 +471,7 @@ def test_sendevent_release_resource_roundtrip_frees_held_units(short_root: Path)
             await _teardown(engine, server, loop_task)
 
     asyncio.run(scenario())
-    records = read_journal(short_root / "run" / "journal.jsonl")
+    records = read_journal(short_root / "run")
     releases = [
         r for r in records if r.get("rec") == "input" and r.get("kind") == "RELEASE_RESOURCE"
     ]
@@ -564,7 +564,7 @@ def test_sendevent_disarm_roundtrip_expect_gated_and_journaled(short_root: Path)
 
     asyncio.run(scenario())
 
-    records = read_journal(short_root / "run" / "journal.jsonl")
+    records = read_journal(short_root / "run")
     disarms = [r for r in records if r.get("rec") == "input" and r.get("kind") == "DISARM"]
     # exactly THREE admitted DISARM inputs: the rejected-by-precondition one
     # (admission is the commit point; its decision is the rejection), the
@@ -854,6 +854,75 @@ def test_spec_texts_helper_renders_post_placeholder_blocks() -> None:
 # ------------------------------------------------------------------ 3. subscribe
 
 
+@pytest.mark.parametrize("during", ["ack", "backfill"])
+def test_a_record_appended_while_the_ack_or_the_backfill_is_in_flight_crosses_the_seam_once(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, during: str
+) -> None:
+    """control-protocol ss5: the seam is the journal's last seq, read as the feed joins the
+    fan-out and before any await. A record appended while the ack is being sent, or while the
+    backfill is being read, is above the seam: the live feed carries it and the backfill does
+    not, so the subscriber sees it exactly once."""
+    from dsl41 import runner_control
+    from dsl41.runner_control import ControlServer
+    from dsl41.runner_preflight import PreflightItem
+
+    text = "insert_job: sub_job\njob_type: c\ncommand: x\nmachine: m1\n"
+    run_root = short_root / "run"
+    marker = PreflightItem(severity="WARN", code="seam", job="sub_job", message="mid-flight")
+    engines: list[Engine] = []
+
+    def append_marker() -> None:
+        (engine,) = engines
+        assert engine.journal is not None
+        engine.journal.preflight([marker], engine.clock.now())
+
+    real_send, real_backfill = ControlServer._send, runner_control.read_backfill
+
+    async def send(writer: asyncio.StreamWriter, record: dict) -> None:
+        if during == "ack" and record.get("subscribed") is True:
+            append_marker()
+        await real_send(writer, record)
+
+    def backfill(*args: object, **kwargs: object) -> object:
+        if during == "backfill":
+            append_marker()
+        return real_backfill(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ControlServer, "_send", staticmethod(send))
+    monkeypatch.setattr(runner_control, "read_backfill", backfill)
+
+    async def scenario() -> list[dict]:
+        engine, server, loop_task = await _serve(run_root, text)
+        engines.append(engine)
+        try:
+            assert (await _sendevent(server.path, "ON_HOLD", job="sub_job"))["ok"] is True
+            reader, writer = await asyncio.open_unix_connection(str(server.path))
+            try:
+                writer.write(
+                    json.dumps(_versioned({"cmd": "subscribe", "since": 0})).encode() + b"\n"
+                )
+                await writer.drain()
+                lines = [json.loads(await asyncio.wait_for(reader.readline(), timeout=2.0))]
+                # a live input after the marker: once it arrives, everything before it has
+                assert (await _sendevent(server.path, "OFF_HOLD", job="sub_job"))["ok"] is True
+                while lines[-1].get("kind") != "OFF_HOLD":
+                    lines.append(json.loads(await asyncio.wait_for(reader.readline(), 2.0)))
+                return lines
+            finally:
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    lines = asyncio.run(scenario())
+    marked = [r for r in lines if r.get("rec") == "preflight" and r["items"][0]["code"] == "seam"]
+    assert len(marked) == 1
+    held = [r for r in lines if r.get("kind") == "ON_HOLD"]
+    assert len(held) == 1  # the backfill still carried what preceded the seam
+    assert lines.index(held[0]) < lines.index(marked[0])
+
+
 def test_subscribe_backfills_since_zero_then_streams_a_live_record_once(short_root: Path) -> None:
     text = "insert_job: sub_job\njob_type: c\ncommand: x\nmachine: m1\n"
     run_root = short_root / "run"
@@ -865,7 +934,7 @@ def test_subscribe_backfills_since_zero_then_streams_a_live_record_once(short_ro
             assert r1["ok"] is True
 
             async def journaled() -> bool:
-                records = read_journal(run_root / "journal.jsonl")
+                records = read_journal(run_root)
                 return any(r.get("kind") == "ON_HOLD" for r in records)
 
             await _wait_for_async(journaled)
@@ -1475,7 +1544,7 @@ def test_cli_run_subprocess_sendevent_and_query_end_to_end(short_root: Path) -> 
         proc.send_signal(signal.SIGTERM)
         proc.wait(timeout=5.0)
         assert proc.returncode == 0
-        assert (run_root / "journal.jsonl").exists()
+        assert (run_root / "engine.db").exists()
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -2790,7 +2859,7 @@ _XINST_JIL = "insert_xinst: PRD\nxtype: a\n\n" + _STATUS_JIL
 
 
 def _inputs_and_decisions(run_root: Path) -> tuple[list[dict], list[dict]]:
-    records = read_journal(run_root / "journal.jsonl")
+    records = read_journal(run_root)
     return (
         [r for r in records if r.get("rec") == "input"],
         [r for r in records if r.get("rec") == "decision"],
@@ -2816,8 +2885,8 @@ def test_dl264_change_status_applies_or_is_refused_before_the_wal(
         try:
             assert engine.journal is not None
             wal_path = engine.journal.path
-            assert wal_path.parent.name == "wal"  # the WAL, not the period sentinel
-            wal_before = wal_path.read_bytes()
+            assert wal_path is not None and wal_path.name == "engine.db"  # the store
+            wal_before = engine.journal.last_seq
             records_before = len(read_journal(wal_path))
             index_before = engine.frontiers.committed_index
             resp = await _sendevent(server.path, "CHANGE_STATUS", job=target, status=status)
@@ -2839,7 +2908,7 @@ def test_dl264_change_status_applies_or_is_refused_before_the_wal(
                 for name in sorted(INJECTABLE_STATUSES):
                     assert name in resp["error"]
                 # not one record of any kind, indexed or not
-                assert wal_path.read_bytes() == wal_before
+                assert engine.journal.last_seq == wal_before
                 assert len(read_journal(wal_path)) == records_before
                 assert engine.frontiers.committed_index == index_before
             assert not loop_task.done()  # the engine stays up
@@ -2850,7 +2919,7 @@ def test_dl264_change_status_applies_or_is_refused_before_the_wal(
             await _teardown(engine, server, loop_task)
         # the log replays from nothing, and the same run root resumes
         replayed = Oracle(catalog)
-        replay_inputs(replayed, read_journal(run_root / "journal.jsonl"))
+        replay_inputs(replayed, read_journal(run_root))
         assert replayed.store.globals_["G_AFTER"].value == "1"
         if injectable:
             assert replayed.store.job[target].status == status

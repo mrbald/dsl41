@@ -16,12 +16,11 @@ from dsl41 import runner_admission, runner_journal
 from dsl41.ir import lower_source
 from dsl41.oracle import InputBatch, Oracle
 from dsl41.oracle_state import Event, JobStatus, OracleError, RuntimeState
-from dsl41.run_root import estate_wal
 from dsl41.runner import Engine, _Pending
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import Attempt, classify_fault, trial_apply
 from dsl41.runner_clock import VirtualClock
-from dsl41.runner_journal import ReplayFault, read_journal, replay_period
+from dsl41.runner_journal import ReplayFault, read_journal, replay_inputs
 from dsl41.runner_startup import start_run
 from dsl41.state_machine import (
     EXIT_STATECHART_ERROR,
@@ -218,7 +217,7 @@ def test_the_engine_stops_before_any_durable_write(
             adapters={"CMD": FakeAdapter(default=None)},
         )
         await engine.run_until_quiescent(T0)
-        before = len(read_journal(run_root / "journal.jsonl"))
+        before = len(read_journal(run_root))
         start = Event(at=T0, kind="STARTJOB", payload={"job": "j"})
         start.source = source
         with pytest.MonkeyPatch.context() as mp:
@@ -227,7 +226,7 @@ def test_the_engine_stops_before_any_durable_write(
                 await engine._admit_and_apply(_Pending(at=T0, request_id=None, ev=start))
         assert engine.quarantined == []
         assert engine.oracle.store.job["j"].status == "INACTIVE"
-        after = len(read_journal(run_root / "journal.jsonl"))
+        after = len(read_journal(run_root))
         await engine.shutdown()
         assert engine.journal is not None
         engine.journal.close()
@@ -263,7 +262,7 @@ def _replay_meets_one(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(runner_journal, "apply_attempt", apply)
 
 
-WAL_FACT = "WAL input: 1: STARTJOB for job j from control"
+WAL_FACT = "input: 1: STARTJOB for job j from control"
 
 
 def test_replay_stops_on_a_statechart_error_as_itself_naming_the_input(
@@ -275,30 +274,8 @@ def test_replay_stops_on_a_statechart_error_as_itself_naming_the_input(
     _journaled_start(run_root)
     _replay_meets_one(monkeypatch)
     with pytest.raises(UnhandledEvent) as raised:
-        replay_period(Oracle(lower_source(_JIL)), read_journal(estate_wal(run_root)))
+        replay_inputs(Oracle(lower_source(_JIL)), read_journal(run_root))
     assert not isinstance(raised.value, ReplayFault)
-    assert WAL_FACT in str(raised.value).splitlines()
-
-
-def test_replay_names_an_undecided_input_whose_dry_apply_meets_one(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The crash window: input 1 has no decision, so replay classifies it on a fork
-    first. The error is not classified; it stops replay naming the input."""
-    run_root = tmp_path / "run"
-    _journaled_start(run_root)
-    records = read_journal(estate_wal(run_root))
-    decided = next(
-        i for i, r in enumerate(records) if r.get("rec") == "decision" and r.get("index") == 1
-    )
-    records = records[:decided]  # the crash came after the attempt and before its decision
-
-    def apply(*args: Any, **kwargs: Any) -> Any:
-        raise _error()
-
-    monkeypatch.setattr(runner_admission, "apply_attempt", apply)
-    with pytest.raises(UnhandledEvent) as raised:
-        replay_period(Oracle(lower_source(_JIL)), records)
     assert WAL_FACT in str(raised.value).splitlines()
 
 
@@ -316,7 +293,7 @@ def test_an_offline_reader_exits_7_with_the_report(
     result = CliRunner().invoke(app, ["journal", str(root)])
     assert result.exit_code == 7, result.output
     assert f"{STATECHART_LOG_PREFIX}: job j: no row and no deferral for STARTJOB" in result.output
-    assert f"{STATECHART_LOG_PREFIX}: WAL input: 1: " in result.output
+    assert f"{STATECHART_LOG_PREFIX}: input: 1: " in result.output
 
 
 # ---- (3) the engine prints the report and exits 7
@@ -419,7 +396,7 @@ def test_a_resume_that_meets_one_exits_7_and_releases_the_lock(
     short_root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from dsl41 import cli_run, runner_startup
-    from dsl41.run_root import runtime_profile_from_cli
+    from dsl41.runner_config import runtime_profile_from_cli
     from dsl41.runner_startup import acquire_run_root
 
     run_root = short_root / "root"
@@ -439,7 +416,7 @@ def test_a_resume_that_meets_one_exits_7_and_releases_the_lock(
 
     def replay(*args: Any, **kwargs: Any) -> Any:
         error = _error()
-        error.facts.append(("WAL input", "1: STARTJOB for job j from control"))
+        error.facts.append(("input", "1: STARTJOB for job j from control"))
         raise error
 
     monkeypatch.setattr(runner_startup, "replay_inputs", replay)
@@ -455,7 +432,7 @@ def test_dsl41_run_exits_7_with_the_report_under_one_prefix(
     short_root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     from dsl41 import cli_run
-    from dsl41.run_root import runtime_profile_from_cli
+    from dsl41.runner_config import runtime_profile_from_cli
 
     assert cli_run.EXIT_STATECHART_ERROR == EXIT_STATECHART_ERROR == 7
 

@@ -45,7 +45,7 @@ from subprocess_harness import mypy_report
 
 from dsl41 import runner_procid, runner_wrapper
 from dsl41.ir import lower_source
-from dsl41.run_root import active_wal, catalog_hash_v2
+from dsl41.runner_config import catalog_hash
 from dsl41.runner_adapters import Failed, LocalCommandAdapter, Terminated, resolve_spool
 from dsl41.runner_clock import RealClock
 from dsl41.runner_journal import read_journal, replay_inputs
@@ -971,11 +971,13 @@ def test_dl210_u2_same_period_resume_preserves_the_trace_prefix(tmp_path: Path) 
 def test_sigkill_engine_midrun_then_resume(tmp_path: Path) -> None:
     """The flagship 11b test: a real engine (RealClock + wrapper adapters)
     is SIGKILLed mid-run. Tethered semantics record everything: the fast
-    job's completion is already in the WAL; both slow jobs' wrappers see
-    lifeline EOF, kill their commands, and record 'parent lost'. Resume
-    replays the journal, walks the ladder, and lands every job in a
-    truthful terminal state -- and because the two slow wrappers were
-    spawned concurrently by one engine, both EOFing also proves the
+    job's completion is already in the store; both slow jobs' wrappers see
+    lifeline EOF, kill their commands, and record 'parent lost'. The restart
+    settles each open attempt from its spool: the fast one is long closed,
+    and each slow one was stopped by the lifeline, so the interruption rule
+    runs it again as attempt 2 of the same run with the same invocation
+    (DL-424), and the oracle is told nothing. Because the two slow wrappers
+    were spawned concurrently by one engine, both EOFing also proves the
     lifeline fd-hygiene invariant through the real adapter path."""
     run_root = tmp_path / "run"
     driver = subprocess.Popen(
@@ -986,20 +988,19 @@ def test_sigkill_engine_midrun_then_resume(tmp_path: Path) -> None:
     try:
         assert driver.stdout is not None
         assert driver.stdout.readline().strip() == "DRIVER-READY"
-        journal_path = active_wal(run_root)
 
-        def fast_completion_journaled() -> bool:
-            if not journal_path.exists():
-                return False
+        def fast_completion_recorded() -> bool:
             return any(
-                '"exit_code"' in line and '"fast"' in line
-                for line in journal_path.read_text().splitlines()
+                r.get("rec") == "input"
+                and r.get("kind") == "STATUS"
+                and (r.get("payload") or {}).get("job") == "fast"
+                for r in read_journal(run_root)
             )
 
-        # wait until the fast completion is journaled and both slows dispatched
-        wait_for(fast_completion_journaled)
+        # wait until the fast completion is recorded and both slows dispatched
+        wait_for(fast_completion_recorded)
         for job in ("slow_one", "slow_two"):
-            wait_for(lambda job=job: (run_root / "runs" / f"{job}.1" / "spawn.json").exists())
+            wait_for(lambda job=job: (run_root / "runs" / f"{job}.1" / "1" / "spawn.json").exists())
         os.kill(driver.pid, signal.SIGKILL)
         driver.wait()
     finally:
@@ -1012,20 +1013,24 @@ def test_sigkill_engine_midrun_then_resume(tmp_path: Path) -> None:
     for job in ("slow_one", "slow_two"):
         status = wait_for(
             lambda job=job: (
-                (run_root / "runs" / f"{job}.1" / "status.json").exists()
-                and read_json(run_root / "runs" / f"{job}.1" / "status.json")
+                (run_root / "runs" / f"{job}.1" / "1" / "status.json").exists()
+                and read_json(run_root / "runs" / f"{job}.1" / "1" / "status.json")
             )
         )
         assert status["outcome"] == "terminated"
         assert status["cause"] == "parent lost"
-        spawn = read_json(run_root / "runs" / f"{job}.1" / "spawn.json")
+        spawn = read_json(run_root / "runs" / f"{job}.1" / "1" / "spawn.json")
         wait_for(lambda: not pid_alive(spawn["command_pid"]))  # zombie until the wrapper reaps
 
     from runner_crash_driver import CRASH_JIL
 
+    from dsl41.runner_journal import read_records
+
     catalog = lower_source(CRASH_JIL)
 
     async def resume() -> dict[str, str]:
+        from datetime import datetime
+
         engine = await resume_run(
             catalog,
             run_root,
@@ -1034,24 +1039,49 @@ def test_sigkill_engine_midrun_then_resume(tmp_path: Path) -> None:
             settle_seconds=1.0,
             grace_seconds=2.0,
         )
-        from datetime import datetime
-
-        await engine.run_until_quiescent(datetime.max)
+        loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
+        for job in ("slow_one", "slow_two"):
+            spawned = run_root / "runs" / f"{job}.1" / "2" / "spawn.json"
+            while not spawned.exists():
+                await asyncio.sleep(0.05)
+        statuses = {job: rt.status for job, rt in engine.oracle.store.job.items()}
+        loop.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await loop
         await engine.shutdown()
         assert engine.journal is not None
         engine.journal.close()
-        return {job: rt.status for job, rt in engine.oracle.store.job.items()}
+        return statuses
 
     statuses = asyncio.run(resume())
-    assert statuses == {"fast": "SUCCESS", "slow_one": "TERMINATED", "slow_two": "TERMINATED"}
+    assert statuses == {"fast": "SUCCESS", "slow_one": "RUNNING", "slow_two": "RUNNING"}
 
-    records = read_journal(run_root / "journal.jsonl")
-    sources = {r["source"] for r in records if r.get("rec") == "input"}
-    assert "reconcile" in sources  # the ladder injections are in the WAL
-    reconciled = [r for r in records if r.get("rec") == "input" and r.get("source") == "reconcile"]
-    assert {r["payload"]["job"] for r in reconciled} == {"slow_one", "slow_two"}
-    assert all(r["payload"]["status"] == "TERMINATED" for r in reconciled)
-    assert all("ended_at" in r["payload"] for r in reconciled)  # true end time (ss7)
+    stored = [record for _, record in read_records(run_root)]
+    outcomes = {r.payload["job"]: r.payload for r in stored if r.kind == "outcome"}
+    assert outcomes["fast"]["outcome"] == "natural"
+    for job in ("slow_one", "slow_two"):
+        assert outcomes[job]["outcome"] == "stopped"
+        assert outcomes[job]["status"]["cause"] == "parent lost"
+        assert "ended_at" in outcomes[job]["status"]  # true end time (ss7)
+        [plan] = [
+            r.payload
+            for r in stored
+            if r.kind == "follow_up"
+            and r.payload.get("event") == "plan"
+            and r.payload["job"] == job
+        ]
+        assert plan["plan"] == "rerun"
+        [first, second] = [
+            r.payload for r in stored if r.kind == "dispatch" and r.payload["job"] == job
+        ]
+        assert (first["ordinal"], second["ordinal"]) == (1, 2)
+        assert second["attempt"] == plan["steps"][0]["attempt"] != first["attempt"]
+        # the same invocation, a new attempt id
+        assert {k: v for k, v in second["env"].items() if k != "DSL41_ATTEMPT"} == {
+            k: v for k, v in first["env"].items() if k != "DSL41_ATTEMPT"
+        }
+    # the oracle is told nothing about an interruption
+    assert not [r for r in stored if r.kind == "input" and r.payload.get("source") == "reconcile"]
 
 
 def test_resume_refuses_catalog_drift(tmp_path: Path) -> None:
@@ -1067,7 +1097,7 @@ def test_resume_refuses_catalog_drift(tmp_path: Path) -> None:
     run_root = tmp_path / "run"
     catalog = lower_source(CRASH_JIL)
     changed = lower_source(CRASH_JIL.replace("sleep 120", "sleep 121"))
-    assert catalog_hash_v2(catalog) != catalog_hash_v2(changed)
+    assert catalog_hash(catalog) != catalog_hash(changed)
 
     async def scenario() -> str:
         engine = start_run(
@@ -1154,10 +1184,10 @@ def _fabricate_exit_record(run_root: Path, job: str, run_number: int, ended_at: 
     REFUSES (DL-118 identity split) rather than consumes."""
     spawned = next(
         r["run_id"]
-        for r in read_journal(run_root / "journal.jsonl")
+        for r in read_journal(run_root)
         if r.get("rec") == "dispatch" and (r["job"], r["run_number"]) == (job, run_number)
     )
-    run_dir = run_root / "runs" / f"{job}.{run_number}"
+    run_dir = run_root / "runs" / f"{job}.{run_number}" / "1"
     run_dir.mkdir(parents=True)
     (run_dir / "status.json").write_text(
         json.dumps(
@@ -1225,7 +1255,7 @@ def test_b1_advance_fired_kill_beats_late_exit_record_at_resume(tmp_path: Path) 
         assert resumed.journal is not None
         resumed.journal.close()
         statuses: dict[str, str] = {job: rt.status for job, rt in resumed.oracle.store.job.items()}
-        return statuses, read_journal(run_root / "journal.jsonl")
+        return statuses, read_journal(run_root)
 
     statuses, records = asyncio.run(scenario())
     assert statuses["x"] == "TERMINATED"  # the kill stands
@@ -1287,7 +1317,7 @@ def test_b1_advance_record_replays_the_kill(tmp_path: Path) -> None:
         assert resumed.journal is not None
         resumed.journal.close()
         statuses: dict[str, str] = {job: rt.status for job, rt in resumed.oracle.store.job.items()}
-        return statuses, read_journal(run_root / "journal.jsonl")
+        return statuses, read_journal(run_root)
 
     statuses, records = asyncio.run(scenario())
     assert statuses["x"] == "TERMINATED" and statuses["y"] == "INACTIVE"
@@ -1452,7 +1482,7 @@ def test_m6_wrapper_spawn_failure_fails_job_not_engine(
         assert engine.journal is not None
         engine.journal.close()
         statuses: dict[str, str] = {job: rt.status for job, rt in engine.oracle.store.job.items()}
-        return statuses, read_journal(tmp_path / "run" / "journal.jsonl")
+        return statuses, read_journal(tmp_path / "run")
 
     statuses, records = asyncio.run(scenario())
     assert statuses == {"doomed": "FAILURE", "fine": "SUCCESS"}
@@ -1476,8 +1506,10 @@ def test_enospc_on_the_runs_dir_fails_loudly_and_resolves_at_resume(
     is the other case -- the SPAWN effect is already applied and durable,
     and the directory that would have carried the answer does not exist --
     so the engine raises instead of deciding. Nothing invents a completion:
-    the WAL holds the applied effect and no STATUS, and the ladder resolves
-    the run at resume from the absent spool (ss7)."""
+    the store holds the dispatch and no outcome, and the restart settles the
+    attempt from the absent spool: no record and no command is unobservable,
+    so the interruption rule runs the idempotent job again as attempt 2 of
+    the same run (DL-424)."""
     import errno
 
     from dsl41.oracle_state import Event
@@ -1517,7 +1549,7 @@ def test_enospc_on_the_runs_dir_fails_loudly_and_resolves_at_resume(
         engine.journal.close()
 
     asyncio.run(crash())
-    records = read_journal(active_wal(run_root))
+    records = read_journal(run_root)
     assert [r["rec"] for r in records].count("decision") == 1  # the SPAWN was applied
     # ...and nothing spoke for the run: no completion, no run directory
     assert [r for r in records if r.get("rec") == "input" and r.get("source") == "adapter"] == []
@@ -1538,14 +1570,14 @@ def test_enospc_on_the_runs_dir_fails_loudly_and_resolves_at_resume(
         engine.journal.close()
         return {job: rt.status for job, rt in engine.oracle.store.job.items()}
 
-    assert asyncio.run(resume())["doomed"] == "FAILURE"
-    reconciled = [
-        r["payload"]
-        for r in read_journal(active_wal(run_root))
-        if r.get("rec") == "input" and r.get("source") == "reconcile"
-    ]
-    assert [p["job"] for p in reconciled] == ["doomed"]
-    assert "never spawned" in reconciled[0]["cause"]  # what happened, not a guess
+    assert asyncio.run(resume())["doomed"] == "SUCCESS"
+    from dsl41.runner_journal import read_records
+
+    stored = [r.payload for _, r in read_records(run_root) if r.payload.get("job") == "doomed"]
+    [lost] = [p for p in stored if p.get("outcome") == "unobservable"]
+    assert "run directory missing" in lost["status"]["cause"]  # what happened, not a guess
+    assert [p["ordinal"] for p in stored if "ordinal" in p] == [1, 2]
+    assert (run_root / "runs" / "doomed.1" / "2" / "status.json").exists()
 
 
 @contextlib.contextmanager

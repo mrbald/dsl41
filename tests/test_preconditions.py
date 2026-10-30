@@ -488,7 +488,7 @@ def test_a_late_status_after_a_deadline_records_one_kill_and_replays(tmp_path: P
     assert engine.journal is not None
     engine.journal.close()
 
-    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    records = read_journal(tmp_path / "run")
     # the deadline is its own verbless input, stamped at its due instant
     assert [(r["rec"], r["at"]) for r in records if r["rec"] in ("input", "advance")][-2:] == [
         ("advance", (T0 + timedelta(minutes=2)).isoformat()),
@@ -537,7 +537,7 @@ def test_a_timer_due_before_the_last_admitted_instant_is_stamped_at_that_instant
     asyncio.run(scenario())
     assert engine.journal is not None
     engine.journal.close()
-    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    records = read_journal(tmp_path / "run")
     assert [(r["rec"], r["at"]) for r in records if r["rec"] in ("input", "advance")] == [
         ("input", T0.isoformat()),
         ("advance", T0.isoformat()),
@@ -637,7 +637,7 @@ def test_a_refusal_leaves_nothing_in_the_log_and_a_rejection_leaves_a_decision(
         engine.journal.close()
 
     asyncio.run(scenario())
-    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    records = read_journal(tmp_path / "run")
     ids = [r.get("request_id") for r in records if r.get("rec") == "input"]
     assert ids.count("keeps-its-index") == 1  # the rejection; the refusal is absent
     result = next(r for r in records if r.get("rec") == "decision" and r["decision"] == "rejected")
@@ -708,46 +708,11 @@ def test_a_rejected_precondition_replays_as_a_rejection(tmp_path: Path) -> None:
         engine.journal.close()
 
     asyncio.run(scenario())
-    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    records = read_journal(tmp_path / "run")
     fresh = Oracle(lower_source(_SOLO_JIL))
     replay = replay_inputs(fresh, records)
     assert fresh.store.job["j"].on_hold is False
-    assert replay.recovered == []  # every attempt had its decision on disk
-
-
-def test_an_admitted_precondition_with_no_result_re_runs_the_gate(tmp_path: Path) -> None:
-    """The crash window (ss4): admission is the commit point, so an attempt
-    with no result is applied -- and it goes through the gate on the way,
-    because its decision is exactly what did not survive. The `expect` it was
-    admitted under is on the record, which is what makes that possible."""
-
-    async def scenario() -> None:
-        engine = start_run(
-            lower_source(_SOLO_JIL),
-            tmp_path / "run",
-            clock=VirtualClock(start=T0),
-            adapters={"CMD": FakeAdapter(default=None)},
-        )
-        stale = engine.oracle.store.revision("job:j")
-        engine.inject(_ev("ON_ICE", 1, job="j"))
-        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
-        await _submitted(engine, _ev("ON_HOLD", 2, job="j"), _envelope("r1", "job:j", stale))()
-        await engine.shutdown()
-        assert engine.journal is not None
-        engine.journal.close()
-
-    asyncio.run(scenario())
-    path = tmp_path / "run" / "journal.jsonl"
-    records = read_journal(path)
-    # cut the last decision record: the crash landed between steps 4 and 7
-    torn = [r for r in records if not (r.get("rec") == "decision" and r["index"] == 2)]
-    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in torn))
-
-    fresh = Oracle(lower_source(_SOLO_JIL))
-    replay = replay_inputs(fresh, read_journal(path))
-    assert [r.decision for r in replay.recovered] == ["rejected"]
-    assert "precondition failed" in (replay.recovered[0].reason or "")
-    assert fresh.store.job["j"].on_hold is False
+    assert replay.decisions.for_index(2) is not None  # every attempt has its decision
 
 
 # --------------------------------------------------------- 6. the wire (ss6)
@@ -1078,9 +1043,7 @@ def test_the_journal_records_what_the_caller_claimed_to_be(short_root: Path) -> 
             await _teardown(engine, server, loop_task)
 
     asyncio.run(scenario())
-    record = next(
-        r for r in read_journal(run_root / "journal.jsonl") if r.get("request_id") == "claim-1"
-    )
+    record = next(r for r in read_journal(run_root) if r.get("request_id") == "claim-1")
     assert record["claimed_actor"] == "not-really-root@somewhere"
     assert record["expect"] == {"job:j": 0}
 
@@ -1338,9 +1301,7 @@ def test_a_retry_under_the_original_id_applies_nothing_twice(short_root: Path) -
             await _teardown(engine, server, loop_task)
 
     asyncio.run(scenario())
-    records = [
-        r for r in read_journal(run_root / "journal.jsonl") if r.get("request_id") == "operator-2"
-    ]
+    records = [r for r in read_journal(run_root) if r.get("request_id") == "operator-2"]
     # one admission and one decision -- the retry added neither
     assert [r["rec"] for r in records] == ["input", "decision"]
 

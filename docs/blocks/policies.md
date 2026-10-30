@@ -8,7 +8,7 @@ This page is not a block card. It gives each policy one paragraph: what it decid
 
 The [scheduler frontier](../glossary.md#scheduler-frontier) decides which calendar ticks a segment has already admitted or dropped, so that a resume or a seal neither fires a tick twice nor loses one without a record.
 It is a calculation, not a state machine.
-`scheduler_frontier(records)` in `runner_journal.py` reads it off the journal's record kinds and stamps each time it is needed, and the ticks after it are computed from the calendars.
+`Position` in `runner_journal.py` folds it from the store's record kinds and stamps in seq order, a snapshot carries it, and the ticks after it are computed from the calendars.
 No mode is stored. The steps in the scheduler card's flowchart are steps of that computation.
 Its rules are in [the scheduler card](scheduler.md) and period-model §6 (`period-model.md`, retired in 2.0.0).
 

@@ -45,10 +45,10 @@ five decisions shape it.
    segment and this job's own `job_hash`, in every `--format`. The break line `--format table`
    prints between two consecutive rows of one job fires on `job_hash`, falling back to
    `catalog_hash` only when either row has none. The estate hash moves for every job when any
-   job changes (`run_root.catalog_hash_v2`), so a break on it would mark the whole estate.
-   `run_root.job_fingerprints` states what the per-job hash can say: it fingerprints the resolved
-   definition, so an estate whose placeholders vary per run gets no more than `catalog_hash`
-   gave it. Rows sort by (job, started_at), so a break lands where that job changed.
+   job changes (`runner_config.catalog_hash`), so a break on it would mark the whole estate.
+   `runner_config.job_fingerprints` states what the per-job hash can say: it fingerprints the
+   resolved definition, so an estate whose placeholders vary per run gets no more than
+   `catalog_hash` gave it. Rows sort by (job, started_at), so a break lands where that job changed.
 
 5. **A missing manifest degrades; a wrong one refuses.** A root whose retention pruned its
    manifest folds from records alone. A manifest whose `catalog_hash` disagrees with the
@@ -60,6 +60,15 @@ five decisions shape it.
    no catalog there is no gate to re-run, so the row stands on what the records decide and
    `undecided` says the newest completion did not. The full-fidelity path replays the gate and
    takes its recovered verdicts.
+
+6. **A pruned store anchors at its snapshot.** Retention deletes the oldest records, and the
+   replay starts from the latest snapshot (`runner_journal.replay_store`), so the trace covers
+   only what follows it. The snapshot's job rows are the anchor: a job's run numbering continues
+   from the row's `run_number`, and that run's window opens or closes as the row says. A run
+   that began at or before the anchor is `partial`: its status comes from its retained
+   completion, the anchor row and the trace after it, and a run that ended before the anchor
+   with none of those is `UNKNOWN`, never RUNNING. `full` is only for a run the trace covers
+   from its start.
 """
 
 from __future__ import annotations
@@ -69,31 +78,20 @@ from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Final, Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from dsl41.ast_jil import JilParseError, parse
 from dsl41.canon import is_wire_int, naive_utc
-from dsl41.ir import CatalogIR, LoweringError, Semantics, lower_catalog
-from dsl41.oracle import Oracle
-from dsl41.oracle_state import LIVE, TERMINAL, JobStatus, OracleError, TraceEntry
-from dsl41.run_root import (
-    Manifest,
-    RuntimeProfile,
-    bundle_dir,
-    bundle_source_paths,
-    is_opening,
-    job_fingerprints,
-    read_period_manifest,
-    oracle_reading,
-    check_manifest_against_segment,
-)
+from dsl41.ir import CatalogIR, Semantics
+from dsl41.oracle_state import LIVE, TERMINAL, JobRuntime, JobStatus, OracleError, TraceEntry
 from dsl41.runner_adapters import load_json, spool_names_run
 from dsl41.runner_admission import ApplyResult
 from dsl41.runner_clock import EngineError
-from dsl41.runner_journal import ReplayFault, dispatched_runs, read_journal, replay_period
-from dsl41.runner_ledger import check_state_machine_version
+from dsl41.runner_config import Configuration, job_fingerprints, oracle_reading
+from dsl41.runner_journal import StoreReplay, open_reader, replay_store, wire_record
+from dsl41.runner_ledger import STATE_MACHINE_VERSION
+from dsl41.runner_store import Store
 
 
 class RunHistoryError(Exception):
@@ -114,7 +112,9 @@ class RunRow(BaseModel):
     started_at: datetime
     ended_at: datetime | None = None
     duration_s: float | None = None
-    status: JobStatus
+    #: the run's status, or `UNKNOWN` for a run that ended before the snapshot a pruned store
+    #: replays from with no retained record of how (decision 6)
+    status: JobStatus | Literal["UNKNOWN"]
     exit_code: int | None = None
     started_by: str | None = None
     run_dir: str | None = None
@@ -129,8 +129,11 @@ class RunRow(BaseModel):
     #: how much of the row could be established (decision 5). "records_only" means the run root had
     #: no period manifest: no box rows, null `box_name`, `started_by` and `job_hash`, the bare
     #: SEM-09 exit-code default, and a run closed by KILLJOB or term_run_time reads as RUNNING.
-    #: It rides on the row so a JSON or CSV consumer sees it.
-    fidelity: Literal["full", "records_only"] = "full"
+    #: It rides on the row so a JSON or CSV consumer sees it. "partial" means the run began
+    #: before the snapshot a pruned store replays from: its status comes from the snapshot's
+    #: rows and the records after it, and its trace evidence before the snapshot is gone
+    #: (decision 6).
+    fidelity: Literal["full", "records_only", "partial"] = "full"
     #: the ss4 crash window (DL-156): the newest completion the records hold for this run was
     #: admitted and has no decision record, and with no catalog there is no gate to re-run, so it
     #: did not decide the row. The status stands on the earlier durable verdict or the
@@ -151,13 +154,17 @@ class SpoolRead:
 @dataclass(frozen=True)
 class _TraceWindow:
     """One run's boundaries in the replayed trace (decision 2): the Nth `*->STARTING` transition for
-    a job opens it, the next terminal transition closes it (None if none shows)."""
+    a job opens it, the next terminal transition closes it (None if none shows). `partial` marks
+    a run that began before the trace (decision 6); `approximate` one whose start only an anchor
+    row gives, as the row's last status change."""
 
     run_number: int
     started_at: datetime
     started_by: str
     ended_at: datetime | None
     status: str | None
+    partial: bool = False
+    approximate: bool = False
 
 
 def definition_change(previous: RunRow, row: RunRow) -> Literal["definition", "catalog"] | None:
@@ -179,25 +186,57 @@ def _parse_timestamp(value: str) -> datetime:
     return naive_utc(datetime.fromisoformat(value))
 
 
-def _windows_from_entries(entries: Sequence[TraceEntry]) -> list[_TraceWindow]:
+#: The statuses an anchor row closes its run with (decision 6): a terminal end, or the INACTIVE
+#: a box cascade or an injected status leaves on a run (DL-242).
+_CLOSING: frozenset[str] = frozenset(TERMINAL | {"INACTIVE"})
+
+
+def _windows_from_entries(
+    entries: Sequence[TraceEntry],
+    anchor: JobRuntime | None = None,
+    history: Sequence[_TraceWindow] = (),
+) -> list[_TraceWindow]:
     """One job's trace entries, filtered to that job and in trace order, folded into run windows
     (decision 2). Out-of-band markers (`SCHED_DISARM`, `START_REFUSED`, ...) carry no "->" and are
-    skipped. The first window is run 1."""
+    skipped. The first window is run 1. A pruned store's replay starts at a snapshot (decision
+    6): the snapshot's run history gives the runs before the trace and the trace continues the
+    last; with no history for the job, the anchor row gives its run, opened or closed as the row
+    says. The trace's first start is the run after it."""
     windows: list[_TraceWindow] = []
     run_number = 0
     started_at: datetime | None = None
     started_by = ""
     ended_at: datetime | None = None
     status: str | None = None
+    partial = approximate = False
+    if history and (anchor is None or history[-1].run_number >= anchor.run_number):
+        windows = list(history[:-1])
+        last = history[-1]
+        run_number, started_at, started_by = last.run_number, last.started_at, last.started_by
+        ended_at, status, partial, approximate = last.ended_at, last.status, True, last.approximate
+    elif anchor is not None and anchor.run_number:
+        # the history kept nothing of the row's run (retention dropped it): the row still
+        # numbers the next run
+        windows = list(history)
+        run_number, partial, approximate = anchor.run_number, True, True
+        started_at = anchor.status_at or datetime.min
+        started_by = anchor.started_by or ""
+        if anchor.status in _CLOSING:
+            ended_at, status = anchor.last_end_at or anchor.status_at, anchor.status
     for entry in entries:
         old, sep, new = entry.transition.partition("->")
         if not sep:
             continue
         if new == "STARTING":
             if started_at is not None:
-                windows.append(_TraceWindow(run_number, started_at, started_by, ended_at, status))
+                windows.append(
+                    _TraceWindow(
+                        run_number, started_at, started_by, ended_at, status, partial, approximate
+                    )
+                )
             run_number += 1
             started_at, started_by, ended_at, status = entry.at, entry.cause, None, None
+            partial = approximate = False
         elif new in TERMINAL and started_at is not None:
             # SEM-01 latching: a later CHANGE_STATUS overwrites the close recorded for this run
             ended_at, status = entry.at, new
@@ -208,19 +247,86 @@ def _windows_from_entries(entries: Sequence[TraceEntry]) -> list[_TraceWindow]:
             # leaves the recorded close alone.
             ended_at, status = entry.at, new
     if started_at is not None:
-        windows.append(_TraceWindow(run_number, started_at, started_by, ended_at, status))
+        windows.append(
+            _TraceWindow(run_number, started_at, started_by, ended_at, status, partial, approximate)
+        )
     return windows
 
 
-def _trace_windows_by_job(trace: Sequence[TraceEntry]) -> dict[str, dict[int, _TraceWindow]]:
-    """job -> {run_number: window}."""
-    by_job: dict[str, list[TraceEntry]] = {}
+def _trace_windows_by_job(
+    trace: Sequence[TraceEntry],
+    anchor: Mapping[str, JobRuntime] | None = None,
+    history: Mapping[str, Sequence[_TraceWindow]] | None = None,
+) -> dict[str, dict[int, _TraceWindow]]:
+    """job -> {run_number: window}; `anchor` is the job rows a pruned store's replay started
+    from and `history` the run history its snapshot carries (decision 6)."""
+    by_job: dict[str, list[TraceEntry]] = {job: [] for job in [*(anchor or {}), *(history or {})]}
     for entry in trace:
         by_job.setdefault(entry.job, []).append(entry)
     return {
-        job: {window.run_number: window for window in _windows_from_entries(entries)}
+        job: {
+            window.run_number: window
+            for window in _windows_from_entries(
+                entries, (anchor or {}).get(job), (history or {}).get(job, ())
+            )
+        }
         for job, entries in by_job.items()
     }
+
+
+def _history_windows(
+    history: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> dict[str, list[_TraceWindow]]:
+    """A snapshot's run history read back as windows, each `partial` (decision 6)."""
+    return {
+        job: [
+            _TraceWindow(
+                run_number=int(run["run"]),
+                started_at=datetime.fromisoformat(run["started_at"]),
+                started_by=str(run["started_by"]),
+                ended_at=None
+                if run["ended_at"] is None
+                else datetime.fromisoformat(run["ended_at"]),
+                status=run["status"],
+                partial=True,
+                approximate=bool(run["approximate"]),
+            )
+            for run in runs
+        ]
+        for job, runs in history.items()
+    }
+
+
+def run_history(
+    history: Mapping[str, Sequence[Mapping[str, Any]]],
+    trace: Sequence[TraceEntry],
+    since: datetime | None,
+    anchor: Mapping[str, JobRuntime] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """The run history a snapshot carries (decision 6): the history the engine restored from,
+    continued by its trace since, keeping every run still open or ended at or after `since` (the
+    retention window's start; None keeps every run). `anchor` is the job rows the engine
+    restored with: a job whose history retention emptied is still numbered from its row's run.
+    A pruned store's reader seeds its windows from it, so a retained run that began before the
+    snapshot keeps its row."""
+    windows = _trace_windows_by_job(trace, anchor, _history_windows(history))
+    out: dict[str, list[dict[str, Any]]] = {}
+    for job, runs in sorted(windows.items()):
+        kept = [
+            {
+                "run": window.run_number,
+                "started_at": window.started_at.isoformat(),
+                "started_by": window.started_by,
+                "ended_at": None if window.ended_at is None else window.ended_at.isoformat(),
+                "status": window.status,
+                "approximate": window.approximate,
+            }
+            for _, window in sorted(runs.items())
+            if since is None or window.ended_at is None or window.ended_at >= since
+        ]
+        if kept:
+            out[job] = kept
+    return out
 
 
 def _box_rows(
@@ -238,9 +344,10 @@ def _box_rows(
         if job_ir.job_type != "BOX":
             continue
         for window in windows_by_job.get(job, {}).values():
+            # an anchor row's window starts at the row's last status change, not the run's start
             duration = (
                 None
-                if window.ended_at is None
+                if window.ended_at is None or window.approximate
                 else (window.ended_at - window.started_at).total_seconds()
             )
             rows.append(
@@ -258,7 +365,7 @@ def _box_rows(
                     box_name=job_ir.box.box_name,
                     clock_source="journal",
                     job_hash=fingerprints.get(job),
-                    fidelity="full",
+                    fidelity="partial" if window.partial else "full",
                 )
             )
     return rows
@@ -451,23 +558,31 @@ def _emit_leaf_rows(
     trace_windows: Mapping[str, Mapping[int, _TraceWindow]],
     fingerprints: Mapping[str, str],
     fidelity: Literal["full", "records_only"],
+    anchor_runs: Mapping[str, int],
 ) -> list[RunRow]:
     """Emit phase (D3): one `RunRow` per dispatched (job, run_number), in dispatch order, as a
-    pure function of the leaf index."""
+    pure function of the leaf index. `anchor_runs` is each job's run at the snapshot a pruned
+    store replays from (decision 6)."""
     rows: list[RunRow] = []
     for key in index.order:
         job, run_number = key
         dispatch = index.dispatch_by_key[key]
         completion = index.completion_by_key.get(key)
         window = trace_windows.get(job, {}).get(run_number)
+        anchored = run_number <= anchor_runs.get(job, 0)
 
         journal_started = _parse_timestamp(str(dispatch["started_at"]))
         journal_ended = _journal_ended_at(completion)
+        status: str
         if completion is not None:
             status, exit_code = _leaf_status(job, catalog, completion)
         elif window is not None and window.status is not None:
             status, exit_code = window.status, None
             journal_ended = window.ended_at
+        elif anchored and run_number < anchor_runs[job]:
+            # a later run had started by the snapshot, so this one ended before it, and nothing
+            # retained says how (decision 6)
+            status, exit_code = "UNKNOWN", None
         else:
             status, exit_code = "RUNNING", None
 
@@ -502,7 +617,7 @@ def _emit_leaf_rows(
                 box_name=box_name,
                 clock_source=clock_source,  # type: ignore[arg-type]
                 job_hash=fingerprints.get(job),
-                fidelity=fidelity,
+                fidelity="partial" if anchored else fidelity,
                 undecided=key in index.undecided_keys,
             )
         )
@@ -518,6 +633,7 @@ def _leaf_rows(
     fingerprints: Mapping[str, str],
     fidelity: Literal["full", "records_only"],
     recovered: Sequence[ApplyResult],
+    anchor_runs: Mapping[str, int],
 ) -> list[RunRow]:
     """Every CMD/FW job's run rows, from `dispatch` + `input(kind=STATUS)` records (decision 1),
     with the trace as fallback for a close that produced no STATUS input (decision 2's
@@ -532,7 +648,7 @@ def _leaf_rows(
     decided = _decided_attempts(records) if fidelity == "records_only" else frozenset()
     index = _index_leaves(records, rejected, decided, fidelity, trace_windows)
     return _emit_leaf_rows(
-        index, catalog, catalog_hash, spool, trace_windows, fingerprints, fidelity
+        index, catalog, catalog_hash, spool, trace_windows, fingerprints, fidelity, anchor_runs
     )
 
 
@@ -543,6 +659,8 @@ def fold_run_rows(
     trace: Sequence[TraceEntry] = (),
     spool: Mapping[tuple[str, int], SpoolRead] | None = None,
     recovered: Sequence[ApplyResult] = (),
+    anchor: Mapping[str, JobRuntime] | None = None,
+    history: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
 ) -> list[RunRow]:
     """The pure fold (DL-113): parsed journal records plus, optionally, a catalog
     (box_name/job_type/SEM-09) and a replayed trace (box run boundaries, started_by, the
@@ -557,8 +675,11 @@ def fold_run_rows(
     `replay_trace` recovers for attempts whose decision record was never written. A caller that
     replayed supplies them with `trace` (`read_run_root` does); only recovered rejections join
     the skip set. Without a catalog, supplying them raises, and an undecided completion does
-    not decide its row: the row carries `undecided`."""
-    if not records or not is_opening(records[0]):
+    not decide its row: the row carries `undecided`.
+
+    `anchor` is the job rows of the snapshot a pruned store's replay started from, and
+    `history` the run history it carries, with `trace` covering what follows it (decision 6)."""
+    if not records or records[0].get("rec") != "segment":
         raise RunHistoryError("run history requires a journal starting with a segment record")
     if catalog is None and recovered:
         # DL-156's grant is asymmetric: recovered verdicts are the gate's re-run under a catalog,
@@ -569,7 +690,7 @@ def fold_run_rows(
             " the gate's re-run -- it refuses to decide instead (DL-156)"
         )
     catalog_hash = str(records[0]["catalog_hash"])
-    trace_windows = _trace_windows_by_job(trace)
+    trace_windows = _trace_windows_by_job(trace, anchor, _history_windows(history or {}))
     fingerprints = {} if catalog is None else job_fingerprints(catalog)
     fidelity: Literal["full", "records_only"] = "records_only" if catalog is None else "full"
     rows: list[RunRow] = []
@@ -585,6 +706,7 @@ def fold_run_rows(
             fingerprints,
             fidelity,
             recovered,
+            {job: row.run_number for job, row in (anchor or {}).items()},
         )
     )
     return rows
@@ -622,8 +744,8 @@ def read_spool(
 
 
 def _read_all_spool(records: list[dict[str, Any]]) -> dict[tuple[str, int], SpoolRead]:
-    # the run_id each run's `dispatch` record bound (DL-118), through the shared reader (DL-139)
-    bound = dispatched_runs(records)
+    """Each run's spool, read from its latest attempt's directory, which its `dispatch` record
+    names, held to the id that record bound (DL-118)."""
     spool: dict[tuple[str, int], SpoolRead] = {}
     for record in records:
         if record.get("rec") != "dispatch":
@@ -632,254 +754,73 @@ def _read_all_spool(records: list[dict[str, Any]]) -> dict[tuple[str, int], Spoo
         run_dir = record.get("run_dir")
         if not isinstance(run_dir, str):
             continue
-        found = read_spool(Path(run_dir), job, run_number, bound.get((job, run_number)))
+        found = read_spool(Path(run_dir), job, run_number, str(record["run_id"]))
         if found is not None:
             spool[(job, run_number)] = found
+        else:
+            spool.pop((job, run_number), None)
     return spool
 
 
-# --------------------------------------------------------- I/O: the catalog
-
-
-def load_catalog_from_manifest(run_root: Path, period_id: int | None = None) -> CatalogIR:
-    """Rebuild the catalog `dsl41 run` loaded, from the run root's own artifact; no estate-file
-    argument, unlike `dsl41 journal`.
-
-    A root keeps its inputs in `catalogs/<source_bundle_hash>/`, addressed by their bytes
-    (DL-138), and names the address in `periods/<id>/manifest.json`; the bundle holds the
-    byte-exact post-placeholder JIL (render_preserve, F1) in command-line order.
-
-    The reload is not hash-gated as `dsl41 journal` is: `SourceSpan.file` names the stored path,
-    so its `catalog_hash` cannot equal the journal's (runner-design ss7). The offline check is
-    that the manifest's own recorded hash, computed from the original catalog object, agrees
-    with the opening record; it catches a manifest from a different run.
-
-    `period_id` names which period's catalog to rebuild; omitted, the active one. Each period
-    has its own bundle, and the active period's would misreport a closed period's runs
-    (period-model ss1.1)."""
-    paths = stored_input_paths(run_root, period_id)
-    if not paths:
-        raise RunHistoryError(f"{run_root}: no stored inputs to rebuild the catalog from")
-    parsed = []
+def _replay(store: Store, configuration: Configuration, where: str) -> StoreReplay:
+    """The store replayed through a fresh Oracle under the configuration's profile, so a replay
+    reads conditions as the engine did (DL-151, DL-252); a pruned store from its latest
+    snapshot (decision 6)."""
     try:
-        for path in paths:
-            parsed.append(parse(path.read_text(encoding="utf-8"), file=str(path)))
-        return lower_catalog(parsed, permit_unknown=True)
-    except (OSError, UnicodeDecodeError, JilParseError, LoweringError) as exc:
-        raise RunHistoryError(f"{run_root}: cannot rebuild the catalog ({exc})") from exc
-
-
-def active_period_id(run_root: Path) -> int:
-    """Which period this root's active segment holds (period-model I1).
-
-    1 on a root that has never sealed. Artifacts under `periods/` are addressed by period
-    number, so defaulting to 1 after a boundary would pair period 1's manifest with period N's
-    records and refuse the root."""
-    try:
-        opening = read_journal(run_root)[0]
-    except (OSError, EngineError) as exc:
-        raise RunHistoryError(f"{run_root}: {exc}") from exc
-    # `read_journal` has run ss2.1's schema over the opening, so the field is present and an
-    # int; a fallback would be a second authority (DL-138)
-    return int(opening["period_id"])
-
-
-#: Retired estate layouts: the marker FILE that identifies one, and the entry that retired it.
-#: Append-only (docs/protocol-evolution.md ss6).
-RETIRED_LAYOUTS: Final[tuple[tuple[str, str], ...]] = (("manifest/manifest.json", "DL-138"),)
-
-
-def _refuse_retired_layout(run_root: Path) -> None:
-    """D9, DL-138: tell a root with no period manifest which state it is in, by the FILE.
-
-    `<run-root>/manifest/manifest.json` is DL-66's layout and refuses by name. A `manifest/`
-    directory without that file is unknown residue and refuses generically. A root with neither
-    has no manifest, and the caller degrades (decision 5)."""
-    for marker, retiring in RETIRED_LAYOUTS:
-        if (run_root / marker).exists():
-            raise RunHistoryError(
-                f"{run_root}: holds `{marker}` and no periods/<id>/manifest.json --"
-                f" the `manifest/` run-root layout is RETIRED and refused by name"
-                f" since {retiring} (docs/protocol-evolution.md ss6, ss8)"
-            )
-    if (run_root / "manifest").is_dir():
-        raise RunHistoryError(
-            f"{run_root}: holds a `manifest/` directory with no manifest.json inside"
-            " and no periods/<id>/manifest.json -- nothing here names this root's"
-            " inputs, and history does not guess (period-model ss1.1)"
+        return replay_store(
+            store,
+            configuration.catalog.model_copy(deep=True),
+            where=where,
+            **oracle_reading(configuration.profile),
         )
-
-
-def _period_manifest_or_refuse(run_root: Path, period_id: int | None = None) -> "Manifest | None":
-    """`read_period_manifest` with its refusal converted to `RunHistoryError`, and D9's layout
-    tombstone where it returns None. Every door into run history answers `RunHistoryError`, so
-    a multi-root `dsl41 runs` prints exit 2 and not a traceback."""
-    try:
-        manifest = read_period_manifest(
-            run_root, active_period_id(run_root) if period_id is None else period_id
-        )
-    except EngineError as exc:
-        raise RunHistoryError(f"{run_root}: {exc}") from exc
-    if manifest is None:
-        _refuse_retired_layout(run_root)
-    return manifest
-
-
-def stored_input_paths(run_root: Path, period_id: int | None = None) -> list[Path]:
-    """The stored inputs in command-line order (DL-130's bundle), or `[]` when this root stores
-    none (nothing staged, or retention pruned them). Empty is a missing fact and degrades (decision
-    5); a present, unreadable bundle is corruption and raises. `period_id` names which period's
-    inputs; omitted, the active one."""
-    manifest = _period_manifest_or_refuse(run_root, period_id)
-    if manifest is None:
-        return []
-    directory = bundle_dir(run_root, manifest.source_bundle_hash)
-    if not (directory / "sources.json").exists():
-        return []
-    try:
-        return bundle_source_paths(run_root, manifest.source_bundle_hash)
-    except EngineError as exc:
-        raise RunHistoryError(f"{run_root}: {exc}") from exc
-
-
-def check_replay_version(opening: Mapping[str, Any], *, where: str = "") -> None:
-    """period-model ss2.1's other half: a build replays only a log its own state machine wrote,
-    so a foreign log never narrates transitions this build's semantics invented.
-
-    A wrapper over `runner_ledger.check_state_machine_version`, mode="replay" (an absent field
-    refuses in both halves, DL-189). It converts the `EngineError` to `RunHistoryError`, the
-    type this module's contract promises; the message crosses unchanged.
-
-    Two entry points reach it and one nests inside the other. `_read_segment` calls it directly,
-    after `prove_opening` (identity before semantics), so the two degraded paths that fold
-    records with no replay refuse too: a foreign version is a wrong fact, and decision 5 degrades
-    only on a missing one. `replay_trace` asks again at its own entry because it is callable
-    alone. The `dsl41 journal` lineage walk calls it beside the other opening checks, before a
-    crossing is proved. No well-formed log can trip it while one version exists; a tampered
-    segment can."""
-    try:
-        check_state_machine_version(opening, mode="replay", where=where)
-    except EngineError as exc:
-        raise RunHistoryError(str(exc)) from exc
-
-
-def pinned_profile(run_root: Path, opening: Mapping[str, Any]) -> "RuntimeProfile":
-    """The runtime profile an opening segment's period was pinned with, from a manifest bound to
-    that segment (ss2.1, PR-22).
-
-    Required, not degraded: the profile carries the semantic switches and the alias table the
-    engine read conditions under (DL-252), and a replay under defaults narrates a run the engine
-    may never have made. A missing or foreign manifest refuses."""
-    try:
-        manifest = read_period_manifest(run_root, int(opening["period_id"]))
-        if manifest is None:
-            raise EngineError(
-                f"{run_root}: periods/{int(opening['period_id']):06d}/manifest.json is not"
-                " there -- a replay reads the period's semantic switches and alias table"
-                " from it, and without it would narrate readings the engine may not have"
-                " used (period-model ss2.1, DL-252)"
-            )
-        check_manifest_against_segment(manifest, opening)
-    except EngineError as exc:
-        raise RunHistoryError(str(exc)) from exc
-    return manifest.runtime_profile
-
-
-@dataclass(frozen=True)
-class SegmentReplay:
-    """What one segment's offline replay yields (DL-156): the trace (decision 2) and the
-    verdicts the ss4 gate re-derived for attempts with no decision record
-    (`Replay.recovered`). They are the engine's own gate over its own records, behind
-    `check_replay_version`, and a resume derives the same ones; taking them adds no fold
-    authority."""
-
-    trace: list[TraceEntry]
-    recovered: list[ApplyResult]
-
-
-def replay_trace(
-    run_root: Path,
-    records: list[dict[str, Any]],
-    catalog: CatalogIR,
-) -> SegmentReplay:
-    """The trace (decision 2), reconstructed by replaying the log through a fresh Oracle
-    (`replay_period`). The recovered crash-window verdicts ride back beside it (DL-156).
-
-    A foreign `state_machine_version` refuses before anything is replayed
-    (`check_replay_version`)."""
-    check_replay_version(records[0], where=str(run_root))
-    # SEM-35: this period's alias table, read from its pin; without it a replay refuses a log
-    # the engine wrote (DL-151). A missing or foreign manifest refuses. The semantic switches
-    # come from the same pin (DL-252): other switches would narrate conditions the engine never
-    # read
-    profile = pinned_profile(run_root, records[0])
-    oracle = Oracle(catalog, **oracle_reading(profile))
-    try:
-        replay = replay_period(oracle, records)
-    except (OracleError, ReplayFault) as exc:
+    except (OracleError, EngineError) as exc:
         # a replayed input that raises arrives named, as a ReplayFault (period-model ss11);
         # `runs` refuses it like any other replay fault
-        raise RunHistoryError(f"{run_root}: replay failed ({exc})") from exc
-    return SegmentReplay(trace=oracle.trace(), recovered=replay.recovered)
+        raise RunHistoryError(f"{where}: replay failed ({exc})") from exc
+
+
+def replay_trace(store: Store, configuration: Configuration, where: str) -> list[TraceEntry]:
+    """The trace (decision 2), reconstructed by replaying the store's inputs. A store whose
+    oldest records were pruned replays from its latest snapshot: the trace then covers what
+    follows it (decision 6)."""
+    return _replay(store, configuration, where).oracle.trace()
 
 
 def read_run_root(run_root: Path) -> list[RunRow]:
-    """One run root's history: its segment folded under the root's catalog (PR-50).
+    """One run root's history: its store's records folded under the configuration it ran.
 
     The cost is one replay; `--job` and `--since` filter after the fold."""
-    from dsl41.runner_journal import read_backfill
-
     try:
-        # one validated read: `read_backfill` binds the segment to the root's sentinel and its
-        # filename (DL-135), so a spliced foreign segment refuses here
-        stream = read_backfill(run_root / "journal.jsonl", since=0).records
-    except (OSError, EngineError) as exc:
-        raise RunHistoryError(f"{run_root}: {exc}") from exc
-    try:
-        return _read_segment(run_root, stream)
+        store = open_reader(run_root)
     except EngineError as exc:
-        # the shared `dispatched_runs` refusal arrives as itself (DL-139); the message names
-        # the root, since `dsl41 runs` reads several roots in one command
-        raise RunHistoryError(f"{run_root}: {exc}") from exc
-
-
-def _read_segment(run_root: Path, records: list[dict[str, Any]]) -> list[RunRow]:
-    """The I/O shell for the root's segment: its validated records, manifest and the spool of the
-    runs it dispatched, folded into run rows by the pure `fold_run_rows`."""
-    if not records or not is_opening(records[0]):
-        raise RunHistoryError(
-            f"{run_root}: run history requires a journal starting with a segment record"
+        raise RunHistoryError(str(exc)) from exc
+    try:
+        meta = store.meta()
+        if meta.get("state_version") != str(STATE_MACHINE_VERSION):
+            raise RunHistoryError(
+                f"{run_root}: state version {meta.get('state_version')}, this build derives"
+                f" {STATE_MACHINE_VERSION}: one executable replays only what its own state"
+                " machine wrote (DL-424)"
+            )
+        configuration = Configuration.from_bytes(
+            store.get_config(store.current_config_rev()), where=str(run_root)
         )
-    period_id = records[0]["period_id"]
-    # before the manifest, and not only in `replay_trace`, so the two degraded paths below,
-    # which replay nothing, refuse too
-    check_replay_version(records[0], where=str(run_root))
-    spool = _read_all_spool(records)
-    period_manifest = _period_manifest_or_refuse(run_root, period_id)
-    if period_manifest is None:
-        # a missing manifest degrades, a wrong one refuses, and a retired layout is named
-        # (`_period_manifest_or_refuse`). Every degraded row says `records_only`, so what is
-        # missing rides on the data (decision 5)
-        return fold_run_rows(records, spool=spool)
-    # PR-22: the manifest and the segment are one object written twice; a self-consistent
-    # replacement that shares catalog_hash but not baseline_id or runtime_hash is foreign, so
-    # the full agreement is checked
-    try:
-        check_manifest_against_segment(period_manifest, records[0])
-    except EngineError as exc:
+        records = [w for _, record in store.read_from(0) if (w := wire_record(record)) is not None]
+        if not records or records[0].get("rec") != "segment":
+            # the retention pruned the opening: the configuration row still names the catalog
+            records.insert(0, {"rec": "segment", "catalog_hash": configuration.catalog_hash})
+        replayed = _replay(store, configuration, str(run_root))
+    except (EngineError, ValueError) as exc:
         raise RunHistoryError(f"{run_root}: {exc}") from exc
-    if not stored_input_paths(run_root, period_id):
-        # a manifest that names inputs this root does not hold is a missing fact: the rows
-        # come back `records_only`
-        return fold_run_rows(records, spool=spool)
-    catalog = load_catalog_from_manifest(run_root, period_id)
-    replayed = replay_trace(run_root, records, catalog)
+    finally:
+        store.close()
     return fold_run_rows(
         records,
-        catalog=catalog,
-        trace=replayed.trace,
-        spool=spool,
-        recovered=replayed.recovered,
+        catalog=configuration.catalog,
+        trace=replayed.oracle.trace(),
+        spool=_read_all_spool(records),
+        anchor=None if replayed.anchor is None else replayed.anchor.rows.jobs,
+        history=None if replayed.anchor is None else replayed.anchor.runs,
     )
 
 

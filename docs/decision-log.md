@@ -25135,3 +25135,43 @@ relitigate an entry; append a new one.
   REJECTED: refusing a stale plan at application (jobs stopped for a plan thrown away); a second
   update admitted over an open one; a tick anchor inferred from the plan; a tombstone as a
   startable row. Reviewed by an Opus reviewer and Astra, three rounds each.
+- DL-428 The store replaces the journal; `run` resumes by default; the segment record is cut
+  (2026-10-30; slice 1b of the v2 train under DL-424; `SqliteStore` is the only durable record;
+  `run_root.py`, the JSONL writer, segments, `wal/` and the sentinel are gone; `runner_config.py`
+  keeps the catalog hash, the trimmed profile and `engine.toml`).
+  RECORDS. One admission is one append: the `input` (its time half and verb together) and the
+  `decision`, after the oracle applied and before the reply; a refused command keeps its `input`
+  and replay re-refuses it the same way. The `dispatch` is its own append after the admission
+  (DL-425's order); an admitted start is `dispatch_pending` until its `dispatch` commits, so no
+  snapshot boundary is reached with a start unrepresented. `outcome`, `follow_up`, `drop`,
+  `preflight`, `config`, `engine` as spec-wiring names them; a plan is committed with its outcome.
+  STARTUP. Lock, versions (`schema_version` and `state_version` written at creation; a foreign
+  version refuses by name), snapshot plus replay with the snapshot seeding the dispatch frontier,
+  settle open attempts, finish plan steps, discharge pending starts (skipping a run with an open
+  attempt or a queued replacement), then `engine started`, the missed-tick drops (E9) and the
+  socket, recorded by the loop after an `Engine.started` event the CLI waits for. Every start
+  derived during reconciliation waits behind the recovery barrier until the due work has run, so
+  a dependent of a recovered completion is never launched past its deadline.
+  SNAPSHOT AND RETENTION. A snapshot at applied boundaries, every `snapshot_interval_s` and at
+  both shutdowns holds the oracle's state, the scheduler's position, the configuration rev, the
+  open table (attempts, pending dispatches, plans with open steps) and `runs`, the history of
+  every run open or ended inside the retention window, so no retained row is lost to a prune. It
+  prunes by seq below the floor the open table and the window set; a cursor below it gets the gap
+  marker, inputs retained or not; the decision index evicts pruned request ids. `journal` and
+  `runs` restore the latest snapshot when the head is pruned; a run that began before the anchor
+  reads from the snapshot as `partial`, or `UNKNOWN` (a reader marker, never an oracle status)
+  when no retained record says how it ended; never RUNNING from a fold without its end.
+  THE WIRE. `subscribe`'s `seq` stays the admission index, `Journal.last_seq` the once-only seam;
+  `segment`, projected from `config applied`, retires `segment_no`, `estate_id`, `period_id`,
+  `catalog_hash_version`, `source_bundle_hash`, `first_index`, `opens_from_seal`, `reclaimed` and
+  `trust_unaudited` and gains `rev` (§5 names them); an unknown record kind is refused by name on
+  both sides; the DL-118 run-id grammar is checked on read and write.
+  THE PROCESS. A CMD attempt's spool is `runs/<job>.<run>/<ordinal>/`; the `dispatch` record's
+  invocation environment (DL-424) reaches the command through the wrapper spec's optional `env`
+  key (`docs/wrapper-protocol.md`; a bad value is refused before `spawn.json`). `run` on a root
+  with `engine.db` resumes with or without `--resume` (a no-op now), since `Restart=always` reruns
+  the same command line; `engine.toml` is written only after the root is accepted.
+  NARROWS DL-424 (the dormant profile fields leave with `run_root.py`) and DL-425 (a live start
+  with a dispatch record and no directory is rerun under the attempt rule, not FAILURE). REJECTED:
+  the wire `seq` as the store seq; a dispatch inside the admission's append; a pruned store
+  replayed from seq 0. Reviewed by an Opus reviewer (two rounds) and Astra (four, owner-approved).

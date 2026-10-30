@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import re
 from dataclasses import replace
 from datetime import datetime
@@ -30,13 +29,11 @@ from genesis_harness import C1_JIL, _catalog
 
 from datetime import timedelta
 
-from dsl41.run_root import estate_wal
 from dsl41.runner_startup import resume_run
 from dsl41 import runner_admission
 from dsl41.ir import lower_source
 from dsl41.machines import MACHINES
 from dsl41.oracle_state import Event
-from dsl41.run_root import RuntimeProfile, stage_manifest, wal_path, write_bundle
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import (
@@ -53,7 +50,6 @@ from dsl41.runner_admission import (
 )
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_journal import read_attempts, read_decisions, read_journal
-from dsl41.runner_ledger import STATE_MACHINE_VERSION
 from dsl41.runner_startup import start_run
 from dsl41.state_machine import (
     HITS_ENV,
@@ -495,20 +491,13 @@ def _posting(posted: list[tuple[str, tuple[str, ...]]]) -> Executor:
 
 
 def _genesis_on(run_root: Path, machines: Executor) -> Engine:
-    """`test_boundary._genesis`, on a given process executor."""
-    catalog, sources = _catalog(C1_JIL)
-    staged = stage_manifest(
-        catalog,
-        source_bundle_hash=write_bundle(run_root, sources),
-        profile=RuntimeProfile(),
-        state_machine_version=STATE_MACHINE_VERSION,
-    )
+    """`genesis_harness._genesis`, on a given process executor."""
+    catalog, _ = _catalog(C1_JIL)
     return start_run(
         catalog,
         run_root,
         clock=VirtualClock(start=T0),
         adapters={"CMD": FakeAdapter(default=None)},
-        staged=staged,
         machines=machines,
     )
 
@@ -563,7 +552,7 @@ def test_replay_names_the_attempt_whose_instance_cannot_start(
     with pytest.raises(StatechartError, match="action 'enter' is not in the registry") as raised:
         read_decisions(records)
     (attempt,) = read_attempts(records)
-    assert f"WAL input: 1: {describe_input(attempt)}" in str(raised.value).splitlines()
+    assert f"input: 1: {describe_input(attempt)}" in str(raised.value).splitlines()
 
 
 @pytest.mark.parametrize(("number", "decision"), [("02", "applied"), ("03", "rejected")])
@@ -582,7 +571,7 @@ def test_replay_names_the_decision_a_gap_meets(
     assert re.match(
         r"admission \(decisions@[0-9a-f]+, 'r1'\): no row and no deferral for decide", lines[0]
     )
-    assert f"WAL input: 1: the {decision} decision" in lines
+    assert f"input: 1: the {decision} decision" in lines
 
 
 def _report(err: str) -> list[str]:
@@ -594,7 +583,7 @@ _RUN_JIL = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
 
 def _serve(run_root: Path, resume: bool) -> int:
     from dsl41 import cli_run
-    from dsl41.run_root import runtime_profile_from_cli
+    from dsl41.runner_config import runtime_profile_from_cli
 
     serve = cli_run._serve_run(
         lower_source(_RUN_JIL),
@@ -607,17 +596,15 @@ def _serve(run_root: Path, resume: bool) -> int:
     return asyncio.run(asyncio.wait_for(serve, timeout=60))
 
 
-def test_dsl41_run_exits_7_when_a_decision_meets_a_gap_live_and_at_replay(
+def test_dsl41_run_exits_7_when_a_decision_meets_a_gap_before_it_is_recorded(
     short_root: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The loop's first applied decision meets the gap: the engine prints the
-    report under one prefix and exits 7 before the decision line is written,
-    so the attempt is left in the crash window. Resume replays it through
-    the gate, meets the same gap at its recovered decision, names the WAL
-    input and exits 7."""
+    """The loop's first applied decision meets the gap: the engine prints the report under one
+    prefix and exits 7 before the attempt and its decision are appended, so the store holds no
+    trace of it and a restart has nothing to replay."""
     from dsl41.runner_startup import acquire_run_root
 
     run_root = short_root / "root"
@@ -634,15 +621,8 @@ def test_dsl41_run_exits_7_when_a_decision_meets_a_gap_live_and_at_replay(
     assert "no row and no deferral for decide" in report[0]
     assert report[0].startswith(f"{STATECHART_LOG_PREFIX}: admission (decisions@")
     assert f"{STATECHART_LOG_PREFIX}: machine: admission" in report
-    records = read_journal(wal_path(run_root, 1))
-    assert not any(r["rec"] == "decision" for r in records)
-    (last,) = read_attempts(records)  # the stop left it undecided
-    monkeypatch.setattr(Engine, "run_until_quiescent", real)
-    assert _serve(run_root, True) == 7
-    report = _report(capsys.readouterr().err)
-    assert "no row and no deferral for decide" in report[0]
-    wal_input = f"{STATECHART_LOG_PREFIX}: WAL input: {last.index}: {describe_input(last)}"
-    assert wal_input in report
+    records = read_journal(run_root)
+    assert not any(r["rec"] in ("input", "decision") for r in records)
     acquire_run_root(run_root).release()  # the lock went with the stop
 
 
@@ -651,9 +631,9 @@ def test_dsl41_run_exits_7_when_resume_meets_a_second_attempt_for_a_decided_id(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A run decides a held command under `a` and stops. A corrupt log then
-    holds a second attempt line for `a`: resume's index pass refuses it, the
-    report names the WAL input, and `dsl41 run` exits 7."""
+    """A run decides a held command under `a` and stops. A corrupt store then holds a second
+    attempt for `a`: resume's index pass refuses it, the report names the input, and `dsl41
+    run` exits 7."""
     from dsl41.runner_startup import acquire_run_root
 
     run_root = short_root / "root"
@@ -679,14 +659,15 @@ def test_dsl41_run_exits_7_when_resume_meets_a_second_attempt_for_a_decided_id(
         assert _serve(run_root, False) == 1
     assert decided, "the hold was not decided in 30 s"  # exit 1 either way
     capsys.readouterr()
-    wal = wal_path(run_root, 1)
-    records = read_journal(wal)
+    from store_surgery import append, drop_snapshots, rows
+
+    drop_snapshots(run_root)  # the whole journal replays, through the index pass
+    records = read_journal(run_root)
     (first,) = [r for r in records if r["rec"] == "input" and r.get("request_id") == "a"]
     seq = max(int(r["seq"]) for r in records if "seq" in r) + 1
-    second = {**first, "seq": seq}
-    with wal.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(second, sort_keys=True) + "\n")
-    (attempt,) = [a for a in read_attempts(read_journal(wal)) if a.index == seq]
+    [body] = [b for _, kind, b in rows(run_root) if kind == "input" and b["request_id"] == "a"]
+    append(run_root, "input", {**body, "index": seq}, at=T0)
+    (attempt,) = [a for a in read_attempts(read_journal(run_root)) if a.index == seq]
     assert _serve(run_root, True) == 7
     report = _report(capsys.readouterr().err)
     assert re.match(
@@ -695,15 +676,14 @@ def test_dsl41_run_exits_7_when_resume_meets_a_second_attempt_for_a_decided_id(
         report[0],
     )
     assert f"{STATECHART_LOG_PREFIX}: stored decision: applied at index {first['seq']}" in report
-    assert f"{STATECHART_LOG_PREFIX}: WAL input: {seq}: {describe_input(attempt)}" in report
+    assert f"{STATECHART_LOG_PREFIX}: input: {seq}: {describe_input(attempt)}" in report
     acquire_run_root(run_root).release()  # the lock went with the stop
 
 
 def test_every_event_a_poster_sends_is_in_the_alphabet(tmp_path: Path) -> None:
     """The live loop notes and decides an applied and a rejected command,
     refuses a command whose id is in flight, and stops on the same command
-    in flight; resume replays the decided attempts and decides the one a
-    crash left open.
+    in flight; resume replays the decided attempts through the same chart.
     Every post is `decide` or `input`, and every row fires. An id is in
     flight here as a second writer would leave it."""
     run_root = tmp_path / "run"
@@ -734,13 +714,6 @@ def test_every_event_a_poster_sends_is_in_the_alphabet(tmp_path: Path) -> None:
     asyncio.run(scenario())
     assert {(DECIDE, ("admission.02",)), (DECIDE, ("admission.03",))} <= set(live)
     assert ("input", ("admission.09",)) in live
-    # the crash landed between the rejected attempt's line and its decision
-    wal = estate_wal(run_root)
-    lines = wal.read_text().splitlines(keepends=True)
-    records = read_journal(wal)
-    (at,) = [i for i, r in enumerate(records) if r["rec"] == "decision" and r["request_id"] == "b"]
-    assert not any(r["rec"] in ("input", "decision") for r in records[at + 1 :])
-    wal.write_text("".join(lines[:at] + lines[at + 1 :]))
     resumed: list[tuple[str, tuple[str, ...]]] = []
 
     async def resume() -> Engine:
@@ -754,7 +727,7 @@ def test_every_event_a_poster_sends_is_in_the_alphabet(tmp_path: Path) -> None:
 
     again = asyncio.run(resume())
     assert again.decisions.state("a") == "applied"
-    assert again.decisions.state("b") == "rejected"  # decided again, the same way
+    assert again.decisions.state("b") == "rejected"  # the durable decision, replayed
     assert ("<start>", ()) in resumed
     assert {(DECIDE, ("admission.02",)), (DECIDE, ("admission.03",))} <= set(resumed)
     assert again.journal is not None

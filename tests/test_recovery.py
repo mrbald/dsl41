@@ -81,11 +81,7 @@ def _sending(stderr: str) -> list[str]:
 
 
 def _records_for(run_root: Path, request_id: str) -> list[str]:
-    return [
-        r["rec"]
-        for r in read_journal(run_root / "journal.jsonl")
-        if r.get("request_id") == request_id
-    ]
+    return [r["rec"] for r in read_journal(run_root) if r.get("request_id") == request_id]
 
 
 async def _poll(predicate: Callable[[], bool], timeout_s: float = 5.0) -> None:
@@ -1055,7 +1051,7 @@ def test_a_rejected_retry_answers_the_stored_code_and_a_record_without_one_omits
 ) -> None:
     """protocol-evolution ss7 for the `code` a rejected decision stores
     (period-model ss2.3). After a same-period restart the decision index is
-    rebuilt from the WAL, and an exact retry is answered from it. A record
+    rebuilt from the store, and an exact retry is answered from it. A record
     this build wrote carries its code, so the retry answers exactly what the
     live rejection answered. A record written before codes existed has none:
     it still replays, and its retry answers without `code` rather than with
@@ -1087,13 +1083,12 @@ def test_a_rejected_retry_answers_the_stored_code_and_a_record_without_one_omits
             await _teardown(engine, server, loop_task)
 
         # the second decision, as a writer from before codes left it
-        lines = wal.read_bytes().splitlines(keepends=True)
-        for position, line in enumerate(lines):
-            record = json.loads(line)
-            if record.get("rec") == "decision" and record["request_id"] == "pre-code":
-                assert record.pop("code") == "precondition_failed"
-                lines[position] = json.dumps(record, sort_keys=True).encode("utf-8") + b"\n"
-        wal.write_bytes(b"".join(lines))
+        from store_surgery import rows, update
+
+        for seq, kind, body in rows(wal):
+            if kind == "decision" and body["request_id"] == "pre-code":
+                assert body.pop("code") == "precondition_failed"
+                update(wal, seq, body)
 
         resumed, server, loop_task = await _resume_served(run_root)
         try:

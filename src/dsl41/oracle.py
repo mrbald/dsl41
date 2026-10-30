@@ -383,7 +383,7 @@ ITEM_CEILING: Final = 400_000
 #: and takes about 1,004 frames to evaluate; the engine's and the replays' call sites add their
 #: own stack. Each construction raises the process's limit to this and never lowers it. A logged
 #: input is far inside it (a run root stores no condition deeper than about 250 levels,
-#: `period.catalog_hash_v2`); the headroom serves the paths that hash no catalog: equiv and a
+#: `runner_config.catalog_hash`); the headroom serves the paths that hash no catalog: equiv and a
 #: directly built oracle.
 RECURSION_LIMIT: Final = 3000
 

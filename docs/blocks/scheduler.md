@@ -12,16 +12,16 @@ With it, a resume or a seal (retired in 2.0.0) neither fires a tick twice nor lo
 `Scheduler` and `autocal.py` carry over unchanged and need none of the storage capabilities.
 They compute ticks from the catalog and an anchor and import no storage module.
 The frontier needs epoch-conditional append, the leader fence of concurrency-model §1 (`concurrency-model.md`, retired in 2.0.0).
-Its guarantees of no double fire and no duplicate drop (DL-166, DL-174) assume that one writer adjudicates a segment's ticks.
+Its guarantees of no double fire and no duplicate drop (DL-166, DL-174) assume that one writer adjudicates a store's ticks.
 Two engines that both ran the resume sweep in `runner_startup.py` would each append a `drop` for the same tick, or each admit it.
-The fence is enforced in `Journal._write` in `runner_journal.py`, which checks the leader lock before each append when a lock is wired.
-Its rules carry over to a store that returns a segment's records in order, because `scheduler_frontier` reads record kinds and stamps, not files.
+The fence is enforced in `Journal.append` in `runner_journal.py`, which checks the leader lock before each append when a lock is wired.
+`Position` in `runner_journal.py` reads the frontier off record kinds and stamps, in seq order, and a snapshot carries it.
 
 ## Interface
 
 - `Scheduler(catalog, start=, default_tz=, tz_aliases=, semantics=)` in `runner_scheduler.py`: `next_occurrence()`, `pop_due(upto)`, `reset(start)`, `upcoming()`. `pop_due` returns STARTJOB events stamped at their ticks.
 - Engine, in `runner.py`: the loop wakes at the earliest of the oracle's timers, the next tick, the clock's sleepers and the queue head ([runner-design §4](../runner-design.md#4-engine-loop--single-writer)). A due tick is enqueued with `source="scheduler"`. `Engine._cutoff(at)` admits every tick at or before a seal's cutoff.
-- Resume, in `runner_startup.py`: re-anchor at `scheduler_frontier(records)`, sweep the ticks up to now, and record each missed one with `journal.drop`.
+- Resume, in `runner_startup.py`: re-anchor at the frontier `Position` holds, sweep the ticks up to now, and record each missed one with `journal.drop` at startup step 8.
 - Clocks, in `runner_clock.py`: the `Clock` protocol, `RealClock` on naive UTC, and `VirtualClock` ([runner-design §9](../runner-design.md#9-time-domains-e2)).
 - Calendars: `compile_calendar`, `CompiledCalendar` and `standard_rows` from `autocal.py`. Start instants: `start_time_instants` and `start_mins_instants` from `timezones.py`.
 - Oracle timers: `Oracle.next_timer_due()` and `Oracle.advance(now)` ([runner-design §3](../runner-design.md#3-architecture--functional-core-imperative-shell)).
@@ -69,7 +69,7 @@ flowchart TD
 - `src/dsl41/runner.py`: tick admission in the engine loop, the cutoff.
 - `src/dsl41/runner_clock.py`: the real and virtual clocks.
 - `src/dsl41/runner_startup.py`: the resume sweep.
-- `src/dsl41/runner_journal.py`: `scheduler_frontier`.
+- `src/dsl41/runner_journal.py`: `Position`, the scheduler frontier.
 - `src/dsl41/autocal.py`: extended calendar interpretation.
 
 ## Tests

@@ -53,8 +53,8 @@ from dsl41.reload_update import (
     live_of,
     plan_application,
 )
-from dsl41 import run_root
 from dsl41.reload_diff import catalog_hash_v2
+from dsl41 import runner_config
 from dsl41.runner_clock import EngineError
 from dsl41.runner_scheduler import Scheduler
 from dsl41.state_machine import (
@@ -739,7 +739,7 @@ def test_tombstones_travel_in_the_carried_rows_and_restore(tmp_path: Path) -> No
 def test_the_catalog_hash_is_the_one_the_scheduler_pins(tmp_path: Path) -> None:
     world = _world(tmp_path)
     catalog = world.oracle.catalog
-    assert catalog_hash_v2(catalog) == run_root.catalog_hash_v2(catalog)
+    assert catalog_hash_v2(catalog) == runner_config.catalog_hash(catalog)
     assert catalog_hash_v2(catalog) == world.scheduler.catalog_hash
 
 

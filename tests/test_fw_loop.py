@@ -179,7 +179,7 @@ def test_sem10_fw_loop_box_rearmed_by_recycler_over_two_files(short_root: Path) 
 
     asyncio.run(scenario())
 
-    records = read_journal(run_root / "journal.jsonl")
+    records = read_journal(run_root)
 
     def reported(job: str) -> list[tuple[int, int | None]]:
         return [

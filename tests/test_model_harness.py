@@ -79,6 +79,24 @@ def test_harness_cm14_reports_a_second_run_of_one_run_number() -> None:
     assert "engine incarnation 0" in violation  # names WHERE, not just THAT
 
 
+def test_harness_cm14_accepts_a_rerun_after_an_interruption_in_a_later_incarnation() -> None:
+    """DL-424: a run interrupted by its engine's end runs again in the next incarnation; the same
+    run twice in one incarnation, or again after an attempt that was not interrupted, is a
+    double run."""
+    first = _spawn("alpha", 1, 0, 5, seq=0)
+    first.outcome = "cancelled"
+    rerun = _spawn("alpha", 1, 9, 12, seq=1)
+    rerun.incarnation = 1
+    assert cm14_double_spawns(SpawnLog(spawns=[first, rerun])) == []
+    finished = _spawn("alpha", 1, 0, 5, seq=0)
+    finished.outcome = "0"
+    (violation,) = cm14_double_spawns(SpawnLog(spawns=[finished, rerun]))
+    assert "alpha run 1 ran twice" in violation
+    same = _spawn("alpha", 1, 9, 12, seq=1)
+    (violation,) = cm14_double_spawns(SpawnLog(spawns=[first, same]))
+    assert "engine incarnation 0" in violation
+
+
 def test_harness_cm14_accepts_distinct_runs() -> None:
     log = SpawnLog(spawns=[_spawn("alpha", 1, 0, 5, seq=0), _spawn("alpha", 2, 9, 12, seq=1)])
     assert cm14_double_spawns(log) == []
@@ -141,20 +159,17 @@ def test_cm14_two_starts_for_one_stopped_job_spawn_once(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_cm14_a_run_lost_to_an_engine_crash_is_failed_not_rerun(tmp_path: Path) -> None:
+def test_cm14_a_run_lost_to_an_engine_crash_is_rerun_once(tmp_path: Path) -> None:
     """The failure a per-engine assertion cannot see: engine 0 spawns run
-    1, dies with it live, and engine 1 replays a journal that says the job
+    1, dies with it live, and engine 1 replays a store that says the job
     is RUNNING. Each engine is individually correct; only a log that
-    outlives the crash shows whether the process started twice.
+    outlives the crash shows whether the process started twice, and when.
 
-    The guard is reconciliation's rule for a start whose SPAWN the log
-    already resolved: no intent is left waiting, so there is nothing to
-    deliver and the run is FAILED rather than silently re-run. DL-102
-    narrowed that from "any start with no spool trace" -- a start still
-    PENDING in the outbox is re-driven instead, which is a different case
-    and has its own test (tests/test_ledger.py). The resumed engine is a
-    plausible place to break either, because everything it knows says the
-    job ought to be running."""
+    DL-424's interruption rule: the attempt left no record and its command
+    is gone, so it is unobservable, and an idempotent job's run is started
+    again as a new attempt of the SAME run -- once, in the new incarnation,
+    after the first ended with the engine. The oracle is told nothing: the
+    run stays RUNNING until the new attempt ends."""
 
     async def scenario() -> None:
         run = ModelRun(MODEL_JIL, tmp_path / "run", script={("solo", 1): (600.0, 0)})
@@ -170,8 +185,12 @@ def test_cm14_a_run_lost_to_an_engine_crash_is_failed_not_rerun(tmp_path: Path) 
         engine = await run.resume(settle_seconds=0.0, grace_seconds=0.0)
         await run.run_to(at + timedelta(seconds=3600))
 
-        assert [(s.job, s.run_number, s.incarnation) for s in run.log.execs()] == [("solo", 1, 0)]
-        assert engine.oracle.store.job["solo"].status == "FAILURE"
+        assert [(s.job, s.run_number, s.incarnation) for s in run.log.execs()] == [
+            ("solo", 1, 0),
+            ("solo", 1, 1),
+        ]
+        assert engine.oracle.store.job["solo"].status == "SUCCESS"
+        assert engine.oracle.store.job["solo"].run_number == 1
         run.check()
         await run.close()
 

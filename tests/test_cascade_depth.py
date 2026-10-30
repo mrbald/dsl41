@@ -42,7 +42,8 @@ from dsl41.oracle import (
     item_cap,
 )
 from dsl41.oracle_state import CascadeDepthError, Event, OracleError
-from dsl41.run_root import catalog_hash_v2
+from dsl41.runner_config import catalog_hash
+from dsl41.runner_journal import read_journal
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import AdmissionRefused, Envelope
@@ -447,7 +448,7 @@ def _deepest_stored() -> int:
     while low < high:
         middle = (low + high + 1) // 2
         try:
-            catalog_hash_v2(lower_source(_deep_jil(middle)))
+            catalog_hash(lower_source(_deep_jil(middle)))
         except EngineError:
             high = middle - 1
         else:
@@ -508,7 +509,7 @@ def test_sem10_a_condition_deeper_than_the_hash_serializes_is_refused_by_name(
     traceback; rehearse prints the refusal and exits 2."""
     catalog = lower_source(_deep_jil(_PAST_THE_HASH))
     with pytest.raises(EngineError, match="deeper than its hash serializes \\(about 250 levels"):
-        catalog_hash_v2(catalog)
+        catalog_hash(catalog)
     (tmp_path / "estate.jil").write_text(_deep_jil(_PAST_THE_HASH))
     played = CliRunner().invoke(
         app, ["rehearse", str(tmp_path / "estate.jil"), "--start", START, "--hours", "1"]
@@ -527,7 +528,7 @@ def test_sem10_the_hash_names_only_the_depth_refusal(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(type(catalog), "model_dump", broken)
     with pytest.raises(ValueError, match="some other serializer error"):
-        catalog_hash_v2(catalog)
+        catalog_hash(catalog)
 
 
 # ------------------------------------------------------------- the item cap
@@ -747,10 +748,11 @@ def test_sem10_an_engine_made_input_at_the_cap_is_quarantined_and_replays_alike(
     """An engine whose cap the scheduler's tick reaches meets the error on the
     tick's dry apply. The tick's time half applies alone, so the tick is
     quarantined: logged with its rejection, and rehearse names it and fails
-    (concurrency-model ss4). A replay under the same cap quarantines it the
-    same way; the cap is the catalog's, so the live engine and its replays
-    agree. A log an older build wrote holds the tick with no decision, and a
-    replay under the cap quarantines it too."""
+    (concurrency-model ss4). A replay under the same cap reads the recorded
+    quarantine; the cap is the catalog's, so the live engine and its replays
+    agree. An engine with no dry apply meets the error in the apply itself,
+    before the attempt and its decision are appended in one transaction, so
+    the store holds no trace of the tick and its replay is the empty trace."""
     jil, _ = _box_chain(200)
     (tmp_path / "estate.jil").write_text(jil)
     _capped(monkeypatch, 500)
@@ -769,15 +771,15 @@ def test_sem10_an_engine_made_input_at_the_cap_is_quarantined_and_replays_alike(
     assert narrated.exit_code == 0, narrated.output
     assert quarantined in narrated.output
     assert "q199 RUNNING->SUCCESS" not in narrated.output
-    # the older build: no dry apply for an engine-made input, so the tick
-    # reached the WAL before its apply raised
+    # no dry apply for an engine-made input: the apply raises before the
+    # admission's one transaction, so nothing of the tick is recorded
     old = tmp_path / "old"
     with monkeypatch.context() as older:
         older.setattr(runner.Engine, "_dry_apply_engine_made", lambda _self, _attempt: None)
         died = invoke(app, [*rehearse, "--run-root", str(old)])
     assert died.exit_code == 1, died.output
     assert f"rehearse failed: {capped}" in died.output
+    assert not [r for r in read_journal(old) if r["rec"] in ("input", "advance", "decision")]
     recovered = invoke(app, ["journal", str(old)])
     assert recovered.exit_code == 0, recovered.output
-    assert quarantined in recovered.output
-    assert f"CascadeDepthError: {capped}" in recovered.output
+    assert recovered.output == ""

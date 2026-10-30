@@ -1,20 +1,18 @@
-"""A 2.0.0 run root holds period 1 only, opened from nothing, under its own sentinel.
+"""A 2.0.0 run root holds one store, `engine.db`, opened from nothing (spec-wiring 1b).
 
-Resume checks the WAL against the root before any replay or write: a segment from another
-estate, a second segment, or an opening that names a seal refuses by name and leaves the WAL's
-bytes as they were.
+Genesis refuses a root that already holds a store, and both genesis and restart refuse a 1.x
+root (its `journal.jsonl` sentinel or its `wal/` segments) by name, before any write: 2.0.0
+runs from the store only.
 """
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 
 import pytest
 from genesis_harness import C1_JIL, _close, _genesis, _resume
 
-from dsl41.run_root import read_sentinel, sentinel_path, wal_path
 from dsl41.runner_clock import EngineError
 
 
@@ -24,81 +22,38 @@ def _root(tmp_path: Path) -> Path:
     return run_root
 
 
-def _loosened(run_root: Path) -> tuple[int, int]:
-    """Loosen the root's mode, so a resume that tightens it shows; answer (mode, mtime_ns)."""
-    os.chmod(run_root, 0o750)
-    st = run_root.stat()
-    return st.st_mode, st.st_mtime_ns
-
-
-def _as_left(run_root: Path) -> tuple[int, int]:
-    st = run_root.stat()
-    return st.st_mode, st.st_mtime_ns
-
-
-def test_a_root_with_its_own_segment_resumes(tmp_path: Path) -> None:
+def test_a_root_with_its_own_store_resumes(tmp_path: Path) -> None:
     """The counterpart: a resume that passes every check tightens a loosened root."""
     run_root = _root(tmp_path)
-    _loosened(run_root)
+    os.chmod(run_root, 0o750)
     _close(_resume(run_root, C1_JIL))
     assert run_root.stat().st_mode & 0o777 == 0o700
+    assert {"engine.db", "leader.lock", "plans", "runs"} <= {p.name for p in run_root.iterdir()}
 
 
-def test_a_sentinel_naming_another_estate_refuses_before_any_write(tmp_path: Path) -> None:
+def test_genesis_refuses_a_root_that_already_holds_a_store(tmp_path: Path) -> None:
     run_root = _root(tmp_path)
-    sentinel = read_sentinel(run_root)
-    assert sentinel is not None
-    payload = json.loads(sentinel_path(run_root).read_text())
-    payload["estate_id"] = "someone-else"
-    sentinel_path(run_root).write_text(json.dumps(payload, sort_keys=True) + "\n")
-    before = wal_path(run_root, 1).read_bytes()
-    with pytest.raises(EngineError, match="stranger's segment"):
+    with pytest.raises(EngineError, match="already exists: a new run needs a fresh run root"):
+        _genesis(run_root)
+
+
+def test_a_restart_of_a_root_with_no_store_refuses(tmp_path: Path) -> None:
+    (tmp_path / "empty").mkdir()
+    with pytest.raises(EngineError, match="no engine.db to resume"):
+        _resume(tmp_path / "empty", C1_JIL)
+
+
+@pytest.mark.parametrize("marker", ["journal.jsonl", "wal"])
+def test_a_1x_root_is_refused_by_name_before_any_write(tmp_path: Path, marker: str) -> None:
+    run_root = tmp_path / "old"
+    run_root.mkdir()
+    if marker == "wal":
+        (run_root / "wal").mkdir()
+    else:
+        (run_root / marker).write_text('{"rec": "period_root"}\n')
+    before = sorted(p.name for p in run_root.iterdir())
+    with pytest.raises(EngineError, match="a 1.x run root"):
+        _genesis(run_root)
+    with pytest.raises(EngineError, match="a 1.x run root"):
         _resume(run_root, C1_JIL)
-    assert wal_path(run_root, 1).read_bytes() == before
-
-
-def test_a_second_segment_refuses_before_any_write(tmp_path: Path) -> None:
-    run_root = _root(tmp_path)
-    before = wal_path(run_root, 1).read_bytes()
-    wal_path(run_root, 2).write_bytes(before)
-    left = _loosened(run_root)
-    with pytest.raises(EngineError, match="segment 1 only"):
-        _resume(run_root, C1_JIL)
-    assert wal_path(run_root, 1).read_bytes() == before
-    assert _as_left(run_root) == left
-
-
-def test_an_opening_that_names_a_seal_refuses_before_any_write(tmp_path: Path) -> None:
-    run_root = _root(tmp_path)
-    lines = wal_path(run_root, 1).read_text().splitlines()
-    opening = json.loads(lines[0])
-    opening["opens_from_seal"] = {"period_id": 1, "digest": "sha256:" + "0" * 64}
-    lines[0] = json.dumps(opening, sort_keys=True)
-    wal_path(run_root, 1).write_text("\n".join(lines) + "\n")
-    before = wal_path(run_root, 1).read_bytes()
-    left = _loosened(run_root)
-    with pytest.raises(EngineError, match="segment 1 opens no seal"):
-        _resume(run_root, C1_JIL)
-    assert wal_path(run_root, 1).read_bytes() == before
-    assert _as_left(run_root) == left
-
-
-def test_a_segment_whose_opening_names_another_segment_refuses_before_any_write(
-    tmp_path: Path,
-) -> None:
-    """A foreign segment renamed into place: its opening is a well-formed period 2 that opens
-    period 1's seal, and it sits in the file named for segment 1. Resume reads the opening's
-    own number and refuses by name."""
-    run_root = _root(tmp_path)
-    lines = wal_path(run_root, 1).read_text().splitlines()
-    opening = json.loads(lines[0])
-    opening["segment_no"] = opening["period_id"] = 2
-    opening["opens_from_seal"] = {"period_id": 1, "digest": "sha256:" + "0" * 64}
-    lines[0] = json.dumps(opening, sort_keys=True)
-    wal_path(run_root, 1).write_text("\n".join(lines) + "\n")
-    before = wal_path(run_root, 1).read_bytes()
-    left = _loosened(run_root)
-    with pytest.raises(EngineError, match="names segment 1 and its opening says 2"):
-        _resume(run_root, C1_JIL)
-    assert wal_path(run_root, 1).read_bytes() == before
-    assert _as_left(run_root) == left
+    assert sorted(p.name for p in run_root.iterdir() if p.name != "leader.lock") == before

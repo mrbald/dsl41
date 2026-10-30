@@ -1,13 +1,15 @@
 """Semantic switches (runner-design ss8a, DL-252): the closed registry, the
 runtime-profile field that records overrides, the hash-neutral spelling of
 "no override", the path from the command line to the period's pin, and the
-first switch, `ice-lookback`, across the manifest, the engine and replay.
+first switch, `ice-lookback`, across the configuration row, the engine and replay.
 
 The oracle's own reading of the switch, on both bisimulation paths, is in
 `test_oracle.py` (`test_sem20_ice_lookback_switch_selects_the_q10_reading`).
 """
 
 from __future__ import annotations
+
+from contextlib import closing
 
 import ast
 import asyncio
@@ -32,26 +34,18 @@ from dsl41.cli import app
 from dsl41.conditions import ExitCodeAtom, StatusAtom, parse_condition
 from dsl41.ir import LoweringError, lower_source
 from dsl41.oracle_state import Event
-from dsl41.run_root import (
-    EMPTY_BUNDLE_HASH,
+from dsl41.runner_config import (
+    Configuration,
     RuntimeProfile,
-    estate_wal,
-    genesis_manifest,
-    period_dir,
-    read_period_manifest,
     runtime_hash,
     runtime_profile_from_cli,
-    stage_manifest,
     switches_of,
-    wal_path,
-    write_period_manifest,
 )
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_history import RunHistoryError, replay_trace
-from dsl41.runner_journal import read_journal
-from dsl41.runner_ledger import STATE_MACHINE_VERSION
+from dsl41.runner_journal import open_reader, read_journal
 from dsl41.runner_scheduler import Scheduler
 from dsl41.runner_startup import (
     _derive_runtime_profile,
@@ -89,11 +83,27 @@ _ICED_JIL = (
 #: The default profile's canonical bytes, spelled out by hand: `semantics`
 #: is present and `{}` like every other empty collection (period-model ss3.2).
 _DEFAULT_PROFILE_BYTES = (
-    b'{"as_machine":[],"cmd_grace_us":10000000,"deadman_us":null,"default_tz":"UTC",'
-    b'"execution_mode":"tethered","fw_default_interval_us":60000000,'
-    b'"machine_policy":"strict","reconcile_settle_us":5000000,"retry_horizon_us":60000000,'
-    b'"semantics":{},"spawn_window_us":5000000,"tz_aliases":{}}'
+    b'{"as_machine":[],"default_tz":"UTC","fw_default_interval_us":60000000,'
+    b'"machine_policy":"strict","semantics":{},"tz_aliases":{}}'
 )
+
+
+def _recorded(run_root: Path) -> Configuration:
+    """The configuration row the run root's store holds."""
+    store = open_reader(run_root)
+    try:
+        return Configuration.from_bytes(store.get_config(store.current_config_rev()), where="t")
+    finally:
+        store.close()
+
+
+def _replayed(run_root: Path) -> list:
+    """The trace of the store's inputs, replayed under its own configuration."""
+    store = open_reader(run_root)
+    try:
+        return replay_trace(store, _recorded(run_root), str(run_root))
+    finally:
+        store.close()
 
 
 # ------------------------------------------------------------------ registry
@@ -253,49 +263,28 @@ def test_an_override_is_in_the_bytes_and_moves_the_hash() -> None:
     assert runtime_hash(profile) != runtime_hash(RuntimeProfile())
 
 
-def _write_manifest(root: Path, profile: RuntimeProfile) -> None:
-    catalog = lower_source(_ICED_JIL)
-    manifest = genesis_manifest(
-        catalog,
-        clock_domain="virtual",
-        state_machine_version=STATE_MACHINE_VERSION,
-        staged=stage_manifest(
-            catalog,
-            source_bundle_hash=EMPTY_BUNDLE_HASH,
-            profile=profile,
-            state_machine_version=STATE_MACHINE_VERSION,
-        ),
-    )
-    write_period_manifest(root, manifest)
-
-
 @pytest.mark.parametrize("overrides", [{}, ORDINARY])
-def test_the_period_manifest_round_trips_the_overrides(
-    tmp_path: Path, overrides: dict[str, str]
-) -> None:
-    """The manifest always writes `semantics`, `{}` when there is none, and
-    reads both back to the profile that was written."""
+def test_the_configuration_row_round_trips_the_overrides(overrides: dict[str, str]) -> None:
+    """The row always writes `semantics`, `{}` when there is none, and reads both back to the
+    profile that was written."""
     profile = RuntimeProfile(semantics=overrides)
-    _write_manifest(tmp_path, profile)
-    raw = json.loads((period_dir(tmp_path, 1) / "manifest.json").read_bytes())
-    assert raw["runtime_profile"]["semantics"] == overrides
-    manifest = read_period_manifest(tmp_path)
-    assert manifest is not None
-    assert manifest.runtime_profile == profile
-    assert manifest.runtime_hash == runtime_hash(profile)
+    row = Configuration(catalog=lower_source(_ICED_JIL), profile=profile)
+    raw = json.loads(row.to_bytes())
+    assert raw["profile"]["semantics"] == overrides
+    back = Configuration.from_bytes(row.to_bytes(), where="t")
+    assert back.profile == profile
+    assert back.runtime_hash == runtime_hash(profile)
 
 
 @pytest.mark.parametrize("field", ["semantics", "default_tz"])
-def test_a_manifest_refuses_a_missing_profile_field(tmp_path: Path, field: str) -> None:
-    """`semantics` gets no exemption: absent is a defaulted pin, refused
-    like any other missing field."""
-    _write_manifest(tmp_path, RuntimeProfile())
-    path = period_dir(tmp_path, 1) / "manifest.json"
-    raw = json.loads(path.read_bytes())
-    del raw["runtime_profile"][field]
-    path.write_bytes(canonical_bytes(raw))
-    with pytest.raises(EngineError, match=f"runtime_profile missing {field}"):
-        read_period_manifest(tmp_path)
+def test_a_configuration_row_with_a_missing_profile_field_reads_the_default(field: str) -> None:
+    """A field the row does not spell reads as its default, which the hash then says: the row
+    is the store's own output, written whole by `Configuration.to_bytes`."""
+    row = Configuration(catalog=lower_source(_ICED_JIL), profile=RuntimeProfile())
+    raw = json.loads(row.to_bytes())
+    del raw["profile"][field]
+    back = Configuration.from_bytes(canonical_bytes(raw), where="t")
+    assert back.profile == RuntimeProfile()
 
 
 # ------------------------------------------------- engine, resume and replay
@@ -304,21 +293,15 @@ def test_a_manifest_refuses_a_missing_profile_field(tmp_path: Path, field: str) 
 def _start_iced(
     run_root: Path, profile: RuntimeProfile, text: str = _ICED_JIL, *, scheduled: bool = False
 ):
-    from dsl41.ast_jil import parse
-    from dsl41.run_root import stage_period
-
     jil = run_root.parent / "iced.jil"
     jil.write_text(text)
     catalog = lower_source(text, file=str(jil))
-    parsed = [parse(text, file=str(jil))]
-    run_root.mkdir()
-    staged = stage_period(run_root, parsed, catalog, profile)
     return catalog, start_run(
         catalog,
         run_root,
         clock=VirtualClock(start=T0),
         adapters={"CMD": FakeAdapter(default=None)},
-        staged=staged,
+        launched=profile,
         scheduler=Scheduler(
             catalog, start=T0, default_tz=profile.default_tz, tz_aliases=profile.tz_aliases
         )
@@ -353,8 +336,7 @@ def test_the_engine_runs_the_period_s_pin_and_replay_reads_it_back(
     live.journal.close()
     expected = ["INACTIVE->STARTING", "STARTING->RUNNING"] if starts else []
     assert _cons_transitions(live.oracle.trace()) == expected
-    records = read_journal(estate_wal(run_root))
-    assert _cons_transitions(replay_trace(run_root, records, catalog).trace) == expected
+    assert _cons_transitions(_replayed(run_root)) == expected
     resumed = asyncio.run(
         resume_run(
             catalog,
@@ -427,10 +409,7 @@ def test_queued_recheck_reads_today_in_the_base_zone_on_the_engine_and_replay(
     if mode != "0":
         [left] = [t.cause for t in live.oracle.trace() if t.transition == "QUE_WAIT->INACTIVE"]
         assert "2026-07-02 is in exclude_calendar 'ex'" in left
-    records = read_journal(estate_wal(run_root))
-    replayed = [
-        t.transition for t in replay_trace(run_root, records, catalog).trace if t.job == "xq"
-    ]
+    replayed = [t.transition for t in _replayed(run_root) if t.job == "xq"]
     assert replayed == trace
 
 
@@ -466,10 +445,7 @@ def test_the_engine_runs_queued_recheck_and_replay_reads_it_back(
     trace = [t.transition for t in live.oracle.trace() if t.job == "qc"]
     assert trace[0] == "INACTIVE->QUE_WAIT"
     assert trace[-1].endswith(qc_end)
-    records = read_journal(estate_wal(run_root))
-    replayed = [
-        t.transition for t in replay_trace(run_root, records, catalog).trace if t.job == "qc"
-    ]
+    replayed = [t.transition for t in _replayed(run_root) if t.job == "qc"]
     assert replayed == trace
 
 
@@ -479,12 +455,12 @@ def test_an_engine_refuses_switches_that_disagree_with_its_pin(tmp_path: Path) -
     run_root = tmp_path / "run"
     catalog, live = _start_iced(run_root, RuntimeProfile(semantics=ORDINARY))
     try:
-        with pytest.raises(EngineError, match="disagree with the period's pin"):
+        with pytest.raises(EngineError, match="disagree with the profile's"):
             Engine(
                 catalog,
                 clock=VirtualClock(start=T0),
                 adapters={"CMD": FakeAdapter(default=None)},
-                manifest=live.manifest,
+                profile=live.profile,
                 semantics=semantics.DEFAULTS,
             )
     finally:
@@ -497,8 +473,8 @@ def test_a_declared_switch_that_moves_off_the_pin_is_profile_drift() -> None:
     inherits the pin, and one that names a different value drifts, exactly
     as a changed machine identity does."""
     pinned = RuntimeProfile(semantics=ORDINARY)
-    assert _derive_runtime_profile(None, {}, None, pinned).semantics == ORDINARY
-    moved = _derive_runtime_profile(None, {}, None, pinned, RuntimeProfile())
+    assert _derive_runtime_profile(None, {}, pinned).semantics == ORDINARY
+    moved = _derive_runtime_profile(None, {}, pinned, RuntimeProfile())
     assert moved.semantics == {}
 
 
@@ -513,14 +489,14 @@ def test_fw_existence_is_derived_from_the_wired_adapter_not_the_pin() -> None:
 
     pinned = RuntimeProfile()  # fw-existence: stable, the default
     immediate_fw = {"FW": FileWatcherAdapter(existence="immediate")}
-    assert _derive_runtime_profile(None, immediate_fw, None, pinned).semantics == {
+    assert _derive_runtime_profile(None, immediate_fw, pinned).semantics == {
         "fw-existence": "immediate"
     }
     pinned_immediate = RuntimeProfile(semantics={"fw-existence": "immediate"})
     stable_fw = {"FW": FileWatcherAdapter(existence="stable")}
-    assert _derive_runtime_profile(None, stable_fw, None, pinned_immediate).semantics == {}
+    assert _derive_runtime_profile(None, stable_fw, pinned_immediate).semantics == {}
     declared = RuntimeProfile(semantics={"ice-lookback": "ordinary"})
-    derived = _derive_runtime_profile(None, immediate_fw, None, pinned, declared)
+    derived = _derive_runtime_profile(None, immediate_fw, pinned, declared)
     assert derived.semantics == {"ice-lookback": "ordinary", "fw-existence": "immediate"}
 
 
@@ -528,31 +504,25 @@ def test_fw_existence_is_derived_from_the_wired_adapter_not_the_pin() -> None:
     ("pinned_existence", "wired_existence"),
     [("stable", "immediate"), ("immediate", "stable")],
 )
-def test_genesis_refuses_a_staged_profile_the_fw_adapter_disagrees_with(
+def test_genesis_refuses_a_launch_profile_the_fw_adapter_disagrees_with(
     tmp_path: Path, pinned_existence: str, wired_existence: str
 ) -> None:
-    """DL-258: a staged profile pinning one `fw-existence` reading over an
-    FW adapter actually wired the other is a fiction, refused before
-    anything is written -- the same gate `_finish_genesis` already runs for
-    every other wired field. Both mismatch directions are checked: the one
-    that would report SUCCESS too early, and the one that would lose it."""
+    """DL-258: a launch profile naming one `fw-existence` reading over an FW adapter actually
+    wired the other is a fiction, refused before anything is written -- the same gate genesis
+    runs for every other wired field. Both mismatch directions are checked: the one that would
+    report SUCCESS too early, and the one that would lose it."""
     from dsl41.runner_adapters import FileWatcherAdapter
 
     catalog = lower_source("insert_job: w\njob_type: f\nmachine: m1\nwatch_file: /tmp/x\n")
-    staged = stage_manifest(
-        catalog,
-        source_bundle_hash=EMPTY_BUNDLE_HASH,
-        profile=RuntimeProfile(semantics={"fw-existence": pinned_existence}),
-        state_machine_version=STATE_MACHINE_VERSION,
-    )
     with pytest.raises(EngineError, match="disagrees with the engine's wiring"):
         start_run(
             catalog,
             tmp_path / "run",
             clock=VirtualClock(start=T0),
             adapters={"FW": FileWatcherAdapter(existence=wired_existence)},
-            staged=staged,
+            launched=RuntimeProfile(semantics={"fw-existence": pinned_existence}),
         )
+    assert not (tmp_path / "run" / "engine.db").exists()
 
 
 @pytest.mark.parametrize(
@@ -592,13 +562,27 @@ def test_resume_refuses_an_fw_adapter_disagreeing_with_the_pin(
 
 
 def test_a_resume_with_a_different_switch_refuses(tmp_path: Path) -> None:
-    from dsl41.cli_run import _resume_profile_error
+    run_root = tmp_path / "run"
+    catalog, live = _start_iced(run_root, runtime_profile_from_cli(semantics=ORDINARY))
+    asyncio.run(live.shutdown())
+    live.journal.close()
 
-    _write_manifest(tmp_path, runtime_profile_from_cli(semantics=ORDINARY))
-    refused = _resume_profile_error(tmp_path, runtime_profile_from_cli())
-    assert refused is not None and "runtime-profile mismatch" in refused
-    assert "semantics" in refused
-    assert _resume_profile_error(tmp_path, runtime_profile_from_cli(semantics=ORDINARY)) is None
+    def resume(declared: RuntimeProfile):
+        return asyncio.run(
+            resume_run(
+                catalog,
+                run_root,
+                clock=VirtualClock(start=T0 + timedelta(minutes=1)),
+                adapters={"CMD": FakeAdapter(default=None)},
+                declared=declared,
+            )
+        )
+
+    with pytest.raises(EngineError, match="runtime-profile mismatch on semantics"):
+        resume(runtime_profile_from_cli())
+    resumed = resume(runtime_profile_from_cli(semantics=ORDINARY))
+    asyncio.run(resumed.shutdown())
+    resumed.journal.close()
 
 
 def test_ice_lookback_affects_exactly_the_jobs_with_a_lookback_atom() -> None:
@@ -806,7 +790,7 @@ def test_an_engine_refuses_an_fw_adapter_built_under_another_fw_existence() -> N
     Engine(catalog, clock=VirtualClock(T0), adapters=immediate)
 
 
-def _wekr_genesis(run_root: Path, scheduler_switches: dict[str, str] | None, staged=None):
+def _wekr_genesis(run_root: Path, scheduler_switches: dict[str, str] | None, launched=None):
     catalog = lower_source(_WEKR_JIL)
     scheduler = Scheduler(catalog, start=T0, semantics=semantics.resolve(scheduler_switches))
     return catalog, start_run(
@@ -815,7 +799,7 @@ def _wekr_genesis(run_root: Path, scheduler_switches: dict[str, str] | None, sta
         clock=VirtualClock(start=T0),
         adapters={"CMD": FakeAdapter(default=None)},
         scheduler=scheduler,
-        staged=staged,
+        launched=launched,
     )
 
 
@@ -825,46 +809,29 @@ def _close(live) -> None:
 
 
 def test_genesis_pins_the_calendar_switch_its_scheduler_compiled_under(tmp_path: Path) -> None:
-    """DL-259: with no staged manifest, genesis reads the calendar switches
-    back from the wired scheduler, like its timezone. It used to pin the
-    default, write the manifest and the log, and only then refuse in the
-    engine, so a retry met an existing log."""
+    """DL-259: with no launch profile, genesis reads the calendar switches back from the wired
+    scheduler, like its timezone, so the record names the reading that ticks."""
     run_root = tmp_path / "run"
     _catalog, live = _wekr_genesis(run_root, PARTIAL)
     try:
         assert live.oracle.semantics.wekr_first_week == "partial"
     finally:
         _close(live)
-    manifest = read_period_manifest(run_root)
-    assert manifest is not None
-    assert manifest.runtime_profile.semantics == PARTIAL
+    assert _recorded(run_root).profile.semantics == PARTIAL
 
 
-def test_a_staged_profile_that_disagrees_with_the_scheduler_writes_nothing(
+def test_a_launch_profile_that_disagrees_with_the_scheduler_writes_nothing(
     tmp_path: Path,
 ) -> None:
-    """A staged default pin over a `partial` scheduler is profile drift,
-    refused before the manifest and the log exist; a retry with the right
-    pin then opens the period."""
+    """A default launch profile over a `partial` scheduler is profile drift, refused before the
+    store exists; a retry with the right profile then starts."""
     run_root = tmp_path / "run"
-    catalog = lower_source(_WEKR_JIL)
-
-    def staged(profile: RuntimeProfile):
-        return stage_manifest(
-            catalog,
-            source_bundle_hash=EMPTY_BUNDLE_HASH,
-            profile=profile,
-            state_machine_version=STATE_MACHINE_VERSION,
-        )
-
     with pytest.raises(EngineError, match="disagrees with the engine's wiring on semantics"):
-        _wekr_genesis(run_root, PARTIAL, staged(RuntimeProfile()))
-    assert not (period_dir(run_root, 1) / "manifest.json").exists()
-    assert not wal_path(run_root, 1).exists()
-    _catalog, live = _wekr_genesis(run_root, PARTIAL, staged(RuntimeProfile(semantics=PARTIAL)))
+        _wekr_genesis(run_root, PARTIAL, RuntimeProfile())
+    assert not (run_root / "engine.db").exists()
+    _catalog, live = _wekr_genesis(run_root, PARTIAL, RuntimeProfile(semantics=PARTIAL))
     _close(live)
-    manifest = read_period_manifest(run_root)
-    assert manifest is not None and manifest.runtime_profile.semantics == PARTIAL
+    assert _recorded(run_root).profile.semantics == PARTIAL
 
 
 def test_a_resume_with_a_scheduler_off_the_pin_refuses_before_the_leader_record(
@@ -873,7 +840,7 @@ def test_a_resume_with_a_scheduler_off_the_pin_refuses_before_the_leader_record(
     run_root = tmp_path / "run"
     catalog, live = _wekr_genesis(run_root, None)
     _close(live)
-    before = read_journal(estate_wal(run_root))
+    before = read_journal(run_root)
     with pytest.raises(EngineError, match="runtime-profile mismatch on semantics"):
         asyncio.run(
             resume_run(
@@ -884,22 +851,17 @@ def test_a_resume_with_a_scheduler_off_the_pin_refuses_before_the_leader_record(
                 scheduler=Scheduler(catalog, start=T0, semantics=semantics.resolve(PARTIAL)),
             )
         )
-    assert read_journal(estate_wal(run_root)) == before
+    assert read_journal(run_root) == before
 
 
 @pytest.mark.parametrize("claimed", [False, True])
 def test_a_rehearse_root_pins_every_switch_staged_or_not(tmp_path: Path, claimed: bool) -> None:
-    """A fresh root stages the launch options; a root holding only the
-    sentinel stages nothing, and genesis pins the launch options instead.
-    Either way both switches are pinned and the oracle runs `ordinary`:
-    the iced producer's f(prod, 0) reads false and `cons` never starts.
-    The unstaged path used to pin only the calendar switch."""
-    from dsl41.run_root import claim_root
-
+    """A rehearsal's root records the launch options, an empty existing directory as a fresh
+    one: both switches are recorded and the oracle runs `ordinary`, so the iced producer's
+    f(prod, 0) reads false and `cons` never starts."""
     run_root = tmp_path / "run"
     if claimed:
         run_root.mkdir()
-        claim_root(run_root)
     result = _rehearse(
         tmp_path,
         "--semantics",
@@ -911,19 +873,12 @@ def test_a_rehearse_root_pins_every_switch_staged_or_not(tmp_path: Path, claimed
     )
     assert result.exit_code == 0, result.output
     assert "cons runs=0" in result.stdout
-    manifest = read_period_manifest(run_root)
-    assert manifest is not None and manifest.runtime_profile.semantics == BOTH
+    assert _recorded(run_root).profile.semantics == BOTH
 
 
-def test_a_rehearse_rerun_over_a_claimed_root_pins_the_calendar_switch(tmp_path: Path) -> None:
-    """A root holding only the genesis sentinel (a crash before the log) is
-    not unused, so the rehearsal stages nothing and genesis completes it.
-    The pin is the calendar switch the rehearsal's scheduler runs."""
-    from dsl41.run_root import claim_root
-
+def test_a_rehearse_root_records_the_calendar_switch(tmp_path: Path) -> None:
+    """The record names the calendar switch the rehearsal's scheduler runs."""
     run_root = tmp_path / "run"
-    run_root.mkdir()
-    claim_root(run_root)
     jil = tmp_path / "wekr.jil"
     jil.write_text(_WEKR_JIL)
     scenario = tmp_path / "scenario.json"
@@ -949,8 +904,7 @@ def test_a_rehearse_rerun_over_a_claimed_root_pins_the_calendar_switch(tmp_path:
     )
     assert result.exit_code == 0, result.output
     assert "wj runs=1" in result.stdout  # January 6 2014 is in week 2 under `partial`
-    manifest = read_period_manifest(run_root)
-    assert manifest is not None and manifest.runtime_profile.semantics == PARTIAL
+    assert _recorded(run_root).profile.semantics == PARTIAL
 
 
 def test_dst_start_times_affects_exactly_the_jobs_with_start_times_or_start_mins() -> None:
@@ -1092,9 +1046,7 @@ def test_rehearse_reads_the_switch_and_records_it(tmp_path: Path) -> None:
     )
     assert recorded.exit_code == 0, recorded.output
     assert "cons runs=0" in recorded.stdout
-    manifest = read_period_manifest(run_root)
-    assert manifest is not None
-    assert manifest.runtime_profile.semantics == ORDINARY
+    assert _recorded(run_root).profile.semantics == ORDINARY
     # `dsl41 journal` replays the log under the recorded switch, so it
     # narrates the run the engine made: cons never started
     replayed = CliRunner().invoke(app, ["journal", str(run_root)])
@@ -1112,7 +1064,7 @@ _DST_JIL = (
 FOLD0 = {"dst-start-times": "fold0"}
 
 
-def _dst_genesis(run_root: Path, scheduler_switches: dict[str, str] | None, staged=None):
+def _dst_genesis(run_root: Path, scheduler_switches: dict[str, str] | None, launched=None):
     catalog = lower_source(_DST_JIL)
     scheduler = Scheduler(catalog, start=T0, semantics=semantics.resolve(scheduler_switches))
     return catalog, start_run(
@@ -1121,7 +1073,7 @@ def _dst_genesis(run_root: Path, scheduler_switches: dict[str, str] | None, stag
         clock=VirtualClock(start=T0),
         adapters={"CMD": FakeAdapter(default=None)},
         scheduler=scheduler,
-        staged=staged,
+        launched=launched,
     )
 
 
@@ -1138,45 +1090,33 @@ def test_the_scheduler_switches_are_the_calendar_ones_and_dst_start_times() -> N
 def test_unstaged_genesis_pins_the_dst_start_times_its_scheduler_compiled_under(
     tmp_path: Path, scheduler_switches: dict[str, str] | None, pinned: dict[str, str]
 ) -> None:
-    """DL-260: with no staged manifest, genesis reads `dst-start-times` back
-    from the wired scheduler, so the pin names the reading that ticks."""
+    """DL-260: with no launch profile, genesis reads `dst-start-times` back from the wired
+    scheduler, so the record names the reading that ticks."""
     run_root = tmp_path / "run"
     _catalog, live = _dst_genesis(run_root, scheduler_switches)
     try:
         assert live.oracle.semantics == semantics.resolve(scheduler_switches)
     finally:
         _close(live)
-    manifest = read_period_manifest(run_root)
-    assert manifest is not None
-    assert manifest.runtime_profile.semantics == pinned
+    assert _recorded(run_root).profile.semantics == pinned
 
 
 @pytest.mark.parametrize("staged_switches", [{}, FOLD0], ids=["vendor-pin", "fold0-pin"])
-def test_a_staged_dst_pin_off_the_scheduler_writes_nothing(
+def test_a_dst_launch_profile_off_the_scheduler_writes_nothing(
     tmp_path: Path, staged_switches: dict[str, str]
 ) -> None:
-    """DL-260, period-model PR-22b: a staged vendor pin over a fold0
-    scheduler is profile drift, refused before the manifest and the log
-    exist. It used to pass the drift gate, write both, and only then be
-    refused in the engine. The twin, a staged fold0 pin, opens."""
+    """DL-260, period-model PR-22b: a vendor launch profile over a fold0 scheduler is profile
+    drift, refused before the store exists. The twin, a fold0 profile, starts."""
     run_root = tmp_path / "run"
-    catalog = lower_source(_DST_JIL)
-    staged = stage_manifest(
-        catalog,
-        source_bundle_hash=EMPTY_BUNDLE_HASH,
-        profile=RuntimeProfile(semantics=staged_switches),
-        state_machine_version=STATE_MACHINE_VERSION,
-    )
+    launched = RuntimeProfile(semantics=staged_switches)
     if staged_switches != FOLD0:
         with pytest.raises(EngineError, match="disagrees with the engine's wiring on semantics"):
-            _dst_genesis(run_root, FOLD0, staged)
-        assert not (period_dir(run_root, 1) / "manifest.json").exists()
-        assert not wal_path(run_root, 1).exists()
+            _dst_genesis(run_root, FOLD0, launched)
+        assert not (run_root / "engine.db").exists()
         return
-    _catalog, live = _dst_genesis(run_root, FOLD0, staged)
+    _catalog, live = _dst_genesis(run_root, FOLD0, launched)
     _close(live)
-    manifest = read_period_manifest(run_root)
-    assert manifest is not None and manifest.runtime_profile.semantics == FOLD0
+    assert _recorded(run_root).profile.semantics == FOLD0
 
 
 @pytest.mark.parametrize("switch", ["vendor", "fold0"])
@@ -1215,34 +1155,27 @@ def test_rehearse_ticks_under_the_dst_start_times_switch(
     assert f"dj runs={1 if switch == 'vendor' else 2}" in result.stdout
 
 
-@pytest.mark.parametrize("damage", ["missing", "foreign"])
-def test_replay_refuses_a_period_whose_manifest_is_not_bound_to_it(
-    tmp_path: Path, damage: str
-) -> None:
-    """DL-252: replay needs the switches the engine ran. A root whose
-    manifest is gone, or is another period's, used to replay under the
-    default switches and narrate a run the engine never made; it refuses."""
+def test_replay_refuses_a_store_whose_configuration_does_not_read(tmp_path: Path) -> None:
+    """DL-252: replay needs the switches the engine ran, and reads them from the store's own
+    configuration row. A row that does not read would mean a replay under the default
+    switches, narrating a run the engine never made; it refuses."""
+    import sqlite3
+
+    from dsl41.runner_history import read_run_root
+
     run_root = tmp_path / "run"
     recorded = _rehearse(
         tmp_path, "--semantics", "ice-lookback=ordinary", "--run-root", str(run_root)
     )
     assert recorded.exit_code == 0, recorded.output
-    path = period_dir(run_root, 1) / "manifest.json"
-    if damage == "missing":
-        path.unlink()
-        expected = "manifest.json is not there"
-    else:
-        foreign = tmp_path / "foreign"
-        foreign.mkdir()
-        _write_manifest(foreign, RuntimeProfile())
-        path.write_bytes((period_dir(foreign, 1) / "manifest.json").read_bytes())
-        expected = "is not this segment's"
+    with closing(sqlite3.connect(run_root / "engine.db", isolation_level=None)) as db:
+        db.execute("UPDATE configs SET data = ?", (b"{}",))
     replayed = CliRunner().invoke(app, ["journal", str(run_root)])
     assert replayed.exit_code == 2
-    assert expected in replayed.stderr
+    assert "unreadable configuration row" in replayed.stderr
     assert "cons INACTIVE->STARTING" not in replayed.stdout
-    with pytest.raises(RunHistoryError, match=expected):
-        replay_trace(run_root, read_journal(estate_wal(run_root)), lower_source(_ICED_JIL))
+    with pytest.raises(RunHistoryError, match="unreadable configuration row"):
+        read_run_root(run_root)
 
 
 @pytest.mark.parametrize(
@@ -1261,12 +1194,9 @@ def test_the_cli_refuses_an_unknown_switch_or_value(
     assert "--semantics" in result.stderr and message in result.stderr
 
 
-def test_the_run_cli_records_the_switch_in_the_manifest(short_root: Path) -> None:
+def test_the_run_cli_records_the_switch_in_the_configuration(short_root: Path) -> None:
     with engine(short_root, extra=["--semantics", "ice-lookback=ordinary"]) as proc:
-        manifest = read_period_manifest(proc.run_root)
-        assert manifest is not None
-        assert manifest.runtime_profile.semantics == ORDINARY
-        assert manifest.runtime_hash == runtime_hash(manifest.runtime_profile)
+        assert _recorded(proc.run_root).profile.semantics == ORDINARY
 
 
 def test_the_help_lists_every_switch(cli_env: None) -> None:
@@ -1315,41 +1245,6 @@ def test_sem09_a_malformed_token_keeps_the_ordinary_message(value: str) -> None:
 
 
 # ---------------------------------------------- producers and staged ingress
-
-
-def test_a_journal_only_log_installs_its_manifest_and_stays_replayable(tmp_path: Path) -> None:
-    """`Journal.create` with no manifest synthesizes the default pin; it is
-    written beside the log, bound to the segment, as genesis writes one, so
-    `dsl41 journal FILE estate.jil` still replays a log made that way."""
-    from dsl41.runner import Engine
-    from dsl41.runner_journal import Journal
-
-    jil = tmp_path / "estate.jil"
-    jil.write_text(_ICED_JIL)
-    catalog = lower_source(_ICED_JIL, file=str(jil))
-    path = tmp_path / "journal.jsonl"
-    journal = Journal.create(path, catalog=catalog, clock_domain="virtual", started_at=T0)
-    live = Engine(
-        catalog,
-        clock=VirtualClock(start=T0),
-        adapters={"CMD": FakeAdapter(default=None)},
-        journal=journal,
-    )
-    live.inject(Event(at=T0, kind="STARTJOB", payload={"job": "prod"}), source="control")
-
-    async def play() -> None:
-        try:
-            await live.run_until_quiescent(T0 + timedelta(minutes=1))
-        finally:
-            await live.shutdown()
-
-    asyncio.run(play())
-    journal.close()
-    manifest = read_period_manifest(tmp_path)
-    assert manifest is not None
-    assert manifest.runtime_profile == RuntimeProfile()
-    result = CliRunner().invoke(app, ["journal", str(path), str(jil)])
-    assert result.exit_code == 0, result.output
 
 
 # ------------------------------------------- switches reach every production call
@@ -1498,9 +1393,8 @@ def test_fw_existence_reaches_the_adapter_from_the_pinned_profile() -> None:
 def test_run_without_a_staged_bundle_wires_and_pins_the_calendar_switch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`_serve_run` with no parsed sources stages nothing; `wire_from_profile`
-    builds the scheduler under the profile's switches, and genesis pins
-    what it built."""
+    """`wire_from_profile` builds the scheduler under the profile's switches, and genesis
+    records what it built."""
     from dsl41 import runner_startup
     from dsl41.cli_run import _serve_run
 
@@ -1518,11 +1412,9 @@ def test_run_without_a_staged_bundle_wires_and_pins_the_calendar_switch(
     run_root = tmp_path / "root"
     profile = RuntimeProfile(semantics=BOTH)
     catalog = lower_source(_WEKR_JIL + "\n" + _ICED_JIL)
-    with pytest.raises(EngineError, match="stop before the loop"):
-        asyncio.run(_serve_run(catalog, run_root, False, [], profile=profile))
+    assert asyncio.run(_serve_run(catalog, run_root, False, [], profile=profile)) == 2
     assert seen == {"scheduler": semantics.resolve(BOTH), "engine": semantics.resolve(BOTH)}
-    manifest = read_period_manifest(run_root)
-    assert manifest is not None and manifest.runtime_profile.semantics == BOTH
+    assert _recorded(run_root).profile.semantics == BOTH
 
 
 def test_wire_from_profile_builds_the_scheduler_under_the_profile_s_switch() -> None:
@@ -1561,16 +1453,12 @@ def test_a_resume_with_a_scheduler_off_the_dst_pin_writes_nothing(
 ) -> None:
     """DL-260, period-model PR-22b: a period pinned fold0, resumed with a
     default (vendor) scheduler and no declared profile, is refused by the
-    drift gate before it writes anything: no successor segment and no record.
-    The twin, a fold0 scheduler, resumes, and names itself in the lock's
-    note."""
-    from dsl41.run_root import wal_segments
-
+    drift gate before it writes anything. The twin, a fold0 scheduler,
+    resumes, and names itself in the lock's note."""
     run_root = tmp_path / "run"
     catalog, live = _dst_genesis(run_root, FOLD0)
     _close(live)
-    before = read_journal(estate_wal(run_root))
-    segments = wal_segments(run_root)
+    before = read_journal(run_root)
 
     def resume():
         return asyncio.run(
@@ -1588,11 +1476,10 @@ def test_a_resume_with_a_scheduler_off_the_dst_pin_writes_nothing(
     if resume_switches is None:
         with pytest.raises(EngineError, match="runtime-profile mismatch on semantics"):
             resume()
-        assert read_journal(estate_wal(run_root)) == before
-        assert wal_segments(run_root) == segments
+        assert read_journal(run_root) == before
         return
     _close(resume())
-    after = read_journal(estate_wal(run_root))
+    after = read_journal(run_root)
     assert after[: len(before)] == before
     note = json.loads((run_root / "leader.lock").read_text())
     assert note["pid"] == os.getpid()

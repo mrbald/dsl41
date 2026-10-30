@@ -181,6 +181,11 @@ class OracleReads:
     def trace(self) -> list[TraceEntry]:
         return [entry.model_copy() for entry in self._trace]  # no aliasing out
 
+    def mark(self, at: datetime, transition: str, cause: str) -> None:
+        """Append an out-of-band trace line that names no job (a restart's `RESTART`): no
+        transition, no state moves."""
+        self._trace.append(TraceEntry(at=at, job="", transition=transition, cause=cause))
+
     def trace_since(self, since: int) -> tuple[int, list[TraceEntry]]:
         """The trace length and a copy of the entries after the first `since`; only the slice is
         copied."""

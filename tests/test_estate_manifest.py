@@ -23,9 +23,8 @@ from dsl41 import cli_compile, cli_run, estate_manifest
 from dsl41.cli import app
 from dsl41.estate_manifest import ManifestError, load_manifest, resolve_manifest
 from dsl41.idempotence import Exceptions
-from dsl41.run_root import (
-    bundle_sources,
-    read_period_manifest,
+from dsl41.runner_config import (
+    Configuration,
     runtime_profile_from_cli,
 )
 
@@ -220,12 +219,16 @@ def test_rehearse_pins_the_manifests_profile_and_files(
     )
     assert result.exit_code == 0, result.output
     assert loads.calls[0][1] == [f"{d}/base.properties", f"{d}/prod.properties", str(site)]
-    pinned = read_period_manifest(root)
-    assert pinned is not None
-    assert pinned.runtime_profile == _expected_profile()
-    sources = bundle_sources(root, pinned.source_bundle_hash)
-    assert [source.path for source in sources] == [f"{d}/b.jil", f"{d}/a.jil"]
-    assert "command: echo base prod site" in sources[0].text
+    from dsl41.runner_journal import open_reader
+
+    store = open_reader(root)
+    try:
+        recorded = Configuration.from_bytes(store.get_config(1), where="t")
+    finally:
+        store.close()
+    assert recorded.profile == _expected_profile()
+    assert list(recorded.catalog.meta.source_files) == [f"{d}/b.jil", f"{d}/a.jil"]
+    assert recorded.catalog.jobs["b"].exec_.command == "echo base prod site"
 
 
 def test_run_takes_the_manifests_profile_and_keeps_its_deployment_options(

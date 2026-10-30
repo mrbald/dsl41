@@ -50,6 +50,7 @@ from dsl41.runner_admission import (
 )
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_control import command
+from dsl41.runner_store import MemoryStore
 from dsl41.runner_journal import SUBSCRIPTION, Journal, read_decisions, read_journal
 from dsl41.semantics import DEFAULTS, SemanticSwitches
 from dsl41.semantics import resolve as resolve_switches
@@ -522,22 +523,22 @@ def _feeds(path: Path) -> Iterator[tuple[Journal, Any, list[Outcome]]]:
     for live in (False, True):
         for tight in (False, True):
             outcomes: list[Outcome] = []
-            journal = Journal(path / f"j-{live}-{tight}.jsonl", fsync_each=False)
+            journal = Journal(MemoryStore())
             feed = journal.subscribe(_spied(outcomes), budget=1 if tight else 1 << 30)
-            journal.preflight([])  # an empty backlog takes one record
+            journal.preflight([], datetime(2026, 7, 1, 8, 0))  # an empty backlog takes one record
             if live:
                 feed.go_live()
             yield journal, feed, outcomes
     for live in (False, True):
         for end in ("overflow", "unsubscribe"):
             outcomes = []
-            journal = Journal(path / f"e-{live}-{end}.jsonl", fsync_each=False)
+            journal = Journal(MemoryStore())
             feed = journal.subscribe(_spied(outcomes), budget=1)
-            journal.preflight([])
+            journal.preflight([], datetime(2026, 7, 1, 8, 0))
             if live:
                 feed.go_live()
             if end == "overflow":
-                journal.preflight([])
+                journal.preflight([], datetime(2026, 7, 1, 8, 0))
             else:
                 journal.unsubscribe(feed)
             yield journal, feed, outcomes
@@ -583,7 +584,7 @@ def test_every_feed_event_in_every_subscription_state_takes_a_declared_transitio
             state, tight, before = feed.state, feed.budget == 1, len(outcomes)
             try:
                 if event == "append":
-                    journal.preflight([])
+                    journal.preflight([], datetime(2026, 7, 1, 8, 0))
                 elif event == "unsubscribe":
                     journal.unsubscribe(feed)
                 elif state == "backfill":

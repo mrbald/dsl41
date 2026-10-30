@@ -133,8 +133,9 @@ flowchart TB
 - **TUI and web TUI.** One Textual app, a client of the control socket.
   `dsl41 serve` starts one `dsl41 ui` per browser session and ships no
   authentication.
-- **Run root.** The run root holds the WAL, the spool of each run, the
-  catalogs and the perimeter journal. Its layout is `src/dsl41/run_root.py`.
+- **Run root.** The run root holds the store (`engine.db`), `engine.toml`, the
+  spool of each run, the plans and the perimeter journal. Its layout is
+  `src/dsl41/runner_startup.py`.
 
 The service shape, with systemd units, owners and modes, is
 deployment-runbook §0, "Processes, units and storage" (`deployment-runbook.md`, retired in 2.0.0).

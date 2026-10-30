@@ -127,9 +127,16 @@ class Store(Protocol):
         ...
 
     def prune_before(self, seq: int, older_than: datetime) -> int:
-        """Delete journal rows below `seq` and older than `older_than`, never reaching the latest
-        snapshot's seq, and every snapshot but the latest two. Configs are kept. Returns the
-        number of journal rows deleted."""
+        """Delete the journal rows below one seq bound, and every snapshot but the latest two.
+        The bound is the least of `seq`, the latest snapshot's seq, and the first seq whose row
+        is not older than `older_than`; the delete reads seqs only, so the rows it keeps are one
+        unbroken range (spec-wiring 1b). Configs are kept. Returns the number of journal rows
+        deleted."""
+        ...
+
+    def meta(self) -> dict[str, str]:
+        """The meta rows: `schema_version`, `engine_version`, `estate_name`, `created_at`, and
+        the identity rows the creator named."""
         ...
 
     def close(self) -> None: ...
@@ -223,7 +230,8 @@ class MemoryStore:
     inputs as `SqliteStore`. `close` does nothing: the rows live as long as the object, and the
     store stays usable after it."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, identity: Mapping[str, str] | None = None) -> None:
+        self._meta = {"schema_version": str(SCHEMA_VERSION), **dict(identity or {})}
         self._rows: list[_MemRow] = []
         self._next_seq = 1
         self._requests: dict[str, _MemRow] = {}
@@ -300,11 +308,12 @@ class MemoryStore:
         latest = self.latest_snapshot()
         if latest is None:
             return 0
-        bound = min(seq, latest.seq)
         cutoff = _stamp(older_than)
+        recent = next((entry.seq for entry in self._rows if entry.row.at >= cutoff), None)
+        bound = min(seq, latest.seq, recent if recent is not None else seq)
         kept: list[_MemRow] = []
         for entry in self._rows:
-            if entry.seq < bound and entry.row.at < cutoff:
+            if entry.seq < bound:
                 if entry.row.request_id is not None:
                     del self._requests[entry.row.request_id]
             else:
@@ -312,6 +321,9 @@ class MemoryStore:
         deleted = len(self._rows) - len(kept)
         self._rows = kept
         return deleted
+
+    def meta(self) -> dict[str, str]:
+        return dict(self._meta)
 
     def close(self) -> None:
         return None  # nothing to release
@@ -359,6 +371,9 @@ class SqliteStore:
 
     A non-empty file that does not hold this store's `meta.schema_version` row is a foreign file:
     opening it for writing raises `StoreError` before anything in it is changed.
+
+    `identity` names further meta rows written when the file is created and never changed after
+    (the engine's `state_version` among them), so a reader of an empty journal knows them.
     """
 
     def __init__(
@@ -369,6 +384,7 @@ class SqliteStore:
         engine_version: str = "",
         estate_name: str = "",
         created_at: datetime | None = None,
+        identity: Mapping[str, str] | None = None,
     ) -> None:
         self._path = Path(path)
         if read_only:
@@ -387,7 +403,7 @@ class SqliteStore:
                 self._db.execute("PRAGMA synchronous=FULL")
                 if sys.platform == "darwin":  # fsync alone does not reach the platters there
                     self._db.execute("PRAGMA fullfsync=ON")
-                self._create(engine_version, estate_name, created_at)
+                self._create(engine_version, estate_name, created_at, identity or {})
         except BaseException:
             self._db.close()
             raise
@@ -413,7 +429,13 @@ class SqliteStore:
         if mode != "wal" and not (mode == "memory" and str(self._path) == ":memory:"):
             raise StoreError(f"{self._path}: journal_mode is {mode!r}, the store needs WAL")
 
-    def _create(self, engine_version: str, estate_name: str, created_at: datetime | None) -> None:
+    def _create(
+        self,
+        engine_version: str,
+        estate_name: str,
+        created_at: datetime | None,
+        identity: Mapping[str, str],
+    ) -> None:
         self._db.execute("BEGIN IMMEDIATE")
         try:
             for statement in _SCHEMA:
@@ -427,6 +449,7 @@ class SqliteStore:
                         ("engine_version", engine_version),
                         ("estate_name", estate_name),
                         ("created_at", _stamp(made)),
+                        *sorted(identity.items()),
                     ],
                 )
             self._db.execute("COMMIT")
@@ -450,7 +473,8 @@ class SqliteStore:
         return None if row is None else str(row[0])
 
     def meta(self) -> dict[str, str]:
-        """The meta rows: `schema_version`, `engine_version`, `estate_name`, `created_at`."""
+        """The meta rows: `schema_version`, `engine_version`, `estate_name`, `created_at`, and
+        the identity rows named at creation."""
         return {str(k): str(v) for k, v in self._db.execute("SELECT key, value FROM meta")}
 
     # ---- writes
@@ -520,10 +544,14 @@ class SqliteStore:
             latest = self._db.execute("SELECT MAX(seq) FROM snapshots").fetchone()[0]
             if latest is None:
                 return 0
-            cursor = self._db.execute(
-                "DELETE FROM journal WHERE seq < ? AND at_utc < ?",
-                (min(seq, latest), _stamp(older_than)),
-            )
+            # the first row inside the window, in seq order: the rows already pruned are gone,
+            # so the scan stops near the head
+            recent = self._db.execute(
+                "SELECT seq FROM journal WHERE at_utc >= ? ORDER BY seq LIMIT 1",
+                (_stamp(older_than),),
+            ).fetchone()
+            bound = min(seq, latest, recent[0] if recent is not None else seq)
+            cursor = self._db.execute("DELETE FROM journal WHERE seq < ?", (bound,))
             return cursor.rowcount
 
     # ---- reads

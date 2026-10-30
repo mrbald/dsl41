@@ -80,7 +80,7 @@ from typing import Any, get_args
 from dsl41.canon import is_scalar_json, is_wire_int
 from dsl41.conditions import GlobalAtom, iter_atoms
 from dsl41.ir import ExecSpec, FwSpec, JobIR
-from dsl41.run_root import FW_DEFAULT_INTERVAL_S
+from dsl41.runner_config import FW_DEFAULT_INTERVAL_S
 from dsl41.oracle_state import (
     INJECTABLE_STATUSES,
     Event,
@@ -103,6 +103,7 @@ from dsl41.runner_admission import (
 from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import UNKNOWN_OUTCOME_CODES, Code
 from dsl41.runner_journal import best_effort_report, read_backfill
+from dsl41.runner_store import Store
 from dsl41.runner_preflight import and_success_skeleton
 from dsl41.state_machine import StatechartError
 
@@ -900,15 +901,15 @@ class ControlServer:
         return {"ok": True, "waves": waves}
 
     async def _subscribe(self, writer: asyncio.StreamWriter, request: dict[str, Any]) -> None:
-        """Stream journal records: optional backfill from `since` (an input/advance seq; the
-        cut is positional, everything after the last record at or below it), then live.
-        seq'd records are exactly-once across the backfill/live seam; unsequenced
-        dispatch/drop/decision records in the race window are at-least-once (runner.py
-        module docstring). The seam keys on `seq`, never a record name, so DL-118's
-        `decision` has `result`'s guarantee.
+        """Stream the store's wire records: an optional backfill from `since` (an input's index;
+        the cut is positional, everything after the last input at or below it), then live.
 
-        What this root does not retain cannot be sent; that case is the GAP MARKER, not a
-        short stream (DL-135)."""
+        The seam is the journal's last seq, read in the same step that joins the feed to the
+        fan-out, with no await between: every record at or below it is the backfill's, every
+        record above it is the feed's, so no record is skipped or sent twice.
+
+        What the store does not retain cannot be sent; that case is the GAP MARKER, not a short
+        stream (DL-135)."""
         journal = self.engine.journal
         if journal is None:
             await self._send(writer, _failure("no_journal", "this run has no journal"))
@@ -928,66 +929,51 @@ class ControlServer:
             best_effort_report(f"dsl41: closing a subscribe stream: {why}")
 
         feed = journal.subscribe(self.engine.machines, overflowed, budget=self.subscriber_budget)
+        seam = journal.last_seq
         try:
-            # sample the seam BEFORE the ack yields: a record written during the send takes
-            # the next index and would be skipped as "covered" without being backfilled
-            # (DL-45). The seam is the admission frontier (concurrency-model ss2). The ack
-            # names it, so a client that reads no seq'd record still has a cursor (ss5,
-            # DL-267)
-            max_seq = since if since is not None else self.engine.frontiers.committed_index
-            await self._send(writer, {"ok": True, "subscribed": True, "since": max_seq})
-            if since is not None:
-                sent = await self._backfill(writer, journal.path, since)
-                if sent is None:
-                    return
-                max_seq = max(max_seq, sent)
+            # the ack names the cursor, so a client that reads no seq'd record still has one
+            # (ss5, DL-267)
+            cursor = since if since is not None else self.engine.frontiers.committed_index
+            await self._send(writer, {"ok": True, "subscribed": True, "since": cursor})
+            if since is not None and not await self._backfill(writer, journal.store, since, seam):
+                return
             feed.go_live()
             while True:
                 record = await feed.get()
                 seq = record.get("seq")
-                if isinstance(seq, int):
-                    if seq <= max_seq:
-                        continue  # already delivered by the backfill
-                    max_seq = seq
+                if since is not None and isinstance(seq, int) and seq <= since:
+                    continue  # a cursor ahead of the store: what it already holds is not owed
                 await self._send(writer, record)
         finally:
             journal.unsubscribe(feed)
 
-    async def _backfill(self, writer: asyncio.StreamWriter, wal: Path, since: int) -> int | None:
-        """Send what a subscriber resuming at `since` is owed and answer the highest seq sent
-        (`since` if none), or None when the stream ended on a refusal.
+    async def _backfill(
+        self, writer: asyncio.StreamWriter, store: Store, since: int, seam: int
+    ) -> bool:
+        """Send what a subscriber resuming at `since` is owed, up to the seam; False when the
+        stream ended on a refusal.
 
         This phase holds the unsent records it read, outside the subscriber budget: the
-        retained WAL. Each is released once
-        sent, and the list is gone on return (ss5, DL-267)."""
+        retained store. Each is released once sent, and the list is gone on return (ss5,
+        DL-267)."""
         try:
-            backfill = read_backfill(wal, since=since)
+            backfill = read_backfill(store, since=since, upto=seam)
         except EngineError as exc:
             # the ack has gone, so the refusal goes on the STREAM; a raising handler would
             # hang the client up unanswered
             await self._send(writer, _failure(exc.code or "engine_error", str(exc)))
-            return None
+            return False
         gap_from, records = backfill.gap_from, backfill.records
         del backfill
         if gap_from is not None:
             # ss11: a cursor below the earliest retained record is told so explicitly;
             # silence would read as "nothing happened since your cursor"
             await self._send(writer, {"gap": True, "earliest_retained": gap_from})
-        cut = 0
-        for index, record in enumerate(records):
-            seq = record.get("seq")
-            if isinstance(seq, int) and seq <= since:
-                cut = index + 1
-        pending = deque(records[cut:])
+        pending = deque(records)
         del records
-        sent = since
         while pending:
-            record = pending.popleft()
-            seq = record.get("seq")
-            if isinstance(seq, int):
-                sent = max(sent, seq)
-            await self._send(writer, record)
-        return sent
+            await self._send(writer, pending.popleft())
+        return True
 
 
 # ---------------------------------------------------------------- clients (ss10)

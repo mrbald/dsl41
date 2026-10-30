@@ -49,7 +49,9 @@ from dsl41.runner_admission import (
     fingerprint,
 )
 from dsl41.runner_clock import EngineError, VirtualClock
-from dsl41.runner_journal import Journal, read_decisions, read_journal, replay_inputs
+from dsl41.runner_admission import apply_attempt
+from dsl41.runner_journal import Journal, input_record, read_decisions, read_journal, replay_inputs
+from dsl41.runner_store import MemoryStore
 from dsl41.runner_startup import start_run
 
 T0 = datetime(2026, 7, 1, 8, 0)
@@ -347,32 +349,29 @@ def test_an_admitted_but_undecided_id_is_refused_rather_than_re_admitted() -> No
 # ------------------------------------------------------------ two-pass replay (CM-07)
 
 
-def _write_log(
-    path: Path, jil: str, attempts: list[Attempt], results: list[ApplyResult] = []
-) -> list[dict]:
-    """A hand-built log: these attempts, and durable results for whichever
-    of them a case wants decided."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    journal = Journal.create(path, catalog=lower_source(jil), clock_domain="virtual", started_at=T0)
+def _write_log(jil: str, attempts: list[Attempt], results: list[ApplyResult] = []) -> list[dict]:
+    """A hand-built store: these attempts, each with its durable result when the case gives
+    one; an attempt with none stands alone, as only a store that disagrees with itself
+    holds it."""
+    journal = Journal(MemoryStore())
     by_index = {result.index: result for result in results}
     for attempt in attempts:
-        journal.admit(attempt)
         if attempt.index in by_index:
-            journal.decision(by_index[attempt.index])
-    journal.close()
-    return read_journal(path)
+            journal.admission(attempt, by_index[attempt.index])
+        else:
+            journal.append(input_record(attempt))
+    return read_journal(journal.store)
 
 
-def _as_the_engine_decided(tmp_path: Path, jil: str, attempts: list[Attempt]) -> list[ApplyResult]:
-    """The results a live engine WOULD have written for these attempts.
+def _as_the_engine_decided(jil: str, attempts: list[Attempt]) -> list[ApplyResult]:
+    """The results a live engine WOULD have written for these attempts: the gate, applied to
+    each in turn on one oracle.
 
-    Cases that need a durable decision take it from here rather than
-    hand-writing revision numbers: the numbers are not what those tests are
-    about, and a test that guessed them would fail the ss7 divergence check
-    for a reason that has nothing to do with the decision it is pinning.
-    The one case that IS about the numbers writes a wrong one deliberately."""
-    records = _write_log(tmp_path / "dry" / "journal.jsonl", jil, attempts)
-    return replay_inputs(Oracle(lower_source(jil)), records).recovered
+    Cases that need a durable decision take it from here rather than hand-writing revision
+    numbers: a test that guessed them would fail the ss7 divergence check for a reason that
+    has nothing to do with the decision it is pinning."""
+    oracle = Oracle(lower_source(jil))
+    return [apply_attempt(oracle, attempt).result for attempt in attempts]
 
 
 def test_cm07_a_durably_rejected_attempt_is_not_applied_on_replay(tmp_path: Path) -> None:
@@ -381,16 +380,15 @@ def test_cm07_a_durably_rejected_attempt_is_not_applied_on_replay(tmp_path: Path
     reader that met the attempt alone could not tell. Pass one finds the
     rejection, pass two honours it.
 
-    The contrast below is the same journal with the result record removed --
-    which IS applied, and would be indistinguishable if the decision were
-    being re-derived rather than read."""
+    The contrast below is the same store with the result record removed: an
+    attempt and its decision are one transaction, so that store disagrees
+    with itself and replay refuses it rather than re-derive the decision."""
     attempts = [
         _attempt(1, 0, _ev("STARTJOB", 0, job="j")),
         _attempt(2, 1, _ev("STATUS", 1, job="j", status="SUCCESS")),
     ]
-    start_applied = _as_the_engine_decided(tmp_path, _SOLO_JIL, attempts[:1])
+    start_applied = _as_the_engine_decided(_SOLO_JIL, attempts[:1])
     records = _write_log(
-        tmp_path / "run" / "journal.jsonl",
         _SOLO_JIL,
         attempts,
         [
@@ -409,43 +407,10 @@ def test_cm07_a_durably_rejected_attempt_is_not_applied_on_replay(tmp_path: Path
     replay = replay_inputs(oracle, records)
     assert oracle.store.job["j"].status == "RUNNING"  # the rejected STATUS never landed
     assert replay.frontiers.applied_index == 2
-    assert not replay.recovered  # both decisions were durable
 
     without_the_rejection = [r for r in records if not (r["rec"] == "decision" and r["index"] == 2)]
-    fresh = Oracle(lower_source(_SOLO_JIL))
-    replay_inputs(fresh, without_the_rejection)
-    assert fresh.store.job["j"].status == "SUCCESS"
-
-
-def test_cm07_an_attempt_admitted_without_a_result_is_applied_through_the_gate(
-    tmp_path: Path,
-) -> None:
-    """The crash window, both ways.
-
-    Two completions are admitted with no result -- the engine died between
-    ss4 steps 4 and 7. Admission is the commit point, so both are applied;
-    but a decision is exactly what they are missing, so the gate runs on the
-    way, and the one whose run has moved on is rejected rather than fed. A
-    replay that applied them blindly would overwrite a finished run with the
-    report of a dead one."""
-    records = _write_log(
-        tmp_path / "run" / "journal.jsonl",
-        _SOLO_JIL,
-        [
-            _attempt(1, 0, _ev("STARTJOB", 0, job="j")),
-            _attempt(2, 1, _ev("STATUS", 1, job="j", run_number=1, exit_code=0), source="adapter"),
-            _attempt(3, 2, _ev("STATUS", 2, job="j", run_number=0, exit_code=0), source="adapter"),
-        ],
-    )
-
-    oracle = Oracle(lower_source(_SOLO_JIL))
-    replay = replay_inputs(oracle, records)
-    assert oracle.store.job["j"].status == "SUCCESS"  # the current run's exit landed
-    assert [r.decision for r in replay.recovered] == ["applied", "applied", "rejected"]
-    assert replay.recovered[2].reason == "run_number mismatch"
-    # the re-decision names its code as the live gate would (DL-156)
-    assert [r.code for r in replay.recovered] == [None, None, "stale_completion"]
-    assert replay.frontiers.applied_index == 3
+    with pytest.raises(EngineError, match="input 2 has no decision"):
+        replay_inputs(Oracle(lower_source(_SOLO_JIL)), without_the_rejection)
 
 
 def test_a_rejection_is_written_with_its_code_and_one_without_is_refused(
@@ -460,9 +425,9 @@ def test_a_rejection_is_written_with_its_code_and_one_without_is_refused(
         _attempt(1, 0, _ev("STARTJOB", 0, job="j")),
         _attempt(2, 1, _ev("STATUS", 1, job="j", run_number=0, exit_code=0), source="adapter"),
     ]
-    results = _as_the_engine_decided(tmp_path, _SOLO_JIL, attempts)
+    results = _as_the_engine_decided(_SOLO_JIL, attempts)
     assert (results[1].decision, results[1].code) == ("rejected", "stale_completion")
-    records = _write_log(tmp_path / "run" / "journal.jsonl", _SOLO_JIL, attempts, results)
+    records = _write_log(_SOLO_JIL, attempts, results)
     stored = [r for r in records if r["rec"] == "decision"]
     assert [(r["decision"], r["code"]) for r in stored] == [
         ("applied", None),
@@ -471,27 +436,16 @@ def test_a_rejection_is_written_with_its_code_and_one_without_is_refused(
     reread = read_decisions(records).for_index(2)
     assert reread is not None and reread.code == "stale_completion"
 
-    journal = Journal.create(
-        tmp_path / "refused" / "journal.jsonl",
-        catalog=lower_source(_SOLO_JIL),
-        clock_domain="virtual",
-        started_at=T0,
-    )
-    try:
-        journal.admit(attempts[0])
-        # a registry code that no gate stores is refused too: the stored
-        # set is append-only, the rest of the registry is not
-        for code in (None, "not_a_registry_code", "decision_timeout"):
-            rejection = ApplyResult(
-                index=1, request_id="r1", decision="rejected", reason="gated", code=code
-            )
-            with pytest.raises(EngineError, match="names its stored code"):
-                journal.decision(rejection)
-    finally:
-        journal.close()
-    assert not [
-        r for r in read_journal(tmp_path / "refused" / "journal.jsonl") if r["rec"] == "decision"
-    ]
+    journal = Journal(MemoryStore())
+    # a registry code that no gate stores is refused too: the stored set is append-only, the
+    # rest of the registry is not
+    for code in (None, "not_a_registry_code", "decision_timeout"):
+        rejection = ApplyResult(
+            index=1, request_id="r1", decision="rejected", reason="gated", code=code
+        )
+        with pytest.raises(EngineError, match="names its stored code"):
+            journal.admission(attempts[0], rejection)
+    assert read_journal(journal.store) == []
 
 
 def test_cm07_a_durable_application_is_not_re_decided(tmp_path: Path) -> None:
@@ -507,13 +461,15 @@ def test_cm07_a_durable_application_is_not_re_decided(tmp_path: Path) -> None:
     attempts = [_attempt(1, 0, _ev("STARTJOB", 0, job="j")), stale]
     # what the same log says without the durable decision: today's gate
     # rejects this completion, which is what makes the case a case
-    assert _as_the_engine_decided(tmp_path, _SOLO_JIL, attempts)[1].decision == "rejected"
+    assert _as_the_engine_decided(_SOLO_JIL, attempts)[1].decision == "rejected"
 
     records = _write_log(
-        tmp_path / "run" / "journal.jsonl",
         _SOLO_JIL,
         attempts,
-        [ApplyResult(index=2, request_id="r2", decision="applied", revisions={"job:j": 2})],
+        [
+            *_as_the_engine_decided(_SOLO_JIL, attempts[:1]),
+            ApplyResult(index=2, request_id="r2", decision="applied", revisions={"job:j": 2}),
+        ],
     )
     oracle = Oracle(lower_source(_SOLO_JIL))
     replay_inputs(oracle, records)
@@ -531,26 +487,19 @@ def test_cm07_the_time_half_of_a_rejected_attempt_still_applies(tmp_path: Path) 
     rejected" -- would leave x RUNNING forever.
 
     Both ways of being rejected are checked, because they are separate code
-    paths and only one of them is obvious: the decision recovered at replay
-    (no result in the log), and the decision READ from the log, where
-    "honour the rejection" is most tempting to implement as `continue`."""
+    paths and only one of them is obvious: the live gate's decision, and the
+    decision READ from the store, where "honour the rejection" is most
+    tempting to implement as `continue`."""
     attempts = [
         _attempt(1, 0, _ev("STARTJOB", 0, job="x")),
         _attempt(2, 2, _ev("STATUS", 2, job="x", run_number=1, exit_code=0), source="adapter"),
     ]
-    recovered_log = _write_log(tmp_path / "recovered" / "journal.jsonl", _TERM_JIL, attempts)
-    oracle = Oracle(lower_source(_TERM_JIL))
-    replay = replay_inputs(oracle, recovered_log)
-    assert oracle.store.job["x"].status == "TERMINATED"  # the deadline fired on the way
-    assert replay.recovered[1].decision == "rejected"
-
-    durable_log = _write_log(
-        tmp_path / "durable" / "journal.jsonl", _TERM_JIL, attempts, replay.recovered
-    )
+    live = _as_the_engine_decided(_TERM_JIL, attempts)
+    assert live[1].decision == "rejected"
+    durable_log = _write_log(_TERM_JIL, attempts, live)
     from_the_record = Oracle(lower_source(_TERM_JIL))
-    again = replay_inputs(from_the_record, durable_log)
-    assert from_the_record.store.job["x"].status == "TERMINATED"
-    assert not again.recovered  # nothing left to decide, and the kill still happened
+    replay_inputs(from_the_record, durable_log)
+    assert from_the_record.store.job["x"].status == "TERMINATED"  # the deadline fired on the way
 
 
 def test_a_log_this_build_derives_differently_from_is_refused(tmp_path: Path) -> None:
@@ -560,40 +509,12 @@ def test_a_log_this_build_derives_differently_from_is_refused(tmp_path: Path) ->
     from here on would be checked against a number the log never
     produced."""
     records = _write_log(
-        tmp_path / "run" / "journal.jsonl",
         _SOLO_JIL,
         [_attempt(1, 0, _ev("STARTJOB", 0, job="j"))],
         [ApplyResult(index=1, request_id="r1", decision="applied", revisions={"job:j": 99})],
     )
     with pytest.raises(EngineError, match="replay diverged at index 1"):
         replay_inputs(Oracle(lower_source(_SOLO_JIL)), records)
-
-
-def test_a_journal_with_no_decisions_replays_unchanged(tmp_path: Path) -> None:
-    """No format gate was needed for the pre-S2 shape, and this is why: a
-    log whose attempts carry NO decision applies every one of them --
-    exactly what the single-pass reader did. The synthesized ids name each
-    attempt's position in the log, which is the only thing that could ever
-    have identified them.
-
-    Opened with a real `segment` since DL-138: the `header` this test used
-    to build is a retired dialect and refuses by name. What is exercised is
-    the decision-less log, not the opening record."""
-    catalog = lower_source(_SOLO_JIL)
-    path = tmp_path / "journal.jsonl"
-    Journal.create(
-        path, catalog=catalog, clock_domain="virtual", started_at=datetime(2026, 7, 1, 8, 0)
-    ).close()
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(
-            '{"rec": "input", "seq": 1, "at": "2026-07-01T08:00:00", "kind": "STARTJOB",'
-            ' "payload": {"job": "j"}, "source": "control"}\n'
-            '{"rec": "advance", "seq": 2, "at": "2026-07-01T08:01:00"}\n'
-        )
-    oracle = Oracle(catalog)
-    replay = replay_inputs(oracle, read_journal(path))
-    assert oracle.store.job["j"].status == "RUNNING"
-    assert [r.request_id for r in replay.recovered] == ["log:1", "log:2"]
 
 
 def test_resume_carries_the_log_position_and_still_answers_a_retry(tmp_path: Path) -> None:

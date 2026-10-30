@@ -666,25 +666,28 @@ Runner:
   the optional `--access-map`, its gates over the control verbs, denial
   receipts, and the privileged ledger. With no map, nothing changes.
 - `src/dsl41/runner_history.py`: run history for `runs`, a projection over
-  journal, manifest, and spool.
-- `src/dsl41/runner_journal.py`: the inputs-only write-ahead log: the
-  record kinds, append and fsync before every feed, `read_journal`, the
-  two-pass `replay_inputs`, `read_backfill` for a subscriber resuming
-  across a boundary, and the segment checks (tail, identity, adjacency).
-  Records live in `wal/<segment_no>.jsonl`; `journal.jsonl` holds the
-  one-line `period_root` sentinel.
-- `src/dsl41/runner_store.py`: the 2.x store, not yet wired: one SQLite
-  file per engine holding an append-only journal of canonical records, an
-  append-only configuration history, snapshots and pruning, under one
-  writer with synchronous commits; `MemoryStore` is its in-memory twin for
-  rehearsal and tests.
-- `src/dsl41/idempotence.py`: the 2.x idempotence declaration, not yet wired:
+  the store's records, its configuration row, and the spool.
+- `src/dsl41/runner_journal.py`: the engine's record over its store: the
+  record kinds, the one writer (an admission is one transaction), the
+  projection onto the subscribe wire, the open table of attempts, pending
+  starts and follow-up plans, the snapshot, `read_journal`, `replay_inputs`
+  and `read_backfill`.
+- `src/dsl41/runner_store.py`: the engine's only durable record: one SQLite
+  file per run root, `engine.db`, holding an append-only journal of
+  canonical records, an append-only configuration history, snapshots and
+  pruning, under one writer with synchronous commits; `MemoryStore` is its
+  in-memory twin for rehearsal and tests.
+- `src/dsl41/runner_config.py`: what an engine runs under: `catalog_hash`,
+  `RuntimeProfile` and `runtime_hash`, the configuration row that holds the
+  catalog, the profile and the marked set, and `engine.toml`'s stop grace,
+  snapshot cadence and retention.
+- `src/dsl41/idempotence.py`: the idempotence declaration:
   `non-idempotent.toml` in the manifest's directory names the jobs whose interrupted
   attempt waits for the operator, with its canonical bytes for the reload
-  token, and the four `DSL41_*` variables every launch exports.
+  token, and the four `DSL41_*` variables each `dispatch` record carries.
 - `src/dsl41/runner_ledger.py`: one engine per run root: the flock held
-  for the process lifetime, its holder note, and the eligibility gate on
-  the opening record.
+  for the process lifetime, its holder note, and the state-machine
+  version a store and its snapshots carry.
 - `src/dsl41/runner_scheduler.py`: the calendar scheduler: standard day
   sets and windowed extended-calendar generators, turned into UTC instants
   through `timezones.py`.
@@ -743,9 +746,6 @@ Shared cores:
 - `src/dsl41/estate_manifest.py`: the estate manifest, `estate.toml`: the
   application's one declaration of its catalog files, properties layers,
   timezone and semantic switches, read by the verbs' `--manifest` option.
-- `src/dsl41/run_root.py`: a run root's identity and layout: `catalog_hash`,
-  `RuntimeProfile` and `runtime_hash`, the two manifests, the sentinel,
-  `wal/`, and the content-addressed input bundle.
 
 CLI and scripts:
 
@@ -910,9 +910,9 @@ Runner:
   phase-boundary kill matrix, spoofed-record and boot-flip guards, and the
   engine-SIGKILL crash-recovery test (`tests/runner_crash_driver.py` is its
   engine subprocess).
-- `tests/test_runner_journal.py`: WAL record shapes, read tolerance and
-  refusals, catalog-hash sensitivity, replay fidelity, and the `journal`
-  CLI.
+- `tests/test_runner_journal.py`: the store's record shapes, the wire
+  projection, the open table, the snapshot, catalog-hash sensitivity,
+  replay fidelity, and the `journal` CLI.
 - `tests/test_run_history.py`: the `runs` CLI: per-root and multi-root
   folding, the filters, a history spanning a boundary, and the
   `records_only` fidelity degrade.
