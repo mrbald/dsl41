@@ -893,6 +893,10 @@ Runner:
   rules: job type, machine resolution, owner, calendars, timezones,
   resources, oracle construction, and the AND-success skeleton cycle that
   disables `plan`.
+- `src/dsl41/reload_diff.py`: the redeploy diff as pure functions over two
+  catalogs: a job's definition hash without source spans, the added,
+  removed, changed and unchanged sets with the reason for an indirect
+  change, the running-box check, and the plan token.
 - `src/dsl41/runner_control.py`: the control plane, both ends: the
   unix-socket server (sendevent parity, queries, subscribe), the wire
   vocabulary, and three clients (persistent async for the TUI, one-shot
