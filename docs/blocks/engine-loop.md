@@ -12,15 +12,14 @@ The choice decides order only; what an input does is the [admission](admission.m
 The code and the contract carry over unchanged if the storage changes.
 Storage capabilities needed: none.
 Reason: `_next_work` reads the in-memory input queue, `oracle.next_timer_due()`, `scheduler.next_occurrence()` and the clock, and returns a `_Work` value; it writes nothing.
-Every durable write happens after the choice, in admission, dispatch or the seal.
+Every durable write happens after the choice, in admission or dispatch.
 
 ## Interface
 
 - `Engine._next_work(horizon, now) -> _Work`. `_Work.do` is one of the five `_Do` names: `EVENT`, `TICK`, `TIMER`, `QUIESCE`, `WAIT`. `_Work.at` is the tick, the timer's stamp or the wake target.
 - `Engine.run_until_quiescent(horizon) -> list[Event]` runs the loop and returns the events the oracle emitted.
-- The queue is a heap of `_Pending` inputs ordered by `(at, arrival number)`. These fill it: `Engine.inject`, `Engine.submit`, `Engine.submit_host`, `Engine.inject_host`, `Engine.observe_opening`, scheduler ticks, adapter completions, reconciliation injections at resume (`_inject_completion`) and the seal's cutoff ticks (`Engine._cutoff`).
-- `Engine._push` refuses an external request while a seal is running, with the code `period_sealing` ([control-protocol §2](../control-protocol.md#2-transport-and-framing-frozen)).
-- `Engine._seal_boundary` runs one queued seal inside the loop to its outcome.
+- The queue is a heap of `_Pending` inputs ordered by `(at, arrival number)`. These fill it: `Engine.inject`, `Engine.submit`, `Engine.submit_host`, `Engine.inject_host`, scheduler ticks, adapter completions and reconciliation injections at resume (`_inject_completion`).
+- `Engine._push` puts one input on the queue and wakes the loop.
 - `EVENT` and `TIMER` go through `Engine._admit_and_apply` and then `Engine._dispatch` (the [effect outbox](effect-outbox.md)).
 - `TICK` waits for the tick and queues its `STARTJOB` inputs.
 - `WAIT` blocks until the target instant or queue activity, then the loop chooses again.
@@ -77,7 +76,7 @@ flowchart TD
 
 ## Owning modules
 
-- `src/dsl41/runner.py`: `Engine._next_work`, `Engine.run_until_quiescent`, `Engine._push`, `Engine._seal_boundary`, `_Do`, `_Work`.
+- `src/dsl41/runner.py`: `Engine._next_work`, `Engine.run_until_quiescent`, `Engine._push`, `_Do`, `_Work`.
 - Inputs to the choice come from `src/dsl41/runner_clock.py` (the clock) and `src/dsl41/runner_scheduler.py` (the ticks).
 
 ## Tests

@@ -39,6 +39,7 @@ from dsl41.runner_adapters import (
     _build_run_spec,
     _named,
     job_log_paths,
+    load_json,
     read_watch_log,
     resolve_spool,
 )
@@ -694,6 +695,35 @@ def _spawn_doc() -> dict[str, Any]:
         "command_pgid": command,
         "command_start_time": "ticks:2",
     }
+
+
+@pytest.mark.parametrize("missing", [None, "absent"])
+def test_resolve_spool_reads_a_missing_run_directory_as_a_lost_dispatch(
+    tmp_path: Path, missing: str | None
+) -> None:
+    """ss7's first rung: no run directory means the dispatch never reached the
+    host, whether the WAL named none or the one it named is gone."""
+    run_dir = None if missing is None else tmp_path / missing
+    result, ended_at = asyncio.run(
+        resolve_spool("j", 1, run_dir, "boot-A", settle_seconds=0.0, grace_seconds=0.0)
+    )
+    assert result == Failed("dispatch lost to engine crash (run directory missing)")
+    assert ended_at is None
+
+
+def test_load_json_reads_a_spool_version_it_does_not_implement_as_unreadable(
+    tmp_path: Path,
+) -> None:
+    """The `Wrapper-owned spool files` row is strict on versions: a version this
+    binary does not implement reads as None, the same as an unreadable file. The
+    version it implements, and an absent one, read through."""
+    path = tmp_path / "status.json"
+    path.write_text(json.dumps({"version": 2, "outcome": "exited", "exit_code": 0}))
+    assert load_json(path) is None
+    path.write_text(json.dumps({"version": 1, "outcome": "exited", "exit_code": 0}))
+    assert load_json(path) == {"version": 1, "outcome": "exited", "exit_code": 0}
+    path.write_text(json.dumps({"outcome": "exited", "exit_code": 0}))
+    assert load_json(path) == {"outcome": "exited", "exit_code": 0}
 
 
 @pytest.mark.parametrize("name", ["spawn.json", "status.json"])

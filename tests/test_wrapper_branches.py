@@ -365,6 +365,32 @@ def test_wrapper_already_session_leader_still_runs_and_records(tmp_path: Path) -
     assert status["outcome"] == "exited" and status["exit_code"] == 6
 
 
+def test_wrapper_records_a_spawn_it_could_not_open(tmp_path: Path) -> None:
+    """DL-151: a spec whose log path cannot be opened (here a NUL in it) still
+    leaves a record. The wrapper writes `spawn_failed` and exits 0; an absent
+    `status.json` would read as a machine that died."""
+    run_dir = tmp_path / "j1.1"
+    run_dir.mkdir()
+    lifeline_r, lifeline_w = os.pipe()
+    spec = json.loads(_spec(run_dir, "true", lifeline_r))
+    spec["stdout_path"] = str(run_dir / "ou\x00t.log")
+    out = subprocess.run(
+        [sys.executable, str(Path(runner_wrapper.__file__))],
+        input=json.dumps(spec).encode(),
+        capture_output=True,
+        pass_fds=(lifeline_r,),
+        check=False,
+        timeout=30,
+    )
+    os.close(lifeline_r)
+    os.close(lifeline_w)
+    assert out.returncode == 0, out.stderr
+    status = read_json(run_dir / "status.json")
+    assert status["outcome"] == "spawn_failed"
+    assert "null" in status["error"]
+    assert not (run_dir / "spawn.json").exists()
+
+
 def _spec(run_dir: Path, command: str, lifeline_fd: int) -> bytes:
     return json.dumps(
         {
