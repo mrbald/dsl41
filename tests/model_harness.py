@@ -31,7 +31,6 @@ and pins that the checkers can actually fail.
 from __future__ import annotations
 
 import asyncio
-import json
 import random
 from collections import defaultdict
 from collections.abc import Callable, Sequence
@@ -42,13 +41,12 @@ from typing import TYPE_CHECKING
 
 from dsl41.ir import CatalogIR, lower_source
 from dsl41.oracle_state import Event
-from dsl41.run_root import active_wal, wal_path
 from dsl41.runner import Engine
 from dsl41.runner_adapters import AdapterContext, FakeAdapter
 from dsl41.runner_clock import VirtualClock
-from dsl41.runner_journal import read_journal
 from dsl41.runner_scheduler import Scheduler
 from dsl41.runner_startup import resume_run, start_run
+from store_surgery import delete
 
 if TYPE_CHECKING:
     from dsl41.ir import JobIR
@@ -158,6 +156,8 @@ class RecordingAdapter:
         #: intent to spawn and acting on it, which is the only state in which
         #: ss7's barrier re-drives rather than fails (DL-102).
         self.park_next = False
+        #: the attempt id of the exec `park_next` parked, once it has
+        self.parked: str | None = None
 
     def _mode(self, job_ir: JobIR, run_number: int) -> str:
         if job_ir.job_type == "FW":
@@ -171,6 +171,7 @@ class RecordingAdapter:
         mode = self._mode(job_ir, run_number)
         if mode == EXEC and self.park_next:
             self.park_next = False
+            self.parked = ctx.run_id
             await ctx.clock.sleep_until(datetime.max)  # the crash arrives first
         if mode == EXEC and ctx.run_root is not None:
             # The trace, created the way every real adapter creates it:
@@ -184,7 +185,8 @@ class RecordingAdapter:
             # behind, so "no trace anywhere" really does mean "nothing ran".
             # Without it here, the seeded sweep double-ran on its first
             # afternoon (DL-108) -- the model, not the engine, was wrong.
-            (ctx.run_root / "runs" / f"{job_ir.name}.{run_number}").mkdir(parents=True)
+            spool = ctx.spool or ctx.run_root / "runs" / f"{job_ir.name}.{run_number}" / "1"
+            spool.mkdir(parents=True)
         spawn = self.log.begin(
             job=job_ir.name,
             run_number=run_number,
@@ -212,16 +214,23 @@ class RecordingAdapter:
 
 
 def cm14_double_spawns(log: SpawnLog) -> list[str]:
-    """CM-14: no `(job, run_number)` ever executes twice.
+    """CM-14 as DL-424 narrows it: no `(job, run_number)` executes twice in one engine
+    incarnation, and it executes again in a later one only after every earlier execution was
+    interrupted by an engine's end (`cancelled`): the interruption rule reruns an idempotent
+    job's run with the same invocation.
 
-    The safety property of the whole model (concurrency-model ss0),
-    counted rather than argued."""
-    seen: dict[tuple[str, int], Spawn] = {}
+    The safety property of the whole model (concurrency-model ss0), counted rather than
+    argued."""
+    seen: dict[tuple[str, int], list[Spawn]] = {}
     violations: list[str] = []
     for spawn in log.execs():
-        first = seen.get(spawn.key)
+        earlier = seen.setdefault(spawn.key, [])
+        first = next(
+            (e for e in earlier if e.incarnation >= spawn.incarnation or e.outcome != "cancelled"),
+            None,
+        )
+        earlier.append(spawn)
         if first is None:
-            seen[spawn.key] = spawn
             continue
         violations.append(
             f"{spawn.job} run {spawn.run_number} ran twice:"
@@ -403,14 +412,20 @@ class ModelRun:
         every branch of that rule but this one.
 
         Modelled by parking the next exec before it leaves any trace and
-        then cutting the last `dispatch` record, indistinguishable from
-        dying a moment earlier."""
+        then cutting that exec's `dispatch` record, indistinguishable from
+        dying a moment earlier. With no exec due now, the fault waits for the
+        next one that is (the next adapter completion or timer); with none,
+        nothing is cut."""
         if self.engine is None:
             return False
-        self.adapter.park_next = True
+        self.adapter.park_next, self.adapter.parked = True, None
         await self.run_to(self.clock.now())
+        due = [t for t in (self.live.oracle.next_timer_due(), self.clock.next_sleeper_due()) if t]
+        if self.adapter.parked is None and due and min(due) < datetime.max:
+            await self.run_to(min(due))
         await self.crash()
-        cut = self._cut_last_dispatch()
+        parked, self.adapter.park_next = self.adapter.parked, False
+        cut = parked is not None and self._cut_dispatch(parked)
         await self.resume(settle_seconds=0.0, grace_seconds=0.0)
         return cut
 
@@ -456,19 +471,16 @@ class ModelRun:
                 return job, rt.run_number
         return None
 
-    def _cut_last_dispatch(self) -> bool:
-        """Drop the log's last `dispatch` record. Written between crash and
+    def _cut_dispatch(self, attempt: str) -> bool:
+        """Drop the `dispatch` record of `attempt`. Written between crash and
         resume, which is the only moment it is safe to edit a run root's
-        log -- no engine holds it, exactly as no engine held it in the crash
+        store -- no engine holds it, exactly as no engine held it in the crash
         this models."""
-        path = active_wal(self.run_root)
-        records = [json.loads(line) for line in path.read_text().splitlines() if line]
-        for index in range(len(records) - 1, -1, -1):
-            if records[index].get("rec") == "dispatch":
-                del records[index]
-                path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records))
-                return True
-        return False
+        cut = delete(
+            self.run_root,
+            lambda seq, kind, body: kind == "dispatch" and body.get("attempt") == attempt,
+        )
+        return bool(cut)
 
     async def settle(self, horizon: datetime) -> None:
         """Resume if the last fault left no engine, then run to quiescence."""
@@ -548,22 +560,17 @@ class FaultSchedule:
 
 
 def _lose_the_decision_for(run_root: Path, source: str) -> None:
-    """Delete the decision that answered the one STATUS input from
-    `source` -- the crash the window is named for: the absence of a
-    decision is exactly how replay recognises it (`Journal.decision`), so
-    nothing else in the segment moves."""
-    records = read_journal(wal_path(run_root, 1))
-    [seq] = [
-        r["seq"]
-        for r in records
-        if r.get("rec") == "input" and r.get("kind") == "STATUS" and r.get("source") == source
+    """Delete the decision that answered the one STATUS input from `source`. An attempt and its
+    decision are one transaction, so no crash leaves this state: the store then disagrees with
+    itself, and replay refuses it."""
+    from store_surgery import rows
+
+    [index] = [
+        body["index"]
+        for _, kind, body in rows(run_root)
+        if kind == "input" and body.get("kind") == "STATUS" and body.get("source") == source
     ]
-    wal = wal_path(run_root, 1)
-    lines = wal.read_text().splitlines()
-    kept = [
-        line
-        for line in lines
-        if not (json.loads(line).get("rec") == "decision" and json.loads(line).get("index") == seq)
-    ]
-    assert len(kept) == len(lines) - 1  # exactly one verdict lost
-    wal.write_text("\n".join(kept) + "\n")
+    lost = delete(
+        run_root, lambda seq, kind, body: kind == "decision" and body.get("index") == index
+    )
+    assert len(lost) == 1  # exactly one verdict lost

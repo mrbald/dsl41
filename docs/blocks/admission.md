@@ -81,7 +81,6 @@ An id before its attempt line has no instance: deduplication and every refusal b
 - `test_results_out_of_order_are_refused`
 - `test_admission_time_never_goes_backwards`
 - `test_cm07_a_durably_rejected_attempt_is_not_applied_on_replay`
-- `test_cm07_an_attempt_admitted_without_a_result_is_applied_through_the_gate`
 - `test_cm07_the_time_half_of_a_rejected_attempt_still_applies`
 - `test_a_log_this_build_derives_differently_from_is_refused`
 - `test_a_mutation_that_names_no_revision_is_refused`
@@ -97,7 +96,7 @@ An id before its attempt line has no instance: deduplication and every refusal b
 - `test_a_decided_id_never_reaches_the_chart`
 - `test_every_event_a_poster_sends_is_in_the_alphabet`
 - `test_replay_keeps_one_instance_open_where_the_lines_interleave`
-- `test_dsl41_run_exits_7_when_a_decision_meets_a_gap_live_and_at_replay`
+- `test_dsl41_run_exits_7_when_a_decision_meets_a_gap_before_it_is_recorded`
 - `test_a_decision_with_no_open_instance_raises_and_writes_nothing`
 - `test_a_second_attempt_for_an_id_in_flight_carries_the_instance_s_facts`
 - `test_a_second_attempt_for_a_decided_id_is_refused_before_any_start`

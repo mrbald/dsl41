@@ -1,13 +1,15 @@
-"""Resume's decision for a live start that left no run directory (DL-102, DL-315).
+"""A restart's decision for a live start the crash took (DL-102, DL-315, DL-424).
 
-A start's `dispatch` record, naming its `run_id`, is durable before its adapter task exists, and
-its run directory is made after (runner-design ss7). So resume reads three cases off the log:
+A start's admission is one transaction, its `dispatch` record, naming the attempt's `run_id`,
+is durable before its adapter task exists, and its spool is made after (runner-design ss7). So
+a restart reads three cases off the store:
 
-  * a `dispatch` record and no directory: the start was launched and the crash took it. A
-    tethered command is FAILURE, a watch is relaunched under the recorded `run_id`;
-  * no record, and replay derives the start: it was decided and never launched, and resume
-    dispatches it now;
-  * neither: the live engine launched nothing for the run, and resume launches nothing.
+  * a `dispatch` record and no outcome: an open attempt. A command is settled from its spool
+    (with no spool, unobservable, and the interruption rule runs it again); a watch is
+    relaunched under the recorded `run_id`;
+  * no record, and replay derives the start: it was decided and never launched, and the restart
+    dispatches it once the due work is processed;
+  * neither: the live engine launched nothing for the run, and the restart launches nothing.
 
 These tests moved here from the routing-table suite, which held the same restarts behind a
 drained host.
@@ -16,6 +18,7 @@ drained host.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -28,7 +31,7 @@ from dsl41.oracle_state import Event
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import VirtualClock
-from dsl41.runner_journal import Replay, read_journal
+from dsl41.runner_journal import read_journal
 from dsl41.runner_startup import resume_run, start_run
 
 T0 = datetime(2026, 7, 1, 8, 0)
@@ -58,9 +61,9 @@ def _count_launches(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int]]:
     launches: list[tuple[str, int]] = []
     real = Engine._launch
 
-    def counted(self, job_ir, run_number, adapter, *, run_id=None):  # type: ignore[no-untyped-def]
+    def counted(self, job_ir, run_number, adapter, *, run_id=None, spool=None, env=None):  # type: ignore[no-untyped-def]
         launches.append((job_ir.name, run_number))
-        real(self, job_ir, run_number, adapter, run_id=run_id)
+        real(self, job_ir, run_number, adapter, run_id=run_id, spool=spool, env=env)
 
     monkeypatch.setattr(Engine, "_launch", counted)
     return launches
@@ -94,7 +97,7 @@ async def _close_engine(engine: Engine) -> None:
 
 
 def _records(run_root: Path) -> list[dict[str, Any]]:
-    return read_journal(run_root / "journal.jsonl")
+    return read_journal(run_root)
 
 
 def _dispatches(run_root: Path) -> list[tuple[str, int, str]]:
@@ -118,24 +121,26 @@ def _decisions_at(run_root: Path, index: int) -> list[dict[str, object]]:
     return [r for r in _records(run_root) if r["rec"] == "decision" and r["index"] == index]
 
 
-async def _die_before_the_decision(engine: Engine, ev: Event) -> int:
-    """Admit `ev` and kill the engine after its attempt record and before its decision record
-    (DL-156's window). Returns the attempt's index."""
-
-    def die(*_args: object, **_kwargs: object) -> None:
-        raise RuntimeError("the engine died before the decision record")
-
+async def _die_before_the_dispatch(engine: Engine, ev: Event) -> int:
+    """Admit `ev` and kill the engine after its admission and before any `dispatch` record it
+    implies (DL-102's window). Returns the attempt's index."""
     assert engine.journal is not None
-    path = engine.journal.path
-    engine.journal.decision = die  # type: ignore[method-assign]
+    journal = engine.journal
+    real = journal.append
+
+    def append(*records: Any) -> int:
+        if any(record.kind == "dispatch" for record in records):
+            raise RuntimeError("the engine died before the dispatch record")
+        return real(*records)
+
+    journal.append = append  # type: ignore[method-assign]
     engine.inject(ev)
-    with pytest.raises(RuntimeError, match="before the decision record"):
+    with contextlib.suppress(RuntimeError):
         await engine.run_until_quiescent(ev.at + timedelta(minutes=1))
     await _close_engine(engine)
-    records = read_journal(path)
-    index = int(records[-1]["seq"])
-    assert records[-1]["rec"] == "input"
-    assert not [r for r in records if r["rec"] == "decision" and r["index"] == index]
+    records = _records(engine.journal.path)  # type: ignore[arg-type]
+    index = max(int(r["seq"]) for r in records if r["rec"] == "input")
+    assert [r for r in records if r["rec"] == "decision" and r["index"] == index]
     return index
 
 
@@ -190,19 +195,19 @@ def test_a_watch_is_launched_once_at_resume(
 
 
 @pytest.mark.parametrize("job_type", ["FW", "CMD"])
-def test_an_undecided_start_is_committed_and_dispatched_at_resume(
+def test_a_start_decided_and_never_dispatched_is_dispatched_at_resume(
     short_root: Path, monkeypatch: pytest.MonkeyPatch, job_type: str
 ) -> None:
-    """A start whose decision never landed. Resume re-decides it through the gate (DL-156),
-    writes the decision, and dispatches the start replay derives from it (DL-315): one
-    `dispatch` record with a fresh uuid4 run_id, then one launch under it. A command is not
-    failed as a lost dispatch, because nothing was launched before the crash."""
+    """A start whose decision landed and whose `dispatch` record did not. The restart
+    dispatches the start replay derives from the decision (DL-102): one `dispatch` record with
+    a fresh uuid4 run_id, then one launch under it. Nothing was launched before the crash, so
+    nothing is settled."""
 
     async def scenario() -> None:
         run_root = short_root / "run"
         jil, job = (_WATCH_JIL, "w") if job_type == "FW" else (_SOLO_JIL, "j")
         engine = _genesis_engine(run_root, jil, job_type)
-        index = await _die_before_the_decision(engine, _ev("FORCE_STARTJOB", 1, job=job))
+        index = await _die_before_the_dispatch(engine, _ev("FORCE_STARTJOB", 1, job=job))
         launches = _count_launches(monkeypatch)
         adapter = _CountingWatch()
         resumed = await _resume(run_root, jil, adapter)
@@ -223,28 +228,15 @@ def test_an_undecided_start_is_committed_and_dispatched_at_resume(
     asyncio.run(scenario())
 
 
-def test_a_committed_start_is_committed_once(
-    short_root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The commit is durable: a second restart finds the attempt decided, recovers nothing,
-    writes no second decision and no second `dispatch` record, and relaunches the watch under
-    the id the first restart bound (DL-315)."""
-    import dsl41.runner_startup as startup
-
-    replays: list[Replay] = []
-    real = startup.replay_inputs
-
-    def recording(*args: Any, **kwargs: Any) -> Replay:
-        replay = real(*args, **kwargs)
-        replays.append(replay)
-        return replay
-
-    monkeypatch.setattr(startup, "replay_inputs", recording)
+def test_a_start_dispatched_at_a_restart_is_dispatched_once(short_root: Path) -> None:
+    """The dispatch is durable: a second restart finds the attempt open, writes no second
+    decision and no second `dispatch` record, and relaunches the watch under the id the first
+    restart bound (DL-118)."""
 
     async def scenario() -> None:
         run_root = short_root / "run"
         engine = _genesis_engine(run_root, _WATCH_JIL, "FW")
-        index = await _die_before_the_decision(engine, _ev("FORCE_STARTJOB", 1, job="w"))
+        index = await _die_before_the_dispatch(engine, _ev("FORCE_STARTJOB", 1, job="w"))
         first = await _resume(run_root, _WATCH_JIL, _CountingWatch())
         await first.run_until_quiescent(T0 + timedelta(minutes=4))  # the loop dispatches
         await _close_engine(first)
@@ -259,29 +251,27 @@ def test_a_committed_start_is_committed_once(
             await _close_engine(second)
         assert len(_decisions_at(run_root, index)) == 1
         assert _dispatches(run_root) == [("w", 1, run_id)]
-        assert [len(r.recovered) for r in replays] == [1, 0]
 
     asyncio.run(scenario())
 
 
 def test_a_refused_resume_writes_nothing(short_root: Path) -> None:
-    """A run root an earlier build resumed: a watch start lost its decision, and that build
-    launched the watch with no identity, so `watch.jsonl` starts with `run_id: null`. This
-    build's resume would dispatch the start under a fresh id, so it refuses the root by name as a
-    WAL/spool identity split (DL-118). It checks before it writes the recovered decision, so the
-    refused resume appends nothing and the build that wrote the log can still open it (DL-315)."""
-    from dsl41.run_root import active_wal
+    """A dispatched watch whose `watch.jsonl` names another run_id than the attempt the store
+    bound: a store/spool identity split (DL-118). The restart checks every open attempt's spool
+    before it writes, so the refused restart appends nothing."""
+    from store_surgery import rows
+
     from dsl41.runner_adapters import ARTIFACT_FORMAT_VERSION, append_watch_line
     from dsl41.runner_clock import EngineError
 
     async def scenario() -> None:
         run_root = short_root / "run"
-        engine = _genesis_engine(run_root, _WATCH_JIL, "FW")
-        await _die_before_the_decision(engine, _ev("FORCE_STARTJOB", 1, job="w"))
-        run_dir = run_root / "runs" / "w.1"
-        run_dir.mkdir(parents=True)
+        await _start_a_watch(run_root, takeover=False)
+        log = run_root / "runs" / "w.1" / "watch.jsonl"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.unlink(missing_ok=True)
         append_watch_line(
-            run_dir / "watch.jsonl",
+            log,
             {
                 "artifact_format_version": ARTIFACT_FORMAT_VERSION,
                 "at": T0 + timedelta(minutes=2),
@@ -289,49 +279,10 @@ def test_a_refused_resume_writes_nothing(short_root: Path) -> None:
                 "run_id": None,
             },
         )
-        wal = active_wal(run_root)
-        before = wal.read_bytes()
+        before = rows(run_root)
         with pytest.raises(EngineError, match="watch.jsonl reports run_id None"):
             await _resume(run_root, _WATCH_JIL, _CountingWatch())
-        assert wal.read_bytes() == before
-
-    asyncio.run(scenario())
-
-
-def test_a_recovered_start_followed_by_decided_ones_dispatches_nothing_stale(
-    short_root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A log an earlier build resumed without writing the lost decision: the undecided start of
-    run 1 is followed by a decided start of run 2, dispatched under its own id. This build writes
-    the lost decision once and dispatches nothing for run 1, whose row has moved on; run 2 keeps
-    its one record and id (DL-315)."""
-
-    async def scenario() -> None:
-        run_root = short_root / "run"
-        engine = _genesis_engine(run_root, _SOLO_JIL, "CMD")
-        index = await _die_before_the_decision(engine, _ev("FORCE_STARTJOB", 1, job="j"))
-        with monkeypatch.context() as earlier_build:
-            earlier_build.setattr(Engine, "commit_recovered", lambda *_args: None)
-            old = await _resume(run_root, _SOLO_JIL, FakeAdapter(default=None))
-            try:
-                await old.run_until_quiescent(T0 + timedelta(minutes=4))
-                old.inject(_ev("KILLJOB", 5, job="j"))
-                old.inject(_ev("FORCE_STARTJOB", 5.5, job="j"))
-                await old.run_until_quiescent(T0 + timedelta(minutes=6))
-                assert old.oracle.store.job["j"].run_number == 2
-            finally:
-                await _close_engine(old)
-        assert _decisions_at(run_root, index) == []
-        before = _dispatches(run_root)
-        assert [(job, run) for job, run, _ in before] == [("j", 1), ("j", 2)]
-
-        resumed = await _resume(run_root, _SOLO_JIL, FakeAdapter(default=None), minutes=7)
-        try:
-            assert resumed.oracle.store.job["j"].run_number == 2
-        finally:
-            await _close_engine(resumed)
-        assert len(_decisions_at(run_root, index)) == 1
-        assert _dispatches(run_root) == before
+        assert rows(run_root) == before
 
     asyncio.run(scenario())
 
@@ -347,15 +298,15 @@ _TERMINATOR_JIL = (
 )
 
 
-def test_a_recovered_starting_overwrite_of_a_superseded_start_is_left_live(
+def test_a_starting_overwrite_of_a_superseded_start_is_left_live(
     short_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """DL-315's case. Run 1 of `j` starts and is TERMINATED inside the input that decided it,
     so the live engine launches nothing and writes no `dispatch` record. An operator's
-    `CHANGE_STATUS STARTING` at the same run number then loses its decision. Resume writes that
-    decision and launches nothing: the run number did not move (DL-232), the start replay
-    derives was superseded, and nothing was dispatched. The row stays live with no FAILURE, for
-    the operator to end or restart."""
+    `CHANGE_STATUS STARTING` at the same run number is decided and the engine dies. The restart
+    launches nothing: the run number did not move (DL-232), the start replay derives was
+    superseded, and nothing was dispatched. The row stays live with no FAILURE, for the
+    operator to end or restart."""
 
     async def scenario() -> None:
         run_root = short_root / "run"
@@ -368,7 +319,7 @@ def test_a_recovered_starting_overwrite_of_a_superseded_start_is_left_live(
         row = engine.oracle.store.job["j"]
         assert (row.status, row.run_number) == ("TERMINATED", 1)
         assert [job for job, _run, _id in _dispatches(run_root)] == ["x"]
-        index = await _die_before_the_decision(engine, _ev("STATUS", 4, job="j", status="STARTING"))
+        index = await _die_before_the_dispatch(engine, _ev("STATUS", 4, job="j", status="STARTING"))
         launches = _count_launches(monkeypatch)
         resumed = await _resume(run_root, _TERMINATOR_JIL, _CountingWatch(), minutes=5)
         try:
@@ -476,13 +427,13 @@ def test_the_dispatch_record_precedes_the_launch(short_root: Path) -> None:
         engine.adapters["CMD"] = adapter
         order: list[str] = []
         assert engine.journal is not None
-        real_write = engine.journal._write
+        real_append = engine.journal.append
 
-        def write(record: dict[str, Any]) -> None:
-            order.append(str(record["rec"]))
-            real_write(record)
+        def append(*records: Any) -> int:
+            order.extend(record.kind for record in records)
+            return real_append(*records)
 
-        engine.journal._write = write  # type: ignore[method-assign]
+        engine.journal.append = append  # type: ignore[method-assign]
         engine.inject(_ev("STARTJOB", 0, job="j"))
         await engine.run_until_quiescent(T0 + timedelta(minutes=1))
         await _close_engine(engine)
@@ -500,7 +451,7 @@ def test_an_overdue_deadline_applies_before_a_recovered_start_dispatches(
     """A start with a one-minute `term_run_time` is decided and the engine dies before its
     `dispatch` record. Resumed at two minutes, the overdue deadline fires first and ends the
     run, so the recovered start is superseded: no adapter call and no `dispatch` record. The
-    loop dispatches recovered starts only once nothing is due (`Engine.recover_start`)."""
+    loop dispatches owed starts only once nothing is due (`Engine.defer`)."""
     jil = "insert_job: j\njob_type: c\ncommand: x\nterm_run_time: 1\n"
 
     async def scenario() -> None:
@@ -555,8 +506,8 @@ def test_a_refused_resume_stops_the_tasks_it_started_before_it_releases_the_lock
     tasks: list[asyncio.Task[None]] = []
     real_launch = Engine._launch
 
-    def launch(self, job_ir, run_number, adapter, *, run_id=None):  # type: ignore[no-untyped-def]
-        real_launch(self, job_ir, run_number, adapter, run_id=run_id)
+    def launch(self, job_ir, run_number, adapter, *, run_id=None, spool=None):  # type: ignore[no-untyped-def]
+        real_launch(self, job_ir, run_number, adapter, run_id=run_id, spool=spool)
         tasks.append(self._live[job_ir.name].task)
 
     def fail(*_args: object, **_kwargs: object) -> None:
@@ -570,7 +521,7 @@ def test_a_refused_resume_stops_the_tasks_it_started_before_it_releases_the_lock
         real_release(self)
 
     monkeypatch.setattr(Engine, "_launch", launch)
-    monkeypatch.setattr(startup, "_inject_completion", fail)
+    monkeypatch.setattr(startup, "_settle", fail)
     monkeypatch.setattr(LeaderLock, "release", release)
 
     async def second() -> None:

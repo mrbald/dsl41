@@ -11,23 +11,29 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from genesis_harness import C1_JIL, T0, _close, _genesis
+from genesis_harness import C1_JIL, T0, _catalog, _close, _genesis
 
 from dsl41.cli_run import _serve_run
 from dsl41.ir import lower_source
-from dsl41.run_root import RuntimeProfile
-from dsl41.runner_clock import EngineError
+from dsl41.runner_config import RuntimeProfile
 from dsl41.runner_ledger import LeaderLock
 from dsl41.runner_startup import acquire_run_root, wire_from_profile
 
 
-def test_the_builder_refuses_a_detached_profile_by_name() -> None:
-    """`wire_from_profile` wires the tethered mode only: a profile in detached mode is refused
-    by name before any adapter is built. Its twin, the tethered profile, wires."""
+def test_the_builder_takes_the_stop_grace_from_the_engine_settings() -> None:
+    """`wire_from_profile` builds the command adapter with the settings' `grace_term_s`
+    (engine.toml, DL-424), and with the default 10 s when it is given none."""
+    from dsl41.runner_adapters import LocalCommandAdapter
+    from dsl41.runner_config import EngineSettings
+
     catalog = lower_source("insert_job: a\njob_type: c\ncommand: x\n")
-    with pytest.raises(EngineError, match="detached mode is retired"):
-        wire_from_profile(catalog, RuntimeProfile(execution_mode="detached"), start=T0)
-    assert "CMD" in wire_from_profile(catalog, RuntimeProfile(), start=T0).adapters
+    wired = wire_from_profile(
+        catalog, RuntimeProfile(), start=T0, settings=EngineSettings(grace_term_s=3.0)
+    )
+    adapter = wired.adapters["CMD"]
+    assert isinstance(adapter, LocalCommandAdapter) and adapter.grace_seconds == 3.0
+    default = wire_from_profile(catalog, RuntimeProfile(), start=T0).adapters["CMD"]
+    assert isinstance(default, LocalCommandAdapter) and default.grace_seconds == 10.0
 
 
 def test_a_raise_after_genesis_opens_its_segment_closes_the_journal_and_frees_the_lock(
@@ -47,17 +53,20 @@ def test_a_raise_after_genesis_opens_its_segment_closes_the_journal_and_frees_th
     acquire_run_root(run_root).release()
 
 
-def test_a_resume_of_a_root_pinned_in_detached_mode_is_refused_naming_the_mode(
+def test_a_resume_under_another_profile_is_refused_naming_the_field(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """`dsl41 run --resume` wires from the launch profile, which is tethered, and then holds
-    it to the root's pin (PR-22). A root pinned in detached mode is refused there, exit 2,
-    naming `execution_mode`, before any replay."""
+    """`dsl41 run --resume` wires from the launch profile and then holds it to the profile the
+    store's configuration recorded (PR-22). A store recorded under `local-eligible` is refused
+    there, exit 2, naming `machine_policy`, before any replay, and the store is unchanged."""
+    from store_surgery import rows
+
     run_root = tmp_path / "run"
-    _close(_genesis(run_root, profile=RuntimeProfile(execution_mode="detached")))
-    before = sorted(p.relative_to(run_root) for p in run_root.rglob("*"))
-    rc = asyncio.run(_serve_run(lower_source(C1_JIL), run_root, True, [], profile=RuntimeProfile()))
+    _close(_genesis(run_root, profile=RuntimeProfile(machine_policy="local-eligible")))
+    before = rows(run_root)
+    catalog, _ = _catalog(C1_JIL)
+    rc = asyncio.run(_serve_run(catalog, run_root, True, [], profile=RuntimeProfile()))
     assert rc == 2
     err = capsys.readouterr().err
-    assert "runtime-profile mismatch" in err and "(execution_mode)" in err
-    assert sorted(p.relative_to(run_root) for p in run_root.rglob("*")) == before
+    assert "runtime-profile mismatch on machine_policy" in err
+    assert rows(run_root) == before

@@ -256,6 +256,11 @@ def _spec_refusal(spec: dict[str, Any]) -> str | None:
         return f"unsupported spec version {version!r}"
     if "lifeline_fd" in spec and not _is_wire_int(spec["lifeline_fd"]):
         return f"lifeline_fd is not an integer: {spec['lifeline_fd']!r}"
+    if "env" in spec and not (
+        isinstance(spec["env"], dict)
+        and all(isinstance(k, str) and isinstance(v, str) for k, v in spec["env"].items())
+    ):
+        return f"env is not an object of strings: {spec['env']!r}"
     if "grace_seconds" in spec:
         grace = spec["grace_seconds"]
         refusal = f"grace_seconds is not a finite number of zero or more: {grace!r}"
@@ -317,7 +322,9 @@ def main() -> int:
     # drain the bytes and never read them.
     signal.set_wakeup_fd(self_pipe_w, warn_on_full_buffer=False)
 
-    env = dict(os.environ)
+    # the invocation the engine recorded (DSL41_JOB, DSL41_RUN_NUMBER, DSL41_SCHEDULED_AT,
+    # DSL41_ATTEMPT): a rerun gets the same values but the attempt (crash spec)
+    env = {**os.environ, **spec.get("env", {})}
     env["DSL41_RUN"] = base64.urlsafe_b64encode(
         json.dumps({**identity, "boot_id": boot_id}, sort_keys=True).encode("utf-8")
     ).decode("ascii")

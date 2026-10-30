@@ -24,9 +24,10 @@ Two properties carry the rest of the file:
 
 from __future__ import annotations
 
+from contextlib import closing
+
 import asyncio
 import fcntl
-import json
 import os
 import signal
 import subprocess
@@ -41,18 +42,12 @@ import pytest
 from proc_pipes import close_pipes
 
 from dsl41.ir import lower_source
-from dsl41.run_root import catalog_hash_v2, hash_over
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, RealClock, VirtualClock
 from dsl41.runner_journal import read_journal
-from dsl41.runner_ledger import (
-    LOCK_NAME,
-    STATE_MACHINE_VERSION,
-    LeaderLock,
-    check_leader_eligibility,
-    check_state_machine_version,
-)
+from dsl41.runner_ledger import LOCK_NAME, STATE_MACHINE_VERSION, LeaderLock
 from dsl41.runner_startup import resume_run, start_run
+from store_surgery import append, delete, rows
 
 T0 = datetime(2026, 7, 1, 8, 0)
 _SOLO_JIL = "insert_job: j\njob_type: c\ncommand: x\n"
@@ -116,10 +111,10 @@ def test_a_refused_resume_leaves_the_log_and_the_estate_untouched(tmp_path: Path
     run_root = tmp_path / "run"
     engine = _start(run_root)
     try:
-        before = engine.journal.path.read_bytes()
+        before = rows(run_root)
         with pytest.raises(EngineError, match="held by another engine"):
             asyncio.run(_resume(run_root, T0 + timedelta(minutes=1)))
-        assert engine.journal.path.read_bytes() == before  # not one record
+        assert rows(run_root) == before  # not one record
         assert list((run_root / "runs").iterdir()) == []
     finally:
         _close(engine)
@@ -241,7 +236,7 @@ def test_a_replaced_lock_file_stops_the_engine_that_can_no_longer_prove_it_leads
     async def scenario() -> None:
         engine.inject(_event("STARTJOB", 0))
         await engine.run_until_quiescent(T0 + timedelta(seconds=30))  # lands: still the leader
-        before = engine.journal.path.read_bytes()
+        before = rows(run_root)
 
         lock_path.unlink()
         usurper = LeaderLock(run_root)
@@ -252,7 +247,7 @@ def test_a_replaced_lock_file_stops_the_engine_that_can_no_longer_prove_it_leads
                 await engine.run_until_quiescent(T0 + timedelta(minutes=2))
             # refused BEFORE the write: an engine that appended and then
             # noticed would have already admitted the input
-            assert engine.journal.path.read_bytes() == before
+            assert rows(run_root) == before
         finally:
             usurper.release()
 
@@ -301,192 +296,86 @@ def test_the_fence_stops_the_spawn_and_not_only_the_record(tmp_path: Path) -> No
 # ------------------------------------------------------- 4. eligibility (ss7)
 
 
-def test_the_segment_pins_the_state_machine_version(tmp_path: Path) -> None:
+def test_the_store_pins_the_state_machine_version(tmp_path: Path) -> None:
     run_root = tmp_path / "run"
     _close(_start(run_root))
-    segment = read_journal(run_root / "journal.jsonl")[0]
+    segment = read_journal(run_root)[0]
     assert segment["state_machine_version"] == STATE_MACHINE_VERSION
 
 
-def test_a_build_that_derives_different_state_may_not_lead_this_log(tmp_path: Path) -> None:
-    """ss7: eligibility is an exact match on BOTH pins. Mixed builds derive
-    different revisions from identical inputs and nothing downstream can
-    detect the disagreement -- a SPAWN spec is a resolved literal command
-    string, and the supervisor holds no job definitions."""
+def _set_state_version(run_root: Path, version: int) -> None:
+    import sqlite3
+
+    with closing(sqlite3.connect(run_root / "engine.db", isolation_level=None)) as db:
+        db.execute("UPDATE meta SET value = ? WHERE key = 'state_version'", (str(version),))
+
+
+def test_a_build_that_derives_different_state_may_not_lead_this_store(tmp_path: Path) -> None:
+    """DL-424: a store's `meta.state_version` is written at creation, before the first input,
+    so a binary with another version refuses to start naming both, even when no snapshot
+    exists yet. Mixed builds derive different revisions from identical inputs and nothing
+    downstream can detect the disagreement."""
     run_root = tmp_path / "run"
     _close(_start(run_root))
-    path = run_root / "journal.jsonl"
-    records = read_journal(path)
-    records[0]["state_machine_version"] = STATE_MACHINE_VERSION + 1
-    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records))
+    _set_state_version(run_root, STATE_MACHINE_VERSION + 1)
+    with pytest.raises(EngineError) as refused:
+        asyncio.run(_resume(run_root, T0 + timedelta(minutes=1)))
+    assert str(refused.value) == (
+        f"{run_root / 'engine.db'}: state version {STATE_MACHINE_VERSION + 1}, this binary"
+        f" runs {STATE_MACHINE_VERSION}: drain and snapshot with the binary that wrote it, or"
+        " start a fresh run root (DL-424)"
+    )
 
-    with pytest.raises(EngineError, match="state-machine version mismatch"):
+
+def test_a_snapshot_another_build_wrote_is_refused_naming_both_versions(tmp_path: Path) -> None:
+    """A snapshot carries the version it was taken under; a binary loads only its own and
+    replays nothing across versions (no migration in 2.0, DL-424)."""
+    run_root = tmp_path / "run"
+    engine = _start(run_root)
+    assert engine.journal is not None
+    engine.journal.store.put_snapshot(engine.journal.last_seq, STATE_MACHINE_VERSION - 1, b"{}")
+    _close(engine)
+    with pytest.raises(EngineError, match=f"state version {STATE_MACHINE_VERSION - 1}, this"):
         asyncio.run(_resume(run_root, T0 + timedelta(minutes=1)))
 
 
-def _hash_at_ir_version(catalog, ir_version: str) -> str:
-    """`catalog_hash_v2` as an older build computed it: the same projection
-    with that build's `ir_version` stamped in (DL-253)."""
-    payload = catalog.model_dump(mode="json")
-    payload["meta"] = {"source_files": list(catalog.meta.source_files)}
-    payload["ir_version"] = ir_version
-    return hash_over(payload)
-
-
-def test_dl253_an_older_build_s_log_is_refused_for_its_version_not_its_hash(
+def test_an_older_build_s_store_is_refused_for_its_version_not_its_hash(
     tmp_path: Path,
 ) -> None:
-    """DL-253: a log an older build wrote pins that build's state-machine
-    version and a catalog hash over its own `ir_version`, so both pins
-    disagree with this build for the same unchanged estate. The version is
-    checked first: the refusal names it and never says the estate changed."""
+    """DL-253: a store an older build wrote pins that build's state version; the version is
+    checked first, so the refusal names it and never says the estate changed, even against a
+    changed estate."""
     run_root = tmp_path / "run"
     _close(_start(run_root))
-    path = run_root / "journal.jsonl"
-    records = read_journal(path)
-    catalog = lower_source(_SOLO_JIL)
-    records[0]["state_machine_version"] = STATE_MACHINE_VERSION - 1
-    records[0]["catalog_hash"] = _hash_at_ir_version(catalog, "0.2")
-    assert records[0]["catalog_hash"] != catalog_hash_v2(catalog)
-    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records))
-
-    with pytest.raises(EngineError, match="state-machine version mismatch") as refused:
-        asyncio.run(_resume(run_root, T0 + timedelta(minutes=1)))
-    assert "catalog hash mismatch" not in str(refused.value)
-    assert "estate changed" not in str(refused.value)
-
-
-def test_the_pinned_state_machine_version_is_read_as_an_exact_integer() -> None:
-    """ss7: one executable implements one state machine, and the pin is an
-    INTEGER.
-
-    Python's `==` is not integer identity -- `True == 1` and `1.0 == 1` --
-    so a bare comparison let a JSON `true` or a float stand in for version
-    1 and lead a log this build may not lead. The same class the supervisor
-    closed at its own version gate (DL-151). An ABSENT field refuses as
-    well (DL-189): `read_journal` has required it on every segment since
-    DL-138, so a record without one is hand-built and neither half guesses."""
-    catalog = lower_source(_SOLO_JIL)
-    record = {
-        "rec": "segment",
-        "catalog_hash": catalog_hash_v2(catalog),
-        "catalog_hash_version": 2,
-    }
-    check_leader_eligibility(
-        {**record, "state_machine_version": STATE_MACHINE_VERSION}, catalog=catalog
-    )
-    with pytest.raises(EngineError, match="state-machine version mismatch"):
-        check_leader_eligibility(record, catalog=catalog)  # absent: refuses since DL-189
-    for wrong in (True, float(STATE_MACHINE_VERSION), str(STATE_MACHINE_VERSION), None):
-        with pytest.raises(EngineError, match="state-machine version mismatch"):
-            check_leader_eligibility({**record, "state_machine_version": wrong}, catalog=catalog)
-
-
-def test_state_machine_version_modes_split_on_absent_and_agree_when_present() -> None:
-    """The name is the one DL-165 cites and is kept for that reason; the
-    split it names is gone. DL-165 made `check_state_machine_version` the one door behind both
-    `check_leader_eligibility` (mode="lead") and `runner_history`'s
-    `check_replay_version` (mode="replay"), and kept one split: lead read
-    an ABSENT field as v1, replay refused it. DL-189 removed the split.
-    `read_journal` has refused an unversioned record outright since DL-138
-    and `runner_startup` reads before it gates, so no on-disk log could
-    ever reach the lead courtesy; a policy no artifact can exercise is not
-    kept. Both modes now refuse absent, and agree on every present value,
-    right or wrong. `mode` survives only to pick that half's message."""
-    with pytest.raises(EngineError, match="state-machine version mismatch"):
-        check_state_machine_version({}, mode="lead")  # absent: refuses since DL-189
-    with pytest.raises(EngineError, match="state_machine_version None"):
-        check_state_machine_version({}, mode="replay")
-
-    right = {"state_machine_version": STATE_MACHINE_VERSION}
-    check_state_machine_version(right, mode="lead")
-    check_state_machine_version(right, mode="replay")
-    for wrong in (
-        True,
-        float(STATE_MACHINE_VERSION),
-        str(STATE_MACHINE_VERSION),
-        None,
-        STATE_MACHINE_VERSION + 1,
-    ):
-        opening = {"state_machine_version": wrong}
-        with pytest.raises(EngineError):
-            check_state_machine_version(opening, mode="lead")
-        with pytest.raises(EngineError):
-            check_state_machine_version(opening, mode="replay")
-
-
-def test_state_machine_version_messages_are_pinned_whole() -> None:
-    """DL-165 review: before this test the two refusal messages were pinned
-    only by the substring "state-machine version mismatch", and the replay
-    message and its `where` prefix by nothing at all -- so the wording
-    could drift, or the prefix vanish, with the suite green. Both texts are
-    contracts (quoted in period-model ss2.1 and concurrency-model ss7), so
-    both are pinned whole here."""
-    with pytest.raises(EngineError) as lead:
-        check_state_machine_version({"state_machine_version": 999}, mode="lead")
-    assert str(lead.value) == (
-        "state-machine version mismatch: this journal is v999, this build derives"
-        f" v{STATE_MACHINE_VERSION}; a leader must derive identical revisions from"
-        " identical inputs (concurrency-model ss7) -- re-baseline explicitly with a"
-        " fresh run"
-    )
-
-    tail = (
-        f" and this build derives v{STATE_MACHINE_VERSION} -- one executable implements"
-        " one state machine, so this build can neither lead nor replay this log"
-        " (period-model ss2.1)"
-    )
-    with pytest.raises(EngineError) as bare:
-        check_state_machine_version({"state_machine_version": 999}, mode="replay")
-    assert str(bare.value) == "this segment names state_machine_version 999" + tail
-
-    # the `where` prefix is the only thing that says WHICH root refused, and
-    # `dsl41 runs` reads several in one command
-    with pytest.raises(EngineError) as named:
-        check_state_machine_version({"state_machine_version": 999}, mode="replay", where="/roots/a")
-    assert str(named.value) == "/roots/a: this segment names state_machine_version 999" + tail
-
-
-def test_eligibility_compares_the_hash_recipe_the_log_itself_names() -> None:
-    """(period-model ss1.1, DL-130; D4, DL-138): `catalog_hash` is versioned,
-    so the gate recomputes under the recipe the record PINS and never under
-    the one this build happens to write.
-
-    Rewritten at DL-138, which left one readable recipe: what the gate
-    proves now is that the pinned version reaches the one dispatcher --
-    version 2 compares, the retired 1 refuses BY NAME, an unknown 3 refuses
-    as its own error -- rather than being assumed anywhere along the way."""
-    catalog = lower_source(_SOLO_JIL)
-    current = {
-        "rec": "segment",
-        "catalog_hash": catalog_hash_v2(catalog),
-        "catalog_hash_version": 2,
-        "state_machine_version": STATE_MACHINE_VERSION,
-    }
-    check_leader_eligibility(current, catalog=catalog)
-    with pytest.raises(EngineError, match="catalog hash mismatch"):
-        check_leader_eligibility({**current, "catalog_hash": "sha256:" + "0" * 64}, catalog=catalog)
-    with pytest.raises(EngineError, match="RETIRED") as retired:
-        check_leader_eligibility({**current, "catalog_hash_version": 1}, catalog=catalog)
-    assert "DL-138" in str(retired.value)
-    with pytest.raises(EngineError, match="catalog_hash_version 3") as unknown:
-        check_leader_eligibility({**current, "catalog_hash_version": 3}, catalog=catalog)
-    assert "DL-138" not in str(unknown.value)
-
-
-def test_a_changed_estate_refuses() -> None:
-    """The gate's own reason for existing: a changed estate re-baselines
-    explicitly rather than drifting."""
-    catalog = lower_source(_SOLO_JIL)
+    _set_state_version(run_root, STATE_MACHINE_VERSION - 1)
     changed = lower_source(_SOLO_JIL.replace("command: x", "command: y"))
-    record = {
-        "rec": "segment",
-        "catalog_hash": catalog_hash_v2(catalog),
-        "catalog_hash_version": 2,
-        "state_machine_version": STATE_MACHINE_VERSION,
-    }
+    with pytest.raises(EngineError, match="state version") as refused:
+        asyncio.run(
+            resume_run(
+                changed,
+                run_root,
+                clock=VirtualClock(start=T0 + timedelta(minutes=1)),
+                adapters={"CMD": FakeAdapter(default=None)},
+            )
+        )
+    assert "catalog hash mismatch" not in str(refused.value)
+
+
+def test_a_changed_estate_refuses(tmp_path: Path) -> None:
+    """The gate's own reason for existing: a changed estate is an update (3b), never a silent
+    drift (ss7)."""
+    run_root = tmp_path / "run"
+    _close(_start(run_root))
+    changed = lower_source(_SOLO_JIL.replace("command: x", "command: y"))
     with pytest.raises(EngineError, match="catalog hash mismatch"):
-        check_leader_eligibility(record, catalog=changed)
+        asyncio.run(
+            resume_run(
+                changed,
+                run_root,
+                clock=VirtualClock(start=T0 + timedelta(minutes=1)),
+                adapters={"CMD": FakeAdapter(default=None)},
+            )
+        )
 
 
 # ------------------------------------------------- 5. the takeover barrier
@@ -497,11 +386,7 @@ def _log_without_dispatch(run_root: Path) -> None:
     window between deciding the start and dispatching it. The only honest
     way to build a crash window -- racing for one would test the scheduler,
     not the rule."""
-    path = run_root / "journal.jsonl"
-    records = read_journal(path)
-    kept = [r for r in records if r.get("rec") != "dispatch"]
-    assert len(kept) == len(records) - 1
-    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in kept))
+    assert len(delete(run_root, lambda seq, kind, body: kind == "dispatch")) == 1
 
 
 def _crash_after_deciding_a_start(run_root: Path) -> None:
@@ -535,14 +420,17 @@ def test_cm09_a_start_the_previous_engine_never_dispatched_is_dispatched(tmp_pat
     assert resumed.live_jobs() == frozenset({"j"})
     assert resumed.oracle.store.job["j"].run_number == 1  # the same run, not a second
     _close(resumed)
-    dispatched = [r for r in read_journal(run_root / "journal.jsonl") if r["rec"] == "dispatch"]
+    dispatched = [r for r in read_journal(run_root) if r["rec"] == "dispatch"]
     assert [(r["job"], r["run_number"]) for r in dispatched] == [("j", 1)]
 
 
-def test_a_dispatched_start_that_left_no_trace_is_failed(tmp_path: Path) -> None:
-    """The contrast, and the half of runner-design ss7 that stands. Same
-    estate, same missing spool, one record different: the log says the start
-    was dispatched, so it is not re-run silently."""
+def test_a_dispatched_start_that_left_no_trace_is_run_again_as_its_next_attempt(
+    tmp_path: Path,
+) -> None:
+    """The contrast. Same estate, same missing spool, one record different: the store says
+    the attempt was dispatched, and it left no record and no process, so it is unobservable.
+    The interruption rule runs the idempotent job's run again as attempt 2, with the same
+    invocation, and the oracle is told nothing (DL-424)."""
     run_root = tmp_path / "run"
     _crash_after_deciding_a_start(run_root)  # the dispatch record stays
 
@@ -552,9 +440,14 @@ def test_a_dispatched_start_that_left_no_trace_is_failed(tmp_path: Path) -> None
         return resumed
 
     resumed = asyncio.run(scenario())
-    assert resumed.oracle.store.job["j"].status == "FAILURE"
-    assert resumed.live_jobs() == frozenset()
+    assert resumed.oracle.store.job["j"].status == "RUNNING"
+    assert resumed.oracle.store.job["j"].run_number == 1
+    assert resumed.live_jobs() == frozenset({"j"})
     _close(resumed)
+    outcomes = [body for _, kind, body in rows(run_root) if kind == "outcome"]
+    assert [o["outcome"] for o in outcomes] == ["unobservable"]
+    ordinals = [body["ordinal"] for _, kind, body in rows(run_root) if kind == "dispatch"]
+    assert ordinals == [1, 2]
 
 
 def _event(kind: str, minutes: float):
@@ -652,13 +545,15 @@ def test_a_journal_stamped_in_the_future_refuses_to_resume(tmp_path: Path) -> No
         adapters={"CMD": FakeAdapter(default=None)},
     )
     _close(engine)
-    path = run_root / "journal.jsonl"
-    records = read_journal(path)
-    records[0]["at"] = "2099-01-01T00:00:00"  # a segment's opening stamp
-    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records))
+    append(  # a record stamped ahead of the machine clock
+        run_root,
+        "drop",
+        {"at": "2099-01-01T00:00:00", "kind": "STARTJOB", "payload": {}, "reason": "x"},
+        at=datetime(2099, 1, 1),
+    )
 
     async def scenario() -> None:
-        with pytest.raises(EngineError, match="journal is from the future"):
+        with pytest.raises(EngineError, match="the store is from the future"):
             await resume_run(
                 lower_source(_SOLO_JIL),
                 run_root,
@@ -670,11 +565,10 @@ def test_a_journal_stamped_in_the_future_refuses_to_resume(tmp_path: Path) -> No
 
 
 def test_the_sweep_reads_what_is_there_and_ignores_what_is_not(tmp_path: Path) -> None:
-    """The candidate sweep is a union over things that may each be missing or
-    malformed: a run root with no `runs/` at all (nothing ever dispatched, or
-    an operator cleaned up), and entries in it that are not run directories.
-    Neither is corruption, so neither may raise -- reconciliation has to
-    survive the state of a directory it does not own."""
+    """The restart reads the spools the open attempts name and nothing else: a run root with
+    no `runs/` at all (nothing ever dispatched, or an operator cleaned up), and entries in it
+    that are not run directories, are neither corruption nor evidence, so neither may raise --
+    reconciliation has to survive the state of a directory it does not own."""
     run_root = tmp_path / "run"
     _close(_start(run_root))
     (run_root / "runs").rmdir()  # gone entirely
@@ -704,27 +598,32 @@ def test_a_run_this_catalog_has_no_job_for_is_left_alone(tmp_path: Path) -> None
     inventing a verdict about it."""
     run_root = tmp_path / "run"
     _close(_start(run_root))
-    path = run_root / "journal.jsonl"
-    records = read_journal(path)
-    next_seq = max((int(r["seq"]) for r in records if "seq" in r), default=0) + 1
-    records.append(
+    body = {
+        "index": 1,
+        "at": T0.isoformat(),
+        "request_id": "ghost-1",
+        "fingerprint": "f",
+        "kind": "STATUS",
+        "payload": {"job": "ghost", "status": "RUNNING"},
+        "source": "control",
+    }
+    append(run_root, "input", body, at=T0)
+    append(
+        run_root,
+        "decision",
         {
-            "rec": "input",
-            "seq": next_seq,
-            "at": T0.isoformat(),
+            "index": 1,
             "request_id": "ghost-1",
             "fingerprint": "f",
-            "kind": "STATUS",
-            "payload": {"job": "ghost", "status": "RUNNING"},
-            "source": "control",
-        }
+            "decision": "applied",
+            "reason": None,
+            "code": None,
+            "revisions": {"job:ghost": 1},
+        },
+        at=T0,
+        request_id="ghost-1",
     )
-    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records))
-    # the run_number the oracle actually holds for it: an injected STATUS never
-    # advances one (the ghost-run gate), so this is the only directory that
-    # reaches the catalog lookup rather than stopping at the run-number check
-    # above it
-    (run_root / "runs" / "ghost.0").mkdir(parents=True)
+    (run_root / "runs" / "ghost.0").mkdir(parents=True)  # a directory no attempt names
 
     async def scenario():
         resumed = await _resume(run_root, T0 + timedelta(minutes=1))
@@ -843,15 +742,11 @@ def test_a_running_box_is_not_a_start_the_barrier_can_have_lost(tmp_path: Path) 
 
     resumed = asyncio.run(scenario())
     _close(resumed)
-    # the MEMBER's start was lost and is failed; the box is never addressed by
-    # the sweep at all. Its status follows from its members afterwards, which
+    # the MEMBER's attempt was lost and is run again; the box is never addressed by the
+    # restart at all, because it has no attempt. Its status follows from its members, which
     # is the fold doing its job rather than a verdict about the box.
-    reconciled = {
-        r["payload"]["job"]
-        for r in read_journal(run_root / "journal.jsonl")
-        if r.get("rec") == "input" and r.get("source") == "reconcile"
-    }
-    assert reconciled == {"member"}
+    settled = {body["job"] for _, kind, body in rows(run_root) if kind == "outcome"}
+    assert settled == {"member"}
 
 
 def test_dl210_flock_exclusive_is_shared_and_keeps_the_lock_file(tmp_path: Path):

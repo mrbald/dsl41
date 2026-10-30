@@ -260,7 +260,7 @@ def test_a_control_input_whose_apply_fails_is_refused_before_the_wal(
     refusal = asyncio.run(scenario())
     assert refusal.code == "apply_faulted"
     assert str(refusal).startswith("refused before admission")
-    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    records = read_journal(tmp_path / "run")
     assert not [r for r in records if r.get("rec") in ("input", "decision")]
 
 
@@ -276,7 +276,7 @@ def test_a_clean_control_input_is_admitted_after_its_dry_apply(tmp_path: Path) -
         return result
 
     assert asyncio.run(scenario()).decision == "applied"
-    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    records = read_journal(tmp_path / "run")
     assert [r["request_id"] for r in records if r.get("rec") == "input"][0] == "r1"
 
 
@@ -294,7 +294,7 @@ def test_a_gate_rejection_is_still_a_logged_decision(tmp_path: Path) -> None:
 
     result = asyncio.run(scenario())
     assert (result.decision, result.code) == ("rejected", "precondition_failed")
-    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    records = read_journal(tmp_path / "run")
     assert [r["request_id"] for r in records if r.get("rec") == "input"] == ["stale"]
     assert [r["code"] for r in records if r.get("rec") == "decision"] == ["precondition_failed"]
 
@@ -310,7 +310,7 @@ def _completed_run(run_root: Path) -> list[dict[str, Any]]:
         await _close(engine)
 
     asyncio.run(scenario())
-    return read_journal(run_root / "journal.jsonl")
+    return read_journal(run_root)
 
 
 def test_a_replayed_input_that_raises_stops_resume_naming_it(
@@ -341,7 +341,7 @@ def test_a_replayed_input_that_raises_stops_resume_naming_it(
         f"input {completion['seq']} (STATUS from adapter at {completion['at']}, request_id"
         f" engine:{completion['seq']}): RuntimeError: an injected fault on j"
     ) in str(error)
-    assert "roll back to the release that wrote this log" in str(error)
+    assert "roll back to the release that wrote this store" in str(error)
     assert isinstance(error.__cause__, ReplayFault)
     assert error.__cause__.index == completion["seq"]
     assert error.code is None
@@ -414,7 +414,7 @@ def test_a_crash_exits_1_and_5_is_retired(
     `--on-transition-violation stop` until DL-353; deployed units still
     list it in `RestartPreventExitStatus`, so no exit code of `run` takes it."""
     from dsl41 import cli_run
-    from dsl41.run_root import runtime_profile_from_cli
+    from dsl41.runner_config import runtime_profile_from_cli
 
     assert 5 not in {value for name, value in vars(cli_run).items() if name.startswith("EXIT_")}
 
@@ -522,7 +522,7 @@ def test_an_exact_retry_of_a_refused_request_is_refused_again(
         return codes
 
     assert asyncio.run(scenario()) == ["apply_faulted", "apply_faulted"]
-    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    records = read_journal(tmp_path / "run")
     assert not [r for r in records if r.get("rec") in ("input", "decision")]
 
 

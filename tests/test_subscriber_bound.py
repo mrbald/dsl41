@@ -31,6 +31,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from datetime import datetime
+
 import pytest
 from test_access import ME, _map_granting, _receipts, _serve_armed
 from test_access import TEXT as ACCESS_TEXT
@@ -49,6 +51,7 @@ from dsl41.runner_control import (
     subscribe_lines,
 )
 from dsl41.runner_journal import Journal, read_journal
+from dsl41.runner_store import MemoryStore, Record
 from dsl41.state_machine import Executor
 
 TEXT = "insert_job: sb_job\njob_type: c\ncommand: x\nmachine: m1\n"
@@ -79,8 +82,24 @@ class _BrokenStderr:
 # ------------------------------------------------------------ the journal
 
 
-def _on_disk(path: Path) -> list[dict[str, Any]]:
-    return [json.loads(line) for line in path.read_text().splitlines()]
+def _on_disk(journal: Journal) -> list[dict[str, Any]]:
+    return read_journal(journal.store)
+
+
+def _bare() -> Journal:
+    """A journal over an in-memory store, with no engine behind it."""
+    return Journal(MemoryStore())
+
+
+def _write(journal: Journal, record: dict[str, Any]) -> None:
+    """Append one preflight record whose wire line is `record`."""
+    body = {key: value for key, value in record.items() if key != "rec"}
+    journal.append(Record(datetime(2026, 7, 1, 8, 0), "preflight", None, None, body))
+
+
+def _stored_bytes(path: Path) -> int:
+    """The store's bytes on disk, its write-ahead file included."""
+    return sum(p.stat().st_size for p in (path, path.with_name(path.name + "-wal")) if p.exists())
 
 
 def _filler(size: int) -> dict[str, Any]:
@@ -98,29 +117,29 @@ def test_dl267_a_feed_is_removed_at_the_fixed_bound_and_never_grows_past_it(
     """The real budget, on a feed whose consumer is not waiting: every
     record that fits is kept in order, the first that does not removes
     the feed, and the backlog never passed the budget on the way."""
-    journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
+    journal = _bare()
     reasons: list[str] = []
     feed = journal.subscribe(Executor(), reasons.append, budget=SUBSCRIBER_BACKLOG_BYTES)
     written = 0
     while feed.overflow is None:
-        journal._write(_filler(256 * 1024))
+        _write(journal, _filler(256 * 1024))
         written += 1
         assert feed.backlog_bytes <= SUBSCRIBER_BACKLOG_BYTES
     assert journal._subscribers == []
     assert len(reasons) == 1 and str(SUBSCRIBER_BACKLOG_BYTES) in reasons[0]
     assert feed.empty() and feed.backlog_bytes == 0  # the backlog was dropped
     # the record that overflowed it is durable: the append succeeded
-    assert len(_on_disk(journal.path)) == written
+    assert len(_on_disk(journal)) == written
     journal.close()
 
 
 def test_dl267_records_within_the_budget_are_all_delivered_in_order(tmp_path: Path) -> None:
     """The non-triggering twin: a reader that keeps up is never removed."""
-    journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
+    journal = _bare()
     reasons: list[str] = []
     feed = journal.subscribe(Executor(), reasons.append, budget=4096)
     for n in range(200):
-        journal._write(_filler(1000) | {"n": n})
+        _write(journal, _filler(1000) | {"n": n})
         assert feed.get_nowait()["n"] == n
     assert reasons == [] and journal._subscribers == [feed]
     journal.close()
@@ -131,12 +150,12 @@ def test_dl267_one_record_larger_than_the_budget_delays_and_does_not_remove(
 ) -> None:
     """A record always enters an empty backlog, so a healthy subscriber is
     never removed for the size of one record."""
-    journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
+    journal = _bare()
     feed = journal.subscribe(Executor(), budget=100)
-    journal._write(_filler(1000))
+    _write(journal, _filler(1000))
     assert feed.overflow is None and feed.backlog_bytes > feed.budget
     assert feed.get_nowait()["rec"] == "preflight"
-    journal._write(_filler(1000))
+    _write(journal, _filler(1000))
     assert feed.overflow is None
     journal.close()
 
@@ -148,7 +167,7 @@ def test_dl267_a_burst_past_the_budget_removes_even_a_waiting_feed(tmp_path: Pat
     and the backlog never held more than the budget or one record."""
 
     async def scenario() -> None:
-        journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
+        journal = _bare()
         waiting = journal.subscribe(Executor(), budget=4096)
         peaks: list[int] = []
         offer = waiting.offer
@@ -166,7 +185,7 @@ def test_dl267_a_burst_past_the_budget_removes_even_a_waiting_feed(tmp_path: Pat
         consumer = asyncio.ensure_future(consume())
         await asyncio.sleep(0)  # the consumer parks on the empty backlog
         for n in range(100):  # one synchronous burst, ~25 times the budget
-            journal._write(_filler(1000) | {"n": n})
+            _write(journal, _filler(1000) | {"n": n})
         assert waiting.overflow is not None and journal._subscribers == []
         assert max(peaks) <= waiting.budget
         consumer.cancel()
@@ -184,7 +203,7 @@ def test_dl267_a_broken_stderr_and_a_raising_owner_never_fail_the_append(
     the overflowed one still gets the record: owners are told only once
     the fan-out is done. An owner that raises, and a stderr that cannot
     take the report of it, go no further."""
-    journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
+    journal = _bare()
 
     def broken(_why: str) -> None:
         raise RuntimeError("owner bug")
@@ -193,13 +212,13 @@ def test_dl267_a_broken_stderr_and_a_raising_owner_never_fail_the_append(
     feed = journal.subscribe(machines, broken, budget=10)
     ownerless = journal.subscribe(machines, budget=10)
     healthy = journal.subscribe(machines)  # listed after the overflowed ones
-    journal._write(_filler(10))
+    _write(journal, _filler(10))
     monkeypatch.setattr(sys, "stderr", _BrokenStderr())
-    journal._write(_filler(10))  # overflows `feed` and `ownerless`; returns normally
+    _write(journal, _filler(10))  # overflows `feed` and `ownerless`; returns normally
     monkeypatch.undo()
     assert feed.overflow is not None and ownerless.overflow is not None
     assert journal._subscribers == [healthy]
-    assert [r["rec"] for r in _on_disk(journal.path)] == ["preflight", "preflight"]
+    assert [r["rec"] for r in _on_disk(journal)] == ["preflight", "preflight"]
     assert [healthy.get_nowait()["rec"] for _ in range(2)] == ["preflight", "preflight"]
     journal.close()
 
@@ -486,7 +505,7 @@ def test_dl267_an_overflow_during_backfill_ends_the_stream_inside_it(
             # far more backfill than any platform's socket buffers hold
             mutator = _Mutator(
                 server.path,
-                lambda: journal.path.stat().st_size >= 2 * 1024 * 1024,
+                lambda: _stored_bytes(journal.path) >= 2 * 1024 * 1024,
                 value=lambda n: BIG if n < 10 else "w" * 32768,
             )
             await _wait_or_fail(mutator.paused.is_set, mutator, "the history")
@@ -526,7 +545,7 @@ def test_dl267_a_broken_stderr_does_not_keep_an_overflowed_stream_open(
     a feed listed after it still gets the record."""
 
     async def scenario() -> None:
-        journal = Journal(short_root / "wal.jsonl", fsync_each=False)
+        journal = _bare()
         server = ControlServer(_FakeEngine(journal), short_root / "e.sock")  # type: ignore[arg-type]
         server.subscriber_budget = SMALL_BUDGET
         server.HANGUP_GRACE_S = AN_HOUR
@@ -539,12 +558,12 @@ def test_dl267_a_broken_stderr_does_not_keep_an_overflowed_stream_open(
             healthy = journal.subscribe(server.engine.machines)  # after the stalled one
             written = 0
             while not _backpressured(writer):
-                journal._write(_filler(2000))
+                _write(journal, _filler(2000))
                 written += 1
                 await asyncio.sleep(0)  # let the handler send it
             monkeypatch.setattr(sys, "stderr", _BrokenStderr())
             while stalled_feed.overflow is None:
-                journal._write(_filler(2000))  # raises here if the report escapes
+                _write(journal, _filler(2000))  # raises here if the report escapes
                 written += 1
             monkeypatch.undo()
             await _until(handler.done, "the stalled handler to end")

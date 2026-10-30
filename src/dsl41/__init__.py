@@ -39,12 +39,12 @@ docs/runner-design.md ss14):
                functions; plus the ss6 envelope and the ss0 mandate that a
                mutation names the revision it was composed against
                (parse_envelope)
-  run_root   - a run root's identity and layout: catalog_hash v2,
-               source_bundle_hash and the bundle it addresses, RuntimeProfile +
-               runtime_hash, the staged and committed manifests, the `segment`
-               record
-  runner_journal - the ss7 inputs-only WAL: Journal, read_journal, the
-               two-pass replay_inputs, and the catalog_hash resume gate
+  runner_config - a run's configuration: catalog_hash, the job fingerprints,
+               RuntimeProfile + runtime_hash, and engine.toml's settings
+  runner_store - the store: the journal, the configs, the snapshots, the meta
+  runner_journal - the engine's record over its store: the record kinds, the
+               writer, the wire projection, the open table, the snapshot and
+               replay
   runner_scheduler - the ss5 calendar scheduler, turning its ticks into UTC
                instants through the shared timezone module
   timezones - SEM-35 name resolution and the one naive-UTC <-> local

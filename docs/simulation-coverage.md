@@ -611,25 +611,17 @@ nothing.
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | profile_field:as_machine | supported | period-model ss2.1, DL-52 | - |  |  |  | generic | the machine names this runner answers to, sorted and de-duplicated |
-| profile_field:cmd_grace_us | supported | period-model ss2.1 | - |  |  |  | generic | the grace between SIGTERM and SIGKILL on a cancelled command |
-| profile_field:deadman_us | supported | period-model ss2.1, DL-126 | - |  |  |  | generic | the supervisor's observed deadman interval; null means there is no deadman |
 | profile_field:default_tz | supported | period-model ss2.1, SEM-35 | - |  |  |  | generic | the zone a job with no timezone of its own is read in |
-| profile_field:execution_mode | supported | period-model ss2.1 | - |  |  |  | generic | whether the engine owns the child processes or a supervisor does |
 | profile_field:fw_default_interval_us | supported | period-model ss2.1 | - |  |  |  | generic | the poll interval an FW job with no watch_interval uses |
 | profile_field:fw_default_interval_us#rounding | provisional | runner_startup.wire_from_profile, period-model ss2.1 | - |  |  |  | none | no shipped surface sets a value that is not whole seconds. A hand-pinned one is wired rounded half to even (at least 1 s), not at the pinned interval, and resume refuses it as profile drift. No label was opened for the conversion |
 | profile_field:machine_policy | supported | period-model ss2.1, DL-49 | - |  |  |  | generic | how the one ambiguous machine verdict resolves |
-| profile_field:reconcile_settle_us | supported | period-model ss2.1 | - |  |  |  | generic | how long reconcile waits for late evidence before it decides |
-| profile_field:retry_horizon_us | supported | period-model ss2.1 | - |  |  |  | generic | how far ahead a deferred dispatch retry may be scheduled |
 | profile_field:semantics | supported | period-model ss2.1, runner-design ss8a, DL-252 | - |  |  |  | generic | explicit semantic-switch overrides only, an explicit default normalized away; written {} when there is none |
-| profile_field:spawn_window_us | supported | period-model ss2.1 | - |  |  |  | generic | the window a spawn has to produce its receipt |
 | profile_field:tz_aliases | supported | period-model ss2.1, DL-62 | - |  |  |  | generic | the site-local zone-name table; a name only it resolves fails without it |
 
 ### profile_alt
 
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| profile_alt:execution_mode=detached | supported | period-model ss2.1 | - |  |  |  | generic | a supervisor owns the child processes across engine restarts |
-| profile_alt:execution_mode=tethered | supported | period-model ss2.1 | - |  |  |  | generic | the engine owns the child processes; there is no supervisor |
 | profile_alt:machine_policy=local-eligible | supported | period-model ss2.1 | - |  |  |  | generic | only a MIXED pool runs here, with a warning that pool placement was ignored; a foreign or unreadable machine still refuses |
 | profile_alt:machine_policy=strict | supported | period-model ss2.1 | - |  |  |  | generic | a job whose machine does not resolve local is refused |
 | profile_alt:semantics.box-start-all-members-out=complete | supported | runner-design ss8a, SEM-11 | - |  |  |  | generic | the default: a box whose start leaves no member in the run, every direct member on ice or no members, completes at its start through the completion door |
@@ -659,8 +651,8 @@ nothing.
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | adapter_outcome:Failed | supported | runner-design ss6 | - |  |  |  | generic | a completion with no raw exit code; the engine injects STATUS FAILURE with the cause |
-| adapter_outcome:Failed=dispatch lost to engine crash (run directory missing) | supported | runner_adapters.resolve_spool, DL-118 | - |  |  |  | generic | a dispatch whose run directory is gone provably never reached the host, so it fails rather than being retried blind |
-| adapter_outcome:Failed=exit_status_unobservable | provisional | runner_adapters.resolve_spool, runner-design ss15 | E7 | yes |  |  | generic | a resumed run with no status record fails rather than guessing an exit code |
+| adapter_outcome:Failed=dispatch lost to engine crash (run directory missing) | supported | runner_adapters.resolve_spool, DL-118 | - |  |  |  | generic | a dispatch whose run directory is gone never reached the host: the attempt is unobservable, and the interruption rule runs it again, holds it or closes it (spec-wiring 2b) |
+| adapter_outcome:Failed=exit_status_unobservable | provisional | runner_adapters.resolve_spool, runner-design ss15 | E7 | yes |  |  | generic | a resumed attempt with no status record and no live command is unobservable: the interruption rule decides it, never a guessed exit code (DL-424) |
 | adapter_outcome:Failed=exit_status_unobservable (wrapper exited rc={} without a status record) | provisional | runner_adapters.LocalCommandAdapter.run, runner-design ss15 | E7 | yes |  |  | generic | a wrapper that exited without writing a status record fails the run and names the wrapper's own exit code |
 | adapter_outcome:Failed=interrupted | supported | runner_attempts.follow_up_plan, DL-424 | - |  |  |  | generic | an interrupted attempt of a job named in non-idempotent.toml feeds FAILURE before the job is put ON_HOLD with the evidence |
 | adapter_outcome:Failed=malformed status record: outcome 'exited' with exit_code={} | refused | runner_adapters.outcome_from_status | - |  |  |  | generic | an 'exited' record with no integer exit code is refused as a truthful FAILURE, never mapped to something a downstream success could consume |
@@ -690,7 +682,7 @@ nothing.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | event_source:adapter | supported | ir-design ss7, DL-68, runner.Engine._enqueue | - |  |  |  | generic | the event is a live adapter completion -- the stamp that subjects it to the ss4 stale gate; it is the DEFAULT provenance of an engine-raised input |
 | event_source:control | supported | ir-design ss7, DL-68, runner.Engine.inject | - |  |  |  | generic | the event crossed the ss10 control socket, or a rehearsal script stood in for one; it is not something the engine raised itself |
-| event_source:reconcile | supported | ir-design ss7, DL-68, runner_startup._inject_completion | - |  |  |  | generic | the completion came from resolving an incomplete run at resume, not from a live adapter; it still goes through the ss4 stale gate |
+| event_source:reconcile | supported | ir-design ss7, DL-68, runner_startup._finish_plans | - |  |  |  | generic | the completion came from resolving an incomplete run at restart, not from a live adapter; it still goes through the ss4 stale gate |
 | event_source:scheduler | supported | ir-design ss7, DL-68, runner.Engine.run_until_quiescent | - |  |  |  | generic | the start came from a calendar tick, so a journal reader can tell it from an operator's sendevent |
 
 ### trace_marker

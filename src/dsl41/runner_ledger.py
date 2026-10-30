@@ -1,4 +1,4 @@
-"""One engine per run root: the `leader.lock` mutex and the log's version pins.
+"""One engine per run root: the `leader.lock` mutex and the state-machine version.
 
 The mutex is an `flock` held for the process lifetime. It is not a lease: the kernel releases
 it when the holder dies, `kill -9` included, so nothing decides whether the previous holder is
@@ -19,19 +19,16 @@ import json
 import os
 import socket
 
-from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal, Protocol, overload
+from typing import Protocol
 
-from dsl41.canon import is_wire_int
-from dsl41.ir import CatalogIR
-from dsl41.run_root import catalog_hash_for
 from dsl41.runner_procid import LockHeld, flock_exclusive, mkdir_durable
 from dsl41.runner_clock import EngineError
 
-#: ss7 ledger header, the half `catalog_hash` does not cover: the version of the state
-#: machine that derives oracle state from inputs. Leader eligibility requires an exact match,
+#: The version of the state machine that derives oracle state from inputs, the half
+#: `catalog_hash` does not cover. The store's `meta.state_version` and every snapshot carry it,
+#: and a restart requires an exact match (DL-424),
 #: because mixed builds derive different revisions from identical inputs and nothing
 #: downstream detects it: a SPAWN spec is a resolved literal command and the supervisor holds
 #: no job definitions.
@@ -230,60 +227,3 @@ def acquire_run_root(run_root: Path) -> LeaderLock:
     lock = LeaderLock(run_root)
     lock.acquire()
     return lock
-
-
-@overload
-def check_state_machine_version(opening: Mapping[str, Any], *, mode: Literal["lead"]) -> None: ...
-
-
-@overload
-def check_state_machine_version(
-    opening: Mapping[str, Any], *, mode: Literal["replay"], where: str = ""
-) -> None: ...
-
-
-def check_state_machine_version(
-    opening: Mapping[str, Any], *, mode: Literal["lead", "replay"], where: str = ""
-) -> None:
-    """Refuse a log whose version this build does not implement (period-model ss2.1,
-    concurrency-model ss7): a foreign build neither leads nor replays it.
-
-    `mode` selects the refusal text: "lead" at resume (`check_leader_eligibility`), "replay" in
-    every offline reader (`check_replay_version`). An absent field refuses in both modes
-    (DL-138, DL-189; `read_journal` already refuses an unversioned segment, DL-165). The
-    version is read exactly: `is_wire_int` rejects `bool`, so a JSON `true` cannot stand in for
-    version 1 (DL-151). `where` names the segment in the replay message; the overloads make it
-    a type error in lead mode."""
-    pinned = opening.get("state_machine_version")
-    if is_wire_int(pinned) and pinned == STATE_MACHINE_VERSION:
-        return
-    if mode == "lead":
-        raise EngineError(
-            f"state-machine version mismatch: this journal is v{pinned}, this build"
-            f" derives v{STATE_MACHINE_VERSION}; a leader must derive identical"
-            " revisions from identical inputs (concurrency-model ss7) -- re-baseline"
-            " explicitly with a fresh run"
-        )
-    named = f"{where}: " if where else ""
-    raise EngineError(
-        f"{named}this segment names state_machine_version {pinned!r} and this build"
-        f" derives v{STATE_MACHINE_VERSION} -- one executable implements one state"
-        " machine, so this build can neither lead nor replay this log"
-        " (period-model ss2.1)"
-    )
-
-
-def check_leader_eligibility(opening: dict[str, Any], *, catalog: CatalogIR) -> None:
-    """ss7: leading requires an exact match on the log's two opening pins, checked together.
-
-    The catalog hash is recomputed under the recipe the log's own `segment` names
-    (period-model ss1.1), so a gate never refuses an estate that did not change (DL-100).
-    The version half runs first (`check_state_machine_version`, DL-189), so a log an older
-    build wrote is refused for its version, not reported as a changed estate. The catalog hash
-    covers `ir_version`, so an IR bump alone moves it (DL-253)."""
-    check_state_machine_version(opening, mode="lead")
-    if opening.get("catalog_hash") != catalog_hash_for(opening, catalog):
-        raise EngineError(
-            "catalog hash mismatch: the estate changed since this journal was written;"
-            " re-baseline explicitly with a fresh run (no silent semantic drift, ss7)"
-        )

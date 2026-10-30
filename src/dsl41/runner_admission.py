@@ -44,8 +44,8 @@ An input fails in one of two ways, recorded differently:
 An engine-made input has nobody to hear a refusal. If its dry apply raises and the time half
 alone applies, the input is logged with a rejected decision under `engine_apply_faulted` and only
 its time half applies. If the time half raises too, the engine stops before logging
-(`TimeHalfStop`). Replay classifies an undecided attempt that raises the same way; both ask
-`classify_fault`.
+(`TimeHalfStop`). It asks `classify_fault`; an attempt and its decision are one store
+transaction, so replay meets no undecided attempt.
 
 One engine holds a run root (`leader.lock`, DL-99), so admission checks no leader term.
 """
@@ -57,7 +57,7 @@ import json
 import reprlib
 import sys
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Final, Literal, get_args
@@ -603,6 +603,10 @@ class DecisionIndex:
         self._results: dict[str, ApplyResult] = {}
         self._by_index: dict[int, ApplyResult] = {}
         self._fingerprints: dict[str, str] = {}
+        #: the decisions this index did not see, by request id, with the fingerprint each was
+        #: admitted under: the store's, for an engine that restarted from a snapshot
+        #: (`Store.find_request`). None when the index holds every decision
+        self.fallback: Callable[[str], tuple[ApplyResult, str] | None] | None = None
 
     def key(self, request_id: str) -> tuple[DecisionIndex, str]:
         """The executor's key of a request id's instance: this index and the id."""
@@ -690,6 +694,19 @@ class DecisionIndex:
     def for_index(self, index: int) -> ApplyResult | None:
         return self._by_index.get(index)
 
+    def evict_below(self, index: int) -> None:
+        """Forget every decision at an index below `index`: the ones the store's retention
+        pruned, whose request ids are free again (spec-journal). Decisions are recorded in index
+        order, so the oldest are first; an id in flight has no decision and stays."""
+        while self._by_index:
+            found = next(iter(self._by_index))
+            if found >= index:
+                break
+            result = self._by_index.pop(found)
+            # one decision per request id: the id's entries are this decision's
+            del self._results[result.request_id]
+            del self._fingerprints[result.request_id]
+
     def lookup(self, request_id: str, fingerprint: str) -> ApplyResult | None:
         """The prior decision for an exact retry, or None for an unseen request. Raises on a
         reused id, carrying its decision (DL-217), and on an id with no decision yet, which
@@ -699,7 +716,13 @@ class DecisionIndex:
         instance."""
         seen = self._fingerprints.get(request_id)
         if seen is None:
-            return None
+            earlier = None if self.fallback is None else self.fallback(request_id)
+            if earlier is None:
+                return None
+            stored, admitted_under = earlier
+            if admitted_under != fingerprint:
+                raise _collision(request_id, stored)
+            return stored
         result = self._results.get(request_id)
         if result is None:
             (outcome,) = self.machines.dispatch(
@@ -905,7 +928,7 @@ def quarantine_verdict(oracle: Oracle, attempt: Attempt, cause: Exception) -> Re
     The time half runs alone on a second fresh fork, under the rejection, because the batch
     commits both halves and a commit-time check can trip on either. An attempt with no verb is
     all time half and is never quarantined. The live engine stops before the append on an
-    exception (`TimeHalfStop`); replay stops with a `ReplayFault`."""
+    exception (`TimeHalfStop`)."""
     if attempt.verbless:
         return cause
     rejection = Rejection(
@@ -920,18 +943,12 @@ def quarantine_verdict(oracle: Oracle, attempt: Attempt, cause: Exception) -> Re
 
 class TimeHalfFault(Exception):
     """`classify_fault`'s stop: the time half raised `cause` alone, after the whole apply raised
-    `full`. Its callers turn it into `TimeHalfStop` live and `ReplayFault` on replay."""
+    `full`. The live engine turns it into `TimeHalfStop`."""
 
     def __init__(self, cause: Exception, full: Exception) -> None:
         super().__init__(f"{type(cause).__name__}: {cause}")
         self.cause = cause
         self.full = full
-
-    @property
-    def note(self) -> str | None:
-        """The whole apply's fault as the stop's context, or None when it matches the time
-        half's."""
-        return _whole_input_note(self.cause, self.full)
 
 
 def classify_fault(oracle: Oracle, attempt: Attempt) -> tuple[Rejection, Exception] | None:
@@ -945,7 +962,7 @@ def classify_fault(oracle: Oracle, attempt: Attempt) -> tuple[Rejection, Excepti
     - The time half raises too: `TimeHalfFault`.
 
     The live engine asks this for an engine-made input only, since a fault refuses a control
-    input. Replay asks it for every undecided attempt."""
+    input."""
     full = trial_apply(oracle, attempt)
     if not isinstance(full, Exception):
         return None
@@ -983,6 +1000,8 @@ def _gate(oracle: Oracle, attempt: Attempt, ev: Event | None) -> Rejection | Non
         rejection = precondition_reason(oracle, attempt.expect)
         if rejection is not None:
             return rejection  # ss0, and it outranks everything below
-    if ev is None or attempt.source not in COMPLETION_SOURCES:
-        return None  # CHANGE_STATUS parity: an external event is never gated
+    if ev is None or ev.kind != "STATUS" or attempt.source not in COMPLETION_SOURCES:
+        # CHANGE_STATUS parity: an external event is never gated, and an engine-made input
+        # that is not a completion (a follow-up's hold) reports no run's end
+        return None
     return stale_reason(oracle, ev)

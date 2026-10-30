@@ -23,12 +23,13 @@ from model_harness import _lose_the_decision_for
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, JobRuntime
-from dsl41.run_root import wal_path
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import dispatch_plan, spawn_superseded
 from dsl41.runner_clock import VirtualClock
+from dsl41.runner_clock import EngineError
 from dsl41.runner_journal import read_journal, replay_inputs
+from dsl41.runner_store import Record
 from dsl41.runner_startup import start_run
 
 T0 = datetime(2026, 7, 1, 8, 0)
@@ -50,9 +51,7 @@ def _engine(jil: str = _SOLO_JIL, adapter: FakeAdapter | None = None) -> Engine:
 
 def _dispatches(root: Path) -> list[tuple[str, int]]:
     return [
-        (str(r["job"]), int(r["run_number"]))
-        for r in read_journal(root / "journal.jsonl")
-        if r["rec"] == "dispatch"
+        (str(r["job"]), int(r["run_number"])) for r in read_journal(root) if r["rec"] == "dispatch"
     ]
 
 
@@ -188,7 +187,7 @@ def test_a_start_writes_its_dispatch_record_after_its_decision(tmp_path: Path) -
     assert engine.journal is not None
     engine.journal.close()
 
-    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    records = read_journal(tmp_path / "run")
     kinds = [r["rec"] for r in records]
     [decision] = [r for r in records if r["rec"] == "decision"]
     assert decision["decision"] == "applied" and decision["legacy_batch"] is False
@@ -241,7 +240,7 @@ def test_a_kill_cancels_the_live_run(tmp_path: Path) -> None:
     asyncio.run(scenario())
     assert engine.journal is not None
     engine.journal.close()
-    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    records = read_journal(tmp_path / "run")
     assert {r["rec"] for r in records} <= {"segment", "input", "decision", "dispatch"}
 
 
@@ -298,7 +297,7 @@ def test_a_completion_for_a_job_an_operator_set_inactive_is_rejected_not_applied
     assert engine.journal is not None
     engine.journal.close()
 
-    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    records = read_journal(tmp_path / "run")
     # a decision record with its reason, not the resume sweep's "drop" rec
     assert [r for r in records if r.get("rec") == "drop"] == []
     fresh = Oracle(catalog)
@@ -361,7 +360,7 @@ def test_a_box_set_inactive_cascades_without_a_kill_and_its_orphans_exit_is_reje
     engine.journal.close()
 
     fresh = Oracle(catalog)
-    replay_inputs(fresh, read_journal(tmp_path / "run" / "journal.jsonl"))
+    replay_inputs(fresh, read_journal(tmp_path / "run"))
     assert (fresh.store.job["j"].status, fresh.store.job["dep"].status) == (
         "INACTIVE",
         "INACTIVE",
@@ -405,17 +404,14 @@ def test_a_restart_on_an_inactive_row_cancels_the_orphan_and_spawns_again() -> N
     assert engine._dispatched == {"j": 2}
 
 
-def test_a_crash_window_completion_on_an_inactive_row_recovers_as_rejected(
+def test_a_completion_on_an_inactive_row_is_rejected_and_its_decision_is_never_lost(
     tmp_path: Path,
 ) -> None:
-    """DL-235's compatibility statement, pinned. The admitted run-1
-    completion for a row an operator set INACTIVE crashes before its
-    rejection is durable (the ss4 gate's crash window, DL-156); replay
-    re-decides it through the same gate and must reach the SAME verdict
-    the live engine did -- `STATE_MACHINE_VERSION` moved to 2 exactly
-    because v1 re-derives a different verdict here. `dep` pins that
-    the recovered rejection, not an accepted completion, is what reaches
-    the dependent."""
+    """DL-235, pinned through the store. The run-1 completion for a row an operator set
+    INACTIVE is rejected by the ss4 gate, and its attempt and rejection are one transaction:
+    replay reads the durable verdict and reaches the live engine's state, and `dep` pins that
+    the rejection, not an accepted completion, is what reached the dependent. A store that
+    holds the attempt without its decision disagrees with itself and replay refuses it."""
     catalog = lower_source(_INACTIVE_GATE_JIL)
     engine = start_run(
         catalog,
@@ -433,7 +429,7 @@ def test_a_crash_window_completion_on_an_inactive_row_recovers_as_rejected(
         await engine.run_until_quiescent(T0 + timedelta(minutes=1))
         assert engine.oracle.store.job["j"].status == "INACTIVE"
 
-        engine._enqueue(  # the admitted run-1 completion, about to lose its decision
+        engine._enqueue(  # the run-1 completion for the row set aside
             _ev("STATUS", 2, job="j", run_number=1, exit_code=0), source="adapter"
         )
         await engine.run_until_quiescent(T0 + timedelta(minutes=2))
@@ -441,10 +437,8 @@ def test_a_crash_window_completion_on_an_inactive_row_recovers_as_rejected(
     asyncio.run(scenario())
     assert engine.journal is not None
     engine.journal.close()
-    _lose_the_decision_for(tmp_path / "run", "adapter")
 
-    path = wal_path(tmp_path / "run", 1)
-    records = read_journal(path)
+    records = read_journal(tmp_path / "run")
     fresh = Oracle(catalog)
     replay = replay_inputs(fresh, records)
     [seq] = [
@@ -452,15 +446,16 @@ def test_a_crash_window_completion_on_an_inactive_row_recovers_as_rejected(
         for r in records
         if r.get("rec") == "input" and r.get("kind") == "STATUS" and r.get("source") == "adapter"
     ]
-    recovered = replay.decisions.for_index(seq)
-    assert recovered is not None
-    assert recovered.decision == "rejected"
-    assert recovered.reason == "job not live: INACTIVE"
-    assert replay.recovered == [
-        recovered
-    ]  # reached through the recovery path, not a durable record
+    durable = replay.decisions.for_index(seq)
+    assert durable is not None
+    assert durable.decision == "rejected"
+    assert durable.reason == "job not live: INACTIVE"
     assert (fresh.store.job["j"].status, fresh.store.job["j"].run_number) == ("INACTIVE", 1)
     assert fresh.store.job["dep"].status == "INACTIVE"  # never started
+
+    _lose_the_decision_for(tmp_path / "run", "adapter")
+    with pytest.raises(EngineError, match="has no decision"):
+        replay_inputs(Oracle(catalog), read_journal(tmp_path / "run"))
 
 
 #: a negative term_run_time arms a deadline already past due, which the
@@ -511,7 +506,7 @@ def test_a_deadline_and_a_status_ending_one_run_in_one_batch_record_one_kill(
     assert engine.journal is not None
     engine.journal.close()
 
-    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    records = read_journal(tmp_path / "run")
     fresh = Oracle(catalog)
     replay_inputs(fresh, records)
     assert fresh.store.job["x"].status == "SUCCESS"
@@ -523,7 +518,10 @@ def test_a_starting_overwrite_after_an_ended_run_launches_nothing(
 ) -> None:
     """DL-232: a run counts as dispatched from its plan, so a `CHANGE_STATUS STARTING` at the
     same run number meets the ghost-run gate and plans nothing. The log replays, and a resume
-    rebuilds the same gate."""
+    rebuilds the same gate. A KILLJOB closed run 1's attempt, so the restart has nothing to
+    settle; an injected INACTIVE left it running (DL-235), and the engine's stop interrupted
+    it while the oracle holds run 1 in STARTING, so the interruption rule runs run 1 again as
+    its second attempt (spec-wiring 2b, step 3 counts STARTING as live)."""
     from dsl41.runner_startup import resume_run
 
     root = tmp_path / "run"
@@ -562,11 +560,12 @@ def test_a_starting_overwrite_after_an_ended_run_launches_nothing(
         assert resumed.oracle.store.job["j"].model_dump() == row.model_dump()
         assert resumed._dispatched == engine._dispatched == {"j": 1}
         await resumed.run_until_quiescent(T0 + timedelta(minutes=7))
-        assert resumed.live_jobs() == frozenset()
+        interrupted = ending == "INACTIVE"
+        assert resumed.live_jobs() == (frozenset({"j"}) if interrupted else frozenset())
         await resumed.shutdown()
         assert resumed.journal is not None
         resumed.journal.close()
-        assert _dispatches(root) == [("j", 1)]
+        assert _dispatches(root) == [("j", 1)] * (2 if interrupted else 1)
 
     asyncio.run(scenario())
 
@@ -615,16 +614,16 @@ def test_replay_derives_no_start_the_batch_itself_superseded(
         engine.journal.close()
 
     asyncio.run(scenario())
-    records = read_journal(root / "journal.jsonl")
+    records = read_journal(root)
     assert replay_inputs(Oracle(lower_source(_SOLO_JIL)), records).spawns == {("j", 1)}
     monkeypatch.setattr(journal_mod, "spawn_superseded", lambda *_a: "superseded")
     assert replay_inputs(Oracle(lower_source(_SOLO_JIL)), records).spawns == set()
 
 
 def test_a_failed_dispatch_still_answers_the_durable_decision(tmp_path: Path) -> None:
-    """The answer follows the decision record, not the dispatch: a `dispatch` append that fails
-    stops the engine with its own error, and the request that decided the start is answered
-    `applied` all the same, never left waiting."""
+    """The answer follows the admission's transaction, not the dispatch: a `dispatch` append
+    that fails stops the engine with its own error, and the request that decided the start is
+    answered `applied` all the same, never left waiting."""
     from dsl41.runner_admission import Envelope
 
     engine = start_run(
@@ -635,10 +634,15 @@ def test_a_failed_dispatch_still_answers_the_durable_decision(tmp_path: Path) ->
     )
     assert engine.journal is not None
 
-    def full(*_args: object, **_kwargs: object) -> None:
-        raise OSError(28, "No space left on device")
+    journal = engine.journal
+    original = journal.append
 
-    engine.journal.dispatch = full  # type: ignore[method-assign]
+    def full(*records: Record) -> int:
+        if any(record.kind == "dispatch" for record in records):
+            raise OSError(28, "No space left on device")
+        return original(*records)
+
+    journal.append = full  # type: ignore[method-assign]
 
     async def scenario() -> None:
         expect = {"job:j": engine.oracle.store.revision("job:j")}

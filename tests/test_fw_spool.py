@@ -19,7 +19,6 @@ and are deliberately absent.
 from __future__ import annotations
 
 import asyncio
-import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -28,9 +27,9 @@ import pytest
 from dsl41.canon import ARTIFACT_FORMAT_VERSION, canonical_bytes, decode
 from dsl41.ir import lower_source
 from dsl41.oracle_state import Event
-from dsl41.run_root import active_wal
 from dsl41.runner_adapters import WATCH_LOG, FileWatcherAdapter, read_watch_log
 from dsl41.runner_clock import EngineError, VirtualClock
+from dsl41.runner_journal import read_journal
 from dsl41.runner_startup import resume_run, start_run
 
 T0 = datetime(2026, 7, 1, 8, 0)
@@ -67,11 +66,17 @@ async def _close(engine) -> None:
 
 
 def _journal_records(run_root: Path) -> list[dict]:
-    return [json.loads(line) for line in active_wal(run_root).read_text().splitlines() if line]
+    return read_journal(run_root)
 
 
-def _rewrite_journal(run_root: Path, records: list[dict]) -> None:
-    active_wal(run_root).write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records))
+def _crash_before_the_completion(run_root: Path) -> None:
+    """The crash at the window between w's completing poll and its STATUS input: every record
+    from w's `outcome` on is gone, as an engine that died before appending it leaves the
+    store."""
+    from store_surgery import delete, rows
+
+    [cut] = [seq for seq, kind, body in rows(run_root) if kind == "outcome" and body["job"] == "w"]
+    delete(run_root, lambda seq, kind, body: seq >= cut)
 
 
 def _spawn_effect(records: list[dict]) -> dict:
@@ -331,13 +336,7 @@ def test_pr34a_a_completing_poll_then_a_crash_injects_the_completion_from_the_lo
     completed = _lines(run_root)
     assert completed[-1]["stable_polls"] == 2
 
-    records = _journal_records(run_root)
-    cut = next(
-        i
-        for i, r in enumerate(records)
-        if r.get("rec") == "input" and r.get("kind") == "STATUS" and r["payload"]["job"] == "w"
-    )
-    _rewrite_journal(run_root, records[:cut])  # the crash, at the write-ahead point
+    _crash_before_the_completion(run_root)
     watch_file.unlink()  # the world moved on: a re-poll would never complete
 
     async def second():
@@ -401,13 +400,7 @@ def test_dl258_an_immediate_qualifying_poll_then_a_crash_injects_from_the_log(
     assert completed[-1]["stable_polls"] == 1  # one poll, not FW_STABLE_POLLS's two
     assert completed[-1]["qualifying"] is True
 
-    records = _journal_records(run_root)
-    cut = next(
-        i
-        for i, r in enumerate(records)
-        if r.get("rec") == "input" and r.get("kind") == "STATUS" and r["payload"]["job"] == "w"
-    )
-    _rewrite_journal(run_root, records[:cut])  # the crash, at the write-ahead point
+    _crash_before_the_completion(run_root)
     watch_file.unlink()  # the world moved on: a re-poll would never complete
 
     async def second():
@@ -461,72 +454,6 @@ def test_pr34_a_run_directory_with_no_log_is_re_dispatched_under_the_bound_id(
     assert lines[0]["run_id"] == effect["run_id"]
 
 
-def test_resume_watch_falls_back_to_the_conventional_run_dir_when_none_is_named(
-    tmp_path: Path,
-) -> None:
-    """The same fallback `_preflight_identities` makes for every candidate:
-    a run_dir that came back None still has a conventional directory,
-    `<run_root>/runs/<job>.<run_number>`, and `_resume_watch` must derive it
-    rather than treat "no run_dir named" as "nothing to resume" -- proven
-    here by reading a COMPLETE watch log placed only at that conventional
-    path and observing the completion get enqueued from it. (The resume
-    ladder only ever hands this function a None run_dir through
-    `supervised_live`, a route an FW watch -- never supervisor-managed --
-    has no ordinary way into; exercised at the function directly.)"""
-    from dsl41.runner_adapters import append_watch_line
-    from dsl41.runner_startup import _resume_watch
-
-    run_root = tmp_path / "run"
-    engine = start_run(
-        _catalog(tmp_path / "watched"),
-        run_root,
-        clock=VirtualClock(start=T0),
-        adapters={"FW": FileWatcherAdapter()},
-    )
-    job_ir = engine.oracle.catalog.jobs["w"]
-    log_path = run_root / "runs" / "w.1" / "watch.jsonl"
-    log_path.parent.mkdir(parents=True)
-    append_watch_line(
-        log_path,
-        {
-            "artifact_format_version": ARTIFACT_FORMAT_VERSION,
-            "at": T0,
-            "kind": "start",
-            "run_id": None,
-        },
-    )
-    for seconds, stable in ((60, 1), (120, 2)):
-        append_watch_line(
-            log_path,
-            {
-                "artifact_format_version": ARTIFACT_FORMAT_VERSION,
-                "at": T0 + timedelta(seconds=seconds),
-                "kind": "poll",
-                "run_id": None,
-                "size": 6,
-                "qualifying": True,
-                "exists": True,
-                "stable_polls": stable,
-            },
-        )
-    last_at = T0 + timedelta(seconds=120)
-
-    _resume_watch(engine, job_ir, 1, None, T0, None)  # run_dir=None: must fall back
-    assert engine.journal is not None
-    engine.journal.close()  # the assertions read the queue, not the log
-
-    assert len(engine._queue) == 1
-    _, _, pending = engine._queue[0]
-    assert pending.ev is not None
-    assert (pending.ev.kind, pending.ev.source) == ("STATUS", "reconcile")
-    assert pending.ev.payload == {
-        "job": "w",
-        "run_number": 1,
-        "exit_code": 0,
-        "ended_at": last_at.isoformat(),
-    }
-
-
 def test_pr34_a_complete_line_this_binary_cannot_read_is_refused_not_truncated(
     tmp_path: Path,
 ) -> None:
@@ -535,7 +462,7 @@ def test_pr34_a_complete_line_this_binary_cannot_read_is_refused_not_truncated(
     is evidence a future binary wrote, and truncating it as "torn" would
     delete it. It refuses loudly and the bytes stay."""
     from dsl41.runner_clock import EngineError
-    from dsl41.runner_journal import repair_tail
+    from dsl41.runner_adapters import repair_tail
 
     run_root = tmp_path / "run"
 
@@ -549,7 +476,7 @@ def test_pr34_a_complete_line_this_binary_cannot_read_is_refused_not_truncated(
         f.write(b'{"artifact_format_version":2,"at":"2026-07-01T08:01:00.000000","kind":"poll"}\n')
     before = _log_path(run_root).read_bytes()
 
-    repair_tail(_log_path(run_root))  # the watch log follows the WAL's own rule
+    repair_tail(_log_path(run_root))  # the watch log ends on a line boundary first
     assert _log_path(run_root).read_bytes() == before
 
     try:
@@ -723,3 +650,23 @@ def test_resume_never_relaunches_a_watch_whose_row_a_box_start_reset(tmp_path: P
 
     asyncio.run(second())
     assert _lines(run_root) == lines_before  # no poll from a relaunched watch
+
+
+def test_a_watch_log_tail_is_repaired_before_the_next_append(tmp_path: Path) -> None:
+    """A line is written in one call, so a crash mid-write leaves a prefix: a tail that parses
+    lost only its newline and gets one; any other tail is cut at the last newline; a log that
+    ends on a newline, or is empty or absent, is left alone."""
+    from dsl41.runner_adapters import repair_tail
+
+    log = tmp_path / "watch.jsonl"
+    repair_tail(log)  # absent
+    assert not log.exists()
+    log.write_bytes(b"")
+    repair_tail(log)
+    assert log.read_bytes() == b""
+    log.write_bytes(b'{"a": 1}\n{"b": 2}')
+    repair_tail(log)
+    assert log.read_bytes() == b'{"a": 1}\n{"b": 2}\n'
+    log.write_bytes(b'{"a": 1}\n{"b": ')
+    repair_tail(log)
+    assert log.read_bytes() == b'{"a": 1}\n'

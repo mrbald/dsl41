@@ -5,9 +5,8 @@ it. If the apply raises and the batch's time half applies alone on a
 second fork, the input is quarantined: logged with a rejected decision
 under `engine_apply_faulted`, its time half applied, its attempt not. If
 the time half raises too, the engine stops before the append with
-`TimeHalfStop`, and `dsl41 run` exits 6. Replay classifies an undecided
-attempt that raises the same way, so a log an older build left poisoned
-resumes through step 6a.
+`TimeHalfStop`, and `dsl41 run` exits 6. An attempt and its decision are
+one store transaction, so replay never meets an undecided attempt.
 
 Faults are injected the way test_dry_apply.py injects them: a patched
 `RuntimeState.transition` raises after a job moves into one status.
@@ -113,7 +112,7 @@ async def _close(engine: Engine) -> None:
 
 
 def _records(run_root: Path) -> list[dict[str, Any]]:
-    return read_journal(run_root / "journal.jsonl")
+    return read_journal(run_root)
 
 
 def _decision(records: list[dict[str, Any]], index: int) -> dict[str, Any] | None:
@@ -262,8 +261,9 @@ def test_a_quarantine_replays_on_the_same_build_and_on_a_fixed_one(
 
 def test_the_dry_apply_is_what_quarantines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The guard, removed: an engine that does not dry-apply an engine-made
-    input logs it, raises on the real apply and leaves it undecided -- the
-    crash loop this change ends."""
+    input raises on the real apply and stops. The attempt and its decision
+    are one transaction appended after the apply, so the store holds no
+    trace of the completion, and a fixed build resumes the root."""
     run_root = tmp_path / "run"
     monkeypatch.setattr(Engine, "_dry_apply_engine_made", lambda _self, _attempt: None)
     _on_status(monkeypatch, "SUCCESS")
@@ -278,93 +278,16 @@ def test_the_dry_apply_is_what_quarantines(tmp_path: Path, monkeypatch: pytest.M
             await _close(engine)
 
     asyncio.run(scenario())
-    completion = _the_input("completion", _records(run_root))
-    assert _decision(_records(run_root), completion["seq"]) is None
+    assert not [r for r in _records(run_root) if r.get("kind") == "STATUS"]
+    monkeypatch.undo()
+
+    async def fixed() -> None:
+        await _close(await _resume(run_root))
+
+    asyncio.run(fixed())
 
 
 # ------------------------------------------------------- replay and rollback
-
-
-def _poisoned_root(run_root: Path, monkeypatch: pytest.MonkeyPatch) -> int:
-    """A root an older build left: the completion is in the WAL with no
-    decision, because that build applied it after the append and died.
-    Returns its index."""
-
-    async def scenario() -> None:
-        engine = _journaled(run_root)
-        engine.inject(_start(), source="control")
-        try:
-            with pytest.raises(RuntimeError):
-                await engine.run_until_quiescent(LATER)
-        finally:
-            await _close(engine)
-
-    with monkeypatch.context() as older:
-        older.setattr(Engine, "_dry_apply_engine_made", lambda _self, _attempt: None)
-        _on_status(older, "SUCCESS")
-        asyncio.run(scenario())
-    index = int(_the_input("completion", _records(run_root))["seq"])
-    assert _decision(_records(run_root), index) is None
-    return index
-
-
-@pytest.mark.parametrize("fixed", [False, True])
-def test_a_root_poisoned_by_an_undecided_faulting_attempt_resumes_through_6a(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    fixed: bool,
-) -> None:
-    """Replay applies the undecided attempt on a fork first. On the build
-    that still faults, its time half applies alone, so the verdict is the
-    quarantine, which resume writes (step 6a) with the stderr line. On a
-    fixed build the attempt applies, as before."""
-    run_root = tmp_path / "run"
-    index = _poisoned_root(run_root, monkeypatch)
-    capsys.readouterr()
-    if not fixed:
-        _on_status(monkeypatch, "SUCCESS")
-
-    async def scenario() -> Engine:
-        resumed = await _resume(run_root)
-        await _close(resumed)
-        return resumed
-
-    resumed = asyncio.run(scenario())
-    written = _decision(_records(run_root), index)
-    assert written is not None
-    err = capsys.readouterr().err
-    if fixed:
-        assert (written["decision"], written["code"]) == ("applied", None)
-        assert resumed.oracle.store.job["j"].status == "SUCCESS"
-        assert QUARANTINE_LOG_PREFIX not in err
-        return
-    assert (written["decision"], written["code"]) == ("rejected", CODE)
-    assert "STATUS for job j run 1 from adapter" in written["reason"]
-    assert resumed.oracle.store.job["j"].status == "RUNNING"
-    assert err.count(f"{QUARANTINE_LOG_PREFIX}: input {index}:") == 1
-
-
-def test_an_undecided_attempt_whose_time_half_raises_still_stops_replay(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Replay quarantines only when the time half applies alone. Here
-    the time half of every batch after `j` started raises, so the
-    undecided completion's does too, and replay stops naming it."""
-    run_root = tmp_path / "run"
-    index = _poisoned_root(run_root, monkeypatch)
-    real = Oracle._fire_timers_due
-
-    def fire(self: Oracle, at: datetime) -> None:
-        if self.store.job["j"].status == "RUNNING":
-            raise RuntimeError("an injected timer fault")
-        real(self, at)
-
-    records = _records(run_root)
-    replay_inputs(Oracle(lower_source(_JIL)), records)  # unarmed, it replays
-    monkeypatch.setattr(Oracle, "_fire_timers_due", fire)
-    with pytest.raises(EngineError, match=f"replay stopped at input {index} .*timer fault"):
-        replay_inputs(Oracle(lower_source(_JIL)), records)
 
 
 def _quarantined_completion(run_root: Path, monkeypatch: pytest.MonkeyPatch) -> int:
@@ -411,7 +334,6 @@ def test_an_unregistered_stored_code_replays_past_the_revisions_check(
     replay = replay_inputs(oracle, records)
     result = replay.decisions.for_index(index)
     assert result is not None and result.code == "a_code_no_build_has_heard_of"
-    assert replay.recovered == []
     assert oracle.store.job["j"].status == "RUNNING"
 
 
@@ -731,40 +653,6 @@ def test_the_stop_names_what_the_time_half_raised_alone(tmp_path: Path) -> None:
     assert "(applying the whole input raised KeyError: 'an attempt-half fault')" in str(stop)
 
 
-@pytest.mark.parametrize("differ", [True, False])
-def test_the_replay_stop_names_what_the_time_half_raised_alone(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, differ: bool
-) -> None:
-    """Replay names the time half's fault too, and adds the whole apply's
-    as a note only when the two differ."""
-    run_root = tmp_path / "run"
-    index = _poisoned_root(run_root, monkeypatch)
-    records = _records(run_root)
-    with monkeypatch.context() as mp:
-        if differ:
-            _fork_only_commit_fault(mp)
-        else:
-            real = Oracle._fire_timers_due
-            mp.setattr(
-                Oracle,
-                "_fire_timers_due",
-                lambda self, at: (
-                    real(self, at)
-                    if self.store.job["j"].status != "RUNNING"
-                    else (_ for _ in ()).throw(RuntimeError("an injected timer fault"))
-                ),
-            )
-        with pytest.raises(EngineError, match=f"replay stopped at input {index} ") as stopped:
-            replay_inputs(Oracle(lower_source(_JIL)), records)
-    notes = getattr(stopped.value, "__notes__", [])
-    if differ:
-        assert "RuntimeError: a time-half commit fault" in str(stopped.value)
-        assert notes == ["applying the whole input raised KeyError: 'an attempt-half fault'"]
-    else:
-        assert "RuntimeError: an injected timer fault" in str(stopped.value)
-        assert notes == []
-
-
 _GATED_JIL = "insert_job: gate\njob_type: c\ncommand: x\nmachine: m1\ncondition: v(FLAG) = go\n"
 
 
@@ -803,53 +691,6 @@ def test_a_quarantine_met_only_in_a_sweep_fails_rehearse_naming_its_case(
     assert "applying STATUS for job gate run 1 from adapter" in result.stderr
 
 
-@pytest.mark.parametrize("armed", [True, False])
-def test_the_journal_narrates_a_control_input_that_replay_quarantined(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, armed: bool
-) -> None:
-    """A command whose real apply raised after a passing dry apply is in
-    the WAL with no decision. Replay quarantines it on a build that still
-    faults, and the narration names it though its source is `control`.
-    On a fixed build it applies, and nothing is narrated."""
-    import dsl41.runner as runner_mod
-    from dsl41.cli_run import _rejection_lines
-
-    run_root = tmp_path / "run"
-    real_apply = runner_mod.apply_attempt
-
-    def apply_on_the_engine(oracle: Oracle, attempt: Any, **kwargs: Any) -> Any:
-        if attempt.request_id == "op-1":
-            raise RuntimeError("only the real apply raised")
-        return real_apply(oracle, attempt, **kwargs)
-
-    async def scenario() -> None:
-        engine = _journaled(run_root)
-        expect = {"job:j": engine.oracle.store.revision("job:j")}
-        engine.submit(_start(), Envelope(request_id="op-1", expect=expect))
-        try:
-            with pytest.raises(RuntimeError, match="only the real apply raised"):
-                await engine.run_until_quiescent(T0)
-        finally:
-            await _close(engine)
-
-    with monkeypatch.context() as mp:
-        mp.setattr(runner_mod, "apply_attempt", apply_on_the_engine)
-        asyncio.run(scenario())
-    records = _records(run_root)
-    if armed:
-        _on_status(monkeypatch, "STARTING")
-    replay = replay_inputs(Oracle(lower_source(_JIL)), records)
-    lines = _rejection_lines(records, replay.decisions)
-    if not armed:
-        assert lines == []
-        return
-    assert len(lines) == 1
-    assert lines[0].startswith(
-        f"{T0.isoformat()} rejected input 1 (STARTJOB for job j from control):"
-        " engine_apply_faulted: quarantined: applying STARTJOB"
-    )
-
-
 def _raised(exc: Exception) -> Exception:
     try:
         raise exc
@@ -886,7 +727,7 @@ def test_a_time_half_stop_exits_6_and_a_crash_exits_1(
     `RestartPreventExitStatus=2 3 6 7` keeps it down: every restart would
     meet the same timers."""
     from dsl41 import cli_run
-    from dsl41.run_root import runtime_profile_from_cli
+    from dsl41.runner_config import runtime_profile_from_cli
     from dsl41.runner_admission import Attempt
 
     assert cli_run.EXIT_TIME_HALF_STOP == 6
