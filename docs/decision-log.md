@@ -25215,3 +25215,27 @@ relitigate an entry; append a new one.
   `unsettled` and `stops`; §5 names them. REJECTED: two stop paths for oracle kills; `{"cmd":
   "engine", "verb": "stop"}`; a recovered completion stamped with the restart's clock (an outage
   deadline would TERMINATE a success). Opus three rounds, Astra six, owner-approved past the cap.
+- DL-430 Review rounds: a shape note before long rework; a fresh final review after it (2026-10-30;
+  owner, after slice 2b wiring's nine rework rounds under DL-262's cap). THE GAP. DL-262 capped
+  rounds per change at three, read in practice as three per reviewer, and sent an open finding to
+  the owner, but said nothing about the change as a whole: when one reviewer's rounds were spent
+  early and the other kept finding things, the later fixes had one reader (2b wiring's rounds two to
+  six were read by Astra alone), and a seam could be patched one case at a time until the ninth
+  round replaced the list with one rule. TERMS. A review round is one reviewer's pass over the
+  change or over the fixes to its findings; a rework round is the executor's one pass over every
+  finding then open, whoever raised them; a fix is found wrong when the reviewer that raised the
+  finding, or its stand-in, reopens it. SHAPE NOTE. Before the first rework round after the change's
+  third, and whenever the fix of one finding has been found wrong twice, the boss writes a shape
+  note in the change's review record and the owner reads it before the rework starts: the rule as
+  the change states it, why cases keep appearing, and the one-rule design, the split or the redesign
+  it suggests. The change leaves the merge train while it waits. FRESH FINAL REVIEW. When a change
+  has had more than three rework rounds, the final diff gets one fresh review: a new reviewer of the
+  vendor whose last round is the older, with its own three-round cap; the stand-in rule picks the
+  model when that vendor is out of budget, and no fresh review is owed when every reviewer's last
+  round read the current fixes. A material finding it raises is fixed in one more owner-approved
+  rework round. A material finding still open after its reviewer's third round goes to the owner,
+  who approves further rounds one at a time; a disagreement on semantics still goes to the advisor
+  (DL-262, DL-395). NARROWS DL-262: the cap of three is per reviewer, not per change; the
+  stated-limit option counts the raiser's review rounds; the owner hand-off gains the shape note
+  before it and the fresh review after it. REJECTED: a higher cap (more rounds of the same shape); a
+  cap per change that ends review while fixes are unread.
