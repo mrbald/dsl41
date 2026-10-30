@@ -132,21 +132,6 @@ def check_artifact_version(value: object) -> None:
         )
 
 
-def require_artifact_version(payload: Mapping[str, Any]) -> None:
-    """Refuse a payload with no `artifact_format_version` key (DL-157).
-
-    An absent typed field is corruption, not a v1 to assume. Raises a bare
-    `CanonError("missing artifact_format_version")`; the caller's `except (CanonError,
-    ValidationError)` supplies the path and the noun. canon.py is stdlib-only because the
-    supervisor tier reads it (DL-42 item 3, spec ss1).
-
-    The policy is the opposite of `check_artifact_version`, which lets an absent key pass: this
-    one is for the closed-artifact readers DL-157 covers.
-    """
-    if "artifact_format_version" not in payload:
-        raise CanonError("missing artifact_format_version")
-
-
 def decode(data: bytes | str) -> object:
     """Decode canonical JSON, refusing what ss3.2 refuses at ingress.
 

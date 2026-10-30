@@ -2,8 +2,8 @@
 
 `run` and `rehearse` drive the engine through the same `start_run`/`resume_run` path: `run` on
 the wall clock with real processes, `rehearse` on the virtual clock with scripted adapters.
-`journal` and `runs` are their offline readers: a WAL replayed through a fresh oracle, and run
-history folded out of one or more run roots.
+`journal` and `runs` are their offline readers: a run root's store replayed through a fresh
+oracle, and run history folded out of one or more run roots.
 """
 
 from __future__ import annotations
@@ -35,8 +35,6 @@ from dsl41.cli_common import (
     statechart_report,
 )
 from dsl41.ir import CatalogIR
-from dsl41.run_root import root_is_unused
-
 from dsl41.state_machine import EXIT_STATECHART_ERROR, STATECHART_LOG_PREFIX, StatechartError
 
 if TYPE_CHECKING:
@@ -51,7 +49,7 @@ if TYPE_CHECKING:
     from dsl41.runner_control import ControlServer
     from dsl41.runner_clock import VirtualClock, ZeroDelayCycleError
     from dsl41.runner_scheduler import Scheduler
-    from dsl41.run_root import Manifest, RuntimeProfile, StagedManifest
+    from dsl41.runner_config import RuntimeProfile
     from dsl41.runner import Engine
     from dsl41.runner_history import RunRow
     from dsl41.runner_admission import DecisionIndex
@@ -169,7 +167,10 @@ def run(
         help="Directory for this run: the journal, runs/, logs/ and control.sock.",
     ),
     resume: bool = typer.Option(
-        False, "--resume", help="Continue the run recorded in --run-root's journal."
+        False,
+        "--resume",
+        help="Accepted and ignored: a run root that holds engine.db always continues the"
+        " run it records, and one that does not starts a new one.",
     ),  # ss7
     ui: bool = typer.Option(
         False, "--ui", help="Open the terminal UI in this terminal. Quitting it stops the run."
@@ -214,6 +215,30 @@ def run(
     ),
     manifest: Path | None = MANIFEST_OPT,
     environment: str | None = ENVIRONMENT_OPT,
+    grace_term: float | None = typer.Option(
+        None,
+        "--grace-term",
+        help="Seconds from TERM to KILL when a job is stopped, for this run only."
+        " Default: grace_term_s in --run-root's engine.toml.",
+    ),
+    grace_kill: float | None = typer.Option(
+        None,
+        "--grace-kill",
+        help="Seconds from KILL to the job's exit record, for this run only."
+        " Default: grace_kill_s in engine.toml.",
+    ),
+    snapshot_interval: float | None = typer.Option(
+        None,
+        "--snapshot-interval",
+        help="Seconds between snapshots of the engine's state, for this run only."
+        " Default: snapshot_interval_s in engine.toml.",
+    ),
+    retention_days: int | None = typer.Option(
+        None,
+        "--retention-days",
+        help="Days of journal kept behind the latest snapshot, for this run only."
+        " Default: retention_days in engine.toml.",
+    ),
 ) -> None:
     """Run an estate on this machine with real processes and a wall clock.
 
@@ -221,10 +246,13 @@ def run(
     declares them with their layers, timezone, map and switches.
 
     The engine schedules jobs by calendar, starts real processes,
-    journals every input, and listens on a control socket under
-    --run-root. It runs until SIGINT or SIGTERM. Jobs are tethered:
-    when the engine dies, its jobs are terminated and the journal
-    records it.
+    records every input in --run-root's engine.db, and listens on a
+    control socket under --run-root. It runs until SIGINT or SIGTERM.
+    Jobs are tethered: when the engine dies, its jobs are terminated
+    and their wrappers record it. The first run writes engine.toml with
+    the default stop grace, snapshot cadence and retention; the
+    --grace-term, --grace-kill, --snapshot-interval and --retention-days
+    flags override it for one run.
 
     While it runs, use 'dsl41 query' and 'dsl41 sendevent' from another
     terminal, or open the terminal UI with --ui here or 'dsl41 ui'
@@ -266,11 +294,16 @@ def run(
         tz_aliases=tz_aliases,
         semantics=resolve_switches(overrides),
     )
+    from dsl41.idempotence import IdempotenceError, load_exceptions
     from dsl41.runner_clock import EngineError
-    from dsl41.run_root import runtime_profile_from_cli
+    from dsl41.runner_config import runtime_profile_from_cli
 
+    try:
+        marked = {} if manifest is None else dict(load_exceptions(manifest.parent).reasons)
+    except IdempotenceError as exc:
+        raise typer.Exit(refuse(exc)) from exc
     # ss2.1: the launch options that change interpretation or dispatch, as one typed value;
-    # `runtime_hash` tells a period launched --timezone UTC from one launched Europe/Zurich
+    # `runtime_hash` tells an engine launched --timezone UTC from one launched Europe/Zurich
     profile = runtime_profile_from_cli(
         timezone=timezone,
         tz_aliases=tz_aliases,
@@ -290,50 +323,20 @@ def run(
                     ui=ui,
                     spec_texts=_spec_texts(parsed, catalog),
                     estate_fingerprint=fingerprint,
-                    parsed=parsed,
                     access_map=access_map,
+                    non_idempotent=marked,
+                    overrides={
+                        "grace_term_s": grace_term,
+                        "grace_kill_s": grace_kill,
+                        "snapshot_interval_s": snapshot_interval,
+                        "retention_days": retention_days,
+                    },
                 )
             )
         )
     except EngineError as exc:
         # start/resume gates (existing journal, hash/domain mismatch, live socket): never started
         raise typer.Exit(refuse(exc)) from exc
-
-
-def _resume_profile_error(run_root: Path, profile: "RuntimeProfile") -> "str | None":
-    """PR-22's runtime half: a run root's semantics are (catalog_hash, runtime_hash,
-    state_machine_version), and either of the first two moving needs a fresh root.
-
-    The catalog gate lives in resume; this holds the LAUNCH OPTIONS to the pin. A root with no
-    manifest has no pin to hold (DL-130)."""
-    from dsl41.run_root import read_period_manifest
-    from dsl41.runner_clock import EngineError
-
-    try:
-        manifest = read_period_manifest(run_root)
-    except EngineError as exc:
-        return str(exc)
-    if manifest is None:
-        return None
-    return _profile_mismatch(profile, manifest)
-
-
-def _profile_mismatch(observed: "RuntimeProfile", manifest: "Manifest") -> "str | None":
-    """The ONE comparison of a launch's options with a period's pin, and its refusal.
-
-    The resume gate runs it after wiring."""
-    from dsl41.run_root import runtime_hash
-    from dsl41.runner_startup import profile_drift
-
-    if runtime_hash(observed) == manifest.runtime_hash:
-        return None
-    # names only: the caller reports WHICH options moved, by the core's drift walk (DL-137)
-    moved = profile_drift(observed, manifest.runtime_profile)
-    return (
-        "runtime-profile mismatch: this run was launched with different"
-        f" options than the period pinned ({', '.join(moved) or 'runtime_hash'})."
-        " A runtime-profile change needs a fresh run root"
-    )
 
 
 def _attach_tui(server_path: Path, owns_run: bool) -> tuple[Any, "asyncio.Task[Any]"]:
@@ -407,21 +410,32 @@ class _RunEnd(NamedTuple):
     done: "set[asyncio.Task[Any]]"
 
 
+async def _await_started(
+    engine: "Engine", loop_task: "asyncio.Task[Any]", stop: "asyncio.Event"
+) -> bool:
+    """Wait for the engine loop to finish a restart's recovery and record `engine started`
+    (startup step 8), or for the loop to end or a stop signal first. True when it started."""
+    import asyncio
+
+    started = asyncio.ensure_future(engine.started.wait())
+    stopping = asyncio.ensure_future(stop.wait())
+    await asyncio.wait({loop_task, started, stopping}, return_when=asyncio.FIRST_COMPLETED)
+    started.cancel()
+    stopping.cancel()
+    return engine.started.is_set() and not loop_task.done()
+
+
 async def _await_run_end(
     engine: "Engine",
     server: "ControlServer",
+    loop_task: "asyncio.Task[Any]",
     stop: "asyncio.Event",
     ui: bool,
 ) -> _RunEnd:
-    """Start the engine loop and wait for the first thing that ends the run: the loop, a stop
-    signal, the server's failure or the attached TUI."""
+    """Wait for the first thing that ends the run: the loop, a stop signal, the server's
+    failure or the attached TUI."""
     import asyncio
-    from datetime import datetime
 
-    loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
-    # a control handler's StatechartError stops the run as one from the loop does
-    # (statechart-engine ss5): the handler cancels the loop at once and the run wakes on `failed`
-    server.on_statechart_error = loop_task.cancel
     stop_task = asyncio.ensure_future(stop.wait())
     failed_task = asyncio.ensure_future(server.failed.wait())
     ui_task: asyncio.Task[Any] | None = None
@@ -532,23 +546,29 @@ async def _serve_run(
     ui: bool = False,
     spec_texts: "dict[str, str] | None" = None,
     estate_fingerprint: "dict[str, str] | None" = None,
-    parsed: "list[JilFile] | None" = None,
     access_map: "Path | None" = None,
+    non_idempotent: "dict[str, str] | None" = None,
+    overrides: "dict[str, float | int | None] | None" = None,
 ) -> int:
     """`dsl41 run`, from the acquire to the last teardown.
 
+    A run root that holds `engine.db` continues the run it records, whatever `resume` says, so
+    a supervisor that reruns the same command line restarts the engine; one that does not
+    starts a new run, and a missing root is created.
+
     The profile is REQUIRED and is the one source of every launch option read here (timezone,
-    alias table, every adapter window) (DL-137)."""
+    alias table, the FW window) (DL-137); `engine.toml` with `overrides` over it is the source
+    of the stop grace, the snapshot cadence and the retention."""
     import asyncio
 
     from datetime import UTC, datetime
 
-    from dsl41.run_root import check_root_unused, stage_period
     from dsl41.runner_startup import start_run, wire_from_profile
     from dsl41.runner_control import ControlServer
     from dsl41.runner_startup import resume_run as _resume_run
     from dsl41.runner_access import AccessError
     from dsl41.runner_clock import EngineError, RealClock
+    from dsl41.runner_config import load_settings
 
     from dsl41.runner_ledger import acquire_run_root
 
@@ -557,89 +577,82 @@ async def _serve_run(
         _preflight_launch(access_map)
     except (EngineError, AccessError) as exc:
         return refuse(exc)
-    # ACQUIRE first (S6a): everything after it stages, replays or launches in a root this process
+    # ACQUIRE first (S6a): everything after it reads, replays or launches in a root this process
     # must lead
     try:
         lock = acquire_run_root(run_root)
     except EngineError as exc:
         return refuse(exc)
     # ONE teardown, for every way out (DL-145). The leader lock is taken here and given back
-    # here, after the journal; `release` is idempotent, so the S6a close inside `journal.close`
-    # stays where the log ends.
+    # here, after the store; `release` is idempotent, so the S6a close inside `journal.close`
+    # stays where the record ends.
+    from dsl41.runner_journal import STORE_NAME
+
+    resume = (run_root / STORE_NAME).exists()
     engine: "Engine | None" = None
+    code = 1
+    running = False
     try:
-        staged: "StagedManifest | None" = None
-        if not resume:
-            # stage the run's inputs UNDER the lock (ss1.1): a used run root is start_run's
-            # refusal to make, and what a refusal leaves behind is content-addressed and never
-            # read. OWNERSHIP first, the FULL ss1.1 predicate: a sentinelless root that keeps a
-            # WAL, a committed period or a populated runs/ is somebody's work
-            try:
-                if not root_is_unused(run_root):
-                    raise EngineError(
-                        f"{run_root}: already holds an estate -- genesis refuses a used"
-                        " root; resume it (`dsl41 run --resume`) or pick a fresh one"
-                    )
-                check_root_unused(run_root)
-            except EngineError as exc:
-                return refuse(exc)
-            if parsed is not None:
-                staged = stage_period(run_root, parsed, catalog, profile)
-        # ONE wiring builder (DL-137): genesis and resume build adapters and scheduler from the
-        # PROFILE, so a window that moves on the pin moves in the components that run
+        try:
+            # read, not written: a root the restart refuses gains no file
+            settings = load_settings(run_root, create=False).overridden(**(overrides or {}))
+        except (EngineError, ValueError) as exc:
+            return refuse(exc)
+        # ONE wiring builder (DL-137): genesis and restart build adapters and scheduler from the
+        # PROFILE and the settings
         try:
             wiring = wire_from_profile(
-                catalog, profile, start=datetime.now(UTC).replace(tzinfo=None)
+                catalog, profile, start=datetime.now(UTC).replace(tzinfo=None), settings=settings
             )
         except EngineError as exc:
             return refuse(exc)
-        adapters = wiring.adapters
-        scheduler = wiring.scheduler
-        if resume:
-            error = _resume_profile_error(run_root, profile)
-            if error is not None:
-                return refuse(error)
         try:
             if resume:
                 engine = await _resume_run(
                     catalog,
                     run_root,
                     clock=clock,
-                    adapters=adapters,
-                    scheduler=scheduler,
+                    adapters=wiring.adapters,
+                    scheduler=wiring.scheduler,
                     hold_open=True,
                     lock=lock,
                     # the launch options no wired object can report (machine identity and policy):
-                    # without them the core gate inherits them from the pin and can never
+                    # without them the core gate inherits them from the store and can never
                     # disagree with it (DL-151)
                     declared=profile,
                     machines=wiring.machines,
+                    settings=settings,
                 )
             else:
                 engine = start_run(
                     catalog,
                     run_root,
                     clock=clock,
-                    adapters=adapters,
-                    scheduler=scheduler,
+                    adapters=wiring.adapters,
+                    scheduler=wiring.scheduler,
                     hold_open=True,
                     lock=lock,
-                    staged=staged,
                     launched=profile,
+                    non_idempotent=non_idempotent,
                     machines=wiring.machines,
+                    settings=settings,
                 )
         except StatechartError as exc:
-            # a replayed input that meets one: the report names the WAL input, and exit 7 keeps
+            # a replayed input that meets one: the report names the input, and exit 7 keeps
             # the unit down (docs/statechart-engine.md ss5)
             return statechart_report(exc)
-        # everything resume did not apply: E9's missed scheduler ticks, plus any reconciliation
-        # completion the ss4 gate rejected; both are on `drops` (DL-91)
+        except EngineError as exc:
+            return refuse(exc)
+        # the first run writes the defaults out (spec-wiring 1b); the read above already
+        # refused a file that does not read
+        load_settings(run_root)
+        # what the restart did not apply: E9's missed scheduler ticks (DL-91)
         for ev, reason in engine.drops:
             typer.echo(
                 f"dropped {ev.kind} {ev.job() or ''} @ {ev.at.isoformat()}: {reason}", err=True
             )
         if warns and engine.journal is not None:
-            engine.journal.preflight(warns)
+            engine.journal.preflight(warns, clock.now())
         access = None
         if access_map is not None:
             # access-model ss4: a configured path that does not load REFUSES;
@@ -649,6 +662,7 @@ async def _serve_run(
             try:
                 access = AccessControl.arm(access_map, run_root)
             except AccessError as exc:
+                await engine.shutdown()
                 return refuse(exc)
         server = ControlServer(
             engine,
@@ -662,28 +676,64 @@ async def _serve_run(
         # default action; one before the loop task exists only sets `stop` or reloads.
         stop = asyncio.Event()
         _install_signal_handlers(stop, access)
+        # the loop carries out the restart's steps 6 and 7 and records step 8; the socket is
+        # bound only then (spec-wiring 1b)
+        loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
+        # a control handler's StatechartError stops the run as one from the loop does
+        # (statechart-engine ss5): the handler cancels the loop at once and the run wakes on
+        # `failed`
+        server.on_statechart_error = loop_task.cancel
+        if not await _await_started(engine, loop_task, stop):
+            done = {loop_task} if loop_task.done() else set()
+            code = await _stop_and_judge(engine, server, _RunEnd(loop_task, None, None, done))
+            return code
         try:
             await server.start()
         except EngineError as exc:
-            # the handlers stay until `loop.close()`, as on the success path; the tasks resume
-            # started stop before the journal closes and the lock is released below
+            # the handlers stay until `loop.close()`, as on the success path; the tasks the
+            # restart started stop before the store closes and the lock is released below
+            loop_task.cancel()
+            await asyncio.wait({loop_task})
             await engine.shutdown()
             return refuse(exc)
+        running = True
         typer.echo(f"engine up; control socket: {server.path}")
-        end = await _await_run_end(engine, server, stop, ui)
+        end = await _await_run_end(engine, server, loop_task, stop, ui)
         code = await _stop_and_judge(engine, server, end)
         # the CLI wrapper reports a statechart error as exit 7
-        return _finish_run(server, code)
+        code = _finish_run(server, code)
+        return code
     finally:
-        # EACH step guaranteed, whatever the one before it did (DL-145): the log's fsync and the
-        # leader lock are two obligations to two things. A failing fsync inside `journal.close()`
-        # must PROPAGATE, but must not also strand the lock, which would refuse the operator's
-        # retry with "held by another engine".
+        # EACH step guaranteed, whatever the one before it did (DL-145): the shutdown record,
+        # the store's close and the leader lock are obligations to different things. A failing
+        # close must PROPAGATE, but must not also strand the lock, which would refuse the
+        # operator's retry with "held by another engine".
         try:
             if engine is not None and engine.journal is not None:
-                engine.journal.close()
+                try:
+                    _record_shutdown(engine, clean=code == 0, running=running)
+                finally:
+                    engine.journal.close()
         finally:
             lock.release()
+
+
+def _record_shutdown(engine: "Engine", *, clean: bool, running: bool) -> None:
+    """The engine's last records (spec-wiring 1b). An engine that reached RUNNING takes a
+    snapshot at the applied boundary the teardown left, then records `clean_shutdown` or
+    `unclean_shutdown`; one that never did records `shutdown_during_startup` and no snapshot. A
+    snapshot is skipped off the applied boundary: the next start derives what it lacks from the
+    records."""
+    assert engine.journal is not None
+    try:
+        if not running:
+            engine.journal.engine("shutdown_during_startup", engine.clock.now())
+            return
+        if engine.settings is not None and engine.at_applied_boundary:
+            engine.take_snapshot()
+        engine.journal.engine("clean_shutdown" if clean else "unclean_shutdown", engine.clock.now())
+    except Exception as exc:  # noqa: BLE001 -- the records are best effort; the close follows
+        typer.echo(f"dsl41: the shutdown record was not written: {exc}", err=True)
 
 
 class RehearseFormat(str, Enum):
@@ -957,60 +1007,37 @@ def _scenario_completion(raw: object, where: str) -> tuple[float, int]:
 
 def _rehearsal_engine(
     catalog: CatalogIR,
-    parsed: "list[JilFile]",
     run_root: "Path | None",
     clock: "VirtualClock",
     adapters: "dict[str, FakeAdapter]",
     scheduler: "Scheduler",
-    switches: "SemanticSwitches",
     *,
     timezone: "str | None",
     tz_aliases: "dict[str, str] | None",
     overrides: "dict[str, str]",
 ) -> "Engine":
-    """The engine `rehearse` plays: the genesis of `run_root` when one was
-    named, else a bare in-memory engine. An `EngineError` is a refusal."""
-    from dsl41.run_root import runtime_profile_from_cli, stage_period
-    from dsl41.runner import Engine
+    """The engine `rehearse` plays: genesis of `run_root`'s store when one was named, else of a
+    `MemoryStore`. An `EngineError` is a refusal."""
     from dsl41.runner_clock import EngineError
+    from dsl41.runner_config import runtime_profile_from_cli
     from dsl41.runner_startup import start_run
 
+    # the profile the rehearsal interprets the estate under, its timezone above all, belongs in
+    # the configuration row, or the record claims a run it did not make (ss2.1)
+    launched = runtime_profile_from_cli(
+        timezone=timezone, tz_aliases=tz_aliases, semantics=overrides
+    )
     try:
-        if run_root is not None:
-            # a rehearsal's run root is a self-contained artifact: the profile it interpreted the
-            # estate under, its timezone above all, belongs in the manifest or the log claims a
-            # period it did not run (ss2.1). Staged only for a FRESH root; an existing journal is
-            # start_run's refusal to make.
-            launched = runtime_profile_from_cli(
-                timezone=timezone, tz_aliases=tz_aliases, semantics=overrides
-            )
-            staged = (
-                stage_period(run_root, parsed, catalog, launched)
-                if root_is_unused(run_root)
-                else None
-            )
-            engine = start_run(
-                catalog,
-                run_root,
-                clock=clock,
-                adapters=adapters,
-                scheduler=scheduler,
-                staged=staged,
-                # a root holding only the sentinel stages nothing; genesis then pins the launch
-                # options, every switch included
-                launched=launched,
-            )
-        else:
-            engine = Engine(
-                catalog,
-                clock=clock,
-                adapters=adapters,
-                scheduler=scheduler,
-                semantics=switches,
-            )
+        return start_run(
+            catalog,
+            run_root,
+            clock=clock,
+            adapters=adapters,
+            scheduler=scheduler,
+            launched=launched,
+        )
     except EngineError as exc:
         raise typer.Exit(refuse(exc)) from exc
-    return engine
 
 
 def rehearse(
@@ -1064,7 +1091,7 @@ def rehearse(
     timezone_map: Path | None = TIMEZONE_MAP_OPT,
     semantics: list[str] = SEMANTICS_OPT,
     run_root: Path = typer.Option(
-        None, "--run-root", help="Also write the journal under this directory."
+        None, "--run-root", help="Also write the record to engine.db under this directory."
     ),
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
@@ -1140,7 +1167,7 @@ def rehearse(
                 "--sweep refuses --run-root: a sweep replays the estate, one journal claims one run"
             )
         )
-    catalog, parsed, _ = load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)
+    catalog, _, _ = load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)
     overrides = load_semantics(semantics)
     start_dt = (
         _naive_utc_arg(start, "--start")
@@ -1193,18 +1220,16 @@ def rehearse(
     adapters = {"CMD": adapter, "FW": adapter}
     engine = _rehearsal_engine(
         catalog,
-        parsed,
         run_root,
         clock,
         adapters,
         scheduler,
-        switches,
         timezone=timezone,
         tz_aliases=tz_aliases,
         overrides=overrides,
     )
     if warns and engine.journal is not None:
-        engine.journal.preflight(warns)
+        engine.journal.preflight(warns, start_dt)
     runs_before = {name: engine.oracle.store.runtime(name).run_number for name in catalog.jobs}
     for ev in events:
         engine.inject(ev, source="control")
@@ -1270,106 +1295,94 @@ def rehearse(
 def journal(
     journal_file: Path = typer.Argument(
         ...,
-        help="What to replay: a run root, its journal.jsonl, or its wal/000001.jsonl segment.",
+        help="What to replay: a run root, or its engine.db.",
     ),
     files: list[Path] = typer.Argument(
         None,
         help="JIL files of the run's catalog. Optional: without them the"
-        " catalog is loaded from the run root's bundle.",
+        " catalog is the one the run root's store recorded.",
     ),  # DL-142
     permit_unknown: bool = PERMIT_UNKNOWN,
     properties: list[Path] = PROPERTIES,
 ) -> None:
     """Replay a run's journal and print the reconstructed trace.
 
-    The journal stores inputs only. Events and the trace are recomputed
-    from them, never stored. Replay refuses when the journal's catalog
-    hash does not match the catalog it is replayed against.
+    The store records inputs only. Events and the trace are recomputed
+    from them, never stored. Replay refuses when the catalog it is
+    replayed against does not hash to the one the store recorded.
 
     The catalog argument is optional. Without it, the catalog comes
-    from the run root's own bundle. With it, the given FILES are
-    checked against the journal's pinned hash. --permit-unknown and -p
+    from the run root's own store. With it, the given FILES are
+    checked against the store's catalog hash. --permit-unknown and -p
     apply only to the files you give.
 
     Exit codes: 0 replayed; 2 refused (a catalog hash mismatch or an
     unreadable input).
     """
-    # Design: runner-design ss7, DL-142, DL-130
-    from dsl41.run_root import require_period_one, resolve_wal, root_of_wal
-    from dsl41.runner_clock import EngineError
-    from dsl41.runner_history import RunHistoryError, check_replay_version
-    from dsl41.runner_journal import check_segment_identity, read_journal
-
-    catalog = load_catalog_or_exit_2(files, permit_unknown, properties) if files else None
-    segment = resolve_wal(journal_file)
-    try:
-        records = read_journal(segment)
-        check_segment_identity(segment, records[0])
-        require_period_one(root_of_wal(segment))
-        # a foreign state machine cannot lead OR replay, and the resume-side gate never runs here
-        check_replay_version(records[0])
-    except (OSError, EngineError, RunHistoryError) as exc:
-        raise typer.Exit(refuse(exc)) from exc
-    root = root_of_wal(segment)
-    _run_period(
-        records,
-        _period_catalog(root, records[0], catalog, where=""),
-        where="",
-        profile=_period_profile(root, records[0], where=""),
-    )
-
-
-def _period_profile(root: Path, opening: "dict[str, Any]", *, where: str) -> "RuntimeProfile":
-    """This period's runtime profile, from a manifest bound to its segment (period-model ss2.1,
-    PR-22): the SEM-35 alias table and the semantic switches a replay must read as the engine did.
-
-    Required, not degraded (DL-252): a missing or foreign manifest refuses."""
-    from dsl41.runner_history import RunHistoryError, pinned_profile
-
-    try:
-        return pinned_profile(root, opening)
-    except RunHistoryError as exc:
-        raise typer.Exit(refuse(exc, prefix=where)) from exc
-
-
-def _run_period(
-    records: list[dict[str, Any]],
-    catalog: CatalogIR,
-    *,
-    where: str,
-    profile: "RuntimeProfile | None" = None,
-) -> None:
-    """ONE period, replayed and printed; a single-segment read and a lineage differ in which
-    segments they name, never in what replaying one means."""
-    from dsl41.oracle import Oracle
+    # Design: runner-design ss7, DL-142, DL-424
     from dsl41.oracle_state import OracleError
-    from dsl41.run_root import oracle_reading
     from dsl41.runner_clock import EngineError
-    from dsl41.runner_journal import replay_period
+    from dsl41.runner_config import Configuration, catalog_hash, oracle_reading
+    from dsl41.runner_journal import StoreReplay, open_reader, replay_store
+    from dsl41.runner_ledger import STATE_MACHINE_VERSION
 
-    named = f"{where}: " if where else ""
-    # SEM-35: the period's own alias table (DL-151), since a `ujo_timezones` name is site-local
-    # and lives in the pin. The semantic switches (DL-252) and the base zone (DL-253) come from
-    # the same pin, so the replay reads a condition as the engine that wrote the log did.
-    oracle = Oracle(catalog, **oracle_reading(profile))
+    supplied = load_catalog_or_exit_2(files, permit_unknown, properties) if files else None
     try:
-        replay = replay_period(oracle, records)
-    except (OracleError, EngineError) as exc:
-        raise typer.Exit(refuse(exc, prefix=f"{named}replay failed")) from exc
-    for entry in oracle.trace():
+        store = open_reader(journal_file)
+    except (OSError, EngineError) as exc:
+        raise typer.Exit(refuse(exc)) from exc
+    try:
+        try:
+            meta = store.meta()
+            if meta.get("state_version") != str(STATE_MACHINE_VERSION):
+                raise EngineError(
+                    f"{journal_file}: state version {meta.get('state_version')}, this build"
+                    f" derives {STATE_MACHINE_VERSION}: one executable replays only what its"
+                    " own state machine wrote (DL-424)"
+                )
+            configuration = Configuration.from_bytes(
+                store.get_config(store.current_config_rev()), where=str(journal_file)
+            )
+        except (OSError, EngineError) as exc:
+            raise typer.Exit(refuse(exc)) from exc
+        catalog = configuration.catalog
+        if supplied is not None:
+            if catalog_hash(supplied) != configuration.catalog_hash:
+                raise typer.Exit(
+                    refuse(
+                        "catalog hash mismatch: the estate differs from the one this"
+                        " store ran (runner-design ss7: no silent semantic drift)"
+                    )
+                )
+            catalog = supplied
+        # SEM-35: the run's own alias table (DL-151), since a `ujo_timezones` name is site-local
+        # and lives in the profile. The semantic switches (DL-252) and the base zone (DL-253)
+        # come from the same profile, so the replay reads a condition as the engine that wrote
+        # it did. A pruned store replays from its latest snapshot, as a restart does
+        try:
+            replayed: StoreReplay = replay_store(
+                store, catalog, where=str(journal_file), **oracle_reading(configuration.profile)
+            )
+        except (OracleError, EngineError) as exc:
+            raise typer.Exit(refuse(exc, prefix="replay failed")) from exc
+    finally:
+        store.close()
+    records, replay = replayed.records, replayed.replay
+    if replayed.anchor is not None:
+        since = replayed.anchor.position.last_at
+        stamp = since.isoformat() if since is not None else "its first record"
+        typer.echo(f"trace since the snapshot at {stamp}; `dsl41 runs` has the history")
+    for entry in replayed.oracle.trace():
         typer.echo(_trace_line(entry))
     for line in _rejection_lines(records, replay.decisions):
         typer.echo(line)
 
 
 def _rejection_lines(records: list[dict[str, Any]], decisions: "DecisionIndex") -> list[str]:
-    """The narration beside a period's trace: one line per engine-made input the period rejected
-    (a stale completion, a quarantined input) and one per
-    quarantine (`engine_apply_faulted`, concurrency-model ss4) whatever its source, since replay
-    quarantines an undecided control input too.
-
-    Read from the decisions replay holds, the recovered ones included, so the journal says what a
-    resume would write. Unprefixed, like the trace lines; nothing replayed reads it."""
+    """The narration beside the trace: one line per engine-made input the store rejected (a
+    stale completion, a quarantined input) and one per quarantine (`engine_apply_faulted`,
+    concurrency-model ss4) whatever its source. Unprefixed, like the trace lines; nothing
+    replayed reads it."""
     from dsl41.runner_admission import describe_input
     from dsl41.runner_journal import read_attempts
 
@@ -1385,50 +1398,6 @@ def _rejection_lines(records: list[dict[str, Any]], decisions: "DecisionIndex") 
             f" ({describe_input(attempt)}): {decided.code}: {decided.reason}"
         )
     return lines
-
-
-def _period_catalog(
-    root: Path, opening: dict[str, Any], supplied: "CatalogIR | None", *, where: str
-) -> CatalogIR:
-    """The run's catalog: the caller's files when given, else the root's own bundle, in BOTH
-    cases checked against the hash the `segment` itself pins, never the one this build writes.
-
-    The two mismatches keep two texts: a supplied catalog that disagrees is a checkout at the
-    wrong revision, and a BUNDLE that disagrees is the stored bytes failing to rebuild what they
-    ran as (corruption, or a lowering that moved under a pin that did not).
-
-    A bundle is loaded with `permit_unknown`, not from the CLI flag: these are the bytes this
-    period RAN, the gate ran once at launch, and re-asking would make `dsl41 journal` refuse a
-    root that `dsl41 runs` answers about (as `load_catalog_from_manifest`). The flag governs only
-    the files a caller supplies."""
-    from dsl41.run_root import catalog_hash_for, load_bundle_catalog
-    from dsl41.runner_clock import EngineError
-
-    named = f"{where}: " if where else ""
-    if supplied is None:
-        try:
-            catalog = load_bundle_catalog(
-                root, str(opening["source_bundle_hash"]), permit_unknown=True
-            )
-        except EngineError as exc:
-            raise typer.Exit(refuse(exc, prefix=where)) from exc
-        if opening["catalog_hash"] != catalog_hash_for(opening, catalog):
-            raise typer.Exit(
-                refuse(
-                    f"{named}the bundle {opening['source_bundle_hash']} does not reproduce"
-                    " the catalog hash this segment pins -- the stored inputs are not the"
-                    " ones this run ran"
-                )
-            )
-        return catalog
-    if opening["catalog_hash"] != catalog_hash_for(opening, supplied):
-        raise typer.Exit(
-            refuse(
-                f"{named}catalog hash mismatch: the estate differs from the one this"
-                " journal ran (runner-design ss7: no silent semantic drift)"
-            )
-        )
-    return supplied
 
 
 class RunsFormat(str, Enum):
@@ -1519,6 +1488,15 @@ def runs(
             "warning: some run roots have no stored inputs, so their rows are"
             " fidelity=records_only: no box rows, no box_name/started_by/job_hash,"
             " and a run closed by KILLJOB or term_run_time reads as RUNNING",
+            err=True,
+        )
+
+    if any(row.fidelity == "partial" for row in rows):
+        typer.echo(
+            "warning: some run roots are pruned, so the rows of runs that began before"
+            " their latest snapshot are fidelity=partial: their status comes from the"
+            " snapshot and the records after it, and one that ended before it with no"
+            " retained record of how reads as UNKNOWN",
             err=True,
         )
 

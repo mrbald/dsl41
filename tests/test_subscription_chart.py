@@ -27,7 +27,6 @@ from test_runner_control import _serve, _teardown, _versioned
 from dsl41 import runner_control, runner_journal
 from dsl41.machines import MACHINES
 from dsl41.oracle_state import Event
-from dsl41.run_root import wal_path
 from dsl41.runner import Engine
 from dsl41.runner_control import ControlServer
 from dsl41.runner_journal import (
@@ -237,10 +236,12 @@ def test_every_event_the_posters_send_is_in_the_alphabet(short_root: Path) -> No
                     await asyncio.sleep(0.01)
 
             await asyncio.wait_for(joined(), timeout=5)
-            journal.preflight([])  # a live record
+            journal.preflight([], datetime(2026, 7, 1, 8, 0))  # a live record
             stalled = journal.subscribe(engine.machines, budget=1)
-            journal.preflight([])
-            journal.preflight([])  # the stalled feed's backlog cannot take it
+            journal.preflight([], datetime(2026, 7, 1, 8, 0))
+            journal.preflight(
+                [], datetime(2026, 7, 1, 8, 0)
+            )  # the stalled feed's backlog cannot take it
             assert stalled.state == "removed"
         finally:
             writer.close()
@@ -272,7 +273,10 @@ def test_a_statechart_error_from_an_owner_reaches_the_append(tmp_path: Path) -> 
     """`tell_owner` contains any other owner fault (DL-267), not this one: the
     append that overflowed the feed raises it, after its record is durable and
     a feed listed later has it."""
-    journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
+    from dsl41.runner_journal import read_journal
+    from dsl41.runner_store import MemoryStore
+
+    journal = Journal(MemoryStore())
     error = UnhandledEvent("an owner met a gap")
 
     def owner(_why: str) -> None:
@@ -281,12 +285,12 @@ def test_a_statechart_error_from_an_owner_reaches_the_append(tmp_path: Path) -> 
     machines = Executor()
     journal.subscribe(machines, owner, budget=1)
     healthy = journal.subscribe(machines)
-    journal.preflight([])
+    journal.preflight([], datetime(2026, 7, 1, 8, 0))
     with pytest.raises(UnhandledEvent) as raised:
-        journal.preflight([])
+        journal.preflight([], datetime(2026, 7, 1, 8, 0))
     assert raised.value is error
-    on_disk = [json.loads(line)["rec"] for line in journal.path.read_text().splitlines()]
-    assert on_disk == ["preflight"] * 2
+    stored = [record["rec"] for record in read_journal(journal.store)]
+    assert stored == ["preflight"] * 2
     assert [healthy.get_nowait()["rec"] for _ in range(2)] == ["preflight"] * 2
     journal.close()
 
@@ -357,14 +361,21 @@ def _serve_with_a_client(
     socket is up. Answers the exit code and the lines the client read."""
     from dsl41 import cli_run
     from dsl41.ir import lower_source
-    from dsl41.run_root import runtime_profile_from_cli
+    from dsl41.runner_config import runtime_profile_from_cli
 
     real = Engine.run_until_quiescent
     clients: list[asyncio.Task[list[Any]]] = []
 
     async def with_a_client(self: Engine, horizon: datetime) -> list[Event]:
         sock = run_root / "control.sock"
-        clients.append(asyncio.create_task(_converse(sock, request(self), after_ack)))
+
+        async def talk() -> list[Any]:
+            # the socket is bound once the loop has recorded `engine started` (spec-wiring 1b)
+            while not sock.exists():
+                await asyncio.sleep(0.01)
+            return await _converse(sock, request(self), after_ack)
+
+        clients.append(asyncio.create_task(talk()))
         return await real(self, horizon)
 
     monkeypatch.setattr(Engine, "run_until_quiescent", with_a_client)
@@ -475,7 +486,9 @@ def test_a_handler_s_statechart_error_stops_the_loop_before_its_next_step(
     assert raised and steps_after == []
     report = _report(capsys.readouterr().err)
     assert report[0] == f"{STATECHART_LOG_PREFIX}: a query met a gap", report[:3]
-    assert "STARTJOB" not in wal_path(run_root, 1).read_text()
+    from dsl41.runner_journal import read_journal
+
+    assert not [r for r in read_journal(run_root) if r.get("kind") == "STARTJOB"]
 
 
 def test_a_handler_s_statechart_error_beside_a_loop_crash_reports_both_and_tears_down(

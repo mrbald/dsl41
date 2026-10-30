@@ -121,11 +121,10 @@ The same rule covers an absent field (DL-157). §3.2's canonical form has no
 optional `artifact_format_version`. A retained instance without the key is
 not a narrower dialect that this binary declines to read; it is not this
 artifact at all. Each reader requires the key before it validates the rest
-of the document:
-
-- `run_root.py`'s `read_sentinel`;
-- `run_root.py`'s `read_period_manifest`, which requires every field of the
-  manifest (`require_manifest_fields`, DL-252).
+of the document. In 2.0.0 the period sentinel and manifest that were its
+readers are gone: the store's rows are written and read by one binary under
+`meta.schema_version` (`runner_store.py`), and a row that does not read is
+refused (`runner_config.py`'s `Configuration.from_bytes`).
 
 A third gate stands beside unknown and absent (DL-168): a field of the WRONG
 TYPE is refused, never coerced. **A closed artifact or staged identity is

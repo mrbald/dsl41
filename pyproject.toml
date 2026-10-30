@@ -211,7 +211,7 @@ include = [
     "src/dsl41/oracle_schedule.py",
     "src/dsl41/oracle_state.py",
     "src/dsl41/oracle_writers.py",
-    "src/dsl41/run_root.py",
+    "src/dsl41/runner_config.py",
     "src/dsl41/runner.py",
     # the access perimeter (DL-146) is decision-shaped the same way: an
     # authorization guard whose false arm nothing takes is an untested

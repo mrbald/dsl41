@@ -548,7 +548,7 @@ def statechart_exit(exc: StatechartError) -> NoReturn:
 
 def stops_on_statechart_error[**P, R](verb: Callable[P, R]) -> Callable[P, R]:
     """Wrap a verb so a `StatechartError` from anything it runs or replays prints the report and
-    exits 7, naming the WAL input for a replay. cli.py wraps every verb that runs, replays or reads
+    exits 7, naming the recorded input for a replay. cli.py wraps every verb that runs, replays or reads
     back an estate."""
 
     @functools.wraps(verb)

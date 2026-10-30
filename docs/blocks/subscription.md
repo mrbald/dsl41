@@ -64,7 +64,7 @@ An unsubscribe of a removed feed finds nothing to leave and posts nothing.
 ## Tests
 
 - `test_subscribe_backfills_since_zero_then_streams_a_live_record_once`
-- `test_subscribe_forwards_decision_at_least_once_across_the_seam`
+- `test_subscribe_forwards_decision_once_across_the_seam`
 - `test_dl267_a_feed_is_removed_at_the_fixed_bound_and_never_grows_past_it`
 - `test_dl267_one_record_larger_than_the_budget_delays_and_does_not_remove`
 - `test_dl267_a_broken_stderr_and_a_raising_owner_never_fail_the_append`

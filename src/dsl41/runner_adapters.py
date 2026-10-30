@@ -32,7 +32,7 @@ import time
 import uuid
 
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Final, Protocol, get_args
@@ -52,9 +52,8 @@ from dsl41.canon import (
 )
 from dsl41.ir import ExecSpec, FwSpec, JobIR
 from dsl41.runner_procid import SPOOL_VERSION, fsync_dir, spool_version_supported, write_all
-from dsl41.run_root import CMD_GRACE_S, FW_DEFAULT_INTERVAL_S
+from dsl41.runner_config import FW_DEFAULT_INTERVAL_S, GRACE_TERM_S
 from dsl41.runner_clock import Clock, EngineError
-from dsl41.runner_journal import repair_tail
 from dsl41.runner_ledger import Proof
 from dsl41.semantics import FwExistence, fw_existence_immediate
 
@@ -79,11 +78,17 @@ class AdapterContext:
     clock: Clock
     run_root: Path | None = None
     run_id: str | None = None
+    #: the attempt's spool directory, which the engine names in its `dispatch` record; None
+    #: takes the first attempt's (`runs/<job>.<run>/1`, a watch's `runs/<job>.<run>`)
+    spool: Path | None = None
     #: the run root's lock proof. The journal re-checks it before every append, and the FW
     #: adapter appends to a spool the journal never sees: an append after the lock was lost is
     #: evidence written by an engine that has lost the root, so this adapter re-proves before
     #: every line (PR-03).
     fence: Proof | None = None
+    #: the invocation environment the attempt's `dispatch` record holds; the wrapper spec
+    #: carries it to the command (crash spec)
+    env: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -261,10 +266,16 @@ def _build_run_spec(
     command = spec_ir.command
     if spec_ir.profile:
         command = f". {spec_ir.profile} && {command}"  # PENDING: E5
-    run_dir = ctx.run_root / "runs" / f"{job_ir.name}.{run_number}"
-    run_dir.mkdir(parents=True)  # a collision is a bug: run_numbers never repeat
+    run_dir = (
+        ctx.spool
+        if ctx.spool is not None
+        else ctx.run_root / "runs" / f"{job_ir.name}.{run_number}" / "1"
+    )
+    run_dir.parent.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir()  # a collision is a bug: an attempt's directory is made once
     fsync_dir(run_dir)
-    fsync_dir(run_dir.parent)  # the runs dir is fsync'd at creation
+    fsync_dir(run_dir.parent)  # the run's and the runs dir are fsync'd at creation
+    fsync_dir(run_dir.parent.parent)
     (ctx.run_root / "logs").mkdir(parents=True, exist_ok=True)
     stdout_path, stderr_path = job_log_paths(job_ir, run_number, ctx.run_root)
     spec = {
@@ -282,6 +293,8 @@ def _build_run_spec(
         "stdin_path": spec_ir.std_in_file,
         "grace_seconds": grace_seconds,
     }
+    if ctx.env:
+        spec["env"] = dict(ctx.env)
     return run_dir, spec
 
 
@@ -303,7 +316,7 @@ class LocalCommandAdapter:
     process ONLY and is closed in a finally: engine death EOFs every wrapper (tethered semantics,
     ss6a)."""
 
-    def __init__(self, *, grace_seconds: float = CMD_GRACE_S) -> None:
+    def __init__(self, *, grace_seconds: float = GRACE_TERM_S) -> None:
         self.grace_seconds = grace_seconds
 
     async def run(self, job_ir: JobIR, run_number: int, ctx: AdapterContext) -> AdapterResult:
@@ -485,8 +498,8 @@ def read_watch_log(run_dir: Path) -> WatchLog | None:
     """Fold a run directory's `watch.jsonl`, or None when the watch has not been dispatched (no
     file, or no `start` line yet).
 
-    A torn FINAL line is dropped, as `read_journal` drops one: the append is write-ahead, so the
-    progress it would have recorded never happened. A torn INTERIOR line is corruption and raises."""
+    A torn FINAL line is dropped: the append is write-ahead, so the progress it would have
+    recorded never happened. A torn INTERIOR line is corruption and raises."""
     path = run_dir / WATCH_LOG
     try:
         raw = path.read_bytes()
@@ -611,6 +624,29 @@ def _watch_at(path: Path, record: dict[str, Any]) -> datetime:
     return datetime.fromisoformat(at)
 
 
+def repair_tail(path: Path) -> None:
+    """Make an existing JSON-lines log end on a line boundary before anything appends.
+
+    A line is written in one call, and a crash mid-write leaves a prefix. Under the run's lock,
+    with fsync: a tail that parses lost only its newline and gets one; any other tail is cut at
+    the last newline, so the reader drops nothing it read before."""
+    if not path.exists():
+        return
+    with path.open("r+b") as f:
+        data = f.read()
+        if not data or data.endswith(b"\n"):
+            return
+        cut = data.rfind(b"\n") + 1
+        try:
+            json.loads(data[cut:])
+        except ValueError:
+            f.truncate(cut)
+        else:
+            f.write(b"\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def append_watch_line(path: Path, record: dict[str, Any]) -> None:
     """One ss3.2-canonical line, fsynced (period-model ss3.5). Append-only, so a torn tail is
     truncated on the next open instead of made atomic by rename. 0600 at creation, like every
@@ -672,12 +708,16 @@ class FileWatcherAdapter:
         log_path: Path | None = None
         next_at = ctx.clock.now()
         if ctx.run_root is not None:
-            run_dir = ctx.run_root / "runs" / f"{job_ir.name}.{run_number}"
+            run_dir = (
+                ctx.spool
+                if ctx.spool is not None
+                else ctx.run_root / "runs" / f"{job_ir.name}.{run_number}"
+            )
             run_dir.mkdir(parents=True, exist_ok=True)
             fsync_dir(run_dir.parent)
             log_path = run_dir / WATCH_LOG
-            # the watch log follows the WAL's own tail-repair rule (period-model ss3.5):
-            # make it end on a line boundary before anything appends
+            # make the watch log end on a line boundary before anything appends
+            # (period-model ss3.5)
             repair_tail(log_path)
             log = read_watch_log(run_dir)
             if log is None:

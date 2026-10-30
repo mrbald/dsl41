@@ -79,7 +79,7 @@ def _live_status(text: str, result: object) -> dict:
         lower_source(text), clock=VirtualClock(start=T0), adapters={"CMD": _ReturnsAdapter(result)}
     )
     seen: list[Event] = []
-    engine._enqueue = seen.append  # type: ignore[method-assign]
+    engine._enqueue = lambda ev, **_kw: seen.append(ev)  # type: ignore[method-assign]
     asyncio.run(engine._run_adapter(engine.oracle.catalog.jobs["j"], 1, _ReturnsAdapter(result)))
     [event] = seen
     assert {event.payload["job"], event.payload["run_number"]} == {"j", 1}
@@ -87,48 +87,44 @@ def _live_status(text: str, result: object) -> dict:
 
 
 def _resumed_status(run_root: Path, text: str, result: object, monkeypatch) -> dict:
-    """What the RESUME ladder puts on the same input for the same result."""
+    """What the restart's settle step records for the same result: the open attempt's
+    `outcome` carries the STATUS fields the result maps to."""
     from dsl41 import runner_startup
     from dsl41.runner_adapters import FakeAdapter
-    from dsl41.runner_journal import read_journal
-    from dsl41.runner_startup import _reconcile
+    from dsl41.runner_journal import read_records
+    from dsl41.runner_startup import resume_run
 
     engine = start_run(
         lower_source(text),
         run_root,
         clock=VirtualClock(start=T0),
-        adapters={"CMD": FakeAdapter(default=None)},  # parks the run: RUNNING at resume
+        adapters={"CMD": FakeAdapter(default=None)},  # parks the run: open at the restart
     )
-    seen: list[dict] = []
 
     async def _resolve(*_a: Any, **_kw: Any) -> Any:
         return result, None
 
-    def _capture(_engine, _job, _run_number, extras, *, at, last_at) -> None:
-        seen.append(extras)
-
-    monkeypatch.setattr(runner_startup, "resolve_spool", _resolve)
-    monkeypatch.setattr(runner_startup, "_inject_completion", _capture)
-
     async def scenario() -> None:
         engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "j"}))
         await engine.run_until_quiescent(T0)
-        # the ladder's candidates are the run directories, and `FakeAdapter`
-        # makes none -- so the run is handed the one a dispatched CMD run
-        # really leaves; the journal holds its `dispatch` record
-        (run_root / "runs" / "j.1").mkdir(parents=True)
+        await engine.shutdown()
         assert engine.journal is not None
-        records = read_journal(engine.journal.path)
-        try:
-            await _reconcile(engine, records, T0, settle_seconds=0.0, grace_seconds=0.0)
-        finally:
-            await engine.shutdown()
-            assert engine.journal is not None
-            engine.journal.close()
+        engine.journal.close()
+        with monkeypatch.context() as mp:
+            mp.setattr(runner_startup, "resolve_spool", _resolve)
+            resumed = await resume_run(
+                lower_source(text),
+                run_root,
+                clock=VirtualClock(start=T0),
+                adapters={"CMD": FakeAdapter(default=None)},
+            )
+        await resumed.shutdown()
+        assert resumed.journal is not None
+        resumed.journal.close()
 
     asyncio.run(scenario())
-    [extras] = seen
-    return dict(extras)
+    [outcome] = [r.payload for _, r in read_records(run_root) if r.kind == "outcome"]
+    return dict(outcome["status"])
 
 
 def test_one_adapter_result_is_reported_the_same_live_and_at_resume(
@@ -388,7 +384,7 @@ def test_killjob_mid_run_terminates_and_no_completion_overwrites_it(tmp_path: Pa
     sleep is long so the kill always precedes the natural exit."""
     text = "insert_job: kj\njob_type: c\ncommand: sleep 30\nmachine: m1\n"
     run_root = tmp_path / "run"
-    spawned = run_root / "runs" / "kj.1" / "spawn.json"
+    spawned = run_root / "runs" / "kj.1" / "1" / "spawn.json"
 
     async def scenario() -> Engine:
         catalog = lower_source(text)
@@ -415,7 +411,7 @@ def test_killjob_mid_run_terminates_and_no_completion_overwrites_it(tmp_path: Pa
     assert engine.oracle.store.job["kj"].status == "TERMINATED"
     assert engine.oracle.store.job["kj"].exit_code is None
     assert engine.drops == []
-    status = json.loads((run_root / "runs" / "kj.1" / "status.json").read_text())
+    status = json.loads((run_root / "runs" / "kj.1" / "1" / "status.json").read_text())
     assert status["outcome"] == "signaled"
     assert status["signal"] == signal.SIGTERM
 

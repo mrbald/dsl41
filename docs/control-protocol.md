@@ -564,46 +564,50 @@ decision and its revisions; there is no separate `result` record. The
 seam keys on the presence of `seq`, not on a record name, so `decision`
 has the at-least-once guarantee.
 
-**The backfill spans segments** (DL-135; period-model §11). An estate's
-records live in `wal/<segment_no>.jsonl`, one segment per period. The
-backfill covers every retained segment from the one holding the cursor
-onward and delivers records oldest first. So a subscriber that resumes
-with a cursor taken before a boundary sees the records before it (the
-walk itself is bounded; see below). `since` is an index, the cut is
-positional, and the seam keys on the presence of `seq`, so the
-exactly-once and at-least-once guarantees above hold across segments.
+**The backfill reads the store** (DL-135, DL-424). An estate's records
+live in its run root's store, `engine.db`, in seq order. The backfill
+reads every retained record after the cursor and delivers them oldest
+first. `since` is an index, the cut is positional, and the seam keys on
+the presence of `seq`, so the exactly-once and at-least-once guarantees
+above hold over the whole retained store.
+
+**The `segment` record in 2.0.0** is the configuration the engine
+applied (DL-424): `{"rec": "segment", "rev", "at", "catalog_hash",
+"runtime_hash", "state_machine_version", "baseline_id",
+"clock_domain"}`. `rev` is the configuration rev and is new in 2.0.0.
+The 1.x period fields are retired, and a 2.0.0 engine sends none of
+them: `segment_no`, `estate_id`, `period_id`, `catalog_hash_version`,
+`source_bundle_hash`, `first_index`, `opens_from_seal`, `reclaimed` and
+`trust_unaudited`.
 
 **A cursor below the earliest retained record gets a gap marker.** The
 server sends one line, `{"gap": true, "earliest_retained": <index>}`,
 before the backfill, and then backfills everything it has.
-`earliest_retained` is the first index the oldest retained segment may
-allocate. A physical roll is the reachable case. The new root holds the
-seal it opened from and none of the closing period's WAL, by design
-(period-model §1.3). So a subscriber resuming there cannot be given what
-it asked for, and is told so. The rule is exact: a marker goes out when
-no retained segment holds the cursor **and**
-`max(since, 0) < earliest_retained - 1`. A cursor at
-`earliest_retained - 1` is contiguous with what the root holds and gets
+`earliest_retained` is the first index the store still holds: the first
+retained input's, or, when retention has pruned every input, the index
+after the last one the latest snapshot covers. Retention is the
+reachable case: the store prunes its oldest records behind a snapshot
+once they leave the retention window. So a subscriber resuming below
+what is left cannot be given what it asked for, and is told so. The rule
+is exact: a marker goes out when the store's oldest records were pruned
+**and** `max(since, 0) < earliest_retained - 1`. A cursor at
+`earliest_retained - 1` is contiguous with what the store holds and gets
 none. One below it is missing a record and gets one. A negative cursor
-reads as 0. So on a root that still retains from index 1 no cursor is
-ever a gap, but on a rolled root `since: 0` is one. A client that does not
-read the marker sees a record it does not recognise and skips it, as it
-does with any record kind it has no case for. The marker is a response
-like any other, so the leader re-proves the lineage in front of it
-(PR-03).
+reads as 0. So on a store that still retains from index 1 no cursor is
+ever a gap, but on a pruned store `since: 0` is one. A client that does
+not read the marker sees a record it does not recognise and skips it, as
+it does with any record kind it has no case for. The marker is a
+response like any other, so the leader re-proves the lineage in front of
+it (PR-03).
 
-**The backfill can refuse on the stream** (DL-135). It reads files this
-subscription's own period did not write, so it can meet a file it cannot
-read as this estate's. Examples are a foreign name under `wal/`, a
-closed segment whose tail is missing, a break in the chain of segments,
-or a corrupt line in any segment, the live one included. Any such
-failure is
+**The backfill can refuse on the stream** (DL-135). It reads records
+this subscription did not see appended, so it can meet one it cannot
+read: a corrupt row, or a record kind this binary does not know. Any
+such failure is
 `{"ok": false, "code": "backfill_refused", "error": …}` sent *after* the
 ack, and then a hangup. It is never a hangup with no answer, and never a
-stream that silently skips the records it could not read. The read is
-bounded: it walks segments newest first and stops at the one holding the
-cursor. So a cursor inside the live period costs one segment however long
-the lineage is.
+stream that silently skips the records it could not read. Retention
+bounds the read.
 
 **A subscriber that stops reading is removed** (DL-267). Each
 subscription has a backlog: the live records appended for it and not yet
@@ -650,9 +654,9 @@ They raise a distinct error, `StreamLineTooLong`, and the CLI names no
 `--since` for it.
 
 **The backfill phase is outside the budget.** A subscription with `since`
-holds the backfill records it has read and not yet sent: the retained WAL
-from the segment holding the cursor onward. The retained WAL bounds it,
-not the budget, and each subscription reads its own copy. Each record is
+holds the backfill records it has read and not yet sent: the retained
+records after the cursor. Retention bounds it, not the budget, and each
+subscription reads its own copy. Each record is
 released once it is sent, and the phase holds nothing once the live
 stream starts. Live records queue against the budget meanwhile, so a
 client that stalls inside its backfill is removed there like any other.
