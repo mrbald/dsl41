@@ -728,6 +728,10 @@ Shared cores:
   the test suite turns on. Standard library only, so the supervisor can load
   it by path.
 - `src/dsl41/machines.py`: the registry of declared state machines.
+- `src/dsl41/engine_charts.py`: the 2.x engine lifecycle and attempt
+  statecharts, declared and not yet wired: STARTING, RUNNING, DRAINING,
+  STOPPED for the engine; SPAWNING, RUNNING, STOPPING, ENDED for one
+  attempt, with the outcome derived from the wrapper's exit record.
 - `src/dsl41/estate_manifest.py`: the estate manifest, `estate.toml`: the
   application's one declaration of its catalog files, properties layers,
   timezone and semantic switches, read by the verbs' `--manifest` option.
