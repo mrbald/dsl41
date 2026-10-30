@@ -14,7 +14,6 @@ list is empty.
 from __future__ import annotations
 
 import weakref
-
 from collections.abc import Callable
 from typing import Any
 

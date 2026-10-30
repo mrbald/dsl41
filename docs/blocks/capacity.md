@@ -12,7 +12,7 @@ No contract section is dedicated to it; the sources are cited below.
 The code and its contract carry over unchanged if the storage under the runner changes.
 It needs none of the storage capabilities.
 Reason: `CapacityPool` in `src/dsl41/capacity.py` holds no state. It is a pure function of the catalog, the rows and `consumed` ([DL-120](../decision-log.md)).
-Reservations and waiter ranks ride on the job rows in the in-memory `RuntimeState`, so a seal carries them with the rows ([period-model §5](../period-model.md#5-capacity-decomposed)).
+Reservations and waiter ranks ride on the job rows in the in-memory `RuntimeState`, so a seal carries them with the rows (period-model §5 (`period-model.md`, retired in 2.0.0)).
 
 ## Interface
 
@@ -21,7 +21,7 @@ Reservations and waiter ranks ride on the job rows in the in-memory `RuntimeStat
 - Row fields: `JobRuntime.reservations`, a tuple of `CapacityReservation`, and `JobRuntime.waiter_seq`. Owner fields: `RuntimeState.consumed` and `enqueue_counter`.
 - Owner verbs: `reserve`, `take_over_held`, `release_reservations`, `release_held`, `enqueue_waiter`, `dequeue_waiter`, `seed_consumed`.
 - Oracle steps: `_admissible` and the start's facts (`oracle_facts.StartFacts`), the admitted start's extent (`OracleCascade._extent`, `_frees_excess`), the queue's scan (the `queue_scan` chart's guards and actions in `scan_chart.py`, `ScanFacts`, `ReadmitFacts`), the period opening's release (`Oracle._release_removed_holders`), and the writers `_w_reserve`, `_w_take_over`, `_w_on_held`, `_w_queue`, `_w_readmit`, `_w_released`, `_w_release_ignored` and `_w_opening`.
-- Operator verb: RELEASE_RESOURCE ([control-protocol §3](../control-protocol.md#3-mutating-verbs-sendevent-host-seal)).
+- Operator verb: RELEASE_RESOURCE ([control-protocol §3](../control-protocol.md#3-mutating-verbs-sendevent-host)).
 - Semantic switches: `renewable-free` and `queued-recheck` ([runner-design §8a](../runner-design.md#8a-semantic-switches)).
 
 ## States
@@ -43,7 +43,7 @@ A threshold request is checked at admission and never reserved.
 - Only a positive priority checks machine load, and every start holds its load ([DL-247](../decision-log.md)).
 - A load waiter blocks lower priorities on its machine ([DL-247](../decision-log.md)). A resource waiter that passed its load check blocks lower priorities that name its resources ([DL-255](../decision-log.md)).
 - Waiters readmit in a total order read off the rows ([DL-50](../decision-log.md), [DL-247](../decision-log.md)).
-- The row-level capacity rules are in [period-model §5](../period-model.md#5-capacity-decomposed). `RuntimeState._check_capacity` checks the row invariants when each input commits; the verbs, such as `reserve` and `take_over_held`, enforce the rest.
+- The row-level capacity rules are in period-model §5 (`period-model.md`, retired in 2.0.0). `RuntimeState._check_capacity` checks the row invariants when each input commits; the verbs, such as `reserve` and `take_over_held`, enforce the rest.
 - Usage is spent units plus units on rows; nothing stores the sum ([DL-120](../decision-log.md)).
 - A renewable's unfreed units stay held by the job; a depletable's are spent ([DL-256](../decision-log.md)).
 - What a job re-checks as it leaves the queue is a switch ([DL-257](../decision-log.md)).
@@ -56,8 +56,8 @@ A threshold request is checked at admission and never reserved.
 - The oracle sizes only buckets it can read. Preflight refuses an unsized resource, an unknown `res_type`, `FREE=Y` or `FREE=A` on a depletable ([DL-287](../decision-log.md)) and a demand that can never fit ([runner-design §8](../runner-design.md#8-preflight--refuse-loudly-run-honestly), [DL-50](../decision-log.md), [DL-247](../decision-log.md)).
 - KILLJOB on a queued job dequeues and terminates it. ON_ICE dequeues it to INACTIVE ([DL-50](../decision-log.md)).
 - A waiter that can never fit at runtime, such as one on a spent depletable, blocks lower priorities that name that resource. Preflight cannot see it ([DL-255](../decision-log.md)).
-- Held units cross a seal on the row. A holder that the next catalog removes gives its units back at the opening ([period-model §5](../period-model.md#5-capacity-decomposed), [DL-256](../decision-log.md)).
-- Recovery is replay of the inputs. The seal loader refuses capacity state that breaks the rules of [period-model §5](../period-model.md#5-capacity-decomposed).
+- Held units cross a seal on the row. A holder that the next catalog removes gives its units back at the opening (period-model §5 (`period-model.md`, retired in 2.0.0), [DL-256](../decision-log.md)).
+- Recovery is replay of the inputs. The seal loader refuses capacity state that breaks the rules of period-model §5 (`period-model.md`, retired in 2.0.0).
 
 ## Owning modules
 
@@ -83,8 +83,6 @@ A threshold request is checked at admission and never reserved.
 - `test_dl256_held_units_never_overcommit_under_force_and_release`
 - `test_dl256_a_circular_wait_over_held_units_breaks_by_an_operator_act`
 - `test_dl256_releasing_the_blockers_own_held_unit_leaves_the_circular_wait`
-- `test_dl256_held_units_cross_the_seal_until_release_resource`
-- `test_dl256_a_row_that_is_not_live_may_carry_a_resources_held_units`
 - `test_preflight_resources_refuses_free_y_or_a_on_a_depletable`
 - `test_preflight_resources_accepts_free_n_on_a_depletable_and_y_or_a_on_a_renewable`
 - `test_dl257_a_queued_job_whose_condition_went_false`

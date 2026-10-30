@@ -5,7 +5,6 @@ Three synthetic businesses run through the public dsl41 CLI:
 | Example | Real work | Incident |
 | --- | --- | --- |
 | [Fulfilment](../fulfilment/README.md) | PostgreSQL inventory and an HTTP carrier backed by SQLite | Carrier commits a label, then drops the reply |
-| [Energy](../energy/README.md) | Meter files, an HTTP feed, and PostgreSQL settlement records | A late correction crosses a sealed period |
 | [Media](../media/README.md) | FFmpeg workers and files served over HTTP | One rendition fails before publication |
 
 These are runnable examples with independent result checks. An opt-in pytest
@@ -62,7 +61,6 @@ the first run's database schema or business files.
 
 ```sh
 docker --context "$WORKFLOW_CONTEXT" compose -f examples/workflows/compose.yaml run --rm runner python examples/fulfilment/demo.py
-docker --context "$WORKFLOW_CONTEXT" compose -f examples/workflows/compose.yaml run --rm runner python examples/energy/demo.py
 docker --context "$WORKFLOW_CONTEXT" compose -f examples/workflows/compose.yaml run --rm runner python examples/media/demo.py
 ```
 
@@ -150,14 +148,11 @@ their names and the command that removes them.
 A missing engine, Compose, or image build fails every test. Nothing is skipped.
 
 For fulfilment and media the lane runs the happy path and the demonstrated
-incident. Energy has one documented run; its two tests read that run from the
-business side and the scheduler side.
+incident.
 Each test asserts the checker's result, the scheduler history, and the real
 worker attempts separately. Damage tests rerun a checker after changing a result
 it reads and require a failure: fulfilment's stock and one operation payload,
-energy's adjustment, and media's served file and an older rendition served with
-recomputed hashes. The energy tests pass `--force-seal`;
-the seal records that override, and the correction still crosses a period.
+and media's served file and an older rendition served with recomputed hashes.
 
 Evidence goes to `WORKFLOW_EVIDENCE`, or to pytest's temporary directory when
 that is unset. The summary prints the path. `session.json` records the context

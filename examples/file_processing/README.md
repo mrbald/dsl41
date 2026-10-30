@@ -6,9 +6,8 @@ Slices 1 to 4 of [HANDOVER.md](HANDOVER.md) are built. The authoring API is
 `python -m dsl41.file_processing_worker`; the job author's guide shows both
 ([authoring §1.1](../../docs/authoring.md#11-add-file-processing-to-an-estate)).
 The [exercise](#exercise-run-the-estate-under-the-runner) runs the example estate
-under the real engine and supervisor on one host (DL-417): repeated arrivals, a
-long handler, a supervisor stop and resume, a toxic delivery and an operator's
-ruling. It does not exercise what slice 5 also names: batch limits, resource
+under the real engine on one host (DL-417): repeated arrivals, a long handler,
+an engine stop and resume, a toxic delivery and an operator's ruling. It does not exercise what slice 5 also names: batch limits, resource
 waits and missed wakes. It adds no compiler or scheduler behavior.
 The worker imports the existing statechart executor, but no scheduler.
 The Python estate uses ordinary `CatalogBuilder.job` calls.
@@ -366,7 +365,7 @@ These cases leave the watch down until an operator sends
 - an archiver that fails, so no processor runs;
 - a REARM that fails, for example because the engine was stopped while it ran and
   its STARTJOB found no socket;
-- a REARM ended by a supervisor stop.
+- a REARM ended by an engine stop.
 
 `--resume` starts nothing by itself. It re-arms only when the stopped processor's
 end, recorded at resume, completes REARM's condition, as in the exercise. Without
@@ -410,8 +409,7 @@ continuous signalling or arbitrary external-effect reconciliation.
 ## Exercise: run the estate under the runner
 
 This exercise is for an operator. It runs the example estate under `dsl41 run`
-and its supervisor on one POSIX host, stops both while the processor is
-mid-run, resumes, and rules one toxic delivery `REJECTED`. You are done when
+on one POSIX host, stops the engine while the processor is mid-run, resumes, and rules one toxic delivery `REJECTED`. You are done when
 every work row is terminal and the handler ran once for each row.
 
 Work from the repository root after `uv sync --frozen --extra dev`, with
@@ -455,14 +453,11 @@ deliveries are written beside the inbox and renamed into it, as a producer must.
 
 ### 2. Start the engine and the first cycle
 
-`--detached` runs the commands under a supervisor that the engine starts.
-`DSL41_DRAIN_S=5` is in the environment that supervisor inherits. It is the
-supervisor's drain bound (DL-416), set short here so that step 3's stop cuts
-the held item within seconds; a service unit sets 840 s.
+The engine runs each command as its own child, under the wrapper.
 
 <!-- exercise: start -->
 ```sh
-DSL41_DRAIN_S=5 dsl41 run "$work/estate.jil" --run-root "$RUN_ROOT" --detached \
+dsl41 run "$work/estate.jil" --run-root "$RUN_ROOT" \
   --as-machine localhost >"$work/engine.log" 2>&1 &
 echo $! >"$work/engine.pid"
 ```
@@ -499,45 +494,23 @@ dsl41 query status --brief -J INBOX_FW -S "$S"
 # INBOX_FW … SUCCESS … run 1 …
 ```
 
-### 3. Stop the engine, then the supervisor
+### 3. Stop the engine
 
-The engine goes first, as in `dsl41 estate quiesce`. Its detached jobs keep
-running under the supervisor.
+A stop cancels the live jobs: the wrapper sends the processor TERM, and the
+processor run ends `TERMINATED`.
 
 <!-- exercise: stop-engine -->
 ```sh
 kill -TERM "$(cat "$work/engine.pid")"
 ```
 
-*Repeat* until the engine has printed its reattach line:
+*Repeat* until the engine has stopped:
 
 <!-- exercise: engine-stopped repeat -->
 ```sh
 cat "$work/engine.log"
 # engine up; control socket: …/control.sock
-# stopping: jobs continue under the supervisor (detached, ss6a)
-# detached: reattach with `…`
-```
-
-Now stop the supervisor with SIGTERM. It drains (DL-416): it starts no new
-command and lets the running ones end within its bound, `DSL41_DRAIN_S`. The
-processor waits on the hold, so it outlives the bound: after 5 s the supervisor
-sends it TERM, and the processor run ends `TERMINATED`. On a service host,
-`dsl41 estate quiesce` stops the estate and seals the period, and its
-maintenance stage needs Linux service containment; SIGTERM is the stop this
-host has.
-
-<!-- exercise: stop-supervisor -->
-```sh
-kill -TERM "$(dsl41 supervise list --run-root "$RUN_ROOT" | sed 's/.*"supervisor_pid": \([0-9]*\).*/\1/')"
-```
-
-*Repeat* until the supervisor is gone:
-
-<!-- exercise: supervisor-stopped repeat -->
-```sh
-dsl41 supervise list --run-root "$RUN_ROOT"
-# exit 2: no supervisor at …/supervisor.sock
+# stopping: cancelling live jobs (wrappers record the kills, ss6a)
 ```
 
 The first item's output exists and the handler ran once, but the claim is still
@@ -557,7 +530,7 @@ rm "$root/hold"
 
 <!-- exercise: resume -->
 ```sh
-DSL41_DRAIN_S=5 dsl41 run --resume "$work/estate.jil" --run-root "$RUN_ROOT" --detached \
+dsl41 run --resume "$work/estate.jil" --run-root "$RUN_ROOT" \
   --as-machine localhost >"$work/resume.log" 2>&1 &
 echo $! >"$work/engine.pid"
 ```
@@ -681,32 +654,19 @@ ls "$root/todo"
 
 ### 7. Stop
 
-Stop the engine, then the supervisor, as in step 3.
+Stop the engine, as in step 3.
 
 <!-- exercise: stop-engine-again -->
 ```sh
 kill -TERM "$(cat "$work/engine.pid")"
 ```
 
-*Repeat* until the engine has printed its reattach line:
+*Repeat* until the engine has stopped:
 
 <!-- exercise: engine-stopped-again repeat -->
 ```sh
 tail -n 1 "$work/resume.log"
-# detached: reattach with `…`
-```
-
-<!-- exercise: stop-supervisor-again -->
-```sh
-kill -TERM "$(dsl41 supervise list --run-root "$RUN_ROOT" | sed 's/.*"supervisor_pid": \([0-9]*\).*/\1/')"
-```
-
-*Repeat* until the supervisor is gone:
-
-<!-- exercise: supervisor-stopped-again repeat -->
-```sh
-dsl41 supervise list --run-root "$RUN_ROOT"
-# exit 2: no supervisor at …/supervisor.sock
+# stopping: cancelling live jobs (wrappers record the kills, ss6a)
 ```
 
 Remove `$work` when you are done.

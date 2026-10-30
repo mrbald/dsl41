@@ -124,11 +124,8 @@ jobs:
         run: uv run ruff check src tests examples
       - if: needs.classify.outputs.code != 'false'
         run: uv run ruff format --check src tests scripts examples
-      # DL-193: tests/uc_oracle.py is named because it is a fully annotated
-      # executable spec (stonebranch Part IV) that left src/ with DL-189, and
-      # nothing else held it to the type gate afterwards.
       - if: needs.classify.outputs.code != 'false'
-        run: uv run mypy src tests/uc_oracle.py
+        run: uv run mypy
       # DL-75: blocking checks only decide the exit code (duplicate bodies,
       # new private cross-module imports in src/, unresolvable citations, an
       # IR-F shape change without an IR_VERSION bump). The "review due" escalation
@@ -186,10 +183,7 @@ jobs:
       - run: uv sync --locked --extra dev
       - run: uv run ruff check src tests examples
       - run: uv run ruff format --check src tests scripts examples
-      # DL-193: tests/uc_oracle.py is named because it is a fully annotated
-      # executable spec (stonebranch Part IV) that left src/ with DL-189, and
-      # nothing else held it to the type gate afterwards.
-      - run: uv run mypy src tests/uc_oracle.py
+      - run: uv run mypy
       # DL-75: blocking checks only decide the exit code (duplicate bodies,
       # new private cross-module imports in src/, unresolvable citations, an
       # IR-F shape change without an IR_VERSION bump). The "review due" escalation
@@ -217,17 +211,6 @@ jobs:
       - run: uv run coverage report
       - run: uv run python scripts/branch_coverage.py
       - run: uv run python scripts/transition_coverage.py
-      # DL-218: a static check of the example service units; no unit is
-      # started. The launcher is installed at the path both units exec, so
-      # verify's executable check resolves the real file rather than being
-      # waived; --recursive-errors=no keeps a host unit's warning from
-      # failing the build while any warning about these two still fails it.
-      - name: systemd-analyze verify examples/nightbank/deploy
-        run: |
-          set -euo pipefail
-          command -v systemd-analyze >/dev/null || { sudo apt-get update -q; sudo apt-get install -y -q systemd; }
-          sudo install -D -m 0755 examples/nightbank/deploy/dsl41-launch /opt/dsl41/bin/dsl41-launch
-          systemd-analyze verify --man=no --recursive-errors=no examples/nightbank/deploy/*.service
 
   # DL-77: the viz --format explore page's controls exist only in a browser, and
   # byte assertions could not see a WebKit-fatal defect in them. Its own job, on

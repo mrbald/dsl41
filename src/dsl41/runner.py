@@ -95,9 +95,8 @@ mid-move.
 
 The ss10 control plane (socket server, wire vocabulary, clients) lives in runner_control.py
 (DL-78) and is frozen in docs/control-protocol.md. Control mutations arrive through
-Engine.submit, submit_host (routes) and submit_seal (the boundary). The first two are
-journaled by the queued-input path (`_Do.EVENT`), and the single-writer loop serializes all
-three, so that tier carries no controller lease (DL-41a). Query handlers read the oracle store
+Engine.submit and submit_host (routes). Both are journaled by the queued-input path
+(`_Do.EVENT`), and the single-writer loop serializes them, so that tier carries no controller lease (DL-41a). Query handlers read the oracle store
 between feeds, which is safe because feed() never yields.
 """
 
@@ -105,7 +104,6 @@ from __future__ import annotations
 
 import asyncio
 import heapq
-import time
 import uuid
 
 from collections.abc import Awaitable, Mapping
@@ -118,32 +116,10 @@ from typing import Final
 from dsl41.ir import CatalogIR, JobIR
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import CarriedRows, Event, EventSource
-from dsl41.boundary import (
-    CommittedBoundary,
-    EstateHome,
-    PeriodSealed,
-    SealRequest,
-    Snapshot,
-    StagedContext,
-    commit_boundary,
-    executions_at,
-    load_staged_catalog,
-    QUIESCE_WAIT_S,
-    executing_jobs,
-    retry_horizon_gate,
-    staged_bytes_for,
-    validate_staged,
-)
-from dsl41.classify import Baseline, CarriedState, carried_from_oracle
 from dsl41.runner_adapters import (
     AdapterContext,
-    DetachSignal,
     FileWatcherAdapter,
     JobAdapter,
-    SealBarrier,
-    SupervisorClient,
-    SupervisorListSuccess,
-    SupervisorUnavailable,
     status_payload,
 )
 from dsl41.runner_admission import (
@@ -156,7 +132,6 @@ from dsl41.runner_admission import (
     Envelope,
     Frontiers,
     RequestCollision,
-    SealInFlight,
     Applied,
     TimeHalfFault,
     TimeHalfStop,
@@ -181,45 +156,24 @@ from dsl41.runner_hosts import (
     routes_new_effects,
     seed_local_executor,
 )
-from dsl41.period import (
+from dsl41.run_root import (
     CMD_GRACE_S,
+    Manifest,
     OracleReading,
-    StagedManifest,
     oracle_reading,
-    staging_dir,
     switches_of,
 )
 from dsl41.runner_journal import (
     Journal,
     RecoveredAttempt,
-    read_journal,
 )
 from dsl41.runner_ledger import Fence
-from dsl41.seal import Execution, SealedHost, SealedState, implicit_routes
 from dsl41.runner_scheduler import Scheduler
 from dsl41.semantics import ADAPTER_SWITCHES, SCHEDULER_SWITCHES, SemanticSwitches
 from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES
-from dsl41.runner_seal import (
-    COMMITTED,
-    EXCEPTION,
-    PARKED,
-    QUIESCED,
-    SEAL_BOUNDARY,
-    SealExit,
-    SealFault,
-    seal_phase,
-    stops_by_type,
-)
-from dsl41.state_machine import Event as ChartEvent
 from dsl41.state_machine import Executor, StatechartError
 from dsl41.timezones import alias_table
 
-
-#: event-loop turns the sealed engine gives the control server to write its answer before the
-#: loop unwinds: the server awaits the future, shapes the answer and drains the writer, one turn
-#: each. The client's other route is the committed seal in the next period (period-model ss2.2),
-#: so the wait is courtesy, not the contract.
-_ANSWER_TURNS = 3
 
 #: floor for the zero-delay-cycle guard's same-instant event budget (`run_until_quiescent`'s
 #: frontier-rule docstring): `max(INSTANT_BUDGET_FLOOR, 100 * len(catalog.jobs))`. A module
@@ -231,26 +185,6 @@ INSTANT_BUDGET_FLOOR: Final = 10_000
 class _LiveRun:
     run_number: int
     task: asyncio.Task[None]
-
-
-@dataclass(eq=False)
-class _PendingSeal:
-    """One boundary awaiting the single writer (period-model ss7).
-
-    A seal is not an oracle input and takes no index. Its DECISION is the `seal` record, so it
-    cannot ride the ordinary admission order: a crash before the seal would leave a durable
-    "applied" for a boundary that never happened, and records after a seal are forbidden (ss2.2).
-
-    It is its own instance key in the engine's executor, which runs `SEAL_BOUNDARY` for it from
-    `submit_seal` until it rests in `sealed` or `aborted` (DL-327). Equality is identity. A
-    shutdown's CancelledError leaves it where it was and posts nothing (`_boundary_exits`)."""
-
-    request: SealRequest
-    future: asyncio.Future[CommittedBoundary]
-
-    def __repr__(self) -> str:
-        """The boundary as a statechart error's report names its instance."""
-        return f"_PendingSeal({self.request.request_id!r})"
 
 
 @dataclass
@@ -348,24 +282,24 @@ def adapter_switch(adapters: Mapping[str, JobAdapter], name: str) -> str | None:
 
 
 def _engine_switches(
-    estate: EstateHome | None,
+    manifest: Manifest | None,
     semantics: SemanticSwitches | None,
     scheduler: Scheduler | None,
     adapters: Mapping[str, JobAdapter],
 ) -> SemanticSwitches:
     """The semantic switches an engine runs (DL-252).
 
-    An engine that leads an estate runs its period's pin. `semantics` is for an engine with no
-    estate; one that disagrees with the pin is refused. So is a scheduler built under another
+    An engine over a run root runs its manifest's pin. `semantics` is for an engine with no
+    manifest; one that disagrees with the pin is refused. So is a scheduler built under another
     value of a switch it reads (DL-259, DL-260), since its calendars or start instants would
     fire under a reading the period and oracle do not use; the derived runtime profile reads
     those switches from the scheduler, so a launcher meets this before any durable write and this
     check is the backstop. The same holds for a wired adapter built under another value of a
     switch it reads (DL-258, DL-280), once a pin or `semantics` names a reading."""
-    if estate is None:
+    if manifest is None:
         switches = semantics or DEFAULT_SWITCHES
     else:
-        switches = switches_of(estate.manifest.runtime_profile)
+        switches = switches_of(manifest.runtime_profile)
         if semantics is not None and semantics != switches:
             raise EngineError(
                 f"semantic switches {semantics} disagree with the period's pin {switches}"
@@ -380,7 +314,7 @@ def _engine_switches(
                     f"{scheduler.semantics.value(name)}, the engine runs"
                     f" {switches.value(name)} (runner-design ss8a)"
                 )
-    if estate is not None or semantics is not None:
+    if manifest is not None or semantics is not None:
         for name in ADAPTER_SWITCHES:
             wired = adapter_switch(adapters, name)
             if wired is not None and wired != switches.value(name):
@@ -394,7 +328,7 @@ def _engine_switches(
 def _engine_oracle(
     catalog: CatalogIR,
     carried: CarriedRows | None,
-    estate: EstateHome | None,
+    manifest: Manifest | None,
     semantics: SemanticSwitches | None,
     scheduler: Scheduler | None,
     adapters: Mapping[str, JobAdapter],
@@ -404,11 +338,11 @@ def _engine_oracle(
     # come from the period's pinned profile, which every replay reads (`oracle_reading`), else
     # from the scheduler: both halves of one engine read a job's zone the same way (DL-62,
     # DL-253). Empty aliases read as absent.
-    switches = _engine_switches(estate, semantics, scheduler, adapters)
-    if estate is not None:
+    switches = _engine_switches(manifest, semantics, scheduler, adapters)
+    if manifest is not None:
         # the zone and aliases from the pin; the switches as checked above
         reading = OracleReading(
-            **{**oracle_reading(estate.manifest.runtime_profile), "semantics": switches}
+            **{**oracle_reading(manifest.runtime_profile), "semantics": switches}
         )
     else:
         reading = OracleReading(
@@ -427,10 +361,6 @@ class Engine:
     `hold_open` keeps a real-domain loop waiting at quiescence: run mode serves the control
     socket until stopped, so "no work now" never means "no work can arrive" (ss10)."""
 
-    #: how long the sealer waits out an unbound SPAWN, an unresolved KILL ladder or a draining
-    #: queue before it refuses (period-model ss8); the bound makes a wedged tier refuse, not hang
-    QUIESCE_WAIT_S: float = QUIESCE_WAIT_S
-
     def __init__(
         self,
         catalog: CatalogIR,
@@ -444,14 +374,14 @@ class Engine:
         executor_id: str = LOCAL_EXECUTOR_ID,
         deadman_s: float | None = None,
         epoch: int = INERT_EPOCH,
-        estate: EstateHome | None = None,
+        manifest: Manifest | None = None,
         fence: Fence | None = None,
         carried: CarriedRows | None = None,
         semantics: SemanticSwitches | None = None,
         machines: Executor | None = None,
     ) -> None:
         self.oracle: Oracle = _engine_oracle(
-            catalog, carried, estate, semantics, scheduler, adapters
+            catalog, carried, manifest, semantics, scheduler, adapters
         )
         #: concurrency-model ss2/ss8: the execution host this engine dispatches to. One engine
         #: per run root owns one local executor; machine names resolve to a relay through the
@@ -468,9 +398,6 @@ class Engine:
         self.run_root = run_root
         self.scheduler = scheduler
         self.hold_open = hold_open
-        #: flipped by the CLI before a detach-stop cancels adapter tasks (ss3
-        #: case b): the SupervisedCommandAdapter then abandons instead of killing
-        self.detach = DetachSignal()
         #: events not applied: step 6's gate rejections and resume's missed
         #: ticks (WAL `drop` records). A quarantine is on `quarantined` only
         self.drops: list[tuple[Event, str]] = []
@@ -494,11 +421,9 @@ class Engine:
         self._init_live_state()
         #: this engine's statechart executor (statechart-engine ss11): one worklist for every
         #: instance. Its machines are `ADMISSION`, one instance per request id in flight
-        #: (DL-334); `EFFECT`, one per open effect of the outbox (DL-331); `SEAL_BOUNDARY`, one
-        #: per seal request (DL-327); `SUBSCRIPTION`, one per subscribe feed, started by the
-        #: control server through `machines`; and `SUPERVISOR_CLIENT`, the detached run's
-        #: client. The client is built before the engine, so the wiring makes the process's
-        #: executor and hands it to both; an engine given none makes its own
+        #: (DL-334); `EFFECT`, one per open effect of the outbox (DL-331); `SUBSCRIPTION`, one
+        #: per subscribe feed, started by the
+        #: control server through `machines`. An engine given no executor makes its own
         self._machines = machines if machines is not None else Executor()
         #: concurrency-model ss5: what this engine intends to do to its execution hosts, and what
         #: came of it; restored from the log on resume, so a decided kill is not forgotten
@@ -506,19 +431,12 @@ class Engine:
         #: the decision index, built here because it runs each request id in flight on this
         #: engine's executor
         self.decisions = DecisionIndex(self._machines)
-        #: period-model ss1.3: what this engine leads besides its own run root. None on an engine
-        #: with no lineage (the bisimulation harness, a rehearsal); a seal request then has
-        #: nothing to close.
-        self.estate = estate
-        #: ss8's supervisor clauses need the CLIENT: the seal must prove the LIST it reconciles
-        #: against came from the incarnation whose lease this engine holds (PR-27). None on a
-        #: tethered engine, whose wrappers are this process's children, so the clause is vacuous.
-        self.supervisor: SupervisorClient | None = None
-        #: BOTH proofs, re-checked before every append, dispatch and revision-bearing read: this
-        #: run root's `leader.lock` and the lineage's `anchor.lock` (PR-03). The journal holds
-        #: the same object, so an append and a dispatch prove the same thing.
+        #: the run root's committed manifest, the pin the oracle reads under. None on an engine
+        #: with no run root (the bisimulation harness, a rehearsal)
+        self.manifest = manifest
+        #: this run root's `leader.lock` proof, re-checked before every append and dispatch. The
+        #: journal holds the same object, so an append and a dispatch prove the same thing.
         self.fence: Fence | None = fence
-        self._init_seal_state()
 
     def _init_live_state(self) -> None:
         """The queue and the live-run books `__init__` starts empty."""
@@ -537,28 +455,9 @@ class Engine:
         #: with
         self._reaping: list[asyncio.Task[None]] = []
         #: task ids whose failure _settle has already raised: the corpse stays in
-        #: `_live`/`_reaping` so a reversible catcher (the seal's abort) cannot consume the only
+        #: `_live`/`_reaping` so a reversible catcher cannot consume the only
         #: observation, and teardown does not raise the same failure twice
         self._corpses_raised: set[int] = set()
-
-    def _init_seal_state(self) -> None:
-        """The seal barrier and the flags a boundary sets and clears."""
-        #: ss6 step 2's freeze, seen by an FW task at its poll boundary (ss3.5) and by admission
-        #: (`sealing`). An ENGINE fact, not a row field: the barrier freezes ADMISSION and holds
-        #: no job, so an abort restores no row and a committed seal carries every `on_hold` as
-        #: the operator left it (PR-28c).
-        self.barrier = SealBarrier()
-        #: the one boundary queued or running; `submit_seal` refuses another
-        #: while it is set, and `_seal_boundary` clears it when it exits
-        self._seal: _PendingSeal | None = None
-        #: the index of an admitted attempt not yet fully applied (admission line, decision,
-        #: outbox entries and answer): set when the frontier admits it, cleared when
-        #: `_admit_and_apply` returns. A seal that meets an exception while it is set fail-stops,
-        #: because memory may disagree with the WAL (DL-274).
-        self._applying: int | None = None
-        #: the kind of a queued input with no one to answer that the seal's drain could not admit
-        #: (`clock_regressed`); refusing it would lose it, so the seal fail-stops (DL-274)
-        self._unadmitted: str | None = None
 
     @property
     def machines(self) -> Executor:
@@ -594,11 +493,6 @@ class Engine:
                 " (statechart-engine ss11)"
             )
         self._decisions = decisions
-
-    @property
-    def sealing(self) -> bool:
-        """ss6 step 2: admission is frozen for a boundary (the barrier's `parked`)."""
-        return self.barrier.parked
 
     def note_executor_contact(self) -> None:
         """Stamp positive contact with this engine's own execution host (concurrency-model ss8).
@@ -699,499 +593,6 @@ class Engine:
         not answering."""
         self._push(_Pending(at=self.clock.now(), request_id=None, host=cmd, source="reconcile"))
 
-    # ------------------------------------------------------ the boundary
-
-    def submit_seal(self, request: SealRequest) -> Awaitable[CommittedBoundary]:
-        """Queue ONE boundary and return its outcome (ss7, live mode).
-
-        A seal takes no index, addresses no row and is decided by the `seal` record, not a
-        `decision`. It waits for the SINGLE WRITER, because the cutoff must observe a state
-        nothing else can move."""
-        future: asyncio.Future[CommittedBoundary] = asyncio.get_running_loop().create_future()
-        if self._seal is not None:
-            # one boundary at a time, a retry of the same request_id included; the committed
-            # seal's retry is answered by the control server from the next period (ss2.2)
-            future.set_exception(
-                SealInFlight(
-                    f"a boundary is already in flight (request_id"
-                    f" {self._seal.request.request_id}, {self._seal_phase(self._seal)}):"
-                    " one seal at a time",
-                    in_flight_request_id=self._seal.request.request_id,
-                )
-            )
-        else:
-            pending = _PendingSeal(request=request, future=future)
-            # the initial entry runs no action: the instance rests in `requested`
-            self._machines.start(pending, SEAL_BOUNDARY)
-            self._machines.run()
-            self._seal = pending
-            self._activity.set()
-        return future
-
-    def _seal_phase(self, pending: _PendingSeal) -> str:
-        """Where a boundary in flight is in `SEAL_BOUNDARY`."""
-        return seal_phase(self._machines.active(pending))
-
-    def _seal_exit(self, pending: _PendingSeal, name: str, payload: object = None) -> SealExit:
-        """Post a `committed` or `exception` exit of the boundary; return the `SealExit` that the
-        final state's entry reports. An entry's intents join the outcome of the row that entered
-        it (statechart-engine ss4 entry actions, ss5 step 5), so the post's one outcome carries
-        it."""
-        (exit_,) = self._machines.dispatch(pending, ChartEvent(name, payload))[0].intents
-        assert isinstance(exit_, SealExit)  # every final state's entry reports one
-        return exit_
-
-    def abort_boundary(self) -> None:
-        """ss7: every non-commit exit inside the reversible interval runs this, while the fence
-        is valid. The two that fail-stop in `_seal_boundary` do not: a fence loss (PR-28b) and an
-        exception that leaves memory or the WAL in doubt (DL-274).
-
-        It clears the sealing flag, reopens control admission, restarts scheduler admission and
-        unparks FW tasks. It TOUCHES NO ROW, because the barrier held no job (ss6). It runs on
-        every pre-commit failure, not only validation, so an `ENOSPC` on the sidecar leaves no
-        engine frozen behind ss6 step 2 (PR-28b)."""
-        self.barrier.release()
-        self._activity.set()
-
-    async def _seal_boundary(self) -> None:
-        """One queued boundary, run to its outcome inside the loop.
-
-        Its exits are `SEAL_BOUNDARY`'s rows. A commit raises `PeriodSealed` and the engine
-        stops with code 3. A refusal answers the request, aborts, and C1 carries on; the cutoff
-        work already admitted stays C1 activity. A fail-stop after the `seal` append propagates
-        WITHOUT an abort, because reopening admission behind a possibly-durable seal line cannot
-        be repaired; a fence loss, the stop run option and DL-274's doubts propagate without an
-        abort too. A statechart error stops the engine with exit 7 and the boundary does not move.
-
-        The request stays in `_seal` until this returns or raises, so `submit_seal` refuses a
-        second one for the whole boundary."""
-        pending = self._seal
-        assert pending is not None
-        try:
-            await self._boundary_exits(pending)
-        finally:
-            self._seal = None
-
-    async def _boundary_exits(self, pending: _PendingSeal) -> None:
-        """Post the boundary's exit to `SEAL_BOUNDARY` and carry out the `SealExit` it reports.
-
-        An exception is posted with the facts its rows read (`_seal_fault`). It is not only
-        EngineError: an OSError from a pre-PONR write, fsync or rename is as reversible, and
-        leaving admission frozen behind it wedges the engine (ss7). commit_boundary wraps every
-        post-PONR failure in BoundaryFailStop, so anything else is pre-PONR.
-
-        Two exits post nothing. A `StatechartError` is an assertion failure, not a fault to
-        contain (statechart-engine ss5): the boundary neither aborts nor moves, the request is
-        not answered, and the engine exits 7. A shutdown's CancelledError is not an `Exception`
-        and passes through with the request's future."""
-        try:
-            committed = await self._run_boundary(pending)
-        except StatechartError:
-            raise
-        except Exception as exc:
-            try:
-                exit_ = self._seal_exit(pending, EXCEPTION, self._seal_fault(exc))
-            except StatechartError as gap:
-                # the report prints the payload through `reprlib`, which keeps about thirty
-                # characters, so the seal's exception is named in full
-                gap.facts.append(("seal exception", f"{type(exc).__name__}: {exc}"))
-                raise
-            if exit_.note:
-                exc.add_note(exit_.note)
-            if exit_.verdict == "stop":
-                raise
-            self.abort_boundary()
-            self._machines.forget(pending)
-            if not pending.future.done():
-                pending.future.set_exception(exc)
-            return
-        self._seal_exit(pending, COMMITTED)
-        if not pending.future.done():
-            pending.future.set_result(committed)
-        # the control server writes the answer before this loop unwinds, since the socket drops
-        # when the engine exits and the client's other route is the committed seal in the NEXT
-        # period (ss2.2); a request landing in these turns reads its phase from the instance,
-        # so the instance outlives them
-        for _ in range(_ANSWER_TURNS):
-            await asyncio.sleep(0)
-        self._machines.forget(pending)
-        raise PeriodSealed(committed)
-
-    def _seal_fault(self, exc: Exception) -> SealFault:
-        """The facts the exception rows read, read once before the post.
-
-        The fence is read only for an exception of neither stop type. The flags are DL-274's: an
-        attempt admitted during the seal and not fully applied, an engine-made input the drain
-        could not admit, and an unfinished WAL append."""
-        return SealFault(
-            error=exc,
-            fence_lost=(
-                not stops_by_type(exc) and self.fence is not None and not self.fence.intact()
-            ),
-            applying=self._applying,
-            unadmitted=self._unadmitted,
-            append_unfinished=self.journal is not None and self.journal.append_unfinished,
-        )
-
-    async def _run_boundary(self, pending: _PendingSeal) -> CommittedBoundary:
-        """ss6's steps 2-8, in the single-writer loop.
-
-        Step 1 is the OPERATOR's (the runbook's hold set, placed before the seal); this barrier
-        never touches `on_hold`. It posts `parked` once the barrier parks and `quiesced` before
-        the commit, so the boundary moves from `requested` to `frozen` to `committing`; every
-        exit is `_boundary_exits`'s."""
-        request = pending.request
-        estate = self.estate
-        if estate is None or self.journal is None:
-            raise AdmissionRefused(
-                "this engine leads no lineage: a run root with no estate anchor and no"
-                " WAL has no boundary to close (period-model ss1.3)",
-                code="no_lineage",
-            )
-        if request.epoch != self.epoch:
-            # the ss4 epoch rule for external input: a boundary composed against an old
-            # leader's epoch is refused
-            raise AdmissionRefused(
-                f"epoch {request.epoch} is not this leader's {self.epoch}:"
-                " re-read and re-compose against the current leader",
-                code="stale_epoch",
-            )
-        staged_ctx, staged_manifest = self._readiness(request, estate)
-        self.barrier.park()  # step 2
-        self._machines.dispatch(pending, ChartEvent(PARKED))
-        await self._drain_admitted()
-        at = self.clock.now()  # step 3
-        await self._cutoff(at)  # steps 4-6
-        # step 7, and the ss8 proof, until BOTH hold at once: the proof awaits the supervisor,
-        # and a completion landing during that await would otherwise be snapshotted un-drained
-        deadline = time.monotonic() + self.QUIESCE_WAIT_S
-        while True:
-            late = sorted(
-                p.ev.kind if p.ev is not None else "request" for _, _, p in self._queue if p.at > at
-            )
-            if late:
-                # C1 owns every instant <= T and nothing after it (ss6): an input stamped past the
-                # cutoff is refused, since re-choosing T mid-seal would move the boundary under
-                # the request that composed it; C1 reopens and the retry closes at a later T
-                raise EngineError(
-                    f"input(s) {', '.join(late)} arrived stamped after the cutoff"
-                    " T: they are C2's, and this boundary refuses rather than"
-                    " snapshotting a state that has moved past its own T"
-                    " (period-model ss6)",
-                    code="seal_input_after_cutoff",
-                )
-            if self._queue:
-                # a completion at or before T that landed while the proof yielded is C1 work
-                # (PR-33a): drained to its decision, then quiescence AND the proof are
-                # re-established over the state it moved
-                await self._drain_admitted()
-            await self._await_quiescence(estate)
-            await self._supervisor_proof(estate)  # ss8's supervisor clauses (PR-27)
-            # a task that died while the proof awaited surfaces in _settle; exit only when a
-            # full pass moved nothing
-            await self._settle()
-            if not self._queue and self._not_quiescent(estate) is None:
-                break
-            if time.monotonic() > deadline:
-                raise EngineError(
-                    "inputs keep arriving during the ss8 supervisor proof: the estate"
-                    f" is not settling within {self.QUIESCE_WAIT_S}s (period-model ss8)",
-                    code="seal_not_settling",
-                )
-        forced_gate = retry_horizon_gate(
-            read_journal(self.journal.path),
-            horizon_us=estate.manifest.runtime_profile.retry_horizon_us,
-            at=at,
-            force_seal=request.force_seal,
-            now=self.clock.now(),
-        )
-        self._machines.dispatch(pending, ChartEvent(QUIESCED))
-        return commit_boundary(  # step 8
-            run_root=estate.run_root,
-            anchor=estate.anchor,
-            journal=self.journal,
-            estate_id=estate.estate_id,
-            closing=estate.manifest,
-            staged_ctx=staged_ctx,
-            staged_manifest=staged_manifest,
-            snapshot=self._snapshot(at, estate=estate),
-            prev_seal_digest=estate.prev_seal_digest,
-            forced_gate=forced_gate,
-            crash_point=self.crash_point,
-        )
-
-    def crash_point(self, _stage: str) -> None:
-        """The boundary crash matrix's seam (`runner_supervisor._crash_point`'s twin); a no-op in
-        production. The ss11 matrix stops the operation between two durable writes."""
-
-    def _readiness(
-        self, request: SealRequest, estate: EstateHome
-    ) -> tuple[StagedContext, StagedManifest]:
-        """ss8's readiness, BEFORE the current period closes: phase 1 over exactly the staged
-        bytes the request's digest names. A failure refuses while C1 is still open."""
-        if request.next_period.stage_digest != request.stage_digest:
-            raise AdmissionRefused(
-                f"the request stages {request.stage_digest} and its next_period digests to"
-                f" {request.next_period.stage_digest}: the candidate is not the one the"
-                " request names (period-model ss7)",
-                code="stage_digest_mismatch",
-            )
-        staged_manifest = staged_bytes_for(
-            estate.run_root, request.stage_digest, next_period=estate.manifest.period_id + 1
-        )
-        if staged_manifest is None:
-            raise AdmissionRefused(
-                f"{staging_dir(estate.run_root, request.stage_digest)}: nothing is staged"
-                " at this digest -- stage C2 before asking for the boundary that opens it"
-                " (period-model ss7)",
-                code="nothing_staged",
-            )
-        now = self.clock.now()
-        context = StagedContext(
-            staged=request.next_period,
-            staged_bytes=staged_manifest,
-            boundary_request=request.boundary_request,
-            request_fingerprint=request.fingerprint,
-            c1=Baseline(catalog=self.oracle.catalog, profile=estate.manifest.runtime_profile),
-            c2=load_staged_catalog(estate.run_root, staged_manifest),
-            carried_state=self._carried(now),
-            decision_index=self.decisions,
-            state_machine_version=estate.manifest.state_machine_version,
-            at=now,
-        )
-        validate_staged(context)
-        return context, staged_manifest
-
-    async def _drain_admitted(self) -> None:
-        """ss6 step 2's other half: drain every ALREADY-ADMITTED attempt to its durable decision
-        before any sidecar byte is written.
-
-        The active seal request is not waited on: its decision IS the `seal` record and cannot
-        precede the sidecar (PR-28e). It is not on this queue, so the exclusion is structural."""
-        deadline = time.monotonic() + self.QUIESCE_WAIT_S
-        while self._queue:
-            _, _, pending = heapq.heappop(self._queue)
-            await self._admit_and_apply(pending)
-            self._dispatch()
-            await self._settle()
-            if time.monotonic() > deadline:
-                raise EngineError(
-                    "the input queue is still filling after"
-                    f" {self.QUIESCE_WAIT_S}s of draining: the estate is not settling,"
-                    " and a boundary over a moving state is not a boundary"
-                    " (period-model ss6 step 2)",
-                    code="seal_not_settling",
-                )
-
-    async def _cutoff(self, at: datetime) -> None:
-        """ss6 steps 4-6: admit every scheduler tick due at or before T, advance the oracle through
-        T firing every due semantic timer, and drain what that produced.
-
-        `Scheduler._next` cannot be re-derived at a boundary: resume re-anchors INCLUSIVE of
-        `last_at` and dedups against the journal's ticks, and a seal cuts that evidence away. So
-        C1 consumes every tick it owns here, and `scheduler_admitted_through: T` is the only
-        evidence the next period needs: C1 owns every tick <= T, C2 every tick after it."""
-        if self.scheduler is not None:
-            for tick_ev in self.scheduler.pop_due(at):
-                self._enqueue(tick_ev, source="scheduler")
-            await self._drain_admitted()
-        # a time observation is an input (DL-44): its firings survive a crash, or replay would
-        # resurrect a job the oracle killed on the way to the cutoff. It is unguarded: a clock
-        # that moved backwards refuses the boundary through `Frontiers.admit`, so no seal
-        # commits with a `now` behind the log's frontier
-        await self._admit_and_apply(_Pending(at=at, request_id=None))
-        self._dispatch()
-        await self._drain_admitted()
-
-    async def _await_quiescence(self, estate: EstateHome) -> None:
-        """ss8's "always" set, re-checked after the cutoff (ss6 step 7).
-
-        The sealer WAITS OUT three clauses instead of refusing: a KILL ladder not yet resolved to
-        a spool proof, an applied CMD SPAWN whose adapter task has not written `spawn.json`, and
-        an FW poll between its observation and its durable line. A half-run ladder would carry a
-        grace deadline the next period cannot honour (PR-27, PR-33a)."""
-        deadline = time.monotonic() + self.QUIESCE_WAIT_S
-        while True:
-            await self._settle()
-            self._dispatch()
-            reason = self._not_quiescent(estate)
-            if reason is None:
-                return
-            if time.monotonic() >= deadline:
-                raise EngineError(
-                    f"the estate is not quiescent at the cutoff: {reason}."
-                    " A seal refuses rather than snapshots a half-run ladder, an unbound"
-                    " spawn or a half-recorded poll (period-model ss8)",
-                    code="seal_not_quiescent",
-                )
-            await asyncio.sleep(0 if self.clock.virtual else 0.01)
-
-    async def _supervisor_proof(self, estate: EstateHome) -> None:
-        """ss8's supervisor clauses, at the seal (PR-27): the supervisor reachable, its LIST from
-        the incarnation whose lease this engine holds, and that LIST reconciled BOTH ways against
-        the executions the seal will carry.
-
-        A reachable supervisor with an empty LIST is not proof: LIST shows what THIS incarnation
-        spawned, and a restarted supervisor has a new incarnation and an empty history. Tethered
-        engines return at once, since quiescence already settled their wrappers."""
-        carried = self._executions(estate)
-        if self.supervisor is None:
-            if estate.manifest.runtime_profile.execution_mode == "detached" and any(
-                e.kind in ("bound", "pending_spawn") for e in carried
-            ):
-                # a detached estate's live work is owned by a supervisor; an engine with no client
-                # cannot prove it reachable, so quiescence is unprovable, not vacuous
-                # (period-model ss8, PR-27)
-                raise EngineError(
-                    "this estate runs detached and the engine holds no supervisor"
-                    " client: the ss8 supervisor clauses cannot be proved over its"
-                    " live executions, so the seal refuses (period-model ss8, PR-27)",
-                    code="seal_supervisor_unproven",
-                )
-            return
-        bound = {(e.job, e.run_number): e for e in carried if e.kind == "bound"}
-        unresolved = bool(bound) or any(e.kind == "pending_spawn" for e in carried)
-        try:
-            listing = await self.supervisor.list_runs()
-        except SupervisorUnavailable as exc:
-            if not unresolved:
-                return  # it owns nothing a seal needs (PR-27a)
-            raise EngineError(
-                f"the supervisor is unreachable and this estate carries live detached"
-                f" work ({exc}): quiescence is unprovable, the seal refuses"
-                " (period-model ss8, PR-27)",
-                code="seal_supervisor_unproven",
-            ) from exc
-        if not isinstance(listing, SupervisorListSuccess):
-            raise EngineError(
-                f"the supervisor refused LIST ({listing.error}): quiescence is"
-                " unprovable, the seal refuses (period-model ss8, PR-27)",
-                code="seal_supervisor_unproven",
-            )
-        held = self.supervisor.incarnation
-        got = listing.incarnation
-        if held is None or got != held:
-            raise EngineError(
-                f"the supervisor's LIST is from incarnation"
-                f" {got!r} but this engine's lease names"
-                f" {held!r}: a restarted supervisor's history is not proof"
-                " (period-model ss8, PR-27)",
-                code="seal_supervisor_unproven",
-            )
-        rows = {(r.job, r.run_number): r for r in listing.runs}
-        for key, entry in sorted(bound.items()):
-            row = rows.get(key)
-            if row is None:
-                raise EngineError(
-                    f"{key[0]}.{key[1]}: bound run {entry.run_id} is not in the"
-                    " leased incarnation's LIST -- a carried non-terminal row the"
-                    " sweep cannot account for refuses the seal (period-model ss8)",
-                    code="seal_run_unaccounted",
-                )
-            if row.run_id != entry.run_id:
-                raise EngineError(
-                    f"{key[0]}.{key[1]}: the supervisor's LIST names run_id"
-                    f" {row.run_id!r} but the bound run is {entry.run_id!r} --"
-                    " an identity split at the seal refuses (DL-118)",
-                    code="seal_run_unaccounted",
-                )
-        for key, row in sorted(rows.items()):
-            if not row.wrapper_alive:
-                continue  # history: its outcome resolves from the spool
-            ours = bound.get(key)
-            if ours is None or ours.run_id != row.run_id:
-                raise EngineError(
-                    f"{key[0]}.{key[1]}: the supervisor holds live run"
-                    f" {row.run_id!r} the seal's executions do not carry --"
-                    " the sweep found evidence quiescence cannot account for"
-                    " (period-model ss8, PR-27)",
-                    code="seal_run_unaccounted",
-                )
-
-    def _not_quiescent(self, estate: EstateHome) -> str | None:
-        """Why this estate may not be sealed right now, or None."""
-        if self._queue:
-            return f"{len(self._queue)} input(s) still queued"
-        if self.frontiers.applied_index != self.frontiers.committed_index:
-            return (
-                f"attempt {self.frontiers.committed_index} is admitted and undecided"
-                f" (applied through {self.frontiers.applied_index})"
-            )
-        if self._reaping:
-            return f"{len(self._reaping)} KILL ladder(s) have not resolved"
-        indeterminate = [
-            effect.effect_id
-            for effect in self.outbox.effects()
-            if self.outbox.state_of(effect.effect_id) == "indeterminate"
-        ]
-        if indeterminate:
-            return f"indeterminate effect(s) {', '.join(sorted(indeterminate))}"
-        try:
-            carried = self._executions(estate)
-        except EngineError as exc:
-            return str(exc)
-        if estate.manifest.runtime_profile.execution_mode == "tethered":
-            # the ss8 mode table: "in place, tethered -- full drain". Stopping the engine cancels
-            # a tethered command, so a seal carrying it as `bound` would name a run exit code 3
-            # kills. Pending intents carry (PR-16c) and FW watches carry (PR-34a): the file
-            # outlives the process.
-            live = sorted(f"{e.job}.{e.run_number}" for e in carried if e.kind == "bound")
-            if live:
-                return (
-                    f"tethered estate with live command(s) {', '.join(live)}: the seal"
-                    " waits for the full drain -- stopping the engine cancels them"
-                    " (period-model ss8 mode table)"
-                )
-        return None
-
-    def _executions(self, estate: EstateHome) -> tuple[Execution, ...]:
-        return executions_at(
-            run_root=estate.run_root,
-            outbox=self.outbox,
-            rows=self.oracle.store.job,
-            catalog=self.oracle.catalog,
-            interval_default=max(
-                1, round(estate.manifest.runtime_profile.fw_default_interval_us / 1_000_000)
-            ),
-        )
-
-    def _carried(self, at: datetime) -> CarriedState:
-        """The classifier's view of the estate at `at` (ss10.1).
-
-        The three execution sets come from the WAL alone: no ss10 rule tells the three ss3.5
-        kinds apart, and readiness runs before the sealer waits an unbound SPAWN out."""
-        executing = executing_jobs(self.outbox, self.oracle.store.job)
-        return carried_from_oracle(
-            self.oracle,
-            now=at,
-            pending_spawn=[job for job, state in executing.items() if state == "pending"],
-            bound=[job for job, state in executing.items() if state == "applied"],
-        )
-
-    def _snapshot(self, at: datetime, *, estate: EstateHome) -> Snapshot:
-        """The estate at T, taken WITHOUT yielding: a synchronous read of state the single writer
-        owns, so nothing moves between the last precondition and the bytes the seal carries."""
-        store = self.oracle.store
-        return Snapshot(
-            state=SealedState(
-                jobs=dict(store.job),
-                globals=dict(store.globals_),
-                hosts={host_id: SealedHost.of(row) for host_id, row in store.hosts.items()},
-                routes=implicit_routes(self.executor_id),
-                timers=tuple(store.timers()),
-                timer_seq=store.timer_seq,
-                consumed=dict(store.consumed),
-                enqueue_counter=store.enqueue_counter,
-                now=at,
-            ),
-            carried=self._carried(at),
-            outbox_pending=tuple(self.outbox.pending()),
-            executions=self._executions(estate),
-            closes_at_index=self.frontiers.applied_index,
-            at=at,
-            epoch=self.epoch,
-        )
-
     def note_executor_unreachable(self) -> None:
         """The leader has lost contact with its own execution host (ss8).
 
@@ -1239,21 +640,6 @@ class Engine:
     def _push(self, pending: _Pending) -> None:
         """Put one input on the time-ordered queue and wake the loop; the arrival counter keeps
         inputs stamped alike in raised order."""
-        if self.sealing and pending.envelope is not None:
-            # ss6 step 2, at the one choke point every input passes: the cutoff stops admitting
-            # EVERY externally requested attempt, rejected and no-op ones included, since each
-            # takes a durable decision that would land after the seal or never (PR-28e). The
-            # engine's own doors stay open: the drain must finish, and an adapter completion is
-            # C1 work, not a request.
-            self._refuse(
-                pending,
-                AdmissionRefused(
-                    "this period is sealing: nothing externally requested is admitted"
-                    " after the cutoff (period-model ss6 step 2)",
-                    code="period_sealing",
-                ),
-            )
-            return
         self._queue_seq += 1
         heapq.heappush(self._queue, (pending.at, self._queue_seq, pending))
         self._activity.set()
@@ -1326,8 +712,7 @@ class Engine:
         ):
             return _Work(_Do.EVENT)
         if (
-            not self.sealing  # ss6 step 2: scheduler admission is frozen too
-            and sched_due is not None
+            sched_due is not None
             and sched_due <= horizon
             and (head_at is None or sched_due < head_at)
             and (eff_due is None or sched_due <= eff_due)
@@ -1344,8 +729,7 @@ class Engine:
         ):
             # concurrency-model ss0 (DL-232): a timer due strictly before a due input fires as its
             # own input, so the revision it moves is one the input's gate reads. It is stamped at
-            # the latest of its due instant, the last admitted instant and the oracle's clock: a
-            # segment opened from a seal has no admitted instant yet but starts at T
+            # the latest of its due instant, the last admitted instant and the oracle's clock
             floors = (self.frontiers.at, self.oracle._now)
             return _Work(_Do.TIMER, at=max([raw_due, *(t for t in floors if t is not None)]))
         if (
@@ -1395,12 +779,6 @@ class Engine:
         instant_budget = max(INSTANT_BUDGET_FLOOR, 100 * len(self.oracle.catalog.jobs))
         while True:
             await self._settle()
-            if self._seal is not None:
-                # the boundary runs INSIDE the single-writer loop, the one place that may freeze
-                # admission, choose T and snapshot a state nothing else can move (ss6); a commit
-                # raises `PeriodSealed` out of this loop, a refusal aborts and C1 carries on
-                await self._seal_boundary()
-                continue
             now = self.clock.now()
             if now != instant:
                 instant, instant_events = now, 0
@@ -1489,10 +867,7 @@ class Engine:
             self._reaping = still_reaping
             if not self.clock.virtual:
                 return
-            if (
-                not self._reaping
-                and len(self._live) == self.clock.pending_sleepers() + self.barrier.parked_tasks
-            ):
+            if not self._reaping and len(self._live) == self.clock.pending_sleepers():
                 return
             await asyncio.sleep(0)
 
@@ -1545,18 +920,7 @@ class Engine:
                 ),
             )
             return []
-        try:
-            admitted = self.frontiers.admit(pending.at)
-        except EngineError as exc:
-            if self.sealing and pending.future is not None:
-                # the seal refuses on this and C1 reopens, so the popped request is answered
-                # (DL-274)
-                self._refuse(pending, AdmissionRefused(str(exc), code=exc.code or "engine_error"))
-            else:
-                # an engine-made input (a completion, a tick, a routing observation) has no one
-                # to answer
-                self._mark_unadmitted(pending)
-            raise
+        admitted = self.frontiers.admit(pending.at)
         # before the frontier moves: a refusal or a stop takes no index
         attempt = self._attempt(pending, admitted.committed_index, fp)
         quarantine: tuple[Rejection, Exception] | None = None
@@ -1566,19 +930,9 @@ class Engine:
                 self._refuse(pending, refusal)
                 return []
         else:
-            try:
-                quarantine = self._dry_apply_engine_made(attempt)
-            except TimeHalfStop:
-                # the input is out of the queue and has no index
-                self._mark_unadmitted(pending)
-                raise
+            quarantine = self._dry_apply_engine_made(attempt)
         forced = None if quarantine is None else quarantine[0]
         self.frontiers = admitted
-        index = self.frontiers.committed_index
-        # the window opens with the frontier: memory has moved and the admission line may
-        # follow; `_write` flushes before it fsyncs, so an exception out of `admit` does not
-        # prove the line absent
-        self._applying = index
         if self.journal is not None:
             self.journal.admit(attempt)  # WAL-append + fsync BEFORE apply (ss7)
         self.decisions.note(attempt)
@@ -1613,19 +967,7 @@ class Engine:
             assert applied.result.reason is not None
             self.drops.append((ev, applied.result.reason))
         self._answer(pending, applied.result)
-        self._applying = None
         return applied.emitted
-
-    def _mark_unadmitted(self, pending: _Pending) -> None:
-        """Inside a seal, name an input that left the queue and took no index, so the seal stops
-        the engine rather than lose it while C1 reopens (DL-274). The cutoff's own time
-        observation is not such an input: it belongs to the seal, and a retry chooses a new T."""
-        if not self.sealing:
-            return
-        if pending.ev is not None:
-            self._unadmitted = pending.ev.kind
-        elif pending.host is not None:
-            self._unadmitted = "host"
 
     def _dry_apply(self, attempt: Attempt) -> AdmissionRefused | None:
         """Apply a control input on a fork of the oracle; return why it must be refused, or None
@@ -1928,9 +1270,7 @@ class Engine:
             clock=self.clock,
             run_root=self.run_root,
             journal=self.journal,
-            detach=self.detach,
             run_id=run_id,
-            barrier=self.barrier,
             fence=self.fence,
             route=self.host_state,
         )

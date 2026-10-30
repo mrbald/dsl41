@@ -42,11 +42,11 @@ from dsl41.oracle import (
     item_cap,
 )
 from dsl41.oracle_state import CascadeDepthError, Event, OracleError
+from dsl41.run_root import catalog_hash_v2
+from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import AdmissionRefused, Envelope
 from dsl41.runner_clock import EngineError, VirtualClock
-from dsl41.period import catalog_hash_v2
-from dsl41.runner import Engine
 from dsl41.runner_startup import start_run
 
 START = "2026-01-05T09:00:00"

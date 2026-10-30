@@ -52,8 +52,12 @@ Inside `estate()`, you can add a file watcher:
 
 ```python
 b.job(
-    "INBOX_FW", job_type="f", machine="prod1",
-    watch_file="/tmp/inbox.ready", watch_interval=1, watch_file_min_size=1,
+    "INBOX_FW",
+    job_type="f",
+    machine="prod1",
+    watch_file="/tmp/inbox.ready",
+    watch_interval=1,
+    watch_file_min_size=1,
 )
 ```
 
@@ -175,7 +179,7 @@ Lowering also refuses duplicate job names.
 At definition time, `status:` accepts only INACTIVE, ON_HOLD, ON_ICE and ON_NOEXEC.
 Lowering refuses resource groups using `QUANTITY=ALL` or `VALUEOP`/`VALUE`.
 Write whole job definitions rather than `update_job`, `delete_job` or `override_job`.
-Follow the [job-edit recipe](deployment-runbook.md#recipe-add-change-or-remove-a-job).
+Follow the job-edit recipe (`deployment-runbook.md`, retired in 2.0.0).
 
 Use these SEM entries for a construct's meaning:
 
@@ -340,7 +344,7 @@ Its default `report` format writes Markdown with a chart per independent workflo
 Check the file-watcher and schedule triggers, condition paths and box membership.
 Read the appendices for standalone jobs, assumptions, redesign flags, OR shapes and cycles.
 Edges use solid, dashed and thick red lines for E, A and R classes.
-The glossary defines [R/A classification (UC backend)](glossary.md#ra-classification-uc-backend).
+The glossary defines R/A classification (UC backend) (retired in 2.0.0).
 Other formats are `chart`, `html`, `html-chart` and `explore`.
 Use `-o/--out PATH` to write a file rather than stdout.
 The `html` format writes a self-contained offline page.
@@ -472,14 +476,14 @@ See the [minify instructions](../README.md#de-identify-an-estate-minify) for its
 
 Use the [gate procedure in §4.4](#44-run-the-checks-in-order) away from the production run.
 The manifest declares the timezone, its map and the semantic switches ([§6.1](#61-declare-the-estate-in-estatetoml); DL-407).
-The runbook's [check block](deployment-runbook.md#recipe-add-change-or-remove-a-job) passes it to `lint` and `rehearse` through `--manifest`, with the site's properties file after the manifest's layers.
+The runbook's check block (`deployment-runbook.md`, retired in 2.0.0) passes it to `lint` and `rehearse` through `--manifest`, with the site's properties file after the manifest's layers.
 
 After the checks pass, commit and tag the estate edit under the
-[job recipe](deployment-runbook.md#recipe-add-change-or-remove-a-job).
+job recipe (`deployment-runbook.md`, retired in 2.0.0).
 The tag holds the estate's manifest ([§6.1](#61-declare-the-estate-in-estatetoml)).
 Give the operator the checked, tagged estate for the rollout window.
 The operator rolls it out by the same recipe: `dsl41 release prepare`, then `dsl41 release apply` in the same run root.
-[Deployment-runbook §6](deployment-runbook.md#6-jil-rollout--updating-the-estate) explains the two cycles an estate changes in.
+Deployment-runbook §6 (`deployment-runbook.md`, retired in 2.0.0) explains the two cycles an estate changes in.
 
 ### 6.1. Declare the estate in estate.toml
 
@@ -534,10 +538,10 @@ The manifest supplies the files, the layers, the timezone, its map and the switc
 For the example above, `lint --manifest /work/payments/estate.toml --environment uat` lints the four files with `base.properties` and `UTC`.
 A refusal is one sentence and exit `2`.
 
-Run the runbook's [check block](deployment-runbook.md#recipe-add-change-or-remove-a-job) in CI on the commit you are about to tag.
+Run the runbook's check block (`deployment-runbook.md`, retired in 2.0.0) in CI on the commit you are about to tag.
 It runs `lint` and `rehearse` with `--manifest` and the site's properties file.
 A manifest the option refuses fails that check, before the tag exists.
-Before the window, the operator runs the block again on the tag, then `dsl41 release prepare` runs `lint` and `rehearse` again as the service account ([the job recipe's step 2](deployment-runbook.md#recipe-add-change-or-remove-a-job)).
+Before the window, the operator runs the block again on the tag, then `dsl41 release prepare` runs `lint` and `rehearse` again as the service account (the job recipe's step 2 (`deployment-runbook.md`, retired in 2.0.0)).
 Prepare's run is the one apply enforces: apply refuses a release whose files are not the ones prepare checked.
 
 When a file such as `eod.jil` comes from a Python module, `dsl41 estate build . --emit eod.jil=eod.py -o dist/v42` assembles the release directory, and `dsl41 release prepare v42 dist/v42` takes it (DL-413).
@@ -563,10 +567,10 @@ These events end a running command:
 - an operator's KILLJOB, or the job's own `term_run_time` ([runner-design §6](runner-design.md#6-adapters));
 - an operator's CHANGE_STATUS of the running job to SUCCESS, FAILURE or TERMINATED;
 - a `job_terminator` or `box_terminator` cascade ([SEM-14](autosys-semantics.md#sem-14--box_terminator--job_terminator-vc));
-- the loss of the supervisor that started the command, by a crash, a `kill -9` or its deadman ([supervisor-protocol §4](supervisor-protocol.md#4-wrapper-behavior-frozen-semantics), step 5, and [§5](supervisor-protocol.md#5-supervisor-socket-protocol-frozen--phase-11f-dl-48), "The deadman");
+- the loss of the supervisor that started the command, by a crash, a `kill -9` or its deadman (supervisor-protocol §4 (`supervisor-protocol.md`, retired in 2.0.0), step 5, and §5 (`supervisor-protocol.md`, retired in 2.0.0), "The deadman");
 - the stop or loss of an engine that runs without a supervisor ([runner-design §15](runner-design.md#15-open-questions-e-series), E4);
-- a stop of the supervisor unit: the supervisor drains while the engine stays up, so a command still running at the drain's bound, 840 s in the example unit, gets SIGTERM, then SIGKILL after the grace ([supervisor-protocol §5](supervisor-protocol.md#5-supervisor-socket-protocol-frozen--phase-11f-dl-48), "The drain", DL-416);
-- a host shutdown or reboot: the engine stops first, so the drain has no leaseholder; with a deadman set it ends at the deadman, and the wrapper sends the command SIGTERM, then SIGKILL after the grace, recording `terminated / parent lost`; with none it runs to its bound ([supervisor-protocol §5](supervisor-protocol.md#5-supervisor-socket-protocol-frozen--phase-11f-dl-48), "The drain", DL-205, DL-416);
+- a stop of the supervisor unit: the supervisor drains while the engine stays up, so a command still running at the drain's bound, 840 s in the example unit, gets SIGTERM, then SIGKILL after the grace (supervisor-protocol §5 (`supervisor-protocol.md`, retired in 2.0.0), "The drain", DL-416);
+- a host shutdown or reboot: the engine stops first, so the drain has no leaseholder; with a deadman set it ends at the deadman, and the wrapper sends the command SIGTERM, then SIGKILL after the grace, recording `terminated / parent lost`; with none it runs to its bound (supervisor-protocol §5 (`supervisor-protocol.md`, retired in 2.0.0), "The drain", DL-205, DL-416);
 - the operator's forced maintenance, `--force=terminate` (DL-390, DL-394).
 
 Under a supervisor with no deadman, an engine restart ends no command: the engine reattaches to the running commands ([runner-design §6a](runner-design.md#6a-process-lifecycle-tiers-dl-41a)).
@@ -580,10 +584,10 @@ The job ends its own helpers itself (DL-403).
 
 | Bound | Value | Source |
 | --- | --- | --- |
-| Command grace, from SIGTERM to SIGKILL | 10 s; no site setting changes it | `CMD_GRACE_S` in `src/dsl41/period.py`, pinned in each period's runtime profile as `cmd_grace_us` ([period-model §2.1](period-model.md#21-segment--the-first-record-of-every-segment)) |
-| Drain at a supervisor stop | 840 s in the example unit | `Environment=DSL41_DRAIN_S` in the supervisor unit ([supervisor-protocol §5](supervisor-protocol.md#5-supervisor-socket-protocol-frozen--phase-11f-dl-48), DL-416) |
+| Command grace, from SIGTERM to SIGKILL | 10 s; no site setting changes it | `CMD_GRACE_S` in `src/dsl41/run_root.py`, pinned in each period's runtime profile as `cmd_grace_us` (period-model §2.1 (`period-model.md`, retired in 2.0.0)) |
+| Drain at a supervisor stop | 840 s in the example unit | `Environment=DSL41_DRAIN_S` in the supervisor unit (supervisor-protocol §5 (`supervisor-protocol.md`, retired in 2.0.0), DL-416) |
 | Host shutdown with a deadman | the deadman plus the 10 s grace | `dsl41 run --deadman`, when the site sets one, and `CMD_GRACE_S` (DL-205, DL-416) |
-| Whole supervisor stop | 900 s in the example unit, 1800 s for a hung supervisor | `TimeoutStopSec` in the supervisor unit bounds its `ExecStop=`, the drain and the wait; when that overruns, systemd sends SIGTERM to every process in the unit and a second `TimeoutStopSec` bounds it before SIGKILL. The site package sizes it against `MAX_JOBS` and `MAX_GRACE_S` ([site-package §5](site-package.md#5-ship-jil-releases-on-the-applications-train), DL-401, DL-416) |
+| Whole supervisor stop | 900 s in the example unit, 1800 s for a hung supervisor | `TimeoutStopSec` in the supervisor unit bounds its `ExecStop=`, the drain and the wait; when that overruns, systemd sends SIGTERM to every process in the unit and a second `TimeoutStopSec` bounds it before SIGKILL. The site package sizes it against `MAX_JOBS` and `MAX_GRACE_S` (site-package §5 (`site-package.md`, retired in 2.0.0), DL-401, DL-416) |
 
 Your SIGTERM cleanup has the command grace to finish.
 Ask the packager for your site's stop bound.
@@ -639,7 +643,7 @@ Write each batch to its own file by the safe shape, or record a key per batch an
 
 ## 7. Follow the other tracks for engine work
 
-This page leaves engine operation to the [operator track](deployment-runbook.md#0-the-operator-path),
+This page leaves engine operation to the operator track (`deployment-runbook.md`, retired in 2.0.0),
 compiler internals to the [architect track](architecture.md),
-the descoped UC backend to [its specification](stonebranch-semantics.md) ([DL-288](decision-log.md)),
+the descoped UC backend to its specification (`stonebranch-semantics.md`, retired in 2.0.0) ([DL-288](decision-log.md)),
 and the meaning of each `--semantics` switch to the [switch contract](runner-design.md#8a-semantic-switches).

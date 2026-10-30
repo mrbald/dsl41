@@ -28,6 +28,7 @@ from typing import Any
 
 import pytest
 
+from dsl41.ast_jil import JilParseError, parse
 from dsl41.canon import (
     ARTIFACT_FORMAT_VERSION,
     CanonError,
@@ -38,7 +39,6 @@ from dsl41.canon import (
     is_scalar_string,
     with_digest,
 )
-from dsl41.ast_jil import JilParseError, parse
 from dsl41.ir import LoweringError, lower_catalog, lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_schedule import TIMER_CHECKS
@@ -566,7 +566,6 @@ def test_pr09_covers_every_timer_call_site_of_the_oracle() -> None:
     # before it reaches the heap, so a new kind cannot slip in behind an
     # existing call site without first being named in TIMER_CHECKS
     from dsl41.oracle_state import Event as _Event
-
     from dsl41.oracle_state import OracleError as _OracleError
 
     with pytest.raises(_OracleError, match="unregistered timer check"):

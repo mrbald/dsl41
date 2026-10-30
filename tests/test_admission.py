@@ -28,19 +28,16 @@ inputs under a different id, the same journal without its result record.
 from __future__ import annotations
 
 import asyncio
-
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
-
 from pydantic import ValidationError
 
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event
 from dsl41.runner import Engine
-from dsl41.runner_startup import start_run
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import (
     AdmissionRefused,
@@ -54,6 +51,7 @@ from dsl41.runner_admission import (
 )
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_journal import Journal, read_decisions, read_journal, replay_inputs
+from dsl41.runner_startup import start_run
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
