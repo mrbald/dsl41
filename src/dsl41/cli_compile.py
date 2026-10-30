@@ -37,6 +37,7 @@ from dsl41.cli_common import (
 )
 from dsl41.ast_jil import JilFile
 from dsl41.ir import CatalogIR, LoweringError, lower_catalog
+from dsl41.idempotence import IdempotenceError, load_exceptions
 from dsl41.lint import lint_catalog
 from dsl41.placeholders import PlaceholderError, load_properties, substitute
 
@@ -111,7 +112,13 @@ def lint(
     tz_aliases = load_tz_aliases(timezone_map)
     check_base_tz(timezone, tz_aliases)
     catalog = load_catalog_or_exit_2(files, permit_unknown, properties)
-    report = lint_catalog(catalog, base_tz=timezone, tz_aliases=tz_aliases).suppress(codes)
+    try:
+        exceptions = None if manifest is None else load_exceptions(manifest.parent)
+    except IdempotenceError as exc:
+        raise typer.Exit(refuse(exc)) from exc
+    report = lint_catalog(
+        catalog, base_tz=timezone, tz_aliases=tz_aliases, exceptions=exceptions
+    ).suppress(codes)
     for violation in report.violations:
         typer.echo(violation.render())
     raise typer.Exit(report.exit_code(strict=strict))
