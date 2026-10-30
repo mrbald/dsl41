@@ -589,7 +589,8 @@ def test_a_wrapper_that_exits_without_a_record_ends_unobservable(state: str) -> 
     assert bench.attempt_state("a") == state
     mark = bench.mark()
     bench.send("a", WRAPPER_GONE)
-    unobservable = AttemptOutcome("unobservable")
+    # the outcome keeps the cause of the stop the attempt took
+    unobservable = AttemptOutcome("unobservable", cause=record.cause)
     assert record.outcome == unobservable
     rows = {"SPAWNING": "attempt.12", "RUNNING": "attempt.13", "STOPPING": "attempt.14"}
     assert bench.since(mark) == [("row", "a", rows[state]), *_ending(unobservable)]
@@ -629,7 +630,7 @@ def test_a_spawn_recorded_during_stopping_runs_the_ladder_again_and_re_arms_the_
     assert bench.attempt_state("a") == "STOPPING"
     assert record.outcome is None
     bench.timeout("a", second)
-    assert record.outcome == AttemptOutcome("unobservable")
+    assert record.outcome == AttemptOutcome("unobservable", cause=ENGINE_STOP)
 
 
 def test_a_failed_spawn_during_stopping_ends_spawn_failed() -> None:
@@ -651,7 +652,7 @@ def test_a_record_after_the_record_timeout_is_ignored_and_the_outcome_stands() -
     generation = bench.generation("a")
     mark = bench.mark()
     bench.timeout("a", generation)
-    unobservable = AttemptOutcome("unobservable")
+    unobservable = AttemptOutcome("unobservable", cause=ENGINE_STOP)
     assert record.outcome == unobservable
     bench.send("a", EXIT_RECORDED, BY_STOP)
     bench.timeout("a", generation)
@@ -681,7 +682,7 @@ def test_a_stop_then_a_record_timeout_ends_unobservable() -> None:
     record = bench.attempt("a")
     bench.send("a", STOP, ENGINE_STOP)
     bench.timeout("a", bench.generation("a"))
-    assert record.outcome == AttemptOutcome("unobservable")
+    assert record.outcome == AttemptOutcome("unobservable", cause=ENGINE_STOP)
 
 
 # ---- an update stop: the engine chart is not involved

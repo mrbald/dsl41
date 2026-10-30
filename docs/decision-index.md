@@ -370,7 +370,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-356 | The architecture review at dd8e774 lands: each rule the oracle wrote twice has one home, the job chart's handlers are named tables, the re-export layer and the... | [docs/statechart-engine.md](statechart-engine.md) |
 | DL-357 | The lifeline pipe is the wrapper's only parent-death guard | [docs/runner-design.md](runner-design.md) |
 | DL-358 | A roll that meets another root's claim names the claim's holder |  |
-| DL-359 | A kill during a CMD adapter's spawn stops what the spawn started | [docs/runner-design.md](runner-design.md) |
+| DL-359 | A kill during a CMD adapter's spawn stops what the spawn started | [docs/blocks/attempts.md](blocks/attempts.md), [docs/runner-design.md](runner-design.md) |
 | DL-360 | Three box and queue defects the reviews recorded leave the oracle: a re-queue takes a new rank, an ancestor's reset stops the job_terminator cascade, and the... | [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/box-execution.md](blocks/box-execution.md), [docs/blocks/job-lifecycle.md](blocks/job-lifecycle.md), [docs/runner-design.md](runner-design.md), [docs/statechart-engine.md](statechart-engine.md) |
 | DL-361 | The architecture review at 236c34d lands: one cancel helper, one refusal shape, a named seal exit, the box-run test in one place; the fold's single pass and the... |  |
 | DL-362 | The comment and docstring diet: a comment states the rule and cites its entry, never what changed; two deterministic gates hold the line | [docs/agent-workflow.md](agent-workflow.md) |
@@ -434,5 +434,6 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-421 | access-model: the release and estate verbs get their tiers, and the release train's sudo grant is a door of its own, outside the gate | [docs/access-model.md](access-model.md) |
 | DL-422 | The six estate verbs read the manifest through `--manifest`; `estate args` and its `eval` are gone | [docs/access-model.md](access-model.md), [docs/authoring.md](authoring.md) |
 | DL-423 | Release verbs read from their command line: `rollback NAME`, `requalify NAME`, and the OFF_HOLD sweep is `off-hold-all` | [docs/access-model.md](access-model.md), [docs/control-protocol.md](control-protocol.md) |
-| DL-424 | The 2.0.0 charter: three things, a production ceiling, and the owner's rulings | [docs/ir-design.md](ir-design.md) |
+| DL-424 | The 2.0.0 charter: three things, a production ceiling, and the owner's rulings | [docs/blocks/attempts.md](blocks/attempts.md), [docs/ir-design.md](ir-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
 | DL-425 | Hosts, effects and the epoch leave the engine; the dispatch record precedes the launch |  |
+| DL-426 | The attempt and engine lifecycle tiers; an attempt settles only when its plan is done |  |

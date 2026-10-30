@@ -99,3 +99,40 @@ live = backfill + backfill_sent
 removed = open + append [overflows]
 closed = open + stream_ends
 ```
+
+## engine_lifecycle
+
+Shown: 5. Folded: 1 (internal 1). Rows in the chart: 6.
+
+### phase
+
+```text
+STARTING <- initial
+RUNNING = STARTING + replay_done // The WAL replay is done and the engine serves
+DRAINING = RUNNING + stop_requested
+STOPPED = STARTING + stop_requested
+       || DRAINING + abort_deadline
+       || DRAINING + all_attempts_settled
+```
+
+## attempt
+
+Shown: 12. Folded: 2 (ignored 1, internal 1). Rows in the chart: 14.
+
+### phase
+
+```text
+SPAWNING <- initial
+RUNNING = SPAWNING + spawn_recorded // `spawn.json` was seen
+STOPPING = SPAWNING + stop
+        || RUNNING + stop
+ENDED = SPAWNING + exit_recorded
+     || SPAWNING + spawn_failed
+     || SPAWNING + wrapper_gone
+     || RUNNING + exit_recorded
+     || RUNNING + wrapper_gone
+     || STOPPING + exit_recorded
+     || STOPPING + record_timeout
+     || STOPPING + spawn_failed
+     || STOPPING + wrapper_gone
+```
