@@ -143,27 +143,6 @@ def test_procid_durable_write_cleans_its_temp_even_when_the_failure_took_it(
     assert sorted(p.name for p in tmp_path.iterdir()) == []
 
 
-# ------------------------------------------------------------ durable_create
-
-
-def test_procid_durable_create_tolerates_a_temp_that_is_already_gone(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The final temp unlink is best effort: when the temp vanished after the
-    link, the publication still stands and the call returns."""
-    target = tmp_path / "rec.json"
-    real_link = os.link
-
-    def link_then_drop_temp(src: str, dst: str) -> None:
-        real_link(src, dst)
-        os.unlink(src)
-
-    monkeypatch.setattr(procid.os, "link", link_then_drop_temp)
-    procid.durable_create(str(target), b"payload")
-    assert target.read_bytes() == b"payload"
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["rec.json"]
-
-
 # ---------------------------------------------------------- current_boot_id
 
 

@@ -263,15 +263,6 @@ class Fence:
         for lock in self.locks:
             lock.check()
 
-    def intact(self) -> bool:
-        """The same proof as a boolean: a fence loss inside the boundary's reversible interval
-        fail-stops instead of reopening admission (period-model ss7, DL-101)."""
-        try:
-            self.check()
-        except EngineError:
-            return False
-        return True
-
     def release(self) -> None:
         for lock in self.locks:
             lock.release()

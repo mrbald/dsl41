@@ -100,7 +100,7 @@ def test_the_rebuild_path_validates() -> None:
     str where an int belongs."""
     state = RuntimeState()
     with pytest.raises(ValidationError):
-        state.seed_job("j", status="NOT_A_STATUS")  # type: ignore[arg-type]
+        state._replace("j", status="NOT_A_STATUS")
     assert state.runtime("j").status == "INACTIVE"  # refused, not half-applied
     # and the trap itself, so this test fails if the owner ever reverts to it
     assert JobRuntime().model_copy(update={"run_number": "seven"}).run_number == "seven"

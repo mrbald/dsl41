@@ -20,7 +20,7 @@ import pytest
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_schedule import DEFERRED_TIMER_KEY
-from dsl41.oracle_state import Event, EventKind, OracleError
+from dsl41.oracle_state import CarriedRows, Event, EventKind, GlobalRuntime, OracleError
 from dsl41.semantics import resolve as resolve_switches
 
 T0 = datetime(2026, 7, 1, 8, 0)  # a Wednesday
@@ -520,3 +520,77 @@ def test_pr09_an_injected_timer_without_a_check_is_a_start_attempt() -> None:
     o = Oracle(lower_source(_ONE_JOB))
     o.feed(ev("TIMER", job="a"))
     assert statuses(o, "a") == {"a": "RUNNING"}
+
+
+# ------------------------------------------------------------ carried rows
+
+
+def test_a_carried_global_keeps_its_value_over_the_catalogs_declaration() -> None:
+    """ss7 phase 3 step 4: only genuinely new rows are seeded. A global the carried rows
+    hold keeps its value over the catalog's `insert_global`; one only the catalog
+    declares is seeded from it."""
+    catalog = lower_source("insert_global: G\nvalue: declared\n\ninsert_global: H\nvalue: h\n")
+    carried = CarriedRows(globals_={"G": GlobalRuntime(value="carried")}, now=T0)
+    o = Oracle(catalog, carried=carried)
+    assert o.store.globals_["G"].value == "carried"
+    assert o.store.globals_["H"].value == "h"
+
+
+_MOVE_C1 = (
+    "insert_job: b\njob_type: b\n\n"
+    "insert_job: j\njob_type: c\ncommand: j\nmachine: m1\nbox_name: b\n"
+    'date_conditions: 1\ndays_of_week: all\nstart_times: "02:00"\n'
+    'run_window: "02:00-04:00"\n\n'
+    "insert_job: w\njob_type: c\ncommand: w\nmachine: m1\nbox_name: b\n\n"
+    "insert_job: newbox\njob_type: b\n\n"
+    "insert_job: nm\njob_type: c\ncommand: n\nmachine: m1\nbox_name: newbox\n"
+)
+_MOVE_C2 = _MOVE_C1.replace(
+    "machine: m1\nbox_name: b\n" + "date_conditions",
+    "machine: m1\nbox_name: newbox\n" + "date_conditions",
+)
+
+
+def test_sem33_a_carried_deferral_does_not_follow_its_job_into_another_box() -> None:
+    """SEM-33 (DL-246): box `b` defers `j` to 02:00, completes, runs again while `j` is
+    held, and completes. The rows carry into a catalog that moves `j` into `newbox`, whose
+    run starts while `j` is still held. At 02:00 the old deferral fires and is refused: it
+    was queued in `b`, so it does not start `j` in `newbox`."""
+    assert _MOVE_C2 != _MOVE_C1
+    day = datetime(2026, 7, 1)
+
+    def on(hour: int, minute: int = 0, *, days: int = 0) -> datetime:
+        return day + timedelta(days=days, hours=hour, minutes=minute)
+
+    closing = Oracle(lower_source(_MOVE_C1))
+    for event in (
+        at(on(16, 5), "STARTJOB", job="b"),
+        at(on(16, 30), "STATUS", job="w", status="SUCCESS"),
+        at(on(17, 0), "STATUS", job="b", status="SUCCESS"),
+        at(on(17, 5), "ON_HOLD", job="j"),
+        at(on(17, 10), "FORCE_STARTJOB", job="b"),
+        at(on(17, 15), "STATUS", job="w", status="SUCCESS"),
+        at(on(17, 20), "STATUS", job="b", status="SUCCESS"),
+    ):
+        closing.feed(event)
+    assert transitions(closing, "j") == ["RUN_WINDOW_DEFER", "ON_HOLD"]
+    store = closing.store
+    opening = Oracle(
+        lower_source(_MOVE_C2),
+        carried=CarriedRows(
+            jobs=dict(store.job),
+            globals_=dict(store.globals_),
+            timers=tuple(store.timers()),
+            timer_seq=store.timer_seq,
+            now=on(17, 20),
+        ),
+    )
+    opening.feed(at(on(18, 0), "STARTJOB", job="newbox"))
+    opening.feed(at(on(18, 30), "OFF_HOLD", job="j"))
+    opening.feed(at(on(2, 0, days=1), "STATUS", job="nm", status="SUCCESS"))
+    assert transitions(opening, "j") == ["OFF_HOLD", "START_REFUSED"]
+    assert (
+        "queued in box 'b', and the job is now in box 'newbox'"
+        in causes(opening, "j", "START_REFUSED")[-1]
+    )
+    assert statuses(opening, "j", "newbox") == {"j": "INACTIVE", "newbox": "RUNNING"}

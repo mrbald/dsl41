@@ -147,20 +147,6 @@ def require_artifact_version(payload: Mapping[str, Any]) -> None:
         raise CanonError("missing artifact_format_version")
 
 
-def is_canonical_file(data: bytes | str, canonical: bytes) -> bool:
-    """ss3.2's one-byte-form rule (DL-137): the file's own bytes are the canonical bytes.
-
-    A whitespace-padded, key-reordered or default-omitting copy carries the digest of the real
-    artifact and passes every tamper check; only this comparison tells them apart. The closed
-    artifact readers, `seal.Seal.from_bytes` and `attest.Attestation.from_bytes`, ask it.
-
-    A predicate, not a refusal: each owner names its own artifact and section. `data` is the
-    bytes as read; a `str` is measured as UTF-8, the only encoding ss3.2 has.
-    """
-    raw = data.encode("utf-8") if isinstance(data, str) else bytes(data)
-    return raw == canonical
-
-
 def decode(data: bytes | str) -> object:
     """Decode canonical JSON, refusing what ss3.2 refuses at ingress.
 

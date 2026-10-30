@@ -207,9 +207,7 @@ def refuse_reserved_request_id(request_id: str) -> None:
         )
 
 
-def parse_envelope(
-    request: Mapping[str, Any], *, addressed: str | None, baseline_id: str
-) -> Envelope:
+def parse_envelope(request: Mapping[str, Any], *, addressed: str, baseline_id: str) -> Envelope:
     """Steps 1-2's framing half, for every external transport (concurrency-model ss4, ss6).
     Raises `EnvelopeError` naming the field.
 
@@ -265,18 +263,9 @@ def parse_envelope(
     )
 
 
-def _parse_expect(request: Mapping[str, Any], *, addressed: str | None) -> dict[str, int]:
-    """ss3's precondition, read off the request. A command that addresses no row takes no
-    `expect`, and the key decides: `"expect": null` is not "no expect" (DL-151). This is the one
-    place that rule is written."""
-    if addressed is None:
-        if "expect" in request:
-            raise EnvelopeError(
-                "expect is not allowed on a command that addresses no row:"
-                " a boundary is not a row mutation (period-model ss2.2)",
-                code="invalid_argument",
-            )
-        return {}
+def _parse_expect(request: Mapping[str, Any], *, addressed: str) -> dict[str, int]:
+    """ss3's precondition, read off the request. This is the one place that rule is
+    written."""
     expect = request.get("expect")
     if expect is None:
         raise EnvelopeError(
@@ -470,16 +459,6 @@ class AdmissionRefused(EngineError):
 
     def __init__(self, message: str, *, code: Code) -> None:
         super().__init__(message, code=code)
-
-
-class SealInFlight(AdmissionRefused):
-    """`seal_in_flight`: a boundary is queued or running, and one seal runs at a time
-    (period-model ss7), an exact retry included. It names the boundary in flight
-    (control-protocol ss3, `in_flight_request_id`)."""
-
-    def __init__(self, message: str, *, in_flight_request_id: str) -> None:
-        super().__init__(message, code="seal_in_flight")
-        self.in_flight_request_id = in_flight_request_id
 
 
 class TimeHalfStop(EngineError):
