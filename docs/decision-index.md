@@ -440,3 +440,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-427 | The update machine, its admission and its application, unwired; one update in flight |  |
 | DL-428 | The store replaces the journal; `run` resumes by default; the segment record is cut |  |
 | DL-429 | The attempt and engine lifecycle tiers run the engine's stops; `engine stop`; the interruption hold is one oracle transition |  |
+| DL-430 | Review rounds: a shape note before long rework; a fresh final review after it |  |

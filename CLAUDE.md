@@ -153,10 +153,28 @@ cannot wait for the reset. The PR, or the review record when there is no
 PR, states both and names the stand-in. If the vendor of a finding's raiser
 is out of budget, the stand-in confirms the fix, and the record names it.
 
-Count review rounds per change, three at most.
-Only the reviewer that raised a finding, or its stand-in, confirms its fix.
-A material finding still open after round three goes to the owner.
-From round two on, a finding may become a stated limit instead of a fix.
+A review round is one reviewer's pass over the change or over the fixes
+to its findings; a rework round is the executor's one pass over every
+finding then open, whoever raised them; a fix is found wrong when the
+reviewer that raised the finding, or its stand-in, reopens it. Each reviewer has three
+review rounds on a change, and only the reviewer that raised a finding,
+or its stand-in, confirms its fix. A material finding still open after
+its reviewer's third round goes to the owner, who approves further
+rounds one at a time.
+Before the first rework round after the change's third, and whenever the
+fix of one finding has been found wrong twice, the boss writes a shape
+note in the change's review record and the owner reads it before the
+rework starts: the rule as the change states it, why cases keep appearing,
+and the one-rule design, the split or the redesign it suggests. The
+change leaves the merge train while it waits (DL-430).
+When a change has had more than three rework rounds, the final diff gets
+one fresh review: a new reviewer of the vendor whose last round is the
+older, with its own three-round cap; the stand-in rule picks the model
+when that vendor is out of budget, and no fresh review is owed when every
+reviewer's last round read the current fixes. A material finding it
+raises is fixed in one more owner-approved rework round (DL-430).
+From the raiser's second review round on, a finding may become a stated
+limit instead of a fix.
 It qualifies only when it needs a deliberately hostile operator or an
 unsupported operation, such as a process stopped or a supervisor started
 by hand. It must not be able to corrupt durable state or cause an external
