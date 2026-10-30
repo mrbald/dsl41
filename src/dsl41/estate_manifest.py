@@ -102,15 +102,18 @@ def _validation_sentence(path: Path, exc: ValidationError) -> str:
     return f"{path}: {where}: {error['msg']}"
 
 
-def load_manifest(path: Path) -> Manifest:
+def load_manifest(path: Path, raw: bytes | None = None) -> Manifest:
     """Parse and validate the manifest at `path`, or raise ManifestError (DL-407).
+
+    With `raw`, the manifest is parsed from those bytes and the file is not read, so a caller
+    that keeps the bytes keeps the one copy it parsed.
 
     Every name must be in normal form (`parse_manifest`) and an existing file under the
     manifest's directory, every environment's layers included, so a manifest that refuses for
     one environment refuses for all. A joined path repeated among the files, or among the base
     layers and one environment's, is refused."""
     check_absolute(path)
-    manifest = parse_manifest(path)
+    manifest = parse_manifest(path, raw)
     _distinct(path, "files", manifest.files)
     for env in [Environment(), *manifest.environments.values()]:
         _distinct(path, "properties", [*manifest.properties, *env.properties])
@@ -149,18 +152,19 @@ def read_regular(path: Path) -> bytes:
     return b"".join(chunks)
 
 
-def parse_manifest(path: Path) -> Manifest:
+def parse_manifest(path: Path, raw: bytes | None = None) -> Manifest:
     """Parse and validate the manifest at `path` without looking for the files it names, or
     raise ManifestError (DL-407).
 
     The manifest is read without following a symlink, as a regular file. Every name must be
     in normal form: relative, with no `.` or `..` part, no `//` and no `/` at its end, so one
     file has one spelling. No name may be a `.py` file: `dsl41 build` renders a module to JIL
-    (DL-410)."""
-    try:
-        raw = read_regular(path)
-    except OSError as exc:
-        raise ManifestError(f"{path}: cannot read the manifest: {exc.strerror}") from exc
+    (DL-410). With `raw`, those bytes are the manifest and nothing is read."""
+    if raw is None:
+        try:
+            raw = read_regular(path)
+        except OSError as exc:
+            raise ManifestError(f"{path}: cannot read the manifest: {exc.strerror}") from exc
     try:
         table = tomllib.loads(raw.decode("utf-8"))
     except (ValueError, RecursionError) as exc:
@@ -253,10 +257,13 @@ class EstateInputs:
         return [*self.files, *self.layers, *([self.timezone_map] if self.timezone_map else [])]
 
 
-def resolve_manifest(path: Path, environment: str | None = None) -> EstateInputs:
+def resolve_manifest(
+    path: Path, environment: str | None = None, raw: bytes | None = None
+) -> EstateInputs:
     """The estate the manifest at `path` declares under `environment`, read once, or
-    ManifestError (DL-407). A manifest that declares environments needs one chosen."""
-    manifest = load_manifest(path)
+    ManifestError (DL-407). A manifest that declares environments needs one chosen. With `raw`,
+    the manifest is those bytes (`load_manifest`)."""
+    manifest = load_manifest(path, raw)
     layers = list(manifest.properties)
     if environment is None and manifest.environments:
         declared = ", ".join(sorted(manifest.environments))

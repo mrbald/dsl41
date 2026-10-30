@@ -712,6 +712,11 @@ Runner:
   catalogs: a job's definition hash without source spans, the added,
   removed, changed and unchanged sets with the reason for an indirect
   change, the running-box check, and the plan token.
+- `src/dsl41/reload_plan.py`: `reread` as a module, not wired to the engine:
+  it loads the estate from disk, lints it under `--strict`, diffs it against
+  the live catalog the engine supplies, refuses a running box, and stores
+  the candidate files and `plan.json` under `plans/<token>/`, the plan file
+  last.
 - `src/dsl41/runner_control.py`: the control plane, both ends: the
   unix-socket server (sendevent parity, queries, subscribe), the wire
   vocabulary, and three clients (persistent async for the TUI, one-shot
