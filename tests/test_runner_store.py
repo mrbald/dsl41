@@ -24,7 +24,7 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from nightbank_props import compute_properties, write_kv
-from sealed_state import SealedHost, SealedState, _canon_ready
+from sealed_state import SealedState, _canon_ready
 
 from dsl41.ast_jil import parse
 from dsl41.canon import CanonError, canonical_bytes, decode, digest
@@ -792,7 +792,7 @@ def sealed_state(oracle: Oracle, at: datetime) -> SealedState:
     return SealedState(
         jobs=dict(store.job),
         globals=dict(store.globals_),
-        hosts={host_id: SealedHost.of(row) for host_id, row in store.hosts.items()},
+        hosts={},  # the host table is dormant and empty after slice 0b (DL-425)
         routes={},
         timers=tuple(store.timers()),
         timer_seq=store.timer_seq,
@@ -895,7 +895,6 @@ def restored(catalog: CatalogIR, data: bytes) -> Oracle:
     carried = CarriedRows(
         jobs=dict(state.jobs),
         globals_=dict(state.globals),
-        hosts={host_id: row.to_row() for host_id, row in state.hosts.items()},
         timers=state.timers,
         timer_seq=state.timer_seq,
         consumed=dict(state.consumed),
