@@ -632,83 +632,6 @@ stateDiagram-v2
 | seeded | built/service |  |  |  |  |
 | live | built/service |  |  |  |  |
 
-## host
-
-Clock: logical.
-
-```mermaid
-stateDiagram-v2
-    state "host" as s2
-    state s2 {
-        [*] --> s5
-        state "routed" as s5
-        state s5 {
-            [*] --> s0
-            state "active" as s0
-            state "passive" as s3
-        }
-        state "quarantined" as s4
-        state "evicted" as s1
-    }
-    state c0 <<choice>>
-    s0 --> s3 : host.02 drain
-    s3 --> s0 : host.03 activate
-    s5 --> s4 : host.05 quarantine / remembers
-    s4 --> c0 : host.07 reinstate
-    s4 --> s1 : host.10 evict / evicts
-    s2 --> s1 : host.11 force_evict [not_evicted] / evicts_forced
-    s1 --> s0 : host.12 register
-    c0 --> s3 : host.23 [remembered_passive]
-    c0 --> s0 : host.24 [else]
-```
-
-| Id | Source | Event | Guard | Action | Target | Kind | Cite |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| host.01 | active | activate |  | none: the row does not move and no revision moves |  | internal | concurrency-model ss8 |
-| host.02 | active | drain |  | new effects are held, running work continues | passive | external | concurrency-model ss8, CM-13 |
-| host.03 | passive | activate |  | held starts dispatch again | active | external | concurrency-model ss8 |
-| host.04 | passive | drain |  | none: the row does not move and no revision moves |  | internal | concurrency-model ss8 |
-| host.05 | routed | quarantine |  | remembers | quarantined | external | concurrency-model ss7, ss8, DL-97, DL-291 |
-| host.06 | quarantined | quarantine |  | none: repeated unreachability is one fact |  | internal | DL-97 |
-| host.07 | quarantined | reinstate |  | The host answered again: put back the state quarantine interrupted, and forget it. | remembered | external | concurrency-model ss8, DL-97 |
-| host.25 | routed | reinstate |  | none: nothing to put back |  | internal | concurrency-model ss8, DL-111 |
-| host.10 | quarantined | evict |  | evicts | evicted | external | concurrency-model ss8 preconditions 1-3, DL-151 |
-| host.11 | host | force_evict | not_evicted | evicts_forced | evicted | external | concurrency-model ss8, DL-111, DL-151 |
-| host.12 | evicted | register |  | The relay presents the current generation and has self-fenced. Its held jobs run as new runs with new effect ids. No code posts it. | active | external (spec-only) | concurrency-model ss8 (eviction is fenced on return), period-model ss3.3 |
-| host.13 | quarantined | activate |  |  |  | refusal host_quarantined | concurrency-model ss8, concurrency-model ss7 |
-| host.14 | quarantined | drain |  |  |  | refusal host_quarantined | concurrency-model ss8, concurrency-model ss7 |
-| host.15 | routed | evict |  |  |  | refusal host_not_quarantined | concurrency-model ss8 precondition 1, DL-94 |
-| host.16 | evicted | activate |  |  |  | refusal host_evicted | concurrency-model ss8 |
-| host.17 | evicted | drain |  |  |  | refusal host_evicted | concurrency-model ss8 |
-| host.18 | evicted | quarantine |  |  |  | refusal host_evicted | concurrency-model ss8, CM-12 |
-| host.19 | evicted | reinstate |  |  |  | refusal host_evicted | concurrency-model ss8, CM-12 |
-| host.20 | evicted | evict |  |  |  | refusal host_already_evicted | concurrency-model ss8 |
-| host.21 | evicted | force_evict |  |  |  | refusal host_already_evicted | concurrency-model ss8 |
-| host.22 | host | register |  | Re-registration refreshes identity and keeps the state. No tier path posts it: `register_host` on an existing row starts nothing. |  | ignored | concurrency-model ss8, DL-94 |
-
-| Id | Choice | Guard | Action | Target |
-| --- | --- | --- | --- | --- |
-| host.23 | remembered | remembered_passive |  | passive |
-| host.24 | remembered | else |  | active |
-
-| State | In | Entry | Exit | Defers | Waits |
-| --- | --- | --- | --- | --- | --- |
-| host |  |  |  |  |  |
-| routed | host/routing |  |  |  |  |
-| active | routed/routing | writes_state |  |  |  |
-| passive | routed/routing | writes_state |  |  |  |
-| quarantined | host/routing | writes_state |  |  |  |
-| evicted | host/routing | writes_state |  |  |  |
-
-| Name | Kind | Prose |
-| --- | --- | --- |
-| not_evicted | guard | The host is not evicted (ss8: force skips the proof, not the state). At `evicted` host.21 takes the event first (statechart-engine ss3). The guard makes a missing host.21 a gap, not a forced eviction of an evicted host (DL-375). |
-| remembered_passive | guard | Quarantine interrupted `passive`: a drained host that answers again stays drained (DL-97). |
-| writes_state | action | A leaf's entry reports the row's state, the leaf entered. The initial entry reports nothing: `register_host` writes the row before the instance starts. |
-| remembers | action | host.05 reports the state quarantine interrupts, read from the row, which the tier writes only after the dispatch (DL-97). |
-| evicts | action | host.10 reports an eviction on the gate's proof of the bound, attributed to nobody (ss8, DL-151). |
-| evicts_forced | action | host.11 reports an eviction by force, attributed to the actor the event carries: the input's `claimed_actor`, which the gate requires (ss8, DL-151). |
-
 ## admission
 
 Clock: logical.
@@ -730,7 +653,7 @@ stateDiagram-v2
 
 | Id | Source | Event | Guard | Action | Target | Kind | Cite |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| admission.02 | admitted | decide | applied | The decision line, with the outbox entries it implies. | applied | external | concurrency-model ss4 steps 5-7, DL-118 |
+| admission.02 | admitted | decide | applied | The decision line. | applied | external | concurrency-model ss4 steps 5-7, DL-118 |
 | admission.03 | admitted | decide | rejected | The decision line, with its stored code. | rejected | external | concurrency-model ss4, DL-235, DL-272, DL-320 |
 | admission.09 | admitted | input | other | Refuse request_id_reused, with no decision to carry. |  | refusal request_id_reused | concurrency-model ss4 step 2, DL-217 |
 | admission.10 | admitted | input | same | The index raises an EngineError: a second writer is applying inputs, or steps 5-7 yielded. The engine stops. |  | internal | concurrency-model ss4 step 2 |
@@ -745,51 +668,9 @@ stateDiagram-v2
 | Name | Kind | Prose |
 | --- | --- | --- |
 | applied | guard | The decision is `applied`: the gate passed, or a replayed durable decision says applied. |
-| rejected | guard | The decision is `rejected`: a precondition, the stale-completion gate or a host guard rejected the input, the input was quarantined, or a replayed durable decision says rejected. |
+| rejected | guard | The decision is `rejected`: a precondition or the stale-completion gate rejected the input, the input was quarantined, or a replayed durable decision says rejected. |
 | same | guard | The input carries the fingerprint the attempt was admitted under. |
 | other | guard | The input carries another fingerprint than the attempt's. |
-
-## effect
-
-Clock: logical.
-
-```mermaid
-stateDiagram-v2
-    state "effect" as s1
-    state s1 {
-        [*] --> s3
-        state "pending" as s3
-        state "applied" as s0
-        state "retired" as s4
-        state "indeterminate" as s2
-        s0 --> [*]
-        s4 --> [*]
-        s2 --> [*]
-    }
-    s3 --> s0 : effect.02 resolve [applied]
-    s3 --> s4 : effect.03 resolve [retired]
-    s3 --> s2 : effect.04 resolve [indeterminate]
-```
-
-| Id | Source | Event | Guard | Action | Target | Kind | Cite |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| effect.02 | pending | resolve | applied | Dispatched, or resume found the run on the host, or a kill landed, or a replayed effect_result, or a carried execution. | applied | external | concurrency-model ss5, DL-96, period-model ss3.5 |
-| effect.03 | pending | resolve | retired | Superseded at dispatch, or resume finds that the run it would kill has exited. | retired | external | concurrency-model ss5, DL-111, DL-232 |
-| effect.04 | pending | resolve | indeterminate | Resume finds no status and no live wrapper for a kill. An exact retry answers outcome_unavailable. | indeterminate | external | concurrency-model ss5, CM-06, DL-111 |
-
-| State | In | Entry | Exit | Defers | Waits |
-| --- | --- | --- | --- | --- | --- |
-| effect |  |  |  |  |  |
-| pending | effect/outcome |  |  |  |  |
-| applied (final) | effect/outcome |  |  |  |  |
-| retired (final) | effect/outcome |  |  |  |  |
-| indeterminate (final) | effect/outcome |  |  |  |  |
-
-| Name | Kind | Prose |
-| --- | --- | --- |
-| applied | guard | The outcome's state is `applied`. |
-| retired | guard | The outcome's state is `retired`. |
-| indeterminate | guard | The outcome's state is `indeterminate`. |
 
 ## subscription
 

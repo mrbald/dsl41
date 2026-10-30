@@ -26,7 +26,7 @@ A dashed node or edge in the diagrams below is specified only.
 | --- | --- | --- |
 | Compiler: parse, lower, derive, lint, graph, equivalence, decompiler | built | README Status |
 | The decompiler's `--patterns` option | specified only | README What is not built |
-| Engine, scheduler, admission, journal, outbox, control socket, access perimeter | built | [runner-design](runner-design.md) status line and [§14](runner-design.md#14-module-layout-and-phasing) |
+| Engine, scheduler, admission, journal, control socket, access perimeter | built | [runner-design](runner-design.md) status line and [§14](runner-design.md#14-module-layout-and-phasing) |
 | Supervisor and wrapper, the lifecycle tier | built | [runner-design §14](runner-design.md#14-module-layout-and-phasing) |
 | TUI and web TUI | built | [runner-design §11](runner-design.md#11-ui--one-textual-app-terminal-and-web-e3) |
 | Remote relay and shared store for more than one job host | specified only | concurrency-model §7 (`concurrency-model.md`, retired in 2.0.0) |
@@ -86,7 +86,7 @@ flowchart TB
     cmd["command"]
     tui["TUI<br/>dsl41 ui, dsl41 run --ui"]
     web["web TUI<br/>dsl41 serve"]
-    cli["headless clients<br/>dsl41 query, dsl41 sendevent, dsl41 host"]
+    cli["headless clients<br/>dsl41 query, dsl41 sendevent"]
     off["offline tools<br/>dsl41 journal, dsl41 runs"]
     rr[("run root")]
   end
@@ -159,7 +159,6 @@ flowchart TB
   adm["admission<br/>runner_admission.py"]
   orc["oracle core<br/>oracle.py, oracle_state.py"]
   jr["journal<br/>runner_journal.py"]
-  ob["outbox<br/>runner_effects.py"]
   ad["adapters<br/>runner_adapters.py"]
   led["leadership fence<br/>runner_ledger.py"]
   st["startup and resume<br/>runner_startup.py"]
@@ -169,8 +168,7 @@ flowchart TB
   ad -->|"completions"| loop
   loop -->|"admit, gate, apply"| adm
   adm -->|"feed in one batch"| orc
-  loop -->|"attempt, decision, effect outcome"| jr
-  loop -->|"record and dispatch effects"| ob
+  loop -->|"attempt, decision, dispatch"| jr
   loop -->|"launch and cancel runs"| ad
   led -->|"fence before append and dispatch"| loop
   st -->|"genesis, replay, reattach"| loop
@@ -195,9 +193,6 @@ flowchart TB
 - **Journal.** The WAL, one JSONL segment per period (retired in 2.0.0),
   and its replay
   ([runner-design §7](runner-design.md#7-journal-and-recovery-e1-prod-grade)).
-- **Outbox.** The effects the engine has decided and not yet finished
-  ([outbox](glossary.md#outbox);
-  concurrency-model §5 (`concurrency-model.md`, retired in 2.0.0)).
 - **Adapters.** One per job type. The command adapters run the wrapper,
   directly or through the supervisor
   ([runner-design §6](runner-design.md#6-adapters)).
@@ -230,33 +225,29 @@ sequenceDiagram
   participant Adm as admission<br/>runner_admission.py
   participant Jr as journal<br/>runner_journal.py
   participant Orc as oracle<br/>oracle.py
-  participant Ob as outbox<br/>runner_effects.py
   participant Ad as adapter<br/>runner_adapters.py
   participant Wr as wrapper<br/>runner_wrapper.py
   participant Cmd as command
   Op->>Ctl: status read
-  Ctl-->>Op: baseline_id, epoch, state_rev
-  Op->>Ctl: sendevent with request_id, expect, epoch
+  Ctl-->>Op: baseline_id, state_rev
+  Op->>Ctl: sendevent with request_id, expect
   Ctl->>Ctl: line framing, JSON, protocol version
   Ctl->>Acc: decide for the peer's principal
   Acc-->>Ctl: allowed, receipt in perimeter.jsonl
   Ctl->>Ctl: lineage check, event framing, parse_envelope
   Ctl->>Eng: submit event and envelope
-  Eng->>Adm: fingerprint, decision lookup, epoch check
+  Eng->>Adm: fingerprint, decision lookup
   Eng->>Jr: admit the attempt, WAL append and fsync
   Eng->>Adm: apply_attempt
   Adm->>Orc: batch with due timers, gate, feed
   Orc-->>Eng: emitted STATUS STARTING
-  Eng->>Ob: plan_effects, SPAWN with a new run_id
-  Eng->>Jr: decision and effects in one record
-  Eng->>Ob: record the effect
-  Eng-->>Ctl: the decision, through the submit future
-  Eng->>Eng: dispatch, fence check
+  Eng->>Jr: the decision record
+  Eng->>Adm: dispatch_plan, a start
+  Eng->>Jr: the dispatch record, with a new run_id, fence check
   Eng->>Ad: launch the adapter task
-  Eng->>Jr: effect outcome applied
+  Eng-->>Ctl: the decision, through the submit future
   Ctl-->>Op: the answer, with a code if it is ok false
   Ad->>Wr: start the wrapper
-  Ad->>Jr: dispatch record
   Wr->>Cmd: spawn
   Wr->>Wr: write spawn.json
   Cmd-->>Wr: exit code
@@ -270,24 +261,23 @@ sequenceDiagram
 Where the real order differs from a simple list of hops:
 
 - The client reads before it writes. `dsl41 sendevent` reads `status` to
-  learn the baseline, the epoch and the revision for its `expect`, unless
+  learn the baseline and the revision for its `expect`, unless
   the operator gives them
-  ([control-protocol §3](control-protocol.md#3-mutating-verbs-sendevent-host)).
+  ([control-protocol §3](control-protocol.md#3-mutating-verb-sendevent)).
 - The access gate runs before the control server routes the request
   ([access-model §5](access-model.md#5-the-enforcement-point)).
 - Any step can end the request early with an `ok: false` answer. It carries
   a stable [code](glossary.md#code), such as `access_denied` from the gate
-  or `stale_epoch` from admission. The code table is in
+  or `request_id_reused` from admission. The code table is in
   [control-protocol §2](control-protocol.md#2-transport-and-framing-frozen).
 - A rejected decision stores its code in the WAL, so an exact retry answers
   the same code (period-model §2.3 (`period-model.md`, retired in 2.0.0); DL-272).
 - The WAL takes two records per input. The attempt is appended before the
-  oracle sees it. The decision and its planned effects are appended
-  together after the oracle decides. So the outbox entry is durable before
-  any effect runs.
+  oracle sees it. The decision is appended after the oracle decides, and
+  each start it implies then appends a `dispatch` record before its adapter
+  task exists. So the log names every run before it starts.
 - The answer is the decision. It does not wait for the job to start.
-- The engine records the effect as applied when it launches the adapter
-  task. For a SPAWN that fails, see
+- For a SPAWN that fails, see
   [runner-design §3](runner-design.md#3-architecture--functional-core-imperative-shell).
 - The adapter starts the wrapper itself and waits on it.
 - The completion is an input like any other. It takes the same admission

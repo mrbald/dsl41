@@ -39,7 +39,6 @@ from dsl41.runner_admission import (
     quarantine_verdict,
 )
 from dsl41.runner_clock import EngineError, VirtualClock
-from dsl41.runner_hosts import HostCommand
 from dsl41.runner_journal import read_journal, replay_inputs
 from dsl41.runner_startup import resume_run, start_run
 
@@ -130,19 +129,6 @@ def _dump(engine: Engine) -> list[dict[str, Any]]:
 # ------------------------------------------------------- one engine-made kind each
 
 
-def _fault_on_host_quarantine(monkeypatch: pytest.MonkeyPatch) -> None:
-    import dsl41.runner_admission as admission
-
-    real = admission.apply_host_command
-
-    def apply_host_command(store: RuntimeState, cmd: HostCommand, **kwargs: Any) -> None:
-        real(store, cmd, **kwargs)
-        if cmd.verb == "quarantine":
-            raise RuntimeError("an injected fault on host local")
-
-    monkeypatch.setattr(admission, "apply_host_command", apply_host_command)
-
-
 #: kind -> (how to arm its fault, how the reason names the input)
 _KINDS: dict[str, tuple[Callable[[pytest.MonkeyPatch], None], str]] = {
     "tick": (lambda mp: _on_status(mp, "STARTING"), "STARTJOB for job j from scheduler"),
@@ -154,7 +140,6 @@ _KINDS: dict[str, tuple[Callable[[pytest.MonkeyPatch], None], str]] = {
         lambda mp: _on_status(mp, "SUCCESS"),
         "STATUS for job j run 1 from reconcile",
     ),
-    "routing": (_fault_on_host_quarantine, "host quarantine of local from reconcile"),
 }
 
 
@@ -165,7 +150,7 @@ async def _play_kind(kind: str, engine: Engine) -> None:
         engine.inject(_start(), source="scheduler")
     elif kind == "completion":
         engine.inject(_start(), source="control")  # FakeAdapter completes it
-    elif kind == "reconcile":
+    else:
         engine.inject(_start(), source="control")
         await engine.run_until_quiescent(T0)
         engine.inject(
@@ -176,18 +161,15 @@ async def _play_kind(kind: str, engine: Engine) -> None:
             ),
             source="reconcile",
         )
-    else:
-        engine.note_executor_unreachable()
     await engine.run_until_quiescent(LATER)
 
 
 #: kind -> where its quarantined input leaves the entity it would have moved
-_HELD = {"tick": "INACTIVE", "completion": "RUNNING", "reconcile": "RUNNING", "routing": "active"}
+_HELD = {"tick": "INACTIVE", "completion": "RUNNING", "reconcile": "RUNNING"}
 
 
 def _held(kind: str, engine: Engine) -> str:
-    store = engine.oracle.store
-    return store.hosts["local"].state if kind == "routing" else store.job["j"].status
+    return engine.oracle.store.job["j"].status
 
 
 @contextmanager
@@ -199,7 +181,7 @@ def _faulted(kind: str, armed: bool) -> Iterator[None]:
 
 
 def _the_input(kind: str, records: list[dict[str, Any]]) -> dict[str, Any]:
-    rec = {"routing": "host"}.get(kind, "input")
+    rec = "input"
     source = {"tick": "scheduler", "completion": "adapter"}.get(kind, "reconcile")
     found = [r for r in records if r.get("rec") == rec and r.get("source") == source]
     assert len(found) == 1, found
@@ -568,9 +550,7 @@ def test_a_control_input_under_a_time_half_fault_stays_refused_apply_faulted(
         with pytest.MonkeyPatch.context() as mp:
             if armed:
                 _on_status(mp, "TERMINATED")
-            future = engine.submit(
-                _start(LATER), Envelope(request_id="op-1", expect=expect, epoch=engine.epoch)
-            )
+            future = engine.submit(_start(LATER), Envelope(request_id="op-1", expect=expect))
             stopped = False
             try:
                 await engine.run_until_quiescent(LATER)
@@ -703,21 +683,6 @@ def test_the_quarantine_line_is_best_effort(
     report_quarantine(result)
     if not broken:
         assert capsys.readouterr().err == f"{QUARANTINE_LOG_PREFIX}: input 4: why\n"
-
-
-def _fault_on_the_engines_oracle(mp: pytest.MonkeyPatch) -> None:
-    """Every batch of the engine's oracle and its forks raises in its time
-    half. The boundary's classification evaluates seeded oracles of its
-    own, which hold no host row; a fault there would refuse the seal
-    before anything is drained."""
-    real = Oracle._fire_timers_due
-
-    def fire(self: Oracle, at: datetime) -> None:
-        if "local" in self.store.hosts:
-            raise RuntimeError("an injected timer fault")
-        real(self, at)
-
-    mp.setattr(Oracle, "_fire_timers_due", fire)
 
 
 def _fork_only_commit_fault(mp: pytest.MonkeyPatch) -> None:
@@ -860,7 +825,7 @@ def test_the_journal_narrates_a_control_input_that_replay_quarantined(
     async def scenario() -> None:
         engine = _journaled(run_root)
         expect = {"job:j": engine.oracle.store.revision("job:j")}
-        engine.submit(_start(), Envelope(request_id="op-1", expect=expect, epoch=engine.epoch))
+        engine.submit(_start(), Envelope(request_id="op-1", expect=expect))
         try:
             with pytest.raises(RuntimeError, match="only the real apply raised"):
                 await engine.run_until_quiescent(T0)

@@ -35,7 +35,7 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Final, Protocol, TYPE_CHECKING, get_args
+from typing import Any, Final, Protocol, get_args
 
 
 from dsl41 import runner_procid as _procid
@@ -58,9 +58,6 @@ from dsl41.runner_journal import repair_tail
 from dsl41.runner_ledger import Proof
 from dsl41.semantics import FwExistence, fw_existence_immediate
 
-if TYPE_CHECKING:  # annotation only: the Journal object is the engine's, not an adapter's
-    from dsl41.runner_journal import Journal
-
 
 #: the ss6a Tier-0 shim, executed by file path, never -m (see its docstring)
 _WRAPPER_PATH = Path(_wrapper.__file__)
@@ -74,19 +71,18 @@ LINE_LIMIT: int = 2**24
 @dataclass
 class AdapterContext:
     """What an adapter may touch (ss6): the clock, and in the real domain the run-root layout
-    (runs/, logs/) plus the WAL for dispatch records. `run_id` is the identity the
-    decision minted for this spawn (DL-118, PR-36a); the wrapper spec carries it onward, so the
-    WAL, the spool and every later reader name ONE key. It is None on the paths with no effect
-    behind them (FW re-dispatch) and for a SPAWN re-driven from a pre-DL-118
-    journal, where the adapter mints its own."""
+    (runs/, logs/). `run_id` is the identity the engine minted for this start and journaled in
+    its `dispatch` record (DL-118, PR-36a); the wrapper spec carries it onward, so the WAL, the
+    spool and every later reader name ONE key. None lets the adapter mint its own, for a caller
+    with no journal behind it."""
 
     clock: Clock
     run_root: Path | None = None
-    journal: Journal | None = None
     run_id: str | None = None
-    #: period-model ss1.3: the fence lives in the journal writer, and the FW adapter appends to a
-    #: spool the journal never sees. An append after leadership was lost is evidence written by a
-    #: non-leader, so this adapter re-proves before every line (PR-03).
+    #: the run root's lock proof. The journal re-checks it before every append, and the FW
+    #: adapter appends to a spool the journal never sees: an append after the lock was lost is
+    #: evidence written by an engine that has lost the root, so this adapter re-proves before
+    #: every line (PR-03).
     fence: Proof | None = None
 
 
@@ -273,9 +269,9 @@ def _build_run_spec(
     stdout_path, stderr_path = job_log_paths(job_ir, run_number, ctx.run_root)
     spec = {
         "version": SPOOL_VERSION,
-        # the decision's mint when there is one (PR-36a); the local fallback covers only the
-        # effect-less and pre-DL-118 paths (AdapterContext). `is None`, not falsy: an empty-string
-        # id, which the journal gates refuse, must fail loudly downstream
+        # the engine's mint when there is one (PR-36a); the local fallback covers only a caller
+        # with no journal (AdapterContext). `is None`, not falsy: an empty-string id, which the
+        # journal gates refuse, must fail loudly downstream
         "run_id": ctx.run_id if ctx.run_id is not None else str(uuid.uuid4()),
         "job": job_ir.name,
         "run_number": run_number,
@@ -342,14 +338,6 @@ class LocalCommandAdapter:
                 await self._stop_unlaunched(proc)
                 raise
             try:
-                if ctx.journal is not None:
-                    ctx.journal.dispatch(
-                        job_ir.name,
-                        run_number,
-                        wrapper_pid=proc.pid,
-                        run_dir=str(run_dir),
-                        started_at=ctx.clock.now(),
-                    )
                 await proc.wait()
             except asyncio.CancelledError:
                 await self._kill(run_dir, proc, str(spec["run_id"]))
@@ -824,7 +812,7 @@ async def resolve_spool(
     """Resolve one incomplete CMD run from its spool directory, walking the ss7 ladder top to
     bottom. Returns (outcome, true ended_at if known).
 
-    `expected_run_id` is the identity the durable effect bound (DL-118): a spool record naming a
+    `expected_run_id` is the identity the run's `dispatch` record bound (DL-118): a spool record naming a
     DIFFERENT run_id refuses loudly before its fate is consumed. It raises, where the (job,
     run_number) spoof below is dropped, because dropping would read the stranger's presence as
     this run's absence and fabricate "dispatch lost". None means no bound identity exists to check
@@ -844,7 +832,7 @@ async def resolve_spool(
         ):
             raise EngineError(
                 f"{job}.{run_number}: the spool's {name} reports run_id"
-                f" {doc.get('run_id')!r} but the durable effect bound"
+                f" {doc.get('run_id')!r} but the dispatch record bound"
                 f" {expected_run_id!r} -- refusing to consume a stranger's fate"
                 " (DL-118)"
             )

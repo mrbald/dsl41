@@ -224,11 +224,9 @@ def test_a_client_that_vanishes_before_its_answer_costs_the_engine_nothing(
 # ------------------------------------------- ss3 framing refusals, per verb
 
 
-def test_a_payload_that_is_not_an_object_is_refused_for_job_and_host_verbs(
-    short_root: Path,
-) -> None:
-    """ss3: the payload is an object, whichever verb set names it. Nothing
-    is admitted: the journal is byte-identical after both refusals."""
+def test_a_payload_that_is_not_an_object_is_refused(short_root: Path) -> None:
+    """ss3: the payload is an object. Nothing is admitted: the journal is
+    byte-identical after the refusal."""
 
     async def scenario() -> None:
         engine, server, loop_task = await _serve(short_root / "run", _ONE_JOB)
@@ -246,78 +244,7 @@ def test_a_payload_that_is_not_an_object_is_refused_for_job_and_host_verbs(
                 "refused": True,
                 "error": "payload must be an object, got []",
             }
-            host = _body(
-                await _control_call(
-                    server.path, {"cmd": "host", "verb": "drain", "payload": "local"}
-                ),
-                engine,
-            )
-            assert host == {
-                "ok": False,
-                "code": "invalid_argument",
-                "refused": True,
-                "error": "payload must be an object, got 'local'",
-            }
             assert engine.journal.path.read_bytes() == before
-        finally:
-            await _teardown(engine, server, loop_task)
-
-    asyncio.run(scenario())
-
-
-def test_a_host_id_with_an_unpaired_surrogate_is_refused_at_the_door(
-    short_root: Path,
-) -> None:
-    """PR-10a, on the host verbs: a lone surrogate is a legal JSON escape
-    and canonicalization raises on one, so the door refuses it and nothing
-    is written. The same request with an ordinary non-ASCII id passes this
-    check and meets the envelope instead."""
-
-    async def scenario() -> None:
-        engine, server, loop_task = await _serve(short_root / "run", _ONE_JOB)
-        try:
-            before = engine.journal.path.read_bytes()
-            lone = _body(
-                await _control_call(
-                    server.path, {"cmd": "host", "verb": "drain", "payload": {"id": "\ud800"}}
-                ),
-                engine,
-            )
-            assert lone == {
-                "ok": False,
-                "code": "invalid_argument",
-                "refused": True,
-                "error": "host id carries an unpaired surrogate",
-            }
-            plain = await _control_call(
-                server.path, {"cmd": "host", "verb": "drain", "payload": {"id": "hé"}}
-            )
-            assert plain["ok"] is False and "surrogate" not in plain["error"]
-            assert engine.journal.path.read_bytes() == before
-        finally:
-            await _teardown(engine, server, loop_task)
-
-    asyncio.run(scenario())
-
-
-def test_hosts_ids_are_a_list_of_strings_or_absent(short_root: Path) -> None:
-    """ss4 `hosts [ids]`: `ids` is a list of host id strings. Anything else
-    is refused; an empty list is a list and answers an empty table."""
-
-    async def scenario() -> None:
-        engine, server, loop_task = await _serve(short_root / "run", _ONE_JOB)
-        try:
-            for bad in (["local", 7], "local", {"local": 1}):
-                refused = _body(
-                    await _control_call(server.path, {"cmd": "hosts", "ids": bad}), engine
-                )
-                assert refused == {
-                    "ok": False,
-                    "code": "invalid_argument",
-                    "error": "ids must be a list of host id strings",
-                }
-            empty = _body(await _control_call(server.path, {"cmd": "hosts", "ids": []}), engine)
-            assert empty["ok"] is True and empty["hosts"] == {}
         finally:
             await _teardown(engine, server, loop_task)
 
@@ -817,3 +744,37 @@ def test_the_blocking_stream_yields_a_line_that_only_mentions_ok_unless_it_is_a_
     finally:
         server.close()
     assert got[1:] == [line.decode().rstrip("\n") for line in lines]
+
+
+def test_a_command_the_dry_apply_refuses_is_answered_refused_with_its_code(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """concurrency-model ss4: a control input whose apply raises on a fork is refused before it
+    is logged, and the socket answers that refusal with its code and the refused marker; the
+    journal is byte-identical."""
+    from dsl41.oracle_state import OracleError, RuntimeState
+
+    real = RuntimeState.set_global
+
+    def set_global(self: RuntimeState, name: str, value: str) -> None:
+        if value == "go":
+            raise OracleError("an injected fault on FLAG=go")
+        real(self, name, value)
+
+    monkeypatch.setattr(RuntimeState, "set_global", set_global)
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", _ONE_JOB)
+        try:
+            assert engine.journal is not None
+            before = engine.journal.path.read_bytes()
+            answer = _body(
+                await _sendevent(server.path, "SET_GLOBAL", name="FLAG", value="go"), engine
+            )
+            assert answer["ok"] is False and answer["refused"] is True
+            assert answer["code"] == "apply_faulted"
+            assert engine.journal.path.read_bytes() == before
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())

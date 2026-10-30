@@ -112,28 +112,28 @@ async def _control_call(sock_path: Path, request: dict) -> dict:
             await writer.wait_closed()
 
 
-async def _read_revision(sock_path: Path, key: str) -> tuple[str, int, int]:
+async def _read_revision(sock_path: Path, key: str) -> tuple[str, int]:
     """The read half of a read-then-write: the ss6 header this log answers
     with, and the revision the addressed entity is at right now. The rule for
     WHICH query answers a key, and where the revision sits in its answer,
     comes from runner_control -- the tests are a third client of it, not a
     third place that knows it (DL-91)."""
     read = await _control_call(sock_path, read_for(key))
-    return str(read.get("baseline_id") or ""), int(read.get("epoch") or 0), revision_in(read, key)
+    return str(read.get("baseline_id") or ""), revision_in(read, key)
 
 
 def _body(response: dict, engine: Engine) -> dict:
     """Split the ss6 read header off an answer, checking it on the way.
 
-    Every answer publishes `baseline_id`, `epoch` and `applied_index` -- so a
+    Every answer publishes `baseline_id` and `applied_index` -- so a
     whole-response assertion that spelled them out would repeat the same
-    three lines in every test that pins a shape. This says it once, for all
+    two lines in every test that pins a shape. This says it once, for all
     of them, and the tests below keep asserting exact shapes rather than
     softening to subset checks."""
-    header = {key: response.pop(key, None) for key in ("baseline_id", "epoch", "applied_index")}
+    assert "epoch" not in response
+    header = {key: response.pop(key, None) for key in ("baseline_id", "applied_index")}
     assert header == {
         "baseline_id": engine.baseline_id,
-        "epoch": engine.epoch,
         "applied_index": engine.frontiers.applied_index,
     }
     return response
@@ -151,7 +151,6 @@ def _sync_sendevent(sock_path: Path, verb: str, **payload: object) -> dict:
             key=key,
             revision=revision_in(read, key),
             baseline_id=str(read.get("baseline_id") or ""),
-            epoch=int(read.get("epoch") or 0),
         ),
     )
 
@@ -164,7 +163,7 @@ async def _sendevent(
     is what a test of a LOST race needs -- an auto-read can only ever agree
     with itself."""
     key = addressed_key(verb, payload)
-    baseline, epoch, current = await _read_revision(sock_path, key)
+    baseline, current = await _read_revision(sock_path, key)
     return await _control_call(
         sock_path,
         command(
@@ -173,7 +172,6 @@ async def _sendevent(
             key=key,
             revision=current if expect is None else expect,
             baseline_id=baseline,
-            epoch=epoch,
             claimed_actor="tests@localhost",
         ),
     )
@@ -339,33 +337,6 @@ def test_non_string_job_verb_is_refused_as_unknown_verb_wal_unchanged(short_root
             assert resp["refused"] is True
             assert resp["code"] == "unknown_verb"
             assert "unknown verb" in resp["error"]
-            assert engine.journal.path.read_bytes() == before
-        finally:
-            await _teardown(engine, server, loop_task)
-
-    asyncio.run(scenario())
-
-
-def test_non_string_host_verb_is_refused_as_unknown_host_verb_wal_unchanged(
-    short_root: Path,
-) -> None:
-    # DL-228: the host path's `verb not in HOST_VERBS` check needs the same
-    # isinstance guard as the job path.
-    text = "insert_job: hv_job\njob_type: c\ncommand: x\nmachine: m1\n"
-    run_root = short_root / "run"
-
-    async def scenario() -> None:
-        engine, server, loop_task = await _serve(run_root, text)
-        try:
-            before = engine.journal.path.read_bytes()
-            resp = await _control_call(
-                server.path,
-                {"cmd": "host", "verb": {}, "payload": {"id": "local"}},
-            )
-            assert resp["ok"] is False
-            assert resp["refused"] is True
-            assert resp["code"] == "unknown_verb"
-            assert "unknown host verb" in resp["error"]
             assert engine.journal.path.read_bytes() == before
         finally:
             await _teardown(engine, server, loop_task)
@@ -552,7 +523,6 @@ def test_sendevent_disarm_roundtrip_expect_gated_and_journaled(short_root: Path)
                 key=key,
                 revision=0,
                 baseline_id=status["baseline_id"],
-                epoch=int(status["epoch"]),
             )
             del bare["expect"]
             refused = await _control_call(server.path, bare)

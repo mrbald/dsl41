@@ -75,7 +75,7 @@ They prove the client cursor rules; they do not run a live seal.
 | `m`, `[]`, `{}`, terminal/viewport resize | `test_pilot_pane_geometry_maximize_toggle_and_share_nudges`; actual size changes in both display lanes |
 | Log follow, scroll, `/`/`?`, `n/N`, `&`, `F`, `o` | Pager motion/search/filter/follow tests, `test_pilot_log_tail_shows_appended_bytes_for_the_selected_job`, log fault tests |
 | Refused queries, disconnect, reconnect | Query fault tests; `test_pilot_reconnect_keeps_the_last_table_and_never_replays_a_mutation` uses socket close/rebind |
-| Period change, mixed read headers, same-period epoch change | `test_dl210_u1_u4_trace_baseline_change_restarts_a_longer_trace_next_poll`, `test_dl210_u3_mixed_read_baselines_return_without_updating_the_table`, `test_dl210_u5_reconnect_same_baseline_keeps_cursor_across_a_new_epoch`; both display lanes also observe a real live seal and resume |
+| Period change, mixed read headers, same-period epoch change | `test_dl210_u1_u4_trace_baseline_change_restarts_a_longer_trace_next_poll`, `test_dl210_u3_mixed_read_baselines_return_without_updating_the_table`, `test_dl210_u5_reconnect_same_baseline_keeps_cursor_across_a_resume`; both display lanes also observe a real live seal and resume |
 | `q`/Ctrl+Q stop versus detach | `test_pilot_quit_confirms_when_the_app_owns_the_run`, `test_pilot_quit_detaches_at_once_when_it_does_not_own_the_run`; real detached viewers exit without stopping their engine |
 
 The PTY lane uses a child terminal process.

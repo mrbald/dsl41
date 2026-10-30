@@ -4,7 +4,7 @@ Run it after a chart changes:
 
     uv run python scripts/render_job_lifecycle.py                      # writes both files
     uv run python scripts/render_job_lifecycle.py --full               # job, with folded rows
-    uv run python scripts/render_job_lifecycle.py --chart host --full  # one chart, the same
+    uv run python scripts/render_job_lifecycle.py --chart admission --full  # one chart, the same
 
 `tests/test_job_lifecycle_doc.py` fails when a committed file and the rendering differ.
 

@@ -103,16 +103,16 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-90 | preconditions become mandatory, and the wire breaks once | [docs/access-model.md](access-model.md), [docs/blocks/admission.md](blocks/admission.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md) |
 | DL-91 | architecture review | [docs/ir-design.md](ir-design.md) |
 | DL-92 | the operator gets the vocabulary S3 built |  |
-| DL-93 | how S5 is built, and where host state lives | [docs/blocks/host-routing.md](blocks/host-routing.md), [docs/citation-index.md](citation-index.md), [docs/control-protocol.md](control-protocol.md), [docs/ir-design.md](ir-design.md) |
-| DL-94 | the routing table lands: four states, three operator verbs, and a drain that holds work instead of losing it | [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md), [docs/state-machines.md](state-machines.md) |
+| DL-93 | how S5 is built, and where host state lives | [docs/citation-index.md](citation-index.md), [docs/ir-design.md](ir-design.md) |
+| DL-94 | the routing table lands: four states, three operator verbs, and a drain that holds work instead of losing it | [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md) |
 | DL-95 | the deadman: one interval, one exit, and the two producers the eviction bound was missing |  |
-| DL-96 | the effect outbox: intent before the attempt, and the orphaned run that proves why | [docs/blocks/effect-outbox.md](blocks/effect-outbox.md), [docs/runner-design.md](runner-design.md), [docs/state-machines.md](state-machines.md) |
-| DL-97 | quarantine gets a producer; the relay does not get built, and why | [docs/blocks/effect-outbox.md](blocks/effect-outbox.md), [docs/blocks/host-routing.md](blocks/host-routing.md), [docs/state-machines.md](state-machines.md) |
+| DL-96 | the effect outbox: intent before the attempt, and the orphaned run that proves why | [docs/runner-design.md](runner-design.md) |
+| DL-97 | quarantine gets a producer; the relay does not get built, and why |  |
 | DL-98 | architecture review after S5 |  |
-| DL-99 | how S6 is built, and where the leader record lives | [docs/citation-index.md](citation-index.md), [docs/control-protocol.md](control-protocol.md) |
-| DL-100 | election: the lock, the epoch, and the act that used to happen before both | [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md) |
-| DL-101 | the fence: every append re-proves leadership |  |
-| DL-102 | the takeover barrier, and the start that gets re-driven rather than failed | [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/effect-outbox.md](blocks/effect-outbox.md), [docs/runner-design.md](runner-design.md) |
+| DL-99 | how S6 is built, and where the leader record lives | [docs/blocks/policies.md](blocks/policies.md), [docs/citation-index.md](citation-index.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md) |
+| DL-100 | election: the lock, the epoch, and the act that used to happen before both | [docs/control-protocol.md](control-protocol.md) |
+| DL-101 | the fence: every append re-proves leadership | [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/policies.md](blocks/policies.md) |
+| DL-102 | the takeover barrier, and the start that gets re-driven rather than failed | [docs/blocks/admission.md](blocks/admission.md), [docs/runner-design.md](runner-design.md) |
 | DL-103 | S6 closes, and the relay's trigger did not fire |  |
 | DL-104 | architecture review after S6 |  |
 | DL-105 | branch coverage over the concurrency tier, and what asking for it found | [docs/risk-map.md](risk-map.md) |
@@ -121,14 +121,14 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-108 | the seeded sweep, and the model that was wrong about the engine | [docs/citation-index.md](citation-index.md) |
 | DL-109 | the matrix moves onto the proving ground | [docs/citation-index.md](citation-index.md) |
 | DL-110 | a doc that cites a test is held to it |  |
-| DL-111 | the spec gets worked examples, and the examples find five things the text was wrong about | [README.md](../README.md), [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/effect-outbox.md](blocks/effect-outbox.md), [docs/state-machines.md](state-machines.md) |
+| DL-111 | the spec gets worked examples, and the examples find five things the text was wrong about | [README.md](../README.md), [docs/blocks/admission.md](blocks/admission.md) |
 | DL-112 | the layers that were only ever tested by an interpreter meet two processes | [docs/citation-index.md](citation-index.md) |
 | DL-113 | run history: a projection, not a new record kind | [docs/citation-index.md](citation-index.md), [docs/runner-design.md](runner-design.md) |
 | DL-114 | the period model is frozen | [docs/citation-index.md](citation-index.md) |
 | DL-115 | the directory is not the baseline |  |
 | DL-116 | the lineage fence |  |
 | DL-117 | `baseline_id` is the period's, and derived | [docs/control-protocol.md](control-protocol.md) |
-| DL-118 | the atomic `decision` record and control-protocol v3 | [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/effect-outbox.md](blocks/effect-outbox.md), [docs/blocks/fw-observation.md](blocks/fw-observation.md), [docs/blocks/subscription.md](blocks/subscription.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md), [docs/state-machines.md](state-machines.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
+| DL-118 | the atomic `decision` record and control-protocol v3 | [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/fw-observation.md](blocks/fw-observation.md), [docs/blocks/subscription.md](blocks/subscription.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md), [docs/state-machines.md](state-machines.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
 | DL-119 | the seal artifact and the canonical form |  |
 | DL-120 | capacity decomposed | [docs/blocks/capacity.md](blocks/capacity.md), [docs/state-machines.md](state-machines.md) |
 | DL-121 | `run_id` is minted in the effect; SPAWN idempotency is durable; FW has a spool |  |
@@ -161,7 +161,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-148 | the second conformance round: forty-two findings held over ten passes, four frozen docs amended, the headerless answers enumerated | [docs/access-model.md](access-model.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md) |
 | DL-149 | the DL-148 code follow-ups land and the loader's escape class closes whole | [docs/access-model.md](access-model.md) |
 | DL-150 | the conformance round over the whole spec set: what eighteen sweeps found, what the code still owes, and what was deliberately left open | [docs/access-model.md](access-model.md), [docs/control-protocol.md](control-protocol.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
-| DL-151 | the DL-150 code ledger is paid: what the fixes closed, what verification refuted, and what stays owed with its blocking question | [docs/access-model.md](access-model.md), [docs/blocks/host-routing.md](blocks/host-routing.md), [docs/citation-index.md](citation-index.md), [docs/control-protocol.md](control-protocol.md), [docs/ir-design.md](ir-design.md), [docs/jil-statement-syntax.md](jil-statement-syntax.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md), [docs/state-machines.md](state-machines.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
+| DL-151 | the DL-150 code ledger is paid: what the fixes closed, what verification refuted, and what stays owed with its blocking question | [docs/access-model.md](access-model.md), [docs/citation-index.md](citation-index.md), [docs/control-protocol.md](control-protocol.md), [docs/ir-design.md](ir-design.md), [docs/jil-statement-syntax.md](jil-statement-syntax.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
 | DL-152 | the review after the perimeter: what the access work and two conformance rounds left behind | [docs/access-model.md](access-model.md) |
 | DL-153 | f()/d() joins the latch discipline: every M04/M05 edge is A-class and the same-cycle detector picks the assumption, never the class |  |
 | DL-154 | the run_window skip inside a live box is a bypass: the member goes INACTIVE, casts no vote, and the box runs the completion door | [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/box-execution.md](blocks/box-execution.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/state-machines.md](state-machines.md) |
@@ -243,9 +243,9 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-229 | supervisor-protocol reconciliation: nine items ruled | [docs/blocks/wrapper.md](blocks/wrapper.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
 | DL-230 | The documentation audit lands: ops-model.md is folded and deleted, agent-harness-review.md is deleted | [README.md](../README.md), [docs/architecture.md](architecture.md), [docs/citation-index.md](citation-index.md), [docs/runner-design.md](runner-design.md) |
 | DL-231 | access-model.md is frozen | [docs/access-model.md](access-model.md) |
-| DL-232 | concurrency-model reconciliation: a strictly earlier timer goes before a later command, one KILL per run per batch, and a held SPAWN applies only to a job still... | [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/effect-outbox.md](blocks/effect-outbox.md), [docs/blocks/engine-loop.md](blocks/engine-loop.md), [docs/state-machines.md](state-machines.md) |
+| DL-232 | concurrency-model reconciliation: a strictly earlier timer goes before a later command, one KILL per run per batch, and a held SPAWN applies only to a job still... | [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/engine-loop.md](blocks/engine-loop.md), [docs/runner-design.md](runner-design.md) |
 | DL-233 | The DISARM audit distinction is the trace reason, not the revisions map | [docs/control-protocol.md](control-protocol.md) |
-| DL-234 | Supersession is decided before the routing hold, and a run has its one identity from the instant its SPAWN is planned | [docs/blocks/effect-outbox.md](blocks/effect-outbox.md), [docs/blocks/engine-loop.md](blocks/engine-loop.md), [docs/glossary.md](glossary.md) |
+| DL-234 | Supersession is decided before the routing hold, and a run has its one identity from the instant its SPAWN is planned | [docs/blocks/engine-loop.md](blocks/engine-loop.md), [docs/glossary.md](glossary.md) |
 | DL-235 | CHANGE_STATUS INACTIVE on a launched run: no KILL, the stale-completion gate rejects a completion whose row is not STARTING or RUNNING, and the state-machine... | [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/box-execution.md](blocks/box-execution.md), [docs/blocks/job-lifecycle.md](blocks/job-lifecycle.md), [docs/runner-design.md](runner-design.md), [docs/state-machines.md](state-machines.md), [docs/statechart-engine.md](statechart-engine.md) |
 | DL-236 | The workflow examples get an opt-in integration lane at the operator's interfaces | [docs/agent-workflow.md](agent-workflow.md) |
 | DL-237 | Joint review of the workflow examples: what was fixed and what stands | [README.md](../README.md) |
@@ -283,9 +283,9 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-269 | The branch gate covers the state-machine modules | [README.md](../README.md), [docs/risk-map.md](risk-map.md) |
 | DL-270 | The release note answers the upgrade rows, and the integration's corrections | [docs/risk-map.md](risk-map.md) |
 | DL-271 | The drill's steps run unprivileged with sudo, locally as on the runner | [docs/risk-map.md](risk-map.md) |
-| DL-272 | Every `ok: false` control answer carries a stable `code`, and a rejected decision stores it | [docs/access-model.md](access-model.md), [docs/architecture.md](architecture.md), [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/host-routing.md](blocks/host-routing.md), [docs/control-protocol.md](control-protocol.md), [docs/gateway.md](gateway.md), [docs/glossary.md](glossary.md), [docs/risk-map.md](risk-map.md), [docs/runner-design.md](runner-design.md), [docs/state-machines.md](state-machines.md) |
+| DL-272 | Every `ok: false` control answer carries a stable `code`, and a rejected decision stores it | [docs/access-model.md](access-model.md), [docs/architecture.md](architecture.md), [docs/blocks/admission.md](blocks/admission.md), [docs/control-protocol.md](control-protocol.md), [docs/gateway.md](gateway.md), [docs/glossary.md](glossary.md), [docs/risk-map.md](risk-map.md), [docs/runner-design.md](runner-design.md), [docs/state-machines.md](state-machines.md) |
 | DL-273 | An HTTP and WebSocket gateway is specified as proposed | [docs/architecture.md](architecture.md), [docs/glossary.md](glossary.md), [docs/risk-map.md](risk-map.md) |
-| DL-274 | A seal fail-stops on an attempt it has not fully applied, a failed WAL append, or an engine-made input it cannot admit | [docs/architecture.md](architecture.md), [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/effect-outbox.md](blocks/effect-outbox.md), [docs/blocks/engine-loop.md](blocks/engine-loop.md), [docs/blocks/fw-observation.md](blocks/fw-observation.md), [docs/blocks/scheduler.md](blocks/scheduler.md), [docs/control-protocol.md](control-protocol.md), [docs/glossary.md](glossary.md), [docs/risk-map.md](risk-map.md) |
+| DL-274 | A seal fail-stops on an attempt it has not fully applied, a failed WAL append, or an engine-made input it cannot admit | [docs/architecture.md](architecture.md), [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/fw-observation.md](blocks/fw-observation.md), [docs/blocks/scheduler.md](blocks/scheduler.md), [docs/control-protocol.md](control-protocol.md), [docs/glossary.md](glossary.md), [docs/risk-map.md](risk-map.md) |
 | DL-275 | Signal handlers are armed before a socket is published | [docs/access-model.md](access-model.md), [docs/architecture.md](architecture.md), [docs/risk-map.md](risk-map.md) |
 | DL-276 | A generated index of the decision log | [README.md](../README.md) |
 | DL-277 | The architecture gate checks that cited modules exist and that the README's source map is complete |  |
@@ -295,18 +295,18 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-281 | The ON_ICE atom row is one helper, and lint reads an ON_NOEXEC predecessor through its bypass | [docs/autosys-semantics.md](autosys-semantics.md), [docs/ir-design.md](ir-design.md) |
 | DL-282 | Architecture review of 2026-10-05: what was acted on and what was declined |  |
 | DL-283 | The architecture baseline is re-armed after the review of 2026-10-05 |  |
-| DL-284 | Runner contracts and comments match the code; two entries are narrowed | [docs/blocks/effect-outbox.md](blocks/effect-outbox.md), [docs/blocks/engine-loop.md](blocks/engine-loop.md) |
+| DL-284 | Runner contracts and comments match the code; two entries are narrowed | [docs/blocks/engine-loop.md](blocks/engine-loop.md) |
 | DL-285 | An ON_ICE on a member that has not run re-runs its RUNNING box's completion check | [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/box-execution.md](blocks/box-execution.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/simulation-coverage.md](simulation-coverage.md), [docs/state-machines.md](state-machines.md) |
 | DL-286 | A circular wait over held units is a stated limit | [docs/blocks/capacity.md](blocks/capacity.md), [docs/risk-map.md](risk-map.md) |
 | DL-287 | Preflight refuses FREE=Y and FREE=A on a depletable resource | [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/capacity.md](blocks/capacity.md), [docs/citation-index.md](citation-index.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
 | DL-288 | The UC backend and Q12 are descoped until further notice | [docs/authoring.md](authoring.md), [docs/autosys-semantics.md](autosys-semantics.md), [docs/citation-index.md](citation-index.md), [docs/ir-design.md](ir-design.md), [docs/live-instance-runbook.md](live-instance-runbook.md) |
 | DL-289 | Runner state machines get transition tables, and a gate requires every transition to be taken by a test | [docs/citation-index.md](citation-index.md), [docs/risk-map.md](risk-map.md), [docs/runner-design.md](runner-design.md), [docs/statechart-engine.md](statechart-engine.md) |
 | DL-290 | The anchor head and the period row are state machines, and an undeclared move refuses the boundary operation before any write | [docs/risk-map.md](risk-map.md) |
-| DL-291 | The supervisor tier is three state machines, and lease renewal never stops while the client is open | [docs/blocks/host-routing.md](blocks/host-routing.md), [docs/risk-map.md](risk-map.md), [docs/state-machines.md](state-machines.md) |
+| DL-291 | The supervisor tier is three state machines, and lease renewal never stops while the client is open | [docs/risk-map.md](risk-map.md) |
 | DL-292 | A control input is dry-applied before it is admitted, a transition violation has one channel and one policy, and a replayed fault names its input | [docs/control-protocol.md](control-protocol.md), [docs/risk-map.md](risk-map.md), [docs/statechart-engine.md](statechart-engine.md) |
 | DL-293 | The oracle's job lifecycle, flags, holding and assembly are state machines, and every ignored event is a declared internal transition | [docs/risk-map.md](risk-map.md), [docs/state-machines.md](state-machines.md), [docs/statechart-engine.md](statechart-engine.md) |
 | DL-294 | The supervisor, the wrapper and process identity join the 100% branch gate | [docs/blocks/wrapper.md](blocks/wrapper.md), [docs/risk-map.md](risk-map.md) |
-| DL-295 | The engine tier is five state machines, the outbox refuses a second outcome, and a second seal request is refused while a boundary is in flight | [docs/blocks/effect-outbox.md](blocks/effect-outbox.md), [docs/blocks/host-routing.md](blocks/host-routing.md), [docs/control-protocol.md](control-protocol.md), [docs/risk-map.md](risk-map.md) |
+| DL-295 | The engine tier is five state machines, the outbox refuses a second outcome, and a second seal request is refused while a boundary is in flight | [docs/control-protocol.md](control-protocol.md), [docs/risk-map.md](risk-map.md) |
 | DL-296 | Every state machine has an exhaustive event-by-state test | [docs/risk-map.md](risk-map.md), [docs/statechart-engine.md](statechart-engine.md) |
 | DL-297 | The `engine:` request-id prefix is reserved, and the integration's contract corrections | [docs/control-protocol.md](control-protocol.md), [docs/risk-map.md](risk-map.md) |
 | DL-298 | Seven more modules join the 100% branch gate | [docs/blocks/job-lifecycle.md](blocks/job-lifecycle.md), [docs/blocks/scheduler.md](blocks/scheduler.md), [docs/risk-map.md](risk-map.md) |
@@ -326,7 +326,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-312 | period-model: the anchor's local-filesystem check and the seal's quiesce wait, stated as the code does them |  |
 | DL-313 | At resume a held file-watcher start stays held, and a pending start counts only for its own run |  |
 | DL-314 | Small runner fixes from the spec reviews: the wrapper spec is written whole, an oversized grace is bad_spec, and the perimeter journal's name is made durable | [docs/access-model.md](access-model.md) |
-| DL-315 | At resume a recovered start is committed, and a start whose SPAWN was retired stays as the live engine left it | [docs/blocks/effect-outbox.md](blocks/effect-outbox.md), [docs/runner-design.md](runner-design.md) |
+| DL-315 | At resume a recovered start is committed, and a start whose SPAWN was retired stays as the live engine left it | [docs/runner-design.md](runner-design.md) |
 | DL-316 | Lint L023: a schedule time that a DST change moves, drops, repeats or merges |  |
 | DL-317 | The tested size: a 200-job estate on a virtual and a real clock, what it costs, and the limits that follow |  |
 | DL-318 | A DST and midnight drill runs the real runner on a fast fake clock, and L023 names every opening of a window with its day and pass | [docs/ir-design.md](ir-design.md) |
@@ -344,13 +344,13 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-330 | The supervisor client runs on the statechart executor; a statechart error on its path stops the engine with exit 7 | [docs/statechart-engine.md](statechart-engine.md) |
 | DL-331 | The effect runs on the statechart executor: one instance per open effect, forgotten at its outcome | [docs/statechart-engine.md](statechart-engine.md) |
 | DL-332 | The statechart executor plans each external row once per chart |  |
-| DL-333 | The host routing row runs on the statechart executor: the state owner has its own executor, rebuilt from its rows | [docs/blocks/host-routing.md](blocks/host-routing.md), [docs/statechart-engine.md](statechart-engine.md) |
+| DL-333 | The host routing row runs on the statechart executor: the state owner has its own executor, rebuilt from its rows | [docs/statechart-engine.md](statechart-engine.md) |
 | DL-334 | The admission of one request id runs on the statechart executor: the instance is the in-flight window, from the attempt line to the decision | [docs/blocks/admission.md](blocks/admission.md), [docs/statechart-engine.md](statechart-engine.md) |
 | DL-335 | The state owner's assembly runs on the statechart executor; the executor gains a selection read | [docs/blocks/job-lifecycle.md](blocks/job-lifecycle.md), [docs/statechart-engine.md](statechart-engine.md) |
 | DL-336 | The anchor's head and period rows run on the statechart executor: a durable file no process owns gets its executor per move | [docs/statechart-engine.md](statechart-engine.md) |
 | DL-337 | The composite job statechart, declared and checked against the three job tables, not yet driven | [docs/blocks/job-lifecycle.md](blocks/job-lifecycle.md), [docs/citation-index.md](citation-index.md), [docs/statechart-engine.md](statechart-engine.md) |
 | DL-338 | The oracle's old-versus-new harness: a lockstep driver, generated estates and the switch matrix, proven on the oracle against itself | [docs/statechart-engine.md](statechart-engine.md) |
-| DL-339 | The statechart executor forks: a copy that shares immutable instance records until a dispatch writes one | [docs/blocks/host-routing.md](blocks/host-routing.md), [docs/statechart-engine.md](statechart-engine.md) |
+| DL-339 | The statechart executor forks: a copy that shares immutable instance records until a dispatch writes one | [docs/statechart-engine.md](statechart-engine.md) |
 | DL-340 | Oracle defects the job chart's declaration exposed: the member of a box restarted by its own completion, and the carried rescan timer of a job the catalog no... | [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/capacity.md](blocks/capacity.md), [docs/state-machines.md](state-machines.md), [docs/statechart-engine.md](statechart-engine.md) |
 | DL-341 | The second oracle begins: a chart oracle beside the old one, with one job instance per row on the state owner's executor, and the STATUS family decided by the... | [docs/blocks/job-lifecycle.md](blocks/job-lifecycle.md), [docs/statechart-engine.md](statechart-engine.md) |
 | DL-342 | The start family is decided by the job chart: every attempt to start a job is one `start` on the job's instance, with lazy payload facts, the per-job start... | [docs/blocks/job-lifecycle.md](blocks/job-lifecycle.md), [docs/statechart-engine.md](statechart-engine.md) |
@@ -385,8 +385,8 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-372 | The queue's scan is one declared coordinator: the `queue_scan` chart, one instance per oracle on the jobs' executor, whose states wait for each readmission's... | [docs/state-machines.md](state-machines.md), [docs/statechart-engine.md](statechart-engine.md) |
 | DL-373 | A rule of `runtime_assembly` is written once at the source the hierarchy gives it: the phases group as `unbuilt`, `open` and `built`, a rule every member of a... |  |
 | DL-374 | A rule of `supervisor_client` is written once at the source the hierarchy gives it: `alive` holds every state but `closed` and `down` the two with no live... |  |
-| DL-375 | A rule of `host` is written once at the source the hierarchy gives it, and the gate reads the chart with the engine's selection read: host.08 and host.09 are... | [docs/state-machines.md](state-machines.md) |
-| DL-376 | Every write of `host` is an intent the chart reports: each leaf's entry action reports the state write, the moving rows' actions report the row's other writes,... | [docs/blocks/host-routing.md](blocks/host-routing.md), [docs/statechart-engine.md](statechart-engine.md) |
+| DL-375 | A rule of `host` is written once at the source the hierarchy gives it, and the gate reads the chart with the engine's selection read: host.08 and host.09 are... |  |
+| DL-376 | Every write of `host` is an intent the chart reports: each leaf's entry action reports the state write, the moving rows' actions report the row's other writes,... |  |
 | DL-377 | The seal boundary's exit is its final state's entry action: `sealed`, `aborted` and `stopped` each report the one `SealExit` of their state, and `stopped` notes... |  |
 | DL-378 | Teardown's ownership is the chart's: a teardown row per source state, in three ownership classes, each row reporting its class's unlink; the start verdict is... |  |
 | DL-379 | An entry holds the decision and its reasons, and the process record lives in the PR; entries from DL-380 on have a line ceiling, and the entries from DL-324 on... | [docs/citation-index.md](citation-index.md) |

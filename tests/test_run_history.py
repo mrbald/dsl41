@@ -48,7 +48,7 @@ from dsl41.runner_history import (
     read_spool,
     replay_trace,
 )
-from dsl41.runner_journal import read_journal, read_outbox
+from dsl41.runner_journal import dispatched_runs, read_journal
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
 from dsl41.runner_startup import resume_run, start_run
 
@@ -89,13 +89,13 @@ def _header(catalog_hash: str = "h1", started_at: datetime = T0) -> dict[str, An
 
 
 def _dispatch(
-    job: str, run_number: int, *, run_dir: str | None, started_at: datetime, wrapper_pid: int = 111
+    job: str, run_number: int, *, run_dir: str | None, started_at: datetime, run_id: str = _RID
 ) -> dict[str, Any]:
     return {
         "rec": "dispatch",
         "job": job,
         "run_number": run_number,
-        "wrapper_pid": wrapper_pid,
+        "run_id": run_id,
         "run_dir": run_dir,
         "started_at": started_at.isoformat(),
     }
@@ -133,42 +133,6 @@ def _status_input(
         "source": source,
         "request_id": f"r{seq}",
         "fingerprint": f"fp{seq}",
-        "epoch": 0,
-    }
-
-
-def _spawn_decision(
-    index: int, at: datetime, *, job: str, run_number: int, executor_id: str = "local"
-) -> dict[str, Any]:
-    """One decision and the SPAWN it planned (DL-118): an effect has no
-    record of its own, so the fold reads it out of the decision that wanted
-    it.
-
-    The whole shape `Journal.decision` writes, birth identity included: a
-    SPAWN carries the `run_id` minted in its own transaction and the host
-    `generation` it was born on, and since DL-139 run history refuses one
-    that does not, exactly as `read_outbox` always did."""
-    return {
-        "rec": "decision",
-        "index": index,
-        "request_id": f"r{index}",
-        "decision": "applied",
-        "reason": None,
-        "revisions": {},
-        "legacy_batch": False,
-        "effects": [
-            {
-                "effect_id": f"e{index}:SPAWN:{job}.{run_number}",
-                "kind": "SPAWN",
-                "job": job,
-                "run_number": run_number,
-                "executor_id": executor_id,
-                "index": index,
-                "at": at.isoformat(),
-                "run_id": _RID,
-                "generation": 0,
-            }
-        ],
     }
 
 
@@ -188,7 +152,6 @@ def _applied(index: int) -> dict[str, Any]:
         "reason": None,
         "revisions": {},
         "legacy_batch": False,
-        "effects": [],
     }
 
 
@@ -228,7 +191,6 @@ def test_folding_the_same_records_twice_gives_the_same_rows() -> None:
             status="SUCCESS",
             exit_code=0,
             started_by=None,
-            executor_id=None,
             run_dir=None,
             box_name=None,
             clock_source="journal",
@@ -381,7 +343,6 @@ def test_box_row_folds_entirely_from_the_trace() -> None:
     assert row.status == "SUCCESS"
     assert row.exit_code is None
     assert row.run_dir is None
-    assert row.executor_id is None
     assert row.clock_source == "journal"
     assert row.started_by == "STARTJOB event (control)"
 
@@ -481,89 +442,37 @@ def test_leaf_row_carries_its_box_name_from_the_catalog() -> None:
     assert row.box_name == "b1"
 
 
-def test_executor_id_comes_from_the_spawn_effect_in_the_decision() -> None:
-    records = [
-        _header(),
-        _spawn_decision(1, T0, job="j1", run_number=1, executor_id="local"),
-        _dispatch("j1", 1, run_dir=None, started_at=T0),
-        _status_input(2, T0 + timedelta(minutes=1), job="j1", run_number=1, exit_code=0),
-        _applied(2),
-    ]
-    [row] = fold_run_rows(records)
-    assert row.executor_id == "local"
-
-
-def _corrupt_spawn_decision(index: int, at: datetime, *, job: str, run_number: int) -> Any:
-    """A well-formed decision with ONE identity field taken back out of its
-    SPAWN. The lenient loop DL-139 replaced read `executor_id` off the raw
-    dict with `str(...)`, so this record used to report the run as having
-    run on a host called "None"."""
-    record = _spawn_decision(index, at, job=job, run_number=run_number)
-    del record["effects"][0]["executor_id"]
-    return record
-
-
-def test_a_decision_with_a_malformed_effect_refuses_rather_than_degrades() -> None:
-    """DL-139: run history REFUSES a corrupt decision like `read_outbox`
-    does. The row it would otherwise print names an executor no host ever
-    had, and an operator-facing history that invents the answer is worse
-    than one that stops."""
-    corrupt = _corrupt_spawn_decision(1, T0, job="j1", run_number=1)
-    records = [
-        _header(),
-        corrupt,
-        _dispatch("j1", 1, run_dir=None, started_at=T0),
-        _status_input(2, T0 + timedelta(minutes=1), job="j1", run_number=1, exit_code=0),
-    ]
-    with pytest.raises(EngineError, match="malformed effect"):
-        fold_run_rows(records)
-
-
-def test_history_and_read_outbox_refuse_one_corrupt_decision_with_one_text() -> None:
-    """One question, one answer (DL-139). "Is this decision's effect list
-    valid" is decided at `runner_journal.decision_effects` for every reader
-    of a decision, so the two history call sites and the outbox reader
-    cannot disagree about a record -- nor about what they tell the
-    operator.
-
-    `_bound_run_ids` is named directly because it is the narrowest way to
-    ask history's SECOND call site the same question: both read every
-    `decision` in the log, so no public argument reaches one without the
-    other."""
-    corrupt = _corrupt_spawn_decision(1, T0, job="j1", run_number=1)
-    records = [
-        _header(),
-        corrupt,
-        _dispatch("j1", 1, run_dir=None, started_at=T0),
-        _status_input(2, T0 + timedelta(minutes=1), job="j1", run_number=1, exit_code=0),
-    ]
+def test_history_and_resume_refuse_one_corrupt_dispatch_with_one_text() -> None:
+    """One question, one answer (DL-139). "Which run_id did this run's dispatch bind" is
+    decided at `runner_journal.dispatched_runs` for every reader, so history's spool read and
+    resume cannot disagree about a record -- nor about what they tell the operator."""
+    corrupt = _dispatch("j1", 1, run_dir=None, started_at=T0, run_id="not-a-uuid")
+    records = [_header(), _applied(1), corrupt]
     refusals = []
     for read in (
-        lambda: fold_run_rows(records),
-        lambda: runner_history._bound_run_ids(records),
-        lambda: read_outbox(records),
+        lambda: runner_history._read_all_spool(records),
+        lambda: dispatched_runs(records),
     ):
         with pytest.raises(EngineError) as caught:
             read()
         refusals.append(str(caught.value))
     assert len(set(refusals)) == 1, refusals
-    assert "decision at index 1: malformed effect" in refusals[0]
+    assert "dispatch j1.1" in refusals[0] and "ss11a" in refusals[0]
 
 
-def test_a_well_formed_decision_still_folds_its_row_and_binds_its_run_id() -> None:
-    """The control for the two refusals above: nothing about a log this
-    estate actually wrote changes at DL-139."""
+def test_a_well_formed_dispatch_still_folds_its_row_and_binds_its_run_id() -> None:
+    """The control for the refusal above: a log this estate wrote folds its row, and the
+    dispatch binds the run's id."""
     records = [
         _header(),
-        _spawn_decision(1, T0, job="j1", run_number=1, executor_id="local"),
+        _applied(1),
         _dispatch("j1", 1, run_dir=None, started_at=T0),
         _status_input(2, T0 + timedelta(minutes=1), job="j1", run_number=1, exit_code=0),
         _applied(2),
     ]
     [row] = fold_run_rows(records)
-    assert (row.job, row.run_number, row.status, row.executor_id) == ("j1", 1, "SUCCESS", "local")
-    assert runner_history._bound_run_ids(records) == {("j1", 1): _RID}
-    assert [effect.effect_id for effect in read_outbox(records).effects()] == ["e1:SPAWN:j1.1"]
+    assert (row.job, row.run_number, row.status) == ("j1", 1, "SUCCESS")
+    assert dispatched_runs(records) == {("j1", 1): _RID}
 
 
 def test_a_spool_record_naming_a_stranger_reads_as_absent(tmp_path: Path) -> None:
@@ -1346,10 +1255,10 @@ def test_dsl41_journal_refuses_a_foreign_state_machine_version(tmp_path: Path) -
 
 
 def test_read_run_root_names_the_root_when_a_decision_is_corrupt(tmp_path: Path) -> None:
-    """DL-139 at the I/O shell: the shared decoder's refusal reaches an
+    """DL-139 at the I/O shell: the shared reader's refusal reaches an
     operator as this module's own error, naming the root -- `dsl41 runs`
-    reads several roots in one command, and "decision at index 5" alone
-    does not say whose. Restored, the same root folds the same rows."""
+    reads several roots in one command, and "dispatch j1.1" alone does not
+    say whose. Restored, the same root folds the same rows."""
     from dsl41.run_root import wal_path
 
     run_root = tmp_path / "run"
@@ -1364,17 +1273,17 @@ def test_read_run_root_names_the_root_when_a_decision_is_corrupt(tmp_path: Path)
     lines = saved.splitlines()
     for position, line in enumerate(lines):
         record = json.loads(line)
-        if record.get("rec") == "decision" and record.get("effects"):
-            del record["effects"][0]["executor_id"]
+        if record.get("rec") == "dispatch":
+            record["run_id"] = "not-a-uuid"
             lines[position] = json.dumps(record)
             break
-    else:  # pragma: no cover - the run above always plans a SPAWN
-        raise AssertionError("the WAL holds no decision with an effect")
+    else:  # pragma: no cover - the run above always dispatches
+        raise AssertionError("the WAL holds no dispatch record")
     wal.write_text("\n".join(lines) + "\n")
     with pytest.raises(RunHistoryError) as refused:
         read_run_root(run_root)
     assert str(run_root) in str(refused.value)
-    assert "malformed effect" in str(refused.value)
+    assert "ss11a" in str(refused.value)
     wal.write_text(saved)
     assert read_run_root(run_root) == clean
 
@@ -1467,3 +1376,20 @@ def test_history_refuses_a_replacement_manifest_sharing_catalog_hash(tmp_path: P
     write_period_manifest(run_root, forged)
     with pytest.raises(RunHistoryError, match="disagrees with the journal's segment record"):
         read_run_root(run_root)
+
+
+def test_a_file_watch_run_gets_a_row_like_a_command() -> None:
+    """Every CMD and FW start writes a `dispatch` record (runner-design ss7), so a watch's run
+    folds into a row as a command's does, with its completion and the catalog's placement. A
+    row names no executor: one engine runs every job on its own host."""
+    catalog = lower_source("insert_job: w\njob_type: f\nwatch_file: /tmp/dsl41-never-appears\n")
+    records = [
+        _header(),
+        _applied(1),
+        _dispatch("w", 1, run_dir=None, started_at=T0),
+        _status_input(2, T0 + timedelta(minutes=3), job="w", run_number=1, exit_code=0),
+        _applied(2),
+    ]
+    [row] = fold_run_rows(records, catalog=catalog)
+    assert (row.job, row.run_number, row.status, row.duration_s) == ("w", 1, "SUCCESS", 180.0)
+    assert "executor_id" not in RunRow.model_fields

@@ -1,44 +1,21 @@
-"""Stage S7c: S5's routing table and S6's election under real processes.
+"""One engine per run root, under real processes.
 
-S0-S4 each got a real-process tier as they landed -- the wrapper's kill
-matrix, the supervisor's lease and fencing, the deadman, engine SIGKILL
-tethered and detached. S5 and S6 did not. Everything those stages shipped
-with drives one engine in-process under a virtual clock, which is the right
-instrument for interleavings (S7a/S7b) and the wrong one for the four
-claims below. Each is a claim about processes -- two of them, or one of
-them and the kernel -- and none of it is observable from inside a single
-interpreter:
+Each claim here is about processes -- two of them, or one of them and the kernel -- and none of
+it is observable from inside a single interpreter:
 
-- **the mutex is an `flock`**, so a refusal needs a second OS process to
-  be refused, "the first engine is untouched" needs it to still be serving
-  afterwards, and "the kernel releases it" needs a holder that dies without
-  releasing anything;
-- **the fence is an inode comparison**, so losing proof needs a real
-  `unlink` under a live engine, and the consequence to check is that
-  nothing started -- against the same command, on the same engine,
-  starting something a moment earlier;
-- **the outbox window is between two statements**, so a pending SPAWN
-  needs a process that really died there and a spool that really has
-  nothing in it;
-- **the eviction bound's inputs are produced, not configured** -- a
-  deadman read back off a live supervisor, a `last_contact` stamped by a
-  lease exchange that really landed, a quarantine reached only after the
-  renewal loop really reported the host unreachable.
+- **the mutex is an `flock`**, so a refusal needs a second OS process to be refused, "the first
+  engine is untouched" needs it to still be serving afterwards, and "the kernel releases it"
+  needs a holder that dies without releasing anything;
+- **the fence is an inode comparison**, so losing proof needs a real `unlink` under a live
+  engine, and the consequence to check is that nothing started -- against the same command, on
+  the same engine, starting something a moment earlier;
+- **the dispatch window is between two records**, so a decided start that was never dispatched
+  needs a process that really died there and a spool that really has nothing in it.
 
-Seconds, not minutes. Nothing here waits out a bound: what waiting out the
-real `T_kill` would prove is arithmetic, and the arithmetic is pinned under
-a controlled clock in test_hosts.py. The one deliberate slow spot is the
-quarantine: the loop reports unreachable on the FIFTH consecutive failure, and only
-the first of those five waits `_RENEW_EVERY_S` (shortened here) -- the
-other four wait `_RETRY_EVERY_S`, one second each by default. That ~4.2 s is the property, not
-overhead, so it is paid and asserted rather than shortened away.
-
-**Every claim about a mechanism carries a positive control.** An empty
-`runs/` proves nothing on its own: it is also what a build where nothing
-ever starts would produce. So the fence test starts a job through the very
-path it then breaks, the re-drive test reads the job's own stdout, and the
-quarantine test waits for a real lease exchange to move `last_contact`
-before killing the thing that was stamping it.
+**Every claim about a mechanism carries a positive control.** An empty `runs/` proves nothing
+on its own: it is also what a build where nothing ever starts would produce. So the fence test
+starts a job through the very path it then breaks, and the re-drive test reads the job's own
+stdout.
 """
 
 from __future__ import annotations
@@ -46,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import os
 import signal
 import subprocess
 import sys
@@ -62,15 +38,12 @@ if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
     pytest.skip("leadership tier is POSIX-only", allow_module_level=True)
 
 from runner_redrive_driver import CRASH_CODE, REDRIVE_JIL
-from subprocess_harness import wait_reaped
 
 from dsl41.ir import lower_source
-from dsl41.runner import Engine
 from dsl41.runner_adapters import (
     LocalCommandAdapter,
 )
 from dsl41.runner_clock import RealClock
-from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, HostCommand, kill_allowance, skew_allowance
 from dsl41.runner_journal import read_journal
 from dsl41.runner_ledger import LOCK_NAME
 from dsl41.runner_startup import resume_run
@@ -206,16 +179,18 @@ def engine(
 def test_cm14_a_second_engine_is_refused_the_run_root_and_the_first_is_untouched(
     short_root: Path,
 ) -> None:
-    """concurrency-model ss7's ACQUIRE, between two OS processes.
+    """`leader.lock`'s acquire, between two OS processes.
 
     The refusal is the visible half and the cheap half. The half worth a
-    real process pair is what happens to the INCUMBENT: an election that
-    disturbed the engine already leading -- by unlinking its socket, by
-    appending a term nobody holds -- would trade one double-run window for
-    another. So the assertions are that the second process exits 2 naming
-    the first by pid, that the first is still serving its control socket
-    afterwards, and that the log records exactly ONE term."""
+    real process pair is what happens to the INCUMBENT: a refused engine
+    that disturbed the one already running -- by unlinking its socket, by
+    appending to its log -- would trade one double-run window for another.
+    So the assertions are that the second process exits 2 naming the first
+    by pid, that the first is still serving its control socket afterwards,
+    and that the refused engine appended nothing."""
     with engine(short_root) as first:
+        journal = first.run_root / "journal.jsonl"
+        before = len(read_journal(journal))
         second = cli(
             "run",
             "--resume",
@@ -226,13 +201,11 @@ def test_cm14_a_second_engine_is_refused_the_run_root_and_the_first_is_untouched
         assert second.returncode == 2
         assert "is held by another engine" in second.stderr
         assert f"pid {first.proc.pid}" in second.stderr  # named, from the lock's note
-        assert "epoch 1" in second.stderr
         assert first.proc.poll() is None  # the incumbent never noticed
+        assert len(read_journal(journal)) == before  # the refused engine appended nothing
         status = cli("query", "status", "--socket", str(first.run_root / "control.sock"), "--brief")
         assert status.returncode == 0
         assert "idle" in status.stdout
-    terms = [r for r in read_journal(first.run_root / "journal.jsonl") if r.get("rec") == "leader"]
-    assert [r["epoch"] for r in terms] == [1]  # the refused engine allocated nothing
 
 
 def test_a_run_root_whose_holder_was_killed_is_taken_by_the_next_engine(
@@ -247,8 +220,7 @@ def test_a_run_root_whose_holder_was_killed_is_taken_by_the_next_engine(
     holder's own cleanup would pass this test against a lease implemented
     with a manual unlock -- which is exactly the design `runner_ledger`'s
     docstring rejects. Here nothing runs after the signal: the successor's
-    evidence is that it starts at all, and that it allocates term 2 because
-    term 1 is in the LOG, not because anything unlocked."""
+    evidence is that it starts at all and names itself in the lock's note."""
     first = RunProcess(short_root)
     try:
         first.wait_until_up()
@@ -260,10 +232,8 @@ def test_a_run_root_whose_holder_was_killed_is_taken_by_the_next_engine(
 
     with engine(short_root, resume=True) as second:
         assert second.proc.poll() is None
+        assert json.loads(lock.read_text())["pid"] == second.proc.pid
     assert first.proc.pid != second.proc.pid
-    terms = [r for r in read_journal(second.run_root / "journal.jsonl") if r.get("rec") == "leader"]
-    assert [r["epoch"] for r in terms] == [1, 2]
-    assert [r["pid"] for r in terms] == [first.proc.pid, second.proc.pid]
 
 
 # ----------------------------------------------------------- S6b: the fence
@@ -276,8 +246,8 @@ def test_a_run_root_whose_holder_was_killed_is_taken_by_the_next_engine(
 def test_cm14_an_engine_that_cannot_prove_it_leads_stops_dispatching(
     short_root: Path, how: str, expected: str
 ) -> None:
-    """ss7's "losing proof stops dispatch, not merely renewal" (S6b), against
-    a live engine and a real filesystem.
+    """Losing the proof stops dispatch (S6b), against a live engine and a
+    real filesystem.
 
     Both arms of `LeaderLock.check` are reachable only from outside the
     process: the lock file is unlinked, or a different inode takes its name.
@@ -290,12 +260,9 @@ def test_cm14_an_engine_that_cannot_prove_it_leads_stops_dispatching(
     the path works and `after` was stopped, where an empty `runs/` would
     equally describe a build that never starts anything.
 
-    What this does NOT separate: the fence fires on the way into the FIRST
-    append of admission, so `after` never became an input and therefore
-    never became an effect. The stronger reading -- an effect already
-    pending in the outbox is not applied after proof is lost -- follows from
-    "every effect is preceded by an append" and is not independently held
-    here."""
+    The fence fires on the way into the FIRST append of admission, so
+    `after` never became an input and was never dispatched: every start is
+    preceded by its `dispatch` append."""
     with engine(short_root, jil_text=FENCE_JIL) as live:
         socket_path = str(live.run_root / "control.sock")
         started = cli("sendevent", "STARTJOB", "--job", "proof", "--socket", socket_path)
@@ -320,8 +287,8 @@ def test_cm14_an_engine_that_cannot_prove_it_leads_stops_dispatching(
     records = read_journal(live.run_root / "journal.jsonl")
     jobs = [r["payload"].get("job") for r in records if r.get("rec") == "input"]
     assert jobs == ["proof"]  # admitted, then nothing: `after` never entered the log
-    planned = [e for r in records if r.get("rec") == "decision" for e in r["effects"]]
-    assert [e["job"] for e in planned] == ["proof"]
+    dispatched = [r["job"] for r in records if r.get("rec") == "dispatch"]
+    assert dispatched == ["proof"]
 
 
 # ------------------------------------------------- S6c: the barrier re-drives
@@ -330,23 +297,15 @@ def test_cm14_an_engine_that_cannot_prove_it_leads_stops_dispatching(
 def test_cm09_a_spawn_that_never_reached_the_host_is_redriven_at_resume(
     short_root: Path,
 ) -> None:
-    """DL-102, end to end: a real engine dies in the outbox window, and the
-    takeover barrier finishes what it decided.
+    """DL-102, end to end: a real engine dies between the decision record and
+    the `dispatch` record, and resume dispatches what it decided.
 
-    The seeded sweep proves this over 48 interleavings with a recording
+    The seeded sweep proves this over many interleavings with a recording
     adapter; what it cannot prove is that the window it models is the window
     the process actually has. Here the log is written by a real engine that
-    exited inside it, and the re-drive is done by a real `resume_run` through
+    exited inside it, and the dispatch is done by a real `resume_run` through
     a real wrapper: the evidence that the job ran is its own stdout, in a run
-    directory that did not exist when the barrier started.
-
-    ONE of the two outbox windows. This is the earlier one -- decided,
-    nothing attempted -- which is the one that must be re-driven. The later
-    one (launched, then dead before the outcome was recorded) is what
-    `_reconcile_applied_spawns` exists for, and its answer is the opposite:
-    reconcile from the spool, never re-drive. It has no real-process test
-    because a process cannot be made to die reliably between `_launch` and
-    the next statement; the seeded sweep covers it."""
+    directory that did not exist when resume started."""
     run_root = short_root / "run"
     driver = subprocess.run(
         [sys.executable, str(REDRIVE_DRIVER), str(run_root)],
@@ -356,11 +315,10 @@ def test_cm09_a_spawn_that_never_reached_the_host_is_redriven_at_resume(
     )
     assert driver.returncode == CRASH_CODE, driver.stderr
 
-    # the fault fired, and left exactly what ss5 says a pending effect is
+    # the fault fired: the start is decided and was never dispatched
     records = read_journal(run_root / "journal.jsonl")
-    effects = [e for r in records if r.get("rec") == "decision" for e in r["effects"]]
-    assert [(e["kind"], e["job"]) for e in effects] == [("SPAWN", "lost")]
-    assert not [r for r in records if r.get("rec") == "effect_result"]
+    assert [r["decision"] for r in records if r.get("rec") == "decision"] == ["applied"]
+    assert not [r for r in records if r.get("rec") == "dispatch"]
     # nothing anywhere on the host: `runs/` is the scaffolding every run root
     # gets at genesis, and it is empty
     assert list((run_root / "runs").iterdir()) == []
@@ -387,76 +345,17 @@ def test_cm09_a_spawn_that_never_reached_the_host_is_redriven_at_resume(
 
     assert asyncio.run(take_over()) == "SUCCESS"
     run_dirs = sorted(p.name for p in (run_root / "runs").iterdir())
-    # one directory, from the one dispatch the barrier made. Not an
-    # at-most-once proof -- there was no first run to duplicate -- but it is
-    # what would catch a barrier that re-drove and then dispatched again
+    # one directory, from the one dispatch resume made. Not an at-most-once
+    # proof -- there was no first run to duplicate -- but it is what would
+    # catch a resume that dispatched and then dispatched again
     assert run_dirs == ["lost.1"]
     assert (run_root / "logs" / "lost.1.out").read_text().strip() == "re-driven"
-    resolved = [
-        r
+    dispatched = [
+        (r["job"], r["run_number"])
         for r in read_journal(run_root / "journal.jsonl")
-        if r.get("rec") == "effect_result" and r["effect_id"] == effects[0]["effect_id"]
+        if r.get("rec") == "dispatch"
     ]
-    assert [r["state"] for r in resolved] == ["applied"]  # the same effect, finally resolved
-
-
-# --------------------------------------------- S5: quarantine and the bound
-
-
-HELD_JIL = "insert_job: held\njob_type: c\ncommand: sleep 600\n"
-
-
-def _genesis_contact(engine: Engine) -> datetime | None:
-    return engine.oracle.store.host(LOCAL_EXECUTOR_ID).last_contact
-
-
-def _reap_supervisor(pid: int) -> None:
-    """Wait for the supervisor to exit after SHUTDOWN; one that did not is killed and reaped
-    before the failure is raised, so it never outlives the test."""
-    try:
-        wait_reaped(pid)
-    except AssertionError:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, signal.SIGKILL)
-        wait_reaped(pid)
-        raise
-
-
-def _evict_bound(engine) -> float:
-    """What `dsl41 host evict local` would refuse with, from the same gate
-    the control server calls -- and every term of it re-derived from the row
-    those real processes produced.
-
-    Asserting the identity rather than a number is the point: `deadman_s`
-    came back off a live supervisor and `last_contact` was stamped by a real
-    lease exchange, so a hard-coded 121.0 would pin the constants and not
-    the arithmetic. The grace comes off the ENGINE for the same reason --
-    `apply_attempt` is called with `engine.cmd_grace_s`, so an engine wired
-    with a non-default grace must move this bound, and the module constant
-    would have hidden that. One `at` for both sides, because two `now()`
-    calls a line apart are two different instants and the refusal names
-    tenths."""
-    from dsl41.runner_hosts import host_rejection_reason
-
-    at = engine.clock.now()
-    grace_s = engine.cmd_grace_s
-    store = engine.oracle.store
-    row = store.host(LOCAL_EXECUTOR_ID)
-    gated = HostCommand(verb="evict", host_id=LOCAL_EXECUTOR_ID)
-    reason = host_rejection_reason(store, gated, at, grace_s=grace_s)
-    assert reason is not None and reason.code == "eviction_bound_pending"
-    assert row.last_contact is not None and row.deadman_s is not None
-    bound = row.deadman_s + kill_allowance(grace_s)
-    bound += skew_allowance(bound)  # ss8: skew covers the WHOLE wait, not the deadman
-    waited = (at - row.last_contact).total_seconds()
-    assert f"was in contact {waited:.1f}s ago" in reason.reason
-    assert f"the ss8 bound is {bound:.1f}s" in reason.reason
-    assert f"wait {bound - waited:.1f}s more" in reason.reason
-    # CM-11's other half, against the same produced preconditions: the wait is
-    # skippable, and only by saying so
-    forced = HostCommand(verb="evict", host_id=LOCAL_EXECUTOR_ID, force=True)
-    assert host_rejection_reason(store, forced, at, actor="alice@ops", grace_s=grace_s) is None
-    return bound - waited
+    assert dispatched == [("lost", 1)]
 
 
 def test_pr01c_a_foreign_root_is_refused_before_staging(short_root: Path) -> None:

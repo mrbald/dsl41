@@ -49,8 +49,8 @@ def test_the_stored_codes_are_registry_codes_and_never_an_unknown_outcome() -> N
     them `unknown`."""
     assert STORED_CODES <= CODES
     assert not STORED_CODES & UNKNOWN_OUTCOME_CODES
-    # precondition_failed, nine host codes, stale_completion, engine_apply_faulted
-    assert len(STORED_CODES) == 12
+    # precondition_failed, stale_completion, engine_apply_faulted
+    assert len(STORED_CODES) == 3
 
 
 def _is_true(node: ast.AST | None) -> bool:
