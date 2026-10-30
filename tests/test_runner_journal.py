@@ -1,27 +1,23 @@
-"""WAL journal tests: record shapes, replay, and the `dsl41 journal` CLI
-(phase 11b).
+"""Store-backed journal tests: record shapes, the wire projection, the open table, replay,
+and the `dsl41 journal` CLI.
 
-Normative spec: docs/runner-design.md ss7 (journal and recovery) and ss4 (the
-stale-completion gate whose rejections the WAL also records as drops).
-runner_journal.py's Journal/read_journal/replay_inputs docstrings are
-the API under test; cli.py's `journal` command is the CLI surface. Resume
-and the crash/reconciliation ladder are tests/test_runner_lifecycle.py's
-territory (owned elsewhere, not duplicated here) -- this file stays on the
-WAL itself: what gets written, what read_journal tolerates or refuses, and
-that replaying the inputs alone reproduces the exact trace a live engine
-produced.
+Normative spec: spec-wiring 1b (the store replaces the journal), docs/runner-design.md ss7
+(record kinds and recovery) and ss4 (the stale-completion gate whose rejections the store also
+records). runner_journal.py's Journal/read_journal/replay_inputs docstrings are the API under
+test; cli_run.py's `journal` command is the CLI surface. Restart and the reconciliation ladder
+are tests/test_runner_lifecycle.py's territory -- this file stays on the record itself: what
+gets written, how the wire sees it, and that replaying the inputs alone reproduces the exact
+trace a live engine produced.
 
-House style follows test_runner.py: T0 = datetime(2026, 7, 1, 8, 0), an
-ev() helper, one asyncio.run per async scenario. Every expected outcome here
-was verified empirically against the real runner/CLI before the assertion
-was written (CLAUDE.md: fidelity is tested, not asserted) -- see the final
-report for anything that surprised us or contradicted the design doc.
+House style follows test_runner.py: T0 = datetime(2026, 7, 1, 8, 0), an ev() helper, one
+asyncio.run per async scenario.
 """
 
 from __future__ import annotations
 
+from contextlib import closing
+
 import asyncio
-import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -32,19 +28,29 @@ from dsl41.cli import app
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, EventKind
-from dsl41.run_root import catalog_hash_v2
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
-from dsl41.runner_admission import ApplyResult, Attempt, fingerprint
+from dsl41.runner_admission import ApplyResult, Attempt, Frontiers, fingerprint
 from dsl41.runner_clock import EngineError, VirtualClock
+from dsl41.runner_config import catalog_hash
 from dsl41.runner_journal import (
+    BackfillRefused,
     Journal,
+    OpenTable,
+    Position,
+    decode_snapshot,
+    dispatch_record,
+    encode_snapshot,
+    follow_up_done,
+    read_backfill,
     read_journal,
     replay_inputs,
+    wire_record,
 )
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
 from dsl41.runner_scheduler import Scheduler
 from dsl41.runner_startup import start_run
+from dsl41.runner_store import MemoryStore, Record, SqliteStore
 from dsl41.state_machine import Executor
 
 T0 = datetime(2026, 7, 1, 8, 0)
@@ -55,71 +61,91 @@ def ev(kind: EventKind, minutes: float = 0.0, **payload: object) -> Event:
 
 
 _SOLO_JIL = "insert_job: j1\njob_type: c\ncommand: x\nmachine: m1\n"
+_IDENTITY = {"baseline_id": "b", "clock_domain": "virtual", "state_version": "1"}
+
+
+def _journal(tmp_path: Path) -> Journal:
+    """A journal over a fresh store file under `tmp_path`."""
+    path = tmp_path / "engine.db"
+    return Journal(SqliteStore(path, identity=_IDENTITY), path=path)
 
 
 # --------------------------------------------------------------- 1. record shapes
 
 
-def test_segment_record_carries_the_period_identity_domain_and_instant(
-    tmp_path: Path,
-) -> None:
-    """(period-model ss2.1 / Journal.create docstring): the opening record
-    is a `segment`, and it carries the whole period identity -- estate,
-    period, baseline, catalog hash AND its version, bundle, runtime hash,
-    state-machine version, clock domain, first index, `at`. catalog_hash
-    matches the standalone catalog_hash_v2() function -- one source of
-    truth, no drift between Journal.create's own hashing and the resume
-    gate.
-
-    The build's version is deliberately absent: a patch release must not
-    move these bytes (PR-07)."""
+def test_genesis_opens_with_the_configuration_the_wire_names_segment(tmp_path: Path) -> None:
+    """(spec-wiring 1b): genesis records configuration rev 1 and `engine started`. The wire
+    projects the `config` record as the `segment` a subscriber met first in 1.x: the catalog
+    hash, the runtime hash, the state-machine version, the baseline and the clock domain. The
+    build's version is deliberately absent: a patch release must not move these bytes
+    (PR-07)."""
     catalog = lower_source(_SOLO_JIL)
-    journal = Journal.create(
-        tmp_path / "journal.jsonl", catalog=catalog, clock_domain="real", started_at=T0
+    engine = start_run(
+        catalog, tmp_path / "run", clock=VirtualClock(start=T0), adapters={"CMD": FakeAdapter()}
     )
-    journal.close()
-    segment = read_journal(tmp_path / "journal.jsonl")[0]
-    assert segment["rec"] == "segment"
-    assert segment["catalog_hash"] == catalog_hash_v2(catalog)
-    assert segment["catalog_hash_version"] == 2
-    assert segment["clock_domain"] == "real"
-    assert segment["at"] == T0.isoformat()
-    assert segment["period_id"] == 1 and segment["segment_no"] == 1
-    assert segment["first_index"] == 1
-    assert segment["opens_from_seal"] is None
-    assert segment["reclaimed"] is None and segment["trust_unaudited"] is None
-    assert segment["estate_id"] and segment["baseline_id"]
-    assert segment["source_bundle_hash"].startswith("sha256:")
+    assert engine.journal is not None
+    engine.journal.close()
+    segment = read_journal(tmp_path / "run")[0]
+    assert segment == {
+        "rec": "segment",
+        "rev": 1,
+        "at": T0.isoformat(),
+        "catalog_hash": catalog_hash(catalog),
+        "runtime_hash": segment["runtime_hash"],
+        "state_machine_version": STATE_MACHINE_VERSION,
+        "baseline_id": engine.baseline_id,
+        "clock_domain": "virtual",
+    }
     assert segment["runtime_hash"].startswith("sha256:")
-    assert segment["state_machine_version"] == STATE_MACHINE_VERSION
     assert "dsl41_version" not in segment
-
-
-def test_the_writer_refuses_a_record_kind_this_binary_does_not_write(tmp_path: Path) -> None:
-    """DL-145. DL-138 made retirement REFUSAL BY NAME and put `CURRENT_RECS`
-    at the read side. The write side had no gate at all, so the registry was
-    closed by hand: a kind appended without being registered produced a
-    segment every reader of it -- replay, history, retention, audit --
-    refuses, and the file that holds it is append-only.
-
-    One guard at `_write` closes it structurally."""
-
-    catalog = lower_source(_SOLO_JIL)
-    path = tmp_path / "journal.jsonl"
-    journal = Journal.create(path, catalog=catalog, clock_domain="real", started_at=T0)
+    meta = SqliteStore(tmp_path / "run" / "engine.db", read_only=True)
     try:
-        with pytest.raises(EngineError, match="refusing to append record kind 'tally'"):
-            journal._write({"rec": "tally", "n": 1})
-        with pytest.raises(EngineError, match="refusing to append record kind None"):
-            journal._write({"n": 1})
-        # a RETIRED kind is refused here too: the tombstone registry says a
-        # reader must name it, and a writer must not make one to name
-        with pytest.raises(EngineError, match="refusing to append record kind 'result'"):
-            journal._write({"rec": "result", "n": 1})
+        assert meta.meta()["state_version"] == str(STATE_MACHINE_VERSION)
+        assert meta.current_config_rev() == 1
+        assert [r.kind for _, r in meta.read_from(0)] == ["config", "engine"]
+    finally:
+        meta.close()
+
+
+def test_the_writer_refuses_a_record_this_binary_does_not_write(tmp_path: Path) -> None:
+    """DL-145's write-side registry: a record's kind is one of `KINDS`, an `engine` record names
+    a lifecycle event, an `outcome` one of `OUTCOMES`, a plan one of `PLANS`, or nothing is
+    appended, not even the records beside it in the transaction."""
+    journal = _journal(tmp_path)
+    plan = {"event": "plan", "attempt": "a", "job": "j", "run_number": 1, "steps": []}
+    refused = [
+        (Record(T0, "tally", None, None, {"n": 1}), "record kind 'tally'"),
+        (Record(T0, "segment", None, None, {"n": 1}), "record kind 'segment'"),
+        (Record(T0, "engine", None, None, {"event": "paused"}), "engine record 'paused'"),
+        (Record(T0, "outcome", None, None, {"outcome": "vanished"}), "outcome 'vanished'"),
+        (Record(T0, "follow_up", None, None, {**plan, "plan": "retry"}), "plan 'retry'"),
+    ]
+    try:
+        for record, message in refused:
+            good = Record(T0, "engine", None, None, {"event": "started"})
+            with pytest.raises(EngineError, match=message):
+                journal.append(good, record)
+        with pytest.raises(EngineError, match="engine record 'paused'"):
+            journal.engine("paused", T0)
     finally:
         journal.close()
-    # nothing was appended: the segment record still stands alone
-    assert [r["rec"] for r in read_journal(path)] == ["segment"]
+    assert read_journal(tmp_path) == []
+
+
+def test_every_reader_refuses_a_record_kind_this_binary_does_not_know(tmp_path: Path) -> None:
+    """The read side of the registry (protocol-evolution: an unknown kind refuses by name): the
+    wire projection, the open table and the backfill each name the kind, and none skips it."""
+    store = MemoryStore()
+    store.append(Record(T0, "tally", None, None, {"n": 1}))
+    ((seq, record),) = list(store.read_from(0))
+    with pytest.raises(EngineError, match="record kind 'tally'"):
+        wire_record(record)
+    with pytest.raises(EngineError, match="record kind 'tally'"):
+        OpenTable().note(seq, record)
+    with pytest.raises(EngineError, match="record kind 'tally'"):
+        read_journal(store)
+    with pytest.raises(BackfillRefused, match="record kind 'tally'"):
+        read_backfill(store, since=0, upto=seq)
 
 
 def _attempt(index: int, event: Event | None, *, source: str | None = "control") -> Attempt:
@@ -140,29 +166,24 @@ def _attempt(index: int, event: Event | None, *, source: str | None = "control")
     )
 
 
+def _applied(attempt: Attempt) -> ApplyResult:
+    return ApplyResult(index=attempt.index, request_id=attempt.request_id, decision="applied")
+
+
 def test_input_record_carries_seq_at_kind_payload_source_and_the_admission_fields(
     tmp_path: Path,
 ) -> None:
-    """(runner-design ss7 + concurrency-model ss4): input = {seq, at, kind,
-    payload, source} as it always was, plus the two fields admission needs
-    -- the `request_id` a retry is answered by and the `fingerprint` that
-    catches an id reused for a different command. seq is a monotone WAL
-    sequence number, independent of `at` (adapter completions can enqueue
-    out of chronological arrival relative to future-stamped script events --
-    module docstring); it is the ss2 committed index under its old name."""
-    journal = Journal.create(
-        tmp_path / "journal.jsonl",
-        catalog=lower_source(_SOLO_JIL),
-        clock_domain="virtual",
-        started_at=T0,
-    )
+    """(runner-design ss7 + concurrency-model ss4): on the wire an input is {seq, at, kind,
+    payload, source} plus the `request_id` a retry is answered by and the `fingerprint` that
+    catches an id reused for a different command. `seq` is the admission index. An attempt
+    and its decision are ONE store transaction, so no crash can leave one without the other."""
+    journal = _journal(tmp_path)
     first = _attempt(1, ev("STARTJOB", 0, job="j1"))
-    journal.admit(first)
-    journal.admit(
-        _attempt(2, ev("STATUS", 1, job="j1", run_number=1, exit_code=0), source="adapter")
-    )
+    second = _attempt(2, ev("STATUS", 1, job="j1", run_number=1, exit_code=0), source="adapter")
+    assert journal.admission(first, _applied(first)) == 2
+    assert journal.admission(second, _applied(second)) == 4
     journal.close()
-    records = read_journal(tmp_path / "journal.jsonl")
+    records = read_journal(tmp_path)
     inputs = [r for r in records if r["rec"] == "input"]
     assert inputs[0] == {
         "rec": "input",
@@ -177,29 +198,19 @@ def test_input_record_carries_seq_at_kind_payload_source_and_the_admission_field
     assert inputs[1]["seq"] == 2
     assert inputs[1]["source"] == "adapter"
     assert inputs[1]["payload"] == {"job": "j1", "run_number": 1, "exit_code": 0}
-    # ONE line per admitted input (concurrency-model ss4 step 4): the batch's
-    # time observation is that line's `at`, so no crash can leave the
-    # observation without the attempt it belongs to
-    assert len(records) == 3  # header + two admissions, nothing between them
+    assert [r["rec"] for r in records] == ["input", "decision", "input", "decision"]
 
 
 def test_a_time_observation_is_admitted_as_an_attempt_with_no_verb(tmp_path: Path) -> None:
-    """(concurrency-model ss4): the standalone time observation takes the
-    same path as an operator command and leaves the same kind of record --
-    an `advance`, which is an attempt whose verb is absent. It carries the
-    admission fields for the same reason everything else does: the log
-    indexes decisions by request_id, and an input with no identity has no
-    decision anyone can look up."""
-    journal = Journal.create(
-        tmp_path / "journal.jsonl",
-        catalog=lower_source(_SOLO_JIL),
-        clock_domain="virtual",
-        started_at=T0,
-    )
-    journal.admit(_attempt(1, None))
-    journal.decision(ApplyResult(index=1, request_id="r1", decision="applied"))
+    """(concurrency-model ss4): the standalone time observation takes the same path as an
+    operator command and leaves the same kind of record -- an `input` with no verb, which the
+    wire calls `advance`. Its decision rides under `index`, not `seq`: a decision shares its
+    attempt's number, and the subscribe cursor is keyed on seq."""
+    journal = _journal(tmp_path)
+    attempt = _attempt(1, None)
+    journal.admission(attempt, _applied(attempt))
     journal.close()
-    records = read_journal(tmp_path / "journal.jsonl")
+    records = read_journal(tmp_path)
     advance = next(r for r in records if r["rec"] == "advance")
     assert advance == {
         "rec": "advance",
@@ -208,15 +219,9 @@ def test_a_time_observation_is_admitted_as_an_attempt_with_no_verb(tmp_path: Pat
         "request_id": "r1",
         "fingerprint": advance["fingerprint"],
     }
-    assert "kind" not in advance and "payload" not in advance
-    # and no `expect`: ss0's mandate is on EXTERNALLY REQUESTED mutations, and
-    # a time observation is the engine's own. Writing a null for it would blur
-    # the one distinction this record has to keep.
+    # no `expect`: ss0's mandate is on EXTERNALLY REQUESTED mutations
     assert "expect" not in advance and "claimed_actor" not in advance
     decision = next(r for r in records if r["rec"] == "decision")
-    # `index`, not `seq`: a decision shares its attempt's number, and the ss10
-    # subscribe cursor is keyed on seq -- two records under one cursor value
-    # would leave the second undeliverable to a resuming subscriber
     assert decision == {
         "rec": "decision",
         "index": 1,
@@ -229,46 +234,54 @@ def test_a_time_observation_is_admitted_as_an_attempt_with_no_verb(tmp_path: Pat
     }
 
 
+def test_a_native_rejection_names_its_stored_code(tmp_path: Path) -> None:
+    """A rejection names one of the append-only stored codes at birth (period-model ss2.3);
+    one that does not is refused and nothing is appended."""
+    journal = _journal(tmp_path)
+    attempt = _attempt(1, ev("STARTJOB", 0, job="j1"))
+    with pytest.raises(EngineError, match="names its stored code"):
+        journal.admission(
+            attempt,
+            ApplyResult(index=1, request_id="r1", decision="rejected", reason="no", code="made_up"),
+        )
+    journal.close()
+    assert read_journal(tmp_path) == []
+
+
 def test_dispatch_record_carries_job_run_number_run_id_run_dir_started_at(
     tmp_path: Path,
 ) -> None:
-    """(runner-design ss7): a dispatch record precedes its start's adapter task
-    and names the run's run_id; the wrapper's own spawn.json is the
-    authoritative spawn record (module docstring), so it carries run_dir
-    rather than a pgid the engine never observes."""
-    journal = Journal.create(
-        tmp_path / "journal.jsonl",
-        catalog=lower_source(_SOLO_JIL),
-        clock_domain="real",
-        started_at=T0,
-    )
+    """(runner-design ss7): a dispatch record precedes its attempt's adapter task and names
+    the attempt id the wrapper spec carries as `run_id`. The store keeps the ordinal and the
+    invocation; the wire keeps the 1.x shape, with the attempt's spool as `run_dir`."""
+    journal = _journal(tmp_path)
     run_id = "00000000-0000-4000-8000-000000000001"
-    journal.dispatch("j1", 1, run_id=run_id, run_dir="/abs/runs/j1.1", started_at=T0)
+    journal.append(
+        dispatch_record(
+            "j1", 1, attempt=run_id, spool="/abs/runs/j1.1/1", started_at=T0, env={"A": "1"}
+        )
+    )
+    with pytest.raises(EngineError, match="outside the ss11a uuid4 grammar"):
+        dispatch_record("j1", 1, attempt="freehand", spool=None, started_at=T0)
     journal.close()
-    dispatch = next(r for r in read_journal(tmp_path / "journal.jsonl") if r["rec"] == "dispatch")
+    dispatch = next(r for r in read_journal(tmp_path) if r["rec"] == "dispatch")
     assert dispatch == {
         "rec": "dispatch",
         "job": "j1",
         "run_number": 1,
         "run_id": run_id,
-        "run_dir": "/abs/runs/j1.1",
+        "run_dir": "/abs/runs/j1.1/1",
         "started_at": T0.isoformat(),
     }
 
 
 def test_drop_record_carries_at_kind_payload_reason_and_no_seq(tmp_path: Path) -> None:
-    """(runner-design ss7): drop records an input refused before admission,
-    a scheduler tick missed across downtime (E9); unlike input it consumes
-    no WAL seq number -- it never fed the oracle."""
-    journal = Journal.create(
-        tmp_path / "journal.jsonl",
-        catalog=lower_source(_SOLO_JIL),
-        clock_domain="virtual",
-        started_at=T0,
-    )
+    """(runner-design ss7): drop records an input refused before admission, a scheduler tick
+    missed across downtime (E9); it carries no seq -- it never fed the oracle."""
+    journal = _journal(tmp_path)
     journal.drop(ev("STATUS", 3, job="j1", run_number=0, exit_code=0), "run_number mismatch")
     journal.close()
-    drop = next(r for r in read_journal(tmp_path / "journal.jsonl") if r["rec"] == "drop")
+    drop = next(r for r in read_journal(tmp_path) if r["rec"] == "drop")
     assert drop == {
         "rec": "drop",
         "at": (T0 + timedelta(minutes=3)).isoformat(),
@@ -276,205 +289,118 @@ def test_drop_record_carries_at_kind_payload_reason_and_no_seq(tmp_path: Path) -
         "payload": {"job": "j1", "run_number": 0, "exit_code": 0},
         "reason": "run_number mismatch",
     }
-    assert "seq" not in drop
 
 
-def test_fsync_each_true_in_real_domain_buffered_in_virtual(tmp_path: Path) -> None:
-    """(Journal class docstring): "fsync per record in the real domain
-    (write-ahead: append + fsync BEFORE feed); buffered in rehearse, fsync
-    on close." White-box on the flag Journal.create derives from
-    clock_domain."""
-    real = Journal.create(
-        tmp_path / "real.jsonl", catalog=lower_source(_SOLO_JIL), clock_domain="real", started_at=T0
+def test_the_kinds_the_wire_does_not_carry_project_to_nothing() -> None:
+    """The outcome, its plan, a pending dispatch, an engine record and a configuration intent
+    are the store's own: the frozen wire has no name for them (control-protocol ss5)."""
+    for kind, payload in (
+        ("outcome", {"attempt": "a", "outcome": "natural"}),
+        ("follow_up", {"event": "plan", "plan": "complete"}),
+        ("dispatch_pending", {"event": "pending"}),
+        ("engine", {"event": "started"}),
+        ("config", {"event": "intent"}),
+    ):
+        assert wire_record(Record(T0, kind, None, None, payload)) is None
+
+
+# ------------------------------------------------------------- 2. the open table
+
+
+def test_the_open_table_follows_an_attempt_a_pending_start_and_a_plan() -> None:
+    """(spec-wiring 1b): a dispatch opens an attempt and an outcome closes it; a pending start
+    closes when a dispatch discharges it; a plan stays until every step has its done mark. The
+    floor is the oldest seq any of them refers to, and the snapshot carries the table whole."""
+    table = OpenTable()
+    attempt = "00000000-0000-4000-8000-000000000001"
+    table.note(
+        3,
+        Record(
+            T0,
+            "dispatch_pending",
+            None,
+            None,
+            {
+                "event": "pending",
+                "job": "p",
+                "run_number": 1,
+                "scheduled_at": T0.isoformat(),
+            },
+        ),
     )
-    virtual = Journal.create(
-        tmp_path / "virtual.jsonl",
-        catalog=lower_source(_SOLO_JIL),
-        clock_domain="virtual",
-        started_at=T0,
+    table.note(5, dispatch_record("j1", 1, attempt=attempt, spool=None, started_at=T0))
+    plan = {"event": "plan", "attempt": attempt, "job": "j1", "run_number": 1, "plan": "hold"}
+    steps = [{"step": "feed", "payload": {}}, {"step": "hold", "payload": {}}]
+    table.note(6, Record(T0, "follow_up", None, None, {**plan, "steps": steps}))
+    table.note(7, Record(T0, "outcome", None, None, {"attempt": attempt, "outcome": "natural"}))
+    assert table.floor() == 3 and list(table.attempts) == []
+    assert OpenTable.from_payload(table.to_payload()).to_payload() == table.to_payload()
+    table.note(8, follow_up_done(attempt, 0, 7, T0))
+    assert table.plans[attempt].next_step() == 1
+    table.note(9, follow_up_done(attempt, 1, None, T0))
+    assert table.plans == {}
+    other = "00000000-0000-4000-8000-000000000002"
+    table.note(10, dispatch_record("p", 1, attempt=other, spool=None, started_at=T0, discharges=3))
+    assert table.pending == {} and table.floor() == 10
+    # a plan with no steps is never open; a done mark for a closed plan changes nothing
+    table.note(11, Record(T0, "follow_up", None, None, {**plan, "plan": "none", "steps": []}))
+    table.note(12, follow_up_done("gone", 0, 1, T0))
+    assert table.plans == {}
+    table.note(
+        13,
+        Record(
+            T0,
+            "dispatch_pending",
+            None,
+            None,
+            {
+                "event": "discharged",
+                "pending": 99,
+                "dispatch": None,
+            },
+        ),
     )
-    try:
-        assert real._fsync_each is True
-        assert virtual._fsync_each is False
-    finally:
-        real.close()
-        virtual.close()
 
 
-# ------------------------------------------------------------- 2. read_journal
-
-
-def _write_two_input_journal(tmp_path: Path) -> Path:
-    path = tmp_path / "journal.jsonl"
-    journal = Journal.create(
-        path, catalog=lower_source(_SOLO_JIL), clock_domain="virtual", started_at=T0
+def test_a_snapshot_round_trips_and_a_foreign_one_is_refused_by_name() -> None:
+    """The snapshot holds the oracle's rows, the log's position, the scheduler's position, the
+    configuration rev and the open table; a snapshot that does not read is refused naming
+    where it was read."""
+    oracle = Oracle(lower_source(_SOLO_JIL))
+    oracle.feed(ev("STARTJOB", 0, job="j1"))
+    position = Position()
+    position.note(Record(T0, "config", None, None, {"event": "applied", "at": T0.isoformat()}))
+    data = encode_snapshot(
+        oracle,
+        frontiers=Frontiers(committed_index=1, applied_index=1, at=T0),
+        position=position,
+        config_rev=1,
+        open_table=OpenTable(),
     )
-    journal.admit(_attempt(1, ev("STARTJOB", 0, job="j1")))
-    journal.admit(
-        _attempt(2, ev("STATUS", 1, job="j1", run_number=1, exit_code=0), source="adapter")
-    )
-    journal.close()
-    return path
-
-
-def test_read_journal_tolerates_a_torn_final_line(tmp_path: Path) -> None:
-    """(read_journal docstring): a crash mid-append of the LAST line leaves a
-    truncated final record -- write-ahead means the feed it would have
-    preceded never ran, so it is dropped silently rather than refused."""
-    path = _write_two_input_journal(tmp_path)
-    lines = path.read_bytes().split(b"\n")
-    assert lines[-1] == b""  # trailing newline on a clean write
-    torn = b"\n".join(lines[:-2]) + b"\n" + lines[-2][:15]  # cut the last record short
-    path.write_bytes(torn)
-    records = read_journal(path)
-    assert [r["rec"] for r in records] == ["segment", "input"]
-
-
-def test_reopening_cuts_a_torn_tail_before_the_first_append(tmp_path: Path) -> None:
-    """(Journal._repair_tail): the bytes must agree with what `read_journal`
-    reads BEFORE a successor appends. Opened for append straight after a
-    torn fragment, the successor's first record would fuse with it into one
-    corrupt interior line and every later read would raise -- a run root
-    made unreadable by the resume that was meant to recover it."""
-    path = _write_two_input_journal(tmp_path)
-    lines = path.read_bytes().split(b"\n")
-    path.write_bytes(b"\n".join(lines[:-2]) + b"\n" + lines[-2][:15])
-    before = read_journal(path)
-    journal = Journal(path, fsync_each=False)
-    assert path.read_bytes() == b"\n".join(lines[:-2]) + b"\n"  # cut at the last newline
-    journal.preflight([])
-    journal.close()
-    after = read_journal(path)
-    assert after[: len(before)] == before
-    assert [r["rec"] for r in after] == ["segment", "input", "preflight"]
-
-
-def test_reopening_completes_a_record_that_lost_only_its_newline(tmp_path: Path) -> None:
-    """The other torn shape: every byte of the record landed, the newline did
-    not. `read_journal` already counts that record, so cutting it would lose
-    a record the resuming engine replayed -- it gets its newline instead."""
-    path = _write_two_input_journal(tmp_path)
-    whole = path.read_bytes()
-    path.write_bytes(whole[:-1])
-    before = read_journal(path)
-    assert [r["rec"] for r in before] == ["segment", "input", "input"]
-    journal = Journal(path, fsync_each=False)
-    assert path.read_bytes() == whole
-    journal.preflight([])
-    journal.close()
-    assert read_journal(path)[:-1] == before
-
-
-def test_read_journal_refuses_interior_corruption(tmp_path: Path) -> None:
-    """(read_journal docstring): a torn or invalid line that is NOT the final
-    line is corruption, never a torn write-ahead append -- raised loudly."""
-    path = _write_two_input_journal(tmp_path)
-    lines = path.read_bytes().split(b"\n")
-    lines[1] = lines[1][:8]  # corrupt the first input record (interior)
-    path.write_bytes(b"\n".join(lines))
-    with pytest.raises(EngineError, match="corrupt line"):
-        read_journal(path)
-
-
-def test_read_journal_refuses_a_non_object_json_line(tmp_path: Path) -> None:
-    """(read_journal ss2 dispatch): a line that IS valid JSON but not an
-    object has no `rec` to dispatch on -- refused by its own message, not
-    mistaken for the syntactically corrupt (undecodable) case above."""
-    path = _write_two_input_journal(tmp_path)
-    lines = path.read_bytes().split(b"\n")
-    lines[1] = b"[1, 2, 3]"  # valid JSON, not an object -- an interior line
-    path.write_bytes(b"\n".join(lines))
-    with pytest.raises(EngineError, match="is not a record object"):
-        read_journal(path)
-
-
-@pytest.mark.parametrize("bad_kind", [[], {}])
-def test_an_unhashable_rec_refuses_as_an_unknown_kind(tmp_path: Path, bad_kind: object) -> None:
-    """(check_record docstring, DL-227): `rec` may hold any JSON value. An
-    unhashable one -- a JSON array or object -- takes the same unknown-kind
-    refusal as any other non-current kind, rather than raising a TypeError
-    out of `kind not in CURRENT_RECS`."""
-    path = _write_two_input_journal(tmp_path)
-    lines = path.read_bytes().split(b"\n")
-    record = json.loads(lines[1])
-    record["rec"] = bad_kind
-    lines[1] = json.dumps(record).encode("utf-8")
-    path.write_bytes(b"\n".join(lines))
-    with pytest.raises(EngineError, match="unknown record kind"):
-        read_journal(path)
-
-
-def test_read_journal_refuses_missing_header(tmp_path: Path) -> None:
-    """(read_journal docstring): every journal must open with a header
-    record; a file that starts with anything else is refused."""
-    path = tmp_path / "journal.jsonl"
-    path.write_text(
-        '{"rec": "input", "seq": 1, "at": "2026-07-01T08:00:00",'
-        ' "kind": "STARTJOB", "payload": {}, "source": "control"}\n'
-    )
-    with pytest.raises(EngineError, match="missing segment"):
-        read_journal(path)
-
-
-def test_opens_with_rec_is_none_for_a_path_that_cannot_be_opened(tmp_path: Path) -> None:
-    """(opens_with_rec docstring): the ONE place the first line is sniffed
-    for its kind, RAW -- so it reports the kind whatever the record is (even
-    a retired one, unlike `read_journal`), and None for anything that is not
-    a JSON object naming one. A file that does not exist is the OSError
-    case: no root has ever been claimed there, which is a fact this
-    function reports as absence, not as an error of its own."""
-    from dsl41.runner_journal import opens_with_rec
-
-    missing = tmp_path / "no-such-directory" / "journal.jsonl"
-    assert opens_with_rec(missing) is None
-
-
-@pytest.mark.parametrize(
-    "first_line",
-    [
-        "not json at all",
-        "[1, 2, 3]",  # valid JSON, but not an object
-        '"just a string"',  # valid JSON, still not an object
-    ],
-)
-def test_opens_with_rec_is_none_for_a_first_line_that_names_no_kind(
-    tmp_path: Path, first_line: str
-) -> None:
-    """(opens_with_rec docstring): None for a first line that is not JSON,
-    and for one that IS valid JSON but not an object -- neither has a `rec`
-    to report."""
-    path = tmp_path / "journal.jsonl"
-    path.write_text(first_line + "\n")
-    from dsl41.runner_journal import opens_with_rec
-
-    assert opens_with_rec(path) is None
-
-
-def test_opens_with_rec_reports_a_retired_kind_raw(tmp_path: Path) -> None:
-    """A `header`-opened root is a recognised pre-period one (D5, DL-138):
-    `opens_with_rec` says so plainly, judging nothing -- that verdict is
-    each caller's own tombstone to write."""
-    path = tmp_path / "journal.jsonl"
-    path.write_text('{"rec": "header", "baseline_id": "b"}\n')
-    from dsl41.runner_journal import opens_with_rec
-
-    assert opens_with_rec(path) == "header"
+    snapshot = decode_snapshot(7, data, where="here")
+    assert snapshot.seq == 7 and snapshot.config_rev == 1
+    assert snapshot.frontiers.applied_index == 1 and snapshot.position.frontier == T0
+    assert snapshot.rows.jobs["j1"].status == oracle.store.job["j1"].status
+    with pytest.raises(EngineError, match="here: unreadable snapshot at seq 7"):
+        decode_snapshot(7, b"[]", where="here")
+    with pytest.raises(EngineError, match="here: unreadable snapshot at seq 7"):
+        decode_snapshot(7, b"{}", where="here")
 
 
 # ------------------------------------------------------------- 3. catalog_hash
 
 
 def test_catalog_hash_stable_across_identical_loads() -> None:
-    """(catalog_hash_v2 docstring): a sha256 of the canonical form -- the
-    same estate text loaded twice hashes identically."""
-    assert catalog_hash_v2(lower_source(_SOLO_JIL)) == catalog_hash_v2(lower_source(_SOLO_JIL))
+    """(catalog_hash docstring): a sha256 of the canonical form -- the same estate text loaded
+    twice hashes identically."""
+    assert catalog_hash(lower_source(_SOLO_JIL)) == catalog_hash(lower_source(_SOLO_JIL))
 
 
 def test_catalog_hash_differs_on_any_change() -> None:
-    """(catalog_hash_v2 docstring): "an estate that changed in ANY way
-    re-baselines explicitly" -- even a one-token command change flips it."""
+    """(catalog_hash docstring): an estate that changed in ANY way is another catalog -- even
+    a one-token command change flips it."""
     changed = _SOLO_JIL.replace("command: x", "command: y")
-    assert catalog_hash_v2(lower_source(_SOLO_JIL)) != catalog_hash_v2(lower_source(changed))
+    assert catalog_hash(lower_source(_SOLO_JIL)) != catalog_hash(lower_source(changed))
 
 
 # ------------------------------------------------------------------ 4. replay
@@ -527,7 +453,7 @@ def test_replay_reproduces_a_startjob_cascade_and_killjob_trace(tmp_path: Path) 
     assert engine.oracle.store.job["job_a"].status == "TERMINATED"  # killed before its 5min exit
     assert engine.oracle.store.job["job_b"].status == "INACTIVE"  # s(job_a) never satisfied
 
-    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    records = read_journal(tmp_path / "run")
     fresh = Oracle(lower_source(text))
     replay_inputs(fresh, records)
     assert [t.model_dump() for t in fresh.trace()] == [
@@ -554,7 +480,7 @@ def test_replay_reproduces_a_set_global_gated_trace(tmp_path: Path) -> None:
     engine = asyncio.run(scenario())
     assert engine.oracle.store.job["gate"].status == "SUCCESS"
 
-    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    records = read_journal(tmp_path / "run")
     fresh = Oracle(lower_source(text))
     replay_inputs(fresh, records)
     assert [t.model_dump() for t in fresh.trace()] == [
@@ -596,7 +522,7 @@ def test_replay_reproduces_a_disarm_trace_to_the_same_state(tmp_path: Path) -> N
     assert engine.oracle.store.job["dis_r"].status == "INACTIVE"  # no start followed the edge
     assert engine.oracle.store.job["dis_r"].armed is False
 
-    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    records = read_journal(tmp_path / "run")
     fresh = Oracle(lower_source(text))
     replay_inputs(fresh, records)
     assert [t.model_dump() for t in fresh.trace()] == [
@@ -634,7 +560,7 @@ def test_replay_reproduces_held_units_and_a_release_resource(tmp_path: Path) -> 
     assert engine.oracle.store.job["jh"].reservations == ()
     assert engine.oracle.store.job["jw"].status == "RUNNING"
 
-    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    records = read_journal(tmp_path / "run")
     assert [r["kind"] for r in records if r.get("rec") == "input"].count("RELEASE_RESOURCE") == 1
     fresh = Oracle(lower_source(text))
     replay_inputs(fresh, records)
@@ -661,7 +587,7 @@ def test_replay_refuses_an_unknown_event_kind_by_name(tmp_path: Path) -> None:
         )
 
     asyncio.run(scenario())
-    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    records = read_journal(tmp_path / "run")
     doctored = [
         {**r, "kind": "FUTURE_KIND"} if r.get("rec") == "input" and r.get("kind") else r
         for r in records
@@ -687,7 +613,7 @@ def test_replay_reproduces_source_tagged_causes_and_started_by(tmp_path: Path) -
     engine = asyncio.run(scenario())
     assert engine.oracle.store.job["j1"].started_by == "STARTJOB event (control)"
 
-    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    records = read_journal(tmp_path / "run")
     fresh = Oracle(lower_source(text))
     replay_inputs(fresh, records)
     assert fresh.store.job["j1"].started_by == "STARTJOB event (control)"
@@ -722,7 +648,7 @@ def test_input_records_tag_injected_events_control_and_completions_adapter(
         engine.journal.close()
 
     asyncio.run(scenario())
-    inputs = [r for r in read_journal(tmp_path / "run" / "journal.jsonl") if r["rec"] == "input"]
+    inputs = [r for r in read_journal(tmp_path / "run") if r["rec"] == "input"]
     assert inputs[0]["kind"] == "STARTJOB"
     assert inputs[0]["source"] == "control"
     completion = next(r for r in inputs if r["kind"] == "STATUS")
@@ -773,7 +699,7 @@ def test_gate_dropped_completion_is_journaled_as_an_admitted_rejection(tmp_path:
         engine.journal.close()
 
     asyncio.run(scenario())
-    records = read_journal(tmp_path / "run" / "journal.jsonl")
+    records = read_journal(tmp_path / "run")
     rejected = [r for r in records if r["rec"] == "decision" and r["decision"] == "rejected"]
     assert len(rejected) == 1
     assert rejected[0]["reason"] == "run_number mismatch"
@@ -788,8 +714,8 @@ def test_gate_dropped_completion_is_journaled_as_an_admitted_rejection(tmp_path:
 
 
 def test_start_run_refuses_an_existing_journal(tmp_path: Path) -> None:
-    """(start_run docstring): a run_root that already holds a journal.jsonl
-    must be resumed (resume_run), never silently re-baselined."""
+    """(start_run docstring): a run_root that already holds an engine.db must be resumed
+    (resume_run), never silently re-baselined."""
     catalog = lower_source(_SOLO_JIL)
     run_root = tmp_path / "run"
     engine = start_run(
@@ -828,7 +754,7 @@ def test_cli_journal_renders_the_trace_when_the_catalog_matches(tmp_path: Path) 
         engine.journal.close()
 
     asyncio.run(scenario())
-    result = CliRunner().invoke(app, ["journal", str(run_root / "journal.jsonl"), str(jil_path)])
+    result = CliRunner().invoke(app, ["journal", str(run_root), str(jil_path)])
     assert result.exit_code == 0
     assert result.output == (
         "2026-07-01T08:00:00 j1 INACTIVE->STARTING [STARTJOB event (control)]\n"
@@ -860,17 +786,16 @@ def test_cli_journal_exits_2_on_catalog_hash_mismatch(tmp_path: Path) -> None:
 
     asyncio.run(scenario())
     jil_path.write_text(text.replace("command: x", "command: y"))  # the estate drifted
-    result = CliRunner().invoke(app, ["journal", str(run_root / "journal.jsonl"), str(jil_path)])
+    result = CliRunner().invoke(app, ["journal", str(run_root), str(jil_path)])
     assert result.exit_code == 2
     assert "catalog hash mismatch" in result.output
 
 
-def test_cli_journal_refuses_an_older_build_s_log_for_its_version(tmp_path: Path) -> None:
-    """DL-253: a journal an older build wrote names that build's
-    state-machine version and a catalog hash over its own `ir_version`. Read
-    against the SAME estate file, it is refused for its version, before any
-    hash is compared: never "catalog hash mismatch", never a trace."""
-    from dsl41.run_root import hash_over
+def test_cli_journal_refuses_another_state_version(tmp_path: Path) -> None:
+    """DL-424: a store another build wrote names that build's state version in its meta. Read
+    against the SAME estate file, it is refused for its version, before any hash is compared:
+    never "catalog hash mismatch", never a trace."""
+    import sqlite3
 
     text = "insert_job: j1\njob_type: c\ncommand: x\nmachine: m1\n"
     jil_path = tmp_path / "estate.jil"
@@ -889,128 +814,61 @@ def test_cli_journal_refuses_an_older_build_s_log_for_its_version(tmp_path: Path
         engine.journal.close()
 
     asyncio.run(scenario())
-    path = run_root / "journal.jsonl"
-    records = read_journal(path)
-    payload = catalog.model_dump(mode="json")
-    payload["meta"] = {"source_files": list(catalog.meta.source_files)}
-    payload["ir_version"] = "0.2"
-    records[0]["catalog_hash"] = hash_over(payload)
-    records[0]["state_machine_version"] = STATE_MACHINE_VERSION - 1
-    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records))
-    result = CliRunner().invoke(app, ["journal", str(path), str(jil_path)])
+    with closing(sqlite3.connect(run_root / "engine.db", isolation_level=None)) as db:
+        db.execute(
+            "UPDATE meta SET value = ? WHERE key = 'state_version'",
+            (str(STATE_MACHINE_VERSION - 1),),
+        )
+    result = CliRunner().invoke(app, ["journal", str(run_root), str(jil_path)])
     assert result.exit_code == 2
-    assert f"state_machine_version {STATE_MACHINE_VERSION - 1}" in result.output
+    assert f"state version {STATE_MACHINE_VERSION - 1}" in result.output
     assert "catalog hash mismatch" not in result.output
     assert "STARTING" not in result.output
 
 
-# ------------------------------------ the WAL's own edges (DL-105)
+def test_cli_journal_refuses_a_directory_that_is_not_a_run_root(tmp_path: Path) -> None:
+    """A directory with no `engine.db` is not a run root, and a 1.x root is refused by name:
+    2.0.0 reads the store only."""
+    result = CliRunner().invoke(app, ["journal", str(tmp_path)])
+    assert result.exit_code == 2 and "not a run root" in result.output
+    (tmp_path / "journal.jsonl").write_text("{}\n")
+    result = CliRunner().invoke(app, ["journal", str(tmp_path)])
+    assert result.exit_code == 2 and "a 1.x run root" in result.output
+
+
+# ------------------------------------ the record's own edges (DL-105)
 
 
 def test_the_preflight_caveats_a_run_started_under_are_in_the_log(tmp_path: Path) -> None:
-    """ss8's "prints, JOURNALS, and runs" made literal (DL-45). A WARN that
-    only reached the terminal would be gone by the time anyone asks why a run
-    behaved the way it did; replay ignores the record, because it is not an
-    input -- it is the caveat list the inputs were admitted under."""
+    """ss8's "prints, RECORDS, and runs" made literal (DL-45). A WARN that only reached the
+    terminal would be gone by the time anyone asks why a run behaved the way it did; replay
+    ignores the record, because it is not an input -- it is the caveat list the inputs were
+    admitted under."""
     from dsl41.runner_preflight import PreflightItem
 
-    journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
-    journal.close()
-    journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
+    journal = _journal(tmp_path)
     items = [
         PreflightItem(severity="WARN", code="machine", job="j", message="pool split; local"),
         PreflightItem(severity="WARN", code="timezone", job="k", message="no base tz"),
     ]
-    journal.preflight(items)
+    journal.preflight(items, T0)
     journal.close()
 
-    [record] = [json.loads(line) for line in (tmp_path / "j.jsonl").read_text().splitlines()][-1:]
+    [record] = read_journal(tmp_path)
     assert record["rec"] == "preflight"
     assert [i["code"] for i in record["items"]] == ["machine", "timezone"]
     assert [i["severity"] for i in record["items"]] == ["WARN", "WARN"]
 
 
-def test_unsubscribing_something_that_never_subscribed_is_a_no_op(tmp_path: Path) -> None:
-    """ss10 viewers come and go, and a double `unsubscribe` -- a viewer that
-    drops while its handler is being cancelled -- must not take the WAL down
-    with it. The fan-out never blocks on a subscriber and never dies of one."""
-    journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
+def test_unsubscribing_something_that_never_subscribed_is_a_no_op() -> None:
+    """ss10 viewers come and go, and a double `unsubscribe` -- a viewer that drops while its
+    handler is being cancelled -- must not take the journal down with it. The fan-out never
+    blocks on a subscriber and never dies of one."""
+    journal = Journal(MemoryStore(identity=_IDENTITY))
     queue = journal.subscribe(Executor())
     journal.unsubscribe(queue)
     journal.unsubscribe(queue)  # already gone
-    journal.unsubscribe(asyncio.Queue())  # never here
+    journal.unsubscribe(asyncio.Queue())  # type: ignore[arg-type]  # never here
     journal.drop(Event(at=T0, kind="STARTJOB", payload={"job": "j"}), "for the fan-out")
     assert queue.empty()  # unsubscribed means unsubscribed
     journal.close()
-
-
-def test_an_empty_interior_line_is_corruption_not_a_torn_tail(tmp_path: Path) -> None:
-    """A torn FINAL line is a crash mid-append and is dropped -- write-ahead
-    means the feed it preceded never happened. An empty line with records
-    AFTER it cannot be that: something wrote past it, so the log is not what
-    it claims to be and reading on would silently skip an input.
-
-    The opening here is a RETIRED `header`, deliberately: structural
-    integrity is the more fundamental fact, so the parse pass runs before
-    D1's record validator and this file is called corrupt rather than called
-    a retired dialect (DL-138). Replacing it with a `segment` would drop
-    that ordering pin."""
-    path = tmp_path / "j.jsonl"
-    path.write_text(
-        '{"rec": "header", "catalog_hash": "x", "clock_domain": "virtual",'
-        ' "dsl41_version": "0", "started_at": "2026-07-01T08:00:00"}\n'
-        "\n"
-        '{"rec": "advance", "seq": 2, "at": "2026-07-01T08:01:00"}\n'
-    )
-    with pytest.raises(EngineError, match="empty interior line 2"):
-        read_journal(path)
-
-
-# ------------------------------------------ peer-review round-2 pin (DL-136)
-
-
-def test_an_embedded_opening_record_refuses_the_journal(tmp_path: Path) -> None:
-    """I1: one segment record per file, and it is line 1. An embedded
-    `segment` mid-file is a splice -- a reader that split the validated
-    stream on it would treat forged records as a file boundary and admit an
-    unchained period.
-
-    A byte-true COPY of the real opening is the case that matters: it
-    passes every schema check the first one passed, so position is the only
-    thing that can refuse it. The retired `header` variant this test also
-    carried refuses one gate earlier now, at the record validator (DL-138,
-    pinned in test_decision_record.py)."""
-    from dsl41.canon import canonical_bytes
-
-    wal = _write_two_input_journal(tmp_path)
-    records = read_journal(wal)
-    spliced = [records[0], dict(records[0]), *records[1:]]
-    wal.write_bytes(b"".join(canonical_bytes(r) + b"\n" for r in spliced))
-    with pytest.raises(EngineError, match="a second opening inside one is a splice"):
-        read_journal(wal)
-    wal.write_bytes(b"".join(canonical_bytes(r) + b"\n" for r in records))
-    assert read_journal(wal)  # restored: clean
-
-
-def test_a_zero_first_index_refuses_the_segment(tmp_path: Path) -> None:
-    """I2: index 1 is the first index there ever is -- a forged
-    `first_index: 0` would make the backfill's positional containment
-    stop at that segment and hide every older one."""
-    from dsl41.canon import canonical_bytes
-
-    wal = _write_two_input_journal(tmp_path)
-    records = read_journal(wal)
-    records[0] = {**records[0], "first_index": 0}
-    wal.write_bytes(b"".join(canonical_bytes(r) + b"\n" for r in records))
-    with pytest.raises(EngineError, match="first_index"):
-        read_journal(wal)
-
-
-def test_a_seal_record_is_a_retired_dialect_refused_by_name() -> None:
-    """A 1.x root that sealed holds a `seal` record; 2.0.0 names it rather than
-    calling the file corrupt (docs/protocol-evolution.md ss6)."""
-    from dsl41.runner_journal import RETIRED_RECS, check_record
-
-    assert RETIRED_RECS["seal"] == "2.0.0"
-    with pytest.raises(EngineError, match="`seal` is a RETIRED record dialect.*since 2.0.0"):
-        check_record({"rec": "seal"}, where="journal j")

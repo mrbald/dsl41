@@ -326,7 +326,7 @@ def test_pr10a_surrogate_refused_at_the_control_socket(short_root: Path) -> None
             engine.journal.close()
 
     asyncio.run(scenario())
-    kinds = [r.get("kind") for r in read_journal(run_root / "journal.jsonl")]
+    kinds = [r.get("kind") for r in read_journal(run_root)]
     assert "SET_GLOBAL" not in kinds  # refused means the log says nothing
 
 

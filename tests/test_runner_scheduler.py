@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import getpass
-import json
 import socket as socket_mod
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -32,7 +31,7 @@ from dsl41.oracle_state import Event
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, RealClock, VirtualClock
-from dsl41.runner_journal import read_journal, scheduler_frontier
+from dsl41.runner_journal import Position, read_journal, read_records
 from dsl41.runner_preflight import (
     _local_identity,
     and_success_skeleton,
@@ -545,7 +544,7 @@ def test_engine_fires_scheduler_startjobs_journaled_source_scheduler_and_respect
 
     asyncio.run(scenario())
 
-    records = read_journal(run_root / "journal.jsonl")
+    records = read_journal(run_root)
     starts = [r for r in records if r.get("rec") == "input" and r.get("kind") == "STARTJOB"]
     assert len(starts) == 2
     assert all(r["source"] == "scheduler" for r in starts)
@@ -771,7 +770,7 @@ def test_resume_virtual_scheduler_ticks_never_refire(tmp_path: Path) -> None:
     asyncio.run(phase1())
 
     def scheduler_starts() -> list[dict]:
-        records = read_journal(run_root / "journal.jsonl")
+        records = read_journal(run_root)
         return [r for r in records if r.get("rec") == "input" and r.get("kind") == "STARTJOB"]
 
     assert len(scheduler_starts()) == 1
@@ -809,37 +808,31 @@ def test_resume_real_domain_missed_ticks_are_dropped_and_journaled(tmp_path: Pat
     in the past, over a job ticking every 30 minutes, resumes with 4 missed
     ticks -- each dropped (never fired late) and journaled as a `drop`
     record, and reported on Engine.drops."""
-    from dsl41.runner_journal import Journal
-
     text = (
         "insert_job: mts_job\njob_type: c\ncommand: x\nmachine: m1\n"
         "date_conditions: 1\ndays_of_week: all\nstart_mins: 0,30\n"
     )
     catalog = lower_source(text)
     run_root = tmp_path / "run"
-    run_root.mkdir()
-    (run_root / "runs").mkdir()
-    (run_root / "logs").mkdir()
 
     now = RealClock().now()
     past = now - timedelta(hours=2)
-    # a hand-built root is still a DL-130 root: genesis installs the period
-    # manifest before the log opens, and resume refuses a segment without one
-    from dsl41.run_root import genesis_manifest, write_period_manifest
-    from dsl41.runner_ledger import STATE_MACHINE_VERSION
 
-    manifest = genesis_manifest(
-        catalog, clock_domain="real", state_machine_version=STATE_MACHINE_VERSION
+    class _Then(RealClock):
+        """The real domain, read two hours ago: the genesis the engine died after."""
+
+        def now(self) -> datetime:
+            return past
+
+    genesis = start_run(
+        catalog,
+        run_root,
+        clock=_Then(),
+        adapters={"CMD": FakeAdapter()},
+        scheduler=Scheduler(catalog, start=past),
     )
-    write_period_manifest(run_root, manifest)
-    journal = Journal.create(
-        run_root / "journal.jsonl",
-        catalog=catalog,
-        clock_domain="real",
-        started_at=past,
-        manifest=manifest,
-    )
-    journal.close()
+    assert genesis.journal is not None
+    genesis.journal.close()
 
     async def scenario() -> Engine:
         engine = await resume_run(
@@ -849,6 +842,8 @@ def test_resume_real_domain_missed_ticks_are_dropped_and_journaled(tmp_path: Pat
             adapters={"CMD": FakeAdapter()},
             scheduler=Scheduler(catalog, start=past),
         )
+        # the missed ticks are recorded at startup step 8, which the loop runs
+        await engine.run_until_quiescent(engine.clock.now())
         await engine.shutdown()
         assert engine.journal is not None
         engine.journal.close()
@@ -860,7 +855,7 @@ def test_resume_real_domain_missed_ticks_are_dropped_and_journaled(tmp_path: Pat
     assert all(ev.kind == "STARTJOB" for ev, _ in engine.drops)
     assert all("missed" in reason for _, reason in engine.drops)
 
-    records = read_journal(run_root / "journal.jsonl")
+    records = read_journal(run_root)
     drop_records = [r for r in records if r.get("rec") == "drop"]
     assert len(drop_records) == 4
     assert all(r["kind"] == "STARTJOB" for r in drop_records)
@@ -878,7 +873,7 @@ def test_dl45_a_same_instant_sibling_lost_to_the_crash_is_dropped_not_forgotten(
     and it would vanish with no record at all. The inclusive anchor derives
     both: the journaled one is skipped, the lost one is dropped AND
     journaled -- never fired late, never silently forgotten (DL-166)."""
-    from dsl41.run_root import estate_wal
+    from store_surgery import delete, rows
 
     text = (
         "insert_job: sib_a\njob_type: c\ncommand: x\nmachine: m1\n"
@@ -905,19 +900,20 @@ def test_dl45_a_same_instant_sibling_lost_to_the_crash_is_dropped_not_forgotten(
         engine.journal.close()
 
     asyncio.run(phase1())
-    wal = estate_wal(run_root)
+    wal = run_root
 
-    # the crash: sib_b's `input` append never landed. Truncating at that line
-    # is the real shape -- a contiguous prefix, no forged record.
-    lines = wal.read_text().splitlines(keepends=True)
+    # the crash: sib_b's admission never landed. Cutting the store there is the real
+    # shape -- a contiguous prefix, no forged record.
     cut = next(
-        index
-        for index, line in enumerate(lines)
-        if json.loads(line).get("rec") == "input"
-        and json.loads(line)["payload"].get("job") == "sib_b"
+        seq
+        for seq, kind, body in rows(run_root)
+        if kind == "input" and (body.get("payload") or {}).get("job") == "sib_b"
     )
-    wal.write_text("".join(lines[:cut]))
-    assert scheduler_frontier(read_journal(wal)) == tick  # the frontier IS the tick
+    delete(run_root, lambda seq, kind, body: seq >= cut)
+    position = Position()
+    for _, record in read_records(run_root):
+        position.note(record)
+    assert position.frontier == tick  # the frontier IS the tick
 
     async def phase2() -> Engine:
         engine = await resume_run(
@@ -927,6 +923,8 @@ def test_dl45_a_same_instant_sibling_lost_to_the_crash_is_dropped_not_forgotten(
             adapters={"CMD": FakeAdapter(default=None)},
             scheduler=Scheduler(catalog, start=start),
         )
+        # the missed ticks are recorded at startup step 8, which the loop runs
+        await engine.run_until_quiescent(engine.clock.now())
         assert engine.journal is not None
         engine.journal.close()
         return engine
@@ -951,7 +949,7 @@ def test_dl174_a_tick_at_a_drop_frontier_is_dropped_once_across_three_resumes(
     tmp_path: Path,
 ) -> None:
     """(ss5/ss7, DL-166's own deferred finding, paid here as PR-25b):
-    `scheduler_frontier` counts `drop` records as well as `input` ones
+    the scheduler frontier counts `drop` records as well as `input` ones
     (PR-25a), but the old `replayed_ticks` dedup set only ever looked at
     `input`. So when the frontier IS a drop's instant, the next resume
     re-anchors there, re-derives the SAME tick, finds it in neither dedup
@@ -965,39 +963,29 @@ def test_dl174_a_tick_at_a_drop_frontier_is_dropped_once_across_three_resumes(
     facing `dropped STARTJOB ...` line from -- gets the same guard: it holds
     the tick once, from the resume that made the verdict, and stays empty
     on the resumes that only read it back."""
-    from dsl41.run_root import genesis_manifest, write_period_manifest
-    from dsl41.runner_journal import Journal
-    from dsl41.runner_ledger import STATE_MACHINE_VERSION
-
     text = (
         "insert_job: once_job\njob_type: c\ncommand: x\nmachine: m1\n"
         'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n'
     )
     catalog = lower_source(text)
     run_root = tmp_path / "run"
-    run_root.mkdir()
-    (run_root / "runs").mkdir()
-    (run_root / "logs").mkdir()
 
     start = datetime(2026, 7, 1, 9, 0)
     tick = datetime(2026, 7, 1, 10, 0)
     now = datetime(2026, 7, 1, 10, 5)  # past the tick, short of tomorrow's
 
-    manifest = genesis_manifest(
-        catalog, clock_domain="virtual", state_machine_version=STATE_MACHINE_VERSION
+    genesis = start_run(
+        catalog,
+        run_root,
+        clock=VirtualClock(start=start),
+        adapters={"CMD": FakeAdapter()},
+        scheduler=Scheduler(catalog, start=start),
     )
-    write_period_manifest(run_root, manifest)
-    journal = Journal.create(
-        run_root / "journal.jsonl",
-        catalog=catalog,
-        clock_domain="virtual",
-        started_at=start,
-        manifest=manifest,
-    )
-    journal.close()
+    assert genesis.journal is not None
+    genesis.journal.close()
 
     def drop_records() -> list[dict]:
-        return [r for r in read_journal(run_root / "journal.jsonl") if r.get("rec") == "drop"]
+        return [r for r in read_journal(run_root) if r.get("rec") == "drop"]
 
     async def one_resume() -> Engine:
         engine = await resume_run(
@@ -1007,6 +995,8 @@ def test_dl174_a_tick_at_a_drop_frontier_is_dropped_once_across_three_resumes(
             adapters={"CMD": FakeAdapter()},
             scheduler=Scheduler(catalog, start=start),
         )
+        # the missed ticks are recorded at startup step 8, which the loop runs
+        await engine.run_until_quiescent(engine.clock.now())
         await engine.shutdown()
         assert engine.journal is not None
         engine.journal.close()

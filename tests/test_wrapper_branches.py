@@ -51,6 +51,15 @@ def test_wrapper_spec_refusal_accepts_a_spec_without_grace_seconds() -> None:
     assert "lifeline_fd" in (runner_wrapper._spec_refusal({"version": 1, "lifeline_fd": "3"}) or "")
 
 
+def test_wrapper_spec_refusal_checks_a_present_env() -> None:
+    """`env` is optional, the invocation the attempt's `dispatch` record holds; a present one
+    is an object of strings, or the spec is refused before anything spawns."""
+    assert runner_wrapper._spec_refusal({"version": 1, "env": {"DSL41_JOB": "j"}}) is None
+    for bad in (["DSL41_JOB"], {"DSL41_RUN_NUMBER": 1}, {1: "j"}, "DSL41_JOB=j"):
+        refusal = runner_wrapper._spec_refusal({"version": 1, "env": bad})
+        assert refusal is not None and "env" in refusal
+
+
 # --------------------------------------------------------------- _drain
 
 

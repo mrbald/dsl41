@@ -584,7 +584,7 @@ The job ends its own helpers itself (DL-403).
 
 | Bound | Value | Source |
 | --- | --- | --- |
-| Command grace, from SIGTERM to SIGKILL | 10 s; no site setting changes it | `CMD_GRACE_S` in `src/dsl41/run_root.py`, pinned in each period's runtime profile as `cmd_grace_us` (period-model §2.1 (`period-model.md`, retired in 2.0.0)) |
+| Command grace, from SIGTERM to SIGKILL | 10 s by default | `grace_term_s` in the run root's `engine.toml` (`src/dsl41/runner_config.py`); `dsl41 run --grace-term` overrides it for one run |
 | Drain at a supervisor stop | 840 s in the example unit | `Environment=DSL41_DRAIN_S` in the supervisor unit (supervisor-protocol §5 (`supervisor-protocol.md`, retired in 2.0.0), DL-416) |
 | Host shutdown with a deadman | the deadman plus the 10 s grace | `dsl41 run --deadman`, when the site sets one, and `CMD_GRACE_S` (DL-205, DL-416) |
 | Whole supervisor stop | 900 s in the example unit, 1800 s for a hung supervisor | `TimeoutStopSec` in the supervisor unit bounds its `ExecStop=`, the drain and the wait; when that overruns, systemd sends SIGTERM to every process in the unit and a second `TimeoutStopSec` bounds it before SIGKILL. The site package sizes it against `MAX_JOBS` and `MAX_GRACE_S` (site-package §5 (`site-package.md`, retired in 2.0.0), DL-401, DL-416) |

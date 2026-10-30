@@ -111,18 +111,19 @@ import asyncio
 import heapq
 import uuid
 
-from collections.abc import Awaitable, Mapping
-from dataclasses import dataclass
-from datetime import datetime
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from enum import Enum, auto
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 from dsl41.ir import CatalogIR, JobIR
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import Event, EventSource
+from dsl41.oracle_state import Event, EventSource, JobRuntime
 from dsl41.runner_adapters import (
     AdapterContext,
+    Failed,
     FileWatcherAdapter,
     JobAdapter,
     status_payload,
@@ -146,16 +147,27 @@ from dsl41.runner_admission import (
     spawn_superseded,
     trial_apply,
 )
+from dsl41.canon import CanonError, canonical_bytes
 from dsl41.runner_codes import Rejection
 from dsl41.runner_clock import Clock, EngineError, ZeroDelayCycleError
-from dsl41.run_root import (
-    Manifest,
+from dsl41.idempotence import invocation_env
+from dsl41.runner_config import (
+    EngineSettings,
     OracleReading,
+    RuntimeProfile,
     oracle_reading,
     switches_of,
 )
-from dsl41.runner_journal import Journal
-from dsl41.runner_ledger import Proof
+from dsl41.runner_journal import (
+    Journal,
+    dispatch_record,
+    encode_snapshot,
+    follow_up_done,
+    pending_record,
+)
+from dsl41.runner_history import run_history
+from dsl41.runner_ledger import STATE_MACHINE_VERSION, Proof
+from dsl41.runner_store import Record, Store
 from dsl41.runner_scheduler import Scheduler
 from dsl41.semantics import ADAPTER_SWITCHES, SCHEDULER_SWITCHES, SemanticSwitches
 from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES
@@ -173,6 +185,26 @@ INSTANT_BUDGET_FLOOR: Final = 10_000
 class _LiveRun:
     run_number: int
     task: asyncio.Task[None]
+    #: the attempt's id, the `run_id` its `dispatch` record bound; None with no journal
+    attempt: str | None = None
+
+
+@dataclass(frozen=True)
+class Deferred:
+    """A dispatch startup owes and the loop carries out once the due work is processed: a
+    pending start (`pending` is its `dispatch_pending` record's seq) or a plan's replacement
+    attempt (`plan` is the interrupted attempt's id, `step` the step's position, `attempt` the
+    replacement's id). Each is durable before it is deferred, so a crash before its `dispatch`
+    loses none (spec-wiring 1b)."""
+
+    job: str
+    run_number: int
+    pending: int | None = None
+    plan: str | None = None
+    step: int = 0
+    attempt: str | None = None
+    ordinal: int = 1
+    env: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -194,7 +226,10 @@ class _Pending:
 
     `ev` absent is a standalone time observation. ss4 admits it by the same rule.
 
-    `source` is read only when `ev` is absent; an event carries its own (DL-68)."""
+    `source` is read only when `ev` is absent; an event carries its own (DL-68).
+
+    `step` names the follow-up step this input performs: the plan's attempt id and the step's
+    position. Its done mark is appended with the admission (spec-wiring 1b)."""
 
     at: datetime
     request_id: str | None
@@ -202,6 +237,7 @@ class _Pending:
     source: EventSource | None = None
     envelope: Envelope | None = None
     future: asyncio.Future[ApplyResult] | None = None
+    step: tuple[str, int] | None = None
 
 
 def _without_frames(exc: Exception) -> Exception:
@@ -268,27 +304,27 @@ def adapter_switch(adapters: Mapping[str, JobAdapter], name: str) -> str | None:
 
 
 def _engine_switches(
-    manifest: Manifest | None,
+    profile: RuntimeProfile | None,
     semantics: SemanticSwitches | None,
     scheduler: Scheduler | None,
     adapters: Mapping[str, JobAdapter],
 ) -> SemanticSwitches:
     """The semantic switches an engine runs (DL-252).
 
-    An engine over a run root runs its manifest's pin. `semantics` is for an engine with no
-    manifest; one that disagrees with the pin is refused. So is a scheduler built under another
+    An engine over a run root runs its configuration's profile. `semantics` is for an engine
+    with no profile; one that disagrees with the profile is refused. So is a scheduler built under another
     value of a switch it reads (DL-259, DL-260), since its calendars or start instants would
     fire under a reading the period and oracle do not use; the derived runtime profile reads
     those switches from the scheduler, so a launcher meets this before any durable write and this
     check is the backstop. The same holds for a wired adapter built under another value of a
     switch it reads (DL-258, DL-280), once a pin or `semantics` names a reading."""
-    if manifest is None:
+    if profile is None:
         switches = semantics or DEFAULT_SWITCHES
     else:
-        switches = switches_of(manifest.runtime_profile)
+        switches = switches_of(profile)
         if semantics is not None and semantics != switches:
             raise EngineError(
-                f"semantic switches {semantics} disagree with the period's pin {switches}"
+                f"semantic switches {semantics} disagree with the profile's {switches}"
                 " (runner-design ss8a)"
             )
     if scheduler is not None:
@@ -300,7 +336,7 @@ def _engine_switches(
                     f"{scheduler.semantics.value(name)}, the engine runs"
                     f" {switches.value(name)} (runner-design ss8a)"
                 )
-    if manifest is not None or semantics is not None:
+    if profile is not None or semantics is not None:
         for name in ADAPTER_SWITCHES:
             wired = adapter_switch(adapters, name)
             if wired is not None and wired != switches.value(name):
@@ -313,22 +349,20 @@ def _engine_switches(
 
 def _engine_oracle(
     catalog: CatalogIR,
-    manifest: Manifest | None,
+    profile: RuntimeProfile | None,
     semantics: SemanticSwitches | None,
     scheduler: Scheduler | None,
     adapters: Mapping[str, JobAdapter],
 ) -> Oracle:
     """The oracle an `Engine` reads its catalog through."""
     # SEM-35: the base zone and alias table the oracle reads a job's time attributes in. They
-    # come from the period's pinned profile, which every replay reads (`oracle_reading`), else
+    # come from the configuration's profile, which every replay reads (`oracle_reading`), else
     # from the scheduler: both halves of one engine read a job's zone the same way (DL-62,
     # DL-253). Empty aliases read as absent.
-    switches = _engine_switches(manifest, semantics, scheduler, adapters)
-    if manifest is not None:
-        # the zone and aliases from the pin; the switches as checked above
-        reading = OracleReading(
-            **{**oracle_reading(manifest.runtime_profile), "semantics": switches}
-        )
+    switches = _engine_switches(profile, semantics, scheduler, adapters)
+    if profile is not None:
+        # the zone and aliases from the profile; the switches as checked above
+        reading = OracleReading(**{**oracle_reading(profile), "semantics": switches})
     else:
         reading = OracleReading(
             default_tz=scheduler.default_tz if scheduler is not None else None,
@@ -356,12 +390,13 @@ class Engine:
         run_root: Path | None = None,
         scheduler: Scheduler | None = None,
         hold_open: bool = False,
-        manifest: Manifest | None = None,
+        profile: RuntimeProfile | None = None,
         fence: Proof | None = None,
         semantics: SemanticSwitches | None = None,
         machines: Executor | None = None,
+        settings: EngineSettings | None = None,
     ) -> None:
-        self.oracle: Oracle = _engine_oracle(catalog, manifest, semantics, scheduler, adapters)
+        self.oracle: Oracle = _engine_oracle(catalog, profile, semantics, scheduler, adapters)
         self.clock = clock
         self.adapters = dict(adapters)  # job_type -> adapter; no BOX row
         self.journal = journal
@@ -391,12 +426,37 @@ class Engine:
         #: the decision index, built here because it runs each request id in flight on this
         #: engine's executor
         self.decisions = DecisionIndex(self._machines)
-        #: the run root's committed manifest, the pin the oracle reads under. None on an engine
-        #: with no run root (the bisimulation harness, a rehearsal)
-        self.manifest = manifest
+        #: the configuration's runtime profile, the one the oracle reads under. None on an
+        #: engine with no configuration (the bisimulation harness, a bare rehearsal)
+        self.profile = profile
         #: this run root's `leader.lock` proof. The journal re-checks it before every append, and
         #: the FW adapter before every spool line it writes (`AdapterContext.fence`).
         self.fence: Proof | None = fence
+        #: `engine.toml` (DL-424); None takes no snapshot and prunes nothing
+        self.settings = settings
+        #: the configuration rev the engine runs
+        self.config_rev = 0
+        #: the clock instant and journal seq of the last snapshot this engine took
+        self._snapshot_at: datetime | None = None
+        self._snapshot_seq = 0
+        #: the run history the snapshot this engine restarted from carried; each snapshot
+        #: continues it with the trace since (`runner_history.run_history`)
+        self.restored_runs: dict[str, list[dict[str, Any]]] = {}
+        #: the job rows that snapshot restored: they number a job's next run when retention
+        #: emptied its history
+        self.restored_rows: dict[str, JobRuntime] = {}
+        #: True from the oracle's apply of an attempt until its records are appended and every
+        #: start it decided has its `dispatch`: the store then lacks what the oracle holds, and
+        #: no snapshot may be taken. A dispatch that raises leaves it True
+        self._applying = False
+        #: startup's step 8 (`runner_startup`), which the loop runs once steps 6 and 7 have taken
+        #: effect; None on an engine that is not recovering. While it is set, a start an input
+        #: decides is owed, not launched: the recovery barrier holds it until the due work has
+        #: run (DL-425)
+        self.recovery: Callable[[], None] | None = None
+        #: set once the engine has recorded `engine started`: at genesis, or by the loop at the
+        #: end of a restart's recovery
+        self.started = asyncio.Event()
 
     def _init_live_state(self) -> None:
         """The queue and the live-run books `__init__` starts empty."""
@@ -418,12 +478,14 @@ class Engine:
         #: `_live`/`_reaping` so a reversible catcher cannot consume the only
         #: observation, and teardown does not raise the same failure twice
         self._corpses_raised: set[int] = set()
-        #: decided starts resume found with no `dispatch` record (DL-102), and the journal's last
-        #: instant. The loop dispatches them once it has processed what is due at or before that
-        #: instant or the clock, so the reconciliation inputs and the overdue timers apply first
-        #: and a start they end is superseded rather than launched
-        self._recovered_starts: list[tuple[str, int]] = []
-        self._recovered_after: datetime | None = None
+        #: the dispatches startup owes (pending starts, plan replacements), and the journal's
+        #: last instant. The loop carries them out once it has processed what is due at or
+        #: before that instant or the clock, so the reconciliation inputs and the overdue timers
+        #: apply first and a start they end is not launched (DL-102, DL-425)
+        self._deferred: list[Deferred] = []
+        self._deferred_after: datetime | None = None
+        #: killed tasks by id: their attempt is closed with a `stopped` outcome once reaped
+        self._killed: dict[int, _LiveRun] = {}
 
     @property
     def machines(self) -> Executor:
@@ -489,10 +551,18 @@ class Engine:
         request_id: str | None = None,
         envelope: Envelope | None = None,
         future: asyncio.Future[ApplyResult] | None = None,
+        step: tuple[str, int] | None = None,
     ) -> None:
         ev.source = source  # DL-68: the event carries its own provenance
         self._push(
-            _Pending(at=ev.at, request_id=request_id, ev=ev, envelope=envelope, future=future)
+            _Pending(
+                at=ev.at,
+                request_id=request_id,
+                ev=ev,
+                envelope=envelope,
+                future=future,
+                step=step,
+            )
         )
 
     def _push(self, pending: _Pending) -> None:
@@ -641,22 +711,21 @@ class Engine:
             if now != instant:
                 instant, instant_events = now, 0
             work = self._next_work(horizon, now)
-            if self._recovered_starts and not self._takes_due_work(
-                work, max(now, self._recovered_after or now)
+            if self.recovery is not None and not self._takes_due_work(
+                work, max(now, self._deferred_after or now)
             ):
-                # the starts resume found undispatched go once this pass has processed every
-                # input, timer and tick due at or before the current instant, so the
-                # reconciliation and the overdue deadlines apply first. A due item the frontier
-                # rule holds lazy is not processed now and does not hold them back. On the real
-                # clock a steady stream of due inputs delays them; it never loses one
-                starts, self._recovered_starts = self._recovered_starts, []
-                for job, run_number in starts:
-                    self.spawn(job, run_number)
+                # the dispatches startup owes go once this pass has processed every input, timer
+                # and tick due at or before the current instant, so the reconciliation and the
+                # overdue deadlines apply first. A due item the frontier rule holds lazy is not
+                # processed now and does not hold them back. On the real clock a steady stream
+                # of due inputs delays them; it never loses one
+                self._finish_recovery()
                 continue  # dispatch is not same-instant work: skip the budget
             if work.do is _Do.EVENT:
                 _, _, pending = heapq.heappop(self._queue)
                 out = await self._admit_and_apply(pending)
                 emitted.extend(out)
+                self._maybe_snapshot()
             elif work.do is _Do.TICK:
                 # enqueue the tick's STARTJOB(s), stamped at the tick; the next iteration takes them
                 # like any external input (feed() fires timers due <= tick first)
@@ -671,6 +740,7 @@ class Engine:
                 # operator command, as an attempt with no verb (concurrency-model ss4)
                 out = await self._admit_and_apply(_Pending(at=work.at, request_id=None))
                 emitted.extend(out)
+                self._maybe_snapshot()
             elif work.do is _Do.QUIESCE:
                 # virtual: nothing can move without the clock; real: no work exists and none can
                 # appear, or everything left is beyond the horizon (_next_work's `0 0 0` row)
@@ -730,6 +800,7 @@ class Engine:
                 if task.done():
                     self._note_corpse(task)
                     _raise_if_failed(task)
+                    self._close_killed(task)
                 else:
                     still_reaping.append(task)
             self._reaping = still_reaping
@@ -748,11 +819,12 @@ class Engine:
         no index and moves no clock (2); the frontier checks the stamp is non-decreasing,
         `_dry_apply` may refuse a control input, `_dry_apply_engine_made` may quarantine an
         engine-made one or stop the engine, and only then does the frontier hand out the next
-        index (3); the attempt is one line, so its time observation cannot be torn from its verb
-        (4); the batch applies the time half, firing due timers, which puts a term_run_time kill
-        AHEAD of the gate that reads the status it kills (5); the gate decides (6); the result is
-        recorded with the revisions the input moved (7), and only then is what it implies
-        dispatched. Steps 5-7 do not yield."""
+        index (3); the attempt is one record, so its time observation cannot be torn from its
+        verb (4); the batch applies the time half, firing due timers, which puts a term_run_time
+        kill AHEAD of the gate that reads the status it kills (5); the gate decides (6); the
+        attempt and its result, with the revisions the input moved, are appended in one store
+        transaction (4, 7), and only then is what it implies dispatched. Steps 5-7 do not yield.
+        A plan step's done mark rides in the same transaction (spec-wiring 1b)."""
         ev = pending.ev
         envelope = pending.envelope
         fp = fingerprint(
@@ -786,17 +858,26 @@ class Engine:
         else:
             quarantine = self._dry_apply_engine_made(attempt)
         forced = None if quarantine is None else quarantine[0]
-        self.frontiers = admitted
-        if self.journal is not None:
-            self.journal.admit(attempt)  # WAL-append + fsync BEFORE apply (ss7)
-        self.decisions.note(attempt)
         await self.clock.wait_until(pending.at)
-        applied = apply_attempt(self.oracle, attempt, forced=forced)
-        self.decisions.record(applied.result)
-        self.frontiers = self.frontiers.record(attempt.index)
         if self.journal is not None:
-            # step 7: the decision is durable before anything it implies is dispatched (ss7)
-            self.journal.decision(applied.result)
+            self.journal.prove()  # an engine that lost the root applies nothing (S6b)
+        # nothing moves before the wait: a cancel there leaves the engine as the store has it
+        self.frontiers = admitted
+        self.decisions.note(attempt)
+        self._applying = True
+        applied = apply_attempt(self.oracle, attempt, forced=forced)
+        # the index takes the decision before the store does, so a statechart error stops the
+        # engine before any durable write of it (statechart-engine ss5)
+        self.decisions.record(applied.result)
+        if self.journal is not None:
+            # the attempt and its decision are one transaction, durable before anything the
+            # decision implies is dispatched or answered (ss7)
+            also: list[Record] = []
+            if pending.step is not None:
+                plan, position = pending.step
+                also.append(follow_up_done(plan, position, self.journal.next_seq(), pending.at))
+            self.journal.admission(attempt, applied.result, *also)
+        self.frontiers = self.frontiers.record(attempt.index)
         if quarantine is not None:  # loud once the quarantine is durable
             self.quarantined.append((applied.result, quarantine[1]))
             report_quarantine(applied.result)
@@ -807,6 +888,8 @@ class Engine:
         # that fails stops the engine with its own error, and never leaves the request unanswered
         self._answer(pending, applied.result)
         self._dispatch(applied.emitted)
+        # every start the input decided has its `dispatch` or its `dispatch_pending` now
+        self._applying = False
         return applied.emitted
 
     def _dry_apply(self, attempt: Attempt) -> AdmissionRefused | None:
@@ -816,7 +899,15 @@ class Engine:
         The fork reaches the result the real apply will: `apply_attempt` reads nothing outside
         the oracle, and steps 5-7 do not yield to another writer. A gate rejection is not a
         refusal; the real apply decides and logs it. Every fault in either half refuses,
-        unlogged."""
+        unlogged, and so does a payload the store cannot hold (ss3.2: no float, no lone
+        surrogate)."""
+        try:
+            canonical_bytes(attempt.payload)
+        except CanonError as exc:
+            return AdmissionRefused(
+                f"refused before admission: the payload cannot be recorded: {exc}",
+                code="invalid_argument",
+            )
         dry = trial_apply(self.oracle, attempt)
         if isinstance(dry, Exception):
             return AdmissionRefused(
@@ -844,15 +935,6 @@ class Engine:
             return None
         rejection, fault = quarantine
         return rejection, _without_frames(fault)
-
-    def commit_recovered(self, result: ApplyResult) -> None:
-        """Write the decision record an admitted attempt never got (DL-315). Resume calls this
-        for each verdict replay reached for such an attempt; the decision index already holds
-        it. What the attempt implies is dispatched by resume's ladder, after reconciliation."""
-        assert self.journal is not None  # resume always holds its root's journal
-        self.journal.decision(result)
-        if result.code == "engine_apply_faulted":
-            report_quarantine(result)  # replay quarantined it (ss4)
 
     def _dispatchable(self) -> frozenset[str]:
         """Jobs this engine has a dispatch row for: a catalog entry whose job_type has a
@@ -907,21 +989,102 @@ class Engine:
         for kind, job, run_number in plan:
             if kind == "SPAWN":
                 self._dispatched[job] = max(self._dispatched.get(job, 0), run_number)
-                self.spawn(job, run_number)
+                if self.recovery is not None:
+                    self._owe(job, run_number)
+                else:
+                    self.spawn(job, run_number)
                 continue
             live = self._live.get(job)
             if live is not None and live.run_number == run_number:
                 del self._live[job]
-                live.task.cancel()
-                self._reaping.append(live.task)
+                self._kill(live)
 
-    def recover_start(self, job: str, run_number: int, *, after: datetime) -> None:
-        """Queue a decided start that left no `dispatch` record for the loop to dispatch
-        (DL-102). `after` is the journal's last instant: the loop dispatches it once it has
-        processed what is due at or before the later of that instant and the clock, so the
-        resume's reconciliation and every overdue timer apply first."""
-        self._recovered_starts.append((job, run_number))
-        self._recovered_after = max(after, self._recovered_after or after)
+    def _kill(self, live: _LiveRun) -> None:
+        """Cancel a live attempt through its adapter's ladder. Once the task is reaped its
+        attempt is closed with a `stopped` outcome and no plan: the oracle decided the run's end
+        (spec-wiring 2b's interruption rule, step 3)."""
+        live.task.cancel()
+        self._reaping.append(live.task)
+        self._killed[id(live.task)] = live
+
+    def _close_killed(self, task: asyncio.Task[None]) -> None:
+        live = self._killed.pop(id(task), None)
+        if live is None or live.attempt is None or self.journal is None:
+            return
+        if live.attempt not in self.journal.open.attempts:
+            return  # the adapter recorded its own outcome before the cancel landed
+        job = self.journal.open.attempts[live.attempt].job
+        at = self.clock.now()
+        self.journal.append(
+            outcome_record(live.attempt, job, live.run_number, "stopped", {}, at, cause="killed"),
+            plan_record(live.attempt, job, live.run_number, "none", [], at),
+        )
+
+    def _owe(self, job: str, run_number: int) -> None:
+        """A start decided while the engine recovers (a dependent of a recovered completion):
+        durable at once as `dispatch_pending`, and launched only once the due work has run, so a
+        deadline already past ends it first (DL-425)."""
+        assert self.journal is not None  # only a restart recovers, and it holds the store
+        at = self.clock.now()
+        row = self.oracle.store.job.get(job)
+        scheduled = row.status_at if row is not None and row.status_at is not None else at
+        seq = self.journal.append(pending_record(job, run_number, scheduled, at))
+        self.defer(Deferred(job, run_number, pending=seq), after=self._deferred_after or at)
+
+    def _finish_recovery(self) -> None:
+        """Carry out the dispatches startup owes, each removed only once its `dispatch` (or its
+        discharge) has committed, so one that raises leaves itself and the rest owed; then run
+        step 8 (`recovery`) and mark the engine started."""
+        while self._deferred:
+            self._discharge(self._deferred[0])
+            self._deferred.pop(0)
+        recovery, self.recovery = self.recovery, None
+        assert recovery is not None  # the loop finishes only a recovery in progress
+        recovery()
+        self.started.set()
+
+    def defer(self, item: Deferred, *, after: datetime) -> None:
+        """Queue a dispatch a recovering engine owes for the loop (`Deferred`). `after` is the journal's
+        last instant: the loop carries it out once it has processed what is due at or before the
+        later of that instant and the clock, so the restart's reconciliation and every overdue
+        timer apply first."""
+        self._deferred.append(item)
+        self._deferred_after = max(after, self._deferred_after or after)
+
+    def _discharge(self, item: Deferred) -> None:
+        """Carry out one owed dispatch, or record why it is not carried out: a run the oracle
+        has moved past is not launched (DL-232), and its pending record or plan step is closed
+        with no launch (spec-wiring 1b, startup steps 6 and 7)."""
+        assert self.journal is not None  # only startup defers, and startup holds the store
+        superseded = spawn_superseded(self.oracle.store.job.get(item.job), item.run_number)
+        at = self.clock.now()
+        if item.pending is not None:
+            if superseded is not None:
+                self.journal.append(
+                    Record(
+                        at,
+                        "dispatch_pending",
+                        None,
+                        None,
+                        {"event": "discharged", "pending": item.pending, "dispatch": None},
+                    )
+                )
+                return
+            self._dispatched[item.job] = max(self._dispatched.get(item.job, 0), item.run_number)
+            self.spawn(item.job, item.run_number, discharges=item.pending)
+            return
+        assert item.plan is not None and item.attempt is not None  # `Deferred`'s two kinds
+        if superseded is not None or item.job not in self._dispatchable():
+            self.journal.append(follow_up_done(item.plan, item.step, None, at))
+            return
+        self.spawn(
+            item.job,
+            item.run_number,
+            attempt=item.attempt,
+            ordinal=item.ordinal,
+            env=item.env,
+            step=(item.plan, item.step),
+        )
 
     def _takes_due_work(self, work: _Work, instant: datetime) -> bool:
         """Whether the loop's chosen act processes an input, a timer or a tick due at or before
@@ -933,11 +1096,31 @@ class Engine:
             return work.at <= instant
         return False
 
-    def spawn(self, job: str, run_number: int) -> bool:
+    def spool_of(self, job_ir: JobIR, run_number: int, ordinal: int) -> Path | None:
+        """Where an attempt's spool lives: a command attempt has its own directory under its
+        run's, so a replacement never meets the first one's exclusive `mkdir`; a file watch keeps
+        its run directory and `watch.jsonl` as its identity (spec-wiring 2b)."""
+        if self.run_root is None:
+            return None
+        run_dir = self.run_root / "runs" / f"{job_ir.name}.{run_number}"
+        return run_dir if job_ir.job_type == "FW" else run_dir / str(ordinal)
+
+    def spawn(
+        self,
+        job: str,
+        run_number: int,
+        *,
+        attempt: str | None = None,
+        ordinal: int = 1,
+        env: Mapping[str, str] | None = None,
+        discharges: int | None = None,
+        step: tuple[str, int] | None = None,
+    ) -> bool:
         """Start run `run_number` of `job` unless the oracle has moved past it; True if it was
-        started. The `dispatch` record, with the run's freshly minted `run_id`, is durable before
-        the adapter task exists (journal before effect, ss7; DL-118). Resume calls this to
-        dispatch a decided start whose record never landed (`recover_start`)."""
+        started. The `dispatch` record, with the attempt's freshly minted id, is durable before
+        the adapter task exists (journal before effect, ss7; DL-118). `attempt`, `ordinal` and
+        `env` name a replacement attempt a plan chose; `discharges` a pending start this
+        dispatch ends; `step` the plan step whose done mark rides with the record."""
         if spawn_superseded(self.oracle.store.job.get(job), run_number) is not None:
             return False  # the batch ended the run, or another start overtook it (DL-232)
         job_ir = self.oracle.catalog.jobs[job]  # `_dispatchable` holds catalog jobs only
@@ -949,38 +1132,58 @@ class Engine:
             # oracle's DL-81 refusal does not block a restart: the job goes through STARTJOB
             # again and this start is for the new run. The earlier task is cancelled through the
             # adapter's own ladder; the vendor would run both.
-            stale.task.cancel()
-            self._reaping.append(stale.task)
-        run_id = str(uuid.uuid4())
+            self._kill(stale)
+        run_id = attempt or str(uuid.uuid4())
+        spool = self.spool_of(job_ir, run_number, ordinal)
+        now = self.clock.now()
+        row = self.oracle.store.job.get(job)
+        scheduled = row.status_at if row is not None and row.status_at is not None else now
+        # the invocation the process is given is the one the record holds (crash spec)
+        invocation = dict(env) if env else invocation_env(job, run_number, scheduled, run_id)
         if self.journal is not None:
-            self.journal.dispatch(
-                job,
-                run_number,
-                run_id=run_id,
-                run_dir=(
-                    str(self.run_root / "runs" / f"{job}.{run_number}")
-                    if self.run_root is not None
-                    else None
-                ),
-                started_at=self.clock.now(),
-            )
-        self._launch(job_ir, run_number, adapter, run_id=run_id)
+            records = [
+                dispatch_record(
+                    job,
+                    run_number,
+                    attempt=run_id,
+                    spool=None if spool is None else str(spool),
+                    started_at=now,
+                    ordinal=ordinal,
+                    env=invocation,
+                    discharges=discharges,
+                )
+            ]
+            if step is not None:
+                records.append(follow_up_done(step[0], step[1], self.journal.next_seq(), now))
+            self.journal.append(*records)
+        self._launch(job_ir, run_number, adapter, run_id=run_id, spool=spool, env=invocation)
         return True
 
     def _launch(
-        self, job_ir: JobIR, run_number: int, adapter: JobAdapter, *, run_id: str | None = None
+        self,
+        job_ir: JobIR,
+        run_number: int,
+        adapter: JobAdapter,
+        *,
+        run_id: str | None = None,
+        spool: Path | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> None:
-        """Create the adapter task, from `spawn` and from resume's FW re-dispatch, an idempotent
-        re-read under the run's recorded `run_id`. None lets the adapter mint its own."""
+        """Create the adapter task, from `spawn` and from a restart's FW re-dispatch, an
+        idempotent re-read under the run's recorded `run_id`. None lets the adapter mint its
+        own. `env` is the invocation the process is given."""
         loop = asyncio.get_running_loop()
-        task = loop.create_task(self._run_adapter(job_ir, run_number, adapter, run_id))
+        task = loop.create_task(
+            self._run_adapter(job_ir, run_number, adapter, run_id, spool, dict(env or {}))
+        )
         task.add_done_callback(lambda _t: self._activity.set())
-        self._live[job_ir.name] = _LiveRun(run_number=run_number, task=task)
+        self._live[job_ir.name] = _LiveRun(run_number=run_number, task=task, attempt=run_id)
 
     async def shutdown(self) -> None:
         """Cancel every live adapter task and collect the cancellations, re-raising anything a
         task died with OTHER than the cancellation. This is the orderly harness and rehearse
-        teardown; the wrapper records the outcome of a tethered kill (ss6a).
+        teardown; the wrapper records the outcome of a tethered kill (ss6a), and the next start
+        settles the attempt from that record.
 
         Anyone parked on a decision is told first (S3) that their input never reached admission,
         so nothing in the log refers to it."""
@@ -995,6 +1198,7 @@ class Engine:
         tasks = [run.task for run in self._live.values()] + self._reaping
         self._live.clear()
         self._reaping = []
+        self._killed.clear()
         for task in tasks:
             task.cancel()
         results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -1005,18 +1209,170 @@ class Engine:
                 raise result
 
     async def _run_adapter(
-        self, job_ir: JobIR, run_number: int, adapter: JobAdapter, run_id: str | None = None
+        self,
+        job_ir: JobIR,
+        run_number: int,
+        adapter: JobAdapter,
+        run_id: str | None = None,
+        spool: Path | None = None,
+        env: dict[str, str] | None = None,
     ) -> None:
         ctx = AdapterContext(
             clock=self.clock,
             run_root=self.run_root,
             run_id=run_id,
             fence=self.fence,
+            spool=spool,
+            env=env or {},
         )
         result = await adapter.run(job_ir, run_number, ctx)
         # (job, run_number) ride along for the ss4 stale-completion gate
         payload: dict[str, object] = {"job": job_ir.name, "run_number": run_number}
         payload |= status_payload(result, where=f"adapter for {job_ir.name!r}")
+        at = self.clock.now()
+        step: tuple[str, int] | None = None
+        if self.journal is not None and run_id is not None:
+            # the attempt's end and its plan, one transaction: the completion is the plan's one
+            # step, marked done with the admission that feeds it (spec-wiring 1b)
+            self.journal.append(
+                outcome_record(run_id, job_ir.name, run_number, outcome_kind(result), payload, at),
+                plan_record(run_id, job_ir.name, run_number, "complete", [_feed(payload)], at),
+            )
+            step = (run_id, 0)
         # source="adapter" makes this a COMPLETION, subject to the ss4 stale gate
         # (runner_admission)
-        self._enqueue(Event(at=self.clock.now(), kind="STATUS", payload=payload))
+        self._enqueue(Event(at=at, kind="STATUS", payload=payload), step=step)
+
+    # ---- snapshots (spec-wiring 1b)
+
+    @property
+    def at_applied_boundary(self) -> bool:
+        """Whether a snapshot may be taken now: every applied input is recorded with the
+        `dispatch` of each start it decided, and the engine is not recovering (no snapshot
+        during startup, spec-wiring 1b)."""
+        return not self._applying and self.recovery is None and not self._deferred
+
+    def _maybe_snapshot(self) -> None:
+        """Take a snapshot when `snapshot_interval_s` has passed since the last one and the
+        journal moved, once the dispatches startup owes are done. Called after a batch has been
+        applied and dispatched: a fully applied boundary."""
+        if self.settings is None or self.journal is None or not self.at_applied_boundary:
+            return
+        now = self.clock.now()
+        if self._snapshot_at is None:
+            self._snapshot_at = now
+            return
+        interval = timedelta(seconds=self.settings.snapshot_interval_s)
+        if now - self._snapshot_at >= interval and self.journal.last_seq > self._snapshot_seq:
+            self.take_snapshot()
+
+    def take_snapshot(self) -> int:
+        """Snapshot the engine at the journal's last seq, then prune behind it (spec-wiring 1b):
+        below `min(snapshot seq, the oldest seq the open table refers to)` and older than
+        `retention_days`. Answers the snapshot's seq."""
+        assert self.journal is not None
+        journal = self.journal
+        journal.prove()  # an engine that lost the root writes no snapshot (S6b)
+        seq = journal.last_seq
+        now = self.clock.now()
+        retention = None if self.settings is None else self.settings.retention_days
+        data = encode_snapshot(
+            self.oracle,
+            frontiers=self.frontiers,
+            position=journal.position,
+            config_rev=self.config_rev,
+            open_table=journal.open,
+            runs=run_history(
+                self.restored_runs,
+                self.oracle.trace(),
+                None if retention is None else now - timedelta(days=retention),
+                self.restored_rows,
+            ),
+        )
+        journal.store.put_snapshot(seq, STATE_MACHINE_VERSION, data)
+        journal.engine("snapshot", now, seq=seq)
+        self._snapshot_at, self._snapshot_seq = now, seq
+        if self.settings is not None:
+            floor = min(seq, journal.open.floor() or seq)
+            cutoff = now - timedelta(days=self.settings.retention_days)
+            if journal.store.prune_before(floor, cutoff):
+                # a pruned request id is free again: retention is the one authority for retry
+                # and reuse, before and after a restart (spec-journal)
+                retained = _first_decision_index(journal.store, self.frontiers.committed_index + 1)
+                self.decisions.evict_below(retained)
+        return seq
+
+
+def _first_decision_index(store: Store, otherwise: int) -> int:
+    """The index of the oldest decision the store retains, or `otherwise` when it retains none:
+    every decision below it was pruned."""
+    for _, record in store.read_from(0):
+        if record.kind == "decision":
+            return int(record.payload["index"])
+    return otherwise
+
+
+def outcome_kind(result: object) -> str:
+    """How the live adapter's result says its attempt ended: an exit code or an observed signal
+    is `natural`; a launch that never happened is `spawn_failed`; a wrapper that left no record
+    is `unobservable`. The plan is `complete` for each: the live path feeds the adapter's result
+    as the oracle mapping names it (spec-wiring 1b)."""
+    if isinstance(result, Failed):
+        return "spawn_failed" if "spawn failed" in result.cause else "unobservable"
+    return "natural"
+
+
+def _feed(payload: Mapping[str, object]) -> dict[str, Any]:
+    """A plan step that feeds the completion STATUS `payload` carries."""
+    return {"step": "feed", "payload": dict(payload)}
+
+
+def outcome_record(
+    attempt: str,
+    job: str,
+    run_number: int,
+    kind: str,
+    payload: Mapping[str, object],
+    at: datetime,
+    *,
+    cause: str | None = None,
+) -> Record:
+    """One attempt's `outcome` record."""
+    body: dict[str, Any] = {
+        "attempt": attempt,
+        "job": job,
+        "run_number": run_number,
+        "outcome": kind,
+        "status": {k: v for k, v in payload.items() if k not in ("job", "run_number")},
+        "at": at.isoformat(),
+    }
+    if cause is not None:
+        body["cause"] = cause
+    return Record(at, "outcome", None, None, body)
+
+
+def plan_record(
+    attempt: str,
+    job: str,
+    run_number: int,
+    plan: str,
+    steps: list[dict[str, Any]],
+    at: datetime,
+    **extra: Any,
+) -> Record:
+    """One outcome's `follow_up` plan."""
+    return Record(
+        at,
+        "follow_up",
+        None,
+        None,
+        {
+            "event": "plan",
+            "attempt": attempt,
+            "job": job,
+            "run_number": run_number,
+            "plan": plan,
+            "steps": steps,
+            **extra,
+        },
+    )

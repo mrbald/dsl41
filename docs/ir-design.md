@@ -503,8 +503,8 @@ in `oracle.py` imports them and `oracle_state.py` imports nothing from it (DL-91
 - `sys_id`-free: all identity is by name. The UC backend owns the name→sys_id/retainSysIds
   strategy (UCS-12) and keeps it out of the IR.
 - Hashing: `equiv.catalog_hash = sha256(canonical IR-F JSON)`. The equivalence CLI uses it to
-  short-circuit, and the migration report uses it to pin the verified content. The period
-  model's `catalog_hash_v2` (`run_root.py`; `period-model.md` §1.1, over the §3.2 canonical
+  short-circuit, and the migration report uses it to pin the verified content. The runner's
+  `catalog_hash` (`runner_config.py`, over the §3.2 canonical
   form) is a different hash over a different projection, versioned on its own. The two
   canonicalize differently on purpose, so neither hashes `dump_catalog`'s output.
 

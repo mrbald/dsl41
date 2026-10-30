@@ -11,14 +11,14 @@ The identity of one period on the control wire. Request envelopes and
 revision-bearing reads carry it, and each period derives a fresh one.
 See period-model.md §4 (`period-model.md`, retired in 2.0.0) and
 concurrency-model.md §6 (`concurrency-model.md`, retired in 2.0.0).
-The code is [`run_root.py`](../src/dsl41/run_root.py).
+The code is [`runner_startup.py`](../src/dsl41/runner_startup.py).
 
 ### catalog_hash
 
 The runner's versioned hash of a loaded catalog (`CatalogIR`). It is a
 different hash from `equiv.catalog_hash`, which serves equivalence checks.
 See period-model.md §1.1 (`period-model.md`, retired in 2.0.0).
-The code is [`run_root.py`](../src/dsl41/run_root.py).
+The code is [`runner_config.py`](../src/dsl41/runner_config.py).
 
 ### code
 
@@ -172,7 +172,7 @@ calls it the estate root. It holds the sockets, the WAL segments, the seals and
 the `runs/` spool, and it is a path only, not an identity.
 See period-model.md §1 (`period-model.md`, retired in 2.0.0) and
 §1.1 (`period-model.md`, retired in 2.0.0).
-The code is [`run_root.py`](../src/dsl41/run_root.py).
+The code is [`runner_journal.py`](../src/dsl41/runner_journal.py).
 
 ### runtime profile
 
@@ -197,7 +197,7 @@ One WAL file, `wal/<segment_no>.jsonl`, whose first record is a `segment`
 record. Segment N holds period N.
 See period-model.md §1 (`period-model.md`, retired in 2.0.0) and
 §2.1 (`period-model.md`, retired in 2.0.0).
-The code is [`run_root.py`](../src/dsl41/run_root.py).
+The code is [`runner_journal.py`](../src/dsl41/runner_journal.py).
 
 ### SPAWN
 

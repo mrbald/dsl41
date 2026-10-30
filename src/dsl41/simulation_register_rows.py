@@ -3107,46 +3107,10 @@ PROFILE_ROWS: tuple[Row, ...] = (
             "how the one ambiguous machine verdict resolves",
         ),
         _profile_row(
-            "execution_mode",
-            '"detached"',
-            "period-model ss2.1",
-            "whether the engine owns the child processes or a supervisor does",
-        ),
-        _profile_row(
-            "deadman_us",
-            "30000000",
-            "period-model ss2.1, DL-126",
-            "the supervisor's observed deadman interval; null means there is no deadman",
-        ),
-        _profile_row(
             "fw_default_interval_us",
             "30000000",
             "period-model ss2.1",
             "the poll interval an FW job with no watch_interval uses",
-        ),
-        _profile_row(
-            "cmd_grace_us",
-            "5000000",
-            "period-model ss2.1",
-            "the grace between SIGTERM and SIGKILL on a cancelled command",
-        ),
-        _profile_row(
-            "reconcile_settle_us",
-            "1000000",
-            "period-model ss2.1",
-            "how long reconcile waits for late evidence before it decides",
-        ),
-        _profile_row(
-            "spawn_window_us",
-            "1000000",
-            "period-model ss2.1",
-            "the window a spawn has to produce its receipt",
-        ),
-        _profile_row(
-            "retry_horizon_us",
-            "30000000",
-            "period-model ss2.1",
-            "how far ahead a deferred dispatch retry may be scheduled",
         ),
         _profile_row(
             "semantics",
@@ -3173,22 +3137,6 @@ PROFILE_ROWS: tuple[Row, ...] = (
             effect="only a MIXED pool runs here, with a warning that pool placement was"
             " ignored; a foreign or unreadable machine still refuses",
             trigger='{"machine_policy": "local-eligible"}',
-        ),
-        _row(
-            surface="profile_alt",
-            member="execution_mode=tethered",
-            klass=SUPPORTED,
-            cite="period-model ss2.1",
-            effect="the engine owns the child processes; there is no supervisor",
-            trigger='{"execution_mode": "tethered"}',
-        ),
-        _row(
-            surface="profile_alt",
-            member="execution_mode=detached",
-            klass=SUPPORTED,
-            cite="period-model ss2.1",
-            effect="a supervisor owns the child processes across engine restarts",
-            trigger='{"execution_mode": "detached"}',
         ),
         _row(
             surface="profile_alt",
@@ -3441,8 +3389,9 @@ ADAPTER_ROWS: tuple[Row, ...] = (
         klass=PROVISIONAL,
         cite="runner_adapters.resolve_spool, runner-design ss15",
         label="E7",
-        sites=("runner_adapters.resolve_spool#1", "runner_startup.<module>#1"),
-        effect="a resumed run with no status record fails rather than guessing an exit code",
+        sites=("runner_adapters.resolve_spool#1",),
+        effect="a resumed attempt with no status record and no live command is unobservable:"
+        " the interruption rule decides it, never a guessed exit code (DL-424)",
         trigger=f"Failed={_UNOBSERVABLE}",
     ),
     _row(
@@ -3461,8 +3410,9 @@ ADAPTER_ROWS: tuple[Row, ...] = (
         member=f"Failed={_CRASH_CAUSE}",
         klass=SUPPORTED,
         cite="runner_adapters.resolve_spool, DL-118",
-        effect="a dispatch whose run directory is gone provably never reached the host,"
-        " so it fails rather than being retried blind",
+        effect="a dispatch whose run directory is gone never reached the host: the attempt"
+        " is unobservable, and the interruption rule runs it again, holds it or closes it"
+        " (spec-wiring 2b)",
         trigger=f"Failed={_CRASH_CAUSE}",
     ),
     _row(
@@ -3611,10 +3561,10 @@ EVENT_SOURCE_ROWS: tuple[Row, ...] = (
         surface="event_source",
         member="reconcile",
         klass=SUPPORTED,
-        cite="ir-design ss7, DL-68, runner_startup._inject_completion",
-        effect="the completion came from resolving an incomplete run at resume, not from a"
+        cite="ir-design ss7, DL-68, runner_startup._finish_plans",
+        effect="the completion came from resolving an incomplete run at restart, not from a"
         " live adapter; it still goes through the ss4 stale gate",
-        trigger="runner_startup._inject_completion",
+        trigger="runner_startup._finish_plans",
         quiet="runner.Engine.inject",
     ),
     _row(
@@ -4408,8 +4358,7 @@ RUNTIME_ROWS: tuple[Row, ...] = (
         sites=(
             "runner_scheduler.<module>#1",
             "runner_scheduler.Scheduler.pop_due#1",
-            "runner_startup._resume_under_lock#1",
-            "runner_startup.resume_run#1",
+            "runner_startup._missed_ticks#1",
         ),
         effect="a tick whose instant passed while the engine was down is journaled and"
         " dropped, never fired late",

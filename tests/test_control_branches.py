@@ -466,27 +466,32 @@ def test_a_cursor_ahead_of_the_log_is_owed_only_the_seqs_above_it(short_root: Pa
     asyncio.run(scenario())
 
 
-def test_a_backfill_that_meets_a_foreign_file_refuses_on_the_stream(short_root: Path) -> None:
-    """ss5 (DL-135): the ack has gone when the backfill reads the WAL, so its refusal goes on
+def test_a_backfill_that_meets_an_unreadable_record_refuses_on_the_stream(
+    short_root: Path,
+) -> None:
+    """ss5 (DL-135): the ack has gone when the backfill reads the store, so its refusal goes on
     the stream as `backfill_refused` and the stream ends; a raising handler would hang the
-    client up unanswered. The twin: with the file gone the same cursor is served."""
+    client up unanswered. The twin: with the record restored the same cursor is served."""
+    import sqlite3
 
     async def scenario() -> None:
         run_root = short_root / "run"
         engine, server, loop_task = await _serve(run_root, _ONE_JOB)
+        db = sqlite3.connect(run_root / "engine.db", isolation_level=None)
         try:
-            (run_root / "wal" / "notes.txt").write_text("an operator's note\n")
+            (saved,) = db.execute("SELECT payload FROM journal WHERE seq = 1").fetchone()
+            db.execute("UPDATE journal SET payload = ? WHERE seq = 1", (b"\x00",))
             reader, writer = await _open(server)
             try:
                 ack = await _ask(reader, writer, {"cmd": "subscribe", "since": 0})
                 assert ack == {"ok": True, "subscribed": True, "since": 0}
                 [refusal] = await _read_until(reader, lambda got: len(got) == 1)
                 assert refusal["ok"] is False and refusal["code"] == "backfill_refused"
-                assert "not a segment file" in refusal["error"]
+                assert "the store cannot be read" in refusal["error"]
                 assert await asyncio.wait_for(reader.readline(), timeout=3.0) == b""
             finally:
                 await _hang_up(writer)
-            (run_root / "wal" / "notes.txt").unlink()
+            db.execute("UPDATE journal SET payload = ? WHERE seq = 1", (saved,))
             reader, writer = await _open(server)
             try:
                 await _ask(reader, writer, {"cmd": "subscribe", "since": 0})
@@ -495,20 +500,20 @@ def test_a_backfill_that_meets_a_foreign_file_refuses_on_the_stream(short_root: 
             finally:
                 await _hang_up(writer)
         finally:
+            db.close()
             await _teardown(engine, server, loop_task)
 
     asyncio.run(scenario())
 
 
-def test_a_cursor_below_a_rewritten_first_index_gets_the_gap_marker_then_the_backfill(
+def test_a_cursor_below_the_pruned_head_gets_the_gap_marker_then_the_backfill(
     short_root: Path,
 ) -> None:
-    """ss5's gap protocol on synthetic metadata. The gap branch is unreachable in production:
-    a 2.0.0 root holds period 1 only and retains from index 1. It stays as frozen wire surface,
-    because docs/control-protocol.md still specifies the marker, so the genesis segment's
-    `first_index` is rewritten in place to stand for a root that does not retain from 1. A cursor below `first_index - 1` gets the marker, then every retained record
-    above the cursor, then live delivery. A cursor at `first_index - 1` is contiguous: the
-    same records, no marker."""
+    """ss5's gap protocol over a pruned store (spec-wiring 1b). Once retention pruned the
+    head, a cursor below `earliest_retained - 1` gets the marker, then every retained record
+    above the cursor, then live delivery. A cursor at `earliest_retained - 1` is contiguous:
+    the same records, no marker."""
+    from datetime import datetime as _dt
 
     async def scenario() -> None:
         run_root = short_root / "run"
@@ -516,12 +521,15 @@ def test_a_cursor_below_a_rewritten_first_index_gets_the_gap_marker_then_the_bac
         try:
             for verb in ("ON_HOLD", "OFF_HOLD") * 3:
                 assert (await _sendevent(server.path, verb, job="s6b_job"))["ok"] is True
+            store = engine.journal.store
+            kept = [
+                seq
+                for seq, record in store.read_from(0)
+                if record.kind == "input" and record.payload["index"] == 5
+            ][0]
+            store.put_snapshot(kept, 1, b"{}")
+            assert store.prune_before(kept, _dt(2999, 1, 1)) > 0
             wal = engine.journal.path
-            raw = wal.read_bytes()
-            at = raw.index(b'"first_index": 1,') + len(b'"first_index": ')
-            with wal.open("r+b") as f:
-                f.seek(at)
-                f.write(b"5")
             top = max(r["seq"] for r in read_journal(wal) if "seq" in r)
             assert top >= 6
             for since, gap in ((3, True), (4, False)):
