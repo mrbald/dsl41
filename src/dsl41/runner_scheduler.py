@@ -20,7 +20,7 @@ missed ticks are dropped AND journaled at resume, never fired late (PENDING: E9)
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, tzinfo
 from typing import Literal
@@ -33,6 +33,7 @@ from dsl41.autocal import (
 )
 from dsl41.ir import CatalogIR, ScheduleBlock
 from dsl41.oracle_state import Event
+from dsl41.reload_diff import catalog_hash_v2
 from dsl41.runner_clock import EngineError
 from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES
 from dsl41.semantics import SemanticSwitches
@@ -215,74 +216,95 @@ class Scheduler:
         self._semantics = semantics or DEFAULT_SWITCHES
         # the catalog the plans compiled from is pinned as its v2 hash; an object reference
         # could mutate and the gate would then bless stale plans under the new identity
-        from dsl41.run_root import catalog_hash_v2
-
         self._catalog_hash = catalog_hash_v2(catalog)
+        #: the zone every plan without its own `timezone` reads, and the alias map as given:
+        #: None is no map, which `resolve_timezone` reads apart from an empty one (SEM-35)
+        self._base_tz = base_tz
+        self._zone_map = None if tz_aliases is None else dict(tz_aliases)
         self._plans: dict[str, _SchedulePlan] = {}
-        for name, job in catalog.jobs.items():
-            sched = job.schedule
-            if sched is None:
-                continue
-            own_ticks = bool(sched.start_times or sched.start_mins)
-            if not own_ticks and sched.run_calendar is None:
-                continue  # run_window/SLA are gates/alarms, not triggers
-            run_dates: frozenset[date] | None = None
-            run_gen: _CalCache | None = None
-            row_times: dict[date, frozenset[tuple[int, int]]] | None = None
-            if sched.run_calendar is not None:
-                source = _scheduler_calendar(
-                    catalog, name, "run_calendar", sched.run_calendar, self._semantics
-                )
-                if isinstance(source, CompiledCalendar):
-                    run_gen = _CalCache(source)
-                else:
-                    run_dates = frozenset(source)
-                    if not own_ticks:
-                        # E11 (DL-58): without job-level times each row's own time fires
-                        row_times = source
-            exclude_dates: frozenset[date] = frozenset()
-            exclude_gen: _CalCache | None = None
-            if sched.exclude_calendar is not None:
-                source = _scheduler_calendar(
-                    catalog, name, "exclude_calendar", sched.exclude_calendar, self._semantics
-                )
-                if isinstance(source, CompiledCalendar):
-                    exclude_gen = _CalCache(source)
-                else:
-                    exclude_dates = frozenset(source)
-            if sched.days_of_week is not None and not sched.days_of_week:  # pragma: no cover
-                # unreachable: lowering rejects an empty days_of_week and a runner catalog is
-                # re-lowered from its bundle's JIL (boundary.load_bundle_catalog); a
-                # hand-built IR carrying one is refused here
-                raise EngineError(f"{name}: days_of_week is empty; nothing to schedule")
-            explicit = (run_dates or frozenset()) | exclude_dates
-            last_date = max(explicit) if explicit else None
-            if run_gen is not None and run_gen.compiled.bound is not None:
-                # cycle-bound extended calendars scan like explicit dates
-                last_date = max(d for d in (last_date, run_gen.compiled.bound) if d is not None)
-            tick_source: Literal["start_times", "start_mins", "calendar"] = (
-                "start_times" if sched.start_times else "start_mins" if own_ticks else "calendar"
-            )
-            self._plans[name] = _SchedulePlan(
-                days=frozenset(
-                    _DAY_CODES
-                    if (sched.days_of_week is None or "all" in sched.days_of_week)
-                    else sched.days_of_week
-                ),
-                # E11 (DL-58): a generated (extended) day has no row time, so 00:00
-                times=self._ticks(sched) if own_ticks else ((0, 0),),
-                tz=_scheduler_tz(sched.timezone, name, tz_aliases) if sched.timezone else base_tz,
-                source=tick_source,
-                dst_start_times=self._semantics.dst_start_times,
-                run_dates=run_dates,
-                exclude_dates=exclude_dates,
-                run_gen=run_gen,
-                exclude_gen=exclude_gen,
-                last_date=last_date,
-                row_times=row_times,
-            )
+        for name in catalog.jobs:
+            plan = self._plan(catalog, name, self._semantics, self._zone_map, base_tz)
+            if plan is not None:
+                self._plans[name] = plan
         self._next: dict[str, datetime] = {}
+        #: each job's last tick `pop_due` consumed; `replace` reads it
+        self._consumed: dict[str, datetime] = {}
+        #: per rebuilt job, the old plan's ticks still owed at the update, in order, and where
+        #: its new plan starts: (instant, inclusive). `pop_due` fires the owed ticks first.
+        self._owed: dict[str, tuple[list[datetime], tuple[datetime, bool]]] = {}
         self.reset(start)
+
+    def _plan(
+        self,
+        catalog: CatalogIR,
+        name: str,
+        semantics: SemanticSwitches,
+        zone_map: Mapping[str, str] | None,
+        base_tz: tzinfo | None,
+    ) -> _SchedulePlan | None:
+        """Compile one job's trigger from `catalog` under these switches, alias map and base
+        zone; None for a job with nothing that ticks."""
+        sched = catalog.jobs[name].schedule
+        if sched is None:
+            return None
+        own_ticks = bool(sched.start_times or sched.start_mins)
+        if not own_ticks and sched.run_calendar is None:
+            return None  # run_window/SLA are gates/alarms, not triggers
+        run_dates: frozenset[date] | None = None
+        run_gen: _CalCache | None = None
+        row_times: dict[date, frozenset[tuple[int, int]]] | None = None
+        if sched.run_calendar is not None:
+            source = _scheduler_calendar(
+                catalog, name, "run_calendar", sched.run_calendar, semantics
+            )
+            if isinstance(source, CompiledCalendar):
+                run_gen = _CalCache(source)
+            else:
+                run_dates = frozenset(source)
+                if not own_ticks:
+                    # E11 (DL-58): without job-level times each row's own time fires
+                    row_times = source
+        exclude_dates: frozenset[date] = frozenset()
+        exclude_gen: _CalCache | None = None
+        if sched.exclude_calendar is not None:
+            source = _scheduler_calendar(
+                catalog, name, "exclude_calendar", sched.exclude_calendar, semantics
+            )
+            if isinstance(source, CompiledCalendar):
+                exclude_gen = _CalCache(source)
+            else:
+                exclude_dates = frozenset(source)
+        if sched.days_of_week is not None and not sched.days_of_week:  # pragma: no cover
+            # unreachable: lowering rejects an empty days_of_week and a runner catalog is
+            # re-lowered from its bundle's JIL (boundary.load_bundle_catalog); a
+            # hand-built IR carrying one is refused here
+            raise EngineError(f"{name}: days_of_week is empty; nothing to schedule")
+        explicit = (run_dates or frozenset()) | exclude_dates
+        last_date = max(explicit) if explicit else None
+        if run_gen is not None and run_gen.compiled.bound is not None:
+            # cycle-bound extended calendars scan like explicit dates
+            last_date = max(d for d in (last_date, run_gen.compiled.bound) if d is not None)
+        tick_source: Literal["start_times", "start_mins", "calendar"] = (
+            "start_times" if sched.start_times else "start_mins" if own_ticks else "calendar"
+        )
+        return _SchedulePlan(
+            days=frozenset(
+                _DAY_CODES
+                if (sched.days_of_week is None or "all" in sched.days_of_week)
+                else sched.days_of_week
+            ),
+            # E11 (DL-58): a generated (extended) day has no row time, so 00:00
+            times=self._ticks(sched) if own_ticks else ((0, 0),),
+            tz=(_scheduler_tz(sched.timezone, name, zone_map) if sched.timezone else base_tz),
+            source=tick_source,
+            dst_start_times=semantics.dst_start_times,
+            run_dates=run_dates,
+            exclude_dates=exclude_dates,
+            run_gen=run_gen,
+            exclude_gen=exclude_gen,
+            last_date=last_date,
+            row_times=row_times,
+        )
 
     @property
     def default_tz(self) -> str | None:
@@ -314,10 +336,111 @@ class Scheduler:
         RESUME sweep skips a tick the engine already admitted; the scheduler does not
         encode that (DL-166). A job whose calendar is exhausted gets no entry (DL-56)."""
         self._next = {}
+        self._owed = {}
         for job, plan in self._plans.items():
             occ = self._occurrence(plan, start, inclusive=True)
             if occ is not None:
                 self._next[job] = occ
+
+    def replace(
+        self,
+        catalog: CatalogIR,
+        *,
+        added: Collection[str],
+        changed: Collection[str],
+        removed: Collection[str],
+        now: datetime,
+        default_tz: str | None,
+        tz_aliases: Mapping[str, str] | None,
+        semantics: SemanticSwitches | None,
+    ) -> None:
+        """An update's selective replacement (spec-reload): the plans follow `catalog` and the
+        estate settings `default_tz`, `tz_aliases` and `semantics`, taken as the constructor
+        takes them. A settings change marks every job changed, so every plan is rebuilt.
+
+        A removed job's plan and next tick go; a job whose type changed is removed and added.
+        A new definition takes effect at `now`, the application instant. A changed job's old
+        plan still owes its ticks after the job's last consumed tick and at or before `now`:
+        `pop_due` fires them late with their own stamps, or resume's sweep drops and journals
+        them (E9). Its new plan, and an added job's, counts from `now`: inclusive, unless the
+        job's last consumed tick is at or after `now`, which is then the exclusive anchor, so
+        no tick fires twice. An unchanged job keeps its plan and its next tick. New settings
+        with a job left out of `added` and `changed` are refused, so no plan runs under
+        settings it was not compiled for (DL-130). Every plan is compiled before any is
+        replaced, so a refusal changes nothing. The catalog hash follows.
+        """
+        if (set(removed) & catalog.jobs.keys()) - set(added):
+            raise EngineError("replace: a removed job is still in the catalog")
+        missing = sorted((set(added) | set(changed)) - catalog.jobs.keys())
+        if missing:
+            raise EngineError(f"replace: not in the catalog: {', '.join(missing)}")
+        switches = semantics or DEFAULT_SWITCHES
+        zone_map = None if tz_aliases is None else dict(tz_aliases)
+        moved = (default_tz, zone_map, switches) != (
+            self._default_tz,
+            self._zone_map,
+            self._semantics,
+        )
+        kept = sorted(catalog.jobs.keys() - set(added) - set(changed))
+        if moved and kept:
+            raise EngineError(
+                f"replace: the settings changed and these jobs were not rebuilt: {', '.join(kept)}"
+            )
+        base_tz = _scheduler_tz(default_tz, "--timezone", tz_aliases) if default_tz else None
+        plans = {
+            name: self._plan(catalog, name, switches, zone_map, base_tz)
+            for name in sorted({*added, *changed})
+        }
+        owed = {name: self._owed_until(name, now) for name in changed}
+        self._catalog_hash = catalog_hash_v2(catalog)
+        self._default_tz = default_tz
+        self._tz_aliases = dict(tz_aliases or {})
+        self._semantics = switches
+        self._zone_map = zone_map
+        self._base_tz = base_tz
+        for name in {*removed, *plans}:
+            self._plans.pop(name, None)
+            self._next.pop(name, None)
+            self._owed.pop(name, None)
+        for name, plan in plans.items():
+            seen = self._consumed.get(name)
+            start = (seen, False) if seen is not None and seen >= now else (now, True)
+            if plan is not None:
+                self._plans[name] = plan
+            backlog = owed.get(name, [])
+            if backlog:
+                self._owed[name] = (backlog, start)
+                self._next[name] = backlog[0]
+                continue
+            occ = None if plan is None else self._occurrence(plan, start[0], inclusive=start[1])
+            if occ is not None:
+                self._next[name] = occ
+
+    def _owed_until(self, job: str, now: datetime) -> list[datetime]:
+        """The job's pending ticks at or before `now`, in order."""
+        ticks: list[datetime] = []
+        tick = self._next.get(job)
+        while tick is not None and tick <= now:
+            ticks.append(tick)
+            tick = self._following(job, tick)
+        return ticks
+
+    def _following(self, job: str, tick: datetime) -> datetime | None:
+        """The job's tick after `tick`: an owed one of its old plan, else its plan's own,
+        from where the new plan starts."""
+        plan = self._plans.get(job)
+        if job not in self._owed:
+            assert plan is not None  # a job with a next tick and nothing owed has a plan
+            return self._occurrence(plan, tick, inclusive=False)
+        backlog, (start, inclusive) = self._owed[job]
+        later = [owed for owed in backlog if owed > tick]
+        if later:
+            return later[0]
+        if plan is None:
+            return None
+        if tick < start:
+            return self._occurrence(plan, start, inclusive=inclusive)
+        return self._occurrence(plan, tick, inclusive=False)
 
     def next_occurrence(self) -> datetime | None:
         """Earliest pending tick across all jobs (naive UTC), or None."""
@@ -339,9 +462,16 @@ class Scheduler:
         exhausted: list[str] = []
         for job, tick in self._next.items():
             nxt: datetime | None = tick
+            last: datetime | None = None
             while nxt is not None and nxt <= upto:
                 due.append((nxt, job))
-                nxt = self._occurrence(self._plans[job], nxt, inclusive=False)
+                last = nxt
+                nxt = self._following(job, nxt)
+            if last is not None:
+                self._consumed[job] = last
+                owed = self._owed.get(job)
+                if owed is not None and owed[0][-1] <= last:
+                    del self._owed[job]  # every owed tick is consumed; the new plan runs on
             if nxt is None:
                 exhausted.append(job)  # calendar ran out mid-run: dormant (DL-56)
             else:

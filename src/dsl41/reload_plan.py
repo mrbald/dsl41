@@ -15,10 +15,13 @@ and layer files are read as `run` reads them, following a symlink.
 The estate is `estate.toml`, the JIL files it names in order, and `non-idempotent.toml` (absent
 means empty). Every other input is a part of the candidate and of the token too, because it
 changes the catalog or the settings. The parts are, in order: `estate.toml`, the files, the
-manifest's layers, the timezone map, each site layer as `site/<basename>`, `non-idempotent.toml`.
+manifest's layers, the timezone map, each site layer as `site/<basename>`, `non-idempotent.toml`,
+then `invocation.json`: the environment name and the site layers' absolute paths `reread` was
+called with, as canonical JSON, so the same files under another environment are another plan.
 Each part is read once; the catalog, the settings, the token and the stored copy all come from
 those bytes, and an input that changed while loading is refused. A part name may appear once,
-compared case-insensitively; `estate.toml`, `non-idempotent.toml` and `plan.json` are reserved.
+compared case-insensitively; `estate.toml`, `non-idempotent.toml`, `invocation.json` and
+`plan.json` are reserved.
 
 The candidate settings (`estate_settings`) are the estate-wide values every job runs under:
 
@@ -51,7 +54,7 @@ from __future__ import annotations
 import hashlib
 import os
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -62,7 +65,7 @@ from dsl41.estate_manifest import ManifestError, read_regular, resolve_manifest
 from dsl41.ir import CatalogIR, LoweringError, lower_catalog
 from dsl41.lint import lint_catalog
 from dsl41.placeholders import PlaceholderError, load_properties, substitute
-from dsl41.reload_diff import Plan, diff, plan_token, running_boxes
+from dsl41.reload_diff import Plan, catalog_hash_v2, diff, plan_token, running_boxes
 from dsl41.runner_preflight import PreflightItem, preflight
 from dsl41.runner_procid import durable_write, mkdir_durable
 from dsl41.semantics import check_overrides
@@ -74,8 +77,9 @@ STOPPABLE = frozenset({"RUNNING", "STARTING"})
 
 MANIFEST = "estate.toml"
 MARKED = "non-idempotent.toml"
+INVOCATION = "invocation.json"
 PLAN_JSON = "plan.json"
-_RESERVED = frozenset({MANIFEST, MARKED, PLAN_JSON})
+_RESERVED = frozenset({MANIFEST, MARKED, INVOCATION, PLAN_JSON})
 
 #: Preflight codes that need the launch profile (host identity, invoking user): the engine's.
 _LAUNCH_CODES = frozenset({"machine", "machine-mixed", "owner"})
@@ -91,12 +95,17 @@ class RereadRefused(Exception):
 
 @dataclass(frozen=True)
 class Live:
-    """What the engine supplies: the running catalog, its settings, its revision, the statuses."""
+    """What the engine supplies: the running catalog, its settings, its revision, the statuses,
+    the flags each tombstone of a removed job kept, by name (spec-reload: re-adding a removed
+    name shows them), and the run numbers."""
 
     catalog: CatalogIR
     settings: Mapping[str, object]
     revision: int
     status: Mapping[str, str]
+    tombstones: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    #: each row's current run number, beside its status: the run a stop interrupts
+    runs: Mapping[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -106,6 +115,8 @@ class Estate:
     catalog: CatalogIR
     settings: Mapping[str, object]
     parts: tuple[tuple[str, bytes], ...]
+    environment: str | None = None
+    properties: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -116,6 +127,8 @@ class RereadResult:
     plan_dir: Path
     plan_json: Path
     files: tuple[Path, ...]
+    #: each added name a tombstone kept flags for, with the flags (`Live.tombstones`)
+    restored: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 def estate_settings(
@@ -228,10 +241,15 @@ def load_estate(
     for (path, is_manifest), (_, data) in zip(again, parts, strict=True):
         if _read(path, manifest=is_manifest) != data:
             raise RereadRefused([f"{path}: changed while it was being read"])
+    site_paths = tuple(str(path.absolute()) for path in properties)
+    invocation = {"environment": environment, "properties": list(site_paths)}
+    parts.append((INVOCATION, canonical_bytes(invocation)))
     return Estate(
         catalog=catalog,
         settings=estate_settings(inputs.timezone, aliases, inputs.semantics, catalog),
         parts=tuple(parts),
+        environment=environment,
+        properties=site_paths,
     )
 
 
@@ -271,11 +289,13 @@ def _plan_document(
     stop: Sequence[str],
     estate: Estate,
     warnings: Sequence[PreflightItem],
+    restored: Sequence[tuple[str, tuple[str, ...]]],
 ) -> dict[str, Any]:
     return {
         "artifact_format_version": ARTIFACT_FORMAT_VERSION,
         "token": token,
         "live_rev": live.revision,
+        "live_digest": catalog_hash_v2(live.catalog),
         "added": list(plan.added),
         "removed": list(plan.removed),
         "changed": [
@@ -293,6 +313,9 @@ def _plan_document(
             {"code": item.code, "job": item.job, "message": item.message} for item in warnings
         ],
         "settings": dict(estate.settings),
+        "environment": estate.environment,
+        "properties": list(estate.properties),
+        "restored": [{"name": name, "flags": list(flags)} for name, flags in restored],
         "parts": [
             {"name": name, "sha256": hashlib.sha256(data).hexdigest()}
             for name, data in estate.parts
@@ -300,8 +323,9 @@ def _plan_document(
     }
 
 
-def _stop_set(plan: Plan, live: Live) -> tuple[str, ...]:
-    """Changed or removed jobs with a process that is up. A box has none (spec-reload step 5)."""
+def stop_set(plan: Plan, live: Live) -> tuple[str, ...]:
+    """Changed or removed jobs with a process that is up, sorted. A box has none (spec-reload
+    step 5). `reread` previews it and the update's admission finds it again."""
     names = [change.name for change in plan.changed] + list(plan.removed)
     return tuple(
         sorted(
@@ -339,7 +363,10 @@ def reread(
     boxes = running_boxes(plan, estate.catalog, live.status)
     if boxes:
         raise RereadRefused([f"box_running {box}" for box in boxes])
-    stop = _stop_set(plan, live)
+    stop = stop_set(plan, live)
+    restored = tuple(
+        (name, tuple(live.tombstones[name])) for name in plan.added if live.tombstones.get(name)
+    )
     token = plan_token(estate.parts, live.revision)
     plan_dir = plans_dir / token
     mkdir_durable(str(plan_dir))
@@ -351,10 +378,10 @@ def reread(
         files.append(target)
     plan_json = plan_dir / PLAN_JSON
     document = _plan_document(
-        token, live, plan, stop, estate, [i for i in items if i.severity == "WARN"]
+        token, live, plan, stop, estate, [i for i in items if i.severity == "WARN"], restored
     )
     durable_write(str(plan_json), canonical_bytes(document) + b"\n")
-    return RereadResult(token, plan, stop, plan_dir, plan_json, tuple(files))
+    return RereadResult(token, plan, stop, plan_dir, plan_json, tuple(files), restored)
 
 
 def read_plan(plans_dir: Path, token: str) -> dict[str, Any] | None:
@@ -383,6 +410,7 @@ def read_plan(plans_dir: Path, token: str) -> dict[str, Any] | None:
 
 __all__ = [
     "MANIFEST",
+    "INVOCATION",
     "MARKED",
     "PLAN_JSON",
     "STOPPABLE",
@@ -394,4 +422,5 @@ __all__ = [
     "load_estate",
     "read_plan",
     "reread",
+    "stop_set",
 ]
