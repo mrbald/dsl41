@@ -515,7 +515,7 @@ def _genesis_on(run_root: Path, machines: Executor) -> Engine:
 
 def _hold(engine: Engine, request_id: str, kind: str, revision: int) -> Any:
     event = Event(at=T0, kind=kind, payload={"job": "j"})  # type: ignore[arg-type]
-    envelope = Envelope(request_id=request_id, expect={"job:j": revision}, epoch=engine.epoch)
+    envelope = Envelope(request_id=request_id, expect={"job:j": revision})
     return engine.submit(event, envelope)
 
 
@@ -526,7 +526,6 @@ def _fingerprint_of(engine: Engine, kind: str, revision: int) -> str:
         kind=kind,
         payload={"job": "j"},
         source="control",
-        epoch=engine.epoch,
         expect={"job:j": revision},
     )
 

@@ -313,7 +313,6 @@ def test_pr10a_surrogate_refused_at_the_control_socket(short_root: Path) -> None
                     key=key,
                     revision=revision_in(read, key),
                     baseline_id=str(read["baseline_id"]),
-                    epoch=int(read["epoch"]),
                 ),
             )
             assert outcome_of(response) == REFUSED

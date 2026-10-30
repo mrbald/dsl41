@@ -42,12 +42,10 @@ from dsl41.oracle_state import (
     ReleasePolicy,
     RuntimeState,
 )
-from dsl41.runner_hosts import HostCommand, host_move
 from dsl41.semantics import resolve
 from dsl41.state_machine import (
     COMPLETION,
     HITS_ENV,
-    Executor,
     Outcome,
     Statechart,
     StatechartError,
@@ -566,8 +564,8 @@ def test_a_fork_copies_the_instances_and_its_store_asks_the_fork() -> None:
 
 def test_a_carried_install_and_a_witness_restore_the_instances_from_the_rows() -> None:
     """A period that opens over carried rows restores their instances, a row
-    whose job the catalog no longer has with `catalog=False`; a witness
-    rebuilds the executor with them."""
+    whose job the catalog no longer has with `catalog=False`; a rebuild of
+    the executor restores them again from the rows."""
     first = Oracle(lower_source(_JIL))
     first.feed(ev("STARTJOB", 1, job="k"))
     first.feed(ev("STATUS", 2, job="k", status="FAILURE"))
@@ -585,10 +583,7 @@ def test_a_carried_install_and_a_witness_restore_the_instances_from_the_rows() -
     _agrees(second)
     assert second.store.machines.active("job:k") == configuration("FAILURE", holding="held")
     assert second.store.machines.data("job:m") == JobData(catalog=False)
-    second.store.begin_input()
-    second.store.register_host("h")
-    second.store.witness_host("h", state="passive")
-    second.store.commit_input()
+    second.store.restore_instances()
     _agrees(second)
     assert second.store.machines.data("job:k") == JobData()
     assert RowUnits(second, "k").release(False) == "keep"
@@ -647,30 +642,6 @@ def test_row_units_read_the_policy_of_each_unit_for_both_ends(
     assert data(("r:D", "success")) == ("free", "spend")
     assert data(("r:D", "never")) == ("spend", "spend")
     assert data(("r:D", "never"), ("r:R", "never")) == ("keep", "keep")
-
-
-def test_the_host_gate_reads_the_store_s_instance_and_moves_nothing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The gate reads the host chart with `Executor.resolve` on the store's
-    own instance (DL-375): it builds no executor and moves nothing, so a
-    host command's cost does not grow with the job count."""
-    oracle = Oracle(lower_source(_JIL))
-    store = oracle.store
-    store.begin_input()
-    store.register_host("h")
-    store.commit_input()
-    machines = store.machines
-
-    def rebuild() -> Executor:
-        raise AssertionError("the gate rebuilt an executor")
-
-    monkeypatch.setattr(store, "rebuild_machines", rebuild)
-    outcome = host_move(store, HostCommand(verb="drain", host_id="h"))
-    assert (outcome.kind, outcome.rows) == ("fired", ("host.02",))
-    assert store.machines is machines
-    assert machines.active("host:h") == {"host", "routed", "active"}
-    assert machines.active("job:j") == configuration("INACTIVE")
 
 
 # ---- the start family (STARTJOB, FORCE_STARTJOB, every attempt)

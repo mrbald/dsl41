@@ -934,7 +934,7 @@ def test_dl210_u2_same_period_resume_preserves_the_trace_prefix(tmp_path: Path) 
             assert engine.oracle.store.job["prefix_job"].status == "SUCCESS"
             before = [entry.model_dump() for entry in engine.oracle.trace()]
             assert before
-            baseline, epoch = engine.baseline_id, engine.epoch
+            baseline = engine.baseline_id
         finally:
             await engine.shutdown()
             assert engine.journal is not None
@@ -948,7 +948,6 @@ def test_dl210_u2_same_period_resume_preserves_the_trace_prefix(tmp_path: Path) 
         )
         try:
             assert resumed.baseline_id == baseline
-            assert resumed.epoch > epoch
             assert [entry.model_dump() for entry in resumed.oracle.trace()] == before
             resumed.inject(
                 Event(
@@ -1150,15 +1149,13 @@ condition: s(x)
 def _fabricate_exit_record(run_root: Path, job: str, run_number: int, ended_at: datetime) -> None:
     """A late natural-exit record for the run the engine REALLY spawned --
     so it must carry that run's bound run_id, read from the journal's
-    decision, exactly as the real wrapper would have written it. A wrong id
+    `dispatch` record, exactly as the real wrapper would have written it. A wrong id
     here is a different scenario: a stranger's record, which resume now
     REFUSES (DL-118 identity split) rather than consumes."""
     spawned = next(
-        e["run_id"]
+        r["run_id"]
         for r in read_journal(run_root / "journal.jsonl")
-        if r.get("rec") == "decision"
-        for e in r["effects"]
-        if e["kind"] == "SPAWN" and (e["job"], e["run_number"]) == (job, run_number)
+        if r.get("rec") == "dispatch" and (r["job"], r["run_number"]) == (job, run_number)
     )
     run_dir = run_root / "runs" / f"{job}.{run_number}"
     run_dir.mkdir(parents=True)
@@ -1351,6 +1348,15 @@ def test_m3_malformed_status_records_map_truthfully() -> None:
     assert unsigned == Terminated("killed by signal (unrecorded)")
     unknown = outcome_from_status({"outcome": "gremlins"})
     assert isinstance(unknown, Failed) and "unrecognized" in unknown.cause
+    # the wrapper's own verdict on a kill it observed, its cause kept or defaulted
+    assert outcome_from_status({"outcome": "terminated", "cause": "parent lost"}) == Terminated(
+        "parent lost"
+    )
+    assert outcome_from_status({"outcome": "terminated"}) == Terminated("terminated")
+    # the fourth outcome: the wrapper could not start the command
+    assert outcome_from_status({"outcome": "spawn_failed", "error": "no such file"}) == Failed(
+        "spawn failed: no such file"
+    )
     # a corrupt record's outcome need not be a STRING: `load_json` admits
     # nested JSON, so a list or a dict reaches this function and must still
     # degrade to a truthful FAILURE rather than crash the reader

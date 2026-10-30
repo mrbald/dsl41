@@ -959,9 +959,8 @@ def segment_record(
 ) -> dict[str, Any]:
     """ss2.1's `segment`, the first record of every segment.
 
-    It is self-describing: period, catalog and semantics need no earlier file. `dsl41_version`
-    is not in it, because it is per-process, rides on `leader`, and a patch release must not
-    move these bytes.
+    It is self-describing: period, catalog and semantics need no earlier file. The build's
+    version is not in it, because a patch release must not move these bytes.
 
     `opens_from_seal` is null on segment 1, the only segment a 2.0.0 root holds; the field
     stays in the record format."""

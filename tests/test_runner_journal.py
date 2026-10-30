@@ -39,7 +39,6 @@ from dsl41.runner_admission import ApplyResult, Attempt, fingerprint
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_journal import (
     Journal,
-    dsl41_version,
     read_journal,
     replay_inputs,
 )
@@ -72,8 +71,8 @@ def test_segment_record_carries_the_period_identity_domain_and_instant(
     truth, no drift between Journal.create's own hashing and the resume
     gate.
 
-    `dsl41_version` is deliberately absent: it is per-process, it rides on
-    `leader`, and a patch release must not move these bytes (PR-07)."""
+    The build's version is deliberately absent: a patch release must not
+    move these bytes (PR-07)."""
     catalog = lower_source(_SOLO_JIL)
     journal = Journal.create(
         tmp_path / "journal.jsonl", catalog=catalog, clock_domain="real", started_at=T0
@@ -174,9 +173,6 @@ def test_input_record_carries_seq_at_kind_payload_source_and_the_admission_field
         "source": "control",
         "request_id": "r1",
         "fingerprint": first.fingerprint,
-        # the leader's, not the caller's: S6 fences on it, so every record
-        # carries it even while it is inert on one host (concurrency-model ss6)
-        "epoch": 0,
     }
     assert inputs[1]["seq"] == 2
     assert inputs[1]["source"] == "adapter"
@@ -201,7 +197,7 @@ def test_a_time_observation_is_admitted_as_an_attempt_with_no_verb(tmp_path: Pat
         started_at=T0,
     )
     journal.admit(_attempt(1, None))
-    journal.decision(ApplyResult(index=1, request_id="r1", decision="applied"), [])
+    journal.decision(ApplyResult(index=1, request_id="r1", decision="applied"))
     journal.close()
     records = read_journal(tmp_path / "journal.jsonl")
     advance = next(r for r in records if r["rec"] == "advance")
@@ -211,7 +207,6 @@ def test_a_time_observation_is_admitted_as_an_attempt_with_no_verb(tmp_path: Pat
         "at": (T0 + timedelta(minutes=1)).isoformat(),
         "request_id": "r1",
         "fingerprint": advance["fingerprint"],
-        "epoch": 0,
     }
     assert "kind" not in advance and "payload" not in advance
     # and no `expect`: ss0's mandate is on EXTERNALLY REQUESTED mutations, and
@@ -231,31 +226,31 @@ def test_a_time_observation_is_admitted_as_an_attempt_with_no_verb(tmp_path: Pat
         "code": None,
         "revisions": {},
         "legacy_batch": False,
-        "effects": [],
     }
 
 
-def test_dispatch_record_carries_job_run_number_wrapper_pid_run_dir_started_at(
+def test_dispatch_record_carries_job_run_number_run_id_run_dir_started_at(
     tmp_path: Path,
 ) -> None:
-    """(runner-design ss7): dispatch is audit/ordering only -- the wrapper's
-    own spawn.json is the authoritative spawn record (module docstring) --
-    so it carries wrapper_pid + run_dir rather than a pgid the engine never
-    observes."""
+    """(runner-design ss7): a dispatch record precedes its start's adapter task
+    and names the run's run_id; the wrapper's own spawn.json is the
+    authoritative spawn record (module docstring), so it carries run_dir
+    rather than a pgid the engine never observes."""
     journal = Journal.create(
         tmp_path / "journal.jsonl",
         catalog=lower_source(_SOLO_JIL),
         clock_domain="real",
         started_at=T0,
     )
-    journal.dispatch("j1", 1, wrapper_pid=4242, run_dir="/abs/runs/j1.1", started_at=T0)
+    run_id = "00000000-0000-4000-8000-000000000001"
+    journal.dispatch("j1", 1, run_id=run_id, run_dir="/abs/runs/j1.1", started_at=T0)
     journal.close()
     dispatch = next(r for r in read_journal(tmp_path / "journal.jsonl") if r["rec"] == "dispatch")
     assert dispatch == {
         "rec": "dispatch",
         "job": "j1",
         "run_number": 1,
-        "wrapper_pid": 4242,
+        "run_id": run_id,
         "run_dir": "/abs/runs/j1.1",
         "started_at": T0.isoformat(),
     }
@@ -347,11 +342,11 @@ def test_reopening_cuts_a_torn_tail_before_the_first_append(tmp_path: Path) -> N
     before = read_journal(path)
     journal = Journal(path, fsync_each=False)
     assert path.read_bytes() == b"\n".join(lines[:-2]) + b"\n"  # cut at the last newline
-    journal.leader(epoch=2, at=T0)
+    journal.preflight([])
     journal.close()
     after = read_journal(path)
     assert after[: len(before)] == before
-    assert [r["rec"] for r in after] == ["segment", "input", "leader"]
+    assert [r["rec"] for r in after] == ["segment", "input", "preflight"]
 
 
 def test_reopening_completes_a_record_that_lost_only_its_newline(tmp_path: Path) -> None:
@@ -365,7 +360,7 @@ def test_reopening_completes_a_record_that_lost_only_its_newline(tmp_path: Path)
     assert [r["rec"] for r in before] == ["segment", "input", "input"]
     journal = Journal(path, fsync_each=False)
     assert path.read_bytes() == whole
-    journal.leader(epoch=2, at=T0)
+    journal.preflight([])
     journal.close()
     assert read_journal(path)[:-1] == before
 
@@ -969,20 +964,6 @@ def test_an_empty_interior_line_is_corruption_not_a_torn_tail(tmp_path: Path) ->
     )
     with pytest.raises(EngineError, match="empty interior line 2"):
         read_journal(path)
-
-
-def test_an_uninstalled_build_records_its_version_as_unknown(monkeypatch) -> None:
-    """The `leader` record's `dsl41_version` is advisory forensics and gates
-    nothing (ss7 gates the state-machine version instead), so a src-tree run
-    with no installed distribution records what it knows rather than
-    refusing to start."""
-    import importlib.metadata
-
-    def no_such_distribution(_name: str) -> str:
-        raise importlib.metadata.PackageNotFoundError("dsl41")
-
-    monkeypatch.setattr(importlib.metadata, "version", no_such_distribution)
-    assert dsl41_version() == "0+unknown"
 
 
 # ------------------------------------------ peer-review round-2 pin (DL-136)

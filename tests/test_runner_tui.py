@@ -527,7 +527,6 @@ def test_control_client_subscribe_yields_a_record_for_an_injected_event(short_ro
                 {
                     "cmd": "sendevent",
                     "baseline_id": read["baseline_id"],
-                    "epoch": read["epoch"],
                     "request_id": "tui-sub-1",
                     "verb": "ON_HOLD",
                     "payload": {"job": "sub_job"},
@@ -946,13 +945,11 @@ class _TraceReplies:
         self.status = {
             "ok": True,
             "baseline_id": "period-a",
-            "epoch": 1,
             "jobs": {"trace_job": {"status": "INACTIVE", "job_type": "CMD"}},
         }
         self.trace = {
             "ok": True,
             "baseline_id": "period-a",
-            "epoch": 1,
             "last_seq": 2,
             "entries": self.entries("old", 2),
         }
@@ -1143,8 +1140,8 @@ def test_dl210_u3_mixed_read_baselines_return_without_updating_the_table(short_r
     asyncio.run(scenario())
 
 
-def test_dl210_u5_reconnect_same_baseline_keeps_cursor_across_a_new_epoch(short_root: Path) -> None:
-    """Disconnect preserves alarms and cursor; the next epoch resumes a longer prefix."""
+def test_dl210_u5_reconnect_same_baseline_keeps_cursor_across_a_resume(short_root: Path) -> None:
+    """Disconnect preserves alarms and cursor; a resumed engine continues a longer prefix."""
 
     async def scenario() -> None:
         async with _trace_poll_app(short_root) as (app, pilot, replies):
@@ -1157,13 +1154,11 @@ def test_dl210_u5_reconnect_same_baseline_keeps_cursor_across_a_new_epoch(short_
 
             replies.disconnected = False
             replies.requests.clear()
-            replies.status["epoch"] = 2
-            replies.trace.update(epoch=2, last_seq=3, entries=replies.entries("old", 3))
+            replies.trace.update(last_seq=3, entries=replies.entries("old", 3))
             await pilot.press("r")
             await _wait_for_ui(pilot, lambda: app._trace_seq == 3)
             assert [r["since"] for r in replies.requests if r["cmd"] == "trace"] == [2]
             assert app._alarms == {"trace_job": 3}
-            assert app._epoch == 2
             assert sum("[old-" in line.text for line in console.lines) == 3
             assert not any("trace baseline" in line.text for line in console.lines)
 

@@ -50,7 +50,6 @@ from dsl41.oracle_state import (
     RuntimeState,
     may_outlive_run,
 )
-from dsl41.runner_hosts import HostCommand, apply_host_command
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -808,28 +807,11 @@ def test_enqueue_waiter_is_idempotent_a_queued_job_keeps_its_rank() -> None:
     assert store.runtime("j").waiter_seq == first_rank
 
 
-def test_quarantine_and_reinstate_are_each_idempotent() -> None:
-    """Repeated unreachability is ONE fact, and the producer is a retry loop
-    that gives up five times over (S5d) -- a second quarantine that moved a
-    revision would make a host's `expect` unholdable exactly while an
-    operator is trying to use it. Reinstating a host that was never
-    quarantined is the same no-op from the other side. Both are internal
-    rows of the host chart (host.06, host.25), so the apply writes nothing
-    (DL-333)."""
+def test_a_revision_in_an_unknown_namespace_is_refused() -> None:
+    """`expect` names `job:` and `global:` keys only (concurrency-model ss6); the dormant
+    routing table answers no `host:` key, so a key in any other namespace is a caller's bug,
+    refused by name rather than read as an absent entity at revision 0."""
     store = RuntimeState()
-    store.begin_input()
-    store.register_host("h", deadman_s=None, at=None)
-    store.commit_input()
-
-    def apply(verb: str) -> list[str]:
-        store.begin_input()
-        cmd = HostCommand(verb=verb, host_id="h")  # type: ignore[arg-type]
-        apply_host_command(store, cmd, actor=None)
-        return store.commit_input()
-
-    assert apply("quarantine") == ["host:h"]
-    after_first = store.revision("host:h")
-    assert apply("quarantine") == []  # still unreachable: one fact, not two
-    assert store.revision("host:h") == after_first
-    assert apply("reinstate") == ["host:h"]
-    assert apply("reinstate") == []  # already back: nothing to put back
+    for key in ("host:local", "route:r", "j"):
+        with pytest.raises(OracleError, match="unknown entity namespace"):
+            store.revision(key)

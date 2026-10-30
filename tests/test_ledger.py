@@ -1,8 +1,4 @@
-"""Leadership over one run root: the lock, the epoch, eligibility (S6a).
-
-Normative spec: docs/concurrency-model.md ss1 (the ledger's five
-capabilities), ss7 (leadership, and what the header pins). `ssN` in this
-file always names concurrency-model.
+"""One engine per run root: the lock and eligibility (S6a).
 
 The hole this closes is live, and it is worth stating plainly because the
 tests below only make sense against it. `_serve_run` claims the control
@@ -48,7 +44,6 @@ from dsl41.ir import lower_source
 from dsl41.run_root import catalog_hash_v2, hash_over
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, RealClock, VirtualClock
-from dsl41.runner_effects import OUTCOME_UNAVAILABLE
 from dsl41.runner_journal import read_journal
 from dsl41.runner_ledger import (
     LOCK_NAME,
@@ -56,7 +51,6 @@ from dsl41.runner_ledger import (
     LeaderLock,
     check_leader_eligibility,
     check_state_machine_version,
-    next_epoch,
 )
 from dsl41.runner_startup import resume_run, start_run
 
@@ -100,7 +94,6 @@ def test_a_second_engine_on_one_run_root_is_refused(tmp_path: Path) -> None:
         with pytest.raises(EngineError, match="held by another engine") as refused:
             _start(run_root)
         assert f"pid {os.getpid()}" in str(refused.value)
-        assert "epoch 1" in str(refused.value)
 
         # a resume meets the same wall, and it is the one that matters: the
         # create path already refuses a used run root on its own
@@ -109,9 +102,8 @@ def test_a_second_engine_on_one_run_root_is_refused(tmp_path: Path) -> None:
     finally:
         _close(engine)
 
-    # the contrast: released, the next engine leads
+    # the contrast: released, the next engine runs
     resumed = asyncio.run(_resume(run_root, T0 + timedelta(minutes=1)))
-    assert resumed.epoch == 2
     _close(resumed)
 
 
@@ -150,7 +142,6 @@ def test_a_refused_resume_does_not_hold_the_lock_it_could_not_use(tmp_path: Path
                 adapters={"CMD": FakeAdapter(default=None)},
             )
         resumed = await _resume(run_root, T0 + timedelta(minutes=1))
-        assert resumed.epoch == 2  # the refused attempt spent no term either
         _close(resumed)
 
     asyncio.run(scenario())
@@ -195,7 +186,7 @@ def test_a_dead_holder_leaves_nothing_to_clean_up(tmp_path: Path) -> None:
                 from dsl41.runner_ledger import LeaderLock
                 lock = LeaderLock(Path({str(run_root)!r}))
                 lock.acquire()
-                lock.note(epoch=7, at=__import__("datetime").datetime.now())
+                lock.note(at=__import__("datetime").datetime.now())
                 print("held", flush=True)
                 time.sleep(60)
             """),
@@ -226,63 +217,6 @@ def test_a_dead_holder_leaves_nothing_to_clean_up(tmp_path: Path) -> None:
             child.kill()
             child.wait(timeout=10)
         close_pipes(child)
-
-
-# ------------------------------------------------------------- 2. the epoch
-
-
-def test_the_epoch_is_allocated_by_being_appended(tmp_path: Path) -> None:
-    """ss1's monotone allocation. Written under the lock, in the log, so the
-    allocation and the log's account of it are one write and cannot
-    disagree -- and every input between two `leader` records names the
-    incarnation the earlier one names, which is what makes a failover
-    reconstructible after the fact."""
-    run_root = tmp_path / "run"
-    _close(_start(run_root))
-    _close(asyncio.run(_resume(run_root, T0 + timedelta(minutes=1))))
-    third = asyncio.run(_resume(run_root, T0 + timedelta(minutes=2)))
-    assert third.epoch == 3
-    _close(third)
-
-    terms = [r for r in read_journal(run_root / "journal.jsonl") if r.get("rec") == "leader"]
-    assert [r["epoch"] for r in terms] == [1, 2, 3]
-    assert all(r["pid"] == os.getpid() for r in terms)
-    assert all(r["host"] and r["dsl41_version"] for r in terms)
-
-
-def test_every_input_names_the_term_that_admitted_it(tmp_path: Path) -> None:
-    """The epoch on an attempt is the LEADER's, not the caller's, so an
-    input raised inside the engine carries it too. That is what makes the
-    log self-describing about incarnations rather than only about clients."""
-    run_root = tmp_path / "run"
-
-    async def scenario() -> None:
-        engine = _start(run_root)
-        engine.inject(_event("STARTJOB", 0))
-        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
-        await engine.shutdown()
-        _close(engine)
-
-        resumed = await _resume(run_root, T0 + timedelta(minutes=2))
-        resumed.inject(_event("KILLJOB", 3))
-        await resumed.run_until_quiescent(T0 + timedelta(minutes=4))
-        await resumed.shutdown()
-        _close(resumed)
-
-    asyncio.run(scenario())
-    records = read_journal(run_root / "journal.jsonl")
-    epochs = {r["epoch"] for r in records if r.get("rec") in ("input", "advance", "host")}
-    assert epochs == {1, 2}
-
-
-def test_a_journal_written_before_s6a_takes_the_first_term() -> None:
-    """No format gate, on the courtesy S2 gave a journal with no
-    `request_id`: a log with no `leader` record has had no term held over
-    it, so the first real one is 1 -- the same number a fresh run root
-    gets, and for the same reason."""
-    assert next_epoch([]) == 1
-    assert next_epoch([{"rec": "header"}, {"rec": "input", "seq": 1, "epoch": 0}]) == 1
-    assert next_epoch([{"rec": "leader", "epoch": 4}, {"rec": "input", "epoch": 4}]) == 5
 
 
 # ------------------------------------------------------------- 3. the fence
@@ -344,10 +278,10 @@ def test_a_deleted_lock_file_stops_it_too(tmp_path: Path) -> None:
 
 
 def test_the_fence_stops_the_spawn_and_not_only_the_record(tmp_path: Path) -> None:
-    """Why fencing appends is enough. Every effect is recorded before it is
-    attempted (ss5), so an append this engine may not make is an effect it
-    never applies -- no second mechanism, and no window between the two in
-    which a fence could hold for one and not the other."""
+    """Why fencing appends is enough. Every start is recorded before it is
+    attempted (runner-design ss7), so an append this engine may not make is
+    a start it never makes -- no second mechanism, and no window between the
+    two in which a fence could hold for one and not the other."""
     run_root = tmp_path / "run"
     engine = _start(run_root)
     (run_root / LOCK_NAME).unlink()
@@ -361,7 +295,7 @@ def test_the_fence_stops_the_spawn_and_not_only_the_record(tmp_path: Path) -> No
     _close(engine)
     assert engine.oracle.store.job["j"].run_number == 0
     assert list((run_root / "runs").iterdir()) == []
-    assert engine.outbox.pending() == []
+    assert engine.live_jobs() == frozenset()
 
 
 # ------------------------------------------------------- 4. eligibility (ss7)
@@ -558,18 +492,14 @@ def test_a_changed_estate_refuses() -> None:
 # ------------------------------------------------- 5. the takeover barrier
 
 
-def _log_without_spawn_result(run_root: Path) -> None:
-    """Cut the SPAWN's outcome record: the previous leader died in the window
-    between recording what it meant to do and doing it. The same technique
-    DL-96 used for the undelivered kill, and the only honest way to build a
-    crash window -- racing for one would test the scheduler, not the rule."""
+def _log_without_dispatch(run_root: Path) -> None:
+    """Cut the start's `dispatch` record: the previous engine died in the
+    window between deciding the start and dispatching it. The only honest
+    way to build a crash window -- racing for one would test the scheduler,
+    not the rule."""
     path = run_root / "journal.jsonl"
     records = read_journal(path)
-    kept = [
-        r
-        for r in records
-        if not (r.get("rec") == "effect_result" and str(r.get("effect_id", "")).find(":SPAWN:") > 0)
-    ]
+    kept = [r for r in records if r.get("rec") != "dispatch"]
     assert len(kept) == len(records) - 1
     path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in kept))
 
@@ -585,20 +515,15 @@ def _crash_after_deciding_a_start(run_root: Path) -> None:
     asyncio.run(scenario())
 
 
-def test_cm09_a_start_the_previous_leader_never_dispatched_is_re_driven(tmp_path: Path) -> None:
-    """ss7's "re-drive pending", and the question DL-96 deferred to this
-    barrier. A pending SPAWN with no trace anywhere -- no run directory, no
-    dispatch record, nothing the host admits to running -- is an intent the
-    previous leader recorded and did not get to. Nothing ran, so re-driving
-    starts the run once, at the run_number the oracle already decided.
-
-    Re-driving takes no code: leaving the effect pending is enough, because
-    `_dispatch` drains the outbox through the same gates a fresh effect
-    passes. A drained host therefore still holds it, and this sweep does not
-    have to know that."""
+def test_cm09_a_start_the_previous_engine_never_dispatched_is_dispatched(tmp_path: Path) -> None:
+    """DL-102. A decided start with no trace anywhere -- no run directory,
+    no `dispatch` record -- is one the previous engine decided and did not
+    get to. Nothing ran, so resume starts the run once, at the run_number
+    the oracle already decided, through the same supersession check a fresh
+    start passes."""
     run_root = tmp_path / "run"
     _crash_after_deciding_a_start(run_root)
-    _log_without_spawn_result(run_root)
+    _log_without_dispatch(run_root)
 
     async def scenario():
         resumed = await _resume(run_root, T0 + timedelta(minutes=1))
@@ -609,18 +534,17 @@ def test_cm09_a_start_the_previous_leader_never_dispatched_is_re_driven(tmp_path
     assert resumed.oracle.store.job["j"].status == "RUNNING"  # not FAILURE
     assert resumed.live_jobs() == frozenset({"j"})
     assert resumed.oracle.store.job["j"].run_number == 1  # the same run, not a second
-    assert resumed.outbox.pending() == []  # the intent was discharged, not left over
     _close(resumed)
+    dispatched = [r for r in read_journal(run_root / "journal.jsonl") if r["rec"] == "dispatch"]
+    assert [(r["job"], r["run_number"]) for r in dispatched] == [("j", 1)]
 
 
-def test_a_start_with_no_recorded_intent_is_still_failed(tmp_path: Path) -> None:
+def test_a_dispatched_start_that_left_no_trace_is_failed(tmp_path: Path) -> None:
     """The contrast, and the half of runner-design ss7 that stands. Same
-    estate, same missing spool, one record different: the log says the spawn
-    was applied, so nothing here is an intent waiting to be delivered. A
-    journal written before the outbox existed reaches this branch too, and
-    gets the behaviour it was written under."""
+    estate, same missing spool, one record different: the log says the start
+    was dispatched, so it is not re-run silently."""
     run_root = tmp_path / "run"
-    _crash_after_deciding_a_start(run_root)  # the effect_result stays
+    _crash_after_deciding_a_start(run_root)  # the dispatch record stays
 
     async def scenario():
         resumed = await _resume(run_root, T0 + timedelta(minutes=1))
@@ -697,7 +621,7 @@ def test_using_a_lock_that_was_never_acquired_is_a_loud_error(tmp_path: Path) ->
     `check` that passed would be a fence that always says yes."""
     lock = LeaderLock(tmp_path)
     with pytest.raises(EngineError, match="not held"):
-        lock.note(epoch=1, at=T0)
+        lock.note(at=T0)
     with pytest.raises(EngineError, match="leadership was never acquired"):
         lock.check()
 
@@ -790,27 +714,17 @@ def test_a_run_this_catalog_has_no_job_for_is_left_alone(tmp_path: Path) -> None
             "at": T0.isoformat(),
             "request_id": "ghost-1",
             "fingerprint": "f",
-            "epoch": 1,
             "kind": "STATUS",
             "payload": {"job": "ghost", "status": "RUNNING"},
             "source": "control",
         }
     )
-    records.append(
-        {
-            "rec": "dispatch",
-            "job": "ghost",
-            # the run_number the oracle actually holds for it: an injected
-            # STATUS never advances one (the ghost-run gate), so this is the
-            # only pair that reaches the catalog lookup rather than stopping
-            # at the run-number check above it
-            "run_number": 0,
-            "wrapper_pid": None,
-            "run_dir": None,
-            "started_at": T0.isoformat(),
-        }
-    )
     path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records))
+    # the run_number the oracle actually holds for it: an injected STATUS never
+    # advances one (the ghost-run gate), so this is the only directory that
+    # reaches the catalog lookup rather than stopping at the run-number check
+    # above it
+    (run_root / "runs" / "ghost.0").mkdir(parents=True)
 
     async def scenario():
         resumed = await _resume(run_root, T0 + timedelta(minutes=1))
@@ -887,59 +801,6 @@ def _event_for(job: str, kind: str, minutes: float):
     from dsl41.oracle_state import Event
 
     return Event(at=T0 + timedelta(minutes=minutes), kind=kind, payload={"job": job})
-
-
-def test_a_kill_nobody_can_report_on_is_resolved_from_the_spool_as_indeterminate(
-    tmp_path: Path,
-) -> None:
-    """ss5's third state, reached the way production reaches it. A kill was
-    decided and its outcome never recorded; at resume there is no live
-    wrapper to ask and no `status.json` to read. Nothing observed whether the
-    signal landed, so `indeterminate` is the only honest answer -- reporting
-    it either way would invent a fact about a process nothing watched (E7).
-    Two states would have to call this one of the two things it is not."""
-    run_root = tmp_path / "run"
-
-    async def scenario() -> None:
-        engine = start_run(
-            lower_source(_SOLO_JIL),
-            run_root,
-            clock=VirtualClock(start=T0),
-            adapters={"CMD": FakeAdapter({("j", 1): (3600.0, 0)})},
-        )
-        engine.inject(_event("STARTJOB", 0))
-        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
-        assert engine.live_jobs() == frozenset({"j"})
-        engine.inject(_event("KILLJOB", 2))
-        await engine.run_until_quiescent(T0 + timedelta(minutes=3))
-        await engine.shutdown()
-        _close(engine)
-
-    asyncio.run(scenario())
-
-    path = run_root / "journal.jsonl"
-    records = read_journal(path)
-    kept = [
-        r
-        for r in records
-        if not (r.get("rec") == "effect_result" and ":KILL:" in str(r.get("effect_id", "")))
-    ]
-    assert len(kept) == len(records) - 1  # the crash landed between deciding and recording
-    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in kept))
-
-    async def after():
-        resumed = await _resume(run_root, T0 + timedelta(minutes=5))
-        await resumed.run_until_quiescent(T0 + timedelta(minutes=6))
-        return resumed
-
-    resumed = asyncio.run(after())
-    [kill] = [e for e in resumed.outbox.effects() if e.kind == "KILL"]
-    assert resumed.outbox.state_of(kill.effect_id) == "indeterminate"
-    # and what an exact retry of it is told, which is the reason the third
-    # state exists: not a failure, not a success, an answer nobody can give
-    assert resumed.outbox.result_for(kill.effect_id) == OUTCOME_UNAVAILABLE
-    assert resumed.outbox.pending() == []  # answered, not left hanging
-    _close(resumed)
 
 
 _BOX_JIL = """\

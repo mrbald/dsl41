@@ -1074,8 +1074,6 @@ def recovery_command(socket_path: Path, request: Mapping[str, Any]) -> str:
             str(request["request_id"]),
             "--expect",
             str(revision),
-            "--epoch",
-            str(request["epoch"]),
             "--baseline",
             str(request["baseline_id"]),
             "--claimed-actor",
@@ -1251,7 +1249,6 @@ class RunnerApp(App[None]):
         #: `_jobs_snapshot` were read from, so an `expect` cannot name a re-baselined run root's
         #: number
         self._baseline = ""
-        self._epoch = 0
         self._claimed_actor = claimed_actor()
         self._filter = ""  # space-separated substrings, AND'd, case-insensitive
         self._view_mode = 0  # index into _VIEW_MODES
@@ -1374,15 +1371,14 @@ class RunnerApp(App[None]):
                     last_seq = trace.get("last_seq")
                     if isinstance(last_seq, int) and last_seq < self._trace_seq:
                         # a shorter trace resets the cursor; a baseline change above resets even
-                        # a longer one, and an epoch change alone does not (a same-period resume
-                        # replays the existing prefix)
+                        # a longer one, and a resume alone does not (it replays the existing
+                        # prefix)
                         self._reset_trace_cursor()
                         self._dirty = True
                     self._consume_trace(trace.get("entries", []))
                 if status.get("ok"):
                     # concurrency-model ss6 read header: the revisions below belong to THIS log
                     self._baseline = str(status.get("baseline_id") or "")
-                    self._epoch = int(status.get("epoch") or 0)
                     self._set_drift(bool(status.get("spec_drift")))
                     self._update_table(status.get("jobs", {}))
                 await self._update_explain()
@@ -1975,7 +1971,7 @@ class RunnerApp(App[None]):
             verb,
             target,
             str(row.get("status") or "?"),
-            frozen[2],
+            frozen[1],
             members,
         )
         if not await self._confirm("confirm", body):
@@ -2069,7 +2065,7 @@ class RunnerApp(App[None]):
         self.run_worker(self._do_sendevent(request), group="send", exclusive=False)
 
     async def _do_sendevent(
-        self, request: dict[str, Any], frozen: tuple[str, int, int] | None = None
+        self, request: dict[str, Any], frozen: tuple[str, int] | None = None
     ) -> None:
         """Complete the concurrency-model ss6 envelope and send it (DL-90).
 
@@ -2088,16 +2084,13 @@ class RunnerApp(App[None]):
             return
         recovery: str | None = None
         try:
-            baseline, epoch, revision = (
-                frozen if frozen is not None else await self._precondition(key)
-            )
+            baseline, revision = frozen if frozen is not None else await self._precondition(key)
             envelope = command(
                 str(request.get("verb")),
                 payload,
                 key=key,
                 revision=revision,
                 baseline_id=baseline,
-                epoch=epoch,
                 claimed_actor=self._claimed_actor,
             )
             recovery = recovery_command(self.socket_path, envelope)
@@ -2118,19 +2111,15 @@ class RunnerApp(App[None]):
             self._console_write(Text(f"re-read; recover ONLY as: {recovery}", style="yellow"))
         await self._refresh()
 
-    async def _precondition(self, key: str) -> tuple[str, int, int]:
+    async def _precondition(self, key: str) -> tuple[str, int]:
         """The concurrency-model ss6 read header and the revision to name for `key`: for a job
         the table shows, the revision the operator saw (ss0); otherwise a fresh read."""
         namespace, _, name = key.partition(":")
         row = self._jobs_snapshot.get(name) if namespace == "job" else None
         if row is not None and isinstance(row.get("state_rev"), int):
-            return self._baseline, self._epoch, row["state_rev"]
+            return self._baseline, row["state_rev"]
         read = await self._client.request(read_for(key))
-        return (
-            str(read.get("baseline_id") or ""),
-            int(read.get("epoch") or 0),
-            revision_in(read, key),
-        )
+        return str(read.get("baseline_id") or ""), revision_in(read, key)
 
     def _console_write(self, text: Text) -> None:
         try:

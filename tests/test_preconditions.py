@@ -31,10 +31,8 @@ that makes it non-vacuous:
   * **expect is part of the command.** The same verb at two revisions is
     two commands, so it is in the fingerprint -- otherwise a retry of one
     could be answered by the other's decision, through the dedup path.
-  * **dedup before the epoch check** (ss4 step 2). An exact old-epoch retry
-    recovers its original result; an unseen old-epoch request is refused.
-    The order is counter-intuitive and is pinned here rather than left for
-    S6 to rediscover.
+  * **dedup before admission** (ss4 step 2). An exact retry is answered from
+    its first decision and takes no index.
 """
 
 from __future__ import annotations
@@ -52,7 +50,7 @@ from subprocess_harness import cli
 
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import CarriedRows, Event
+from dsl41.oracle_state import Event
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import (
@@ -69,7 +67,6 @@ from dsl41.runner_admission import (
 from dsl41.runner_clock import RealClock, VirtualClock
 from dsl41.runner_codes import Rejection
 from dsl41.runner_control import APPLIED, REFUSED, REJECTED, UNKNOWN, ControlServer, outcome_of
-from dsl41.runner_hosts import HostCommand
 from dsl41.runner_journal import read_journal, replay_inputs
 from dsl41.runner_startup import start_run
 
@@ -106,7 +103,6 @@ def _request(**fields: object) -> dict:
         "v": PROTOCOL_VERSION,
         "cmd": "sendevent",
         "baseline_id": "the-log",
-        "epoch": 0,
         "request_id": "r1",
         "verb": "ON_HOLD",
         "payload": {"job": "j"},
@@ -131,9 +127,7 @@ def test_a_well_formed_envelope_parses_to_exactly_what_it_said() -> None:
     envelope = parse_envelope(
         _request(claimed_actor="alice@host"), addressed="job:j", baseline_id="the-log"
     )
-    assert envelope == Envelope(
-        request_id="r1", expect={"job:j": 3}, epoch=0, claimed_actor="alice@host"
-    )
+    assert envelope == Envelope(request_id="r1", expect={"job:j": 3}, claimed_actor="alice@host")
 
 
 def test_a_mutation_that_names_no_revision_is_refused() -> None:
@@ -181,20 +175,6 @@ def test_a_request_id_is_required() -> None:
             del request["request_id"]
         with pytest.raises(EnvelopeError, match="request_id is required"):
             parse_envelope(request, addressed="job:j", baseline_id="the-log")
-
-
-def test_epoch_is_required_rather_than_defaulted() -> None:
-    """ss6 ships `epoch` in v2 though it is inert on one host, so that
-    clients CARRY it. Defaulting an omitted one would mean nobody ever sends
-    it, and S6 would then be the second wire break that shipping it early
-    was meant to avoid. Every read publishes the current epoch beside the
-    revision, so a caller that can compose an `expect` already has it."""
-    request = _request()
-    del request["epoch"]
-    with pytest.raises(EnvelopeError, match="epoch is required"):
-        parse_envelope(request, addressed="job:j", baseline_id="the-log")
-    with pytest.raises(EnvelopeError, match="epoch is required"):
-        parse_envelope(_request(epoch="7"), addressed="job:j", baseline_id="the-log")
 
 
 def test_an_unversioned_or_wrongly_versioned_request_is_refused() -> None:
@@ -264,7 +244,7 @@ def test_cm06_a_command_composed_against_a_stale_revision_is_rejected() -> None:
         await engine.run_until_quiescent(T0 + timedelta(minutes=1))
         assert engine.oracle.store.revision("job:j") == stale + 1
         result = await _submitted(
-            engine, _ev("ON_HOLD", 2, job="j"), _envelope("r1", "job:j", stale, epoch=engine.epoch)
+            engine, _ev("ON_HOLD", 2, job="j"), _envelope("r1", "job:j", stale)
         )()
         assert result.decision == "rejected"
         assert result.reason == (
@@ -414,7 +394,7 @@ async def _decided_late(engine: Engine, clock: _SteppedClock, kind: str, minutes
     clock.t = T0 + timedelta(minutes=3)
     future = engine.submit(
         _ev(kind, minutes, job="x"),
-        Envelope(request_id="r1", expect={"job:x": read}, epoch=engine.epoch),
+        Envelope(request_id="r1", expect={"job:x": read}),
     )
     await engine.run_until_quiescent(T0 + timedelta(minutes=3))
     return read, await future
@@ -482,18 +462,29 @@ def test_a_late_status_after_a_deadline_records_one_kill_and_replays(tmp_path: P
         catalog, tmp_path / "run", clock=clock, adapters={"CMD": FakeAdapter(default=None)}
     )
 
+    #: each run the engine's dispatch cancelled, with the admission instant of the input
+    kills: list[tuple[str, datetime | None]] = []
+    real_dispatch = engine._dispatch
+
+    def recording(emitted: list[Event]) -> None:
+        before = set(engine._live)
+        real_dispatch(emitted)
+        kills.extend((job, engine.frontiers.at) for job in sorted(before - set(engine._live)))
+
+    engine._dispatch = recording  # type: ignore[method-assign]
+
     async def scenario() -> None:
         engine.inject(_ev("STARTJOB", 0, job="x"))
         await engine.run_until_quiescent(T0)
         clock.t = T0 + timedelta(minutes=3)
         engine.inject(_ev("STATUS", 2.5, job="x", status="SUCCESS"))
         await engine.run_until_quiescent(T0 + timedelta(minutes=3))
+        # one kill, by the deadline's own input at its due instant, before the late STATUS
+        assert kills == [("x", T0 + timedelta(minutes=2))]
         await engine.shutdown()
 
     asyncio.run(scenario())
     assert engine.oracle.store.job["x"].status == "SUCCESS"
-    [kill] = [e for e in engine.outbox.effects() if e.kind == "KILL"]
-    assert (kill.job, kill.run_number, kill.at) == ("x", 1, T0 + timedelta(minutes=2))
     assert engine.journal is not None
     engine.journal.close()
 
@@ -504,8 +495,7 @@ def test_a_late_status_after_a_deadline_records_one_kill_and_replays(tmp_path: P
         ("input", (T0 + timedelta(minutes=2.5)).isoformat()),
     ]
     fresh = Oracle(catalog)
-    replay = replay_inputs(fresh, records)
-    assert [e.effect_id for e in replay.outbox.effects() if e.kind == "KILL"] == [kill.effect_id]
+    replay_inputs(fresh, records)
     assert fresh.store.job["x"].status == "SUCCESS"
 
 
@@ -538,7 +528,7 @@ def test_a_timer_due_before_the_last_admitted_instant_is_stamped_at_that_instant
         clock.t = T0 + timedelta(minutes=1)
         future = engine.submit(
             _ev("ON_HOLD", 0.5, job="x"),
-            Envelope(request_id="r1", expect={"job:x": read}, epoch=engine.epoch),
+            Envelope(request_id="r1", expect={"job:x": read}),
         )
         await engine.run_until_quiescent(T0 + timedelta(minutes=1))
         assert (await future).decision == "rejected"
@@ -554,53 +544,6 @@ def test_a_timer_due_before_the_last_admitted_instant_is_stamped_at_that_instant
         ("input", (T0 + timedelta(seconds=30)).isoformat()),
     ]
     assert engine.oracle.store.job["x"].status == "TERMINATED"
-
-
-def test_a_carried_timer_due_before_the_seal_instant_fires_at_that_instant() -> None:
-    """A segment opened from a seal has admitted nothing, but its oracle
-    starts at the seal instant T. A carried deadline due before T fires as
-    its own input stamped at T, not at its due instant, which the oracle
-    would refuse as time going backwards (DL-232). The command behind it is
-    refused at admission for its epoch, so it takes no index and the
-    frontier is the timer's own stamp."""
-    catalog = lower_source(_TERM_JIL)
-    seal_at = T0 + timedelta(minutes=3)
-
-    async def scenario() -> Engine:
-        closing = Engine(
-            catalog, clock=VirtualClock(start=T0), adapters={"CMD": FakeAdapter(default=None)}
-        )
-        closing.inject(_ev("STARTJOB", 0, job="x"))
-        await closing.run_until_quiescent(T0)
-        store = closing.oracle.store
-        carried = CarriedRows(
-            jobs=dict(store.job),
-            timers=tuple(store.timers()),
-            timer_seq=store.timer_seq,
-            period_id=2,
-            now=seal_at,
-        )
-        await closing.shutdown()
-
-        clock = _SteppedClock(seal_at + timedelta(minutes=1))
-        opened = Engine(
-            catalog, clock=clock, adapters={"CMD": FakeAdapter(default=None)}, carried=carried
-        )
-        assert [due for due, _, _ in opened.oracle.store.timers()] == [T0 + timedelta(minutes=2)]
-        future = opened.submit(
-            _ev("ON_HOLD", 3.5, job="x"),
-            Envelope(request_id="r1", expect={"job:x": 1}, epoch=opened.epoch + 1),
-        )
-        await opened.run_until_quiescent(seal_at + timedelta(minutes=1))
-        with pytest.raises(AdmissionRefused):
-            await future
-        await opened.shutdown()
-        return opened
-
-    opened = asyncio.run(scenario())
-    assert opened.frontiers.at == seal_at
-    assert opened.frontiers.applied_index == opened.frontiers.committed_index == 1
-    assert opened.oracle.store.job["x"].status == "TERMINATED"
 
 
 def test_revision_zero_is_the_conditional_create() -> None:
@@ -673,7 +616,7 @@ def test_a_refusal_leaves_nothing_in_the_log_and_a_rejection_leaves_a_decision(
         rejected = await _submitted(
             engine,
             _ev("ON_HOLD", 2, job="j"),
-            _envelope("keeps-its-index", "job:j", stale, epoch=engine.epoch),
+            _envelope("keeps-its-index", "job:j", stale),
         )()
         assert rejected.decision == "rejected"
 
@@ -684,7 +627,6 @@ def test_a_refusal_leaves_nothing_in_the_log_and_a_rejection_leaves_a_decision(
                 "keeps-its-index",
                 "job:j",
                 engine.oracle.store.revision("job:j"),
-                epoch=engine.epoch,
             ),
         )
         await engine.run_until_quiescent(T0 + timedelta(minutes=3))
@@ -710,7 +652,7 @@ def test_a_refusal_leaves_nothing_in_the_log_and_a_rejection_leaves_a_decision(
     assert attempt["expect"] == {"job:j": 0}
 
 
-# ------------------------------------------------- 4. retry and epoch (ss4 step 2)
+# ------------------------------------------------------- 4. retry (ss4 step 2)
 
 
 def test_an_exact_retry_of_a_rejected_command_gets_the_same_rejection() -> None:
@@ -739,52 +681,6 @@ def test_an_exact_retry_of_a_rejected_command_gets_the_same_rejection() -> None:
     assert [request_id for request_id, _ in engine.deduped] == ["r1"]
 
 
-def test_an_unseen_request_at_a_stale_epoch_is_refused() -> None:
-    """ss4 step 2's second half. A client still talking to a superseded
-    leader composed this against a world that has moved on."""
-
-    async def scenario() -> Engine:
-        engine = _engine()
-        engine.epoch = 7
-        future = engine.submit(_ev("ON_HOLD", 1, job="j"), _envelope("r1", "job:j", 0, epoch=3))
-        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
-        with pytest.raises(AdmissionRefused, match="epoch 3 is not this leader's 7"):
-            await future
-        await engine.shutdown()
-        return engine
-
-    engine = asyncio.run(scenario())
-    assert engine.oracle.store.job["j"].on_hold is False
-    assert engine.frontiers.committed_index == 0  # refused: it took no index
-
-
-def test_an_exact_retry_at_a_stale_epoch_recovers_its_original_decision() -> None:
-    """The ordering ss4 step 2 calls out, and the reason dedup is written
-    BEFORE the epoch check rather than after it.
-
-    This command was decided by the leader that held epoch 3. The client
-    never heard the answer and retries; by then the epoch has moved. Refusing
-    the retry would hide a decision that was already made and applied -- the
-    client would re-compose and send it a second time. Answering it from the
-    index is the only outcome that does not double-apply."""
-
-    async def scenario() -> Engine:
-        engine = _engine()
-        engine.epoch = 3
-        envelope = _envelope("r1", "job:j", 0, epoch=3)
-        first = await _submitted(engine, _ev("ON_HOLD", 1, job="j"), envelope)()
-        assert first.decision == "applied"
-        engine.epoch = 7  # the world elected someone else, and back again
-        second = await _submitted(engine, _ev("ON_HOLD", 2, job="j"), envelope, horizon_min=2)()
-        assert second == first
-        await engine.shutdown()
-        return engine
-
-    engine = asyncio.run(scenario())
-    assert engine.refused_inputs == []  # answered, not refused
-    assert engine.frontiers.committed_index == 1
-
-
 # ------------------------------------------------------------- 5. replay (ss4)
 
 
@@ -804,7 +700,7 @@ def test_a_rejected_precondition_replays_as_a_rejection(tmp_path: Path) -> None:
         engine.inject(_ev("ON_ICE", 1, job="j"))
         await engine.run_until_quiescent(T0 + timedelta(minutes=1))
         result = await _submitted(
-            engine, _ev("ON_HOLD", 2, job="j"), _envelope("r1", "job:j", stale, epoch=engine.epoch)
+            engine, _ev("ON_HOLD", 2, job="j"), _envelope("r1", "job:j", stale)
         )()
         assert result.decision == "rejected"
         await engine.shutdown()
@@ -835,9 +731,7 @@ def test_an_admitted_precondition_with_no_result_re_runs_the_gate(tmp_path: Path
         stale = engine.oracle.store.revision("job:j")
         engine.inject(_ev("ON_ICE", 1, job="j"))
         await engine.run_until_quiescent(T0 + timedelta(minutes=1))
-        await _submitted(
-            engine, _ev("ON_HOLD", 2, job="j"), _envelope("r1", "job:j", stale, epoch=engine.epoch)
-        )()
+        await _submitted(engine, _ev("ON_HOLD", 2, job="j"), _envelope("r1", "job:j", stale))()
         await engine.shutdown()
         assert engine.journal is not None
         engine.journal.close()
@@ -883,7 +777,7 @@ async def _call_line(sock_path: Path, line: str) -> dict:
 async def _serve_engine(engine: Engine) -> tuple[Engine, ControlServer, asyncio.Future[Any]]:
     """Bind a control socket at `<engine.run_root>/control.sock`, start it,
     and drive the engine to `datetime.max` -- the shared second half of
-    every helper here and in test_recovery.py/test_hosts.py that opens an
+    every helper here and in test_recovery.py that opens an
     engine (by `start_run` or `resume_run`) and then serves it."""
     assert engine.run_root is not None
     server = ControlServer(engine, engine.run_root / "control.sock")
@@ -945,7 +839,7 @@ def test_every_door_refuses_an_unversioned_caller(short_root: Path) -> None:
 def test_every_read_publishes_the_header_a_precondition_is_composed_from(
     short_root: Path,
 ) -> None:
-    """ss6: reads publish `baseline_id`, `epoch` and `applied_index`. A
+    """ss6: reads publish `baseline_id` and `applied_index`. A
     revision is meaningless without the log it came from, and a client that
     cannot name the log cannot be told it is holding a stale one."""
 
@@ -955,9 +849,7 @@ def test_every_read_publishes_the_header_a_precondition_is_composed_from(
             for cmd in ({"cmd": "status"}, {"cmd": "timers"}, {"cmd": "global", "name": "X"}):
                 answer = await _call(server.path, cmd | {"v": PROTOCOL_VERSION})
                 assert answer["baseline_id"] == engine.baseline_id != ""
-                # the term this run root's ledger allocated, not a constant:
-                # a client composes against the leader it read from (S6a)
-                assert answer["epoch"] == engine.epoch == 1
+                assert "epoch" not in answer
                 assert answer["applied_index"] == engine.frontiers.applied_index
         finally:
             await _teardown(engine, server, loop_task)
@@ -980,7 +872,6 @@ def test_the_socket_answers_with_the_decision_not_the_receipt(short_root: Path) 
                 "v": PROTOCOL_VERSION,
                 "cmd": "sendevent",
                 "baseline_id": read["baseline_id"],
-                "epoch": read["epoch"],
                 "request_id": "wire-1",
                 "verb": "ON_HOLD",
                 "payload": {"job": "j"},
@@ -1035,7 +926,6 @@ def test_a_command_with_no_decision_is_answered_i_do_not_know(short_root: Path) 
                     "v": PROTOCOL_VERSION,
                     "cmd": "sendevent",
                     "baseline_id": read["baseline_id"],
-                    "epoch": read["epoch"],
                     "request_id": "undecided",
                     "verb": "ON_HOLD",
                     "payload": {"job": "j"},
@@ -1073,7 +963,6 @@ def test_the_socket_refuses_a_mutation_that_names_no_revision(short_root: Path) 
                     "v": PROTOCOL_VERSION,
                     "cmd": "sendevent",
                     "baseline_id": read["baseline_id"],
-                    "epoch": read["epoch"],
                     "request_id": "no-expect",
                     "verb": "ON_HOLD",
                     "payload": {"job": "j"},
@@ -1109,7 +998,6 @@ def test_an_unknown_job_is_refused_before_its_envelope_is_judged(short_root: Pat
                     "v": PROTOCOL_VERSION,
                     "cmd": "sendevent",
                     "baseline_id": engine.baseline_id,
-                    "epoch": engine.epoch,
                     "request_id": "typo",
                     "verb": "STARTJOB",
                     "payload": {"job": "jj"},
@@ -1178,7 +1066,6 @@ def test_the_journal_records_what_the_caller_claimed_to_be(short_root: Path) -> 
                     "v": PROTOCOL_VERSION,
                     "cmd": "sendevent",
                     "baseline_id": read["baseline_id"],
-                    "epoch": read["epoch"],
                     "request_id": "claim-1",
                     "verb": "ON_HOLD",
                     "payload": {"job": "j"},
@@ -1251,7 +1138,6 @@ def test_every_ok_false_a_mutation_can_meet_says_whether_it_was_admitted(
                     "v": PROTOCOL_VERSION,
                     "cmd": "sendevent",
                     "baseline_id": read["baseline_id"],
-                    "epoch": read["epoch"],
                     "request_id": "sweep-1",
                     "verb": "ON_HOLD",
                     "payload": {"job": "j"},
@@ -1267,10 +1153,6 @@ def test_every_ok_false_a_mutation_can_meet_says_whether_it_was_admitted(
                 "foreign baseline": (
                     envelope(baseline_id="someone-elses-run"),
                     "baseline_mismatch",
-                ),
-                "stale epoch": (
-                    envelope(epoch=read["epoch"] - 1, request_id="sweep-2"),
-                    "stale_epoch",
                 ),
                 "bad status": (
                     envelope(verb="CHANGE_STATUS", payload={"job": "j", "status": "?"}),
@@ -1330,7 +1212,6 @@ def test_a_command_with_no_decision_is_the_only_unmarked_no(short_root: Path) ->
                     "v": PROTOCOL_VERSION,
                     "cmd": "sendevent",
                     "baseline_id": read["baseline_id"],
-                    "epoch": read["epoch"],
                     "request_id": "no-answer",
                     "verb": "ON_HOLD",
                     "payload": {"job": "j"},
@@ -1587,7 +1468,6 @@ def test_an_attempt_carries_its_envelope_into_the_log_and_back() -> None:
         payload={"job": "j"},
         source="control",
         expect={"job:j": 12},
-        epoch=0,
         claimed_actor="alice@host",
     )
     assert attempt.event() is not None
@@ -1623,22 +1503,6 @@ def test_a_claimed_actor_that_is_not_a_string_is_refused() -> None:
     request["claimed_actor"] = {"name": "alice"}
     with pytest.raises(EnvelopeError, match="claimed_actor must be a string"):
         parse_envelope(request, addressed="job:j", baseline_id="the-log")
-
-
-def test_an_attempt_carries_a_verb_or_a_host_command_never_both() -> None:
-    """The two shapes of an admitted input are exclusive by construction
-    (S5a): a host command carries no oracle event, and an attempt that
-    claimed both would be fed AND applied to the routing table."""
-    with pytest.raises(ValueError, match="never both"):
-        Attempt(
-            index=1,
-            at=T0,
-            request_id="r",
-            fingerprint="f",
-            kind="ON_HOLD",
-            payload={"job": "j"},
-            host=HostCommand(verb="drain", host_id="local"),
-        )
 
 
 def test_the_stale_gate_passes_a_completion_that_names_no_job() -> None:

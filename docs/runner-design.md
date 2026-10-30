@@ -113,27 +113,27 @@ steps:
    run `feed()` / `advance()`. The oracle runs a cascade of instant
    starts on its executor's worklist, iteratively, and stops a cascade that
    does not end at an item cap set by the estate's job count (DL-351).
-4. Plan an effect for each emitted event the dispatch table names, and
-   record the plan in the attempt's `decision` record
-   (`runner_effects.plan_effects`; `docs/concurrency-model.md` §4 step 7).
-5. Drain the outbox: apply every pending effect in admission order
-   (`Engine._dispatch`). Journal the dispatch records.
+4. Append the attempt's `decision` record (`docs/concurrency-model.md` §4
+   step 7).
+5. Dispatch what the decision implies, in emitted order
+   (`runner_admission.dispatch_plan`, `Engine._dispatch`): each start
+   appends its `dispatch` record and then launches; each kill cancels the
+   live task.
 
 Dispatch table (emitted event → effect → what applying it does):
 
 | emitted                                   | effect | applying it                     |
 |-------------------------------------------|--------|---------------------------------|
-| `STATUS STARTING`, job_type CMD           | SPAWN  | start a LocalCommandAdapter task, or a SupervisedCommandAdapter task under `run --detached` |
+| `STATUS STARTING`, job_type CMD           | SPAWN  | start a LocalCommandAdapter task |
 | `STATUS STARTING`, job_type FW            | SPAWN  | start a FileWatcherAdapter task |
 | terminal status, job has a live task      | KILL   | cancel the adapter task (see below) |
 | `MUST_START_ALARM` / `MUST_COMPLETE_ALARM`| none   | none; they reach the operator through the trace and the UI |
 | anything on a BOX                         | none   | none (folds are oracle logic)   |
 
-An effect is applied only after its decision is durable. The outbox gates
-of `docs/concurrency-model.md` §5 run first: an effect the job's row has
-moved past is retired, and a SPAWN whose host routes no new work stays
-pending (concurrency-model §8). The supervised adapter's wrapper is a
-child of the §6a Tier 1 supervisor; the local adapter's wrapper is the
+An effect is applied only after its decision is durable, and a start only
+after its `dispatch` record is. A start the job's row has moved past (a
+terminal status, a status that is not live, or another run number) is not
+launched (`spawn_superseded`, DL-232). The local adapter's wrapper is the
 engine's child, and the FW adapter starts no process.
 
 The terminal-status row makes KILLJOB and term_run_time work with no
@@ -463,63 +463,36 @@ Record kinds:
   (`docs/period-model.md` §2.1, DL-130). Self-describing on purpose: a
   reader that opens it knows the period, the catalog and the semantics
   without reading an earlier file. `catalog_hash` + `state_machine_version`
-  are what leader eligibility is an exact match on
-  (`docs/concurrency-model.md` §7, S6a); `catalog_hash_version` says which
-  recipe the hash was taken under, so the gate compares like for like.
-  `dsl41_version` is deliberately NOT here: it is per-process, it rides on
-  `leader`, and a patch release must not move these bytes (PR-07).
-- `leader` — `{epoch, at, pid, host, dsl41_version}`: one term of leadership
-  over this run root (S6a, DL-100). Appended under the run root's lock
-  immediately after acquiring it, which is what makes the epoch monotone:
-  it is allocated by being written, so no two terms can read the same log
-  and choose the same number. Not an input: it is applied to nothing and
-  replay skips it. Every input between two of these records was admitted by
-  the incarnation the earlier one names.
-- `input` — `{seq, at, kind, payload, source, request_id, fingerprint,
-  epoch}` plus `expect` and `claimed_actor` where the input was externally
+  are what resume eligibility is an exact match on (S6a);
+  `catalog_hash_version` says which recipe the hash was taken under, so the
+  gate compares like for like. The build's version is deliberately NOT
+  here: a patch release must not move these bytes (PR-07).
+- `input` — `{seq, at, kind, payload, source, request_id, fingerprint}`
+  plus `expect` and `claimed_actor` where the input was externally
   requested, source ∈ {scheduler, adapter, control, reconcile}.
-- `advance` — `{seq, at, request_id, fingerprint, epoch}`: a time observation that
+- `advance` — `{seq, at, request_id, fingerprint}`: a time observation that
   the engine acted on (`Oracle.advance`), written before the advance (DL-44).
   The input alphabet has two halves: external events and time observations.
   Without the latter, an advance-fired term_run_time kill vanishes from
   replay, and a late natural-exit record can resurrect the job.
-- `host` — `{seq, at, host: {verb, id, force}, source, request_id,
-  fingerprint, epoch}` plus `expect` and `claimed_actor`: a change to the
-  §8 routing table of `docs/concurrency-model.md` (S5a, DL-94). An admitted
-  input like the two above and gated in the same place, carrying no oracle
-  event: the interpreter never reads a host row, so this one is applied to
-  the state owner rather than fed. Under its own key rather than
-  `payload`, so no record shape spells one field name two ways.
 - `decision` — `{index, request_id, decision, reason, code, revisions,
-  legacy_batch, effects}`: the whole concurrency-model §4 step-7 batch in
-  one line (DL-118,
-  `docs/period-model.md` §2.3): the decision the attempt at `index` got,
-  the revisions it moved, and every effect it planned. `index`, not `seq`,
-  because it shares its attempt's number and `seq` is the §10 subscribe
-  cursor. Each nested effect is `{effect_id, kind, job, run_number, run_id,
-  executor_id, generation, index, at}`: an act on an execution host that the
-  engine INTENDS, recorded before the attempt, which is the whole content of
-  an outbox. An engine that dies between deciding and acting leaves the
-  record that it meant to act. A SPAWN's `run_id` is minted in the same
-  transaction (PR-36a) and the wrapper spec carries it, so the WAL and the
-  spool name one process identity; a KILL carries the id its run's SPAWN
-  bound, or null for a run this root holds no binding for. `generation` is the
-  executor host row's value at birth (PR-16). The list is in ADMISSION
-  order, so a SPAWN precedes its run's later KILL. `legacy_batch` is
-  **required false**: this writer pins it, `true` is a retired dialect
-  refused naming DL-138, and missing or non-boolean is malformed and refused
-  as its own error.
-- `effect_result` — `{effect_id, state, run_id, detail}`: what became of one
-  attempt: `applied`, `indeterminate`, or `retired` (superseded before it
-  ran). Its ABSENCE means `pending`: no outcome was recorded, which is the
-  crash window (an attempt may have been made and died before its record).
-  `indeterminate` is the distinct case the kind keeps separate: something
-  was tried and cannot be reported on.
-- `dispatch` — `{job, run_number, wrapper_pid, run_dir, started_at}`
-  (audit/ordering only). The wrapper's `spawn.json` is the authoritative
-  spawn record, written by the process that did the spawn. This closes
-  the crash window between spawn and journal append. The pgid is the
-  wrapper's child's business; the engine never observes it (DL-44).
+  legacy_batch}`: the concurrency-model §4 step-7 record in one line
+  (DL-118, `docs/period-model.md` §2.3): the decision the attempt at
+  `index` got and the revisions it moved. `index`, not `seq`, because it
+  shares its attempt's number and `seq` is the §10 subscribe cursor.
+  `legacy_batch` is **required false**: this writer pins it, `true` is a
+  retired dialect refused naming DL-138, and missing or non-boolean is
+  malformed and refused as its own error.
+- `dispatch` — `{job, run_number, run_id, run_dir, started_at}`: one
+  start, appended after its decision and before its adapter task exists.
+  The `run_id` is minted here and the wrapper spec carries it (PR-36a), so
+  the WAL and the spool name one process identity. An engine that dies
+  between the decision and this record leaves a decided start with no
+  trace, which resume dispatches; one that dies after it leaves a record
+  whose run directory says how far the start got (§7 resume). The
+  wrapper's `spawn.json` is the authoritative spawn record, written by the
+  process that did the spawn. The pgid is the wrapper's child's business;
+  the engine never observes it (DL-44).
 - `drop` — an input refused BEFORE admission, which means only scheduler
   ticks missed across downtime, skipped-and-recorded at resume (E9, DL-45).
   A completion the §4 gate rejects is not a `drop`: it is admitted like
@@ -540,18 +513,17 @@ Record kinds:
 - Retired kinds are refused by name, citing DL-138: `header` (a
   once-per-log header cannot describe a log made of segments, DL-130), and
   `result` and standalone `effect` (the decision and its intents as
-  separate records, each its own fsync, with the window between them the
-  atomicity violation concurrency-model §4 step 7 forbids; `decision`
-  holds both, DL-118). A
+  separate records, DL-118). The 1.x `leader`, `host` and `effect_result`
+  records are refused by name, citing 2.0.0: one engine holds a root with
+  no election, no routing table and no outbox. A
   `catalog_hash_version` of 1 is refused the same way. An **unknown** `rec`
   is refused too, naming the kind, as its own error: the version gate sits
   on the opening `segment`, so an unrecognised kind inside a version-matched
   segment is corruption (`docs/protocol-evolution.md`).
 
 The admission fields (DL-89, DL-90; `docs/concurrency-model.md` §4 is
-normative for the order, this section for what the records hold): `epoch`
-rides on every attempt because it is the LEADER's, not the caller's, and S6
-fences on it. `expect` and `claimed_actor` ride only where they exist: an
+normative for the order, this section for what the records hold):
+`expect` and `claimed_actor` ride only where they exist: an
 input the engine raised has neither, and writing nulls for them would blur
 the one distinction the log has to keep, which inputs were externally
 requested and therefore had to name a revision. Replay reads `expect` back,
@@ -605,7 +577,7 @@ an earlier durable verdict or the pre-completion RUNNING, and it carries
 it. Only an explicit or recovered `rejected` is skipped.
 
 The row is `{job, run_number, catalog_hash, job_hash, started_at,
-ended_at, duration_s, status, exit_code, started_by, executor_id, run_dir,
+ended_at, duration_s, status, exit_code, started_by, run_dir,
 box_name, clock_source, fidelity, undecided}` (DL-113, DL-136, DL-141). `clock_source` says whether the timing came from
 the wrapper's spool or fell back to the journal; `fidelity` says how much of
 the row could be established when the period's manifest is gone. The
@@ -615,8 +587,9 @@ lineage is `(estate, job, run_number)`, with the estate supplied by the
 lineage named, not by a field. An open run gets a row with a null
 `ended_at` and a null duration, never a fabricated one. A run that spans a
 boundary keeps its row in the period that dispatched it and stays RUNNING
-there, because its terminal input is in the next segment. A box gets no
-`dispatch` record, so its row comes from the replay, as does a leaf run that
+there, because its terminal input is in the next segment. Every CMD and FW
+start gets a `dispatch` record, so a file watch has a row like a command. A box
+gets no `dispatch` record, so its row comes from the replay, as does a leaf run that
 KILLJOB or a `term_run_time` kill ended. A duration series breaks where
 the row's `job_hash` moved, falling back to `catalog_hash` only when either
 row lacks a job hash; both ride on every row in the JSON and CSV formats,
@@ -796,57 +769,33 @@ spawned" from absence, where absence only meant "the run directory is
 gone", would let the barrier start a second process for a run the host is
 still holding.
 
-**A start with no trace anywhere is decided by its own SPAWN.** The spool is one kind of
-evidence; the outbox (S5c) is a second, and it lives in the log. A start
-whose SPAWN is still PENDING is an intent the previous leader recorded and
-did not deliver. It is re-driven at the run_number the oracle already
-decided. This is concurrency-model §7's "re-drive pending", and it needs no
-new mechanism: leaving the effect pending is enough, because dispatch
-drains the outbox through the same gates a fresh effect passes (so a
-drained or quarantined host still holds it, and a held start stays held;
-DL-102, `docs/concurrency-model.md` §8). This applies to FW starts too.
-Resume has already written the decision of every attempt whose decision
-was missing (DL-315), so a recovered start reaches this sweep as
-a pending SPAWN. A start whose own SPAWN was RETIRED, or that no decision
-gave a SPAWN, is one the live engine launched nothing for. It is left as
-it is: no launch and no FAILURE, for an FW, a supervised and a tethered
-command start alike. A tethered command start whose SPAWN was retired
-therefore stays live at its run number after a restart, RUNNING or
-STARTING as it was left, with nothing running and nothing held; the operator ends it or restarts it. A start whose
-SPAWN was APPLIED and left no trace is FAILED with cause `dispatch lost to
-engine crash (never spawned)`, with two exceptions. An FW watch is
-dispatched again under its bound `run_id`, because a watch is an
-idempotent read (DL-44 item 7). A supervised adapter that holds a bound
-`run_id` has its SPAWN replayed (PR-36a, the rung above). An
-INDETERMINATE SPAWN takes the applied path, and a tethered start then
-fails with cause `exit_status_unobservable`, because the run may have
-happened. These are the rules of `docs/concurrency-model.md` §5 and §7.
+**A live start with no run directory is decided by the log** (DL-102, DL-315). A start's
+`dispatch` record is durable before its adapter task exists, and its run directory is made
+after, so the log tells three cases apart:
 
-**The barrier ends in a dispatch,** because §7 says so and because without
-it the outbox is drained only on the way out of the next admitted input: a
-re-driven start would wait on unrelated traffic, which on a quiet estate is
-hours and on one whose only remaining work was the lost run is forever.
+- a `dispatch` record and no directory: the start was launched and the crash took it before
+  it made its directory. A tethered command start is FAILED with cause `dispatch lost to
+  engine crash (never spawned)`, because a run provably never started is never silently
+  re-executed. An FW watch is dispatched again under its recorded `run_id`, because a watch
+  is an idempotent read (DL-44 item 7);
+- no record, and replay derives the start (`Replay.spawns`): the previous engine decided it
+  and died before dispatching it, or the attempt's decision never landed and resume has just
+  written it. Nothing ran, so resume dispatches it now, at the run number the oracle already
+  decided, through the supersession check a fresh start passes;
+- neither: the live engine launched nothing for the run and never would, such as a STARTING
+  overwrite at a run that never started. It is left as it is, RUNNING or STARTING with
+  nothing running, for the operator to end or restart.
 
 An FW watch leaves a run directory, its spool (§6), so the sweep finds
 watches too, and the ladder has two rules for them (DL-129; period-model
-§3.5). A pending FW SPAWN whose run directory holds a `start` line
-carrying the effect's `run_id` is **resolved applied by that line**: a
-watch spawns no process, so `spawn.json` is not the evidence that it was
-dispatched, and without the rule the barrier would re-launch a live watch
-as an untraced start, two `start` lines and a fold nothing can reproduce
-(PR-34). A `watch.jsonl` whose last line is a **completing** observation
+§3.5). A dispatched watch whose run directory holds a `start` line carrying
+its `run_id` is relaunched as an idempotent read: the adapter reconstructs
+its progress from the log and appends no second `start` line, so the fold
+stays one watch (PR-34). A `watch.jsonl` whose last line is a **completing** observation
 while the row is still RUNNING is the sibling window, the poll appended and
 the engine dead before the STATUS input; the completion is **injected from
 the log**, exactly as a CMD's is injected from `status.json` (PR-34a).
 Re-polling would decide the watch again against a world that has moved on.
-
-The detached CMD path does not create its own run directory: the
-supervisor creates it on receipt, because that directory is the SPAWN
-tombstone, and an engine that made it first could die before sending,
-leaving the retry's supervisor to read "directory exists, no receipt",
-indeterminate, for a run that provably never reached the host (§11a,
-PR-36). The tethered path keeps engine ownership: there is no supervisor in
-it.
 
 ## 8. Preflight — refuse loudly, run honestly
 
@@ -1111,17 +1060,14 @@ The control plane is a Unix domain socket in the run directory, mode 0600
 (0660 to a named `socket_group` when the DL-146 access perimeter is armed —
 `docs/access-model.md` §8), with a JSON-lines protocol.
 
-There are three mutating commands — `sendevent`, `host` and `seal` — a set
-of queries, and the streaming `subscribe`. `docs/control-protocol.md` is the
+There is one mutating command — `sendevent` — a set of queries, and the
+streaming `subscribe`. `docs/control-protocol.md` is the
 frozen inventory; what follows is what each is for.
 
 - **sendevent parity** (maps 1:1 onto oracle EventKind): STARTJOB,
   FORCE_STARTJOB, KILLJOB, ON_ICE/OFF_ICE, ON_HOLD/OFF_HOLD,
   ON_NOEXEC/OFF_NOEXEC, DISARM (DL-158), RELEASE_RESOURCE (DL-256),
   SET_GLOBAL, CHANGE_STATUS (inject STATUS).
-- **host** (S5a, DL-94) and **seal** (DL-133) are the other two mutations.
-  `host` changes the execution-host routing table (§7's `host` record);
-  `seal` ends a period. Both take the same admission order as sendevent.
 - **Queries**: `status [job]`, `trace [--since seq]`, `explain <job>` — the
   job's condition shown with per-atom truth over the current store (the
   Cond IR makes this nearly free), `spec <job>` — the preserve-rendered
@@ -1134,12 +1080,12 @@ frozen inventory; what follows is what each is for.
   tick, due-ordered (DL-65); `due` is nullable (DL-68): live
   filewatches join as trailing rows with `due: null` (they fire on a
   file, not a clock), `global <name>` / `globals <names>` — a named
-  global's value and its revision, inserting nothing (DL-87), `hosts [ids]`
-  — the routing table's rows, and `plan` (acyclic estates only). The
+  global's value and its revision, inserting nothing (DL-87), and `plan`
+  (acyclic estates only). The
   status response also carries per-job `job_type`/`box_name` (the §11
   tree), `started_by` — the trace cause of the most recent actual start
-  — `state_rev` (the revision an `expect` may name, DL-87), `held` (the
-  oracle started it and its executor routes no new effect, DL-94), plus,
+  — `state_rev` (the revision an `expect` may name, DL-87), `held` (always
+  false: one engine dispatches every start it decides, DL-94), plus,
   for a live FW run, a `watching {file, interval, min_size}`
   object (DL-68), and a `spec_drift` flag — a lazy fingerprint re-check of the
   loaded input files; there is no reload, the flag tells the operator
@@ -1295,10 +1241,8 @@ the split cannot decay into a second name for one file.
   `runner.py`.
 - `runner_admission.py`: the one admission order (`docs/concurrency-model.md`
   §4).
-- `runner_effects.py`: the effect outbox (concurrency-model §5).
-- `runner_hosts.py`: the execution-host routing table (concurrency-model
-  §8).
-- `runner_ledger.py`: leadership over one run root (concurrency-model §7).
+- `runner_ledger.py`: one engine per run root: the lock and the version
+  pins (DL-99).
 - `runner_history.py`: the offline `dsl41 runs` projection (DL-113).
 - `runner_access.py`: the control-socket access perimeter
   (`docs/access-model.md`).
@@ -1309,7 +1253,7 @@ readings, and `cli_compile.py` the compiler verbs. The runner and its
 estates use these:
 
 - `cli_run.py`: `run`, `rehearse`, `journal`, `runs`.
-- `cli_control.py`: `sendevent`, `off-hold-all`, `host`, `ui`, `serve`,
+- `cli_control.py`: `sendevent`, `off-hold-all`, `ui`, `serve`,
   `query`, `supervise`.
 
 Module docstrings name the runner's build phases 11a to 11f; DL-41 and

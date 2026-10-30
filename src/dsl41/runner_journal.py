@@ -7,10 +7,11 @@ Lifecycle semantics: DL-41a, DL-42; ss6-ss7.
   determinism and are never stored. The input alphabet has two halves (DL-44): external events
   (input records) and time observations (advance records, written before every Oracle.advance
   the engine performs). Without the advance records an advance-fired term_run_time kill would
-  vanish from replay and a late natural-exit record could resurrect the job at resume. Dispatch
-  records are audit and ordering only (DL-41a): spawn.json, written by the process that spawned,
-  is the authoritative spawn record, so dispatch carries wrapper_pid and run_dir, not a pgid the
-  engine never observes.
+  vanish from replay and a late natural-exit record could resurrect the job at resume. A
+  `dispatch` record is written before a start's adapter task exists and names the run's
+  `run_id` (DL-118), so resume knows every run this log dispatched and the identity its spool
+  must carry. spawn.json, written by the process that spawned, is the authoritative spawn
+  record; dispatch carries run_dir, not a pgid the engine never observes.
 
 - Two-record ledger (S2, concurrency-model ss4): an `input`/`advance` record is the
   `InputAttempt`, one line, so a crash cannot tear its batch, and it names its `request_id`
@@ -19,15 +20,13 @@ Lifecycle semantics: DL-41a, DL-42; ss6-ss7.
   decision never landed is applied through the gate the live engine used (concurrency-model ss4,
   runner_admission).
 
-- One-line decision (DL-118, period-model ss2.3): a `decision` record carries the decision, the
-  revisions it moved and the effects it planned, in admission order, in one write. Separate
-  records would leave a window between the decision and its KILL effect, which ss4 step 7
-  forbids. `result` and standalone `effect` records are refused by name (DL-138).
+- One-line decision (DL-118, period-model ss2.3): a `decision` record carries the decision and
+  the revisions it moved in one write. `result` and standalone `effect` records are refused by
+  name (DL-138), and so are the 1.x `leader`, `host` and `effect_result` records.
 
-- Ledger (S6a, concurrency-model ss1/ss7): a `leader` record allocates this incarnation's epoch
-  by being appended, so allocation and the log's account of it are one write, under a lock on
-  the run root that this object releases (runner_ledger). The opening record carries ss7's
-  second pin, the state-machine version, beside the catalog hash.
+- The journal is written under the run root's `leader.lock`, which this object releases
+  (runner_ledger). The opening record carries the state-machine version beside the catalog
+  hash.
 
 - Opening record (DL-130, period-model ss2.1): `segment` is self-describing (period, estate,
   catalog, runtime profile and semantics) without reading an earlier file. `header` is a
@@ -35,8 +34,8 @@ Lifecycle semantics: DL-41a, DL-42; ss6-ss7.
 
 Every record passes one validator (`check_record`, D1). It reads the `rec` kind (current,
 retired or unknown: three outcomes, three messages) and, on a `decision`, `legacy_batch`. Per-key
-strictness stays with each record's own schema. It sits at `read_journal` so `runner_history`
-and `retention`, which parse decision effects without `read_outbox`, inherit it.
+strictness stays with each record's own schema. It sits at `read_journal`, so every reader
+inherits it.
 """
 
 from __future__ import annotations
@@ -44,11 +43,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import socket
+import re
 import sys
 import uuid
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -59,7 +58,6 @@ from dsl41.ir import CatalogIR
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event
 from dsl41.runner_admission import (
-    INERT_EPOCH,
     ApplyResult,
     Attempt,
     DecisionIndex,
@@ -68,7 +66,9 @@ from dsl41.runner_admission import (
     apply_attempt,
     classify_fault,
     describe_input,
+    dispatch_plan,
     fingerprint,
+    spawn_superseded,
 )
 from dsl41.run_root import (
     Manifest,
@@ -87,10 +87,6 @@ from dsl41.run_root import (
 )
 from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import STORED_CODES
-from pydantic import ValidationError
-
-from dsl41.runner_effects import Effect, EffectOutcome, Outbox, is_valid_run_id
-from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, HostCommand, seed_local_executor
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, Proof
 from dsl41.state_machine import (
     Context,
@@ -108,6 +104,18 @@ from dsl41.state_machine import Event as ChartEvent
 
 if TYPE_CHECKING:  # annotation only: the WAL stays a leaf of the DL-74 DAG
     from dsl41.runner_preflight import PreflightItem
+
+
+#: period-model ss11a pins `run_id` to a filename-safe grammar: the canonical uuid4 string form.
+#: Every writer and acceptor of a bound run_id checks it, because a freehand string would pass
+#: presence checks and split the one key DL-118 keeps whole.
+RUN_ID_RE: Final = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
+
+
+def is_valid_run_id(run_id: str) -> bool:
+    return RUN_ID_RE.fullmatch(run_id) is not None
 
 
 # ---- one `subscribe` feed as a statechart (control-protocol ss5, DL-267)
@@ -377,21 +385,13 @@ def best_effort_report(line: str) -> None:
         pass
 
 
-def dsl41_version() -> str:
-    try:
-        from importlib.metadata import version
-
-        return version("dsl41")
-    except Exception:  # not installed (editable src run): version is advisory
-        return "0+unknown"
-
-
 class Journal:
     """ss7 append-only JSONL WAL, one file per run. Inputs-only: emitted events and the trace are
     pure functions of the input sequence (oracle determinism), so only injected inputs are
     stored, and `journal render` replays them through a fresh Oracle. Record kinds: segment /
-    input / advance / dispatch / drop / preflight (the module docstring covers why dispatch is
-    audit-only and advances are inputs; preflight keeps the ss8 WARN caveats next to the run).
+    input / advance / decision / dispatch / drop / preflight (the module docstring covers what
+    dispatch records and why advances are inputs; preflight keeps the ss8 WARN caveats next to
+    the run).
     fsync per record in the real domain (append + fsync before feed); buffered in rehearse,
     fsync on close. macOS: os.fsync does not force the drive cache (F_FULLFSYNC would, at a
     large cost); this is accepted."""
@@ -415,16 +415,15 @@ class Journal:
         self.baseline_id = baseline_id
         #: S6a: the run root's mutex, acquired before this file was opened and released when it
         #: is closed. Closing the log closes the lock, so an engine that dropped the file and
-        #: kept the lock would exclude its own successor. None for the journal-less and
-        #: lock-less engines of the bisimulation harness.
+        #: kept the lock would exclude its own successor. None for a journal with no run root's
+        #: lock behind it.
         self._lock = lock
         #: live feeds for ss10 subscribe: every appended record is fanned out post-write. The WAL
         #: never blocks on one, and a feed whose backlog would pass its budget is removed
         #: (DL-267)
         self._subscribers: list[Subscription] = []
         #: True from the start of an append's bytes until the append returns. An exception leaves
-        #: it set, because a failed append does not prove its line absent or whole. A seal that
-        #: meets an exception while it is set fail-stops instead of refusing (DL-274).
+        #: it set, because a failed append does not prove its line absent or whole (DL-274).
         self.append_unfinished = False
 
     @classmethod
@@ -506,72 +505,41 @@ class Journal:
         os.fsync(journal._f.fileno())
         return journal
 
-    def leader(self, *, epoch: int, at: datetime) -> None:
-        """One term of leadership over this run root (ss1's leader record, S6a). Appended under
-        the lock right after acquiring it, so the epoch is monotone: it is allocated by being
-        written, and no two terms read the same log and choose the same number. Every input
-        between two of these records was admitted by the incarnation the earlier one names."""
-        self._write(
-            {
-                "rec": "leader",
-                "epoch": epoch,
-                "at": at.isoformat(),
-                "pid": os.getpid(),
-                "host": socket.gethostname(),
-                "dsl41_version": dsl41_version(),
-            }
-        )
-
     def admit(self, attempt: Attempt) -> None:
         """Append one admitted input (the concurrency-model ss4 step-4 batch) as one line, so a
         crash cannot leave its time observation without its attempt or the reverse.
 
-        The three record names are the three shapes of an attempt: `input` has an oracle verb,
-        `host` carries a routing-table command (S5a, concurrency-model ss8), `advance` is the
-        standalone time observation (DL-44). All three carry the same admission fields. `source`
-        in {scheduler, adapter, control, reconcile} (ss7); None marks an unattributed script
-        injection and never occurs in a real run. It is persisted because replay must re-derive
-        the same causes and gate verdict from it (DL-68).
+        The two record names are the two shapes of an attempt: `input` has an oracle verb,
+        `advance` is the standalone time observation (DL-44). Both carry the same admission
+        fields. `source` in {scheduler, adapter, control, reconcile} (ss7); None marks an
+        unattributed script injection and never occurs in a real run. It is persisted because
+        replay must re-derive the same causes and gate verdict from it (DL-68).
 
-        S3 adds the rest of the ss6 envelope. `epoch` rides on every record because it is the
-        leader's, and S6 fences on it. `expect` and `claimed_actor` ride only where they exist:
-        an input the engine raised has neither, and nulls would blur which inputs were
+        S3 adds the rest of the ss6 envelope. `expect` and `claimed_actor` ride only where they
+        exist: an input the engine raised has neither, and nulls would blur which inputs were
         externally requested and so had to name a revision."""
         record: dict[str, Any] = {
-            "rec": "input"
-            if attempt.kind is not None
-            else ("host" if attempt.host is not None else "advance"),
+            "rec": "input" if attempt.kind is not None else "advance",
             "seq": attempt.index,
             "at": attempt.at.isoformat(),
             "request_id": attempt.request_id,
             "fingerprint": attempt.fingerprint,
-            "epoch": attempt.epoch,
         }
         if attempt.kind is not None:
             record |= {"kind": attempt.kind, "payload": attempt.payload, "source": attempt.source}
-        elif attempt.host is not None:
-            # under its own key, not `payload`: one field name is spelled one way
-            record |= {"host": attempt.host.wire(), "source": attempt.source}
         if attempt.expect is not None:
             record["expect"] = attempt.expect
         if attempt.claimed_actor is not None:
             record["claimed_actor"] = attempt.claimed_actor
         self._write(record)
 
-    def decision(self, result: ApplyResult, effects: Sequence[Effect]) -> None:
-        """Append the whole ss4 step-7 batch as one line (period-model ss2.3, DL-118): the
-        decision an admitted attempt got, the revisions it moved, and every effect it planned.
+    def decision(self, result: ApplyResult) -> None:
+        """Append the ss4 step-7 record as one line (period-model ss2.3, DL-118): the decision an
+        admitted attempt got and the revisions it moved.
 
-        One line, one fsync, as `admit`. Each effect lands here before anything attempts it, which
-        is what an outbox is: an engine that dies between deciding and acting leaves the record
-        that it meant to act, and a recorded kill is re-driven at resume. Separate records leave
-        a window in which the decision is durable and its intents are not (CM-17).
-
-        Written unconditionally, including for an application that moved nothing and planned
-        nothing: the absence of a decision is how replay recognises the crash window.
-
-        `effects` is in admission order, the order `Outbox` receives them, so a SPAWN precedes its
-        run's later KILL.
+        Written unconditionally, including for an application that moved nothing: the absence
+        of a decision is how replay recognises the crash window. It is durable before anything
+        the decision implies is dispatched (ss7).
 
         The index rides under `index`, not `seq`: `seq` is the ss10 subscribe cursor, and a
         decision shares its attempt's number, so a second record under one cursor value would be
@@ -581,28 +549,13 @@ class Journal:
         (D2, DL-138): false proceeds, true is a retired dialect, anything else is malformed
         (`check_record`).
 
-        A native decision names its identity at birth: `generation` on every effect, `run_id` on
-        every SPAWN (DL-118, PR-16/PR-36a); this writer refuses one without. The model's None
-        defaults let a hand-built record validate before this gate reads it. A native rejection
-        names one of the append-only `STORED_CODES` (period-model ss2.3); a reader never requires
-        one."""
+        A native rejection names one of the append-only `STORED_CODES` (period-model ss2.3); a
+        reader never requires one."""
         if result.decision == "rejected" and result.code not in STORED_CODES:
             raise EngineError(
                 f"decision {result.index}: a native rejection names its stored code"
                 f" at birth, and this one names {result.code!r}"
             )
-        for effect in effects:
-            if (
-                effect.generation is None
-                or (effect.kind == "SPAWN" and effect.run_id is None)
-                or (effect.run_id is not None and not is_valid_run_id(effect.run_id))
-            ):
-                raise EngineError(
-                    f"effect {effect.effect_id}: a native decision binds identity at"
-                    " birth -- generation on every effect, run_id on a SPAWN, and any"
-                    " run_id in the ss11a uuid4 grammar (DL-118); an empty or"
-                    " freehand id would lose to a fallback mint downstream"
-                )
         self._write(
             {
                 "rec": "decision",
@@ -613,30 +566,33 @@ class Journal:
                 "code": result.code,
                 "revisions": result.revisions,
                 "legacy_batch": False,
-                "effects": [effect.model_dump(mode="json") for effect in effects],
             }
         )
-
-    def effect_result(self, outcome: EffectOutcome) -> None:
-        """What came of one attempt (concurrency-model ss5). Absent means `pending`, the crash
-        window; `indeterminate` is kept apart: something was tried and cannot be reported on."""
-        self._write({"rec": "effect_result", **outcome.model_dump(mode="json")})
 
     def dispatch(
         self,
         job: str,
         run_number: int,
         *,
-        wrapper_pid: int | None,
+        run_id: str,
         run_dir: str | None,
         started_at: datetime,
     ) -> None:
+        """One start, before its adapter task exists (ss7, DL-118): the run, the `run_id` its
+        wrapper spec and spool carry, and the run directory it will use. Resume reads these to
+        know which runs were dispatched and which identity their evidence must name. A `run_id`
+        outside the ss11a grammar is refused, as a freehand id would split the one key."""
+        if not is_valid_run_id(run_id):
+            raise EngineError(
+                f"dispatch {job}.{run_number}: run_id {run_id!r} is outside the ss11a uuid4"
+                " grammar (DL-118)"
+            )
         self._write(
             {
                 "rec": "dispatch",
                 "job": job,
                 "run_number": run_number,
-                "wrapper_pid": wrapper_pid,
+                "run_id": run_id,
                 "run_dir": run_dir,
                 "started_at": started_at.isoformat(),
             }
@@ -699,19 +655,17 @@ class Journal:
     def _write(self, record: dict[str, Any]) -> None:
         if record.get("rec") not in CURRENT_RECS:
             # the write side of DL-138's registry: a record kind absent from `CURRENT_RECS` is
-            # refused here, not written and then refused by every reader. The `seal` record is
-            # appended by the boundary under its own schema check; it is in the set for readers
+            # refused here, not written and then refused by every reader
             raise EngineError(
                 f"{self.path}: refusing to append record kind"
                 f" {record.get('rec')!r} -- this binary writes"
                 f" {', '.join(sorted(CURRENT_RECS))} (period-model ss2)"
             )
         if self._lock is not None:
-            # ss1's epoch-conditional append, and ss7's "losing proof stops dispatch, not merely
-            # renewal" (S6b). Before the write, so a leader that cannot prove it leads admits
-            # nothing. An append precedes every effect (the outbox records intent first), so
-            # fencing appends fences dispatch. No background prober is needed: an engine with
-            # nothing to append dispatches nothing.
+            # losing the proof stops the next append (S6b). Before the write, so an engine that
+            # cannot prove it holds the root admits nothing. A `dispatch` record precedes every
+            # start, so fencing appends fences dispatch. No background prober is needed: an
+            # engine with nothing to append dispatches nothing.
             self._lock.check()
         line = json.dumps(record, sort_keys=True).encode("utf-8") + b"\n"
         self.append_unfinished = True
@@ -728,13 +682,10 @@ class Journal:
             self._lock.release()  # the term ends where the log does (S6a)
 
     def detach(self) -> None:
-        """Flush and close the file, leaving the term where it is.
+        """Flush and close the file, leaving the lock where it is.
 
         `close` ends both, because for an engine the log and the lock end together (S6a). A
-        physical roll ends neither: it writes the opening `segment` and hands the root to the
-        ordinary resume path, which opens its own journal over the same file and holds the same
-        proofs. Closing this one the ordinary way would release the proofs its successor appends
-        under (period-model ss7, DL-134)."""
+        refused resume detaches the journal it opened and releases the lock itself."""
         self._f.flush()
         os.fsync(self._f.fileno())
         self._f.close()
@@ -767,17 +718,13 @@ def repair_tail(path: Path) -> None:
 
 
 #: ss2's record kinds this binary reads, pinned from the writers above and every read site in
-#: the tree (period-model ss2, runner-design ss7). `host` is current: a host command is admitted
-#: and replays like an input.
+#: the tree (period-model ss2, runner-design ss7).
 CURRENT_RECS: Final[frozenset[str]] = frozenset(
     {
         "segment",
-        "leader",
-        "host",
         "input",
         "advance",
         "decision",
-        "effect_result",
         "dispatch",
         "drop",
         "preflight",
@@ -793,6 +740,11 @@ RETIRED_RECS: Final[dict[str, str]] = {
     "effect": "DL-138",
     #: a 1.x period boundary; 2.0.0 runs one period per root and resumes no sealed one
     "seal": "2.0.0",
+    #: 1.x leader terms, routing-table commands and effect outcomes; 2.0.0 runs one engine per
+    #: root with no election, no routing table and no outbox
+    "leader": "2.0.0",
+    "host": "2.0.0",
+    "effect_result": "2.0.0",
 }
 
 
@@ -819,6 +771,9 @@ def check_record(record: Mapping[str, Any], *, where: str) -> None:
             + (
                 "periods are retired, and a 1.x root that sealed cannot be resumed or read"
                 if kind == "seal"
+                else "a 1.x root's election, routing table and outbox are retired, and such a"
+                " root cannot be resumed or read"
+                if retired == "2.0.0"
                 else "nothing has written one since DL-118/DL-130 and no root holding one exists"
             )
             + " (docs/protocol-evolution.md ss6, ss8)"
@@ -1042,15 +997,13 @@ def _attempt_of(record: dict[str, Any], base: str) -> Attempt | None:
     would have been admitted under, so the pipeline sees one kind of attempt. The synthesized id
     names its position in this log."""
     rec = record.get("rec")
-    if rec not in ("input", "advance", "host"):
+    if rec not in ("input", "advance"):
         return None
     kind = record.get("kind") if rec == "input" else None
     payload = record.get("payload") or {}
-    host = HostCommand.from_wire(record["host"]) if rec == "host" else None
     source = record.get("source")
     expect = record.get("expect")
     actor = record.get("claimed_actor")
-    epoch = int(record.get("epoch", INERT_EPOCH))
     return Attempt(
         index=int(record["seq"]),
         at=datetime.fromisoformat(record["at"]),
@@ -1062,21 +1015,17 @@ def _attempt_of(record: dict[str, Any], base: str) -> Attempt | None:
                 kind=kind,
                 payload=payload,
                 source=source,
-                epoch=epoch,
                 expect=expect,
                 claimed_actor=actor,
-                host=host,
             )
         ),
         kind=kind,
         payload=payload,
-        host=host,
         source=source,
         # the precondition replays with the attempt: an input admitted without a result is
         # re-decided through the same gate, and the revision it named is half of what the gate
         # reads
         expect=expect,
-        epoch=epoch,
         claimed_actor=actor,
     )
 
@@ -1126,105 +1075,27 @@ def read_decisions(
     return index
 
 
-def decision_effects(record: Mapping[str, Any]) -> list[Effect]:
-    """The typed effects one `decision` planned (period-model ss2.3).
-
-    The one decoder for "is this decision's effect list valid": `read_outbox` rebuilds the
-    outbox from it, and `runner_history` reads the executor and the bound run_id from the same
-    list (DL-139).
-
-    It refuses and never degrades, because a decision is durable evidence. A `decision` has one
-    shape, a list `effects`; `.get(...) or []` would read a corrupt or foreign record as an empty
-    native decision, losing intents and inventing provenance.
-
-    No `where` argument: the record names itself by `index`, so the same corrupt record gets the
-    same refusal from every reader. `rec` and `legacy_batch` are `check_record`'s, upstream of
-    every caller (DL-138)."""
-    effects_field = record.get("effects")
-    if not isinstance(effects_field, list):
-        raise EngineError(
-            f"decision at index {record.get('index')}: effects is"
-            f" {type(effects_field).__name__}, not a list (DL-118)"
-        )
-    parsed_effects: list[Effect] = []
-    for effect in effects_field:
-        try:
-            parsed = Effect.model_validate(effect)
-        except ValidationError as exc:
-            # strict fields surface here: `generation: false` or "0" must not coerce past the
-            # fold's exact-0 gate
-            raise EngineError(
-                f"decision at index {record.get('index')}: malformed effect: {exc}"
-            ) from exc
-        if parsed.run_id is not None and not is_valid_run_id(parsed.run_id):
-            # any run_id a decision carries is in the ss11a grammar
-            raise EngineError(
-                f"decision at index {record.get('index')}: effect"
-                f" {parsed.effect_id} carries run_id {parsed.run_id!r} outside"
-                " the ss11a grammar (DL-118)"
-            )
-        if parsed.generation is None or (parsed.kind == "SPAWN" and parsed.run_id is None):
-            # the writer refuses these shapes (Journal.decision), so a native decision carrying
-            # one is corruption or a foreign writer; accepting it would let resume mint an
-            # identity after the transaction (DL-118)
-            raise EngineError(
-                f"decision at index {record.get('index')}: native effect"
-                f" {parsed.effect_id} carries no birth identity (DL-118)"
-            )
-        parsed_effects.append(parsed)
-    return parsed_effects
-
-
-def read_outbox(records: list[dict[str, Any]], outbox: Outbox | None = None) -> Outbox:
-    """The effects this log intended, and what became of them (ss5).
-
-    `outbox` is what the segment opened holding: a period opened from a seal carries C1's
-    undelivered intents and applied bindings (period-model ss3.5), and an `effect_result` here
-    for one of them is an outcome to attach. It is seeded, not patched in afterwards, because
-    `resolve` refuses an outcome for an effect it never saw.
-
-    One pass, in file order, because an outcome follows the effect it resolves; an outcome for
-    an unknown effect means the log lost the record that said what was meant. A `decision`'s
-    nested list is in admission order, which is all per-run ordering takes.
-
-    The standalone `effect` record and `legacy_batch: true` are retired dialects, refused at
-    `check_record` (DL-138). The per-effect shape is `decision_effects`, shared with run history
-    (DL-139).
-
-    A `StatechartError` from the outbox's effect chart is not a replay fault: it stops replay as
-    itself, its report naming the WAL record, as `_at_input` names an input (statechart-engine
-    ss5)."""
-    outbox = outbox if outbox is not None else Outbox()
+def dispatched_runs(records: list[dict[str, Any]]) -> dict[tuple[str, int], str]:
+    """`(job, run_number) -> run_id` for every start this log dispatched (DL-118): the identity a
+    run's spool evidence must name. A run dispatched twice under two ids means the log disagrees
+    with itself, and is refused."""
+    runs: dict[tuple[str, int], str] = {}
     for record in records:
-        try:
-            _read_effect_record(outbox, record)
-        except StatechartError as exc:
-            exc.facts.append(("WAL input", _effect_record_name(record)))
-            raise
-    return outbox
-
-
-def _read_effect_record(outbox: Outbox, record: dict[str, Any]) -> None:
-    """Apply one WAL record's effects or outcome to `outbox`; any other
-    record holds neither."""
-    if record.get("rec") == "decision":
-        for parsed in decision_effects(record):
-            outbox.record(parsed)
-    elif record.get("rec") == "effect_result":
-        outcome = EffectOutcome.model_validate({k: v for k, v in record.items() if k != "rec"})
-        try:
-            outbox.resolve(outcome)
-        except EngineError as exc:
-            # an outcome the outbox refuses (an unknown effect, a stranger's run_id, a second
-            # outcome) stops replay naming the effect, as a raising input does (period-model ss11)
-            raise OutcomeReplayFault(outcome, exc) from exc
-
-
-def _effect_record_name(record: dict[str, Any]) -> str:
-    """A WAL record of the outbox, as a statechart error's report names it."""
-    if record.get("rec") == "decision":
-        return f"{record.get('index')}: the decision's effects"
-    return f"the {record.get('state')} outcome of effect {record.get('effect_id')}"
+        if record.get("rec") != "dispatch":
+            continue
+        run = (str(record["job"]), int(record["run_number"]))
+        run_id = record.get("run_id")
+        if not isinstance(run_id, str) or not is_valid_run_id(run_id):
+            raise EngineError(
+                f"dispatch {run[0]}.{run[1]}: run_id {run_id!r} is outside the ss11a uuid4"
+                " grammar (DL-118)"
+            )
+        if runs.setdefault(run, run_id) != run_id:
+            raise EngineError(
+                f"dispatch {run[0]}.{run[1]}: dispatched under {runs[run]!r} and again under"
+                f" {run_id!r} -- the log disagrees with itself (DL-118)"
+            )
+    return runs
 
 
 class ReplayFault(EngineError):
@@ -1237,18 +1108,12 @@ class ReplayFault(EngineError):
     on its own. An undecided attempt whose time half applies alone is quarantined instead
     (`classify_fault`), and resume writes that decision.
 
-    The cause's `code`, if it has one, rides on; the cause is chained. `index` is the input's, or
-    None when the fault is in a record that is not an input (`OutcomeReplayFault`)."""
+    The cause's `code`, if it has one, rides on; the cause is chained. `index` is the input's."""
 
-    index: int | None
+    index: int
 
     def __init__(self, attempt: Attempt, cause: Exception) -> None:
-        if attempt.kind is not None:
-            what = attempt.kind
-        elif attempt.host is not None:
-            what = f"host {attempt.host.verb}"
-        else:
-            what = "time observation"
+        what = attempt.kind if attempt.kind is not None else "time observation"
         super().__init__(
             f"replay stopped at input {attempt.index} ({what} from"
             f" {attempt.source or 'no source'} at {attempt.at.isoformat()},"
@@ -1258,67 +1123,32 @@ class ReplayFault(EngineError):
         self.index = attempt.index
 
 
-class OutcomeReplayFault(ReplayFault):
-    """A logged `effect_result` the outbox refused when this build replayed it: an outcome for an
-    effect it never saw, one naming another run_id, or a second outcome for one effect
-    (concurrency-model ss5). A `ReplayFault`, so resume stops with the same advice."""
-
-    def __init__(self, outcome: EffectOutcome, cause: EngineError) -> None:
-        EngineError.__init__(
-            self,
-            f"replay stopped at the {outcome.state} outcome of effect {outcome.effect_id}:"
-            f" {type(cause).__name__}: {cause}",
-            code=cause.code,
-        )
-        self.index = None
-
-
-@dataclass(frozen=True)
-class RecoveredAttempt:
-    """One attempt admitted with no durable decision, as replay decided it through the gate
-    (DL-156), with what a resuming engine needs to commit that verdict (DL-315): the events the
-    batch emitted, and every job's run number just before and just after the attempt. The commit
-    plans against these rows, not the rows the whole replay ends on: the ghost-run gate compares a
-    run with the run before the attempt."""
-
-    result: ApplyResult
-    emitted: list[Event]
-    runs_before: dict[str, int]
-    runs_after: dict[str, int]
-
-
 @dataclass
 class Replay:
     """Where the log left the state machine (concurrency-model ss2/ss4)."""
 
     frontiers: Frontiers = field(default_factory=Frontiers)
     decisions: DecisionIndex = field(default_factory=DecisionIndex)
-    #: attempts admitted with no durable result (the crash window), decided by re-running the
-    #: gate
-    recovered_attempts: list[RecoveredAttempt] = field(default_factory=list)
-    #: the effects this log intended and what became of them (ss5), read from the records: an
-    #: effect the previous engine decided is a fact, and re-planning it would let a changed
-    #: planner disagree with the log about what was meant to happen
-    outbox: Outbox = field(default_factory=Outbox)
-
-    @property
-    def recovered(self) -> list[ApplyResult]:
-        """The recovered verdicts alone, in admission order."""
-        return [attempt.result for attempt in self.recovered_attempts]
+    #: the verdicts replay reached for attempts admitted with no durable decision (the crash
+    #: window), in admission order; a resuming engine writes them (DL-315)
+    recovered: list[ApplyResult] = field(default_factory=list)
+    #: every start a live engine dispatched, or would have once each decision was written:
+    #: `dispatch_plan` over each applied input, less the starts `spawn_superseded` refused. A
+    #: run here with no `dispatch` record is a start the previous engine decided and never
+    #: launched, which resume dispatches (DL-102)
+    spawns: set[tuple[str, int]] = field(default_factory=set)
 
 
 def replay_inputs(
     oracle: Oracle,
     records: list[dict[str, Any]],
     *,
-    outbox: Outbox | None = None,
     machines: Executor | None = None,
 ) -> Replay:
     """Apply the journal through `oracle`, two-pass (concurrency-model ss4).
 
-    `outbox` is the carry: a segment opened from a seal starts with C1's undelivered intents and
-    applied bindings (`read_outbox`). `machines` is the executor the decision index runs on: a
-    resuming engine's, or the index's own (`read_decisions`).
+    `machines` is the executor the decision index runs on: a resuming engine's, or the index's
+    own (`read_decisions`).
 
     Pass one indexes the decisions; pass two applies each attempt in admission order. A durable
     decision is authoritative: a rejected attempt is not fed, and an applied one is fed without
@@ -1328,7 +1158,10 @@ def replay_inputs(
     first, as the live engine applies an engine-made input. If that raises and its time half
     applies alone, the verdict is the quarantine the live engine would have logged: rejected,
     `engine_apply_faulted` (concurrency-model ss4). Replay writes nothing: it reports each such
-    attempt in `recovered_attempts`, and a resuming engine writes the missing decision (DL-315).
+    verdict in `recovered`, and a resuming engine writes the missing decision (DL-315).
+
+    Each applied input's starts are derived as the live engine plans them (`spawns`), for every
+    catalog job that is not a box: resume wires an adapter for every such job type.
 
     The time half of every batch applies either way. A rejected completion still observed the
     clock, and the kill that observation let fire is a decision the estate already acted on;
@@ -1346,12 +1179,14 @@ def replay_inputs(
     base = int(first) - 1 if is_wire_int(first) else 0
     replay = Replay(
         decisions=decisions,
-        outbox=read_outbox(records, outbox),
         frontiers=Frontiers(committed_index=base, applied_index=base),
     )
+    dispatchable = frozenset(
+        name for name, job_ir in oracle.catalog.jobs.items() if job_ir.job_type != "BOX"
+    )
+    dispatched: dict[str, int] = {}
     for attempt in read_attempts(records):
         durable = decisions.for_index(attempt.index)
-        runs_before = _run_numbers(oracle) if durable is None else {}
         forced = None
         if durable is None:
             # the crash window: on forks first, so a fault leaves this oracle as the input found
@@ -1382,14 +1217,18 @@ def replay_inputs(
                 decisions.record(applied.result)
             except StatechartError as exc:
                 raise _at_input(exc, attempt)
-            replay.recovered_attempts.append(
-                RecoveredAttempt(
-                    result=applied.result,
-                    emitted=applied.emitted,
-                    runs_before=runs_before,
-                    runs_after=_run_numbers(oracle),
-                )
-            )
+            replay.recovered.append(applied.result)
+        plan = dispatch_plan(
+            applied.emitted,
+            runs={job: rt.run_number for job, rt in oracle.store.job.items()},
+            dispatched=dispatched,
+            live={},
+            dispatchable=dispatchable,
+        )
+        for _kind, job, run_number in plan:  # with no live run, a plan holds starts only
+            dispatched[job] = max(dispatched.get(job, 0), run_number)
+            if spawn_superseded(oracle.store.job.get(job), run_number) is None:
+                replay.spawns.add((job, run_number))
         replay.frontiers = replay.frontiers.admit(attempt.at).record(attempt.index)
     return replay
 
@@ -1401,31 +1240,17 @@ def _at_input(exc: StatechartError, attempt: Attempt) -> StatechartError:
     return exc
 
 
-def _run_numbers(oracle: Oracle) -> dict[str, int]:
-    """Every job's run number as the oracle holds it now."""
-    return {job: rt.run_number for job, rt in oracle.store.job.items()}
-
-
-def replay_period(
-    oracle: Oracle, records: list[dict[str, Any]], *, outbox: Outbox | None = None
-) -> Replay:
-    """Replay one period's log offline onto `oracle`, built for the period
-    (`period.oracle_reading`) with the rows it opened with: this engine's executor is seeded at
-    the opening instant, then `replay_inputs` runs.
-
-    Reproducing a log reproduces the genesis it was replayed onto, not only the catalog: a
-    routing-table input lands on a table that already holds this engine's executor
-    (concurrency-model ss8), and a replay without it would decide "no such host" where the run
-    decided otherwise. The stamp reaches only `last_contact`, which no input reads."""
-    seed_local_executor(oracle.store, LOCAL_EXECUTOR_ID, at=opening_at(records[0]))
-    return replay_inputs(oracle, records, outbox=outbox)
+def replay_period(oracle: Oracle, records: list[dict[str, Any]]) -> Replay:
+    """Replay one run root's log offline onto `oracle`, built for the root
+    (`run_root.oracle_reading`)."""
+    return replay_inputs(oracle, records)
 
 
 def scheduler_frontier(records: list[dict[str, Any]]) -> datetime:
     """ss6: the scheduler's durable frontier is semantic, not the newest timestamp in the file.
 
-    `last_journal_at` takes the maximum `at` over every record, `leader` and `dispatch` included.
-    If T is 02:00, C2 opens at 02:10 and appends `leader.at = 02:10`, and the process dies before
+    `last_journal_at` takes the maximum `at` over every record, `dispatch` included. If T is
+    02:00, an engine resumes at 02:10, dispatches a recovered start stamped 02:10, and dies before
     the missed-tick sweep, the next resume would anchor at 02:10 and neither admit nor drop a
     02:05 tick. The frontier is the opening watermark, the admitted scheduler ticks, the `drop`
     records and the `advance` records, and nothing else (PR-25a)."""

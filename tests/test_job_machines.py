@@ -39,7 +39,6 @@ from dsl41.oracle_state import (
     OracleError,
     RuntimeState,
 )
-from dsl41.runner_hosts import seed_local_executor
 from dsl41.state_machine import HITS_ENV
 
 T0 = datetime(2026, 7, 1, 8, 0)
@@ -117,14 +116,13 @@ def test_the_harness_sees_a_move_outside_an_input_batch(
 
 
 def test_the_seeds_take_no_job_transition(monkeypatch: pytest.MonkeyPatch, recording: Path) -> None:
-    """The constructor's genesis seed, the carried-row install and the
-    executor seed open their own store transaction, so none may write a job
-    move. Only the assembly moves are recorded."""
+    """The constructor's genesis seed and the carried-row install open their
+    own store transaction, so neither may write a job move. Only the assembly
+    moves are recorded."""
     misplaced = batch_harness.install(monkeypatch)
     catalog = lower_source(_JIL + "status: ON_HOLD\n\ninsert_job: gone\njob_type: c\ncommand: y\n")
     carried = CarriedRows(jobs={"gone": JobRuntime(status="SUCCESS")}, period_id=2)
     oracle = Oracle(catalog, carried=carried)
-    seed_local_executor(oracle.store, "local", at=T0)
     assert oracle.store.runtime("j").on_hold is True
     assert misplaced == []
     assert {machine for machine, _ in _hits(recording)} == {"runtime_assembly"}

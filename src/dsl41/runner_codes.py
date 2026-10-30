@@ -26,7 +26,6 @@ Code = Literal[
     "unsupported_version",
     "access_denied",
     "internal_error",
-    "lineage_lost",
     # dispatch and queries
     "unknown_cmd",
     "invalid_argument",
@@ -43,38 +42,14 @@ Code = Literal[
     "baseline_mismatch",
     "expect_required",
     "request_id_reused",
-    "stale_epoch",
-    "period_sealing",
     "engine_shutting_down",
     "decision_timeout",
     # the dry apply (concurrency-model ss4): refused before the log
     "apply_faulted",
     # rejected decisions, stored in the WAL
     "precondition_failed",
-    "unknown_host",
-    "host_quarantined",
-    "host_evicted",
-    "host_already_evicted",
-    "force_needs_actor",
-    "host_not_quarantined",
-    "host_no_deadman",
-    "host_never_contacted",
-    "eviction_bound_pending",
-    # seal
-    "seal_retry_mismatch",
-    "seal_in_flight",
-    "no_lineage",
-    "stage_digest_mismatch",
-    "nothing_staged",
-    "seal_input_after_cutoff",
-    "seal_not_settling",
-    "seal_not_quiescent",
-    "seal_supervisor_unproven",
-    "seal_run_unaccounted",
-    "seal_retry_horizon",
+    # admission's clock
     "clock_regressed",
-    "seal_refused",
-    "seal_timeout",
     # stored on a rejected decision only; never answered on the wire
     "stale_completion",
     # stored on a rejected decision when the input's apply raised and its time
@@ -94,15 +69,6 @@ CODES: frozenset[str] = frozenset(get_args(Code))
 STORED_CODES: frozenset[str] = frozenset(
     {
         "precondition_failed",
-        "unknown_host",
-        "host_quarantined",
-        "host_evicted",
-        "host_already_evicted",
-        "force_needs_actor",
-        "host_not_quarantined",
-        "host_no_deadman",
-        "host_never_contacted",
-        "eviction_bound_pending",
         "stale_completion",
         "engine_apply_faulted",
     }
@@ -110,9 +76,7 @@ STORED_CODES: frozenset[str] = frozenset(
 
 #: the codes of the `unknown` outcome: admission is uncertain, so an answer
 #: with one of these never carries a refusal marker
-UNKNOWN_OUTCOME_CODES: frozenset[str] = frozenset(
-    {"internal_error", "decision_timeout", "seal_timeout"}
-)
+UNKNOWN_OUTCOME_CODES: frozenset[str] = frozenset({"internal_error", "decision_timeout"})
 
 
 class Rejection(NamedTuple):

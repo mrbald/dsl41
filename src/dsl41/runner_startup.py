@@ -1,10 +1,10 @@
-"""Taking possession of a run root (ss7): genesis, resume, and the barrier (DL-74, DL-106).
+"""Taking possession of a run root (ss7): genesis and resume (DL-74, DL-106).
 
 The Engine is the single-writer loop over a live estate. What lives here runs once per
-incarnation, before that loop exists: it creates or claims a run root, takes leadership of it,
-replays the log, reconciles the estate against the world, and hands back an Engine ready to run.
-The two halves share exactly one object, the one this half constructs. The name avoids
-"lifecycle", which DL-42 gives to the wrapper and supervisor tier.
+incarnation, before that loop exists: it creates or claims a run root, takes its lock, replays
+the log, reconciles the estate against the world, and hands back an Engine ready to run. The
+two halves share exactly one object, the one this half constructs. The name avoids
+"lifecycle", which DL-42 gives to the wrapper tier.
 
 - Resume (ss7): refuse on catalog-hash or clock-domain mismatch, replay inputs through a fresh
   Oracle, seed the ghost-run gate so replayed starts never respawn, then reconcile from the
@@ -12,21 +12,19 @@ The two halves share exactly one object, the one this half constructs. The name 
   max(ended_at, last journal at) with the true ended_at in the payload; verified command group
   orphaned by a dead wrapper -> kill it, TERMINATED "wrapper lost; killed at resume" (a kill
   that happened); nothing -> FAILURE exit_status_unobservable (PENDING: E7). First, an attempt
-  the previous engine admitted and never decided gets its decision record, with the effects it
-  implies (DL-315). A start with no trace anywhere is then decided by its own SPAWN (DL-102): a
-  PENDING one is an intent the previous leader never delivered and is re-driven; a RETIRED one,
-  or none, means the live engine launched nothing for the run, and the row is left as it is; an
-  APPLIED one that left no trace is FAILURE "dispatch lost to engine crash", because a run
-  provably never started is never silently re-executed. FW watchers differ: polling is an
-  idempotent read, so an applied watch with no trace is re-dispatched, and a supervised start
-  with a bound id is replayed. A pending one is re-driven like any other start, so a held watch
-  stays held. Reconciliation completions go through the ss4 stale gate like any adapter
+  the previous engine admitted and never decided gets its decision record (DL-315). A live start
+  with no run directory is then decided by the log (DL-102): a run with a `dispatch` record was
+  launched and left no trace, so it is FAILURE "dispatch lost to engine crash", because a run
+  provably never started is never silently re-executed; a start replay derives with no
+  `dispatch` record was decided and never launched, and is dispatched now; anything else, such
+  as a STARTING overwrite at a run that never started, is left as it is. FW watchers differ:
+  polling is an idempotent read, so a dispatched watch with no trace is re-dispatched under its
+  recorded `run_id`. Reconciliation completions go through the ss4 stale gate like any adapter
   completion: if replay already reached a terminal state (say a term_run_time TERMINATED), the
   late real record is dropped and journaled, never silently overwritten.
 
-The whole sequence is concurrency-model ss7's takeover barrier (ACQUIRE, reconcile every
-execution host, retire superseded, re-drive pending, dispatch). `start_run` is its degenerate
-case: an empty log has nothing to replay, reconcile or re-drive, so only the acquire remains.
+`start_run` is the degenerate case: an empty log has nothing to replay, reconcile or dispatch,
+so only the acquire remains.
 """
 
 from __future__ import annotations
@@ -34,7 +32,7 @@ from __future__ import annotations
 import contextlib
 import os
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -47,15 +45,12 @@ from dsl41.runner import Engine, adapter_switch
 from dsl41.runner_adapters import (
     JobAdapter,
     fsync_dir,
-    Terminated,
     load_json,
-    outcome_from_status,
     read_watch_log,
     resolve_spool,
     status_payload,
 )
 from dsl41.runner_clock import Clock, EngineError
-from dsl41.runner_effects import Effect, EffectOutcome, Outbox
 from dsl41.state_machine import Executor
 from dsl41.run_root import (
     GENESIS_SEGMENT_NO,
@@ -78,8 +73,9 @@ from dsl41.run_root import (
 )
 from dsl41.runner_journal import (
     check_segment_identity,
+    dispatched_runs,
     Journal,
-    RecoveredAttempt,
+    Replay,
     ReplayFault,
     last_journal_at,
     baseline_id,
@@ -89,11 +85,9 @@ from dsl41.runner_journal import (
 )
 from dsl41.runner_ledger import (
     STATE_MACHINE_VERSION,
-    Fence,
     LeaderLock,
     acquire_run_root,
     check_leader_eligibility,
-    next_epoch,
 )
 from dsl41.runner_scheduler import Scheduler
 from dsl41.semantics import ADAPTER_SWITCHES, SCHEDULER_SWITCHES, check_overrides
@@ -263,8 +257,8 @@ def _require_scheduler(catalog: CatalogIR, scheduler: Scheduler | None, where: s
 def _require_adapters(catalog: CatalogIR, adapters: Mapping[str, JobAdapter], where: str) -> None:
     """Every executable job type must have an adapter wired (DL-130). The profile inherits pinned
     values for wiring it cannot see, so a missing adapter drifts nothing, and a job of that type
-    reaches RUNNING with no process behind it (`plan_effects` suppresses the SPAWN for a type
-    with no dispatch row). Run at genesis and at resume."""
+    reaches RUNNING with no process behind it (`dispatch_plan` plans no start for a type with no
+    dispatch row). Run at genesis and at resume."""
     required = sorted(
         {job.job_type for job in catalog.jobs.values() if job.job_type != "BOX"} - set(adapters)
     )
@@ -323,7 +317,7 @@ def start_run(
     Four ordered steps; the order is the recovery argument:
 
     1. `flock` `leader.lock`, before the refusal: the refusal reads the root's state, and one
-       leader per run root is the rule under which that read is meaningful (DL-99);
+       engine per run root is the rule under which that read is meaningful (DL-99);
     2. the `period_root` sentinel, create-only under ss1.1's ownership rule;
     3. the bundle and `periods/000001/manifest.json`;
     4. `wal/000001.jsonl` with its `segment` record.
@@ -356,7 +350,6 @@ def start_run(
             catalog,
             run_root,
             lock,
-            Fence(lock),
             root_estate_id=root.estate_id,
             clock=clock,
             adapters=adapters,
@@ -378,7 +371,6 @@ def _finish_genesis(
     catalog: CatalogIR,
     run_root: Path,
     lock: LeaderLock,
-    fence: Fence,
     *,
     root_estate_id: str,
     clock: Clock,
@@ -439,14 +431,12 @@ def _finish_genesis(
         catalog=catalog,
         clock_domain=manifest.clock_domain,
         started_at=at,
-        lock=fence,
+        lock=lock,
         manifest=manifest,
         estate_id=root_estate_id,
     )
-    epoch = next_epoch([])  # the first term over a log that has none
     try:
-        journal.leader(epoch=epoch, at=at)
-        lock.note(epoch=epoch, at=at)
+        lock.note(at=at)
         fsync_dir(journal.path.parent)  # the segment's directory entry is a record too
         fsync_dir(run_root)
     except BaseException:
@@ -463,10 +453,8 @@ def _finish_genesis(
         run_root=run_root,
         scheduler=scheduler,
         hold_open=hold_open,
-        deadman_s=deadman_s,
-        epoch=epoch,
         manifest=manifest,
-        fence=fence,
+        fence=lock,
         semantics=switches_of(manifest.runtime_profile),
         machines=machines,
     )
@@ -499,19 +487,22 @@ async def resume_run(
 
     `machines` is the process's statechart executor, the wiring's; the engine runs on it. With none the engine makes its own, as
     `start_run`'s does."""
-    # acquire first (S6a, concurrency-model ss7): everything below reads or acts (the log is
-    # replayed, the estate reconciled, recorded kills re-driven), and a mutex taken after the
-    # first side effect is not a mutex. It also precedes the read, or another engine could append
-    # between the read and the acquire and this one would allocate an epoch the log already used.
+    # acquire first (S6a, DL-99): everything below reads or acts (the log is replayed, the estate
+    # reconciled, decided starts dispatched), and a mutex taken after the first side effect is not
+    # a mutex. It also precedes the read, or another engine could append between the read and the
+    # acquire.
     lock = lock or acquire_run_root(run_root)
     #: the WAL the ladder opened, closed again if it refuses
     journals: list[Journal] = []
+    #: the engine the ladder built, whose tasks a refusal stops before the lock is released
+    engines: list[Engine] = []
     try:
         engine = await _resume_under_lock(
             catalog,
             run_root,
             lock,
             journals=journals,
+            engines=engines,
             clock=clock,
             adapters=adapters,
             scheduler=scheduler,
@@ -523,8 +514,13 @@ async def resume_run(
             machines=machines,
         )
     except BaseException:
-        # a refused resume holds nothing, so the next engine may lead; the WAL it opened is
-        # closed too, and the lock is released below
+        # a refused resume holds nothing, so the next engine may lead: every task it started
+        # (a relaunched watch) is cancelled and collected first, the WAL it opened is closed,
+        # and the lock is released last
+        for engine in engines:
+            # never mask the refusal with the shutdown's own error
+            with contextlib.suppress(Exception):
+                await engine.shutdown()
         for journal in journals:
             # never mask the refusal with a second error: a WAL already closed, or a flush that
             # fails on the way out
@@ -549,11 +545,11 @@ async def _resume_under_lock(
     deadman_s: float | None,
     declared: RuntimeProfile | None = None,
     journals: list[Journal],
+    engines: list[Engine],
     machines: Executor | None = None,
 ) -> Engine:
-    """The ss7 resume ladder proper, with leadership already held (S6a). Split from `resume_run`
-    so the acquire/release pairing is one block."""
-    fence = Fence(lock)
+    """The ss7 resume ladder proper, with the lock already held (S6a). Split from `resume_run` so
+    the acquire/release pairing is one block."""
     require_period_one(run_root)  # a second segment refuses before it is read
     wal = estate_wal(run_root)
     records = read_journal(wal)
@@ -577,14 +573,10 @@ async def _resume_under_lock(
         estate_wal(run_root),
         fsync_each=not clock.virtual,
         baseline_id=baseline_id(records),
-        lock=fence,
+        lock=lock,
     )
     journals.append(journal)
-    # the term is allocated by being appended (ss1), before the first input this incarnation
-    # admits, so every record after it names its author
-    epoch = next_epoch(records)
-    journal.leader(epoch=epoch, at=clock.now())
-    lock.note(epoch=epoch, at=clock.now())
+    lock.note(at=clock.now())
     engine = Engine(
         catalog,
         clock=clock,
@@ -593,16 +585,15 @@ async def _resume_under_lock(
         run_root=run_root,
         scheduler=scheduler,
         hold_open=hold_open,
-        deadman_s=deadman_s,
-        epoch=epoch,
         manifest=manifest,
-        fence=fence,
+        fence=lock,
         # the pin, so the oracle reads what replay reads (DL-252); the engine checks it against
         # the manifest
         semantics=switches_of(manifest.runtime_profile),
         machines=machines,
     )
-    evidence = await _replay_into_engine(engine, records, run_root)
+    engines.append(engine)
+    replay = await _replay_into_engine(engine, records, run_root)
     # seed the ghost-run gate: replayed starts are reconciliation's business, not a fresh
     # dispatch
     for job, rt in engine.oracle.store.job.items():
@@ -648,7 +639,7 @@ async def _resume_under_lock(
         last_at,
         settle_seconds=settle_seconds,
         grace_seconds=grace_seconds,
-        evidence=evidence,
+        spawns=replay.spawns,
     )
     return engine
 
@@ -728,29 +719,24 @@ def _check_resume_clock(
 
 
 #: What the ss7 sweep reconciles against: each run's spool directory, keyed by (job, run number).
-type ResumeEvidence = dict[tuple[str, int], Path | None]
+type ResumeEvidence = dict[tuple[str, int], Path]
 
 
 async def _replay_into_engine(
     engine: Engine,
     records: list[dict[str, Any]],
     run_root: Path,
-) -> ResumeEvidence:
-    """Replay the segment into `engine`, installing the log's position (frontiers and decisions)
-    and the outbox on it, and answer the evidence the recovered attempts leave."""
-    # the rebuilt outbox's effects and the decision index's request ids in flight run on the
-    # engine's executor, the process's one (statechart-engine ss11)
+) -> Replay:
+    """Replay the segment into `engine`, install the log's position (frontiers and decisions) on
+    it, and write the decision of every attempt the previous engine admitted and never decided
+    (DL-315). Answers the replay, whose `spawns` the ladder reads."""
+    # the decision index's request ids in flight run on the engine's executor, the process's one
+    # (statechart-engine ss11)
     try:
-        replay = replay_inputs(
-            engine.oracle,
-            records,
-            outbox=Outbox(engine.machines),
-            machines=engine.machines,
-        )
+        replay = replay_inputs(engine.oracle, records, machines=engine.machines)
     except ReplayFault as exc:
-        # refuse, don't degrade. The same build raises at the same input on
-        # every resume, so the estate stays down until a build that replays it runs here
-        # (deployment runbook ss7)
+        # refuse, don't degrade. The same build raises at the same input on every resume, so the
+        # estate stays down until a build that replays it runs here
         raise EngineError(
             f"{run_root}: resume stopped: {exc}. Deploy a build that fixes the"
             " fault, or roll back to the release that wrote this log",
@@ -761,62 +747,28 @@ async def _replay_into_engine(
     # decision, not applied again
     engine.frontiers = replay.frontiers
     engine.decisions = replay.decisions
-    # ss5: the effects the previous engine intended, and what became of them. An engine that
-    # forgot a kill it had decided would leave a detached run orphaned: its job is already
-    # TERMINAL, so reconciliation skips it and nothing else would look again.
-    engine.outbox = replay.outbox
-    evidence = await _commit_recovered_after_identity_check(
-        engine, replay.recovered_attempts, records
-    )
-    return evidence
+    # the identity preflight runs first, so a refused resume has written no decision and the
+    # build that wrote the log can still open it
+    _preflight_identities(engine, _resume_evidence(engine), dispatched_runs(records), replay.spawns)
+    for result in replay.recovered:
+        engine.commit_recovered(result)
+    return replay
 
 
-async def _commit_recovered_after_identity_check(
-    engine: Engine,
-    recovered: list[RecoveredAttempt],
-    records: list[dict[str, Any]],
-) -> ResumeEvidence:
-    """ss4 step 7 for each attempt the previous engine admitted and never decided (DL-315): plan,
-    check, then write.
-
-    Every recovered attempt is planned first; with no live run a plan holds SPAWNs only, so no
-    plan reads another's. What the spool and the host hold is then read and checked against the
-    WAL's SPAWNs and the planned ones (DL-118). Only then are the decisions written, so a refused
-    resume has written no decision and minted no id, and the build that wrote the log can still
-    open it. The decisions land before anything after this reads the outbox: a recovered start is
-    then a pending SPAWN like any other, which the barrier's dispatch applies or a held host
-    holds. Returns the evidence read, for the reconciliation ladder."""
-    planned = [(attempt, engine.plan_recovered(attempt)) for attempt in recovered]
-    candidates = await _resume_evidence(engine, records)
-    _preflight_identities(
-        engine,
-        candidates,
-        planned=[effect for _, effects in planned for effect in effects],
-    )
-    for attempt, effects in planned:
-        engine.commit_recovered(attempt, effects)
-    return candidates
-
-
-async def _resume_evidence(engine: Engine, records: list[dict[str, Any]]) -> ResumeEvidence:
-    """The runs the ss7 sweep reconciles. Read only: nothing here appends or launches."""
+def _resume_evidence(engine: Engine) -> ResumeEvidence:
+    """The runs the ss7 sweep reconciles: every run directory under `runs/`. Read only: nothing
+    here appends or launches. A run's `dispatch` record precedes its directory, so a dispatched
+    run with no directory never reached its wrapper (`_resume_untraced_starts`)."""
     assert engine.run_root is not None
-    # sweep = union(journal dispatch records, runs/ directory) (ss7)
-    candidates: dict[tuple[str, int], Path | None] = {}
-    for record in records:
-        if record.get("rec") == "dispatch":
-            run_dir = record.get("run_dir")
-            candidates[(record["job"], int(record["run_number"]))] = (
-                Path(run_dir) if run_dir else None
-            )
+    candidates: ResumeEvidence = {}
     runs_dir = engine.run_root / "runs"
     if runs_dir.is_dir():
         for entry in sorted(runs_dir.iterdir()):
             run = split_run_dir(entry.name)
             if entry.is_dir() and run is not None:
                 # the canonical parser (DL-137): an inline rpartition accepts `b.01` as run 1, and
-                # setdefault over the sorted listing would let a directory this estate never wrote
-                # answer the ss7 ladder for a real run's fate
+                # a directory this estate never wrote would answer the ss7 ladder for a real
+                # run's fate
                 candidates.setdefault(run, entry)
     return candidates
 
@@ -828,20 +780,21 @@ async def _reconcile(
     *,
     settle_seconds: float,
     grace_seconds: float,
-    evidence: ResumeEvidence | None = None,
+    spawns: frozenset[tuple[str, int]] | set[tuple[str, int]] = frozenset(),
 ) -> None:
     """The ss6a/ss7 reconciliation ladder (module docstring). Tethered semantics did the killing
     already (wrappers EOF'd when the engine died), so this mostly reads; signals are for the
     residual crash matrix, and only at a (pid, start-time)-verified target.
 
-    `evidence` is `_resume_evidence`'s reading when the caller has taken it: resume reads it and
-    checks it against the WAL and the planned SPAWNs before it writes the recovered decisions.
-    The preflight below re-checks it against the outbox as it now stands."""
+    `spawns` is replay's derived starts (`Replay.spawns`): a live row whose start is among them
+    and has no `dispatch` record is dispatched now. The identity preflight runs again over the
+    evidence as it now stands, so a record that appeared since resume's first read is held to
+    the same identity."""
     assert engine.run_root is not None
     boot_now = _procid.current_boot_id()
-    candidates = evidence if evidence is not None else await _resume_evidence(engine, records)
-    _preflight_identities(engine, candidates)
-    _reconcile_applied_spawns(engine, candidates)
+    dispatched = dispatched_runs(records)
+    candidates = _resume_evidence(engine)
+    _preflight_identities(engine, candidates, dispatched, spawns)
 
     for (job, run_number), run_dir in sorted(candidates.items()):
         rt = engine.oracle.store.job.get(job)
@@ -855,10 +808,10 @@ async def _reconcile(
         # evidence is still reconciled below (the stale-completion gate rejects it), but nothing
         # starts the run again
         live = rt.status in LIVE
+        bound = dispatched.get((job, run_number))
         if job_ir.job_type == "FW":
-            _resume_watch(engine, job_ir, run_number, run_dir, last_at, relaunch=live)
+            _resume_watch(engine, job_ir, run_number, run_dir, last_at, bound, relaunch=live)
             continue
-        bound = _spawn_effect_for(engine, job, run_number)
         # the ladder resolves this run's fate from its directory; the preflight checked the
         # directory's claim to be this run's, and the bound id rides along so a record that
         # appears between the preflight and this read is held to the same identity
@@ -869,7 +822,7 @@ async def _reconcile(
             boot_now,
             settle_seconds=settle_seconds,
             grace_seconds=grace_seconds,
-            expected_run_id=bound.run_id if bound is not None else None,
+            expected_run_id=bound,
         )
         # the owner's reading (DL-145): a value that is not an int or a `Terminated` is refused,
         # as on the live path, and does not become a fabricated fate at resume
@@ -878,17 +831,7 @@ async def _reconcile(
             extras["ended_at"] = ended_at.isoformat()  # true end time (ss7)
         _inject_completion(engine, job, run_number, extras, at=ended_at or last_at, last_at=last_at)
 
-    _resume_untraced_starts(engine, candidates, last_at)
-    await _redrive_recorded_kills(engine)
-    # ss7's barrier ends where it says: ACQUIRE -> reconcile -> retire superseded, re-drive
-    # pending -> DISPATCH. Otherwise the outbox drains only after the next admitted input (the
-    # loop dispatches on the way out of `_admit_and_apply`), so a re-driven start would wait on
-    # unrelated traffic: hours on a quiet estate, forever where the only remaining work is the
-    # run that was lost. Everything pending here is a SPAWN nothing applied: the kills above are
-    # resolved, and a SPAWN whose run reached the host was reconciled from its trace.
-    # Superseded ones retire on the way through, and a drained or quarantined host holds its
-    # own, in the one gate that owns that call.
-    engine._dispatch()
+    _resume_untraced_starts(engine, candidates, last_at, dispatched, spawns)
 
 
 def _resume_watch(
@@ -897,15 +840,17 @@ def _resume_watch(
     run_number: int,
     run_dir: Path | None,
     last_at: datetime,
+    bound: str | None,
     *,
     relaunch: bool = True,
 ) -> None:
     """One incomplete FW run, from its spool (period-model ss2.2).
 
     A dispatched watch leaves a run directory, so a resumed watch lands here: the sweep finds the
-    directory, and the log says whether the watch is over. `relaunch=False` is a row that is not
-    live (DL-242): a completed log is still injected, for the gate to judge, and an incomplete
-    one is left alone."""
+    directory, and the log says whether the watch is over. `bound` is the `run_id` the run's
+    `dispatch` record names, None for a run this log never dispatched. `relaunch=False` is a row
+    that is not live (DL-242): a completed log is still injected, for the gate to judge, and an
+    incomplete one is left alone."""
     from dsl41.runner_adapters import FileWatcherAdapter
     from dsl41.semantics import fw_existence_immediate
 
@@ -915,11 +860,10 @@ def _resume_watch(
         # run_dir still has one, and without it the inject-from-log branch below is unreachable
         run_dir = engine.run_root / "runs" / f"{job}.{run_number}"
     watch = read_watch_log(run_dir) if run_dir is not None else None
-    bound = _spawn_effect_for(engine, job, run_number)
     if watch is not None and bound is not None:
         # re-checked at this read, not only at the preflight: a log that appeared in the window
         # between them is held to the same identity, or its fate would be injected as this run's
-        _refuse_identity_split(bound, watch.run_id, "the spool's watch.jsonl")
+        _refuse_identity_split(job, run_number, bound, watch.run_id, "the spool's watch.jsonl")
     adapter = engine.adapters.get("FW")
     if adapter is None:
         # _require_adapters runs at genesis and at resume, before reconciliation, and refuses a
@@ -955,18 +899,14 @@ def _resume_watch(
         extras["ended_at"] = watch.last_at.isoformat()
         _inject_completion(engine, job, run_number, extras, at=watch.last_at, last_at=last_at)
         return
-    if not relaunch:
-        return
-    if bound is None or engine.outbox.state_of(bound.effect_id) == "retired":
-        # the live engine planned no launch for this run, or retired the one it planned: the
-        # sweep's rule for an untraced start holds for a traced one, and a watch is relaunched
-        # only under the identity of a SPAWN that was applied (DL-315)
+    if not relaunch or bound is None:
+        # a watch is relaunched only under the identity of a start this log dispatched (DL-315)
         return
     # idempotent read: the adapter reconstructs progress from the log and appends no second
     # `start` line. The bound id rides along for the case with no log to reconstruct from (a run
     # directory made, then a crash before the `start` line), where a watch dispatched with no
     # identity would write `run_id: null` and split from the WAL (DL-118).
-    engine._launch(job_ir, run_number, adapter, run_id=bound.run_id)
+    engine._launch(job_ir, run_number, adapter, run_id=bound)
 
 
 def _inject_completion(
@@ -992,50 +932,41 @@ def _inject_completion(
 
 
 def _resume_untraced_starts(
-    engine: Engine, candidates: dict[tuple[str, int], Path | None], last_at: datetime
+    engine: Engine,
+    candidates: ResumeEvidence,
+    last_at: datetime,
+    dispatched: Mapping[tuple[str, int], str],
+    spawns: frozenset[tuple[str, int]] | set[tuple[str, int]],
 ) -> None:
-    """Starts with no trace anywhere: no run directory, no dispatch record, and nothing the host
-    admits to running (S6c).
+    """Live starts with no run directory (S6c, DL-102).
 
-    This is where ss7's "re-drive pending" step meets a row. The ladder above asks
-    how runs that left a trace ended; this asks what to do about a decision that left none. The
-    answer is the state of the row's own SPAWN (DL-315). Resume has committed every attempt whose
-    decision never landed, so a dispatchable row at run N reached it through a decision, and that
-    decision's plan records what the live engine meant to do for run N."""
+    The ladder above asks how runs that left a trace ended; this asks what to do about a start
+    that left none. The log answers, because a start's `dispatch` record is durable before its
+    adapter task exists and its run directory is made after (ss7):
+
+    - a `dispatch` record: the start was launched and the crash took it before it made its
+      directory. A tethered command is FAILURE, because a run provably never started is never
+      silently re-executed; a watch is re-dispatched under its recorded `run_id`, because
+      polling is an idempotent read (DL-44 item 7);
+    - no record, and replay derives the start (`spawns`): the previous engine decided it and
+      died before dispatching it, or the attempt's decision never landed. Nothing ran, so the
+      loop dispatches it once the reconciliation inputs and the overdue timers have applied,
+      through the same supersession check a live start passes (`Engine.recover_start`);
+    - neither: the live engine launched nothing for this run and never would, such as a
+      STARTING overwrite at a run that never started. The row stays live, for the operator to end
+      or restart (DL-315)."""
     for job, rt in engine.oracle.store.job.items():
         if rt.status not in LIVE or (job, rt.run_number) in candidates:
             continue
         job_ir = engine.oracle.catalog.jobs.get(job)
         if job_ir is None or job_ir.job_type == "BOX":
             continue  # boxes fold from members; pseudo-entries have no dispatch
-        bound = _spawn_effect_for(engine, job, rt.run_number)
-        state = engine.outbox.state_of(bound.effect_id) if bound is not None else None
-        if state == "pending":
-            # re-driven. The log holds this run's intent to spawn, never resolved, and nothing ran:
-            # the previous leader died between recording what it meant to do and doing it. It stays
-            # pending, which is all re-driving takes: `_dispatch` drains the outbox when the loop
-            # runs, through the gates a fresh effect passes, so a drained or quarantined host
-            # still holds it (ss8). An FW start too: its watch waits for the same SPAWN, so a held
-            # watch stays held across the restart (DL-96, DL-102). Only this run's SPAWN counts: a
-            # pending SPAWN of an earlier run says nothing about run N, and dispatch retires it.
+        bound = dispatched.get((job, rt.run_number))
+        if bound is None:
+            if (job, rt.run_number) in spawns:
+                engine.recover_start(job, rt.run_number, after=last_at)
             continue
-        if bound is None or state == "retired":
-            # left as the live engine left it. Run N's SPAWN was retired at dispatch (a retired
-            # effect stays retired, DL-232), or the decision that put the row at run N planned none:
-            # a STARTING overwrite at the same run number, or a row carried across a boundary whose
-            # SPAWN the previous period retired. Either way the live engine launched nothing for
-            # this run and never would, so neither does resume. The row stays live at run N with
-            # nothing running or held, for the operator to end or restart. A tethered command is
-            # not failed: nothing was lost (DL-315).
-            continue
-        # tried, and no trace. The SPAWN resolved `applied`: dispatch reached the adapter, and the
-        # crash took whatever it left before anything durable named the run. `indeterminate` takes
-        # the same ladder; the ladder lets the host decide where it can, which is what the state
-        # means (concurrency-model ss5)
         if job_ir.job_type == "FW":
-            # the watch is an idempotent re-read, so it is re-dispatched and not failed (DL-44
-            # item 7, DL-102), under its bound id. The routing gate passed at the live dispatch,
-            # and a running watch continues on a host that routes nothing new (ss8)
             adapter = engine.adapters.get("FW")
             if adapter is None:
                 # _require_adapters runs at genesis and at resume, before reconciliation, and
@@ -1045,190 +976,75 @@ def _resume_untraced_starts(
                     "_require_adapters already refuses a resume with an FW job and no"
                     " FW adapter wired, so adapter cannot be None here"
                 )
-            engine._launch(job_ir, rt.run_number, adapter, run_id=bound.run_id)
+            engine._launch(job_ir, rt.run_number, adapter, run_id=bound)
             continue
-        # failed. A tethered wrapper died with the engine and left no trace. runner-design ss7 fails such a start rather
-        # than silently re-run it. An indeterminate SPAWN may have run, so its cause is E7's, not
-        # "never spawned"
-        cause = (
-            "exit_status_unobservable"  # PENDING: E7
-            if state == "indeterminate"
-            else "dispatch lost to engine crash (never spawned)"
-        )
         _inject_completion(
             engine,
             job,
             rt.run_number,
-            {"status": "FAILURE", "cause": cause},
+            {"status": "FAILURE", "cause": "dispatch lost to engine crash (never spawned)"},
             at=last_at,
             last_at=last_at,
         )
 
 
-def _spawn_effect_for(engine: Engine, job: str, run_number: int) -> Effect | None:
-    """The durable SPAWN that bound this run's identity, in any state, resolved included: the
-    split to refuse is between the WAL and what a spool or a supervisor claims now, and
-    resolution does not expire the binding."""
-    return next(
-        (
-            e
-            for e in engine.outbox.effects()
-            if e.kind == "SPAWN" and (e.job, e.run_number) == (job, run_number)
-        ),
-        None,
-    )
-
-
-def _refuse_identity_split(effect: Effect, observed: object, source: str) -> None:
-    """One key runs through the WAL and the spool (DL-118, PR-36a): the durable effect bound this
-    run's `run_id` at birth, so present evidence about the run must name that id. A different id,
-    or none where a new-writer wrapper always records one, is a WAL/spool split: corruption, a
-    spoofed record, or a directory from another estate, and reattaching to, resolving, or killing
-    that process would act on a run the log never spawned. It refuses loudly; there is no correct
-    pick between two identities for one run. Callers pass only evidence that exists: an absent
-    file is the ladder's business. A pre-DL-118 effect has no bound id and checks nothing."""
-    if effect.run_id is None:
-        return
+def _refuse_identity_split(
+    job: str, run_number: int, bound: str | None, observed: object, source: str
+) -> None:
+    """One key runs through the WAL and the spool (DL-118, PR-36a): the `dispatch` record bound
+    this run's `run_id` before its wrapper existed, so present evidence about the run must name
+    that id. `bound` None is a start the log decided and never dispatched, which resume is about
+    to dispatch under a fresh id, so any evidence for it is a stranger's. A different id, or none
+    where a wrapper always records one, is a WAL/spool split: corruption, a spoofed record, or a
+    directory from another estate, and reattaching to, resolving, or killing that process would
+    act on a run the log never spawned. It refuses loudly; there is no correct pick between two
+    identities for one run. Callers pass only evidence that exists: an absent file is the
+    ladder's business."""
     observed_id = str(observed) if observed is not None else None
-    if observed_id != effect.run_id:
+    if bound is None:
         raise EngineError(
-            f"{effect.job}.{effect.run_number}: {source} reports run_id"
-            f" {observed_id!r} but the durable effect bound {effect.run_id!r}"
+            f"{job}.{run_number}: {source} reports run_id {observed_id!r} but the log decided"
+            " this start and never dispatched it -- refusing to act on a run the log did not"
+            " spawn (DL-118)"
+        )
+    if observed_id != bound:
+        raise EngineError(
+            f"{job}.{run_number}: {source} reports run_id"
+            f" {observed_id!r} but the dispatch record bound {bound!r}"
             " -- refusing to act on a run the log did not spawn (DL-118)"
         )
 
 
 def _preflight_identities(
     engine: Engine,
-    candidates: dict[tuple[str, int], Path | None],
-    *,
-    planned: Sequence[Effect] = (),
+    candidates: ResumeEvidence,
+    dispatched: Mapping[tuple[str, int], str],
+    spawns: frozenset[tuple[str, int]] | set[tuple[str, int]],
 ) -> None:
-    """Check every candidate's observed identities against the WAL before the barrier mutates
+    """Check every candidate's observed identities against the WAL before resume mutates
     anything (DL-118). One sweep up front: branch-by-branch checks leave ordering holes (a
-    reconciliation that durably recorded `applied` before a later branch refused the same run
-    leaves the refusal half-taken).
+    reconciliation that injected one run's fate before a later branch refused the same run leaves
+    the refusal half-taken).
 
-    `planned` holds the SPAWNs of the recovered decisions resume is about to write (DL-315); a
-    run's id is bound by its durable SPAWN or by one of these. Resume runs this first, before it
-    writes the recovered decisions, so a refusal there has written no decision and launched
-    nothing: the run root holds only this incarnation's `leader` record beyond what the crash
-    left. The barrier runs it again over the same evidence once the decisions are written, and it
-    passes unless the spool changed in between."""
-    for (job, run_number), run_dir in sorted(candidates.items()):
-        effect = _spawn_effect_for(engine, job, run_number) or next(
-            (
-                e
-                for e in planned
-                if e.kind == "SPAWN" and (e.job, e.run_number) == (job, run_number)
-            ),
-            None,
-        )
-        if effect is None or effect.run_id is None:
+    A run is bound by its `dispatch` record, or is a start replay derives (`spawns`) that resume
+    would dispatch. A run that is neither, such as one an operator's STARTING overwrite made
+    live, has no identity to hold its evidence to, and is checked for nothing (DL-315).
+
+    Resume runs this before it writes the recovered decisions, so a refusal there has written
+    nothing. The ladder runs it again over the evidence as it then stands, and it passes unless
+    the spool changed in between."""
+    for (job, run_number), directory in sorted(candidates.items()):
+        bound = dispatched.get((job, run_number))
+        if bound is None and (job, run_number) not in spawns:
             continue
-        directory = run_dir
-        if directory is None:
-            # a candidate comes from resume's sweep, which runs on a rooted engine (ss7)
-            assert engine.run_root is not None
-            directory = engine.run_root / "runs" / f"{job}.{run_number}"
         for name in ("spawn.json", "status.json"):
             doc = load_json(directory / name)
             if doc is not None:
-                _refuse_identity_split(effect, doc.get("run_id"), f"the spool's {name}")
+                _refuse_identity_split(
+                    job, run_number, bound, doc.get("run_id"), f"the spool's {name}"
+                )
         # an FW watch spawns no process; its `start` line names the run and is present
         # evidence like any other
         watch = read_watch_log(directory)
         if watch is not None:
-            _refuse_identity_split(effect, watch.run_id, "the spool's watch.jsonl")
-
-
-def _reconcile_applied_spawns(
-    engine: Engine, candidates: dict[tuple[str, int], Path | None]
-) -> None:
-    """Resolve the pending SPAWNs whose runs did reach the host (ss5).
-
-    `_apply_spawn` launches and then records the outcome, so an engine that died between the two
-    leaves a pending effect for a run that may have started. The spool is the record (DL-93): a
-    run directory means it reached the host, so the effect is reconciled from it and not
-    re-driven, or the next dispatch would drain a pending SPAWN into a second `mkdir()` of a
-    directory that exists."""
-    for effect in [e for e in engine.outbox.pending() if e.kind == "SPAWN"]:
-        spool = candidates.get((effect.job, effect.run_number))
-        if (effect.job, effect.run_number) not in candidates:
-            continue
-        spawned = load_json(spool / "spawn.json") if spool is not None else None
-        if spawned is not None:
-            # re-checked at this read, not only at the preflight (DL-118): evidence that appeared
-            # between them is held to the bound identity before anything durable is recorded,
-            # including present-but-idless evidence, which the strict gate refuses. Otherwise the
-            # applied outcome lands first and the later gates refuse after the WAL has moved.
-            _refuse_identity_split(effect, spawned.get("run_id"), "the spool's spawn.json")
-        run_id = (spawned or {}).get("run_id")
-        detail = "reconciled from the spool: the run reached the host"
-        if spawned is None and spool is not None:
-            # ss11's FW rule (PR-34): a watch writes no spawn.json, and its `start` line says the
-            # dispatch happened. Otherwise the ladder treats the pending SPAWN as an applied-SPAWN
-            # candidate, finds no spawn.json, and re-launches the watch as an untraced start: two
-            # `start` lines and a fold nothing can reproduce.
-            watch = read_watch_log(spool)
-            if watch is not None:
-                _refuse_identity_split(effect, watch.run_id, "the spool's watch.jsonl")
-                run_id = watch.run_id
-                detail = "reconciled from the watch log: the start line is the dispatch"
-        engine._resolve_effect(
-            EffectOutcome(
-                effect_id=effect.effect_id,
-                state="applied",
-                run_id=run_id,
-                detail=detail,
-            )
-        )
-
-
-async def _redrive_recorded_kills(engine: Engine) -> None:
-    """Deliver the kills the previous engine decided and did not get to (concurrency-model ss5;
-    S5c).
-
-    A tethered run dies with the engine, so a kill the previous engine decided and did not
-    deliver is resolved from the spool. Re-driving is not a new licence: runner-design ss7
-    permits exactly this side effect at resume ("no side effects on resume beyond recorded
-    kills").
-
-    A kill whose run is not alive is resolved from the spool, three ways (ss5's third state).
-    `status.json` saying the command was signalled means the kill landed; saying it exited means
-    it finished first and the kill is retired in favour of the truth. No status record and no
-    live wrapper means nobody can say whether the signal landed, and `indeterminate` is the only
-    honest answer: either other report would invent a fact about a process nothing observed (E7)."""
-    assert engine.run_root is not None
-    for effect in [e for e in engine.outbox.pending() if e.kind == "KILL"]:
-        engine._resolve_effect(_kill_outcome_from_spool(engine.run_root, effect))
-
-
-def _kill_outcome_from_spool(run_root: Path, effect: Effect) -> EffectOutcome:
-    """What the spool can say about an undelivered kill (ss5's three states).
-
-    The record is read through `outcome_from_status`, the mapping the live adapter path and
-    reconciliation share. Its `Terminated` means "this run ended by a kill"; `observed` is the
-    wrapper's forensics about how the group died, not its verdict."""
-    run_dir = run_root / "runs" / f"{effect.job}.{effect.run_number}"
-    status = load_json(run_dir / "status.json")
-    if status is not None:
-        _refuse_identity_split(effect, status.get("run_id"), "the spool's status.json")
-    if status is None:
-        return EffectOutcome(
-            effect_id=effect.effect_id,
-            state="indeterminate",
-            detail="no status record and no live wrapper: nothing can say whether it landed",
-        )
-    killed = isinstance(outcome_from_status(status), Terminated)
-    return EffectOutcome(
-        effect_id=effect.effect_id,
-        state="applied" if killed else "retired",
-        run_id=status.get("run_id"),
-        detail=(
-            "the spool records the run as killed"
-            if killed
-            else "the spool records no kill: the run exited on its own, failed to"
-            " spawn, or left a record this build does not recognise"
-        ),
-    )
+            _refuse_identity_split(job, run_number, bound, watch.run_id, "the spool's watch.jsonl")

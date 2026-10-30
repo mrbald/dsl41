@@ -38,8 +38,8 @@ the wire vocabulary, and the three clients.
   connection, plus a separate connection for each `subscribe`. Drives the
   TUI of runner-design §11 (`dsl41 run --ui`, `dsl41 ui`, `dsl41 serve`).
 - **sync client** (`roundtrip`): one-shot blocking request/response for
-  callers outside an event loop. Drives `dsl41 sendevent`, `dsl41 host`,
-  `dsl41 query` and `dsl41 off-hold-all` (DL-423).
+  callers outside an event loop. Drives `dsl41 sendevent`, `dsl41 query`
+  and `dsl41 off-hold-all` (DL-423).
 - **blocking subscription client** (`subscribe_lines`, DL-172): one
   connection held open for the life of a `subscribe`. It yields the ack
   and then journal records, and drives `dsl41 query subscribe`. It lets a
@@ -85,7 +85,7 @@ CLI's job.
   code. `error` is human-readable prose and may change. The other lines a
   server writes, the §5 journal records and the gap marker, carry no
   `ok`.
-- Responses carry the **read header**: `baseline_id`, `epoch` and
+- Responses carry the **read header**: `baseline_id` and
   `applied_index` (`docs/concurrency-model.md` §6). A revision means
   nothing without the period it was read from (`baseline_id` names the
   period, DL-117). A client that cannot name the period cannot be told it
@@ -148,7 +148,16 @@ replayed from it omits the field, so a client must tolerate a missing
 (above), so a client that does not read it keeps working. A code is
 never renamed in place; a new code, or a retired one, is a decision-log
 entry. `transition_violation` is a retired code, and this engine never
-answers it (DL-353).
+answers it (DL-353). In 2.0.0 the engine answers none of the 1.x election,
+routing-table and seal codes: `stale_epoch`, `lineage_lost`,
+`period_sealing`, the host codes (`unknown_host`, `host_quarantined`,
+`host_evicted`, `host_already_evicted`, `force_needs_actor`,
+`host_not_quarantined`, `host_no_deadman`, `host_never_contacted`,
+`eviction_bound_pending`) and the seal codes (`seal_retry_mismatch`,
+`seal_in_flight`, `no_lineage`, `stage_digest_mismatch`, `nothing_staged`,
+`seal_input_after_cutoff`, `seal_not_settling`, `seal_not_quiescent`,
+`seal_supervisor_unproven`, `seal_run_unaccounted`, `seal_retry_horizon`,
+`seal_refused`, `seal_timeout`).
 
 The client action says what a client does next:
 
@@ -170,56 +179,31 @@ The client action says what a client does next:
 | `unsupported_version` | refused | `v` is absent or is not `3` | fix the request |
 | `access_denied` | refused | the perimeter denies this principal the `cmd`; it classifies by `cmd` alone (`docs/access-model.md` §5, §10) | operator |
 | `internal_error` | unknown | a handler raised | re-read; retry a mutation only under the same request_id |
-| `lineage_lost` | refused | this engine can no longer prove it leads the estate's lineage (§4) | operator |
 | `unknown_cmd` | refused | `cmd` names no command | fix the request |
 | `invalid_argument` | refused, query or stream | a field is absent or has the wrong shape or type, or a `request_id` begins with the reserved prefix `engine:` (§3); `error` names the field | fix the request |
 | `plan_cycle` | query | the AND-success skeleton has a cycle, so `plan` is disabled | operator |
 | `unknown_job` | query, or refused on a mutation | the job is not in the catalog (for `status`: in neither the catalog nor the store) | fix the request |
 | `no_journal` | stream | the run has no journal to stream | operator |
 | `backfill_refused` | stream | the backfill met a journal file it cannot read as this estate's | operator |
-| `unknown_verb` | refused | `verb` names no `sendevent` verb or no `host` verb | fix the request |
+| `unknown_verb` | refused | `verb` names no `sendevent` verb | fix the request |
 | `unknown_status` | refused | `CHANGE_STATUS` names no status | fix the request |
 | `status_not_injectable` | refused | `CHANGE_STATUS` names a status an operator may not send (`QUE_WAIT`) | fix the request |
 | `baseline_mismatch` | refused | `baseline_id` is not this period's (DL-117) | re-read then decide |
 | `expect_required` | refused | a mutation that addresses a row carries no `expect` | fix the request |
 | `request_id_reused` | refused | the `request_id` was admitted for a different command | fix the request |
-| `stale_epoch` | refused | `epoch` is not the current leader's | re-read then decide |
-| `period_sealing` | refused | the period is sealing and admits no external request | wait |
 | `engine_shutting_down` | refused | the engine shut down before the input was admitted | wait |
 | `decision_timeout` | unknown | no decision arrived within the window | re-read; retry a mutation only under the same request_id |
 | `apply_faulted` | refused | applying the command on a fork of the engine's state raised, so it was refused before it was logged (`docs/concurrency-model.md` §4, DL-292) | operator |
 | `precondition_failed` | rejected | the addressed entity is not at the revision `expect` names | re-read then decide |
-| `unknown_host` | rejected | no host with this id is in the routing table | fix the request |
-| `host_quarantined` | rejected | the host is quarantined, which the leader sets and clears | wait |
-| `host_evicted` | rejected | the host was evicted; it returns by re-registering. The leader's own reachability observation against an evicted host stores this code too, and answers no client | operator |
-| `host_already_evicted` | rejected | `evict` addresses a host that is already evicted | re-read then decide |
-| `force_needs_actor` | rejected | a forced eviction names no actor | fix the request |
-| `host_not_quarantined` | rejected | a gated eviction addresses a host that is not quarantined | operator |
-| `host_no_deadman` | rejected | a gated eviction addresses a host that runs no deadman | operator |
-| `host_never_contacted` | rejected | a gated eviction addresses a host never in contact | operator |
-| `eviction_bound_pending` | rejected | the eviction bound has not passed; `error` names the remaining wait | wait |
-| `seal_retry_mismatch` | refused | a `seal` names the committed boundary's `request_id` under a different envelope | fix the request |
-| `seal_in_flight` | refused | another boundary is in flight | wait |
-| `no_lineage` | refused | the engine leads no lineage, so there is no boundary to close | operator |
-| `stage_digest_mismatch` | refused | `stage_digest` does not match the digest of `next_period` | fix the request |
-| `nothing_staged` | refused | nothing is staged at `stage_digest` | fix the request |
-| `seal_input_after_cutoff` | refused | an input arrived stamped after the cutoff | wait |
-| `seal_not_settling` | refused | inputs keep arriving while the boundary drains or proves | wait |
-| `seal_not_quiescent` | refused | the estate is not quiescent at the cutoff | wait |
-| `seal_supervisor_unproven` | refused | the supervisor clauses cannot be proved: no client, unreachable, a refused `LIST`, or another incarnation | operator |
-| `seal_run_unaccounted` | refused | the supervisor's `LIST` and the carried executions disagree | operator |
-| `seal_retry_horizon` | refused | an external attempt is younger than the closing period's retry horizon | wait |
 | `clock_regressed` | refused | admission time moved backwards during the cutoff | operator |
-| `seal_refused` | refused | one of the boundary's own pre-commit refusals: the candidate, its validation, the snapshot or the install. A check on the same path that names no code answers `engine_error` | operator |
-| `seal_timeout` | unknown | no boundary outcome arrived within the window | re-read; retry a mutation only under the same request_id |
 | `stale_completion` | rejected, stored only | the stale-completion gate rejected an engine-made completion; it is stored, and no client request is answered with it | none |
 | `engine_apply_faulted` | rejected | applying an input on a fork of the engine's state raised, and its time half applied alone, so the input was logged with this rejection and only its time half applied: it is quarantined (`docs/concurrency-model.md` §4). The live engine stores it for an engine-made input. Replay stores it for any input admitted with no decision whose apply raises the same way, a control input included. Like every stored code, an exact retry of that control input is answered with it | operator |
 | `engine_error` | refused | an engine refusal whose raise site names no code | operator |
 
-## 3. Mutating verbs: sendevent, host
+## 3. Mutating verb: sendevent
 
 ```json
-{"cmd": "sendevent", "v": 3, "baseline_id": "…", "epoch": 0,
+{"cmd": "sendevent", "v": 3, "baseline_id": "…",
  "request_id": "…", "verb": "CHANGE_STATUS",
  "payload": {"job": "nightly", "status": "SUCCESS"},
  "expect": {"job:nightly": 12}, "claimed_actor": "alice@host"}
@@ -296,10 +280,7 @@ consumed, and the log says nothing about it.
 retried safely, because nothing could recognise the retry as one. An id
 that begins with `engine:` is refused as `invalid_argument` (DL-297): the
 engine names the inputs it makes itself `engine:<index>`, so the prefix
-is reserved. The rule covers `sendevent`, `host` and `seal`, and
-`dsl41 seal` offline applies it too. On the socket, a committed seal's
-exact retry is answered before the check, which is harmless: a seal's id
-never enters the decision index.
+is reserved.
 
 An exact retry (same id, same fingerprint) is answered from its original
 decision and takes no second index. With an access map configured
@@ -310,34 +291,29 @@ retry route is reached (`docs/access-model.md` §5, §7). A reused id under
 a *different* command is refused as a collision. `expect` is part of the
 fingerprint, so the same verb at two revisions is two commands.
 
-**A `sendevent` or `host` collision refusal carries the id's earlier
-decision** (DL-217). When the id already holds one, the refusal adds
+**A `sendevent` collision refusal carries the id's earlier decision**
+(DL-217). When the id already holds one, the refusal adds
 `"original_decision": {index, request_id, decision, reason, code, revisions}`,
 the decision's own fields. `code` is the stored one. It is null on an
 application and on a decision that stores no code (§2, DL-272). The
 answer stays a refusal of this request: `ok: false`, `refused: true`, and
 the read header of the engine that answered. The nested decision belongs to
 the earlier command and is never this request's outcome. An id admitted but
-not yet decided carries no `original_decision`. The `seal` verb keeps its
-own retry route (below) and never carries the field.
+not yet decided carries no `original_decision`.
 
-**Recovering a lost answer.** The fingerprint covers `baseline_id`,
-`epoch` and `expect`. A retry must place the values its original placed,
-not values re-read after the loss. `dsl41 sendevent` and `dsl41 host`
-print the id and those three values on stderr before the first write, as
-the flags `--request-id`, `--expect`, `--epoch` and `--baseline`, and
-repeat them in the exit-4 advice. Re-running the original arguments with
+**Recovering a lost answer.** The fingerprint covers `baseline_id` and
+`expect`. A retry must place the values its original placed, not values
+re-read after the loss. `dsl41 sendevent` prints the id and those two
+values on stderr before the first write, as the flags `--request-id`,
+`--expect` and `--baseline`, and repeats them in the exit-4 advice. Re-running the original arguments with
 them gives these answers:
 
 - the original was decided: the retry is answered from that decision and
   takes no index. This holds in the same period, after the entity moved,
   and after a same-period restart that rebuilt the index from the WAL;
-- the original was never admitted, and the engine restarted after it: the
-  retry names a superseded epoch and is refused as stale, "re-read and
-  re-compose". Nothing applies;
-- the original was never admitted, and the same engine still leads: the
-  retry is a fresh command at the pinned `expect`. It applies if the
-  entity is still at that revision and is rejected if it moved;
+- the original was never admitted: the retry is a fresh command at the
+  pinned `expect`. It applies if the entity is still at that revision and
+  is rejected if it moved;
 - the actor claim differs, because the retry ran as another user or host,
   or an access map stamps a different principal than it stamped on the
   original: the envelope differs, and the answer is a collision carrying
@@ -349,12 +325,8 @@ whose decision index holds the id.
 `baseline_id` must match the engine's. A revision read from another
 baseline names nothing here.
 
-`epoch` is required. It is checked **after** deduplication, so an exact
-old-epoch retry recovers its original result, while an unseen old-epoch
-request is refused as stale. An engine with a run root allocates its
-epoch under `leader.lock` by appending a `leader` record. An engine with
-no run root and no log holds no election and accepts epoch 0 as inert
-(DL-99).
+One engine holds a run root (`leader.lock`, DL-99), so a request names
+no leader term.
 
 `claimed_actor` is optional and is exactly what its name says. There is
 no authentication at this tier (§7), so it is recorded as the caller's
@@ -424,94 +396,12 @@ the journal append, so it consumes no log index, and it lists the
 injectable set. Whether the vendor's `sendevent -s QUE_WAIT` is legal is
 not known; this is a stated support limit, not a claim about the vendor.
 
-### `host` (S5a, DL-94)
-
-```json
-{"cmd": "host", "v": 3, "baseline_id": "…", "epoch": 0,
- "request_id": "…", "verb": "drain", "payload": {"id": "local"},
- "expect": {"host:local": 1}, "claimed_actor": "alice@host"}
-```
-
-A `host` command makes one change to `docs/concurrency-model.md` §8's
-routing table: which execution hosts take new work. `verb` is
-`activate` | `drain` | `evict`, and `payload` is `{id, force?}`.
-
-**v3 carries a fourth host verb, `route`, and its query; both are
-specified and neither is built** (DL-118; period-model §2.2). They sit in
-v3 beside the `seal` verb and the gap marker. The shape is frozen so that
-two implementations cannot choose incompatible JSON for one fact:
-
-```json
-{"cmd": "host", "v": 3, "baseline_id": "…", "epoch": 7, "request_id": "…",
- "verb": "route", "payload": {"id": "<role>", "executor_id": "…"},
- "expect": {"route:<role>": 3}, "claimed_actor": "…"}
-
-{"cmd": "routes", "v": 3, "roles": ["<role>", …]}
-→ {"ok": true, "routes": {"<role>": {"present": true, "executor_id": "…",
-    "state_rev": 3}}, …header…}
-```
-
-A remap moves one role→executor row. It is applied to the owner and
-carries no oracle event. It is **rejected**, not refused, when
-`executor_id` names no host row, because that check reads mutable state
-like every other one in the table above (period-model §3.3).
-`route:<role>` is the fourth `expect` namespace, beside `job:`, `global:`
-and `host:`. The `routes` query keeps the `hosts` query's corners: an
-absent role answers `{"present": false, "state_rev": 0}`, and omitting
-`roles` answers the whole table. The WAL record is
-`host: {verb: "route", id, executor_id}`. The answer is the same decision
-shape and the same four outcomes as every host verb.
-
-**None of it is built.** There is no `route` verb, no `routes` query, no
-`RuntimeState` route storage and no `route:` namespace. The shipped table
-is the one implicit row period-model §3.3 describes, projected from the
-single local executor at revision 0. The unit that adds the storage
-builds this, and no plan schedules that unit (DL-189). The wire is
-written here so that unit implements a shape rather than inventing one.
-
-`host` is a **separate `cmd`** because the verb sets are separate things.
-Each `sendevent` verb names one oracle `EventKind`. A host verb
-deliberately names none, because a job's condition truth cannot depend on
-where its machine routes (DL-93). The **envelope is the same envelope**,
-parsed by the same function. concurrency-model §0's mandate is on
-externally requested mutations, not on a particular vocabulary, so
-`expect` is mandatory here
-too and names `host:<id>`, the third namespace, beside `job:` and
-`global:`. The answer is the same decision shape and the same four
-outcomes, with `kind` carrying the host verb.
-
-`quarantine` and `reinstate` are **not** operator verbs, and the wire
-refuses them as unknown verbs. concurrency-model §8 assigns that state to
-the leader, automatically, from what it can and cannot reach. Those two
-arrive through the engine's own door with no `expect`, because
-concurrency-model §0's mandate is on externally *requested* mutations,
-and an observation about reachability is not one.
-An operator verb for quarantine would also blur it with `drain`, which
-asserts nothing about whether the host is answering.
-
-What is refused and what is rejected divides on one line: whether the
-check reads mutable state.
-
-| refused (nothing in the WAL) | rejected (a decision, at an index) |
-|---|---|
-| an unknown verb, a `payload` that is not an object, a missing, empty or non-string `id`, an `id` carrying an unpaired surrogate (PR-10a), a non-boolean `force`, a bad envelope | the host is not in the table; the state forbids this verb; an `evict` whose concurrency-model §8 preconditions do not hold |
-
-The eviction preconditions are concurrency-model §8's three. They read
-mutable state, so
-their failure is a **rejection** at an index and not a refusal. It
-reports the remaining wait, so the operator waits rather than guesses.
-`force: true` skips them. It is recorded with the caller's claimed actor
-on the row as well as in the log, and it is the one path in the
-concurrency model that can produce a double run. Every one of these
-checks is a pure function of the row. Replay has no live host to probe,
-so a gate that probed one would decide differently the second time.
-
 ## 4. Query verbs (frozen response shapes)
 
 **A read is refused when this engine cannot prove it leads the estate's
 LINEAGE** (DL-133; period-model §1.3). Every answer below carries the §2
-read header (headerless exceptions are listed there, DL-148): a baseline,
-an epoch and a log position. Those are exactly the coordinates a
+read header (headerless exceptions are listed there, DL-148): a baseline
+and a log position. Those are exactly the coordinates a
 displaced leader cannot speak for. So a `status` immediately after the
 anchor directory is deleted or replaced is refused rather than answered,
 and the refusal carries no header (PR-03).
@@ -530,7 +420,7 @@ line (the ack, a refusal, a marker or a record) carries the read header
 read.
 
 Every query is a **pure projection** of (oracle, catalog, scheduler,
-outbox, spool paths). None changes protocol-visible engine state, and
+spool paths). None changes protocol-visible engine state, and
 none inserts a store row. `status` does refresh one private cache, the
 `spec_drift` re-hash below. Queries are safe to serve from the engine's
 task because `feed()` never yields, so a handler can never observe a
@@ -540,10 +430,8 @@ Every §4 query that is answered carries the read header in addition to
 the fields listed below. The lineage refusal and the internal-error
 answer are headerless (§2, DL-148). These are the reads an
 `expect` is composed from: per-job `state_rev` in `status`,
-`global`/`globals` for a named global, and `hosts` for a routing row.
-Revision-bearing reads are leader-only (DL-90). One engine per run root
-*is* the leader. It holds `leader.lock` and the epoch allocated under it,
-and the lock is what enforces one leader (`docs/concurrency-model.md` §1,
+and `global`/`globals` for a named global. Revision-bearing reads come
+from the one engine that holds the run root's `leader.lock` (DL-90,
 DL-99).
 
 ### `status [job]`
@@ -563,14 +451,8 @@ the wrapper spec uses, so the tail and the writer can never diverge; CMD
 only), `job_type` and `box_name` (catalog placement, so a tree renders
 without a second query; null for ghosts).
 
-`held` (DL-94) is true when the oracle started the job and this engine
-dispatched no process, because its executor routes no new effects
-(`docs/concurrency-model.md` §8). It is derived from the outbox's pending
-SPAWN intents rather than stored as a job field, so it survives a
-restart. It is published because a held job reads RUNNING: the oracle
-walks a start through STARTING to RUNNING in one feed. So status alone
-cannot tell a drained estate from a working one, and an operator has to
-be able to watch a drain.
+`held` (DL-94) keeps its place in the row and is always false: one engine
+dispatches every start it decides, so no start is held.
 
 `watching` (`{file, interval, min_size}`) is present **only** for a live
 FW run. The absence of the key is itself the "not watching" signal
@@ -645,26 +527,6 @@ conditional create conditions on. Neither verb inserts a row.
 A map of every global would not do instead. It can report what exists,
 never that a particular name does not.
 
-### `hosts [ids]`
-
-`{"ok": true, "executor": "<this engine's host id>", "hosts": {<id>:
-{"present": bool, "state", "generation", "deadman_s", "last_contact",
-"forced_by", "state_rev"}}}`: `docs/concurrency-model.md` §8's routing
-table, and the read a `host` command's `expect` is composed from. An
-absent row answers `{"present": false, "state_rev": 0}`.
-
-Unlike `globals`, omitting `ids` answers the **whole table**. That is not
-an inconsistency. concurrency-model §7's takeover barrier has to
-reconcile every host in
-the table, so a complete list is a meaningful answer here. It is not one
-for globals, where a map of what exists can never express the absence a
-conditional create conditions on. Named `ids` are still answered
-individually, for that case.
-
-A non-null `forced_by` is an incident marker, not decoration: this
-host's work was declared rerouteable without proof that its executor was
-dead (concurrency-model §8's `--force`).
-
 ## 5. Streaming verb: subscribe
 
 `{"cmd": "subscribe", "v": 3, "since": <int>?}`. A subscription **owns
@@ -683,15 +545,14 @@ no journal"}`.
 
 Delivery guarantees:
 
-- seq'd records (`input`, `advance`, `host`) are **exactly once** across
+- seq'd records (`input`, `advance`) are **exactly once** across
   the backfill/live seam. The seam is sampled *before* the ack is
   written. Otherwise a record appended during the send would be skipped
   as "covered" though it was never backfilled.
 - every other record kind carries no `seq` and is **at-least-once**
-  inside the backfill race window. These are `dispatch`, `drop`,
-  `decision`, `effect_result` and `seal` on the live stream, plus
-  `segment`, `leader` and `preflight`, which a backfill can carry but no
-  live subscription meets. `decision` carries its attempt's number under
+  inside the backfill race window. These are `dispatch`, `drop` and
+  `decision` on the live stream, plus `segment` and `preflight`, which a
+  backfill can carry but no live subscription meets. `decision` carries its attempt's number under
   `index` rather than `seq` for this reason: two records sharing one
   cursor value would leave the second undeliverable to a resuming
   subscriber (DL-89).
@@ -699,10 +560,9 @@ Delivery guarantees:
   is at or below it.
 
 The stream carries `decision` records (DL-118). One line carries the
-decision, its revisions and the effects it planned; there is no separate
-`result` or `effect` record. The seam keys on the presence of `seq`, not
-on a record name, so `decision` has the at-least-once guarantee.
-`effect_result` is a stream record too.
+decision and its revisions; there is no separate `result` record. The
+seam keys on the presence of `seq`, not on a record name, so `decision`
+has the at-least-once guarantee.
 
 **The backfill spans segments** (DL-135; period-model §11). An estate's
 records live in `wal/<segment_no>.jsonl`, one segment per period. The
