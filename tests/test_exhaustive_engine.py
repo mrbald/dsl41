@@ -329,13 +329,15 @@ def test_every_job_event_in_every_built_flag_and_holding_state_takes_a_declared_
     assert sum(1 for state in reached if state[0][-1]) == 2
     # not vacuous: the events took every flag, arm and holding row but the
     # queued-recheck leaves (job.438, job.439) and the opening release
-    # (job.308, see above); the arm's rows are job.429 to job.439 (DL-365)
+    # (job.308, see above) and the engine's interruption hold (job.239, a FAILURE no operator
+    # can send: test_job_chart's cells and the oracle goldens take it, DL-424); the arm's rows
+    # are job.429 to job.439 (DL-365)
     taken = _hits(recorded)
     arm = {f"job.{n}" for n in range(429, 440)}
     flags_and_holding = {
         row.id for row in JOB.rows if (row.id[4] in "23" or row.id in arm) and not row.mark
     }
-    assert flags_and_holding - taken == {"job.438", "job.439", "job.308"}
+    assert flags_and_holding - taken == {"job.438", "job.439", "job.308", "job.239"}
 
 
 @pytest.mark.parametrize("holds", [True, False])

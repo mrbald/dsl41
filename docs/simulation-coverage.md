@@ -651,19 +651,14 @@ nothing.
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | adapter_outcome:Failed | supported | runner-design ss6 | - |  |  |  | generic | a completion with no raw exit code; the engine injects STATUS FAILURE with the cause |
-| adapter_outcome:Failed=dispatch lost to engine crash (run directory missing) | supported | runner_adapters.resolve_spool, DL-118 | - |  |  |  | generic | a dispatch whose run directory is gone never reached the host: the attempt is unobservable, and the interruption rule runs it again, holds it or closes it (spec-wiring 2b) |
-| adapter_outcome:Failed=exit_status_unobservable | provisional | runner_adapters.resolve_spool, runner-design ss15 | E7 | yes |  |  | generic | a resumed attempt with no status record and no live command is unobservable: the interruption rule decides it, never a guessed exit code (DL-424) |
-| adapter_outcome:Failed=exit_status_unobservable (wrapper exited rc={} without a status record) | provisional | runner_adapters.LocalCommandAdapter.run, runner-design ss15 | E7 | yes |  |  | generic | a wrapper that exited without writing a status record fails the run and names the wrapper's own exit code |
-| adapter_outcome:Failed=interrupted | supported | runner_attempts.follow_up_plan, DL-424 | - |  |  |  | generic | an interrupted attempt of a job named in non-idempotent.toml feeds FAILURE before the job is put ON_HOLD with the evidence |
+| adapter_outcome:Failed=interrupted | provisional | runner_attempts.follow_up_plan, DL-424 | E7 | yes |  |  | generic | an interrupted attempt of a job named in non-idempotent.toml, an unobservable one included, feeds FAILURE before the job is put ON_HOLD with the evidence; an idempotent job's unobservable attempt is run again, so E7's FAILURE default no longer applies to an attempt the interruption rule reaches (DL-424) |
 | adapter_outcome:Failed=malformed status record: outcome 'exited' with exit_code={} | refused | runner_adapters.outcome_from_status | - |  |  |  | generic | an 'exited' record with no integer exit code is refused as a truthful FAILURE, never mapped to something a downstream success could consume |
 | adapter_outcome:Failed=spawn failed: {} | supported | runner_adapters.outcome_from_status | - |  |  |  | generic | the wrapper recorded that the spawn itself failed; the run never started |
 | adapter_outcome:Failed=unrecognized status record outcome {} | refused | runner_adapters.outcome_from_status | - |  |  |  | generic | a status record whose outcome the protocol does not define is refused, never guessed |
-| adapter_outcome:Failed=wrapper spawn failed: {} | supported | runner_adapters.LocalCommandAdapter.run | - |  |  |  | generic | the engine could not spawn the wrapper at all; the run never started |
 | adapter_outcome:Failed=wrapper_spawn_failed | supported | runner_attempts.oracle_input_for, DL-424 | - |  |  |  | generic | an attempt whose spawn failed, launched or not, feeds FAILURE; the attempt's outcome keeps the error and the wrapper's record as evidence |
 | adapter_outcome:Terminated | supported | runner-design ss6, DL-41a | - |  |  |  | generic | an OBSERVED kill; the engine injects STATUS TERMINATED for it |
 | adapter_outcome:Terminated#external-signal | provisional | runner_adapters | E8 | yes | E8 |  | none | a kill by an external signal is reported as TERMINATED, the same verdict an oracle-ordered kill gets |
 | adapter_outcome:Terminated=<dynamic:outcome_from_status> | supported | runner_adapters.outcome_from_status, DL-41a | - |  |  |  | generic | a signalled or terminated status record carries its own cause text into the TERMINATED verdict |
-| adapter_outcome:Terminated=wrapper lost; killed at resume | supported | runner_adapters.resolve_spool | - |  |  |  | generic | a resume that finds the wrapper gone kills the surviving command group and reports the kill that happened |
 | adapter_outcome:int | supported | runner-design ss6, SEM-09 | - |  |  |  | generic | a raw exit code; the SUCCESS/FAILURE verdict over it stays oracle-side |
 
 ### wrapper_outcome
@@ -682,7 +677,7 @@ nothing.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | event_source:adapter | supported | ir-design ss7, DL-68, runner.Engine._enqueue | - |  |  |  | generic | the event is a live adapter completion -- the stamp that subjects it to the ss4 stale gate; it is the DEFAULT provenance of an engine-raised input |
 | event_source:control | supported | ir-design ss7, DL-68, runner.Engine.inject | - |  |  |  | generic | the event crossed the ss10 control socket, or a rehearsal script stood in for one; it is not something the engine raised itself |
-| event_source:reconcile | supported | ir-design ss7, DL-68, runner_startup._finish_plans | - |  |  |  | generic | the completion came from resolving an incomplete run at restart, not from a live adapter; it still goes through the ss4 stale gate |
+| event_source:reconcile | supported | ir-design ss7, DL-68, runner.Engine.perform_plan | - |  |  |  | generic | the completion came from resolving an incomplete run at restart, not from a live adapter; it still goes through the ss4 stale gate |
 | event_source:scheduler | supported | ir-design ss7, DL-68, runner.Engine.run_until_quiescent | - |  |  |  | generic | the start came from a calendar tick, so a journal reader can tell it from an operator's sendevent |
 
 ### trace_marker

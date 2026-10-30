@@ -1,9 +1,9 @@
 """What an engine runs under: the catalog's identity, the runtime profile, the marked set, the
 engine settings, and the configuration row that holds them (DL-424).
 
-`catalog_hash` is sha256 over the ss3.2 canonical form of `CatalogIR` with `meta` projected to
-`{source_files}`: `tool_version` and `parsed_at` leave, spans stay, so a patch release does not
-change the hash (DL-100).
+The catalog hash is `reload_diff.catalog_hash_v2`: sha256 over the ss3.2 canonical form of
+`CatalogIR` with `meta` projected to `{source_files}`; `tool_version` and `parsed_at` leave, spans
+stay, so a patch release does not change the hash (DL-100).
 
 `RuntimeProfile` holds the launch options that change interpretation or dispatch, as a typed
 frozen model, so a field added later is hashed by construction (`runtime_hash`). The same JIL
@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from dsl41.canon import CanonError, canonical_bytes, decode, hash_over
 from dsl41.ir import CatalogIR
+from dsl41.reload_diff import catalog_hash_v2, catalog_payload
 from dsl41.runner_clock import EngineError
 from dsl41.semantics import SemanticSwitches, check_overrides, resolve
 from dsl41.timezones import alias_table
@@ -50,31 +51,7 @@ def to_us(seconds: float) -> int:
     return round(seconds * 1_000_000)
 
 
-# --------------------------------------------------------------- catalog hash
-
-
-def catalog_hash(catalog: CatalogIR) -> str:
-    """`"sha256:..."` over the ss3.2 canonical form of `catalog`, `meta` projected to
-    `{source_files}`.
-
-    The serializer refuses a condition nested deeper than about 250 grouping levels, so an
-    engine runs none deeper (DL-351)."""
-    payload = _catalog_payload(catalog)
-    payload["meta"] = {"source_files": list(catalog.meta.source_files)}
-    return hash_over(payload)
-
-
-def _catalog_payload(catalog: CatalogIR) -> dict[str, Any]:
-    try:
-        return catalog.model_dump(mode="json")
-    except ValueError as exc:
-        if "depth exceeded" not in str(exc):
-            raise
-        raise EngineError(
-            "the catalog nests a condition deeper than its hash serializes"
-            " (about 250 levels of grouping); flatten the grouping or split"
-            " the condition (period-model ss1.1)"
-        ) from exc
+# --------------------------------------------------------------- job fingerprints
 
 
 def _strip_spans(value: Any) -> Any:
@@ -233,7 +210,7 @@ class Configuration(BaseModel):
 
     @property
     def catalog_hash(self) -> str:
-        return catalog_hash(self.catalog)
+        return catalog_hash_v2(self.catalog)
 
     @property
     def runtime_hash(self) -> str:
@@ -243,7 +220,7 @@ class Configuration(BaseModel):
         """The row's canonical bytes."""
         return canonical_bytes(
             {
-                "catalog": _catalog_payload(self.catalog),
+                "catalog": catalog_payload(self.catalog),
                 "profile": self.profile.model_dump(mode="json"),
                 "non_idempotent": dict(self.non_idempotent),
             }

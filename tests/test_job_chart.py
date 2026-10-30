@@ -371,7 +371,7 @@ def test_the_chart_is_well_formed_draws_no_warning_and_is_registered() -> None:
     assert chart_warnings(CHART) == []
     assert CHART.clock == "logical"
     assert CHART in MACHINES
-    assert len(CHART.rows) == 150
+    assert len(CHART.rows) == 151
     assert [b.id for c in CHART.choices for b in c.branches] == [
         *(f"job.{n}" for n in range(171, 177)),
         "job.309",
@@ -504,7 +504,7 @@ def _moves() -> set[str]:
 def test_every_other_row_moves_nothing_relays_an_attempt_or_settles_held_units() -> None:
     moves = _moves()
     others = [row for row in CHART.rows if row.id not in moves]
-    assert len(moves) == 58 + 6 + 5 + 9 and len(others) == 72
+    assert len(moves) == 59 + 6 + 5 + 9 and len(others) == 72
     moments = {f"job.{n}": event for n, event in zip(MOMENT_IDS, MOMENTS, strict=True)}
     for row in others:
         if row.id in RELAYS:
@@ -695,7 +695,7 @@ _VISITS = [
 #: event cannot carry selects a marked row.
 PARTITIONS: dict[str, list[Any]] = {
     STATUS: [Injection(status=s) for s in STATUSES if s != "QUE_WAIT"]
-    + [Injection(success=True), Injection(success=False)],
+    + [Injection(success=True), Injection(success=False), Injection("FAILURE", hold=True)],
     START: _attempts(),
     STARTJOB: [Attempt()],
     FORCE_STARTJOB: [Attempt()],
@@ -1128,6 +1128,8 @@ CELLS: dict[str, Cell] = {
     "job.209": _flag(ChartEvent(ON_NOEXEC, Noexec())),
     "job.210": _flag(ChartEvent(OFF_NOEXEC)),
     "job.211": _flag(ChartEvent(BOX_OFF_NOEXEC)),
+    # the engine's interruption hold, on the FAILURE of a running job (DL-424)
+    "job.239": _flag(ChartEvent(STATUS, Injection("FAILURE", hold=True)), "RUNNING"),
     "job.301": _holding(ChartEvent(ADMITTED_START, Admission()), "INACTIVE"),
     "job.302": _holding(ChartEvent(ADMITTED_START, Admission()), "FAILURE"),
     "job.303": _holding(ChartEvent(ADMITTED_START, Admission(on_held=True)), "FAILURE"),
@@ -1167,7 +1169,7 @@ def test_every_move_from_every_source_ends_in_its_target() -> None:
     guard parts a waiter from any other job has a waiter's twin with its own cell
     (`WAITER_CELLS`). A rule written once at a superstate fires at each of its leaves but those
     where another row takes its cell (`ELSEWHERE`), and that row fires there."""
-    assert len(CELLS) == 58
+    assert len(CELLS) == 59
     checked = elsewhere = 0
     for primary, cell in (*CELLS.items(), *WAITER_CELLS.items()):
         for ident in (primary, *SIBLINGS.get(primary, ())):
@@ -1188,7 +1190,7 @@ def test_every_move_from_every_source_ends_in_its_target() -> None:
                 after = _leaf(executor.active("j"), REGION[source])
                 assert after in _targets(row), (ident, source, after)
                 checked += 1
-    assert (checked, elsewhere) == (156, 18)
+    assert (checked, elsewhere) == (157, 18)
 
 
 def _advance(executor: Executor, job: str, event: ChartEvent) -> list[Any]:

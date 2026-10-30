@@ -5,17 +5,16 @@ docs/supervisor-protocol.md (the frozen spool format). DL-42 item 8 pins
 the phase-boundary kill matrix exercised here via the wrapper's
 DSL41_WRAPPER_TEST_PAUSE scaffolding: the wrapper SIGSTOPs itself at a
 named boundary, the test SIGKILLs (or SIGCONTs) it there, and the
-reconciliation ladder (`runner.resolve_spool`) must report what actually
-happened -- truthfully, never guessed. The "post-fork pre-exec" boundary
-from DL-42 is covered by post_spawn_pre_record: from the recorder's point
+restart's step 5 (the attempt chart, `runner_startup._settle_attempt`)
+must report what actually happened -- truthfully, never guessed. The
+"post-fork pre-exec" boundary from DL-42 is covered by post_spawn_pre_record: from the recorder's point
 of view both mean "command pid exists, spawn.json does not" (wrapper
 docstring).
 
 House style: process-level tests spawn the wrapper BY FILE PATH exactly as
-the engine does; ladder-level tests fabricate spool directories and call
-the private `resolve_spool` directly (white-box, like test_runner.py's
-gate tests). The crash-recovery integration test drives a real engine
-subprocess (tests/runner_crash_driver.py) and SIGKILLs it mid-run --
+the engine does; the restart's reading of fabricated spools is tested in
+test_engine_stops_branches.py and test_store_wiring.py. The
+crash-recovery integration test drives a real engine subprocess (tests/runner_crash_driver.py) and SIGKILLs it mid-run --
 that single test also proves the lifeline fd-hygiene invariant through
 the real adapter path: two concurrently spawned wrappers must BOTH see
 EOF when the engine dies, which a leaked write end would prevent.
@@ -45,10 +44,10 @@ from subprocess_harness import mypy_report
 
 from dsl41 import runner_procid, runner_wrapper
 from dsl41.ir import lower_source
-from dsl41.runner_config import catalog_hash
-from dsl41.runner_adapters import Failed, LocalCommandAdapter, Terminated, resolve_spool
+from dsl41.reload_diff import catalog_hash_v2 as catalog_hash
+from dsl41.runner_adapters import Failed, LocalCommandAdapter, Terminated
 from dsl41.runner_clock import RealClock
-from dsl41.runner_journal import read_journal, replay_inputs
+from dsl41.runner_journal import read_journal, read_records, replay_inputs
 from dsl41.runner_startup import resume_run
 
 WRAPPER = Path(runner_wrapper.__file__)
@@ -514,398 +513,6 @@ def test_lifeline_write_end_leaks_nowhere(tmp_path: Path) -> None:
         status = wait_for(lambda d=d: (d / "status.json").exists() and read_json(d / "status.json"))
         assert status["outcome"] == "terminated", (d.name, status)
         assert status["cause"] == "parent lost"
-
-
-# ---------------------------------------------- kill matrix (DL-42 item 8)
-
-
-def _resolve(run_dir: Path, job: str = "j1", run_number: int = 1, **kw):
-    return asyncio.run(
-        resolve_spool(
-            job,
-            run_number,
-            run_dir,
-            runner_procid.current_boot_id(),
-            settle_seconds=kw.pop("settle_seconds", 1.0),
-            grace_seconds=kw.pop("grace_seconds", 2.0),
-        )
-    )
-
-
-def _kill_stopped_wrapper(proc: subprocess.Popen) -> None:
-    wait_for(lambda: proc_state(proc.pid) == "T")
-    os.kill(proc.pid, signal.SIGKILL)
-    proc.wait()
-
-
-def test_kill_before_spawn_record_is_unobservable_and_never_signals(tmp_path: Path) -> None:
-    """-9 at post_spawn_pre_record (covers DL-42's post-fork pre-exec, see
-    module docstring): the command exists but no spawn.json ever will. The
-    ladder must report E7 unobservable and must NOT kill the unidentifiable
-    survivor -- it finishes its work untouched (accepted residual matrix)."""
-    run_dir = tmp_path / "j1.1"
-    run_dir.mkdir()
-    marker = run_dir / "survived.txt"
-    proc, lifeline_w = spawn_wrapper(
-        run_dir, f"sleep 1; echo done > {marker}", pause="post_spawn_pre_record"
-    )
-    _kill_stopped_wrapper(proc)
-    os.close(lifeline_w)
-    assert not (run_dir / "spawn.json").exists()
-    result, ended_at = _resolve(run_dir)
-    assert result == Failed("exit_status_unobservable")
-    assert ended_at is None
-    # the orphaned command was never signaled: it completes on its own
-    wait_for(lambda: marker.exists(), timeout_s=10.0)
-
-
-def test_kill_after_spawn_record_survivor_killed_at_resume(tmp_path: Path) -> None:
-    """-9 at post_record: spawn.json exists, wrapper dead, command group
-    verified alive -> the ladder kills it and reports TERMINATED 'wrapper
-    lost; killed at resume' (a kill that actually happened)."""
-    run_dir = tmp_path / "j1.1"
-    run_dir.mkdir()
-    proc, lifeline_w = spawn_wrapper(run_dir, "sleep 120", pause="post_record")
-    wait_for(lambda: (run_dir / "spawn.json").exists())
-    _kill_stopped_wrapper(proc)
-    os.close(lifeline_w)
-    spawn = read_json(run_dir / "spawn.json")
-    assert pid_alive(spawn["command_pid"])  # the survivor
-    result, ended_at = _resolve(run_dir)
-    assert result == Terminated("wrapper lost; killed at resume")
-    assert ended_at is None
-    wait_for(lambda: not pid_alive(spawn["command_pid"]))
-
-
-def test_resume_kill_reaches_a_member_that_ignores_sigterm(tmp_path: Path) -> None:
-    """DL-226: the resume kill sends SIGKILL to the command pgid after the
-    SIGTERM wait, also when the leader died on SIGTERM. Here the leader dies
-    on SIGTERM while a member ignores it; the run resolves TERMINATED and the
-    member dies of the SIGKILL. Before DL-226 the leader's death skipped the
-    SIGKILL and the member outlived the record."""
-    run_dir = tmp_path / "j1.1"
-    run_dir.mkdir()
-    member_pid_file = run_dir / "member.pid"
-    command = (
-        f'sh -c \'trap "" TERM; echo $$ > {member_pid_file}.tmp;'
-        f" mv {member_pid_file}.tmp {member_pid_file}; exec sleep 120' & wait"
-    )
-    proc, lifeline_w = spawn_wrapper(run_dir, command, pause="post_record")
-    member_pid = None
-    try:
-        wait_for(lambda: (run_dir / "spawn.json").exists())
-        _kill_stopped_wrapper(proc)
-        os.close(lifeline_w)
-        member_pid = int(wait_for(lambda: member_pid_file.exists() and member_pid_file.read_text()))
-        spawn = read_json(run_dir / "spawn.json")
-        assert pid_alive(spawn["command_pid"])  # the leader, verified at resume
-        result, ended_at = _resolve(run_dir, grace_seconds=2.0)
-        assert result == Terminated("wrapper lost; killed at resume")
-        assert ended_at is None
-        wait_for(lambda: not pid_alive(member_pid), timeout_s=5.0)
-    finally:
-        if member_pid is not None and pid_alive(member_pid):
-            os.kill(member_pid, signal.SIGKILL)
-
-
-def test_kill_between_wait_and_status_write_is_unobservable(tmp_path: Path) -> None:
-    """-9 at post_wait_pre_status: the exit was OBSERVED but never recorded
-    -- observation without a record is worthless, and the ladder must say
-    unobservable (E7), never guess the exit code."""
-    run_dir = tmp_path / "j1.1"
-    run_dir.mkdir()
-    proc, lifeline_w = spawn_wrapper(run_dir, "exit 5", pause="post_wait_pre_status")
-    _kill_stopped_wrapper(proc)
-    os.close(lifeline_w)
-    assert (run_dir / "spawn.json").exists()
-    assert not (run_dir / "status.json").exists()
-    result, _ = _resolve(run_dir)
-    assert result == Failed("exit_status_unobservable")
-
-
-def test_kill_between_status_write_and_reap_preserves_outcome(tmp_path: Path) -> None:
-    """-9 at post_status_pre_reap: the record is already durable; the
-    ladder reads the REAL completion (record-first-reap-after is exactly
-    what makes this window safe)."""
-    run_dir = tmp_path / "j1.1"
-    run_dir.mkdir()
-    proc, lifeline_w = spawn_wrapper(run_dir, "exit 5", pause="post_status_pre_reap")
-    wait_for(lambda: (run_dir / "status.json").exists())
-    _kill_stopped_wrapper(proc)
-    os.close(lifeline_w)
-    result, ended_at = _resolve(run_dir)
-    assert result == 5  # raw exit code; SEM-09 stays oracle-side
-    assert ended_at is not None
-
-
-def test_live_wrapper_gets_a_settle_window(tmp_path: Path) -> None:
-    """ss7 ladder rung 1: a wrapper verified alive is mid-record; the
-    ladder waits for its status.json instead of killing or guessing. Here
-    the wrapper is frozen at post_wait_pre_status and released mid-settle."""
-    run_dir = tmp_path / "j1.1"
-    run_dir.mkdir()
-    proc, lifeline_w = spawn_wrapper(run_dir, "exit 5", pause="post_wait_pre_status")
-    wait_for(lambda: proc_state(proc.pid) == "T")
-
-    async def scenario():
-        async def release():
-            await asyncio.sleep(0.5)
-            os.kill(proc.pid, signal.SIGCONT)
-
-        releaser = asyncio.get_running_loop().create_task(release())
-        result = await resolve_spool(
-            "j1",
-            1,
-            run_dir,
-            runner_procid.current_boot_id(),
-            settle_seconds=5.0,
-            grace_seconds=2.0,
-        )
-        await releaser
-        return result
-
-    result, ended_at = asyncio.run(scenario())
-    assert result == 5
-    assert ended_at is not None
-    assert proc.wait(timeout=10) == 0
-    os.close(lifeline_w)
-
-
-def _zombie_spawn_record(run_dir: Path, command: subprocess.Popen, command_token: str) -> None:
-    """A spawn.json whose wrapper is gone and whose command is `command`, a
-    child of this process. This process does not reap it, so once it exits
-    it stays a zombie: the shape of a run whose wrapper died under an init
-    that does not reap (DL-319)."""
-    wrapper = subprocess.Popen(["/bin/sh", "-c", "exit 0"])
-    wrapper_token = runner_procid.proc_start_token(wrapper.pid)
-    wrapper.wait()  # reaped: the wrapper is gone
-    (run_dir / "spawn.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "run_id": "test-run",
-                "job": "j1",
-                "run_number": 1,
-                "wrapper_pid": wrapper.pid,
-                "wrapper_start_time": wrapper_token,
-                "command_pid": command.pid,
-                "command_pgid": command.pid,
-                "command_start_time": command_token,
-                "boot_id": runner_procid.current_boot_id(),
-                "started_at": "2026-07-11T00:00:00+00:00",
-            }
-        )
-    )
-
-
-def test_resume_reads_an_exited_unreaped_command_as_unobservable(tmp_path: Path) -> None:
-    """A command that exited while its wrapper was gone, and that nothing
-    reaped, is a zombie. Its start token still matches. Resume must read it
-    as an exit with no record (E7), not as a survivor it killed: TERMINATED
-    would claim a kill that never happened."""
-    run_dir = tmp_path / "j1.1"
-    run_dir.mkdir()
-    command = subprocess.Popen(
-        ["/bin/sh", "-c", "read line"], stdin=subprocess.PIPE, process_group=0
-    )
-    try:
-        token = runner_procid.proc_start_token(command.pid)
-        assert token is not None
-        _zombie_spawn_record(run_dir, command, token)
-        assert command.stdin is not None
-        command.stdin.close()  # the command exits on its own
-        wait_for(lambda: runner_procid.proc_is_zombie(command.pid))
-        result, ended_at = _resolve(run_dir, grace_seconds=0.5)
-        assert result == Failed("exit_status_unobservable")
-        assert ended_at is None
-    finally:
-        if command.stdin is not None and not command.stdin.closed:
-            command.stdin.close()
-        command.wait(timeout=10)
-
-
-def test_resume_never_signals_the_live_member_of_an_exited_unreaped_leader(
-    tmp_path: Path,
-) -> None:
-    """DL-226: a group whose leader is already dead is not signalled, and its
-    run is E7's. A zombie leader is dead, so a member still running in its
-    group is left alone, as it is once the leader is reaped. The member is
-    checked with the same guard, so a member that died of a signal (a zombie
-    for a moment) fails the check."""
-    run_dir = tmp_path / "j1.1"
-    run_dir.mkdir()
-    member_pid_file = run_dir / "member.pid"
-    leader = subprocess.Popen(
-        [
-            "/bin/sh",
-            "-c",
-            f"sleep 300 & echo $! > {member_pid_file}.tmp;"
-            f" mv {member_pid_file}.tmp {member_pid_file}; read line",
-        ],
-        stdin=subprocess.PIPE,
-        process_group=0,
-    )
-    member_pid = member_token = None
-    try:
-        token = runner_procid.proc_start_token(leader.pid)
-        assert token is not None
-        member_pid = int(wait_for(lambda: member_pid_file.exists() and member_pid_file.read_text()))
-        member_token = runner_procid.proc_start_token(member_pid)
-        assert member_token is not None
-        assert os.getpgid(member_pid) == leader.pid  # a member of the leader's group
-        _zombie_spawn_record(run_dir, leader, token)
-        assert leader.stdin is not None
-        leader.stdin.close()  # the leader exits on its own; the member runs on
-        wait_for(lambda: runner_procid.proc_is_zombie(leader.pid))
-        result, ended_at = _resolve(run_dir, grace_seconds=0.5)
-        assert result == Failed("exit_status_unobservable")
-        assert ended_at is None
-        assert runner_procid.verify_alive(member_pid, member_token)  # never signalled
-    finally:
-        if member_pid is not None:
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(member_pid, signal.SIGKILL)
-            # the orphaned member is this process's child only when this
-            # process is a subreaper (Linux, after an in-process supervisor);
-            # reap it then, and either way wait until it is gone
-            with contextlib.suppress(ChildProcessError):
-                os.waitpid(member_pid, 0)
-            if member_token is not None:
-                wait_for(lambda: not runner_procid.verify_alive(member_pid, member_token))
-        if leader.stdin is not None and not leader.stdin.closed:
-            leader.stdin.close()
-        leader.wait(timeout=10)
-
-
-@pytest.mark.skipif(
-    not hasattr(os, "waitid"),
-    reason="without os.waitid (macOS before Python 3.13) the wrapper reaps when it "
-    "observes the exit, so no zombie is left to resolve",
-)
-def test_a_silent_wrapper_whose_command_exited_resolves_unobservable(tmp_path: Path) -> None:
-    """The wrapper is alive but frozen after it observed the exit and before
-    it recorded it, so its command is a zombie it has not reaped yet. Past
-    the settle window plus the grace, resume finds no record and an exited
-    command: E7, not a kill. The real wrapper, frozen at
-    post_wait_pre_status."""
-    run_dir = tmp_path / "j1.1"
-    run_dir.mkdir()
-    proc, lifeline_w = spawn_wrapper(run_dir, "exit 5", pause="post_wait_pre_status")
-    try:
-        wait_for(lambda: proc_state(proc.pid) == "T")
-        command_pid = read_json(run_dir / "spawn.json")["command_pid"]
-        assert runner_procid.proc_is_zombie(command_pid)
-        result, ended_at = _resolve(run_dir, settle_seconds=0.2, grace_seconds=0.2)
-        assert result == Failed("exit_status_unobservable")
-        assert ended_at is None
-    finally:
-        os.kill(proc.pid, signal.SIGCONT)
-        os.close(lifeline_w)
-        assert proc.wait(timeout=10) == 0
-    assert read_json(run_dir / "status.json")["exit_code"] == 5  # the late record
-
-
-def test_spoofed_spawn_json_never_signals_innocents(tmp_path: Path) -> None:
-    """DL-42 item 8 'pid reuse (spoofed spawn.json)': a live innocent pid
-    with a non-matching start-time token must never be signaled; the run
-    resolves unobservable."""
-    innocent = subprocess.Popen(["sleep", "30"])
-    try:
-        run_dir = tmp_path / "j1.1"
-        run_dir.mkdir()
-        stale_token = (
-            "lstart:Mon Jan  1 00:00:00 2001" if not sys.platform.startswith("linux") else "ticks:1"
-        )
-        (run_dir / "spawn.json").write_text(
-            json.dumps(
-                {
-                    "version": 1,
-                    "run_id": "spoof",
-                    "job": "j1",
-                    "run_number": 1,
-                    "wrapper_pid": innocent.pid,
-                    "wrapper_start_time": stale_token,
-                    "command_pid": innocent.pid,
-                    "command_pgid": innocent.pid,
-                    "command_start_time": stale_token,
-                    "boot_id": runner_procid.current_boot_id(),
-                    "started_at": "2026-07-11T00:00:00+00:00",
-                }
-            )
-        )
-        result, _ = _resolve(run_dir)
-        assert result == Failed("exit_status_unobservable")
-        assert pid_alive(innocent.pid)  # untouched
-    finally:
-        innocent.kill()
-        innocent.wait()
-
-
-def test_stranger_status_json_tuple_mismatch_never_signals_the_wrong_job(tmp_path: Path) -> None:
-    """DL-178y: `resolve_spool` tuple-checked spawn.json's (job, run_number)
-    but not status.json's -- a stranger's status record, with no bound
-    `run_id` to catch it (expected_run_id is None, the real reconciliation
-    path for a pre-DL-118 chain), used to be consumed as this run's own
-    fate: a directory with NO evidence of its own would read SUCCESS off
-    another job's status.json. Fixed: the same (job, run_number) gate now
-    applies to status.json too, so a stranger's record degrades to the
-    honest E7 unobservable instead."""
-    run_dir = tmp_path / "j1.1"
-    run_dir.mkdir()
-    (run_dir / "status.json").write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "run_id": "stranger",
-                "job": "OTHER",
-                "run_number": 99,
-                "outcome": "exited",
-                "exit_code": 0,
-                "ended_at": "2026-07-11T00:00:00+00:00",
-            }
-        )
-    )
-    result, ended_at = _resolve(run_dir)
-    assert result == Failed("exit_status_unobservable")
-    assert ended_at is None
-
-
-def test_boot_id_flip_voids_liveness_and_resolves_from_records(tmp_path: Path) -> None:
-    """DL-42 item 5: a foreign boot_id proves nothing survived -- liveness
-    checks are skipped entirely (a matching pid would be a recycled one)
-    and the run resolves from status.json or E7."""
-    innocent = subprocess.Popen(["sleep", "30"])
-    try:
-        token = runner_procid.proc_start_token(innocent.pid)
-        assert token is not None
-        run_dir = tmp_path / "j1.1"
-        run_dir.mkdir()
-        (run_dir / "spawn.json").write_text(
-            json.dumps(
-                {
-                    "version": 1,
-                    "run_id": "rebooted",
-                    "job": "j1",
-                    "run_number": 1,
-                    "wrapper_pid": innocent.pid,
-                    "wrapper_start_time": token,  # WOULD verify, wrong boot
-                    "command_pid": innocent.pid,
-                    "command_pgid": innocent.pid,
-                    "command_start_time": token,
-                    "boot_id": "0000-not-this-boot",
-                    "started_at": "2026-07-11T00:00:00+00:00",
-                }
-            )
-        )
-        result, _ = _resolve(run_dir)
-        assert result == Failed("exit_status_unobservable")
-        assert pid_alive(innocent.pid)  # never signaled despite the token match
-    finally:
-        innocent.kill()
-        innocent.wait()
-
-
-# ------------------------------------------- crash recovery (ss13 item 3)
 
 
 def test_dl210_u2_same_period_resume_preserves_the_trace_prefix(tmp_path: Path) -> None:
@@ -1491,7 +1098,16 @@ def test_m6_wrapper_spawn_failure_fails_job_not_engine(
         for r in records
         if r.get("rec") == "input" and r["payload"].get("job") == "doomed"
     ]
-    assert any(c and "wrapper spawn failed" in str(c) for c in causes)
+    # the attempt's spawn_failed feeds FAILURE `wrapper_spawn_failed` (DL-426); the outcome keeps
+    # the error text as evidence
+    assert "wrapper_spawn_failed" in causes
+    [ended] = [
+        r.payload
+        for _, r in read_records(tmp_path / "run")
+        if r.kind == "outcome" and r.payload["job"] == "doomed"
+    ]
+    assert ended["outcome"] == "spawn_failed"
+    assert "wrapper spawn failed" in ended["status"]["error"]
 
 
 def test_enospc_on_the_runs_dir_fails_loudly_and_resolves_at_resume(
@@ -1575,7 +1191,9 @@ def test_enospc_on_the_runs_dir_fails_loudly_and_resolves_at_resume(
 
     stored = [r.payload for _, r in read_records(run_root) if r.payload.get("job") == "doomed"]
     [lost] = [p for p in stored if p.get("outcome") == "unobservable"]
-    assert "run directory missing" in lost["status"]["cause"]  # what happened, not a guess
+    # no spool, no record, no command: the attempt chart's wrapper_gone, with no record to keep
+    first = next(p for p in stored if p.get("ordinal") == 1)
+    assert (lost["attempt"], lost["status"]) == (first["attempt"], {})
     assert [p["ordinal"] for p in stored if "ordinal" in p] == [1, 2]
     assert (run_root / "runs" / "doomed.1" / "2" / "status.json").exists()
 
@@ -1609,7 +1227,7 @@ def test_rc3_a_spawn_that_cannot_be_recorded_kills_what_it_started(tmp_path: Pat
     and its identity cannot be made durable. Running unrecorded is refused
     -- the wrapper kills what it started, tries the status record anyway,
     and exits 3. Here the status write fails too, so the run leaves no
-    record at all and the ladder must read that as E7 rather than an
+    record at all, which the restart reads as unobservable, never an
     outcome."""
     run_dir = tmp_path / "j1.1"
     run_dir.mkdir()
@@ -1625,16 +1243,14 @@ def test_rc3_a_spawn_that_cannot_be_recorded_kills_what_it_started(tmp_path: Pat
         assert not (run_dir / "status.json").exists()
     finally:
         os.close(lifeline_w)
-    result, ended_at = _resolve(run_dir)
-    assert result == Failed("exit_status_unobservable")
-    assert ended_at is None
+    # no record at all: the restart's attempt chart reads it as unobservable (DL-426)
 
 
 def test_rc3_a_status_that_cannot_be_written_never_reports_an_outcome(tmp_path: Path) -> None:
     """ss6a rc 3, the status.json half: the exit was OBSERVED and the record
     failed. status.json is the sole data channel, so the exit code dies with
-    the wrapper -- rc 3 is a notification, not an answer, and the ladder
-    reports unobservable instead of the code the wrapper saw."""
+    the wrapper -- rc 3 is a notification, not an answer, and the restart
+    reads unobservable instead of the code the wrapper saw."""
     run_dir = tmp_path / "j1.1"
     run_dir.mkdir()
     proc, lifeline_w = spawn_wrapper(run_dir, "exit 5", pause="post_record", grace_seconds=0.5)
@@ -1646,8 +1262,7 @@ def test_rc3_a_status_that_cannot_be_written_never_reports_an_outcome(tmp_path: 
         assert not (run_dir / "status.json").exists()
     finally:
         os.close(lifeline_w)
-    result, _ = _resolve(run_dir)
-    assert result == Failed("exit_status_unobservable")
+    assert (run_dir / "spawn.json").exists()  # observed, then unrecorded: no exit code to read
 
 
 def test_rc3_a_full_disk_at_spawn_leaves_no_record_and_exits_three(tmp_path: Path) -> None:

@@ -123,6 +123,18 @@ to start when a live engine answers it.
 
 **The version handshake** is `"v": 3` on every request (DL-90, DL-118).
 
+**Stopping the engine** is `{"cmd": "engine_stop", "v": 3}`, the
+`dsl41 engine stop` verb, at the `adm` tier (`docs/access-model.md` §10).
+It is a step of the engine's single writer, as SIGTERM is: every mutation
+is admitted wholly before it, or after it and rejected with
+`engine_draining`. `status`, the other queries, `subscribe` and
+`engine_stop` stay legal while the engine drains. The answer is
+`{"ok": true, "engine": "DRAINING"}`, or `"STOPPED"` when nothing was left
+to settle. A second stop moves the drain's deadline to now. The engine
+then records `clean_shutdown` or `unclean_shutdown` and exits 0; its
+socket goes with it. A stop the loop does not take within the decision
+window answers `decision_timeout`.
+
 **No controller lease,** by choice (DL-41a). `sendevent` is multi-writer
 by AutoSys nature, and the engine's single-writer loop serializes every
 injection. The lease guards the supervisor tier, which spawns without
@@ -199,6 +211,7 @@ The client action says what a client does next:
 | `stale_completion` | rejected, stored only | the stale-completion gate rejected an engine-made completion; it is stored, and no client request is answered with it | none |
 | `engine_apply_faulted` | rejected | applying an input on a fork of the engine's state raised, and its time half applied alone, so the input was logged with this rejection and only its time half applied: it is quarantined (`docs/concurrency-model.md` §4). The live engine stores it for an engine-made input. Replay stores it for any input admitted with no decision whose apply raises the same way, a control input included. Like every stored code, an exact retry of that control input is answered with it | operator |
 | `engine_error` | refused | an engine refusal whose raise site names no code | operator |
+| `engine_draining` | rejected | the mutation was admitted after `stop_requested` (a SIGTERM or `engine_stop`, below): it is logged with this rejection and only its time half applied; an exact retry is answered with it (spec-drain) | wait |
 
 ## 3. Mutating verb: sendevent
 
@@ -458,6 +471,31 @@ dispatches every start it decides, so no start is held.
 FW run. The absence of the key is itself the "not watching" signal
 (DL-68).
 
+`attempt` (`{run_id, n, state, after, cause, note}`) is present **only**
+while the job's current run has an attempt that has not settled, or
+while an attempt of the job keeps its starts back (DL-426). `run_id` is
+the attempt's identity, `n` its ordinal within its run, `state` one of
+`SPAWNING`, `RUNNING`, `STOPPING`, or `ENDED` for one whose outcome is
+in, `after` the cause of the stop the attempt replaced (null for a run's
+first attempt), `cause` the cause of the stop it is taking, and `note`
+why a stop could not be carried out (`ladder failed: …`, `command
+survived its KILL`). A job's next dispatch goes only when no attempt of
+the job is unsettled. An attempt settles once its plan is done, which
+comes after its record and its stop ladder; a held attempt, whose group
+may still live with no stop left to end it, settles only once the group
+is gone. A start decided meanwhile waits as `dispatch_pending` and is
+launched once the attempt settles. The attempt of an earlier run that
+keeps it back, or a held one, carries `held: true`, and its `note` says
+why: `stop ladder running`, or `stop in progress` when that is all. Clients show it beside the status: "RUNNING (attempt 2, after
+update_stop)", "STOPPING (ladder failed: …)", "STARTING (held: stop
+ladder running)".
+
+`interrupted` is present **only** while a job is held for an interrupted
+attempt, until its next start (spec-crash): the attempt's display name and
+run id, the outcome's kind and cause, its start and end, the signal or exit
+code the wrapper saw, the attempt limit when that is why it is held, and
+the run number.
+
 `spec_drift` is a lazy re-hash of the input files the run loaded, at most
 every 15 s. `null` means the server holds no fingerprint. There is
 deliberately no reload. The flag tells an operator that the running
@@ -579,6 +617,39 @@ The 1.x period fields are retired, and a 2.0.0 engine sends none of
 them: `segment_no`, `estate_id`, `period_id`, `catalog_hash_version`,
 `source_bundle_hash`, `first_index`, `opens_from_seal`, `reclaimed` and
 `trust_unaudited`.
+
+**The fields 2.0.0 adds** (DL-426), each additive, so a v3 client that
+does not read them keeps working (§2):
+
+- `dispatch` carries `after` on a replacement attempt: the cause of the
+  stop the attempt it replaces took (`engine_stop`, `lifeline`,
+  `unobservable`, …). A run's first attempt has none.
+- An engine-made `input` that holds an interrupted attempt is a `STATUS`
+  whose payload is `{"job", "run_number", "status": "FAILURE", "cause":
+  "interrupted", "hold": true}`: one oracle transition sets the job's
+  hold with its FAILURE (DL-424). No wire door accepts `hold`.
+- A snapshot carries `evidence`: per held job, the interrupted attempt
+  the `status` row shows as `interrupted` until the job's next start.
+- The `status` rows' `attempt` and `interrupted` blocks are §4's.
+- The store's `draining`, `clean_shutdown` and `unclean_shutdown` engine
+  records carry `unsettled`, the run ids of the attempts the engine left
+  unsettled, and `stops`, a map from each of those run ids to the cause of
+  the stop it was taking: `engine_stop`, `update_stop` or `oracle_kill`.
+  In `draining` the map names only the attempts already taking a stop;
+  the rest take the drain's `engine_stop`. In a shutdown record an
+  attempt taking no stop maps to null. Both are absent when nothing was
+  unsettled. The first stop an attempt took is its cause, and a shutdown
+  record's map is the engine's last word; the restart adopts the attempt
+  with it (DL-426).
+- The store's `outcome` record carries `"ladder": "running"` when the
+  attempt's outcome is in but the cleanup of its group is not done: its
+  stop ladder still runs, or its group is held. The attempt stays open
+  until a `follow_up` record `{"event": "ladder_done", "attempt"}` says
+  the group is gone. A reader tells it by `event` from the other two
+  `follow_up` shapes: a plan (`"event": "plan"`) and a plan step's
+  completion (`"event": "done"`, with `step` and `seq`). A restart that
+  finds such an attempt open finishes its ladder before any replacement
+  of it is launched. Neither record is on the stream (DL-426).
 
 **A cursor below the earliest retained record gets a gap marker.** The
 server sends one line, `{"gap": true, "earliest_retained": <index>}`,

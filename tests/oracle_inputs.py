@@ -1531,6 +1531,44 @@ def _box_scripts() -> dict[str, tuple[Step, ...]]:
     }
 
 
+#: The engine's interruption hold (DL-424): a FAILURE that holds the job in the same transition,
+#: so its own start (here its own failure condition) waits for the operator, while a dependent
+#: runs as after any failure. OFF_HOLD lets the start through; FORCE_STARTJOB clears the hold.
+HOLD_JIL = """insert_job: ih_job
+job_type: c
+machine: m1
+command: x
+condition: f(ih_job)
+
+insert_job: ih_down
+job_type: c
+machine: m1
+command: y
+condition: f(ih_job)
+"""
+
+
+def _hold_scripts() -> dict[str, tuple[Step, ...]]:
+    def event(at: datetime, kind: str, job: str, **payload: object) -> Event:
+        return Event.model_validate({"at": at, "kind": kind, "payload": {"job": job, **payload}})
+
+    t0 = EPOCH + timedelta(hours=8)
+    minute = timedelta(minutes=1)
+    held = (
+        event(t0, "FORCE_STARTJOB", "ih_job"),
+        event(t0, "STATUS", "ih_job", status="RUNNING"),
+        event(t0 + minute, "STATUS", "ih_job", status="FAILURE", cause="interrupted", hold=True),
+    )
+    return {
+        "released by OFF_HOLD": (*held, event(t0 + 2 * minute, "OFF_HOLD", "ih_job"), SealPoint()),
+        "cleared by FORCE_STARTJOB": (
+            *held,
+            event(t0 + 2 * minute, "FORCE_STARTJOB", "ih_job"),
+            SealPoint(),
+        ),
+    }
+
+
 def directed_jobs() -> list[Job]:
     """The directed estates the matrix runs besides the corpus."""
     restart = lower_source(RESTART_JIL)
@@ -1571,6 +1609,10 @@ def directed_jobs() -> list[Job]:
         + [
             Job(f"<directed owed settlement: {name}>", owed, script)
             for name, script in _owed_scripts().items()
+        ]
+        + [
+            Job(f"<directed interruption hold: {name}>", lower_source(HOLD_JIL), script)
+            for name, script in _hold_scripts().items()
         ]
     )
 

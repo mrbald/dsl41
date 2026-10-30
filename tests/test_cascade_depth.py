@@ -42,7 +42,7 @@ from dsl41.oracle import (
     item_cap,
 )
 from dsl41.oracle_state import CascadeDepthError, Event, OracleError
-from dsl41.runner_config import catalog_hash
+from dsl41.reload_diff import catalog_hash_v2 as catalog_hash
 from dsl41.runner_journal import read_journal
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter

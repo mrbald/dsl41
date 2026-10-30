@@ -39,8 +39,9 @@ docs/runner-design.md ss14):
                functions; plus the ss6 envelope and the ss0 mandate that a
                mutation names the revision it was composed against
                (parse_envelope)
-  runner_config - a run's configuration: catalog_hash, the job fingerprints,
-               RuntimeProfile + runtime_hash, and engine.toml's settings
+  runner_config - a run's configuration: the job fingerprints, RuntimeProfile +
+               runtime_hash, and engine.toml's settings (the catalog hash is
+               reload_diff.catalog_hash_v2)
   runner_store - the store: the journal, the configs, the snapshots, the meta
   runner_journal - the engine's record over its store: the record kinds, the
                writer, the wire projection, the open table, the snapshot and
