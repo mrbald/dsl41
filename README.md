@@ -689,6 +689,11 @@ Runner:
   across a boundary, and the segment checks (tail, identity, adjacency).
   Records live in `wal/<segment_no>.jsonl`; `journal.jsonl` holds the
   one-line `period_root` sentinel.
+- `src/dsl41/runner_store.py`: the 2.x store, not yet wired: one SQLite
+  file per engine holding an append-only journal of canonical records, an
+  append-only configuration history, snapshots and pruning, under one
+  writer with synchronous commits; `MemoryStore` is its in-memory twin for
+  rehearsal and tests.
 - `src/dsl41/runner_ledger.py`: leadership over one run root: the flock
   held for the process lifetime, the epoch allocated by appending under
   it, and the eligibility gate on the opening record.
