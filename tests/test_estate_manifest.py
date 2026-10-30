@@ -22,6 +22,7 @@ from typer.testing import CliRunner
 from dsl41 import cli_compile, cli_run, estate_manifest
 from dsl41.cli import app
 from dsl41.estate_manifest import ManifestError, load_manifest, resolve_manifest
+from dsl41.idempotence import Exceptions
 from dsl41.run_root import (
     bundle_sources,
     read_period_manifest,
@@ -155,7 +156,11 @@ def test_lint_takes_the_files_layers_timezone_and_map_from_the_manifest(
         )
     ]
     assert loads.command("b") == "echo base prod site"
-    assert seen == {"base_tz": "Europe/Zurich", "tz_aliases": {"zrh": "Europe/Zurich"}}
+    assert seen == {
+        "base_tz": "Europe/Zurich",
+        "tz_aliases": {"zrh": "Europe/Zurich"},
+        "exceptions": Exceptions({}),  # no non-idempotent.toml in the manifest's directory
+    }
 
 
 def test_an_environment_with_no_layers_keeps_the_base_layers_then_the_site(

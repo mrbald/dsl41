@@ -262,7 +262,7 @@ Use the [unknown-attribute policy in §2](#2-check-which-constructs-dsl41-accept
 ### 4.1. Read lint findings
 
 `dsl41 lint` reports the rule, file and line for each finding.
-Use the [L001–L023 rule contract](ir-design.md#9-linter-architecture-findings-not-treatments) for meanings and severities.
+Use the [L001–L025 rule contract](ir-design.md#9-linter-architecture-findings-not-treatments) for meanings and severities.
 
 | Lint exit | Meaning |
 | --- | --- |

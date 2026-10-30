@@ -37,8 +37,10 @@ from dsl41.ir import (
     lower_catalog,
     lower_source,
 )
+from dsl41.idempotence import Exceptions
 from dsl41.lint import (
     GRAPH_RULES,
+    RULE_CODES,
     RULES,
     LintReport,
     Severity,
@@ -55,6 +57,8 @@ from dsl41.lint import (
     rule_l018,
     rule_l019,
     rule_l023,
+    rule_l024,
+    rule_l025,
 )
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
@@ -526,6 +530,11 @@ def test_every_registered_rule_emits_its_own_registry_code() -> None:
     for code, graph_rule in GRAPH_RULES:
         for violation in graph_rule(catalog, graph):
             assert violation.code == code
+    # L024 and L025 are inert without exceptions: name one corpus job and one unknown name
+    named = next(name for name, job in catalog.jobs.items() if job.job_type == "CMD")
+    exceptions = Exceptions({named: "r", "no_such_job": "r"})
+    assert [v.code for v in rule_l024(catalog, exceptions)] == ["L024"]
+    assert [v.code for v in rule_l025(catalog, exceptions)] == ["L025"]
 
 
 def test_lint_catalog_runs_the_whole_lowerable_corpus_without_crashing() -> None:
@@ -1264,3 +1273,73 @@ def test_l023_cli_timezone_map_help_says_what_it_is_for() -> None:
     result = runner.invoke(app, ["lint", "--help"])
     assert "Used only by L023" in result.stdout.replace("\n", " ")
     assert "without a warning" in " ".join(result.stdout.split()).replace("│", "")
+
+
+# ---------------------------- 14. L024 and L025, the idempotence sidecar (DL-424)
+
+L024_JIL = (
+    "insert_job: ledger_post\njob_type: c\ncommand: x\nmachine: m1\n"
+    'date_conditions: 1\ndays_of_week: all\nstart_times: "10:00"\n\n'
+    "insert_job: other\njob_type: c\ncommand: y\nmachine: m1\n"
+    'date_conditions: 1\ndays_of_week: all\nstart_times: "11:00"\n'
+)
+
+
+def test_the_rule_codes_are_registered() -> None:
+    assert {"L024", "L025"} <= RULE_CODES
+
+
+def test_l024_reports_once_per_named_job_with_the_reason() -> None:
+    exceptions = Exceptions({"ledger_post": "posts twice"})
+    report = lint_catalog(lower_source(L024_JIL), exceptions=exceptions)
+    (found,) = report.by_code("L024")
+    assert (found.severity, found.jobs, found.detail) == ("info", ["ledger_post"], "ledger_post")
+    assert "posts twice" in found.message
+    assert "an interrupted attempt waits for the operator" in found.message
+    assert not report.by_code("L025")
+
+
+def test_l024_is_quiet_for_an_idempotent_estate_and_without_exceptions() -> None:
+    catalog = lower_source(L024_JIL)
+    assert not lint_catalog(catalog, exceptions=Exceptions({})).by_code("L024")
+    assert not lint_catalog(catalog).by_code("L024")
+    assert not lint_catalog(catalog, exceptions=None).by_code("L025")
+
+
+def test_l025_is_an_error_for_a_name_the_estate_does_not_define() -> None:
+    exceptions = Exceptions({"ledger_post": "r", "gone": "r"})
+    report = lint_catalog(lower_source(L024_JIL), exceptions=exceptions)
+    (found,) = report.by_code("L025")
+    assert (found.severity, found.jobs, found.detail) == ("error", [], "gone")
+    assert "gone" in found.message
+    assert [v.jobs for v in report.by_code("L024")] == [["ledger_post"]]
+
+
+def test_l025_is_quiet_when_every_name_is_defined() -> None:
+    report = lint_catalog(lower_source(L024_JIL), exceptions=Exceptions({"other": "r"}))
+    assert not report.by_code("L025")
+
+
+def test_exit_code_from_hand_built_l024_and_l025_violations() -> None:
+    info = LintReport(violations=[Violation(code="L024", severity="info", message="m")])
+    error = LintReport(violations=[Violation(code="L025", severity="error", message="m")])
+    assert info.exit_code(strict=True) == 0
+    assert error.exit_code(strict=True) == 1
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "insert_job: bx\njob_type: b\n",
+        "insert_job: bx\njob_type: f\nwatch_file: /tmp/f\nmachine: m1\n",
+    ],
+    ids=["box", "file-watcher"],
+)
+def test_a_sidecar_that_names_a_box_or_file_watcher_is_an_l025_error(declaration: str) -> None:
+    jil = declaration + "\n" + L024_JIL
+    report = lint_catalog(lower_source(jil), exceptions=Exceptions({"bx": "r"}))
+    (found,) = report.by_code("L025")
+    assert found.severity == "error"
+    assert found.detail == "bx"
+    assert "names a box or a file watcher; only command jobs can be declared" in found.message
+    assert not report.by_code("L024")
