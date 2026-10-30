@@ -27,10 +27,9 @@ history, and `citation-index.md`, a registry (DL-230).
 `tests/test_simulation_register.py`: edit its prose only, never its table.
 
 Calibration order for the first pass over the shelf: `ir-design.md` first
-(not frozen, densely cited), then `autosys-semantics.md` and
-`stonebranch-semantics.md`, then the remaining unfrozen documents, then the
-frozen contracts, with `period-model.md` last. After the first pass, take
-the due document with the most lines changed.
+(not frozen, densely cited), then `autosys-semantics.md`, then the
+remaining unfrozen documents, then the frozen contracts. After the first
+pass, take the due document with the most lines changed.
 
 ## Step 1: the fact sheet
 
@@ -71,9 +70,8 @@ When the specification and the code disagree, the decision log decides.
   entry.
 - No entry rules: the code is wrong. Change neither the specification nor
   the code. List the finding in the PR body with file and line, as a fact.
-- A frozen contract (`period-model.md`, `concurrency-model.md`,
-  `control-protocol.md`, `supervisor-protocol.md`, `protocol-evolution.md`,
-  `access-model.md`, `statechart-engine.md`, and the U3a record schema in `uc-edge-schema.md`)
+- A frozen contract (`control-protocol.md`, `wrapper-protocol.md`,
+  `protocol-evolution.md`, `access-model.md`, `statechart-engine.md`)
   changes meaning only
   through a new decision-log entry. So does any rule an entry doc-froze,
   such as SEM-36 to SEM-39.

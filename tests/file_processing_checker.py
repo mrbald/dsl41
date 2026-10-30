@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
 import sqlite3
+from pathlib import Path
 
 
 def expected_output(root: Path, work_key: str, content_hash: str) -> bytes:

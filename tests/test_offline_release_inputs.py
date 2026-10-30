@@ -36,16 +36,6 @@ def inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     repo = tmp_path / "checkout"
     shutil.copytree(TOOLS, repo / "scripts/offline", ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copy2(REPO / "scripts/export-release-inputs.sh", repo / "scripts/")
-    deploy = repo / "examples/nightbank/deploy"
-    deploy.mkdir(parents=True)
-    for name in (
-        "dsl41-launch",
-        "dsl41-engine.service",
-        "dsl41-supervisor.service",
-        "nightbank-access.toml",
-        "offline-local.sh",
-    ):
-        shutil.copy2(REPO / "examples/nightbank/deploy" / name, deploy / name)
     (repo / "pyproject.toml").write_text("""[project]
 name = "dsl41"
 version = "1.0.0"
@@ -325,36 +315,6 @@ def test_builder_downloads_and_installs_both_profiles_without_uv(
     assert _tool(target_python, "candidate", bundle, tmp_path / "refused", "base").returncode != 0
 
 
-@pytest.mark.parametrize("missing", ["wheel", "exports", "invalid-exports"])
-def test_native_harness_checks_inputs_before_any_container_work(
-    tmp_path: Path,
-    inputs: tuple[Path, Path, Path, Path],
-    missing: str,
-) -> None:
-    repo, release, exports, _ = inputs
-    trap = tmp_path / "bin"
-    marker = _trap(trap, "podman")
-    env = {key: value for key, value in os.environ.items() if not key.startswith("DSL41_")}
-    env.update(PYTHON=sys.executable, PATH=f"{trap}:/usr/bin:/bin")
-    if missing != "wheel":
-        env["DSL41_RELEASE_WHEEL"] = str(release)
-    if missing != "exports":
-        env["DSL41_RELEASE_INPUTS"] = str(exports)
-    if missing == "invalid-exports":
-        (exports / "requirements-ui.txt").unlink()
-    evidence = tmp_path / "evidence"
-    result = subprocess.run(
-        ["bash", str(repo / "examples/nightbank/deploy/offline-local.sh"), "ubuntu", str(evidence)],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert result.returncode != 0
-    assert not marker.exists()
-    assert not evidence.exists()
-
-
 def test_export_producer_uses_locked_uv_upstream_and_preserves_selected_wheels(
     tmp_path: Path,
     target_python: str,
@@ -457,50 +417,3 @@ def test_target_builder_keeps_python312_qualification(
     assert "Python 3.12" in result.stderr
     assert not bundle.exists()
     assert not marker.exists()
-
-
-@pytest.mark.parametrize("mode", ["build", "qualify"])
-def test_target_container_refuses_uv_on_path(
-    tmp_path: Path,
-    inputs: tuple[Path, Path, Path, Path],
-    mode: str,
-) -> None:
-    repo, _, _, _ = inputs
-    for args in (["init", "-q"], ["add", "pyproject.toml", "uv.lock", "scripts", "examples"]):
-        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, timeout=30)
-    delivery = tmp_path / "delivery"
-    delivery.mkdir()
-    work = tmp_path / "work"
-    script = tmp_path / "target.sh"
-    source = (REPO / "examples/nightbank/deploy/offline-target.sh").read_text()
-    # Fixed container roots map to disposable fixture roots.
-    for old, new in (
-        ("/src", str(repo)),
-        ("/delivery", str(delivery)),
-        ("/work", str(work)),
-        ("/opt/dsl41", str(tmp_path / "opt/dsl41")),
-        ("/srv/dsl41", str(tmp_path / "srv/dsl41")),
-        ("/tmp/dsl41", str(tmp_path / "tmp/dsl41")),
-        ("/tmp/rpm-lifecycle", str(tmp_path / "tmp/rpm-lifecycle")),
-    ):
-        source = source.replace(old, new)
-    script.write_text(source)
-    trap = tmp_path / "bin"
-    uv_called = _trap(trap, "uv")
-    result = subprocess.run(
-        ["bash", str(script), mode, "ubuntu"],
-        env={**os.environ, "PATH": f"{trap}:/usr/bin:/bin"},
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert result.returncode != 0
-    assert "refused: uv found" in result.stderr
-    recorded = (
-        delivery / "uv-absence-build.txt"
-        if mode == "build"
-        else work / "evidence/uv-absence-qualification.txt"
-    )
-    assert str(trap / "uv") in recorded.read_text()
-    assert not uv_called.exists()
-    assert not (delivery / "bundle").exists()

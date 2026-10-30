@@ -23,17 +23,16 @@ from typing import Any, get_args
 
 import pytest
 import statechart_completeness as sc
-from test_boundary import C2_JIL, _request, _stage
 
+from dsl41.runner_admission import Envelope
+from dsl41.runner_hosts import HostCommand
 from dsl41 import runner_effects
-from dsl41.boundary import carried_outbox
 from dsl41.ir import lower_source
 from dsl41.machines import MACHINES
 from dsl41.oracle_state import Event
-from dsl41.period import estate_wal, wal_path
-from dsl41.runner import Engine, _PendingSeal
+from dsl41.run_root import estate_wal, wal_path
+from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
-from dsl41.runner_admission import Envelope
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_effects import (
     EFFECT,
@@ -44,17 +43,14 @@ from dsl41.runner_effects import (
     Outcome,
     effect_id_for,
 )
-from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, HostCommand
+from dsl41.runner_hosts import LOCAL_EXECUTOR_ID
 from dsl41.runner_journal import ReplayFault, read_journal, read_outbox
-from dsl41.runner_seal import PARKED
 from dsl41.runner_startup import resume_run, start_run
-from dsl41.seal import BoundRun, OpenedRuntime
 from dsl41.state_machine import (
     HITS_ENV,
     STATECHART_LOG_PREFIX,
     Context,
     Executor,
-    Outcome as StepOutcome,
     StatechartError,
     UnhandledEvent,
     alphabet,
@@ -62,6 +58,9 @@ from dsl41.state_machine import (
     well_formed,
 )
 from dsl41.state_machine import Event as ChartEvent
+from dsl41.state_machine import (
+    Outcome as StepOutcome,
+)
 
 CHART = EFFECT
 T0 = datetime(2026, 7, 1, 8, 0)
@@ -320,35 +319,6 @@ def test_a_retry_after_a_refused_resume_runs_on_the_same_executor(tmp_path: Path
     again.journal.close()
 
 
-def test_a_resume_names_the_carried_intent_a_broken_chart_meets(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A held SPAWN crosses the boundary as a pending intent; the next
-    period's resume records it into a chart that cannot start it. The
-    statechart error's report names the carried record."""
-    from test_boundary import T0 as BT0
-    from test_boundary import _close, _genesis, _resume, _seal
-
-    run_root = tmp_path / "run"
-    engine = _genesis(run_root)
-
-    async def under_c1() -> None:
-        engine.inject_host(HostCommand(verb="drain", host_id=engine.executor_id))
-        await engine.run_until_quiescent(BT0)
-        engine.inject(Event(at=BT0, kind="STARTJOB", payload={"job": "a"}))
-        await engine.run_until_quiescent(BT0)
-
-    asyncio.run(under_c1())
-    (held,) = engine.outbox.pending()
-    asyncio.run(_seal(engine, _request(engine, _stage(run_root, C2_JIL))))
-    _close(engine)
-    _broken(monkeypatch, tmp_path)
-    with pytest.raises(StatechartError, match="action 'enter' is not in the registry") as raised:
-        _resume(run_root, C2_JIL)
-    lines = str(raised.value).splitlines()
-    assert f"carried input: the carried intent of effect {held.effect_id}" in lines
-
-
 # ---- the alphabet (DL-325)
 
 _JIL = "insert_job: a\njob_type: c\ncommand: x\n\ninsert_job: b\njob_type: c\ncommand: y\n"
@@ -373,94 +343,6 @@ def _posting(posted: list[tuple[str, tuple[str, ...]]]) -> Executor:
 
     machines.dispatch = spy  # type: ignore[method-assign]
     return machines
-
-
-def test_every_event_a_poster_sends_is_in_the_alphabet(tmp_path: Path) -> None:
-    """An engine run applies a SPAWN, retires a held one whose run ended, and
-    applies a KILL whose `effect_result` the crash then loses. The resume
-    replays the first two and resolves the KILL `indeterminate` (no wrapper,
-    no status). A carried applied binding posts too. Every post is `resolve`."""
-    run_root = tmp_path / "run"
-    live: list[tuple[str, tuple[str, ...]]] = []
-    engine = start_run(
-        lower_source(_JIL),
-        run_root,
-        clock=VirtualClock(start=T0),
-        adapters={"CMD": FakeAdapter({("a", 1): (3600.0, 0)}, default=None)},
-        machines=_posting(live),
-    )
-
-    async def scenario() -> None:
-        engine.inject(_ev("STARTJOB", 0, "a"))
-        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
-        drained = engine.submit_host(
-            HostCommand(verb="drain", host_id="local"),
-            Envelope(request_id="r1", expect={"host:local": 1}, epoch=engine.epoch),
-        )
-        await engine.run_until_quiescent(T0 + timedelta(minutes=2))
-        assert (await drained).decision == "applied"
-        engine.inject(_ev("STARTJOB", 3, "b"))  # held: the host routes no new work
-        await engine.run_until_quiescent(T0 + timedelta(minutes=4))
-        engine.inject(_ev("KILLJOB", 5, "b"))  # the held spawn's run ended
-        engine.inject(_ev("KILLJOB", 6, "a"))  # a kill is never held
-        await engine.run_until_quiescent(T0 + timedelta(minutes=7))
-        await engine.shutdown()
-        assert engine.journal is not None
-        engine.journal.close()
-
-    asyncio.run(scenario())
-    assert sorted(live) == sorted(
-        [(RESOLVE, ("effect.02",)), (RESOLVE, ("effect.03",)), (RESOLVE, ("effect.02",))]
-    )
-    # the crash landed between the kill and its record
-    wal = estate_wal(run_root)
-    records = read_journal(wal)
-    kept = [
-        line
-        for line, record in zip(wal.read_text().splitlines(keepends=True), records, strict=True)
-        if not (record.get("rec") == "effect_result" and ":KILL:" in record["effect_id"])
-    ]
-    assert len(kept) == len(records) - 1
-    wal.write_text("".join(kept))
-
-    resumed: list[tuple[str, tuple[str, ...]]] = []
-    machines = _posting(resumed)
-
-    async def resume() -> Engine:
-        return await resume_run(
-            lower_source(_JIL),
-            run_root,
-            clock=VirtualClock(start=T0 + timedelta(minutes=8)),
-            adapters={"CMD": FakeAdapter(default=None)},
-            machines=machines,
-        )
-
-    again = asyncio.run(resume())
-    assert again.outbox.machines is machines
-    assert sorted(resumed) == sorted(
-        [(RESOLVE, ("effect.02",)), (RESOLVE, ("effect.03",)), (RESOLVE, ("effect.04",))]
-    )
-    (kill,) = [e for e in again.outbox.effects() if e.kind == "KILL"]
-    assert again.outbox.state_of(kill.effect_id) == "indeterminate"
-    assert again.journal is not None
-    again.journal.close()
-
-    carried: list[tuple[str, tuple[str, ...]]] = []
-    bound = BoundRun(
-        job="a",
-        run_number=1,
-        effect_id=effect_id_for(1, "SPAWN", "a", 1),
-        index=1,
-        run_id=RUN_ID,
-        executor_id=LOCAL_EXECUTOR_ID,
-        generation=0,
-        run_dir="runs/a.1",
-    )
-    opened = OpenedRuntime.model_construct(outbox_pending=(), executions=(bound,))
-    box = carried_outbox(opened, at=T0, machines=_posting(carried))
-    assert carried == [(RESOLVE, ("effect.02",))]
-    assert box.state_of(bound.effect_id) == "applied"
-    assert {name for name, _ in live + resumed + carried} <= set(alphabet(CHART))
 
 
 # ---- a statechart error stops the tier (statechart-engine §5)
@@ -555,32 +437,6 @@ def test_a_chart_that_lost_an_outcome_row_raises_a_statechart_error_on_a_second_
     assert f"WAL input: the applied outcome of effect {effect.effect_id}" in lines
 
 
-def _bound(effect_id: str) -> BoundRun:
-    return BoundRun(
-        job="a",
-        run_number=1,
-        effect_id=effect_id,
-        index=1,
-        run_id=RUN_ID,
-        executor_id=LOCAL_EXECUTOR_ID,
-        generation=0,
-        run_dir="runs/a.1",
-    )
-
-
-def test_the_carried_outbox_names_the_carried_execution_a_gap_meets(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _gap(monkeypatch, tmp_path)
-    effect_id = effect_id_for(1, "SPAWN", "a", 1)
-    opened = OpenedRuntime.model_construct(outbox_pending=(), executions=(_bound(effect_id),))
-    with pytest.raises(UnhandledEvent) as raised:
-        carried_outbox(opened, at=T0)
-    assert f"carried input: the carried execution of effect {effect_id}" in (
-        str(raised.value).splitlines()
-    )
-
-
 def _report(err: str) -> list[str]:
     return [line for line in err.splitlines() if line.startswith(STATECHART_LOG_PREFIX)]
 
@@ -599,7 +455,7 @@ def _no_launch(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _serve(run_root: Path, resume: bool) -> int:
     from dsl41 import cli_run
-    from dsl41.period import runtime_profile_from_cli
+    from dsl41.run_root import runtime_profile_from_cli
 
     serve = cli_run._serve_run(
         lower_source(_RUN_JIL),
@@ -607,7 +463,6 @@ def _serve(run_root: Path, resume: bool) -> int:
         resume,
         [],
         profile=runtime_profile_from_cli(),
-        supervisor="spawn",
     )
     # bounded: an engine that swallowed the error would serve on forever
     return asyncio.run(asyncio.wait_for(serve, timeout=60))
@@ -728,48 +583,74 @@ def _applied_spawn_root(
     return result
 
 
-def test_dsl41_run_exits_7_when_a_seal_s_drain_meets_a_gap(
-    short_root: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """The seal's drain applies a queued start and dispatches its SPAWN; the
-    outcome meets the gap. The boundary posts nothing more, aborts nothing and
-    refuses nothing: the request is unanswered and the engine exits 7."""
-    run_root = short_root / "root"
-    real = Engine.run_until_quiescent
-    futures: list[Any] = []
-    aborts: list[bool] = []
-    seal_posts: list[str] = []
+def test_every_event_a_poster_sends_is_in_the_alphabet(tmp_path: Path) -> None:
+    """An engine run applies a SPAWN, retires a held one whose run ended, and
+    applies a KILL whose `effect_result` the crash then loses. The resume
+    replays the first two and resolves the KILL `indeterminate` (no wrapper,
+    no status). Every post is `resolve`."""
+    run_root = tmp_path / "run"
+    live: list[tuple[str, tuple[str, ...]]] = []
+    engine = start_run(
+        lower_source(_JIL),
+        run_root,
+        clock=VirtualClock(start=T0),
+        adapters={"CMD": FakeAdapter({("a", 1): (3600.0, 0)}, default=None)},
+        machines=_posting(live),
+    )
 
-    async def with_a_seal(self: Engine, horizon: datetime) -> list[Event]:
-        dispatch = self.machines.dispatch
+    async def scenario() -> None:
+        engine.inject(_ev("STARTJOB", 0, "a"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        drained = engine.submit_host(
+            HostCommand(verb="drain", host_id="local"),
+            Envelope(request_id="r1", expect={"host:local": 1}, epoch=engine.epoch),
+        )
+        await engine.run_until_quiescent(T0 + timedelta(minutes=2))
+        assert (await drained).decision == "applied"
+        engine.inject(_ev("STARTJOB", 3, "b"))  # held: the host routes no new work
+        await engine.run_until_quiescent(T0 + timedelta(minutes=4))
+        engine.inject(_ev("KILLJOB", 5, "b"))  # the held spawn's run ended
+        engine.inject(_ev("KILLJOB", 6, "a"))  # a kill is never held
+        await engine.run_until_quiescent(T0 + timedelta(minutes=7))
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
 
-        def spy(key: Any, event: ChartEvent) -> list[StepOutcome]:
-            if isinstance(key, _PendingSeal):
-                seal_posts.append(event.name)
-            return dispatch(key, event)
+    asyncio.run(scenario())
+    assert sorted(live) == sorted(
+        [(RESOLVE, ("effect.02",)), (RESOLVE, ("effect.03",)), (RESOLVE, ("effect.02",))]
+    )
+    # the crash landed between the kill and its record
+    wal = estate_wal(run_root)
+    records = read_journal(wal)
+    kept = [
+        line
+        for line, record in zip(wal.read_text().splitlines(keepends=True), records, strict=True)
+        if not (record.get("rec") == "effect_result" and ":KILL:" in record["effect_id"])
+    ]
+    assert len(kept) == len(records) - 1
+    wal.write_text("".join(kept))
 
-        self.machines.dispatch = spy  # type: ignore[method-assign]
-        self.inject(Event(at=self.clock.now(), kind="STARTJOB", payload={"job": "j"}))
-        futures.append(self.submit_seal(_request(self, _stage(run_root, C2_JIL))))
-        return await real(self, horizon)
+    resumed: list[tuple[str, tuple[str, ...]]] = []
+    machines = _posting(resumed)
 
-    def abort(self: Engine) -> None:
-        aborts.append(True)
+    async def resume() -> Engine:
+        return await resume_run(
+            lower_source(_JIL),
+            run_root,
+            clock=VirtualClock(start=T0 + timedelta(minutes=8)),
+            adapters={"CMD": FakeAdapter(default=None)},
+            machines=machines,
+        )
 
-    monkeypatch.setattr(Engine, "run_until_quiescent", with_a_seal)
-    monkeypatch.setattr(Engine, "abort_boundary", abort)
-    _no_launch(monkeypatch)
-    _gap(monkeypatch, tmp_path)
-    assert _serve(run_root, False) == 7
-    report = _report(capsys.readouterr().err)
-    assert report[0] == _gap_line(report)
-    assert seal_posts == [PARKED]  # the drain met it, with the barrier parked
-    assert aborts == []
-    (future,) = futures
-    assert not future.done()  # not refused, not answered
-    records = read_journal(wal_path(run_root, 1))
-    assert all(record["rec"] != "seal" for record in records)
-    assert not any(r["rec"] == "effect_result" for r in records)
+    again = asyncio.run(resume())
+    assert again.outbox.machines is machines
+    assert sorted(resumed) == sorted(
+        [(RESOLVE, ("effect.02",)), (RESOLVE, ("effect.03",)), (RESOLVE, ("effect.04",))]
+    )
+    (kill,) = [e for e in again.outbox.effects() if e.kind == "KILL"]
+    assert again.outbox.state_of(kill.effect_id) == "indeterminate"
+    assert again.journal is not None
+    again.journal.close()
+
+    assert {name for name, _ in live + resumed} <= set(alphabet(CHART))

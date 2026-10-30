@@ -8,9 +8,9 @@ The block tells a refusal from a rejection, answers an exact retry from the earl
 
 ## Fate
 
-The contract carries over: [concurrency-model §1](../concurrency-model.md#1-storage--frozen) names capabilities, not a file format.
+The contract carries over: concurrency-model §1 (`concurrency-model.md`, retired in 2.0.0) names capabilities, not a file format.
 Most of `runner_admission.py` carries over as it is: the envelope, the fingerprint, the frontiers and `apply_attempt` hold no storage.
-`DecisionIndex` is the part that moves with the store. [Concurrency-model §1](../concurrency-model.md#1-storage--frozen) says decision lookup by `request_id` is the `DecisionIndex`, so a store that answers the lookup itself would replace or reduce it.
+`DecisionIndex` is the part that moves with the store. Concurrency-model §1 (`concurrency-model.md`, retired in 2.0.0) says decision lookup by `request_id` is the `DecisionIndex`, so a store that answers the lookup itself would replace or reduce it.
 The writes and the rebuild in `runner_journal.py` would change too.
 Storage capabilities needed:
 
@@ -32,7 +32,7 @@ Monotone epoch allocation is not listed. Step 2 compares the envelope's epoch wi
 - `precondition_reason` checks [`expect`](../glossary.md#expect); `stale_reason` is the stale-completion gate.
 - `Engine._admit_and_apply` in `runner.py` strings the steps together. `Engine.submit` and `Engine.submit_host` return an awaitable decision.
 - WAL records: `input`, `host` or `advance` at step 4, and `decision` at step 7.
-- On the wire, the four outcomes are those of [control-protocol §3](../control-protocol.md#3-mutating-verbs-sendevent-host-seal).
+- On the wire, the four outcomes are those of [control-protocol §3](../control-protocol.md#3-mutating-verbs-sendevent-host).
 - A refusal raises `AdmissionRefused`, or `EnvelopeError` from `parse_envelope`; each carries a required [code](../glossary.md#code). A rejection's `ApplyResult` carries its code too. The codes are in `runner_codes.py`, and the table is [control-protocol §2](../control-protocol.md#2-transport-and-framing-frozen)'s.
 
 ## States
@@ -43,29 +43,29 @@ An id before its attempt line has no instance: deduplication and every refusal b
 
 ## Invariants
 
-- The steps and their order are [concurrency-model §4](../concurrency-model.md#4-admission-and-application)'s. This card does not restate them.
-- Every external mutation names the revision it read. There is no opt-out, and `parse_envelope` is the one enforcement point ([concurrency-model §0](../concurrency-model.md#0-the-invariant); [DL-90](../decision-log.md)).
-- A refusal leaves nothing in the log. A rejection is a decision at an index ([DL-90](../decision-log.md); [control-protocol §3](../control-protocol.md#3-mutating-verbs-sendevent-host-seal)).
-- `expect` and `epoch` are in the fingerprint, so one verb at two revisions is two commands ([DL-90](../decision-log.md); [control-protocol §3](../control-protocol.md#3-mutating-verbs-sendevent-host-seal)).
-- The epoch check comes after deduplication ([concurrency-model §4](../concurrency-model.md#4-admission-and-application) step 2; [DL-90](../decision-log.md)).
+- The steps and their order are concurrency-model §4 (`concurrency-model.md`, retired in 2.0.0)'s. This card does not restate them.
+- Every external mutation names the revision it read. There is no opt-out, and `parse_envelope` is the one enforcement point (concurrency-model §0 (`concurrency-model.md`, retired in 2.0.0); [DL-90](../decision-log.md)).
+- A refusal leaves nothing in the log. A rejection is a decision at an index ([DL-90](../decision-log.md); [control-protocol §3](../control-protocol.md#3-mutating-verbs-sendevent-host)).
+- `expect` and `epoch` are in the fingerprint, so one verb at two revisions is two commands ([DL-90](../decision-log.md); [control-protocol §3](../control-protocol.md#3-mutating-verbs-sendevent-host)).
+- The epoch check comes after deduplication (concurrency-model §4 (`concurrency-model.md`, retired in 2.0.0) step 2; [DL-90](../decision-log.md)).
 - A collision refusal carries the decision the id already holds ([DL-217](../decision-log.md)).
 - A decided id has no instance. The index answers its exact retry from the stored decision, and refuses its reuse carrying that decision, before any post ([DL-217](../decision-log.md); CM-05).
-- Every `ok: false` answer carries a stable code. A rejected `decision` stores its code, so an exact retry answers the same code. `Journal.decision` refuses a rejection whose code is outside `STORED_CODES` ([DL-272](../decision-log.md); [period-model §2.3](../period-model.md#23-decision--one-atomic-batch)).
+- Every `ok: false` answer carries a stable code. A rejected `decision` stores its code, so an exact retry answers the same code. `Journal.decision` refuses a rejection whose code is outside `STORED_CODES` ([DL-272](../decision-log.md); period-model §2.3 (`period-model.md`, retired in 2.0.0)).
 - The step-4 batch is one line ([DL-111](../decision-log.md)), and so is the step-7 batch ([DL-118](../decision-log.md)).
-- A timer that fires inside an input's own batch does not invalidate its precondition. One due strictly earlier fires first and does ([concurrency-model §0](../concurrency-model.md#0-the-invariant); [DL-232](../decision-log.md)).
+- A timer that fires inside an input's own batch does not invalidate its precondition. One due strictly earlier fires first and does (concurrency-model §0 (`concurrency-model.md`, retired in 2.0.0); [DL-232](../decision-log.md)).
 - The stale-completion gate judges only engine-made completions ([runner-design §4](../runner-design.md#4-engine-loop--single-writer); [DL-235](../decision-log.md)).
-- A durable decision is never re-decided on replay; an admitted input with no decision is ([concurrency-model §4](../concurrency-model.md#4-admission-and-application), "Replay is two-pass").
+- A durable decision is never re-decided on replay; an admitted input with no decision is (concurrency-model §4 (`concurrency-model.md`, retired in 2.0.0), "Replay is two-pass").
 
 ## Failure and recovery
 
-- Crash after step 4 and before step 7: replay applies the attempt through the gate ([concurrency-model §4](../concurrency-model.md#4-admission-and-application)). Its effects were never recorded. A command start it decided fails at resume, and a file watch starts again ([DL-102](../decision-log.md); `_resume_untraced_starts`).
-- An id admitted but undecided at lookup raises `EngineError`, and the engine stops ([concurrency-model §4](../concurrency-model.md#4-admission-and-application) step 2).
+- Crash after step 4 and before step 7: replay applies the attempt through the gate (concurrency-model §4 (`concurrency-model.md`, retired in 2.0.0)). Its effects were never recorded. A command start it decided fails at resume, and a file watch starts again ([DL-102](../decision-log.md); `_resume_untraced_starts`).
+- An id admitted but undecided at lookup raises `EngineError`, and the engine stops (concurrency-model §4 (`concurrency-model.md`, retired in 2.0.0) step 2).
 - A gap in the chart is a `StatechartError`. Met at an attempt or a decision in the loop or a seal's drain, or at the seal's readiness lookup, it stops the engine with exit 7 before any further write; in replay its report names the WAL record. So are three faults the index refuses before any post, each naming `admission` and the request id: a decision for an id with no attempt in flight, a second attempt for an id in flight, and an attempt line for an id that already holds a decision. Only an engine bug or a corrupt log produces them; in replay the report names the WAL record ([statechart-engine §5](../statechart-engine.md#5-the-step-and-the-worklist)).
-- A stamp earlier than the frontier, or a decision out of index order, raises `EngineError` from `Frontiers`, and the engine stops. During a seal, a request whose stamp is behind the frontier is answered refused with `clock_regressed` instead. An engine-made input in that case still stops the engine, so resume observes it again ([concurrency-model §4](../concurrency-model.md#4-admission-and-application); [DL-274](../decision-log.md)).
-- An exception after the index is taken and before its decision, outbox entries and answer are all done stops the engine, and so does a failed WAL append. A seal does not turn either into a refusal: it [fail-stops](../glossary.md#fail-stop), and `Engine._applying` and `Journal.append_unfinished` record the window ([period-model §7](../period-model.md#7-the-seal-operation); [DL-274](../decision-log.md)).
+- A stamp earlier than the frontier, or a decision out of index order, raises `EngineError` from `Frontiers`, and the engine stops. During a seal, a request whose stamp is behind the frontier is answered refused with `clock_regressed` instead. An engine-made input in that case still stops the engine, so resume observes it again (concurrency-model §4 (`concurrency-model.md`, retired in 2.0.0); [DL-274](../decision-log.md)).
+- An exception after the index is taken and before its decision, outbox entries and answer are all done stops the engine, and so does a failed WAL append. A seal does not turn either into a refusal: it [fail-stops](../glossary.md#fail-stop), and `Engine._applying` and `Journal.append_unfinished` record the window (period-model §7 (`period-model.md`, retired in 2.0.0); [DL-274](../decision-log.md)).
 - A replay whose revisions differ from the logged decision raises "replay diverged" from `apply_attempt`. A changed gate re-decides a crash-window attempt differently, which is why [DL-235](../decision-log.md) moved the state-machine version.
-- A leader that lost its lock appends nothing: `Journal._write` refuses first ([concurrency-model §1](../concurrency-model.md#1-storage--frozen)).
-- A caller with no decision after 5 s is told the outcome is unknown, and retries under the same id ([control-protocol §3](../control-protocol.md#3-mutating-verbs-sendevent-host-seal)).
+- A leader that lost its lock appends nothing: `Journal._write` refuses first (concurrency-model §1 (`concurrency-model.md`, retired in 2.0.0)).
+- A caller with no decision after 5 s is told the outcome is unknown, and retries under the same id ([control-protocol §3](../control-protocol.md#3-mutating-verbs-sendevent-host)).
 
 ## Owning modules
 
@@ -96,15 +96,11 @@ An id before its attempt line has no instance: deduplication and every refusal b
 - `test_the_stale_gate_rejects_a_completion_for_a_row_an_operator_set_inactive`
 - `test_a_rejection_is_written_with_its_code_and_one_without_is_refused`
 - `test_a_rejected_retry_answers_the_stored_code_and_a_record_without_one_omits_it`
-- `test_pr28b_an_exception_while_a_drained_attempt_applies_fail_stops`
-- `test_pr28b_a_clock_regression_in_the_drain_still_refuses`
-- `test_pr28b_a_clock_regression_on_an_engine_made_input_in_the_drain_fail_stops`
 - `test_the_completeness_table_is_section_4`
 - `test_a_decided_id_never_reaches_the_chart`
 - `test_every_event_a_poster_sends_is_in_the_alphabet`
 - `test_replay_keeps_one_instance_open_where_the_lines_interleave`
 - `test_dsl41_run_exits_7_when_a_decision_meets_a_gap_live_and_at_replay`
-- `test_dsl41_run_exits_7_when_the_seal_s_readiness_lookup_meets_a_gap`
 - `test_a_decision_with_no_open_instance_raises_and_writes_nothing`
 - `test_a_second_attempt_for_an_id_in_flight_carries_the_instance_s_facts`
 - `test_a_second_attempt_for_a_decided_id_is_refused_before_any_start`

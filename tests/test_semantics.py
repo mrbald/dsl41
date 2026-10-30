@@ -20,25 +20,18 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
-import typer
 from pydantic import ValidationError
+from test_runner_leadership import engine
 from typer.testing import CliRunner
 
+from test_period_identity import GOLDEN_RUNTIME_HASH, _full_profile
 from dsl41 import semantics
 from dsl41.canon import canonical_bytes
-from dsl41.classify import (
-    ARMED_ASSUMPTION,
-    SWITCH,
-    Baseline,
-    CarriedJob,
-    CarriedState,
-    classify,
-)
 from dsl41.cli import app
 from dsl41.conditions import ExitCodeAtom, StatusAtom, parse_condition
 from dsl41.ir import LoweringError, lower_source
-from dsl41.oracle_state import Event, JobRuntime
-from dsl41.period import (
+from dsl41.oracle_state import Event
+from dsl41.run_root import (
     EMPTY_BUNDLE_HASH,
     RuntimeProfile,
     estate_wal,
@@ -63,10 +56,7 @@ from dsl41.runner_startup import (
     _derive_runtime_profile,
     resume_run,
     start_run,
-    wire_from_profile,
 )
-from test_period_identity import GOLDEN_RUNTIME_HASH, _full_profile
-from test_runner_leadership import engine
 
 T0 = datetime(2026, 7, 1, 8, 0)
 ORDINARY = {"ice-lookback": "ordinary"}
@@ -255,18 +245,6 @@ def test_pr15a_an_explicit_default_is_the_same_profile_as_no_override() -> None:
 # ------------------------------------------------------- hash and manifest
 
 
-def test_an_empty_semantics_map_is_written_as_an_empty_object() -> None:
-    """ss3.2: a typed field is always present and an empty collection is
-    `{}`. The default profile's bytes and hash are pinned by hand, and so is
-    the fully populated golden vector."""
-    assert canonical_bytes(RuntimeProfile().model_dump(mode="json")) == _DEFAULT_PROFILE_BYTES
-    assert runtime_hash(RuntimeProfile()) == (
-        "sha256:" + hashlib.sha256(_DEFAULT_PROFILE_BYTES).hexdigest()
-    )
-    assert runtime_hash(_full_profile()) == GOLDEN_RUNTIME_HASH
-    assert json.loads(RuntimeProfile().model_dump_json())["semantics"] == {}
-
-
 def test_an_override_is_in_the_bytes_and_moves_the_hash() -> None:
     profile = RuntimeProfile(semantics=ORDINARY)
     data = json.loads(canonical_bytes(profile.model_dump(mode="json")))
@@ -325,8 +303,8 @@ def test_a_manifest_refuses_a_missing_profile_field(tmp_path: Path, field: str) 
 def _start_iced(
     run_root: Path, profile: RuntimeProfile, text: str = _ICED_JIL, *, scheduled: bool = False
 ):
-    from dsl41.boundary import stage_period
     from dsl41.ast_jil import parse
+    from dsl41.run_root import stage_period
 
     jil = run_root.parent / "iced.jil"
     jil.write_text(text)
@@ -505,7 +483,7 @@ def test_an_engine_refuses_switches_that_disagree_with_its_pin(tmp_path: Path) -
                 catalog,
                 clock=VirtualClock(start=T0),
                 adapters={"CMD": FakeAdapter(default=None)},
-                estate=live.estate,
+                manifest=live.manifest,
                 semantics=semantics.DEFAULTS,
             )
     finally:
@@ -616,113 +594,10 @@ def test_a_resume_with_a_different_switch_refuses(tmp_path: Path) -> None:
     from dsl41.cli_run import _resume_profile_error
 
     _write_manifest(tmp_path, runtime_profile_from_cli(semantics=ORDINARY))
-    refused = _resume_profile_error(tmp_path, runtime_profile_from_cli(), None)
+    refused = _resume_profile_error(tmp_path, runtime_profile_from_cli())
     assert refused is not None and "runtime-profile mismatch" in refused
     assert "semantics" in refused
-    assert (
-        _resume_profile_error(tmp_path, runtime_profile_from_cli(semantics=ORDINARY), None) is None
-    )
-
-
-def _switch_only_boundary(estate: str, carried: dict[str, CarriedJob]):
-    """C1 and C2 are the same catalog; only `ice-lookback` flips."""
-    catalog = lower_source(estate)
-    return classify(
-        closing=Baseline(catalog=catalog, profile=RuntimeProfile()),
-        opening=Baseline(catalog=catalog, profile=RuntimeProfile(semantics=ORDINARY)),
-        carried=CarriedState(jobs=carried, now=T0),
-    )
-
-
-_ICED = CarriedJob(row=JobRuntime(status="INACTIVE", on_ice=True))
-_SWITCH_NODE = SWITCH + "ice-lookback"
-
-
-def test_a_switch_flip_refuses_a_running_box_whose_success_reads_a_lookback_atom() -> None:
-    """ss10.2, DL-252: under `true` the box completes SUCCESS once `m`
-    succeeds (f(x, 0) on the iced `x` reads true); under `ordinary` it stays
-    RUNNING. The run in flight changes, so the boundary refuses it, while a
-    job with no lookback atom is untouched."""
-    estate = (
-        "insert_job: x\njob_type: c\nmachine: m1\ncommand: x\n\n"
-        "insert_job: bx\njob_type: b\nbox_success: s(m) & f(x, 0)\n\n"
-        "insert_job: m\njob_type: c\nmachine: m1\ncommand: y\nbox_name: bx\n"
-    )
-    result = _switch_only_boundary(
-        estate,
-        {
-            "x": _ICED,
-            "bx": CarriedJob(row=JobRuntime(status="RUNNING", status_at=T0)),
-            "m": CarriedJob(row=JobRuntime(status="RUNNING", status_at=T0)),
-        },
-    )
-    assert _SWITCH_NODE in result.changed_nodes
-    assert result.by_job["bx"].verdict == "R"
-    assert _SWITCH_NODE in result.by_job["bx"].changed
-    assert result.by_job["x"].verdict == "carry"
-    assert result.by_job["x"].changed == ()
-
-
-def test_a_switch_flip_carries_an_armed_job_with_the_armed_assumption() -> None:
-    """ss10.3, DL-252: an armed job gated on f(a, 0) & s(g), `a` iced, reads
-    its gate true under `true` and false under `ordinary`. It is A with the
-    armed assumption, and the boundary-truth diff reports the flip although
-    nothing in the catalog moved."""
-    estate = (
-        "insert_job: a\njob_type: c\nmachine: m1\ncommand: x\n\n"
-        "insert_job: g\njob_type: c\nmachine: m1\ncommand: y\n\n"
-        "insert_job: j\njob_type: c\nmachine: m1\ncommand: z\ncondition: f(a, 0) & s(g)\n"
-    )
-    result = _switch_only_boundary(
-        estate,
-        {
-            "a": _ICED,
-            "g": CarriedJob(row=JobRuntime(status="SUCCESS", status_at=T0, last_end_at=T0)),
-            "j": CarriedJob(row=JobRuntime(status="INACTIVE", armed=True)),
-        },
-    )
-    verdict = result.by_job["j"]
-    assert verdict.verdict == "A"
-    assert verdict.assumption == ARMED_ASSUMPTION
-    assert verdict.changed == (_SWITCH_NODE,)
-    assert [(f.job, f.before, f.after) for f in result.readiness_flips] == [("j", True, False)]
-
-
-def test_a_queued_recheck_flip_carries_a_queued_job_and_refuses_its_running_box() -> None:
-    """ss10.2, DL-257: a flip of `queued-recheck` changes whether a queued
-    job starts when it leaves the queue. A standalone QUE_WAIT row is latent
-    intent, so it is A; a running box with a queued member is R, since the
-    box depends on its members; a job that cannot queue is untouched."""
-    estate = (
-        "insert_resource: LOCK\nres_type: R\namount: 1\n\n"
-        "insert_job: q\njob_type: c\nmachine: m1\ncommand: x\nresources: (LOCK, QUANTITY=1)\n\n"
-        "insert_job: bx\njob_type: b\n\n"
-        "insert_job: m\njob_type: c\nmachine: m1\ncommand: y\nbox_name: bx\n"
-        "resources: (LOCK, QUANTITY=1)\n\n"
-        "insert_job: other\njob_type: c\nmachine: m1\ncommand: z\n"
-    )
-    catalog = lower_source(estate)
-    result = classify(
-        closing=Baseline(catalog=catalog, profile=RuntimeProfile()),
-        opening=Baseline(catalog=catalog, profile=RuntimeProfile(semantics=RECHECK)),
-        carried=CarriedState(
-            jobs={
-                "q": CarriedJob(row=JobRuntime(status="QUE_WAIT", status_at=T0, waiter_seq=1)),
-                "bx": CarriedJob(row=JobRuntime(status="RUNNING", status_at=T0)),
-                "m": CarriedJob(row=JobRuntime(status="QUE_WAIT", status_at=T0, waiter_seq=2)),
-                "other": CarriedJob(row=JobRuntime(status="RUNNING", status_at=T0)),
-            },
-            now=T0,
-        ),
-    )
-    node = SWITCH + "queued-recheck"
-    assert node in result.changed_nodes
-    assert result.by_job["q"].verdict == "A"
-    assert result.by_job["q"].changed == (node,)
-    assert result.by_job["bx"].verdict == "R"
-    assert node in result.by_job["bx"].changed
-    assert result.by_job["other"].verdict == "carry"
-    assert result.by_job["other"].changed == ()
+    assert _resume_profile_error(tmp_path, runtime_profile_from_cli(semantics=ORDINARY)) is None
 
 
 def test_ice_lookback_affects_exactly_the_jobs_with_a_lookback_atom() -> None:
@@ -812,54 +687,6 @@ def test_fw_existence_immediate_needs_both_the_switch_and_no_minimum_size() -> N
     assert semantics.fw_existence_immediate(wm, "stable") is False
 
 
-def test_a_fw_existence_flip_reaches_exactly_the_no_min_size_fw_jobs() -> None:
-    """ss10.2: the switch's own node reaches an FW job with no
-    `watch_file_min_size` and not one with a minimum size -- the same
-    mechanism `ice-lookback`'s node already proves above."""
-    catalog = lower_source(_FW_ESTATE)
-    result = classify(
-        closing=Baseline(catalog=catalog, profile=RuntimeProfile()),
-        opening=Baseline(
-            catalog=catalog, profile=RuntimeProfile(semantics={"fw-existence": "immediate"})
-        ),
-        carried=CarriedState(
-            jobs={
-                name: CarriedJob(row=JobRuntime(status="INACTIVE"))
-                for name in ("w", "wz", "wm", "plain")
-            },
-            now=T0,
-        ),
-    )
-    node = SWITCH + "fw-existence"
-    assert node in result.changed_nodes
-    assert result.by_job["w"].changed == (node,)
-    assert result.by_job["wz"].changed == (node,)
-    assert result.by_job["wm"].changed == ()
-    assert result.by_job["plain"].changed == ()
-
-
-def test_fw_existence_reaches_the_adapter_from_the_pinned_profile(tmp_path: Path) -> None:
-    """DL-258: `fw-existence` reaches `FileWatcherAdapter` the same way
-    `fw_default_interval_us` does, through `wire_from_profile` -- not a
-    second read of the profile inside the adapter."""
-    from dsl41.runner_adapters import FileWatcherAdapter
-    from dsl41.runner_startup import wire_from_profile
-
-    catalog = lower_source("insert_job: w\njob_type: f\nmachine: m1\nwatch_file: /tmp/x\n")
-
-    async def wire(profile: RuntimeProfile) -> str:
-        wiring = await wire_from_profile(tmp_path, catalog, profile, start=T0, supervisor="spawn")
-        try:
-            fw = wiring.adapters["FW"]
-            assert isinstance(fw, FileWatcherAdapter)
-            return fw.existence
-        finally:
-            await wiring.close()
-
-    assert asyncio.run(wire(RuntimeProfile(semantics={"fw-existence": "immediate"}))) == "immediate"
-    assert asyncio.run(wire(RuntimeProfile())) == "stable"
-
-
 # ------------------------------------------------ wekr-first-week (DL-259)
 
 PARTIAL = {"wekr-first-week": "partial"}
@@ -892,42 +719,6 @@ def test_wekr_first_week_affects_exactly_the_calendars_with_a_wekr_token() -> No
     assert not any(entry.affects(job, catalog) for job in catalog.jobs.values())
     ice = semantics.REGISTRY["ice-lookback"]
     assert not any(ice.affects_calendar(cal) for cal in catalog.calendars.values())
-
-
-def test_a_wekr_switch_flip_refuses_a_running_job_on_a_wekr_calendar() -> None:
-    """ss10.2, DL-259: the flip moves `wk`'s week 2 from January 13-19 2014
-    to January 6-12, so the job on it reaches the switch through its
-    calendar and a running one is refused. The job on a calendar with no
-    WEKR token does not reach the switch and carries."""
-    catalog = lower_source(_WEKR_JIL)
-    running = CarriedJob(row=JobRuntime(status="RUNNING", status_at=T0))
-    result = classify(
-        closing=Baseline(catalog=catalog, profile=RuntimeProfile()),
-        opening=Baseline(catalog=catalog, profile=RuntimeProfile(semantics=PARTIAL)),
-        carried=CarriedState(jobs={"wj": running, "pj": running}, now=T0),
-    )
-    node = SWITCH + "wekr-first-week"
-    assert node in result.changed_nodes
-    assert result.by_job["wj"].verdict == "R"
-    assert result.by_job["wj"].changed == (node,)
-    assert result.by_job["pj"].verdict == "carry"
-    assert result.by_job["pj"].changed == ()
-
-
-def test_a_wekr_respelling_across_a_boundary_carries_a_running_job() -> None:
-    """`WEKRMon#02` and `WEKR1#2` are one calendar (DL-259), so a boundary
-    that only respells the anchor and the padding moves nothing."""
-    running = CarriedJob(row=JobRuntime(status="RUNNING", status_at=T0))
-    result = classify(
-        closing=Baseline(catalog=lower_source(_WEKR_JIL), profile=RuntimeProfile()),
-        opening=Baseline(
-            catalog=lower_source(_WEKR_JIL.replace("WEKR1#02", "WEKRMon#2")),
-            profile=RuntimeProfile(),
-        ),
-        carried=CarriedState(jobs={"wj": running}, now=T0),
-    )
-    assert result.by_job["wj"].verdict == "carry"
-    assert "calendar:wk" not in result.changed_nodes
 
 
 def test_the_scheduler_compiles_wekr_calendars_under_its_switches() -> None:
@@ -1095,36 +886,6 @@ def test_a_resume_with_a_scheduler_off_the_pin_refuses_before_the_leader_record(
     assert read_journal(estate_wal(run_root)) == before
 
 
-def test_run_without_a_staged_bundle_wires_and_pins_the_calendar_switch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`_serve_run` with no parsed sources stages nothing; `wire_from_profile`
-    builds the scheduler under the profile's switches, and genesis pins
-    what it built."""
-    from dsl41 import runner_startup
-    from dsl41.cli_run import _serve_run
-
-    real_start_run = runner_startup.start_run
-    seen: dict[str, object] = {}
-
-    def genesis_then_stop(*args: object, **kwargs: object):
-        live = real_start_run(*args, **kwargs)  # type: ignore[arg-type]
-        seen["scheduler"] = live.scheduler.semantics
-        seen["engine"] = live.oracle.semantics
-        live.journal.close()
-        raise EngineError("pin test: stop before the loop")
-
-    monkeypatch.setattr(runner_startup, "start_run", genesis_then_stop)
-    run_root = tmp_path / "root"
-    profile = RuntimeProfile(semantics=BOTH)
-    catalog = lower_source(_WEKR_JIL + "\n" + _ICED_JIL)
-    with pytest.raises(EngineError, match="stop before the loop"):
-        asyncio.run(_serve_run(catalog, run_root, False, [], profile=profile, supervisor="spawn"))
-    assert seen == {"scheduler": semantics.resolve(BOTH), "engine": semantics.resolve(BOTH)}
-    manifest = read_period_manifest(run_root)
-    assert manifest is not None and manifest.runtime_profile.semantics == BOTH
-
-
 @pytest.mark.parametrize("claimed", [False, True])
 def test_a_rehearse_root_pins_every_switch_staged_or_not(tmp_path: Path, claimed: bool) -> None:
     """A fresh root stages the launch options; a root holding only the
@@ -1132,7 +893,7 @@ def test_a_rehearse_root_pins_every_switch_staged_or_not(tmp_path: Path, claimed
     Either way both switches are pinned and the oracle runs `ordinary`:
     the iced producer's f(prod, 0) reads false and `cons` never starts.
     The unstaged path used to pin only the calendar switch."""
-    from dsl41.boundary import claim_root
+    from dsl41.run_root import claim_root
 
     run_root = tmp_path / "run"
     if claimed:
@@ -1157,7 +918,7 @@ def test_a_rehearse_rerun_over_a_claimed_root_pins_the_calendar_switch(tmp_path:
     """A root holding only the genesis sentinel (a crash before the log) is
     not unused, so the rehearsal stages nothing and genesis completes it.
     The pin is the calendar switch the rehearsal's scheduler runs."""
-    from dsl41.boundary import claim_root
+    from dsl41.run_root import claim_root
 
     run_root = tmp_path / "run"
     run_root.mkdir()
@@ -1281,126 +1042,6 @@ def test_a_box_wide_switch_affects_exactly_the_boxes(switch: str) -> None:
     affects = semantics.REGISTRY[switch].affects
     catalog = lower_source(_BOX_SWITCH_JIL)
     assert {name for name, job in catalog.jobs.items() if affects(job, catalog)} == {"b", "sb"}
-
-
-@pytest.mark.parametrize(
-    ("switch", "value"),
-    [("off-ice-in-running-box", "same-run"), ("box-terminator-on-terminated", "false")],
-)
-def test_a_box_switch_flip_reaches_a_running_box_through_its_member(
-    switch: str, value: str
-) -> None:
-    """ss10.2, SEM-14, SEM-20: a flip of either box switch changes the
-    member it names, and a box depends on every member, so the running box
-    is refused; the job outside every box is not changed."""
-    catalog = lower_source(_BOX_SWITCH_JIL)
-    closing = Baseline(catalog=catalog, profile=RuntimeProfile())
-    opening = Baseline(catalog=catalog, profile=RuntimeProfile(semantics={switch: value}))
-    node = SWITCH + switch
-    result = classify(
-        closing=closing,
-        opening=opening,
-        carried=CarriedState(
-            jobs={
-                "b": CarriedJob(row=JobRuntime(status="RUNNING", status_at=T0)),
-                "bt": CarriedJob(row=JobRuntime(status="RUNNING", status_at=T0)),
-            },
-            now=T0,
-        ),
-    )
-    assert node in result.by_job["bt"].changed
-    assert result.by_job["b"].verdict == "R"
-    assert node not in result.by_job["lone"].changed
-
-
-@pytest.mark.parametrize(
-    ("switch", "value"), [("box-start-all-members-out", "wait"), ("idle-box-iced-member", "vote")]
-)
-def test_a_box_wide_switch_flip_refuses_a_running_box_and_its_member(
-    switch: str, value: str
-) -> None:
-    """ss10.2, SEM-11, SEM-15: a flip of `box-start-all-members-out` or
-    `idle-box-iced-member` changes every box, so a running box is refused,
-    and a member carried with it inherits the change through the
-    classifier's box edge and is refused too; a job outside every box is
-    not changed."""
-    catalog = lower_source(_BOX_SWITCH_JIL)
-    closing = Baseline(catalog=catalog, profile=RuntimeProfile())
-    opening = Baseline(catalog=catalog, profile=RuntimeProfile(semantics={switch: value}))
-    node = SWITCH + switch
-    result = classify(
-        closing=closing,
-        opening=opening,
-        carried=CarriedState(
-            jobs={
-                "b": CarriedJob(row=JobRuntime(status="RUNNING", status_at=T0)),
-                "m": CarriedJob(row=JobRuntime(status="RUNNING", status_at=T0)),
-            },
-            now=T0,
-        ),
-    )
-    assert node in result.by_job["b"].changed
-    assert node in result.by_job["sb"].changed
-    assert result.by_job["b"].verdict == "R"
-    assert node in result.by_job["m"].changed
-    assert result.by_job["m"].verdict == "R"
-    assert node not in result.by_job["lone"].changed
-
-
-def test_a_dst_start_times_flip_refuses_a_running_job_and_carries_a_quiet_one() -> None:
-    """DL-260: a flip changes where a job's live ticks land, so a running
-    job it reaches is refused (R), as a base-zone change does -- not the
-    recorded-assumption reading. The same job, not live, only carries the
-    changed switch node."""
-    catalog = lower_source(
-        "insert_job: st\njob_type: c\nmachine: m1\ncommand: x\n"
-        'date_conditions: 1\nstart_times: "02:05"\ntimezone: America/New_York\n'
-    )
-    closing = Baseline(catalog=catalog, profile=RuntimeProfile())
-    opening = Baseline(
-        catalog=catalog, profile=RuntimeProfile(semantics={"dst-start-times": "fold0"})
-    )
-    node = SWITCH + "dst-start-times"
-
-    running = classify(
-        closing=closing,
-        opening=opening,
-        carried=CarriedState(
-            jobs={"st": CarriedJob(row=JobRuntime(status="RUNNING", status_at=T0))}, now=T0
-        ),
-    )
-    assert running.by_job["st"].verdict == "R"
-    assert node in running.by_job["st"].changed
-
-    quiet = classify(
-        closing=closing,
-        opening=opening,
-        carried=CarriedState(jobs={"st": CarriedJob(row=JobRuntime(status="INACTIVE"))}, now=T0),
-    )
-    assert quiet.by_job["st"].verdict != "R"
-    assert node in quiet.by_job["st"].changed
-
-
-def test_wire_from_profile_builds_the_scheduler_under_the_profile_s_switch(
-    tmp_path: Path,
-) -> None:
-    """DL-260: `run`, its resume and the offline sealer build the scheduler
-    here, so it reads the period's dst-start-times value, as the engine's
-    oracle does."""
-    catalog = lower_source(
-        "insert_job: dj\njob_type: c\ncommand: x\nmachine: m1\n"
-        'date_conditions: 1\nstart_times: "02:05"\n'
-    )
-
-    async def wired(profile: RuntimeProfile) -> str:
-        wiring = await wire_from_profile(tmp_path, catalog, profile, start=T0, supervisor="spawn")
-        await wiring.close()
-        assert wiring.scheduler is not None
-        return wiring.scheduler.semantics.dst_start_times
-
-    assert asyncio.run(wired(RuntimeProfile())) == "vendor"
-    fold0 = runtime_profile_from_cli(semantics={"dst-start-times": "fold0"})
-    assert asyncio.run(wired(fold0)) == "fold0"
 
 
 # ------------------------------------------------------------------ the CLI
@@ -1537,50 +1178,6 @@ def test_a_staged_dst_pin_off_the_scheduler_writes_nothing(
     assert manifest is not None and manifest.runtime_profile.semantics == FOLD0
 
 
-@pytest.mark.parametrize("resume_switches", [None, FOLD0], ids=["vendor-scheduler", "fold0"])
-def test_a_resume_with_a_scheduler_off_the_dst_pin_writes_nothing(
-    tmp_path: Path, resume_switches: dict[str, str] | None
-) -> None:
-    """DL-260, period-model PR-22b: a period pinned fold0, resumed with a
-    default (vendor) scheduler and no declared profile, is refused by the
-    drift gate: no successor segment, the anchor unchanged, and no leader
-    record. The engine check used to refuse it only after the leader record
-    was appended. The twin, a fold0 scheduler, resumes and appends one."""
-    from dsl41.boundary import EstateAnchor, default_anchor_dir
-    from dsl41.period import wal_segments
-
-    run_root = tmp_path / "run"
-    catalog, live = _dst_genesis(run_root, FOLD0)
-    _close(live)
-    before = read_journal(estate_wal(run_root))
-    segments = wal_segments(run_root)
-    anchor = EstateAnchor(default_anchor_dir(run_root)).read()
-
-    def resume():
-        return asyncio.run(
-            resume_run(
-                catalog,
-                run_root,
-                clock=VirtualClock(start=T0 + timedelta(minutes=1)),
-                adapters={"CMD": FakeAdapter(default=None)},
-                scheduler=Scheduler(
-                    catalog, start=T0, semantics=semantics.resolve(resume_switches)
-                ),
-            )
-        )
-
-    if resume_switches is None:
-        with pytest.raises(EngineError, match="runtime-profile mismatch on semantics"):
-            resume()
-        assert read_journal(estate_wal(run_root)) == before
-        assert wal_segments(run_root) == segments
-        assert EstateAnchor(default_anchor_dir(run_root)).read() == anchor
-        return
-    _close(resume())
-    after = read_journal(estate_wal(run_root))
-    assert [r["rec"] for r in after[len(before) :]][:1] == ["leader"]
-
-
 @pytest.mark.parametrize("switch", ["vendor", "fold0"])
 @pytest.mark.parametrize("rooted", [False, True], ids=["bare", "run-root"])
 def test_rehearse_ticks_under_the_dst_start_times_switch(
@@ -1671,15 +1268,6 @@ def test_the_run_cli_records_the_switch_in_the_manifest(short_root: Path) -> Non
         assert manifest.runtime_hash == runtime_hash(manifest.runtime_profile)
 
 
-def test_seal_takes_the_next_period_s_switches() -> None:
-    from dsl41.cli_estate import _next_profile
-
-    profile = _next_profile(None, None, [], "strict", False, None, ["ice-lookback=ordinary"])
-    assert profile.semantics == ORDINARY
-    with pytest.raises(typer.Exit):
-        _next_profile(None, None, [], "strict", False, None, ["ice-lookback=maybe"])
-
-
 def test_the_help_lists_every_switch(cli_env: None) -> None:
     result = CliRunner().invoke(app, ["run", "--help"])
     assert result.exit_code == 0
@@ -1761,56 +1349,6 @@ def test_a_journal_only_log_installs_its_manifest_and_stays_replayable(tmp_path:
     assert manifest.runtime_profile == RuntimeProfile()
     result = CliRunner().invoke(app, ["journal", str(path), str(jil)])
     assert result.exit_code == 0, result.output
-
-
-def test_a_staged_manifest_missing_semantics_is_refused_not_restored(tmp_path: Path) -> None:
-    """Staged ingress applies the committed manifest's completeness rule: a
-    staged profile without `semantics` refuses at read, and a seal over it
-    does not commit a period with a restored `{}`."""
-    from dsl41.boundary import SealRequest, read_staged_manifest, stage_next_period
-    from dsl41.period import STAGED_MANIFEST_NAME, staging_dir, write_bundle
-    from dsl41.period import SourceFile
-
-    run_root = tmp_path / "run"
-    catalog, live = _start_iced(run_root, RuntimeProfile())
-    text = _ICED_JIL.replace("command: y", "command: z")
-    manifest = stage_manifest(
-        lower_source(text, file="next.jil"),
-        source_bundle_hash=write_bundle(run_root, [SourceFile(path="next.jil", text=text)]),
-        profile=RuntimeProfile(),
-        state_machine_version=STATE_MACHINE_VERSION,
-    )
-    staged = stage_next_period(run_root, staged_manifest=manifest)
-    directory = staging_dir(run_root, staged.stage_digest)
-    path = directory / STAGED_MANIFEST_NAME
-    payload = json.loads(path.read_bytes())
-    del payload["runtime_profile"]["semantics"]
-    path.write_bytes(canonical_bytes(payload))
-    with pytest.raises(EngineError, match="runtime_profile missing semantics"):
-        read_staged_manifest(directory)
-    request = SealRequest(
-        baseline_id=live.baseline_id,
-        epoch=live.epoch,
-        request_id="r-semantics",
-        next_period=staged,
-        stage_digest=staged.stage_digest,
-        force_seal=False,
-        claimed_actor="alice@ops",
-    )
-
-    async def seal() -> None:
-        future = live.submit_seal(request)
-        try:
-            await live.run_until_quiescent(T0)
-            assert future.done()
-            with pytest.raises(EngineError, match="runtime_profile missing semantics"):
-                future.result()
-        finally:
-            await live.shutdown()
-
-    asyncio.run(seal())
-    live.journal.close()
-    assert read_period_manifest(run_root, 2) is None
 
 
 # ------------------------------------------- switches reach every production call
@@ -1936,3 +1474,122 @@ def test_preflight_reads_calendars_under_the_run_s_switches(
     )
     warned = any(i.code == "calendar" and "dormant" in i.message for i in items)
     assert warned is dormant
+
+
+def test_fw_existence_reaches_the_adapter_from_the_pinned_profile() -> None:
+    """DL-258: `fw-existence` reaches `FileWatcherAdapter` the same way
+    `fw_default_interval_us` does, through `wire_from_profile` -- not a
+    second read of the profile inside the adapter."""
+    from dsl41.runner_adapters import FileWatcherAdapter
+    from dsl41.runner_startup import wire_from_profile
+
+    catalog = lower_source("insert_job: w\njob_type: f\nmachine: m1\nwatch_file: /tmp/x\n")
+
+    def wire(profile: RuntimeProfile) -> str:
+        fw = wire_from_profile(catalog, profile, start=T0).adapters["FW"]
+        assert isinstance(fw, FileWatcherAdapter)
+        return fw.existence
+
+    assert wire(RuntimeProfile(semantics={"fw-existence": "immediate"})) == "immediate"
+    assert wire(RuntimeProfile()) == "stable"
+
+
+def test_run_without_a_staged_bundle_wires_and_pins_the_calendar_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_serve_run` with no parsed sources stages nothing; `wire_from_profile`
+    builds the scheduler under the profile's switches, and genesis pins
+    what it built."""
+    from dsl41 import runner_startup
+    from dsl41.cli_run import _serve_run
+
+    real_start_run = runner_startup.start_run
+    seen: dict[str, object] = {}
+
+    def genesis_then_stop(*args: object, **kwargs: object):
+        live = real_start_run(*args, **kwargs)  # type: ignore[arg-type]
+        seen["scheduler"] = live.scheduler.semantics
+        seen["engine"] = live.oracle.semantics
+        live.journal.close()
+        raise EngineError("pin test: stop before the loop")
+
+    monkeypatch.setattr(runner_startup, "start_run", genesis_then_stop)
+    run_root = tmp_path / "root"
+    profile = RuntimeProfile(semantics=BOTH)
+    catalog = lower_source(_WEKR_JIL + "\n" + _ICED_JIL)
+    with pytest.raises(EngineError, match="stop before the loop"):
+        asyncio.run(_serve_run(catalog, run_root, False, [], profile=profile))
+    assert seen == {"scheduler": semantics.resolve(BOTH), "engine": semantics.resolve(BOTH)}
+    manifest = read_period_manifest(run_root)
+    assert manifest is not None and manifest.runtime_profile.semantics == BOTH
+
+
+def test_wire_from_profile_builds_the_scheduler_under_the_profile_s_switch() -> None:
+    """DL-260: `run` and its resume build the scheduler here, so it reads the
+    run's dst-start-times value, as the engine's oracle does."""
+    from dsl41.runner_startup import wire_from_profile
+
+    catalog = lower_source(
+        "insert_job: dj\njob_type: c\ncommand: x\nmachine: m1\n"
+        'date_conditions: 1\nstart_times: "02:05"\n'
+    )
+
+    def wired(profile: RuntimeProfile) -> str:
+        return wire_from_profile(catalog, profile, start=T0).scheduler.semantics.dst_start_times
+
+    assert wired(RuntimeProfile()) == "vendor"
+    fold0 = runtime_profile_from_cli(semantics={"dst-start-times": "fold0"})
+    assert wired(fold0) == "fold0"
+
+
+def test_an_empty_semantics_map_is_written_as_an_empty_object() -> None:
+    """ss3.2: a typed field is always present and an empty collection is
+    `{}`. The default profile's bytes and hash are pinned by hand, and so is
+    the fully populated golden vector."""
+    assert canonical_bytes(RuntimeProfile().model_dump(mode="json")) == _DEFAULT_PROFILE_BYTES
+    assert runtime_hash(RuntimeProfile()) == (
+        "sha256:" + hashlib.sha256(_DEFAULT_PROFILE_BYTES).hexdigest()
+    )
+    assert runtime_hash(_full_profile()) == GOLDEN_RUNTIME_HASH
+    assert json.loads(RuntimeProfile().model_dump_json())["semantics"] == {}
+
+
+@pytest.mark.parametrize("resume_switches", [None, FOLD0], ids=["vendor-scheduler", "fold0"])
+def test_a_resume_with_a_scheduler_off_the_dst_pin_writes_nothing(
+    tmp_path: Path, resume_switches: dict[str, str] | None
+) -> None:
+    """DL-260, period-model PR-22b: a period pinned fold0, resumed with a
+    default (vendor) scheduler and no declared profile, is refused by the
+    drift gate: no successor segment and no leader
+    record. The engine check used to refuse it only after the leader record
+    was appended. The twin, a fold0 scheduler, resumes and appends one."""
+    from dsl41.run_root import wal_segments
+
+    run_root = tmp_path / "run"
+    catalog, live = _dst_genesis(run_root, FOLD0)
+    _close(live)
+    before = read_journal(estate_wal(run_root))
+    segments = wal_segments(run_root)
+
+    def resume():
+        return asyncio.run(
+            resume_run(
+                catalog,
+                run_root,
+                clock=VirtualClock(start=T0 + timedelta(minutes=1)),
+                adapters={"CMD": FakeAdapter(default=None)},
+                scheduler=Scheduler(
+                    catalog, start=T0, semantics=semantics.resolve(resume_switches)
+                ),
+            )
+        )
+
+    if resume_switches is None:
+        with pytest.raises(EngineError, match="runtime-profile mismatch on semantics"):
+            resume()
+        assert read_journal(estate_wal(run_root)) == before
+        assert wal_segments(run_root) == segments
+        return
+    _close(resume())
+    after = read_journal(estate_wal(run_root))
+    assert [r["rec"] for r in after[len(before) :]][:1] == ["leader"]

@@ -52,7 +52,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -62,22 +62,18 @@ if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
     pytest.skip("leadership tier is POSIX-only", allow_module_level=True)
 
 from runner_redrive_driver import CRASH_CODE, REDRIVE_JIL
-from test_runner_supervisor import wait_reaped
+from subprocess_harness import wait_reaped
 
 from dsl41.ir import lower_source
-from dsl41.oracle_state import Event
+from dsl41.runner import Engine
 from dsl41.runner_adapters import (
-    FileWatcherAdapter,
     LocalCommandAdapter,
-    SupervisedCommandAdapter,
-    SupervisorClient,
 )
 from dsl41.runner_clock import RealClock
 from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, HostCommand, kill_allowance, skew_allowance
 from dsl41.runner_journal import read_journal
 from dsl41.runner_ledger import LOCK_NAME
-from dsl41.runner import Engine
-from dsl41.runner_startup import resume_run, start_run
+from dsl41.runner_startup import resume_run
 
 REDRIVE_DRIVER = Path(__file__).parent / "runner_redrive_driver.py"
 
@@ -414,66 +410,6 @@ def _genesis_contact(engine: Engine) -> datetime | None:
     return engine.oracle.store.host(LOCAL_EXECUTOR_ID).last_contact
 
 
-@contextlib.asynccontextmanager
-async def _held_estate(
-    client: SupervisorClient, run_root: Path
-) -> AsyncIterator[tuple[Engine, int]]:
-    """A supervisor provisioned for `run_root`, its lease held by `client`, and a held-open
-    engine running HELD_JIL with the client's contact and unreachable reports wired in. The
-    setup runs under the cleanup, so a failure in it leaves no detached supervisor holding the
-    run root. The cleanup resumes a stopped supervisor first."""
-    sup_pid: int | None = None
-    engine: Engine | None = None
-    loop: asyncio.Future[object] | None = None
-    try:
-        await client.provision()
-        sup_pid = json.loads((run_root / "supervisor.pid").read_text())["pid"]
-        await client.acquire()
-        engine = start_run(
-            lower_source(HELD_JIL),
-            run_root,
-            clock=RealClock(),
-            adapters={
-                "CMD": SupervisedCommandAdapter(client, grace_seconds=2.0),
-                "FW": FileWatcherAdapter(),
-            },
-            deadman_s=client.supervisor_deadman_s,
-            hold_open=True,  # what `dsl41 run` does: an idle estate is not a finished one
-        )
-        client.on_contact = engine.note_executor_contact
-        client.on_unreachable = engine.note_executor_unreachable
-        loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
-        yield engine, sup_pid
-    finally:
-        # nested, so a step that raises skips none of the later ones
-        try:
-            if sup_pid is not None:
-                with contextlib.suppress(ProcessLookupError):
-                    os.kill(sup_pid, signal.SIGCONT)  # a stopped one would never shut down
-            try:
-                if loop is not None:
-                    loop.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await loop
-            finally:
-                if engine is not None:
-                    try:
-                        engine.detach.stopping = True
-                        await engine.shutdown()
-                    finally:
-                        if engine.journal is not None:
-                            engine.journal.close()
-        finally:
-            try:
-                # bounded: a supervisor that never answers is killed and reaped below
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(client.shutdown(), 5)
-                await client.close()
-            finally:
-                if sup_pid is not None:
-                    _reap_supervisor(sup_pid)
-
-
 def _reap_supervisor(pid: int) -> None:
     """Wait for the supervisor to exit after SHUTDOWN; one that did not is killed and reaped
     before the failure is raised, so it never outlives the test."""
@@ -484,90 +420,6 @@ def _reap_supervisor(pid: int) -> None:
             os.kill(pid, signal.SIGKILL)
         wait_reaped(pid)
         raise
-
-
-def test_cm09_five_failed_renewals_quarantine_the_host_and_new_work_is_held(
-    short_root: Path, monkeypatch
-) -> None:
-    """ss8 unreachability, produced rather than injected -- and then the
-    eviction bound computed from what those real processes reported.
-
-    Every other test of this path calls `note_executor_unreachable` or
-    injects `quarantine` directly, which assumes the three things worth
-    checking: that a supervisor dying makes the renewal loop report the host
-    unreachable, that the report is what reaches the routing table, and that a SPAWN planned
-    afterwards is HELD rather than failed against a socket that is not
-    there. The bound the refusal then names is arithmetic over two produced
-    numbers -- the deadman this supervisor said it runs, and the instant it
-    last answered -- so the assertion is on the identity, not on a constant.
-
-    Both halves of "five consecutive failures" are asserted, because the
-    count is a design decision and not an implementation detail: reporting
-    on the FIRST failure would also reach `quarantined`, faster, and would
-    hold an estate's work over one refused connection."""
-    monkeypatch.setattr(SupervisorClient, "_RENEW_EVERY_S", 0.2)
-    deadman = 90.0  # long enough that the bound has not passed by the assertion
-
-    async def scenario() -> tuple[dict, str, frozenset[str], float]:
-        run_root = short_root / "run"
-        run_root.mkdir(parents=True)
-        client = SupervisorClient(run_root, deadman_s=deadman)
-        async with _held_estate(client, run_root) as (engine, sup_pid):
-            genesis_contact = _genesis_contact(engine)
-            assert client.supervisor_deadman_s == deadman  # read back off the live supervisor
-            # A RENEW has to LAND before the kill, or `last_contact` is still
-            # the genesis stamp and the bound below is arithmetic over a
-            # number no process produced. The harness wires the reports after
-            # `acquire()`, so the only exchange that can stamp it is one of
-            # the renewals -- wait for one rather than assume it.
-            deadline = time.monotonic() + 15
-            while engine.oracle.store.host(LOCAL_EXECUTOR_ID).last_contact == genesis_contact:
-                assert time.monotonic() < deadline, "no lease exchange stamped the routing row"
-                await asyncio.sleep(0.02)
-
-            killed_at = time.monotonic()
-            os.kill(sup_pid, signal.SIGKILL)
-            deadline = killed_at + 30
-            while engine.oracle.store.host(LOCAL_EXECUTOR_ID).state != "quarantined":
-                assert time.monotonic() < deadline, (
-                    "the renewal loop never reported the host unreachable"
-                )
-                await asyncio.sleep(0.05)
-            # Five CONSECUTIVE failures, not one: a quarantine per blip would
-            # hold work for no reason, and that is the half a "did it end up
-            # quarantined" poll cannot see -- reporting on the first failure
-            # passes such a poll, and passes it FASTER. Four of the five waits
-            # are a one-second `_RETRY_EVERY_S`, so the floor is a real 4 s.
-            reported_after = time.monotonic() - killed_at
-            assert reported_after >= 4.0, reported_after
-
-            # new work, decided while the host is unreachable
-            engine.inject(Event(at=engine.clock.now(), kind="STARTJOB", payload={"job": "held"}))
-            deadline = time.monotonic() + 15
-            while not engine.outbox.pending_for("held", "SPAWN"):
-                assert time.monotonic() < deadline, "the spawn was never planned"
-                await asyncio.sleep(0.02)
-            await asyncio.sleep(0.3)  # ...and it STAYS pending: nothing drains it
-            row = engine.oracle.store.host(LOCAL_EXECUTOR_ID)
-            assert len(engine.outbox.pending_for("held", "SPAWN")) == 1
-            status = engine.oracle.store.job["held"].status
-            # `held_jobs` is that same pending set under the name the control
-            # plane publishes it by (ss8, DL-94) -- checked here because the
-            # operator's answer to "why is nothing happening" comes from this
-            # side, not from the outbox
-            published = engine.held_jobs()
-            return row.model_dump(), status, published, _evict_bound(engine)
-
-    row, status, published, remaining = asyncio.run(scenario())
-    assert row["state"] == "quarantined"
-    assert row["state_before_quarantine"] == "active"  # what it interrupted, kept
-    assert row["deadman_s"] == deadman
-    # RUNNING, not FAILURE and not a process: the oracle walks a start through
-    # to RUNNING inside one feed, and the shell holds the effect underneath it
-    assert status == "RUNNING"
-    assert published == frozenset({"held"})
-    assert list((short_root / "run" / "runs").iterdir()) == []
-    assert remaining > 0
 
 
 def _evict_bound(engine) -> float:
@@ -607,86 +459,23 @@ def _evict_bound(engine) -> float:
     return bound - waited
 
 
-def test_cm09_a_frozen_supervisor_quarantines_the_host_and_its_thaw_reinstates_it(
-    short_root: Path, monkeypatch
-) -> None:
-    """ss8 unreachability from a supervisor that is alive and silent (DL-409).
-
-    A stopped process keeps its socket: the kernel accepts the connection and
-    the RENEW, and no reply comes. Without a deadline the renewal waits for
-    ever, no failure is counted, and the host is never quarantined. With one,
-    five renewals fail and the leader quarantines the host. After SIGCONT the
-    same supervisor answers: the host is reinstated, and the lease is held
-    again under a fresh token."""
-    monkeypatch.setattr(SupervisorClient, "_RENEW_EVERY_S", 0.2)
-    monkeypatch.setattr(SupervisorClient, "_RETRY_EVERY_S", 0.1)
-    monkeypatch.setattr(SupervisorClient, "_RENEW_TIMEOUT_S", 0.8)
-
-    async def scenario() -> tuple[list[str], int, int, dict]:
-        run_root = short_root / "run"
-        run_root.mkdir(parents=True)
-        client = SupervisorClient(run_root)
-        states: list[str] = []
-        async with _held_estate(client, run_root) as (engine, sup_pid):
-            genesis_contact = _genesis_contact(engine)
-
-            async def await_state(state: str, why: str) -> None:
-                deadline = time.monotonic() + 30
-                while engine.oracle.store.host(LOCAL_EXECUTOR_ID).state != state:
-                    assert time.monotonic() < deadline, why
-                    await asyncio.sleep(0.05)
-                states.append(state)
-
-            # the positive control: a renewal lands, so the loop is live and
-            # the supervisor answers inside the deadline before the freeze
-            deadline = time.monotonic() + 15
-            while engine.oracle.store.host(LOCAL_EXECUTOR_ID).last_contact == genesis_contact:
-                assert time.monotonic() < deadline, "no lease exchange stamped the routing row"
-                await asyncio.sleep(0.02)
-            states.append(engine.oracle.store.host(LOCAL_EXECUTOR_ID).state)
-            frozen_token = client.token
-            os.kill(sup_pid, signal.SIGSTOP)
-            await await_state("quarantined", "silent renewals never quarantined the host")
-            os.kill(sup_pid, signal.SIGCONT)
-            # a reconnect's PING alone reinstates the host; the lease is held
-            # again only once its re-ACQUIRE lands with a fresh token
-            await await_state("active", "the thawed supervisor never reinstated the host")
-            deadline = time.monotonic() + 15
-            while client.token == frozen_token:
-                assert time.monotonic() < deadline, "the lease was never re-acquired"
-                await asyncio.sleep(0.02)
-            # a well-formed run id this supervisor never saw: the token check
-            # comes first, so only a current token answers unknown_run
-            answer = await client.signal("00000000-0000-4000-8000-000000000000", "TERM")
-            # the same supervisor throughout: frozen and thawed, never replaced
-            now_pid = json.loads((run_root / "supervisor.pid").read_text())["pid"]
-            return states, sup_pid, now_pid, answer
-
-    states, frozen_pid, thawed_pid, answer = asyncio.run(scenario())
-    assert states == ["active", "quarantined", "active"]
-    assert thawed_pid == frozen_pid
-    assert answer == {"ok": False, "error": "unknown_run"}, answer
-
-
-def test_pr01c_a_foreign_root_is_refused_before_staging_or_supervisor(short_root: Path) -> None:
+def test_pr01c_a_foreign_root_is_refused_before_staging(short_root: Path) -> None:
     """ss1.1: the CLI proves the root is claimable BEFORE it stages a
-    bundle into it or starts a supervisor against it -- both are acts on an
-    estate this process may turn out not to lead. A used root without
+    bundle into it, an act on an estate this process may turn out not to
+    lead. A used root without
     `--resume` gets the same early refusal."""
     foreign = short_root / "foreign"
     (foreign / "wal").mkdir(parents=True)
     jil = short_root / "estate.jil"
     jil.write_text(IDLE_JIL)
-    result = cli("run", "--run-root", str(foreign), "--detached", str(jil))
+    result = cli("run", "--run-root", str(foreign), str(jil))
     assert result.returncode == 2
     assert "not an unused root" in result.stderr
     assert not (foreign / "catalogs").exists()  # nothing was staged into it
     assert not (foreign / "periods").exists()
-    assert not (foreign / "supervisor.sock").exists()  # and no supervisor acted on it
     used = short_root / "used"
     used.mkdir()
     (used / "journal.jsonl").write_text('{"rec": "header"}\n')  # any estate, any dialect
-    again = cli("run", "--run-root", str(used), "--detached", str(jil))
+    again = cli("run", "--run-root", str(used), str(jil))
     assert again.returncode == 2
     assert "already holds an estate" in again.stderr
-    assert not (used / "supervisor.sock").exists()

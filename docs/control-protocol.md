@@ -39,7 +39,7 @@ the wire vocabulary, and the three clients.
   TUI of runner-design §11 (`dsl41 run --ui`, `dsl41 ui`, `dsl41 serve`).
 - **sync client** (`roundtrip`): one-shot blocking request/response for
   callers outside an event loop. Drives `dsl41 sendevent`, `dsl41 host`,
-  `dsl41 query`, `dsl41 off-hold-all` (DL-423) and the live `dsl41 seal`.
+  `dsl41 query` and `dsl41 off-hold-all` (DL-423).
 - **blocking subscription client** (`subscribe_lines`, DL-172): one
   connection held open for the life of a `subscribe`. It yields the ack
   and then journal records, and drives `dsl41 query subscribe`. It lets a
@@ -216,7 +216,7 @@ The client action says what a client does next:
 | `engine_apply_faulted` | rejected | applying an input on a fork of the engine's state raised, and its time half applied alone, so the input was logged with this rejection and only its time half applied: it is quarantined (`docs/concurrency-model.md` §4). The live engine stores it for an engine-made input. Replay stores it for any input admitted with no decision whose apply raises the same way, a control input included. Like every stored code, an exact retry of that control input is answered with it | operator |
 | `engine_error` | refused | an engine refusal whose raise site names no code | operator |
 
-## 3. Mutating verbs: sendevent, host, seal
+## 3. Mutating verbs: sendevent, host
 
 ```json
 {"cmd": "sendevent", "v": 3, "baseline_id": "…", "epoch": 0,
@@ -505,99 +505,6 @@ on the row as well as in the log, and it is the one path in the
 concurrency model that can produce a double run. Every one of these
 checks is a pure function of the row. Replay has no live host to probe,
 so a gate that probed one would decide differently the second time.
-
-### `seal` (DL-133, period-model §2.2)
-
-`seal` is a third mutating verb (DL-133; period-model §7). It differs
-from the two above in three ways, each a consequence of what a boundary
-is.
-
-```json
-{"cmd": "seal", "v": 3, "baseline_id": "…", "epoch": 7, "request_id": "…",
- "next_period": {…StagedNextPeriod…}, "stage_digest": "…",
- "force_seal": false, "claimed_actor": "alice@ops-laptop"}
-
-{"ok": true, "kind": "seal", "decision": "applied", "period_id": 2,
- "digest": "sha256:…", "next_period_id": 3, "next_baseline_id": "…",
- "request_id": "…", …header…}
-```
-
-**It names an `expect` on nothing.** A seal addresses no row, so `expect`
-is not merely optional here; it is **refused**. concurrency-model §0's
-mandate is about a
-caller asserting what they read about an entity, and a boundary reads no
-entity. Making `expect` optional would turn the one command with no
-precondition into a door every other command could slip through. So the
-envelope parser takes "this command addresses no row" as an explicit
-input and rejects an `expect` that arrives anyway. What counts is the KEY
-(DL-150, DL-151): `"expect": null` is an `expect` and not its absence,
-and the seal door refuses it. That refusal sits just behind the retry route
-below, which answers a committed seal whatever rides beside it.
-
-**Its decision is a `seal` record, not a `decision` record.** Before the
-seal, a durable "applied" would name a boundary that never happened.
-After it, records after a seal are forbidden. And no record at all would
-leave a lost response unretryable despite the promised `request_id`. So
-the record IS the commit point. It carries the request's identity:
-`request_id`, the fingerprint over the whole envelope, the claimed actor
-and `force_seal`.
-
-**A committed seal's exact retry is answered ahead of the baseline gate.**
-The generic v3 parser rejects a foreign `baseline_id` before it reads
-`request_id`. A retry of the boundary that closed C1 necessarily carries
-B1, while C2 answers under B2. Without a dedicated route, the exact-retry
-promise would be unreachable at exactly the moment it matters. So the
-engine of period N+1 keeps the `seal` record it opened from and checks an
-incoming `(request_id, fingerprint)` against it first. That check sits
-ahead of the whole generic parser, not the baseline gate alone. A matched
-retry is answered from the record without the `expect` refusal above
-ever running, because a retry of a boundary that already committed is the
-same command whatever else rides beside it. A match is answered `applied`
-from that record. A match on the id under a different envelope is a
-**collision**, refused. Force is an authorization and the actor is
-attribution, and neither may be swapped under a retry. The lookup reaches
-exactly one seal back. An older seal's retry is refused as a stale
-baseline, which is a liveness loss and not a safety one.
-
-**One boundary at a time** (DL-295). While a boundary is queued or running, every
-`seal` request is refused `seal_in_flight`, an exact retry of the one in
-flight included; a retry is never attached to it. The refusal adds
-`in_flight_request_id`, the `request_id` of the boundary in flight, so a
-client can tell its own boundary, still running, from another's. The field
-is additive: consumers ignore unknown fields (§2), and no version moves.
-
-**The retry horizon's wait** (DL-420). A `seal` refused `seal_retry_horizon`
-adds `retry_horizon_left_us`, the microseconds left until the horizon ends at
-the refusal, so a client reads its wait from the field and never from the
-prose. An offline `dsl41 seal` prints the same answer line on stdout. The
-field is additive, as above.
-
-**An uncommitted seal request is unseen.** A request that crashed before
-its record left nothing behind, so its retry is a fresh request that
-attempts the boundary again. Only a committed seal is ever deduplicated.
-That is also why sealing twice is impossible: a second attempt finds the
-first's record if it landed.
-
-The client stages C2 first: the immutable bundle under `catalogs/`, then
-`staged_manifest.json` and `candidate.json` under
-`periods/.staging/<stage_digest>/`. The engine validates **exactly those
-bytes**. On success the engine **exits with code 3** ("sealed period N at
-DIGEST; period N+1 is ready to open"). The code is distinct from its
-0/1/2, so an init system does not restart-loop a sealed engine. The
-engine exits without signalling detached work. It does not load C2 into
-itself: a transition is a restart, not a reload (DL-65). The answer's
-timeout is longer than a mutation's, because a boundary drains every
-admitted attempt and waits out an unbound spawn and an unresolved KILL
-ladder. A timeout is `unknown`, never a refusal.
-
-If the engine stops during a seal because an attempt admitted there is
-not fully applied, because a WAL append failed, or because an engine-made
-input (an adapter completion, a tick or a routing observation) met
-`clock_regressed` before it took an index, the seal gets no answer.
-Neither does an attempt whose answer was still owed. The connection
-drops, and the client reads those outcomes as `unknown`. The seal did not
-commit: recovery rebuilds from the WAL, and the period stays open
-(DL-274, `period-model.md` §7).
 
 ## 4. Query verbs (frozen response shapes)
 

@@ -7,8 +7,8 @@ cleanly.
 
     uv run python generate.py [--asset-classes 8] [--shards 8]
 
-Defaults produce ~520 jobs. The launcher runs it with the same properties
-file as the small estate (`nightbank up --estate bank`).
+Defaults produce ~520 jobs. It takes the same properties file as the small
+estate; the sandbox launcher that ran it returns in a later slice.
 """
 
 from __future__ import annotations

@@ -44,8 +44,7 @@ DOC_TESTS = (
 CODE_GATES = (
     ("uv", "run", "ruff", "check", "src", "tests", "examples"),
     ("uv", "run", "ruff", "format", "--check", "src", "tests", "scripts", "examples"),
-    # DL-193: tests/uc_oracle.py is held to the type gate by name.
-    ("uv", "run", "mypy", "src", "tests/uc_oracle.py"),
+    ("uv", "run", "mypy"),
 )
 
 #: DL-75: the architecture gate checks that docs name existing tests and modules,

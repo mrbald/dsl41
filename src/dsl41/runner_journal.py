@@ -70,16 +70,16 @@ from dsl41.runner_admission import (
     describe_input,
     fingerprint,
 )
-from dsl41.period import (
+from dsl41.run_root import (
     Manifest,
     catalog_hash_at,
     check_catalog_hash_version,
     check_segment_record,
     check_segment_version,
-    estate_segments,
     genesis_manifest,
     is_opening,
     opening_at,
+    require_period_one,
     resolve_wal,
     root_of_wal,
     segment_record,
@@ -617,38 +617,6 @@ class Journal:
             }
         )
 
-    def seal(self, record: Mapping[str, Any]) -> None:
-        """ss2.2's `seal`: the last record of a period's last segment, and the boundary's commit
-        point.
-
-        It is a record and not a decision because a `seal` cannot be decided by an ordinary
-        `decision`: a crash before it would leave a durable "applied" for a boundary that never
-        happened, and records after a seal are forbidden. `boundary.check_seal_record` owns and
-        validates the shape; nothing else can be written through this door.
-
-        Appending it is the point of no return (ss7). The writer flushes the whole line before
-        `fsync`, and an `fsync` error does not prove the line absent or non-durable, so a failure
-        here is an unknown outcome that fail-stops; an abort would reopen admission behind a seal
-        line that then survives."""
-        if record.get("rec") != "seal":
-            raise EngineError(f"Journal.seal writes `seal` records, not {record.get('rec')!r}")
-        rec = dict(record)
-        if self._lock is not None:
-            self._lock.check()  # the same ss1 fence every append passes
-        # plain json.dumps, not canon.canonical_bytes (as `_write`): nothing digests a WAL
-        # line's own bytes (a seal record's digest is computed over canon bytes in `boundary`
-        # and re-derived on read), and the control door refuses a lone surrogate before dispatch
-        line = json.dumps(rec, sort_keys=True).encode("utf-8") + b"\n"
-        self._f.write(line)
-        # unconditionally durable, whatever the per-record policy: a seal durable only at close
-        # would let the anchor's open->closed CAS land before the record that justifies it, naming
-        # a successor by a head whose naming line a power cut then removes. Durability precedes
-        # subscriber publication (not `_write`), because a subscriber told of a commit record
-        # whose fsync then fails has heard of a boundary recovery may discard
-        self._f.flush()
-        os.fsync(self._f.fileno())
-        self._publish(rec, len(line))
-
     def effect_result(self, outcome: EffectOutcome) -> None:
         """What came of one attempt (concurrency-model ss5). Absent means `pending`, the crash
         window; `indeterminate` is kept apart: something was tried and cannot be reported on."""
@@ -813,17 +781,18 @@ CURRENT_RECS: Final[frozenset[str]] = frozenset(
         "dispatch",
         "drop",
         "preflight",
-        "seal",
     }
 )
 
-#: Retired record dialects: the kind, and the entry that retired it. Append-only
+#: Retired record dialects: the kind, and the entry or release that retired it. Append-only
 #: (docs/protocol-evolution.md ss6): a row is never removed or re-used, so a root written before
 #: the retirement is told what it holds, not given a generic parse error.
 RETIRED_RECS: Final[dict[str, str]] = {
     "header": "DL-138",
     "result": "DL-138",
     "effect": "DL-138",
+    #: a 1.x period boundary; 2.0.0 runs one period per root and resumes no sealed one
+    "seal": "2.0.0",
 }
 
 
@@ -846,8 +815,13 @@ def check_record(record: Mapping[str, Any], *, where: str) -> None:
     if retired is not None:
         raise EngineError(
             f"{where}: `{kind}` is a RETIRED record dialect, refused by name since"
-            f" {retired} -- nothing has written one since DL-118/DL-130 and no root"
-            " holding one exists (docs/protocol-evolution.md ss6, ss8)"
+            f" {retired} -- "
+            + (
+                "periods are retired, and a 1.x root that sealed cannot be resumed or read"
+                if kind == "seal"
+                else "nothing has written one since DL-118/DL-130 and no root holding one exists"
+            )
+            + " (docs/protocol-evolution.md ss6, ss8)"
         )
     # `kind` may be any JSON value, including an unhashable array or object (DL-227):
     # `isinstance` first keeps `in CURRENT_RECS` from raising a TypeError, so every non-current
@@ -960,51 +934,21 @@ def read_journal(path: Path | str) -> list[dict[str, Any]]:
                 " segment opens a FILE, and a second opening inside one is a splice"
                 " (period-model ss2.1, I1)"
             )
-        if record.get("rec") == "seal" and position != len(records) - 1:
-            # ss11's recovery matrix: a `seal` is the last record of its segment, so a record
-            # after one is a period that admitted work after its own boundary: interior
-            # corruption, not a torn tail
-            raise EngineError(
-                f"journal {path}: {len(records) - position - 1} record(s) after the `seal`"
-                f" at line {position + 1}: the old period admits nothing after its"
-                " boundary (period-model ss11, PR-29)"
-            )
     return records
-
-
-def check_segment_tail(segment: Path, records: Sequence[Mapping[str, Any]]) -> None:
-    """A closed segment ends in its `seal` (ss11).
-
-    `read_journal` tolerates a torn final line, which is right for the file an appender still
-    appends to and wrong for a closed one: there the tolerated tail is a hole in the middle of
-    the concatenation.
-
-    One helper and one text, positioned per caller (DL-139, DL-142): each reader knows a segment
-    is closed at a different point (the subscriber's backfill when it has read a newer one, the
-    cross-period replay when the segment is not the last it was given), and the check belongs
-    at each of them. The refusal is one sentence because it is one corruption."""
-    if records[-1].get("rec") != "seal":
-        raise EngineError(
-            f"journal {segment}: a closed segment ends in a `seal` and this one"
-            f" ends in {records[-1].get('rec')!r} -- its tail is missing, and a"
-            " backfill across it would skip records silently (period-model ss11)"
-        )
 
 
 def check_segment_identity(segment: Path, opening: Mapping[str, Any]) -> int | None:
     """One segment file, checked against where it sits: the estate its root's sentinel names and
     the period its own filename claims.
 
-    One implementation, because it is a fact about a file and not a reader (DL-139, as
-    `check_segment_adjacency`). The subscriber's backfill needs it because its early stop can
-    read a single segment, where no adjacency check runs. `dsl41 journal`'s cross-period replay
-    needs it too: a root whose segments were all rewritten to a stranger's `estate_id` agrees
-    with itself at every boundary, so the sentinel alone says whose lineage this is.
+    One implementation, because it is a fact about a file and not a reader (DL-139). The
+    subscriber's backfill and `dsl41 journal` both ask it: a segment rewritten to a stranger's
+    `estate_id` agrees with itself, so the sentinel alone says whose root this is.
 
     Returns the period the filename names, or None for a file whose name is not a number (a
     sentinel-less root's `journal.jsonl`, which its owner refuses by name, DL-138). Callers that
     number segments read it from here."""
-    from dsl41.period import read_sentinel, root_of_wal
+    from dsl41.run_root import read_sentinel, root_of_wal
 
     try:
         named = int(segment.stem)
@@ -1027,58 +971,6 @@ def check_segment_identity(segment: Path, opening: Mapping[str, Any]) -> int | N
             " (period-model ss2.1)"
         )
     return named
-
-
-def check_segment_adjacency(
-    older: Sequence[Mapping[str, Any]], newer: Sequence[Mapping[str, Any]], *, where: str
-) -> None:
-    """Two consecutive segments of one lineage, checked both ways: the older's closing seal must
-    be the one the newer opened from, the two must name one estate, and the index frontier must
-    be continuous.
-
-    One implementation, because a boundary is one fact and two readers must not disagree about
-    the same corruption (DL-139). The subscriber's backfill meets it inside a run root;
-    `dsl41 journal`'s cross-period replay meets it across roots, where the older segment is in the
-    root the lineage rolled out of. A rolled boundary is the same record pair in two files.
-
-    The older segment must already have passed `check_segment_tail`: a closed segment with a torn
-    tail has no seal to be adjacent to, and each caller runs that check where it first knows the
-    segment is closed.
-
-    `where` names the stream being read, since a reader that spans roots cannot say whose chain
-    broke from the records alone."""
-    seal_record = older[-1]
-    opening = newer[0]
-    # the full ss2.2 schema first: a `closes_at_index` rewritten to a bool or a string would
-    # otherwise skip the exact-int continuity comparison below
-    from dsl41.boundary import check_seal_record
-
-    check_seal_record(seal_record)
-    link = opening.get("opens_from_seal")
-    if not (
-        isinstance(link, dict)
-        and link.get("digest") == seal_record.get("digest")
-        and seal_record.get("next_period_id") == opening.get("period_id")
-    ):
-        raise EngineError(
-            f"{where}: segment {opening.get('period_id')!r} does not open"
-            f" from the seal that closes the one before it -- a spliced or foreign"
-            " lineage (period-model ss2.1, ss11)"
-        )
-    if seal_record.get("estate_id") != opening.get("estate_id"):
-        raise EngineError(
-            f"{where}: estate {seal_record.get('estate_id')!r} sealed and"
-            f" {opening.get('estate_id')!r} opened -- two estates in one stream"
-            " (period-model ss1.2)"
-        )
-    opens_at = opening.get("first_index")
-    closes = seal_record.get("closes_at_index")
-    if is_wire_int(opens_at) and is_wire_int(closes) and opens_at != closes + 1:
-        raise EngineError(
-            f"{where}: segment {opening.get('period_id')!r} starts its index"
-            f" range at {opens_at} and the seal before it closes at {closes} -- the"
-            " index frontier is not continuous (I2)"
-        )
 
 
 @dataclass(frozen=True)
@@ -1109,74 +1001,15 @@ def read_backfill(path: Path | str, *, since: int) -> Backfill:
     checks are shared with replay and audit, which read no code, so the refusal is re-raised as
     a `BackfillRefused` at the one door the stream reads through."""
     try:
-        return _read_backfill(path, since=since)
+        records = read_journal(path)
+        check_segment_identity(resolve_wal(path), records[0])
+        require_period_one(root_of_wal(resolve_wal(path)))
     except EngineError as exc:
         raise BackfillRefused(str(exc)) from exc
-
-
-def _read_backfill(path: Path | str, *, since: int) -> Backfill:
-    """`read_backfill`'s body.
-
-    `read_journal` reads one segment, which is what an appender, a replay and an audit want
-    (I1: a segment is a period). A subscriber spans periods: its cursor is an estate-wide index
-    (I2) and may name a segment the appender has moved on from.
-
-    It reads backwards and stops at the first segment holding a record at or below the cursor,
-    because everything older sits before the caller's positional cut. A cursor in the live
-    period costs one segment; only `since` at the very beginning costs the estate. Stopping early
-    also says there is no gap: a segment holding the cursor is a root that retains it, so the gap
-    question is asked only when every segment has been read.
-
-    Every segment before the last must end in a `seal`, asked of each segment as it is read and
-    before any other check, so a doubly-faulted segment names the fault that makes the stream a
-    lie."""
-    segments = estate_segments(path)
-    chunks: list[list[dict[str, Any]]] = []
-    holds_cursor = False
-    numbers: list[int] = []
-    for position, segment in enumerate(reversed(segments)):
-        records = read_journal(segment)
-        # a torn tail is decided before identity, sequence and contiguity (DL-142), so a segment
-        # with two faults reports the one that makes the stream a lie
-        if position > 0:
-            check_segment_tail(segment, records)
-        opening = records[0]
-        named = check_segment_identity(segment, opening)
-        if named is not None:
-            numbers.append(named)
-        first = _first_index(opening)
-        for record in records:
-            seq = record.get("seq")
-            if is_wire_int(seq) and seq < first:
-                # I2: a segment allocates from its own first_index upward. A forged low seq
-                # would make the containment test below claim this segment holds an old cursor
-                # and skip every older segment and its chain checks
-                raise EngineError(
-                    f"journal {segment}: seq {seq} below this segment's first_index"
-                    f" {first} -- a record this period could not have admitted (I2)"
-                )
-        chunks.append(records)
-        if first <= since:
-            # positional containment from the validated opening, never from a record scan a
-            # forged seq could satisfy: the cursor sits in the first segment whose index range
-            # begins at or before it
-            holds_cursor = True
-            break
-    if numbers and numbers != list(range(numbers[0], numbers[0] - len(numbers), -1)):
-        raise EngineError(
-            f"journal {path}: retained segments {sorted(numbers)} are not contiguous --"
-            " a missing middle segment is a hole a backfill would stream past"
-            " silently (period-model ss11, I1)"
-        )
-    for newer, older in zip(chunks, chunks[1:]):
-        check_segment_adjacency(older, newer, where=f"journal {path}")
-    first = _first_index(chunks[-1][0])
+    first = _first_index(records[0])
     # index 1 is the first index there is, so no cursor below it names a lost record
-    gap = not holds_cursor and max(since, 0) < first - 1
-    return Backfill(
-        gap_from=first if gap else None,
-        records=[record for chunk in reversed(chunks) for record in chunk],
-    )
+    gap = max(since, 0) < first - 1
+    return Backfill(gap_from=first if gap else None, records=records)
 
 
 def _first_index(opening: Mapping[str, Any]) -> int:

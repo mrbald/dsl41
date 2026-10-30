@@ -21,7 +21,6 @@ import batch_harness
 import pytest
 
 from dsl41 import cli_control
-from dsl41.classify import CarriedJob, CarriedState, _seeded
 from dsl41.ir import lower_source
 from dsl41.job_chart import JOB
 from dsl41.job_chart_rows import configuration
@@ -118,53 +117,17 @@ def test_the_harness_sees_a_move_outside_an_input_batch(
 
 
 def test_the_seeds_take_no_job_transition(monkeypatch: pytest.MonkeyPatch, recording: Path) -> None:
-    """The constructor's genesis seed, the carried-row install, classify's
-    seeding and the executor seed open their own store transaction, so none
-    may write a job move. Only the assembly moves are recorded."""
+    """The constructor's genesis seed, the carried-row install and the
+    executor seed open their own store transaction, so none may write a job
+    move. Only the assembly moves are recorded."""
     misplaced = batch_harness.install(monkeypatch)
     catalog = lower_source(_JIL + "status: ON_HOLD\n\ninsert_job: gone\njob_type: c\ncommand: y\n")
     carried = CarriedRows(jobs={"gone": JobRuntime(status="SUCCESS")}, period_id=2)
     oracle = Oracle(catalog, carried=carried)
     seed_local_executor(oracle.store, "local", at=T0)
-    _seeded(catalog, CarriedState(jobs={"j": CarriedJob(row=JobRuntime(status="QUE_WAIT"))}))
     assert oracle.store.runtime("j").on_hold is True
     assert misplaced == []
     assert {machine for machine, _ in _hits(recording)} == {"runtime_assembly"}
-
-
-def test_classify_rebuilds_carried_rows_as_installs() -> None:
-    """The row each carried job gets is the row a sequence of transitions
-    would have left: a terminal row's last end is its status time, a row
-    that ended and started again keeps its earlier end, and a waiter gets a
-    rank."""
-    end = T0 - timedelta(hours=1)
-    rows = {
-        "done": JobRuntime(status="FAILURE", status_at=T0, last_end_at=end, exit_code=3),
-        "again": JobRuntime(status="RUNNING", status_at=T0, last_end_at=end, on_ice=True),
-        "queued": JobRuntime(status="QUE_WAIT", status_at=T0, armed=True, on_hold=True),
-    }
-    catalog = lower_source(
-        "".join(f"insert_job: {name}\njob_type: c\ncommand: x\n\n" for name in rows)
-    )
-    carried = CarriedState(jobs={name: CarriedJob(row=row) for name, row in rows.items()})
-    store = _seeded(catalog, carried).store
-    lifecycle = (
-        "status",
-        "status_at",
-        "last_end_at",
-        "exit_code",
-        "on_ice",
-        "on_hold",
-        "on_noexec",
-        "armed",
-        "waiter_seq",
-    )
-    got = {name: tuple(getattr(store.job[name], f) for f in lifecycle) for name in rows}
-    assert got == {
-        "done": ("FAILURE", T0, T0, 3, False, False, False, False, None),
-        "again": ("RUNNING", T0, end, None, True, False, False, False, None),
-        "queued": ("QUE_WAIT", T0, None, None, False, True, False, True, 1),
-    }
 
 
 # ------------------------------------------------------------------- assembly

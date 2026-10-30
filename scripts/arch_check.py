@@ -684,10 +684,14 @@ def unresolved_test_citations(paths: Iterable[Path]) -> list[Finding]:
 
 
 def citing_doc_files() -> list[Path]:
+    """Every doc the test-citation rule reads, minus the append-only log and its generated
+    index, which name tests that were later renamed or removed (as
+    MODULE_CITATION_EXEMPT_DOCS)."""
     files: list[Path] = []
     for target in CITING_DOCS:
         files += sorted(target.rglob("*.md")) if target.is_dir() else [target]
-    return [f for f in files if f.exists()]
+    exempt = {ROOT / name for name in MODULE_CITATION_EXEMPT_DOCS}
+    return [f for f in files if f.exists() and f not in exempt]
 
 
 # ------------------------------------------ 3c. cited modules exist, source map complete

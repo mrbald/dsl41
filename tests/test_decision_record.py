@@ -38,17 +38,14 @@ import contextlib
 import json
 import sys
 import uuid
-
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
-from supervisor_list_doubles import stub_refusal, stub_row
-
 from test_runner_control import (
-    _serve,
     _sendevent,
+    _serve,
     _teardown,
     _versioned,
     _wait_for_async,
@@ -56,19 +53,19 @@ from test_runner_control import (
 
 from dsl41.ir import lower_source
 from dsl41.oracle_state import Event
-from dsl41.runner_adapters import FakeAdapter, SupervisorListReply
+from dsl41.run_root import active_wal
+from dsl41.runner import Engine
+from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import (
     PROTOCOL_VERSION,
     ApplyResult,
     EnvelopeError,
     parse_envelope,
 )
-from dsl41.runner import Engine
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_effects import Effect
 from dsl41.runner_hosts import HostCommand
 from dsl41.runner_journal import Journal, read_journal, read_outbox
-from dsl41.period import active_wal
 from dsl41.runner_startup import (
     _preflight_identities,
     _reconcile,
@@ -576,30 +573,6 @@ def test_legacy_batch_is_pinned_three_ways_at_the_central_validator(tmp_path: Pa
         assert "DL-138" not in str(bad.value)
 
 
-def test_the_retired_fold_reaches_a_history_and_a_retention_consumer(tmp_path: Path) -> None:
-    """The inheritance, proved rather than assumed (PR-48's replacement).
-
-    `runner_history` and `retention` parse decision effects WITHOUT
-    `read_outbox`, so before D1 each would have needed its own copy of the
-    `legacy_batch` rule. Both route through `read_journal`, so both refuse
-    the retired fold by name and neither carries a second spelling."""
-    from dsl41.retention import plan_retention
-    from dsl41.runner_history import RunHistoryError, read_run_root
-
-    run_root = _one_period(tmp_path)
-    records = read_journal(_wal(run_root))
-    _rewrite(
-        run_root,
-        [{**r, "legacy_batch": True} if r.get("rec") == "decision" else r for r in records],
-    )
-    with pytest.raises(RunHistoryError, match="RETIRED") as history:
-        read_run_root(run_root)
-    assert "DL-138" in str(history.value)
-    with pytest.raises(EngineError, match="RETIRED") as retention:
-        plan_retention(run_root)
-    assert "DL-138" in str(retention.value)
-
-
 # ------------------------------------------- 3a. identity at birth and readback
 
 
@@ -653,56 +626,6 @@ def _bound_spawn(run_id: str | None) -> Effect:
         run_id=run_id,
         generation=0,
     )
-
-
-def test_pr36a_the_preflight_refuses_every_identity_split_before_anything_moves(
-    tmp_path: Path,
-) -> None:
-    """One key runs through the WAL and the spool. The preflight sweeps
-    every candidate's PRESENT evidence -- spawn.json, status.json, the
-    supervisor's LIST row (alive or dead) -- against the id the durable
-    effect bound, BEFORE the barrier mutates anything: a refusal has
-    appended nothing and resolved nothing. Present evidence that names no
-    id at all is refused too -- a new-writer wrapper always records one. A
-    pre-DL-118 effect (no bound id) checks nothing."""
-    engine = _spool_engine()
-    effect = _bound_spawn("rid-wal")
-    engine.outbox.record(effect)
-    run_dir = tmp_path / "j.1"
-    run_dir.mkdir()
-
-    # a status-only stranger's record: the fate file, no spawn.json at all
-    (run_dir / "status.json").write_text(json.dumps({"run_id": "rid-else"}))
-    with pytest.raises(EngineError, match="'rid-else'.*'rid-wal'"):
-        _preflight_identities(engine, {("j", 1): run_dir}, {})
-    assert [e.effect_id for e in engine.outbox.pending()] == ["e1:SPAWN:j.1"]  # untouched
-    (run_dir / "status.json").unlink()
-
-    # present evidence that names NO id: refused, not treated as unknown
-    (run_dir / "spawn.json").write_text(json.dumps({"pid": 1}))
-    with pytest.raises(EngineError, match="None.*'rid-wal'"):
-        _preflight_identities(engine, {("j", 1): run_dir}, {})
-
-    # a DEAD supervisor row with no local directory is a claim like any other
-    with pytest.raises(EngineError, match="supervisor's LIST"):
-        _preflight_identities(
-            engine,
-            {("j", 1): None},
-            {("j", 1): stub_row(job="j", run_number=1, run_id="rid-else", wrapper_alive=False)},
-        )
-
-    # agreement everywhere: reconciliation then proceeds and resolves
-    (run_dir / "spawn.json").write_text(json.dumps({"run_id": "rid-wal"}))
-    _preflight_identities(engine, {("j", 1): run_dir}, {})
-    _reconcile_applied_spawns(engine, {("j", 1): run_dir})
-    assert engine.outbox.pending() == []
-
-    legacy = _spool_engine()
-    legacy.outbox.record(_bound_spawn(None))
-    (run_dir / "spawn.json").write_text(json.dumps({"run_id": "rid-else"}))
-    _preflight_identities(legacy, {("j", 1): run_dir}, {})
-    _reconcile_applied_spawns(legacy, {("j", 1): run_dir})
-    assert legacy.outbox.pending() == []
 
 
 def test_read_outbox_refuses_a_native_decision_with_an_identity_less_effect() -> None:
@@ -840,49 +763,6 @@ def test_pr36a_the_reconcile_barrier_refuses_a_split_and_appends_nothing(tmp_pat
             # exactly as the crash left it
             assert read_journal(engine.journal.path) == before
             assert [e.effect_id for e in engine.outbox.pending()] == [spawned.effect_id]
-        finally:
-            await engine.shutdown()
-            assert engine.journal is not None
-            engine.journal.close()
-
-    asyncio.run(scenario())
-
-
-def test_pr36a_reconcile_reads_a_list_refusal_as_no_supervised_evidence(tmp_path: Path) -> None:
-    """DL-220: a LIST reply can be `SupervisorRefusal` (a malformed
-    envelope, an unsupported version, an unknown verb -- supervisor-
-    protocol ss5) without the transport itself failing, so `_reconcile`
-    must read it exactly as the unreachable-supervisor case does: no
-    supervised evidence, not a crash on the reply shape."""
-    run_root = tmp_path / "run"
-    engine = start_run(
-        lower_source(_SOLO_JIL),
-        run_root,
-        clock=VirtualClock(start=T0),
-        adapters={"CMD": FakeAdapter(default=None)},
-    )
-
-    class _RefusingSupervisor:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def list_runs(self) -> SupervisorListReply:
-            self.calls += 1
-            return stub_refusal()
-
-    async def scenario() -> None:
-        supervisor = _RefusingSupervisor()
-        try:
-            await _reconcile(
-                engine,
-                [],
-                T0,
-                settle_seconds=0.0,
-                grace_seconds=0.0,
-                supervisor=supervisor,
-            )
-            assert supervisor.calls == 1  # the branch under test actually ran
-            assert engine.outbox.pending() == []  # nothing to reconcile, and no crash
         finally:
             await engine.shutdown()
             assert engine.journal is not None
@@ -1066,3 +946,45 @@ def test_an_unknown_field_on_a_control_request_is_ignored() -> None:
         baseline_id="the-log",
     )
     assert surplus == known  # ignored, not carried and not refused
+
+
+def test_pr36a_the_preflight_refuses_every_identity_split_before_anything_moves(
+    tmp_path: Path,
+) -> None:
+    """One key runs through the WAL and the spool. The preflight sweeps
+    every candidate's PRESENT evidence -- spawn.json, status.json -- against
+    the id the durable
+    effect bound, BEFORE the barrier mutates anything: a refusal has
+    appended nothing and resolved nothing. Present evidence that names no
+    id at all is refused too -- a new-writer wrapper always records one. A
+    pre-DL-118 effect (no bound id) checks nothing."""
+    engine = _spool_engine()
+    effect = _bound_spawn("rid-wal")
+    engine.outbox.record(effect)
+    run_dir = tmp_path / "j.1"
+    run_dir.mkdir()
+
+    # a status-only stranger's record: the fate file, no spawn.json at all
+    (run_dir / "status.json").write_text(json.dumps({"run_id": "rid-else"}))
+    with pytest.raises(EngineError, match="'rid-else'.*'rid-wal'"):
+        _preflight_identities(engine, {("j", 1): run_dir})
+    assert [e.effect_id for e in engine.outbox.pending()] == ["e1:SPAWN:j.1"]  # untouched
+    (run_dir / "status.json").unlink()
+
+    # present evidence that names NO id: refused, not treated as unknown
+    (run_dir / "spawn.json").write_text(json.dumps({"pid": 1}))
+    with pytest.raises(EngineError, match="None.*'rid-wal'"):
+        _preflight_identities(engine, {("j", 1): run_dir})
+
+    # agreement everywhere: reconciliation then proceeds and resolves
+    (run_dir / "spawn.json").write_text(json.dumps({"run_id": "rid-wal"}))
+    _preflight_identities(engine, {("j", 1): run_dir})
+    _reconcile_applied_spawns(engine, {("j", 1): run_dir})
+    assert engine.outbox.pending() == []
+
+    legacy = _spool_engine()
+    legacy.outbox.record(_bound_spawn(None))
+    (run_dir / "spawn.json").write_text(json.dumps({"run_id": "rid-else"}))
+    _preflight_identities(legacy, {("j", 1): run_dir})
+    _reconcile_applied_spawns(legacy, {("j", 1): run_dir})
+    assert legacy.outbox.pending() == []

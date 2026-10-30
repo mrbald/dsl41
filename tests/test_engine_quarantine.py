@@ -16,7 +16,6 @@ Faults are injected the way test_dry_apply.py injects them: a patched
 from __future__ import annotations
 
 import asyncio
-
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -24,8 +23,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from fork_harness import state_bytes
+
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, JobStatus, RuntimeState
@@ -483,7 +482,6 @@ def test_a_time_half_fault_stops_before_the_append_and_leaves_a_clean_log(
                 raised = exc
                 after = (engine.frontiers, state_bytes(engine.oracle), len(_records(run_root)))
                 assert after == before
-                assert engine._applying is None
         await _close(engine)
         return raised, engine
 
@@ -608,90 +606,7 @@ def test_a_verbless_input_is_never_quarantined() -> None:
     assert not isinstance(quarantine_verdict(oracle, verbed, fault), Exception)
 
 
-def test_a_time_half_fault_on_the_cutoff_observation_aborts_the_seal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The cutoff's own time observation is verbless and belongs to the
-    seal, so a time-half fault on it is one of the other exceptions: the
-    seal aborts and refuses, no `seal` record exists, and C1 reopens. The
-    engine's next engine-made input meets the same fault and stops the
-    engine."""
-    from test_boundary import C2_JIL, _genesis, _refusal, _request, _stage
-
-    run_root = tmp_path / "run"
-    engine = _genesis(run_root)
-    staged = _stage(run_root, C2_JIL)
-    real = Oracle._fire_timers_due
-
-    def fire(self: Oracle, at: datetime) -> None:
-        # the engine's oracle and its forks only: the boundary's
-        # classification evaluates seeded oracles of its own, which hold no
-        # host row, and a fault there would refuse the seal before the cutoff
-        if "local" in self.store.hosts:
-            raise RuntimeError("an injected timer fault")
-        real(self, at)
-
-    async def scenario() -> EngineError:
-        with monkeypatch.context() as mp:
-            mp.setattr(Oracle, "_fire_timers_due", fire)
-            refused = await _refusal(engine, _request(engine, staged))
-            assert engine.sealing is False  # the abort ran
-            engine.inject(_start(job="a"), source="scheduler")
-            with pytest.raises(TimeHalfStop):
-                await engine.run_until_quiescent(T0)
-        assert Oracle._fire_timers_due is real
-        await _close(engine)
-        return refused
-
-    refused = asyncio.run(scenario())
-    assert isinstance(refused, TimeHalfStop)
-    assert engine.journal is not None
-    records = read_journal(engine.journal.path)
-    assert not [r for r in records if r["rec"] in ("seal", "input", "advance")]
-
-
 # ------------------------------------------------------- the CLI
-
-
-@pytest.mark.parametrize(
-    ("raised", "code"),
-    [
-        (TimeHalfStop, 6),
-        (EngineError("test: a crash"), 1),
-    ],
-)
-def test_a_time_half_stop_exits_6_and_a_crash_exits_1(
-    short_root: Path, monkeypatch: pytest.MonkeyPatch, raised: Any, code: int
-) -> None:
-    """Exit 6 is the time-half stop's own, so the engine units'
-    `RestartPreventExitStatus=2 3 6 7` keeps it down: every restart would
-    meet the same timers."""
-    from dsl41 import cli_run
-    from dsl41.period import runtime_profile_from_cli
-    from dsl41.runner_admission import Attempt
-
-    assert cli_run.EXIT_TIME_HALF_STOP == 6
-    if raised is TimeHalfStop:
-        attempt = Attempt(index=3, at=T0, request_id="engine:3", fingerprint="fp")
-        raised = TimeHalfStop(attempt, RuntimeError("test: a timer fault"))
-
-    async def halt(self: Engine, horizon: datetime) -> list[Event]:
-        raise raised
-
-    monkeypatch.setattr(Engine, "run_until_quiescent", halt)
-    exit_code = asyncio.run(
-        cli_run._serve_run(
-            lower_source(_JIL),
-            short_root / "root",
-            False,
-            [],
-            profile=runtime_profile_from_cli(),
-            supervisor="spawn",
-        )
-    )
-    assert exit_code == code
-    note = cli_run._reattach_note(None, short_root, detached=True, code=code)
-    assert note is not None and note.startswith("detached: reattach")
 
 
 _TICKED_JIL = 'insert_job: d\njob_type: c\ncommand: x\nmachine: m1\ndate_conditions: 1\nstart_times: "09:00"\n'
@@ -803,80 +718,6 @@ def _fault_on_the_engines_oracle(mp: pytest.MonkeyPatch) -> None:
         real(self, at)
 
     mp.setattr(Oracle, "_fire_timers_due", fire)
-
-
-@pytest.mark.parametrize("armed", [True, False])
-def test_a_time_half_fault_on_a_drained_input_stops_the_seal_without_an_abort(
-    tmp_path: Path, armed: bool
-) -> None:
-    """A completion queued before the seal is drained by it. A time-half
-    stop on it leaves the completion unadmitted, so the seal stops the
-    engine as DL-274 does for `clock_regressed`: no abort, no answer, no
-    `seal` record, and the stop propagates for exit 6. Unarmed, the stale
-    completion is rejected and the seal commits."""
-    from dsl41.runner import PeriodSealed
-    from test_boundary import C2_JIL, _genesis, _request, _stage
-
-    run_root = tmp_path / "run"
-    engine = _genesis(run_root)
-    staged = _stage(run_root, C2_JIL)
-
-    async def scenario() -> BaseException:
-        with pytest.MonkeyPatch.context() as mp:
-            if armed:
-                _fault_on_the_engines_oracle(mp)
-            stale = Event(
-                at=T0, kind="STATUS", payload={"job": "a", "status": "SUCCESS", "run_number": 1}
-            )
-            engine._enqueue(stale, source="adapter")
-            sealed = engine.submit_seal(_request(engine, staged))
-            with pytest.raises((TimeHalfStop, PeriodSealed)) as out:
-                await engine.run_until_quiescent(T0)
-            assert sealed.done() is not armed
-            assert engine.sealing or not armed  # armed: no abort ran
-        await _close(engine)
-        return out.value
-
-    raised = asyncio.run(scenario())
-    assert engine.journal is not None
-    records = read_journal(engine.journal.path)
-    if not armed:
-        assert isinstance(raised, PeriodSealed)
-        assert [r for r in records if r["rec"] == "seal"]
-        return
-    assert isinstance(raised, TimeHalfStop)
-    assert "rather than lose an unadmitted STATUS input" in "\n".join(raised.__notes__)
-    assert not [r for r in records if r["rec"] in ("seal", "input", "advance")]
-
-
-def test_a_time_half_fault_on_a_drained_routing_observation_names_it_unadmitted(
-    tmp_path: Path,
-) -> None:
-    """The leader's own routing observation, queued before the seal, is
-    drained by it like a completion. A time-half stop on it stops the seal
-    without an abort, and the note names it as a host input (DL-274)."""
-    from test_boundary import C2_JIL, _genesis, _request, _stage
-
-    run_root = tmp_path / "run"
-    engine = _genesis(run_root)
-    staged = _stage(run_root, C2_JIL)
-
-    async def scenario() -> TimeHalfStop:
-        with pytest.MonkeyPatch.context() as mp:
-            _fault_on_the_engines_oracle(mp)
-            engine.inject_host(HostCommand(verb="quarantine", host_id="local"))
-            sealed = engine.submit_seal(_request(engine, staged))
-            with pytest.raises(TimeHalfStop) as out:
-                await engine.run_until_quiescent(T0)
-            assert not sealed.done() and engine.sealing  # no abort ran
-        await _close(engine)
-        return out.value
-
-    raised = asyncio.run(scenario())
-    assert "rather than lose an unadmitted host input" in "\n".join(raised.__notes__)
-    assert engine.journal is not None
-    records = read_journal(engine.journal.path)
-    assert not [r for r in records if r["rec"] in ("seal", "host", "advance")]
 
 
 def _fork_only_commit_fault(mp: pytest.MonkeyPatch) -> None:
@@ -1064,3 +905,41 @@ def test_a_kept_fault_drops_the_tracebacks_of_its_cause_and_its_context(armed: b
         assert all(link.__traceback__ is None for link in chain)
     else:
         assert all(link.__traceback__ is not None for link in chain)
+
+
+@pytest.mark.parametrize(
+    ("raised", "code"),
+    [
+        (TimeHalfStop, 6),
+        (EngineError("test: a crash"), 1),
+    ],
+)
+def test_a_time_half_stop_exits_6_and_a_crash_exits_1(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, raised: Any, code: int
+) -> None:
+    """Exit 6 is the time-half stop's own, so the engine units'
+    `RestartPreventExitStatus=2 3 6 7` keeps it down: every restart would
+    meet the same timers."""
+    from dsl41 import cli_run
+    from dsl41.run_root import runtime_profile_from_cli
+    from dsl41.runner_admission import Attempt
+
+    assert cli_run.EXIT_TIME_HALF_STOP == 6
+    if raised is TimeHalfStop:
+        attempt = Attempt(index=3, at=T0, request_id="engine:3", fingerprint="fp")
+        raised = TimeHalfStop(attempt, RuntimeError("test: a timer fault"))
+
+    async def halt(self: Engine, horizon: datetime) -> list[Event]:
+        raise raised
+
+    monkeypatch.setattr(Engine, "run_until_quiescent", halt)
+    exit_code = asyncio.run(
+        cli_run._serve_run(
+            lower_source(_JIL),
+            short_root / "root",
+            False,
+            [],
+            profile=runtime_profile_from_cli(),
+        )
+    )
+    assert exit_code == code

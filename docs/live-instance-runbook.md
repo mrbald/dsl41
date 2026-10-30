@@ -857,8 +857,8 @@ and dsl41's pin holds. Note the tension with SEM-20's "conditions must
 reoccur": the tick, not the condition, is what carried over. If it does
 not run, ice discards the queued start. Then amend SEM-20/SEM-32, clear
 `armed` in the oracle's ON_ICE handler (`SCHED_DISARM` trace record),
-and rewrite the sentence in step 4 of exercise 13 in
-`examples/nightbank/RUNBOOK.md` that names the `DISARM` verb: ON_ICE
+and rewrite any operator exercise that names the `DISARM` verb (the
+nightbank exercises are retired in 2.0.0 and return in a later slice): ON_ICE
 becomes the vendor's way to drop a latched tick, with its
 downstream-satisfaction cost stated. Delete both jobs the same
 day, because the schedule ticks daily: `jil <<< "delete_job: dsl41_q3ice"`

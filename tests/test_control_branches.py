@@ -21,13 +21,11 @@ from pathlib import Path
 
 import pytest
 from test_access import _write_map
-from test_boundary import C2_JIL, T0, _catalog, _close, _genesis, _request, _seal, _stage
 from test_runner_control import (
     _body,
     _control_call,
     _fake_answer_server,
     _RawServer,
-    _seal_wire,
     _sendevent,
     _serve,
     _teardown,
@@ -36,12 +34,8 @@ from test_runner_control import (
 )
 
 import dsl41.runner_control as control_mod
-from dsl41.attest import audit_period
-from dsl41.boundary import EstateAnchor, default_anchor_dir
-from dsl41.estate import roll_into_root
 from dsl41.runner_access import AccessControl, PerimeterJournal, load_policy
-from dsl41.runner_adapters import FakeAdapter
-from dsl41.runner_clock import EngineError, VirtualClock
+from dsl41.runner_clock import EngineError
 from dsl41.runner_control import (
     ControlClient,
     ControlClientError,
@@ -51,7 +45,6 @@ from dsl41.runner_control import (
     subscribe_lines,
 )
 from dsl41.runner_journal import read_journal
-from dsl41.runner_startup import resume_run
 
 if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
     pytest.skip("unix-domain control sockets are POSIX-only", allow_module_level=True)
@@ -226,99 +219,6 @@ def test_a_client_that_vanishes_before_its_answer_costs_the_engine_nothing(
 
 
 # --------------------------------------------------- ss3 the seal's answers
-
-
-def test_a_seal_nothing_drains_is_unknown_and_a_second_one_is_refused(
-    short_root: Path,
-) -> None:
-    """ss3 `seal`: a boundary that no loop drains answers `unknown` -- an
-    `ok: false` with no `refused` -- and a timeout is never a refusal. The
-    boundary is still in flight, so a second request is refused whole,
-    naming the one ahead of it (`one seal at a time`). The healthy seal that
-    answers inside its timeout is `test_pr30a_the_seal_verb_answers_before_the_engine_exits`."""
-
-    async def scenario() -> None:
-        engine, server, loop_task = await _serve(short_root / "run", _ONE_JOB)
-        loop_task.cancel()  # the engine loop never drains the boundary
-        server.SEAL_TIMEOUT_S = 0.2
-        try:
-            first = _body(
-                await _control_call(server.path, _seal_wire(engine, request_id="r-first")),
-                engine,
-            )
-            assert first == {
-                "ok": False,
-                "code": "seal_timeout",
-                "error": "no boundary outcome within 0.2s: the seal may still commit --"
-                " re-read before retrying, and retry only under request_id r-first",
-            }
-            second = _body(
-                await _control_call(server.path, _seal_wire(engine, request_id="r-second")),
-                engine,
-            )
-            assert second == {
-                "ok": False,
-                "code": "seal_in_flight",
-                "refused": True,
-                "error": "a boundary is already in flight (request_id r-first, requested): one seal at a time",
-                "in_flight_request_id": "r-first",
-            }
-        finally:
-            await _teardown(engine, server, loop_task)
-
-    asyncio.run(scenario())
-
-
-def test_a_retry_horizon_refusal_carries_the_time_left(short_root: Path) -> None:
-    """ss3, DL-420: a `seal_retry_horizon` refusal adds `retry_horizon_left_us`, the time
-    left until the horizon ends, so a client reads its wait from a field and never from the
-    prose. The field is additive."""
-    from dsl41.boundary import RetryHorizonRefused
-
-    async def scenario() -> None:
-        engine, server, loop_task = await _serve(short_root / "run", _ONE_JOB)
-
-        async def refused(request: object) -> object:
-            raise RetryHorizonRefused("the horizon holds", left_us=1_500_000)
-
-        engine.submit_seal = refused  # type: ignore[method-assign,assignment]
-        try:
-            answer = _body(await _control_call(server.path, _seal_wire(engine)), engine)
-            assert answer == {
-                "ok": False,
-                "code": "seal_retry_horizon",
-                "refused": True,
-                "error": "the horizon holds",
-                "retry_horizon_left_us": 1_500_000,
-            }
-        finally:
-            await _teardown(engine, server, loop_task)
-
-    asyncio.run(scenario())
-
-
-def test_a_seal_reads_claimed_actor_as_a_string_or_not_at_all(short_root: Path) -> None:
-    """ss3: `claimed_actor` is typed only when present, and absence is legal
-    (it is defaulted). A number is refused before anything is parsed."""
-
-    async def scenario() -> None:
-        engine, server, loop_task = await _serve(short_root / "run", _ONE_JOB)
-        try:
-            refused = _body(
-                await _control_call(server.path, _seal_wire(engine, claimed_actor=7)), engine
-            )
-            assert refused == {
-                "ok": False,
-                "code": "invalid_argument",
-                "refused": True,
-                "error": "malformed seal request: claimed_actor must be a string, got 7",
-            }
-            assert control_mod._seal_wire_error(_seal_wire(engine, claimed_actor=None)) is None
-            assert control_mod._seal_wire_error(_seal_wire(engine)) is None
-        finally:
-            await _teardown(engine, server, loop_task)
-
-    asyncio.run(scenario())
 
 
 # ------------------------------------------- ss3 framing refusals, per verb
@@ -644,106 +544,6 @@ _DISPLACED = (
     " or replaced. Nothing is answered from a lineage this process does not lead"
     " (period-model ss1.3, PR-03)"
 )
-
-
-def test_pr03_a_live_record_is_not_published_once_the_lineage_is_displaced(
-    short_root: Path,
-) -> None:
-    """PR-03 holds per RESPONSE at the live seam too: a record that was
-    appended while the engine still led reaches a subscriber that is parked
-    on its feed only through a lineage proof that is re-read first. The anchor
-    lock is deleted in the same turn the second record is appended, so the
-    handler wakes to a displaced leader: it sends the refusal, headerless,
-    and hangs up. The first record, appended under an intact lineage, is
-    streamed."""
-    run_root = short_root / "run"
-    engine = _genesis(run_root)
-
-    async def scenario() -> None:
-        server = ControlServer(engine, short_root / "c.sock")
-        await server.start()
-        reader, writer = await _open(server)
-        try:
-            ack = await _ask(reader, writer, {"cmd": "subscribe"})
-            assert ack["ok"] is True and ack["subscribed"] is True
-            assert engine.journal is not None
-            engine.journal.preflight([])
-            assert (await _read_until(reader, lambda got: len(got) == 1))[0]["rec"] == "preflight"
-            engine.journal.preflight([])
-            (default_anchor_dir(run_root) / "anchor.lock").unlink()  # displaced, same turn
-            refusal = json.loads(await asyncio.wait_for(reader.readline(), timeout=3.0))
-            assert refusal == {
-                "ok": False,
-                "code": "lineage_lost",
-                "refused": True,
-                "error": _DISPLACED,
-            }
-            assert await asyncio.wait_for(reader.readline(), timeout=3.0) == b""
-        finally:
-            await _hang_up(writer)
-            await server.close()
-            await engine.shutdown()
-
-    asyncio.run(scenario())
-    _close(engine)
-
-
-def test_pr03_the_gap_marker_is_a_response_and_a_displaced_leader_sends_the_refusal(
-    short_root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """ss5 gap marker, PR-03: the marker is a RESPONSE, so the lineage proof
-    runs in front of it like every other one. The root below owes the marker
-    to a cursor under the closed period (the roll imports none of its WAL); the
-    anchor lock is deleted while the backfill is read, and the subscriber is
-    answered the refusal instead of a marker about an estate this process no
-    longer leads. The marker's own answer is
-    `test_pr49_a_cursor_below_the_earliest_retained_record_gets_the_gap_marker`."""
-    root_a = short_root / "a"
-    engine = _genesis(root_a)
-    asyncio.run(_seal(engine, _request(engine, _stage(root_a, C2_JIL))))
-    _close(engine)
-    anchor_dir = default_anchor_dir(root_a)
-    audit_period(root_a, 1, anchor=EstateAnchor(anchor_dir))
-    catalog, _ = _catalog(C2_JIL)
-    root_b = short_root / "b"
-    roll_into_root(root_b, anchor_dir=anchor_dir, catalog_of=lambda _r, _m: catalog)
-    rolled = asyncio.run(
-        resume_run(
-            catalog,
-            root_b,
-            clock=VirtualClock(start=T0),
-            adapters={"CMD": FakeAdapter(default=None)},
-            anchor_dir=anchor_dir,
-        )
-    )
-    real_read = control_mod.read_backfill
-
-    def displaced_while_reading(wal: Path, *, since: int):
-        backfill = real_read(wal, since=since)
-        assert backfill.gap_from is not None  # the marker is owed to this cursor
-        (anchor_dir / "anchor.lock").unlink()
-        return backfill
-
-    monkeypatch.setattr(control_mod, "read_backfill", displaced_while_reading)
-
-    async def scenario() -> list[dict]:
-        server = ControlServer(rolled, short_root / "c.sock")
-        await server.start()
-        reader, writer = await _open(server)
-        try:
-            ack = await _ask(reader, writer, {"cmd": "subscribe", "since": 0})
-            assert ack["ok"] is True
-            answer = json.loads(await asyncio.wait_for(reader.readline(), timeout=3.0))
-            assert await asyncio.wait_for(reader.readline(), timeout=3.0) == b""
-            return [answer]
-        finally:
-            await _hang_up(writer)
-            await server.close()
-            await rolled.shutdown()
-
-    answered = asyncio.run(scenario())
-    _close(rolled)
-    assert answered == [{"ok": False, "code": "lineage_lost", "refused": True, "error": _DISPLACED}]
 
 
 # ------------------------------------------------ ss6 what a client claims

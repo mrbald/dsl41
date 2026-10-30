@@ -9,11 +9,7 @@ from __future__ import annotations
 
 import functools
 import hashlib
-import json
-import os
-import time
 from collections.abc import Callable, Iterable, Mapping
-from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn
 
@@ -28,10 +24,7 @@ from dsl41.semantics import help_text, parse_assignments
 from dsl41.state_machine import EXIT_STATECHART_ERROR, StatechartError
 
 if TYPE_CHECKING:
-    from dsl41.boundary import EstateWalk, Lineage
     from dsl41.dsl import CatalogBuilder
-    from dsl41.runner_adapters import SupervisorConn
-    from dsl41.runner_clock import EngineError
 
 
 # ------------------------------------------------- the shared options
@@ -188,16 +181,6 @@ def estate_args(
         timezone_map=None if inputs.timezone_map is None else Path(inputs.timezone_map),
         semantics=[f"{name}={value}" for name, value in inputs.semantics.items()],
     )
-
-
-class SupervisorChoice(str, Enum):
-    """`--supervisor`: how a detached launch gets its supervisor (DL-396).
-
-    `attach` connects to the supervisor already running on the run root and starts none. `spawn`
-    starts one when none answers. `run` defaults to `spawn` and the offline `seal` to `attach`."""
-
-    attach = "attach"
-    spawn = "spawn"
 
 
 def load_semantics(items: "list[str] | None", *, option: str = "--semantics") -> dict[str, str]:
@@ -417,34 +400,6 @@ def import_tui_or_exit_2():
     return runner_tui
 
 
-# ------------------------------------------ addressing the whole estate
-
-
-def walk_estate_or_exit_2(anchor_dir: Path) -> "EstateWalk":
-    """ss1.3's archive registry, resolved for a verb, or exit 2.
-
-    `audit`, `journal`, `runs` and `estate prune` enter their estate-wide mode through this door
-    (PR-02f): the lineage ANCHOR stands where a run root would. A provisional registry row
-    (`segment_durable: false`, ss1.3) is not a refusal; it is reported once here.
-    """
-    from dsl41.boundary import walk_estate
-    from dsl41.runner_clock import EngineError
-
-    try:
-        walk = walk_estate(anchor_dir)
-    except EngineError as exc:
-        raise typer.Exit(refuse(exc)) from exc
-    if walk.provisional:
-        listed = ", ".join(str(number) for number in walk.provisional)
-        typer.echo(
-            f"note: period(s) {listed} have a registry row whose first segment is not"
-            " durable yet, and every cross-period reader ignores a row until it is"
-            " -- they are not in this total (period-model ss1.3)",
-            err=True,
-        )
-    return walk
-
-
 # ----------------------------------------- an answer becomes an exit code
 
 
@@ -540,28 +495,16 @@ def command_outcome(
     request: dict[str, Any],
     *,
     on_applied: Callable[[], None] | None = None,
-    rejected_as_unknown: bool = False,
-    seal_in_flight_by_id: bool = False,
     retry_command: str | None = None,
 ) -> int:
     """Send one concurrency-model ss6 command envelope; return DL-92's outcome (0 applied, 2
     refused, 3 rejected, 4 unknown).
 
-    One implementation serves `sendevent`/`host` and the live seal (DL-137). A dropped connection
+    One implementation serves `sendevent` and `host` (DL-137). A dropped connection
     after the request left is `unknown` (4), not 2: the engine fsyncs an attempt before it feeds
     it, so 2's "safe to send again unchanged" would be false.
 
-    `on_applied` adds the sentence a boundary prints when it committed.
-
-    `rejected_as_unknown` is for a surface whose published table has no 3. `dsl41 seal` is one:
-    period-model ss7 states 0/2/4/7 for it, and a live engine exits 3 when its period sealed
-    (deployment-runbook ss6a). The ladder test in `tests/test_runner_control.py` drives a
-    synthetic `rejected` reply through it and exits 4 (DL-145).
-
-    `seal_in_flight_by_id`: a `seal_in_flight` refusal names the boundary in flight
-    (`in_flight_request_id`, control-protocol ss3). If that is this request's own id the outcome
-    is unknown (4). If it is another's, this request did nothing (2), with no promise that the
-    period is still open.
+    `on_applied` adds a sentence when the command applied.
 
     `retry_command` names the command an exact retry is sent as when it is not the one typed:
     `off-hold-all` sends one OFF_HOLD per job, and its retry is the one-job `sendevent` (DL-217).
@@ -589,22 +532,6 @@ def command_outcome(
         return 4
     typer.echo(json_mod.dumps(response, sort_keys=True))
     outcome = outcome_of(response)
-    if rejected_as_unknown and outcome == REJECTED:
-        outcome = UNKNOWN
-    if seal_in_flight_by_id and response.get("code") == "seal_in_flight":
-        own = request.get("request_id")
-        in_flight = response.get("in_flight_request_id")
-        if in_flight == own:
-            typer.echo(
-                f"your seal {own} is still in flight; outcome unknown; retry later under"
-                f" --request-id {own}",
-                err=True,
-            )
-            return 4
-        typer.echo(
-            f"another boundary ({in_flight}) is in flight; this request did nothing", err=True
-        )
-        return 2
     if outcome == APPLIED and on_applied is not None:
         on_applied()
     if outcome == REFUSED:
@@ -612,413 +539,6 @@ def command_outcome(
     if outcome == UNKNOWN:
         _no_decision(request, retry_command)
     return {REFUSED: 2, REJECTED: 3, UNKNOWN: 4}.get(outcome, 0)
-
-
-#: how long past the supervisor's own bound a client watches an admitted operation (DL-401)
-MAINTENANCE_MARGIN_S = 2.0
-#: exit 2: a host signal started the supervisor's drain, which refuses maintenance (DL-416)
-DRAINING = "supervisor is draining; wait for the unit to stop"
-#: exit 3: the wait ended on an operation that still runs (DL-401)
-IN_PROGRESS = "in progress; it finishes on its own; read maintenance.json or run this again"
-#: the process states of an admitted operation, running or uncertain (DL-401)
-_OPERATION_STATES = frozenset(
-    {"maintenance_stopping", "maintenance_completing", "maintenance_uncertain"}
-)
-#: ActiveState values of a service unit that is down; `failed` is a sealed engine's exit 3.
-#: `estate quiesce` and the release verbs read a unit's state by this one set (DL-420).
-UNIT_DOWN = ("inactive", "failed")
-#: the process states of an operation still being run (DL-401)
-_RUNNING_STATES = frozenset({"maintenance_stopping", "maintenance_completing"})
-#: the refusals after which nothing changed: exit 2 (DL-390)
-_MAINTENANCE_REFUSALS = frozenset(
-    {
-        "maintenance_refused",
-        "wrong_incarnation",
-        "stale_token",
-        "unknown_verb",
-        "unsupported_version",
-    }
-)
-
-
-def supervisor_exited(pid: int, start: str) -> bool:
-    """Whether the process named by (pid, start token) has exited. Only ESRCH proves absence
-    when the identity cannot be read (DL-390); a zombie or a reused pid has exited."""
-    from dsl41.runner_procid import proc_is_zombie, proc_start_token
-
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    observed = proc_start_token(pid)
-    if observed is None:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return True
-        raise OSError("cannot observe the supervisor process identity")
-    return observed != start or proc_is_zombie(pid)
-
-
-def _left_of(record: dict[str, Any]) -> float:
-    """The rest of a recorded operation's bound, from the wall clock both processes read, held
-    within the bound, plus the client's margin (DL-401)."""
-    from datetime import datetime
-
-    started = datetime.fromisoformat(record["started_at"]).timestamp()
-    bound = float(record["bound_s"])
-    return min(max(started + bound - time.time(), 0.0), bound) + MAINTENANCE_MARGIN_S
-
-
-def settle_maintenance(
-    run_root: Path,
-    incarnation: str | None,
-    *,
-    within_s: float | None = None,
-    sleep: Callable[[float], None] = time.sleep,
-    probe: Callable[[], dict[str, Any]] | None = None,
-) -> tuple[int, str, dict[str, Any] | None]:
-    """Watch an admitted operation to its outcome from `maintenance.json` (DL-401): 0 when the
-    named supervisor has exited and the record says completed; 3 when it is still running as
-    the wait ends; 4 when the outcome cannot be observed: the record says uncertain, is
-    missing or unreadable, does not say completed after the exit, or names no supervisor
-    this caller can tie it to. `incarnation` is the supervisor the caller knows; None takes
-    the record's own, which must then name the root's last supervisor. A record of another
-    boot is 4 unless it says completed. A completed record is final: when both boot ids are
-    known and differ, the reboot ended its supervisor, so it is 0 at the first look; when
-    either is unknown, nothing is proved and the exit decides (DL-420). `within_s` replaces
-    the rest of the recorded bound. 3 needs `probe`, one PING, to answer with this operation
-    still running; a live identity that answers nothing is 4, since nothing more is
-    scheduled. Returns the code, its reason and the last record read. Sends nothing else."""
-    from dsl41.runner_procid import current_boot_id
-    from dsl41.runner_supervisor import read_maintenance_record, record_owner_problem
-
-    record = read_maintenance_record(run_root)
-    if record is None or incarnation not in (None, record["incarnation"]):
-        return 4, "no maintenance.json names this supervisor", record
-    boot, here = record["boot_id"], current_boot_id()
-    if boot != here and record["state"] != "completed":
-        return 4, "maintenance.json names another boot", record
-    # a reboot is proved only by two known boot ids that differ (DL-420)
-    rebooted = boot != here and "unknown" not in (boot, here) and bool(boot and here)
-    if incarnation is None and (problem := record_owner_problem(run_root, record)) is not None:
-        return 4, problem, record
-    incarnation = record["incarnation"]
-    pid, start = record["supervisor_pid"], record["supervisor_start_time"]
-    if rebooted:
-        return 0, f"completed; the supervisor (pid {pid}) exited", record
-    deadline = time.monotonic() + (_left_of(record) if within_s is None else within_s)
-    while True:
-        exited = supervisor_exited(pid, start)
-        # read after the exit check, so an exit observed is read with its final record
-        record = read_maintenance_record(run_root)
-        state = None if record is None else record["state"]
-        if record is not None and record["incarnation"] != incarnation:
-            state = None  # a later supervisor's record says nothing of this one
-        if exited:
-            if state == "completed":
-                return 0, f"completed; the supervisor (pid {pid}) exited", record
-            return 4, f"the supervisor (pid {pid}) exited and its record says {state}", record
-        if state == "uncertain":
-            assert record is not None
-            return 4, f"maintenance is uncertain: {record['detail']}", record
-        if time.monotonic() >= deadline:
-            if state not in ("admitted", "completed"):
-                return 4, f"the supervisor (pid {pid}) is alive and its record says {state}", record
-            answer = {} if probe is None else probe()
-            if (
-                answer.get("ok") is True
-                and answer.get("incarnation") == incarnation
-                and answer.get("process_state") in _RUNNING_STATES
-            ):
-                return 3, IN_PROGRESS, record
-            return (
-                4,
-                f"the supervisor (pid {pid}) is alive without a running operation on its socket"
-                f" ({answer.get('process_state', 'no answer')}); read supervisor.log before"
-                " anything else",
-                record,
-            )
-        sleep(0.05)
-
-
-def ping_probe(
-    sock_path: Path, connect: Callable[[Path], SupervisorConn]
-) -> Callable[[], dict[str, Any]]:
-    """One PING on a fresh connection, or {} when nothing answers: the evidence exit 3 needs
-    that an admitted operation is still being run (DL-401)."""
-    from dsl41.runner_clock import EngineError
-
-    def probe() -> dict[str, Any]:
-        try:
-            conn = connect(sock_path)
-            try:
-                return conn.send({"cmd": "PING"})
-            finally:
-                conn.close()
-        except (OSError, ValueError, EngineError):
-            return {}
-
-    return probe
-
-
-def settle_rerun(run_root: Path, sleep: Callable[[float], None] = time.sleep) -> int:
-    """A rerun that finds no supervisor socket and a `maintenance.json`: the record's own
-    operation, watched to its outcome as `settle_maintenance` does (DL-401)."""
-    try:
-        code, reason, record = settle_maintenance(run_root, None, sleep=sleep)
-    except (OSError, ValueError) as exc:
-        code, reason, record = 4, str(exc), None
-    return _settled(code, reason, record, run_root / "supervisor.sock")[0]
-
-
-def _lost_reply(
-    sock_path: Path,
-    connect: Callable[[Path], SupervisorConn],
-    *,
-    controller_id: str,
-    incarnation: str,
-    token: int,
-    sleep: Callable[[float], None],
-) -> tuple[int, str, dict[str, Any] | None]:
-    """A MAINTENANCE_STOP whose reply was lost after the send (DL-401). It is never resent.
-    One reconnect presents the request's own lease to ACQUIRE: either answer ends that token,
-    so a request not yet read is refused stale_token and cannot run later. PING then says
-    whether it ran. `serving` with no record of this incarnation is "not admitted"; a
-    maintenance state, or a supervisor gone, is settled from maintenance.json."""
-    from dsl41.runner_clock import EngineError
-    from dsl41.runner_supervisor import read_maintenance_record
-
-    ping: dict[str, Any] = {}
-    try:
-        conn = connect(sock_path)
-        try:
-            conn.incarnation = incarnation
-            conn.send(
-                {"cmd": "ACQUIRE", "controller_id": controller_id, "ttl_s": 60, "token": token}
-            )
-            ping = conn.send({"cmd": "PING"})
-        finally:
-            conn.close()
-    except (OSError, ValueError, EngineError):
-        pass  # no supervisor answers: maintenance.json decides
-    if ping.get("ok") is True and ping.get("incarnation") == incarnation:
-        if ping.get("process_state") == "draining":
-            # an admitted operation holds every signal, so a draining one admitted nothing
-            return 2, DRAINING, None
-        if ping.get("process_state") == "serving":
-            record = read_maintenance_record(sock_path.parent)
-            if record is None or record["incarnation"] != incarnation:
-                return 2, "not admitted; nothing changed", None
-            return 4, "the supervisor serves and maintenance.json says it was admitted", record
-        if ping.get("process_state") not in _OPERATION_STATES:
-            return 4, f"the supervisor answers {ping.get('process_state')}", None
-    return settle_maintenance(
-        sock_path.parent, incarnation, sleep=sleep, probe=ping_probe(sock_path, connect)
-    )
-
-
-def _settled(
-    code: int, reason: str, record: dict[str, Any] | None, sock_path: Path
-) -> tuple[int, dict[str, Any] | None]:
-    """Print a settled operation: the completed record on stdout, else the reason. A 2 (a lost
-    request that was never admitted) answers as a refusal would, `not_admitted`."""
-    if code == 0:
-        typer.echo(json.dumps(record, sort_keys=True))
-        return 0, record
-    refuse(reason, prefix=f"supervisor {sock_path}")
-    if code == 2:
-        return 2, {"ok": False, "error": "not_admitted", "detail": reason}
-    return code, None
-
-
-def guarded_maintenance(
-    conn: SupervisorConn,
-    sock_path: Path,
-    *,
-    controller_id: str,
-    force: str | None,
-    before_stop: Callable[[], None] | None = None,
-    on_refusal: Callable[[str, int], None] | None = None,
-    sleep: Callable[[float], None] = time.sleep,
-    connect: Callable[[Path], SupervisorConn] | None = None,
-) -> tuple[int, dict[str, Any] | None]:
-    """The client half of guarded maintenance (DL-390, DL-401): PING, ACQUIRE, MAINTENANCE_STOP,
-    then the admitted operation watched to its outcome in `maintenance.json`, within its
-    `bound_s` and a margin. Returns 0 completed, 2 refused or not admitted, 3 admitted and still
-    running when the wait ends, or 4 unknown, with the final record, or the refusal reply
-    (ACQUIRE's when the lease is refused). A PING that shows an operation already admitted
-    watches it and sends nothing. A lost reply is never resent: one reconnect resolves it
-    (`_lost_reply`). `supervise shutdown` and `estate quiesce` share it.
-
-    `before_stop` runs once the lease is held and before the request is sent. `on_refusal` gets
-    the lease (incarnation, token) of a refused request while the connection is open. The
-    caller closes `conn`; `connect` opens the one reconnect."""
-    from dsl41.runner_adapters import SupervisorConn
-    from dsl41.runner_clock import EngineError
-    from dsl41.runner_procid import current_boot_id, valid_start_token
-    from dsl41.runner_supervisor import MAINTENANCE_STOP_VERSION
-
-    maintenance_attempted = False
-    reconnect = connect or SupervisorConn
-    probe = ping_probe(sock_path, reconnect)
-    try:
-        ping = conn.send({"cmd": "PING"})
-        if ping.get("ok") is True and ping.get("process_state") in _OPERATION_STATES:
-            # an operation already admitted, by a client lost or gone: watch it, send nothing;
-            # from here a failure is an unknown outcome, never a refusal
-            maintenance_attempted = True
-            code, reason, record = settle_maintenance(
-                sock_path.parent, ping.get("incarnation"), sleep=sleep, probe=probe
-            )
-            return _settled(code, reason, record, sock_path)
-        if ping.get("ok") is True and ping.get("process_state") == "draining":
-            return refuse(DRAINING, prefix=f"supervisor {sock_path}"), {
-                "ok": False,
-                "error": "draining",
-            }
-        acq = conn.send({"cmd": "ACQUIRE", "controller_id": controller_id, "ttl_s": 60})
-        if not acq.get("ok"):
-            return refuse(f"cannot acquire lease: {json.dumps(acq, sort_keys=True)}"), acq
-        incarnation = acq.get("incarnation")
-        token = acq.get("token")
-        if not isinstance(incarnation, str) or not incarnation or type(token) is not int:
-            raise ValueError("malformed supervisor lease reply")
-        if before_stop is not None:
-            before_stop()
-        # A send failure can follow a partial or complete delivery (DL-216, DL-390).
-        maintenance_attempted = True
-        request = {
-            "cmd": "MAINTENANCE_STOP",
-            "v": MAINTENANCE_STOP_VERSION,
-            "token": token,
-            "force": force,
-        }
-        try:
-            resp = conn.send(request)
-        except (OSError, ValueError, EngineError) as exc:
-            typer.echo(f"supervisor {sock_path}: the reply was lost ({exc}); resolving", err=True)
-            code, reason, record = _lost_reply(
-                sock_path,
-                reconnect,
-                controller_id=controller_id,
-                incarnation=incarnation,
-                token=token,
-                sleep=sleep,
-            )
-        else:
-            if resp.get("ok") is False and resp.get("error") == "draining":
-                # the drain began after the PING; nothing was admitted (DL-416)
-                if on_refusal is not None:
-                    on_refusal(incarnation, token)
-                return refuse(DRAINING, prefix=f"supervisor {sock_path}"), resp
-            if resp.get("ok") is False and resp.get("error") in _MAINTENANCE_REFUSALS:
-                if on_refusal is not None:
-                    on_refusal(incarnation, token)
-                return refuse(json.dumps(resp, sort_keys=True)), resp
-            if resp.get("ok") is False and resp.get("error") == "maintenance_in_progress":
-                # another request's operation runs: watch it, send nothing more
-                code, reason, record = settle_maintenance(
-                    sock_path.parent, incarnation, sleep=sleep, probe=probe
-                )
-            else:
-                bound = resp.get("bound_s")
-                if not (
-                    resp.get("ok") is True
-                    and resp.get("maintenance") == "admitted"
-                    and resp.get("incarnation") == incarnation
-                    and resp.get("boot_id") == current_boot_id()
-                    and type(resp.get("supervisor_pid")) is int
-                    and valid_start_token(resp.get("supervisor_start_time"))
-                    and isinstance(bound, int | float)
-                    and not isinstance(bound, bool)
-                    and 0 <= bound < float("inf")
-                ):
-                    raise ValueError(
-                        f"maintenance admission is unknown: {json.dumps(resp, sort_keys=True)}"
-                    )
-                code, reason, record = settle_maintenance(
-                    sock_path.parent,
-                    incarnation,
-                    within_s=float(bound) + MAINTENANCE_MARGIN_S,
-                    sleep=sleep,
-                    probe=probe,
-                )
-        return _settled(code, reason, record, sock_path)
-    except (OSError, ValueError, EngineError) as exc:
-        refuse(exc, prefix=f"supervisor {sock_path}")
-        return (4 if maintenance_attempted else 2), None
-
-
-def active_period(run_root: Path) -> int:
-    """The period this root's ACTIVE segment holds, or 1 where the root cannot say."""
-    from dsl41.runner_history import RunHistoryError, active_period_id
-
-    try:
-        return active_period_id(run_root)
-    except RunHistoryError:
-        from dsl41.period import GENESIS_PERIOD_ID
-
-        return GENESIS_PERIOD_ID
-
-
-def lineage_of(run_root: Path) -> "Lineage | None":
-    """ss11 step 3's answer for this root's active segment (`boundary.select_seal` over
-    `estate_wal(run_root)`), or `None` when the root cannot be read.
-
-    `None` on any read failure, not `EngineError` alone: `select_seal` reads its period numbers
-    with a bare `int()`, so a hand-built record can raise `ValueError` or `KeyError`, and a damaged
-    lineage must not become an exit-1 traceback (DL-149). Both `resume_target_period` and
-    `cli_estate._committed_boundary` read it here (DL-169).
-    """
-    from dsl41.boundary import select_seal
-    from dsl41.period import estate_wal
-    from dsl41.runner_clock import EngineError
-    from dsl41.runner_journal import read_journal
-
-    try:
-        return select_seal(run_root, read_journal(estate_wal(run_root)))
-    except (OSError, ValueError, KeyError, EngineError):
-        return None
-
-
-def resume_target_period(run_root: Path) -> int:
-    """The period a resume of this root OPENS INTO (period-model ss11 step 5).
-
-    The newest segment's period, unless the root holds a committed boundary no engine has opened
-    yet: then the resume opens N+1 under N+1's pin. Every CLI act on such a root is about that
-    period (DL-151). An unreadable root falls back to the active period; the resume makes its own
-    refusal (`lineage_of`'s `None`, DL-169). `Lineage.target_period` owns the opens_next-vs-seal
-    rule (DL-171).
-    """
-    lineage = lineage_of(run_root)
-    if lineage is not None:
-        return lineage.target_period(active_period(run_root))
-    return active_period(run_root)
-
-
-def confirmed_resume_refusal(run_root: Path, anchor_dir: "Path | None") -> "EngineError | None":
-    """ss1.3's resume rule (DL-224) for a CLI route that resumes: the refusal, or None.
-
-    Call it before staging anything or wiring a supervisor, holding `leader.lock`. A refusal read
-    without the anchor lock can be stale, so it stands only once a second read under that lock
-    confirms it (`boundary.resume_root_refusal`, `locked=True`). Under the locks every refusal
-    counts, a busy anchor lock included. `resume_run` repeats the check under both locks.
-    """
-    from dsl41.boundary import resume_root_refusal
-
-    if resume_root_refusal(run_root, anchor_dir) is None:
-        return None
-    return resume_root_refusal(run_root, anchor_dir, locked=True)
-
-
-def say_next(run_root: Path, estate_anchor: "Path | None") -> None:
-    anchor = f" --estate-anchor {estate_anchor}" if estate_anchor is not None else ""
-    typer.echo(
-        f"open it with `dsl41 run --resume --run-root {run_root}{anchor} <new estate files>`,"
-        f" or roll: `dsl41 audit --run-root {run_root}{anchor}` then"
-        " `dsl41 run --open-from <anchor-dir> --run-root <new-root> <new estate files>`"
-    )
 
 
 def statechart_report(exc: StatechartError) -> int:

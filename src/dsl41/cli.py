@@ -5,17 +5,11 @@ verbs live one file per domain (DL-137):
 
     cli_common.py   shared options, the catalog door, and the readings that turn an exception
                     or a control answer into an exit code
-    cli_compile.py  a catalog in, an artifact out: lint, equiv, report, uc, decompile, build,
-                    minify, folds, resolve, viz
+    cli_compile.py  a catalog in, an artifact out: lint, equiv, decompile, build, minify,
+                    folds, resolve, viz
     cli_run.py      run, rehearse, and their offline readers journal, runs
     cli_control.py  what an operator says to a RUNNING engine: sendevent, host, query, ui,
-                    serve, supervise
-    cli_estate.py   the period boundary and its surroundings: seal, audit, verify,
-                    estate reclaim, estate prune, estate quiesce
-    cli_estate_build.py  the release an author hands over: estate build, estate diff
-    cli_release.py  the release train: release prepare, requalify, apply, resume, rollback,
-                    status,
-                    and the hidden release service the train runs through sudo
+                    serve
 
 Imports run one way: this file imports the verb modules, the verb modules import `cli_common`,
 and no library module imports any of them.
@@ -37,15 +31,7 @@ from __future__ import annotations
 
 import typer
 
-from dsl41 import (
-    cli_compile,
-    cli_control,
-    cli_estate,
-    cli_estate_build,
-    cli_release,
-    cli_run,
-    release_service,
-)
+from dsl41 import cli_compile, cli_control, cli_run
 from dsl41.cli_common import stops_on_statechart_error as stops
 
 app = typer.Typer(
@@ -61,10 +47,9 @@ app = typer.Typer(
 def _root() -> None:
     """Migration compiler and runner for AutoSys job estates.
 
-    Compile JIL into reports, graphs and Stonebranch Universal Controller
-    records. Run or rehearse an estate on this machine under AutoSys
-    semantics, control it while it runs, and keep its history in sealed
-    periods.
+    Compile JIL into findings, graphs and a Python DSL. Run or rehearse
+    an estate on this machine under AutoSys semantics, and control it
+    while it runs.
 
     Run 'dsl41 COMMAND --help' for one command's options and exit codes.
     """
@@ -73,10 +58,8 @@ def _root() -> None:
 # Panels and order are what `dsl41 --help` shows. `stops` wraps each verb that runs, replays or
 # reads back an estate: a StatechartError there prints its report and exits 7.
 app.command(rich_help_panel="Compile JIL")(cli_compile.lint)
-app.command(rich_help_panel="Compile JIL")(cli_compile.report)
 app.command(rich_help_panel="Compile JIL")(cli_compile.viz)
 app.command(rich_help_panel="Compile JIL")(cli_compile.equiv)
-app.command(rich_help_panel="Compile JIL")(cli_compile.uc)
 app.command(rich_help_panel="Compile JIL")(cli_compile.decompile)
 app.command(rich_help_panel="Compile JIL")(cli_compile.build)
 app.command(rich_help_panel="Compile JIL")(cli_compile.folds)
@@ -92,30 +75,3 @@ app.command(rich_help_panel="Control a running engine")(cli_control.off_hold_all
 app.command(rich_help_panel="Control a running engine")(cli_control.host)
 app.command(rich_help_panel="Control a running engine")(cli_control.ui)
 app.command(rich_help_panel="Control a running engine")(cli_control.serve)
-app.command(rich_help_panel="Control a running engine")(cli_control.supervise)
-app.command(rich_help_panel="Periods and retention")(stops(cli_estate.seal))
-app.command(rich_help_panel="Periods and retention")(stops(cli_estate.audit))
-app.command(rich_help_panel="Periods and retention")(stops(cli_estate.verify))
-
-estate_app = typer.Typer(
-    no_args_is_help=True,
-    help="Stop the estate, prune what retention allows, reclaim a stale claim, assemble a"
-    " release directory (build), or compare two releases (diff).",
-    context_settings={"help_option_names": ["-h", "--help"]},
-)
-app.add_typer(estate_app, name="estate", rich_help_panel="Periods and retention")
-estate_app.command("reclaim")(stops(cli_estate.estate_reclaim))
-estate_app.command("prune")(stops(cli_estate.estate_prune))
-estate_app.command("quiesce")(stops(cli_estate.estate_quiesce))
-estate_app.command("build")(cli_estate_build.estate_build)
-estate_app.command("diff")(cli_estate_build.estate_diff)
-
-# the release train's verbs, their group and names in release_service (DL-412)
-release_app = typer.Typer(
-    no_args_is_help=True,
-    help="Prepare and apply estate releases.",
-    context_settings={"help_option_names": ["-h", "--help"]},
-)
-app.add_typer(release_app, name=release_service.GROUP, rich_help_panel="Periods and retention")
-for name, command, hidden in cli_release.COMMANDS:
-    release_app.command(name, hidden=hidden)(command)

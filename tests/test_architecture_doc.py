@@ -14,18 +14,16 @@ import re
 
 import pytest
 import typer
-
-from dsl41.cli import app
 from test_docs_hygiene import ROOT
 
-DOC = ROOT / "docs" / "architecture.md"
-RUNBOOK = ROOT / "docs" / "deployment-runbook.md"
+from dsl41.cli import app
 
-#: Processes and stores, as deployment-runbook ss0's process diagram names them
-#: (RUN_ROOT and ESTATE_ANCHOR read with `_` as a space). `fixed_names` reads them there.
-PROCESSES = ("engine", "supervisor", "wrapper", "command", "run root", "estate anchor")
-#: People, machines and input around dsl41, as deployment-runbook ss0 and ss4 name them.
-#: `fixed_names` reads them there.
+DOC = ROOT / "docs" / "architecture.md"
+#: Processes and stores the architecture diagrams may name. `fixed_names` reads which of them a
+#: runbook's process diagram uses.
+PROCESSES = ("engine", "wrapper", "command", "run root")
+#: People, machines and input around dsl41. `fixed_names` reads which of them a runbook's ss0
+#: and ss4 use.
 ACTORS = ("operator", "browser", "reverse proxy", "host", "estate")
 DIAGRAM_MARKER = "<!-- diagram: processes -->"
 #: The whole vocabulary, for the synthetic cases below.
@@ -207,13 +205,7 @@ def test_architecture_diagrams_name_real_modules_verbs_and_processes() -> None:
     found = labels(text)
     assert len(MERMAID.findall(text)) >= 4
     assert "wrapper<br/>runner_wrapper.py" in found
-    fixed = fixed_names(RUNBOOK.read_text(encoding="utf-8"))
-    assert problems(found, _modules(), _verbs(), fixed) == []
-
-
-def test_architecture_process_and_actor_words_come_from_the_runbook() -> None:
-    runbook = RUNBOOK.read_text(encoding="utf-8")
-    assert sorted({*PROCESSES, *ACTORS} - fixed_names(runbook)) == []
+    assert problems(found, _modules(), _verbs(), FIXED) == []
 
 
 def test_architecture_vocabulary_without_its_runbook_source_is_reported() -> None:

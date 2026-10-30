@@ -283,7 +283,7 @@ def test_a_changed_chart_makes_the_charts_doc_stale() -> None:
 
 def test_the_charts_doc_has_a_section_per_other_chart_in_registry_order() -> None:
     names = [chart.name for chart in MACHINES if chart.name != "job"]
-    assert len(names) == 12 and "queue_scan" in names
+    assert len(names) == 6 and "queue_scan" in names
     sections = [line[3:] for line in rjl.render_charts().splitlines() if line.startswith("## ")]
     assert sections == names
 
@@ -407,17 +407,6 @@ def test_grouping_states_never_split_the_ways_into_a_target() -> None:
     assert "constructed = unbuilt + finish_genesis" in lines
 
 
-def test_supervisor_lease_names_its_groups_members() -> None:
-    lease = next(chart for chart in MACHINES if chart.name == "supervisor_lease")
-    lines = rjl.section(lease)
-    assert lines[lines.index("### phase") + 2 :][:4] == [
-        "```text",
-        "free <- initial",
-        "unheld = {free, expired}",
-        "held = {live, orphaned}",
-    ]
-
-
 def test_a_row_from_the_root_is_under_its_target_top_level_region() -> None:
     """The engine leaves every region and enters each again (statechart-engine.md §4, the exit
     and entry order; DL-325, the region a row moves); the view prints the line once, under the
@@ -464,6 +453,9 @@ def test_a_spec_only_mark_is_printed_when_the_note_does_not_fit() -> None:
 def test_the_chart_option_prints_one_view(capsys: pytest.CaptureFixture[str]) -> None:
     assert rjl.main(["--chart", "effect"]) == 0
     assert capsys.readouterr().out == "\n".join(rjl.section(EFFECT)) + "\n"
-    assert rjl.main(["--chart", "supervisor_client", "--full"]) == 0
+    assert rjl.main(["--chart", "host", "--full"]) == 0
     full = capsys.readouterr().out
-    assert "### Ignored" in full and "### Refusals" not in full
+    assert "### Ignored" in full and "### Refusals" in full
+    # a kind with no rows has no heading
+    assert rjl.main(["--chart", "effect", "--full"]) == 0
+    assert "### Refusals" not in capsys.readouterr().out

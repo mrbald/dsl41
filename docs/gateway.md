@@ -74,7 +74,7 @@ One route per control `cmd`. The set is the `cmd` column of the verb table
 
 **OpenAPI is the contract artifact.** An OpenAPI 3.1 document is checked
 in; a test fails when the generated one differs. Schemas follow
-control-protocol [§3](control-protocol.md#3-mutating-verbs-sendevent-host-seal)
+control-protocol [§3](control-protocol.md#3-mutating-verbs-sendevent-host)
 and [§4](control-protocol.md#4-query-verbs-frozen-response-shapes) and
 allow unknown fields; prose covers the WebSocket route.
 
@@ -95,7 +95,7 @@ the read header.
 
 **Mutations: the markers decide the class.** For `sendevent`, `host` and
 `seal`, the outcome table of
-[control-protocol §3](control-protocol.md#3-mutating-verbs-sendevent-host-seal)
+[control-protocol §3](control-protocol.md#3-mutating-verbs-sendevent-host)
 rules: `refused: true`, `decision: "rejected"`, or neither, which is
 unknown. The code picks the status inside the class:
 

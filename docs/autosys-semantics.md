@@ -1587,8 +1587,7 @@ pinned by the timezone suite's `test_resolve_timezone_*` and the scheduler suite
 `run_window`, and by four tests that resolve a map-only zone or the base zone:
 `test_sem35_default_tz_resolves_through_the_alias_map_like_a_job_timezone` (oracle suite),
 `test_sem35_the_engine_resolves_a_map_only_zone_through_its_scheduler_map` and
-`test_sem35_a_supplied_map_outranks_the_unique_city_default` (runner suite), and
-`test_sem35_every_replay_of_a_map_only_zone_reads_the_periods_own_table` (boundary suite).
+`test_sem35_a_supplied_map_outranks_the_unique_city_default` (runner suite).
 SEM-36..39 are calendar rules, pinned in the autocal suite (`test_sem36_*`..`test_sem39_*`).
 T34a/b's own `test_sem34a/b_*` cover must_complete only; the must_start half is pinned by `test_must_start_alarm_fires_when_no_run_began_by_deadline` and
 `test_must_start_alarm_quiet_when_the_run_began_in_time`. Two oracle non-goals have no trace

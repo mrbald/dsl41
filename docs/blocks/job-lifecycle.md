@@ -12,7 +12,7 @@ The code and its contract carry over unchanged if the storage under the runner c
 It needs none of the storage capabilities.
 Reason: `src/dsl41/oracle.py` and `src/dsl41/oracle_state.py` import no journal or store module.
 `RuntimeState` keeps the rows in private in-memory maps, and replaying the inputs rebuilds them.
-Its per-input [state_rev](../glossary.md#state_rev) is what a store's conditional write would read ([concurrency-model §3](../concurrency-model.md#3-state-ownership-and-state_rev)).
+Its per-input [state_rev](../glossary.md#state_rev) is what a store's conditional write would read (concurrency-model §3 (`concurrency-model.md`, retired in 2.0.0)).
 
 ## Interface
 
@@ -41,7 +41,7 @@ Each anchor holds the generated diagram and transition table.
 - A job starts only when all its start gates hold ([autosys-semantics §0](../autosys-semantics.md#0-execution-model-the-frame-everything-else-hangs-on)). FORCE_STARTJOB bypasses a named subset ([SEM-23](../autosys-semantics.md#sem-23--force_startjob-vs-startjob-c), [DL-13](../decision-log.md)), and clears ON_ICE or ON_HOLD on a job that is not live first ([DL-243](../decision-log.md)).
 - Conditions are latching predicates, re-evaluated on edges ([SEM-01](../autosys-semantics.md#sem-01--conditions-are-latching-state-predicates-not-edges-v), [DL-13](../decision-log.md)).
 - The oracle classifies an exit code; an adapter never does ([SEM-09](../autosys-semantics.md#sem-09--max_exit_success-shifts-successfailure-boundary-v), [runner-design §3](../runner-design.md#3-architecture--functional-core-imperative-shell)).
-- A scheduled tick blocked at a releasable gate arms the job; an actual start consumes the arm ([SEM-32](../autosys-semantics.md#sem-32--start_times--start_mins-v), [DL-54](../decision-log.md)). An arm crosses a seal ([period-model §10.4](../period-model.md#104-armed-latches-cross-a-release)).
+- A scheduled tick blocked at a releasable gate arms the job; an actual start consumes the arm ([SEM-32](../autosys-semantics.md#sem-32--start_times--start_mins-v), [DL-54](../decision-log.md)). An arm crosses a seal (period-model §10.4 (`period-model.md`, retired in 2.0.0)).
 - ON_ICE, ON_HOLD and ON_NOEXEC are ignored where the vendor says so, with one `EVENT_IGNORED` trace line ([DL-254](../decision-log.md)).
 - KILLJOB on a job that is not running or queued kills nothing and writes one `EVENT_IGNORED` trace line.
 - ON_NOEXEC on a FAILURE or TERMINATED job is a stored move to INACTIVE ([SEM-22](../autosys-semantics.md#sem-22--on_noexec-v), [DL-243](../decision-log.md)).
@@ -53,7 +53,7 @@ Each anchor holds the generated diagram and transition table.
 - A malformed input raises `OracleError`: an unknown status, a STATUS with neither a status nor an integer exit code, a job verb without a job.
 - The shell's stale-completion gate, not the oracle, rejects a completion for a run that is no longer live ([runner-design §4](../runner-design.md#4-engine-loop--single-writer), [DL-235](../decision-log.md)). The oracle lets an injected STATUS overwrite a terminal status, as CHANGE_STATUS does ([DL-13](../decision-log.md)).
 - An injected INACTIVE on a launched run plans no kill. The run becomes an orphan whose later exit the gate rejects ([DL-235](../decision-log.md)).
-- Recovery is replay of the journaled inputs in order ([runner-design §7](../runner-design.md#7-journal-and-recovery-e1-prod-grade), [period-model §11](../period-model.md#11-resume-replay-and-recovery)). A log written under another state-machine version is refused ([DL-235](../decision-log.md)).
+- Recovery is replay of the journaled inputs in order ([runner-design §7](../runner-design.md#7-journal-and-recovery-e1-prod-grade), period-model §11 (`period-model.md`, retired in 2.0.0)). A log written under another state-machine version is refused ([DL-235](../decision-log.md)).
 
 ## Owning modules
 

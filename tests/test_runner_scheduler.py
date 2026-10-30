@@ -30,7 +30,6 @@ from dsl41.ir import CatalogIR, JobIR, lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event
 from dsl41.runner import Engine
-from dsl41.runner_startup import resume_run, start_run
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, RealClock, VirtualClock
 from dsl41.runner_journal import read_journal, scheduler_frontier
@@ -41,6 +40,7 @@ from dsl41.runner_preflight import (
     resolve_machine,
 )
 from dsl41.runner_scheduler import Scheduler
+from dsl41.runner_startup import resume_run, start_run
 from dsl41.semantics import resolve as resolve_switches
 from dsl41.timezones import parse_timezone_map
 
@@ -825,7 +825,7 @@ def test_resume_real_domain_missed_ticks_are_dropped_and_journaled(tmp_path: Pat
     past = now - timedelta(hours=2)
     # a hand-built root is still a DL-130 root: genesis installs the period
     # manifest before the log opens, and resume refuses a segment without one
-    from dsl41.period import genesis_manifest, write_period_manifest
+    from dsl41.run_root import genesis_manifest, write_period_manifest
     from dsl41.runner_ledger import STATE_MACHINE_VERSION
 
     manifest = genesis_manifest(
@@ -878,7 +878,7 @@ def test_dl45_a_same_instant_sibling_lost_to_the_crash_is_dropped_not_forgotten(
     and it would vanish with no record at all. The inclusive anchor derives
     both: the journaled one is skipped, the lost one is dropped AND
     journaled -- never fired late, never silently forgotten (DL-166)."""
-    from dsl41.period import estate_wal
+    from dsl41.run_root import estate_wal
 
     text = (
         "insert_job: sib_a\njob_type: c\ncommand: x\nmachine: m1\n"
@@ -965,7 +965,7 @@ def test_dl174_a_tick_at_a_drop_frontier_is_dropped_once_across_three_resumes(
     facing `dropped STARTJOB ...` line from -- gets the same guard: it holds
     the tick once, from the resume that made the verdict, and stays empty
     on the resumes that only read it back."""
-    from dsl41.period import genesis_manifest, write_period_manifest
+    from dsl41.run_root import genesis_manifest, write_period_manifest
     from dsl41.runner_journal import Journal
     from dsl41.runner_ledger import STATE_MACHINE_VERSION
 
@@ -1795,7 +1795,6 @@ def test_preflight_oracle_rule_is_armor_pinned_by_injection(
     plumbing is pinned by injection -- a constructor refusal must surface
     as a preflight ERROR item, never a crash."""
     import dsl41.runner_preflight as runner_mod
-
     from dsl41.oracle_state import OracleError
 
     def refuse(_catalog: CatalogIR, **_switches: object) -> None:

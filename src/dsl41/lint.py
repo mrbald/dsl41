@@ -66,7 +66,6 @@ from typing import Literal, NamedTuple
 from pydantic import BaseModel
 
 from dsl41.ast_jil import SourceSpan
-from dsl41.backend_uc import SKIP_TRANSLATED
 from dsl41.conditions import (
     And,
     Cond,
@@ -100,6 +99,11 @@ from dsl41.timezones import (
     wall_window_intervals,
     window_spans_near,
 )
+
+#: The initial statuses UC translates to a Skip (M19 ON_ICE, M21 ON_NOEXEC; DL-152). ON_HOLD is
+#: M20 Hold, which blocks downstream on both sides.
+SKIP_TRANSLATED: frozenset[str] = frozenset({"ON_ICE", "ON_NOEXEC"})
+
 
 Severity = Literal["error", "warn", "info"]
 
@@ -923,8 +927,7 @@ def rule_l020(catalog: CatalogIR) -> list[Violation]:
     The tree is evaluated under the ON_ICE truth table (SEM-20, DL-243) and the ON_NOEXEC
     bypass projection (SEM-22, DL-281). Box-override attrs are never read.
 
-    The Skip-translated statuses are `SKIP_TRANSLATED`, the skip half of backend_uc's
-    `INITIAL_STATUS_CONTROL` (DL-152); `test_backend_uc.py` pins it to ON_ICE and ON_NOEXEC.
+    The Skip-translated statuses are `SKIP_TRANSLATED`: ON_ICE and ON_NOEXEC (DL-152).
     ON_HOLD is M20 Hold, which blocks downstream on both sides, so the rule ignores it.
 
     Two divergences, read off `_ice_cond_value`:

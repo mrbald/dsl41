@@ -6,8 +6,8 @@ name = "nightbank-small"
 files = ["amer.jil", "apac.jil", "calendars.jil", "emea.jil", "global.jil", "infra.jil"]
 timezone = "UTC"
 
-# the service drill's and the wargame host's environment
+# a service host's environment; no service example ships in 2.0.0
 [environments.wargame]
 
-# bin/nightbank up, from the checkout
+# a night run from the checkout; the sandbox launcher returns in a later slice
 [environments.sandbox]

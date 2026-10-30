@@ -44,7 +44,7 @@ Before marking an implementation complete, run the full local gates:
 ```sh
 uv run ruff check src tests examples
 uv run ruff format --check src tests scripts examples
-uv run mypy src tests/uc_oracle.py
+uv run mypy
 uv run python scripts/arch_check.py
 uv run coverage erase
 uv run coverage run -m pytest -q -n 4 --dist loadfile
@@ -60,9 +60,7 @@ A comment-only or docstring-only change adds one gate before the suite:
 changed no code and lost no citation token (DL-362). It replaces the logic
 review for that change, not the suite run.
 
-The mypy line names `tests/uc_oracle.py` beside `src`: it is a fully
-annotated executable spec under `tests/`, and nothing else holds it to the
-type gate (DL-193).
+`uv run mypy` checks `src`, the file set `pyproject.toml` names.
 
 Every test runs under a leak detector (`tests/leak_detector_plugin.py`,
 DL-355). A test that leaves global process state changed fails at teardown,
@@ -105,10 +103,8 @@ The golden replay runs the oracle over the whole harness sample, about a minute,
 and names the first run, entry and component that differ from
 `tests/oracle_goldens.txt`; CI runs it as its own `goldens` job (DL-351).
 Keep this list aligned with `.github/workflows/ci.yml`. CI also runs what this
-list does not: the `docs` job, `systemd-analyze verify` over
-`examples/nightbank/deploy/*.service` (DL-218, Linux only), the
-`explore-page` browser job, and the `audit`, `secrets`, `release`,
-`dst-drill` and `service-drill` workflows.
+list does not: the `docs` job, the `explore-page` browser job, and the
+`audit`, `secrets` and `release` workflows.
 The workflow examples lane is opt-in and needs a container engine (DL-236):
 `WORKFLOW_CONTEXT=<context> uv run pytest -q -o faulthandler_timeout=0 examples/workflows/tests`.
 `scripts/arch_check.py --spec-status` prints every specification with its spec

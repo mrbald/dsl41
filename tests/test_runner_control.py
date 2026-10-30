@@ -29,8 +29,8 @@ from pathlib import Path
 from typing import get_args
 
 import pytest
-from proc_pipes import close_pipes
 import typer
+from proc_pipes import close_pipes
 from typer.testing import CliRunner
 
 from dsl41.cli import app
@@ -38,8 +38,9 @@ from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import INJECTABLE_STATUSES, Event, EventKind, JobStatus
 from dsl41.runner import Engine
-from dsl41.runner_startup import resume_run, start_run
+from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import PROTOCOL_VERSION, addressed_key
+from dsl41.runner_clock import EngineError, RealClock
 from dsl41.runner_control import (
     JOB_EVENT_VERBS,
     STATUSES,
@@ -48,10 +49,9 @@ from dsl41.runner_control import (
     read_for,
     revision_in,
 )
-from dsl41.runner_adapters import FakeAdapter
-from dsl41.runner_clock import EngineError, RealClock
 from dsl41.runner_journal import read_journal, replay_inputs
 from dsl41.runner_scheduler import Scheduler
+from dsl41.runner_startup import resume_run, start_run
 
 if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
     pytest.skip("unix-domain control sockets are POSIX-only", allow_module_level=True)
@@ -2482,72 +2482,6 @@ def test_the_cli_maps_every_mutation_outcome_including_the_two_transport_ones(
         assert "sending: --request-id req-7" in err, answer
 
 
-def test_the_live_seal_answers_on_that_same_ladder_and_names_the_opener(
-    monkeypatch, capsys, tmp_path: Path
-) -> None:
-    """The same ladder at its OTHER caller (DL-137).
-
-    A boundary asked for over the socket is a mutation, so it is answered
-    the way every mutation is. What the SURFACE does with that reading is
-    still the surface's: period-model ss7 publishes 0/2/4 for `seal` and 3
-    means something else in that feature area, so a `rejected` answer --
-    which this engine's seal handler cannot give, and which is why the row
-    below is about the reading, not about a shape the server emits -- stays
-    `unknown` here, request_id and all.
-
-    The applied row pins the one thing the seal adds to the ladder: the
-    sentence that names the two openers is printed when the boundary
-    COMMITTED and at no other outcome."""
-    import dsl41.runner_control as control_mod
-    from dsl41.cli_estate import _live_seal
-    from dsl41.period import runtime_profile_from_cli
-    from dsl41.runner_control import ControlClientError
-
-    run_root = tmp_path / "root"
-    run_root.mkdir()
-    (run_root / "control.sock").touch()  # the live door _live_seal requires
-    estate = tmp_path / "c2.jil"
-    estate.write_text("insert_job: seal_ladder_job\njob_type: c\ncommand: x\nmachine: m1\n")
-    profile = runtime_profile_from_cli(timezone="UTC")
-    header = {"ok": True, "baseline_id": "b-1", "epoch": 1}
-
-    cases: list[tuple[object, int, bool, bool]] = [
-        ({"ok": True, "kind": "seal", "digest": "sha256:x"}, 0, False, True),
-        ({"ok": False, "refused": True, "error": "not quiescent"}, 2, False, False),
-        ({"ok": False, "decision": "rejected", "index": 4}, 4, True, False),
-        ({"ok": False, "error": "no boundary outcome within 30.0s"}, 4, True, False),
-        (ControlClientError("no such file"), 2, False, False),
-        (ControlClientError("engine hung up", delivered=True), 4, True, False),
-    ]
-    for answer, code, names_the_id, opens in cases:
-
-        def fake_roundtrip(_path, request, *, answer=answer, **_kw):
-            if request.get("cmd") == "status":
-                return header  # the ss6 read header the seal is composed against
-            if isinstance(answer, Exception):
-                raise answer
-            return answer
-
-        monkeypatch.setattr(control_mod, "roundtrip", fake_roundtrip)
-        got = _live_seal(
-            run_root,
-            None,
-            [estate],
-            profile,
-            permit_unknown=False,
-            properties=None,
-            force_seal=False,
-            actor="ops@t",
-            request_id="req-9",
-        )
-        assert got == code, answer
-        printed = capsys.readouterr()
-        # the advice, not the bare flag: the pre-send record carries the
-        # flag on every outcome (DL-217)
-        assert ("retry ONLY as --request-id req-9" in printed.err) is names_the_id, answer
-        assert ("dsl41 run --resume" in printed.out) is opens, answer
-
-
 _SEAL_JIL = "insert_job: seal_flight_job\njob_type: c\ncommand: x\nmachine: m1\n"
 
 
@@ -2559,272 +2493,6 @@ def _in_flight(in_flight_request_id: str) -> dict[str, object]:
         "error": f"a boundary is already in flight (request_id {in_flight_request_id}, frozen)",
         "in_flight_request_id": in_flight_request_id,
     }
-
-
-@pytest.mark.parametrize(
-    ("in_flight", "code", "says"),
-    [
-        (
-            "req-9",
-            4,
-            "your seal req-9 is still in flight; outcome unknown; retry later under"
-            " --request-id req-9",
-        ),
-        ("req-other", 2, "another boundary (req-other) is in flight; this request did nothing"),
-    ],
-)
-def test_the_live_seal_reads_seal_in_flight_by_whose_boundary_it_is(
-    monkeypatch, capsys, tmp_path: Path, in_flight: str, code: int, says: str
-) -> None:
-    """control-protocol ss3: a `seal_in_flight` refusal names the boundary in
-    flight. The live seal's own id still running is `unknown` (4); another's
-    is a no-op (2), and the CLI does not claim the period is still open."""
-    import dsl41.runner_control as control_mod
-    from dsl41.cli_estate import _live_seal
-    from dsl41.period import runtime_profile_from_cli
-
-    run_root = tmp_path / "root"
-    run_root.mkdir()
-    (run_root / "control.sock").touch()
-    estate = tmp_path / "c2.jil"
-    estate.write_text(_SEAL_JIL)
-    header = {"ok": True, "baseline_id": "b-1", "epoch": 1}
-
-    def fake_roundtrip(_path, request, **_kw):
-        return header if request.get("cmd") == "status" else _in_flight(in_flight)
-
-    monkeypatch.setattr(control_mod, "roundtrip", fake_roundtrip)
-    got = _live_seal(
-        run_root,
-        None,
-        [estate],
-        runtime_profile_from_cli(timezone="UTC"),
-        permit_unknown=False,
-        properties=None,
-        force_seal=False,
-        actor="ops@t",
-        request_id="req-9",
-    )
-    assert got == code
-    err = capsys.readouterr().err
-    assert says in err
-    assert "still open" not in err
-
-
-def test_seal_in_flight_by_id_is_the_live_seals_reading_only(monkeypatch, capsys) -> None:
-    """The per-code reading is opt-in: without it the same reply is the plain
-    refusal it is on the wire (exit 2)."""
-    import dsl41.runner_control as control_mod
-    from dsl41.cli_common import command_outcome
-
-    monkeypatch.setattr(control_mod, "roundtrip", lambda *_a, **_kw: _in_flight("req-9"))
-    request = {"cmd": "seal", "request_id": "req-9"}
-    assert command_outcome(Path("/nowhere.sock"), request) == 2
-    assert "still in flight" not in capsys.readouterr().err
-    assert command_outcome(Path("/nowhere.sock"), request, seal_in_flight_by_id=True) == 4
-
-
-@pytest.mark.parametrize(("ours", "code"), [(True, 4), (False, 2)])
-def test_a_live_seal_against_a_boundary_in_flight_end_to_end(
-    short_root: Path, capsys, ours: bool, code: int
-) -> None:
-    """The real server and the real CLI path over the socket. One boundary
-    is held queued (the engine's loop is not running, so it never starts);
-    a live seal under that boundary's own request_id exits 4, and under
-    another exits 2, each saying which."""
-    import types
-
-    from dsl41.cli_estate import _live_seal
-    from dsl41.period import runtime_profile_from_cli
-
-    run_root = short_root / "run"
-    estate = short_root / "c2.jil"
-    estate.write_text(_SEAL_JIL)
-
-    async def scenario() -> tuple[int, dict[str, object]]:
-        engine = start_run(
-            lower_source(_SEAL_JIL),
-            run_root,
-            clock=RealClock(),
-            adapters={"CMD": FakeAdapter()},
-            hold_open=True,
-        )
-        server = ControlServer(engine, run_root / "control.sock")
-        await server.start()
-        try:
-            # only its request_id is read while it waits in the queue
-            held = engine.submit_seal(types.SimpleNamespace(request_id="r-held"))  # type: ignore[arg-type]
-            got = await asyncio.to_thread(
-                _live_seal,
-                run_root,
-                None,
-                [estate],
-                runtime_profile_from_cli(timezone="UTC"),
-                permit_unknown=False,
-                properties=None,
-                force_seal=False,
-                actor="ops@t",
-                request_id="r-held" if ours else "r-other",
-            )
-            assert not held.done()  # the held boundary is untouched
-            held.cancel()
-            return got, json.loads(capsys.readouterr().out.splitlines()[0])
-        finally:
-            await server.close()
-            await engine.shutdown()
-            assert engine.journal is not None
-            engine.journal.close()
-
-    got, answer = asyncio.run(scenario())
-    assert got == code
-    assert answer["code"] == "seal_in_flight" and answer["in_flight_request_id"] == "r-held"
-
-
-def test_a_live_seal_on_a_rolled_root_prints_the_lineage_anchor(
-    tmp_path: Path, monkeypatch, capsys
-) -> None:
-    """DL-145. `--estate-anchor` reaches the verb and the live sealer threw
-    it away: `say_next` was called with a hard-coded `None`, so a lineage
-    that has ROLLED -- whose anchor is not `<run-root>.anchor` and must be
-    named explicitly -- was handed a resume command that opens the wrong
-    lineage. The offline sealer passed it and printed the right one for the
-    same estate, which is how one verb came to answer two ways."""
-    import dsl41.runner_control as control_mod
-    from dsl41.cli_estate import _live_seal
-    from dsl41.period import runtime_profile_from_cli
-
-    run_root = tmp_path / "root"
-    run_root.mkdir()
-    (run_root / "control.sock").touch()
-    anchor = tmp_path / "lineage.anchor"
-    estate = tmp_path / "c2.jil"
-    estate.write_text("insert_job: rolled_job\njob_type: c\ncommand: x\nmachine: m1\n")
-
-    def fake_roundtrip(_path, request, **_kw):
-        if request.get("cmd") == "status":
-            return {"ok": True, "baseline_id": "b-1", "epoch": 1}
-        return {"ok": True, "kind": "seal", "digest": "sha256:x"}
-
-    monkeypatch.setattr(control_mod, "roundtrip", fake_roundtrip)
-    got = _live_seal(
-        run_root,
-        anchor,
-        [estate],
-        runtime_profile_from_cli(timezone="UTC"),
-        permit_unknown=False,
-        properties=None,
-        force_seal=False,
-        actor="ops@t",
-        request_id="req-10",
-    )
-    assert got == 0
-    printed = capsys.readouterr().out
-    assert f"--estate-anchor {anchor}" in printed
-    assert f"dsl41 run --resume --run-root {run_root} --estate-anchor {anchor}" in printed
-
-
-def test_pr03_a_subscription_re_proves_the_lineage_before_every_response(
-    short_root: Path,
-) -> None:
-    """The accept-time check proves nothing about a lineage replaced
-    mid-stream: each backfill record and each live record re-proves the
-    anchor, and a displaced leader answers the PR-03 refusal and hangs up
-    instead of publishing records for an estate it no longer leads."""
-    text = "insert_job: fence_job\njob_type: c\ncommand: x\nmachine: m1\n"
-    run_root = short_root / "run"
-
-    async def scenario() -> None:
-        engine, server, loop_task = await _serve(run_root, text)
-        try:
-            checks = {"count": 0}
-            real = server._lineage_lost
-
-            def displaced_after_ack() -> dict | None:
-                checks["count"] += 1
-                if checks["count"] == 1:
-                    return real()  # the accept-time check passes
-                return {
-                    "ok": False,
-                    "refused": True,
-                    "error": "this engine can no longer prove it leads (PR-03 pin)",
-                }
-
-            server._lineage_lost = displaced_after_ack  # type: ignore[method-assign]
-            reader, writer = await asyncio.open_unix_connection(str(server.path))
-            try:
-                writer.write(
-                    json.dumps(_versioned({"cmd": "subscribe", "since": 0})).encode() + b"\n"
-                )
-                await writer.drain()
-                ack = json.loads(await asyncio.wait_for(reader.readline(), timeout=2.0))
-                assert ack == {"ok": True, "subscribed": True, "since": 0}
-                # the journal already holds the opening records, so the FIRST
-                # backfill response hits the re-proof and is the refusal
-                answer = json.loads(await asyncio.wait_for(reader.readline(), timeout=2.0))
-                assert answer["ok"] is False and "no longer prove" in answer["error"]
-                assert await asyncio.wait_for(reader.readline(), timeout=2.0) == b""  # hangup
-                assert checks["count"] >= 2  # re-proved per response, not per connection
-            finally:
-                writer.close()
-                with contextlib.suppress(Exception):
-                    await writer.wait_closed()
-        finally:
-            await _teardown(engine, server, loop_task)
-
-    asyncio.run(scenario())
-
-
-def test_pr03_a_backfill_error_from_a_displaced_leader_answers_the_refusal(
-    short_root: Path,
-) -> None:
-    """The backfill read yields, and a lineage replaced during it must
-    answer the PR-03 refusal -- not narrate an error about an estate this
-    process no longer leads."""
-    text = "insert_job: gap_job\njob_type: c\ncommand: x\nmachine: m1\n"
-    run_root = short_root / "run"
-
-    async def scenario() -> None:
-        engine, server, loop_task = await _serve(run_root, text)
-        try:
-            import dsl41.runner_control as control_mod
-
-            def broken(*_args: object, **_kwargs: object):
-                raise EngineError("a stranger's segment")
-
-            real_backfill = control_mod.read_backfill
-            control_mod.read_backfill = broken  # type: ignore[assignment]
-            checks = {"n": 0}
-            real_lost = server._lineage_lost
-
-            def displaced_after_ack() -> dict | None:
-                checks["n"] += 1
-                if checks["n"] == 1:
-                    return real_lost()
-                return {"ok": False, "refused": True, "error": "no longer leads (PR-03 pin)"}
-
-            server._lineage_lost = displaced_after_ack  # type: ignore[method-assign]
-            try:
-                reader, writer = await asyncio.open_unix_connection(str(server.path))
-                try:
-                    writer.write(
-                        json.dumps(_versioned({"cmd": "subscribe", "since": 0})).encode() + b"\n"
-                    )
-                    await writer.drain()
-                    ack = json.loads(await asyncio.wait_for(reader.readline(), timeout=2.0))
-                    assert ack == {"ok": True, "subscribed": True, "since": 0}
-                    answer = json.loads(await asyncio.wait_for(reader.readline(), timeout=2.0))
-                    assert answer["ok"] is False and "no longer leads" in answer["error"]
-                    assert "stranger's segment" not in answer.get("error", "")
-                finally:
-                    writer.close()
-                    with contextlib.suppress(Exception):
-                        await writer.wait_closed()
-            finally:
-                control_mod.read_backfill = real_backfill  # type: ignore[assignment]
-        finally:
-            await _teardown(engine, server, loop_task)
-
-    asyncio.run(scenario())
 
 
 # ------------------------------------ the wire reads what it is sent (DL-151)
@@ -2989,115 +2657,6 @@ def test_true_is_not_a_sequence_number_on_trace_or_subscribe(short_root: Path) -
                 writer.close()
                 with contextlib.suppress(Exception):
                     await writer.wait_closed()
-        finally:
-            await _teardown(engine, server, loop_task)
-
-    asyncio.run(scenario())
-
-
-def _seal_wire(engine: Engine, **overrides: object) -> dict:
-    """A `seal` request with every wire field well-typed -- the tests below
-    mistype exactly one at a time."""
-    from dsl41.runner_ledger import STATE_MACHINE_VERSION
-    from dsl41.seal import StagedNextPeriod
-
-    staged = StagedNextPeriod(
-        catalog_hash="sha256:" + "0" * 64,
-        source_bundle_hash="sha256:" + "1" * 64,
-        runtime_hash="sha256:" + "2" * 64,
-        state_machine_version=STATE_MACHINE_VERSION,
-    )
-    request: dict = {
-        "cmd": "seal",
-        "v": PROTOCOL_VERSION,
-        "baseline_id": engine.baseline_id,
-        "epoch": engine.epoch,
-        "request_id": "r-wire-types",
-        "next_period": staged.model_dump(mode="json"),
-        "stage_digest": staged.stage_digest,
-        "force_seal": False,
-        "claimed_actor": "tests@localhost",
-    }
-    return {**request, **overrides}
-
-
-def test_a_seal_reads_its_force_flag_and_never_coerces_it(short_root: Path) -> None:
-    """ss3: force is an AUTHORIZATION. `bool("false")` is True, so the
-    string "false" used to FORCE a boundary; only JSON true/false is a
-    flag now, and the same rule holds the rest of the seal's wire types."""
-    text = "insert_job: seal_job\njob_type: c\ncommand: x\nmachine: m1\n"
-
-    async def scenario() -> None:
-        engine, server, loop_task = await _serve(short_root / "run", text)
-        try:
-            forced = await _control_call(server.path, _seal_wire(engine, force_seal="false"))
-            assert forced["ok"] is False and forced["refused"] is True
-            assert "force_seal must be true or false" in forced["error"]
-            mistyped = await _control_call(server.path, _seal_wire(engine, epoch=True))
-            assert mistyped["refused"] is True and "epoch must be an integer" in mistyped["error"]
-            retyped = await _control_call(server.path, _seal_wire(engine, request_id=7))
-            assert retyped["refused"] is True and "request_id must be a string" in retyped["error"]
-        finally:
-            await _teardown(engine, server, loop_task)
-
-    asyncio.run(scenario())
-
-
-def test_dl168_a_seal_reads_its_next_period_strict_too(short_root: Path) -> None:
-    """DL-168: `_seal_wire_error` above checks the envelope's own wire
-    types and never looks inside `next_period` -- that dict reaches
-    `StagedNextPeriod.model_validate(...)` unchecked. Before this entry
-    that call was lax, so a laundered `state_machine_version: true` would
-    have validated, passed `runner_startup`'s `staged.state_machine_version
-    != STATE_MACHINE_VERSION` gate by `True == 1`, and entered the pin as
-    if the wire had sent the real version (the brief's own premise,
-    verbatim). `StagedNextPeriod` gained `strict=True`, and every one of
-    its fields is int or str, so the model's own config closes this ingress
-    with no call-time override needed.
-
-    Three assertions, not one (a review finding): "malformed seal request"
-    alone does not discriminate this refusal from `_seal_wire_error`'s
-    envelope-typo branch above, which shares the same prefix. "valid
-    integer" and the field name together pin it to the actual mechanism."""
-    from dsl41.runner_ledger import STATE_MACHINE_VERSION
-    from dsl41.seal import StagedNextPeriod
-
-    text = "insert_job: seal_dl168\njob_type: c\ncommand: x\nmachine: m1\n"
-
-    async def scenario() -> None:
-        engine, server, loop_task = await _serve(short_root / "run", text)
-        try:
-            staged = StagedNextPeriod(
-                catalog_hash="sha256:" + "0" * 64,
-                source_bundle_hash="sha256:" + "1" * 64,
-                runtime_hash="sha256:" + "2" * 64,
-                state_machine_version=STATE_MACHINE_VERSION,
-            )
-            laundered = {**staged.model_dump(mode="json"), "state_machine_version": True}
-            answer = await _control_call(server.path, _seal_wire(engine, next_period=laundered))
-            assert answer["refused"] is True
-            assert "malformed seal request" in answer["error"]
-            assert "valid integer" in answer["error"]
-            assert "state_machine_version" in answer["error"]
-        finally:
-            await _teardown(engine, server, loop_task)
-
-    asyncio.run(scenario())
-
-
-def test_an_expect_that_arrives_on_a_seal_is_refused_by_the_key(short_root: Path) -> None:
-    """ss3: a boundary addresses no row, so an `expect` that ARRIVES is
-    refused -- and the KEY is what arrives. `"expect": null` read as "no
-    expect" made the one command with no precondition the door every other
-    command could slip through."""
-    text = "insert_job: seal_null\njob_type: c\ncommand: x\nmachine: m1\n"
-
-    async def scenario() -> None:
-        engine, server, loop_task = await _serve(short_root / "run", text)
-        try:
-            answer = await _control_call(server.path, _seal_wire(engine, expect=None))
-            assert answer["ok"] is False and answer["refused"] is True
-            assert "expect is not allowed" in answer["error"]
         finally:
             await _teardown(engine, server, loop_task)
 

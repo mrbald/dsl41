@@ -32,10 +32,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from test_access import ME, _map_granting, _receipts, _serve_armed
 from test_access import TEXT as ACCESS_TEXT
-from test_boundary import C2_JIL, _close, _genesis, _request, _seal, _stage
 from test_runner_control import _read_revision, _sendevent, _serve, _teardown
 
 from dsl41.oracle_state import Event
@@ -204,47 +202,6 @@ def test_dl267_a_broken_stderr_and_a_raising_owner_never_fail_the_append(
     assert [r["rec"] for r in _on_disk(journal.path)] == ["preflight", "preflight"]
     assert [healthy.get_nowait()["rec"] for _ in range(2)] == ["preflight", "preflight"]
     journal.close()
-
-
-def test_dl267_an_overflow_at_the_seal_record_leaves_the_boundary_committed(
-    tmp_path: Path,
-) -> None:
-    """ss2.2: the seal append is the point of no return, and anything that
-    raised out of its publication would turn a committed boundary into an
-    UNKNOWN fail-stop. The stalled feed is filled at the boundary's last
-    step before the append, so the `seal` record is the one that overflows
-    it; its owner callback raises as well. The boundary still commits, and
-    a healthy feed gets the seal."""
-    run_root = tmp_path / "run"
-    engine = _genesis(run_root)
-    journal = engine.journal
-    assert journal is not None
-    reasons: list[str] = []
-
-    def stalled_owner(why: str) -> None:
-        reasons.append(why)
-        raise RuntimeError("owner bug")
-
-    stalled = journal.subscribe(engine.machines, stalled_owner, budget=SUBSCRIBER_BACKLOG_BYTES)
-    healthy = journal.subscribe(engine.machines)
-
-    def before_the_seal(stage: str) -> None:
-        if stage == "after_sidecar":
-            room = stalled.budget - stalled.backlog_bytes
-            assert room > 0 and stalled.offer(_filler(1), room)  # now exactly full
-            assert stalled.backlog_bytes == stalled.budget
-
-    engine.crash_point = before_the_seal
-    boundary = asyncio.run(_seal(engine, _request(engine, _stage(run_root, C2_JIL))))
-    assert boundary is not None
-    assert len(reasons) == 1 and stalled.overflow is not None
-    assert stalled not in journal._subscribers and healthy in journal._subscribers
-    seen = []
-    while not healthy.empty():
-        seen.append(healthy.get_nowait()["rec"])
-    assert seen[-1] == "seal"
-    assert read_journal(journal.path)[-1]["rec"] == "seal"  # durable, last
-    _close(engine)
 
 
 # ------------------------------------------------------------ socket harness
@@ -1112,9 +1069,9 @@ def test_dl267_a_record_past_the_stream_limit_is_not_a_resume_point(
     it raises the distinct `StreamLineTooLong`, and the CLI names no
     `--since`: resubscribing at the same cursor would meet the same record
     and loop."""
-    import dsl41.runner_control as control_mod
     from typer.testing import CliRunner
 
+    import dsl41.runner_control as control_mod
     from dsl41.cli import app
 
     monkeypatch.setattr(control_mod, "SUBSCRIBER_BACKLOG_BYTES", 64)

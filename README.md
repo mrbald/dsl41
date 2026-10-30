@@ -8,54 +8,39 @@
 [![license](https://img.shields.io/badge/license-AGPL--3.0%20%7C%20commercial-blue)](LICENSING.md)
 
 dsl41 is a migration compiler and a runner for AutoSys job estates. It reads
-JIL, lowers it to a semantic IR, lints it, draws its dependency graph, proves
-two catalogs equivalent, and emits Stonebranch Universal Controller (UC)
-workflow records. A Python DSL builds catalogs, and a decompiler turns JIL
-into that DSL. The runner executes an estate under AutoSys semantics on a
-wall clock or a virtual clock. It has a control socket, a terminal UI, a
-detached supervisor for jobs that must outlive the engine, and period
-boundaries for estates that run for months.
+JIL, lowers it to a semantic IR, lints it, draws its dependency graph, and
+proves two catalogs equivalent. A Python DSL builds catalogs, and a
+decompiler turns JIL into that DSL. The runner executes an estate under
+AutoSys semantics on a wall clock or a virtual clock. It has a control
+socket, a terminal UI and access roles. Jobs are tethered to the engine.
 
 ## Documents
 
 Each document is written for one reader ([docs/writing.md](docs/writing.md),
 DL-405). Pick your track; the architect's track is the background reading for
-the other four.
+the other three.
 
-**Packager**: build the site package (the RPM or equivalent that installs
-dsl41 and your services) and keep fixed what the application's JIL releases run within.
+**Operator**: start, watch and recover the engine; incidents.
 
-1. [docs/site-package.md](docs/site-package.md) - the packager guide: what a release gives you, the reference RPM or the offline recipe, what the site adds, install and first start, the infrastructure contract for the application's JIL releases, qualification
-2. [docs/offline-installation.md](docs/offline-installation.md) - the release inputs, the reference RPM, what the package owns
-3. [docs/deployment-runbook.md §1](docs/deployment-runbook.md#1-install) to §3 - install, filesystem layout, starting the engine; the launcher and units are the example under [examples/nightbank/deploy](examples/nightbank/deploy)
-4. [docs/deployment-runbook.md, the job recipe](docs/deployment-runbook.md#recipe-add-change-or-remove-a-job) - the application's train for a JIL release; [§6](docs/deployment-runbook.md#6-jil-rollout--updating-the-estate) explains the two rollout cycles; §7 upgrades of dsl41 itself
-5. [docs/deployment-qualification.md](docs/deployment-qualification.md) and [docs/offline-rehearsal.md](docs/offline-rehearsal.md) - qualifying a target and rehearsing the exact wheel
-
-**Operator**: start, watch, recover and retire the engine; drills and incidents.
-
-1. [docs/operator-curriculum.md](docs/operator-curriculum.md) - the operator course: the nightbank exercises in order, the service drills, what no drill trains, where to look on shift
-2. [docs/incident-triage.md](docs/incident-triage.md) - on shift: why a job failed, is late or has not started, the intervention and its read-back, the escalation bundle for a dsl41 fault
-3. [docs/deployment-runbook.md §0](docs/deployment-runbook.md#0-the-operator-path) - the operator path: tasks, diagrams, recipes, a configuration-management play for a patch window, monitoring and retirement; §2b backup and restore, §6a the period boundary, §8 scenarios
-4. [examples/nightbank/README.md](examples/nightbank/README.md) and its [RUNBOOK](examples/nightbank/RUNBOOK.md) - the training sandbox: numbered operator exercises on the real engine, run from a checkout with `uv run examples/nightbank/bin/nightbank up`; its [service runbook](examples/nightbank/RUNBOOK-service.md) holds exercises 22 to 33, the §0 service tasks typed by hand on a wargame host; `scripts/wargame.sh` supplies a disposable EL8 systemd container with `uv` for service exercises by hand, from an image that is also the service drill's base; its own container has no network; the drill runs the image in a container of its own
-5. [examples/file_processing/README.md](examples/file_processing/README.md) - the operator CLI and procedures of the file-processing block; [examples/dst-drill](examples/dst-drill/README.md) for the clock-change drill
+1. [docs/incident-triage.md](docs/incident-triage.md) - on shift: why a job failed, is late or has not started, the intervention and its read-back, the escalation bundle for a dsl41 fault
+2. [examples/nightbank/README.md](examples/nightbank/README.md) - the 82-job training estate
+3. [examples/file_processing/README.md](examples/file_processing/README.md) - the operator CLI and procedures of the file-processing block
 
 **Job author**: write an estate in JIL or the Python DSL, or bring an existing one in, and get it accepted.
 
-1. [docs/authoring.md](docs/authoring.md) - the author guide: JIL or the Python DSL, what dsl41 accepts, conditions, lint, rehearse, viz, bringing an estate in, the rollout handoff, the estate manifest and the interruption contract every job meets
+1. [docs/authoring.md](docs/authoring.md) - the author guide: JIL or the Python DSL, what dsl41 accepts, conditions, lint, rehearse, viz, bringing an estate in, the estate manifest and the interruption contract every job meets
 2. [Lint a catalog](#lint-a-catalog) - the rules L001-L023, and `rehearse` and `viz` under [CLI](#cli)
-3. [DSL -> JIL (build)](#dsl---jil-build) - the Python DSL builders (`job`, `box`, `sequence`, `parallel`) and `to_jil()`; [examples/file_processing/estate.py](examples/file_processing/estate.py) is a worked Python estate; `examples/nightbank`, `fulfilment`, `energy`, `media` and `dst-drill` hold worked JIL estates
+3. [DSL -> JIL (build)](#dsl---jil-build) - the Python DSL builders (`job`, `box`, `sequence`, `parallel`) and `to_jil()`; [examples/file_processing/estate.py](examples/file_processing/estate.py) is a worked Python estate; `examples/nightbank`, `fulfilment` and `media` hold worked JIL estates
 4. [JIL -> DSL (decompile)](#jil---dsl-decompile) and [Prove two catalogs equivalent](#prove-two-catalogs-equivalent) - bringing an existing estate in and checking a rewrite; [examples/README.md](examples/README.md) indexes the worked estates
 5. [docs/autosys-semantics.md](docs/autosys-semantics.md) - the meaning of JIL (SEM entries); [docs/simulation-coverage.md](docs/simulation-coverage.md) - what the runner models, refuses, or assumes; [docs/jil-statement-syntax.md](docs/jil-statement-syntax.md) - the statement scanner spec
-6. [docs/deployment-runbook.md, the job recipe](docs/deployment-runbook.md#recipe-add-change-or-remove-a-job) - how an accepted estate reaches the engine: `dsl41 release` in the same run root; [§6](docs/deployment-runbook.md#6-jil-rollout--updating-the-estate) explains the two rollout cycles
 
 **Architect**: the design and the implementation.
 
 1. [docs/architecture.md](docs/architecture.md) - the reader's map, then the [block cards](docs/blocks/README.md), then [docs/glossary.md](docs/glossary.md)
 2. [docs/runner-design.md](docs/runner-design.md) - the runner's design; [docs/ir-design.md](docs/ir-design.md) - AST, IR-F, IR-G, oracle, and equivalence; [Implementation memo](#implementation-memo) - the compiler side and the source map
 3. [docs/state-machines.md](docs/state-machines.md), [docs/job-chart-lifecycle.md](docs/job-chart-lifecycle.md) and [docs/chart-lifecycles.md](docs/chart-lifecycles.md) - the generated views of every declared chart
-4. [docs/stonebranch-semantics.md](docs/stonebranch-semantics.md) and [docs/uc-edge-schema.md](docs/uc-edge-schema.md) - the target model and the AutoSys-to-UC mapping (UCS/M entries); the UC backend is descoped (DL-288)
-5. [docs/gateway.md](docs/gateway.md) - a proposed HTTP and WebSocket gateway; nothing of it is built
-6. [docs/decision-log.md](docs/decision-log.md) - the reasons for the decisions, indexed by [docs/decision-index.md](docs/decision-index.md); [docs/citation-index.md](docs/citation-index.md) - what every reference token in the sources means; [docs/risk-map.md](docs/risk-map.md) - each runner machine with its branch coverage and open findings
+4. [docs/gateway.md](docs/gateway.md) - a proposed HTTP and WebSocket gateway; nothing of it is built
+5. [docs/decision-log.md](docs/decision-log.md) - the reasons for the decisions, indexed by [docs/decision-index.md](docs/decision-index.md); [docs/citation-index.md](docs/citation-index.md) - what every reference token in the sources means; [docs/risk-map.md](docs/risk-map.md) - each runner machine with its branch coverage and open findings
 
 **Maintainer**: contribute code or documents, or run an agent that does.
 
@@ -64,10 +49,7 @@ dsl41 and your services) and keep fixed what the application's JIL releases run 
 3. [docs/live-instance-runbook.md](docs/live-instance-runbook.md) - probing a live AutoSys instance to settle an open semantic question
 
 The runner's frozen contracts are
-[docs/supervisor-protocol.md](docs/supervisor-protocol.md),
 [docs/control-protocol.md](docs/control-protocol.md),
-[docs/concurrency-model.md](docs/concurrency-model.md),
-[docs/period-model.md](docs/period-model.md),
 [docs/protocol-evolution.md](docs/protocol-evolution.md),
 [docs/access-model.md](docs/access-model.md),
 and [docs/statechart-engine.md](docs/statechart-engine.md).
@@ -77,8 +59,8 @@ They are reference, cited from the pages above, not reading.
 
 The compiler and the runner are built and tested. The items that are
 specified and not built, and the open questions, are listed under
-[What is not built](#what-is-not-built). The UC backend is descoped until
-further notice (DL-288): it stays built and tested, and gets no new work.
+[What is not built](#what-is-not-built). The UC backend, the period
+boundaries and the release train are retired in 2.0.0.
 
 ## Install
 
@@ -100,14 +82,12 @@ files may include `autocal_asc` calendar exports (`calendar`, `cycle`,
 
 Exit codes: 0 is success or clean. 2 means the input never reached the
 tool: an unreadable file, a JIL parse error, a lowering refusal, or a
-preflight refusal. Findings exit 1: `lint`, `equiv`, `uc --strict`, a
-failed `decompile` check, and a `build --check` difference. A mid-run engine
+preflight refusal. Findings exit 1: `lint`, `equiv`, a failed `decompile` check, and a `build --check` difference. A mid-run engine
 failure in `run` or `rehearse` exits 1 as well. `minify` refusals and a
-`rehearse --check-cadence` deviation exit 3. The control verbs `sendevent`,
-`host`, and `seal` spend a code per outcome: 0 applied, 2 refused, 3
+`rehearse --check-cadence` deviation exit 3. The control verbs `sendevent`
+and `host` spend a code per outcome: 0 applied, 2 refused, 3
 rejected, 4 outcome unknown. On 4, retry with the printed `request_id`
-instead of re-sending. `report` exits 0
-once the report is written; the findings are in the report. Each verb's
+instead of re-sending. Each verb's
 `--help` states its own codes.
 
 Lowering refuses unknown attributes (DL-07). `--permit-unknown` carries them
@@ -142,8 +122,6 @@ derived graph, and dangling-name rules. `--strict` is the migration gate: an
 estate brought in under
 [authoring §5](docs/authoring.md#5-bring-an-existing-autosys-estate-in)
 always lints with it, and a site may require it for every estate.
-`dsl41 release prepare` lints without `--strict`: an `error` finding
-refuses the release, and a `warn` finding refuses nothing.
 
 L023 warns when a DST change moves, drops or doubles a schedule time of the
 job's zone, and prints what the runner does. A job's own `timezone` decides the zone, else `--timezone` (UTC by
@@ -285,35 +263,6 @@ on pushes to main and on pull requests. If a browser refuses the menu or
 the collapse extension, the status line says so and every other control
 keeps working.
 
-### Migration report
-
-```sh
-dsl41 report jobs.jil -o report.md
-```
-
-The report comes from the UC backend. It lists refused (R) constructs, the
-assumption recorded on each A-classified edge, and the open U-question
-table. Use `lint --strict` as the pass/fail gate.
-
-### Emit UC workflow records
-
-```sh
-dsl41 uc jobs.jil -o bundle.json            # CREATE-ONLY taskWorkflow records
-dsl41 uc --strict jobs.jil                  # exit 1 if anything was quarantined
-```
-
-The command emits one `taskWorkflow` record per serializable workflow, in
-the shape frozen in
-[docs/uc-edge-schema.md](docs/uc-edge-schema.md).
-The records use base edge conditions only (Success, Failure,
-Success/Failure), with `retainSysIds: false` and no system ids. A workflow
-with an edge the base schema cannot express (a `t()`-derived condition, a
-variable condition) is quarantined whole. Two workflows that would emit one
-record are quarantined as well. The bundle's ledger lists every quarantined
-workflow with its reason. There is no partial workflow and no silent edge
-drop. Rich condition forms and write-path verification wait on a live
-controller (U3b).
-
 ### Prove two catalogs equivalent
 
 ```sh
@@ -389,12 +338,9 @@ modules you trust. It calls `estate()`, lowers the JIL through the compiler,
 and writes it through a temporary file and a rename. `--check FILE` compares
 bytes and writes nothing; `--stdout` prints. For a package, `--out DIR` writes
 and `--check DIR` compares one JIL per module under its file's name.
-`--param NAME=VALUE` fills a placeholder for a local check; a release fills
-them through the manifest's layers. `dsl41 estate build DIR --emit
-jobs.jil=catalog.py -o OUT` assembles the release directory that `dsl41 release
-prepare` takes, with no Python in it; with a package, `--emit eod.jil=estate`
-takes that file from it. `dsl41 run` and the run root
-take JIL bytes only. In Python, the builder's `to_jil()` returns the JIL
+`--param NAME=VALUE` fills a placeholder for a local check; the estate
+manifest fills them through its layers. `dsl41 run` and the run root take
+JIL bytes only. In Python, the builder's `to_jil()` returns the JIL
 text, and its `build()` returns the in-process catalog.
 
 `job()` keyword names are JIL attribute names. `sequence()` wires `s()`
@@ -471,7 +417,7 @@ dispatches it again. An operator hold is `on_hold`: `sendevent ON_HOLD`
 sets it, and `sendevent OFF_HOLD` or `off-hold-all` releases it. Jobs the
 drain holds are not failed and not moved. A job is rerun elsewhere only
 after the host is evicted, which needs proof that the old executor is dead
-([docs/concurrency-model.md](docs/concurrency-model.md)
+(docs/concurrency-model.md (retired in 2.0.0)
 §8). The `held` mark matters because a held job reads RUNNING with no
 process behind it.
 
@@ -494,63 +440,6 @@ Where dsl41's default reading of an estate can differ from AutoSys,
 `--semantics NAME=VALUE` selects the other reading and records it with the
 run; the switches are listed in "Semantic switches",
 [docs/runner-design.md](docs/runner-design.md) §8a.
-
-### Detached mode
-
-By default a run is tethered: if the engine dies, its jobs terminate, and
-the termination is recorded even under `kill -9`. If a long-running estate
-must survive an engine restart, such as an upgrade, add `--detached`:
-
-```sh
-dsl41 run jobs.jil --run-root ./run1 --detached   # CMD jobs run under a supervisor
-# ...stop the engine (SIGINT); jobs keep running under the supervisor...
-dsl41 run jobs.jil --run-root ./run1 --detached --resume   # reattach, no re-run
-dsl41 supervise list --run-root ./run1            # what the supervisor is holding
-dsl41 supervise start --run-root ./run1           # run the supervisor in the foreground
-dsl41 run jobs.jil --run-root ./run1 --detached --supervisor attach  # use that one, start none
-dsl41 run jobs.jil --run-root ./run1 --detached --deadman 600  # opt into eviction
-```
-
-A per-run-root supervisor (`runner_supervisor.py`, stdlib-only, one process
-per run root) owns the lifelines of the job wrappers, so the parent of the
-jobs is the supervisor, not the engine. If the engine stops or crashes, the
-jobs continue. `--resume --detached` reconnects and reattaches to the runs
-still alive, with no re-run, and resolves from the spool any run that
-finished meanwhile. The engine holds a single fencing lease.
-By default `run --detached` starts a supervisor when none answers on the
-run root. Under a supervisor service, pass `--supervisor attach`: the
-engine connects to the running supervisor, starts none, and exits 1 when
-none answers. The offline `dsl41 seal` attaches by default and starts one
-only with `--supervisor spawn`. The socket
-protocol is frozen in
-[docs/supervisor-protocol.md](docs/supervisor-protocol.md).
-`supervise` is read-only unless you ask it to shut down or start.
-
-For a supervisor in a qualified dedicated Linux systemd service,
-`dsl41 supervise shutdown --run-root <root>` refuses active or indeterminate
-work without signals. `--force=terminate` deliberately uses TERM, grace
-and KILL for validated command groups. Both require the stopped engine,
-existing leader lock and verified service containment. The supervisor
-answers at once and records the operation's outcome in
-`<root>/maintenance.json`, which the CLI watches. The CLI returns 0 for
-verified completion, 2 for refusal, 3 for an operation still running when
-its watch ends, and 4 for uncertainty. Running it again
-watches an operation already admitted and sends nothing; never signal or
-force an uncertain stop by reflex. An unmanaged supervisor refuses
-these maintenance requests. To stop a whole estate under the example
-units, root disables both units and stops the engine unit; then
-`dsl41 estate quiesce` seals, audits and stops the supervisor, and checks
-that nothing comes back. It never waits for a precondition: a refusal
-names what to wait for, and a rerun skips what is done. Follow the
-[deployment runbook](docs/deployment-runbook.md) for unit setup,
-maintenance and incident shutdown.
-
-`--deadman N` trades some of what `--detached` buys. The supervisor exits
-after N seconds with no live controller, and every job it holds dies by
-lifeline EOF. An engine down longer than N loses its jobs. That bound is
-what makes `dsl41 host evict` provable rather than a guess; without it a
-run root is never reroutable except by `--force`. Choose N longer than any
-planned engine outage.
 
 ### Serve the TUI over the web
 
@@ -581,105 +470,32 @@ proxy layer. dsl41 has none of its own here. The control socket is mode
 only reaches what its own user can already reach directly. It does not
 widen access; it makes existing access reachable from a browser.
 
-### Release an estate
-
-```sh
-dsl41 release prepare NAME DIR
-dsl41 release requalify NAME
-dsl41 release apply NAME
-dsl41 release resume
-dsl41 release rollback NAME
-dsl41 release status
-```
-
-`dsl41 release` ships an estate edit on the application's train. It applies
-a checked release to the running estate in one window, in the same run
-root. Run every verb as the deployment identity; its sudo grant lets the
-verbs act as the service account (DL-421). The
-[job recipe](docs/deployment-runbook.md#recipe-add-change-or-remove-a-job)
-gives the steps, the exit codes and the waits.
-
-- `release prepare NAME DIR` installs a copy of `DIR` as
-  `ESTATE_RELEASES/NAME`, read-only, once it passes lint and rehearse. It
-  checks the release's job count against the launcher's `MAX_JOBS`, and
-  the runtime's command grace against `MAX_GRACE_S`.
-- `release requalify NAME` runs prepare's checks on an installed
-  release, after a runtime switch or for a release installed by hand
-  (DL-423).
-- `release apply NAME` holds the scheduled jobs, waits for running jobs to
-  finish, seals the period into `NAME`, writes `NAME` to `ACTIVE`, starts
-  the engine unit, checks the new period and releases its own holds.
-- `release resume` finishes a recorded apply from the step it reached.
-- `release rollback NAME` applies `NAME` by the same window. `NAME` must be
-  the release the active one replaced, as `release status` names it
-  (DL-423).
-- `release status` shows the active release, whether an engine answers,
-  where a rollback goes, and how the last apply ended.
-
-Prepare and requalify run `lint` and `rehearse` with `--manifest`, and
-apply's seal passes it (DL-422). The release verbs take no `--manifest`.
-
 ### Run history
 
 ```sh
 dsl41 runs ./run1                            # one row per job run, this root
 dsl41 runs ./run1 ./run2 --job extract       # multiple roots, one job
-dsl41 runs ./lineage --format json           # a lineage anchor: every period's root, in order
+dsl41 runs ./run1 --format json
 ```
 
 `runs` folds run history from a run root's journal, manifest, and spool.
-It is offline only: no control socket, no live engine. Pointed at a
-lineage anchor directory, it reads every root the estate's archive registry
-names, in period order, so a rolled lineage reads as one table. `--format`
+It is offline only: no control socket, no live engine. `--format`
 is `table` (default), `json`, or `csv`. Every row carries its
 `catalog_hash`, so a caller can segment a series by watching that field
 change. A run root with no stored inputs reports its rows as
 `fidelity=records_only`, with a warning on stderr.
 
-### Period boundaries
-
-A long-lived estate runs as a sequence of periods under a lineage anchor.
-The contract is
-[docs/period-model.md](docs/period-model.md).
-
-- `seal` closes the running period and commits the next one. It works live
-  through the engine, which then exits with code 3, or offline when no
-  engine holds the root. The lock decides which.
-- `run --resume` reopens the next period in the same root. `run --open-from`
-  rolls it into a fresh root; the closing period must be attested first.
-- `audit` re-derives a closed period from its opening seal, journal, spool,
-  and manifests, and writes its attestation. `verify` checks one.
-- `journal` replays a run's write-ahead log into the trace it produced,
-  across period boundaries.
-- `estate diff OLD/estate.toml NEW/estate.toml` lists the records a release
-  adds, removes and changes by the seal's definition test, before the window.
-- `estate prune` deletes what retention allows and refuses the rest.
-  `--archive-inputs` writes an archive receipt, then deletes a period's
-  inputs. That step is irreversible: the period can never be re-derived
-  again, only checked against its attestation. `estate reclaim --force` is
-  the break-glass move of a stale successor claim; prove the claimant is
-  gone before you run it.
-
-### Training sandbox (examples/nightbank)
+### Training estate (examples/nightbank)
 
 A synthetic bank overnight estate: three regions closing follow-the-sun,
 demand-driven refdata, and a human approval before the start-of-day flip.
-It exists for learning to operate the engine. Scripted incidents (stalled
-feeds, hung jobs, failed loads) need an operator's response. A whole night
-plays in about 15 real minutes on the real engine. Start with
-[examples/nightbank/README.md](examples/nightbank/README.md) and its
-[RUNBOOK](examples/nightbank/RUNBOOK.md) of operator exercises
-(`uv run examples/nightbank/bin/nightbank up`). Exercises 15 to 21 cover
-the period boundary: sealing a night live and offline, opening the next
-period in place, the morning-after `audit` and `verify`, rolling to a fresh
-run root, break-glass reclaim, and retention. The
-[service runbook](examples/nightbank/RUNBOOK-service.md)'s exercises 22
-to 33 run the service tasks by hand on a `scripts/wargame.sh` host. The
-`deploy/` directory holds a launcher script and systemd units for running
-it as a service. The example is repo-only; it is not packaged.
+Scripted incidents (stalled feeds, hung jobs, failed loads) need an
+operator's response. Start with
+[examples/nightbank/README.md](examples/nightbank/README.md). The example is
+repo-only; it is not packaged.
 
 CI also uses it to test the concurrency model
-([docs/concurrency-model.md](docs/concurrency-model.md)
+(docs/concurrency-model.md (retired in 2.0.0)
 §9): seeded interleavings of leader failover, a spawn decided and never
 acted on, duplicated and stale completions, quarantine, and drain, with a
 check that no `(job, run_number)` ever runs twice.
@@ -705,8 +521,8 @@ host, through a stop and an operator's rejection.
 ## Implementation memo
 
 The compiler modules build in this order: ast_jil, conditions, ir, lint,
-derive, viz, oracle, equiv, backend_uc, dsl (DL-03). The DSL is last by
-design. The runner sits on the oracle. There is no re-export facade: every
+derive, viz, oracle, equiv, backend_uc, dsl (DL-03); backend_uc is retired in
+2.0.0. The DSL is last by design. The runner sits on the oracle. There is no re-export facade: every
 consumer imports a name from the module that owns it.
 
 ### Source map
@@ -728,8 +544,6 @@ Front end and IR:
 - `src/dsl41/derive.py`: IR-F to IR-G. Seven analysis passes produce the
   edges, mutex pairs, box tree, same-cycle detection, and the M01-M36
   mapping-row classification.
-- `src/dsl41/classify.py`: boundary classification, what a catalog change
-  does to live work. Pure analysis: no disk, socket, or clock.
 
 Visualization:
 
@@ -803,10 +617,6 @@ Semantics:
 
 Backend and DSL:
 
-- `src/dsl41/backend_uc.py`: the UC twin model, edge classification, the
-  migration report, and the base CREATE-ONLY record bundle. The UC-side
-  twin interpreter that drives the expected-divergence pairs is
-  `tests/uc_oracle.py`.
 - `src/dsl41/dsl.py`: the builder surface (`job`, `box`, `sequence`,
   `parallel`) and the decompiler, extracted from corpus-observed patterns
   only.
@@ -855,9 +665,8 @@ Runner:
   nothing from dsl41.
 - `src/dsl41/runner_adapters.py`: the adapter contract and every adapter:
   FakeAdapter, LocalCommandAdapter (each command under the wrapper),
-  FileWatcherAdapter, the detached path (SupervisorClient and
-  SupervisedCommandAdapter), and the spool ladder that resolves an
-  interrupted run's outcome.
+  FileWatcherAdapter, and the spool ladder that resolves an interrupted
+  run's outcome.
 - `src/dsl41/runner_admission.py`: the one order every input takes (dedup,
   stamp, append, apply, decide, record), the Attempt and ApplyResult
   records, the decision index that answers a retry, and the envelope with
@@ -865,9 +674,6 @@ Runner:
 - `src/dsl41/runner_effects.py`: the effect outbox: what the shell intends
   to do to an execution host, recorded before the attempt, in the states
   pending, applied, and indeterminate.
-- `src/dsl41/runner_seal.py`: the seal boundary as a statechart: its
-  declaration, the facts its exception rows read, and the exit each row
-  reports for the engine to carry out.
 - `src/dsl41/runner_hosts.py`: the execution-host routing table: the
   HostCommand vocabulary, eviction's preconditions as a pure function of
   the row, and the genesis seed.
@@ -903,11 +709,6 @@ Runner:
   blocking for the CLI, a blocking generator for `subscribe`). The
   protocol is
   [docs/control-protocol.md](docs/control-protocol.md).
-- `src/dsl41/runner_supervisor.py`: the detached supervisor: stdlib-only,
-  one per run root. It owns the wrapper lifelines and speaks the supervisor
-  protocol (SPAWN, SIGNAL, LIST, MAINTENANCE_STOP, legacy SHUTDOWN, PING,
-  and the lease), with
-  same-uid peer credentials and a Linux subreaper.
 - `src/dsl41/runner_wrapper.py`: the per-run wrapper, stdlib-only. It
   records `spawn.json` and `status.json` durably, and on lifeline EOF it
   kills and records.
@@ -918,12 +719,8 @@ Runner:
   socket. Every view comes from the idempotent queries; subscribe is only
   a wake-up signal.
 
-Period boundary:
+Shared cores:
 
-- `src/dsl41/period.py`: period identity: `catalog_hash`,
-  `source_bundle_hash` and the content-addressed input bundle, the
-  RuntimeProfile and its hash, the staged and committed manifests, the
-  `segment` record every log opens with, and the archive receipt.
 - `src/dsl41/canon.py`: the canonical serialization behind every digest.
 - `src/dsl41/state_machine.py`: the statechart executor of
   `docs/statechart-engine.md`: `Statechart` declarations, the `Executor`,
@@ -931,36 +728,12 @@ Period boundary:
   the test suite turns on. Standard library only, so the supervisor can load
   it by path.
 - `src/dsl41/machines.py`: the registry of declared state machines.
-- `src/dsl41/seal.py`: the seal artifact a period ends by writing, and the
-  two pure functions over it, `close_runtime` and `open_from_seal`. Every
-  section is a frozen model; an unknown section is a refusal.
-- `src/dsl41/boundary.py`: the boundary operation: the lineage anchor and
-  its head states under a lock, the successor claim, the `period_root`
-  sentinel, staging, the retry-horizon gate, validation, the three writes
-  in the one order that makes the boundary durable, and seal selection at
-  resume.
-- `src/dsl41/attest.py`: the attestation `audit` produces and `verify`
-  consumes. Producing one re-derives the period's seal from the opening
-  seal, the journal, the spool, and the manifests, and needs the
-  predecessor checkpoint. Consuming one accepts it alone, so a rolled root
-  can verify a chain whose earlier roots are gone.
-- `src/dsl41/estate.py`: the physical roll (`run --open-from`): opening a
-  lineage's next period in a fresh root.
 - `src/dsl41/estate_manifest.py`: the estate manifest, `estate.toml`: the
   application's one declaration of its catalog files, properties layers,
   timezone and semantic switches, read by the verbs' `--manifest` option.
-- `src/dsl41/release.py`: the release train's verbs, `release prepare`,
-  `requalify`, `apply`, `resume`, `rollback` and `status`: the apply's record, each step
-  before it acts, the holds it owns through the run root's log, and the
-  receipts (DL-412).
-- `src/dsl41/release_service.py`: the release verbs' service side, run as
-  the service account through sudo, and what both sides read: the launcher
-  beside the runtime, `dsl41-launch vars`, the releases on disk, and the
-  run root's seal and hold records.
-- `src/dsl41/retention.py`: the retention floors and `estate prune`: what
-  may never be deleted, computed from the root, with three verdicts
-  (floored, held, prunable). The remover refuses a path that is not
-  prunable, is outside the run root, or holds a retained artifact.
+- `src/dsl41/run_root.py`: a run root's identity and layout: `catalog_hash`,
+  `RuntimeProfile` and `runtime_hash`, the two manifests, the sentinel,
+  `wal/`, and the content-addressed input bundle.
 
 CLI and scripts:
 
@@ -968,8 +741,7 @@ CLI and scripts:
   order. The verbs live one module per domain: `cli_common.py` (shared
   options, the catalog loader, and the readings that turn an exception or a
   control answer into an exit code), `cli_compile.py`, `cli_run.py`,
-  `cli_control.py`, `cli_estate.py`, `cli_estate_build.py` (`estate build`
-  and `estate diff`), and `cli_release.py`, the release verbs' command line.
+  and `cli_control.py`.
 - `src/dsl41/__main__.py`: `python -m dsl41`, which `serve` uses to spawn
   one `dsl41 ui` per browser session.
 - `src/dsl41/__init__.py`: the module map docstring. No exports.
@@ -1059,11 +831,6 @@ Compiler:
   to local conversion at both DST edges.
 - `tests/test_equiv.py`: the canonical form, tiers a, b, and c, the
   truth-table lint rules, and the equiv CLI.
-- `tests/test_backend_uc.py`: edge classification, the migration report,
-  the report and uc CLIs, and the record bundle (frozen-shape golden test,
-  CREATE-ONLY hygiene, quarantine).
-- `tests/test_uc_oracle.py`: UCS-entry trace semantics and the
-  expected-divergence pairs, driving `tests/uc_oracle.py`.
 - `tests/test_dsl.py`: the corpus-extracted builders, condition source
   fidelity, and the decompile round-trip property.
 - `tests/test_build_cli.py`: the decompiled module's `estate()` shape, the
@@ -1076,9 +843,6 @@ Compiler:
 - `tests/test_simulation_register.py`: the coverage register's own gate:
   every derived surface's members are computed from the code and must
   match the rows; ids are unique; the checked document matches the rows.
-- `tests/test_classification.py`: every classifier tier row with a
-  contrast case, the profile-field sweep, both closure directions, and
-  nested containment.
 - `tests/test_arch_check.py`: each blocking check of the architecture gate,
   the advisory size ratchet, and the spec-review status, tripped and not
   tripped.
@@ -1116,7 +880,7 @@ Compiler:
   coverage hits, the completeness generator against a hand-written table,
   and the structured error report.
 - `tests/test_statechart_stop.py`: a `StatechartError` stops every tier
-  before any durable write, and the engine and the supervisor exit 7.
+  before any durable write, and the engine exits 7.
 - `tests/statechart_completeness.py`: the generated completeness test that a
   converted machine's test module calls (§13).
 - `tests/test_examples.py`: the three workflow examples' catalogs lower
@@ -1134,13 +898,9 @@ Runner:
 - `tests/test_runner_journal.py`: WAL record shapes, read tolerance and
   refusals, catalog-hash sensitivity, replay fidelity, and the `journal`
   CLI.
-- `tests/test_journal_replay.py`: `dsl41 journal` across a boundary, and
-  one refusal per way a boundary can fail to prove out.
 - `tests/test_run_history.py`: the `runs` CLI: per-root and multi-root
   folding, the filters, a history spanning a boundary, and the
   `records_only` fidelity degrade.
-- `tests/test_run_reattach.py`: the reattach line a detached run prints
-  on exit, built from the process's own argv.
 - `tests/test_ledger.py`: one leader per run root, the monotone epoch, the
   eligibility gate, a SIGKILLed holder, the fence, and the takeover
   barrier.
@@ -1190,13 +950,6 @@ Runner:
   and missing extra, the constructed textual-serve command, loopback bind,
   bind failure, and TUI exit-code propagation. The real server is
   monkeypatched.
-- `tests/test_runner_supervisor.py`: the supervisor protocol, the
-  import-boundary test, the Linux subreaper, the detached kill matrix, the
-  deadman, and a kill re-driven at resume.
-- `tests/test_supervisor_backlog.py`: a full macOS listen backlog is not
-  evidence of a stale socket.
-- `tests/test_supervisor_idempotency.py`: SPAWN idempotency that outlives
-  the supervisor, driven through a crash matrix and a real subprocess.
 - `tests/test_fw_spool.py`: the file-watcher poll spool from which an
   audit re-derives a watch's progress after a restart.
 - `tests/test_runtime_state.py`: the state owner and its revisions: frozen
@@ -1208,88 +961,38 @@ Runner:
   `tests/model_harness.py`, and the seeded fault sweep whose faults must
   all fire.
 
-Period boundary:
+Shared cores:
 
 - `tests/test_canon.py`: the canonical form, with a golden vector of exact
   bytes and digest.
-- `tests/test_period_identity.py`: the estate layout, the hashes, the
-  `segment` record, RuntimeProfile, and the manifests, with golden vectors.
-- `tests/test_seal_artifact.py`: the seal sidecar: a golden vector, close,
-  open, close reproducing its bytes, tamper detection over every key, the
-  ingress refusals, and one injected failure per load invariant.
-- `tests/test_boundary.py`: the genesis transaction at each crash point,
-  ownership refusals, the crash matrix over the write order, candidate
-  reuse and quarantine, the seal barrier, the `seal` control verb, and a
-  subscriber resuming across a boundary.
-- `tests/test_resume_root_authority.py`: `run --resume` and the offline
-  seal refuse a root the anchor does not name or does not own, leaving the
-  root untouched.
-- `tests/test_estate.py`: the offline and live seal, audit, the producer
-  rule's negatives, the physical roll, the attestation gate, and
-  break-glass reclaim.
-- `tests/test_retention.py`: each retention floor refused and released,
-  the structural guards, and the prune flags.
-- `tests/test_estate_wide.py`: `audit`, `journal`, `runs`, and
-  `estate prune` over a lineage rather than one root.
 - `tests/test_estate_manifest.py`: the manifest's refusals and the
   `--manifest` option on each verb that reads the estate, against explicit
   arguments.
-- `tests/test_estate_build.py`: `estate build`'s release directory, its
-  refusals and `--check`, and `estate diff` in text and JSON.
-- `tests/test_restore_drill.py`: backup, delete, restore at the same path,
-  and re-open over the nightbank estate.
 
 Branch gate (DL-269): one test per branch of its module that the other
 suites do not reach, each asserting the branch's observable effect:
 
 - `tests/test_oracle_branches.py`, `tests/test_capacity_branches.py`,
-  `tests/test_scheduler_branches.py`, `tests/test_control_branches.py`,
-  `tests/test_seal_branches.py`, `tests/test_period_branches.py`,
-  `tests/test_retention_branches.py` and `tests/test_boundary_branches.py`.
+  `tests/test_scheduler_branches.py` and `tests/test_control_branches.py`.
 
 Training estate:
 
 - `tests/test_nightbank_example.py`: the estate loads, lints clean, and
   reaches the start-of-day flip on one virtual night, plus the seeded
   interleaving sweep.
-- `tests/test_nightbank_boundary.py`: the RUNBOOK's exercises 15 to 21 as
-  acceptance scenarios, including a detached night sealed mid-flight under
-  a real supervisor, and a check that every verb the RUNBOOK types exists.
-- `tests/test_nightbank_deploy.py`: the shipped launcher script and the
-  systemd units beside it.
-- `tests/test_release_prepare.py`, `tests/test_release_apply.py`,
-  `tests/test_release_apply_holds.py`, `tests/test_release_apply_answers.py`,
-  `tests/test_release_apply_seal.py`, `tests/test_release_apply_horizon.py`,
-  `tests/test_release_rollback.py`, `tests/test_release_rollback_takeover.py`,
-  `tests/test_release_rollback_holds.py` and `tests/test_release_status.py`:
-  the release verbs against a stub engine, `sudo` and `systemctl`, on a site
-  laid out as an install lays one out, which `tests/release_site.py` builds
-  (DL-412).
-- `tests/test_operator_recipes.py`: the runbook's §0 recipes run as printed
-  against a synthetic estate under the shipped launcher, content checks of
-  the recipes only the service drill runs, and the reboot hold (DL-268).
 
 ## What is not built
 
 - The remote relay and shared store that multihost execution needs. They
   are designed in
-  [docs/concurrency-model.md](docs/concurrency-model.md)
+  docs/concurrency-model.md (retired in 2.0.0)
   §7.
 - Follower mode, `standby check` and the multi-executor rig (DL-230). They
   wait for the relay above.
-- The `route` verb, which maps an affinity role to an executor, and the
-  `routes` query, which reads that map. Their wire is specified in
-  [docs/period-model.md](docs/period-model.md) §2.2.
-- Resume's `--trust-unaudited-seal` override, for a seal with no
-  attestation whose inputs are corrupt or pruned. It is specified in
-  [docs/period-model.md](docs/period-model.md) §11.
 - Fingerprints on tombstones (DL-111). They are specified in
-  [docs/concurrency-model.md](docs/concurrency-model.md) §5.
+  docs/concurrency-model.md (retired in 2.0.0) §5.
 - The HTTP and WebSocket gateway that [docs/gateway.md](docs/gateway.md)
   proposes.
-- Rich UC condition forms, the live OpenAPI pull, write-path verification,
-  and the generated client (U3b). They need a live controller. UC work is
-  descoped until further notice (DL-288).
 - The decompiler's custom-pattern option (`--patterns` recognizer and
   expander pairs).
 
@@ -1298,10 +1001,8 @@ the code. The AutoSys questions Q3c, Q3d, Q6, Q8b-Q8d, Q10, Q13, Q14, Q15 and Q1
 a live AutoSys instance; Q6, Q13 and Q14 have no code switch. The resource-manager questions
 Qr2-Qr5 are stated in DL-50; DL-247 narrows Qr2. Qr6 is decided: dsl41
 keeps its default, and the `queued-recheck` switch selects the vendor's
-readings (DL-257). The UC questions
-U1, U3b and U6b are descoped (DL-288); U1 and U3b would need a live
-controller, and U6b lives in the migration report's question table. The
-runner questions E5-E10 are in
+readings (DL-257). The UC questions U1, U3b and U6b are retired with the
+UC backend in 2.0.0. The runner questions E5-E10 are in
 [docs/runner-design.md](docs/runner-design.md)
 §15. E8's probe is in
 [docs/live-instance-runbook.md](docs/live-instance-runbook.md); the others
@@ -1314,14 +1015,11 @@ Releases are tag-driven. A push of a tag that matches `v*` starts
 The workflow runs the whole CI workflow as its first job, checks that the
 tag is annotated and names the version in `pyproject.toml`, builds the
 sdist and the wheel, exports the locked dependency closure with hashes,
-smoke-tests the installed wheel with
-[scripts/release_smoke.sh](scripts/release_smoke.sh),
-qualifies that wheel in Ubuntu and EL8 containers on native x86_64 runners,
-and publishes only the tested files. Publication uses trusted
+and publishes only those files. Publication uses trusted
 publishing (OIDC) in the `pypi` environment, which waits for the owner's
 approval. The repository holds no PyPI token. The GitHub release that
-follows carries the sdist, the wheel, the two requirements files, their input manifest, the
-Ubuntu and EL8 wheelhouses, the reference EL8 RPM, and `SHA256SUMS`.
+follows carries the sdist, the wheel, the two requirements files, their input manifest
+and `SHA256SUMS`.
 The workflow's header records the one-time trusted-publisher setup on pypi.org.
 The package readme is README.md with every relative link rewritten at
 build time to the file on `main`, because the PyPI project page cannot
@@ -1334,7 +1032,7 @@ package inside a minor bump; the tag message names it.
 
 The annotated tag's message is the release note. Its first line is the
 summary. Its body answers the questions that
-[the runbook's upgrade section](docs/deployment-runbook.md#7-upgrading-dsl41-itself)
+the runbook's upgrade section (`deployment-runbook.md`, retired in 2.0.0)
 reads to pick an upgrade row, in the order of the template under "Make a
 release". It also names any Python module that left the package.
 
@@ -1347,7 +1045,7 @@ coverage requirement.
 
 Set the new version in `pyproject.toml` and run `uv lock`, which writes the
 same version into `uv.lock`. Update the wheel filename and RPM version
-examples in [docs/offline-installation.md](docs/offline-installation.md)
+examples in docs/offline-installation.md (retired in 2.0.0)
 to the same version. Build locally and compare the wheel's file list with
 the previous release's (`uv build`, then `unzip -Z1` on both): the
 difference must be what the tag message is about to say. Commit the three
@@ -1360,8 +1058,7 @@ git push origin main
 ```
 
 Rehearse the release on that commit before you tag it. A manual run of the
-workflow from a branch runs `gates`, `build`, `smoke`, and `offline`
-qualification in Ubuntu and EL8 containers on native x86_64 runners. It publishes
+workflow from a branch runs `gates` and `build`. It publishes
 nothing, whatever its `publish` input says. Publication needs a tag: a tag
 push, or a manual run from a tag with `publish` set.
 
@@ -1373,13 +1070,11 @@ gh run list --workflow release.yml --limit 1
 The tag checks in `build` run whenever the ref is a tag, on a push or a
 manual run.
 
-The smoke test also runs locally, on macOS or Linux, against a local build.
-`dist/` must hold only this build's two files:
+Build locally first. `dist/` must hold only this build's two files:
 
 ```sh
 uv build --sdist && uv build --wheel
 bash scripts/export-release-inputs.sh dist/*.whl exports
-bash scripts/release_smoke.sh dist exports
 ```
 
 Then tag that commit and push the tag. The first `-m` is the summary; the

@@ -3453,16 +3453,11 @@ ADAPTER_ROWS: tuple[Row, ...] = (
         surface="adapter_outcome",
         member=f"Failed={_UNOBSERVABLE} (wrapper exited rc={{}} without a status record)",
         klass=PROVISIONAL,
-        cite="runner_adapters.LocalCommandAdapter.run,"
-        " runner_adapters.SupervisedCommandAdapter._await_outcome, runner-design ss15",
+        cite="runner_adapters.LocalCommandAdapter.run, runner-design ss15",
         label="E7",
-        sites=(
-            "runner_adapters.LocalCommandAdapter.run#1",
-            "runner_adapters.SupervisedCommandAdapter._await_outcome#1",
-        ),
+        sites=("runner_adapters.LocalCommandAdapter.run#1",),
         effect="a wrapper that exited without writing a status record fails the run and"
-        " names the wrapper's own exit code; both the tethered and the supervised"
-        " adapter build it",
+        " names the wrapper's own exit code",
         trigger=f"Failed={_UNOBSERVABLE} (wrapper exited rc={{}} without a status record)",
     ),
     _row(
@@ -3504,7 +3499,7 @@ ADAPTER_ROWS: tuple[Row, ...] = (
         surface="adapter_outcome",
         member="Failed=wrapper spawn failed: {}",
         klass=SUPPORTED,
-        cite="runner_adapters.LocalCommandAdapter.run, runner_adapters.SupervisedCommandAdapter.run",
+        cite="runner_adapters.LocalCommandAdapter.run",
         effect="the engine could not spawn the wrapper at all; the run never started",
         trigger="Failed=wrapper spawn failed: {}",
     ),
@@ -3584,7 +3579,7 @@ EVENT_SOURCE_ROWS: tuple[Row, ...] = (
         klass=SUPPORTED,
         cite="ir-design ss7, DL-68, runner.Engine.run_until_quiescent",
         effect="the start came from a calendar tick, so a journal reader can tell it from"
-        " an operator's sendevent; `Engine._cutoff` stamps it on the boundary path",
+        " an operator's sendevent",
         trigger="runner.Engine.run_until_quiescent",
         quiet="runner.Engine.inject_host",
     ),
@@ -3606,7 +3601,7 @@ EVENT_SOURCE_ROWS: tuple[Row, ...] = (
         effect="the completion came from resolving an incomplete run at resume, not from a"
         " live adapter; it still goes through the ss4 stale gate",
         trigger="runner_startup._inject_completion",
-        quiet="runner.Engine._cutoff",
+        quiet="runner.Engine.inject",
     ),
     _row(
         surface="event_source",
@@ -3616,7 +3611,7 @@ EVENT_SOURCE_ROWS: tuple[Row, ...] = (
         effect="the event is a live adapter completion -- the stamp that subjects it to the"
         " ss4 stale gate; it is the DEFAULT provenance of an engine-raised input",
         trigger="runner.Engine._enqueue",
-        quiet="runner.Engine._cutoff",
+        quiet="runner.Engine.inject",
     ),
 )
 

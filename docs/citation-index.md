@@ -68,8 +68,7 @@ tokens pointing at review conversations; those had no in-repo index, so a
 reader could not follow them. DL-75 deleted every one in `src/dsl41/`,
 where the gate runs, and inlined the reason it stood for. That sweep did
 not reach `tests/`; DL-151 finished it there — the eighteen it left
-(five in `test_uc_oracle.py`, six in `test_runner_lifecycle.py`, seven in
-`test_seal_artifact.py`), hyphenated (`Review M-1`, `Review E-1`),
+(spread over `test_runner_lifecycle.py` and other test files), hyphenated (`Review M-1`, `Review E-1`),
 unhyphenated (`Review M3`, `Review B1`) and compound (`review U6A-05`,
 `review U6AR3-04`), now state their reason instead of pointing at it. Two
 kinds of residue are left and neither is a citation: some test FUNCTION
@@ -92,7 +91,7 @@ Different document, different phase of the pipeline, different owner.
 **A `D\d` beside a DL citation is that entry's own label.** `D1`–`D4` in
 `ir-design.md` §10 are that document's design decisions. DL-138 numbers its own
 outline `D1`–`D9`, and the code cites those the same way — `# D5, DL-138`
-in `boundary.py` is a tombstone rule, not a deferred decision. The
+in the runner source is a tombstone rule, not a deferred decision. The
 adjacent DL number is what tells them apart, so keep it on every such
 citation.
 
@@ -119,7 +118,7 @@ above.
 | Token shape | Why it went |
 | --- | --- |
 | `sol #\d+` | Pointed at a numbered solution in a review conversation with no in-repo index. DL-75 inlined the actual reason at all five sites (all of them "this artifact is owner-only because of what it holds") and deleted the token. |
-| `review [A-Z]-\d+`, `Review [A-Z]\d+`, `review [A-Z0-9]+-\d+` | All three shapes pointed at findings in review conversations with no in-repo index. DL-75 inlined the reason at every `src/dsl41/` site; where the finding restated a dossier entry, the dossier citation replaced it. The sweep did not reach `tests/`: `test_uc_oracle.py`, `test_runner_lifecycle.py` and `test_seal_artifact.py` still carry the three shapes in docstrings. |
+| `review [A-Z]-\d+`, `Review [A-Z]\d+`, `review [A-Z0-9]+-\d+` | All three shapes pointed at findings in review conversations with no in-repo index. DL-75 inlined the reason at every `src/dsl41/` site; where the finding restated a dossier entry, the dossier citation replaced it. The sweep did not reach `tests/`. |
 
 A citation whose target is a conversation is not a citation — it is a note
 to the one person who was in the room. If a review produces something worth

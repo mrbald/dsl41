@@ -557,7 +557,6 @@ for the tier it falls under. It is not a second classification axis.
 | `status`, `trace`, `explain`, `spec`, `deps`, `timers`, `plan`, `global`, `globals`, `hosts`, `subscribe` | — | read |
 | `sendevent` | the externally injectable verbs (control-protocol §3): `STARTJOB`, `FORCE_STARTJOB`, `KILLJOB`, `ON_ICE`/`OFF_ICE`, `ON_HOLD`/`OFF_HOLD`, `ON_NOEXEC`/`OFF_NOEXEC`, `DISARM` (DL-158), `RELEASE_RESOURCE` (DL-256), `SET_GLOBAL`, `CHANGE_STATUS`. The internal EventKinds (`STATUS`, `TIMER`, the alarms) have no wire door: the dispatcher refuses them like any unknown verb | ops |
 | `host` | `activate`, `drain`, `evict` (forced included) | ops |
-| `seal` | normal and `force_seal` | ops |
 
 `quarantine` and `reinstate` are leader-only inputs, not operator verbs
 (control-protocol §3). They have no tier because they have no external

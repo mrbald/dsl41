@@ -74,7 +74,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from dsl41.oracle import Oracle
 from dsl41.canon import is_scalar_string, is_wire_int
-from dsl41.period import CMD_GRACE_S
+from dsl41.run_root import CMD_GRACE_S
 from dsl41.oracle_state import LIVE, TERMINAL, Event, EventKind, RuntimeState
 from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import Code, Rejection

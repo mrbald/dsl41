@@ -1,9 +1,8 @@
 """The control-plane verbs: what an operator says to a RUNNING engine (DL-137).
 
 `sendevent`, `host` and `query` speak the ss10 control protocol over the run root's socket
-(docs/control-protocol.md); `ui` and `serve` attach the ss11 TUI to it; `supervise` speaks the
-Tier-1 supervisor's protocol (docs/supervisor-protocol.md). `supervise start` execs that
-supervisor; the other verbs are clients and hold no engine state.
+(docs/control-protocol.md); `ui` and `serve` attach the ss11 TUI to it. Every verb is a client
+and holds no engine state.
 
 The four mutation exit codes (0/2/3/4) are DL-92's and are read in `cli_common.command_outcome`.
 """
@@ -17,8 +16,6 @@ import typer
 
 from dsl41.cli_common import (
     command_outcome,
-    guarded_maintenance,
-    settle_rerun,
     import_tui_or_exit_2,
     read_header_of,
     refuse,
@@ -587,105 +584,3 @@ def query(
             raise typer.Exit(0)
         _answer_or_exit(response)
     _stream_subscribe(socket_path, request)
-
-
-def supervise(
-    action: str = typer.Argument(..., metavar="ACTION", help="start, list or shutdown."),
-    run_root: Path = typer.Option(
-        ..., "--run-root", help="Run directory holding supervisor.sock."
-    ),  # ss6a Tier 1
-    deadman_seconds: float | None = typer.Option(
-        None,
-        "--deadman-seconds",
-        help="start only: exit after this many seconds without a holder.",
-    ),
-    force: str | None = typer.Option(
-        None, "--force", help="shutdown only: terminate known command groups deliberately."
-    ),
-) -> None:
-    """Start, list or request guarded maintenance of a supervisor.
-
-    shutdown refuses active or unobservable work by default. --force=terminate
-    uses TERM, each command's grace period and KILL on validated command groups.
-    Orphaning is unsupported. The supervisor answers at once and the CLI
-    watches the operation in maintenance.json. Shutdown exits 0 on verified
-    completion, 2 on refusal, 3 when the operation still runs as the wait ends
-    (it finishes on its own) and 4 when the outcome is unknown; run again, it
-    watches an operation already admitted and sends nothing. start returns 8 on
-    maintenance completion, 0 on host shutdown, 1 on failure, 2 on bad
-    configuration and 7 on a statechart error.
-    """
-    # Design: runner-design ss6a, DL-42 item 4, DL-210, DL-401
-    import math
-    import os
-    import sys
-
-    from dsl41.runner_adapters import SupervisorConn, supervisor_argv, supervisor_log_path
-    from dsl41.runner_clock import EngineError
-
-    verb = action.lower()
-    if verb not in ("start", "list", "shutdown"):
-        raise typer.Exit(refuse(f"unknown supervise action {action!r} (start|list|shutdown)"))
-    if not isinstance(force, str | type(None)):
-        force = None  # direct Python callers omit Typer's Option default
-    if force is not None and (verb != "shutdown" or force != "terminate"):
-        raise typer.Exit(refuse("--force=terminate is valid only for supervise shutdown"))
-    if deadman_seconds is not None:
-        if verb != "start":
-            raise typer.Exit(refuse("--deadman-seconds is only valid for supervise start"))
-        if not (math.isfinite(deadman_seconds) and deadman_seconds > 0):
-            raise typer.Exit(refuse("--deadman-seconds must be a finite positive number"))
-    if verb == "start":
-        try:
-            try:
-                run_root.mkdir(mode=0o700, parents=True)
-            except FileExistsError:
-                if not run_root.is_dir():
-                    raise
-            else:
-                run_root.chmod(0o700)
-            argv = supervisor_argv(run_root.resolve(), deadman_seconds)
-            log_fd = os.open(
-                supervisor_log_path(run_root), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600
-            )
-            try:
-                os.dup2(log_fd, 1)
-                os.dup2(log_fd, 2)
-            finally:
-                if log_fd > 2:
-                    os.close(log_fd)
-            null_fd = os.open(os.devnull, os.O_RDONLY)
-            try:
-                os.dup2(null_fd, 0)
-            finally:
-                if null_fd > 2:
-                    os.close(null_fd)
-            # dup2(fd, fd) leaves O_CLOEXEC intact when open reused stdio.
-            for fd in (0, 1, 2):
-                os.set_inheritable(fd, True)
-            os.execv(sys.executable, argv)
-        except OSError as exc:
-            raise typer.Exit(refuse(exc, prefix="supervisor start")) from exc
-    sock_path = run_root / "supervisor.sock"
-    if not sock_path.exists():
-        if verb == "shutdown" and (run_root / "maintenance.json").exists():
-            # a rerun after an admitted operation: its record says how it ended (DL-401)
-            raise typer.Exit(settle_rerun(run_root))
-        raise typer.Exit(refuse(f"no supervisor at {sock_path}"))
-    try:
-        conn = SupervisorConn(sock_path)
-    except OSError as exc:
-        raise typer.Exit(refuse(exc, prefix=f"supervisor {sock_path}")) from exc
-    try:
-        if verb == "list":
-            try:
-                listing = conn.send({"cmd": "LIST"})
-            except (OSError, ValueError, EngineError) as exc:
-                raise typer.Exit(refuse(exc, prefix=f"supervisor {sock_path}")) from exc
-            _answer_or_exit(listing)
-        code, _ = guarded_maintenance(
-            conn, sock_path, controller_id=f"supervise-cli-{os.getpid()}", force=force
-        )
-    finally:
-        conn.close()
-    raise typer.Exit(code)

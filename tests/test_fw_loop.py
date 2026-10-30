@@ -21,8 +21,8 @@ import os
 import shlex
 import sys
 import time
-from datetime import datetime
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -31,13 +31,13 @@ import pytest
 from dsl41.ir import lower_source
 from dsl41.oracle_state import Event
 from dsl41.runner import Engine
-from dsl41.runner_admission import ENGINE_REQUEST_ID_PREFIX
 from dsl41.runner_adapters import (
     WATCH_LOG,
     FileWatcherAdapter,
     LocalCommandAdapter,
     read_watch_log,
 )
+from dsl41.runner_admission import ENGINE_REQUEST_ID_PREFIX
 from dsl41.runner_clock import RealClock
 from dsl41.runner_control import ControlServer
 from dsl41.runner_journal import read_journal

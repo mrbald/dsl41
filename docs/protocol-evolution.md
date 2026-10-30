@@ -123,14 +123,8 @@ not a narrower dialect that this binary declines to read; it is not this
 artifact at all. Each reader requires the key before it validates the rest
 of the document:
 
-- `period.py`'s `read_sentinel`;
-- `boundary.py`'s `EstateAnchor.read`, `EstateAnchor.read_claim`,
-  `read_candidate` and `read_staged_manifest`, whose `_read_artifact` also
-  applies `require_manifest_fields` to `staged_manifest.json` (DL-252);
-- `seal.py`'s `Seal.from_payload` (DL-227);
-- `period.py`'s `parse_sealed_preamble`, which the attestation and the
-  archive receipt share;
-- `period.py`'s `read_period_manifest`, which requires every field of the
+- `run_root.py`'s `read_sentinel`;
+- `run_root.py`'s `read_period_manifest`, which requires every field of the
   manifest (`require_manifest_fields`, DL-252).
 
 A third gate stands beside unknown and absent (DL-168): a field of the WRONG
@@ -170,8 +164,6 @@ string never becomes the integer it spells.
 - `runner_control._seal_wire_error` runs first on the live socket. It owns
   the pinned refusal PROSE, which this row's strictness rule does not
   promise: a `ValidationError` uses pydantic's words, not the operator's.
-- The model's `strict=True` also covers `cli_estate.py`'s offline retry
-  route. That route builds a `SealRequest` directly and passes no wire gate.
 - One field is not fully covered by either check alone. `_seal` builds
   `claimed_actor=request.get("claimed_actor") or ""`, which turns a falsy
   non-string into a legal empty string before the model sees it. For that

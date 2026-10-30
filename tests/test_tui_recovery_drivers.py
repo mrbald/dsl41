@@ -36,6 +36,19 @@ _TEXT = (
     "insert_job: recovery_other\njob_type: c\ncommand: x\nmachine: m1\n"
 )
 _TIMEOUT = 15.0
+# DL-391: after Esc clears the filter, the driver waits for the table title that only a cleared
+# filter renders. The event log already names every job, so a job name proves nothing, and a `q`
+# sent within textual's escape delay of the Esc is parsed as alt+q and never detaches.
+_UNFILTERED = "jobs 3/3"
+# DL-391: the footer draws "esc clear" only while the filter line has focus, so it proves `/`
+# opened the line. A kept filter shows its value, and the event log already names that job.
+_FILTER_OPEN = "esc clear"
+_SGR = re.compile(rb"\x1b\[[\d;:]*m")
+
+
+def _sgr_free(data: bytes | bytearray) -> bytes:
+    """The rendered bytes without colour codes, which split a footer key from its label."""
+    return _SGR.sub(b"", data)
 
 
 def _command(*args: str) -> list[str]:
@@ -50,7 +63,7 @@ def _environment() -> dict[str, str]:
 
 
 class _Estate:
-    """A real CLI engine, sealed and resumed while its viewer remains attached."""
+    """A real CLI engine, stopped and resumed while its viewer remains attached."""
 
     def __init__(self, base: Path, diagnostics: Path) -> None:
         self.run_root = base / "run"
@@ -94,49 +107,37 @@ class _Estate:
         finally:
             await client.close()
 
-    async def seal_reopen(self) -> None:
+    async def restart(self) -> None:
+        """Stop the engine with SIGTERM, resume the same root and force-start `recovery_other`,
+        whose FAILURE the still-attached viewer must then show."""
         client = ControlClient(self.socket)
         try:
             before = await asyncio.wait_for(client.request({"cmd": "status"}), timeout=_TIMEOUT)
         finally:
             await client.close()
-        self.source.write_text(
-            _TEXT + "\ninsert_job: recovery_added\njob_type: c\ncommand: x\nmachine: m1\n"
-        )
-        process = await asyncio.create_subprocess_exec(
-            *_command(
-                "seal",
-                "--run-root",
-                str(self.run_root),
-                "--next",
-                str(self.source),
-                "--next-as-machine",
-                "m1",
-                "--force-seal",
-            ),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=self.diagnostics,
-            env=_environment(),
-            start_new_session=True,
-        )
-        try:
-            output, _ = await asyncio.wait_for(process.communicate(), timeout=_TIMEOUT)
-            (self.diagnostics / "seal.log").write_bytes(output)
-            assert process.returncode == 0, output.decode(errors="replace")
-        finally:
-            await _stop(process)
         assert self.process is not None
-        assert await asyncio.wait_for(self.process.wait(), timeout=5) == 3
+        self.process.send_signal(signal.SIGTERM)
+        assert await asyncio.wait_for(self.process.wait(), timeout=_TIMEOUT) == 0
         await self.start(resume=True)
         client = ControlClient(self.socket)
         try:
             after = await asyncio.wait_for(client.request({"cmd": "status"}), timeout=_TIMEOUT)
-            assert after["baseline_id"] != before["baseline_id"]
-            assert "recovery_added" in after["jobs"]
+            assert after["baseline_id"] == before["baseline_id"]
             assert after["jobs"]["recovery_child"]["on_hold"]
         finally:
             await client.close()
+        # a state the viewer has not seen before the restart: the attached viewer must read it
+        # from the new engine
+        process = await asyncio.create_subprocess_exec(
+            *_command(
+                "sendevent", "FORCE_STARTJOB", "-J", "recovery_other", "-S", str(self.socket)
+            ),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            cwd=self.diagnostics,
+            env=_environment(),
+        )
+        assert await asyncio.wait_for(process.wait(), timeout=_TIMEOUT) == 0
 
     async def close(self) -> None:
         if self.process is not None:
@@ -217,7 +218,7 @@ def test_real_terminal_filter_selection_resize_confirm_cancel_and_detach(
             async def until(text: str, *, after: int = 0) -> None:
                 deadline = time.monotonic() + _TIMEOUT
                 while time.monotonic() < deadline:
-                    if text.encode() in raw[after:]:
+                    if text.encode() in _sgr_free(raw[after:]):
                         return
                     assert process is not None and process.returncode is None, raw.decode(
                         errors="replace"
@@ -246,13 +247,13 @@ def test_real_terminal_filter_selection_resize_confirm_cancel_and_detach(
             os.write(master, b"\x1b")
             await until("cancelled", after=mark)
             mark = len(raw)
-            await estate.seal_reopen()
-            await until("trace baseline changed", after=mark)
+            await estate.restart()
+            await until("FAILURE", after=mark)
             mark = len(raw)
             os.write(master, b"/")
-            await until("recovery_child", after=mark)
+            await until(_FILTER_OPEN, after=mark)
             os.write(master, b"\x1b")
-            await until("recovery_added", after=mark)
+            await until(_UNFILTERED, after=mark)
             os.write(master, b"q")
             assert await asyncio.wait_for(process.wait(), timeout=5) == 0
             assert await _held(client)
@@ -503,7 +504,7 @@ def _browser_drive(
             def until(text: str, *, after: int = 0) -> None:
                 deadline = time.monotonic() + _TIMEOUT
                 while time.monotonic() < deadline:
-                    if text.encode() in b"".join(output[after:]):
+                    if text.encode() in _sgr_free(b"".join(output[after:])):
                         assert not errors, errors
                         return
                     page.wait_for_timeout(20)
@@ -547,12 +548,12 @@ def _browser_drive(
             until("cancelled", after=mark)
             mark = len(output)
             transition()
-            until("trace baseline changed", after=mark)
+            until("FAILURE", after=mark)
             mark = len(output)
             page.keyboard.press("/")
-            until("recovery_child", after=mark)
+            until(_FILTER_OPEN, after=mark)
             page.keyboard.press("Escape")
-            until("recovery_added", after=mark)
+            until(_UNFILTERED, after=mark)
             page.keyboard.press("q")
             page.locator("body.-closed").wait_for(state="attached")
             assert not errors, errors
@@ -629,7 +630,7 @@ def test_served_tui_real_browser_filter_resize_confirm_cancel_and_detach(
                 loop = asyncio.get_running_loop()
 
                 def transition() -> None:
-                    asyncio.run_coroutine_threadsafe(estate.seal_reopen(), loop).result(
+                    asyncio.run_coroutine_threadsafe(estate.restart(), loop).result(
                         timeout=_TIMEOUT * 2
                     )
 

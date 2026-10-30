@@ -314,7 +314,7 @@ it forks wrappers, reaps them, and answers SPAWN, SIGNAL, LIST and
 SHUTDOWN and guarded MAINTENANCE_STOP, plus PING and the lease verbs ACQUIRE, RENEW and RELEASE
 (`docs/supervisor-protocol.md` §5). It has no scheduling timers, no conditions, and no configuration reload.
 Its only time bounds are lifecycle bounds, which the
-[supervisor-protocol preamble](supervisor-protocol.md) lists (DL-150). Its own-bug
+supervisor-protocol preamble (`supervisor-protocol.md`, retired in 2.0.0) lists (DL-150). Its own-bug
 crash surface is near zero. Wrappers hold ITS lifeline (below). Thus even
 `kill -9` of the supervisor keeps
 "supervisor death ⇒ all jobs terminate and are recorded". On restart, the
@@ -1287,8 +1287,7 @@ the split cannot decay into a second name for one file.
 - `runner_preflight.py`: the §8 rules.
 - `runner_wrapper.py`: the §6a Tier-0 shim, stdlib-only with no third-party
   imports; its dumbness is a correctness property.
-- `runner_supervisor.py`: the §6a Tier-1 daemon, held to the same boundary.
-- `runner_procid.py`: the process-identity helpers those two share,
+- `runner_procid.py`: the process-identity helpers the wrapper uses,
   stdlib-only for the same reason (DL-72).
 - `runner_tui.py`: the §11 TUI (guarded textual import).
 - `runner_startup.py`: taking possession of a run root: genesis, resume and
@@ -1300,8 +1299,6 @@ the split cannot decay into a second name for one file.
 - `runner_hosts.py`: the execution-host routing table (concurrency-model
   §8).
 - `runner_ledger.py`: leadership over one run root (concurrency-model §7).
-- `runner_seal.py`: the engine's seal boundary as a statechart
-  (period-model §6 and §7, DL-327).
 - `runner_history.py`: the offline `dsl41 runs` projection (DL-113).
 - `runner_access.py`: the control-socket access perimeter
   (`docs/access-model.md`).
@@ -1314,11 +1311,6 @@ estates use these:
 - `cli_run.py`: `run`, `rehearse`, `journal`, `runs`.
 - `cli_control.py`: `sendevent`, `off-hold-all`, `host`, `ui`, `serve`,
   `query`, `supervise`.
-- `cli_estate.py`: the period verbs `seal`, `audit`, `verify`, and
-  `estate reclaim`, `estate prune`, `estate quiesce`.
-- `cli_estate_build.py`: `estate build` and `estate diff`.
-- `cli_release.py`: the release train, `release prepare`, `requalify`,
-  `apply`, `resume`, `rollback` and `status`.
 
 Module docstrings name the runner's build phases 11a to 11f; DL-41 and
 DL-41a map them to parts.

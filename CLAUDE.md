@@ -14,8 +14,6 @@ Do not re-derive settled decisions.
   Read files line by line when checking hygiene. Never bypass an installed
   pre-push guard; a clean clone does not install local Git hooks.
 - No silent loss: lowering rejects unknown, non-allow-listed attributes (DL-07).
-  UC compilation refuses R-classified constructs and reports them.
-  Every A-classified edge records its assumption.
 - Fidelity is tested: preserve-mode `render(parse(x)) == x` across the corpus;
   canonical mode is a fixpoint (F1–F4).
 - IR-G is a pure derivation of IR-F, never a persisted source of truth.
@@ -46,7 +44,6 @@ Read a small contract whole when that gives needed context at lower cost.
 | JIL scanner or rendering | `docs/jil-statement-syntax.md`, including F1–F4 |
 | Conditions or oracle | `docs/autosys-semantics.md`; §8 maps semantics to trace tests, §9 tracks open questions |
 | Calendars | AutoSys dossier SEM-36–39 and §9; `docs/live-instance-runbook.md` only for live probes |
-| UC backend | `docs/stonebranch-semantics.md` and `docs/uc-edge-schema.md`; preserve R-row refusals, A-row assumptions, and the U3b rich-emission gate |
 | Graph derivation, lint, or visualization | `docs/ir-design.md` §§5 and 9; DL-35 for chart grammar |
 | DSL or decompiler | DL-03 and DL-38; README's implementation memo; extract patterns from the corpus rather than invent combinators |
 | Runner behavior | `docs/runner-design.md`, then the frozen contracts below |
@@ -54,9 +51,8 @@ Read a small contract whole when that gives needed context at lower cost.
 | Citations or open-question labels | `docs/citation-index.md`; Q, Qr, U, and E are distinct namespaces |
 | Live-instance work | `docs/live-instance-runbook.md`; ask for access, never assume it |
 
-Runner changes must preserve `docs/period-model.md`,
-`docs/concurrency-model.md`, `docs/control-protocol.md`,
-`docs/supervisor-protocol.md`, `docs/protocol-evolution.md`,
+Runner changes must preserve `docs/control-protocol.md`,
+`docs/wrapper-protocol.md`, `docs/protocol-evolution.md`,
 `docs/access-model.md`, and `docs/statechart-engine.md`.
 Read the affected contracts before changing their behavior.
 All ten compiler phases in DL-03 are implemented; their order remains normative.

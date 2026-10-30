@@ -588,7 +588,7 @@ def test_an_unminted_subject_is_a_refusal_not_a_guard_question() -> None:
     renderer without being minted, its `#` tail would ship; that is a refusal,
     and the token guard is not trusted for it. Driven with an allocator whose
     mint is stubbed out, because nothing in the real path can produce it."""
-    from dsl41.minify import _Allocator, _Transformed, _transform_statement
+    from dsl41.minify import _Allocator, _transform_statement, _Transformed
 
     stmt = parse("insert_machine: ACMEHOST # jsmith\ntype: a\n", file="<f>").statements[0]
     out = _Transformed(jil=parse("", file="<f>"), needles=set(), kept=set())
@@ -865,9 +865,8 @@ def test_the_timezone_predicate_enumerates_instead_of_resolving() -> None:
     """`resolve_timezone` answers "can this be interpreted", which is not the
     same question as "is this closed vocabulary" -- the POSIX fallback resolves
     any 3+ letter run followed by digits."""
-    from dsl41.timezones import resolve_timezone
-
     from dsl41.minify_rules import validate_keep
+    from dsl41.timezones import resolve_timezone
 
     assert resolve_timezone("ACMEBANKLONDONDESK5") is not None  # it DOES resolve
     assert not validate_keep("timezone", "ACMEBANKLONDONDESK5")  # and is refused

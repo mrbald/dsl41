@@ -43,18 +43,17 @@ import asyncio
 import contextlib
 import json
 import sys
-
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+from subprocess_harness import cli
 
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import CarriedRows, Event
 from dsl41.runner import Engine
-from dsl41.runner_startup import start_run
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import (
     PROTOCOL_VERSION,
@@ -69,10 +68,10 @@ from dsl41.runner_admission import (
 )
 from dsl41.runner_clock import RealClock, VirtualClock
 from dsl41.runner_codes import Rejection
-from dsl41.runner_hosts import HostCommand
 from dsl41.runner_control import APPLIED, REFUSED, REJECTED, UNKNOWN, ControlServer, outcome_of
+from dsl41.runner_hosts import HostCommand
 from dsl41.runner_journal import read_journal, replay_inputs
-from subprocess_harness import cli
+from dsl41.runner_startup import start_run
 
 T0 = datetime(2026, 7, 1, 8, 0)
 

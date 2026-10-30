@@ -3,19 +3,18 @@ and SEM-04 backlog limits, without scheduler changes."""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
 import json
 import os
-from pathlib import Path
 import shlex
 import subprocess
 import sys
+from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from dsl41.cli import app
-
 from dsl41.dsl import CatalogBuilder, cond_to_source, decompile
 from dsl41.equiv import catalog_hash, equivalent_tier_a
 from dsl41.file_processing import STAGE, Policy, WorkItem, archive, process

@@ -14,5 +14,4 @@ ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1 EXAMPLE_RUNS=/runs
 # Copy only example source. Example run directories and bytecode stay outside the image.
 COPY examples/workflows/support.py ./examples/workflows/support.py
 COPY examples/fulfilment/*.py examples/fulfilment/*.jil examples/fulfilment/*.sql examples/fulfilment/README.md ./examples/fulfilment/
-COPY examples/energy/*.py examples/energy/*.jil examples/energy/README.md ./examples/energy/
 COPY examples/media/*.py examples/media/*.jil examples/media/README.md ./examples/media/

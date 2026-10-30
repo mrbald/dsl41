@@ -22,20 +22,20 @@ import asyncio
 import json
 import shutil
 import time
-
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+from model_harness import _lose_the_decision_for
 from typer.testing import CliRunner
 
 from dsl41 import runner_history
 from dsl41.ast_jil import parse
-from dsl41.boundary import stage_period
 from dsl41.cli import app
 from dsl41.ir import lower_catalog, lower_source
 from dsl41.oracle_state import Event, TraceEntry
+from dsl41.run_root import runtime_profile_from_cli, stage_period, wal_path
 from dsl41.runner_adapters import LocalCommandAdapter
 from dsl41.runner_admission import ApplyResult
 from dsl41.runner_clock import EngineError, RealClock
@@ -48,11 +48,9 @@ from dsl41.runner_history import (
     read_spool,
     replay_trace,
 )
-from dsl41.period import read_period_manifest, runtime_profile_from_cli, wal_path
 from dsl41.runner_journal import read_journal, read_outbox
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
 from dsl41.runner_startup import resume_run, start_run
-from model_harness import _lose_the_decision_for
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -884,75 +882,6 @@ def test_d9_a_retired_manifest_layout_refuses_by_name(tmp_path: Path) -> None:
     assert "DL-138" in str(retired.value)
 
 
-def test_pr50_run_history_spans_a_boundary(tmp_path: Path) -> None:
-    """PR-50 (period-model ss13.8): history SPANS a boundary, and a run
-    keeps the period that dispatched it and its own run number.
-
-    A run root is one WAL until it seals and many segments afterwards
-    (period-model ss1.1, I1). A reader that opened only the ACTIVE segment
-    was right for as long as there was one, and became silently wrong at
-    the first boundary: `dsl41 runs` answered with an EMPTY table, because
-    every row it had ever printed lives in a closed period's segment. That
-    is the defect DL-135 closed for the subscriber's backfill, in the other
-    reader; DL-136 closed it here.
-
-    The same job and the same box run in BOTH periods, which is what makes
-    the second half of the property visible. Run numbers are monotone
-    across the ESTATE (I2), so `b1` and `j1` must come back as runs 1 and
-    2 -- a fold that replayed each segment from an empty oracle would
-    number both periods from 1 and print one `(job, run_number)` twice. The
-    leaf takes its number from the `dispatch` record and could never
-    duplicate; the BOX has no dispatch record and takes its number from the
-    replay, so the box rows are where the carry is proved. `started_by` on
-    period 2's leaf row proves the other half of the same fix: the window
-    is found by run NUMBER, not by position in a segment-local list.
-
-    `j1`'s definition never changes, so both its rows carry one `job_hash`
-    across a moved `catalog_hash` -- DL-113 decision 4's segmentation rule,
-    now across periods as it already was across roots."""
-    # the machine is DECLARED here and nowhere else in this file: the seal
-    # runs preflight over C2 before it closes C1 (period-model ss8), and a
-    # job on an undeclared machine is an ERROR there
-    machine = "insert_machine: m1\ntype: a\nnode_name: localhost\n\n"
-    estate = (
-        "insert_job: b1\njob_type: b\n\n"
-        "insert_job: j1\njob_type: c\ncommand: exit 0\nmachine: m1\nbox_name: b1\n"
-    )
-    c1 = tmp_path / "c1.jil"
-    c1.write_text(machine + estate)
-    c2 = tmp_path / "c2.jil"
-    c2.write_text(
-        machine + estate + "\ninsert_job: j2\njob_type: c\ncommand: exit 0\nmachine: m1\n"
-    )
-    run_root = tmp_path / "run"
-    asyncio.run(_run_real_and_manifest(c1.read_text(), run_root, ["b1"], file=str(c1)))
-
-    sealed = CliRunner().invoke(
-        app, ["seal", "--run-root", str(run_root), "--next", str(c2)], catch_exceptions=False
-    )
-    assert sealed.exit_code == 0, sealed.output
-    asyncio.run(_resume_real(c2, run_root, ["b1"]))
-
-    rows = read_run_root(run_root)
-    assert {row.job for row in rows} == {"b1", "j1"}  # period 1's runs did NOT disappear
-    for job in ("b1", "j1"):
-        series = sorted((row for row in rows if row.job == job), key=lambda r: r.started_at)
-        assert [row.run_number for row in series] == [1, 2], (job, rows)
-        assert all(row.status == "SUCCESS" for row in series), (job, series)
-        assert len({row.job_hash for row in series}) == 1  # the definition never moved
-        assert len({row.catalog_hash for row in series}) == 2  # the estate did
-        assert all(row.started_by for row in series)  # the window was found by number
-    first = read_period_manifest(run_root, 1)
-    second = read_period_manifest(run_root, 2)
-    assert first is not None and second is not None
-    assert first.catalog_hash != second.catalog_hash
-    by_period = {row.run_number: row.catalog_hash for row in rows if row.job == "j1"}
-    assert by_period == {1: first.catalog_hash, 2: second.catalog_hash}
-    assert [row for row in rows if row.job == "j1" and row.run_number == 1][
-        0
-    ].clock_source == "spool"
-
-
 async def _resume_real(jil: Path, run_root: Path, jobs: list[str]) -> None:
     """`dsl41 run --resume` on a sealed root, in process: open the period
     the seal committed and run the named jobs in it."""
@@ -1376,7 +1305,7 @@ def test_replay_refuses_a_segment_naming_a_foreign_state_machine_version(
 def test_replay_accepts_the_state_machine_version_this_build_derives(tmp_path: Path) -> None:
     # replay reads the period's runtime profile from a manifest bound to the
     # segment (DL-252), so the header is the one that manifest names
-    from dsl41.period import _SHARED_FIELDS, genesis_manifest, write_period_manifest
+    from dsl41.run_root import _SHARED_FIELDS, genesis_manifest, write_period_manifest
 
     catalog = lower_source(_SOLO_JIL)
     manifest = genesis_manifest(
@@ -1416,36 +1345,12 @@ def test_dsl41_journal_refuses_a_foreign_state_machine_version(tmp_path: Path) -
 # ------------------------------------------ peer-review round-1 pins (DL-136)
 
 
-def _two_period_root(tmp_path: Path) -> Path:
-    """The spanning fixture's estate, reduced: two sealed-and-resumed
-    periods, real subprocesses, ready for chain/manifest/opening pins."""
-    machine = "insert_machine: m1\ntype: a\nnode_name: localhost\n\n"
-    estate = (
-        "insert_job: b1\njob_type: b\n\n"
-        "insert_job: j1\njob_type: c\ncommand: exit 0\nmachine: m1\nbox_name: b1\n"
-    )
-    c1 = tmp_path / "c1.jil"
-    c1.write_text(machine + estate)
-    c2 = tmp_path / "c2.jil"
-    c2.write_text(
-        machine + estate + "\ninsert_job: j2\njob_type: c\ncommand: exit 0\nmachine: m1\n"
-    )
-    run_root = tmp_path / "run"
-    asyncio.run(_run_real_and_manifest(c1.read_text(), run_root, ["b1"], file=str(c1)))
-    sealed = CliRunner().invoke(
-        app, ["seal", "--run-root", str(run_root), "--next", str(c2)], catch_exceptions=False
-    )
-    assert sealed.exit_code == 0, sealed.output
-    asyncio.run(_resume_real(c2, run_root, ["b1"]))
-    return run_root
-
-
 def test_read_run_root_names_the_root_when_a_decision_is_corrupt(tmp_path: Path) -> None:
     """DL-139 at the I/O shell: the shared decoder's refusal reaches an
     operator as this module's own error, naming the root -- `dsl41 runs`
     reads several roots in one command, and "decision at index 5" alone
     does not say whose. Restored, the same root folds the same rows."""
-    from dsl41.period import wal_path
+    from dsl41.run_root import wal_path
 
     run_root = tmp_path / "run"
     asyncio.run(
@@ -1473,159 +1378,9 @@ def test_read_run_root_names_the_root_when_a_decision_is_corrupt(tmp_path: Path)
     wal.write_text(saved)
     assert read_run_root(run_root) == clean
 
-
-def test_history_refuses_a_spliced_or_holed_segment_chain(tmp_path: Path) -> None:
-    """PR-50 through DL-135's chain proofs: history reads the estate
-    through the same validated stream as the subscriber's backfill, so a
-    foreign segment or a missing middle refuses instead of silently
-    omitting a period or reporting a stranger's rows."""
-    from dsl41.period import wal_path
-
-    run_root = _two_period_root(tmp_path)
-    (tmp_path / "other-base").mkdir()
-    other = _two_period_root(tmp_path / "other-base")
-    saved = wal_path(run_root, 1).read_bytes()
-    shutil.copyfile(wal_path(other, 1), wal_path(run_root, 1))
-    with pytest.raises(RunHistoryError, match="stranger's segment|does not open from"):
-        read_run_root(run_root)
-    wal_path(run_root, 1).write_bytes(saved)
-    assert read_run_root(run_root)  # restored: clean
     # (a missing OLDEST segment is not a hole: it is DL-135's legitimate
     # pruned-history gap. The missing-MIDDLE refusal is pinned where the
     # shared reader lives: tests/test_retention.py's backfill chain pin.)
-
-
-def test_history_refuses_a_replacement_manifest_sharing_catalog_hash(tmp_path: Path) -> None:
-    """PR-22 at the reader: a self-consistent replacement manifest sharing
-    catalog_hash but not baseline_id is foreign -- the FULL agreement
-    check runs, not one field."""
-    from dsl41.period import read_period_manifest, write_period_manifest
-
-    run_root = _two_period_root(tmp_path)
-    manifest = read_period_manifest(run_root, 1)
-    assert manifest is not None
-    import uuid as uuid_mod
-
-    forged = manifest.model_copy(update={"baseline_id": str(uuid_mod.uuid4())})
-    write_period_manifest(run_root, forged)
-    with pytest.raises(RunHistoryError, match="disagrees with the journal's segment record"):
-        read_run_root(run_root)
-
-
-def test_history_refuses_an_opening_it_cannot_prove(tmp_path: Path) -> None:
-    """ss11/PR-50: a period whose opening NAMES a seal and whose sidecar
-    is gone must refuse -- swallowing it would replay period 2 from an
-    empty state and return full-fidelity history from an unproved
-    opening."""
-    from dsl41.period import seal_path as _seal_path
-
-    run_root = _two_period_root(tmp_path)
-    _seal_path(run_root, 1).unlink()
-    with pytest.raises(RunHistoryError, match="unproved opening"):
-        read_run_root(run_root)
-    # the SAME proof runs before the manifest-degradation branch too: with
-    # BOTH artifacts gone, `records_only` rows are still refused
-    manifest = run_root / "periods" / "000002" / "manifest.json"
-    manifest.unlink()
-    with pytest.raises(RunHistoryError, match="unproved opening"):
-        read_run_root(run_root)
-
-
-def test_history_refuses_an_identity_grafted_sidecar(tmp_path: Path) -> None:
-    """ss11: the digest binds the file's bytes, not its place in this
-    lineage -- a valid sidecar from ANOTHER estate, with the link
-    rewritten to its digest, must refuse even on the records_only path."""
-    from dsl41.canon import canonical_bytes
-    from dsl41.period import seal_path as _seal_path
-    from dsl41.period import wal_path as _wal_path
-    from dsl41.runner_journal import read_journal
-
-    run_root = _two_period_root(tmp_path)
-    (tmp_path / "other-base").mkdir()
-    other = _two_period_root(tmp_path / "other-base")
-    donor = _seal_path(other, 1).read_bytes()
-    _seal_path(run_root, 1).write_bytes(donor)
-    import json as json_mod
-
-    donor_digest = json_mod.loads(donor)["digest"]
-    records = read_journal(_wal_path(run_root, 2))
-    link = dict(records[0]["opens_from_seal"])
-    link["digest"] = donor_digest
-    records[0] = {**records[0], "opens_from_seal": link}
-    _wal_path(run_root, 2).write_bytes(b"".join(canonical_bytes(r) + b"\n" for r in records))
-    # the manifest goes too: with it present, open_from_seal would reject
-    # the donor anyway and the pin would stay green without _prove_opening
-    # -- the records_only path is exactly what this pin exists to hold.
-    # And WAL 1 goes: on a two-segment root the chain check refuses first;
-    # the rolled/pruned shape (successor segment only) is where the
-    # opening proof is the ONLY guard
-    (run_root / "periods" / "000002" / "manifest.json").unlink()
-    _wal_path(run_root, 1).unlink()
-    with pytest.raises(RunHistoryError, match="identity graft|unproved opening"):
-        read_run_root(run_root)
-
-
-def test_the_opening_proof_covers_every_shared_field(tmp_path: Path) -> None:
-    """ss11/PR-50, coverage pinned: the projection is derived from the
-    model-field/segment-field intersection, and every member refuses when
-    the OPENING's copy is forged -- on the rolled/pruned shape where the
-    opening proof is the only guard. (catalog_hash_version is exempt in
-    the loop: check_segment_record refuses its forgery before the proof
-    can, which is coverage by an earlier gate, and `at` is asserted
-    separately.)"""
-    from dsl41.canon import canonical_bytes
-    from dsl41.period import SEGMENT_FIELDS
-    from dsl41.period import wal_path as _wal_path
-    from dsl41.runner_journal import read_journal
-    from dsl41.seal import CommittedNextPeriod
-
-    shared = sorted(set(CommittedNextPeriod.model_fields) & SEGMENT_FIELDS)
-    assert "state_machine_version" in shared and "catalog_hash" in shared  # the derivation lives
-    forged_value: dict[str, Any] = {
-        "baseline_id": "11111111-1111-4111-8111-111111111111",
-        "catalog_hash": "sha256:" + "3" * 64,
-        "clock_domain": "virtual",  # the fixture runs real
-        "first_index": 999,
-        "period_id": 7,
-        "runtime_hash": "sha256:" + "4" * 64,
-        "segment_no": 7,
-        "source_bundle_hash": "sha256:" + "5" * 64,
-        "state_machine_version": 99,
-    }
-    run_root = _two_period_root(tmp_path)
-    (run_root / "periods" / "000002" / "manifest.json").unlink()
-    _wal_path(run_root, 1).unlink()  # the single-segment shape
-    original = _wal_path(run_root, 2).read_bytes()
-    baseline_rows = read_run_root(run_root)  # the honest root still folds
-    assert all(row.fidelity == "records_only" for row in baseline_rows)
-    for name in shared:
-        if name == "catalog_hash_version":
-            continue  # forged at read_journal's own gate, not this one
-        records = read_journal(_wal_path(run_root, 2))
-        records[0] = {**records[0], name: forged_value[name]}
-        _wal_path(run_root, 2).write_bytes(b"".join(canonical_bytes(r) + b"\n" for r in records))
-        # "could not have admitted" is round-3's seq-range gate refusing a
-        # forged first_index BEFORE the proof -- coverage by an earlier
-        # gate is coverage
-        with pytest.raises(
-            RunHistoryError,
-            match="identity graft|unproved opening|could not have admitted|one period, one segment|stranger's segment",
-        ):
-            read_run_root(run_root)
-        _wal_path(run_root, 2).write_bytes(original)
-    # `at` and `estate_id` are the non-projection halves of the same proof
-    for name, wrong, accept in (
-        ("at", "2031-01-01T00:00:00", "identity graft|unproved opening"),
-        # the sentinel binding (DL-135's gate) refuses a forged estate
-        # before the proof -- coverage by an earlier gate is coverage
-        ("estate_id", "e-stranger", "identity graft|stranger's segment"),
-    ):
-        records = read_journal(_wal_path(run_root, 2))
-        records[0] = {**records[0], name: wrong}
-        _wal_path(run_root, 2).write_bytes(b"".join(canonical_bytes(r) + b"\n" for r in records))
-        with pytest.raises(RunHistoryError, match=accept):
-            read_run_root(run_root)
-        _wal_path(run_root, 2).write_bytes(original)
 
 
 def test_a_cascaded_inactive_closes_the_members_run_as_an_injected_one_does() -> None:
@@ -1692,3 +1447,23 @@ def test_an_operator_status_after_an_undispatched_start_does_not_rewrite_the_ear
     [row] = fold_run_rows(records, catalog=catalog, trace=oracle.trace())
     assert (row.run_number, row.status) == (1, "SUCCESS")
     assert row.ended_at == T0 + timedelta(minutes=1)
+
+
+def test_history_refuses_a_replacement_manifest_sharing_catalog_hash(tmp_path: Path) -> None:
+    """PR-22 at the reader: a self-consistent replacement manifest sharing
+    catalog_hash but not baseline_id is foreign -- the FULL agreement
+    check runs, not one field."""
+    import uuid as uuid_mod
+
+    from genesis_harness import _close, _genesis
+
+    from dsl41.run_root import read_period_manifest, write_period_manifest
+
+    run_root = tmp_path / "run"
+    _close(_genesis(run_root))
+    manifest = read_period_manifest(run_root, 1)
+    assert manifest is not None
+    forged = manifest.model_copy(update={"baseline_id": str(uuid_mod.uuid4())})
+    write_period_manifest(run_root, forged)
+    with pytest.raises(RunHistoryError, match="disagrees with the journal's segment record"):
+        read_run_root(run_root)

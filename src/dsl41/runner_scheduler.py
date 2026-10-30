@@ -215,7 +215,7 @@ class Scheduler:
         self._semantics = semantics or DEFAULT_SWITCHES
         # the catalog the plans compiled from is pinned as its v2 hash; an object reference
         # could mutate and the gate would then bless stale plans under the new identity
-        from dsl41.period import catalog_hash_v2
+        from dsl41.run_root import catalog_hash_v2
 
         self._catalog_hash = catalog_hash_v2(catalog)
         self._plans: dict[str, _SchedulePlan] = {}

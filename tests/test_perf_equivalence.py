@@ -12,7 +12,6 @@ same bytes.
 from __future__ import annotations
 
 import json
-
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -24,8 +23,8 @@ from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event
 from dsl41.runner import Engine
-from dsl41.runner_admission import Applied, ApplyResult
 from dsl41.runner_adapters import FakeAdapter
+from dsl41.runner_admission import Applied, ApplyResult
 from dsl41.runner_clock import VirtualClock
 from dsl41.runner_control import ControlServer
 from dsl41.runner_effects import Effect, Outbox, effect_id_for

@@ -36,23 +36,26 @@ import pytest
 
 pytest.importorskip("textual")
 
+from textual.binding import Binding
+from textual.widgets import DataTable, HelpPanel, Input, RichLog, Static
+
 from dsl41.ir import lower_source
 from dsl41.runner import Engine
-from dsl41.runner_startup import start_run
+from dsl41.runner_adapters import FakeAdapter
+from dsl41.runner_clock import RealClock
 from dsl41.runner_control import (
     JOB_EVENT_VERBS,
     ControlClient,
     ControlClientError,
     ControlServer,
 )
-from dsl41.runner_adapters import FakeAdapter
-from dsl41.runner_clock import RealClock
+from dsl41.runner_startup import start_run
 from dsl41.runner_tui import (
+    _CONSOLE_VERBS,
     ConfirmScreen,
     RunnerApp,
     SpecScreen,
     TriggersScreen,
-    _CONSOLE_VERBS,
     _ConsoleInput,
     _JobsTable,
     _LogPane,
@@ -67,8 +70,6 @@ from dsl41.runner_tui import (
     format_countdown,
     parse_console_command,
 )
-from textual.binding import Binding
-from textual.widgets import DataTable, HelpPanel, Input, RichLog, Static
 
 if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
     pytest.skip("unix-domain control sockets are POSIX-only", allow_module_level=True)

@@ -31,15 +31,6 @@ EXPECTED = {
         },
         set(),
     ),
-    "energy": (
-        {"ENERGY_INITIAL_B", "ENERGY_CORRECTION_B"},
-        {
-            f"ENERGY_{wave}_{step}"
-            for wave in ("INITIAL", "CORRECTION")
-            for step in ("INGEST", "CALCULATE", "PUBLISH")
-        },
-        set(),
-    ),
     "media": (
         set(),
         {

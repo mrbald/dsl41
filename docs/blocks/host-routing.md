@@ -10,7 +10,7 @@ Eviction is the one move that lets work bound to a host run elsewhere, so it is 
 
 The code and its contract carry over unchanged if the storage under the runner changes.
 It needs no storage capability of its own.
-Reason: the row is a `HostRuntime` in the in-memory `RuntimeState`, under the state owner ([concurrency-model §3](../concurrency-model.md#3-state-ownership-and-state_rev); [DL-93](../decision-log.md)).
+Reason: the row is a `HostRuntime` in the in-memory `RuntimeState`, under the state owner (concurrency-model §3 (`concurrency-model.md`, retired in 2.0.0); [DL-93](../decision-log.md)).
 A host command is an admitted input, so its durability is the [admission](admission.md) block's: replay rebuilds the row, and a drain survives a failover.
 Replay does not run the gate again. It applies the stored decision: the chart is dispatched for an applied command, and the rows are enough to rebuild its instance.
 
@@ -34,22 +34,22 @@ A rejection moves nothing: the gate reads the chart with `Executor.resolve`, and
 
 ## Invariants
 
-- The four states and what each routes are [concurrency-model §8](../concurrency-model.md#8-host-lifecycle-active-passive-quarantined-evicted)'s table. This card does not restate it.
+- The four states and what each routes are concurrency-model §8 (`concurrency-model.md`, retired in 2.0.0)'s table. This card does not restate it.
 - The oracle never reads a host row, and `HostCommand` is not an `EventKind` ([DL-93](../decision-log.md)).
-- Only an operator sends `activate`, `drain` and `evict`. Only the leader sends `quarantine` and `reinstate` ([concurrency-model §8](../concurrency-model.md#8-host-lifecycle-active-passive-quarantined-evicted), the "set by" column).
+- Only an operator sends `activate`, `drain` and `evict`. Only the leader sends `quarantine` and `reinstate` (concurrency-model §8 (`concurrency-model.md`, retired in 2.0.0), the "set by" column).
 - Quarantine follows five failed lease renewals in a row, and reinstatement puts back the state quarantine interrupted ([DL-97](../decision-log.md); [DL-291](../decision-log.md)).
 - Eviction without force needs the three preconditions of §8. Its kill allowance is derived from the period's command grace ([DL-151](../decision-log.md)).
 - A forced eviction names who asked, and an unattributed force is refused ([DL-151](../decision-log.md)).
-- Eviction bumps the generation. An evicted host returns only by re-registering at that generation after it self-fences, which is the relay's act and is not built ([concurrency-model §8](../concurrency-model.md#8-host-lifecycle-active-passive-quarantined-evicted); [DL-97](../decision-log.md)).
-- A host command moves its row's revision once ([concurrency-model §3](../concurrency-model.md#3-state-ownership-and-state_rev)).
+- Eviction bumps the generation. An evicted host returns only by re-registering at that generation after it self-fences, which is the relay's act and is not built (concurrency-model §8 (`concurrency-model.md`, retired in 2.0.0); [DL-97](../decision-log.md)).
+- A host command moves its row's revision once (concurrency-model §3 (`concurrency-model.md`, retired in 2.0.0)).
 
 ## Failure and recovery
 
-- A rejected host command is a decision with a stored code, and it replays as the rejection it was ([concurrency-model §4](../concurrency-model.md#4-admission-and-application); [DL-272](../decision-log.md)).
+- A rejected host command is a decision with a stored code, and it replays as the rejection it was (concurrency-model §4 (`concurrency-model.md`, retired in 2.0.0); [DL-272](../decision-log.md)).
 - A decided host command that the chart refuses, or one for a host with no instance, is a `StatechartError`. Live, the gate makes this unreachable. On replay the error names the WAL input, and `dsl41 run` exits 7 ([DL-295](../decision-log.md), DL-333; it was a replay fault, exit 2).
 - A gap in the chart is a `StatechartError`: met in the loop, in a control input's dry apply or in replay, it stops the engine with exit 7 and nothing is logged for the input ([statechart-engine §5](../statechart-engine.md#5-the-step-and-the-worklist)).
 - A command naming a host that is not in the table is rejected.
-- A drain and a quarantine survive the engine that set them: resume replays the admitted inputs ([period-model §11](../period-model.md#11-resume-replay-and-recovery)).
+- A drain and a quarantine survive the engine that set them: resume replays the admitted inputs (period-model §11 (`period-model.md`, retired in 2.0.0)).
 
 ## Owning modules
 
@@ -95,7 +95,6 @@ A rejection moves nothing: the gate reads the chart with `Executor.resolve`, and
 - `test_an_eviction_bumps_the_generation_once_and_a_forced_one_records_its_actor`
 - `test_a_refusal_code_the_gate_has_no_sentence_for_raises`
 - `test_a_dry_host_command_leaves_the_rows_revisions_and_instance_alone`
-- `test_a_carried_drain_is_the_configuration_the_next_period_opens_in`
 - `test_every_host_input_moves_the_revisions_the_table_implementation_moved`
 - `test_a_leader_s_quarantine_that_meets_a_gap_stops_the_loop_and_logs_nothing`
 - `test_an_operator_s_drain_whose_dry_apply_meets_a_gap_stops_the_loop_unrefused`

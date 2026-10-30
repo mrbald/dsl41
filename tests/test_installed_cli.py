@@ -39,10 +39,8 @@ def invoke(cli: Path, work: Path, *args: str) -> subprocess.CompletedProcess[str
             (name,)
             for name in (
                 "lint",
-                "report",
                 "viz",
                 "equiv",
-                "uc",
                 "decompile",
                 "build",
                 "folds",
@@ -58,15 +56,8 @@ def invoke(cli: Path, work: Path, *args: str) -> subprocess.CompletedProcess[str
                 "host",
                 "ui",
                 "serve",
-                "supervise",
-                "seal",
-                "audit",
-                "verify",
-                "estate",
             )
         ),
-        ("estate", "prune"),
-        ("estate", "reclaim"),
     ],
 )
 def test_installed_public_help(
@@ -81,8 +72,6 @@ def test_installed_public_help(
     "arguments",
     [
         ["no-such-command"],
-        ["supervise", "shutdown", "--run-root", "/nonexistent-dsl41-root", "--force=orphan"],
-        ["supervise", "start", "--run-root", "/nonexistent-dsl41-root", "--force=terminate"],
         ["sendevent", "STARTJOB"],
     ],
 )

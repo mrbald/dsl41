@@ -1,4 +1,4 @@
-"""Branch tests for `dsl41.period` that the identity and retention suites do
+"""Branch tests for `dsl41.run_root` that the identity and retention suites do
 not reach (DL-269).
 
 Normative spec: `docs/period-model.md` ss1.1 (layout, the bundle), ss2.1
@@ -13,76 +13,31 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import BaseModel, ValidationError
 
 from dsl41.canon import canonical_bytes
-from dsl41.period import (
-    ArchiveReceipt,
+from dsl41.ir import lower_source
+from dsl41.run_root import (
     Manifest,
     SourceFile,
-    archivable_names,
-    attestation_periods,
     bundle_dir,
     bundle_source_paths,
-    check_addresses,
     check_segment_version,
-    check_stamp,
-    check_wire_ints,
-    closed_periods,
     genesis_manifest,
     opening_at,
     read_period_manifest,
     read_sentinel,
     require_manifest_fields,
-    sealed_periods,
     wal_segments,
     write_bundle,
     write_period_manifest,
 )
 from dsl41.runner_clock import EngineError
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
-from dsl41.ir import lower_source
 
 _SOLO_JIL = "insert_job: j1\njob_type: c\ncommand: echo hi\nmachine: m1\n"
 
 
 # ------------------------------------------------ ss3.2 spellings, one owner
-
-
-def test_ss3_2_a_stamp_that_is_not_iso_is_refused_with_the_field_name() -> None:
-    with pytest.raises(ValueError, match=r"archived_at 'yesterday'"):
-        check_stamp("yesterday", "archived_at")
-
-
-def test_ss3_2_a_stamp_with_other_than_six_fractional_digits_is_refused() -> None:
-    with pytest.raises(ValueError, match="exactly six fractional digits"):
-        check_stamp("2026-08-21T10:00:00.5", "audited_at")
-    check_stamp("2026-08-21T10:00:00.500000", "audited_at")  # the twin: six digits pass
-
-
-def test_ss3_2_a_bool_is_not_a_wire_int() -> None:
-    """`True` is an `int` to Python and not to the wire (DL-152). The model
-    is built without validation so the helper, not pydantic, is what meets
-    the bool."""
-
-    class Fields(BaseModel):
-        period_id: int
-        epoch: int
-
-    flagged = Fields.model_construct(period_id=2, epoch=True)
-    with pytest.raises(ValueError, match=r"epoch is True: an exact integer"):
-        check_wire_ints(flagged, ("period_id", "epoch"))
-    check_wire_ints(Fields(period_id=2, epoch=7), ("period_id", "epoch"))  # the twin
-
-
-def test_ss3_2_an_address_refusal_without_a_reason_is_the_bare_mismatch() -> None:
-    """`cite` adds a reason (the seal's callers pass one); the artifacts
-    that pass none get the bare message, and a good address passes."""
-    with pytest.raises(ValueError, match=r"seal_digest 'x': not a sha256 address$"):
-        check_addresses({"seal_digest": "x"})
-    with pytest.raises(ValueError, match=r"is not a sha256 address -- because"):
-        check_addresses({"seal_digest": "x"}, cite="because")
-    check_addresses({"seal_digest": "sha256:" + "a" * 64})
 
 
 # ------------------------------------------------------- the archive receipt
@@ -97,45 +52,6 @@ _RECEIPT_BODY: dict[str, Any] = {
     "archived_at": "2026-08-21T10:00:00.000000",
     "dsl41_version": "0.1.0",
 }
-
-
-def _receipt(**overrides: Any) -> ArchiveReceipt:
-    body = {**_RECEIPT_BODY, "archived": (archivable_names(2)[0],), **overrides}
-    return ArchiveReceipt(**body)
-
-
-def test_ss12_a_checkpoint_that_does_not_reach_the_period_licenses_nothing() -> None:
-    with pytest.raises(ValidationError, match=r"chain_through_period 1 is below the period"):
-        _receipt(chain_through_period=1)
-    assert _receipt(chain_through_period=2).chain_through_period == 2  # the twin: reaches it
-
-
-def test_ss12_a_receipt_names_the_interpreter_that_wrote_it() -> None:
-    with pytest.raises(ValidationError, match="dsl41_version is empty"):
-        _receipt(dsl41_version="")
-    assert _receipt().dsl41_version == "0.1.0"
-
-
-def test_ss12_a_receipt_licenses_only_the_paths_it_lists_under_the_root(tmp_path: Path) -> None:
-    """`licenses` answers for a path inside the root it is asked about and
-    says no, rather than raising, for one outside it."""
-    receipt = _receipt()
-    inside = tmp_path / archivable_names(2)[0]
-    assert receipt.licenses(tmp_path, inside) is True
-    assert receipt.licenses(tmp_path, tmp_path / "wal" / "000009.jsonl") is False
-    assert receipt.licenses(tmp_path / "elsewhere", inside) is False  # outside the root
-
-
-def test_ss12_a_receipt_read_from_json_takes_its_list_as_a_tuple() -> None:
-    """The wire's list is the model's tuple: `from_bytes` converts it, and
-    the round trip reproduces the receipt. A string where the list belongs
-    is handed to validation unconverted and refuses there."""
-    receipt = _receipt()
-    assert ArchiveReceipt.from_bytes(receipt.to_bytes(), where="r") == receipt
-    document = json.loads(receipt.to_bytes())
-    document["archived"] = archivable_names(2)[0]  # a bare string, not a list
-    with pytest.raises(EngineError, match="not an archive receipt this binary can read"):
-        ArchiveReceipt.from_bytes(canonical_bytes(document), where="r")
 
 
 # --------------------------------------------------- the root's own listings
@@ -166,19 +82,6 @@ def test_ss1_1_a_dot_file_under_wal_is_a_liturgy_temporary_and_not_a_segment(
     (tmp_path / "wal" / "000001.jsonl").write_text("")
     (tmp_path / "wal" / ".000002.jsonl.tmp").write_text("")
     assert wal_segments(tmp_path) == [1]
-
-
-def test_ss12_a_root_with_no_seal_directory_lists_no_periods(tmp_path: Path) -> None:
-    assert sealed_periods(tmp_path) == []
-    assert closed_periods(tmp_path) == []
-    assert attestation_periods(tmp_path) == []
-    seals = tmp_path / "seals"
-    seals.mkdir()
-    (seals / "000002.json").write_text("{}")
-    (seals / "000002.audit.json").write_text("{}")
-    assert sealed_periods(tmp_path) == [2]  # the twin: a directory is listed
-    assert attestation_periods(tmp_path) == [2]
-    assert closed_periods(tmp_path) == []  # no segment re-derives it
 
 
 # ------------------------------------------------------------ the bundle (ss1.1)

@@ -25,20 +25,21 @@ import asyncio
 import hashlib
 import json
 import os
-import inspect
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+from test_runner_leadership import engine
 from typer.testing import CliRunner
 
+from dsl41.ast_jil import parse
 from dsl41.canon import canonical_bytes
-from dsl41.boundary import stage_period
 from dsl41.cli import app
-from dsl41.cli_run import _observed_profile, _serve_run
+from dsl41.cli_run import _serve_run
 from dsl41.ir import CatalogIR, CatalogMeta, lower_catalog, lower_source
-from dsl41.period import (
+from dsl41.run_root import (
+    _SHARED_FIELDS,
     CATALOG_HASH_VERSION,
     CMD_GRACE_S,
     EMPTY_BUNDLE_HASH,
@@ -52,9 +53,9 @@ from dsl41.period import (
     bundle_source_paths,
     catalog_hash_at,
     catalog_hash_for,
-    genesis_manifest,
     catalog_hash_v2,
     check_manifest_against_segment,
+    genesis_manifest,
     is_hash_address,
     period_dir,
     read_period_manifest,
@@ -63,18 +64,16 @@ from dsl41.period import (
     segment_record,
     source_bundle_hash,
     stage_manifest,
+    stage_period,
     write_bundle,
     write_period_manifest,
 )
-from dsl41.ast_jil import parse
-from dsl41.period import _SHARED_FIELDS
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_history import read_run_root
 from dsl41.runner_journal import read_journal
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
 from dsl41.runner_startup import resume_run, start_run
-from test_runner_leadership import engine
 
 T0 = datetime(2026, 7, 1, 8, 0)
 _SOLO_JIL = "insert_job: j1\njob_type: c\ncommand: echo hi\nmachine: m1\n"
@@ -327,7 +326,7 @@ GOLDEN_RUNTIME_HASH = "sha256:aa82271f28aa992a72f20785b0086775c59270ba003302ac61
 def test_the_profile_fields_default_to_the_seconds_constants_unmoved() -> None:
     """The microsecond fields read the seconds constants (one source), and
     the numbers are the ones every pinned manifest already carries."""
-    from dsl41.period import RECONCILE_SETTLE_S, RETRY_HORIZON_S, to_us
+    from dsl41.run_root import RECONCILE_SETTLE_S, RETRY_HORIZON_S, to_us
 
     profile = RuntimeProfile()
     assert profile.fw_default_interval_us == to_us(FW_DEFAULT_INTERVAL_S) == 60_000_000
@@ -335,31 +334,6 @@ def test_the_profile_fields_default_to_the_seconds_constants_unmoved() -> None:
     assert profile.reconcile_settle_us == to_us(RECONCILE_SETTLE_S) == 5_000_000
     assert profile.spawn_window_us == to_us(SPAWN_WINDOW_S) == 5_000_000
     assert profile.retry_horizon_us == to_us(RETRY_HORIZON_S) == 60_000_000
-
-
-def test_the_profile_defaults_are_the_engine_s_own() -> None:
-    """A profile that disagreed with the running engine would pin a
-    fiction. The four durations with an engine counterpart are asserted
-    against it, so moving an adapter default fails here rather than
-    quietly making every later manifest untrue. The numbers themselves are
-    pinned by `test_the_profile_fields_default_to_the_seconds_constants_unmoved`."""
-    from dsl41.runner_adapters import (
-        FileWatcherAdapter,
-        LocalCommandAdapter,
-        SupervisedCommandAdapter,
-    )
-    from dsl41.runner_startup import resume_run
-
-    assert LocalCommandAdapter().grace_seconds == CMD_GRACE_S
-    assert FileWatcherAdapter().default_interval_s == FW_DEFAULT_INTERVAL_S
-    assert SupervisedCommandAdapter._SPAWN_WINDOW_S == SPAWN_WINDOW_S
-    parameters = inspect.signature(resume_run).parameters
-    # None = "resolve from the period's pin" (U4R3-02): the manifest is the
-    # default, and only an explicit caller override departs from it. The
-    # legacy fallbacks inside resume are the same numbers as the profile
-    # defaults, which the two assertions above already tie to the engine.
-    assert parameters["settle_seconds"].default is None
-    assert parameters["grace_seconds"].default is None
 
 
 def test_the_v2_projection_accounts_for_every_meta_field() -> None:
@@ -414,10 +388,11 @@ def test_pr15_runtime_hash_moves_for_every_field(field: str) -> None:
 
 #: Fields `_derive_runtime_profile` deliberately leaves to the pin, with no
 #: wired object and no launcher declaration behind them. Today that is the
-#: retry horizon: nothing the engine wires reports it, and the launcher does
-#: not declare it, so it inherits unconditionally. Listed rather than
+#: retry horizon and the reconcile settle window, both dormant in 2.0.0: nothing
+#: the engine wires reports them, and the launcher does not declare them, so
+#: they inherit unconditionally. Listed rather than
 #: computed, so widening this set is a decision somebody wrote down.
-_INHERITED_FIELDS: frozenset[str] = frozenset({"retry_horizon_us"})
+_INHERITED_FIELDS: frozenset[str] = frozenset({"retry_horizon_us", "reconcile_settle_us"})
 
 
 def test_every_profile_field_is_wired_declared_or_deliberately_inherited() -> None:
@@ -1000,65 +975,6 @@ def test_a_rehearsal_run_root_records_the_profile_it_rehearsed_under(tmp_path: P
     check_manifest_against_segment(manifest, read_journal(run_root / "journal.jsonl")[0])
 
 
-def test_the_manifest_pins_the_deadman_the_supervisor_runs_not_the_one_asked_for() -> None:
-    """A reattaching engine meets a supervisor it did not start, and one
-    already up cannot change its interval -- so the engine runs the
-    supervisor's value and the manifest has to say so. Recording the
-    request would pin a bound the estate does not have."""
-    staged = _staged(_catalog(), profile=runtime_profile_from_cli(detached=True, deadman_s=90.0))
-    observed = _observed_profile(staged, 60.0)
-    assert observed is not None
-    assert observed.runtime_profile.deadman_us == 60_000_000
-    assert observed.runtime_hash == runtime_hash(observed.runtime_profile)
-    assert observed.runtime_hash != staged.runtime_hash
-    # agreement changes nothing at all, including the bytes
-    assert _observed_profile(staged, 90.0) is staged
-    assert _observed_profile(_staged(_catalog()), None) is not None
-    assert _observed_profile(None, 60.0) is None
-
-
-def test_the_deadman_mismatch_hint_is_true_for_genesis_and_for_resume(
-    capsys: pytest.CaptureFixture[str], tmp_path: Path
-) -> None:
-    """A fresh run can stop the supervisor that is up. A resume starts a missing one at the
-    period's pinned deadman, so only a boundary changes the interval (period-model ss2.1). A
-    supervisor that outlived a boundary runs another value, and stopping it is the remedy."""
-    import shlex
-
-    from dsl41.cli_run import _running_deadman
-
-    class _Client:
-        supervisor_deadman_s = 60.0
-
-    root = tmp_path / "run root"
-    stop = f"`dsl41 supervise shutdown --run-root {shlex.quote(str(root))}`"
-    assert _running_deadman(_Client(), 90.0, root, False, None) == 60.0
-    err = capsys.readouterr().err
-    assert stop in err
-    assert "docs/deployment-runbook.md section 3" in err
-    assert "pinned" not in err
-
-    # the supervisor runs the pin: stopping it changes nothing
-    assert _running_deadman(_Client(), 90.0, root, True, 60.0) == 60.0
-    err = capsys.readouterr().err
-    assert "keeps the deadman it pinned" in err
-    assert "`dsl41 seal --next-deadman`" in err
-    assert "supervise shutdown" not in err
-
-    # a supervisor that outlived a boundary runs the old interval and the resume will refuse
-    for asked in (90.0, 45.0):
-        assert _running_deadman(_Client(), asked, root, True, 90.0) == 60.0
-        err = capsys.readouterr().err
-        assert "not the 90.0 the period pinned" in err
-        assert stop in err
-        assert "docs/deployment-runbook.md section 3" in err
-        assert "keeps the deadman it pinned" not in err
-
-    for resume in (False, True):
-        assert _running_deadman(_Client(), 60.0, root, resume, 60.0) == 60.0
-        assert capsys.readouterr().err == ""
-
-
 def test_a_journal_less_engine_is_untouched_by_any_of_this() -> None:
     """The bisimulation harness runs an Engine with no journal at all;
     period identity is a property of a log, and there is none here."""
@@ -1190,21 +1106,12 @@ def test_a_resume_with_different_launch_options_refuses(tmp_path: Path) -> None:
     )
     write_period_manifest(tmp_path, manifest)
 
-    moved = _resume_profile_error(
-        tmp_path, runtime_profile_from_cli(timezone="Europe/Zurich"), None
-    )
+    moved = _resume_profile_error(tmp_path, runtime_profile_from_cli(timezone="Europe/Zurich"))
     assert moved is not None and "runtime-profile mismatch" in moved and "default_tz" in moved
-    assert _resume_profile_error(tmp_path, runtime_profile_from_cli(timezone="UTC"), None) is None
-    # the ASKED deadman does not matter; the observed one does
-    asked_only = runtime_profile_from_cli(timezone="UTC", deadman_s=90.0)
-    assert _resume_profile_error(tmp_path, asked_only, None) is None
-    observed = _resume_profile_error(tmp_path, runtime_profile_from_cli(timezone="UTC"), 90.0)
-    assert observed is not None and "deadman_us" in observed
+    assert _resume_profile_error(tmp_path, runtime_profile_from_cli(timezone="UTC")) is None
     # a legacy root has no pin
     assert (
-        _resume_profile_error(
-            tmp_path / "legacy", runtime_profile_from_cli(timezone="Tokyo/Nope"), None
-        )
+        _resume_profile_error(tmp_path / "legacy", runtime_profile_from_cli(timezone="Tokyo/Nope"))
         is None
     )
 
@@ -1497,7 +1404,7 @@ def test_a_nested_profile_field_restored_from_its_default_refuses(tmp_path: Path
 def test_a_segment_with_an_unknown_key_refuses(tmp_path: Path) -> None:
     """Exact means exact: required-fields-present alone would bless a record
     this schema does not describe."""
-    from dsl41.period import check_segment_record
+    from dsl41.run_root import check_segment_record
 
     catalog = lower_source(_SOLO_JIL)
     manifest = genesis_manifest(
@@ -1821,7 +1728,7 @@ def test_genesis_refuses_a_scheduled_catalog_with_no_or_the_wrong_scheduler(
 def test_a_float_spelled_version_never_passes_the_segment_schema() -> None:
     """JSON loads `2.0` as a float that compares equal to 2; the schema is
     int-first."""
-    from dsl41.period import check_segment_record
+    from dsl41.run_root import check_segment_record
 
     catalog = lower_source(_SOLO_JIL)
     manifest = genesis_manifest(
@@ -1922,503 +1829,12 @@ def test_the_resume_sweep_rejects_a_noncanonical_run_directory(tmp_path: Path) -
     parser accepted it -- sorted-first, it could answer the ss7 ladder for
     a run this estate never wrote. One parser now (period.split_run_dir),
     and it refuses the spelling."""
-    from dsl41.period import split_run_dir
+    from dsl41.run_root import split_run_dir
 
     assert split_run_dir("b.1") == ("b", 1)
     assert split_run_dir("a.b.12") == ("a.b", 12)
     assert split_run_dir("b.01") is None  # non-canonical: never a run
     assert split_run_dir("b.") is None and split_run_dir(".1") is None
-
-
-def test_the_next_profile_gate_owns_the_deadman_pairing_rule(capsys) -> None:
-    """DL-145, pinned AT THE GATE. The CLI-level test below drives `seal`,
-    so it passes whether the pairing rule lives in `_next_profile` or back
-    in the verb body -- and the whole claim of that slice is that every
-    `--next-*` flag is checked in ONE place, which a verb-level drive
-    cannot see.
-
-    This calls the gate directly. A deadman with no supervisor to hold the
-    lifelines is the one rule `RuntimeProfile` cannot state -- it is about
-    two flags, not one field -- so it is the one rule this function still
-    words itself, and the refusal has to come from here."""
-    import typer
-
-    from dsl41.cli_estate import _next_profile
-
-    with pytest.raises(typer.Exit) as refused:
-        _next_profile(None, None, [], "strict", False, 30.0)
-    assert refused.value.exit_code == 2
-    assert "--next-deadman needs --next-detached" in capsys.readouterr().err
-
-    # the paired form is what the gate is FOR, so it passes through and
-    # carries the value: a guard that refused both would pass the test above
-    paired = _next_profile(None, None, [], "strict", True, 30.0)
-    assert paired.execution_mode == "detached" and paired.deadman_us == 30_000_000
-    # and the model's own bound is caught HERE too, not by a second copy
-    with pytest.raises(typer.Exit) as zero:
-        _next_profile(None, None, [], "strict", True, 0.0)
-    assert zero.value.exit_code == 2
-    assert "deadman_us" in capsys.readouterr().err
-
-
-def test_every_next_profile_bound_is_the_models_and_refuses_with_exit_2(tmp_path: Path) -> None:
-    """DL-137 found `--machine-policy bogus` exiting 1 on `seal`; DL-145
-    found the guard that fixed it was a HAND COPY of `run`'s and had
-    checked one bound of two.
-
-    `--next-deadman 0` was still an uncaught ValidationError and exit 1
-    while `run --deadman 0` was a clean exit 2. Both bounds are
-    `RuntimeProfile`'s -- a machine-policy literal and a positive deadman
-    -- so `_next_profile` catches the MODEL's refusal instead of restating
-    it, and neither bound can be checked on one route and not the other.
-
-    The machine-policy sentence is now the model's own; it names the field
-    and the values it accepts, which is what the copy said in fewer
-    words."""
-    from typer.testing import CliRunner
-
-    from dsl41.cli import app
-
-    def _seal(*flags: str) -> Any:
-        return CliRunner().invoke(
-            app,
-            [
-                "seal",
-                "--run-root",
-                str(tmp_path / "nowhere"),
-                "--next",
-                str(tmp_path / "nowhere.jil"),
-                *flags,
-            ],
-        )
-
-    bad_policy = _seal("--next-machine-policy", "bogus")
-    assert bad_policy.exit_code == 2
-    assert "machine_policy" in bad_policy.output
-    assert "'strict'" in bad_policy.output and "'local-eligible'" in bad_policy.output
-
-    zero_deadman = _seal("--next-detached", "--next-deadman", "0")
-    assert zero_deadman.exit_code == 2  # was 1, on an uncaught ValidationError
-    assert "deadman_us" in zero_deadman.output
-
-    # the one rule the model cannot hold -- it is about two flags, not one
-    # field -- keeps its own sentence, and `run` says the same of its own
-    tethered = _seal("--next-deadman", "30")
-    assert tethered.exit_code == 2
-    assert "--next-deadman needs --next-detached" in tethered.output
-
-
-def test_serve_wires_every_adapter_window_from_the_pinned_profile(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """DL-137: `dsl41 run` built its adapters and its scheduler BARE while
-    the profile pinned the windows -- a latent divergence whose values
-    coincided only because both sides read the same defaults.
-
-    One builder now (`runner_startup.wire_from_profile`), and this drives a
-    profile off every default so the coincidence becomes an equality: the
-    engine is wired with the grace, the settle window, the FW interval, the
-    timezone and the deadman the PROFILE carries, not with the constructor
-    defaults. The `timezone: Zurich` job pins the other half of the same
-    question -- the profile cannot spell "no --timezone-map", so an empty
-    alias table has to read as ABSENT or SEM-35's unique-city ladder is
-    silently retired for every per-job zone."""
-    from dsl41 import runner_adapters, runner_startup
-
-    catalog = lower_source(
-        _SOLO_JIL + 'date_conditions: 1\ndays_of_week: all\nstart_times: "03:00"\n'
-        "timezone: Zurich\n"
-    )
-    profile = RuntimeProfile(
-        default_tz="Europe/Zurich",
-        execution_mode="detached",
-        deadman_us=41_000_000,
-        cmd_grace_us=7_000_000,
-        reconcile_settle_us=11_000_000,
-        fw_default_interval_us=23_000_000,
-    )
-
-    clients: list[Any] = []
-
-    class _FakeSupervisorClient:
-        supervisor_deadman_s = None
-
-        def __init__(
-            self, run_root: Path, deadman_s: float | None = None, machines: object = None
-        ) -> None:
-            self.run_root = run_root
-            self.deadman_s = deadman_s
-            clients.append(self)
-
-        async def provision(self) -> None:
-            return None
-
-        async def acquire(self) -> None:
-            return None
-
-        async def release(self) -> None:
-            return None
-
-        async def close(self) -> None:
-            return None
-
-    captured: dict[str, Any] = {}
-
-    def _capture(catalog_arg: Any, root: Path, **kwargs: Any) -> Any:
-        captured.update(kwargs)
-        raise EngineError("pin test: stop before the loop")
-
-    # BOTH bindings: the one the wiring builder holds, and the one in the
-    # adapter module a bare construction would reach for -- so this test
-    # fails on the WINDOWS if the wiring ever goes bare again, not on a
-    # supervisor that never came up
-    monkeypatch.setattr(runner_startup, "SupervisorClient", _FakeSupervisorClient)
-    monkeypatch.setattr(runner_adapters, "SupervisorClient", _FakeSupervisorClient)
-    monkeypatch.setattr(runner_startup, "start_run", _capture)
-
-    with pytest.raises(EngineError, match="stop before the loop"):
-        asyncio.run(
-            _serve_run(catalog, tmp_path / "root", False, [], profile=profile, supervisor="spawn")
-        )
-
-    assert captured["adapters"]["CMD"].grace_seconds == 7.0
-    assert captured["adapters"]["CMD"].settle_seconds == 11.0
-    assert captured["adapters"]["FW"].default_interval_s == 23
-    assert captured["scheduler"].default_tz == "Europe/Zurich"
-    # the supervisor is started on the profile's deadman, not on a default
-    assert [c.deadman_s for c in clients] == [41.0]
-    # SEM-35's city ladder still resolves the per-job zone: an empty alias
-    # table read as a PRESENT map would refuse this catalog outright
-    assert str(captured["scheduler"]._plans["j1"].tz) == "Europe/Zurich"
-
-
-def test_an_early_refusal_after_the_wiring_gives_back_the_lease_and_the_lock(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """DL-145. `_serve_run` takes two things it must give back: the run
-    root's leader lock, and -- detached -- the supervisor's LEASE, whose
-    deadman is measured in tens of seconds.
-
-    Every refusal below the wiring used to `return` past both. The lock
-    then excluded the operator's own corrected retry, and the lease made a
-    second engine wait out an eviction for a supervisor nobody was using.
-    One `finally` now, in the order the normal path always had: lease,
-    journal, lock.
-
-    The `--timezone` drift is driven because it refuses at the LAST of the
-    three early returns -- after the supervisor is up and the lease is
-    taken -- so the leak it proves is the whole one."""
-    from dsl41 import runner_adapters, runner_startup
-    from dsl41.runner_ledger import acquire_run_root
-
-    catalog = lower_source(_SOLO_JIL)
-    run_root = tmp_path / "root"
-    run_root.mkdir()
-    pinned = runtime_profile_from_cli(timezone="UTC", detached=True)
-    write_period_manifest(
-        run_root,
-        genesis_manifest(
-            catalog,
-            clock_domain="real",
-            state_machine_version=STATE_MACHINE_VERSION,
-            staged=stage_manifest(
-                catalog,
-                source_bundle_hash=EMPTY_BUNDLE_HASH,
-                profile=pinned,
-                state_machine_version=STATE_MACHINE_VERSION,
-            ),
-        ),
-    )
-    lease: list[str] = []
-
-    class _FakeSupervisorClient:
-        supervisor_deadman_s = None
-
-        def __init__(
-            self, run_root: Path, deadman_s: float | None = None, machines: object = None
-        ) -> None:
-            self.deadman_s = deadman_s
-
-        async def provision(self) -> None:
-            lease.append("provision")
-
-        async def acquire(self) -> None:
-            lease.append("acquire")
-
-        async def release(self) -> None:
-            lease.append("release")
-
-        async def close(self) -> None:
-            lease.append("close")
-
-    monkeypatch.setattr(runner_startup, "SupervisorClient", _FakeSupervisorClient)
-    monkeypatch.setattr(runner_adapters, "SupervisorClient", _FakeSupervisorClient)
-
-    drifted = runtime_profile_from_cli(timezone="Europe/Zurich", detached=True)
-    code = asyncio.run(_serve_run(catalog, run_root, True, [], profile=drifted, supervisor="spawn"))
-
-    assert code == 2  # the run never started: the pin says another zone
-    assert lease == ["provision", "acquire", "release", "close"]
-    # the raw-fd lock conflicts with a retry in THIS process, so a held one
-    # would refuse here -- which is exactly what an operator's corrected
-    # re-run would have met
-    retry = acquire_run_root(run_root)
-    retry.release()
-
-
-def test_wire_from_profile_detached_takes_the_lease_in_order_and_close_returns_it(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """DL-137 slice follow-up. The detached wiring's supervisor calls moved
-    from cli.py -- outside the DL-105 coverage gate -- into runner_startup,
-    the gated tier, so the order they always had becomes a pinned fact: the
-    supervisor comes up BEFORE the lease is taken (an acquire against a
-    socket that is not there is a refusal, not a boot), and `close()`
-    returns the lease BEFORE closing the transport (a closed transport
-    cannot release)."""
-    from dsl41 import runner_adapters
-    from dsl41.runner_startup import wire_from_profile
-
-    catalog = lower_source(_SOLO_JIL)
-    profile = RuntimeProfile(execution_mode="detached", deadman_us=41_000_000)
-    calls: list[str] = []
-
-    async def _ensure(self: Any) -> None:
-        calls.append("provision")
-
-    async def _acquire(self: Any) -> None:
-        calls.append("acquire")
-
-    async def _release(self: Any) -> None:
-        calls.append("release")
-
-    async def _close(self: Any) -> None:
-        calls.append("close")
-
-    monkeypatch.setattr(runner_adapters.SupervisorClient, "provision", _ensure)
-    monkeypatch.setattr(runner_adapters.SupervisorClient, "acquire", _acquire)
-    monkeypatch.setattr(runner_adapters.SupervisorClient, "release", _release)
-    monkeypatch.setattr(runner_adapters.SupervisorClient, "close", _close)
-
-    async def _drive() -> None:
-        wiring = await wire_from_profile(tmp_path, catalog, profile, start=_NOW, supervisor="spawn")
-        assert calls == ["provision", "acquire"]
-        assert wiring.client is not None
-        assert wiring.deadman_s == 41.0
-        await wiring.close()
-        assert calls == ["provision", "acquire", "release", "close"]
-
-    asyncio.run(_drive())
-
-
-def test_a_lease_release_that_raises_still_closes_the_transport(tmp_path: Path) -> None:
-    """DL-145, at the LOWER level. `Wiring.close` owes the supervisor a
-    RELEASE and owes this process a transport CLOSE, and they are two
-    obligations to two different things.
-
-    `release` speaks over the socket, so it is exactly the step that fails
-    when the socket has died -- and a chain of two statements let it take
-    the close with it, leaving a live reader task and an open writer on a
-    client nobody holds a handle to. The first exception still comes out:
-    this makes the teardown total, not silent."""
-    from dsl41.runner_scheduler import Scheduler
-    from dsl41.runner_startup import Wiring
-
-    steps: list[str] = []
-
-    class _BadRelease:
-        async def release(self) -> None:
-            steps.append("release")
-            raise OSError("pin: the supervisor socket died mid-RELEASE")
-
-        async def close(self) -> None:
-            steps.append("close")
-
-    wiring = Wiring(
-        adapters={},
-        scheduler=Scheduler(lower_source(_SOLO_JIL), start=_NOW),
-        client=_BadRelease(),  # type: ignore[arg-type]
-        deadman_s=None,
-    )
-    with pytest.raises(OSError, match="died mid-RELEASE"):
-        asyncio.run(wiring.close())
-    assert steps == ["release", "close"]
-
-
-def test_a_lease_release_that_raises_still_closes_the_journal_and_the_lock(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """The same failure at the UPPER level (DL-145). `_serve_run` owes three
-    things back -- the lease, the log's fsync, the leader lock -- to three
-    different owners, and none of them is the others' to skip.
-
-    A `release` that raises used to end the teardown where it stood: the
-    journal was left unflushed and the lock was left held, so the estate
-    refused the operator's own retry with "held by another engine" by a
-    process that had already exited."""
-    from dsl41 import runner_adapters, runner_control, runner_journal, runner_startup
-    from dsl41.runner_ledger import acquire_run_root
-
-    catalog = lower_source(_SOLO_JIL)
-    run_root = tmp_path / "root"
-    steps: list[str] = []
-
-    class _FakeSupervisorClient:
-        supervisor_deadman_s = None
-
-        def __init__(
-            self, run_root: Path, deadman_s: float | None = None, machines: object = None
-        ) -> None:
-            self.deadman_s = deadman_s
-
-        async def provision(self) -> None:
-            return None
-
-        async def acquire(self) -> None:
-            return None
-
-        async def release(self) -> None:
-            steps.append("release")
-            raise OSError("pin: the supervisor socket died mid-RELEASE")
-
-        async def close(self) -> None:
-            steps.append("close")
-
-    async def _no_socket(self: Any) -> None:
-        raise EngineError("pin: the control socket could not be bound")
-
-    real_close = runner_journal.Journal.close
-
-    def _noted_close(self: Any) -> None:
-        steps.append("journal")
-        real_close(self)
-
-    monkeypatch.setattr(runner_startup, "SupervisorClient", _FakeSupervisorClient)
-    monkeypatch.setattr(runner_adapters, "SupervisorClient", _FakeSupervisorClient)
-    monkeypatch.setattr(runner_control.ControlServer, "start", _no_socket)
-    monkeypatch.setattr(runner_journal.Journal, "close", _noted_close)
-
-    profile = runtime_profile_from_cli(detached=True)
-    with pytest.raises(OSError, match="died mid-RELEASE"):
-        asyncio.run(_serve_run(catalog, run_root, False, [], profile=profile, supervisor="spawn"))
-    # the transport and the journal both closed, in the order they are owed
-    assert steps == ["release", "close", "journal"]
-    retry = acquire_run_root(run_root)  # and the lock came back
-    retry.release()
-
-
-def test_a_failing_journal_close_still_gives_the_leader_lock_back(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """DL-145, the other half of the one teardown. `Journal.close` fsyncs
-    before it releases, and a failing fsync must PROPAGATE -- durability is
-    not suppressible here any more than it is anywhere else in the liturgy.
-
-    What it must not ALSO do is strand the estate's leader lock: the
-    operator's retry would then be refused with "held by another engine" by
-    a process that is gone. The lock comes back whatever the steps above it
-    do."""
-    from dsl41 import runner_control, runner_journal
-    from dsl41.runner_ledger import acquire_run_root
-
-    catalog = lower_source(_SOLO_JIL)
-    run_root = tmp_path / "root"
-
-    async def _no_socket(self: Any) -> None:
-        raise EngineError("pin: the control socket could not be bound")
-
-    def _bad_close(self: Any) -> None:
-        self._f.close()  # the failure is the fsync; the descriptor still goes
-        raise OSError("pin: fsync failed on the way out")
-
-    monkeypatch.setattr(runner_control.ControlServer, "start", _no_socket)
-    monkeypatch.setattr(runner_journal.Journal, "close", _bad_close)
-
-    with pytest.raises(OSError, match="fsync failed on the way out"):
-        asyncio.run(
-            _serve_run(
-                catalog, run_root, False, [], profile=runtime_profile_from_cli(), supervisor="spawn"
-            )
-        )
-    retry = acquire_run_root(run_root)
-    retry.release()
-
-
-def test_wire_from_profile_gives_back_a_lease_it_cannot_finish_wiring(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """DL-145. The supervisor is started and LEASED before the scheduler is
-    built, and `Scheduler` refuses a catalog it cannot plan -- an unknown
-    `run_calendar`, an unresolvable per-job zone.
-
-    Everything between the two used to leave the lease held with nobody
-    holding a handle to it: the caller has no `Wiring` to close, so the
-    only thing that ends it is the deadman, tens of seconds later, and the
-    corrected retry meets a supervisor that is already leased. The lease is
-    this function's until it hands back a `Wiring`."""
-    from dsl41 import runner_adapters, runner_startup
-    from dsl41.runner_startup import wire_from_profile
-
-    catalog = lower_source(
-        _SOLO_JIL + 'date_conditions: 1\nrun_calendar: nosuchcal\nstart_times: "03:00"\n'
-    )
-    lease: list[str] = []
-
-    class _FakeSupervisorClient:
-        supervisor_deadman_s = None
-
-        def __init__(
-            self, run_root: Path, deadman_s: float | None = None, machines: object = None
-        ) -> None:
-            self.deadman_s = deadman_s
-
-        async def provision(self) -> None:
-            lease.append("provision")
-
-        async def acquire(self) -> None:
-            lease.append("acquire")
-
-        async def release(self) -> None:
-            lease.append("release")
-
-        async def close(self) -> None:
-            lease.append("close")
-
-    monkeypatch.setattr(runner_startup, "SupervisorClient", _FakeSupervisorClient)
-    monkeypatch.setattr(runner_adapters, "SupervisorClient", _FakeSupervisorClient)
-
-    profile = RuntimeProfile(execution_mode="detached")
-    with pytest.raises(EngineError, match="no calendar definition"):
-        asyncio.run(wire_from_profile(tmp_path, catalog, profile, start=_NOW, supervisor="spawn"))
-    assert lease == ["provision", "acquire", "release", "close"]
-
-    # the TETHERED half of the same refusal: there is no lease to give
-    # back, and the teardown must not invent a client to close
-    lease.clear()
-    with pytest.raises(EngineError, match="no calendar definition"):
-        asyncio.run(
-            wire_from_profile(tmp_path, catalog, RuntimeProfile(), start=_NOW, supervisor="spawn")
-        )
-    assert lease == []
-
-
-def test_wire_from_profile_refuses_a_supervisor_that_cannot_come_up(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """The SupervisorUnavailable arm of the same wiring: refuse with the
-    house error, never hand back a half-wired engine."""
-    from dsl41 import runner_adapters
-    from dsl41.runner_startup import wire_from_profile
-
-    catalog = lower_source(_SOLO_JIL)
-    profile = RuntimeProfile(execution_mode="detached")
-
-    async def _boom(self: Any) -> None:
-        raise runner_adapters.SupervisorUnavailable("no socket answered")
-
-    monkeypatch.setattr(runner_adapters.SupervisorClient, "provision", _boom)
-    with pytest.raises(EngineError, match="supervisor unavailable: no socket answered"):
-        asyncio.run(wire_from_profile(tmp_path, catalog, profile, start=_NOW, supervisor="spawn"))
 
 
 _CAL_JIL = (
@@ -2463,3 +1879,101 @@ def test_an_unresolvable_base_zone_is_refused_before_preflight_prints(tmp_path: 
     assert refused.exit_code == 2
     assert "--timezone 'Bogus/Zone' is not resolvable" in refused.stderr
     assert "preflight" not in refused.stdout and "preflight" not in refused.stderr
+
+
+def test_serve_wires_every_adapter_window_from_the_pinned_profile(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """DL-137: `dsl41 run` built its adapters and its scheduler BARE while
+    the profile pinned the windows -- a latent divergence whose values
+    coincided only because both sides read the same defaults.
+
+    One builder now (`runner_startup.wire_from_profile`), and this drives a
+    profile off every default so the coincidence becomes an equality: the
+    engine is wired with the grace, the FW interval and the timezone the
+    PROFILE carries, not with the constructor
+    defaults. The `timezone: Zurich` job pins the other half of the same
+    question -- the profile cannot spell "no --timezone-map", so an empty
+    alias table has to read as ABSENT or SEM-35's unique-city ladder is
+    silently retired for every per-job zone."""
+    from dsl41 import runner_startup
+
+    catalog = lower_source(
+        _SOLO_JIL + 'date_conditions: 1\ndays_of_week: all\nstart_times: "03:00"\n'
+        "timezone: Zurich\n"
+    )
+    profile = RuntimeProfile(
+        default_tz="Europe/Zurich",
+        cmd_grace_us=7_000_000,
+        fw_default_interval_us=23_000_000,
+    )
+
+    captured: dict[str, Any] = {}
+
+    def _capture(catalog_arg: Any, root: Path, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        raise EngineError("pin test: stop before the loop")
+
+    monkeypatch.setattr(runner_startup, "start_run", _capture)
+
+    with pytest.raises(EngineError, match="stop before the loop"):
+        asyncio.run(_serve_run(catalog, tmp_path / "root", False, [], profile=profile))
+
+    assert captured["adapters"]["CMD"].grace_seconds == 7.0
+    assert captured["adapters"]["FW"].default_interval_s == 23
+    assert captured["scheduler"].default_tz == "Europe/Zurich"
+    # SEM-35's city ladder still resolves the per-job zone: an empty alias
+    # table read as a PRESENT map would refuse this catalog outright
+    assert str(captured["scheduler"]._plans["j1"].tz) == "Europe/Zurich"
+
+
+def test_a_failing_journal_close_still_gives_the_leader_lock_back(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """DL-145, the other half of the one teardown. `Journal.close` fsyncs
+    before it releases, and a failing fsync must PROPAGATE -- durability is
+    not suppressible here any more than it is anywhere else in the liturgy.
+
+    What it must not ALSO do is strand the estate's leader lock: the
+    operator's retry would then be refused with "held by another engine" by
+    a process that is gone. The lock comes back whatever the steps above it
+    do."""
+    from dsl41 import runner_control, runner_journal
+    from dsl41.runner_ledger import acquire_run_root
+
+    catalog = lower_source(_SOLO_JIL)
+    run_root = tmp_path / "root"
+
+    async def _no_socket(self: Any) -> None:
+        raise EngineError("pin: the control socket could not be bound")
+
+    def _bad_close(self: Any) -> None:
+        self._f.close()  # the failure is the fsync; the descriptor still goes
+        raise OSError("pin: fsync failed on the way out")
+
+    monkeypatch.setattr(runner_control.ControlServer, "start", _no_socket)
+    monkeypatch.setattr(runner_journal.Journal, "close", _bad_close)
+
+    with pytest.raises(OSError, match="fsync failed on the way out"):
+        asyncio.run(_serve_run(catalog, run_root, False, [], profile=runtime_profile_from_cli()))
+    retry = acquire_run_root(run_root)
+    retry.release()
+
+
+def test_the_profile_defaults_are_the_engine_s_own() -> None:
+    """A profile that disagreed with the running engine would pin a
+    fiction. The durations with an engine counterpart are asserted against
+    it, so moving an adapter default fails here rather than quietly making
+    every later manifest untrue."""
+    import inspect
+
+    from dsl41.runner_adapters import FileWatcherAdapter, LocalCommandAdapter
+    from dsl41.runner_startup import resume_run
+
+    assert LocalCommandAdapter().grace_seconds == CMD_GRACE_S
+    assert FileWatcherAdapter().default_interval_s == FW_DEFAULT_INTERVAL_S
+    parameters = inspect.signature(resume_run).parameters
+    # None = "resolve from the run root's pin" (U4R3-02): the manifest is the
+    # default, and only an explicit caller override departs from it
+    assert parameters["settle_seconds"].default is None
+    assert parameters["grace_seconds"].default is None

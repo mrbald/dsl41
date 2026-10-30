@@ -34,7 +34,6 @@ from __future__ import annotations
 import asyncio
 import json
 import random
-
 from collections import defaultdict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -43,17 +42,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from dsl41.ir import CatalogIR, lower_source
-from dsl41.oracle_state import Event
+from dsl41.oracle_state import Event, RuntimeState
+from dsl41.run_root import active_wal, wal_path
 from dsl41.runner import Engine
-from dsl41.runner_scheduler import Scheduler
-from dsl41.runner_startup import resume_run, start_run
 from dsl41.runner_adapters import AdapterContext, FakeAdapter
 from dsl41.runner_admission import Envelope
 from dsl41.runner_clock import VirtualClock
 from dsl41.runner_hosts import HostCommand
-from dsl41.oracle_state import RuntimeState
-from dsl41.period import active_wal, wal_path
 from dsl41.runner_journal import read_journal
+from dsl41.runner_scheduler import Scheduler
+from dsl41.runner_startup import resume_run, start_run
 
 if TYPE_CHECKING:
     from dsl41.ir import JobIR

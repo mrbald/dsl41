@@ -17,14 +17,12 @@ is the `fork` param of test_oracle.py.
 from __future__ import annotations
 
 import asyncio
-
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
-
 from fork_harness import (
     ORACLE_COPIED,
     ORACLE_FRESH,
@@ -36,6 +34,7 @@ from fork_harness import (
     history,
     state_bytes,
 )
+
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, JobStatus, RuntimeState
@@ -508,7 +507,7 @@ def test_a_crash_exits_1_and_5_is_retired(
     `--on-transition-violation stop` until DL-353; deployed units still
     list it in `RestartPreventExitStatus`, so no exit code of `run` takes it."""
     from dsl41 import cli_run
-    from dsl41.period import runtime_profile_from_cli
+    from dsl41.run_root import runtime_profile_from_cli
 
     assert 5 not in {value for name, value in vars(cli_run).items() if name.startswith("EXIT_")}
 
@@ -523,7 +522,6 @@ def test_a_crash_exits_1_and_5_is_retired(
             False,
             [],
             profile=runtime_profile_from_cli(),
-            supervisor="spawn",
         )
     )
     assert exit_code == 1
@@ -569,11 +567,11 @@ def test_runs_refuses_a_root_whose_replay_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`dsl41 runs` exits 2 naming the input, not with a traceback."""
+    from genesis_harness import _genesis
     from typer.testing import CliRunner
 
     from dsl41.cli import app
     from dsl41.oracle_state import OracleError
-    from test_boundary import _genesis
 
     run_root = tmp_path / "run"
 

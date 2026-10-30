@@ -19,18 +19,21 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from dataclasses import dataclass
-from datetime import datetime
 import json
 import os
-from pathlib import Path
 import re
 import signal
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 
 import pytest
+from test_docs_hygiene import ROOT
+from test_fw_loop import _stop as _cancel
+from test_fw_loop import _successes, _until
 
 from dsl41.file_processing import archive, list_work, process, show_work
 from dsl41.ir import lower_source
@@ -42,8 +45,6 @@ from dsl41.runner_startup import start_run
 from examples.file_processing.estate import estate
 from examples.file_processing.rearm import pending
 from examples.file_processing.worker import counts_handler
-from test_docs_hygiene import ROOT
-from test_fw_loop import _stop as _cancel, _successes, _until
 
 if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
     pytest.skip("the runner and its control socket are POSIX-only", allow_module_level=True)
@@ -57,7 +58,7 @@ SEP = "\x1e"
 PROCESSOR_ID = "counts-v1"
 FIRST = "e2655ccff9fd0788f8676a41e9f7cb78cd1122fca579a099e8b340b4b702687f"
 #: The steps the test reads the root after, and those slices 5 and 6 need.
-REQUIRED = ("holding", "supervisor-stopped", "interrupted", "resumed", "stuck", "reject", "done")
+REQUIRED = ("holding", "engine-stopped", "interrupted", "resumed", "stuck", "reject", "done")
 
 
 @dataclass(frozen=True)
@@ -176,8 +177,8 @@ def _gone(pid: int) -> bool:
 
 
 def _stop(*pids: int | None) -> None:
-    """Teardown after a failed step: the engine, then the supervisor, which ends its
-    commands. Neither is this process's child: each was started by a shell that exited."""
+    """Teardown after a failed step: the engine, which ends its commands. It is not this
+    process's child: a shell that exited started it."""
     for pid in pids:
         if pid is None or _gone(pid):
             continue
@@ -211,7 +212,7 @@ def test_dl404_exercise_runs_the_estate_through_a_stop_and_a_rejection(short_roo
     second handler call; an operator rejects the toxic delivery and a manual run drains the
     queue. The handler's calls file is the witness independent of the ledger."""
     work = short_root
-    root, run_root = work / "root", work / "run"
+    root = work / "root"
     env = {
         **os.environ,
         "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ.get('PATH', '')}",
@@ -233,11 +234,11 @@ def test_dl404_exercise_runs_the_estate_through_a_stop_and_a_rejection(short_roo
                 assert (status.state, status.attempt) == ("RUNNING", 1)
                 assert calls.read_text().split() == [FIRST]
                 effect = (first.stat().st_ino, first.stat().st_mtime_ns, first.read_bytes())
-            if step.name == "supervisor-stopped-again":
+            if step.name == "engine-stopped-again":
                 stopped = True
     finally:
         if not stopped:
-            _stop(_pid(work / "engine.pid"), _pid(run_root / "supervisor.pid"))
+            _stop(_pid(work / "engine.pid"))
 
     rows = list_work(root, PROCESSOR_ID)
     assert [(row.receipt_sequence, row.receipts[0].name, row.state) for row in rows] == [

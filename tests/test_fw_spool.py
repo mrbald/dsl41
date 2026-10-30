@@ -28,10 +28,10 @@ import pytest
 from dsl41.canon import ARTIFACT_FORMAT_VERSION, canonical_bytes, decode
 from dsl41.ir import lower_source
 from dsl41.oracle_state import Event
+from dsl41.run_root import active_wal
 from dsl41.runner_adapters import WATCH_LOG, FileWatcherAdapter, read_watch_log
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_startup import resume_run, start_run
-from dsl41.period import active_wal
 
 T0 = datetime(2026, 7, 1, 8, 0)
 

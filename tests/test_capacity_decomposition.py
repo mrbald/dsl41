@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import ModuleType

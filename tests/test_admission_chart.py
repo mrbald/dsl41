@@ -20,21 +20,24 @@ import contextlib
 import json
 import re
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 import statechart_completeness as sc
-from test_boundary import C1_JIL, C2_JIL, _catalog, _close, _refusal, _request, _stage
+from genesis_harness import C1_JIL, _catalog
 
+from datetime import timedelta
+
+from dsl41.run_root import estate_wal
+from dsl41.runner_startup import resume_run
 from dsl41 import runner_admission
-from dsl41.boundary import BoundaryRefusal
 from dsl41.ir import lower_source
 from dsl41.machines import MACHINES
 from dsl41.oracle_state import Event
-from dsl41.period import RuntimeProfile, estate_wal, stage_manifest, wal_path, write_bundle
-from dsl41.runner import Engine, _PendingSeal
+from dsl41.run_root import RuntimeProfile, stage_manifest, wal_path, write_bundle
+from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import (
     ADMISSION,
@@ -51,7 +54,7 @@ from dsl41.runner_admission import (
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_journal import read_attempts, read_decisions, read_journal
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
-from dsl41.runner_startup import resume_run, start_run
+from dsl41.runner_startup import start_run
 from dsl41.state_machine import (
     HITS_ENV,
     STATECHART_LOG_PREFIX,
@@ -528,103 +531,6 @@ def _fingerprint_of(engine: Engine, kind: str, revision: int) -> str:
     )
 
 
-def test_every_event_a_poster_sends_is_in_the_alphabet(tmp_path: Path) -> None:
-    """The live loop notes and decides an applied and a rejected command,
-    refuses a command whose id is in flight, and stops on the same command
-    in flight; resume replays the decided attempts and decides the one a
-    crash left open; the seal's readiness lookup refuses an id in flight.
-    Every post is `decide` or `input`, and every row fires. An id is in
-    flight here as a second writer would leave it."""
-    run_root = tmp_path / "run"
-    live: list[tuple[str, tuple[str, ...]]] = []
-    engine = start_run(
-        lower_source(_JIL),
-        run_root,
-        clock=VirtualClock(start=T0),
-        adapters={"CMD": FakeAdapter(default=None)},
-        machines=_posting(live),
-    )
-
-    async def scenario() -> None:
-        applied = _hold(engine, "a", "ON_HOLD", 0)
-        rejected = _hold(engine, "b", "OFF_HOLD", 0)  # the hold moved the revision
-        await engine.run_until_quiescent(T0)
-        assert (await applied).decision == "applied"
-        assert (await rejected).decision == "rejected"
-        engine.decisions.note(_attempt("c", "fp-c", index=99))
-        reused = _hold(engine, "c", "ON_HOLD", 1)
-        await engine.run_until_quiescent(T0)
-        with pytest.raises(RequestCollision):
-            await reused
-        await engine.shutdown()
-        assert engine.journal is not None
-        engine.journal.close()
-
-    asyncio.run(scenario())
-    assert {(DECIDE, ("admission.02",)), (DECIDE, ("admission.03",))} <= set(live)
-    assert ("input", ("admission.09",)) in live
-    # the crash landed between the rejected attempt's line and its decision
-    wal = estate_wal(run_root)
-    lines = wal.read_text().splitlines(keepends=True)
-    records = read_journal(wal)
-    (at,) = [i for i, r in enumerate(records) if r["rec"] == "decision" and r["request_id"] == "b"]
-    assert not any(r["rec"] in ("input", "decision") for r in records[at + 1 :])
-    wal.write_text("".join(lines[:at] + lines[at + 1 :]))
-    resumed: list[tuple[str, tuple[str, ...]]] = []
-
-    async def resume() -> Engine:
-        return await resume_run(
-            lower_source(_JIL),
-            run_root,
-            clock=VirtualClock(start=T0 + timedelta(minutes=1)),
-            adapters={"CMD": FakeAdapter(default=None)},
-            machines=_posting(resumed),
-        )
-
-    again = asyncio.run(resume())
-    assert again.decisions.state("a") == "applied"
-    assert again.decisions.state("b") == "rejected"  # decided again, the same way
-    assert ("<start>", ()) in resumed
-    assert {(DECIDE, ("admission.02",)), (DECIDE, ("admission.03",))} <= set(resumed)
-    assert again.journal is not None
-    again.journal.close()
-
-    sealing: list[tuple[str, tuple[str, ...]]] = []
-    root = tmp_path / "sealed"
-    genesis = _genesis_on(root, _posting(sealing))
-    request = _request(genesis, _stage(root, C2_JIL))
-    genesis.decisions.note(_attempt(request.request_id, "fp-open", index=99))
-    refused = asyncio.run(_refusal(genesis, request))
-    assert isinstance(refused, BoundaryRefusal)
-    assert "already names another command" in str(refused)
-    assert sealing[-1] == ("input", ("admission.09",))
-    _close(genesis)
-
-    stopped: list[tuple[str, tuple[str, ...]]] = []
-    lone = Engine(
-        lower_source(_JIL),
-        clock=VirtualClock(start=T0),
-        adapters={"CMD": FakeAdapter(default=None)},
-        machines=_posting(stopped),
-    )
-    lone.decisions.note(_attempt("d", _fingerprint_of(lone, "ON_HOLD", 0)))
-
-    async def second_writer() -> None:
-        try:
-            _hold(lone, "d", "ON_HOLD", 0)
-            with pytest.raises(EngineError, match="admitted but undecided"):
-                await lone.run_until_quiescent(T0)
-        finally:
-            await lone.shutdown()
-
-    asyncio.run(second_writer())
-    assert stopped[-1] == ("input", ("admission.10",))
-    posted = live + resumed + sealing + stopped
-    assert {name for name, _ in posted} - {"<start>"} <= set(alphabet(CHART))
-    rows = {row for _, fired in posted for row in fired}
-    assert rows == {row.id for row in CHART.rows}
-
-
 # ---- a statechart error stops the tier (statechart-engine §5)
 
 
@@ -689,7 +595,7 @@ _RUN_JIL = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
 
 def _serve(run_root: Path, resume: bool) -> int:
     from dsl41 import cli_run
-    from dsl41.period import runtime_profile_from_cli
+    from dsl41.run_root import runtime_profile_from_cli
 
     serve = cli_run._serve_run(
         lower_source(_RUN_JIL),
@@ -697,7 +603,6 @@ def _serve(run_root: Path, resume: bool) -> int:
         resume,
         [],
         profile=runtime_profile_from_cli(),
-        supervisor="spawn",
     )
     # bounded: an engine that swallowed the error would serve on forever
     return asyncio.run(asyncio.wait_for(serve, timeout=60))
@@ -740,59 +645,6 @@ def test_dsl41_run_exits_7_when_a_decision_meets_a_gap_live_and_at_replay(
     wal_input = f"{STATECHART_LOG_PREFIX}: WAL input: {last.index}: {describe_input(last)}"
     assert wal_input in report
     acquire_run_root(run_root).release()  # the lock went with the stop
-
-
-def test_dsl41_run_exits_7_when_the_seal_s_readiness_lookup_meets_a_gap(
-    short_root: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """The seal's request id is in flight, as a second writer would leave it,
-    and the chart lost the row that refuses another fingerprint. Readiness
-    asks the index, which asks the instance: the boundary parks nothing,
-    aborts nothing and refuses nothing, the request is unanswered and the
-    engine exits 7 (DL-327)."""
-    run_root = short_root / "root"
-    real = Engine.run_until_quiescent
-    futures: list[Any] = []
-    aborts: list[bool] = []
-    seal_posts: list[str] = []
-    keys: list[str] = []
-
-    async def with_a_seal(self: Engine, horizon: datetime) -> list[Event]:
-        dispatch = self.machines.dispatch
-
-        def spy(key: Any, event: ChartEvent) -> list[Outcome]:
-            if isinstance(key, _PendingSeal):
-                seal_posts.append(event.name)
-            return dispatch(key, event)
-
-        self.machines.dispatch = spy  # type: ignore[method-assign]
-        request = _request(self, _stage(run_root, C2_JIL))
-        self.decisions.note(_attempt(request.request_id, "fp-open", index=99))
-        keys.append(repr(self.decisions.key(request.request_id)))
-        futures.append(self.submit_seal(request))
-        return await real(self, horizon)
-
-    def abort(self: Engine) -> None:
-        aborts.append(True)
-
-    monkeypatch.setattr(Engine, "run_until_quiescent", with_a_seal)
-    monkeypatch.setattr(Engine, "abort_boundary", abort)
-    _gap(monkeypatch, tmp_path, "09")
-    assert _serve(run_root, False) == 7
-    report = _report(capsys.readouterr().err)
-    assert report[0] == (
-        f"{STATECHART_LOG_PREFIX}: admission {keys[0]}: no row and no deferral"
-        " for input in ['admission', 'admitted']"
-    )
-    assert seal_posts == []  # readiness runs before the barrier parks
-    assert aborts == []
-    (future,) = futures
-    assert not future.done()  # not refused, not answered
-    records = read_journal(wal_path(run_root, 1))
-    assert all(record["rec"] != "seal" for record in records)
 
 
 def test_dsl41_run_exits_7_when_resume_meets_a_second_attempt_for_a_decided_id(
@@ -846,3 +698,89 @@ def test_dsl41_run_exits_7_when_resume_meets_a_second_attempt_for_a_decided_id(
     assert f"{STATECHART_LOG_PREFIX}: stored decision: applied at index {first['seq']}" in report
     assert f"{STATECHART_LOG_PREFIX}: WAL input: {seq}: {describe_input(attempt)}" in report
     acquire_run_root(run_root).release()  # the lock went with the stop
+
+
+def test_every_event_a_poster_sends_is_in_the_alphabet(tmp_path: Path) -> None:
+    """The live loop notes and decides an applied and a rejected command,
+    refuses a command whose id is in flight, and stops on the same command
+    in flight; resume replays the decided attempts and decides the one a
+    crash left open.
+    Every post is `decide` or `input`, and every row fires. An id is in
+    flight here as a second writer would leave it."""
+    run_root = tmp_path / "run"
+    live: list[tuple[str, tuple[str, ...]]] = []
+    engine = start_run(
+        lower_source(_JIL),
+        run_root,
+        clock=VirtualClock(start=T0),
+        adapters={"CMD": FakeAdapter(default=None)},
+        machines=_posting(live),
+    )
+
+    async def scenario() -> None:
+        applied = _hold(engine, "a", "ON_HOLD", 0)
+        rejected = _hold(engine, "b", "OFF_HOLD", 0)  # the hold moved the revision
+        await engine.run_until_quiescent(T0)
+        assert (await applied).decision == "applied"
+        assert (await rejected).decision == "rejected"
+        engine.decisions.note(_attempt("c", "fp-c", index=99))
+        reused = _hold(engine, "c", "ON_HOLD", 1)
+        await engine.run_until_quiescent(T0)
+        with pytest.raises(RequestCollision):
+            await reused
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+
+    asyncio.run(scenario())
+    assert {(DECIDE, ("admission.02",)), (DECIDE, ("admission.03",))} <= set(live)
+    assert ("input", ("admission.09",)) in live
+    # the crash landed between the rejected attempt's line and its decision
+    wal = estate_wal(run_root)
+    lines = wal.read_text().splitlines(keepends=True)
+    records = read_journal(wal)
+    (at,) = [i for i, r in enumerate(records) if r["rec"] == "decision" and r["request_id"] == "b"]
+    assert not any(r["rec"] in ("input", "decision") for r in records[at + 1 :])
+    wal.write_text("".join(lines[:at] + lines[at + 1 :]))
+    resumed: list[tuple[str, tuple[str, ...]]] = []
+
+    async def resume() -> Engine:
+        return await resume_run(
+            lower_source(_JIL),
+            run_root,
+            clock=VirtualClock(start=T0 + timedelta(minutes=1)),
+            adapters={"CMD": FakeAdapter(default=None)},
+            machines=_posting(resumed),
+        )
+
+    again = asyncio.run(resume())
+    assert again.decisions.state("a") == "applied"
+    assert again.decisions.state("b") == "rejected"  # decided again, the same way
+    assert ("<start>", ()) in resumed
+    assert {(DECIDE, ("admission.02",)), (DECIDE, ("admission.03",))} <= set(resumed)
+    assert again.journal is not None
+    again.journal.close()
+
+    stopped: list[tuple[str, tuple[str, ...]]] = []
+    lone = Engine(
+        lower_source(_JIL),
+        clock=VirtualClock(start=T0),
+        adapters={"CMD": FakeAdapter(default=None)},
+        machines=_posting(stopped),
+    )
+    lone.decisions.note(_attempt("d", _fingerprint_of(lone, "ON_HOLD", 0)))
+
+    async def second_writer() -> None:
+        try:
+            _hold(lone, "d", "ON_HOLD", 0)
+            with pytest.raises(EngineError, match="admitted but undecided"):
+                await lone.run_until_quiescent(T0)
+        finally:
+            await lone.shutdown()
+
+    asyncio.run(second_writer())
+    assert stopped[-1] == ("input", ("admission.10",))
+    posted = live + resumed + stopped
+    assert {name for name, _ in posted} - {"<start>"} <= set(alphabet(CHART))
+    rows = {row for _, fired in posted for row in fired}
+    assert rows == {row.id for row in CHART.rows}

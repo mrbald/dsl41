@@ -279,25 +279,6 @@ def test_serve_gets_the_server_class_from_the_textual_serve_extra() -> None:
 # -------------------------------------------------------------------- supervise
 
 
-def test_supervise_start_refuses_a_run_root_that_is_a_file(tmp_path: Path) -> None:
-    occupied = tmp_path / "run"
-    occupied.write_text("not a directory")
-    result = runner.invoke(app, ["supervise", "start", "--run-root", str(occupied)])
-    assert result.exit_code == 2
-    assert "supervisor start:" in result.output
-    assert "File exists" in result.output  # the mkdir's own refusal, not a later one
-    assert occupied.read_text() == "not a directory"
-
-
-def test_supervise_refuses_a_supervisor_socket_it_cannot_connect_to(short_root: Path) -> None:
-    """A path short enough to be connected to: the file is not a listening socket."""
-    (short_root / "supervisor.sock").write_text("a file, not a socket")
-    result = runner.invoke(app, ["supervise", "list", "--run-root", str(short_root)])
-    assert result.exit_code == 2
-    assert f"supervisor {short_root / 'supervisor.sock'}:" in result.output
-    assert "AF_UNIX path too long" not in result.output
-
-
 class _Conn:
     """A supervisor connection that answers from a script and notes that it was closed."""
 
@@ -322,96 +303,5 @@ class _Conn:
 _SERVING = {"ok": True, "incarnation": "a" * 32, "process_state": "serving"}
 
 
-def _supervised(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, script: list[Any]
-) -> tuple[Any, _Conn]:
-    import dsl41.runner_adapters as adapters
-
-    (tmp_path / "supervisor.sock").write_text("")  # only its existence is read
-    conn = _Conn(script)
-    monkeypatch.setattr(adapters, "SupervisorConn", lambda path: conn)
-    result = runner.invoke(app, ["supervise", "shutdown", "--run-root", str(tmp_path)])
-    return result, conn
-
-
 _DRAINING = "supervisor is draining; wait for the unit to stop"
 _LEASE = {"ok": True, "incarnation": "a" * 32, "token": 3}
-
-
-def test_supervise_shutdown_refuses_a_draining_supervisor_before_the_lease(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """DL-416: PING shows the drain. Exit 2, the one sentence, and nothing sent but PING."""
-    draining = {**_SERVING, "process_state": "draining"}
-    result, conn = _supervised(monkeypatch, tmp_path, [draining])
-    assert result.exit_code == 2
-    assert _DRAINING in result.output
-    assert [r["cmd"] for r in conn.sent] == ["PING"]
-
-
-def test_supervise_shutdown_reads_a_draining_refusal_as_refused(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """DL-416: the drain began after PING, so MAINTENANCE_STOP is refused `draining`: exit 2."""
-    refused = {"ok": False, "error": "draining"}
-    result, conn = _supervised(monkeypatch, tmp_path, [_SERVING, _LEASE, refused])
-    assert result.exit_code == 2
-    assert _DRAINING in result.output
-    assert [r["cmd"] for r in conn.sent] == ["PING", "ACQUIRE", "MAINTENANCE_STOP"]
-
-
-def test_supervise_shutdown_reads_a_lost_reply_and_a_drain_as_refused(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """DL-416: the reply is lost and the PING after the reconnect shows `draining`. A draining
-    supervisor admitted nothing, since an admitted operation holds every signal: exit 2."""
-    draining = {**_SERVING, "process_state": "draining"}
-    script = [_SERVING, _LEASE, OSError("lost"), _LEASE, draining]
-    result, conn = _supervised(monkeypatch, tmp_path, script)
-    assert result.exit_code == 2
-    assert _DRAINING in result.output
-    assert [r["cmd"] for r in conn.sent] == [
-        "PING",
-        "ACQUIRE",
-        "MAINTENANCE_STOP",
-        "ACQUIRE",
-        "PING",
-    ]
-
-
-def test_supervise_shutdown_stops_when_the_lease_is_refused(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    result, conn = _supervised(monkeypatch, tmp_path, [_SERVING, {"ok": False, "error": "held"}])
-    assert result.exit_code == 2
-    assert 'cannot acquire lease: {"error": "held", "ok": false}' in result.output
-    assert [r["cmd"] for r in conn.sent] == ["PING", "ACQUIRE"]
-    assert conn.closed
-
-
-def test_supervise_shutdown_reports_a_supervisor_that_drops_the_line(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    result, conn = _supervised(monkeypatch, tmp_path, [OSError("connection reset")])
-    assert result.exit_code == 2
-    assert "connection reset" in result.output
-    assert conn.closed
-
-
-def test_supervise_shutdown_takes_the_lease_then_asks_for_the_stop(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    result, conn = _supervised(
-        monkeypatch,
-        tmp_path,
-        [
-            _SERVING,
-            {"ok": True, "token": 1, "incarnation": "a" * 32},
-            {"ok": False, "error": "maintenance_refused"},
-        ],
-    )
-    assert result.exit_code == 2
-    assert [r["cmd"] for r in conn.sent] == ["PING", "ACQUIRE", "MAINTENANCE_STOP"]
-    assert conn.sent[2]["token"] == 1
-    assert conn.sent[2]["force"] is None
-    assert conn.closed

@@ -29,7 +29,6 @@ import json
 import pathlib
 import re
 import textwrap
-
 from datetime import datetime, timedelta
 from functools import cache
 from typing import Any, Literal, get_args, get_origin
@@ -38,23 +37,23 @@ import pytest
 
 from dsl41 import (
     ast_jil,
-    oracle_state,
     autocal,
     capacity,
     conditions,
     ir,
     oracle_schedule,
+    oracle_state,
     runner_adapters,
     runner_preflight,
     runner_wrapper,
     semantics,
 )
+from dsl41 import simulation_register_rows as rows_mod
 from dsl41.conditions import Lookback, parse_condition
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, EventKind, JobStatus, ReleasePolicy
-from dsl41.period import RuntimeProfile
+from dsl41.run_root import RuntimeProfile
 from dsl41.runner_adapters import FakeAdapter
-from dsl41 import simulation_register_rows as rows_mod
 from dsl41.simulation_register import (
     FREE_SURFACES,
     REGISTER,
@@ -355,13 +354,13 @@ LITERAL_ALT_EXCLUDED = frozenset(
         "runner_preflight.MachineVerdict",  # machine_verdict
         "oracle_state.EventSource",  # event_source
         "autocal.ActionCategory",  # cal_action, whose members are its pairs
-        "period.MachinePolicy",  # profile_alt:machine_policy=*
-        "period.RuntimeProfile.execution_mode",  # profile_alt:execution_mode=*
+        "run_root.MachinePolicy",  # profile_alt:machine_policy=*
+        "run_root.RuntimeProfile.execution_mode",  # profile_alt:execution_mode=*
         "timezones.DstStartTimes",  # profile_alt:semantics.dst-start-times=*
-        # the estate-layout sentinel is part of the period model's on-disk
-        # contract, closed by that document's own obligations (DL-209)
-        "period.Sentinel.rec",
-        "period.Sentinel.see",
+        # the run-root sentinel is part of the on-disk layout, closed by its own
+        # obligations (DL-209)
+        "run_root.Sentinel.rec",
+        "run_root.Sentinel.see",
         # the LIST reply's `ok` flag (supervisor-protocol ss5): a frozen
         # supervisor-contract vocabulary, same rationale as the other two
         # protocol discriminators above (DL-220)
@@ -372,7 +371,7 @@ LITERAL_ALT_EXCLUDED = frozenset(
 
 LITERAL_ALT_MODULES = (
     "ir",
-    "period",
+    "run_root",
     "conditions",
     "oracle_state",
     "oracle",
@@ -1363,7 +1362,7 @@ CITED_MODULES = (
     "oracle_facts",
     "oracle_schedule",
     "oracle_state",
-    "period",
+    "run_root",
     "runner_adapters",
     "runner_preflight",
     "runner_scheduler",
