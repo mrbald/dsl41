@@ -730,6 +730,11 @@ Shared cores:
   statecharts, declared and not yet wired: STARTING, RUNNING, DRAINING,
   STOPPED for the engine; SPAWNING, RUNNING, STOPPING, ENDED for one
   attempt, with the outcome derived from the wrapper's exit record.
+- `src/dsl41/runner_attempts.py`: the 2.x attempt and engine lifecycle tiers,
+  not yet wired: the exit record from `status.json`, the missing-record
+  verdict, the oracle mapping, the interruption rule's plans, and the tiers
+  that post the two charts' events and carry out their intents through
+  injected protocols.
 - `src/dsl41/estate_manifest.py`: the estate manifest, `estate.toml`: the
   application's one declaration of its catalog files, properties layers,
   timezone and semantic switches, read by the verbs' `--manifest` option.
