@@ -254,6 +254,8 @@ class Injection(Payload):
 
     status: str | None = None
     success: bool = False
+    #: the engine's interruption hold: the FAILURE also holds the job (DL-424)
+    hold: bool = False
 
 
 class Noexec(Protocol):

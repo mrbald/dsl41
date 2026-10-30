@@ -496,8 +496,9 @@ dsl41 query status --brief -J INBOX_FW -S "$S"
 
 ### 3. Stop the engine
 
-A stop cancels the live jobs: the wrapper sends the processor TERM, and the
-processor run ends `TERMINATED`.
+A stop drains the engine: the processor gets TERM, its attempt ends stopped,
+and the engine records a clean shutdown. The oracle is told nothing, so the
+processor's run stays `RUNNING` (DL-424).
 
 <!-- exercise: stop-engine -->
 ```sh
@@ -510,7 +511,7 @@ kill -TERM "$(cat "$work/engine.pid")"
 ```sh
 cat "$work/engine.log"
 # engine up; control socket: …/control.sock
-# stopping: cancelling live jobs (wrappers record the kills, ss6a)
+# engine stopped: clean_shutdown
 ```
 
 The first item's output exists and the handler ran once, but the claim is still
@@ -535,17 +536,18 @@ dsl41 run --resume "$work/estate.jil" --run-root "$RUN_ROOT" \
 echo $! >"$work/engine.pid"
 ```
 
-The engine records the stopped processor run as `TERMINATED`. That end completes
-REARM's condition. REARM finds work pending and publishes the signal again, and
-the next cycle recovers the work. *Repeat* until the processor's second run has
-succeeded and REARM has started the third watch:
+The restart runs the processor's interrupted run again, as attempt 2 of the
+same run with the same invocation. That run's end completes REARM's condition.
+The run reconciled the first item and processed the second, and REARM starts
+the watch again. *Repeat* until the
+processor's run has succeeded and REARM has started the second watch:
 
 <!-- exercise: resumed repeat -->
 ```sh
 dsl41 query status --brief -J PROCESSOR -S "$S"
-# PROCESSOR … SUCCESS … run 2 … exit 0 …
+# PROCESSOR … SUCCESS … run 1 … exit 0 …
 dsl41 query status --brief -J INBOX_FW -S "$S"
-# INBOX_FW … RUNNING … run 3 …
+# INBOX_FW … RUNNING … run 2 …
 ```
 
 The reconciler found the first output and recorded it as the completion: rows
@@ -554,7 +556,7 @@ second item only.
 
 <!-- exercise: recovered -->
 ```sh
-cat "$RUN_ROOT/logs/PROCESSOR.2.out"
+tail -n 1 "$RUN_ROOT/logs/PROCESSOR.1.out"
 # {"completed": 2, "duplicates": 0, "reconciled": 1, "remaining": 0, "selected": 2, "stopped": false, "unknown": 0}
 python -m examples.file_processing.operate --root "$root" show --key e2655ccff9fd0788f8676a41e9f7cb78cd1122fca579a099e8b340b4b702687f
 # {"decisions": [{…"chart_row": "file_process.01"…"state": "RUNNING"…}, {…"chart_row": "file_process.04"…"origin": "reconciler"…"state": "UNKNOWN"…}, {…"chart_row": "file_process.05"…"origin": "reconciler"…"state": "DONE"…}], "work": {"attempt": 1, …"state": "DONE", "todo": false…}}
@@ -584,9 +586,9 @@ echo ready >"$root/ready.signal"
 <!-- exercise: second-cycle-done repeat -->
 ```sh
 dsl41 query status --brief -J PROCESSOR -S "$S"
-# PROCESSOR … FAILURE … run 3 … exit 1 …
+# PROCESSOR … FAILURE … run 2 … exit 1 …
 dsl41 query status --brief -J REARM -S "$S"
-# REARM … SUCCESS … run 3 …
+# REARM … SUCCESS … run 2 …
 ```
 
 The run stopped at the toxic item, and the fourth waits behind it. REARM saw the
@@ -594,12 +596,12 @@ The run stopped at the toxic item, and the fourth waits behind it. REARM saw the
 
 <!-- exercise: stuck -->
 ```sh
-cat "$RUN_ROOT/logs/PROCESSOR.3.out"
+cat "$RUN_ROOT/logs/PROCESSOR.2.out"
 # {"completed": 0, "duplicates": 0, "reconciled": 0, "remaining": 2, "selected": 1, "stopped": true, "unknown": 1}
 python -m examples.file_processing.operate --root "$root" list
 # […"reason": "ValueError: sample JSON input must be a records array"…"name": "003-bad.json"…"state": "UNKNOWN", "todo": true, "work_key": "…"}, {"attempt": 0, …"name": "004-c.txt"…"state": "READY", "todo": true…}]
 dsl41 query status --brief -J INBOX_FW -S "$S"
-# INBOX_FW … RUNNING … run 4 …
+# INBOX_FW … RUNNING … run 3 …
 ```
 
 ### 6. Reject the toxic delivery and drain the queue
@@ -629,7 +631,7 @@ dsl41 sendevent FORCE_STARTJOB -J PROCESSOR -S "$S"
 <!-- exercise: drained repeat -->
 ```sh
 dsl41 query status --brief -J PROCESSOR -S "$S"
-# PROCESSOR … SUCCESS … run 4 … exit 0 …
+# PROCESSOR … SUCCESS … run 3 … exit 0 …
 ```
 
 Every row is terminal, the handler ran once per row, and the inbox and the TODO
@@ -666,7 +668,7 @@ kill -TERM "$(cat "$work/engine.pid")"
 <!-- exercise: engine-stopped-again repeat -->
 ```sh
 tail -n 1 "$work/resume.log"
-# stopping: cancelling live jobs (wrappers record the kills, ss6a)
+# engine stopped: clean_shutdown
 ```
 
 Remove `$work` when you are done.

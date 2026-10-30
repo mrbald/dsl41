@@ -529,6 +529,13 @@ def injects_inactive_box(ctx: Context) -> bool:
     return injected_inactive(ctx) and is_box(ctx)
 
 
+def injects_hold(ctx: Context) -> bool:
+    """The payload is the engine's interruption hold: a FAILURE that holds the job in the same
+    transition (DL-424, spec-crash)."""
+    injection: Injection = ctx.event.payload
+    return injection.hold
+
+
 def injects_live(ctx: Context) -> bool:
     """The payload's status is STARTING or RUNNING: units the job holds are the run's."""
     return _injected(ctx) in LIVE
@@ -895,6 +902,7 @@ GUARDS: Final = {
         injects_inactive_job,
         injects_inactive_box,
         injects_live,
+        injects_hold,
         injected_inactive,
         injected_starting,
         injected_running,

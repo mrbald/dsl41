@@ -39,7 +39,7 @@ from dsl41.state_machine import EXIT_STATECHART_ERROR, STATECHART_LOG_PREFIX, St
 
 if TYPE_CHECKING:
     import asyncio
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
     from datetime import datetime
 
     from dsl41.oracle_state import Event, TraceEntry
@@ -247,7 +247,9 @@ def run(
 
     The engine schedules jobs by calendar, starts real processes,
     records every input in --run-root's engine.db, and listens on a
-    control socket under --run-root. It runs until SIGINT or SIGTERM.
+    control socket under --run-root. SIGINT, SIGTERM or 'dsl41 engine
+    stop' drains it: every running job is asked to stop (TERM, then KILL
+    after the grace), the engine records how each ended and exits 0.
     Jobs are tethered: when the engine dies, its jobs are terminated
     and their wrappers record it. The first run writes engine.toml with
     the default stop grace, snapshot cadence and retention; the
@@ -258,8 +260,9 @@ def run(
     terminal, or open the terminal UI with --ui here or 'dsl41 ui'
     elsewhere.
 
-    Exit codes: 0 stopped by the operator; 1 the engine or the estate
-    failed while running; 2
+    Exit codes: 0 stopped by the operator (a drain, clean or not); 1 the
+    engine or the estate failed while running, a failed shutdown record
+    included; 2
     the run never started (a preflight error, a refused resume, an
     unreadable input); 6 a time-half stop (the time half of an
     engine-made input raised, and the engine stopped before logging it);
@@ -379,15 +382,17 @@ def _preflight_launch(access_map: "Path | None") -> None:
         load_policy(access_map, generation=1)
 
 
-def _install_signal_handlers(stop: "asyncio.Event", access: "AccessControl | None") -> None:
-    """Route SIGINT and SIGTERM to `stop`, and SIGHUP to the access reload."""
+def _install_signal_handlers(stop: "Callable[[], object]", access: "AccessControl | None") -> None:
+    """Route SIGINT and SIGTERM to `stop`, the engine's `stop_requested` (a drain; a second one
+    moves its deadline to now; in STARTING, `shutdown_during_startup`), and SIGHUP to the access
+    reload."""
     import asyncio
     import signal as signal_mod
 
     loop = asyncio.get_running_loop()
     for sig in (signal_mod.SIGINT, signal_mod.SIGTERM):
         try:
-            loop.add_signal_handler(sig, stop.set)
+            loop.add_signal_handler(sig, stop)
         except (NotImplementedError, ValueError, RuntimeError):
             # non-main-thread embedding (test harnesses): stoppable only by engine failure
             pass
@@ -400,6 +405,27 @@ def _install_signal_handlers(stop: "asyncio.Event", access: "AccessControl | Non
             pass
 
 
+class _EarlyStops:
+    """The stops that land before the engine exists, kept for it: the signal's callback may run
+    after the engine is built, so a stop it brings then goes straight to the engine."""
+
+    def __init__(self) -> None:
+        self.kept = 0
+        self.engine: "Engine | None" = None
+
+    def stop(self) -> None:
+        if self.engine is not None:
+            self.engine.request_stop()
+        else:
+            self.kept += 1
+
+    def hand_to(self, engine: "Engine") -> None:
+        self.engine = engine
+        for _ in range(self.kept):
+            engine.request_stop()
+        self.kept = 0
+
+
 class _RunEnd(NamedTuple):
     """What `_await_run_end` hands `_stop_and_judge`: the loop task, the attached TUI and its
     task, and the tasks that finished."""
@@ -410,18 +436,15 @@ class _RunEnd(NamedTuple):
     done: "set[asyncio.Task[Any]]"
 
 
-async def _await_started(
-    engine: "Engine", loop_task: "asyncio.Task[Any]", stop: "asyncio.Event"
-) -> bool:
+async def _await_started(engine: "Engine", loop_task: "asyncio.Task[Any]") -> bool:
     """Wait for the engine loop to finish a restart's recovery and record `engine started`
-    (startup step 8), or for the loop to end or a stop signal first. True when it started."""
+    (startup step 8), or for the loop to end first: a crash, or a stop request during the
+    recovery, which records `shutdown_during_startup` and exits 0. True when it started."""
     import asyncio
 
     started = asyncio.ensure_future(engine.started.wait())
-    stopping = asyncio.ensure_future(stop.wait())
-    await asyncio.wait({loop_task, started, stopping}, return_when=asyncio.FIRST_COMPLETED)
+    await asyncio.wait({loop_task, started}, return_when=asyncio.FIRST_COMPLETED)
     started.cancel()
-    stopping.cancel()
     return engine.started.is_set() and not loop_task.done()
 
 
@@ -429,23 +452,25 @@ async def _await_run_end(
     engine: "Engine",
     server: "ControlServer",
     loop_task: "asyncio.Task[Any]",
-    stop: "asyncio.Event",
     ui: bool,
 ) -> _RunEnd:
-    """Wait for the first thing that ends the run: the loop, a stop signal, the server's
-    failure or the attached TUI."""
+    """Wait for the first thing that ends the run: the loop (a drain that reached STOPPED, or a
+    crash), the server's failure or the attached TUI. Quitting the attached TUI drains the
+    engine, as a stop signal does, and the run ends with the loop."""
     import asyncio
 
-    stop_task = asyncio.ensure_future(stop.wait())
     failed_task = asyncio.ensure_future(server.failed.wait())
     ui_task: asyncio.Task[Any] | None = None
     tui = None
     if ui:
         tui, ui_task = _attach_tui(server.path, owns_run=True)
-    waiters = {loop_task, stop_task, failed_task}
+    waiters = {loop_task, failed_task}
     waiters |= {ui_task} if ui_task is not None else set()
     done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
-    stop_task.cancel()
+    if ui_task is not None and ui_task in done and not loop_task.done():
+        engine.request_stop()
+        await asyncio.wait({loop_task, failed_task}, return_when=asyncio.FIRST_COMPLETED)
+        done |= {task for task in (loop_task, failed_task) if task.done()}
     failed_task.cancel()
     return _RunEnd(loop_task, tui, ui_task, done)
 
@@ -493,16 +518,19 @@ async def _stop_and_judge(
             await asyncio.wait({loop_task})
             if not loop_task.cancelled() and loop_task.exception() is not None:
                 typer.echo(f"engine failed: {loop_task.exception()}", err=True)
-        elif ended:  # hold_open never quiesces: this is a crash
-            typer.echo(f"engine failed: {outcome}", err=True)
-            code = 1
-        else:
-            # operator stop: a signal, or quitting the attached TUI (ss11: --ui tethers the run to
-            # this terminal; `dsl41 ui` attaches viewers that must not stop it)
+        elif ended and outcome is None and engine.exit_code is not None:
+            # the drain reached STOPPED: a signal, `engine stop`, or quitting the attached TUI
+            # (ss11: --ui tethers the run to this terminal; `dsl41 ui` attaches viewers that
+            # must not stop it). Its record says whether every attempt settled (spec-drain)
+            code = engine.exit_code
             if tui_failure is not None:
                 typer.echo(f"TUI failed: {tui_failure}", err=True)
                 code = 1
-            typer.echo("stopping: cancelling live jobs (wrappers record the kills, ss6a)")
+            leaving = engine.leaving_record
+            typer.echo(f"engine stopped: {leaving}" if leaving else "engine stopped")
+        else:  # hold_open never quiesces: this is a crash
+            typer.echo(f"engine failed: {outcome}", err=True)
+            code = 1
         if not loop_task.done():
             loop_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -589,6 +617,10 @@ async def _serve_run(
     from dsl41.runner_journal import STORE_NAME
 
     resume = (run_root / STORE_NAME).exists()
+    # every SIGTERM is the lifecycle's `stop_requested`: one that lands while the engine is
+    # built is kept and handed to it as soon as it exists (spec-drain)
+    early = _EarlyStops()
+    _install_signal_handlers(early.stop, None)
     engine: "Engine | None" = None
     code = 1
     running = False
@@ -672,10 +704,10 @@ async def _serve_run(
             access=access,
         )
         # Handlers go in BEFORE the socket is bound, so a SIGHUP after this engine bound
-        # control.sock is a reload, not a kill. A signal before the handlers exist keeps its
-        # default action; one before the loop task exists only sets `stop` or reloads.
-        stop = asyncio.Event()
-        _install_signal_handlers(stop, access)
+        # control.sock is a reload, not a kill. A stop that came while the engine was built
+        # (the replay, step 5) is the lifecycle's now: STARTING + stop_requested
+        early.hand_to(engine)
+        _install_signal_handlers(engine.request_stop, access)
         # the loop carries out the restart's steps 6 and 7 and records step 8; the socket is
         # bound only then (spec-wiring 1b)
         loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
@@ -683,7 +715,7 @@ async def _serve_run(
         # (statechart-engine ss5): the handler cancels the loop at once and the run wakes on
         # `failed`
         server.on_statechart_error = loop_task.cancel
-        if not await _await_started(engine, loop_task, stop):
+        if not await _await_started(engine, loop_task):
             done = {loop_task} if loop_task.done() else set()
             code = await _stop_and_judge(engine, server, _RunEnd(loop_task, None, None, done))
             return code
@@ -698,7 +730,7 @@ async def _serve_run(
             return refuse(exc)
         running = True
         typer.echo(f"engine up; control socket: {server.path}")
-        end = await _await_run_end(engine, server, loop_task, stop, ui)
+        end = await _await_run_end(engine, server, loop_task, ui)
         code = await _stop_and_judge(engine, server, end)
         # the CLI wrapper reports a statechart error as exit 7
         code = _finish_run(server, code)
@@ -711,28 +743,25 @@ async def _serve_run(
         try:
             if engine is not None and engine.journal is not None:
                 try:
-                    _record_shutdown(engine, clean=code == 0, running=running)
+                    _record_shutdown(engine, running=running)
                 finally:
                     engine.journal.close()
         finally:
             lock.release()
 
 
-def _record_shutdown(engine: "Engine", *, clean: bool, running: bool) -> None:
-    """The engine's last records (spec-wiring 1b). An engine that reached RUNNING takes a
-    snapshot at the applied boundary the teardown left, then records `clean_shutdown` or
-    `unclean_shutdown`; one that never did records `shutdown_during_startup` and no snapshot. A
-    snapshot is skipped off the applied boundary: the next start derives what it lacks from the
-    records."""
+def _record_shutdown(engine: "Engine", *, running: bool) -> None:
+    """The engine's last record when the lifecycle wrote none. Only the lifecycle's STOPPED
+    writes `clean_shutdown` or `unclean_shutdown` (spec-drain); an engine that never reached
+    RUNNING records `shutdown_during_startup` and no snapshot; one that failed while running
+    records nothing, so the restart's fold sees where it stopped (a drain it interrupted
+    included)."""
     assert engine.journal is not None
+    if engine.shutdown_recorded or running:
+        return
     try:
-        if not running:
-            engine.journal.engine("shutdown_during_startup", engine.clock.now())
-            return
-        if engine.settings is not None and engine.at_applied_boundary:
-            engine.take_snapshot()
-        engine.journal.engine("clean_shutdown" if clean else "unclean_shutdown", engine.clock.now())
-    except Exception as exc:  # noqa: BLE001 -- the records are best effort; the close follows
+        engine.journal.engine("shutdown_during_startup", engine.clock.now())
+    except Exception as exc:  # noqa: BLE001 -- the record is best effort; the close follows
         typer.echo(f"dsl41: the shutdown record was not written: {exc}", err=True)
 
 
@@ -1322,7 +1351,8 @@ def journal(
     # Design: runner-design ss7, DL-142, DL-424
     from dsl41.oracle_state import OracleError
     from dsl41.runner_clock import EngineError
-    from dsl41.runner_config import Configuration, catalog_hash, oracle_reading
+    from dsl41.reload_diff import catalog_hash_v2
+    from dsl41.runner_config import Configuration, oracle_reading
     from dsl41.runner_journal import StoreReplay, open_reader, replay_store
     from dsl41.runner_ledger import STATE_MACHINE_VERSION
 
@@ -1347,7 +1377,7 @@ def journal(
             raise typer.Exit(refuse(exc)) from exc
         catalog = configuration.catalog
         if supplied is not None:
-            if catalog_hash(supplied) != configuration.catalog_hash:
+            if catalog_hash_v2(supplied) != configuration.catalog_hash:
                 raise typer.Exit(
                     refuse(
                         "catalog hash mismatch: the estate differs from the one this"

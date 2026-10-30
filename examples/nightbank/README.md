@@ -42,6 +42,9 @@ builds one for a chosen UTC anchor.
   (bank targets are per-asset-class names that only exist there).
 - `estate/<profile>/estate.toml` — the estate's manifest (DL-407): its
   files in catalog order, its timezone and its environments.
+- `deploy/dsl41-engine.service` — one systemd unit for the engine: `run`
+  resumes the root it names, and the unit's stop is the engine's drain
+  (`dsl41 engine stop --wait`).
 
 ## Notes
 
