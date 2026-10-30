@@ -29,7 +29,7 @@ from dsl41.oracle_state import (
     RUNTIME_ASSEMBLY,
     AssemblyPhase,
     CarriedRows,
-    HostRuntime,
+    GlobalRuntime,
     OracleError,
     RuntimeState,
 )
@@ -517,22 +517,20 @@ def test_a_fork_keeps_the_source_s_phase_in_its_own_executor() -> None:
 def test_an_install_rebuilds_the_executor_from_the_phase_and_the_carried_rows() -> None:
     store = RuntimeState()
     machines = store.machines
-    store.install(CarriedRows(hosts={"h": HostRuntime(state="passive")}, period_id=2))
+    store.install(CarriedRows(globals_={"G": GlobalRuntime(value="v")}, period_id=2))
     assert store.machines is not machines
     assert store._phase == "installed"
     assert store.machines.active(ASSEMBLY_KEY) == {"runtime_assembly", "unbuilt", "installed"}
-    assert store.machines.active(store.host_key("h")) == {"host", "routed", "passive"}
+    assert store.global_value("G") == "v"
 
 
 @pytest.mark.parametrize("phase", ["installed", "genesis_input", "input", "live"])
-def test_a_witness_rebuild_keeps_the_phase(phase: str) -> None:
+def test_a_rebuild_keeps_the_phase(phase: str) -> None:
     store = _built(phase)
-    store.register_host("h", deadman_s=60.0, at=T0)
     machines = store.machines
-    store.witness_host("h", state="quarantined", state_before_quarantine="active")
+    store.restore_instances()
     assert store.machines is not machines
     assert store._phase == phase
-    assert store.machines.active(store.host_key("h")) == {"host", "quarantined"}
     assert store.machines.active(ASSEMBLY_KEY) == {"runtime_assembly", GROUP[phase], phase}
 
 

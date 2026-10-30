@@ -289,8 +289,8 @@ def peer_principal(sock: socket_mod.socket) -> Principal | None:
 
 # --------------------------------------------------------------- verb table
 
-#: access-model ss10: the closed table, cmd -> required tier. `sendevent` and `host` are OPS
-#: whatever their verb; the dispatcher splits the verbs. A cmd absent here is denied.
+#: access-model ss10: the closed table, cmd -> required tier. `sendevent` is OPS whatever its
+#: verb; the dispatcher splits the verbs. A cmd absent here is denied.
 REQUIRED_TIER: dict[str, Tier] = {
     "status": Tier.READ,
     "trace": Tier.READ,
@@ -301,10 +301,8 @@ REQUIRED_TIER: dict[str, Tier] = {
     "plan": Tier.READ,
     "global": Tier.READ,
     "globals": Tier.READ,
-    "hosts": Tier.READ,
     "subscribe": Tier.READ,
     "sendevent": Tier.OPS,
-    "host": Tier.OPS,
 }
 
 

@@ -65,8 +65,7 @@ Its rules are in the SPAWN idempotency card (`spawn-idempotency.md`, retired in 
 
 Leadership decides which process may append to a run root's log and act on its estate, and it fences every later act of a process that lost it.
 It is a fence protocol, not a state machine.
-Its stored facts are the `leader` record in the ledger and the locks the process holds: the run root's `flock` and, where there is an anchor, the lineage anchor's.
-A lock is held for the process lifetime. `Fence.check` re-proves each one before an act by re-reading its file's inode, and a lost lock stops the process.
-The epoch is a counter, allocated by appending the `leader` record.
-None of these moves along transitions: a lock is held until the process stops, and the epoch only counts up.
-Its rules are in concurrency-model §1 (`concurrency-model.md`, retired in 2.0.0), §7 (`concurrency-model.md`, retired in 2.0.0) and period-model §2.4 (`period-model.md`, retired in 2.0.0), and `runner_ledger.py` implements them.
+Its one stored fact is the run root's `flock`, held for the process lifetime, with a note naming its holder.
+`LeaderLock.check` re-proves it before every append by re-reading the lock file's inode, and a lost lock stops the process.
+Nothing moves along transitions: the lock is held until the process stops.
+Its rules are in DL-99 and DL-101, and `runner_ledger.py` implements them.

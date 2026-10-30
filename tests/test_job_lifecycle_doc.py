@@ -12,7 +12,7 @@ import pytest
 
 from dsl41.job_chart import JOB
 from dsl41.machines import MACHINES
-from dsl41.runner_effects import EFFECT
+from dsl41.runner_admission import ADMISSION
 from dsl41.scan_chart import QUEUE_SCAN
 from dsl41.state_machine import COMPLETION, Branch, Choice, Region, Row, State, Statechart
 
@@ -276,14 +276,14 @@ def test_the_committed_charts_doc_is_the_rendering() -> None:
 
 
 def test_a_changed_chart_makes_the_charts_doc_stale() -> None:
-    dropped = replace(EFFECT, rows=EFFECT.rows[1:])
-    others = tuple(dropped if chart is EFFECT else chart for chart in rjl.OTHERS)
+    dropped = replace(ADMISSION, rows=ADMISSION.rows[1:])
+    others = tuple(dropped if chart is ADMISSION else chart for chart in rjl.OTHERS)
     assert not rjl.charts_current(REPO_ROOT, others)
 
 
 def test_the_charts_doc_has_a_section_per_other_chart_in_registry_order() -> None:
     names = [chart.name for chart in MACHINES if chart.name != "job"]
-    assert len(names) == 6 and "queue_scan" in names
+    assert len(names) == 4 and "queue_scan" in names
     sections = [line[3:] for line in rjl.render_charts().splitlines() if line.startswith("## ")]
     assert sections == names
 
@@ -309,28 +309,27 @@ def test_a_note_naming_any_row_id_is_dropped() -> None:
     for note in (
         "see job.196",
         "the cleanup of .10, then exit",
-        "as host.11 does",
+        "as admission.11 does",
         "See job.196. Then it ends",
         "as .10. Then",
     ):
-        assert rjl._note(Row("effect.99", "pending", "x", note=note)) == ""
+        assert rjl._note(Row("admission.99", "admitted", "x", note=note)) == ""
     for note in ("a 0.5 second wait", "version 1.10", "keep going"):
-        assert rjl._note(Row("effect.99", "pending", "x", note=note)) == note
+        assert rjl._note(Row("admission.99", "admitted", "x", note=note)) == note
 
 
-def test_the_effect_view_is_pinned() -> None:
-    assert rjl.section(EFFECT) == [
-        "## effect",
+def test_the_admission_view_is_pinned() -> None:
+    assert rjl.section(ADMISSION) == [
+        "## admission",
         "",
-        "Shown: 3. Folded: 0. Rows in the chart: 3.",
+        "Shown: 2. Folded: 2 (refusals 1, internal 1). Rows in the chart: 4.",
         "",
-        "### outcome",
+        "### window",
         "",
         "```text",
-        "pending <- initial",
-        "applied = pending + resolve [applied]",
-        "retired = pending + resolve [retired]",
-        "indeterminate = pending + resolve [indeterminate]",
+        "admitted <- initial",
+        "applied = admitted + decide [applied] // The decision line",
+        "rejected = admitted + decide [rejected] // The decision line, with its stored code",
         "```",
     ]
 
@@ -451,11 +450,11 @@ def test_a_spec_only_mark_is_printed_when_the_note_does_not_fit() -> None:
 
 
 def test_the_chart_option_prints_one_view(capsys: pytest.CaptureFixture[str]) -> None:
-    assert rjl.main(["--chart", "effect"]) == 0
-    assert capsys.readouterr().out == "\n".join(rjl.section(EFFECT)) + "\n"
-    assert rjl.main(["--chart", "host", "--full"]) == 0
+    assert rjl.main(["--chart", "admission"]) == 0
+    assert capsys.readouterr().out == "\n".join(rjl.section(ADMISSION)) + "\n"
+    assert rjl.main(["--chart", "admission", "--full"]) == 0
     full = capsys.readouterr().out
-    assert "### Ignored" in full and "### Refusals" in full
+    assert "### Internal" in full and "### Refusals" in full
     # a kind with no rows has no heading
-    assert rjl.main(["--chart", "effect", "--full"]) == 0
+    assert rjl.main(["--chart", "subscription", "--full"]) == 0
     assert "### Refusals" not in capsys.readouterr().out

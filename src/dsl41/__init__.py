@@ -23,7 +23,7 @@ docs/runner-design.md ss14):
   placeholders - non-core `~{$NAME}~` estate templating preprocessor behind
                the `resolve` verb; nothing in the core imports it (DL-19)
   cli        - typer entry points (lint/equiv/viz/decompile/build/folds/minify/
-               resolve/journal/runs/run/rehearse/sendevent/query/host/ui/serve)
+               resolve/journal/runs/run/rehearse/sendevent/query/ui/serve)
   __init__   - this map, and nothing else: the package exports no names
   __main__   - `python -m dsl41`; `serve` spawns each session through it
   runner     - phase-11 engine loop over the oracle: the single-writer loop,
@@ -35,9 +35,10 @@ docs/runner-design.md ss14):
                ss7 spool ladder
   runner_admission - the frozen admission order (concurrency-model ss4):
                Attempt/ApplyResult, the typed Frontiers, the DecisionIndex,
-               the fingerprint, and the gate as a pure function; plus the
-               ss6 envelope and the ss0 mandate that a mutation names the
-               revision it was composed against (parse_envelope)
+               the fingerprint, the gate and the dispatch plan as pure
+               functions; plus the ss6 envelope and the ss0 mandate that a
+               mutation names the revision it was composed against
+               (parse_envelope)
   run_root   - a run root's identity and layout: catalog_hash v2,
                source_bundle_hash and the bundle it addresses, RuntimeProfile +
                runtime_hash, the staged and committed manifests, the `segment`

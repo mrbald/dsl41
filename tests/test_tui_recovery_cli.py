@@ -42,7 +42,6 @@ def test_tui_recovery_command_reconstructs_the_complete_envelope(
         key=key,
         revision=17,
         baseline_id="original ' period",
-        epoch=4,
         request_id="request ' one",
         claimed_actor="original user@host",
     )
@@ -54,7 +53,6 @@ def test_tui_recovery_command_reconstructs_the_complete_envelope(
         lambda *_: {
             "ok": True,
             "baseline_id": "different",
-            "epoch": 99,
             "jobs": {"target": {"state_rev": 333}},
             "globals": {"FLAG": {"value": "new", "state_rev": 333}},
         },
@@ -91,7 +89,6 @@ def test_recovery_pins_the_socket_directory_and_backing_runtime(
         key="job:j",
         revision=1,
         baseline_id="p",
-        epoch=1,
         claimed_actor="operator@synthetic",
     )
     args = shlex.split(recovery_command(Path("control.sock"), envelope))
@@ -141,11 +138,11 @@ def test_destructive_confirmation_requires_readable_frozen_pins(
 
 
 @pytest.mark.parametrize("actor", ["original user@host", ""])
-def test_host_recovery_actor_pin_is_metadata_and_preserves_an_empty_claim(
+def test_recovery_actor_pin_is_metadata_and_preserves_an_empty_claim(
     actor: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sent: list[dict[str, Any]] = []
-    monkeypatch.setattr(cli_control, "_pinned_read", lambda *_: ("period", 2, 7))
+    monkeypatch.setattr(cli_control, "_pinned_read", lambda *_: ("period", 7))
 
     def capture(_socket: Path, request: dict[str, Any]) -> None:
         sent.append(request)
@@ -153,7 +150,8 @@ def test_host_recovery_actor_pin_is_metadata_and_preserves_an_empty_claim(
 
     monkeypatch.setattr(cli_control, "_mutate", capture)
     result = CliRunner().invoke(
-        cli_app, ["host", "drain", "host1", "--socket", "/unused", "--claimed-actor", actor]
+        cli_app,
+        ["sendevent", "ON_HOLD", "--job", "j", "--socket", "/unused", "--claimed-actor", actor],
     )
     assert result.exit_code == 0, result.output
     assert sent[0]["claimed_actor"] == actor
@@ -303,7 +301,6 @@ def test_cli_before_write_and_unknown_advice_include_the_original_actor(
         key="job:j",
         revision=3,
         baseline_id="p",
-        epoch=2,
         request_id="r",
         claimed_actor="operator ' one",
     )

@@ -1,9 +1,9 @@
 """`Executor.resolve`, the read of the selection (docs/statechart-engine.md §5, DL-335).
 
 It never mutates an instance, the history ring or the hits, and it agrees with
-the first microstep of a dispatch on every cell of the assembly chart, on the
-host chart (guards, an ignored row, a choice) and on a small chart with a
-deferral and a re-armable time event.
+the first microstep of a dispatch on every cell of the assembly chart, on a
+small chart with guards, an ignored row, a refusal and a choice, and on a small
+chart with a deferral and a re-armable time event.
 """
 
 from __future__ import annotations
@@ -16,19 +16,14 @@ from typing import Any
 import pytest
 import statechart_completeness as sc
 from test_assembly_chart import ABSTRACTION as ASSEMBLY
-from test_host_chart import ABSTRACTION as HOST_WITNESSES
 
-from dsl41.oracle_state import (
-    FORCE_EVICT,
-    HOST,
-    REGISTER,
-    RUNTIME_ASSEMBLY,
-    HostData,
-    RuntimeState,
-)
+from dsl41.oracle_state import RUNTIME_ASSEMBLY
 from dsl41.state_machine import (
     HITS_ENV,
     AmbiguousTransition,
+    Branch,
+    Choice,
+    Context,
     Executor,
     Region,
     Row,
@@ -70,23 +65,93 @@ def test_it_agrees_with_dispatch_on_every_cell_of_the_assembly_chart() -> None:
     assert _agrees(RUNTIME_ASSEMBLY, ASSEMBLY) == 40
 
 
-def test_it_agrees_with_dispatch_on_the_host_chart() -> None:
-    """Guards (`not_evicted`, `remembered_passive`), an ignored row and a choice:
-    a choice's branches are the one thing a read does not name."""
-    assert _agrees(HOST, HOST_WITNESSES) == 34
+# ---- a small chart: guards, an ignored row, a refusal and a choice
+
+
+def _remembered(ctx: Context) -> bool:
+    """The instance's data remembers `passive`."""
+    return bool(ctx.data == "passive")
+
+
+def _forced(ctx: Context) -> bool:
+    """The event carries a payload."""
+    return ctx.event.payload is not None
+
+
+def _plain(ctx: Context) -> bool:
+    """The event carries no payload."""
+    return ctx.event.payload is None
+
+
+_GATE = Statechart(
+    name="gate",
+    root=State(
+        "gate",
+        regions=(
+            Region(
+                "r",
+                "active",
+                (State("active"), State("passive"), State("parked"), State("gone")),
+            ),
+        ),
+    ),
+    rows=(
+        Row("gate.01", "active", "park", "parked"),
+        Row("gate.02", "passive", "park", "parked"),
+        Row("gate.03", "parked", "back", "remembered"),
+        Row("gate.04", "parked", "go", "gone", guard="plain"),
+        Row("gate.05", "parked", "go", "gone", guard="forced"),
+        Row("gate.06", "active", "go", kind="refusal", code="gate_not_parked"),
+        Row("gate.07", "passive", "go", kind="refusal", code="gate_not_parked"),
+        Row("gate.08", "gone", "go", kind="refusal", code="gate_gone"),
+        Row("gate.09", "gate", "hello", kind="ignored"),
+        Row("gate.10", "active", "back", kind="internal"),
+        Row("gate.11", "passive", "back", kind="internal"),
+        Row("gate.12", "gone", "back", kind="refusal", code="gate_gone"),
+        Row("gate.13", "gone", "park", kind="refusal", code="gate_gone"),
+        Row("gate.14", "parked", "park", kind="internal"),
+    ),
+    choices=(
+        Choice(
+            "remembered",
+            (Branch("gate.15", "passive", guard="remembered"), Branch("gate.16", "active")),
+        ),
+    ),
+    guards={"remembered": _remembered, "forced": _forced, "plain": _plain},
+    clock="logical",
+)
+
+
+def _gate_at(state: str, data: object = None) -> tuple[Executor, str]:
+    executor = Executor()
+    executor.restore("g", _GATE, {"gate", state}, data)
+    return executor, "g"
+
+
+_GATE_WITNESSES = sc.Abstraction(
+    witnesses={
+        "active": lambda: _gate_at("active"),
+        "passive": lambda: _gate_at("passive"),
+        "parked": lambda: _gate_at("parked", "passive"),
+        "parked-active": lambda: _gate_at("parked", "active"),
+        "gone": lambda: _gate_at("gone"),
+    }
+)
+
+
+def test_it_agrees_with_dispatch_on_a_chart_with_guards_and_a_choice() -> None:
+    """Guards, an ignored row, refusals and a choice: a choice's branches are
+    the one thing a read does not name."""
+    assert _agrees(_GATE, _GATE_WITNESSES) == 20
 
 
 def test_it_names_no_branch() -> None:
     """A choice resolves as its row runs: the read names the row, not the branch."""
-    store = RuntimeState()
-    store.begin_input()
-    store.register_host("h", deadman_s=60.0, at=None)
-    store.witness_host("h", state="quarantined", state_before_quarantine="passive")
-    key = store.host_key("h")
-    read = store.machines.resolve(key, ChartEvent("reinstate"))
-    assert (read.rows, read.branches) == (("host.07",), ())
-    assert store.machines.active(key) == {"host", "quarantined"}
-    assert store.machines.data(key) == HostData(store, "h")
+    executor, key = _gate_at("parked", "passive")
+    read = executor.resolve(key, ChartEvent("back"))
+    assert (read.rows, read.branches) == (("gate.03",), ())
+    assert executor.active(key) == {"gate", "parked"}
+    assert executor.data(key) == "passive"
 
 
 def test_it_records_no_hit_and_no_ring_entry(
@@ -95,39 +160,30 @@ def test_it_records_no_hit_and_no_ring_entry(
     directory = tmp_path / "hits"
     directory.mkdir()
     monkeypatch.setenv(HITS_ENV, str(directory))
-    store = RuntimeState()
-    store.begin_input()
-    store.register_host("h", deadman_s=60.0, at=None)  # a guardless dispatch
-    store.commit_input()
+    executor, key = _gate_at("parked", "passive")
     for path in directory.glob("hits-*.jsonl"):
         path.unlink()
-    key = store.host_key("h")
-    ring = list(store.machines._recent["host"])
-    for event in alphabet(HOST):
-        store.machines.resolve(key, ChartEvent(event))  # force_evict's guard runs
+    ring = list(executor._recent.get("gate", ()))
+    for event in alphabet(_GATE):
+        executor.resolve(key, ChartEvent(event, "someone"))  # `forced`'s guard runs
     assert list(directory.glob("hits-*.jsonl")) == []
-    assert list(store.machines._recent["host"]) == ring
-    store.machines.dispatch(key, ChartEvent(FORCE_EVICT))
+    assert list(executor._recent.get("gate", ())) == ring
+    executor.dispatch(key, ChartEvent("go", "someone"))
     kinds = {
         (r["kind"], r["id"])
         for path in directory.glob("hits-*.jsonl")
         for r in map(json.loads, path.read_text().splitlines())
     }
-    assert ("guard", "host.11") in {(k, i) for k, i in kinds}  # a dispatch does record it
+    assert ("guard", "gate.05") in kinds  # a dispatch does record it
 
 
 def test_a_scratch_instance_of_a_chart_with_guards() -> None:
-    """The host chart through a scratch instance, as a tier's gate would build it."""
-    scratch = Executor()
-    store = RuntimeState()
-    store.begin_input()
-    store.register_host("h", deadman_s=60.0, at=None)
-    key = store.host_key("h")
-    scratch.restore(key, HOST, {"host", "evicted"}, HostData(store, "h"))
-    assert scratch.resolve(key, ChartEvent(FORCE_EVICT)).refusals == ("host_already_evicted",)
-    assert scratch.active(key) == {"host", "evicted"}
-    scratch.restore("other", HOST, {"host", "routed", "active"}, HostData(store, "h"))
-    assert scratch.resolve("other", ChartEvent(REGISTER)).ignored == ("host.22",)
+    """A chart through a scratch instance, as a tier's gate would build it."""
+    scratch, key = _gate_at("gone")
+    assert scratch.resolve(key, ChartEvent("go", "someone")).refusals == ("gate_gone",)
+    assert scratch.active(key) == {"gate", "gone"}
+    scratch.restore("other", _GATE, {"gate", "active"}, None)
+    assert scratch.resolve("other", ChartEvent("hello")).ignored == ("gate.09",)
 
 
 # ---- a small chart: an action, deferral, a re-armable time event, and the errors

@@ -1,24 +1,15 @@
-"""Leadership over one run root (concurrency-model ss1/ss7, stage S6a).
-
-Three of ss1's five ledger capabilities live here: monotone epoch allocation, the
-linearizable read of the leader record, and the mutex both rest on. The other two landed with
-S2: decision lookup by `request_id` is the `DecisionIndex`; atomic multi-record commit is the
-one-line attempt record.
+"""One engine per run root: the `leader.lock` mutex and the log's version pins.
 
 The mutex is an `flock` held for the process lifetime. It is not a lease: the kernel releases
 it when the holder dies, `kill -9` included, so nothing decides whether the previous holder is
 alive. It is taken before the log is read and before the first side effect (`resume_run`
-replays, reconciles, re-drives recorded kills and appends), because a mutex taken after an act
-on the estate is not a mutex (DL-99).
+replays, reconciles and appends), because a mutex taken after an act on the estate is not a
+mutex (DL-99).
 
-The leader record lives in the ledger: the epoch is allocated by appending it, so the
-allocation and the log's account of it cannot disagree. The lock file carries the holder's
-identity so a refusal can name it; the note is diagnostic, never the fence, because a note can
-be stale and a held lock cannot.
+The lock file carries the holder's identity so a refusal can name it; the note is diagnostic,
+never the fence, because a note can be stale and a held lock cannot.
 
-Limit: a flock'd file with fsync provides the three rows for one host and none across hosts,
-and on NFS it provides none. The relay DL-97 defers waits on a Postgres-class store; this module
-gives it a fencing token that moves.
+Limit: a flock'd file serves one host, and on NFS it serves none.
 """
 
 from __future__ import annotations
@@ -126,8 +117,8 @@ LOCK_NAME = "leader.lock"
 class Proof(Protocol):
     """What an appender re-proves before it writes, and drops when it stops.
 
-    `Journal` and the adapters hold a `Proof`, never a `LeaderLock`: an appender proves two
-    things (period-model ss1.3), that it leads this run root and that it leads the lineage."""
+    `Journal` and the adapters hold a `Proof`, never a `LeaderLock`: an appender proves that it
+    still holds this run root's lock."""
 
     def check(self) -> None: ...
 
@@ -137,14 +128,10 @@ class Proof(Protocol):
 class LeaderLock:
     """One directory's mutex, held for the process lifetime.
 
-    `acquire` is ss7's ACQUIRE: exclusive, non-blocking, held or refused with the holder named.
-    `check` re-reads the proof (S6b): a replaced lock file leaves this process holding a lock
-    on an unlinked inode while another holds the name, and ss7's "losing proof stops dispatch"
-    needs that noticed.
-
-    The lineage lock is this pattern on the anchor directory (DL-133, period-model ss15's
-    row), because a bare `O_EXCL` does not solve replacement and lifetime. Only the file name
-    and the noun in the refusal differ; the run-root spelling is the default."""
+    `acquire` is exclusive and non-blocking: held, or refused with the holder named. `check`
+    re-reads the proof (S6b): a replaced lock file leaves this process holding a lock on an
+    unlinked inode while another holds the name, and losing the proof must stop the next
+    append."""
 
     def __init__(
         self,
@@ -175,12 +162,12 @@ class LeaderLock:
                 ) from exc
             raise EngineError(
                 f"{self.path.parent} is held by another {self.held_by} ({self._holder()}):"
-                f" one leader per {self.of} (concurrency-model ss7)"
+                f" one engine per {self.of} (DL-99)"
             ) from exc
         self._fd, self._ino = fd, os.fstat(fd).st_ino
 
-    def note(self, *, epoch: int, at: datetime) -> None:
-        """Record who holds this term, for another process's refusal text."""
+    def note(self, *, at: datetime) -> None:
+        """Record who holds the lock, for another process's refusal text."""
         if self._fd is None:
             raise EngineError(f"{self.path}: not held")
         # plain json.dumps, not canon.canonical_bytes: the blob feeds `_holder()` only and is
@@ -189,7 +176,6 @@ class LeaderLock:
             {
                 "pid": os.getpid(),
                 "host": socket.gethostname(),
-                "epoch": epoch,
                 "since": at.isoformat(),
             },
             sort_keys=True,
@@ -207,13 +193,11 @@ class LeaderLock:
         except FileNotFoundError as exc:
             raise EngineError(
                 f"{self.path} was deleted: this {self.held_by} can no longer prove it leads"
-                f" this {self.of}, and another may already have claimed it"
-                " (concurrency-model ss7)"
+                f" this {self.of}, and another may already have claimed it (DL-101)"
             ) from exc
         if current != self._ino:
             raise EngineError(
-                f"{self.path} was replaced: another {self.held_by} may hold this {self.of}"
-                " (concurrency-model ss7)"
+                f"{self.path} was replaced: another {self.held_by} may hold this {self.of} (DL-101)"
             )
 
     def release(self) -> None:
@@ -231,49 +215,21 @@ class LeaderLock:
             return "holder unknown"
         if not isinstance(note, dict):
             return "holder unknown"
-        pid, host = note.get("pid"), note.get("host")
-        epoch, since = note.get("epoch"), note.get("since")
-        return f"pid {pid} on {host}, epoch {epoch}, since {since}"
+        pid, host, since = note.get("pid"), note.get("host"), note.get("since")
+        return f"pid {pid} on {host}, since {since}"
 
 
 def acquire_run_root(run_root: Path) -> LeaderLock:
-    """Take leadership of `run_root` before touching anything in it.
+    """Take `run_root`'s lock before touching anything in it.
 
-    For a caller whose first act is not opening the log, such as `dsl41 run --detached`, which
-    starts a supervisor. The engine's own entry points acquire when no caller has."""
+    For a caller whose first act is not opening the log. The engine's own entry points acquire
+    when no caller has."""
     # every entry down to the run root is durable, so a power cut cannot lose the directory;
     # unconditional, so a retry after a failed fsync repairs it (mkdir_durable's contract)
     mkdir_durable(str(run_root))
     lock = LeaderLock(run_root)
     lock.acquire()
     return lock
-
-
-class Fence:
-    """Every proof this process holds, re-proved together (period-model ss1.3).
-
-    An appender leads this run root and the lineage the anchor names. Deleting or replacing
-    either directory stops the incumbent on its next act (DL-101); that records a divergence
-    and does not un-run what happened. A root with no anchor holds a fence of one lock."""
-
-    def __init__(self, *locks: LeaderLock) -> None:
-        self.locks = locks
-
-    def check(self) -> None:
-        for lock in self.locks:
-            lock.check()
-
-    def release(self) -> None:
-        for lock in self.locks:
-            lock.release()
-
-
-def next_epoch(records: list[dict[str, Any]]) -> int:
-    """ss1's monotone allocation: one past the highest term the log records, read under the lock.
-
-    A journal with no `leader` record (S6a) gets term 1, as a fresh run root does."""
-    terms = [int(r["epoch"]) for r in records if r.get("rec") == "leader" and "epoch" in r]
-    return max(terms, default=0) + 1
 
 
 @overload

@@ -2265,14 +2265,21 @@ def _assert_ignored(o: Oracle | EngineHarness, kind: EventKind, job: str, at: fl
     no effect is planned."""
     row = o.store.job[job]
     trace_len = len(o.trace())
-    effects = len(list(o.engine.outbox.effects())) if isinstance(o, EngineHarness) else 0
+    effects = _dispatch_state(o)
     o.feed(ev(kind, at, job=job))
     assert o.store.job[job] == row
     added = o.trace()[trace_len:]
     assert [(t.job, t.transition) for t in added] == [(job, "EVENT_IGNORED")]
     assert added[0].cause.startswith(f"sendevent {kind} ignored")
-    if isinstance(o, EngineHarness):
-        assert len(list(o.engine.outbox.effects())) == effects
+    assert _dispatch_state(o) == effects
+
+
+def _dispatch_state(o: Oracle | EngineHarness) -> object:
+    """What the engine path has dispatched: the runs it started and the jobs it holds live. The
+    oracle path dispatches nothing."""
+    if not isinstance(o, EngineHarness):
+        return None
+    return dict(o.engine._dispatched), o.engine.live_jobs()
 
 
 def _complete_with_failure_254(o: Oracle | EngineHarness, shape: str, at: float) -> None:
@@ -4015,7 +4022,7 @@ def _assert_out_of_the_queue(o: Oracle | EngineHarness, status: str) -> None:
     assert "QUE_WAIT->INACTIVE" in transitions(o, "q254")
     assert o.store.job["h254"].status == "RUNNING"  # still holds the lock
     if isinstance(o, EngineHarness):
-        assert [e.job for e in o.engine.outbox.effects() if e.kind == "SPAWN"] == ["h254"]
+        assert set(o.engine._dispatched) == {"h254"}
 
 
 def test_sem22_on_noexec_on_a_queued_job_takes_it_out_of_the_queue() -> None:
@@ -4227,7 +4234,7 @@ def test_sem22_on_noexec_on_a_box_cascades_inactive_and_flags_every_level() -> N
         "INACTIVE",
     ]
     o.feed(ev("STATUS", 4, job="ib255", status="SUCCESS"))
-    effects = len(list(o.engine.outbox.effects())) if isinstance(o, EngineHarness) else 0
+    effects = _dispatch_state(o)
     o.feed(ev("ON_NOEXEC", 5, job="ob255"))
     tree = ("ob255", "m255", "ib255", "g255", "k255")
     assert _status(o, *tree) == ["INACTIVE"] * 5
@@ -4235,8 +4242,7 @@ def test_sem22_on_noexec_on_a_box_cascades_inactive_and_flags_every_level() -> N
     assert not o.store.job["k255"].on_hold
     assert o.store.job["m255"].exit_code is None
     assert o.store.job["wf255"].status == "RUNNING"  # woke on the real FAILURE earlier
-    if isinstance(o, EngineHarness):
-        assert len(list(o.engine.outbox.effects())) == effects
+    assert _dispatch_state(o) == effects
     o.feed(ev("STARTJOB", 6, job="ob255"))  # the dry run: every member bypasses
     assert [transitions(o, j)[-1] for j in ("m255", "g255", "k255")] == ["INACTIVE->SUCCESS"] * 3
 
@@ -7660,7 +7666,7 @@ def test_sem18_box_set_inactive_cascades_to_members() -> None:
     contains to INACTIVE." The cascade runs top-down -- the box, then a
     subbox before its own member -- and marks nothing resolved. On the
     engine path the live members plan no KILL (DL-235); their processes run
-    on in the shell. The orphan's later exit is pinned in test_effects.py
+    on in the shell. The orphan's later exit is pinned in test_dispatch.py
     (`test_a_box_set_inactive_cascades_without_a_kill_and_its_orphans_exit_is_rejected`)."""
     text = (
         "insert_job: ob18\njob_type: b\n\n"
@@ -7680,8 +7686,7 @@ def test_sem18_box_set_inactive_cascades_to_members() -> None:
     assert cascade[0].cause == "injected STATUS"
     assert all(t.cause.startswith("box 'ob18' set INACTIVE") for t in cascade[1:])
     if isinstance(o, EngineHarness):
-        assert all(e.kind != "KILL" for e in o.engine.outbox.effects())
-        assert o.engine.live_jobs() == {"m18", "g18"}
+        assert o.engine.live_jobs() == {"m18", "g18"}  # no kill: the processes run on
 
 
 @pytest.mark.parametrize("subbox_first", [False, True], ids=["m1-first", "subbox-first"])

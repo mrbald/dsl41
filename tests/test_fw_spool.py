@@ -75,12 +75,11 @@ def _rewrite_journal(run_root: Path, records: list[dict]) -> None:
 
 
 def _spawn_effect(records: list[dict]) -> dict:
+    """The `dispatch` record of w's start, which binds its run_id (DL-118)."""
     for record in records:
-        if record.get("rec") == "decision":
-            for effect in record.get("effects", []):
-                if effect["kind"] == "SPAWN" and effect["job"] == "w":
-                    return effect
-    raise AssertionError("no SPAWN effect for w in the journal")
+        if record.get("rec") == "dispatch" and record["job"] == "w":
+            return record
+    raise AssertionError("no dispatch record for w in the journal")
 
 
 # ------------------------------------------------------------- the poll phase
@@ -152,8 +151,8 @@ def test_pr34_the_start_line_is_the_first_durable_act_and_carries_the_effects_ru
 ) -> None:
     """A dispatched watch always has `watch_seq >= 1` (a watch not yet
     dispatched is a `pending_spawn`, not an `fw_watch`), and the identity on
-    the line is the one the DECISION minted -- one key through the WAL and
-    the spool (DL-118)."""
+    the line is the one the `dispatch` record bound -- one key through the WAL
+    and the spool (DL-118)."""
     run_root = tmp_path / "run"
 
     async def scenario() -> None:
@@ -278,15 +277,10 @@ def test_pr34_a_torn_final_line_truncates_on_open(tmp_path: Path) -> None:
 # ------------------------------------------------- the ss11 ladder's FW rules
 
 
-def test_pr34_a_start_line_resolves_a_pending_spawn(tmp_path: Path) -> None:
-    """ss11's ladder gains the rule: a pending FW SPAWN whose run directory
-    holds a `start` line carrying the effect's run_id is APPLIED by that line.
-
-    The window is real -- the decision commits, the adapter appends `start`,
-    the engine dies before `effect_result{applied}` -- and without the rule
-    the ladder treats the pending SPAWN as an applied-SPAWN candidate, looks
-    for `spawn.json`, finds none, and re-launches the watch as an untraced
-    start: two `start` lines and a fold nothing can reproduce."""
+def test_pr34_a_start_line_resumes_the_watch_without_a_second_one(tmp_path: Path) -> None:
+    """ss11's ladder: a dispatched watch whose run directory holds a `start` line carrying
+    the dispatch record's run_id is resumed from that log. The adapter reconstructs its
+    progress and appends no second `start` line, so the fold stays one watch."""
     watch_file = tmp_path / "watched"
     run_root = tmp_path / "run"
 
@@ -296,31 +290,22 @@ def test_pr34_a_start_line_resolves_a_pending_spawn(tmp_path: Path) -> None:
         await _close(engine)
 
     asyncio.run(first())
-    records = _journal_records(run_root)
-    effect = _spawn_effect(records)
-    # the crash: the decision and the start line are durable, the outcome is not
-    _rewrite_journal(
-        run_root,
-        [r for r in records if r.get("effect_id") != effect["effect_id"]],
-    )
+    effect = _spawn_effect(_journal_records(run_root))
 
-    async def second():
+    async def second() -> None:
         engine = await resume_run(
             _catalog(watch_file),
             run_root,
             clock=VirtualClock(start=T0),
             adapters={"FW": FileWatcherAdapter()},
         )
-        state = engine.outbox.state_of(effect["effect_id"])
-        outcome = engine.outbox.result_for(effect["effect_id"])
+        await engine.run_until_quiescent(T0)
         await _close(engine)
-        return state, outcome
 
-    state, outcome = asyncio.run(second())
-    assert state == "applied"
-    assert outcome.run_id == effect["run_id"]
-    assert "watch log" in (outcome.detail or "")
-    assert [r["kind"] for r in _lines(run_root)].count("start") == 1
+    asyncio.run(second())
+    lines = _lines(run_root)
+    assert [r["kind"] for r in lines].count("start") == 1
+    assert all(r["run_id"] == effect["run_id"] for r in lines)
 
 
 def test_pr34a_a_completing_poll_then_a_crash_injects_the_completion_from_the_log(
@@ -445,8 +430,8 @@ def test_pr34_a_run_directory_with_no_log_is_re_dispatched_under_the_bound_id(
     tmp_path: Path,
 ) -> None:
     """The one FW case with no log to reconstruct from: the directory was
-    made and the crash landed before the `start` line. The re-dispatch has no
-    effect behind it, so without the bound id riding along it would write
+    made and the crash landed before the `start` line. The re-dispatch writes
+    no second `dispatch` record, so without the bound id riding along it would write
     `run_id: null` -- and the next resume would meet a spool naming no run
     while the WAL names one, which is the split DL-118 refuses."""
     run_root = tmp_path / "run"
@@ -526,7 +511,7 @@ def test_resume_watch_falls_back_to_the_conventional_run_dir_when_none_is_named(
         )
     last_at = T0 + timedelta(seconds=120)
 
-    _resume_watch(engine, job_ir, 1, None, T0)  # run_dir=None: must fall back
+    _resume_watch(engine, job_ir, 1, None, T0, None)  # run_dir=None: must fall back
     assert engine.journal is not None
     engine.journal.close()  # the assertions read the queue, not the log
 

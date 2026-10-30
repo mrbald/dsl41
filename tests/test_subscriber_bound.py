@@ -577,10 +577,10 @@ class _FakeEngine:
 # ---------------------------------------------- one command at the line limit
 
 
-def _limit_request(read: tuple[str, int, int], char: str) -> bytes:
+def _limit_request(read: tuple[str, int], char: str) -> bytes:
     """A SET_GLOBAL request line of exactly LINE_LIMIT bytes before its
     newline, its value made of `char`, sent as raw UTF-8."""
-    baseline, epoch, revision = read
+    baseline, revision = read
 
     def line(value: str) -> bytes:
         request = command(
@@ -589,7 +589,6 @@ def _limit_request(read: tuple[str, int, int], char: str) -> bytes:
             key="global:SB_LIMIT",
             revision=revision,
             baseline_id=baseline,
-            epoch=epoch,
             request_id="r-limit",
         )
         request["v"] = PROTOCOL_VERSION
@@ -681,9 +680,7 @@ def test_dl267_queued_commands_keep_a_reading_subscriber_within_the_bound(
                         kind="SET_GLOBAL",
                         payload={"name": f"SB_Q{n}", "value": value},
                     ),
-                    Envelope(
-                        request_id=f"r-q{n}", expect={f"global:SB_Q{n}": 0}, epoch=engine.epoch
-                    ),
+                    Envelope(request_id=f"r-q{n}", expect={f"global:SB_Q{n}": 0}),
                 )
                 for n in range(24)  # about six times the budget, queued at once
             ]

@@ -81,10 +81,10 @@ Engine:
   picks its next act.
 - [Admission and idempotency](admission.md): one ordered path from arrival
   to a durable decision.
-- [Effect outbox](effect-outbox.md): SPAWN and KILL intent recorded before
-  the attempt, then dispatched or reconciled.
-- [Host routing](host-routing.md): the routing table's four states, drain,
-  quarantine and eviction.
+- Effect outbox (`effect-outbox.md`, retired in 2.0.0): SPAWN and KILL
+  intent recorded before the attempt.
+- Host routing (`host-routing.md`, retired in 2.0.0): the routing table's
+  four states, drain, quarantine and eviction.
 - [Control subscription](subscription.md): one `subscribe` feed, from its
   backfill to its end.
 - Seal and lineage (`seal-and-lineage.md`, retired in 2.0.0): the anchor head, the period
@@ -111,8 +111,8 @@ that explains it.
 | supervisor_process (retired in 2.0.0) | Supervisor (`supervisor.md`, retired in 2.0.0) |
 | supervisor_lease (retired in 2.0.0) | Supervisor (`supervisor.md`, retired in 2.0.0) |
 | supervisor_client (retired in 2.0.0) | Supervisor (`supervisor.md`, retired in 2.0.0) |
-| [host](../state-machines.md#host) | [Host routing](host-routing.md) |
+| host (retired in 2.0.0) | Host routing (`host-routing.md`, retired in 2.0.0) |
 | [admission](../state-machines.md#admission) | [Admission](admission.md) |
-| [effect](../state-machines.md#effect) | [Effect outbox](effect-outbox.md) |
+| effect (retired in 2.0.0) | Effect outbox (`effect-outbox.md`, retired in 2.0.0) |
 | [subscription](../state-machines.md#subscription) | [Control subscription](subscription.md) |
 | seal_boundary (retired in 2.0.0) | Seal and lineage (`seal-and-lineage.md`, retired in 2.0.0) |

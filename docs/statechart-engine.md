@@ -139,7 +139,8 @@ A macrostep is iterative on one executor worklist and never recursive.
    Tests assert that the chain works and that the re-entrant call raises.
 5. Guards are pure. Actions change machine state and report intents. Each tier's durable
    protocol carries the intents out:
-   - the oracle's effects go through the outbox, after DL-320's dry apply on `Oracle.fork()`;
+   - the oracle's effects go through the decision record and then one `dispatch` record per
+     start, after DL-320's dry apply on `Oracle.fork()`;
    - the supervisor's go through its index, receipt, spawn and reply protocol;
    - the engine's go through the WAL decision.
 
@@ -647,19 +648,11 @@ a statechart error that a control handler meets stops the engine as one from the
 the engine and hands to both; the client posts nothing once closed, and a statechart error that
 its reader, renewal or LIST task meets stops the engine as one from the loop does.
 
-`effect` (DL-331) runs on the engine's executor, one instance per open effect from its record to
-its outcome; the outbox refuses a second outcome before any post, and a statechart error out of a
-record or an outcome stops the engine as one from the loop does, and in replay names the WAL
-record.
+`effect` (DL-331) is retired in 2.0.0: the engine dispatches a decided start behind its
+`dispatch` record and keeps no outbox.
 
-`host` (DL-333) is an oracle-tier machine. It runs on the state owner's executor, one
-instance per host row; the row's state is the instance's configuration. Each leaf's entry action
-reports the state write, and the moving rows' actions report the row's other writes; the initial
-entry reports nothing. The apply carries out the outcome's intents in order after the dispatch
-(DL-376). The gate reads the chart with `resolve` (§5) on the store's instance and keeps only the
-checks that read the input's own facts. The chart is dispatched on the store's executor only for
-an applied decision; the gate's read runs no action and moves nothing. A durable `applied` the
-chart refuses is a statechart error that names the WAL input.
+`host` (DL-333) is retired in 2.0.0: one engine runs every job on its own host, and the
+state owner's routing table stays empty.
 
 `admission` (DL-334) runs on the engine's executor, one instance per request id from its durable
 attempt to its durable decision; the decided state is final and forgotten, and the stored decision

@@ -63,7 +63,7 @@ flowchart TD
 
 ## Failure and recovery
 
-- The engine dies after the `start` line and before `effect_result{applied}`. Resume resolves the pending SPAWN by the line and rebuilds the watch from the log (PR-34a in period-model §13.6 (`period-model.md`, retired in 2.0.0)).
+- The engine dies after the `start` line. Resume relaunches the dispatched watch, which rebuilds its progress from the log and appends no second `start` line (PR-34a in period-model §13.6 (`period-model.md`, retired in 2.0.0)).
 - The engine dies after a completing poll and before the STATUS input is durable. `_resume_watch` injects the completion from the log (PR-34a).
 - A run directory exists with no `start` line. Resume dispatches the watch again under the bound `run_id`.
 - Leadership is lost. The fence check raises before the append, so no line lands (PR-03, cited in §3.5).
@@ -82,7 +82,7 @@ flowchart TD
 
 - The log: `test_pr34_the_start_line_is_the_first_durable_act_and_carries_the_effects_run_id`, `test_pr34_a_line_lands_for_every_poll_including_the_ones_that_changed_nothing`, `test_pr34_next_poll_at_is_start_at_then_poll_at_plus_interval`, `test_pr34_a_torn_final_line_truncates_on_open`, `test_pr34_a_complete_line_this_binary_cannot_read_is_refused_not_truncated`, `test_pr34_an_unversioned_line_is_unsupported_evidence`.
 - Identity: `test_pr34_a_poll_naming_another_run_never_completes_the_watch`, `test_pr34_a_recorded_count_the_observations_cannot_derive_refuses`, `test_pr34_the_adapter_refuses_to_adopt_a_strangers_watch`.
-- Resume: `test_pr34_a_start_line_resolves_a_pending_spawn`, `test_pr34_a_restart_between_the_two_qualifying_polls_completes_the_same_watch`, `test_pr34a_a_completing_poll_then_a_crash_injects_the_completion_from_the_log`, `test_dl258_an_immediate_qualifying_poll_then_a_crash_injects_from_the_log`, `test_pr34_a_run_directory_with_no_log_is_re_dispatched_under_the_bound_id`, `test_m4_resume_refuses_incomplete_fw_without_adapter`.
+- Resume: `test_pr34_a_start_line_resumes_the_watch_without_a_second_one`, `test_pr34_a_restart_between_the_two_qualifying_polls_completes_the_same_watch`, `test_pr34a_a_completing_poll_then_a_crash_injects_the_completion_from_the_log`, `test_dl258_an_immediate_qualifying_poll_then_a_crash_injects_from_the_log`, `test_pr34_a_run_directory_with_no_log_is_re_dispatched_under_the_bound_id`, `test_m4_resume_refuses_incomplete_fw_without_adapter`.
 - Completion rule: `test_fw_two_immediately_stable_polls_succeed`, `test_fw_existence_with_the_file_already_present`, `test_fw_existence_with_the_file_appearing_later`, `test_fw_existence_does_not_change_a_job_with_a_minimum_size`, `test_fw_existence_is_derived_from_the_wired_adapter_not_the_pin`.
 
 ## Open findings

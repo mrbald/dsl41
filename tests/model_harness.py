@@ -20,10 +20,9 @@ engine incarnation in an interleaving. The log outlives a crash on
 purpose: a resume-driven double spawn is invisible to any per-engine
 assertion, because each engine is individually correct.
 
-**What it does not check yet.** `state_rev`, admission, election and host
-eviction have no code (S1c/S2/S6/S8). The checkers are written against the
-frozen model rather than against today's engine, so those arrive as new
-rows here, not as a rewrite.
+**What it does not check.** `state_rev` and admission. The checkers are
+written against the model rather than against today's engine, so those
+arrive as new rows here, not as a rewrite.
 
 Not a test file: no test_ prefix. `tests/test_model_harness.py` drives it,
 and pins that the checkers can actually fail.
@@ -42,13 +41,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from dsl41.ir import CatalogIR, lower_source
-from dsl41.oracle_state import Event, RuntimeState
+from dsl41.oracle_state import Event
 from dsl41.run_root import active_wal, wal_path
 from dsl41.runner import Engine
 from dsl41.runner_adapters import AdapterContext, FakeAdapter
-from dsl41.runner_admission import Envelope
 from dsl41.runner_clock import VirtualClock
-from dsl41.runner_hosts import HostCommand
 from dsl41.runner_journal import read_journal
 from dsl41.runner_scheduler import Scheduler
 from dsl41.runner_startup import resume_run, start_run
@@ -291,19 +288,13 @@ class ModelRun:
     engine death mid-run, resume, duplicated and dropped completions.
 
     S7a (DL-108) added the rest of what one host can suffer, and a seed to
-    choose between them: leader failover at an arbitrary point, a spawn
-    decided and never acted on, duplicated and stale completions,
-    quarantine, and a drain under in-flight work. `FaultSchedule` is the
+    choose between them: engine failover at an arbitrary point, a spawn
+    decided and never acted on, and duplicated and stale completions. `FaultSchedule` is the
     driver; the sweep in test_model_harness.py is CM-14 over every
     interleaving a seed produces rather than over six an author thought of.
 
-    Partition BETWEEN leaders and reroute to a second host remain absent,
-    and this time the reason is stable rather than a promise: there is no
-    second host to reroute to and no relay to partition from (DL-97, DL-103).
-    They stay absent rather than stubbed, because a stub that always passes
-    is the failure mode this harness exists to prevent. What this models is
-    therefore ONE run root across SEQUENTIAL incarnations -- which is the
-    whole of what today's code can be held to, and not the whole of ss9.
+    What this models is ONE run root across SEQUENTIAL incarnations of one
+    engine, which is the whole of what today's code can be held to.
     """
 
     def __init__(
@@ -335,9 +326,6 @@ class ModelRun:
         self.log = SpawnLog()
         self.clock = VirtualClock(start=start) if start else VirtualClock()
         self.engine: Engine | None = None
-        #: faults that persist until `settle` puts them back
-        self.quarantined = False
-        self.drained = False
 
     def _adapters(self) -> dict[str, JobAdapter]:
         inner = FakeAdapter(self.script, default=self.default)
@@ -397,42 +385,32 @@ class ModelRun:
     # is absent is a no-op and says so, because a schedule that counted it
     # would let the sweep report coverage it does not have.
 
-    async def fault_failover(self, *, lose_outcome: bool = False) -> bool:
-        """Engine death at this point, then ss7's takeover barrier.
-
-        `lose_outcome` additionally cuts the last effect_result from the log
-        before the resume, which models the window S5c named: the previous
-        leader acted, or was about to, and died before recording what came
-        of it. That is the case the barrier has to tell apart from a start
-        that simply never happened."""
+    async def fault_failover(self) -> bool:
+        """Engine death at this point, then ss7's resume."""
         if self.engine is None:
             return False
         await self.crash()
-        if lose_outcome and not self._cut_last_effect_result():
-            pass  # nothing to lose here; the failover still happened
         await self.resume(settle_seconds=0.0, grace_seconds=0.0)
         return True
-
-    async def fault_failover_losing_the_outcome(self) -> bool:
-        return await self.fault_failover(lose_outcome=True)
 
     async def fault_lost_dispatch(self) -> bool:
         """The engine decided a spawn and died before doing it.
 
-        The narrow window ss4 step 7 opens: the effect is in the log, the
-        adapter never acted, and nothing is on disk. It is the ONLY state in
-        which the barrier re-drives rather than fails (DL-102), so a sweep
-        without it would exercise every branch of that rule but the new one.
+        The narrow window between the decision record and the `dispatch`
+        record: the decision is in the log, the adapter never acted, and
+        nothing is on disk. It is the ONLY state in which resume dispatches
+        rather than fails (DL-102), so a sweep without it would exercise
+        every branch of that rule but this one.
 
         Modelled by parking the next exec before it leaves any trace and
-        then cutting the outcome record -- from the log and from disk,
-        indistinguishable from dying a moment earlier."""
+        then cutting the last `dispatch` record, indistinguishable from
+        dying a moment earlier."""
         if self.engine is None:
             return False
         self.adapter.park_next = True
         await self.run_to(self.clock.now())
         await self.crash()
-        cut = self._cut_last_effect_result()
+        cut = self._cut_last_dispatch()
         await self.resume(settle_seconds=0.0, grace_seconds=0.0)
         return cut
 
@@ -470,35 +448,6 @@ class ModelRun:
         )
         return True
 
-    async def fault_quarantine(self) -> bool:
-        """The supervisor stops answering (S5d). New work is HELD rather
-        than failed; running work continues. The reinstate rides on the next
-        confirmed contact, which `settle` performs at the end of the run."""
-        if self.engine is None or self.quarantined:
-            return False
-        self.live.note_executor_unreachable()
-        self.quarantined = True
-        return True
-
-    async def fault_drain(self) -> bool:
-        """The operator parks the host under in-flight work (S5a, CM-13).
-        Unlike quarantine this is an admitted operator command with a
-        precondition, so it goes through the door an operator uses."""
-        if self.engine is None or self.drained:
-            return False
-        engine = self.live
-        key = RuntimeState.host_key(LOCAL)
-        engine.submit_host(
-            HostCommand(verb="drain", host_id=LOCAL),
-            Envelope(
-                request_id=f"drain-{len(self.log.spawns)}-{engine.frontiers.committed_index}",
-                expect={key: engine.oracle.store.revision(key)},
-                epoch=engine.epoch,
-            ),
-        )
-        self.drained = True
-        return True
-
     def _a_live_run(self) -> tuple[str, int] | None:
         if self.engine is None:
             return None
@@ -507,44 +456,24 @@ class ModelRun:
                 return job, rt.run_number
         return None
 
-    def _cut_last_effect_result(self) -> bool:
-        """Drop the log's last `effect_result`. Written between crash and
+    def _cut_last_dispatch(self) -> bool:
+        """Drop the log's last `dispatch` record. Written between crash and
         resume, which is the only moment it is safe to edit a run root's
         log -- no engine holds it, exactly as no engine held it in the crash
         this models."""
         path = active_wal(self.run_root)
         records = [json.loads(line) for line in path.read_text().splitlines() if line]
         for index in range(len(records) - 1, -1, -1):
-            if records[index].get("rec") == "effect_result":
+            if records[index].get("rec") == "dispatch":
                 del records[index]
                 path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records))
                 return True
         return False
 
     async def settle(self, horizon: datetime) -> None:
-        """Put back everything the faults took away, then run to quiescence.
-
-        Safety is checked over the WHOLE interleaving, but a run left
-        quarantined or drained ends with work held for a reason that has
-        nothing to do with the property under test -- and a sweep whose runs
-        all end held would pass without ever having dispatched anything."""
+        """Resume if the last fault left no engine, then run to quiescence."""
         if self.engine is None:
             await self.resume(settle_seconds=0.0, grace_seconds=0.0)
-        if self.quarantined:
-            self.live.note_executor_contact()
-            self.quarantined = False
-        if self.drained:
-            engine = self.live
-            key = RuntimeState.host_key(LOCAL)
-            engine.submit_host(
-                HostCommand(verb="activate", host_id=LOCAL),
-                Envelope(
-                    request_id=f"activate-{engine.frontiers.committed_index}",
-                    expect={key: engine.oracle.store.revision(key)},
-                    epoch=engine.epoch,
-                ),
-            )
-            self.drained = False
         await self.run_to(horizon)
 
     async def resume(self, **kwargs: object) -> Engine:
@@ -572,19 +501,13 @@ class ModelRun:
 
 # ------------------------------------------------- seeded faults (S7a, DL-107)
 
-#: What one host can actually suffer. Every entry is producible by today's
-#: code and every one has a rule it is supposed to obey; partition BETWEEN
-#: leaders and reroute to a second host are deliberately absent, because the
-#: second host does not exist and a stub that always passes is the failure
-#: mode this harness exists to prevent (ModelRun's docstring).
+#: What one engine can actually suffer. Every entry is producible by today's
+#: code and every one has a rule it is supposed to obey.
 FAULT_MENU: tuple[str, ...] = (
-    "failover",  # engine death at an arbitrary point, then ss7's barrier
-    "failover_losing_the_outcome",  # ...having died between acting and recording
+    "failover",  # engine death at an arbitrary point, then ss7's resume
     "duplicate_completion",  # the same adapter report delivered twice
     "stale_completion",  # a report about a run the estate has moved past
-    "lost_dispatch",  # decided, never acted on: the ONLY state that re-drives
-    "quarantine",  # the supervisor stops answering; new work is HELD
-    "drain",  # the operator parks the host under in-flight work
+    "lost_dispatch",  # decided, never acted on: the ONLY state resume dispatches
 )
 
 

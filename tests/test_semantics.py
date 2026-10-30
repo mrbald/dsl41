@@ -14,6 +14,7 @@ import asyncio
 import dataclasses
 import hashlib
 import json
+import os
 import re
 import typing
 from datetime import datetime, timedelta
@@ -1560,9 +1561,9 @@ def test_a_resume_with_a_scheduler_off_the_dst_pin_writes_nothing(
 ) -> None:
     """DL-260, period-model PR-22b: a period pinned fold0, resumed with a
     default (vendor) scheduler and no declared profile, is refused by the
-    drift gate: no successor segment and no leader
-    record. The engine check used to refuse it only after the leader record
-    was appended. The twin, a fold0 scheduler, resumes and appends one."""
+    drift gate before it writes anything: no successor segment and no record.
+    The twin, a fold0 scheduler, resumes, and names itself in the lock's
+    note."""
     from dsl41.run_root import wal_segments
 
     run_root = tmp_path / "run"
@@ -1592,4 +1593,6 @@ def test_a_resume_with_a_scheduler_off_the_dst_pin_writes_nothing(
         return
     _close(resume())
     after = read_journal(estate_wal(run_root))
-    assert [r["rec"] for r in after[len(before) :]][:1] == ["leader"]
+    assert after[: len(before)] == before
+    note = json.loads((run_root / "leader.lock").read_text())
+    assert note["pid"] == os.getpid()

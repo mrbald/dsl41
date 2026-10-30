@@ -117,7 +117,6 @@ def test_installed_mutation_outcomes_and_no_resend(
                         response = {
                             "ok": True,
                             "baseline_id": "current",
-                            "epoch": 99,
                             "globals": {"FLAG": {"value": "old", "state_rev": 99}},
                         }
                     elif answer in {"lost", "truncated"}:

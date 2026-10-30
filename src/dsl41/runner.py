@@ -6,11 +6,11 @@ durability (WAL), the calendar scheduler and the control surface. The bisimulati
 (ss13, ss14) runs every SEM trace test through both Oracle-direct and Engine(VirtualClock,
 FakeAdapter) with identical traces.
 
-The clocks (runner_clock), adapters and supervisor client (runner_adapters), WAL
-(runner_journal), calendar scheduler (runner_scheduler; its timezone ladder lives in
-`timezones`, DL-163), preflight (runner_preflight), the ss10 control plane (runner_control,
-DL-78) and possession of a run root (genesis, resume, ss7's takeover barrier:
-runner_startup, DL-106) each own their file and their part of this contract (DL-74). This
+The clocks (runner_clock), adapters (runner_adapters), WAL (runner_journal), calendar scheduler
+(runner_scheduler; its timezone ladder lives in `timezones`, DL-163), preflight
+(runner_preflight), the ss10 control plane (runner_control, DL-78) and possession of a run root
+(genesis and resume: runner_startup, DL-106) each own their file and their part of this
+contract (DL-74). This
 module is the engine loop that runs while an estate is live, over an Engine that
 runner_startup constructs and hands over.
 
@@ -49,6 +49,11 @@ decides, the shell kills). A cancelled adapter never reports, and anything it di
 than the cancellation re-raises at the next settle. Boxes have no adapter row; ON_NOEXEC
 bypass never emits STARTING, so nothing spawns. MUST_START/MUST_COMPLETE alarms are journal
 and UI surface only.
+
+Journal before effect (ss7, DL-44): an input's decision record is durable before anything it
+implies is dispatched, and a start's `dispatch` record, naming the run's `run_id`, is durable
+before its adapter task exists. A kill is not journaled: the oracle's terminal status is the
+record, and a tethered wrapper records how its command died (ss6a).
 
 Stale-completion gate (ss4, DL-41 decision 4): completions carry (job, run_number). The engine
 drops any completion whose run_number mismatches the current one or whose row is not
@@ -95,9 +100,9 @@ mid-move.
 
 The ss10 control plane (socket server, wire vocabulary, clients) lives in runner_control.py
 (DL-78) and is frozen in docs/control-protocol.md. Control mutations arrive through
-Engine.submit and submit_host (routes). Both are journaled by the queued-input path
-(`_Do.EVENT`), and the single-writer loop serializes them, so that tier carries no controller lease (DL-41a). Query handlers read the oracle store
-between feeds, which is safe because feed() never yields.
+Engine.submit. They are journaled by the queued-input path (`_Do.EVENT`), and the single-writer
+loop serializes them, so that tier carries no controller lease (DL-41a). Query handlers read the
+oracle store between feeds, which is safe because feed() never yields.
 """
 
 from __future__ import annotations
@@ -115,7 +120,7 @@ from typing import Final
 
 from dsl41.ir import CatalogIR, JobIR
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import CarriedRows, Event, EventSource
+from dsl41.oracle_state import Event, EventSource
 from dsl41.runner_adapters import (
     AdapterContext,
     FileWatcherAdapter,
@@ -124,7 +129,6 @@ from dsl41.runner_adapters import (
 )
 from dsl41.runner_admission import (
     ENGINE_REQUEST_ID_PREFIX,
-    INERT_EPOCH,
     AdmissionRefused,
     ApplyResult,
     Attempt,
@@ -132,42 +136,26 @@ from dsl41.runner_admission import (
     Envelope,
     Frontiers,
     RequestCollision,
-    Applied,
     TimeHalfFault,
     TimeHalfStop,
     apply_attempt,
     classify_fault,
+    dispatch_plan,
     fingerprint,
     report_quarantine,
+    spawn_superseded,
     trial_apply,
 )
 from dsl41.runner_codes import Rejection
 from dsl41.runner_clock import Clock, EngineError, ZeroDelayCycleError
-from dsl41.runner_effects import (
-    Effect,
-    EffectOutcome,
-    Outbox,
-    plan_effects,
-    superseded_reason,
-)
-from dsl41.runner_hosts import (
-    LOCAL_EXECUTOR_ID,
-    HostCommand,
-    routes_new_effects,
-    seed_local_executor,
-)
 from dsl41.run_root import (
-    CMD_GRACE_S,
     Manifest,
     OracleReading,
     oracle_reading,
     switches_of,
 )
-from dsl41.runner_journal import (
-    Journal,
-    RecoveredAttempt,
-)
-from dsl41.runner_ledger import Fence
+from dsl41.runner_journal import Journal
+from dsl41.runner_ledger import Proof
 from dsl41.runner_scheduler import Scheduler
 from dsl41.semantics import ADAPTER_SWITCHES, SCHEDULER_SWITCHES, SemanticSwitches
 from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES
@@ -204,15 +192,13 @@ class _Pending:
     it, and a per-incarnation counter would collide with the ids a previous incarnation left in
     the log.
 
-    `ev` absent is an attempt with no oracle verb: a routing-table command (`host`) or, with
-    neither, a standalone time observation. ss4 admits all three by the same rule.
+    `ev` absent is a standalone time observation. ss4 admits it by the same rule.
 
     `source` is read only when `ev` is absent; an event carries its own (DL-68)."""
 
     at: datetime
     request_id: str | None
     ev: Event | None = None
-    host: HostCommand | None = None
     source: EventSource | None = None
     envelope: Envelope | None = None
     future: asyncio.Future[ApplyResult] | None = None
@@ -327,7 +313,6 @@ def _engine_switches(
 
 def _engine_oracle(
     catalog: CatalogIR,
-    carried: CarriedRows | None,
     manifest: Manifest | None,
     semantics: SemanticSwitches | None,
     scheduler: Scheduler | None,
@@ -350,7 +335,7 @@ def _engine_oracle(
             tz_aliases=alias_table(scheduler.tz_aliases if scheduler is not None else None),
             semantics=switches,
         )
-    return Oracle(catalog, carried=carried, **reading)
+    return Oracle(catalog, **reading)
 
 
 class Engine:
@@ -371,27 +356,12 @@ class Engine:
         run_root: Path | None = None,
         scheduler: Scheduler | None = None,
         hold_open: bool = False,
-        executor_id: str = LOCAL_EXECUTOR_ID,
-        deadman_s: float | None = None,
-        epoch: int = INERT_EPOCH,
         manifest: Manifest | None = None,
-        fence: Fence | None = None,
-        carried: CarriedRows | None = None,
+        fence: Proof | None = None,
         semantics: SemanticSwitches | None = None,
         machines: Executor | None = None,
     ) -> None:
-        self.oracle: Oracle = _engine_oracle(
-            catalog, carried, manifest, semantics, scheduler, adapters
-        )
-        #: concurrency-model ss2/ss8: the execution host this engine dispatches to. One engine
-        #: per run root owns one local executor; machine names resolve to a relay through the
-        #: routing table (ss5), and with no relay (S5d) every job routes here. It is seeded into
-        #: the table at genesis, not admitted, so no log index records how the process was
-        #: launched (see seed_local_executor). `deadman_s` is what the LOCAL SUPERVISOR reports
-        #: it runs, so the ss8 eviction bound describes the host, not this engine's launch
-        #: options (S5b).
-        self.executor_id = executor_id
-        seed_local_executor(self.oracle.store, executor_id, at=clock.now(), deadman_s=deadman_s)
+        self.oracle: Oracle = _engine_oracle(catalog, manifest, semantics, scheduler, adapters)
         self.clock = clock
         self.adapters = dict(adapters)  # job_type -> adapter; no BOX row
         self.journal = journal
@@ -402,12 +372,6 @@ class Engine:
         #: ticks (WAL `drop` records). A quarantine is on `quarantined` only
         self.drops: list[tuple[Event, str]] = []
         self.baseline_id = journal.baseline_id if journal is not None else ""
-        #: concurrency-model ss2: the leader's fencing token, allocated by the run root's ledger
-        #: when this incarnation took the term (S6a, runner_ledger). INERT_EPOCH means no
-        #: election was held: an Engine with no run root and no log, as in the bisimulation
-        #: harness. The check sits after dedup (ss4), so an exact old-epoch retry recovers its
-        #: original result.
-        self.epoch = epoch
         self.frontiers = Frontiers()
         #: retries answered from the index rather than re-applied (CM-05)
         self.deduped: list[tuple[str, ApplyResult]] = []
@@ -421,22 +385,18 @@ class Engine:
         self._init_live_state()
         #: this engine's statechart executor (statechart-engine ss11): one worklist for every
         #: instance. Its machines are `ADMISSION`, one instance per request id in flight
-        #: (DL-334); `EFFECT`, one per open effect of the outbox (DL-331); `SUBSCRIPTION`, one
-        #: per subscribe feed, started by the
-        #: control server through `machines`. An engine given no executor makes its own
+        #: (DL-334), and `SUBSCRIPTION`, one per subscribe feed, started by the control server
+        #: through `machines`. An engine given no executor makes its own
         self._machines = machines if machines is not None else Executor()
-        #: concurrency-model ss5: what this engine intends to do to its execution hosts, and what
-        #: came of it; restored from the log on resume, so a decided kill is not forgotten
-        self.outbox = Outbox(self._machines)
         #: the decision index, built here because it runs each request id in flight on this
         #: engine's executor
         self.decisions = DecisionIndex(self._machines)
         #: the run root's committed manifest, the pin the oracle reads under. None on an engine
         #: with no run root (the bisimulation harness, a rehearsal)
         self.manifest = manifest
-        #: this run root's `leader.lock` proof, re-checked before every append and dispatch. The
-        #: journal holds the same object, so an append and a dispatch prove the same thing.
-        self.fence: Fence | None = fence
+        #: this run root's `leader.lock` proof. The journal re-checks it before every append, and
+        #: the FW adapter before every spool line it writes (`AdapterContext.fence`).
+        self.fence: Proof | None = fence
 
     def _init_live_state(self) -> None:
         """The queue and the live-run books `__init__` starts empty."""
@@ -458,26 +418,17 @@ class Engine:
         #: `_live`/`_reaping` so a reversible catcher cannot consume the only
         #: observation, and teardown does not raise the same failure twice
         self._corpses_raised: set[int] = set()
+        #: decided starts resume found with no `dispatch` record (DL-102), and the journal's last
+        #: instant. The loop dispatches them once it has processed what is due at or before that
+        #: instant or the clock, so the reconciliation inputs and the overdue timers apply first
+        #: and a start they end is superseded rather than launched
+        self._recovered_starts: list[tuple[str, int]] = []
+        self._recovered_after: datetime | None = None
 
     @property
     def machines(self) -> Executor:
         """This engine's one statechart executor (statechart-engine ss11)."""
         return self._machines
-
-    @property
-    def outbox(self) -> Outbox:
-        """The engine's outbox. One on another executor is refused, since it would split the
-        process's one worklist (statechart-engine ss11)."""
-        return self._outbox
-
-    @outbox.setter
-    def outbox(self, outbox: Outbox) -> None:
-        if outbox.machines is not self._machines:
-            raise StatechartError(
-                "effect: the outbox runs on another executor than the engine's"
-                " (statechart-engine ss11)"
-            )
-        self._outbox = outbox
 
     @property
     def decisions(self) -> DecisionIndex:
@@ -493,39 +444,6 @@ class Engine:
                 " (statechart-engine ss11)"
             )
         self._decisions = decisions
-
-    def note_executor_contact(self) -> None:
-        """Stamp positive contact with this engine's own execution host (concurrency-model ss8).
-
-        A confirmed ACQUIRE or RENEW of the supervisor client's lease is the leader hearing back
-        from the host, which the eviction bound counts from. `last_contact` is outside the ss3
-        semantic projection, so this moves no revision and writes no log record. Clearing a
-        quarantine is an input and a separate call."""
-        self.oracle.store.touch_host(self.executor_id, self.clock.now())
-        self.note_executor_reachable()
-
-    @property
-    def cmd_grace_s(self) -> float:
-        """The TERM grace the wired CMD adapter waits before it kills (concurrency-model ss8's
-        `T_kill` is two of these).
-
-        It is read off the adapter, not the period's manifest, because the bound describes the
-        machine that runs; resume holds the two equal. An engine wired with neither gets the
-        ss2.1 default."""
-        cmd = self.adapters.get("CMD")
-        grace = getattr(cmd, "grace_seconds", None)
-        if isinstance(grace, bool) or not isinstance(grace, (int, float)):
-            return CMD_GRACE_S  # an adapter with no grace of its own (a test double)
-        return float(grace)
-
-    def held_jobs(self) -> frozenset[str]:
-        """Jobs with a start this shell intended and has not dispatched, because their executor
-        routes no new effects (concurrency-model ss8).
-
-        The outbox is the held set (S5c, DL-94): a pending SPAWN is an intent recorded and not
-        yet applied, and it survives a restart. A second derivation would be the parallel model
-        DL-91 forbids."""
-        return frozenset(e.job for e in self.outbox.pending() if e.kind == "SPAWN")
 
     def live_jobs(self) -> frozenset[str]:
         """Jobs with an in-flight adapter task; a filewatch is ONLY an in-flight task, so the ss10
@@ -562,51 +480,6 @@ class Engine:
             future=future,
         )
         return future
-
-    def submit_host(
-        self, cmd: HostCommand, envelope: Envelope, *, source: EventSource = "control"
-    ) -> Awaitable[ApplyResult]:
-        """Queue one routing-table change and return its decision (concurrency-model ss8).
-
-        It takes the same envelope, admission order and four outcomes as `submit`. The attempt
-        carries no oracle event, so nothing is fed; the ss3 owner is written directly inside the
-        batch (DL-93)."""
-        future: asyncio.Future[ApplyResult] = asyncio.get_running_loop().create_future()
-        self._push(
-            _Pending(
-                at=self.clock.now(),
-                request_id=envelope.request_id,
-                host=cmd,
-                source=source,
-                envelope=envelope,
-                future=future,
-            )
-        )
-        return future
-
-    def inject_host(self, cmd: HostCommand) -> None:
-        """The LEADER's own routing observation (concurrency-model ss8).
-
-        It is on the trust side of ss0's boundary, like the scheduler and the adapters: no
-        envelope, no `expect`, no future. It is still an admitted input, journaled and replayed,
-        so a quarantine survives a restart and the next engine routes no work at a host that is
-        not answering."""
-        self._push(_Pending(at=self.clock.now(), request_id=None, host=cmd, source="reconcile"))
-
-    def note_executor_unreachable(self) -> None:
-        """The leader has lost contact with its own execution host (ss8).
-
-        It fires on the fifth consecutive failed renewal of an outage (DL-291), not on a single
-        failure. New work is then HELD until the host answers, instead of every spawn failing
-        against an absent supervisor and marking its job FAILURE."""
-        self.inject_host(HostCommand(verb="quarantine", host_id=self.executor_id))
-
-    def note_executor_reachable(self) -> None:
-        """Contact restored: the leader clears what it set and restores the state it interrupted
-        (a drained host stays drained)."""
-        row = self.oracle.store.host(self.executor_id)
-        if row is not None and row.state == "quarantined":
-            self.inject_host(HostCommand(verb="reinstate", host_id=self.executor_id))
 
     def _enqueue(
         self,
@@ -768,11 +641,22 @@ class Engine:
             if now != instant:
                 instant, instant_events = now, 0
             work = self._next_work(horizon, now)
+            if self._recovered_starts and not self._takes_due_work(
+                work, max(now, self._recovered_after or now)
+            ):
+                # the starts resume found undispatched go once this pass has processed every
+                # input, timer and tick due at or before the current instant, so the
+                # reconciliation and the overdue deadlines apply first. A due item the frontier
+                # rule holds lazy is not processed now and does not hold them back. On the real
+                # clock a steady stream of due inputs delays them; it never loses one
+                starts, self._recovered_starts = self._recovered_starts, []
+                for job, run_number in starts:
+                    self.spawn(job, run_number)
+                continue  # dispatch is not same-instant work: skip the budget
             if work.do is _Do.EVENT:
                 _, _, pending = heapq.heappop(self._queue)
                 out = await self._admit_and_apply(pending)
                 emitted.extend(out)
-                self._dispatch()
             elif work.do is _Do.TICK:
                 # enqueue the tick's STARTJOB(s), stamped at the tick; the next iteration takes them
                 # like any external input (feed() fires timers due <= tick first)
@@ -787,7 +671,6 @@ class Engine:
                 # operator command, as an attempt with no verb (concurrency-model ss4)
                 out = await self._admit_and_apply(_Pending(at=work.at, request_id=None))
                 emitted.extend(out)
-                self._dispatch()
             elif work.do is _Do.QUIESCE:
                 # virtual: nothing can move without the clock; real: no work exists and none can
                 # appear, or everything left is beyond the horizon (_next_work's `0 0 0` row)
@@ -835,10 +718,10 @@ class Engine:
         while True:
             for job, run in list(self._live.items()):
                 if run.task.done():
-                    # raise FIRST: a failed task stays in `_live`, so a reversible catcher (the
-                    # seal's abort path) cannot consume the only observation; the next settle
-                    # re-raises the corpse, and the engine never resumes over an applied SPAWN
-                    # whose task and completion are both gone
+                    # raise FIRST: a failed task stays in `_live`, so a reversible catcher cannot
+                    # consume the only observation; the next settle re-raises the corpse, and the
+                    # engine never resumes over a dispatched run whose task and completion are
+                    # both gone
                     self._note_corpse(run.task)
                     _raise_if_failed(run.task)
                     del self._live[job]
@@ -868,7 +751,8 @@ class Engine:
         index (3); the attempt is one line, so its time observation cannot be torn from its verb
         (4); the batch applies the time half, firing due timers, which puts a term_run_time kill
         AHEAD of the gate that reads the status it kills (5); the gate decides (6); the result is
-        recorded with the revisions the input moved (7). Steps 5-7 do not yield."""
+        recorded with the revisions the input moved (7), and only then is what it implies
+        dispatched. Steps 5-7 do not yield."""
         ev = pending.ev
         envelope = pending.envelope
         fp = fingerprint(
@@ -876,10 +760,8 @@ class Engine:
             kind=ev.kind if ev is not None else None,
             payload=dict(ev.payload) if ev is not None else {},
             source=ev.source if ev is not None else pending.source,
-            epoch=envelope.epoch if envelope is not None else self.epoch,
             expect=envelope.expect if envelope is not None else None,
             claimed_actor=envelope.claimed_actor if envelope is not None else None,
-            host=pending.host,
         )
         if pending.request_id is not None:
             try:
@@ -892,19 +774,6 @@ class Engine:
                 self.deduped.append((pending.request_id, prior))
                 self._answer(pending, prior)
                 return []  # a retry advances no logical time (CM-05)
-        if envelope is not None and envelope.epoch != self.epoch:
-            # ss4 step 2, AFTER the dedup: an exact old-epoch retry recovers its original result
-            # (the leader that held that epoch decided it), while an UNSEEN old-epoch request was
-            # composed against an old leader and is refused
-            self._refuse(
-                pending,
-                AdmissionRefused(
-                    f"epoch {envelope.epoch} is not this leader's {self.epoch}:"
-                    " re-read and re-compose against the current leader",
-                    code="stale_epoch",
-                ),
-            )
-            return []
         admitted = self.frontiers.admit(pending.at)
         # before the frontier moves: a refusal or a stop takes no index
         attempt = self._attempt(pending, admitted.committed_index, fp)
@@ -922,36 +791,22 @@ class Engine:
             self.journal.admit(attempt)  # WAL-append + fsync BEFORE apply (ss7)
         self.decisions.note(attempt)
         await self.clock.wait_until(pending.at)
-        applied = apply_attempt(self.oracle, attempt, forced=forced, grace_s=self.cmd_grace_s)
+        applied = apply_attempt(self.oracle, attempt, forced=forced)
         self.decisions.record(applied.result)
         self.frontiers = self.frontiers.record(attempt.index)
-        # step 7 commits the decision and the outbox entries it implies as ONE batch
-        # (concurrency-model ss1): an engine that dies between deciding and acting leaves the
-        # record that it MEANT to act, or a decided kill vanishes with its task. The batch is
-        # one record and one fsync (DL-118, CM-17)
-        effects = self._plan_effects(applied, attempt.index)
         if self.journal is not None:
-            self.journal.decision(applied.result, effects)
-        for effect in effects:
-            self.outbox.record(effect)
-            if effect.kind == "SPAWN":
-                # a run has its one identity from its plan (DL-234): a held or retired SPAWN
-                # still counts, so a STARTING overwrite at the same run number plans no second
-                # one. Resume rebuilds `_dispatched` from every row's run number (runner_startup,
-                # period-model ss3.3), which agrees: a dispatchable row reaches run N through a
-                # decision that planned run N's SPAWN, and resume writes that decision for an
-                # attempt whose decision never landed before it seeds the map
-                # (`commit_recovered`, DL-315)
-                self._dispatched[effect.job] = max(
-                    self._dispatched.get(effect.job, 0), effect.run_number
-                )
+            # step 7: the decision is durable before anything it implies is dispatched (ss7)
+            self.journal.decision(applied.result)
         if quarantine is not None:  # loud once the quarantine is durable
             self.quarantined.append((applied.result, quarantine[1]))
             report_quarantine(applied.result)
         elif applied.result.decision == "rejected" and ev is not None:
             assert applied.result.reason is not None
             self.drops.append((ev, applied.result.reason))
+        # the answer follows the durable decision and does not wait on its dispatch: a dispatch
+        # that fails stops the engine with its own error, and never leaves the request unanswered
         self._answer(pending, applied.result)
+        self._dispatch(applied.emitted)
         return applied.emitted
 
     def _dry_apply(self, attempt: Attempt) -> AdmissionRefused | None:
@@ -962,7 +817,7 @@ class Engine:
         the oracle, and steps 5-7 do not yield to another writer. A gate rejection is not a
         refusal; the real apply decides and logs it. Every fault in either half refuses,
         unlogged."""
-        dry = trial_apply(self.oracle, attempt, grace_s=self.cmd_grace_s)
+        dry = trial_apply(self.oracle, attempt)
         if isinstance(dry, Exception):
             return AdmissionRefused(
                 f"refused before admission: applying the input raised {type(dry).__name__}: {dry}",
@@ -982,7 +837,7 @@ class Engine:
 
         The fault is kept without its traceback, whose frames hold the fork."""
         try:
-            quarantine = classify_fault(self.oracle, attempt, grace_s=self.cmd_grace_s)
+            quarantine = classify_fault(self.oracle, attempt)
         except TimeHalfFault as stop:
             raise TimeHalfStop(attempt, stop.cause, stop.full) from stop.cause
         if quarantine is None:
@@ -990,77 +845,14 @@ class Engine:
         rejection, fault = quarantine
         return rejection, _without_frames(fault)
 
-    def _plan_effects(self, applied: Applied, index: int) -> list[Effect]:
-        """ss4 step 7's other half: what the shell now intends to do about what the oracle decided.
-
-        Two identity binds happen inside the decision transaction (period-model ss2.3): a SPAWN's
-        `run_id` is minted with the effect (PR-36a), and `generation` is read from the executor's
-        host row (PR-16); the row exists from the genesis seed. A KILL looks its run's id up in
-        the outbox, where its SPAWN recorded it."""
-        return self._plan(
-            applied.emitted,
-            index,
-            runs={job: rt.run_number for job, rt in self.oracle.store.job.items()},
-            dispatched=self._dispatched,
-            live={job: run.run_number for job, run in self._live.items()},
-        )
-
-    def _plan(
-        self,
-        emitted: list[Event],
-        index: int,
-        *,
-        runs: Mapping[str, int],
-        dispatched: Mapping[str, int],
-        live: Mapping[str, int],
-    ) -> list[Effect]:
-        """`plan_effects` with this engine's executor, generation, dispatch rows, run-id bindings
-        and mint."""
-        row = self.oracle.store.host(self.executor_id)
-        return plan_effects(
-            emitted,
-            index=index,
-            executor_id=self.executor_id,
-            generation=row.generation if row is not None else 0,
-            runs=runs,
-            dispatched=dispatched,
-            live=live,
-            dispatchable=self._dispatchable(),
-            run_ids=self.outbox.spawn_run_ids(),
-            mint_run_id=lambda: str(uuid.uuid4()),
-        )
-
-    def plan_recovered(self, recovered: RecoveredAttempt) -> list[Effect]:
-        """The effects a replay-recovered attempt (DL-156) implies, as its step 7 would have
-        planned them (DL-315). Nothing is written here; `commit_recovered` writes them.
-
-        The plan reads the rows as of the attempt: `dispatched` is every run number before it and
-        `runs` every run number after it, because the seeded `_dispatched` would plan no SPAWN for
-        a recovered start and an empty map would plan one for a STARTING overwrite whose run has
-        one. `live` is empty, so the plan holds SPAWNs only, and a SPAWN mints its `run_id`."""
-        return self._plan(
-            recovered.emitted,
-            recovered.result.index,
-            runs=recovered.runs_after,
-            dispatched=recovered.runs_before,
-            live={},
-        )
-
-    def commit_recovered(self, recovered: RecoveredAttempt, effects: list[Effect]) -> None:
-        """Write the step-7 batch an attempt never got: its decision and the effects
-        `plan_recovered` planned, as one record (DL-315).
-
-        Resume calls this for each recovered verdict, after the identity preflight and before
-        `_dispatched` is seeded. Dispatch follows the decision record, so a missing record means
-        no SPAWN of that attempt was recorded or applied; this record is the attempt's decision
-        transaction, and its SPAWN's `run_id` the run's one identity. The decision index already
-        holds the verdict."""
+    def commit_recovered(self, result: ApplyResult) -> None:
+        """Write the decision record an admitted attempt never got (DL-315). Resume calls this
+        for each verdict replay reached for such an attempt; the decision index already holds
+        it. What the attempt implies is dispatched by resume's ladder, after reconciliation."""
         assert self.journal is not None  # resume always holds its root's journal
-        self.journal.decision(recovered.result, effects)
-        for effect in effects:
-            self.outbox.record(effect)
-        if recovered.result.code == "engine_apply_faulted":
-            report_quarantine(recovered.result)  # replay quarantined it (ss4)
+        self.journal.decision(result)
+        if result.code == "engine_apply_faulted":
+            report_quarantine(result)  # replay quarantined it (ss4)
 
     def _dispatchable(self) -> frozenset[str]:
         """Jobs this engine has a dispatch row for: a catalog entry whose job_type has a
@@ -1093,129 +885,93 @@ class Engine:
             fingerprint=fp,
             kind=ev.kind if ev is not None else None,
             payload=dict(ev.payload) if ev is not None else {},
-            host=pending.host,
             source=ev.source if ev is not None else pending.source,
             expect=dict(envelope.expect) if envelope is not None else None,
-            epoch=envelope.epoch if envelope is not None else self.epoch,
             claimed_actor=envelope.claimed_actor if envelope is not None else None,
         )
 
-    def _dispatch(self) -> None:
-        """Drain the outbox: apply every pending effect, in admission order (concurrency-model
-        ss5). This is the only place an effect is applied.
+    def _dispatch(self, emitted: list[Event]) -> None:
+        """Carry out what one decided input implies, in the order its events were emitted
+        (`dispatch_plan`, ss4). This is the only place a decided start or kill is acted on.
 
-        ss5 makes per-run effect ordering mandatory: a KILL decided after a SPAWN that overtook it
-        would stop a run that had not started.
-
-        The fence is re-proved HERE as well as in the journal writer (period-model ss1.3): an
-        append and a dispatch are two acts, and a leader that lost the lineage between them would
-        start a process for an estate it does not lead (PR-03)."""
-        pending = self.outbox.pending()
-        if pending and self.fence is not None:
-            self.fence.check()
-        for effect in pending:
-            self._apply_effect(effect)
-
-    def _apply_effect(self, effect: Effect) -> None:
-        """One effect, at-most-once (concurrency-model ss5, CM-09).
-
-        Three gates come before the attempt. An effect the world has moved past is RETIRED, not
-        applied; supersession is checked first (DL-234). A host that routes nothing leaves the
-        effect PENDING: held, not failed and not rerouted (ss8). Every input ends in a dispatch
-        pass, so a held SPAWN is retired in the pass after the status edge that ended its run.
-        The outcome is recorded either way, because "attempted and we cannot say" must survive a
-        crash (ss5's third state)."""
-        reason = superseded_reason(
-            effect,
-            self.oracle.store.job.get(effect.job),
-            self._live[effect.job].run_number if effect.job in self._live else None,
+        A planned start counts as dispatched for the ghost-run gate whether or not it launches
+        (DL-234), so a STARTING overwrite at the same run number plans no second one. A kill
+        cancels the live task of the run it names, and nothing if that run is gone."""
+        plan = dispatch_plan(
+            emitted,
+            runs={job: rt.run_number for job, rt in self.oracle.store.job.items()},
+            dispatched=self._dispatched,
+            live={job: run.run_number for job, run in self._live.items()},
+            dispatchable=self._dispatchable(),
         )
-        if reason is not None:
-            self._retire(effect, reason)
-            return
-        if effect.kind == "SPAWN" and not routes_new_effects(
-            self.oracle.store.host(effect.executor_id)
-        ):
-            # ss8: a drained or quarantined host routes no NEW effect. The effect stays pending,
-            # which IS the held set: rerouting without proof the old executor is dead is the
-            # double run ss7 prevents, and failing it would turn a maintenance window into an
-            # estate-wide incident.
-            #
-            # SPAWN only. ss8's column is about NEW work: `passive` lets running work complete,
-            # and a kill is how running work ends, so a drain never holds a kill.
-            return
-        if effect.kind == "SPAWN":
-            self._apply_spawn(effect)
-        else:
-            self._apply_kill(effect)
+        for kind, job, run_number in plan:
+            if kind == "SPAWN":
+                self._dispatched[job] = max(self._dispatched.get(job, 0), run_number)
+                self.spawn(job, run_number)
+                continue
+            live = self._live.get(job)
+            if live is not None and live.run_number == run_number:
+                del self._live[job]
+                live.task.cancel()
+                self._reaping.append(live.task)
 
-    def _retire(self, effect: Effect, detail: str) -> None:
-        """Record an effect as retired; its run already counts as dispatched from the plan
-        (DL-234)."""
-        self._resolve_effect(
-            EffectOutcome(effect_id=effect.effect_id, state="retired", detail=detail)
-        )
+    def recover_start(self, job: str, run_number: int, *, after: datetime) -> None:
+        """Queue a decided start that left no `dispatch` record for the loop to dispatch
+        (DL-102). `after` is the journal's last instant: the loop dispatches it once it has
+        processed what is due at or before the later of that instant and the clock, so the
+        resume's reconciliation and every overdue timer apply first."""
+        self._recovered_starts.append((job, run_number))
+        self._recovered_after = max(after, self._recovered_after or after)
 
-    def _resolve_effect(self, outcome: EffectOutcome) -> None:
-        self.outbox.resolve(outcome)
-        if self.journal is not None:
-            self.journal.effect_result(outcome)
+    def _takes_due_work(self, work: _Work, instant: datetime) -> bool:
+        """Whether the loop's chosen act processes an input, a timer or a tick due at or before
+        `instant`."""
+        if work.do is _Do.EVENT:
+            return self._queue[0][0] <= instant
+        if work.do in (_Do.TICK, _Do.TIMER):
+            assert work.at is not None
+            return work.at <= instant
+        return False
 
-    def _apply_spawn(self, effect: Effect) -> None:
-        job_ir = self.oracle.catalog.jobs.get(effect.job)
-        adapter = self.adapters.get(job_ir.job_type) if job_ir is not None else None
-        if job_ir is None or adapter is None:  # pragma: no cover -- unreachable via planning
-            # `_dispatchable` filters both, and a log's effects name only jobs its own catalog
-            # had (the ss7 hash gate refuses a resume against a changed estate). The branch
-            # guards a DISAGREEMENT between catalog and log, which would otherwise be a
-            # KeyError in the middle of dispatch.
-            self._retire(effect, f"{effect.job} has no dispatch row in this catalog")
-            return
-        self._dispatched[effect.job] = effect.run_number
-        stale = self._live.pop(effect.job, None)
+    def spawn(self, job: str, run_number: int) -> bool:
+        """Start run `run_number` of `job` unless the oracle has moved past it; True if it was
+        started. The `dispatch` record, with the run's freshly minted `run_id`, is durable before
+        the adapter task exists (journal before effect, ss7; DL-118). Resume calls this to
+        dispatch a decided start whose record never landed (`recover_start`)."""
+        if spawn_superseded(self.oracle.store.job.get(job), run_number) is not None:
+            return False  # the batch ended the run, or another start overtook it (DL-232)
+        job_ir = self.oracle.catalog.jobs[job]  # `_dispatchable` holds catalog jobs only
+        adapter = self.adapters[job_ir.job_type]
+        stale = self._live.pop(job, None)
         if stale is not None:
             # One live attempt per job. An injected INACTIVE (DL-235) leaves the earlier run live
-            # in the shell while the oracle's row is not STARTING/RUNNING/QUE_WAIT, so
-            # the oracle's DL-81 refusal does not block a restart: the job goes through
-            # STARTJOB again and this SPAWN is for the new run. The earlier task is cancelled
-            # through the adapter's own ladder, and the second SPAWN records the supersession;
-            # the vendor would run both.
+            # in the shell while the oracle's row is not STARTING/RUNNING/QUE_WAIT, so the
+            # oracle's DL-81 refusal does not block a restart: the job goes through STARTJOB
+            # again and this start is for the new run. The earlier task is cancelled through the
+            # adapter's own ladder; the vendor would run both.
             stale.task.cancel()
             self._reaping.append(stale.task)
-        self._launch(job_ir, effect.run_number, adapter, run_id=effect.run_id)
-        self._resolve_effect(EffectOutcome(effect_id=effect.effect_id, state="applied"))
-
-    def _apply_kill(self, effect: Effect) -> None:
-        """The oracle decided terminal; the shell stops the run.
-
-        Cancelling the adapter task IS the effect at this tier; the adapter's TERM/grace/KILL
-        ladder runs on the way out. `applied` means the cancellation was delivered to a live
-        run; the wrapper records what became of the process."""
-        live = self._live.pop(effect.job, None)
-        if live is None:  # pragma: no cover -- unreachable via planning
-            # `plan_effects` plans no KILL for a job with no live run (a test pins it), and
-            # resume re-drives recorded kills through `_redrive_recorded_kills`, which resolves
-            # every pending KILL before the barrier's dispatch reaches this
-            self._resolve_effect(
-                EffectOutcome(
-                    effect_id=effect.effect_id,
-                    state="retired",
-                    detail=f"{effect.job} has no live run: nothing to cancel",
-                )
+        run_id = str(uuid.uuid4())
+        if self.journal is not None:
+            self.journal.dispatch(
+                job,
+                run_number,
+                run_id=run_id,
+                run_dir=(
+                    str(self.run_root / "runs" / f"{job}.{run_number}")
+                    if self.run_root is not None
+                    else None
+                ),
+                started_at=self.clock.now(),
             )
-            return
-        live.task.cancel()
-        self._reaping.append(live.task)
-        self._resolve_effect(EffectOutcome(effect_id=effect.effect_id, state="applied"))
+        self._launch(job_ir, run_number, adapter, run_id=run_id)
+        return True
 
     def _launch(
         self, job_ir: JobIR, run_number: int, adapter: JobAdapter, *, run_id: str | None = None
     ) -> None:
-        """Create the adapter task, from `_apply_spawn` (an outbox effect) and from resume's FW
-        re-dispatch and detached reattach, which go through no effect: one is an idempotent
-        re-read and the other a run that never stopped. `run_id` is the effect's on the
-        `_apply_spawn` path; None marks those two callers and a re-driven SPAWN the outbox holds
-        no binding for."""
+        """Create the adapter task, from `spawn` and from resume's FW re-dispatch, an idempotent
+        re-read under the run's recorded `run_id`. None lets the adapter mint its own."""
         loop = asyncio.get_running_loop()
         task = loop.create_task(self._run_adapter(job_ir, run_number, adapter, run_id))
         task.add_done_callback(lambda _t: self._activity.set())
@@ -1254,7 +1010,6 @@ class Engine:
         ctx = AdapterContext(
             clock=self.clock,
             run_root=self.run_root,
-            journal=self.journal,
             run_id=run_id,
             fence=self.fence,
         )

@@ -121,7 +121,6 @@ def test_installed_recovery_executes_with_original_envelope_and_runtime(
         "verb": "SET_GLOBAL",
         "payload": {"name": "FLAG", "value": "a'b;$HOME=$(pwd)"},
         "baseline_id": "original ' period",
-        "epoch": 4,
         "request_id": "request ' one",
         "expect": {"global:FLAG": 17},
         "claimed_actor": "original user@host",
@@ -181,7 +180,6 @@ def test_installed_recovery_executes_with_original_envelope_and_runtime(
                             {
                                 "ok": True,
                                 "baseline_id": "different",
-                                "epoch": 99,
                                 "globals": {"FLAG": {"value": "new", "state_rev": 333}},
                             }
                             if index == 0

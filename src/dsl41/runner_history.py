@@ -2,8 +2,8 @@
 
 `docs/runner-design.md` ss7 lists every record the journal writes; this module adds none. It
 folds `dispatch`, the `input` records the ss4 stale-completion gate journals, each `decision`
-(its verdict on a completion and the effects nested in it), and the run root's manifest and
-spool into one row per job run. It is offline: no engine, no control socket, no wire verb.
+(its verdict on a completion), and the run root's manifest and spool into one row per job
+run. It is offline: no engine, no control socket, no wire verb.
 
 Two layers: `fold_run_rows` is a pure function of parsed journal records plus an optional
 catalog and trace. `read_run_root` is the I/O shell: it rebuilds the root's catalog from its own
@@ -77,7 +77,7 @@ from dsl41.ast_jil import JilParseError, parse
 from dsl41.canon import is_wire_int, naive_utc
 from dsl41.ir import CatalogIR, LoweringError, Semantics, lower_catalog
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import LIVE, TERMINAL, CarriedRows, JobStatus, OracleError, TraceEntry
+from dsl41.oracle_state import LIVE, TERMINAL, JobStatus, OracleError, TraceEntry
 from dsl41.run_root import (
     Manifest,
     RuntimeProfile,
@@ -92,7 +92,7 @@ from dsl41.run_root import (
 from dsl41.runner_adapters import load_json, spool_names_run
 from dsl41.runner_admission import ApplyResult
 from dsl41.runner_clock import EngineError
-from dsl41.runner_journal import ReplayFault, decision_effects, read_journal, replay_period
+from dsl41.runner_journal import ReplayFault, dispatched_runs, read_journal, replay_period
 from dsl41.runner_ledger import check_state_machine_version
 
 
@@ -117,7 +117,6 @@ class RunRow(BaseModel):
     status: JobStatus
     exit_code: int | None = None
     started_by: str | None = None
-    executor_id: str | None = None
     run_dir: str | None = None
     box_name: str | None = None
     #: which clock supplied started_at/ended_at together (decision 1): "spool" means both came from
@@ -180,16 +179,12 @@ def _parse_timestamp(value: str) -> datetime:
     return naive_utc(datetime.fromisoformat(value))
 
 
-def _windows_from_entries(entries: Sequence[TraceEntry], first: int = 0) -> list[_TraceWindow]:
+def _windows_from_entries(entries: Sequence[TraceEntry]) -> list[_TraceWindow]:
     """One job's trace entries, filtered to that job and in trace order, folded into run windows
     (decision 2). Out-of-band markers (`SCHED_DISARM`, `START_REFUSED`, ...) carry no "->" and are
-    skipped.
-
-    `first` is the run number the job had reached before the segment, so the first window is
-    `first + 1`. Run numbers are monotone across the estate, not across a segment (I2). Zero
-    covers period 1 and a segment whose opening seal this root does not hold."""
+    skipped. The first window is run 1."""
     windows: list[_TraceWindow] = []
-    run_number = first
+    run_number = 0
     started_at: datetime | None = None
     started_by = ""
     ended_at: datetime | None = None
@@ -217,19 +212,13 @@ def _windows_from_entries(entries: Sequence[TraceEntry], first: int = 0) -> list
     return windows
 
 
-def _trace_windows_by_job(
-    trace: Sequence[TraceEntry], carried: Mapping[str, int] | None = None
-) -> dict[str, dict[int, _TraceWindow]]:
-    """job -> {run_number: window}, keyed by run number because `carried` breaks the match with
-    position."""
+def _trace_windows_by_job(trace: Sequence[TraceEntry]) -> dict[str, dict[int, _TraceWindow]]:
+    """job -> {run_number: window}."""
     by_job: dict[str, list[TraceEntry]] = {}
     for entry in trace:
         by_job.setdefault(entry.job, []).append(entry)
     return {
-        job: {
-            window.run_number: window
-            for window in _windows_from_entries(entries, (carried or {}).get(job, 0))
-        }
+        job: {window.run_number: window for window in _windows_from_entries(entries)}
         for job, entries in by_job.items()
     }
 
@@ -243,7 +232,7 @@ def _box_rows(
 ) -> list[RunRow]:
     """Every BOX job's run rows, entirely from the trace (decision 2); a box has no dispatch record
     and no spool. The windows are the caller's, so a box and a leaf in one fold are numbered
-    from the same carried state."""
+    alike."""
     rows: list[RunRow] = []
     for job, job_ir in catalog.jobs.items():
         if job_ir.job_type != "BOX":
@@ -265,7 +254,6 @@ def _box_rows(
                     status=window.status or "RUNNING",  # type: ignore[arg-type]
                     exit_code=None,
                     started_by=window.started_by,
-                    executor_id=None,
                     run_dir=None,
                     box_name=job_ir.box.box_name,
                     clock_source="journal",
@@ -317,8 +305,7 @@ def attempt_index(record: Mapping[str, Any]) -> int | None:
     1, as `period.check_segment_record` applies).
 
     None fails open on the input side: a STATUS input with a malformed `seq` drops out of both
-    checks below and its completion decides the row (decision 5's degrade posture); a malformed
-    decision is already refused by `decision_effects` when it carries effects. A malformed
+    checks below and its completion decides the row (decision 5's degrade posture). A malformed
     decision `index` lands in neither set: the rejected-set miss fails open, and at records-only
     fidelity the decided-set miss reads as the crash window, so the completion is refused
     (`_decided_attempts`, DL-156)."""
@@ -373,7 +360,6 @@ class _LeafIndex:
     order: list[tuple[str, int]]
     completion_by_key: dict[tuple[str, int], dict[str, Any]]
     undecided_keys: set[tuple[str, int]]
-    executor_by_key: dict[tuple[str, int], str]
 
 
 def _trace_run_at(windows: Mapping[int, _TraceWindow], at: datetime) -> int | None:
@@ -399,7 +385,6 @@ def _index_leaves(
     last_run_number: dict[str, int] = {}
     completion_by_key: dict[tuple[str, int], dict[str, Any]] = {}
     undecided_keys: set[tuple[str, int]] = set()
-    executor_by_key: dict[tuple[str, int], str] = {}
 
     for record in records:
         rec = record.get("rec")
@@ -427,7 +412,7 @@ def _index_leaves(
                 # option): it overwrites the run currently open, as the oracle's SEM-01 read does
                 c_run = last_run_number.get(c_job)
                 # DL-242: a run can start and end with no dispatch (a job_terminator cascade
-                # TERMINATES it during its STARTING transition and its SPAWN retires). A later
+                # TERMINATES it during its STARTING transition and its start is superseded). A later
                 # operator status is not that run's close, and rewriting an earlier close would
                 # corrupt a finished run. An undispatched run has no row.
                 traced = _trace_run_at(
@@ -449,19 +434,12 @@ def _index_leaves(
                 "at": record["at"],
                 "source": record.get("source"),
             }
-        elif rec == "decision":
-            # the executor a run was bound to rides on the SPAWN effect inside the decision that
-            # planned it (DL-118); the shared decoder refuses a malformed effect (DL-139)
-            for effect in decision_effects(record):
-                if effect.kind == "SPAWN":
-                    executor_by_key[(effect.job, effect.run_number)] = effect.executor_id
 
     return _LeafIndex(
         dispatch_by_key=dispatch_by_key,
         order=order,
         completion_by_key=completion_by_key,
         undecided_keys=undecided_keys,
-        executor_by_key=executor_by_key,
     )
 
 
@@ -481,8 +459,6 @@ def _emit_leaf_rows(
         job, run_number = key
         dispatch = index.dispatch_by_key[key]
         completion = index.completion_by_key.get(key)
-        # by number, not position: a run carried across a boundary has a run number the
-        # segment's window list does not index (I2)
         window = trace_windows.get(job, {}).get(run_number)
 
         journal_started = _parse_timestamp(str(dispatch["started_at"]))
@@ -522,7 +498,6 @@ def _emit_leaf_rows(
                 status=status,  # type: ignore[arg-type]
                 exit_code=exit_code,
                 started_by=started_by,
-                executor_id=index.executor_by_key.get(key),
                 run_dir=run_dir if isinstance(run_dir, str) else None,
                 box_name=box_name,
                 clock_source=clock_source,  # type: ignore[arg-type]
@@ -567,7 +542,6 @@ def fold_run_rows(
     catalog: CatalogIR | None = None,
     trace: Sequence[TraceEntry] = (),
     spool: Mapping[tuple[str, int], SpoolRead] | None = None,
-    carried: Mapping[str, int] | None = None,
     recovered: Sequence[ApplyResult] = (),
 ) -> list[RunRow]:
     """The pure fold (DL-113): parsed journal records plus, optionally, a catalog
@@ -578,10 +552,6 @@ def fold_run_rows(
     Without a catalog there are no box rows, no box_name or `job_hash`, and exit-code verdicts
     use the bare SEM-09 default; every row says so in `fidelity` (decision 5). `read_run_root`
     supplies a catalog whenever the run root holds its bundle.
-
-    `carried` is job -> the run number this period opened with, so a run that crosses a boundary
-    keeps one identity (I2). Absent (period 1, or no seal to read it from), numbering starts
-    at 1.
 
     `recovered` is the ss4 gate's re-run over the crash window (DL-156): the verdicts
     `replay_trace` recovers for attempts whose decision record was never written. A caller that
@@ -599,7 +569,7 @@ def fold_run_rows(
             " the gate's re-run -- it refuses to decide instead (DL-156)"
         )
     catalog_hash = str(records[0]["catalog_hash"])
-    trace_windows = _trace_windows_by_job(trace, carried)
+    trace_windows = _trace_windows_by_job(trace)
     fingerprints = {} if catalog is None else job_fingerprints(catalog)
     fidelity: Literal["full", "records_only"] = "records_only" if catalog is None else "full"
     rows: list[RunRow] = []
@@ -651,21 +621,9 @@ def read_spool(
     return SpoolRead(started_at=started_at, ended_at=ended_at)
 
 
-def _bound_run_ids(records: list[dict[str, Any]]) -> dict[tuple[str, int], str]:
-    """(job, run_number) -> the run_id its durable SPAWN bound, from the decisions in the log
-    (DL-118), through the shared decoder (DL-139), which refuses a SPAWN with no run_id."""
-    bound: dict[tuple[str, int], str] = {}
-    for record in records:
-        if record.get("rec") != "decision":
-            continue
-        for effect in decision_effects(record):
-            if effect.kind == "SPAWN" and effect.run_id is not None:
-                bound[(effect.job, effect.run_number)] = effect.run_id
-    return bound
-
-
 def _read_all_spool(records: list[dict[str, Any]]) -> dict[tuple[str, int], SpoolRead]:
-    bound = _bound_run_ids(records)
+    # the run_id each run's `dispatch` record bound (DL-118), through the shared reader (DL-139)
+    bound = dispatched_runs(records)
     spool: dict[tuple[str, int], SpoolRead] = {}
     for record in records:
         if record.get("rec") != "dispatch":
@@ -843,27 +801,19 @@ def replay_trace(
     run_root: Path,
     records: list[dict[str, Any]],
     catalog: CatalogIR,
-    carried: "CarriedRows | None" = None,
 ) -> SegmentReplay:
-    """The trace (decision 2), reconstructed as `audit` does: an Oracle seeded with the rows this
-    period opened with, this engine's executor seeded, and the log replayed by `replay_period`
-    (S6a routing reads the seed). The recovered crash-window verdicts ride back beside it
-    (DL-156).
+    """The trace (decision 2), reconstructed by replaying the log through a fresh Oracle
+    (`replay_period`). The recovered crash-window verdicts ride back beside it (DL-156).
 
     A foreign `state_machine_version` refuses before anything is replayed
-    (`check_replay_version`).
-
-    `carried` is None for period 1 and for a period whose opening seal this root does not hold.
-    Elsewhere it is required: revisions and run numbers are monotone across the estate (I2),
-    and an empty oracle derives numbers the log never recorded, so `replay_inputs` refuses at
-    the first admitted input that touches a carried entity (DL-136)."""
+    (`check_replay_version`)."""
     check_replay_version(records[0], where=str(run_root))
     # SEM-35: this period's alias table, read from its pin; without it a replay refuses a log
     # the engine wrote (DL-151). A missing or foreign manifest refuses. The semantic switches
     # come from the same pin (DL-252): other switches would narrate conditions the engine never
     # read
     profile = pinned_profile(run_root, records[0])
-    oracle = Oracle(catalog, carried=carried, **oracle_reading(profile))
+    oracle = Oracle(catalog, **oracle_reading(profile))
     try:
         replay = replay_period(oracle, records)
     except (OracleError, ReplayFault) as exc:
@@ -888,7 +838,7 @@ def read_run_root(run_root: Path) -> list[RunRow]:
     try:
         return _read_segment(run_root, stream)
     except EngineError as exc:
-        # the shared `decision_effects` refusal arrives as itself (DL-139); the message names
+        # the shared `dispatched_runs` refusal arrives as itself (DL-139); the message names
         # the root, since `dsl41 runs` reads several roots in one command
         raise RunHistoryError(f"{run_root}: {exc}") from exc
 
@@ -923,7 +873,7 @@ def _read_segment(run_root: Path, records: list[dict[str, Any]]) -> list[RunRow]
         # come back `records_only`
         return fold_run_rows(records, spool=spool)
     catalog = load_catalog_from_manifest(run_root, period_id)
-    replayed = replay_trace(run_root, records, catalog, None)
+    replayed = replay_trace(run_root, records, catalog)
     return fold_run_rows(
         records,
         catalog=catalog,

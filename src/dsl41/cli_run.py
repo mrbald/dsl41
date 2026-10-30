@@ -56,7 +56,6 @@ if TYPE_CHECKING:
     from dsl41.runner_history import RunRow
     from dsl41.runner_admission import DecisionIndex
     from dsl41.runner_preflight import PreflightItem
-    from dsl41.oracle_state import CarriedRows
     from dsl41.semantics import SemanticSwitches
 
 
@@ -666,7 +665,9 @@ async def _serve_run(
         try:
             await server.start()
         except EngineError as exc:
-            # the handlers stay until `loop.close()`, as on the success path
+            # the handlers stay until `loop.close()`, as on the success path; the tasks resume
+            # started stop before the journal closes and the lock is released below
+            await engine.shutdown()
             return refuse(exc)
         typer.echo(f"engine up; control socket: {server.path}")
         end = await _await_run_end(engine, server, stop, ui)
@@ -1312,7 +1313,7 @@ def journal(
     root = root_of_wal(segment)
     _run_period(
         records,
-        (_period_catalog(root, records[0], catalog, where=""), None),
+        _period_catalog(root, records[0], catalog, where=""),
         where="",
         profile=_period_profile(root, records[0], where=""),
     )
@@ -1333,7 +1334,7 @@ def _period_profile(root: Path, opening: "dict[str, Any]", *, where: str) -> "Ru
 
 def _run_period(
     records: list[dict[str, Any]],
-    opened: "tuple[CatalogIR, CarriedRows | None]",
+    catalog: CatalogIR,
     *,
     where: str,
     profile: "RuntimeProfile | None" = None,
@@ -1346,12 +1347,11 @@ def _run_period(
     from dsl41.runner_clock import EngineError
     from dsl41.runner_journal import replay_period
 
-    catalog, carried = opened
     named = f"{where}: " if where else ""
     # SEM-35: the period's own alias table (DL-151), since a `ujo_timezones` name is site-local
     # and lives in the pin. The semantic switches (DL-252) and the base zone (DL-253) come from
     # the same pin, so the replay reads a condition as the engine that wrote the log did.
-    oracle = Oracle(catalog, carried=carried, **oracle_reading(profile))
+    oracle = Oracle(catalog, **oracle_reading(profile))
     try:
         replay = replay_period(oracle, records)
     except (OracleError, EngineError) as exc:
@@ -1364,7 +1364,7 @@ def _run_period(
 
 def _rejection_lines(records: list[dict[str, Any]], decisions: "DecisionIndex") -> list[str]:
     """The narration beside a period's trace: one line per engine-made input the period rejected
-    (a stale completion, a refused routing observation, a quarantined input) and one per
+    (a stale completion, a quarantined input) and one per
     quarantine (`engine_apply_faulted`, concurrency-model ss4) whatever its source, since replay
     quarantines an undecided control input too.
 
@@ -1492,7 +1492,8 @@ def runs(
     """List the run history of one or more run roots.
 
     One row per job run, built from each root's journal, manifest and
-    spool: when it started, how long it took, and how it ended. Rows
+    spool: when it started, how long it took, and how it ended. Command
+    and file-watch runs and boxes each get rows. Rows
     sort by job and start time across all the roots given. Where the
     catalog changed between runs, the table marks the break instead of
     blending the series.

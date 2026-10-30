@@ -74,25 +74,6 @@ seeded = fresh + seed_period // Set the period id. A period below one is the ver
 live = input + commit_input // Check capacity. One revision per changed entity
 ```
 
-## host
-
-Shown: 7. Folded: 14 (ignored 1, refusals 9, internal 4). Rows in the chart: 21.
-
-### routing
-
-```text
-active <- initial
-routed = {active, passive}
-active = passive + activate // held starts dispatch again
-      || quarantined + reinstate [else]
-      || evicted + register // spec-only
-passive = active + drain // new effects are held; running work continues
-       || quarantined + reinstate [remembered_passive]
-quarantined = routed + quarantine
-evicted = host + force_evict [not_evicted]
-       || quarantined + evict
-```
-
 ## admission
 
 Shown: 2. Folded: 2 (refusals 1, internal 1). Rows in the chart: 4.
@@ -101,21 +82,8 @@ Shown: 2. Folded: 2 (refusals 1, internal 1). Rows in the chart: 4.
 
 ```text
 admitted <- initial
-applied = admitted + decide [applied] // The decision line, with the outbox entries it implies
+applied = admitted + decide [applied] // The decision line
 rejected = admitted + decide [rejected] // The decision line, with its stored code
-```
-
-## effect
-
-Shown: 3. Folded: 0. Rows in the chart: 3.
-
-### outcome
-
-```text
-pending <- initial
-applied = pending + resolve [applied]
-retired = pending + resolve [retired]
-indeterminate = pending + resolve [indeterminate]
 ```
 
 ## subscription

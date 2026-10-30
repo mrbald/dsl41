@@ -90,6 +90,7 @@ def _resumed_status(run_root: Path, text: str, result: object, monkeypatch) -> d
     """What the RESUME ladder puts on the same input for the same result."""
     from dsl41 import runner_startup
     from dsl41.runner_adapters import FakeAdapter
+    from dsl41.runner_journal import read_journal
     from dsl41.runner_startup import _reconcile
 
     engine = start_run(
@@ -112,10 +113,12 @@ def _resumed_status(run_root: Path, text: str, result: object, monkeypatch) -> d
     async def scenario() -> None:
         engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "j"}))
         await engine.run_until_quiescent(T0)
-        # the ladder's candidate set is (dispatch records + runs/), and
-        # `FakeAdapter` writes neither -- so the run is handed the one
-        # record a dispatched CMD run really leaves
-        records = [{"rec": "dispatch", "job": "j", "run_number": 1, "run_dir": None}]
+        # the ladder's candidates are the run directories, and `FakeAdapter`
+        # makes none -- so the run is handed the one a dispatched CMD run
+        # really leaves; the journal holds its `dispatch` record
+        (run_root / "runs" / "j.1").mkdir(parents=True)
+        assert engine.journal is not None
+        records = read_journal(engine.journal.path)
         try:
             await _reconcile(engine, records, T0, settle_seconds=0.0, grace_seconds=0.0)
         finally:

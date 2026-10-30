@@ -158,8 +158,8 @@ sigterm = true
 [tool.coverage.report]
 # The gate is scoped, and the scope is an argument rather than a convenience.
 # These are the modules that implement docs/concurrency-model.md: the state
-# owner, admission, the ledger and its lock, the outbox, the routing table,
-# and the engine loop that drives them. A missed branch here is a rule the
+# owner, admission, the ledger and its lock, and the engine loop that drives
+# them. A missed branch here is a rule the
 # code states and no test holds it to -- which is how `superseded_reason`
 # came to be proven as a function while the wiring that acts on it was never
 # once exercised (DL-105).
@@ -221,8 +221,6 @@ include = [
     "src/dsl41/runner_admission.py",
     "src/dsl41/runner_clock.py",
     "src/dsl41/runner_control.py",
-    "src/dsl41/runner_effects.py",
-    "src/dsl41/runner_hosts.py",
     "src/dsl41/runner_journal.py",
     "src/dsl41/runner_ledger.py",
     "src/dsl41/runner_procid.py",

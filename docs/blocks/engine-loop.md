@@ -18,9 +18,9 @@ Every durable write happens after the choice, in admission or dispatch.
 
 - `Engine._next_work(horizon, now) -> _Work`. `_Work.do` is one of the five `_Do` names: `EVENT`, `TICK`, `TIMER`, `QUIESCE`, `WAIT`. `_Work.at` is the tick, the timer's stamp or the wake target.
 - `Engine.run_until_quiescent(horizon) -> list[Event]` runs the loop and returns the events the oracle emitted.
-- The queue is a heap of `_Pending` inputs ordered by `(at, arrival number)`. These fill it: `Engine.inject`, `Engine.submit`, `Engine.submit_host`, `Engine.inject_host`, scheduler ticks, adapter completions and reconciliation injections at resume (`_inject_completion`).
+- The queue is a heap of `_Pending` inputs ordered by `(at, arrival number)`. These fill it: `Engine.inject`, `Engine.submit`, scheduler ticks, adapter completions and reconciliation injections at resume (`_inject_completion`).
 - `Engine._push` puts one input on the queue and wakes the loop.
-- `EVENT` and `TIMER` go through `Engine._admit_and_apply` and then `Engine._dispatch` (the [effect outbox](effect-outbox.md)).
+- `EVENT` and `TIMER` go through `Engine._admit_and_apply`, which ends in `Engine._dispatch`: each start writes its `dispatch` record and launches, and each kill cancels the live run.
 - `TICK` waits for the tick and queues its `STARTJOB` inputs.
 - `WAIT` blocks until the target instant or queue activity, then the loop chooses again.
 - Two clock domains: a virtual clock jumps; a real clock sleeps and wakes early on activity.
@@ -28,17 +28,12 @@ Every durable write happens after the choice, in admission or dispatch.
 ## States
 
 The work choice is a policy, not a declared machine; [the policies](policies.md#work-choice) say why.
-The seal's phases are seal_boundary (retired in 2.0.0), explained in seal and lineage (`seal-and-lineage.md`, retired in 2.0.0).
 The flowchart shows one turn of the loop:
 
 ```mermaid
 flowchart TD
     turn(["loop turn"]) --> settle["Settle"]
-    settle --> sealq{"a seal request waiting?"}
-    sealq -->|"yes"| boundary["run the seal boundary"]
-    boundary -->|"refused: the period stays open"| settle
-    boundary -->|"committed, or a fail-stop"| ends(["the loop ends"])
-    sealq -->|"no"| choose{"choose"}
+    settle --> choose{"choose"}
     choose -->|"a queued input is takeable"| input["admit and decide the input"]
     choose -->|"a calendar tick is takeable"| tick["queue its STARTJOB inputs"]
     choose -->|"a timer is takeable"| timer["admit and decide the timer"]
@@ -56,19 +51,14 @@ flowchart TD
 - One task owns the oracle, and nothing else writes it ([runner-design §4](../runner-design.md#4-engine-loop--single-writer)).
 - A timer firing and a calendar tick are inputs. Each takes the one admission order (concurrency-model §4 (`concurrency-model.md`, retired in 2.0.0); ticks: [DL-45](../decision-log.md) item 2, narrowed by [DL-284](../decision-log.md)).
 - The choice is one decision with a fixed priority: input, then tick, then timer. The truth table lives in the `_next_work` docstring; [DL-145](../decision-log.md) keeps its branch count as the domain's.
-- Outside a seal (period-model §6 (`period-model.md`, retired in 2.0.0) step 2), a tick pops before any later-due event and any same-or-later-due timer. A queued input stamped at the tick's instant goes first ([DL-45](../decision-log.md) item 2, narrowed by [DL-284](../decision-log.md); `test_dl137_a_tick_and_an_input_stamped_alike_feed_the_input_first`).
+- A tick pops before any later-due event and any same-or-later-due timer. A queued input stamped at the tick's instant goes first ([DL-45](../decision-log.md) item 2, narrowed by [DL-284](../decision-log.md); `test_dl137_a_tick_and_an_input_stamped_alike_feed_the_input_first`).
 - On a real clock the loop commits to work only once its instant is due. An earlier instant is waited out, and an input that arrives during the wait makes the loop choose again ([DL-45](../decision-log.md) item 1).
 - On a real clock a timer due strictly before a due queued input fires first, as its own input ([DL-232](../decision-log.md); concurrency-model §0 (`concurrency-model.md`, retired in 2.0.0)).
-- While `sealing` is true, `Engine._push` refuses new externally requested inputs and `_next_work` takes no tick. The seal itself drains the queue and admits the ticks due at or before its cutoff (period-model §6 (`period-model.md`, retired in 2.0.0) steps 2 and 4).
 - Every admitted input ends in a dispatch pass ([DL-234](../decision-log.md)).
 - Work at one clock instant has a budget. The floor is `INSTANT_BUDGET_FLOOR` ([DL-211](../decision-log.md)).
 
 ## Failure and recovery
 
-- A seal has four exits: commit, refusal, [fail-stop](../glossary.md#fail-stop) and a statechart error. A refusal runs `abort_boundary`, and the loop carries on in the open period. A fail-stop raises out of the loop with no abort. A statechart error is never posted to the chart: it raises out of the loop with no abort, and the engine exits 7 ([statechart-engine §5](../statechart-engine.md)). `SEAL_BOUNDARY` names the phases and the other three exits (state machines (retired in 2.0.0)).
-- `Engine.sealing` reads `SealBarrier.parked`: the freeze is one fact.
-- One kind of fail-stop comes before the `seal` append: a fence loss, an exception while an attempt admitted during the seal is not fully applied, a failed WAL append, or a `clock_regressed` on an engine-made input. The last three are [DL-274](../decision-log.md)'s; the row's action reports a note naming it, and the engine adds it to the exception. After a fence loss or one of DL-274's cases, resume rebuilds from the WAL, and the period stays open.
-- The other kind is a failure at or after the `seal` append, an anchor close after a durable seal line included. `commit_boundary` raises `BoundaryFailStop`, and the outcome is unknown. Recovery decides: it commits a complete seal line once its `fsync` succeeds, and it truncates a torn or absent line and reopens the period (period-model §7 (`period-model.md`, retired in 2.0.0), PR-28d).
 - An adapter task that died with an exception is re-raised by `Engine._settle`, and the engine stops. Resume rebuilds the estate from the log (period-model §11 (`period-model.md`, retired in 2.0.0)).
 - A condition cycle that makes no progress at one instant raises `ZeroDelayCycleError` with the instant and the jobs it started ([DL-184](../decision-log.md)).
 - A crash anywhere in the loop loses no choice: the choice is not durable. Resume replays the log and the new loop chooses afresh (period-model §11 (`period-model.md`, retired in 2.0.0) steps 6 to 8).

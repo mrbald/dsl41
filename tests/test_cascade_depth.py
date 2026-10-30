@@ -725,9 +725,7 @@ def test_sem10_a_control_input_at_the_cap_is_refused_apply_faulted(
             clock=VirtualClock(start=T0),
             adapters={"CMD": FakeAdapter()},
         )
-        future = engine.submit(
-            _force_q0(), Envelope(request_id="r1", expect={}, epoch=engine.epoch)
-        )
+        future = engine.submit(_force_q0(), Envelope(request_id="r1", expect={}))
         assert isinstance(future, asyncio.Future)
         await engine.run_until_quiescent(T0)
         with pytest.raises(AdmissionRefused) as refused:

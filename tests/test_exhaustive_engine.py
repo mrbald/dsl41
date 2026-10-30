@@ -23,12 +23,10 @@ from typing import Any
 
 import pytest
 
-from dsl41.ast_jil import parse, render_preserve
-from dsl41.ir import lower_catalog, lower_source
+from dsl41.ir import lower_source
 from dsl41.job_chart import JOB
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import (
-    HOST,
     LIVE,
     CapacityReservation,
     CarriedRows,
@@ -37,7 +35,6 @@ from dsl41.oracle_state import (
     OracleError,
     RuntimeState,
 )
-from dsl41.run_root import RuntimeProfile, SourceFile, stage_manifest, write_bundle
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import (
@@ -48,16 +45,12 @@ from dsl41.runner_admission import (
     Attempt,
     Envelope,
     EnvelopeError,
-    apply_attempt,
     fingerprint,
     parse_envelope,
 )
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_control import command
-from dsl41.runner_effects import Effect, EffectOutcome, Outbox, effect_id_for
-from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, HostCommand, seed_local_executor
 from dsl41.runner_journal import SUBSCRIPTION, Journal, read_decisions, read_journal
-from dsl41.runner_ledger import STATE_MACHINE_VERSION
 from dsl41.semantics import DEFAULTS, SemanticSwitches
 from dsl41.semantics import resolve as resolve_switches
 from dsl41.state_machine import (
@@ -486,207 +479,14 @@ def test_every_assembly_verb_in_every_phase_meets_a_row_or_a_refusal(
     )
 
 
-# ------------------------------------------------------------------- host
+# ------------------------------------------------------------------ engine
 
 _HOST_JIL = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
-_ACTOR = "alice@ops"
-#: (verb, force, seconds after T0) for each step that builds a routing state
-type _HostStep = tuple[str, bool, int]
-_HOST_BUILDS: tuple[tuple[_HostStep, ...], ...] = (
-    (),
-    (("drain", False, 0),),
-    (("quarantine", False, 0),),
-    (("drain", False, 0), ("quarantine", False, 0)),
-    (("quarantine", False, 0), ("reinstate", False, 0)),
-    (("drain", False, 0), ("quarantine", False, 0), ("reinstate", False, 0)),
-    (("evict", True, 0),),
-    (("drain", False, 0), ("evict", True, 0)),
-    (("quarantine", False, 0), ("evict", True, 0)),
-    (("quarantine", False, 0), ("evict", False, 3600)),
-)
-_HOST_VERBS = ("activate", "drain", "evict", "quarantine", "reinstate")
-
-
-def _host_attempt(
-    index: int, verb: str, *, force: bool, at: datetime, actor: str | None, host: str
-) -> Attempt:
-    return Attempt(
-        index=index,
-        at=at,
-        request_id=f"r{index}",
-        fingerprint="fp",
-        host=HostCommand(verb=verb, host_id=host, force=force),  # type: ignore[arg-type]
-        claimed_actor=actor,
-    )
-
-
-def _host_events(now: datetime) -> Iterator[tuple[str, Attempt, ApplyResult | None]]:
-    """Every host command: each verb, with and without force, with and
-    without an actor, at `now` and a day later, gated live; each
-    verb and force again as a replayed durable `applied` (the apply half,
-    which skips the guards); and each verb for a host the table does not
-    hold."""
-    index = 100
-    for verb in _HOST_VERBS:
-        for force in (False, True):
-            for actor in (None, _ACTOR):
-                for at in (now, now + DAY):
-                    index += 1
-                    yield (
-                        f"{verb} force={force} actor={actor} at={at}",
-                        _host_attempt(
-                            index, verb, force=force, at=at, actor=actor, host=LOCAL_EXECUTOR_ID
-                        ),
-                        None,
-                    )
-            index += 1
-            yield (
-                f"replayed applied {verb} force={force}",
-                _host_attempt(
-                    index, verb, force=force, at=now, actor=_ACTOR, host=LOCAL_EXECUTOR_ID
-                ),
-                ApplyResult(index=index, request_id=f"r{index}", decision="applied"),
-            )
-        index += 1
-        yield (
-            f"{verb} on an unknown host",
-            _host_attempt(index, verb, force=False, at=now, actor=_ACTOR, host="nowhere"),
-            None,
-        )
-
-
-def test_every_host_command_in_every_built_routing_state_takes_a_declared_transition(
-    recorded: Path,
-) -> None:
-    """`host`: the routing states the verbs build through `apply_attempt`,
-    the path the engine and replay share (`_HOST_BUILDS`): active and
-    passive (also after a quarantine and reinstate), quarantined from
-    either, evicted by force from each of the three, and evicted past the
-    ss8 bound; each with and without a deadman. Every host command
-    (`_host_events`) in each. A command takes a declared row of the chart,
-    or the gate rejects it (a decision that moves nothing), or the apply
-    half meets a durable decision the chart refuses, or a host with no
-    instance: a `StatechartError` (statechart-engine ss5). A replay check
-    that the stored revisions match is an EngineError, raised after the
-    move.
-
-    Left out: a carried row with no `last_contact` (only the
-    `host_never_contacted` rejection reads it, and a rejection takes no
-    transition), a stale `expect` (the precondition rejects before the
-    host gate), and the relay's re-registration, which no code posts:
-    host.12 (spec-only) and host.22, the ignored `register` outside
-    `evicted`, which only the chart's completeness test posts."""
-    catalog = lower_source(_HOST_JIL)
-    reached: set[tuple[object, ...]] = set()
-    for deadman in (None, 60.0):
-        for build in _HOST_BUILDS:
-            base = Oracle(catalog)
-            seed_local_executor(base.store, LOCAL_EXECUTOR_ID, at=T0, deadman_s=deadman)
-            for index, (verb, force, offset) in enumerate(build, start=1):
-                step = _host_attempt(
-                    index,
-                    verb,
-                    force=force,
-                    at=T0 + timedelta(seconds=offset),
-                    actor=_ACTOR,
-                    host=LOCAL_EXECUTOR_ID,
-                )
-                apply_attempt(base, step, grace_s=10.0)
-            row = base.store.hosts[LOCAL_EXECUTOR_ID]
-            state = (
-                row.state,
-                row.deadman_s,
-                row.forced_by,
-                row.generation,
-                row.state_before_quarantine,
-            )
-            if state in reached:
-                continue
-            reached.add(state)
-            for name, attempt, decided in _host_events(base._now or T0):
-                twin = base.fork()
-                try:
-                    applied = apply_attempt(twin, attempt, decided=decided, grace_s=10.0)
-                except StatechartError as exc:
-                    assert decided is not None, name  # never a live gated command
-                    assert "the chart refuses it" in str(exc) or "no instance" in str(exc)
-                    continue
-                except EngineError as exc:
-                    assert "replay diverged" in str(exc)
-                    continue
-                assert applied.result.decision in ("applied", "rejected"), name
-    assert {state[0] for state in reached} == {"active", "passive", "quarantined", "evicted"}
-    assert len(reached) == 11
-    # by design: host.12 is spec-only, and host.22 is declaration-only, which the
-    # chart's completeness test alone posts
-    assert {row.id for row in HOST.rows} - _hits(recorded) == {"host.12", "host.22"}
-
-
-# ----------------------------------------------------------------- effect
-
-_RUN_ID = "00000000-0000-4000-8000-000000000001"
-_STRANGER = "00000000-0000-4000-8000-000000000002"
-
-
-def _spawn(**fields: Any) -> Effect:
-    return Effect(
-        **{
-            "effect_id": effect_id_for(1, "SPAWN", "j", 1),
-            "kind": "SPAWN",
-            "job": "j",
-            "run_number": 1,
-            "executor_id": LOCAL_EXECUTOR_ID,
-            "index": 1,
-            "at": T0,
-            "run_id": _RUN_ID,
-            "generation": 0,
-            **fields,
-        }
-    )
-
-
-#: the outbox calls an effect's state reaches, as the engine and
-#: `read_outbox` make them: nothing, a record, or a record and an outcome
-_EFFECT_BUILDS: dict[str, tuple[str, ...]] = {
-    "absent": (),
-    "pending": ("record",),
-    "applied": ("record", "applied"),
-    "retired": ("record", "retired"),
-    "indeterminate": ("record", "indeterminate"),
-}
-
-
-def _effect_events() -> dict[str, Callable[[Outbox], None]]:
-    """Every call the outbox accepts for one effect: the record again, a
-    different record under its id, a KILL of its run naming another
-    process, each outcome, and an outcome naming another process."""
-    spawn = _spawn()
-    kill = _spawn(effect_id=effect_id_for(2, "KILL", "j", 1), kind="KILL", index=2)
-    events: dict[str, Callable[[Outbox], None]] = {
-        "record": lambda box: box.record(spawn),
-        "record other content": lambda box: box.record(_spawn(index=9)),
-        "record a KILL naming a stranger": lambda box: box.record(
-            kill.model_copy(update={"run_id": _STRANGER})
-        ),
-        "outcome naming a stranger": lambda box: box.resolve(
-            EffectOutcome(effect_id=spawn.effect_id, state="applied", run_id=_STRANGER)
-        ),
-    }
-    for outcome in ("applied", "retired", "indeterminate"):
-        events[f"outcome {outcome}"] = _resolve_to(spawn.effect_id, outcome)
-    return events
-
-
-def _resolve_to(effect_id: str, outcome: str) -> Callable[[Outbox], None]:
-    def resolve(box: Outbox) -> None:
-        box.resolve(EffectOutcome(effect_id=effect_id, state=outcome))  # type: ignore[arg-type]
-
-    return resolve
 
 
 def _run_spied(outcomes: list[Outcome]) -> Executor:
-    """An outbox's executor that keeps every outcome: a record's start and an
-    outcome's post both end in `run`."""
+    """An engine's executor that keeps every outcome: a start and a post both
+    end in `run`."""
     machines = Executor()
     run = machines.run
 
@@ -697,86 +497,6 @@ def _run_spied(outcomes: list[Outcome]) -> Executor:
 
     machines.run = spy  # type: ignore[method-assign]
     return machines
-
-
-#: the row each outcome of a pending effect takes
-_OUTCOME_ROWS = {"applied": "effect.02", "retired": "effect.03", "indeterminate": "effect.04"}
-
-
-def _effect_cell(state: str, name: str) -> str:
-    """What one call does to an effect in `state`, from concurrency-model ss5
-    and DL-118: the effect starts `pending` when it is first recorded; an
-    exact record again changes nothing; other content under its id, or a
-    KILL of its bound run naming another process, is refused; an outcome
-    must belong to a recorded effect and its run, and an outcome is final."""
-    if name == "record":
-        return "started" if state == "absent" else "no-op"
-    if state == "absent":
-        return "started" if name.startswith("record") else "refused"
-    if name.startswith("record") or name == "outcome naming a stranger":
-        return "refused"
-    return _OUTCOME_ROWS[name.split()[1]] if state == "pending" else "refused"
-
-
-def test_every_outbox_call_in_every_effect_state_takes_a_declared_transition(
-    recorded: Path,
-) -> None:
-    """`effect`: all five states, built on an `Outbox` by its own verbs, as
-    the engine and `read_outbox` build it (`_EFFECT_BUILDS`), and every
-    call it accepts for that effect (`_effect_events`). Each call starts the
-    effect's instance, posts one outcome that fires its row, is a no-op (the
-    same record again), or is refused by the outbox's own EngineError before
-    anything is posted. A second outcome is that refusal, by design
-    (DL-295): the instance of a resolved effect is gone, so no chart is
-    asked. Left out: nothing."""
-    events = _effect_events()
-    cells: dict[tuple[str, str], str] = {}
-    for state, build in _EFFECT_BUILDS.items():
-        for name, call in events.items():
-            outcomes: list[Outcome] = []
-            box = Outbox(_run_spied(outcomes))
-            for step in build:
-                if step == "record":
-                    box.record(_spawn())
-                else:
-                    box.resolve(EffectOutcome(effect_id=_spawn().effect_id, state=step))  # type: ignore[arg-type]
-            assert (box.state_of(_spawn().effect_id) or "absent") == state
-            before = len(outcomes)
-            try:
-                call(box)
-            except EngineError as error:
-                assert outcomes[before:] == []  # refused before any post
-                assert not box.machines._pool  # and nothing left in the pool
-                assert (box.state_of(_spawn().effect_id) or "absent") == state
-                if (
-                    state in _OUTCOME_ROWS
-                    and name.startswith("outcome ")
-                    and "stranger" not in name
-                ):
-                    assert "an outcome is final" in str(error)
-                cells[(state, name)] = "refused"
-                continue
-            cell = outcomes[before:]
-            if not cell:
-                cells[(state, name)] = "no-op"
-            else:
-                (outcome,) = cell
-                cells[(state, name)] = (
-                    outcome.kind if outcome.kind == "started" else outcome.rows[0]
-                )
-            if box.state_of(_spawn().effect_id) in _OUTCOME_ROWS:
-                with pytest.raises(StatechartError, match="no instance"):
-                    box.machines.active(box.key(_spawn().effect_id))  # forgotten once final
-    assert cells == {cell: _effect_cell(*cell) for cell in cells}
-    assert len(cells) == len(_EFFECT_BUILDS) * len(events)
-    second = {(s, f"outcome {o}") for s in _OUTCOME_ROWS for o in _OUTCOME_ROWS}
-    assert {cell for cell, value in cells.items() if value == "refused"} >= second
-    assert {value for value in cells.values() if value.startswith("effect.")} == set(
-        _OUTCOME_ROWS.values()
-    )
-
-
-# ----------------------------------------------------------- subscription
 
 
 def _spied(outcomes: list[Outcome]) -> Executor:
@@ -892,37 +612,29 @@ def _set_global(value: str) -> Event:
     return Event(at=T0, kind="SET_GLOBAL", payload={"name": "G", "value": value})
 
 
-#: (event, expect, epoch offset) of each operator command an admission case sends
-type _Command = tuple[Event | HostCommand, dict[str, int], int]
-_APPLIES: _Command = (_set_global("1"), {_G: 0}, 0)
-_REJECTED: _Command = (_set_global("1"), {_G: 5}, 0)
+#: (event, expect) of each operator command an admission case sends
+type _Command = tuple[Event, dict[str, int]]
+_APPLIES: _Command = (_set_global("1"), {_G: 0})
+_REJECTED: _Command = (_set_global("1"), {_G: 5})
 
 
 def _send(engine: Engine, command: _Command) -> asyncio.Future[ApplyResult]:
-    what, expect, epoch = command
-    envelope = Envelope(request_id=_R, expect=expect, epoch=engine.epoch + epoch)
-    if isinstance(what, HostCommand):
-        return engine.submit_host(what, envelope)  # type: ignore[return-value]
+    what, expect = command
+    envelope = Envelope(request_id=_R, expect=expect)
     return engine.submit(what.model_copy(), envelope)  # type: ignore[return-value]
 
 
 def _admission_events() -> dict[str, _Command | None]:
     """Every input that can address `_R`: the command that built the state
-    (or, for an unseen id, one that applies), another command, a stale
-    epoch, a failed precondition, a command that faults when applied, a
-    host command, and (None) an input the engine makes. That one takes a name
+    (or, for an unseen id, one that applies), another command, a failed
+    precondition, a command that faults when applied, and (None) an input
+    the engine makes. That one takes a name
     of its own, so it cannot address `_R`: it must leave the id where it was."""
     return {
         "the same command": None,
-        "another command": (_set_global("2"), {_G: 0}, 0),
-        "a stale epoch": (_set_global("1"), {_G: 0}, 1),
-        "a failed precondition": (_set_global("3"), {_G: 7}, 0),
-        "a faulting command": (Event(at=T0, kind="STARTJOB", payload={}), {"job:j": 0}, 0),
-        "a host command": (
-            HostCommand(verb="drain", host_id=LOCAL_EXECUTOR_ID),
-            {"host:local": 1},
-            0,
-        ),
+        "another command": (_set_global("2"), {_G: 0}),
+        "a failed precondition": (_set_global("3"), {_G: 7}),
+        "a faulting command": (Event(at=T0, kind="STARTJOB", payload={}), {"job:j": 0}),
         "an engine-made input": None,
     }
 
@@ -963,8 +675,7 @@ async def _admission_case(state: str, event: str) -> tuple[str, str, tuple[str, 
         await engine.run_until_quiescent(T0)
         if state == "admitted":
             # an attempt line with no decision, as `read_decisions` notes one
-            what, expect, _ = built
-            assert isinstance(what, Event)
+            what, expect = built
             engine.decisions.note(
                 Attempt(
                     index=2,
@@ -975,7 +686,6 @@ async def _admission_case(state: str, event: str) -> tuple[str, str, tuple[str, 
                         kind=what.kind,
                         payload=dict(what.payload),
                         source="control",
-                        epoch=engine.epoch,
                         expect=expect,
                     ),
                 )
@@ -1009,7 +719,6 @@ def _wire_refuses_an_engine_name() -> bool:
         "v": PROTOCOL_VERSION,
         "baseline_id": "b",
         "request_id": "engine:2",
-        "epoch": 1,
         "expect": {_G: 0},
     }
     try:
@@ -1020,16 +729,15 @@ def _wire_refuses_an_engine_name() -> bool:
 
 
 #: what an unseen id's admitted command is decided, by concurrency-model ss4
-#: steps 5-7: `expect` holds for the command that built the state, another
-#: command and a host command, and fails for the failed precondition
+#: steps 5-7: `expect` holds for the command that built the state and another
+#: command, and fails for the failed precondition
 _UNSEEN_DECISIONS = {
     "the same command": "applied",
     "another command": "applied",
     "a failed precondition": "rejected",
-    "a host command": "applied",
 }
 #: what refuses an unseen id's command before admission (ss4 steps 2-3)
-_UNSEEN_REFUSALS = {"a stale epoch": "stale_epoch", "a faulting command": "apply_faulted"}
+_UNSEEN_REFUSALS = {"a faulting command": "apply_faulted"}
 
 
 def _admission_cell(state: str, event: str) -> tuple[str, str, tuple[str, ...]]:
@@ -1040,10 +748,9 @@ def _admission_cell(state: str, event: str) -> tuple[str, str, tuple[str, ...]]:
     own: it is made and posts nothing for `_R`. An unseen id refused before
     admission starts nothing; one admitted starts and takes its decision. A
     decided id is answered by the index from the stored decision, retry or
-    reuse, with no post (DL-217, CM-05); the epoch is checked only after
-    dedup, so a stale epoch is a reuse too. An id in flight refuses every
-    other command (`request_id_reused`, the epoch being in the fingerprint)
-    and stops the engine on the same command: a second writer. A `stopped`
+    reuse, with no post (DL-217, CM-05). An id in flight refuses every other
+    command (`request_id_reused`) and stops the engine on the same command:
+    a second writer. A `stopped`
     answer is matched as a prefix."""
     if event == "an engine-made input":
         return "made", state, ()
@@ -1073,12 +780,7 @@ def test_every_input_in_every_request_id_state_takes_a_declared_transition(recor
     where the index answered a decided id or a refusal came before
     admission. A gap in the chart would raise a statechart error.
 
-    Left out: the two refusals made only while a seal is in flight
-    (`period_sealing` comes before dedup and starts no instance; a stamp
-    behind the frontier during the seal's drain is refused before
-    admission, as the stale epoch is here); the seal's own request-id
-    lookup (`boundary._check_request_id`, which posts to an id in flight
-    only); and replay's moves (`read_decisions` notes every attempt and
+    Left out: replay's moves (`read_decisions` notes every attempt and
     records every decision, `replay_inputs` records a recovered one),
     whose one collision the reserved `engine:` prefix closes
     (`test_a_client_request_id_in_the_engines_prefix_is_refused`)."""
@@ -1135,7 +837,6 @@ def test_a_client_request_id_in_the_engines_prefix_is_refused(
         "v": PROTOCOL_VERSION,
         "baseline_id": "b",
         "request_id": request_id,
-        "epoch": 1,
         "expect": {_G: 0},
     }
     if refused:
@@ -1150,8 +851,8 @@ def test_no_client_request_collides_with_an_engine_made_input_live_or_on_replay(
     recorded: Path, short_root: Path
 ) -> None:
     """The collision the prefix closes, end to end. An operator tries the
-    name the engine would give index 2, on `sendevent` and on `host`: both
-    are refused on the wire and nothing reaches the log. A legal request
+    name the engine would give index 2 on `sendevent`: it is refused on the
+    wire and nothing reaches the log. A legal request
     takes index 1, the engine then makes input 2 and names it
     `engine:2`, and the client's decision stands: its retry is answered
     from it. Replay of the log notes every attempt."""
@@ -1161,33 +862,17 @@ def test_no_client_request_collides_with_an_engine_made_input_live_or_on_replay(
         engine, server, loop_task = await _serve(short_root / "run", _HOST_JIL)
         try:
             assert engine.journal is not None
-            baseline, epoch, revision = await _read_revision(server.path, _G)
+            baseline, revision = await _read_revision(server.path, _G)
             legal = command(
                 "SET_GLOBAL",
                 {"name": "G", "value": "1"},
                 key=_G,
                 revision=revision,
                 baseline_id=baseline,
-                epoch=epoch,
                 request_id="r-1",
             )
             before = engine.journal.path.read_bytes()
-            refusals = [
-                await _control_call(server.path, {**legal, "request_id": "engine:2"}),
-                await _control_call(
-                    server.path,
-                    command(
-                        "drain",
-                        {"id": LOCAL_EXECUTOR_ID},
-                        key="host:local",
-                        revision=1,
-                        baseline_id=baseline,
-                        epoch=epoch,
-                        request_id="engine:2",
-                        cmd="host",
-                    ),
-                ),
-            ]
+            refusals = [await _control_call(server.path, {**legal, "request_id": "engine:2"})]
             assert engine.journal.path.read_bytes() == before  # nothing was admitted
             first = await _control_call(server.path, legal)
             assert first["ok"] is True and first["decision"] == "applied"
@@ -1219,71 +904,3 @@ def test_no_client_request_collides_with_an_engine_made_input_live_or_on_replay(
     index = read_decisions(records)
     assert index.state("r-1") == "applied"
     assert index.state("engine:2") == "applied"
-
-
-# ---------------------------------------------------------- seal_boundary
-
-_C1_JIL = "insert_job: a\njob_type: c\ncommand: x\n\ninsert_job: b\njob_type: c\ncommand: y\n"
-_C2_JIL = "insert_job: a\njob_type: c\ncommand: x\n\ninsert_job: b\njob_type: c\ncommand: z\n"
-
-
-def _staged_manifest(run_root: Path, text: str) -> Any:
-    parsed = [parse(text, file="estate.jil")]
-    sources = [SourceFile(path="estate.jil", text=render_preserve(parsed[0]))]
-    return lower_catalog(parsed), stage_manifest(
-        lower_catalog(parsed),
-        source_bundle_hash=write_bundle(run_root, sources),
-        profile=RuntimeProfile(),
-        state_machine_version=STATE_MACHINE_VERSION,
-    )
-
-
-def _raise(exc: BaseException) -> Callable[..., Any]:
-    def fault(*_args: Any, **_kwargs: Any) -> Any:
-        raise exc
-
-    return fault
-
-
-class _FailingEffectWrite:
-    """The WAL file, except that writing an `effect_result` line fails
-    after part of it may be on disk (DL-274)."""
-
-    def __init__(self, inner: Any) -> None:
-        self._inner = inner
-
-    def write(self, line: bytes) -> int:
-        if b'"rec": "effect_result"' in line:
-            raise OSError(28, "No space left on device")
-        return int(self._inner.write(line))
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
-
-
-#: every (phase, event) the boundary's code can meet: the moves it takes
-#: (the exit last), the phase it ends in, and for an in-doubt stop the
-#: DL-274 note that names which flag stopped it. The phase is where the
-#: event lands: `requested` until the barrier parks, `frozen` through the
-#: drain, cutoff and quiescence, `committing` inside `commit_boundary`.
-_FROZEN = ("seal_boundary.01",)
-_COMMITTING = ("seal_boundary.01", "seal_boundary.02")
-_SEAL_CELLS: dict[str, tuple[tuple[str, ...], str, str]] = {
-    "requested: refused": (("seal_boundary.04",), "aborted", ""),
-    "requested: fence lost": (("seal_boundary.13",), "stopped", ""),
-    "requested: cancelled": ((), "requested", ""),
-    "frozen: refused": ((*_FROZEN, "seal_boundary.04"), "aborted", ""),
-    "frozen: fence lost": ((*_FROZEN, "seal_boundary.13"), "stopped", ""),
-    "frozen: an attempt applying": ((*_FROZEN, "seal_boundary.06"), "stopped", "not fully applied"),
-    "frozen: an input unadmitted": ((*_FROZEN, "seal_boundary.06"), "stopped", "unadmitted"),
-    "frozen: a WAL append unfinished": ((*_FROZEN, "seal_boundary.06"), "stopped", "WAL append"),
-    "frozen: cancelled": (_FROZEN, "frozen", ""),
-    "committing: the commit returns": ((*_COMMITTING, "seal_boundary.03"), "sealed", ""),
-    "committing: refused": ((*_COMMITTING, "seal_boundary.04"), "aborted", ""),
-    "committing: fence lost": ((*_COMMITTING, "seal_boundary.13"), "stopped", ""),
-    "committing: past the point of no return": (
-        (*_COMMITTING, "seal_boundary.13"),
-        "stopped",
-        "",
-    ),
-}

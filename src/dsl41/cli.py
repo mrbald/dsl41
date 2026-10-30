@@ -8,8 +8,7 @@ verbs live one file per domain (DL-137):
     cli_compile.py  a catalog in, an artifact out: lint, equiv, decompile, build, minify,
                     folds, resolve, viz
     cli_run.py      run, rehearse, and their offline readers journal, runs
-    cli_control.py  what an operator says to a RUNNING engine: sendevent, host, query, ui,
-                    serve
+    cli_control.py  what an operator says to a RUNNING engine: sendevent, query, ui, serve
 
 Imports run one way: this file imports the verb modules, the verb modules import `cli_common`,
 and no library module imports any of them.
@@ -72,6 +71,5 @@ app.command(rich_help_panel="Run an estate")(stops(cli_run.runs))
 app.command(rich_help_panel="Control a running engine")(cli_control.query)
 app.command(rich_help_panel="Control a running engine")(cli_control.sendevent)
 app.command(rich_help_panel="Control a running engine")(cli_control.off_hold_all)
-app.command(rich_help_panel="Control a running engine")(cli_control.host)
 app.command(rich_help_panel="Control a running engine")(cli_control.ui)
 app.command(rich_help_panel="Control a running engine")(cli_control.serve)

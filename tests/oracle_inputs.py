@@ -7,7 +7,7 @@ inputs and digest these renderings after every input:
 - `trace`: the trace entries the input added, as the trace contract prints
   them (at, job, transition, cause);
 - `emitted`: the events the input emitted (`InputBatch.emitted`);
-- `store`: the store rows as canonical lines: jobs, globals, hosts, the
+- `store`: the store rows as canonical lines: jobs, globals, the
   timers in `(due, token)` order, `timer_seq`, `consumed` and
   `enqueue_counter`;
 - `revisions`: the revisions the input moved, in the order the commit
@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any
 
 from estate_gen import Advance, SealPoint, Step, catalog_script, seeded
-from sealed_state import SealedHost, SealedState, _canon_ready
+from sealed_state import SealedState, _canon_ready
 
 from dsl41.ast_jil import parse_file
 from dsl41.canon import canonical_bytes, digest
@@ -94,12 +94,6 @@ def _job_dump(row: Any) -> dict[str, Any]:
     return dumped
 
 
-def _host_dump(row: Any) -> dict[str, Any]:
-    dumped: dict[str, Any] = row.model_dump(by_alias=True)
-    dumped["deadman_s"] = repr(row.deadman_s)  # the canonical grammar has no floats
-    return dumped
-
-
 class _Rows:
     """The store as canonical lines, written as the seal writes its rows:
     sets sorted, keys sorted, reservations by bucket, rows by name. So two
@@ -132,7 +126,6 @@ class _Rows:
         self._next = {}
         lines = self._rows("jobs", store.job, _job_dump)
         lines += self._rows("globals", store.globals_, lambda row: row.model_dump(by_alias=True))
-        lines += self._rows("hosts", store.hosts, _host_dump)
         self._memo = self._next
         lines += [
             f"timer {_canonical([due, token, ev.model_dump(by_alias=True)])}"
@@ -162,9 +155,8 @@ def sealed_state(oracle: Oracle, at: datetime) -> SealedState:
     return SealedState(
         jobs=dict(store.job),
         globals=dict(store.globals_),
-        hosts={host_id: SealedHost.of(row) for host_id, row in store.hosts.items()},
-        # the engine projects the route table from its own executor id, which
-        # has a host row there and none here: not oracle state
+        # the routing table is dormant: no tier writes a host row (oracle_state)
+        hosts={},
         routes={},
         timers=tuple(store.timers()),
         timer_seq=store.timer_seq,

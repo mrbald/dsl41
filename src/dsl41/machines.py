@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from dsl41.job_chart import JOB
-from dsl41.oracle_state import HOST, RUNTIME_ASSEMBLY
+from dsl41.oracle_state import RUNTIME_ASSEMBLY
 from dsl41.runner_admission import ADMISSION
-from dsl41.runner_effects import EFFECT
 from dsl41.runner_journal import SUBSCRIPTION
 from dsl41.scan_chart import QUEUE_SCAN
 from dsl41.state_machine import Statechart
@@ -15,8 +14,6 @@ MACHINES: tuple[Statechart, ...] = (
     JOB,
     QUEUE_SCAN,
     RUNTIME_ASSEMBLY,
-    HOST,
     ADMISSION,
-    EFFECT,
     SUBSCRIPTION,
 )

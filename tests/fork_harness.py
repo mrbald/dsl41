@@ -71,7 +71,6 @@ STORE_COPIED = frozenset(
     {
         "_jobs",
         "_globals",
-        "_hosts",
         "_timers",
         "_timer_seq",
         "_period_id",
@@ -80,9 +79,12 @@ STORE_COPIED = frozenset(
         "_snapshots",
     }
 )
+#: RuntimeState attributes no tier writes: the dormant routing table
+#: (oracle_state). The fork shares it, empty.
+STORE_DORMANT = frozenset({"_hosts"})
 #: RuntimeState attributes the fork gives its own value rather than a
-#: shallow copy: the store's executor, copied by `Executor.fork` with each
-#: host instance's data bound to the twin (statechart-engine ss11, DL-339).
+#: shallow copy: the store's executor, copied by `Executor.fork`
+#: (statechart-engine ss11, DL-339).
 #: The phase is its assembly instance's configuration.
 STORE_REBUILT = frozenset({"machines"})
 #: RuntimeState attributes the store's fork shares: the source of the job
@@ -113,20 +115,6 @@ def state_bytes(oracle: Oracle, since: tuple[int, int] = (0, 0)) -> bytes:
     doc = {
         "jobs": {name: row.model_dump(mode="json") for name, row in store.job.items()},
         "globals": {name: row.model_dump(mode="json") for name, row in store.globals_.items()},
-        # `deadman_s` is a float, which the canonical grammar has none of
-        "hosts": {
-            name: {**row.model_dump(mode="json"), "deadman_s": repr(row.deadman_s)}
-            for name, row in store.hosts.items()
-        },
-        # each host instance's configuration and deferred queue on the store's
-        # executor: a dispatch on a fork must not reach them
-        "machines": {
-            name: [
-                sorted(store.machines.active(store.host_key(name))),
-                len(store.machines.deferred(store.host_key(name))),
-            ]
-            for name in store.hosts
-        },
         # the queue scan's coordinator's configuration: a dispatch on a fork must not reach
         # the original's (DL-372); `Oracle._check_scan_idle` checks that it is idle
         "queue_scan": sorted(store.machines.active(SCAN_KEY)),

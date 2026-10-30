@@ -74,10 +74,10 @@ import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from pathlib import Path
-from typing import Any, cast, get_args
+from typing import Any, get_args
 
 
-from dsl41.canon import is_scalar_json, is_scalar_string, is_wire_int
+from dsl41.canon import is_scalar_json, is_wire_int
 from dsl41.conditions import GlobalAtom, iter_atoms
 from dsl41.ir import ExecSpec, FwSpec, JobIR
 from dsl41.run_root import FW_DEFAULT_INTERVAL_S
@@ -85,7 +85,6 @@ from dsl41.oracle_state import (
     INJECTABLE_STATUSES,
     Event,
     EventKind,
-    HostRuntime,
     JobRuntime,
     JobStatus,
 )
@@ -103,7 +102,6 @@ from dsl41.runner_admission import (
 )
 from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import UNKNOWN_OUTCOME_CODES, Code
-from dsl41.runner_hosts import HOST_VERBS, HostCommand, HostVerb
 from dsl41.runner_journal import best_effort_report, read_backfill
 from dsl41.runner_preflight import and_success_skeleton
 from dsl41.state_machine import StatechartError
@@ -170,7 +168,7 @@ class ControlServer:
     Every request names `"v": 3` (DL-90, DL-118). Queries: status [job], trace [since],
     explain job, spec job, deps job, timers, plan, global name, globals names; and
     subscribe [since]. An answer that passed routing and the lineage proof carries the
-    concurrency-model ss6 read header (`baseline_id`, `epoch`, `applied_index`), so a
+    concurrency-model ss6 read header (`baseline_id`, `applied_index`), so a
     client can tell which log a revision was read from. Everything sent BEFORE routing is
     headerless (DL-148): the bad-request and version refusals, the perimeter's credential
     refusal and denials, the lineage refusal, a raised handler's internal error, and
@@ -460,12 +458,10 @@ class ControlServer:
         header onto its answer."""
         response = await self._dispatch(request)
         # concurrency-model ss6: every read publishes where the log has reached and which
-        # log it is, so a client can tell a revision it may name from one it may not.
-        # Leader-only: one engine per run root IS the leader, enforced by the
-        # `leader.lock` flock (concurrency-model ss1, DL-100).
+        # log it is, so a client can tell a revision it may name from one it may not. One
+        # engine per run root answers, enforced by the `leader.lock` flock (DL-100).
         return response | {
             "baseline_id": self.engine.baseline_id,
-            "epoch": self.engine.epoch,
             "applied_index": self.engine.frontiers.applied_index,
         }
 
@@ -473,10 +469,6 @@ class ControlServer:
         cmd = request.get("cmd")
         if cmd == "sendevent":
             return await self._sendevent(request)
-        if cmd == "host":
-            return await self._host(request)
-        if cmd == "hosts":
-            return self._hosts(request)
         if cmd == "status":
             return self._status(request)
         if cmd == "trace":
@@ -530,24 +522,6 @@ class ControlServer:
             return _failure(exc.code, str(exc), refused=True)
         return await self._decision(self.engine.submit(ev, envelope), kind=ev.kind)
 
-    async def _host(self, request: dict[str, Any]) -> dict[str, Any]:
-        """One routing-table change through the ss4 admission order, answered with the same
-        four outcomes (concurrency-model ss8).
-
-        It is a separate `cmd` because a host verb maps onto no oracle `EventKind`: a job's
-        condition truth cannot depend on where its machine routes (DL-93). The ENVELOPE is
-        the same, parsed by the same function, because ss0 admits one mandate."""
-        parsed = self._host_command_for(request)
-        if isinstance(parsed, dict):
-            return _failure(parsed["code"], parsed["error"], refused=True)
-        try:
-            envelope = parse_envelope(
-                request, addressed=parsed.key, baseline_id=self.engine.baseline_id
-            )
-        except EnvelopeError as exc:
-            return _failure(exc.code, str(exc), refused=True)
-        return await self._decision(self.engine.submit_host(parsed, envelope), kind=parsed.verb)
-
     async def _decision(self, submitted: Awaitable[ApplyResult], *, kind: str) -> dict[str, Any]:
         """Wait out one submitted mutation and shape its answer, the half identical whatever
         it mutates.
@@ -593,71 +567,6 @@ class ControlServer:
             # did; a record from before codes existed has none and the field is omitted
             answer["code"] = result.code
         return answer
-
-    def _host_command_for(self, request: dict[str, Any]) -> HostCommand | dict[str, Any]:
-        """The verb half of framing for `host`, or the refusal it earns: `_event_for`'s
-        sibling, so a shape the protocol does not define is never admitted.
-
-        Not checked here: whether the host exists and whether an eviction may proceed.
-        Both read mutable state, so the engine decides them inside the input's batch (ss8)."""
-        verb = request.get("verb")
-        payload = request.get("payload")
-        if not isinstance(payload, dict):
-            return _failure("invalid_argument", f"payload must be an object, got {payload!r}")
-        if not (isinstance(verb, str) and verb in HOST_VERBS):
-            return _failure(
-                "unknown_verb", f"unknown host verb {verb!r} (one of {sorted(HOST_VERBS)})"
-            )
-        host_id = payload.get("id")
-        if not isinstance(host_id, str) or not host_id:
-            return _failure("invalid_argument", "a host verb addresses a host by id")
-        if not is_scalar_string(host_id):
-            # PR-10a
-            return _failure("invalid_argument", "host id carries an unpaired surrogate")
-        force = payload.get("force", False)
-        if not isinstance(force, bool):
-            return _failure("invalid_argument", f"force must be a boolean, got {force!r}")
-        # the membership check proved `verb` is a HostVerb literal; mypy sees only `str`,
-        # so the cast states what the check decided
-        return HostCommand(verb=cast(HostVerb, verb), host_id=host_id, force=force)
-
-    def _hosts(self, request: dict[str, Any]) -> dict[str, Any]:
-        """The ss8 routing table, and the read a `host` command's `expect` is composed from
-        (concurrency-model ss6).
-
-        Without `ids` it answers the WHOLE table, unlike `globals`: ss7's takeover barrier
-        walks the small, enumerable inventory in full. Named `ids` are answered whether or
-        not they exist, at revision 0 when absent, since absence you cannot name is absence
-        you cannot lock against."""
-        table = self.engine.oracle.store.hosts
-        ids = request.get("ids")
-        if ids is None:
-            names = sorted(table)
-        elif isinstance(ids, list) and all(isinstance(name, str) for name in ids):
-            names = list(ids)
-        else:
-            return _failure("invalid_argument", "ids must be a list of host id strings")
-        return {
-            "ok": True,
-            "executor": self.engine.executor_id,
-            "hosts": {name: self._host_row(table.get(name)) for name in names},
-        }
-
-    @staticmethod
-    def _host_row(row: HostRuntime | None) -> dict[str, Any]:
-        if row is None:
-            return {"present": False, "state_rev": 0}
-        return {
-            "present": True,
-            "state": row.state,
-            "generation": row.generation,
-            "deadman_s": row.deadman_s,
-            "last_contact": row.last_contact.isoformat() if row.last_contact else None,
-            # non-null is the ss8 incident marker: work was rerouted without proof its executor
-            # was dead
-            "forced_by": row.forced_by,
-            "state_rev": row.state_rev,
-        }
 
     def _event_for(self, request: dict[str, Any]) -> Event | dict[str, Any]:
         """The verb half of framing: the Event a well-formed request names, or the refusal it
@@ -755,7 +664,6 @@ class ControlServer:
         pending: dict[str, list[dict[str, str]]] = {}
         for due, timer_job, kind in self.engine.oracle.pending_timers():
             pending.setdefault(timer_job, []).append({"due": due.isoformat(), "kind": kind})
-        held = self.engine.held_jobs()
         jobs: dict[str, dict[str, Any]] = {}
         for name in names:
             rt = store.job.get(name) or JobRuntime()  # never insert from a query
@@ -785,10 +693,9 @@ class ControlServer:
                 # DL-87: the revision an `expect` precondition names for this entity, on
                 # every read so a client can say WHAT it saw
                 "state_rev": rt.state_rev,
-                # DL-94: the oracle started it and its executor routes no new effects, so
-                # no process was launched (concurrency-model ss8). Derived, never stored; a
-                # drained estate whose jobs sit in STARTING would otherwise look hung
-                "held": name in held,
+                # control-protocol ss4's held flag: one engine dispatches every start it
+                # decides, so no start is held
+                "held": False,
                 "pending_timers": pending.get(name, []),
                 "log_out": log_out,
                 "log_err": log_err,
@@ -1147,8 +1054,6 @@ def read_for(key: str) -> dict[str, Any]:
     namespace, _, name = key.partition(":")
     if namespace == "global":
         return {"cmd": "global", "name": name}
-    if namespace == "host":
-        return {"cmd": "hosts", "ids": [name]}
     return {"cmd": "status", "job": name}
 
 
@@ -1164,8 +1069,6 @@ def revision_in(response: Mapping[str, Any], key: str) -> int:
         return 0
     if namespace == "global":
         return int(response["globals"][name]["state_rev"])
-    if namespace == "host":
-        return int(response["hosts"][name]["state_rev"])
     return int(response["jobs"][name]["state_rev"])
 
 
@@ -1227,21 +1130,14 @@ def command(
     key: str,
     revision: int,
     baseline_id: str,
-    epoch: int,
     request_id: str | None = None,
     claimed_actor: str | None = None,
-    cmd: str = "sendevent",
 ) -> dict[str, Any]:
-    """One concurrency-model ss6 command envelope, complete. `request_id` defaults to a
-    fresh uuid4; a caller that RETRIES passes the original's.
-
-    `cmd` selects the verb set: `sendevent` for the oracle's, `host` for the ss8 routing
-    table's. The envelope is the same for both, because ss0's mandate is on externally
-    requested mutations, not on a vocabulary."""
+    """One concurrency-model ss6 `sendevent` envelope, complete. `request_id` defaults to a
+    fresh uuid4; a caller that RETRIES passes the original's."""
     request: dict[str, Any] = {
-        "cmd": cmd,
+        "cmd": "sendevent",
         "baseline_id": baseline_id,
-        "epoch": epoch,
         "request_id": request_id or str(uuid.uuid4()),
         "verb": verb,
         "payload": dict(payload),

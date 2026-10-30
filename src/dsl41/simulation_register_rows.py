@@ -3441,11 +3441,7 @@ ADAPTER_ROWS: tuple[Row, ...] = (
         klass=PROVISIONAL,
         cite="runner_adapters.resolve_spool, runner-design ss15",
         label="E7",
-        sites=(
-            "runner_adapters.resolve_spool#1",
-            "runner_startup.<module>#1",
-            "runner_startup._resume_untraced_starts#1",
-        ),
+        sites=("runner_adapters.resolve_spool#1", "runner_startup.<module>#1"),
         effect="a resumed run with no status record fails rather than guessing an exit code",
         trigger=f"Failed={_UNOBSERVABLE}",
     ),
@@ -3581,7 +3577,7 @@ EVENT_SOURCE_ROWS: tuple[Row, ...] = (
         effect="the start came from a calendar tick, so a journal reader can tell it from"
         " an operator's sendevent",
         trigger="runner.Engine.run_until_quiescent",
-        quiet="runner.Engine.inject_host",
+        quiet="runner.Engine.submit",
     ),
     _row(
         surface="event_source",

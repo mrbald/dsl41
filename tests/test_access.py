@@ -229,10 +229,9 @@ def test_the_query_surface_forwards_exactly_the_read_verbs() -> None:
 
     It was a hand-written list of the READ half of `REQUIRED_TIER`, so a
     read verb added to the gate reached the gate, the help and the query
-    surface at three different times. `hosts` is the one READ verb this
-    surface does not forward -- `dsl41 control host list` owns it -- and
-    that exclusion is the only thing the CLI still states."""
-    from dsl41.cli_control import _QUERY_ELSEWHERE, _QUERY_VERBS
+    surface at three different times. The query surface forwards every READ
+    verb."""
+    from dsl41.cli_control import _QUERY_VERBS
     from dsl41.runner_access import Tier
 
     # spelled out, not recomputed: a test that re-runs the source's own
@@ -250,9 +249,7 @@ def test_the_query_surface_forwards_exactly_the_read_verbs() -> None:
         "subscribe",
     )
     read_verbs = {verb for verb, tier in REQUIRED_TIER.items() if tier is Tier.READ}
-    assert read_verbs == set(_QUERY_VERBS) | _QUERY_ELSEWHERE
-    assert _QUERY_ELSEWHERE <= read_verbs, "an excluded verb must still BE a read verb"
-    assert "hosts" not in _QUERY_VERBS
+    assert read_verbs == set(_QUERY_VERBS)
 
 
 # ----------------------------------------------------------- the live gate
@@ -308,7 +305,6 @@ def _envelope(verb: str, job: str, read: dict) -> dict:
         key=key,
         revision=revision_in(read, key),
         baseline_id=str(read.get("baseline_id") or ""),
-        epoch=int(read.get("epoch") or 0),
         claimed_actor="impostor@nowhere",
     )
 

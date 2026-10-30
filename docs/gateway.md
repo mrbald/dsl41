@@ -41,9 +41,8 @@ One route per control `cmd`. The set is the `cmd` column of the verb table
 | `explain`, `spec`, `deps` | `GET /api/v1/explain` (and `/spec`, `/deps`) | `job` |
 | `timers`, `plan` | `GET /api/v1/timers`, `GET /api/v1/plan` | none |
 | `global`, `globals` | `GET /api/v1/global`, `GET /api/v1/globals` | `name`; `names`, repeated |
-| `hosts` | `GET /api/v1/hosts` | `ids`, repeated, optional |
 | `subscribe` | `GET /api/v1/subscribe`, WebSocket upgrade (§5) | `since`, optional integer |
-| `sendevent`, `host`, `seal` | `POST /api/v1/sendevent` (and `/host`, `/seal`) | JSON body |
+| `sendevent`, `seal` | `POST /api/v1/sendevent` (and `/seal`) | JSON body |
 
 - `GET /api/v1/health`, the one route without a `cmd`, touches no engine
   state. It runs criterion 11's socket check and answers `503` when that
@@ -55,26 +54,23 @@ One route per control `cmd`. The set is the `cmd` column of the verb table
 - A `POST` body is the control request as an `application/json` object.
   A body naming `cmd`, `v` or `claimed_actor` is refused, not overwritten:
   identity belongs to the gateway's layer (§6). Every other field passes
-  through unchanged, `request_id`, `expect`, `epoch` and `baseline_id`
-  included. Validation stays with the engine.
+  through unchanged, `request_id`, `expect` and `baseline_id` included. Validation stays with the engine.
 - `request_id` must be a canonical UUID version 4; other forms are
   refused. Every human of a tier shares the tier's one OS principal
   ([access-model §3](access-model.md#3-local-authentication-kernel-peer-credentials),
   [§9](access-model.md#9-the-web-tier)), so a guessable id could collide
   with another person's command.
-- `routes`, specified and not built (control-protocol §3), gets
-  `GET /api/v1/routes` when built.
 - `POST /api/v1/seal` commits an existing stage. Staging writes under the
   run root, so it stays an adm act on the host
   ([access-model §10](access-model.md#10-the-verb-table)). The adm hands
   the browser the staged `next_period` and `stage_digest` out of band.
 - A success is `200` with the control answer as the body, unchanged. The
-  read header (`baseline_id`, `epoch`, `applied_index`) stays in the body,
+  read header (`baseline_id`, `applied_index`) stays in the body,
   and no HTTP header copies it: two copies could disagree.
 
 **OpenAPI is the contract artifact.** An OpenAPI 3.1 document is checked
 in; a test fails when the generated one differs. Schemas follow
-control-protocol [§3](control-protocol.md#3-mutating-verbs-sendevent-host)
+control-protocol [§3](control-protocol.md#3-mutating-verb-sendevent)
 and [§4](control-protocol.md#4-query-verbs-frozen-response-shapes) and
 allow unknown fields; prose covers the WebSocket route.
 
@@ -93,9 +89,9 @@ prose; clients branch on `code`. Every other answer field is an extension
 member: `code`, the markers, `index`, `request_id`, `original_decision`,
 the read header.
 
-**Mutations: the markers decide the class.** For `sendevent`, `host` and
-`seal`, the outcome table of
-[control-protocol §3](control-protocol.md#3-mutating-verbs-sendevent-host)
+**Mutations: the markers decide the class.** For `sendevent` and `seal`,
+the outcome table of
+[control-protocol §3](control-protocol.md#3-mutating-verb-sendevent)
 rules: `refused: true`, `decision: "rejected"`, or neither, which is
 unknown. The code picks the status inside the class:
 
@@ -122,27 +118,24 @@ the control protocol stays transport-neutral:
 | --- | --- |
 | 400 | `invalid_argument`, `unknown_verb`, `unknown_status` |
 | 403 | `access_denied` |
-| 404 | `unknown_job`, `unknown_host` |
-| 409 | `baseline_mismatch`, `request_id_reused`, `stale_epoch`, `host_quarantined`, `host_evicted`, `host_already_evicted`, `host_not_quarantined`, `host_no_deadman`, `host_never_contacted`, `eviction_bound_pending`, `seal_retry_mismatch`, `seal_in_flight`, `no_lineage`, `nothing_staged`, `seal_input_after_cutoff`, `seal_not_quiescent`, `seal_run_unaccounted`, `seal_retry_horizon`, `clock_regressed`, `seal_refused` |
+| 404 | `unknown_job` |
+| 409 | `baseline_mismatch`, `request_id_reused`, `clock_regressed` |
 | 412 | `precondition_failed` |
-| 422 | `plan_cycle`, `status_not_injectable`, `force_needs_actor`, `stage_digest_mismatch` |
+| 422 | `plan_cycle`, `status_not_injectable` |
 | 428 | `expect_required` |
 | 500 | `internal_error`, `engine_error`, `apply_faulted`, `engine_apply_faulted` |
 | 502 | `peer_unauthenticated`, `malformed_request`, `unsupported_version`, `unknown_cmd` |
-| 503 | `lineage_lost`, `period_sealing`, `engine_shutting_down`, `seal_not_settling`, `seal_supervisor_unproven` |
-| 504 | `decision_timeout`, `seal_timeout` |
+| 503 | `engine_shutting_down` |
+| 504 | `decision_timeout` |
 
 An unknown code on a mutation maps by rules 2 and 3. `no_journal` and
 `backfill_refused` arrive only as stream frames (§5). Every rejected code is
 stored with its decision, and an exact retry is answered from that record
 (control-protocol §2). Some stored answers never reach a first request:
-`stale_completion` answers no request; `host_evicted`, when stored for the
-leader's own reachability observation, answers no client; and
-`engine_apply_faulted` answers only an exact retry of the control input it
+`stale_completion` answers no request, and `engine_apply_faulted` answers only an exact retry of the control input it
 was stored for. `apply_faulted` and `engine_apply_faulted` are engine
 faults a browser cannot fix, so they map to `500` beside `engine_error`;
-the markers still decide the class. `eviction_bound_pending` carries no
-`Retry-After`: the engine states the wait in prose only. The four `502`
+the markers still decide the class. The four `502`
 codes are the gateway's own identity or framing, which a browser cannot
 cause.
 
@@ -173,20 +166,19 @@ no marker: a failure after a write attempt is `delivered` (control-protocol §2)
   included. The gateway reads the answer and logs it (§6); a cancel would
   only lose the outcome.
 - **Deadlines are ordered engine < gateway < proxy, per route**: the
-  engine's are `DECISION_TIMEOUT_S` (5 s) and `SEAL_TIMEOUT_S` (180 s),
-  above many proxy defaults. After its own `504` the gateway still reads
+  engine's is `DECISION_TIMEOUT_S` (5 s), above many proxy defaults. After its own `504` the gateway still reads
   and logs the late answer.
 
 **Seal and roll.** After a committed seal the engine exits, and the next
 period's engine answers the seal's exact retry, one seal back
 (control-protocol §3). A physical roll opens a new run root: the gateway
 is repointed at its `control.sock` and restarted. Until then
-`gateway_upstream_unavailable`, like `period_sealing` before the exit,
-refuses that request only and says nothing about the seal.
+`gateway_upstream_unavailable` refuses that request only and says nothing
+about the seal.
 
 **Browser obligations.**
 
-1. Save the `request_id` and the pins (`expect`, `epoch`, `baseline_id`;
+1. Save the `request_id` and the pins (`expect`, `baseline_id`;
    a seal's whole body) before the first send, where a reload keeps them.
 2. For a mutation the body decides, never the status. Only a `200`
    answer or a problem with a marker is a known outcome. All else after
@@ -314,7 +306,7 @@ fixture that implements §4's browser obligations and §5's resume.
 
 1. Each `cmd` has one route, each route but `health` a `cmd`, and the
    generated OpenAPI equals the checked-in one.
-2. `request_id`, `expect`, `epoch` and `baseline_id` reach the engine
+2. `request_id`, `expect` and `baseline_id` reach the engine
    unchanged; an exact retry is answered from the original decision with
    no second index. A non-UUID id and a `claimed_actor` field are refused.
 3. Each mutation code maps to its status. A decision timeout, an internal

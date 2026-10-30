@@ -48,22 +48,6 @@ See [runner-design.md §1](runner-design.md#1-mission-and-scope),
 [§6a](runner-design.md#6a-process-lifecycle-tiers-dl-41a) and, for the deadman,
 concurrency-model.md §8 (`concurrency-model.md`, retired in 2.0.0).
 
-### effect
-
-One act the engine intends for one run: a `SPAWN` or a `KILL`. It is
-recorded in its `decision` before it is attempted, and its outcome later
-reads `applied`, `indeterminate` or `retired`.
-See concurrency-model.md §5 (`concurrency-model.md`, retired in 2.0.0).
-The code is [`runner_effects.py`](../src/dsl41/runner_effects.py).
-
-### epoch
-
-The leader's term number. A leader takes one by appending a `leader` record,
-and each request envelope carries the epoch its client read.
-See concurrency-model.md §7 (`concurrency-model.md`, retired in 2.0.0)
-and period-model.md §2.4 (`period-model.md`, retired in 2.0.0).
-The code is [`runner_ledger.py`](../src/dsl41/runner_ledger.py).
-
 ### estate
 
 In the period model, one lineage of periods from genesis until retirement,
@@ -76,7 +60,7 @@ The code is [`estate_manifest.py`](../src/dsl41/estate_manifest.py).
 ### expect
 
 The envelope field that names the revision the caller read: a map from one
-entity key (`job:`, `global:` or `host:`) to its `state_rev`. Admission
+entity key (`job:` or `global:`) to its `state_rev`. Admission
 compares it with the current revision.
 See concurrency-model.md §0 (`concurrency-model.md`, retired in 2.0.0) and
 §6 (`concurrency-model.md`, retired in 2.0.0).
@@ -101,8 +85,7 @@ The code is [`statechart-engine.md`](statechart-engine.md).
 ### fencing token
 
 The integer `token` a supervisor issues with each lease. Mutating supervisor
-verbs carry it beside the incarnation; the concurrency model also uses the
-phrase for the leader's epoch.
+verbs carry it beside the incarnation.
 See supervisor-protocol.md §5 (`supervisor-protocol.md`, retired in 2.0.0)
 and concurrency-model.md §1 (`concurrency-model.md`, retired in 2.0.0).
 The code is [`runner_ledger.py`](../src/dsl41/runner_ledger.py).
@@ -120,7 +103,7 @@ A status row with no job definition in the current catalog, so `status`
 reports `job_type: null` for it. `CHANGE_STATUS` invents one for a `JOB^INST`
 target, and a job the next period's catalog drops while it is not live stays
 as one.
-See [control-protocol.md §3](control-protocol.md#3-mutating-verbs-sendevent-host),
+See [control-protocol.md §3](control-protocol.md#3-mutating-verb-sendevent),
 [§4](control-protocol.md#status-job) and
 period-model.md §10.1 (`period-model.md`, retired in 2.0.0).
 
@@ -152,14 +135,6 @@ See supervisor-protocol.md §5 (`supervisor-protocol.md`, retired in 2.0.0),
 and, for the leadership lock,
 concurrency-model.md §1 (`concurrency-model.md`, retired in 2.0.0).
 
-### outbox
-
-The set of effects the engine has intended, with the outcome of each. The WAL
-carries it in `decision` and `effect_result` records, and replay rebuilds it.
-See concurrency-model.md §1 (`concurrency-model.md`, retired in 2.0.0) and
-§5 (`concurrency-model.md`, retired in 2.0.0).
-The code is [`runner_effects.py`](../src/dsl41/runner_effects.py).
-
 ### perimeter
 
 The access gate in front of `control.sock` and the served web TUI. It maps an
@@ -188,7 +163,7 @@ The id a client puts on each mutating request. With the envelope's
 fingerprint, it lets the engine answer an exact retry from the recorded
 decision.
 See concurrency-model.md §4 (`concurrency-model.md`, retired in 2.0.0)
-and [control-protocol.md §3](control-protocol.md#3-mutating-verbs-sendevent-host).
+and [control-protocol.md §3](control-protocol.md#3-mutating-verb-sendevent).
 
 ### run root
 
@@ -226,18 +201,15 @@ The code is [`run_root.py`](../src/dsl41/run_root.py).
 
 ### SPAWN
 
-The effect kind that launches one run of a CMD or FW job; an FW run is a watch
-inside the engine, not a process. In detached mode, SPAWN is also the
-supervisor verb that launches a CMD run, and the effect's `run_id` is its
-idempotency key.
-See concurrency-model.md §5 (`concurrency-model.md`, retired in 2.0.0),
-supervisor-protocol.md §5 (`supervisor-protocol.md`, retired in 2.0.0)
-and period-model.md §11a (`period-model.md`, retired in 2.0.0).
-The code is [`runner_effects.py`](../src/dsl41/runner_effects.py).
+The start of one run of a CMD or FW job; an FW run is a watch inside the
+engine, not a process. Its `dispatch` record, naming the run's `run_id`, is
+written before it is attempted.
+See runner-design.md §7 (`runner-design.md`).
+The code is [`runner_admission.py`](../src/dsl41/runner_admission.py).
 
 ### state_rev
 
-A revision counter on one job, global or host row. It moves when a committed
+A revision counter on one job or global row. It moves when a committed
 input changes the row's semantic projection.
 See concurrency-model.md §3 (`concurrency-model.md`, retired in 2.0.0).
 The code is [`oracle_state.py`](../src/dsl41/oracle_state.py).

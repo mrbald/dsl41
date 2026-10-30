@@ -414,36 +414,29 @@ def refuse(exc: BaseException | str, *, prefix: str = "") -> int:
     return 2
 
 
-def read_header_of(response: dict[str, Any]) -> "tuple[str, int] | None":
-    """The concurrency-model ss6 read header off one control answer, or None after printing
-    the refusal (DL-137)."""
-    baseline, epoch = response.get("baseline_id"), response.get("epoch")
-    if not isinstance(baseline, str) or not isinstance(epoch, int):
+def read_header_of(response: dict[str, Any]) -> str | None:
+    """The concurrency-model ss6 read header's `baseline_id` off one control answer, or None
+    after printing the refusal (DL-137)."""
+    baseline = response.get("baseline_id")
+    if not isinstance(baseline, str):
         typer.echo(str(response.get("error", "the engine answered no read header")), err=True)
         return None
-    return baseline, epoch
+    return baseline
 
 
 def _pins(request: dict[str, Any]) -> str:
-    """The original revision, epoch, baseline and actor pins (DL-217, DL-391).
-
-    Empty for an envelope with no `expect`, such as the seal, whose retry restores its own baseline
-    and epoch from the committed record (cli_estate).
-    """
+    """The original revision, baseline and actor pins (DL-217, DL-391). Empty for an envelope
+    with no `expect`."""
     import shlex
 
     expect = request.get("expect")
     if not isinstance(expect, dict) or len(expect) != 1:
         return ""
     (revision,) = expect.values()
-    return (
-        f" --expect {revision} --epoch {request.get('epoch')}"
-        f" --baseline {shlex.quote(str(request.get('baseline_id')))}"
-        + (
-            f" --claimed-actor {shlex.quote(str(request['claimed_actor']))}"
-            if "claimed_actor" in request
-            else ""
-        )
+    return f" --expect {revision} --baseline {shlex.quote(str(request.get('baseline_id')))}" + (
+        f" --claimed-actor {shlex.quote(str(request['claimed_actor']))}"
+        if "claimed_actor" in request
+        else ""
     )
 
 
@@ -468,8 +461,8 @@ def _sending(request: dict[str, Any], retry_command: str | None) -> None:
 def _no_decision(request: dict[str, Any], retry_command: str | None = None) -> None:
     """DL-92's fourth outcome. The id goes to stderr because it is what makes the retry safe.
 
-    The pins ride with it (DL-217): the fingerprint covers revision, epoch and baseline, so an id
-    carried back alone is a collision once any of them has moved.
+    The pins ride with it (DL-217): the fingerprint covers revision and baseline, so an id
+    carried back alone is a collision once either has moved.
     """
     typer.echo(
         f"no decision: this command may still apply. Re-read, then retry ONLY as"
@@ -500,7 +493,7 @@ def command_outcome(
     """Send one concurrency-model ss6 command envelope; return DL-92's outcome (0 applied, 2
     refused, 3 rejected, 4 unknown).
 
-    One implementation serves `sendevent` and `host` (DL-137). A dropped connection
+    One implementation serves `sendevent` and `off-hold-all` (DL-137). A dropped connection
     after the request left is `unknown` (4), not 2: the engine fsyncs an attempt before it feeds
     it, so 2's "safe to send again unchanged" would be false.
 

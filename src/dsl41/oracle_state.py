@@ -4,20 +4,18 @@
 
 - The vocabulary: `JobStatus`, `TERMINAL`, `EventKind`, `Event`, `TraceEntry`. `Event` is the
   oracle's input alphabet and, with `source`, its provenance (DL-68).
-- The rows: `JobRuntime`, `GlobalRuntime` and `HostRuntime`, all frozen (DL-86, DL-94), and the
-  semantic projection that decides when a revision moves.
+- The rows: `JobRuntime` and `GlobalRuntime`, both frozen (DL-86), and the semantic projection
+  that decides when a revision moves. `HostRuntime` is the dormant routing row: the store keeps
+  an empty table of it (`RuntimeState._hosts`) and no tier writes or reads one.
 - The owner: `RuntimeState` holds private maps, typed verbs, the timer heap with its ordering
   token, and the input transaction that gives one committed input one revision per changed
   entity (concurrency-model ss3).
 - `OracleError`, defined here because it has no dependencies.
-- The machines the owner holds: `runtime_assembly` declares assembly and the open input, `host`
-  declares one host's routing state (docs/state-machines.md), and the `job` chart (`job_chart`)
-  declares every move of a job row. The oracle drives the chart and writes what it reached
+- The machines the owner holds: `runtime_assembly` declares assembly and the open input
+  (docs/state-machines.md), and the `job` chart (`job_chart`) declares every move of a job row. The oracle drives the chart and writes what it reached
   through the verbs here.
 
-`HostRuntime` lives here, not in `oracle.py`: a job's condition truth cannot depend on where
-its machine routes, so the interpreter never reads a host row (DL-93). `InputBatch` stays with
-`Oracle`. `_N_FALSE_STATUSES` (SEM-02's n() rule) is interpretation, not state.
+`InputBatch` stays with `Oracle`. `_N_FALSE_STATUSES` (SEM-02's n() rule) is interpretation, not state.
 """
 
 from __future__ import annotations
@@ -26,7 +24,6 @@ import copy
 import heapq
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
 from typing import Final, Literal, cast, get_args
@@ -36,12 +33,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from dsl41.scan_chart import IDLE as SCAN_IDLE
 from dsl41.scan_chart import QUEUE_SCAN, SCAN_KEY
 from dsl41.state_machine import (
-    INITIAL,
-    Branch,
-    Choice,
-    Context,
-    Effects,
-    Exclusion,
     Executor,
     Outcome,
     Region,
@@ -294,21 +285,9 @@ HostState = Literal["active", "passive", "quarantined", "evicted"]
 
 
 class HostRuntime(BaseModel):
-    """One execution host's routing row (concurrency-model ss8). FROZEN, for
-    the reason the other two rows are: a change is a REPLACEMENT, so "this
-    entity changed" is one observable act.
-
-    A host is a RELAY, not a machine -- ss2 gives it `host_id` and
-    `generation`, and machine names resolve TO one. The row therefore holds
-    only what decides routing and what proves an eviction. What the host is
-    RUNNING is not here: that is the outbox's business (S5c), and a second
-    durable record of "did this run start" is exactly the parallel model
-    DL-91 exists to catch.
-
-    The oracle never reads this row (DL-93). It is published state and it
-    carries a `state_rev`, so it belongs to ss3's owner; it is not oracle
-    vocabulary, so `HOST` is not an `EventKind` and `oracle.py` does not
-    name this class."""
+    """One execution host's routing row (concurrency-model ss8), dormant: one engine runs every
+    job on its own host, so the store's table of these stays empty and no tier reads it. The
+    oracle never reads this row (DL-93)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -338,17 +317,8 @@ class HostRuntime(BaseModel):
 #: `state_rev` is the only exclusion the models carry. Effect and disk state (`watching`, log
 #: locations, catalog metadata, `spec_drift`) lives runner-side.
 _UNPROJECTED: frozenset[str] = frozenset({"state_rev"})
-#: `last_contact` is liveness that
-#: moves with relay traffic and no committed input; projecting it would put a revision on every
-#: lease renewal (DL-95). `deadman_s` is observed liveness configuration that `register_host`
-#: moves with no journal record, so projecting it would move a revision audit cannot derive
-#: (DL-133, period-model ss3.3, PR-24b).
-_UNPROJECTED_HOST: frozenset[str] = _UNPROJECTED | {"last_contact", "deadman_s"}
 _PROJECTED_JOB_FIELDS: tuple[str, ...] = tuple(
     name for name in JobRuntime.model_fields if name not in _UNPROJECTED
-)
-_PROJECTED_HOST_FIELDS: tuple[str, ...] = tuple(
-    name for name in HostRuntime.model_fields if name not in _UNPROJECTED_HOST
 )
 _DEFAULT_JOB = JobRuntime()
 
@@ -373,7 +343,6 @@ class CarriedRows(BaseModel):
 
     jobs: dict[str, JobRuntime] = {}
     globals_: dict[str, GlobalRuntime] = {}
-    hosts: dict[str, HostRuntime] = {}
     #: ss3.2's order: `(due, token)`, never heap-array layout.
     timers: tuple[tuple[datetime, int, Event], ...] = ()
     timer_seq: int = 0
@@ -738,374 +707,6 @@ RUNTIME_ASSEMBLY: Final = Statechart(
 )
 
 
-# ---- one host's routing state as a statechart (concurrency-model ss8)
-#
-# `HOST` is the declaration (docs/statechart-engine.md). The store's executor,
-# `RuntimeState.machines`, holds one instance per host row under `host_key(host_id)`. The
-# instance's configuration is the host's state; `HostRuntime.state` is its projection. Every write
-# of a host command is an intent a row's action or a leaf's entry reports, and the tier carries
-# the outcome's intents out after the dispatch (statechart-engine ss4, ss5). Everything that
-# rebuilds the rows rebuilds the executor from them (`rebuild_machines`): an install, a test's
-# witness (`witness_host`), `restore_instances` and `keep_job_instances`. A fork copies the
-# executor (`Executor.fork`, DL-339) and binds each host instance's data to the fork's store. A
-# state write that no microstep made raises a `StatechartError`.
-#
-# The chart is dispatched only for an applied host command: the gate in `runner_hosts` reads it
-# first with `Executor.resolve`, which moves nothing, and a refusal row carries the gate's code.
-# The gate keeps the rules that read the input's own facts (the deadman, the bound, the
-# attribution of a force), because a rejection is replayed as stored and `last_contact` is
-# re-seeded at resume (DL-94). The read runs no action, so it reports no intent. Rows .01, .04,
-# .06 and .25 are internal: they report nothing, the apply writes nothing and no revision moves.
-# A gap in the chart is a `StatechartError`, which stops the tier (statechart-engine ss5).
-
-#: The cite of the routing table's rows.
-_SS8 = "concurrency-model ss8"
-#: The event of `evict --force`: the same act with its proof waived, which
-#: the gate and the chart tell apart.
-FORCE_EVICT: Final = "force_evict"
-#: The event of a relay's re-registration. No code posts it (host.12 is spec-only).
-REGISTER: Final = "register"
-
-
-@dataclass(frozen=True)
-class HostEntered:
-    """An intent: write the row's state as the leaf the instance entered. The memory of an
-    interrupted state is quarantine's own, so every other leaf clears it (DL-97, DL-111)."""
-
-    state: HostState
-
-
-@dataclass(frozen=True)
-class HostRemembered:
-    """An intent: remember the state quarantine interrupts (DL-97)."""
-
-    state: HostState
-
-
-@dataclass(frozen=True)
-class HostEvicted:
-    """An intent: bump the generation a returning relay is fenced on, and record the actor of a
-    forced eviction, or None for a gated one (ss8)."""
-
-    forced_by: str | None
-
-
-@dataclass(frozen=True)
-class HostData:
-    """A host instance's data: the store that holds its row and the row's id.
-
-    A write replaces the row, so the instance reads it through the store."""
-
-    store: RuntimeState
-    host_id: str
-
-    @property
-    def row(self) -> HostRuntime:
-        return self.store.hosts[self.host_id]
-
-
-def host_configuration(state: HostState) -> frozenset[str]:
-    """The configuration a host row's state projects from: its leaf and the states above it."""
-    if state in ("active", "passive"):
-        return frozenset({"host", "routed", state})
-    return frozenset({"host", state})
-
-
-def _not_evicted(ctx: Context) -> bool:
-    """The host is not evicted (ss8: force skips the proof, not the state).
-
-    At `evicted` host.21 takes the event first (statechart-engine ss3). The guard makes a
-    missing host.21 a gap, not a forced eviction of an evicted host (DL-375)."""
-    return "evicted" not in ctx.active
-
-
-def _remembered_passive(ctx: Context) -> bool:
-    """Quarantine interrupted `passive`: a drained host that answers again stays drained (DL-97)."""
-    data: HostData = ctx.data
-    return data.row.state_before_quarantine == "passive"
-
-
-def _writes_state(ctx: Context) -> Effects | None:
-    """A leaf's entry reports the row's state, the leaf entered. The initial entry reports
-    nothing: `register_host` writes the row before the instance starts."""
-    if ctx.event.name == INITIAL:
-        return None
-    (leaf,) = [state for state in get_args(HostState) if state in ctx.active]
-    return Effects(intents=(HostEntered(leaf),))
-
-
-def _remembers(ctx: Context) -> Effects:
-    """host.05 reports the state quarantine interrupts, read from the row, which the tier writes
-    only after the dispatch (DL-97)."""
-    data: HostData = ctx.data
-    return Effects(intents=(HostRemembered(data.row.state),))
-
-
-def _evicts(ctx: Context) -> Effects:
-    """host.10 reports an eviction on the gate's proof of the bound, attributed to nobody
-    (ss8, DL-151)."""
-    return Effects(intents=(HostEvicted(forced_by=None),))
-
-
-def _evicts_forced(ctx: Context) -> Effects:
-    """host.11 reports an eviction by force, attributed to the actor the event carries: the
-    input's `claimed_actor`, which the gate requires (ss8, DL-151)."""
-    actor: str | None = ctx.event.payload
-    return Effects(intents=(HostEvicted(forced_by=actor),))
-
-
-#: concurrency-model ss8's routing table, one instance per host row. A new row starts in
-#: `active` (`register_host`); re-registration starts nothing. `touch_host` is not an event:
-#: `last_contact` is outside the semantic projection. A leaf's entry reports the row's state; the
-#: moving rows' actions report the row's other writes. Nothing writes inside the chart.
-HOST: Final = Statechart(
-    name="host",
-    root=State(
-        "host",
-        regions=(
-            Region(
-                "routing",
-                "routed",
-                (
-                    State(
-                        "routed",
-                        regions=(
-                            Region(
-                                "routing",
-                                "active",
-                                (
-                                    State("active", entry="writes_state"),
-                                    State("passive", entry="writes_state"),
-                                ),
-                            ),
-                        ),
-                    ),
-                    State("quarantined", entry="writes_state"),
-                    State("evicted", entry="writes_state"),
-                ),
-            ),
-        ),
-    ),
-    rows=(
-        Row(
-            "host.01",
-            "active",
-            "activate",
-            kind="internal",
-            cite=_SS8,
-            note="none: the row does not move and no revision moves",
-        ),
-        Row(
-            "host.02",
-            "active",
-            "drain",
-            "passive",
-            cite=f"{_SS8}, CM-13",
-            note="new effects are held; running work continues",
-        ),
-        Row(
-            "host.03",
-            "passive",
-            "activate",
-            "active",
-            cite=_SS8,
-            note="held starts dispatch again",
-        ),
-        Row(
-            "host.04",
-            "passive",
-            "drain",
-            kind="internal",
-            cite=_SS8,
-            note="none: the row does not move and no revision moves",
-        ),
-        Row(
-            "host.05",
-            "routed",
-            "quarantine",
-            "quarantined",
-            action="remembers",
-            cite="concurrency-model ss7, ss8, DL-97, DL-291",
-            note=(
-                "The leader's renewal failed five times in a row. The row remembers the"
-                " state it interrupts."
-            ),
-        ),
-        Row(
-            "host.06",
-            "quarantined",
-            "quarantine",
-            kind="internal",
-            cite="DL-97",
-            note="none: repeated unreachability is one fact",
-        ),
-        Row(
-            "host.07",
-            "quarantined",
-            "reinstate",
-            "remembered",
-            cite=f"{_SS8}, DL-97",
-            note="The host answered again: put back the state quarantine interrupted, and forget it.",
-        ),
-        Row(
-            "host.25",
-            "routed",
-            "reinstate",
-            kind="internal",
-            cite=f"{_SS8}, DL-111",
-            note="none: nothing to put back",
-        ),
-        Row(
-            "host.10",
-            "quarantined",
-            "evict",
-            "evicted",
-            action="evicts",
-            cite=f"{_SS8} preconditions 1-3, DL-151",
-            note=(
-                "The gate has proved the bound: a deadman, a contact, and silence past"
-                " deadman + kill + skew. generation += 1; forced_by = none; forget the"
-                " interrupted state."
-            ),
-        ),
-        Row(
-            "host.11",
-            "host",
-            FORCE_EVICT,
-            "evicted",
-            guard="not_evicted",
-            action="evicts_forced",
-            cite=f"{_SS8}, DL-111, DL-151",
-            false_unreachable="`evicted` refuses a forced eviction with its own row",
-            note=(
-                "The gate has the attribution: claimed_actor names who asks. generation"
-                " += 1; forced_by = the actor; forget the interrupted state."
-            ),
-        ),
-        Row(
-            "host.12",
-            "evicted",
-            REGISTER,
-            "active",
-            cite=f"{_SS8} (eviction is fenced on return), period-model ss3.3",
-            mark="spec-only",
-            note=(
-                "The relay presents the current generation and has self-fenced. Its held"
-                " jobs run as new runs with new effect ids. No code posts it."
-            ),
-        ),
-        Row(
-            "host.13",
-            "quarantined",
-            "activate",
-            kind="refusal",
-            code="host_quarantined",
-            cite=f"{_SS8}, concurrency-model ss7",
-        ),
-        Row(
-            "host.14",
-            "quarantined",
-            "drain",
-            kind="refusal",
-            code="host_quarantined",
-            cite=f"{_SS8}, concurrency-model ss7",
-        ),
-        Row(
-            "host.15",
-            "routed",
-            "evict",
-            kind="refusal",
-            code="host_not_quarantined",
-            cite=f"{_SS8} precondition 1, DL-94",
-        ),
-        Row(
-            "host.16",
-            "evicted",
-            "activate",
-            kind="refusal",
-            code="host_evicted",
-            cite=_SS8,
-        ),
-        Row(
-            "host.17",
-            "evicted",
-            "drain",
-            kind="refusal",
-            code="host_evicted",
-            cite=_SS8,
-        ),
-        Row(
-            "host.18",
-            "evicted",
-            "quarantine",
-            kind="refusal",
-            code="host_evicted",
-            cite=f"{_SS8}, CM-12",
-        ),
-        Row(
-            "host.19",
-            "evicted",
-            "reinstate",
-            kind="refusal",
-            code="host_evicted",
-            cite=f"{_SS8}, CM-12",
-        ),
-        Row(
-            "host.20",
-            "evicted",
-            "evict",
-            kind="refusal",
-            code="host_already_evicted",
-            cite=_SS8,
-        ),
-        Row(
-            "host.21",
-            "evicted",
-            FORCE_EVICT,
-            kind="refusal",
-            code="host_already_evicted",
-            cite=_SS8,
-        ),
-        Row(
-            "host.22",
-            "host",
-            REGISTER,
-            kind="ignored",
-            cite=f"{_SS8}, DL-94",
-            note=(
-                "Re-registration refreshes identity and keeps the state. No tier path posts"
-                " it: `register_host` on an existing row starts nothing."
-            ),
-        ),
-    ),
-    choices=(
-        Choice(
-            "remembered",
-            (
-                Branch("host.23", "passive", guard="remembered_passive"),
-                Branch("host.24", "active"),
-            ),
-        ),
-    ),
-    guards={"not_evicted": _not_evicted, "remembered_passive": _remembered_passive},
-    actions={
-        "writes_state": _writes_state,
-        "remembers": _remembers,
-        "evicts": _evicts,
-        "evicts_forced": _evicts_forced,
-    },
-    clock="logical",
-    exclusions=(
-        Exclusion(
-            "evicted",
-            REGISTER,
-            "host.12 is spec-only: the relay's re-registration has no code, and a hit"
-            " would make its mark stale",
-        ),
-    ),
-)
-
-
 #: What the job instances' tier gives the state owner for one job row (DL-341): the chart, the
 #: configuration the row projects, and the instance's data.
 type JobInstance = Callable[[str, JobRuntime], tuple[Statechart, frozenset[str], object]]
@@ -1140,13 +741,12 @@ class RuntimeState:
     def __init__(self) -> None:
         self._jobs: dict[str, JobRuntime] = {}
         self._globals: dict[str, GlobalRuntime] = {}
-        #: DL-94: the ss8 routing table. It lives under this owner because durability, replay,
-        #: the one-increment-per-input rule, the ss0 precondition check and the read verbs
-        #: already work on namespaced keys.
+        #: DL-94's routing table, dormant: one engine runs every job on its own host, so the
+        #: table stays empty and no tier writes or reads it.
         self._hosts: dict[str, HostRuntime] = {}
-        #: The state owner's executor (statechart-engine ss11): the `RUNTIME_ASSEMBLY` instance
-        #: and one `HOST` instance per host row. A fork copies it (DL-339); an install and a
-        #: test's witness rebuild it (`rebuild_machines`). The engine's executor is separate.
+        #: The state owner's executor (statechart-engine ss11): the `RUNTIME_ASSEMBLY` instance.
+        #: A fork copies it (DL-339); an install, `restore_instances` and `keep_job_instances`
+        #: rebuild it (`rebuild_machines`). The engine's executor is separate.
         self.machines = Executor()
         self.machines.start(ASSEMBLY_KEY, RUNTIME_ASSEMBLY)
         self.machines.run()
@@ -1185,16 +785,13 @@ class RuntimeState:
 
         Shallow: rows are frozen and a write replaces a row, so copying each map and the heap list
         keeps every write on the copy. The twin's executor is `Executor.fork` of this one's
-        (DL-339); each host instance's data is bound to the twin. Job instances share their value
-        data, and `job_instance` is shared for the oracle's fork to rebind (DL-341).
+        (DL-339). Job instances share their value data, and `job_instance` is shared for the
+        oracle's fork to rebind (DL-341).
         """
         twin = copy.copy(self)
         twin._jobs = dict(self._jobs)
         twin._globals = dict(self._globals)
-        twin._hosts = dict(self._hosts)
-        twin.machines = self.machines.fork(
-            {self.host_key(host_id): HostData(twin, host_id) for host_id in self._hosts}
-        )
+        twin.machines = self.machines.fork()
         twin._timers = list(self._timers)
         twin._consumed = dict(self._consumed)
         twin._snapshots = dict(self._snapshots)
@@ -1211,11 +808,6 @@ class RuntimeState:
     def global_key(name: str) -> str:
         return f"global:{name}"
 
-    @staticmethod
-    def host_key(host_id: str) -> str:
-        """The third ss6 namespace (DL-93): a host names its revision in the same key space."""
-        return f"host:{host_id}"
-
     def revision(self, key: str) -> int:
         """The revision an `expect` must name for `key`; an entity that does not exist reads 0.
 
@@ -1228,9 +820,6 @@ class RuntimeState:
         if namespace == "global":
             grow = self._globals.get(name)
             return 0 if grow is None else grow.state_rev
-        if namespace == "host":
-            hrow = self._hosts.get(name)
-            return 0 if hrow is None else hrow.state_rev
         raise OracleError(f"unknown entity namespace in {key!r}")
 
     @property
@@ -1241,15 +830,6 @@ class RuntimeState:
     @property
     def globals_(self) -> Mapping[str, GlobalRuntime]:
         return MappingProxyType(self._globals)
-
-    @property
-    def hosts(self) -> Mapping[str, HostRuntime]:
-        return MappingProxyType(self._hosts)
-
-    def host(self, host_id: str) -> HostRuntime | None:
-        """Read one routing row, or None. A host the table does not know reads as absent, because
-        the ss7 takeover barrier would never reconcile it (DL-93)."""
-        return self._hosts.get(host_id)
 
     def runtime(self, job: str) -> JobRuntime:
         """Read access. Creates the row on demand: the oracle addresses entities with no catalog
@@ -1289,21 +869,14 @@ class RuntimeState:
         """An entity's semantic value: what a revision is a revision of.
 
         A job's is its projected fields plus its own timers with their ordering tokens
-        (concurrency-model ss3). A missing job projects as the default row; a missing global or
-        host projects as None, so first-set is a change and `revision() == 0` means absent.
+        (concurrency-model ss3). A missing job projects as the default row; a missing global
+        projects as None, so first-set is a change and `revision() == 0` means absent.
         """
         namespace, _, name = key.partition(":")
         if namespace == "job":
             row = self._jobs.get(name) or _DEFAULT_JOB
             fields = tuple(getattr(row, field) for field in _PROJECTED_JOB_FIELDS)
             return (fields, tuple(self.timers_for(name)))
-        if namespace == "host":
-            hrow = self._hosts.get(name)
-            return (
-                None
-                if hrow is None
-                else tuple(getattr(hrow, field) for field in _PROJECTED_HOST_FIELDS)
-            )
         grow = self._globals.get(name)
         return None if grow is None else grow.value
 
@@ -1325,7 +898,7 @@ class RuntimeState:
     def commit_input(self) -> list[str]:
         """Close the transaction and increment each changed entity once; return the changed keys.
 
-        S2's outbox and `ApplyResult` read the list.
+        `ApplyResult` reads the list.
 
         Committing with no input open is refused: the chart has no such move. Where job instances
         are kept, each touched job that has a row must project to its instance's configuration,
@@ -1339,8 +912,6 @@ class RuntimeState:
             namespace, _, name = key.partition(":")
             if namespace == "job":
                 self._replace(name, state_rev=self.runtime(name).state_rev + 1)
-            elif namespace == "host":
-                self._replace_host(name, state_rev=self._hosts[name].state_rev + 1)
             else:
                 row = self._globals[name]
                 self._globals[name] = GlobalRuntime(value=row.value, state_rev=row.state_rev + 1)
@@ -1593,53 +1164,16 @@ class RuntimeState:
                 raise OracleError(f"consumed[{bucket!r}] = {units}: units spent cannot be negative")
         self._consumed = dict(consumed)
 
-    # ------------------------------------------------------------------- hosts
-
-    def _replace_host(self, host_id: str, **fields: object) -> None:
-        """The single host write, on `_replace`'s rule: rebuilt through the model's constructor.
-
-        A write of `state` must be the projection of the instance: the tier writes the leaf a
-        microstep entered after the dispatch. A state the instance is not in raises a
-        `StatechartError` before anything is written (statechart-engine ss5). A test's witness
-        writes through `witness_host`.
-        """
-        key = self.host_key(host_id)
-        current = self._hosts.get(host_id) or HostRuntime()
-        row = HostRuntime.model_validate({**dict(current), **fields})
-        if "state" in fields:
-            active = self.machines.active(key)
-            if active != host_configuration(row.state):
-                raise StatechartError(
-                    f"host {host_id!r}: a write of state {row.state} while its instance is in"
-                    f" {', '.join(sorted(active))}; only the tier writes a state, from the leaf"
-                    " a microstep reached"
-                )
-        self._touch(key)
-        self._hosts[host_id] = row
-
-    def witness_host(self, host_id: str, **fields: object) -> None:
-        """A test's witness (DL-293): write a host row's fields with no microstep, then rebuild
-        the executor from the rows. No tier calls it."""
-        key = self.host_key(host_id)
-        current = self._require_host(host_id)
-        self._touch(key)
-        self._hosts[host_id] = HostRuntime.model_validate({**dict(current), **fields})
-        self.machines = self.rebuild_machines()
-
     def rebuild_machines(self) -> Executor:
-        """A new executor holding the assembly instance in the store's phase, one `HOST` instance
-        per host row in the configuration its state projects (statechart-engine ss11), and, with
-        `job_instance` set, one `job` instance per job row (DL-341) and the queue scan's
-        coordinator, idle between inputs (DL-372).
+        """A new executor holding the assembly instance in the store's phase (statechart-engine
+        ss11) and, with `job_instance` set, one `job` instance per job row (DL-341) and the queue
+        scan's coordinator, idle between inputs (DL-372).
 
-        An install, a test's witness, `restore_instances` and `keep_job_instances` build
-        theirs here; no action runs.
+        An install, `restore_instances` and `keep_job_instances` build theirs here; no action
+        runs.
         """
         machines = Executor()
         machines.restore(ASSEMBLY_KEY, RUNTIME_ASSEMBLY, self.machines.active(ASSEMBLY_KEY))
-        for host_id, row in self._hosts.items():
-            data = HostData(self, host_id)
-            machines.restore(self.host_key(host_id), HOST, host_configuration(row.state), data)
         if self.job_instance is not None:
             machines.restore(SCAN_KEY, QUEUE_SCAN, SCAN_IDLE)
             for job, jrow in self._jobs.items():
@@ -1657,31 +1191,6 @@ class RuntimeState:
         macrostep that raised, every instance is its row's again (DL-350)."""
         self.machines = self.rebuild_machines()
 
-    def _require_host(self, host_id: str) -> HostRuntime:
-        row = self._hosts.get(host_id)
-        if row is None:
-            raise OracleError(f"no host {host_id!r} in the routing table")
-        return row
-
-    def register_host(
-        self, host_id: str, *, deadman_s: float | None = None, at: datetime | None = None
-    ) -> None:
-        """Put a host in the routing table, or refresh the identity of one already in it (ss8).
-
-        A new host lands `active`, and its `HOST` instance starts here. An existing one keeps its
-        routing state, so a relay cannot undo a drain by re-registering; the deadman and the
-        contact are refreshed.
-        """
-        row = self._hosts.get(host_id)
-        self._replace_host(
-            host_id,
-            deadman_s=deadman_s,
-            last_contact=at if at is not None else (row.last_contact if row else None),
-        )
-        if row is None:
-            self.machines.start(self.host_key(host_id), HOST, HostData(self, host_id))
-            self.machines.run()
-
     @property
     def period_id(self) -> int:
         return self._period_id
@@ -1689,8 +1198,8 @@ class RuntimeState:
     def finish_genesis(self) -> None:
         """Mark the constructor's own seeding as not an input for the seed-versus-advance latch.
 
-        Genesis seeding is identical on every replay and unjournaled (`runner_hosts`), so a
-        constructed state is fresh. One-shot: a second call after real inputs would launder a
+        Genesis seeding is identical on every replay and unjournaled, so a constructed state is
+        fresh. One-shot: a second call after real inputs would launder a
         used state back to fresh. Refused inside the genesis input too.
         """
         self._assemble(FINISH_GENESIS)
@@ -1736,7 +1245,6 @@ class RuntimeState:
         self._assemble(INSTALL)
         self._jobs = dict(carried.jobs)
         self._globals = dict(carried.globals_)
-        self._hosts = dict(carried.hosts)
         self.machines = self.rebuild_machines()
         self._timers = sorted(carried.timers, key=_timer_order)
         heapq.heapify(self._timers)
@@ -1756,40 +1264,6 @@ class RuntimeState:
             raise ValueError(f"seed_period({period_id}): periods count from 1 (I2)")
         self._assemble(SEED_PERIOD)
         self._period_id = period_id
-
-    def touch_host(self, host_id: str, at: datetime) -> None:
-        """Record positive contact with a host (concurrency-model ss8, S5b).
-
-        Not an admitted input: `last_contact` is outside the semantic projection, so this moves
-        no revision and writes no log record. An unknown host is ignored, not created.
-        """
-        if host_id in self._hosts:
-            self._replace_host(host_id, last_contact=at)
-
-    def set_host_state(self, host_id: str, state: HostState) -> None:
-        """Write the leaf a host command's microstep entered (`HostEntered`). Every leaf but
-        `quarantined` clears what quarantine interrupted: the memory is quarantine's own
-        (DL-97, DL-111)."""
-        self._require_host(host_id)
-        if state == "quarantined":
-            self._replace_host(host_id, state=state)
-        else:
-            self._replace_host(host_id, state=state, state_before_quarantine=None)
-
-    def remember_host_state(self, host_id: str, state: HostState) -> None:
-        """ss8: record what quarantine interrupts, so a drained host that comes back is still
-        drained (`HostRemembered`, DL-97)."""
-        self._require_host(host_id)
-        self._replace_host(host_id, state_before_quarantine=state)
-
-    def evict_host(self, host_id: str, *, forced_by: str | None) -> None:
-        """ss8: bump the `generation` a returning relay is fenced on and record the actor of a
-        `--force` that skipped the proof, None when the ss8 preconditions were met
-        (`HostEvicted`)."""
-        row = self._require_host(host_id)
-        self._replace_host(host_id, generation=row.generation + 1, forced_by=forced_by)
-
-    # ------------------------------------------------------------------ timers
 
     def enqueue_timer(self, due: datetime, ev: Event) -> int:
         """Arm a timer and return its ordering token. The token is one global counter, so
