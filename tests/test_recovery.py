@@ -34,6 +34,10 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+from subprocess_harness import cli
+from test_access import ME, _map_granting, _serve_armed
+from test_access import TEXT as _ACCESS_TEXT
+from test_preconditions import _SOLO_JIL, _call, _sendevent_cli, _serve, _serve_engine, _teardown
 
 import dsl41.runner_control as control
 from dsl41.ir import lower_source
@@ -51,10 +55,6 @@ from dsl41.runner_control import ControlClient, ControlClientError, ControlServe
 from dsl41.runner_journal import read_journal
 from dsl41.runner_startup import resume_run
 from dsl41.runner_tui import _outcome_line, _transport_line
-from test_access import ME, _map_granting, _serve_armed
-from test_access import TEXT as _ACCESS_TEXT
-from test_preconditions import _SOLO_JIL, _call, _sendevent_cli, _serve, _serve_engine, _teardown
-from subprocess_harness import cli
 
 #: wording a refusal of a RETRY must never carry (R7): each one says or
 #: implies that the ORIGINAL request did not happen, which a retry's own

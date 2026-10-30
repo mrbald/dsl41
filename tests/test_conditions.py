@@ -16,8 +16,8 @@ from dsl41.ast_jil import parse_file
 from dsl41.conditions import (
     And,
     Cond,
-    CondSpan,
     ConditionParseError,
+    CondSpan,
     ExitCodeAtom,
     GlobalAtom,
     JobRef,

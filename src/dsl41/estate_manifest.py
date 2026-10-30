@@ -4,23 +4,14 @@ The manifest names the catalog files in command-line order, the properties layer
 timezone and its map, and the semantic switches. `resolve_manifest` reads it once into
 `EstateInputs` for one environment. The verbs that read an estate take it through `--manifest`,
 which `cli_common.estate_args` expands into the verb's own parameters before its one loader
-(DL-422); the release's service side and `estate diff` read the value itself, and
-`manifest_catalog` loads its catalog (DL-413).
-
-The manifest carries the interpretation half of the runtime profile: files, layers, timezone,
-timezone map and semantics. The launcher carries the deployment half (`--detached`,
-`--deadman`, `--as-machine`, `--machine-policy`), and every seal restates it as `--next-*`,
-because an omitted `--next-*` option takes its default (DL-407).
+(DL-422).
 
 The manifest is given as an absolute path, and each name is joined to its directory as given.
 Nothing resolves a symlink or normalises the path beyond pathlib's join, because
-`source_bundle_hash` frames each input's path string as given (period-model ss1.1): the seal's
-`--next` paths and the opener's paths must be the same strings whatever the working directory.
-pathlib's form of the join is the string a verb hashes after typer turns an argument into a
-Path, so the two spellings of one input hash alike. A name with a `..` part is refused, so a
-release directory holds every input it names.
-A name not in normal form (a `.` part, `//`, a `/` at either end) is refused, so one file has
-one spelling, and so is a `.py` name: no Python enters a release (DL-410, DL-413).
+`source_bundle_hash` frames each input's path string as given: two spellings of one input would
+hash apart. A name with a `..` part is refused, so the manifest's directory holds every input it
+names. A name not in normal form (a `.` part, `//`, a `/` at either end) is refused, so one file
+has one spelling, and so is a `.py` name: an estate's inputs are JIL, not Python (DL-410).
 """
 
 from __future__ import annotations
@@ -30,18 +21,14 @@ import os
 import re
 import stat
 import tomllib
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from dsl41.ir import tool_version
 from dsl41.semantics import check_overrides
-
-if TYPE_CHECKING:
-    from dsl41.ir import CatalogIR
 
 
 class ManifestError(ValueError):
@@ -164,13 +151,12 @@ def read_regular(path: Path) -> bytes:
 
 def parse_manifest(path: Path) -> Manifest:
     """Parse and validate the manifest at `path` without looking for the files it names, or
-    raise ManifestError (DL-407). `estate build` reads a source directory with it, where an
-    emitted file does not exist yet (DL-413).
+    raise ManifestError (DL-407).
 
     The manifest is read without following a symlink, as a regular file. Every name must be
     in normal form: relative, with no `.` or `..` part, no `//` and no `/` at its end, so one
-    file has one spelling. No name may be a `.py` file: a release takes no Python, and
-    `estate build --emit` renders a module (DL-410, DL-413)."""
+    file has one spelling. No name may be a `.py` file: `dsl41 build` renders a module to JIL
+    (DL-410)."""
     try:
         raw = read_regular(path)
     except OSError as exc:
@@ -203,7 +189,7 @@ def parse_manifest(path: Path) -> Manifest:
             if name.endswith(".py"):
                 raise ManifestError(
                     f"{path}: {key} names {name!r}, a Python file; a release takes no Python,"
-                    f" so render it with 'dsl41 estate build --emit' (DL-410)"
+                    f" so render it with 'dsl41 build' (DL-410)"
                 )
     return manifest
 
@@ -291,36 +277,3 @@ def resolve_manifest(path: Path, environment: str | None = None) -> EstateInputs
         timezone_map=None if manifest.timezone_map is None else _join(path, manifest.timezone_map),
         semantics=dict(manifest.semantics),
     )
-
-
-def manifest_catalog(
-    inputs: EstateInputs,
-    site: list[Path],
-    read: Callable[[Path], bytes] | None = None,
-    *,
-    permit_unknown: bool = False,
-) -> CatalogIR:
-    """The catalog INPUTS declare, its own layers first and the SITE layers after them. With
-    READ, the loader reads a private copy of the files and layers, each through READ; the SITE
-    layers are read in place. A load that fails exits as `load_catalog_or_exit_2` does. The
-    release's service side and `estate diff` load through this one function (DL-412, DL-413)."""
-    import tempfile
-
-    from dsl41.cli_common import load_catalog_or_exit_2
-
-    files = [Path(file) for file in inputs.files]
-    layers = [Path(layer) for layer in inputs.layers]
-    if read is None:
-        return load_catalog_or_exit_2(files, permit_unknown, [*layers, *site])
-    root = inputs.manifest.parent
-    with tempfile.TemporaryDirectory(prefix="dsl41-release-") as scratch:
-
-        def copied(file: Path) -> Path:
-            target = Path(scratch) / file.relative_to(root)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(read(file))
-            return target
-
-        loaded = [copied(file) for file in files]
-        stacked = [copied(layer) for layer in layers]
-        return load_catalog_or_exit_2(loaded, permit_unknown, [*stacked, *site])

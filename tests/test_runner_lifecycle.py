@@ -41,15 +41,15 @@ from proc_pipes import close_pipes
 if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
     pytest.skip("lifecycle tier is POSIX-only", allow_module_level=True)
 
+from subprocess_harness import mypy_report
+
 from dsl41 import runner_procid, runner_wrapper
 from dsl41.ir import lower_source
-from dsl41.runner_startup import resume_run
+from dsl41.run_root import active_wal, catalog_hash_v2
 from dsl41.runner_adapters import Failed, LocalCommandAdapter, Terminated, resolve_spool
 from dsl41.runner_clock import RealClock
-from dsl41.period import catalog_hash_v2
 from dsl41.runner_journal import read_journal, replay_inputs
-from dsl41.period import active_wal
-from subprocess_harness import mypy_report
+from dsl41.runner_startup import resume_run
 
 WRAPPER = Path(runner_wrapper.__file__)
 PROCID = Path(runner_procid.__file__)
@@ -1061,9 +1061,9 @@ def test_resume_refuses_catalog_drift(tmp_path: Path) -> None:
 
     from runner_crash_driver import CRASH_JIL
 
-    from dsl41.runner_startup import start_run
     from dsl41.runner_adapters import FakeAdapter
     from dsl41.runner_clock import EngineError, VirtualClock
+    from dsl41.runner_startup import start_run
 
     run_root = tmp_path / "run"
     catalog = lower_source(CRASH_JIL)
@@ -1095,12 +1095,13 @@ def test_resume_refuses_catalog_drift(tmp_path: Path) -> None:
 
 
 def test_resume_refuses_clock_domain_flip(tmp_path: Path) -> None:
-    from runner_crash_driver import CRASH_JIL
     from datetime import datetime
 
-    from dsl41.runner_startup import start_run
+    from runner_crash_driver import CRASH_JIL
+
     from dsl41.runner_adapters import FakeAdapter
     from dsl41.runner_clock import EngineError, VirtualClock
+    from dsl41.runner_startup import start_run
 
     catalog = lower_source(CRASH_JIL)
     run_root = tmp_path / "run"
@@ -1192,9 +1193,9 @@ def test_b1_advance_fired_kill_beats_late_exit_record_at_resume(tmp_path: Path) 
     TERMINATED without needing the reconciliation to happen again."""
     from datetime import timedelta
 
-    from dsl41.runner_startup import start_run
     from dsl41.runner_adapters import FakeAdapter
     from dsl41.runner_clock import VirtualClock
+    from dsl41.runner_startup import start_run
 
     catalog = lower_source(KILL_JIL)
     run_root = tmp_path / "run"
@@ -1255,10 +1256,10 @@ def test_b1_advance_record_replays_the_kill(tmp_path: Path) -> None:
 
     from dsl41.oracle import Oracle
     from dsl41.oracle_state import Event
-    from dsl41.runner_startup import start_run
     from dsl41.runner_adapters import FakeAdapter
     from dsl41.runner_clock import VirtualClock
     from dsl41.runner_journal import replay_inputs
+    from dsl41.runner_startup import start_run
 
     catalog = lower_source(KILL_JIL)
     run_root = tmp_path / "run"
@@ -1364,9 +1365,9 @@ def test_m4_resume_refuses_incomplete_fw_without_adapter(tmp_path: Path) -> None
     refuses loudly: a watch nothing can re-drive would otherwise hang
     RUNNING for the life of the estate."""
     from dsl41.oracle_state import Event
-    from dsl41.runner_startup import start_run
     from dsl41.runner_adapters import FakeAdapter, FileWatcherAdapter
     from dsl41.runner_clock import EngineError, VirtualClock
+    from dsl41.runner_startup import start_run
 
     fw_jil = "insert_job: w\njob_type: f\nwatch_file: /nonexistent/watched\n"
     catalog = lower_source(fw_jil)

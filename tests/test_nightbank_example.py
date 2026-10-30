@@ -2,7 +2,7 @@
 night reaches the SOD flip -- and, since S7b, survives its faults.
 
 The last sentence here used to read "the live-engine path is exercised
-manually via the RUNBOOK; these tests pin what CI can pin", and
+manually; these tests pin what CI can pin", and
 docs/concurrency-model.md quotes it as the gap the whole phase-12 programme
 closes. The virtual-clock half of it is closed: the sweep at the foot of
 this file drives the real 82-job night through seeded interleavings of
@@ -15,18 +15,16 @@ DL-107 scopes as S7c."""
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import json
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
-from importlib.machinery import SourceFileLoader
 from pathlib import Path
 
 import pytest
+from subprocess_harness import cli
 
 from dsl41.oracle_state import Event
-from subprocess_harness import cli
 
 ROOT = Path(__file__).resolve().parent.parent
 NB = ROOT / "examples" / "nightbank"
@@ -35,12 +33,10 @@ BANK = sorted(str(p) for p in (NB / "estate" / "bank").glob("*.jil"))
 
 
 def _launcher():
-    loader = SourceFileLoader("nightbank_launcher", str(NB / "bin" / "nightbank"))
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    assert spec is not None
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
+    """The night's properties builder (tests/nightbank_props.py)."""
+    import nightbank_props
+
+    return nightbank_props
 
 
 @pytest.fixture(scope="module")
@@ -164,26 +160,9 @@ def test_incident_targets_exist_in_their_estate(estate: str, props_file: Path) -
     assert not missing, f"incident targets not in the {estate} estate: {missing}"
 
 
-def test_runbook_job_names_exist_in_an_estate(props_file: Path) -> None:
-    """The RUNBOOK is a contract: every estate job it names must exist in
-    the small or bank catalog (review: two exercises referenced plays that
-    could not run as written)."""
-    import re
-
-    text = (NB / "RUNBOOK.md").read_text()
-    names = set(re.findall(r"\b(?:APAC|EMEA|AMER|GLOBAL|SOD|OPS)_[A-Z0-9_]*_(?:B|C|F)\b", text))
-    assert len(names) > 15  # the extraction itself must keep working
-    small = load_estate("small", props_file).jobs
-    bank = load_estate("bank", props_file).jobs
-    missing = sorted(n for n in names if n not in small and n not in bank)
-    assert not missing, f"RUNBOOK names not in any estate: {missing}"
-
-
 def test_readme_pipeline_claims_hold(props_file: Path) -> None:
-    """README: viz/report/uc also accept the estate (lint + rehearse are
-    pinned above). Claims are CI-substantiated, not asserted (review)."""
-    report = cli("report", *SMALL, "-p", str(props_file), cwd=ROOT)
-    assert report.returncode == 0, report.stdout + report.stderr
+    """README: viz also accepts the estate (lint + rehearse are pinned
+    above). Claims are CI-substantiated, not asserted (review)."""
     viz = cli("viz", "--format", "chart", *SMALL, "-p", str(props_file), cwd=ROOT)
     assert viz.returncode == 0, viz.stdout + viz.stderr
     assert "flowchart" in viz.stdout  # --format chart emits the bare chart
@@ -199,9 +178,6 @@ def test_readme_pipeline_claims_hold(props_file: Path) -> None:
     assert explore.returncode == 0, explore.stdout + explore.stderr
     assert 'id="graph-data"' in lens.read_text(encoding="utf-8")
     assert lens.stat().st_size > 1_500_000  # the cytoscape payload really embedded
-    uc = cli("uc", *SMALL, "-p", str(props_file), cwd=ROOT)
-    assert uc.returncode == 0, uc.stdout + uc.stderr
-    json.loads(uc.stdout)  # a bundle, not a traceback
 
 
 # ------------------- the concurrency matrix over the proving ground (S7b)
@@ -236,6 +212,7 @@ async def _night(catalog, run_root: Path, schedule, *, close: bool = True):
     before the SOD flip, and a sweep that never reached the flip would be
     testing the first half of an estate."""
     from model_harness import ModelRun
+
     from dsl41.runner_scheduler import Scheduler
 
     run = ModelRun(

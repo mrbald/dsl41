@@ -4,22 +4,22 @@ operator interface (CONTRACT.md "Failure disposition is `stop`"). Effects live u
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 import hashlib
 import json
 import os
-from pathlib import Path
 import sqlite3
 import subprocess
 import sys
+from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
+from file_processing_checker import check_counts_outputs, expected_output, record
 
 from dsl41 import file_processing as fp
 from dsl41.file_processing_charts import PROCESS, state_after
 from examples.file_processing.exits import EXIT_LOCK_BUSY, EXIT_REFUSED, EXIT_STOPPED
 from examples.file_processing.worker import CountsHandler
-from file_processing_checker import check_counts_outputs, expected_output, record
 
 IDENTITY = "counts-v1"
 REPO = Path(__file__).resolve().parents[1]

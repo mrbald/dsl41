@@ -1,4 +1,4 @@
-"""dsl41: AutoSys->Stonebranch migration compiler.
+"""dsl41: AutoSys migration compiler and runner.
 
 Module map (implementation order per CLAUDE.md; the runner is twenty sibling modules,
 docs/runner-design.md ss14):
@@ -19,14 +19,11 @@ docs/runner-design.md ss14):
                and OracleError. It imports nothing from the interpreter (DL-91)
   oracle     - discrete-event AutoSys semantics interpreter (docs/ir-design.md ss7)
   equiv      - canonical form + equivalence tiers a/b/c (docs/ir-design.md ss6)
-  backend_uc - UC twin model + edge classification + migration report +
-               U3a base CREATE-ONLY record bundle (docs/uc-edge-schema.md;
-               rich condition forms PENDING: U3b)
   dsl        - builder surface (job/box/sequence/parallel) + decompiler
   placeholders - non-core `~{$NAME}~` estate templating preprocessor behind
                the `resolve` verb; nothing in the core imports it (DL-19)
-  cli        - typer entry points (lint/equiv/report/uc/viz/decompile/folds/
-               resolve/journal/run/rehearse/sendevent/query/supervise/ui/serve)
+  cli        - typer entry points (lint/equiv/viz/decompile/build/folds/minify/
+               resolve/journal/runs/run/rehearse/sendevent/query/host/ui/serve)
   __init__   - this map, and nothing else: the package exports no names
   __main__   - `python -m dsl41`; `serve` spawns each session through it
   runner     - phase-11 engine loop over the oracle: the single-writer loop,
@@ -35,16 +32,16 @@ docs/runner-design.md ss14):
   runner_clock - the ss9 time domains (Clock protocol, VirtualClock,
                RealClock) + EngineError, at the bottom of the import DAG
   runner_adapters - the ss6 adapter contract and every adapter, plus the
-               ss6a Tier-1 detached path and the ss7 spool ladder
+               ss7 spool ladder
   runner_admission - the frozen admission order (concurrency-model ss4):
                Attempt/ApplyResult, the typed Frontiers, the DecisionIndex,
                the fingerprint, and the gate as a pure function; plus the
                ss6 envelope and the ss0 mandate that a mutation names the
                revision it was composed against (parse_envelope)
-  period     - period identity (docs/period-model.md ss1.1/ss2.1):
-               catalog_hash v1/v2, source_bundle_hash and the bundle it
-               addresses, RuntimeProfile + runtime_hash, the staged and
-               committed manifests, and the `segment` record
+  run_root   - a run root's identity and layout: catalog_hash v2,
+               source_bundle_hash and the bundle it addresses, RuntimeProfile +
+               runtime_hash, the staged and committed manifests, the `segment`
+               record
   runner_journal - the ss7 inputs-only WAL: Journal, read_journal, the
                two-pass replay_inputs, and the catalog_hash resume gate
   runner_scheduler - the ss5 calendar scheduler, turning its ticks into UTC
@@ -55,9 +52,7 @@ docs/runner-design.md ss14):
   runner_tui - the ss11 Textual TUI, a client of the control socket only
                (optional `dsl41[ui]` extra)
   runner_wrapper - per-run Tier-0 lifecycle recorder; STDLIB-ONLY, spawned
-               by file path (docs/supervisor-protocol.md, DL-42 boundary)
-  runner_supervisor - the ss6a Tier-1 daemon, one per run_root; STDLIB-ONLY
-               on the same boundary (docs/supervisor-protocol.md ss5)
-  runner_procid - durable records + process identity shared by the Tier-0
-               wrapper and the Tier-1 supervisor; STDLIB-ONLY (DL-72)
+               by file path (DL-42 boundary)
+  runner_procid - durable records + process identity used by the wrapper;
+               STDLIB-ONLY (DL-72)
 """

@@ -9,18 +9,18 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from pathlib import Path
 import sqlite3
 import stat
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
+from file_processing_checker import check_counts_outputs, record
 
 from dsl41 import file_processing as fp
 from dsl41.file_processing_charts import PROCESS
 from examples.file_processing.worker import EXIT_LOCK_BUSY, EXIT_REFUSED, CountsHandler
-from file_processing_checker import check_counts_outputs, record
 
 IDENTITY = "counts-v1"
 REPO = Path(__file__).resolve().parents[1]

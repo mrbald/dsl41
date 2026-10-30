@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 import transition_hits_plugin as plugin
+
 from dsl41 import state_machine as core
 from dsl41.machines import MACHINES
 from dsl41.state_machine import (

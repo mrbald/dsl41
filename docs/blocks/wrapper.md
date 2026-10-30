@@ -10,14 +10,14 @@ The wrapper writes that status durably, and it kills the command's group when it
 
 The code and the contract carry over unchanged. It needs none of the storage capabilities.
 Reason: `runner_wrapper.py` imports only the standard library and `runner_procid.py`, and it writes two files in the run directory; it never touches the WAL or the ledger.
-It does need the run directory on a local filesystem ([supervisor-protocol §3](../supervisor-protocol.md#3-spool-format-frozen)), which is a filesystem property, not a row of the storage table.
+It does need the run directory on a local filesystem (supervisor-protocol §3 (`supervisor-protocol.md`, retired in 2.0.0)), which is a filesystem property, not a row of the storage table.
 
 ## Interface
 
 - Run as `sys.executable <path>/runner_wrapper.py`, never with `-m`.
-- Input: one JSON object on stdin, the frozen spec of [supervisor-protocol §2](../supervisor-protocol.md#2-wrapper-input-spec-frozen). `lifeline_fd` is the read end of a pipe whose write end the spawner holds.
-- Output: `spawn.json`, then `status.json`, in `run_dir` ([§3](../supervisor-protocol.md#3-spool-format-frozen)). The outcome vocabulary is `WrapperOutcome`.
-- Exit code: a notification only, never the outcome ([§4](../supervisor-protocol.md#4-wrapper-behavior-frozen-semantics) step 6).
+- Input: one JSON object on stdin, the frozen spec of supervisor-protocol §2 (`supervisor-protocol.md`, retired in 2.0.0). `lifeline_fd` is the read end of a pipe whose write end the spawner holds.
+- Output: `spawn.json`, then `status.json`, in `run_dir` (§3 (`supervisor-protocol.md`, retired in 2.0.0)). The outcome vocabulary is `WrapperOutcome`.
+- Exit code: a notification only, never the outcome (§4 (`supervisor-protocol.md`, retired in 2.0.0) step 6).
 - Spawners: `LocalCommandAdapter` in [tethered](../glossary.md#tethered) mode, where the engine holds the write end, and `Supervisor._spawn_wrapper` in [detached](../glossary.md#detached) mode. Both engine-side spec builders, in `LocalCommandAdapter` and `SupervisedCommandAdapter`, use `_build_run_spec`; the supervisor takes the spec off the wire and fills only `lifeline_fd`.
 - Readers: `load_json`, `outcome_from_status` and `resolve_spool` in `src/dsl41/runner_adapters.py`.
 - `DSL41_WRAPPER_TEST_PAUSE` names pause points for the kill-matrix tests. It is inert when unset.
@@ -46,15 +46,15 @@ flowchart TD
 
 ## Invariants
 
-- Stdlib-only, run by file path and parent-agnostic ([supervisor-protocol §1](../supervisor-protocol.md#1-roles); [runner-design §6a](../runner-design.md#6a-process-lifecycle-tiers-dl-41a); DL-42).
-- The command has its own process group, apart from the wrapper's, so a group kill never kills the recorder (DL-41a item 2; [§3, spawn.json](../supervisor-protocol.md#spawnjson--written-by-the-wrapper-immediately-after-spawning)).
+- Stdlib-only, run by file path and parent-agnostic (supervisor-protocol §1 (`supervisor-protocol.md`, retired in 2.0.0); [runner-design §6a](../runner-design.md#6a-process-lifecycle-tiers-dl-41a); DL-42).
+- The command has its own process group, apart from the wrapper's, so a group kill never kills the recorder (DL-41a item 2; §3, spawn.json (`supervisor-protocol.md`, retired in 2.0.0)).
 - The lifeline's write end lives in exactly one process, the spawner. EOF means the parent died, `kill -9` included (DL-41a item 3; runner-design §6a, "Lifeline fd hygiene").
-- On every wakeup the exit check runs before the lifeline-EOF check ([§4](../supervisor-protocol.md#4-wrapper-behavior-frozen-semantics) step 3).
-- Record before reap, with one stated exception: the path where the `spawn.json` write failed ([§3, status.json](../supervisor-protocol.md#statusjson--written-by-the-wrapper-before-reaping); DL-229 item 1).
-- Every record uses the durability liturgy on a local filesystem ([§3](../supervisor-protocol.md#3-spool-format-frozen); DL-41a item 4).
+- On every wakeup the exit check runs before the lifeline-EOF check (§4 (`supervisor-protocol.md`, retired in 2.0.0) step 3).
+- Record before reap, with one stated exception: the path where the `spawn.json` write failed (§3, status.json (`supervisor-protocol.md`, retired in 2.0.0); DL-229 item 1).
+- Every record uses the durability liturgy on a local filesystem (§3 (`supervisor-protocol.md`, retired in 2.0.0); DL-41a item 4).
 - `status.json` is the sole data channel and appears at most once. Its absence is the E7 case (§3, status.json).
 - A pid whose start-time token does not match the record is never signalled (§3, spawn.json; DL-41a item 5).
-- The `DSL41_RUN` tag is forensics only, never identity ([§3](../supervisor-protocol.md#dsl41_run-env-tag--forensics-only)).
+- The `DSL41_RUN` tag is forensics only, never identity (§3 (`supervisor-protocol.md`, retired in 2.0.0)).
 - The wrapper ignores a fixed set of signals, and the command restores their defaults before exec (§4 steps 1 and 2; DL-229 item 6).
 
 ## Failure and recovery
@@ -75,7 +75,7 @@ flowchart TD
 ## Tests
 
 - Boundary: `test_wrapper_imports_are_stdlib_only`, `test_wrapper_records_under_pythonsafepath`.
-- Recording: `test_wrapper_records_natural_exit_and_appends_stdout`, `test_wrapper_survives_external_group_kill_and_records_signal`, `test_wrapper_survives_sigusr1_and_sigusr2_and_still_records`, `test_wrapper_refuses_mistyped_spec_field_before_spawning`, `test_dl151_the_wrapper_records_a_spawn_it_could_not_open`.
+- Recording: `test_wrapper_records_natural_exit_and_appends_stdout`, `test_wrapper_survives_external_group_kill_and_records_signal`, `test_wrapper_survives_sigusr1_and_sigusr2_and_still_records`, `test_wrapper_refuses_mistyped_spec_field_before_spawning`.
 - Parent loss: `test_wrapper_graceful_sigterm_reaches_command_on_parent_loss`, `test_lifeline_write_end_leaks_nowhere`, `test_sigkill_engine_midrun_then_resume`.
 - Kill matrix: `test_kill_before_spawn_record_is_unobservable_and_never_signals`, `test_kill_after_spawn_record_survivor_killed_at_resume`, `test_kill_between_wait_and_status_write_is_unobservable`, `test_kill_between_status_write_and_reap_preserves_outcome`, `test_resume_kill_reaches_a_member_that_ignores_sigterm`.
 - Identity: `test_spoofed_spawn_json_never_signals_innocents`, `test_boot_id_flip_voids_liveness_and_resolves_from_records`.

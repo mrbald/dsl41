@@ -6,10 +6,9 @@ folds `dispatch`, the `input` records the ss4 stale-completion gate journals, ea
 spool into one row per job run. It is offline: no engine, no control socket, no wire verb.
 
 Two layers: `fold_run_rows` is a pure function of parsed journal records plus an optional
-catalog and trace. `read_run_root` is the I/O shell: for every WAL segment the root retains (one
-per period, I1) it rebuilds that period's catalog from its own stored inputs (DL-130's
-content-addressed bundle, so no estate-file argument), replays it through a fresh `Oracle` as
-`dsl41 journal` does, and reads the spool. `read_spool` is a separate function so the WAL and
+catalog and trace. `read_run_root` is the I/O shell: it rebuilds the root's catalog from its own
+stored inputs (DL-130's content-addressed bundle, so no estate-file argument), replays the WAL
+through a fresh `Oracle` as `dsl41 journal` does, and reads the spool. `read_spool` is a separate function so the WAL and
 the spool stay independent I/O concerns. The decision itself is `docs/decision-log.md` DL-113;
 five decisions shape it.
 
@@ -46,8 +45,8 @@ five decisions shape it.
    segment and this job's own `job_hash`, in every `--format`. The break line `--format table`
    prints between two consecutive rows of one job fires on `job_hash`, falling back to
    `catalog_hash` only when either row has none. The estate hash moves for every job when any
-   job changes (`period.catalog_hash_v2`), so a break on it would mark the whole estate.
-   `period.job_fingerprints` states what the per-job hash can say: it fingerprints the resolved
+   job changes (`run_root.catalog_hash_v2`), so a break on it would mark the whole estate.
+   `run_root.job_fingerprints` states what the per-job hash can say: it fingerprints the resolved
    definition, so an estate whose placeholders vary per run gets no more than `catalog_hash`
    gave it. Rows sort by (job, started_at), so a break lands where that job changed.
 
@@ -75,23 +74,20 @@ from typing import Any, Final, Literal
 from pydantic import BaseModel, ConfigDict
 
 from dsl41.ast_jil import JilParseError, parse
-from dsl41.boundary import read_seal
 from dsl41.canon import is_wire_int, naive_utc
 from dsl41.ir import CatalogIR, LoweringError, Semantics, lower_catalog
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import LIVE, TERMINAL, CarriedRows, JobStatus, OracleError, TraceEntry
-from dsl41.period import (
+from dsl41.run_root import (
     Manifest,
     RuntimeProfile,
     bundle_dir,
     bundle_source_paths,
-    disagreements,
     is_opening,
     job_fingerprints,
     read_period_manifest,
     oracle_reading,
     check_manifest_against_segment,
-    SEGMENT_FIELDS,
 )
 from dsl41.runner_adapters import load_json, spool_names_run
 from dsl41.runner_admission import ApplyResult
@@ -878,71 +874,35 @@ def replay_trace(
 
 
 def read_run_root(run_root: Path) -> list[RunRow]:
-    """One run root's whole retained history: every segment it holds, each folded under its own
-    period's catalog, concatenated (PR-50).
+    """One run root's history: its segment folded under the root's catalog (PR-50).
 
-    A period is a baseline, and this is the fold `read_run_roots` performs per root. After a
-    seal (DL-133 made the WAL many files) the rows of earlier periods live in segments the
-    active one does not hold (DL-135 closed the same gap for the subscriber's backfill).
-
-    Each period folds on its own manifest, bundle and replay, so a run is reported under the
-    catalog it started in (`start_period`). State continues across a boundary: the replay is
-    seeded from the rows the period opened with (`_opening_rows`), so revisions and run numbers
-    continue and a box that ran in two periods gets runs 1 and 2.
-
-    Two limits. A run that spans a boundary keeps its row in the period that dispatched it, with
-    its spool timings, and its STATUS stays RUNNING: the terminal input is in the next segment.
-    And the cost is one replay per retained period; `--job` and `--since` filter after the
-    fold."""
-    from dsl41.period import wal_segments
+    The cost is one replay; `--job` and `--since` filter after the fold."""
     from dsl41.runner_journal import read_backfill
 
-    if not wal_segments(run_root) and _archived_here(run_root):
-        # every period this root held was archived (DL-144): no rows and no fault; the caller
-        # names the missing coverage, since a backfill over an empty segment list would raise.
-        # `_archived_here` proves each receipt, so an unreadable one never becomes an empty table
-        return []
     try:
-        # one validated read for the whole estate: `read_backfill` holds the chain proofs
-        # (DL-135): sentinel-bound openings, filename vs record, contiguous retained numbers,
-        # each segment opening from the seal that closes the one before it, one estate, a
-        # continuous index frontier. A spliced foreign segment or a missing middle refuses here
+        # one validated read: `read_backfill` binds the segment to the root's sentinel and its
+        # filename (DL-135), so a spliced foreign segment refuses here
         stream = read_backfill(run_root / "journal.jsonl", since=0).records
     except (OSError, EngineError) as exc:
         raise RunHistoryError(f"{run_root}: {exc}") from exc
-    rows: list[RunRow] = []
-    for records in _split_segments(stream):
-        try:
-            rows.extend(_read_segment(run_root, records))
-        except EngineError as exc:
-            # the shared `decision_effects` refusal arrives as itself (DL-139); the message
-            # names the root, since `dsl41 runs` reads several roots in one command
-            raise RunHistoryError(f"{run_root}: {exc}") from exc
-    return rows
-
-
-def _split_segments(stream: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-    """The validated whole-estate stream, split into its segments at each opening record."""
-    out: list[list[dict[str, Any]]] = []
-    for record in stream:
-        if is_opening(record) or not out:
-            out.append([])
-        out[-1].append(record)
-    return out
+    try:
+        return _read_segment(run_root, stream)
+    except EngineError as exc:
+        # the shared `decision_effects` refusal arrives as itself (DL-139); the message names
+        # the root, since `dsl41 runs` reads several roots in one command
+        raise RunHistoryError(f"{run_root}: {exc}") from exc
 
 
 def _read_segment(run_root: Path, records: list[dict[str, Any]]) -> list[RunRow]:
-    """The I/O shell for one period: its chain-validated records, manifest and the spool of the
+    """The I/O shell for the root's segment: its validated records, manifest and the spool of the
     runs it dispatched, folded into run rows by the pure `fold_run_rows`."""
     if not records or not is_opening(records[0]):
         raise RunHistoryError(
             f"{run_root}: run history requires a journal starting with a segment record"
         )
     period_id = records[0]["period_id"]
-    prove_opening(run_root, records[0])
-    # after the opening proof and before the manifest: identity first, then semantics, so a
-    # segment this root cannot prove is reported as that. Here and not only in `replay_trace`, so
-    # the two degraded paths below, which replay nothing, refuse too
+    # before the manifest, and not only in `replay_trace`, so the two degraded paths below,
+    # which replay nothing, refuse too
     check_replay_version(records[0], where=str(run_root))
     spool = _read_all_spool(records)
     period_manifest = _period_manifest_or_refuse(run_root, period_id)
@@ -958,140 +918,19 @@ def _read_segment(run_root: Path, records: list[dict[str, Any]]) -> list[RunRow]
         check_manifest_against_segment(period_manifest, records[0])
     except EngineError as exc:
         raise RunHistoryError(f"{run_root}: {exc}") from exc
-    opened = _opening_rows(run_root, records[0], period_manifest)
-    carried = (
-        {}
-        if opened is None
-        else {job: row.run_number for job, row in opened.jobs.items() if row.run_number > 0}
-    )
     if not stored_input_paths(run_root, period_id):
         # a manifest that names inputs this root does not hold is a missing fact: the rows
         # come back `records_only`
-        return fold_run_rows(records, spool=spool, carried=carried)
+        return fold_run_rows(records, spool=spool)
     catalog = load_catalog_from_manifest(run_root, period_id)
-    replayed = replay_trace(run_root, records, catalog, opened)
+    replayed = replay_trace(run_root, records, catalog, None)
     return fold_run_rows(
         records,
         catalog=catalog,
         trace=replayed.trace,
         spool=spool,
-        carried=carried,
         recovered=replayed.recovered,
     )
-
-
-def prove_opening(run_root: Path, opening: Mapping[str, Any]) -> None:
-    """A period whose opening names a seal must hold that sidecar, and the sidecar must be the
-    seal this opening stands on (period-model ss11).
-
-    The ss11 ladder, offline: the digest the naming record carries, the period and estate the
-    sidecar claims, the instant it closed, and every `next_period` field the opening `segment`
-    repeats. One implementation for every offline reader (DL-139): run history calls it before
-    any degradation branch, and `dsl41 journal`'s cross-period replay calls it at every boundary
-    it crosses, because a replay that narrated a forged continuation is worse than a refusal.
-
-    Public and reader-neutral: the refusal names the root and the record, not the tool."""
-    link = opening.get("opens_from_seal")
-    if not isinstance(link, Mapping):
-        return  # period 1: opened from nothing
-    period_id = link.get("period_id")
-    digest = link.get("digest")
-    try:
-        seal = read_seal(run_root, int(period_id))  # type: ignore[arg-type]
-    except (OSError, EngineError, ValueError, TypeError) as exc:
-        raise RunHistoryError(
-            f"{run_root}: this period opens from seal {digest!r} of period"
-            f" {period_id!r} and that sidecar cannot be read ({exc}) -- an"
-            " unproved opening (period-model ss11, PR-50)"
-        ) from exc
-    staged = seal.next_period
-    # the projection is derived: every `next_period` field that is also a segment field is
-    # compared, so a field added to either model is covered by default
-    shared = sorted(set(type(staged).model_fields) & SEGMENT_FIELDS)
-    grafted = (
-        seal.digest != digest
-        or seal.period_id != period_id
-        or seal.estate_id != opening.get("estate_id")
-        or seal.closed_at.isoformat() != opening.get("at")
-        or bool(disagreements(staged, opening, shared))
-    )
-    if grafted:
-        # the digest binds the file's bytes, not its place in this lineage: a valid sidecar from
-        # another period or estate with the link rewritten to its digest would pass. The seal
-        # must also be the named period's, this estate's, and the one whose next_period is this
-        # opening
-        raise RunHistoryError(
-            f"{run_root}: the sidecar at period {period_id!r} is not the seal this"
-            f" opening stands on (seal: period {seal.period_id}, estate"
-            f" {seal.estate_id}, opens {seal.next_period.period_id}) -- an identity"
-            " graft, an unproved opening (period-model ss11, PR-50)"
-        )
-
-
-def _opening_rows(
-    run_root: Path, opening: Mapping[str, Any], manifest: "Manifest | None"
-) -> "CarriedRows | None":
-    """The rows this period opened with (`attest.carried_from_opening`, the audit's source).
-
-    None means the period opened from nothing: period 1, or a root with no period manifest. A
-    period whose opening names a seal and whose sidecar is absent, unreadable or not the named
-    one refuses: swallowing that failure would let a period 2 that runs only C2-added jobs
-    replay from an empty state and return full-fidelity history from an unproven opening."""
-    from dsl41.attest import carried_from_opening
-
-    if opening.get("opens_from_seal") is None:
-        return None
-    if manifest is None:
-        return None  # pre-DL-130 layout: `records_only` fidelity downstream
-    try:
-        return carried_from_opening(run_root, opening, manifest)
-    except (OSError, EngineError, ValueError, KeyError) as exc:
-        raise RunHistoryError(
-            f"{run_root}: this period opens from a seal this root cannot prove"
-            f" ({exc}) -- history refuses an unproved opening rather than replaying"
-            " it from an empty state (period-model ss11, PR-50)"
-        ) from exc
-
-
-def _archived_here(run_root: Path) -> list[int]:
-    """Every period of this root whose archive receipt proves out, in order (DL-144).
-
-    `period.archived_periods` lists the receipt files. Decisions read this instead: an
-    unreadable or unbound receipt never buys a shorter answer, and it refuses as
-    `RunHistoryError` so `dsl41 runs` names it."""
-    from dsl41.attest import verify_archive_receipt
-    from dsl41.period import archived_periods
-
-    out: list[int] = []
-    for period_id in archived_periods(run_root):
-        try:
-            proved = verify_archive_receipt(run_root, period_id)
-        except EngineError as exc:
-            raise RunHistoryError(f"{run_root}: {exc}") from exc
-        if proved is not None:
-            out.append(period_id)
-    return out
-
-
-def archived_coverage(run_roots: Sequence[Path]) -> list[str]:
-    """One line per period whose inputs were archived, naming the coverage this history lacks
-    (period-model ss12, DL-144).
-
-    An archived period's WAL contributes no rows, and a shorter answer is never silent, so each
-    missing period is named with the receipt that says why."""
-    from dsl41.period import archive_receipt_path, wal_path
-
-    return [
-        f"{run_root}: period {period_id} has no rows -- its inputs were archived"
-        f" ({archive_receipt_path(run_root, period_id).name}), so this history covers"
-        " every period this estate retains and not that one"
-        for run_root in run_roots
-        for period_id in _archived_here(run_root)
-        # the receipt says archived; the segment says whether the rows are gone. Between a
-        # durable receipt and the deletion the fold still produces this period's rows, and
-        # claiming otherwise would misreport them (DL-144)
-        if not wal_path(run_root, period_id).is_file()
-    ]
 
 
 def read_run_roots(

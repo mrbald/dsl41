@@ -34,22 +34,20 @@ from __future__ import annotations
 
 import asyncio
 import json
-
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
-
+from model_harness import _lose_the_decision_for
 from pydantic import ValidationError
 
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, JobRuntime
-from dsl41.period import wal_path
+from dsl41.run_root import wal_path
 from dsl41.runner import Engine
-from dsl41.runner_clock import EngineError
-from dsl41.runner_startup import start_run
 from dsl41.runner_adapters import FakeAdapter
+from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_effects import (
     OUTCOME_UNAVAILABLE,
     Effect,
@@ -59,10 +57,10 @@ from dsl41.runner_effects import (
     plan_effects,
     superseded_reason,
 )
-from dsl41.runner_clock import VirtualClock
 from dsl41.runner_journal import read_journal, read_outbox, replay_inputs
-from dsl41.semantics import SemanticSwitches, resolve as resolve_switches
-from model_harness import _lose_the_decision_for
+from dsl41.runner_startup import start_run
+from dsl41.semantics import SemanticSwitches
+from dsl41.semantics import resolve as resolve_switches
 
 T0 = datetime(2026, 7, 1, 8, 0)
 

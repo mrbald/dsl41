@@ -35,7 +35,7 @@ from typing import Any, Literal, Protocol, overload
 
 from dsl41.canon import is_wire_int
 from dsl41.ir import CatalogIR
-from dsl41.period import catalog_hash_for
+from dsl41.run_root import catalog_hash_for
 from dsl41.runner_procid import LockHeld, flock_exclusive, mkdir_durable
 from dsl41.runner_clock import EngineError
 

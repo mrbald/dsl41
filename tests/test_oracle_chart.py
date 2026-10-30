@@ -1865,9 +1865,8 @@ def test_a_live_kill_row_with_its_state_swapped_differs_from_the_goldens(
     declaration of a job's moves, so the oracle writes what the mutant
     reached; the goldens catch it at the first kill their corpus makes. The
     mutant's hits stay out of the session."""
-    from test_oracle_goldens import _directed_runs
-
     from oracle_goldens import replay
+    from test_oracle_goldens import _directed_runs
 
     monkeypatch.setenv(HITS_ENV, str(tmp_path))
     mutant = _rows_changed(**_SWAPPED)

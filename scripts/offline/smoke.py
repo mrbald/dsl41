@@ -39,15 +39,12 @@ def main() -> None:
         cli = str(candidate / "bin/dsl41")
         for args in (
             ["--help"],
-            ["uc", str(estate), "-o", str(work / "bundle.json")],
             ["viz", "--format", "explore", str(estate), "-o", str(work / "graph.html")],
         ):
             subprocess.run([cli, *args], cwd=work, check=True, capture_output=True, timeout=60)
-        compiled = json.loads((work / "bundle.json").read_text())
-        assert compiled["tool_version"] == version and compiled["records"]
         page = (work / "graph.html").read_text()
         assert "<!doctype html" in page[:256].lower() and "cytoscape" in page
-    print(f"ok: installed {version} {profile} import, CLI, UC compilation, and explore assets")
+    print(f"ok: installed {version} {profile} import, CLI and explore assets")
 
 
 if __name__ == "__main__":

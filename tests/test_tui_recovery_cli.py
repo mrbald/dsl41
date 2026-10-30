@@ -10,15 +10,15 @@ from typing import Any
 
 import pytest
 import typer
-from typer.testing import CliRunner
+from test_runner_tui import _serve, _teardown, _wait_for_ui
 from textual.widgets import RichLog
+from typer.testing import CliRunner
 
 from dsl41 import cli_control, runner_tui
 from dsl41.cli import app as cli_app
 from dsl41.runner_clock import EngineError
 from dsl41.runner_control import JOB_EVENT_VERBS, ControlClientError, command
 from dsl41.runner_tui import RunnerApp, parse_console_command, recovery_command
-from test_runner_tui import _serve, _teardown, _wait_for_ui
 
 
 @pytest.mark.parametrize(
@@ -294,8 +294,8 @@ def test_pilot_reconnect_keeps_the_last_table_and_never_replays_a_mutation(
 def test_cli_before_write_and_unknown_advice_include_the_original_actor(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from dsl41.cli_common import command_outcome
     from dsl41 import runner_control
+    from dsl41.cli_common import command_outcome
 
     envelope = command(
         "ON_HOLD",

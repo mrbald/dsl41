@@ -24,7 +24,6 @@ from typing import Any
 import pytest
 
 from dsl41.ast_jil import parse, render_preserve
-from dsl41.boundary import SealRequest, default_anchor_dir, stage_next_period
 from dsl41.ir import lower_catalog, lower_source
 from dsl41.job_chart import JOB
 from dsl41.oracle import Oracle
@@ -38,8 +37,8 @@ from dsl41.oracle_state import (
     OracleError,
     RuntimeState,
 )
-from dsl41.period import RuntimeProfile, SourceFile, stage_manifest, write_bundle
-from dsl41.runner import SEAL_BOUNDARY, Engine, _PendingSeal
+from dsl41.run_root import RuntimeProfile, SourceFile, stage_manifest, write_bundle
+from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import (
     ADMISSION,
@@ -54,15 +53,13 @@ from dsl41.runner_admission import (
     parse_envelope,
 )
 from dsl41.runner_clock import EngineError, VirtualClock
+from dsl41.runner_control import command
 from dsl41.runner_effects import Effect, EffectOutcome, Outbox, effect_id_for
 from dsl41.runner_hosts import LOCAL_EXECUTOR_ID, HostCommand, seed_local_executor
-from dsl41.runner_control import command
 from dsl41.runner_journal import SUBSCRIPTION, Journal, read_decisions, read_journal
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
 from dsl41.semantics import DEFAULTS, SemanticSwitches
 from dsl41.semantics import resolve as resolve_switches
-from dsl41.runner_startup import start_run
-from dsl41.seal import StagedNextPeriod
 from dsl41.state_machine import (
     HITS_ENV,
     Executor,
@@ -1231,54 +1228,6 @@ def test_no_client_request_collides_with_an_engine_made_input_live_or_on_replay(
     assert index.state("engine:2") == "applied"
 
 
-def test_a_seal_request_cannot_take_an_engine_name(recorded: Path, short_root: Path) -> None:
-    """`seal` is a client request id too: the boundary refuses the prefix
-    before it submits anything, and the engine stays open."""
-    from test_boundary import C1_JIL, C2_JIL, _catalog, _seal_request_wire, _stage
-
-    from dsl41.runner_clock import RealClock
-    from dsl41.runner_control import ControlClient, ControlServer
-
-    run_root = short_root / "run"
-    catalog, sources = _catalog(C1_JIL)
-    staged_manifest = stage_manifest(
-        catalog,
-        source_bundle_hash=write_bundle(run_root, sources),
-        profile=RuntimeProfile(),
-        state_machine_version=STATE_MACHINE_VERSION,
-    )
-    engine = start_run(
-        catalog,
-        run_root,
-        clock=RealClock(),
-        adapters={"CMD": FakeAdapter(default=None)},
-        hold_open=True,
-        staged=staged_manifest,
-    )
-
-    async def scenario() -> dict[str, Any]:
-        server = ControlServer(engine, run_root / "control.sock")
-        await server.start()
-        loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
-        client = ControlClient(run_root / "control.sock")
-        try:
-            staged = _stage(run_root, C2_JIL)
-            answer = await client.request(_seal_request_wire(engine, staged, request_id="engine:7"))
-            assert not loop_task.done()  # no boundary: the engine is still serving
-            return answer
-        finally:
-            loop_task.cancel()
-            await client.close()
-            await server.close()
-            await engine.shutdown()
-
-    answer = asyncio.run(scenario())
-    assert engine.journal is not None
-    engine.journal.close()
-    assert answer["ok"] is False and answer["refused"] is True
-    assert answer["code"] == "invalid_argument" and "engine:" in answer["error"]
-
-
 # ---------------------------------------------------------- seal_boundary
 
 _C1_JIL = "insert_job: a\njob_type: c\ncommand: x\n\ninsert_job: b\njob_type: c\ncommand: y\n"
@@ -1294,45 +1243,6 @@ def _staged_manifest(run_root: Path, text: str) -> Any:
         profile=RuntimeProfile(),
         state_machine_version=STATE_MACHINE_VERSION,
     )
-
-
-def _sealable(run_root: Path) -> tuple[Engine, SealRequest]:
-    """A periodized root with period 1 open, and a request to seal it into
-    a staged period 2, as `dsl41 run` and `dsl41 seal` make them."""
-    catalog, manifest = _staged_manifest(run_root, _C1_JIL)
-    engine = start_run(
-        catalog,
-        run_root,
-        clock=VirtualClock(start=T0),
-        adapters={"CMD": FakeAdapter(default=None)},
-        staged=manifest,
-    )
-    staged: StagedNextPeriod = stage_next_period(
-        run_root, staged_manifest=_staged_manifest(run_root, _C2_JIL)[1]
-    )
-    request = SealRequest(
-        baseline_id=engine.baseline_id,
-        epoch=engine.epoch,
-        request_id="r-seal",
-        next_period=staged,
-        stage_digest=staged.stage_digest,
-        force_seal=False,
-        claimed_actor=_ACTOR,
-    )
-    return engine, request
-
-
-def _seal_future(engine: Engine, request: SealRequest) -> asyncio.Future[Any]:
-    """`submit_seal`'s answer, which is a future."""
-    future = engine.submit_seal(request)
-    assert isinstance(future, asyncio.Future)
-    return future
-
-
-def _lose_fence(engine: Engine) -> None:
-    """Delete the lineage's anchor lock under the engine (PR-03)."""
-    assert engine.estate is not None
-    (default_anchor_dir(engine.estate.run_root) / "anchor.lock").unlink()
 
 
 def _raise(exc: BaseException) -> Callable[..., Any]:
@@ -1356,78 +1266,6 @@ class _FailingEffectWrite:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
-
-
-def _submit_second(engine: Engine, request: SealRequest, second: list[BaseException]) -> None:
-    """Send another seal request while the boundary is in flight, and keep
-    its answer."""
-    refused = _seal_future(engine, request.model_copy(update={"request_id": "r-two"})).exception()
-    assert refused is not None
-    second.append(refused)
-
-
-def _arrange(
-    cell: str,
-    engine: Engine,
-    request: SealRequest,
-    mp: pytest.MonkeyPatch,
-    second: list[BaseException],
-) -> SealRequest:
-    """Put the fault for `cell` at the step of the boundary it names, by the
-    path the code takes there, and answer the request to send. A second
-    request sent during the boundary lands in `second`."""
-    queued = Event(at=T0, kind="STARTJOB", payload={"job": "a"})
-    match cell:
-        case "requested: refused":
-            return request.model_copy(update={"epoch": engine.epoch + 1})
-        case "requested: fence lost":
-
-            def lost(*_args: Any) -> Any:
-                _lose_fence(engine)
-                raise EngineError("readiness failed", code="seal_refused")
-
-            mp.setattr(engine, "_readiness", lost)
-        case "frozen: refused" | "frozen: fence lost":
-
-            async def quiescence(_estate: Any) -> None:
-                _submit_second(engine, request, second)
-                if cell == "frozen: fence lost":
-                    _lose_fence(engine)
-                raise EngineError("not quiescent", code="seal_not_quiescent")
-
-            mp.setattr(engine, "_await_quiescence", quiescence)
-        case "frozen: an attempt applying":
-            engine.inject(queued, source="scheduler")
-            mp.setattr("dsl41.runner.apply_attempt", _raise(RuntimeError("apply fault")))
-        case "frozen: an input unadmitted":
-            engine.inject(
-                queued.model_copy(update={"at": T0 - timedelta(minutes=1)}), source="adapter"
-            )
-        case "frozen: a WAL append unfinished":
-            engine.inject(queued, source="scheduler")
-            assert engine.journal is not None
-            mp.setattr(engine.journal, "_f", _FailingEffectWrite(engine.journal._f))
-        case "committing: the commit returns" | "committing: refused" | "committing: fence lost":
-
-            def hook(stage: str) -> None:
-                if stage != "after_sidecar":
-                    return
-                _submit_second(engine, request, second)
-                if cell == "committing: fence lost":
-                    _lose_fence(engine)
-                if cell != "committing: the commit returns":
-                    raise EngineError(f"crash at {stage}")
-
-            mp.setattr(engine, "crash_point", hook)
-        case "committing: past the point of no return":
-            mp.setattr(
-                engine,
-                "crash_point",
-                lambda stage: (
-                    _raise(EngineError("crash"))() if stage == "after_seal_record" else None
-                ),
-            )
-    return request
 
 
 #: every (phase, event) the boundary's code can meet: the moves it takes
@@ -1456,123 +1294,3 @@ _SEAL_CELLS: dict[str, tuple[tuple[str, ...], str, str]] = {
         "",
     ),
 }
-
-
-async def _seal_cell(
-    cell: str, run_root: Path, mp: pytest.MonkeyPatch, second: list[BaseException]
-) -> tuple[tuple[str, ...], str, str, Engine]:
-    """Run one cell. Answers the moves taken, the phase the boundary ended
-    in, the notes on the exception that ended the loop, and the engine."""
-    taken: list[str] = []
-    phases: list[str] = []
-    engine, request = _sealable(run_root)
-    dispatch = engine._machines.dispatch
-
-    def spy(key: Any, event: Any) -> Any:
-        # the executor's outcome: the rows each post took, and the phase it left.
-        # The seal's posts only: the outbox's effects run on the same executor
-        outcomes = dispatch(key, event)
-        if isinstance(key, _PendingSeal):
-            taken.extend(row for outcome in outcomes for row in outcome.rows)
-            phases.append(engine._seal_phase(key))
-        return outcomes
-
-    mp.setattr(engine._machines, "dispatch", spy)
-    if cell == "frozen: an input unadmitted":
-        # the frontier at T0, so an input stamped before it cannot be admitted
-        engine.inject(_set_global("0"), source="scheduler")
-        await engine.run_until_quiescent(T0)
-    request = _arrange(cell, engine, request, mp, second)
-    parked = asyncio.Event()
-    if cell == "frozen: cancelled":
-
-        async def quiescence(_estate: Any) -> None:
-            parked.set()
-            await asyncio.Event().wait()  # a shutdown arrives while it waits
-
-        mp.setattr(engine, "_await_quiescence", quiescence)
-    if cell == "requested: cancelled":
-        real_settle = engine._settle
-
-        async def settle() -> None:
-            # the loop's first await, before it takes the queued boundary
-            await real_settle()
-            if engine._seal is not None and engine._seal_phase(engine._seal) == "requested":
-                parked.set()
-                await asyncio.Event().wait()  # a shutdown arrives while it waits
-
-        mp.setattr(engine, "_settle", settle)
-    future = _seal_future(engine, request)
-    pending = engine._seal
-    assert isinstance(pending, _PendingSeal) and engine._seal_phase(pending) == "requested"
-    if cell == "requested: refused":
-        _submit_second(engine, request, second)  # while the first is still queued
-    loop = asyncio.create_task(engine.run_until_quiescent(T0 + timedelta(minutes=1)))
-    if cell in ("requested: cancelled", "frozen: cancelled"):
-        # Wait for the pause point OR the loop's end, bounded, so a change that
-        # lets the loop finish first fails the cell instead of hanging it.
-        waiter = asyncio.ensure_future(parked.wait())
-        await asyncio.wait({waiter, loop}, timeout=30, return_when=asyncio.FIRST_COMPLETED)
-        waiter.cancel()
-        assert parked.is_set(), "the loop never reached the cell's pause point"
-        assert engine._seal_phase(pending) == cell.split(":")[0]
-        loop.cancel()
-    notes = ""
-    try:
-        await loop
-    except asyncio.CancelledError:
-        pass
-    except Exception as exc:  # noqa: BLE001 -- each exit is checked by its moves
-        notes = " ".join(getattr(exc, "__notes__", []))
-    phase = phases[-1] if phases else engine._seal_phase(pending)
-    if phase in ("aborted", "sealed"):
-        assert future.done()
-        with pytest.raises(StatechartError, match="no instance"):
-            engine._machines.active(pending)  # forgotten once it rests there
-    else:
-        assert engine._seal_phase(pending) == phase  # a stop or a shutdown keeps it
-    if future.done() and not future.cancelled():
-        future.exception()  # read, so a refusal is not logged as never retrieved
-    return tuple(taken), phase, notes, engine
-
-
-def test_every_exit_in_every_seal_phase_takes_a_declared_transition(
-    recorded: Path, tmp_path: Path
-) -> None:
-    """`seal_boundary`: one boundary per cell, on a live engine leading a
-    lineage, with the event put at the step of the boundary where its phase
-    holds, by the path the code takes there (`_arrange`): a refusal, a
-    fence loss, an attempt admitted and not applied, an engine-made input
-    the drain cannot admit, an unfinished WAL append, the stop run option,
-    a shutdown, the commit, and a failure past the point of no return. In
-    each phase that has one, a second seal request too, which is refused
-    `seal_in_flight` and moves nothing. Each exit takes its declared
-    transition, or (a shutdown, while queued or frozen) none.
-
-    Left out, because the code cannot meet them: in `requested`, every exit
-    but a refusal, a fence loss and a shutdown while the boundary is still
-    queued (`_run_boundary` neither awaits nor admits before the barrier
-    parks, and the stop option, the in-doubt flags and BoundaryFailStop
-    come from the drain or the commit); in
-    `committing`, a shutdown, the stop option and the in-doubt flags
-    (`commit_boundary` is synchronous and admits nothing, and the seal
-    record is not a `_write`); in `frozen`, BoundaryFailStop and the
-    commit. The finals have no events: the boundary is over and a new
-    request is a new boundary."""
-    ended: dict[str, tuple[tuple[str, ...], str, str]] = {}
-    second_in: set[str] = set()
-    for index, (cell, (_moves, _phase, note)) in enumerate(_SEAL_CELLS.items()):
-        second: list[BaseException] = []
-        with pytest.MonkeyPatch.context() as mp:
-            taken, phase, notes, engine = asyncio.run(
-                _seal_cell(cell, tmp_path / f"run{index}", mp, second)
-            )
-        ended[cell] = (taken, phase, note if note in notes else notes)
-        for refusal in second:
-            assert isinstance(refusal, EngineError) and refusal.code == "seal_in_flight"
-            second_in.add(str(refusal).split("r-seal, ")[1].split(")")[0])
-        if engine.journal is not None:
-            engine.journal.close()
-    assert ended == _SEAL_CELLS
-    assert second_in == {"requested", "frozen", "committing"}
-    assert {row.id for row in SEAL_BOUNDARY.rows if row.kind != "ignored"} <= _hits(recorded)

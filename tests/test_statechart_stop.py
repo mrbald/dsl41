@@ -16,7 +16,7 @@ from dsl41 import runner_admission, runner_journal
 from dsl41.ir import lower_source
 from dsl41.oracle import InputBatch, Oracle
 from dsl41.oracle_state import Event, JobStatus, OracleError, RuntimeState
-from dsl41.period import estate_wal
+from dsl41.run_root import estate_wal
 from dsl41.runner import Engine, _Pending
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import Attempt, classify_fault, trial_apply
@@ -319,213 +319,10 @@ def test_an_offline_reader_exits_7_with_the_report(
     assert f"{STATECHART_LOG_PREFIX}: WAL input: 1: " in result.output
 
 
-def test_a_resume_that_meets_one_exits_7_and_releases_the_lock(
-    short_root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    from dsl41 import cli_run, runner_startup
-    from dsl41.period import runtime_profile_from_cli
-    from dsl41.runner_startup import acquire_run_root
-
-    run_root = short_root / "root"
-    profile = runtime_profile_from_cli()
-
-    async def crash(self: Engine, horizon: datetime) -> list[Event]:
-        raise RuntimeError("test: stop the genesis run at once")
-
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(Engine, "run_until_quiescent", crash)
-        assert (
-            asyncio.run(
-                cli_run._serve_run(
-                    lower_source(_JIL), run_root, False, [], profile=profile, supervisor="spawn"
-                )
-            )
-            == 1
-        )
-
-    def replay(*args: Any, **kwargs: Any) -> Any:
-        error = _error()
-        error.facts.append(("WAL input", "1: STARTJOB for job j from control"))
-        raise error
-
-    monkeypatch.setattr(runner_startup, "replay_inputs", replay)
-    capsys.readouterr()
-    code = asyncio.run(
-        cli_run._serve_run(
-            lower_source(_JIL), run_root, True, [], profile=profile, supervisor="spawn"
-        )
-    )
-    assert code == 7
-    err = capsys.readouterr().err
-    assert f"{STATECHART_LOG_PREFIX}: {WAL_FACT}" in err.splitlines()
-    acquire_run_root(run_root).release()  # the lock went with the stop
-
-
 # ---- (3) the engine prints the report and exits 7
 
 
-def test_dsl41_run_exits_7_with_the_report_under_one_prefix(
-    short_root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    from dsl41 import cli_run
-    from dsl41.period import runtime_profile_from_cli
-
-    assert cli_run.EXIT_STATECHART_ERROR == EXIT_STATECHART_ERROR == 7
-
-    async def halt(self: Engine, horizon: datetime) -> list[Event]:
-        raise _error()
-
-    monkeypatch.setattr(Engine, "run_until_quiescent", halt)
-    code = asyncio.run(
-        cli_run._serve_run(
-            lower_source(_JIL),
-            short_root / "root",
-            False,
-            [],
-            profile=runtime_profile_from_cli(),
-            supervisor="spawn",
-        )
-    )
-    assert code == 7
-    err = [line for line in capsys.readouterr().err.splitlines() if STATECHART_LOG_PREFIX in line]
-    assert err == [
-        f"{STATECHART_LOG_PREFIX}: job j: no row and no deferral for STARTJOB",
-        f"{STATECHART_LOG_PREFIX}: machine: job",
-        f"{STATECHART_LOG_PREFIX}: instance: 'j'",
-    ]
-    note = cli_run._reattach_note(None, short_root, detached=True, code=code)
-    assert note is not None and note.startswith("detached: reattach")
-
-
-def test_the_engine_units_do_not_restart_exit_7() -> None:
-    deploy = Path(__file__).resolve().parent.parent / "examples" / "nightbank" / "deploy"
-    for unit in ("dsl41-engine.service", "dsl41-supervisor.service"):
-        (line,) = [
-            line
-            for line in (deploy / unit).read_text(encoding="utf-8").splitlines()
-            if line.startswith("RestartPreventExitStatus=")
-        ]
-        assert "7" in line.split("=", 1)[1].split(), unit
-
-
 # ---- (4) the supervisor lets it through its belts to a stop
-
-
-def test_the_supervisor_dispatch_belt_lets_a_statechart_error_through(
-    queued_supervisor: Any,
-) -> None:
-    from dsl41 import runner_supervisor
-
-    sup, connect = queued_supervisor
-    conn, peer = connect()
-
-    def ping(_conn: Any, _req: Any) -> Any:
-        raise runner_supervisor.StatechartError("supervisor_lease: no row for RENEW")
-
-    sup._h_ping = ping
-    peer.sendall(b'{"v":1,"cmd":"PING"}\n')
-    with pytest.raises(runner_supervisor.StatechartError):
-        sup._readable(conn)
-
-
-def test_a_statechart_error_in_a_shutdown_wait_is_not_logged_as_a_retry(
-    queued_supervisor: Any, capsys: pytest.CaptureFixture[str], stand: Any
-) -> None:
-    """The wait reads the lease (`_reap`, `_push_exit`), so the chart can stop the
-    supervisor inside a SHUTDOWN. That is a stop, not a failed wait to run again,
-    so the "running it once more" line is not written. An OSError there is the
-    non-triggering case: it is logged as a retry. The SHUTDOWN's row moved the
-    process to shutting_down, so it serves again before the second request."""
-    from dsl41 import runner_supervisor
-
-    sup, connect = queued_supervisor
-    conn, _peer = connect()
-    granted = sup._h_acquire(conn, {"controller_id": "c"})
-    creds = {"incarnation": sup.incarnation, "token": granted["token"]}
-    errors = iter([runner_supervisor.StatechartError("stop"), OSError(5, "synthetic")])
-
-    def wait() -> None:
-        raise next(errors)
-
-    sup._shutdown_wait = wait
-    with pytest.raises(runner_supervisor.StatechartError):
-        sup._h_shutdown(conn, creds)
-    assert "running it once more" not in capsys.readouterr().err
-    stand(sup, "serving")
-    with pytest.raises(OSError):
-        sup._h_shutdown(conn, creds)
-    assert "running it once more" in capsys.readouterr().err
-
-
-def test_the_supervisor_still_answers_any_other_handler_error(queued_supervisor: Any) -> None:
-    sup, connect = queued_supervisor
-    conn, peer = connect()
-
-    def ping(_conn: Any, _req: Any) -> Any:
-        raise RuntimeError("one request's problem")
-
-    sup._h_ping = ping
-    peer.sendall(b'{"v":1,"cmd":"PING"}\n')
-    sup._readable(conn)
-    assert sup._conns
-
-
-def test_the_supervisor_read_belt_lets_a_statechart_error_through(
-    queued_supervisor: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from dsl41 import runner_supervisor
-
-    sup, connect = queued_supervisor
-    conn, _peer = connect()
-
-    def read(_conn: Any) -> None:
-        raise runner_supervisor.StatechartError("a machine broke while reading")
-
-    monkeypatch.setattr(sup, "_read_conn", read)
-    with pytest.raises(runner_supervisor.StatechartError):
-        sup._readable(conn)
-
-
-def test_the_supervisor_exits_7_when_its_construction_meets_one(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    from dsl41 import runner_supervisor
-
-    class Failing:
-        def __init__(
-            self, run_root: str, deadman_s: float | None = None, drain_s: float = 0.0
-        ) -> None:
-            raise runner_supervisor.StatechartError("supervisor_lease: restore refused")
-
-    monkeypatch.setattr(runner_supervisor, "Supervisor", Failing)
-    assert runner_supervisor.main(["--run-root", str(tmp_path)]) == 7
-    assert capsys.readouterr().err.splitlines() == [
-        f"{STATECHART_LOG_PREFIX}: supervisor_lease: restore refused"
-    ]
-
-
-def test_the_supervisor_exits_7_with_the_report_under_one_prefix(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    from dsl41 import runner_supervisor
-
-    class Stopping:
-        def __init__(
-            self, run_root: str, deadman_s: float | None = None, drain_s: float = 0.0
-        ) -> None:
-            pass
-
-        def run(self) -> int:
-            error = runner_supervisor.StatechartError("supervisor_lease: two rows enabled")
-            error.facts = [("machine", "supervisor_lease")]
-            raise error
-
-    monkeypatch.setattr(runner_supervisor, "Supervisor", Stopping)
-    assert runner_supervisor.main(["--run-root", str(tmp_path)]) == 7
-    assert capsys.readouterr().err.splitlines() == [
-        f"{STATECHART_LOG_PREFIX}: supervisor_lease: two rows enabled",
-        f"{STATECHART_LOG_PREFIX}: machine: supervisor_lease",
-    ]
 
 
 def test_every_executor_error_is_one_base() -> None:
@@ -590,22 +387,16 @@ WRAPPED_VERBS = [
     ("rehearse", "cli_run", "rehearse"),
     ("journal", "cli_run", "journal"),
     ("runs", "cli_run", "runs"),
-    ("seal", "cli_estate", "seal"),
-    ("audit", "cli_estate", "audit"),
-    ("verify", "cli_estate", "verify"),
-    ("estate reclaim", "cli_estate", "estate_reclaim"),
-    ("estate prune", "cli_estate", "estate_prune"),
 ]
 
 
 def _registered(verb: str) -> Any:
-    """The callback cli.py registered for `verb`, a top-level verb or `estate <sub>`."""
+    """The callback cli.py registered for the top-level `verb`."""
     from dsl41 import cli
 
-    app, name = (cli.estate_app, verb.split()[1]) if verb.startswith("estate ") else (cli.app, verb)
-    for info in app.registered_commands:
+    for info in cli.app.registered_commands:
         assert info.callback is not None
-        if (info.name or info.callback.__name__.replace("_", "-")) == name:
+        if (info.name or info.callback.__name__.replace("_", "-")) == verb:
             return info.callback
     raise AssertionError(f"{verb} is not registered")
 
@@ -622,3 +413,69 @@ def test_each_estate_verb_is_registered_inside_the_statechart_stop(
     guarded = stops_on_statechart_error(lambda: None)
     assert callback.__code__ is guarded.__code__, f"{verb} is registered unwrapped"
     assert callback.__wrapped__ is getattr(importlib.import_module(f"dsl41.{module}"), function)
+
+
+def test_a_resume_that_meets_one_exits_7_and_releases_the_lock(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from dsl41 import cli_run, runner_startup
+    from dsl41.run_root import runtime_profile_from_cli
+    from dsl41.runner_startup import acquire_run_root
+
+    run_root = short_root / "root"
+    profile = runtime_profile_from_cli()
+
+    async def crash(self: Engine, horizon: datetime) -> list[Event]:
+        raise RuntimeError("test: stop the genesis run at once")
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(Engine, "run_until_quiescent", crash)
+        assert (
+            asyncio.run(
+                cli_run._serve_run(lower_source(_JIL), run_root, False, [], profile=profile)
+            )
+            == 1
+        )
+
+    def replay(*args: Any, **kwargs: Any) -> Any:
+        error = _error()
+        error.facts.append(("WAL input", "1: STARTJOB for job j from control"))
+        raise error
+
+    monkeypatch.setattr(runner_startup, "replay_inputs", replay)
+    capsys.readouterr()
+    code = asyncio.run(cli_run._serve_run(lower_source(_JIL), run_root, True, [], profile=profile))
+    assert code == 7
+    err = capsys.readouterr().err
+    assert f"{STATECHART_LOG_PREFIX}: {WAL_FACT}" in err.splitlines()
+    acquire_run_root(run_root).release()  # the lock went with the stop
+
+
+def test_dsl41_run_exits_7_with_the_report_under_one_prefix(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from dsl41 import cli_run
+    from dsl41.run_root import runtime_profile_from_cli
+
+    assert cli_run.EXIT_STATECHART_ERROR == EXIT_STATECHART_ERROR == 7
+
+    async def halt(self: Engine, horizon: datetime) -> list[Event]:
+        raise _error()
+
+    monkeypatch.setattr(Engine, "run_until_quiescent", halt)
+    code = asyncio.run(
+        cli_run._serve_run(
+            lower_source(_JIL),
+            short_root / "root",
+            False,
+            [],
+            profile=runtime_profile_from_cli(),
+        )
+    )
+    assert code == 7
+    err = [line for line in capsys.readouterr().err.splitlines() if STATECHART_LOG_PREFIX in line]
+    assert err == [
+        f"{STATECHART_LOG_PREFIX}: job j: no row and no deferral for STARTJOB",
+        f"{STATECHART_LOG_PREFIX}: machine: job",
+        f"{STATECHART_LOG_PREFIX}: instance: 'j'",
+    ]

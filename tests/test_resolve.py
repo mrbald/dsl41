@@ -15,6 +15,8 @@ from typing import Any
 
 import pytest
 import statechart_completeness as sc
+from test_assembly_chart import ABSTRACTION as ASSEMBLY
+from test_host_chart import ABSTRACTION as HOST_WITNESSES
 
 from dsl41.oracle_state import (
     FORCE_EVICT,
@@ -38,8 +40,6 @@ from dsl41.state_machine import (
     alphabet,
 )
 from dsl41.state_machine import Event as ChartEvent
-from test_assembly_chart import ABSTRACTION as ASSEMBLY
-from test_host_chart import ABSTRACTION as HOST_WITNESSES
 
 
 def _agrees(chart: Statechart, abstraction: sc.Abstraction) -> int:

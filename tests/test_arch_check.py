@@ -851,6 +851,22 @@ def test_doc_scans_reach_docs_subdirectories(
     assert set(arch_check.module_citation_docs(tmp_path)) == {nested, top, readme}
 
 
+def test_the_test_citation_scan_skips_the_decision_log_and_its_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The log is append-only history, so an old entry may name a test that was later removed;
+    its generated index carries the same names. Both are skipped, as the module-citation rule
+    skips them, and every other doc is read."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    top = _write(docs / "top.md", "`test_gone`\n")
+    _write(docs / "decision-log.md", "`test_gone`\n")
+    _write(docs / "decision-index.md", "`test_gone`\n")
+    monkeypatch.setattr(arch_check, "ROOT", tmp_path)
+    monkeypatch.setattr(arch_check, "CITING_DOCS", (docs,))
+    assert arch_check.citing_doc_files() == [top]
+
+
 # ----------------------------------------- 3c. cited modules exist (module citations)
 
 

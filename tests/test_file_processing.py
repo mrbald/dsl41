@@ -2,23 +2,23 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 import hashlib
 import json
 import os
-from pathlib import Path
 import sqlite3
 import subprocess
 import sys
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
+from file_processing_checker import check_counts_outputs
 
 from dsl41 import file_processing as fp
 from dsl41.file_processing_charts import ARCHIVE, PROCESS, state_after
 from dsl41.state_machine import StatechartError, well_formed
 from examples.file_processing.demo import run
 from examples.file_processing.worker import CountsHandler
-from file_processing_checker import check_counts_outputs
 
 IDENTITY = "counts-v1"
 

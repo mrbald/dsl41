@@ -37,21 +37,18 @@ import subprocess
 import sys
 import textwrap
 import time
-
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
 import pytest
 from proc_pipes import close_pipes
-from supervisor_list_doubles import stub_listing, stub_row
 
 from dsl41.ir import lower_source
-from dsl41.runner_startup import resume_run, start_run
-from dsl41.runner_adapters import FakeAdapter, SupervisorListReply
+from dsl41.run_root import catalog_hash_v2, hash_over
+from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, RealClock, VirtualClock
 from dsl41.runner_effects import OUTCOME_UNAVAILABLE
-from dsl41.period import catalog_hash_v2, hash_over
 from dsl41.runner_journal import read_journal
 from dsl41.runner_ledger import (
     LOCK_NAME,
@@ -61,6 +58,7 @@ from dsl41.runner_ledger import (
     check_state_machine_version,
     next_epoch,
 )
+from dsl41.runner_startup import resume_run, start_run
 
 T0 = datetime(2026, 7, 1, 8, 0)
 _SOLO_JIL = "insert_job: j\njob_type: c\ncommand: x\n"
@@ -632,64 +630,6 @@ def test_a_start_with_no_recorded_intent_is_still_failed(tmp_path: Path) -> None
     resumed = asyncio.run(scenario())
     assert resumed.oracle.store.job["j"].status == "FAILURE"
     assert resumed.live_jobs() == frozenset()
-    _close(resumed)
-
-
-def test_a_run_the_host_admits_to_is_never_re_driven(tmp_path: Path) -> None:
-    """The guard that keeps the re-drive above from being the double run.
-    "Never spawned" is concluded from ABSENCE, and absence that meant only
-    "the run directory is gone" would let the barrier start a second process
-    for a run the supervisor is still holding. ss7 reconciles every
-    execution HOST, so what the host says it is running joins the sweep's
-    candidate set beside what the disk shows."""
-    run_root = tmp_path / "run"
-    _crash_after_deciding_a_start(run_root)
-    _log_without_spawn_result(run_root)
-
-    bound = next(
-        e["run_id"]
-        for r in read_journal(run_root / "journal.jsonl")
-        if r.get("rec") == "decision"
-        for e in r["effects"]
-        if e["kind"] == "SPAWN"
-    )
-
-    class _HostWithTheRun:
-        """A reachable supervisor that reports the run as live -- the state
-        the disk cannot show once its directory is gone. It reports the id
-        the durable effect bound, as the real supervisor would: a different
-        one is a different scenario, the DL-118 identity split, which resume
-        REFUSES rather than reconciles."""
-
-        async def list_runs(self) -> SupervisorListReply:
-            return stub_listing(
-                runs=[stub_row(job="j", run_number=1, run_id=bound, wrapper_alive=True)]
-            )
-
-    async def scenario():
-        resumed = await resume_run(
-            lower_source(_SOLO_JIL),
-            run_root,
-            clock=VirtualClock(start=T0 + timedelta(minutes=1)),
-            adapters={"CMD": FakeAdapter(default=None)},
-            supervisor=_HostWithTheRun(),  # type: ignore[arg-type]
-            settle_seconds=0.0,
-            grace_seconds=0.0,
-        )
-        await resumed.run_until_quiescent(T0 + timedelta(minutes=2))
-        return resumed
-
-    resumed = asyncio.run(scenario())
-    # nothing was launched: the barrier concluded the run had reached the
-    # host and did not start a second one. (Reattaching to it is the
-    # supervised adapter's job; a FakeAdapter has nothing to reattach to,
-    # which is why the run ends up reported rather than resumed here.)
-    assert resumed.live_jobs() == frozenset()
-    assert resumed.oracle.store.job["j"].run_number == 1
-    [outcome] = [r for r in resumed.outbox.effects() if r.kind == "SPAWN"]
-    result = resumed.outbox.result_for(outcome.effect_id)
-    assert result is not None and result.state == "applied"
-    assert "reached the host" in (result.detail or "")
     _close(resumed)
 
 

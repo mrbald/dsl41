@@ -24,16 +24,13 @@ A dashed node or edge in the diagrams below is specified only.
 
 | Part | State | Source |
 | --- | --- | --- |
-| Compiler: parse, lower, derive, lint, graph, equivalence, UC twin, decompiler | built | README Status |
-| Rich UC condition forms, the live OpenAPI pull, write-path verification, the generated client | specified only; needs a live controller | README What is not built |
+| Compiler: parse, lower, derive, lint, graph, equivalence, decompiler | built | README Status |
 | The decompiler's `--patterns` option | specified only | README What is not built |
 | Engine, scheduler, admission, journal, outbox, control socket, access perimeter | built | [runner-design](runner-design.md) status line and [§14](runner-design.md#14-module-layout-and-phasing) |
 | Supervisor and wrapper, the lifecycle tier | built | [runner-design §14](runner-design.md#14-module-layout-and-phasing) |
 | TUI and web TUI | built | [runner-design §11](runner-design.md#11-ui--one-textual-app-terminal-and-web-e3) |
-| Periods: seal, lineage anchor, audit, retention | built | README Status; [period-model](period-model.md) |
-| Remote relay and shared store for more than one job host | specified only | [concurrency-model §7](concurrency-model.md#7-leadership-relay-takeover) |
+| Remote relay and shared store for more than one job host | specified only | concurrency-model §7 (`concurrency-model.md`, retired in 2.0.0) |
 | Follower mode, `standby check` and the multi-executor rig | specified only; they wait for the relay | README What is not built; DL-230 |
-| The `route` verb and the `routes` query | specified only | README What is not built; [period-model §2.2](period-model.md#22-seal--the-last-record-of-a-periods-last-segment) |
 | HTTP and WebSocket gateway in front of the control socket | specified only; status proposed | [gateway](gateway.md); DL-273 |
 | Authentication of a web session | outside dsl41: a reverse proxy or an ssh tunnel provides it | [runner-design §11](runner-design.md#11-ui--one-textual-app-terminal-and-web-e3); [access-model §9](access-model.md#9-the-web-tier) |
 
@@ -41,12 +38,12 @@ A dashed node or edge in the diagrams below is specified only.
 
 dsl41 runs on one job host.
 It reads an estate of JIL files.
-It compiles the estate into reports and UC records, or it runs the estate
-under AutoSys semantics.
+It compiles the estate into findings, graphs and DSL source, or it runs the
+estate under AutoSys semantics.
 An operator drives it from a shell on that host.
 The web TUI listens on loopback by default. A browser reaches it through a
 reverse proxy or an ssh tunnel
-([deployment-runbook §4](deployment-runbook.md#4-ui-surfaces)).
+(deployment-runbook §4 (`deployment-runbook.md`, retired in 2.0.0)).
 
 ```mermaid
 flowchart LR
@@ -55,13 +52,11 @@ flowchart LR
   px["reverse proxy"]
   est["estate<br/>JIL files and properties"]
   sys["host<br/>runs dsl41"]
-  uc["UC bundle and migration report<br/>dsl41 uc, dsl41 report"]
   remote["host<br/>remote, specified only"]
   op -->|"compile, run and control commands"| sys
   br -->|"HTTPS with auth"| px
   px -->|"loopback HTTP"| sys
   est -->|"read at compile and at start"| sys
-  sys -->|"writes files"| uc
   sys -.->|"multihost relay"| remote
   classDef specified stroke-dasharray: 5 5
   class remote specified
@@ -71,16 +66,12 @@ The compiler pipeline is drawn in
 [ir-design §1](ir-design.md#1-pipeline--representations).
 The runner's place in that pipeline is
 [runner-design §2](runner-design.md#2-position-in-the-pipeline).
-The UC bundle is a file. dsl41 writes nothing to a live controller.
 
 ## 3. Containers
 
-The operator starts the engine, and optionally the supervisor, with
-`dsl41`. A detached engine starts a missing supervisor itself (DL-210).
-The supervisor and the wrappers run by file path, not as a module of the package.
-`dsl41 supervise start` and the engine both start the supervisor that way.
-The runner keeps state in two stores: the [run root](glossary.md#run-root)
-and the lineage [anchor](glossary.md#anchor).
+The operator starts the engine with `dsl41`.
+The wrappers run by file path, not as a module of the package.
+The runner keeps state in the [run root](glossary.md#run-root).
 
 ```mermaid
 flowchart TB
@@ -88,24 +79,21 @@ flowchart TB
   px["reverse proxy"]
   est["estate"]
   subgraph box["host"]
-    comp["compiler<br/>dsl41 lint, dsl41 viz, dsl41 uc"]
+    comp["compiler<br/>dsl41 lint, dsl41 viz, dsl41 decompile"]
     eng["engine<br/>dsl41 run, dsl41 rehearse"]
     sock["control socket<br/>runner_control.py"]
-    sup["supervisor<br/>dsl41 supervise, runner_supervisor.py"]
     wr["wrapper<br/>runner_wrapper.py"]
     cmd["command"]
     tui["TUI<br/>dsl41 ui, dsl41 run --ui"]
     web["web TUI<br/>dsl41 serve"]
-    cli["headless clients<br/>dsl41 query, dsl41 sendevent, dsl41 host, dsl41 seal"]
-    off["offline tools<br/>dsl41 journal, dsl41 runs, dsl41 audit, dsl41 estate prune, dsl41 seal"]
+    cli["headless clients<br/>dsl41 query, dsl41 sendevent, dsl41 host"]
+    off["offline tools<br/>dsl41 journal, dsl41 runs"]
     rr[("run root")]
-    anc[("estate anchor")]
   end
   op --> comp
   op --> tui
   op --> cli
   op -->|"dsl41 run"| eng
-  op -->|"dsl41 supervise"| sup
   px -->|"one dsl41 ui per browser session"| web
   est --> comp
   est --> eng
@@ -113,20 +101,15 @@ flowchart TB
   web --> sock
   cli --> sock
   sock -->|"served by"| eng
-  eng -->|"tethered: starts one per run"| wr
-  eng -->|"detached: starts one if absent, then SPAWN, SIGNAL"| sup
-  sup -->|"starts one per run"| wr
+  eng -->|"starts one per run"| wr
   wr -->|"spawns and waits"| cmd
-  eng -->|"wal, seals, catalogs, perimeter.jsonl"| rr
-  sup -->|"receipt.json, reply.json"| rr
+  eng -->|"wal, catalogs, perimeter.jsonl"| rr
   wr -->|"spawn.json, status.json"| rr
-  eng -->|"anchor.lock, anchor.json"| anc
-  off -->|"read; audit attests, prune deletes"| rr
-  off -->|"offline seal takes both locks"| anc
+  off -->|"read"| rr
 ```
 
-- **Compiler.** The compile verbs read JIL and write reports, Mermaid,
-  DSL source or a UC bundle. They hold no state between calls.
+- **Compiler.** The compile verbs read JIL and write findings, Mermaid or
+  DSL source. They hold no state between calls.
 - **Engine.** `dsl41 run` is one asyncio process per run root. It owns
   the oracle, the WAL and the control socket. `dsl41 rehearse` runs the
   same engine on a virtual clock
@@ -142,7 +125,7 @@ flowchart TB
 - **Supervisor.** It keeps job processes alive across an engine restart.
   It runs only in [detached](glossary.md#detached) mode. Its socket
   protocol is
-  [supervisor-protocol §5](supervisor-protocol.md#5-supervisor-socket-protocol-frozen--phase-11f-dl-48).
+  supervisor-protocol §5 (`supervisor-protocol.md`, retired in 2.0.0).
 - **Wrapper.** One small process per job run. It is the direct parent of
   the command and writes the command's outcome to `status.json`
   ([wrapper](glossary.md#wrapper)). In [tethered](glossary.md#tethered)
@@ -150,16 +133,14 @@ flowchart TB
 - **TUI and web TUI.** One Textual app, a client of the control socket.
   `dsl41 serve` starts one `dsl41 ui` per browser session and ships no
   authentication.
-- **Run root and anchor.** The run root holds the WAL, the spool of each
-  run, the seals, the catalogs and the perimeter journal. The anchor, a
-  directory outside every run root, holds the estate's lineage. Their
-  layout is [period-model §1.1](period-model.md#11-layout).
+- **Run root.** The run root holds the WAL, the spool of each run, the
+  catalogs and the perimeter journal. Its layout is `src/dsl41/run_root.py`.
 
 The service shape, with systemd units, owners and modes, is
-[deployment-runbook §0, "Processes, units and storage"](deployment-runbook.md#processes-units-and-storage).
+deployment-runbook §0, "Processes, units and storage" (`deployment-runbook.md`, retired in 2.0.0).
 The identities that these stores carry (estate, period, segment, seal,
 execution) are the
-[period-model identity table](period-model.md#1-identities).
+period-model identity table (`period-model.md`, retired in 2.0.0).
 
 ## 4. Engine components
 
@@ -202,21 +183,21 @@ flowchart TB
   [fail-stops](glossary.md#fail-stop). A refusal aborts the boundary, and
   the period stays open. A fail-stop stops the engine with no abort and no
   answer, and recovery rebuilds from the WAL
-  ([period-model §7](period-model.md#7-the-seal-operation); DL-274).
+  (period-model §7 (`period-model.md`, retired in 2.0.0); DL-274).
 - **Admission.** The one admission order for every input
-  ([concurrency-model §4](concurrency-model.md#4-admission-and-application)).
+  (concurrency-model §4 (`concurrency-model.md`, retired in 2.0.0)).
   It answers an exact retry from the decision index by
   [request_id](glossary.md#request_id).
 - **Oracle core.** The AutoSys semantics interpreter
   ([ir-design §7](ir-design.md#7-oracle-interface-semantics-interpreter)).
 - **Scheduler.** It turns calendars into STARTJOB inputs
   ([runner-design §5](runner-design.md#5-scheduler--the-calendar-the-oracle-deliberately-lacks)).
-- **Journal.** The WAL, one JSONL segment per [period](glossary.md#period),
+- **Journal.** The WAL, one JSONL segment per period (retired in 2.0.0),
   and its replay
   ([runner-design §7](runner-design.md#7-journal-and-recovery-e1-prod-grade)).
 - **Outbox.** The effects the engine has decided and not yet finished
   ([outbox](glossary.md#outbox);
-  [concurrency-model §5](concurrency-model.md#5-effects)).
+  concurrency-model §5 (`concurrency-model.md`, retired in 2.0.0)).
 - **Adapters.** One per job type. The command adapters run the wrapper,
   directly or through the supervisor
   ([runner-design §6](runner-design.md#6-adapters)).
@@ -231,8 +212,8 @@ flowchart TB
   ([access-model §7](access-model.md#7-reload-and-revocation); DL-275).
 - **Leadership fence and startup.** They take possession of a run root and
   the lineage, and prove both before each append and each dispatch
-  ([concurrency-model §7](concurrency-model.md#7-leadership-relay-takeover);
-  [period-model §1.3](period-model.md#13-the-successor-fence)).
+  (concurrency-model §7 (`concurrency-model.md`, retired in 2.0.0);
+  period-model §1.3 (`period-model.md`, retired in 2.0.0)).
 
 ## 5. One control input, end to end
 
@@ -251,7 +232,6 @@ sequenceDiagram
   participant Orc as oracle<br/>oracle.py
   participant Ob as outbox<br/>runner_effects.py
   participant Ad as adapter<br/>runner_adapters.py
-  participant Sup as supervisor<br/>runner_supervisor.py
   participant Wr as wrapper<br/>runner_wrapper.py
   participant Cmd as command
   Op->>Ctl: status read
@@ -275,17 +255,13 @@ sequenceDiagram
   Eng->>Ad: launch the adapter task
   Eng->>Jr: effect outcome applied
   Ctl-->>Op: the answer, with a code if it is ok false
-  Ad->>Sup: SPAWN over supervisor.sock
-  Sup->>Sup: write receipt.json
-  Sup->>Wr: start the wrapper
-  Sup-->>Ad: reply, kept in reply.json
+  Ad->>Wr: start the wrapper
   Ad->>Jr: dispatch record
   Wr->>Cmd: spawn
   Wr->>Wr: write spawn.json
   Cmd-->>Wr: exit code
   Wr->>Wr: write status.json, then reap
-  Wr-->>Sup: wrapper exits
-  Sup-->>Ad: exit push
+  Wr-->>Ad: wrapper exits
   Ad->>Ad: read status.json
   Ad->>Eng: completion, STATUS with the exit code
   Note over Eng,Orc: The completion is admitted like the command, with its own WAL records
@@ -296,7 +272,7 @@ Where the real order differs from a simple list of hops:
 - The client reads before it writes. `dsl41 sendevent` reads `status` to
   learn the baseline, the epoch and the revision for its `expect`, unless
   the operator gives them
-  ([control-protocol §3](control-protocol.md#3-mutating-verbs-sendevent-host-seal)).
+  ([control-protocol §3](control-protocol.md#3-mutating-verbs-sendevent-host)).
 - The access gate runs before the control server routes the request
   ([access-model §5](access-model.md#5-the-enforcement-point)).
 - Any step can end the request early with an `ok: false` answer. It carries
@@ -304,27 +280,21 @@ Where the real order differs from a simple list of hops:
   or `stale_epoch` from admission. The code table is in
   [control-protocol §2](control-protocol.md#2-transport-and-framing-frozen).
 - A rejected decision stores its code in the WAL, so an exact retry answers
-  the same code ([period-model §2.3](period-model.md#23-decision--one-atomic-batch); DL-272).
+  the same code (period-model §2.3 (`period-model.md`, retired in 2.0.0); DL-272).
 - The WAL takes two records per input. The attempt is appended before the
   oracle sees it. The decision and its planned effects are appended
   together after the oracle decides. So the outbox entry is durable before
   any effect runs.
 - The answer is the decision. It does not wait for the job to start.
 - The engine records the effect as applied when it launches the adapter
-  task. That is before the supervisor receives SPAWN. For a SPAWN that
-  fails, see [runner-design §3](runner-design.md#3-architecture--functional-core-imperative-shell).
-- The supervisor answers SPAWN once the wrapper is started. The wrapper
-  writes `spawn.json` a moment later, so these two steps can swap.
-- In tethered mode there is no supervisor. The adapter starts the wrapper
-  itself and waits on it.
+  task. For a SPAWN that fails, see
+  [runner-design §3](runner-design.md#3-architecture--functional-core-imperative-shell).
+- The adapter starts the wrapper itself and waits on it.
 - The completion is an input like any other. It takes the same admission
   order, with a stale-completion gate
-  ([concurrency-model §4](concurrency-model.md#4-admission-and-application)).
+  (concurrency-model §4 (`concurrency-model.md`, retired in 2.0.0)).
 
-The spool files are
-[supervisor-protocol §3](supervisor-protocol.md#3-spool-format-frozen).
-[SPAWN](glossary.md#spawn) idempotency across a supervisor restart is
-[period-model §11a](period-model.md#11a-spawn-idempotency-that-outlives-the-supervisor).
+The spool files are written by `src/dsl41/runner_wrapper.py`.
 
 ## 6. The runnable example: `examples/fulfilment`
 
@@ -365,9 +335,9 @@ The README's "Operator recovery" section runs the same `query status` and
 - Coverage and open findings per machine: [risk map](risk-map.md).
 - The runner's design: [runner-design](runner-design.md).
 - The frozen runner contracts: [control-protocol](control-protocol.md),
-  [supervisor-protocol](supervisor-protocol.md),
-  [concurrency-model](concurrency-model.md), [period-model](period-model.md),
+  supervisor-protocol (`supervisor-protocol.md`, retired in 2.0.0),
+  concurrency-model (`concurrency-model.md`, retired in 2.0.0), period-model (`period-model.md`, retired in 2.0.0),
   [protocol-evolution](protocol-evolution.md), [access-model](access-model.md),
   [statechart-engine](statechart-engine.md).
-- The operator path: [deployment-runbook §0](deployment-runbook.md#0-the-operator-path).
+- The operator path: deployment-runbook §0 (`deployment-runbook.md`, retired in 2.0.0).
 - The decisions behind all of it: [decision index](decision-index.md).

@@ -74,15 +74,13 @@ import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from pathlib import Path
-from typing import Any, Final, Literal, cast, get_args
+from typing import Any, cast, get_args
 
-from pydantic import ValidationError
 
-from dsl41.boundary import RetryHorizonRefused, SealRequest
 from dsl41.canon import is_scalar_json, is_scalar_string, is_wire_int
 from dsl41.conditions import GlobalAtom, iter_atoms
 from dsl41.ir import ExecSpec, FwSpec, JobIR
-from dsl41.period import FW_DEFAULT_INTERVAL_S
+from dsl41.run_root import FW_DEFAULT_INTERVAL_S
 from dsl41.oracle_state import (
     INJECTABLE_STATUSES,
     Event,
@@ -100,14 +98,12 @@ from dsl41.runner_admission import (
     ApplyResult,
     EnvelopeError,
     RequestCollision,
-    SealInFlight,
     addressed_key,
     parse_envelope,
 )
 from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import UNKNOWN_OUTCOME_CODES, Code
 from dsl41.runner_hosts import HOST_VERBS, HostCommand, HostVerb
-from dsl41.seal import StagedNextPeriod
 from dsl41.runner_journal import best_effort_report, read_backfill
 from dsl41.runner_preflight import and_success_skeleton
 from dsl41.state_machine import StatechartError
@@ -207,14 +203,6 @@ class ControlServer:
     #: single-writer loop is not running. It is below `roundtrip`'s client timeout so the
     #: caller gets this diagnosis, not a bare socket timeout.
     DECISION_TIMEOUT_S = 5.0
-
-    #: a boundary is not a mutation and does not answer in 5s: it drains every admitted
-    #: attempt, waits out an unbound spawn and an unresolved KILL ladder, and writes four
-    #: artifacts. The client's other route is the committed seal in the next period
-    #: (ss2.2), so a timeout is `unknown`, never a refusal. It is above the two
-    #: independent `QUIESCE_WAIT_S` budgets the barrier can spend, so a HEALTHY seal
-    #: never lands in the unknown branch.
-    SEAL_TIMEOUT_S = 180.0
 
     #: ss5's grace at a hangup the server makes for any reason but an overflow or a
     #: revocation (DL-267): how long a closing connection may take to hand its unsent
@@ -469,21 +457,7 @@ class ControlServer:
 
     async def _respond(self, request: dict[str, Any]) -> dict[str, Any]:
         """Route one already-versioned request and stamp the concurrency-model ss6 read
-        header onto its answer.
-
-        **The fence is re-proved before the answer, not only before an append** (DL-133,
-        period-model ss1.3). These reads are leader-only and carry lineage coordinates,
-        so a displaced leader must not keep answering `status`, `routes` and backfill
-        from a lineage it does not lead: a `status` right after the anchor is replaced
-        is REFUSED (PR-03).
-
-        **Two proofs, two rules.** The RUN ROOT's proof is CM-14's: losing it stops
-        dispatch at admission's first append. This check is the LINEAGE's proof alone;
-        refusing the run-root half here would also refuse the read a client composes its
-        `expect` from, so the stopping mutation would never be sent."""
-        lost = self._lineage_lost()
-        if lost is not None:
-            return lost
+        header onto its answer."""
         response = await self._dispatch(request)
         # concurrency-model ss6: every read publishes where the log has reached and which
         # log it is, so a client can tell a revision it may name from one it may not.
@@ -495,36 +469,12 @@ class ControlServer:
             "applied_index": self.engine.frontiers.applied_index,
         }
 
-    def _lineage_lost(self) -> dict[str, Any] | None:
-        """The refusal a displaced leader owes a reader, or None.
-
-        Without the concurrency-model ss6 read header: it publishes a baseline, epoch and
-        log position, and this process may not speak for those coordinates."""
-        estate = self.engine.estate
-        if estate is None or estate.anchor.lock.held is False:
-            return None
-        try:
-            estate.anchor.check()
-        except EngineError:
-            pass
-        else:
-            return None
-        return _failure(
-            "lineage_lost",
-            "this engine can no longer prove it leads this estate's lineage:"
-            " the anchor was deleted or replaced. Nothing is answered from a lineage"
-            " this process does not lead (period-model ss1.3, PR-03)",
-            refused=True,
-        )
-
     async def _dispatch(self, request: dict[str, Any]) -> dict[str, Any]:
         cmd = request.get("cmd")
         if cmd == "sendevent":
             return await self._sendevent(request)
         if cmd == "host":
             return await self._host(request)
-        if cmd == "seal":
-            return await self._seal(request)
         if cmd == "hosts":
             return self._hosts(request)
         if cmd == "status":
@@ -597,109 +547,6 @@ class ControlServer:
         except EnvelopeError as exc:
             return _failure(exc.code, str(exc), refused=True)
         return await self._decision(self.engine.submit_host(parsed, envelope), kind=parsed.verb)
-
-    async def _seal(self, request: dict[str, Any]) -> dict[str, Any]:
-        """ss2.2's `seal` verb: one period boundary requested over the socket and DECIDED
-        by the `seal` record.
-
-        It differs from other mutating verbs in three ways. It names an `expect` on
-        NOTHING, because it addresses no row. Its decision is a `seal` record, not a
-        `decision`: a crash before the seal would leave a durable "applied" for a boundary
-        that never happened, and records after a seal are forbidden. And **a committed
-        seal's exact retry is answered ahead of the baseline gate**: the generic v3
-        parser rejects a foreign `baseline_id` before it reads `request_id`, and a retry
-        of the boundary that closed C1 carries B1 while C2 answers under B2 (PR-30a,
-        PR-30e).
-
-        The CLI stages C2 and names the staged bytes by `stage_digest`; the engine
-        validates exactly those bytes, performs the cutoff in its single-writer loop, and
-        exits with code 3 ("sealed period N at DIGEST; period N+1 is ready to open"). It
-        does NOT load C2: a transition is a restart, not a reload (DL-65)."""
-        if (wire := _seal_wire_error(request)) is not None:
-            return _failure("invalid_argument", f"malformed seal request: {wire}", refused=True)
-        # left key-by-key on purpose (DL-170): `_seal_wire_error` proves every REQUIRED
-        # field present and wire-typed except `next_period` (validated below on its own
-        # strict config, DL-168); `force_seal` and `claimed_actor` are typed when present
-        # and may be absent (both default), so `strict=True` on `SealRequest` has nothing
-        # left to catch. One `model_validate` over a filtered dict would pin only the
-        # "malformed seal request" prefix, not the shape after it.
-        try:
-            parsed = SealRequest(
-                baseline_id=request["baseline_id"],
-                epoch=request["epoch"],
-                request_id=request["request_id"],
-                next_period=StagedNextPeriod.model_validate(request.get("next_period")),
-                stage_digest=request["stage_digest"],
-                force_seal=request.get("force_seal", False),
-                claimed_actor=request.get("claimed_actor") or "",
-            )
-        except (KeyError, TypeError, ValueError, ValidationError) as exc:
-            return _failure("invalid_argument", f"malformed seal request: {exc}", refused=True)
-        answered = self._committed_seal(parsed)
-        if answered is not None:
-            return answered
-        try:
-            # `parse_envelope` refuses an `expect` that ARRIVES on a boundary (ss3), by key;
-            # it sits behind the retry route, which answers a committed seal regardless
-            parse_envelope(request, addressed=None, baseline_id=self.engine.baseline_id)
-        except EnvelopeError as exc:
-            return _failure(exc.code, str(exc), refused=True)
-        try:
-            committed = await asyncio.wait_for(
-                self.engine.submit_seal(parsed), timeout=self.SEAL_TIMEOUT_S
-            )
-        except EngineError as exc:
-            # a readiness or phase-2 refusal: C1 stays open and correct and the cutoff work
-            # already admitted stays legitimate C1 activity (ss7's exit codes); also the
-            # one-seal-at-a-time refusal (AdmissionRefused is an EngineError). A raise site
-            # that named no code answers the neutral `engine_error`
-            answer = _failure(exc.code or "engine_error", str(exc), refused=True)
-            if isinstance(exc, SealInFlight):
-                # additive (ss2: consumers ignore unknown fields): the client tells its own
-                # running boundary from another's
-                answer["in_flight_request_id"] = exc.in_flight_request_id
-            if isinstance(exc, RetryHorizonRefused):
-                # additive as above: the client reads its wait from the field (DL-420)
-                answer[exc.FIELD] = exc.left_us
-            return answer
-        except TimeoutError:
-            return _failure(
-                "seal_timeout",
-                f"no boundary outcome within {self.SEAL_TIMEOUT_S}s: the seal may"
-                " still commit -- re-read before retrying, and retry only under"
-                f" request_id {parsed.request_id}",
-            )
-        return _seal_answer(committed.record)
-
-    def _committed_seal(self, parsed: SealRequest) -> dict[str, Any] | None:
-        """ss2.2's retry route: the engine of period N+1 keeps the `seal` record it opened
-        from and answers an exact retry from it.
-
-        The lookup reaches ONE seal back; a retry of an older seal is refused as a stale
-        baseline, a liveness loss and not a safety one (PR-30e). An uncommitted seal
-        request left nothing behind, so its retry attempts the boundary afresh: only a
-        committed seal is deduplicated."""
-        estate = self.engine.estate
-        record = estate.prior_seal_record if estate is not None else None
-        if record is None:
-            return None
-        retry = committed_retry(
-            parsed.request_id,
-            parsed.fingerprint,
-            committed_request_id=record.get("request_id"),
-            committed_fingerprint=record.get("request_fingerprint"),
-        )
-        if retry is None:
-            return None
-        if retry == "collision":
-            return _failure(
-                "seal_retry_mismatch",
-                f"request_id {parsed.request_id} named the boundary that closed"
-                f" period {record.get('period_id')} under a different envelope: "
-                + RETRY_SWAP_REASON,
-                refused=True,
-            )
-        return _seal_answer(record)
 
     async def _decision(self, submitted: Awaitable[ApplyResult], *, kind: str) -> dict[str, Any]:
         """Wait out one submitted mutation and shape its answer, the half identical whatever
@@ -1153,13 +1000,8 @@ class ControlServer:
         module docstring). The seam keys on `seq`, never a record name, so DL-118's
         `decision` has `result`'s guarantee.
 
-        The backfill spans SEGMENTS (DL-135). I2 makes the index estate-wide, so a cursor
-        names one record across the whole lineage. What this root does not retain cannot be
-        sent; that case is the GAP MARKER (period-model ss11), not a short stream."""
-        lost = self._lineage_lost()  # a subscription response is a read too (PR-03)
-        if lost is not None:
-            await self._send(writer, lost)
-            return
+        What this root does not retain cannot be sent; that case is the GAP MARKER, not a
+        short stream (DL-135)."""
         journal = self.engine.journal
         if journal is None:
             await self._send(writer, _failure("no_journal", "this run has no journal"))
@@ -1195,10 +1037,6 @@ class ControlServer:
             feed.go_live()
             while True:
                 record = await feed.get()
-                lost = self._lineage_lost()
-                if lost is not None:
-                    await self._send(writer, lost)  # same PR-03 rule, live seam
-                    return
                 seq = record.get("seq")
                 if isinstance(seq, int):
                     if seq <= max_seq:
@@ -1213,28 +1051,20 @@ class ControlServer:
         (`since` if none), or None when the stream ended on a refusal.
 
         This phase holds the unsent records it read, outside the subscriber budget: the
-        retained WAL from the segment holding the cursor onward. Each is released once
+        retained WAL. Each is released once
         sent, and the list is gone on return (ss5, DL-267)."""
         try:
             backfill = read_backfill(wal, since=since)
         except EngineError as exc:
-            # the read spans segments, so it can meet a file this one did not write. The ack
-            # has gone, so the refusal goes on the STREAM; a raising handler would hang the
-            # client up unanswered. PR-03 holds for this response too: the read yielded, and
-            # a displaced leader owes its own refusal
-            lost = self._lineage_lost()
-            await self._send(writer, lost or _failure(exc.code or "engine_error", str(exc)))
+            # the ack has gone, so the refusal goes on the STREAM; a raising handler would
+            # hang the client up unanswered
+            await self._send(writer, _failure(exc.code or "engine_error", str(exc)))
             return None
         gap_from, records = backfill.gap_from, backfill.records
         del backfill
         if gap_from is not None:
             # ss11: a cursor below the earliest retained record is told so explicitly;
-            # silence would read as "nothing happened since your cursor". The marker is a
-            # RESPONSE, so PR-03's fence runs in front of it
-            lost = self._lineage_lost()
-            if lost is not None:
-                await self._send(writer, lost)
-                return None
+            # silence would read as "nothing happened since your cursor"
             await self._send(writer, {"gap": True, "earliest_retained": gap_from})
         cut = 0
         for index, record in enumerate(records):
@@ -1246,12 +1076,6 @@ class ControlServer:
         sent = since
         while pending:
             record = pending.popleft()
-            lost = self._lineage_lost()
-            if lost is not None:
-                # PR-03 holds per RESPONSE, not per connection: the accept-time check proves
-                # nothing about a lineage replaced mid-stream
-                await self._send(writer, lost)
-                return None
             seq = record.get("seq")
             if isinstance(seq, int):
                 sent = max(sent, seq)
@@ -1260,85 +1084,6 @@ class ControlServer:
 
 
 # ---------------------------------------------------------------- clients (ss10)
-
-
-def _seal_wire_error(request: Mapping[str, Any]) -> str | None:
-    """What is wrong with a `seal` request's WIRE TYPES, or None.
-
-    `SealRequest` is `strict=True` (DL-170) and refuses a coerced `baseline_id`, `epoch`,
-    `request_id` or `stage_digest` itself. `claimed_actor` is the exception: the construct
-    block builds it as `request.get("claimed_actor") or ""`, which turns a falsy non-string
-    (JSON `0`, `false`, `[]`) into a legal `""` before the model sees it.
-
-    This function stays as the message layer: `pydantic.ValidationError`'s prose cannot
-    reproduce the pinned refusals ("force_seal must be true or false", "epoch must be an
-    integer"). `boundary.SealRequest`'s docstring carries the DL-151 argument against
-    coercion.
-
-    `parse_envelope` (`runner_admission.py`) checks `baseline_id`, `request_id`, `epoch`
-    and `claimed_actor` by the same predicates but cannot run first: `_seal`'s retry route
-    answers a committed boundary by FINGERPRINT ahead of it (PR-30a/PR-30e), so those
-    fields must be well-typed before the fingerprint is taken. `force_seal` and
-    `stage_digest` have no other check.
-
-    Values are read, never coerced: `bool("false")` is True and force is an AUTHORIZATION
-    (ss3), so a mistyped flag refuses rather than forces a boundary."""
-    force = request.get("force_seal", False)
-    if not isinstance(force, bool):
-        return f"force_seal must be true or false, got {force!r}"
-    epoch = request.get("epoch")
-    if not is_wire_int(epoch):
-        return f"epoch must be an integer, got {epoch!r}"
-    for name in ("baseline_id", "request_id", "stage_digest"):
-        value = request.get(name)
-        if not isinstance(value, str):
-            return f"{name} must be a string, got {value!r}"
-    actor = request.get("claimed_actor")
-    if actor is not None and not isinstance(actor, str):
-        return f"claimed_actor must be a string, got {actor!r}"
-    return None
-
-
-#: why a committed boundary's request_id may not name another envelope: the sentence both
-#: retry doors quote (period-model ss2.2, PR-30c)
-RETRY_SWAP_REASON: Final[str] = (
-    "force is an authorization and the actor is attribution, and neither may be"
-    " swapped under a retry (period-model ss2.2, PR-30c)"
-)
-
-
-def committed_retry(
-    request_id: str,
-    fingerprint: str,
-    *,
-    committed_request_id: object,
-    committed_fingerprint: object,
-) -> Literal["exact", "collision"] | None:
-    """ss2.2's exact-retry rule against the boundary that committed: None when the request
-    names another request_id, "exact" for the same one under the same fingerprint,
-    "collision" under another. An exact retry is answered with the original decision; a
-    collision is refused with `RETRY_SWAP_REASON` (PR-30c, PR-30e). Both doors use this
-    rule, each with its own answer shape and exit code: the live route
-    (`ControlServer._committed_seal`, over the `seal` record) and the offline sealer
-    (`cli_estate`, over the seal sidecar)."""
-    if committed_request_id != request_id:
-        return None
-    return "exact" if committed_fingerprint == fingerprint else "collision"
-
-
-def _seal_answer(record: Mapping[str, Any]) -> dict[str, Any]:
-    """ss2.2's answer shape, built from the `seal` record alone, so a fresh commit and an
-    exact retry answer identically."""
-    return {
-        "ok": True,
-        "kind": "seal",
-        "decision": "applied",
-        "period_id": record["period_id"],
-        "digest": record["digest"],
-        "next_period_id": record["next_period_id"],
-        "next_baseline_id": record["next_baseline_id"],
-        "request_id": record["request_id"],
-    }
 
 
 class ControlClientError(RuntimeError):
