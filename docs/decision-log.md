@@ -18275,6 +18275,7 @@ relitigate an entry; append a new one.
   fixed. Each fix was confirmed by the reviewer that raised it. A Fable
   pass over the integration with DL-273, standing in for DL-262's Codex
   integration pass, found no material defect; its minors are fixed.
+  NARROWED BY DL-425: 25 codes retired with hosts, effects and the epoch; the stable set is the rest.
 - DL-273 An HTTP and WebSocket gateway is specified as proposed
   (2026-10-05; docs/gateway.md)
   THE SPEC. `docs/gateway.md` specifies a gateway that puts HTTP and
@@ -25031,3 +25032,35 @@ relitigate an entry; append a new one.
   not start"; a job-chart state); a per-command idempotence rig (the engine cannot see inside a
   job); snapshot migrations in 2.0 (a drained engine carries no work; the old binary drains
   first); a scratch rewrite (the compiler, the oracle tier, the wrapper and procid are the asset).
+- DL-425 Hosts, effects and the epoch leave the engine; the dispatch record precedes the launch
+  (2026-10-30; slice 0b of the v2 train under DL-424; `runner_hosts.py`, `runner_effects.py`, the
+  HOST and EFFECT charts, the `host:` expect namespace and the leader record are gone).
+  DISPATCH. A start is three durable steps in one order: the admission's decision record, a
+  `dispatch` record with a freshly minted `run_id` (every start, FW and rehearsal included), then
+  the launch. The reply to the requester follows the decision record and never waits for the
+  dispatch. A kill cancels the live task and writes no record of its own: the KILLJOB input and
+  the deadline's advance are the journal's, so replay reaches the same terminal row, and the
+  wrapper kills its command when the engine dies (DL-357).
+  RESUME. The evidence is the `runs/` directories plus the dispatch records that bind run ids.
+  Replay derives the starts. Due timers and reconciliation run before any recovered start is
+  dispatched, so a start an overdue deadline would end is never launched; a recovered start
+  waits only for work due at or before the current instant, never for a later horizon. A live
+  start with a dispatch record and no directory is FAILURE for a command and a relaunch for a
+  watch; a derived start with no record is dispatched now; anything else is left as it stands
+  (DL-315's cases hold). A failed resume shuts the engine down, every task cancelled and
+  awaited, before the journal detaches and the lock is released. A retry whose original never
+  reached the log is admitted after a restart: the journal knows only logged decisions.
+  THE WIRE. Twenty-five codes are retired from the stable set of DL-272: `stale_epoch`,
+  `lineage_lost`, `period_sealing`, the nine host codes and the thirteen seal codes; nothing emits
+  them. `STORED_CODES` keeps the three a rejected input can still carry. The §2 table of
+  `docs/control-protocol.md` names the retired codes once. `status` keeps `held`, always false.
+  OLD ROOTS. `leader`, `host` and `effect_result` join `RETIRED_RECS` as "2.0.0", so a 1.x root is
+  refused by name, as `seal` was (slice 0).
+  KEPT, DORMANT. `HostRuntime` and an empty `RuntimeState._hosts`; `CarriedRows`,
+  `Oracle(carried=)` and `install`: removing them removes the runtime_assembly INSTALL rows and
+  the job chart's PERIOD_OPENING rows, an oracle restructure this slice does not make; they go
+  with the oracle's own pass. The ADMISSION chart and `DecisionIndex` stay, with epoch, host and
+  grace removed.
+  REJECTED: intents inside the decision record (an outbox again); failing every untraced start at
+  resume (the pre-outbox rule DL-315 replaced); a `runner_lock.py` (the version gates live beside
+  the lock in `runner_ledger.py`). Reviewed by an Opus reviewer (three rounds) and Astra (two).
