@@ -38,6 +38,7 @@ ORACLE_COPIED = frozenset(
         "_now",
         "_opening_release",
         "_scan_owed",
+        "_wake_owed",
         "_tz_cache",
         "_calendars",
         "_window_starts",
@@ -51,9 +52,10 @@ ORACLE_FRESH = frozenset({"_trace", "_emitted"})
 #: last `readmit` moved its waiter, the instances a macrostep reached
 #: (DL-350), and the items and the root of the dispatch in flight (DL-351).
 ORACLE_IDLE = frozenset({"_late_settlements", "_readmitted", "_reached", "_items", "_rooted"})
-#: Oracle attributes fixed once the constructor returns, so the fork shares
-#: them; `_cap`, the item cap, is fixed by the catalog's job count (DL-351),
-#: and `_members_of`, the box-to-members index, by the catalog.
+#: Oracle attributes the fork shares: set by the constructor and replaced
+#: whole only by an update's `replace_catalog`, never edited; `_cap`, the item
+#: cap, follows the catalog's job count (DL-351), and `_members_of`, the
+#: box-to-members index, the catalog.
 ORACLE_SHARED = frozenset(
     {
         "catalog",
@@ -77,6 +79,7 @@ STORE_COPIED = frozenset(
         "_consumed",
         "_enqueue_counter",
         "_snapshots",
+        "_tombstones",
     }
 )
 #: RuntimeState attributes no tier writes: the dormant routing table
@@ -126,12 +129,13 @@ def state_bytes(oracle: Oracle, since: tuple[int, int] = (0, 0)) -> bytes:
         "consumed": dict(store.consumed),
         "enqueue_counter": store.enqueue_counter,
         "snapshots": sorted(store._snapshots),
+        "tombstones": {name: row.model_dump(mode="json") for name, row in store.tombstones.items()},
         "trace": [entry.model_dump(mode="json") for entry in oracle._trace[traced:]],
         "emitted": [_event(ev) for ev in oracle._emitted[emitted:]],
         "queue": [_event(ev) for ev in oracle._queue],
         "now": _when(oracle._now),
         "opening_release": list(oracle._opening_release),
-        "flags": [oracle._scan_owed],
+        "flags": [oracle._scan_owed, oracle._wake_owed],
         "tz_cache": sorted(oracle._tz_cache),
         "calendars": sorted(oracle._calendars),
         "window_starts": (

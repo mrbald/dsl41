@@ -108,32 +108,10 @@ class OracleReads:
         #: ss3.3: feed times are non-decreasing across the boundary, so an opened interpreter
         #: starts from the instant the seal was taken.
         self._now: datetime | None = carried.now if carried is not None else None
-        #: Edge-trigger index (DL-13): entity key -> jobs whose `condition` references it. Keys:
-        #: job names (incl. "name^INST"), "g:NAME".
-        self._referencers: dict[str, list[str]] = {}
-        for name, job_ir in catalog.jobs.items():
-            attr = job_ir.sem.condition
-            if attr is None:
-                continue
-            for key in _entity_keys(attr.cond):
-                self._referencers.setdefault(key, []).append(name)
-        #: box -> the jobs it holds directly, in catalog order (`_members`).
-        members: dict[str, list[str]] = {}
-        for name, job_ir in catalog.jobs.items():
-            if job_ir.box.box_name is not None:
-                members.setdefault(job_ir.box.box_name, []).append(name)
-        self._members_of = {box: tuple(names) for box, names in members.items()}
-        #: DL-50 capacity buckets and the QUE_WAIT queue (DL-74): it decides admission and its
-        #: order; the transitions are this class's. It holds no state (DL-120): the reservations
-        #: and ranks are on the rows, the spent units are under the owner, and the pool is given
-        #: all three.
-        self._pool = CapacityPool(catalog, self.semantics)
+        self._index_catalog()
         #: SEM-35 name -> zone, resolved once per name (the ladder walks the whole zoneinfo
         #: database for a city default).
         self._tz_cache: dict[str, tzinfo] = {}
-        #: calendar name -> its days, built on first use by `queued-recheck` (DL-257): a standard
-        #: calendar's day set, or a compiled extended one.
-        self._calendars: dict[str, frozenset[date] | CompiledCalendar] = {}
         #: SEM-35's `ujo_timezones` table, as `--timezone-map` supplies it to the scheduler
         #: (DL-62). None means no map, which differs from an empty one: the ladder's unique-city
         #: default applies only when the estate supplied no table (`timezones`'
@@ -148,13 +126,42 @@ class OracleReads:
         #: `--timezone` stays on the scheduler.
         self._default_tz: str | None = default_tz
 
+    def _index_catalog(self) -> None:
+        """Build what the oracle reads off `catalog`: the referencer and members indexes, the
+        capacity pool and an empty calendar cache. The constructor and `replace_catalog` call
+        it; each is replaced whole, never edited, so a fork may share it."""
+        #: Edge-trigger index (DL-13): entity key -> jobs whose `condition` references it. Keys:
+        #: job names (incl. "name^INST"), "g:NAME".
+        self._referencers: dict[str, list[str]] = {}
+        for name, job_ir in self.catalog.jobs.items():
+            attr = job_ir.sem.condition
+            if attr is None:
+                continue
+            for key in _entity_keys(attr.cond):
+                self._referencers.setdefault(key, []).append(name)
+        #: box -> the jobs it holds directly, in catalog order (`_members`).
+        members: dict[str, list[str]] = {}
+        for name, job_ir in self.catalog.jobs.items():
+            if job_ir.box.box_name is not None:
+                members.setdefault(job_ir.box.box_name, []).append(name)
+        self._members_of = {box: tuple(names) for box, names in members.items()}
+        #: DL-50 capacity buckets and the QUE_WAIT queue (DL-74): it decides admission and its
+        #: order; the transitions are this class's. It holds no state (DL-120): the reservations
+        #: and ranks are on the rows, the spent units are under the owner, and the pool is given
+        #: all three.
+        self._pool = CapacityPool(self.catalog, self.semantics)
+        #: calendar name -> its days, built on first use by `queued-recheck` (DL-257): a standard
+        #: calendar's day set, or a compiled extended one.
+        self._calendars: dict[str, frozenset[date] | CompiledCalendar] = {}
+
     def fork(self) -> OracleReads:
         """An independent copy to dry-apply one input on (concurrency-model ss4).
 
         Not `deepcopy`, which would copy the catalog. The store forks itself; every other
         mutable container is copied, here and by each layer above, the memo caches included. The
         catalog, the switches, the capacity pool, the referencer index and the members index
-        are shared: they are fixed once the constructor returns. The trace and the emitted log
+        are shared: an update replaces each whole (`replace_catalog`) and nothing edits one. The
+        trace and the emitted log
         start empty, so a fork costs nothing in the period's length: both are append-only and an
         apply reads them only by slicing from a length it saved. A new attribute must be added
         to a fork; the fork test pins the attribute set.

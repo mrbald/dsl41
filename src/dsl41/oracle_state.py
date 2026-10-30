@@ -348,6 +348,11 @@ class CarriedRows(BaseModel):
     timer_seq: int = 0
     consumed: dict[str, int] = {}
     enqueue_counter: int = 0
+    #: the rows updates removed, by job name (`RuntimeState.retire_job`)
+    tombstones: dict[str, JobRuntime] = {}
+    #: an update swapped the catalog and no input has run since: the next one scans the queue
+    #: first (`Oracle._wake_after_swap`)
+    wake_owed: bool = False
     period_id: int = 1
     #: T, the instant the seal was taken at. Feed times are non-decreasing across the boundary,
     #: so the opened interpreter starts from T.
@@ -726,7 +731,8 @@ class RuntimeState:
     the capacity verbs `reserve`, `release_reservations`, `enqueue_waiter`, `dequeue_waiter`,
     `seed_consumed` (DL-120), `take_over_held` and `release_held` (DL-256). The verbs that move
     a job's status, flags or held capacity write what the `job` chart reached. `install` and
-    `seed_job` install rows. Optimistic locking needs one place where "this entity changed" is
+    `seed_job` install rows; an update's `retire_job` and `admit_job` remove and add one between
+    inputs (spec-reload). Optimistic locking needs one place where "this entity changed" is
     observable once per applied input (concurrency-model ss3).
 
     The timer heap lives here (concurrency-model ss3): an armed must_start deadline on a refused
@@ -767,6 +773,10 @@ class RuntimeState:
         #: DL-120: the waiter-rank allocator's high-water mark. Carried, never renormalised
         #: (period-model ss5).
         self._enqueue_counter = 0
+        #: The last row of each job an update removed (spec-reload): its run number, flags and
+        #: history fields, kept so a later update that adds the name back carries them. A
+        #: tombstone is not a row: no verb, read or scan sees it (`retire_job`, `admit_job`).
+        self._tombstones: dict[str, JobRuntime] = {}
         #: DL-87 input transaction: entity key -> its projection at first touch within the open
         #: input. Empty outside one.
         self._snapshots: dict[str, object] = {}
@@ -795,6 +805,7 @@ class RuntimeState:
         twin._timers = list(self._timers)
         twin._consumed = dict(self._consumed)
         twin._snapshots = dict(self._snapshots)
+        twin._tombstones = dict(self._tombstones)
         return twin
 
     # ------------------------------------------------------------------- reads
@@ -833,7 +844,10 @@ class RuntimeState:
 
     def runtime(self, job: str) -> JobRuntime:
         """Read access. Creates the row on demand: the oracle addresses entities with no catalog
-        entry (pseudo-entries `name^INST`, whatever a CHANGE_STATUS invents)."""
+        entry (pseudo-entries `name^INST`, whatever a CHANGE_STATUS invents). A name an update
+        removed is refused instead: its tombstone is not a row, and no input makes it one."""
+        if job in self._tombstones:
+            raise OracleError(f"{job!r} was removed by an update: no input reaches it")
         if job not in self._jobs:
             row = self._jobs[job] = JobRuntime()
             if self.job_instance is not None:
@@ -843,6 +857,11 @@ class RuntimeState:
     def global_value(self, name: str) -> str | None:
         row = self._globals.get(name)
         return None if row is None else row.value
+
+    @property
+    def tombstones(self) -> Mapping[str, JobRuntime]:
+        """Read-only view of the rows updates removed, by job name (spec-reload)."""
+        return MappingProxyType(self._tombstones)
 
     @property
     def consumed(self) -> Mapping[str, int]:
@@ -1071,6 +1090,51 @@ class RuntimeState:
         move, so no machine is taken."""
         self._replace(job, on_ice=on_ice, on_hold=on_hold, on_noexec=on_noexec)
 
+    def require_between_inputs(self, verb: str) -> None:
+        """Raise unless no input is open: an update applies between inputs (spec-reload)."""
+        if "open" in self.machines.active(ASSEMBLY_KEY):
+            raise OracleError(f"{verb} inside an input: an update applies between inputs")
+
+    def retire_job(self, job: str, keeps_held: Callable[[str], bool] | None) -> JobRuntime:
+        """An update removed `job` (spec-reload): its row ends and becomes its tombstone.
+
+        A live run's units settle as an end that is not SUCCESS (`release_reservations` with
+        `keeps_held`), so a depletable's units are spent into `consumed`; what the row still
+        holds after that goes back with the row, as a removed holder's units do at a period
+        opening (DL-256). The queue rank and the job's timers go. The tombstone keeps the
+        status, the run number, the flags and the times; it holds no units and no rank. Not an
+        input: no revision moves. The caller rebuilds the instances (`restore_instances`).
+        """
+        self.require_between_inputs(f"retire_job({job!r})")
+        if job not in self._jobs:
+            raise OracleError(f"retire_job({job!r}): the job has no row")
+        if self._jobs[job].status in LIVE:
+            self.release_reservations(job, "TERMINATED", keeps_held)
+        row = self._jobs.pop(job)
+        tombstone = JobRuntime.model_validate({**dict(row), "reservations": (), "waiter_seq": None})
+        self._tombstones[job] = tombstone
+        self._timers = [entry for entry in self._timers if entry[2].payload.get("job") != job]
+        heapq.heapify(self._timers)
+        return tombstone
+
+    def admit_job(
+        self, job: str, *, on_ice: bool = False, on_hold: bool = False, on_noexec: bool = False
+    ) -> None:
+        """An update added `job` (spec-reload): a new INACTIVE row with these flags. A tombstone
+        of the name gives the row its run number, so a run number is never reused, and its
+        revision plus one, so an `expect` read before the removal fails (concurrency-model
+        ss3); the tombstone is dropped. Not an input. The caller rebuilds the instances."""
+        self.require_between_inputs(f"admit_job({job!r})")
+        if job in self._jobs:
+            raise OracleError(f"admit_job({job!r}): the job already has a row")
+        tombstone = self._tombstones.pop(job, None)
+        carried = {} if tombstone is None else {"run_number": tombstone.run_number}
+        if tombstone is not None:
+            carried["state_rev"] = tombstone.state_rev + 1
+        self._jobs[job] = JobRuntime.model_validate(
+            {**carried, "on_ice": on_ice, "on_hold": on_hold, "on_noexec": on_noexec}
+        )
+
     def set_global(self, name: str, value: str) -> None:
         """Latch a global's value (SEM-06). Only commit_input() moves the revision, and only if
         the value changed; a same-value SET_GLOBAL is a real input."""
@@ -1251,6 +1315,7 @@ class RuntimeState:
         self._timer_seq = carried.timer_seq
         self._consumed = dict(carried.consumed)
         self._enqueue_counter = carried.enqueue_counter
+        self._tombstones = dict(carried.tombstones)
 
     def seed_period(self, period_id: int) -> None:
         """Set the period a fresh state is being assembled into (period-model ss3.5, DL-132).

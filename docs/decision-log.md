@@ -25098,3 +25098,40 @@ relitigate an entry; append a new one.
   cascade through `failure()`, which the engine-level attempt exists to prevent); an unbounded
   rerun of a wrapper that keeps dying with no record; a `wrapper_gone` from the leader's death
   alone when the ladder could still run. Reviewed by an Opus reviewer and Astra, two rounds each.
+- DL-427 The update machine, its admission and its application, unwired; one update in flight
+  (2026-10-30; slice 3b-b core of the v2 train under DL-424; `reload_update.py`, `cli_reload.py`,
+  `Oracle.replace_catalog`, `Scheduler.replace`, tombstones in the runtime state).
+  THE MACHINE. UPDATE has IDLE, STOPPING, APPLIED and REFUSED and spec-reload's four rows, no more;
+  the guards read the admission's payload. Admission is a pure check in the spec's order:
+  `stale_plan` (the plan's live revision is not the engine's), `update_in_progress` (another plan
+  is in STOPPING, named), `box_running` (a box started since `reread`), `would_stop_running` (the
+  changed and removed jobs that are RUNNING or STARTING now, named, without `--stop-running`).
+  The stop set carries run numbers. The dispatch filter (added, changed, removed) is installed
+  only once the chart is in STOPPING. The application is built when APPLIED is reached, never at
+  admission; a raise while applying is a crash, and startup step 4 resumes from the `config
+  intent` record. `plan.json` records the environment, the properties layers and the live
+  catalog's digest, bound by the token; the application refuses a moved catalog by digest and by
+  revision.
+  THE CARRY. Unchanged: nothing. Added: a row INACTIVE. Removed: the row ends into a tombstone
+  that keeps history and operator overrides, its units settled as a TERMINATED end (DL-256), its
+  timers and queue rank gone; an input naming it is refused like an unknown job. Changed: the
+  definition replaced in place, the row keeping status, holds, counters, history and lookback.
+  A type change (CMD, BOX, FW) is removed-and-added. A re-added name takes the tombstone's flags
+  and run number and a revision one above the tombstone's. The swap checks every precondition
+  before its first write, rebuilds indexes, cap and instances, and owes a queue scan to the next
+  input. Globals and the clock are untouched; a dropped resource keeps its old definition in the
+  rebuilt pool while a run holds its units or `consumed` has its bucket, so spent depletable
+  units stay spent through a removal and a re-add.
+  SETTINGS. A settings edit is applied, not refused: the catalog, the settings and the marked set
+  swap together; the oracle's switches, aliases and base zone and the scheduler's zone are
+  re-derived; every job is changed by the diff, so every plan is rebuilt and every running job is
+  in the stop set; `replace` refuses settings that leave a job unrebuilt.
+  THE TICKS. `Scheduler.replace` drops removed plans, rebuilds changed and added ones, and keeps
+  the rest with their next tick. A new definition takes effect from the application instant:
+  `pop_due` records each job's last consumed tick; a changed job's old ticks after that record
+  and up to now stay owed to `pop_due` or the resume sweep (E9 applies there); its new plan, and
+  an added job's, counts from now, a tick at now skipped only when the job's record is at or
+  after now. No tick fires twice, none is lost, none fires for an instant before its definition.
+  REJECTED: refusing a stale plan at application (jobs stopped for a plan thrown away); a second
+  update admitted over an open one; a tick anchor inferred from the plan; a tombstone as a
+  startable row. Reviewed by an Opus reviewer and Astra, three rounds each.

@@ -228,7 +228,9 @@ from collections.abc import Hashable, Mapping
 from datetime import datetime
 from typing import Final, cast
 
+from dsl41.capacity import CapacityPool
 from dsl41.ir import CatalogIR, Semantics
+from dsl41.reload_diff import retyped_jobs
 from dsl41.job_chart import JOB
 from dsl41.job_chart_events import (
     DISARM,
@@ -319,6 +321,8 @@ class InputBatch:
             oracle._fire_timers_due(self._at)
             oracle._now = self._at
             oracle._lazy_clock_checks()
+            # spec-reload: the first input after an update's swap wakes the waiters first
+            oracle._wake_after_swap()
             oracle._drain()  # checks-then-drain adjacency
         except BaseException as exc:
             try:
@@ -438,6 +442,9 @@ class Oracle(OracleWriters):
         self._rooted: tuple[str, str] | None = None
         #: The instances the macrostep's items reached, checked at its end.
         self._reached: set[str] = set()
+        #: An update swapped the catalog since the last input, so the next one scans the queue
+        #: first (`_wake_after_swap`).
+        self._wake_owed = carried is not None and carried.wake_owed
         self.store.keep_job_instances(self._job_instance)
 
     def fork(self) -> Oracle:
@@ -449,6 +456,88 @@ class Oracle(OracleWriters):
         twin._opening_release = list(self._opening_release)
         twin._reached = set()
         return twin
+
+    def replace_catalog(
+        self,
+        catalog: CatalogIR,
+        *,
+        semantics: SemanticSwitches,
+        tz_aliases: Mapping[str, str] | None,
+        default_tz: str | None,
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """An update's swap (spec-reload): the oracle runs `catalog` under `semantics`, the
+        `tz_aliases` table (None: no table, DL-151) and the base zone `default_tz` (DL-155)
+        from now on, so the run windows and deadlines of a job with no zone of its own follow
+        the update as the scheduler does. Answers the (removed, added) names, each sorted.
+
+        A resource the new catalog drops keeps its old definition in the pool while a run
+        holds its units or `consumed` has a bucket of it (a ghost), so a depletable's units
+        are still spent at the end of a run that took them, and stay spent.
+
+        A kept job's row is untouched: status, flags, run counters and lookback times stay, and
+        its new definition is read from the next input on, which scans the queue first
+        (`_wake_after_swap`). A job whose type changes is removed and added. Every precondition
+        is checked before the first write: each removed job has a row, and each added job has
+        none, so a refused swap changes nothing. A removed job's row ends into a
+        tombstone (`RuntimeState.retire_job`), its units settled under the pool of the
+        definition it ran under. An added job gets an INACTIVE row with the flags its
+        `initial_status` seeds (SEM-24), plus any flag a tombstone of the name kept. Globals,
+        `consumed`, the clock, the trace and the timers of kept jobs are untouched. The indexes,
+        the item cap and the job instances are rebuilt from the new catalog. Between inputs only.
+        """
+        self.store.require_between_inputs("replace_catalog")
+        retyped = retyped_jobs(self.catalog, catalog)
+        removed = tuple(sorted((self.catalog.jobs.keys() - catalog.jobs.keys()) | retyped))
+        added = tuple(sorted((catalog.jobs.keys() - self.catalog.jobs.keys()) | retyped))
+        rows = self.store.job
+        missing = [job for job in removed if job not in rows]
+        taken = [job for job in added if job in rows and job not in retyped]
+        if missing or taken:
+            raise OracleError(
+                "replace_catalog: refused before any write:"
+                f" removed with no row {missing}, added with a row {taken}"
+            )
+        for job in removed:
+            self.store.retire_job(job, self._pool.keeps_held)
+        held = {r.bucket for row in rows.values() for r in row.reservations}
+        named = {bucket[2:] for bucket in held | self.store.consumed.keys() if bucket[:2] == "r:"}
+        known = self._pool.catalog.resources
+        ghosts = {
+            name: known[name] for name in sorted(named - catalog.resources.keys()) if name in known
+        }
+        self.catalog = catalog
+        self.semantics = semantics
+        self._tz_aliases = None if tz_aliases is None else dict(tz_aliases)
+        self._default_tz = default_tz
+        self._tz_cache = {}
+        self._index_catalog()
+        if ghosts:
+            pooled = catalog.model_copy(update={"resources": {**ghosts, **catalog.resources}})
+            self._pool = CapacityPool(pooled, semantics)
+        self._cap = item_cap(len(catalog.jobs))
+        for job in added:
+            initial = catalog.jobs[job].sem.initial_status
+            kept = self.store.tombstones.get(job)
+            self.store.admit_job(
+                job,
+                on_hold=initial == "ON_HOLD" or (kept is not None and kept.on_hold),
+                on_ice=initial == "ON_ICE" or (kept is not None and kept.on_ice),
+                on_noexec=initial == "ON_NOEXEC" or (kept is not None and kept.on_noexec),
+            )
+        self.store.restore_instances()
+        self._wake_owed = True
+        return removed, added
+
+    def _wake_after_swap(self) -> None:
+        """The input after a catalog swap scans the queue first, as a period's opening does
+        after it gives a removed holder's units back (DL-256): a retired holder's units, a
+        raised amount or a dropped claim may admit a waiter. Its starts are the input's."""
+        if not self._wake_owed:
+            return
+        self._wake_owed = False
+        waiters = self._pool.sorted_waiters(self.store.job)
+        if waiters:
+            self._root_scan(waiters[0], keep_stopped=False)
 
     def _job_instance(self, job: str, row: JobRuntime) -> tuple[Statechart, frozenset[str], object]:
         return JOB, row_configuration(row), job_data(self, job)
