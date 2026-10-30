@@ -335,3 +335,81 @@ def test_the_night_completes_end_to_end_in_the_harness(small_catalog, tmp_path: 
     finally:
         assert run.live.journal is not None
         run.live.journal.close()  # the loop is gone; the journal needs no loop to close
+
+
+FAKEWORK = str(NB / "bin" / "fakework")
+
+
+def _fakework(data: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    import os
+
+    env = {**os.environ, "NIGHTBANK_DATA": str(data), "NIGHTBANK_STATE": str(data / "st")}
+    return subprocess.run(
+        [sys.executable, FAKEWORK, "job", "--sleep", "0", *args],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def _layout(data: Path) -> dict[str, dict[str, str]]:
+    return {
+        d: {p.name: p.read_text() for p in sorted((data / d).iterdir())}
+        for d in ("pending", "current", "previous", "previous.old")
+        if (data / d).is_dir()
+    }
+
+
+def _state(data: Path, **dirs: dict[str, str] | None) -> None:
+    for name, files in dirs.items():
+        if files is None:
+            continue
+        (data / name.replace("_old", ".old")).mkdir(parents=True)
+        for fname, text in files.items():
+            (data / name.replace("_old", ".old") / fname).write_text(text)
+
+
+NEW, CUR, OLD = {"new.dat": "new"}, {"cur.dat": "cur"}, {"old.dat": "old"}
+DONE = {"pending": {}, "current": NEW, "previous": CUR}
+
+# Each case is the layout a SIGKILL at that instant of the flip leaves.
+FLIP_CRASH_STATES = {
+    "before_any_step": dict(pending=NEW, current=CUR, previous=OLD),
+    "partial_stale_doomed_rmtree": dict(pending=NEW, current=CUR, previous=OLD, previous_old=OLD),
+    "after_previous_to_doomed": dict(pending=NEW, current=CUR, previous_old=OLD),
+    "after_current_to_previous": dict(pending=NEW, previous=CUR, previous_old=OLD),
+    "after_pending_to_current": dict(current=NEW, previous=CUR, previous_old=OLD),
+    "after_mkdir_pending": dict(pending={}, current=NEW, previous=CUR, previous_old=OLD),
+    "partial_final_rmtree": dict(pending={}, current=NEW, previous=CUR, previous_old={}),
+}
+
+
+@pytest.mark.parametrize("case", sorted(FLIP_CRASH_STATES))
+def test_fakework_flip_recovers_from_every_crash_point(tmp_path: Path, case: str) -> None:
+    _state(tmp_path, **FLIP_CRASH_STATES[case])
+    result = _fakework(tmp_path, "--flip")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _layout(tmp_path) == DONE
+
+
+def test_fakework_publication_overwrites_a_killed_temp_file(tmp_path: Path) -> None:
+    (tmp_path / "feed").mkdir()
+    (tmp_path / "feed" / ".a.dat.tmp").write_text("partial")
+    result = _fakework(tmp_path, "--produce", "feed/a.dat")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert sorted(p.name for p in (tmp_path / "feed").iterdir()) == ["a.dat"]
+    assert "rows=" in (tmp_path / "feed" / "a.dat").read_text()
+
+
+@pytest.mark.parametrize("counter", [None, "", "2"])
+def test_fakework_attempt_counter_survives_an_empty_or_missing_file(
+    tmp_path: Path, counter: str | None
+) -> None:
+    if counter is not None:
+        (tmp_path / "st").mkdir()
+        (tmp_path / "st" / "job.attempts").write_text(counter)
+    result = _fakework(tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    expected = str(int(counter or "0") + 1)
+    assert (tmp_path / "st" / "job.attempts").read_text() == expected
