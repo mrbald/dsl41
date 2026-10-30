@@ -437,3 +437,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-424 | The 2.0.0 charter: three things, a production ceiling, and the owner's rulings | [docs/blocks/attempts.md](blocks/attempts.md), [docs/ir-design.md](ir-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
 | DL-425 | Hosts, effects and the epoch leave the engine; the dispatch record precedes the launch |  |
 | DL-426 | The attempt and engine lifecycle tiers; an attempt settles only when its plan is done |  |
+| DL-427 | The update machine, its admission and its application, unwired; one update in flight |  |

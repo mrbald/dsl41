@@ -101,14 +101,23 @@ def test_unedited_estate_is_unchanged_and_the_token_is_stable(tmp_path: Path) ->
     stored = {
         p.relative_to(first.plan_dir).as_posix() for p in first.plan_dir.rglob("*") if p.is_file()
     }
-    assert stored == {*sources, "site/night.properties", "non-idempotent.toml", "plan.json"}
+    assert stored == {
+        *sources,
+        "site/night.properties",
+        "non-idempotent.toml",
+        "invocation.json",
+        "plan.json",
+    }
     for path in first.files:
         name = path.relative_to(first.plan_dir)
         if name.name == "night.properties":
             assert path.read_bytes() == (tmp_path / "night.properties").read_bytes()
-        elif name.name != "non-idempotent.toml":
+        elif name.name not in ("non-idempotent.toml", "invocation.json"):
             assert path.read_bytes() == (estate / name).read_bytes()
     assert (first.plan_dir / "non-idempotent.toml").read_bytes() == b""
+    invocation = decode((first.plan_dir / "invocation.json").read_bytes())
+    props = str((tmp_path / "night.properties").absolute())
+    assert invocation == {"environment": "sandbox", "properties": [props]}
 
 
 def test_a_changed_job_and_an_added_job(tmp_path: Path) -> None:
@@ -253,7 +262,10 @@ def test_plan_json_round_trips_through_canon(tmp_path: Path) -> None:
     assert document["unchanged"] == list(result.plan.unchanged)
     names = [part["name"] for part in document["parts"]]
     assert names[0] == "estate.toml"
-    assert names[-1] == "non-idempotent.toml"
+    assert names[-2:] == ["non-idempotent.toml", "invocation.json"]
+    assert document["environment"] == "sandbox"
+    assert document["properties"] == [str((tmp_path / "night.properties").absolute())]
+    assert document["restored"] == []
     for part in document["parts"]:
         data = (result.plan_dir / part["name"]).read_bytes()
         assert part["sha256"] == hashlib.sha256(data).hexdigest()
@@ -522,3 +534,46 @@ def test_a_job_with_envvars_that_run_refuses_is_refused(tmp_path: Path) -> None:
         _reread(estate, live, tmp_path / "plans")
     assert any("preflight ERROR [envvars] M1" in finding for finding in refused.value.findings)
     assert not (tmp_path / "plans").exists()
+
+
+def test_the_environment_and_the_site_layers_are_bound_into_the_token(tmp_path: Path) -> None:
+    estate = _nightbank(tmp_path)
+    live = _live(estate)
+    plans = tmp_path / "plans"
+    sandbox = _reread(estate, live, plans)
+    props = tmp_path / "night.properties"
+    wargame = reread(estate, live, plans, [props], "wargame", start=START)
+    assert wargame.plan == sandbox.plan
+    assert wargame.token != sandbox.token
+    document = read_plan(plans, wargame.token)
+    assert document is not None
+    assert (document["environment"], document["properties"]) == ("wargame", [str(props)])
+    moved = tmp_path / "elsewhere"
+    moved.mkdir()
+    shutil.copy(props, moved / "night.properties")
+    elsewhere = reread(estate, live, plans, [moved / "night.properties"], "sandbox", start=START)
+    assert elsewhere.token not in (sandbox.token, wargame.token)
+
+
+def test_a_re_added_name_shows_the_flags_its_tombstone_kept(tmp_path: Path) -> None:
+    estate = _nightbank(tmp_path)
+    loaded = load_estate(estate, **_site(estate))
+    text = (estate / "global.jil").read_text()
+    found = re.search(r"insert_job: OPS_FAIL_ALERT_C\n.*?(?=/\*)", text, flags=re.S)
+    assert found is not None
+    (estate / "global.jil").write_text(text.replace(found.group(0), "", 1))
+    without = load_estate(estate, **_site(estate)).catalog
+    (estate / "global.jil").write_text(text)
+    live = Live(
+        without,
+        loaded.settings,
+        2,
+        {},
+        {"OPS_FAIL_ALERT_C": ("ON_HOLD",), "GONE_C": ("ON_ICE",)},
+    )
+    result = _reread(estate, live, tmp_path / "plans")
+    assert result.plan.added == ("OPS_FAIL_ALERT_C",)
+    assert result.restored == (("OPS_FAIL_ALERT_C", ("ON_HOLD",)),)
+    document = read_plan(tmp_path / "plans", result.token)
+    assert document is not None
+    assert document["restored"] == [{"name": "OPS_FAIL_ALERT_C", "flags": ["ON_HOLD"]}]

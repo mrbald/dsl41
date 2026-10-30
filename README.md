@@ -701,6 +701,11 @@ Runner:
   the live catalog the engine supplies, refuses a running box, and stores
   the candidate files and `plan.json` under `plans/<token>/`, the plan file
   last.
+- `src/dsl41/reload_update.py`: the 2.x update machine, not yet wired: the
+  declared `UPDATE` statechart (IDLE, STOPPING, APPLIED, REFUSED), the
+  admission that re-checks the revision, the running boxes and the stop set,
+  the tier that journals the intent, stops each job and applies, and the
+  application's per-job carry onto the oracle's state.
 - `src/dsl41/runner_control.py`: the control plane, both ends: the
   unix-socket server (sendevent parity, queries, subscribe), the wire
   vocabulary, and three clients (persistent async for the TUI, one-shot
@@ -749,6 +754,9 @@ CLI and scripts:
   options, the catalog loader, and the readings that turn an exception or a
   control answer into an exit code), `cli_compile.py`, `cli_run.py`,
   and `cli_control.py`.
+- `src/dsl41/cli_reload.py`: the 2.x `reread` and `update` verbs, not yet
+  registered: their rendering and exit codes, with the engine reached
+  through one function the wiring binds to the control socket.
 - `src/dsl41/__main__.py`: `python -m dsl41`, which `serve` uses to spawn
   one `dsl41 ui` per browser session.
 - `src/dsl41/__init__.py`: the module map docstring. No exports.

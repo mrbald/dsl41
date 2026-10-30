@@ -41,8 +41,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from dsl41.canon import digest
+from dsl41.canon import digest, hash_over
 from dsl41.ir import CatalogIR, JobIR, unquote_jil_value
+from dsl41.runner_clock import EngineError
 
 #: The status string a running row carries in the status map.
 RUNNING = "RUNNING"
@@ -206,6 +207,15 @@ def _reason(
     return "; ".join(reasons)
 
 
+def retyped_jobs(live: CatalogIR, candidate: CatalogIR) -> frozenset[str]:
+    """The names in both catalogs whose job type differs."""
+    return frozenset(
+        name
+        for name in live.jobs.keys() & candidate.jobs.keys()
+        if live.jobs[name].job_type != candidate.jobs[name].job_type
+    )
+
+
 def diff(
     live: CatalogIR,
     candidate: CatalogIR,
@@ -214,16 +224,19 @@ def diff(
 ) -> Plan:
     """Compare by job name: added, removed, changed (hash differs), unchanged.
 
-    A difference between the two settings mappings changes every kept job.
+    A difference between the two settings mappings changes every kept job. A job whose type
+    changes (CMD, BOX, FW) is another job under the same name: it is in both removed and added,
+    so the update retires the old row and admits a new one.
     """
     live_names = live.jobs.keys()
     cand_names = candidate.jobs.keys()
-    added = tuple(sorted(cand_names - live_names))
-    removed = tuple(sorted(live_names - cand_names))
+    retyped = retyped_jobs(live, candidate)
+    added = tuple(sorted((cand_names - live_names) | retyped))
+    removed = tuple(sorted((live_names - cand_names) | retyped))
     changed: list[Change] = []
     unchanged: list[str] = []
     prior: list[tuple[str, str | None]] = [(name, live.jobs[name].box.box_name) for name in removed]
-    for name in sorted(live_names & cand_names):
+    for name in sorted((live_names & cand_names) - retyped):
         old, new = live.jobs[name], candidate.jobs[name]
         old_hash = definition_hash(old, live, live_settings)
         new_hash = definition_hash(new, candidate, candidate_settings)
@@ -274,6 +287,26 @@ def running_boxes(plan: Plan, candidate: CatalogIR, status: Mapping[str, str]) -
     return tuple(sorted(box for box in touched if status.get(box) == RUNNING))
 
 
+def catalog_hash_v2(catalog: CatalogIR) -> str:
+    """`"sha256:..."` over the canonical form of `catalog`, `meta` projected to
+    `{source_files}`: the catalog hash an applied configuration records (DL-424 keeps it).
+
+    The serializer refuses a condition nested deeper than about 250 grouping levels, so a run
+    root holds none deeper (DL-351)."""
+    try:
+        payload = catalog.model_dump(mode="json")
+    except ValueError as exc:
+        if "depth exceeded" not in str(exc):
+            raise
+        raise EngineError(
+            "the catalog nests a condition deeper than its hash serializes"
+            " (about 250 levels of grouping); flatten the grouping or split"
+            " the condition (period-model ss1.1)"
+        ) from exc
+    payload["meta"] = {"source_files": list(catalog.meta.source_files)}
+    return hash_over(payload)
+
+
 def plan_token(parts: Sequence[tuple[str, bytes]], live_rev: int) -> str:
     """Hex digest of the candidate's named parts and the live catalog revision.
 
@@ -296,8 +329,10 @@ __all__ = [
     "RUNNING",
     "Change",
     "Plan",
+    "catalog_hash_v2",
     "definition_hash",
     "diff",
     "plan_token",
+    "retyped_jobs",
     "running_boxes",
 ]

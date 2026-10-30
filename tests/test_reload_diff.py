@@ -339,3 +339,14 @@ def test_dropping_a_reference_is_reported_as_no_longer_referenced() -> None:
     assert change.reason == (
         "calendar eom changed; calendar hols no longer referenced; calendar other now referenced"
     )
+
+
+def test_a_job_whose_type_changes_is_removed_and_added() -> None:
+    live = _cat(_job("keep"), _job("turns"), _box("bx"))
+    candidate = _cat(_job("keep"), _box("turns"), _job("bx"))
+    plan = _diff(live, candidate)
+    assert plan.added == plan.removed == ("bx", "turns")
+    assert plan.changed == ()
+    assert plan.unchanged == ("keep",)
+    assert plan.edited_boxes == ("bx",)
+    assert running_boxes(plan, candidate, {"bx": "RUNNING"}) == ("bx",)
