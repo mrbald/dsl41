@@ -22,7 +22,7 @@ Storage capabilities needed:
 - `EffectOutcome`: `state` is `applied`, `indeterminate` or `retired`. An effect with no outcome is `pending`, the name `Outbox.state_of` gives it.
 - `EFFECT` is the effect's statechart ([state machines](../state-machines.md#effect)): one instance per open effect, from its record to its outcome, keyed by `Outbox.key(effect_id)`, the outbox and the id, so two outboxes on one executor never collide.
 - `effect_id_for(index, kind, job, run_number)` derives the id `e<index>:<KIND>:<job>.<run_number>`.
-- `Outbox(machines)`: `record`, `resolve`, `pending`, `pending_for`, `effects`, `state_of`, `result_for`. `machines` is the executor its instances run on: the engine's, or the outbox's own when it is read offline ([statechart-engine §11](../statechart-engine.md#11-instances-and-boundaries)).
+- `Outbox(machines)`: `record`, `resolve`, `pending`, `effects`, `state_of`, `result_for`. `machines` is the executor its instances run on: the engine's, or the outbox's own when it is read offline ([statechart-engine §11](../statechart-engine.md#11-instances-and-boundaries)).
 - `plan_effects(...)` is the planner at step 7, pure except the `run_id` mint. `superseded_reason(effect, row, live_run)` is asked at dispatch.
 - In `runner.py`: `Engine._plan_effects`, `Engine._dispatch`, `Engine._apply_effect`, `Engine._apply_spawn`, `Engine._apply_kill`, `Engine._resolve_effect`.
 - In `runner_journal.py`: `Journal.decision`, `Journal.effect_result`, `decision_effects`, `read_outbox`.

@@ -31,7 +31,7 @@ import sys
 import time
 import uuid
 
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -88,9 +88,6 @@ class AdapterContext:
     #: spool the journal never sees. An append after leadership was lost is evidence written by a
     #: non-leader, so this adapter re-proves before every line (PR-03).
     fence: Proof | None = None
-    #: the routing state of the executor the run is bound to (concurrency-model ss8), read
-    #: before each resend of a held SPAWN; None outside an engine (DL-416)
-    route: Callable[[], str | None] | None = None
 
 
 @dataclass(frozen=True)
@@ -252,19 +249,12 @@ def _build_run_spec(
     ctx: AdapterContext,
     *,
     grace_seconds: float,
-    create_run_dir: bool = True,
 ) -> tuple[Path, dict[str, Any]]:
     """The run_dir, log-path and wrapper-spec construction shared by the tethered
     CMD path (LocalCommandAdapter): everything the wrapper
     input spec needs EXCEPT lifeline_fd, which each caller fills from the end that owns the pipe's
     write side. One function keeps the run-dir layout, profile composition and log targets of the
-    two paths identical (ss6a).
-
-    `create_run_dir=False` is the DETACHED path (period-model ss11a, DL-129): the run directory is
-    the SPAWN tombstone, and the supervisor creates it on receipt. An engine that created it
-    first could die before sending and leave the retry's supervisor reading "directory exists, no
-    receipt" (indeterminate) for a run that never reached the host. The tethered path keeps
-    engine ownership, since no supervisor is in it."""
+    two paths identical (ss6a)."""
     if ctx.run_root is None:
         raise EngineError("command dispatch needs a run_root (real domain only)")
     spec_ir = job_ir.exec_
@@ -276,10 +266,9 @@ def _build_run_spec(
     if spec_ir.profile:
         command = f". {spec_ir.profile} && {command}"  # PENDING: E5
     run_dir = ctx.run_root / "runs" / f"{job_ir.name}.{run_number}"
-    if create_run_dir:
-        run_dir.mkdir(parents=True)  # a collision is a bug: run_numbers never repeat
-        fsync_dir(run_dir)
-        fsync_dir(run_dir.parent)  # the runs dir is fsync'd at creation
+    run_dir.mkdir(parents=True)  # a collision is a bug: run_numbers never repeat
+    fsync_dir(run_dir)
+    fsync_dir(run_dir.parent)  # the runs dir is fsync'd at creation
     (ctx.run_root / "logs").mkdir(parents=True, exist_ok=True)
     stdout_path, stderr_path = job_log_paths(job_ir, run_number, ctx.run_root)
     spec = {
@@ -504,21 +493,12 @@ class WatchLog:
         return self.last_at + timedelta(seconds=interval_s)
 
 
-def read_watch_log(run_dir: Path, *, prefix: int | None = None) -> WatchLog | None:
+def read_watch_log(run_dir: Path) -> WatchLog | None:
     """Fold a run directory's `watch.jsonl`, or None when the watch has not been dispatched (no
     file, or no `start` line yet).
 
     A torn FINAL line is dropped, as `read_journal` drops one: the append is write-ahead, so the
-    progress it would have recorded never happened. A torn INTERIOR line is corruption and raises.
-
-    `prefix` folds only the first that many durable lines: audit re-derives a CLOSED period whose
-    live watch carried across the boundary, and the successor's later polls in the same file are
-    ITS evidence. The cut is POSITIONAL, not wall-time: ss3.5 says an instant is not a unique log
-    position, and a successor unparked at the boundary can poll at exactly T. audit owns the
-    count's authority (attest.py: the successor segment's `opens_from_seal` pins the sidecar the
-    count is read from). Lines past the prefix are not read at all, so the successor's evidence,
-    an unsupported version a future binary wrote included, cannot make a closed period
-    unauditable. A prefix the log cannot supply refuses: the claimed evidence does not exist."""
+    progress it would have recorded never happened. A torn INTERIOR line is corruption and raises."""
     path = run_dir / WATCH_LOG
     try:
         raw = path.read_bytes()
@@ -532,8 +512,6 @@ def read_watch_log(run_dir: Path, *, prefix: int | None = None) -> WatchLog | No
     trailing = lines.pop() if lines and lines[-1] == b"" else None
     records: list[dict[str, Any]] = []
     for index, line in enumerate(lines):
-        if prefix is not None and len(records) == prefix:
-            break  # everything further is the successor's, and is not read
         if not line:
             raise EngineError(f"{path}: empty interior line {index + 1}")
         if index == len(lines) - 1 and trailing is None and not _is_json(line):
@@ -550,11 +528,6 @@ def read_watch_log(run_dir: Path, *, prefix: int | None = None) -> WatchLog | No
         records.append(record)
     if not records:
         return None
-    if prefix is not None and len(records) < prefix:
-        raise EngineError(
-            f"{path}: a prefix of {prefix} line(s) was claimed and the log holds"
-            f" {len(records)} -- the claimed evidence does not exist (period-model ss3.5)"
-        )
     for position, record in enumerate(records, start=1):
         # required, not implemented-if-present: `decode` passes an absent version, and an
         # unversioned line is unsupported evidence (PR-08d)

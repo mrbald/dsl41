@@ -608,9 +608,6 @@ async def _resume_under_lock(
     for job, rt in engine.oracle.store.job.items():
         if rt.run_number:
             engine._dispatched[job] = rt.run_number
-    # DL-256: units of a job the opening catalog removed go back in the period's first input; a
-    # fresh opening admits one for it
-    engine.observe_opening()
     if scheduler is not None:
         # the ticks this segment's journal has already adjudicated: admitted as a scheduler
         # `input` (`Engine._enqueue` -> `Journal.admit`, replay already fed them) or dropped and
@@ -894,14 +891,6 @@ async def _reconcile(
     engine._dispatch()
 
 
-def _spool_has_evidence(run_dir: Path | None) -> bool:
-    """Whether a wrapper left any trace in this directory. The PR-36a replay is only for runs the
-    host provably never recorded: once either record exists, the spool ladder owns the verdict."""
-    if run_dir is None:
-        return False
-    return (run_dir / "spawn.json").exists() or (run_dir / "status.json").exists()
-
-
 def _resume_watch(
     engine: Engine,
     job_ir: JobIR,
@@ -1138,18 +1127,19 @@ def _preflight_identities(
         if effect is None or effect.run_id is None:
             continue
         directory = run_dir
-        if directory is None and engine.run_root is not None:
+        if directory is None:
+            # a candidate comes from resume's sweep, which runs on a rooted engine (ss7)
+            assert engine.run_root is not None
             directory = engine.run_root / "runs" / f"{job}.{run_number}"
-        if directory is not None:
-            for name in ("spawn.json", "status.json"):
-                doc = load_json(directory / name)
-                if doc is not None:
-                    _refuse_identity_split(effect, doc.get("run_id"), f"the spool's {name}")
-            # an FW watch spawns no process; its `start` line names the run and is present
-            # evidence like any other
-            watch = read_watch_log(directory)
-            if watch is not None:
-                _refuse_identity_split(effect, watch.run_id, "the spool's watch.jsonl")
+        for name in ("spawn.json", "status.json"):
+            doc = load_json(directory / name)
+            if doc is not None:
+                _refuse_identity_split(effect, doc.get("run_id"), f"the spool's {name}")
+        # an FW watch spawns no process; its `start` line names the run and is present
+        # evidence like any other
+        watch = read_watch_log(directory)
+        if watch is not None:
+            _refuse_identity_split(effect, watch.run_id, "the spool's watch.jsonl")
 
 
 def _reconcile_applied_spawns(

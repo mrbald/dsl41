@@ -499,12 +499,6 @@ class Oracle(OracleWriters):
             # DL-255: the input's waiter step, after all its referencers
             self._run_owed_scan()
 
-    @property
-    def opening_release_owed(self) -> bool:
-        """True while a removed job's held units wait for the period's first input (DL-256). The
-        engine admits a time observation for it at opening."""
-        return bool(self._opening_release)
-
     # ---- the inputs: each a root item
 
     def _dispatch(self, ev: Event) -> None:

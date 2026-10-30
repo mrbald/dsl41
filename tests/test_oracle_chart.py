@@ -3169,7 +3169,6 @@ def test_dl256_the_period_opening_gives_a_removed_jobs_units_back_through_the_ch
     with its line."""
     oracle, carried = _opening()
     paired = Oracle(oracle.catalog, carried=carried)
-    assert paired.opening_release_owed
     seen = _spied(paired)
     paired.feed(ev("STARTJOB", 3, job="j"))
     _agrees(paired)

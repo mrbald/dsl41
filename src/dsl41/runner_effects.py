@@ -412,9 +412,6 @@ class Outbox:
     def effects(self) -> Iterator[Effect]:
         return (self._effects[eid] for eid in self._order)
 
-    def pending_for(self, job: str, kind: EffectKind | None = None) -> list[Effect]:
-        return [e for e in self.pending() if e.job == job and (kind is None or e.kind == kind)]
-
 
 def plan_effects(
     emitted: Iterable[Event],

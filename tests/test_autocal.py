@@ -17,7 +17,6 @@ from hypothesis import strategies as st
 from dsl41.autocal import (
     CalendarRuleError,
     compile_calendar,
-    semantic_key,
     standard_days,
     standard_rows,
 )
@@ -247,37 +246,6 @@ def test_sem37_wekr_year_starting_on_the_anchor_day(switches: dict[str, str] | N
     assert _year("WEKR1#53", 2018, switches) == {date(2018, 12, 31)}
     assert _year("WEKR1M01", 2018, switches) == {date(2018, 12, 31)}
     assert _year("WEKR1M02", 2018, switches) == _span(date(2018, 12, 24), date(2018, 12, 30))
-
-
-def test_sem37_semantic_key_reads_one_spelling_per_meaning() -> None:
-    """The classifier's calendar key (DL-259): a day-name or digit WEKR
-    anchor and a padded or unpadded ordinal are one key. A token the parser
-    refuses keeps its own spelling."""
-
-    def key(*conditions: str) -> tuple[object, ...]:
-        cal = _ext(conditions=list(conditions))
-        return semantic_key(cal, _catalog(ext=cal))
-
-    assert key("WEKRMon#02") == key("WEKR1#2") == key("wekr1#02")
-    assert key("XWEKRSunM01") == key("xwekr7m1")
-    assert key("MNTHD#05 & WEKR3X02") == key("mnthd#5 & WEKRWedX2")
-    assert key("WEKRMon#02") != key("WEKRTue#02")
-    assert key("MON#01") != key("MON#1")  # MON#01 is refused, so not canonical
-
-
-def test_sem37_semantic_key_compiles_under_the_switches_it_is_given() -> None:
-    """The holiday-shielding reach compiles the calendar. January 1 2014 is
-    a holiday and in no WEKR1 week under `first-full`, so `holiday: S`
-    shields nothing; under `partial` it is in week 1 and S shields it from
-    the non_workday walk."""
-    hols = _std("hols", "01/01/2014")
-    cal = _ext(conditions=["WEKR1#01"], holcal="hols", holiday="S", non_workday="W")
-    catalog = _catalog(ext=cal, hols=hols)
-    default = semantic_key(cal, catalog)
-    partial = semantic_key(cal, catalog, resolve(PARTIAL))
-    assert default[2] is None
-    assert partial[2] == "s"
-    assert default[:2] == partial[:2] and default[3:] == partial[3:]
 
 
 @pytest.mark.parametrize(

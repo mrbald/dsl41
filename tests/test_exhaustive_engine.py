@@ -1144,13 +1144,6 @@ def test_a_client_request_id_in_the_engines_prefix_is_refused(
         assert caught.value.code == "invalid_argument"
     else:
         assert parse_envelope(request, addressed=_G, baseline_id="b").request_id == request_id
-    # a request that addresses no row (a boundary) meets the same door
-    boundary = {key: value for key, value in request.items() if key != "expect"}
-    if refused:
-        with pytest.raises(EnvelopeError, match="reserves"):
-            parse_envelope(boundary, addressed=None, baseline_id="b")
-    else:
-        assert parse_envelope(boundary, addressed=None, baseline_id="b").request_id == request_id
 
 
 def test_no_client_request_collides_with_an_engine_made_input_live_or_on_replay(

@@ -81,3 +81,24 @@ def test_an_opening_that_names_a_seal_refuses_before_any_write(tmp_path: Path) -
         _resume(run_root, C1_JIL)
     assert wal_path(run_root, 1).read_bytes() == before
     assert _as_left(run_root) == left
+
+
+def test_a_segment_whose_opening_names_another_segment_refuses_before_any_write(
+    tmp_path: Path,
+) -> None:
+    """A foreign segment renamed into place: its opening is a well-formed period 2 that opens
+    period 1's seal, and it sits in the file named for segment 1. Resume reads the opening's
+    own number and refuses by name."""
+    run_root = _root(tmp_path)
+    lines = wal_path(run_root, 1).read_text().splitlines()
+    opening = json.loads(lines[0])
+    opening["segment_no"] = opening["period_id"] = 2
+    opening["opens_from_seal"] = {"period_id": 1, "digest": "sha256:" + "0" * 64}
+    lines[0] = json.dumps(opening, sort_keys=True)
+    wal_path(run_root, 1).write_text("\n".join(lines) + "\n")
+    before = wal_path(run_root, 1).read_bytes()
+    left = _loosened(run_root)
+    with pytest.raises(EngineError, match="names segment 1 and its opening says 2"):
+        _resume(run_root, C1_JIL)
+    assert wal_path(run_root, 1).read_bytes() == before
+    assert _as_left(run_root) == left
