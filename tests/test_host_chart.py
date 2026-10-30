@@ -29,7 +29,6 @@ from typing import Any, cast
 
 import pytest
 import statechart_completeness as sc
-from test_boundary import C2_JIL, _close, _genesis, _request, _resume, _seal, _stage
 from test_effect_chart import _serve
 from test_exhaustive_engine import _ACTOR, _HOST_BUILDS, _HOST_JIL, _host_attempt, _host_events
 
@@ -47,7 +46,7 @@ from dsl41.oracle_state import (
     OracleError,
     RuntimeState,
 )
-from dsl41.period import estate_wal, wal_path
+from dsl41.run_root import estate_wal, wal_path
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import Envelope, apply_attempt
@@ -559,33 +558,6 @@ def test_no_tier_calls_the_witness_write() -> None:
         if "witness_host(" in line
     ]
     assert found == ["def witness_host(self, host_id: str, **fields: object) -> None:"]
-
-
-def test_a_carried_drain_is_the_configuration_the_next_period_opens_in(tmp_path: Path) -> None:
-    """Seal and reopen: the drain crosses the boundary in the carried row, the
-    next period's store restores its instance from it, and an activate then
-    takes host.03 from there."""
-    run_root = tmp_path / "run"
-    engine = _genesis(run_root)
-
-    async def under_c1() -> None:
-        engine.inject_host(HostCommand(verb="drain", host_id=engine.executor_id))
-        await engine.run_until_quiescent(T0)
-
-    asyncio.run(under_c1())
-    asyncio.run(_seal(engine, _request(engine, _stage(run_root, C2_JIL))))
-    _close(engine)
-    opened = _resume(run_root, C2_JIL)
-    key = RuntimeState.host_key(opened.executor_id)
-    store = opened.oracle.store
-    assert store.hosts[opened.executor_id].state == "passive"
-    assert store.machines.active(key) == {"host", "routed", "passive"}
-    store.begin_input()
-    cmd = HostCommand(verb="activate", host_id=opened.executor_id)
-    (outcome,) = store.machines.dispatch(key, host_event(cmd, actor=None))
-    store.commit_input()
-    assert outcome.rows == ("host.03",)
-    _close(opened)
 
 
 # ---- the alphabet (DL-325)

@@ -20,8 +20,6 @@ cp "$repo/uv.lock" "$repo/pyproject.toml" "$bundle/"
 cp "$wheel" "$bundle/wheels/"
 cp "$repo"/scripts/offline/{prepare.sh,prepare-locked.sh,bundle.py,smoke.py,qualify.sh} \
     "$bundle/tools/"
-cp "$repo"/examples/nightbank/deploy/{dsl41-launch,dsl41-engine.service,dsl41-supervisor.service,nightbank-access.toml} \
-    "$bundle/assets/"
 for profile in base ui; do
     cp "$bundle/release-inputs/requirements-$profile.txt" "$bundle/requirements-$profile.txt"
     "$python" -I "$repo/scripts/offline/bundle.py" add-release "$bundle" "$wheel" "$profile"

@@ -233,32 +233,6 @@ class Engine:
             time.sleep(0.1)
         raise TimeoutError(f"{name} did not reach {status}: {self.job(name)}")
 
-    def seal(self, force: bool = False) -> dict[str, Any]:
-        if self.process is None or self.process.poll() is not None:
-            raise RuntimeError("seal requires this launcher's live engine")
-        args = [
-            "seal",
-            "--run-root",
-            str(self.root),
-            "--next",
-            str(self.catalog),
-            "-p",
-            str(self.properties),
-            "--next-timezone",
-            "UTC",
-        ]
-        if force:
-            args.append("--force-seal")
-        # A live seal prints its JSON decision, then a human-readable opener
-        # command. The full output stays in commands.jsonl.
-        output = self._command(*args, timeout=90)
-        response = json.loads(output.splitlines()[0])
-        if not response.get("ok") or response.get("kind") != "seal":
-            raise RuntimeError(f"unexpected seal response: {response}")
-        if self.process is None or self.process.wait(timeout=30) != 3:
-            raise RuntimeError("committed seal did not produce engine exit 3")
-        return response
-
     def stop(self) -> None:
         if self.process is not None and self.process.poll() is None:
             self.process.terminate()

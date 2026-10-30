@@ -1,9 +1,9 @@
 """The compiler verbs (DL-137): every verb that reads JIL and writes a finding, report, bundle,
 module, chart or de-identified estate, and touches no run root and no socket.
 
-The verbs are `lint`, `equiv`, `report`, `uc`, `decompile`, `build`, `minify`, `folds`,
-`resolve` and `viz`. `build` imports an authored module and writes the JIL its estate() declares,
-through `cli_common.module_jil`, the loader `estate build` shares. The exit-code contract is
+The verbs are `lint`, `equiv`, `decompile`, `build`, `minify`, `folds`, `resolve` and `viz`.
+`build` imports an authored module and writes the JIL its estate() declares, through
+`cli_common.module_jil`. The exit-code contract is
 stated in `cli.py`.
 """
 
@@ -249,71 +249,6 @@ def equiv(
     except RenameError as exc:
         raise typer.Exit(refuse(exc)) from exc
     raise typer.Exit(1 if divergent else 0)
-
-
-def report(
-    files: list[Path] = CATALOG_FILES,
-    out: Path = typer.Option(
-        None, "--out", "-o", help="Write the report to this file instead of stdout."
-    ),
-    permit_unknown: bool = PERMIT_UNKNOWN,
-    properties: list[Path] = PROPERTIES,
-) -> None:
-    """Write the migration report for a set of JIL files (Markdown).
-
-    The report lists what the compiler refused, assumed or warned about.
-    It is the record of those findings, so it exits 0 whenever it was
-    generated. Use 'dsl41 lint --strict' as a pass or fail gate.
-
-    Exit codes: 0 report generated; 2 the input could not be read, parsed
-    or lowered.
-    """
-    from dsl41.backend_uc import render_migration_report
-
-    catalog = load_catalog_or_exit_2(files, permit_unknown, properties)
-    markdown = render_migration_report(catalog)
-    _emit(markdown, out)
-
-
-def uc(
-    files: list[Path] = CATALOG_FILES,
-    out: Path = typer.Option(
-        None, "--out", "-o", help="Write the JSON bundle to this file instead of stdout."
-    ),
-    strict: bool = typer.Option(
-        False, "--strict", help="Exit 1 when any workflow was quarantined."
-    ),
-    permit_unknown: bool = PERMIT_UNKNOWN,
-    properties: list[Path] = PROPERTIES,
-) -> None:
-    """Convert JIL files into Stonebranch Universal Controller records (JSON).
-
-    The bundle holds one taskWorkflow record per workflow, in the base
-    create-only schema (docs/uc-edge-schema.md). A workflow is
-    quarantined whole when it has an edge the base schema cannot
-    express, or when its record name collides with another workflow's.
-    Quarantined workflows are listed in the bundle's ledger and
-    summarized on stderr.
-
-    Exit codes: 0 bundle generated; 1 with --strict when any workflow
-    was quarantined; 2 the input could not be read, parsed or lowered.
-    """
-    # Design: U3a
-    from dsl41.backend_uc import compile_to_uc
-
-    catalog = load_catalog_or_exit_2(files, permit_unknown, properties)
-    bundle = compile_to_uc(catalog)
-    # +"\n": `uc` is the one emitter whose body ends in a newline; `_emit` adds none
-    _emit(bundle.model_dump_json(indent=2) + "\n", out)
-    typer.echo(
-        f"{len(bundle.records)} record(s); {len(bundle.quarantined)} quarantined",
-        err=True,
-    )
-    for workflow in bundle.quarantined:
-        for reason in workflow.reasons:
-            typer.echo(f"quarantined {workflow.name}: {reason}", err=True)
-    if strict and bundle.quarantined:
-        raise typer.Exit(1)
 
 
 def _decompile_package(

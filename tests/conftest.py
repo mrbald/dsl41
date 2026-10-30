@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import os
-import selectors
 import shutil
 import signal
-import socket
 import sys
 import tempfile
 from pathlib import Path
@@ -156,59 +154,3 @@ def _configuration(state, phase):
             if below is not None:
                 return below | {state.name}
     return None
-
-
-@pytest.fixture
-def stand():
-    """`stand(sup, phase)` puts a supervisor's process in the leaf state `phase`
-    with no row taken, where a test wrote the table machine's `state` before. A
-    fresh executor holds the lease as it was and the process in `phase`; a spy
-    on the old executor is gone."""
-    from dsl41 import runner_supervisor
-
-    def _stand(sup, phase: str) -> None:
-        chart = runner_supervisor.SUPERVISOR_PROCESS
-        executor = runner_supervisor.Executor()
-        executor.restore(
-            "lease",
-            runner_supervisor.SUPERVISOR_LEASE,
-            sup._machines.active("lease"),
-            sup,
-        )
-        executor.restore("process", chart, _configuration(chart.root, phase), sup)
-        sup._machines = executor
-
-    return _stand
-
-
-@pytest.fixture
-def queued_supervisor(short_root: Path):
-    """In-process selector with real sockets and explicit descriptor cleanup.
-    The supervisor stands in `serving`, the only state whose requests are read
-    and dispatched; it binds nothing and publishes nothing. It gets there by
-    the process chart's rows: the startup fact `free`, then `publish`."""
-    from dsl41 import runner_supervisor
-
-    sup = runner_supervisor.Supervisor(str(short_root))
-    sup._process(runner_supervisor.START, runner_supervisor.FREE)
-    sup._process(runner_supervisor.PUBLISH)
-    peers = []
-
-    def connect():
-        server, peer = socket.socketpair()
-        server.setblocking(False)
-        peer.settimeout(1)
-        conn = runner_supervisor._Conn(server)
-        sup._conns[server.fileno()] = conn
-        sup._sel.register(server, selectors.EVENT_READ, ("conn", conn))
-        peers.append(peer)
-        return conn, peer
-
-    yield sup, connect
-    for conn in list(sup._conns.values()):
-        sup._drop_conn(conn)
-    for peer in peers:
-        peer.close()
-    for fd in (sup._chld_r, sup._chld_w):
-        os.close(fd)
-    sup._sel.close()

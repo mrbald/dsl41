@@ -38,6 +38,7 @@ from dsl41.oracle_intents import StatusLine
 from dsl41.oracle_state import CascadeDepthError, Event, EventKind, OracleError
 from dsl41.scan_chart import IDLE as SCAN_IDLE
 from dsl41.scan_chart import SCAN_KEY
+from dsl41.semantics import resolve
 from dsl41.state_machine import (
     COMPLETION,
     HITS_ENV,
@@ -47,7 +48,6 @@ from dsl41.state_machine import (
     StatechartError,
 )
 from dsl41.state_machine import Event as ChartEvent
-from dsl41.semantics import resolve
 
 T0 = datetime(2026, 7, 1, 8, 0)
 

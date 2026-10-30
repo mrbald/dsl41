@@ -37,36 +37,35 @@ import asyncio
 import contextlib
 import json
 import uuid
-
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+from test_preconditions import _serve_engine
 
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, HostRuntime, OracleError, RuntimeState
+from dsl41.run_root import CMD_GRACE_S
 from dsl41.runner import Engine
-from dsl41.runner_startup import resume_run, start_run
-from dsl41.runner_adapters import FakeAdapter, SupervisorClient
+from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import PROTOCOL_VERSION, Envelope
 from dsl41.runner_clock import RealClock, VirtualClock
-from dsl41.runner_effects import EffectOutcome
 from dsl41.runner_control import ControlServer, outcome_of, read_for, revision_in
-from dsl41.period import CMD_GRACE_S
+from dsl41.runner_effects import EffectOutcome
 from dsl41.runner_hosts import (
     LOCAL_EXECUTOR_ID,
     HostCommand,
     apply_host_command,
-    kill_allowance,
     host_rejection_reason,
+    kill_allowance,
     routes_new_effects,
     seed_local_executor,
     skew_allowance,
 )
 from dsl41.runner_journal import Replay, read_journal
-from test_preconditions import _serve_engine
+from dsl41.runner_startup import resume_run, start_run
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -1226,7 +1225,7 @@ def test_a_refused_mixed_history_resume_writes_no_decision(short_root: Path) -> 
     SPAWN: its `leader` record, which any refused resume appends, is the
     only new record, and the build that wrote the log can still open it
     (DL-315)."""
-    from dsl41.period import active_wal
+    from dsl41.run_root import active_wal
     from dsl41.runner_adapters import ARTIFACT_FORMAT_VERSION, append_watch_line
     from dsl41.runner_clock import EngineError
 
@@ -1349,68 +1348,6 @@ def test_a_recovered_starting_overwrite_plans_no_spawn(
             await _close_engine(resumed)
         [decision] = _decisions_at(run_root, index)
         assert (decision["decision"], decision["effects"]) == ("applied", [])
-        assert _reconciled(run_root) == []
-
-    asyncio.run(scenario())
-
-
-@pytest.mark.parametrize("arm", ["FW", "supervised", "tethered"])
-def test_a_start_whose_spawn_was_retired_is_left_as_it_is_at_a_restart(
-    short_root: Path, monkeypatch: pytest.MonkeyPatch, arm: str
-) -> None:
-    """Run 1 was killed while its SPAWN was held, so dispatch retired it,
-    and an operator then set the row RUNNING at the same run number. The
-    live engine launches nothing for that run, and neither does a restart
-    (DL-315): a watch is not relaunched, a supervised start is not
-    replayed under the retired id, and a tethered start is not failed as a
-    lost dispatch. The row stays RUNNING at run 1 with nothing live and
-    nothing held, for the operator to end or restart."""
-    from test_supervisor_idempotency import _probe_adapter
-
-    async def scenario() -> None:
-        run_root = short_root / "run"
-        if arm == "FW":
-            jil, job, job_type = _WATCH_JIL, "w", "FW"
-            genesis, resume = FakeAdapter(default=None), _CountingWatch()
-        else:
-            jil, job, job_type = _SOLO_JIL, "j", "CMD"
-            if arm == "supervised":
-                genesis, resume = _probe_adapter(hang=True), _probe_adapter()
-            else:
-                genesis, resume = FakeAdapter(default=None), _CountingWatch()
-        engine = _genesis_engine(run_root, jil, job_type, genesis)
-        await _hold_host(engine, "drain")
-        engine.inject(_ev("STARTJOB", 0.5, job=job))
-        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
-        engine.inject(_ev("KILLJOB", 2, job=job))
-        await engine.run_until_quiescent(T0 + timedelta(minutes=3))
-        [spawn] = [e for e in engine.outbox.effects() if e.kind == "SPAWN"]
-        assert engine.outbox.state_of(spawn.effect_id) == "retired"
-        await _release_host(engine, "drain", 4)
-        engine.inject(_ev("STATUS", 5, job=job, status="RUNNING"))
-        await engine.run_until_quiescent(T0 + timedelta(minutes=6))
-        assert engine.live_jobs() == frozenset()
-        await _close_engine(engine)
-
-        launches = _count_launches(monkeypatch)
-        resumed = await resume_run(
-            lower_source(jil),
-            run_root,
-            clock=VirtualClock(start=T0 + timedelta(minutes=7)),
-            adapters={job_type: resume},
-            settle_seconds=0.0,
-            grace_seconds=0.0,
-        )
-        try:
-            await resumed.run_until_quiescent(T0 + timedelta(minutes=8))
-            row = resumed.oracle.store.job[job]
-            assert (row.status, row.run_number) == ("RUNNING", 1)
-            assert resumed.live_jobs() == frozenset()
-            assert resumed.held_jobs() == frozenset()
-            assert launches == []
-            assert resume.calls == []
-        finally:
-            await _close_engine(resumed)
         assert _reconciled(run_root) == []
 
     asyncio.run(scenario())
@@ -1692,32 +1629,6 @@ def test_contact_refreshes_the_row_without_costing_a_revision_or_a_record() -> N
     # something outside the inventory is not a registration
     store.touch_host("stranger", T0)
     assert store.host("stranger") is None
-
-
-def test_the_recorded_deadman_is_what_the_supervisor_reports() -> None:
-    """ss8's bound has to describe the HOST. A reattaching engine meets a
-    supervisor it did not start -- possibly one launched with a different
-    interval, or none -- so the row records what the supervisor says it runs,
-    read back over the lease exchange, never the flag this engine was given.
-
-    A wrong value here is not cosmetic: it is the length of the wait that
-    stands between an operator and a double run."""
-    client = SupervisorClient(Path("/nonexistent"), deadman_s=90.0)
-    assert client.supervisor_deadman_s is None  # nothing said so yet
-
-    client._note_contact({"ok": True, "deadman_s": 45.0})
-    assert client.supervisor_deadman_s == 45.0  # the supervisor's, not the flag's
-    client._note_contact({"ok": True})  # RENEW carries no interval
-    assert client.supervisor_deadman_s == 45.0  # and does not erase one
-
-    engine = Engine(
-        lower_source(_SOLO_JIL),
-        clock=VirtualClock(start=T0),
-        adapters={"CMD": FakeAdapter(default=None)},
-        deadman_s=client.supervisor_deadman_s,
-    )
-    row = engine.oracle.store.host(LOCAL_EXECUTOR_ID)
-    assert row is not None and row.deadman_s == 45.0
 
 
 def test_cm11_a_real_deadman_and_a_real_contact_make_the_bound_computable() -> None:
@@ -2076,3 +1987,60 @@ def test_cm11_the_force_that_skips_the_proof_carries_the_claim_that_asked_for_it
     apply_host_command(gated, _cmd("evict", "g"), actor="alice@ops-laptop")
     gated.commit_input()
     assert gated.host("g").forced_by is None  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize("arm", ["FW", "tethered"])
+def test_a_start_whose_spawn_was_retired_is_left_as_it_is_at_a_restart(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, arm: str
+) -> None:
+    """Run 1 was killed while its SPAWN was held, so dispatch retired it,
+    and an operator then set the row RUNNING at the same run number. The
+    live engine launches nothing for that run, and neither does a restart
+    (DL-315): a watch is not relaunched, and a tethered start is not failed as a
+    lost dispatch. The row stays RUNNING at run 1 with nothing live and
+    nothing held, for the operator to end or restart."""
+
+    async def scenario() -> None:
+        run_root = short_root / "run"
+        if arm == "FW":
+            jil, job, job_type = _WATCH_JIL, "w", "FW"
+            genesis, resume = FakeAdapter(default=None), _CountingWatch()
+        else:
+            jil, job, job_type = _SOLO_JIL, "j", "CMD"
+            genesis, resume = FakeAdapter(default=None), _CountingWatch()
+        engine = _genesis_engine(run_root, jil, job_type, genesis)
+        await _hold_host(engine, "drain")
+        engine.inject(_ev("STARTJOB", 0.5, job=job))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+        engine.inject(_ev("KILLJOB", 2, job=job))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=3))
+        [spawn] = [e for e in engine.outbox.effects() if e.kind == "SPAWN"]
+        assert engine.outbox.state_of(spawn.effect_id) == "retired"
+        await _release_host(engine, "drain", 4)
+        engine.inject(_ev("STATUS", 5, job=job, status="RUNNING"))
+        await engine.run_until_quiescent(T0 + timedelta(minutes=6))
+        assert engine.live_jobs() == frozenset()
+        await _close_engine(engine)
+
+        launches = _count_launches(monkeypatch)
+        resumed = await resume_run(
+            lower_source(jil),
+            run_root,
+            clock=VirtualClock(start=T0 + timedelta(minutes=7)),
+            adapters={job_type: resume},
+            settle_seconds=0.0,
+            grace_seconds=0.0,
+        )
+        try:
+            await resumed.run_until_quiescent(T0 + timedelta(minutes=8))
+            row = resumed.oracle.store.job[job]
+            assert (row.status, row.run_number) == ("RUNNING", 1)
+            assert resumed.live_jobs() == frozenset()
+            assert resumed.held_jobs() == frozenset()
+            assert launches == []
+            assert resume.calls == []
+        finally:
+            await _close_engine(resumed)
+        assert _reconciled(run_root) == []
+
+    asyncio.run(scenario())

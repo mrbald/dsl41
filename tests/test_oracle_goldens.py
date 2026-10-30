@@ -40,10 +40,10 @@ import dsl41.oracle_writers
 from dsl41.ir import lower_source
 from dsl41.oracle import InputBatch, Oracle
 from dsl41.oracle_state import CascadeDepthError, Event, OracleError
-from dsl41.semantics import resolve
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import VirtualClock
+from dsl41.semantics import resolve
 
 #: The oracle the goldens hold to: the engine's.
 ORACLE: OracleFactory = Oracle

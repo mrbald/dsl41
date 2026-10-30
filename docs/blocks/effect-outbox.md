@@ -8,7 +8,7 @@ Dispatch applies pending effects in admission order. Resume reconciles or re-dri
 
 ## Fate
 
-The contract carries over: [concurrency-model §1](../concurrency-model.md#1-storage--frozen) already puts the outbox in the ledger, whatever provides it.
+The contract carries over: concurrency-model §1 (`concurrency-model.md`, retired in 2.0.0) already puts the outbox in the ledger, whatever provides it.
 `runner_effects.py` carries over as it is: `Outbox` is in memory, and `read_outbox` rebuilds it from the WAL.
 The resume half reads the local spool, `runs/<job>.<run_number>`, and the supervisor's run list. Those belong to the lifecycle tier, not to the ledger.
 Storage capabilities needed:
@@ -35,31 +35,31 @@ One effect's states are [effect](../state-machines.md#effect); the anchor holds 
 
 ## Invariants
 
-- Intent is durable before the attempt: effects ride in the step-7 `decision` line ([concurrency-model §4](../concurrency-model.md#4-admission-and-application); [DL-96](../decision-log.md); [DL-118](../decision-log.md)).
-- Every effect is bound to its executor and the host row's generation at birth. A SPAWN's `run_id` is minted in the decision transaction ([concurrency-model §5](../concurrency-model.md#5-effects); [DL-118](../decision-log.md)).
-- One run has one `run_id` and one `run_id` names one run. A second, different record under one id is refused ([concurrency-model §5](../concurrency-model.md#5-effects); [DL-118](../decision-log.md)).
+- Intent is durable before the attempt: effects ride in the step-7 `decision` line (concurrency-model §4 (`concurrency-model.md`, retired in 2.0.0); [DL-96](../decision-log.md); [DL-118](../decision-log.md)).
+- Every effect is bound to its executor and the host row's generation at birth. A SPAWN's `run_id` is minted in the decision transaction (concurrency-model §5 (`concurrency-model.md`, retired in 2.0.0); [DL-118](../decision-log.md)).
+- One run has one `run_id` and one `run_id` names one run. A second, different record under one id is refused (concurrency-model §5 (`concurrency-model.md`, retired in 2.0.0); [DL-118](../decision-log.md)).
 - `effect_id` is derived, not minted ([DL-96](../decision-log.md)).
-- Effects apply in admission order ([concurrency-model §5](../concurrency-model.md#5-effects)).
+- Effects apply in admission order (concurrency-model §5 (`concurrency-model.md`, retired in 2.0.0)).
 - Dispatch asks about supersession before the routing hold, on every pass ([DL-234](../decision-log.md)). A SPAWN applies only while its row is `STARTING` or `RUNNING` at its run number ([DL-232](../decision-log.md)).
 - Routing holds a SPAWN only; a KILL is never held ([DL-96](../decision-log.md)).
 - One planning call plans at most one KILL per run ([DL-232](../decision-log.md)).
 - The [ghost-run](../glossary.md#ghost-run) gate decides at planning, and a run counts as dispatched from its plan ([DL-234](../decision-log.md)).
-- The outcome states are four, and `indeterminate` is not `pending` ([concurrency-model §5](../concurrency-model.md#5-effects); [DL-111](../decision-log.md)).
-- An outcome is final. `Outbox.resolve` refuses a second one before any post, live and on replay ([concurrency-model §5](../concurrency-model.md#5-effects); [DL-295](../decision-log.md)).
-- `Outbox.result_for` gives the known result or `outcome_unavailable`. Nothing in the local engine asks for it; its caller would be the relay, which is not built ([DL-97](../decision-log.md); [DL-284](../decision-log.md)). Locally an indeterminate effect refuses the seal ([concurrency-model §5](../concurrency-model.md#5-effects) and the [CM-06 row](../concurrency-model.md#9-the-proving-ground)).
-- At resume a pending SPAWN with a spool trace is applied, and one with none is re-driven ([DL-102](../decision-log.md)). A recorded KILL is re-driven, and so is a live wrapper under a terminal row ([period-model §11](../period-model.md#11-resume-replay-and-recovery) step 7).
+- The outcome states are four, and `indeterminate` is not `pending` (concurrency-model §5 (`concurrency-model.md`, retired in 2.0.0); [DL-111](../decision-log.md)).
+- An outcome is final. `Outbox.resolve` refuses a second one before any post, live and on replay (concurrency-model §5 (`concurrency-model.md`, retired in 2.0.0); [DL-295](../decision-log.md)).
+- `Outbox.result_for` gives the known result or `outcome_unavailable`. Nothing in the local engine asks for it; its caller would be the relay, which is not built ([DL-97](../decision-log.md); [DL-284](../decision-log.md)). Locally an indeterminate effect refuses the seal (concurrency-model §5 (`concurrency-model.md`, retired in 2.0.0) and the CM-06 row (`concurrency-model.md`, retired in 2.0.0)).
+- At resume a pending SPAWN with a spool trace is applied, and one with none is re-driven ([DL-102](../decision-log.md)). A recorded KILL is re-driven, and so is a live wrapper under a terminal row (period-model §11 (`period-model.md`, retired in 2.0.0) step 7).
 
 ## Failure and recovery
 
-- Crash between the decision and the attempt: the effect stays pending in the WAL. Resume re-drives or resolves it as the invariants above say ([concurrency-model §5](../concurrency-model.md#5-effects)).
+- Crash between the decision and the attempt: the effect stays pending in the WAL. Resume re-drives or resolves it as the invariants above say (concurrency-model §5 (`concurrency-model.md`, retired in 2.0.0)).
 - Crash between a launch and its `effect_result`: the spool is the record, and resume resolves the SPAWN as applied ([DL-96](../decision-log.md)).
 - A spool file or a supervisor row naming another `run_id` than the effect bound: resume refuses before it changes anything (`_preflight_identities`; [DL-118](../decision-log.md)).
-- A log that records one effect id twice with different content: `Outbox` raises `EngineError`, and resume stops. An outcome for an unknown effect, one naming another `run_id`, or a second outcome for one effect: replay stops with an `OutcomeReplayFault` naming the effect, and resume stops as for any replay fault ([period-model §11](../period-model.md#11-resume-replay-and-recovery)).
-- An engine that died during the kill ladder leaves a live wrapper under a terminal row. Resume kills it whatever the KILL effect says ([period-model §11](../period-model.md#11-resume-replay-and-recovery) step 7).
-- A leader that lost its lock launches nothing: `_dispatch` re-proves the fence first ([concurrency-model §1](../concurrency-model.md#1-storage--frozen)).
-- During a seal, an `outbox.record` that raises, or a failed `effect_result` append, [fail-stops](../glossary.md#fail-stop) the engine instead of refusing the seal. Resume rebuilds the outbox from the WAL's decision records ([period-model §7](../period-model.md#7-the-seal-operation); [DL-274](../decision-log.md)).
+- A log that records one effect id twice with different content: `Outbox` raises `EngineError`, and resume stops. An outcome for an unknown effect, one naming another `run_id`, or a second outcome for one effect: replay stops with an `OutcomeReplayFault` naming the effect, and resume stops as for any replay fault (period-model §11 (`period-model.md`, retired in 2.0.0)).
+- An engine that died during the kill ladder leaves a live wrapper under a terminal row. Resume kills it whatever the KILL effect says (period-model §11 (`period-model.md`, retired in 2.0.0) step 7).
+- A leader that lost its lock launches nothing: `_dispatch` re-proves the fence first (concurrency-model §1 (`concurrency-model.md`, retired in 2.0.0)).
+- During a seal, an `outbox.record` that raises, or a failed `effect_result` append, [fail-stops](../glossary.md#fail-stop) the engine instead of refusing the seal. Resume rebuilds the outbox from the WAL's decision records (period-model §7 (`period-model.md`, retired in 2.0.0); [DL-274](../decision-log.md)).
 - A statechart error out of `record` or `resolve` is not a fault to contain. It stops the engine with exit 7 from the loop, from a seal's drain and from resume; in replay its report names the WAL record, and at a period's opening the carried record ([statechart-engine §5](../statechart-engine.md#5-the-step-and-the-worklist)).
-- An attempt whose decision never reached the WAL is applied through the gate at replay. Before the resume ladder reads the outbox, the resuming engine performs step 7 for it: it writes the missing `decision` record with the effects `plan_effects` plans, and a SPAWN mints its `run_id` there (`Engine.commit_recovered`). The recovered start is then a pending SPAWN, which dispatch applies or a drained or quarantined host holds ([concurrency-model §4](../concurrency-model.md#4-admission-and-application); [period-model §11](../period-model.md#11-resume-replay-and-recovery) step 6a; [DL-274](../decision-log.md); [DL-315](../decision-log.md)).
+- An attempt whose decision never reached the WAL is applied through the gate at replay. Before the resume ladder reads the outbox, the resuming engine performs step 7 for it: it writes the missing `decision` record with the effects `plan_effects` plans, and a SPAWN mints its `run_id` there (`Engine.commit_recovered`). The recovered start is then a pending SPAWN, which dispatch applies or a drained or quarantined host holds (concurrency-model §4 (`concurrency-model.md`, retired in 2.0.0); period-model §11 (`period-model.md`, retired in 2.0.0) step 6a; [DL-274](../decision-log.md); [DL-315](../decision-log.md)).
 
 ## Owning modules
 
@@ -67,7 +67,6 @@ One effect's states are [effect](../state-machines.md#effect); the anchor holds 
 - `src/dsl41/runner.py`: planning at step 7 and the dispatch gates.
 - `src/dsl41/runner_startup.py`: reconciliation and re-drive at resume.
 - `src/dsl41/runner_journal.py`: the `decision` and `effect_result` records and the rebuild.
-- `src/dsl41/boundary.py`: `carried_outbox`, the outbox a segment opens with after a seal.
 
 ## Tests
 
@@ -88,18 +87,13 @@ One effect's states are [effect](../state-machines.md#effect); the anchor holds 
 - `test_a_starting_overwrite_while_a_spawn_is_held_plans_no_second_spawn`
 - `test_a_recorded_kill_is_resolved_from_the_spool_three_ways`
 - `test_cm09_a_spawn_that_never_reached_the_host_is_redriven_at_resume`
-- `test_a_run_the_host_admits_to_is_never_re_driven`
 - `test_pr34_a_start_line_resolves_a_pending_spawn`
-- `test_pr33_a_live_wrapper_under_a_terminal_row_is_re_driven`
 - `test_the_fence_stops_the_spawn_and_not_only_the_record`
-- `test_pr28b_an_exception_while_a_drained_attempt_applies_fail_stops`
 - `test_a_second_outcome_never_reaches_the_chart`
 - `test_a_retry_after_a_refused_resume_runs_on_the_same_executor`
-- `test_a_resume_names_the_carried_intent_a_broken_chart_meets`
 - `test_every_event_a_poster_sends_is_in_the_alphabet`
 - `test_dsl41_run_exits_7_when_a_resolve_in_the_loop_meets_a_gap`
 - `test_dsl41_run_exits_7_when_replay_meets_a_gap_naming_the_wal_input`
-- `test_dsl41_run_exits_7_when_a_seal_s_drain_meets_a_gap`
 
 ## Open findings
 

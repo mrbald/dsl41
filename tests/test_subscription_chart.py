@@ -22,15 +22,13 @@ from typing import Any
 
 import pytest
 import statechart_completeness as sc
-from test_boundary import C2_JIL, _close, _genesis, _request, _seal, _seal_request_wire, _stage
 from test_runner_control import _serve, _teardown, _versioned
 
-from dsl41 import runner, runner_control, runner_journal
-from dsl41.boundary import BoundaryFailStop
+from dsl41 import runner_control, runner_journal
 from dsl41.machines import MACHINES
 from dsl41.oracle_state import Event
-from dsl41.period import wal_path
-from dsl41.runner import SEAL_BOUNDARY, Engine
+from dsl41.run_root import wal_path
+from dsl41.runner import Engine
 from dsl41.runner_control import ControlServer
 from dsl41.runner_journal import (
     APPEND,
@@ -40,7 +38,6 @@ from dsl41.runner_journal import (
     Journal,
     Offer,
     Subscription,
-    read_journal,
 )
 from dsl41.state_machine import (
     HITS_ENV,
@@ -294,49 +291,6 @@ def test_a_statechart_error_from_an_owner_reaches_the_append(tmp_path: Path) -> 
     journal.close()
 
 
-def test_a_statechart_error_at_the_seal_record_s_fan_out_is_not_an_unknown_outcome(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The `seal` record is published after its fsync. A statechart error in
-    that fan-out leaves the boundary as itself, not as `BoundaryFailStop`, so
-    the engine exits 7. The seal does not abort: the barrier stays parked and
-    the head stays open on period 1. The record is durable, so a resume opens
-    period 2 from it (PR-45)."""
-    from test_boundary import _resume
-    from test_estate import _head
-
-    from dsl41.boundary import OpenHead
-
-    run_root = tmp_path / "run"
-    engine = _genesis(run_root)
-    journal = engine.journal
-    assert journal is not None
-    aborted: list[Engine] = []
-    monkeypatch.setattr(Engine, "abort_boundary", aborted.append)
-    feed = journal.subscribe(engine.machines)
-    offer = feed.offer
-    error = UnhandledEvent("a feed met a gap at the seal record")
-
-    def offered(record: dict[str, Any], size: int) -> bool:
-        if record.get("rec") == "seal":
-            raise error
-        return offer(record, size)
-
-    feed.offer = offered  # type: ignore[method-assign]
-    with pytest.raises(UnhandledEvent) as raised:
-        asyncio.run(_seal(engine, _request(engine, _stage(run_root, C2_JIL))))
-    assert raised.value is error and not isinstance(raised.value, BoundaryFailStop)
-    assert aborted == [] and engine.sealing
-    assert read_journal(wal_path(run_root, 1))[-1]["rec"] == "seal"
-    head = _head(run_root)
-    assert isinstance(head, OpenHead) and head.period_id == 1
-    _close(engine)
-    resumed = _resume(run_root, C2_JIL)
-    _close(resumed)
-    head = _head(run_root)
-    assert isinstance(head, OpenHead) and head.period_id == 2
-
-
 # ---- the control belt (statechart-engine ss5, concurrency-model ss4)
 
 
@@ -403,7 +357,7 @@ def _serve_with_a_client(
     socket is up. Answers the exit code and the lines the client read."""
     from dsl41 import cli_run
     from dsl41.ir import lower_source
-    from dsl41.period import runtime_profile_from_cli
+    from dsl41.run_root import runtime_profile_from_cli
 
     real = Engine.run_until_quiescent
     clients: list[asyncio.Task[list[Any]]] = []
@@ -422,7 +376,6 @@ def _serve_with_a_client(
             False,
             [],
             profile=runtime_profile_from_cli(),
-            supervisor="spawn",
         )
         # bounded: an engine that swallowed the error would serve on forever
         code = await asyncio.wait_for(serve, timeout=60)
@@ -450,56 +403,6 @@ def _resume_at_zero(_engine: Engine) -> dict[str, Any]:
 
 def _follow(_engine: Engine) -> dict[str, Any]:
     return _versioned({"cmd": "subscribe"})
-
-
-@pytest.mark.parametrize(
-    "cell", ["respond/handler", "respond/chart", "subscribe/handler", "subscribe/chart"]
-)
-def test_a_statechart_error_in_a_control_handler_stops_the_run_with_exit_7(
-    short_root: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    cell: str,
-) -> None:
-    """Under `_respond`, a query raises one, or a seal request's instance start
-    meets a seal chart whose entry action is missing. Under `_subscribe`, the
-    backfill raises one, or the feed's chart lacks the row for the backfill
-    sent. Each time the client gets no reply past the ack, the connection
-    hangs up, and the run prints the report and exits 7."""
-    run_root = short_root / "root"
-    directory = tmp_path / "hits"
-    directory.mkdir()
-    monkeypatch.setenv(HITS_ENV, str(directory))
-
-    def seal(engine: Engine) -> dict[str, Any]:
-        return _seal_request_wire(engine, _stage(run_root, C2_JIL))
-
-    request: Any
-    if cell == "respond/handler":
-        monkeypatch.setattr(ControlServer, "_timers", _timers)
-        request, first = _query, "a query met a gap"
-    elif cell == "respond/chart":
-        root = _with_entry(SEAL_BOUNDARY.root, "requested", "missing")
-        monkeypatch.setattr(runner, "SEAL_BOUNDARY", replace(SEAL_BOUNDARY, root=root))
-        request, first = seal, "action 'missing' is not in the registry"
-    elif cell == "subscribe/handler":
-        monkeypatch.setattr(ControlServer, "_backfill", _backfill)
-        request, first = _resume_at_zero, "a backfill met a gap"
-    else:
-        rows = tuple(row for row in CHART.rows if row.id != _row("02"))
-        monkeypatch.setattr(runner_journal, "SUBSCRIPTION", replace(CHART, rows=rows))
-        request, first = _follow, "subscription <dsl41.runner_journal.Subscription object at"
-    code, lines = _serve_with_a_client(run_root, monkeypatch, request)
-    assert code == 7
-    report = _report(capsys.readouterr().err)
-    assert report[0].startswith(f"{STATECHART_LOG_PREFIX}: {first}"), report[:3]
-    if cell.startswith("subscribe"):
-        assert lines[0]["subscribed"] is True
-        lines = lines[1:]
-        if cell == "subscribe/chart":
-            assert f"{STATECHART_LOG_PREFIX}: machine: subscription" in report
-    assert lines == []  # no reply, no `internal_error`: the server hung up
 
 
 def test_the_old_belt_would_have_answered_internal_error(
@@ -649,60 +552,41 @@ def test_a_statechart_error_while_the_server_closes_still_exits_7(
     assert not any("had already stopped" in line for line in report)
 
 
-def test_a_statechart_error_while_the_server_closes_keeps_a_sealed_exit_3(
+@pytest.mark.parametrize("cell", ["respond/handler", "subscribe/handler", "subscribe/chart"])
+def test_a_statechart_error_in_a_control_handler_stops_the_run_with_exit_7(
     short_root: Path,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    cell: str,
 ) -> None:
-    """A seal ends the run with a stream attached, and the stream's end meets
-    a chart without its row while the server closes. The run keeps the halt
-    the engine chose: exit 3. The report's last line says so, and the report
-    goes out before the next period's opener is named."""
-    from dsl41 import cli_run
-    from dsl41.ir import lower_source
-    from dsl41.period import runtime_profile_from_cli
-
-    _gap(monkeypatch, tmp_path, "04")
+    """Under `_respond`, a query raises one. Under `_subscribe`, the
+    backfill raises one, or the feed's chart lacks the row for the backfill
+    sent. Each time the client gets no reply past the ack, the connection
+    hangs up, and the run prints the report and exits 7."""
     run_root = short_root / "root"
-    real = Engine.run_until_quiescent
-    clients: list[asyncio.Task[list[Any]]] = []
-    order: list[str] = []
+    directory = tmp_path / "hits"
+    directory.mkdir()
+    monkeypatch.setenv(HITS_ENV, str(directory))
 
-    async def a_feed_then_a_seal(self: Engine, horizon: datetime) -> list[Event]:
-        subscribed = asyncio.Event()
-        sock = run_root / "control.sock"
-        clients.append(asyncio.create_task(_converse(sock, _follow(self), subscribed.set)))
-        await subscribed.wait()
-        self.submit_seal(_request(self, _stage(run_root, C2_JIL)))
-        return await real(self, horizon)
-
-    def report(exc: StatechartError) -> int:
-        order.append("report")
-        return real_report(exc)
-
-    real_report = cli_run.statechart_report
-    monkeypatch.setattr(Engine, "run_until_quiescent", a_feed_then_a_seal)
-    monkeypatch.setattr(cli_run, "statechart_report", report)
-    monkeypatch.setattr(cli_run, "say_next", lambda *_args: order.append("say_next"))
-
-    async def scenario() -> tuple[int, list[Any]]:
-        serve = cli_run._serve_run(
-            lower_source(_JIL),
-            run_root,
-            False,
-            [],
-            profile=runtime_profile_from_cli(),
-            supervisor="spawn",
-        )
-        code = await asyncio.wait_for(serve, timeout=60)
-        (client,) = clients
-        return code, await client
-
-    code, lines = asyncio.run(scenario())
-    assert code == 3
-    assert lines[0]["subscribed"] is True
-    lines_out = _report(capsys.readouterr().err)
-    assert "no row and no deferral for stream_ends" in lines_out[0], lines_out[:3]
-    assert lines_out[-1] == f"{STATECHART_LOG_PREFIX}: the engine had already stopped with exit 3"
-    assert order == ["report", "say_next"]
+    request: Any
+    if cell == "respond/handler":
+        monkeypatch.setattr(ControlServer, "_timers", _timers)
+        request, first = _query, "a query met a gap"
+    elif cell == "subscribe/handler":
+        monkeypatch.setattr(ControlServer, "_backfill", _backfill)
+        request, first = _resume_at_zero, "a backfill met a gap"
+    else:
+        rows = tuple(row for row in CHART.rows if row.id != _row("02"))
+        monkeypatch.setattr(runner_journal, "SUBSCRIPTION", replace(CHART, rows=rows))
+        request, first = _follow, "subscription <dsl41.runner_journal.Subscription object at"
+    code, lines = _serve_with_a_client(run_root, monkeypatch, request)
+    assert code == 7
+    report = _report(capsys.readouterr().err)
+    assert report[0].startswith(f"{STATECHART_LOG_PREFIX}: {first}"), report[:3]
+    if cell.startswith("subscribe"):
+        assert lines[0]["subscribed"] is True
+        lines = lines[1:]
+        if cell == "subscribe/chart":
+            assert f"{STATECHART_LOG_PREFIX}: machine: subscription" in report
+    assert lines == []  # no reply, no `internal_error`: the server hung up

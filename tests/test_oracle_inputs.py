@@ -2,10 +2,9 @@
 
 The seeded estates are deterministic and carry every input family and
 attribute the oracle reads; the switch matrix is each value of each switch
-once, then the named pairs; the seal's `state` section is serialized as the
-seal writes it and holds the fields the engine fills; equal stores render
-the same whatever order their sets iterate or their rows were inserted in;
-and a state the seal refuses renders as its refusal.
+once, then the named pairs; equal store snapshots render the same whatever
+order their sets iterate or their rows were inserted in; and a state the
+snapshot refuses renders as its refusal.
 """
 
 from __future__ import annotations
@@ -14,19 +13,16 @@ import ast
 import inspect
 import re
 import textwrap
-from collections.abc import Callable
 from datetime import datetime
 
 from estate_gen import Advance, SealPoint, seeded
-from oracle_inputs import _Rows, seal_digest, seal_state_payload, sealed_state, switch_matrix
-from test_seal_artifact import _seal
+from oracle_inputs import _Rows, seal_digest, sealed_state, switch_matrix
 
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, JobRuntime
-from dsl41.runner import Engine
-from dsl41.seal import SealedState
 from dsl41.semantics import REGISTRY
+from sealed_state import SealedState
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -153,33 +149,6 @@ def test_the_switch_matrix_is_each_value_of_each_switch_once() -> None:
 # ------------------------------------------------------------- the renderings
 
 
-def test_the_seal_state_section_is_serialized_as_the_seal_writes_it() -> None:
-    seal = _seal()
-    assert seal_state_payload(seal.state) == seal.to_payload()["state"]
-
-
-def _sealed_state_keywords(function: Callable[..., object]) -> set[str]:
-    tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
-    calls = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "SealedState"
-    ]
-    assert len(calls) == 1, (
-        f"{function.__qualname__} builds SealedState in {len(calls)} calls, not one:"
-        " point this pin at the function that builds the seal's state now"
-    )
-    return {keyword.arg for keyword in calls[0].keywords if keyword.arg is not None}
-
-
-def test_the_seal_state_fills_the_fields_the_engine_fills() -> None:
-    fields = set(SealedState.model_fields)
-    assert _sealed_state_keywords(Engine._snapshot) == fields
-    assert _sealed_state_keywords(sealed_state) == fields
-
-
 def _equal_rows_iterating_differently() -> tuple[JobRuntime, JobRuntime]:
     """Two equal rows whose `ran_members` iterate in different orders: a
     pair of names that collide in a small set's table, found in this
@@ -221,3 +190,18 @@ def test_an_unsealable_state_is_rendered_as_its_refusal() -> None:
     found, payload = seal_digest(oracle, T0)
     assert payload is None
     assert found.startswith("unsealable: ValidationError")
+
+
+def test_the_snapshot_fills_every_field_of_the_model() -> None:
+    """`sealed_state` names every `SealedState` field, so no field of the golden
+    snapshot is left at its default by omission."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(sealed_state)))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "SealedState"
+    ]
+    assert len(calls) == 1
+    assert {k.arg for k in calls[0].keywords if k.arg is not None} == set(SealedState.model_fields)

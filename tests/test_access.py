@@ -37,6 +37,7 @@ from proc_pipes import close_pipes
 from dsl41.ir import lower_source
 from dsl41.runner import Engine
 from dsl41.runner_access import (
+    REQUIRED_TIER,
     AccessControl,
     AccessError,
     Principal,
@@ -44,9 +45,8 @@ from dsl41.runner_access import (
     load_policy,
     required_tier,
 )
-from dsl41.runner_access import REQUIRED_TIER
-from dsl41.runner_admission import PROTOCOL_VERSION
 from dsl41.runner_adapters import FakeAdapter
+from dsl41.runner_admission import PROTOCOL_VERSION
 from dsl41.runner_clock import RealClock
 from dsl41.runner_control import ControlServer, command, read_for, revision_in
 from dsl41.runner_journal import read_journal
@@ -222,23 +222,6 @@ def test_access_verb_table_completeness_gate() -> None:
     assert dispatched | doors == set(REQUIRED_TIER)
     assert required_tier("no-such-cmd") is None
     assert required_tier(None) is None
-
-
-def test_access_service_door_lists_every_action_the_dispatcher_accepts() -> None:
-    """ss2/ss12.12: the actions ss2 lists for the release train's door are exactly the ones
-    `release_service.service` accepts (DL-421). A new action fails here until ss2 names it."""
-    import inspect
-
-    from dsl41 import release_service
-
-    source = inspect.getsource(release_service.service)
-    assert "action in" not in source, "an action branch the gate cannot read"
-    accepted = set(re.findall(r'action == "(\w+)"', source))
-    doc = (Path(__file__).resolve().parents[1] / "docs" / "access-model.md").read_text()
-    listed = re.search(r"The dispatcher\s+accepts \w+ actions:\s+([^.]+)\.", doc)
-    assert listed, "ss2 lost its action list"
-    assert accepted, "the gate lost sight of release_service.service"
-    assert accepted == set(re.split(r",\s*|\s+and\s+", " ".join(listed.group(1).split())))
 
 
 def test_the_query_surface_forwards_exactly_the_read_verbs() -> None:
@@ -691,49 +674,6 @@ def test_access_cli_run_refuses_a_configured_but_invalid_map(short_root: Path) -
     assert not (short_root / "run.anchor").exists()
 
 
-def test_access_fingerprint_carries_identity_never_tier(tmp_path: Path) -> None:
-    """ss3/ss12.10: the seal fingerprint sees the actor SPELLING and
-    nothing of policy. Held in three parts: the spelling is realm/name
-    (groups out), the same request fingerprints identically across a
-    reload that changes the principal's tier, and a DIFFERENT principal's
-    retry mismatches by design (DL-144's stand-in refuses it)."""
-    from dsl41.boundary import seal_fingerprint
-    from dsl41.runner_ledger import STATE_MACHINE_VERSION
-    from dsl41.seal import StagedNextPeriod
-
-    a = Principal("os", "alice", frozenset({"oncall", "watchers"}))
-    b = Principal("os", "alice", frozenset())
-    assert a.spelling == b.spelling == "os/alice"
-
-    staged = StagedNextPeriod(
-        catalog_hash="sha256:" + "0" * 64,
-        source_bundle_hash="sha256:" + "1" * 64,
-        runtime_hash="sha256:" + "2" * 64,
-        state_machine_version=STATE_MACHINE_VERSION,
-    )
-
-    def fingerprint(actor: str) -> str:
-        return seal_fingerprint(
-            source="request",
-            baseline_id="b-1",
-            epoch=1,
-            next_period=staged,
-            force_seal=False,
-            claimed_actor=actor,
-        )
-
-    map_path = _map_granting(tmp_path / "roles.toml", "ops")
-    run_root = tmp_path / "run"
-    run_root.mkdir()
-    access = AccessControl.arm(map_path, run_root)
-    before = fingerprint(a.spelling)
-    _map_granting(tmp_path / "roles.toml", "read")  # the role edit
-    access.reload()
-    assert access.policy.generation == 2
-    assert fingerprint(a.spelling) == before  # retry survives the reload
-    assert fingerprint("os/mallory") != before  # another identity mismatches
-
-
 def _same_uid_socketpair() -> tuple[socket_mod.socket, socket_mod.socket]:
     return socket_mod.socketpair(socket_mod.AF_UNIX)
 
@@ -1070,7 +1010,7 @@ def test_access_run_installs_signal_handlers_before_the_socket_binds(
     import signal as signal_mod
 
     from dsl41 import cli_run
-    from dsl41.period import RuntimeProfile
+    from dsl41.run_root import RuntimeProfile
     from dsl41.runner_clock import EngineError
 
     sigs = (signal_mod.SIGINT, signal_mod.SIGTERM, signal_mod.SIGHUP)
@@ -1099,7 +1039,6 @@ def test_access_run_installs_signal_handlers_before_the_socket_binds(
             [],
             profile=RuntimeProfile(),
             access_map=map_path,
-            supervisor="spawn",
         )
 
     assert asyncio.run(scenario()) == 2
@@ -1716,3 +1655,60 @@ def test_access_a_create_whose_first_write_fails_still_owes_the_name_fsync(
     assert (run_root / "perimeter.jsonl").exists()  # the create landed
     assert journal.write("policy_loaded", sync=True, generation=1) is True
     assert synced == [str(run_root)]
+
+
+# ------------------------------------------------- the peer credential (moved from the supervisor)
+
+
+def test_peer_uid_same_uid_on_socketpair() -> None:
+    """The same-uid gate input: a local peer's uid is our uid."""
+    import socket as socket_module
+
+    from dsl41 import runner_access
+
+    a, b = socket_module.socketpair(socket_module.AF_UNIX, socket_module.SOCK_STREAM)
+    try:
+        assert runner_access.peer_uid(a) == os.getuid()
+        assert runner_access.peer_uid(b) == os.getuid()
+    finally:
+        a.close()
+        b.close()
+
+
+class _CredSocket:
+    def __init__(self, reply: bytes) -> None:
+        self.reply = reply
+        self.args: tuple[Any, ...] = ()
+
+    def getsockopt(self, *args: Any) -> bytes:
+        self.args = args
+        return self.reply
+
+
+def test_peer_uid_reads_so_peercred_where_the_socket_module_has_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import struct
+    from types import SimpleNamespace
+
+    from dsl41 import runner_access
+
+    monkeypatch.setattr(runner_access, "socket_mod", SimpleNamespace(SO_PEERCRED=17, SOL_SOCKET=1))
+    sock = _CredSocket(struct.pack("iII", 4242, 501, 20))
+    assert runner_access.peer_uid(sock) == 501  # type: ignore[arg-type]
+    assert sock.args == (1, 17, struct.calcsize("iII"))
+
+
+def test_peer_uid_reads_the_xucred_uid_on_macos(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No SO_PEERCRED: macOS asks LOCAL_PEERCRED and takes `cr_uid`, the
+    second unsigned int of a 76-byte `xucred`."""
+    import struct
+    from types import SimpleNamespace
+
+    from dsl41 import runner_access
+
+    monkeypatch.setattr(runner_access, "socket_mod", SimpleNamespace(SOL_SOCKET=1))
+    monkeypatch.setattr(runner_access, "sys", SimpleNamespace(platform="darwin"))
+    sock = _CredSocket(struct.pack("=II", 0, 777) + bytes(68))
+    assert runner_access.peer_uid(sock) == 777  # type: ignore[arg-type]
+    assert sock.args == (0, 1, 76)

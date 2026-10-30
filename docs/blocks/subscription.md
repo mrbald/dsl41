@@ -14,7 +14,7 @@ It needs none of the five storage capabilities.
 It reads the log in order from a cursor and fans out each record after its append.
 A store that keeps records in index order and can be read from a cursor serves it.
 `Subscription` and the fan-out in `Journal` are in memory, and the backfill reads the retained segments under `wal/`, which a new store would replace.
-Before every response it re-proves the lineage fence, as every revision-bearing read does ([period-model §1.3](../period-model.md#13-the-successor-fence); PR-03 in [§13.1](../period-model.md#131-lineage)).
+Before every response it re-proves the lineage fence, as every revision-bearing read does (period-model §1.3 (`period-model.md`, retired in 2.0.0); PR-03 in §13.1 (`period-model.md`, retired in 2.0.0)).
 
 ## Interface
 
@@ -53,7 +53,7 @@ An unsubscribe of a removed feed finds nothing to leave and posts nothing.
 - The engine loses its lineage: the next response is the refusal, and the stream ends (PR-03).
 - An operator revokes the peer's access: the stream ends at once ([access-model §7](../access-model.md#7-reload-and-revocation)).
 - A shutdown gives a reading client its queued bytes for up to `HANGUP_GRACE_S`, and a stalled one does not hold the shutdown ([DL-267](../decision-log.md)).
-- After a roll, the new root holds none of the closing period's WAL, so an old cursor gets the gap marker ([period-model §1.3](../period-model.md#13-the-successor-fence)).
+- After a roll, the new root holds none of the closing period's WAL, so an old cursor gets the gap marker (period-model §1.3 (`period-model.md`, retired in 2.0.0)).
 
 ## Owning modules
 
@@ -65,11 +65,6 @@ An unsubscribe of a removed feed finds nothing to leave and posts nothing.
 
 - `test_subscribe_backfills_since_zero_then_streams_a_live_record_once`
 - `test_subscribe_forwards_decision_at_least_once_across_the_seam`
-- `test_pr49_the_backfill_spans_segments_after_a_boundary`
-- `test_pr49_a_cursor_below_the_earliest_retained_record_gets_the_gap_marker`
-- `test_a_foreign_file_under_wal_refuses_the_backfill_on_the_stream`
-- `test_pr03_a_subscription_re_proves_the_lineage_before_every_response`
-- `test_a_seal_whose_fsync_fails_reaches_no_subscriber`
 - `test_dl267_a_feed_is_removed_at_the_fixed_bound_and_never_grows_past_it`
 - `test_dl267_one_record_larger_than_the_budget_delays_and_does_not_remove`
 - `test_dl267_a_broken_stderr_and_a_raising_owner_never_fail_the_append`
@@ -86,7 +81,6 @@ An unsubscribe of a removed feed finds nothing to leave and posts nothing.
 - `test_a_statechart_error_in_a_control_handler_stops_the_run_with_exit_7`
 - `test_the_old_belt_would_have_answered_internal_error`
 - `test_a_statechart_error_from_an_owner_reaches_the_append`
-- `test_a_statechart_error_at_the_seal_record_s_fan_out_is_not_an_unknown_outcome`
 - `test_a_statechart_error_while_the_server_closes_still_exits_7`
 
 ## Open findings

@@ -5,13 +5,13 @@
 This block turns each scheduled job's calendar into STARTJOB inputs at its ticks.
 The oracle owns no calendar ([runner-design §5](../runner-design.md#5-scheduler--the-calendar-the-oracle-deliberately-lacks)).
 It also keeps the [scheduler frontier](../glossary.md#scheduler-frontier): the evidence of which ticks a segment already admitted or dropped.
-With it, a resume or a [seal](../glossary.md#seal) neither fires a tick twice nor loses one without a record.
+With it, a resume or a seal (retired in 2.0.0) neither fires a tick twice nor loses one without a record.
 
 ## Fate
 
 `Scheduler` and `autocal.py` carry over unchanged and need none of the storage capabilities.
 They compute ticks from the catalog and an anchor and import no storage module.
-The frontier needs epoch-conditional append, the leader fence of [concurrency-model §1](../concurrency-model.md#1-storage--frozen).
+The frontier needs epoch-conditional append, the leader fence of concurrency-model §1 (`concurrency-model.md`, retired in 2.0.0).
 Its guarantees of no double fire and no duplicate drop (DL-166, DL-174) assume that one writer adjudicates a segment's ticks.
 Two engines that both ran the resume sweep in `runner_startup.py` would each append a `drop` for the same tick, or each admit it.
 The fence is enforced in `Journal._write` in `runner_journal.py`, which checks the leader lock before each append when a lock is wired.
@@ -49,7 +49,7 @@ flowchart TD
 - A tick is an input: stamped at the tick and journaled before it is fed ([DL-45](../decision-log.md)).
 - A stalled live engine fires its backlog. Ticks missed across downtime are dropped and journaled, never fired late (E9 in [runner-design §15](../runner-design.md#15-open-questions-e-series)).
 - The resume anchor is inclusive. The sweep skips a tick this segment adjudicated or the previous cutoff owned ([DL-166](../decision-log.md), [DL-174](../decision-log.md)).
-- Which records count toward the frontier, and how ticks split at a seal: [period-model §6](../period-model.md#6-the-cutoff-barrier).
+- Which records count toward the frontier, and how ticks split at a seal: period-model §6 (`period-model.md`, retired in 2.0.0).
 - Calendar days are read on the job's local day. An exhausted calendar makes the job dormant, not an error ([DL-56](../decision-log.md), [DL-57](../decision-log.md)).
 - A job without a `timezone` uses the base zone ([DL-155](../decision-log.md)). Start times on a DST change follow `dst-start-times`, and the engine refuses a scheduler on another value ([DL-260](../decision-log.md)).
 - Feeding timers through `advance` gives the same trace as feeding them through `feed` ([runner-design §3](../runner-design.md#3-architecture--functional-core-imperative-shell)).
@@ -59,8 +59,8 @@ flowchart TD
 - An unresolvable timezone or a calendar that cannot be read raises `EngineError` when the scheduler is built. Preflight refuses both before a run ([runner-design §8](../runner-design.md#8-preflight--refuse-loudly-run-honestly)).
 - An extended calendar the interpreter cannot read is refused loudly. Materializing it to a standard calendar is the workaround ([DL-57](../decision-log.md)).
 - After a crash, resume re-derives from the frontier and drops what it missed, once per tick ([DL-174](../decision-log.md)). A crash between two same-instant ticks leaves one unjournaled; the inclusive anchor finds it and drops it ([DL-45](../decision-log.md), [DL-166](../decision-log.md)).
-- During a seal, tick admission is frozen and the cutoff admits every tick through its instant ([period-model §6](../period-model.md#6-the-cutoff-barrier)).
-- A tick that hits `clock_regressed` in the seal's drain has no one to answer, so the seal [fail-stops](../glossary.md#fail-stop) the engine instead of refusing. Resume observes the tick again through the missed-tick policy ([period-model §7](../period-model.md#7-the-seal-operation); [DL-274](../decision-log.md)).
+- During a seal, tick admission is frozen and the cutoff admits every tick through its instant (period-model §6 (`period-model.md`, retired in 2.0.0)).
+- A tick that hits `clock_regressed` in the seal's drain has no one to answer, so the seal [fail-stops](../glossary.md#fail-stop) the engine instead of refusing. Resume observes the tick again through the missed-tick policy (period-model §7 (`period-model.md`, retired in 2.0.0); [DL-274](../decision-log.md)).
 - Open: whether the vendor fires or skips a tick missed during an outage (E9), and absent `days_of_week` read as every day (E10) ([runner-design §15](../runner-design.md#15-open-questions-e-series)).
 
 ## Owning modules
@@ -89,9 +89,7 @@ The calendar rules are pinned by the `test_sem36_*` to `test_sem39_*` families. 
 - `test_resume_real_domain_missed_ticks_are_dropped_and_journaled`
 - `test_resume_virtual_scheduler_ticks_never_refire`
 - `test_dl45_a_same_instant_sibling_lost_to_the_crash_is_dropped_not_forgotten`
-- `test_dl166_a_tick_this_segment_admitted_after_t_is_skipped_without_a_drop`
 - `test_dl174_a_tick_at_a_drop_frontier_is_dropped_once_across_three_resumes`
-- `test_pr25_the_next_period_starts_its_scheduler_strictly_after_t`
 - `test_hypothesis_feed_only_vs_advance_interleaved_traces_identical`
 
 ## Open findings

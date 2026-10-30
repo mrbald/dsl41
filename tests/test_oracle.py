@@ -35,12 +35,13 @@ from fork_harness import ForkCheckedOracle
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
+from dsl41.capacity import CapacityPool
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, EventKind, OracleError, TraceEntry
 from dsl41.runner_clock import EngineError
-from dsl41.capacity import CapacityPool
-from dsl41.semantics import SemanticSwitches, resolve as resolve_switches
+from dsl41.semantics import SemanticSwitches
+from dsl41.semantics import resolve as resolve_switches
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
@@ -10555,30 +10556,6 @@ def _leap_run_started_since(o, monkeypatch: pytest.MonkeyPatch) -> datetime:
     assert o.store.job["ml257"].run_number == 1
     assert o.store.job["bl257"].status == "SUCCESS"
     return bound
-
-
-@pytest.mark.parametrize("mode", ("1", "2"))
-def test_dl257_a_superseded_continuation_is_not_live(
-    mode: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A continuation armed at run 0 can never act once the job has started:
-    it is not a pending timer, so a boundary that removes the job does not
-    hold the period open for it (period-model ss10, DL-257)."""
-    from dsl41.classify import Baseline, carried_from_oracle, classify
-    from dsl41.period import RuntimeProfile
-
-    o = oracle(_LEAP_257, semantics=_recheck_257(mode))
-    _leap_run_started_since(o, monkeypatch)
-    assert "ml257" not in pending_timer_jobs(o)
-    oracle_obj = o if isinstance(o, Oracle) else o.engine.oracle
-    removed = _LEAP_257[: _LEAP_257.index("insert_job: ml257")]
-    profile = RuntimeProfile(semantics={"queued-recheck": mode})
-    result = classify(
-        closing=Baseline(catalog=lower_source(_LEAP_257), profile=profile),
-        opening=Baseline(catalog=lower_source(removed), profile=profile),
-        carried=carried_from_oracle(oracle_obj, now=datetime(2028, 3, 1, 9, 0)),
-    )
-    assert result.by_job["ml257"].verdict != "R"
 
 
 @pytest.mark.parametrize("mode", ("1", "2"))

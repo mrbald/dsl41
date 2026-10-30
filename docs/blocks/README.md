@@ -15,7 +15,7 @@ Every card has these sections, in this order:
 2. **Fate.** Whether the block's code and contract would carry over if the
    storage under the runner changed, and which storage capabilities it
    needs. The capabilities are the rows of
-   [concurrency-model §1](../concurrency-model.md#1-storage--frozen)'s
+   concurrency-model §1 (`concurrency-model.md`, retired in 2.0.0)'s
    storage contract: epoch-conditional append, monotone epoch allocation,
    decision lookup by `request_id`, atomic multi-record commit, and
    linearizable read of the leader record. A block that needs none says
@@ -66,9 +66,9 @@ Semantics core:
 
 Process tier:
 
-- [Supervisor](supervisor.md): the process that holds detached runs'
+- Supervisor (`supervisor.md`, retired in 2.0.0): the process that holds detached runs'
   lifelines, its lease and its lifecycle.
-- [SPAWN idempotency](spawn-idempotency.md): why a replayed SPAWN never
+- SPAWN idempotency (`spawn-idempotency.md`, retired in 2.0.0): why a replayed SPAWN never
   starts a second process.
 - [Wrapper](wrapper.md): the per-run recorder that writes `spawn.json` and
   `status.json`.
@@ -87,7 +87,7 @@ Engine:
   quarantine and eviction.
 - [Control subscription](subscription.md): one `subscribe` feed, from its
   backfill to its end.
-- [Seal and lineage](seal-and-lineage.md): the anchor head, the period
+- Seal and lineage (`seal-and-lineage.md`, retired in 2.0.0): the anchor head, the period
   registry row and the engine's seal phases.
 
 Rules without a machine:
@@ -106,13 +106,13 @@ that explains it.
 | [job](../state-machines.md#job) | [Job lifecycle](job-lifecycle.md); its box rows in [Box execution](box-execution.md); QUE_WAIT and the holding region in [Capacity](capacity.md) |
 | [queue_scan](../state-machines.md#queue_scan) | [Capacity](capacity.md) |
 | [runtime_assembly](../state-machines.md#runtime_assembly) | [Job lifecycle](job-lifecycle.md) |
-| [anchor_head](../state-machines.md#anchor_head) | [Seal and lineage](seal-and-lineage.md) |
-| [period_row](../state-machines.md#period_row) | [Seal and lineage](seal-and-lineage.md) |
-| [supervisor_process](../state-machines.md#supervisor_process) | [Supervisor](supervisor.md) |
-| [supervisor_lease](../state-machines.md#supervisor_lease) | [Supervisor](supervisor.md) |
-| [supervisor_client](../state-machines.md#supervisor_client) | [Supervisor](supervisor.md) |
+| anchor_head (retired in 2.0.0) | Seal and lineage (`seal-and-lineage.md`, retired in 2.0.0) |
+| period_row (retired in 2.0.0) | Seal and lineage (`seal-and-lineage.md`, retired in 2.0.0) |
+| supervisor_process (retired in 2.0.0) | Supervisor (`supervisor.md`, retired in 2.0.0) |
+| supervisor_lease (retired in 2.0.0) | Supervisor (`supervisor.md`, retired in 2.0.0) |
+| supervisor_client (retired in 2.0.0) | Supervisor (`supervisor.md`, retired in 2.0.0) |
 | [host](../state-machines.md#host) | [Host routing](host-routing.md) |
 | [admission](../state-machines.md#admission) | [Admission](admission.md) |
 | [effect](../state-machines.md#effect) | [Effect outbox](effect-outbox.md) |
 | [subscription](../state-machines.md#subscription) | [Control subscription](subscription.md) |
-| [seal_boundary](../state-machines.md#seal_boundary) | [Seal and lineage](seal-and-lineage.md) |
+| seal_boundary (retired in 2.0.0) | Seal and lineage (`seal-and-lineage.md`, retired in 2.0.0) |

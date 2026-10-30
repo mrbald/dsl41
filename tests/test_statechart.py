@@ -19,11 +19,11 @@ from hypothesis import strategies as st
 from dsl41 import state_machine as sm
 from dsl41.state_machine import (
     COMPLETION,
-    Ancestry,
     INITIAL,
     OVERFLOWED,
     START,
     AmbiguousTransition,
+    Ancestry,
     Branch,
     Choice,
     Context,
@@ -31,8 +31,8 @@ from dsl41.state_machine import (
     Effects,
     Event,
     Executor,
-    Region,
     ReentrantDispatch,
+    Region,
     Row,
     State,
     Statechart,

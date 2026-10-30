@@ -20,6 +20,8 @@ import os
 import pwd
 import socket as socket_mod
 import stat as stat_lib
+import struct
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -29,7 +31,6 @@ from typing import Any
 
 from dsl41.canon import is_wire_int
 from dsl41.runner_procid import fsync_dir
-from dsl41.runner_supervisor import peer_uid
 
 __all__ = [
     "AccessControl",
@@ -40,6 +41,25 @@ __all__ = [
     "peer_principal",
     "required_tier",
 ]
+
+
+def peer_uid(sock: socket_mod.socket) -> int | None:
+    """The connecting peer's uid for the same-uid gate, or None where the platform has
+    no credential (Linux SO_PEERCRED, macOS LOCAL_PEERCRED)."""
+    if hasattr(socket_mod, "SO_PEERCRED"):  # Linux
+        data = sock.getsockopt(
+            socket_mod.SOL_SOCKET, socket_mod.SO_PEERCRED, struct.calcsize("iII")
+        )
+        _pid, uid, _gid = struct.unpack("iII", data)
+        return int(uid)
+    if sys.platform == "darwin":
+        sol_local, local_peercred = 0, 0x001
+        # struct xucred: u_int cr_version; uid_t cr_uid; short cr_ngroups;
+        # gid_t cr_groups[16] -> 76 bytes; cr_uid is the second u_int
+        raw = sock.getsockopt(sol_local, local_peercred, 76)
+        _version, cr_uid = struct.unpack("=II", raw[:8])
+        return int(cr_uid)
+    return None  # pragma: no cover -- POSIX-only tier
 
 
 class AccessError(Exception):
@@ -269,8 +289,8 @@ def peer_principal(sock: socket_mod.socket) -> Principal | None:
 
 # --------------------------------------------------------------- verb table
 
-#: access-model ss10: the closed table, cmd -> required tier. `sendevent`, `host` and `seal` are
-#: OPS whatever their verb; the dispatcher splits the verbs. A cmd absent here is denied.
+#: access-model ss10: the closed table, cmd -> required tier. `sendevent` and `host` are OPS
+#: whatever their verb; the dispatcher splits the verbs. A cmd absent here is denied.
 REQUIRED_TIER: dict[str, Tier] = {
     "status": Tier.READ,
     "trace": Tier.READ,
@@ -285,7 +305,6 @@ REQUIRED_TIER: dict[str, Tier] = {
     "subscribe": Tier.READ,
     "sendevent": Tier.OPS,
     "host": Tier.OPS,
-    "seal": Tier.OPS,
 }
 
 

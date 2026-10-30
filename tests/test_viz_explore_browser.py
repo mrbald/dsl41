@@ -38,10 +38,11 @@ pytest.importorskip(
     reason="playwright is dev-only (pyproject [dev]); `uv sync --extra dev` installs it",
 )
 
-from playwright.sync_api import Error as PlaywrightError, TimeoutError as PlaywrightTimeout
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeout
 from playwright.sync_api import sync_playwright
 from test_viz import CORPUS_DIR, corpus_catalog
-from test_viz_explore import S_EDGE_TEXT, _COND_TEXT, _NESTED_BOX_TEXT
+from test_viz_explore import _COND_TEXT, _NESTED_BOX_TEXT, S_EDGE_TEXT
 
 from dsl41.ir import lower_source
 from dsl41.viz_explore import to_explore_html

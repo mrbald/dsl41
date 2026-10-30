@@ -48,27 +48,35 @@ form; no vendor page documents it (SEM-08 [?]).
 
 ```python
 class SourceSpan(BaseModel):
-    file: str; line_start: int; line_end: int; byte_start: int; byte_end: int
+    file: str
+    line_start: int
+    line_end: int
+    byte_start: int
+    byte_end: int
+
 
 class Comment(BaseModel):
-    text: str                  # raw, including '/*...*/' or '#...' marker
+    text: str  # raw, including '/*...*/' or '#...' marker
     span: SourceSpan
     attachment: Literal["leading", "trailing", "floating"]
 
+
 class RawAttr(BaseModel):
-    key: str                   # exactly as written (case preserved)
-    raw_value: str             # verbatim; continuation lines joined with '\n'
+    key: str  # exactly as written (case preserved)
+    raw_value: str  # verbatim; continuation lines joined with '\n'
     span: SourceSpan
     comments: list[Comment] = []
 
+
 class JilStatement(BaseModel):
-    subcommand: str            # e.g. "insert_job"
-    subject: str               # the value after the subcommand key (job name, etc.)
+    subcommand: str  # e.g. "insert_job"
+    subject: str  # the value after the subcommand key (job name, etc.)
     job_type_inline: str | None  # 'insert_job: X job_type: c' one-line form support
-    attrs: list[RawAttr]       # ORDER PRESERVED — this is the fidelity guarantee
-    date_lines: list[str] = [] # autocal standard-calendar date rows, verbatim (rule 11/DL-36)
+    attrs: list[RawAttr]  # ORDER PRESERVED — this is the fidelity guarantee
+    date_lines: list[str] = []  # autocal standard-calendar date rows, verbatim (rule 11/DL-36)
     comments: list[Comment] = []
     span: SourceSpan
+
 
 class JilFile(BaseModel):
     statements: list[JilStatement]
@@ -98,47 +106,73 @@ Notes:
 Source: SEM-02/03/04/07/08.
 
 ```python
-Status = Literal["SUCCESS","FAILURE","DONE","TERMINATED","NOTRUNNING"]
-CmpOp  = Literal["=","!=","<",">","<=",">="]
+Status = Literal["SUCCESS", "FAILURE", "DONE", "TERMINATED", "NOTRUNNING"]
+CmpOp = Literal["=", "!=", "<", ">", "<=", ">="]
+
 
 class Lookback(BaseModel):
-    kind: Literal["window","zero","indefinite"]   # SEM-04
-    minutes: int | None       # for kind=window; from hhhh.mm, hhhh\:mm, or bare hours
-    raw: str                   # original token, for round-trip + Q2 auditing
+    kind: Literal["window", "zero", "indefinite"]  # SEM-04
+    minutes: int | None  # for kind=window; from hhhh.mm, hhhh\:mm, or bare hours
+    raw: str  # original token, for round-trip + Q2 auditing
+
 
 class JobRef(BaseModel):
     name: str
-    instance: str | None       # cross-instance '^INST' (SEM-07)
+    instance: str | None  # cross-instance '^INST' (SEM-07)
+
 
 class CondSpan(BaseModel):
-    start: int; end: int        # char offsets inside the attribute value; end exclusive
+    start: int
+    end: int  # char offsets inside the attribute value; end exclusive
+
 
 class StatusAtom(BaseModel):
     kind: Literal["status"] = "status"
-    job: JobRef; status: Status
-    lookback: Lookback | None   # None == indefinite w/o explicit token
-    span: CondSpan | None       # every node carries one
+    job: JobRef
+    status: Status
+    lookback: Lookback | None  # None == indefinite w/o explicit token
+    span: CondSpan | None  # every node carries one
+
 
 class ExitCodeAtom(BaseModel):
     kind: Literal["exitcode"] = "exitcode"
-    job: JobRef; op: CmpOp; value: int
+    job: JobRef
+    op: CmpOp
+    value: int
     lookback: Lookback | None
     span: CondSpan | None
 
+
 class GlobalAtom(BaseModel):
     kind: Literal["global"] = "global"
-    name: str; op: CmpOp; value: str      # lookback FORBIDDEN here (SEM-04) — see below
+    name: str
+    op: CmpOp
+    value: str  # lookback FORBIDDEN here (SEM-04) — see below
     span: CondSpan | None
 
-class And(BaseModel):
-    kind: Literal["and"] = "and"; operands: list["Cond"]; span: CondSpan | None  # n-ary, flat
-class Or(BaseModel):
-    kind: Literal["or"] = "or"; operands: list["Cond"]; span: CondSpan | None
-class Paren(BaseModel):
-    kind: Literal["paren"] = "paren"; inner: "Cond"; span: CondSpan | None  # fidelity only;
-                                                                            # erased in canonical
 
-Cond = Annotated[StatusAtom|ExitCodeAtom|GlobalAtom|And|Or|Paren, Field(discriminator="kind")]
+class And(BaseModel):
+    kind: Literal["and"] = "and"
+    operands: list["Cond"]
+    span: CondSpan | None  # n-ary, flat
+
+
+class Or(BaseModel):
+    kind: Literal["or"] = "or"
+    operands: list["Cond"]
+    span: CondSpan | None
+
+
+class Paren(BaseModel):
+    kind: Literal["paren"] = "paren"
+    inner: "Cond"
+    span: CondSpan | None  # fidelity only;
+    # erased in canonical
+
+
+Cond = Annotated[
+    StatusAtom | ExitCodeAtom | GlobalAtom | And | Or | Paren, Field(discriminator="kind")
+]
 ```
 
 - Parser precedence: left-associative, `&` and `|` at equal precedence (DL-53), per TechDocs
@@ -156,99 +190,110 @@ Cond = Annotated[StatusAtom|ExitCodeAtom|GlobalAtom|And|Or|Paren, Field(discrimi
 ## 4. IR-F: entities
 
 ```python
-class ScheduleBlock(BaseModel):          # SEM-30..35; present iff date_conditions truthy
-    days_of_week: list[str] | None       # XOR run_calendar (SEM-31) — model validator
+class ScheduleBlock(BaseModel):  # SEM-30..35; present iff date_conditions truthy
+    days_of_week: list[str] | None  # XOR run_calendar (SEM-31) — model validator
     run_calendar: str | None
     exclude_calendar: str | None
-    start_times: list[Time] | None       # XOR start_mins (SEM-31)
+    start_times: list[Time] | None  # XOR start_mins (SEM-31)
     start_mins: list[int] | None
-    run_window: tuple[Time, Time] | None # semantics: SEM-33 gate, NOT trigger
+    run_window: tuple[Time, Time] | None  # semantics: SEM-33 gate, NOT trigger
     timezone: str | None
-    must_start: SlaSpec | None           # SEM-34: annotation class
-    must_complete: SlaSpec | None        # absolute times are MustTime, 00:00-71:59 (DL-253)
+    must_start: SlaSpec | None  # SEM-34: annotation class
+    must_complete: SlaSpec | None  # absolute times are MustTime, 00:00-71:59 (DL-253)
+
 
 class BoxLinkage(BaseModel):
     box_name: str | None
-    box_terminator: bool = False         # SEM-14
+    box_terminator: bool = False  # SEM-14
     job_terminator: bool = False
 
-class ExecSpecBase(BaseModel):           # shared by every executable type
+
+class ExecSpecBase(BaseModel):  # shared by every executable type
     machine: str | None
     owner: str | None
     profile: str | None
     std_out_file: str | None
     std_err_file: str | None
 
-class ExecSpec(ExecSpecBase):            # command jobs
-    kind: Literal["cmd"] = "cmd"
-    command: str                         # may contain $$VAR sites — kept verbatim,
-    std_in_file: str | None              #   substitution sites indexed separately (below)
-    envvars: str | None                  # CMD-only pair; NAME=value list, verbatim (DL-32)
 
-class FwSpec(ExecSpecBase):              # file-watcher jobs: a SOURCE node in derived graphs
+class ExecSpec(ExecSpecBase):  # command jobs
+    kind: Literal["cmd"] = "cmd"
+    command: str  # may contain $$VAR sites — kept verbatim,
+    std_in_file: str | None  #   substitution sites indexed separately (below)
+    envvars: str | None  # CMD-only pair; NAME=value list, verbatim (DL-32)
+
+
+class FwSpec(ExecSpecBase):  # file-watcher jobs: a SOURCE node in derived graphs
     kind: Literal["fw"] = "fw"
     watch_file: str
     watch_interval: int | None
     watch_file_min_size: int | None
 
+
 ExecUnion = Annotated[ExecSpec | FwSpec, Field(discriminator="kind")]
 
-class ResourceRef(BaseModel):            # one group of `resources:` (DL-21)
-    name: str
-    quantity: int                        # QUANTITY, required, >= 1
-    free: Literal["Y","N","A"] | None    # absent = engine default, never guessed
 
-class VarSite(BaseModel):                # one $$VAR or $${VAR} occurrence in a string attr
-    attr: str                            # attribute that holds it, e.g. "command"
-    name: str                            # global variable name, no markers
+class ResourceRef(BaseModel):  # one group of `resources:` (DL-21)
+    name: str
+    quantity: int  # QUANTITY, required, >= 1
+    free: Literal["Y", "N", "A"] | None  # absent = engine default, never guessed
+
+
+class VarSite(BaseModel):  # one $$VAR or $${VAR} occurrence in a string attr
+    attr: str  # attribute that holds it, e.g. "command"
+    name: str  # global variable name, no markers
     braced: bool
-    start: int                           # char offsets into the stored attribute value
+    start: int  # char offsets into the stored attribute value
     end: int
 
-class CondAttr(BaseModel):               # one condition-bearing attribute (DL-73)
-    cond: Cond
-    span: SourceSpan | None              # where the attr sits in the source file
 
-class Semantics(BaseModel):              # attributes with control-flow teeth (§5 of dossier)
+class CondAttr(BaseModel):  # one condition-bearing attribute (DL-73)
+    cond: Cond
+    span: SourceSpan | None  # where the attr sits in the source file
+
+
+class Semantics(BaseModel):  # attributes with control-flow teeth (§5 of dossier)
     condition: CondAttr | None
-    max_exit_success: int = 0            # SEM-09
-    success_codes: list[tuple[int, int]] | None   # SEM-09/DL-33, CMD-only; verdict via
-    fail_codes: list[tuple[int, int]] | None      #   ir.exit_is_success (Q7 cited, DL-58)
+    max_exit_success: int = 0  # SEM-09
+    success_codes: list[tuple[int, int]] | None  # SEM-09/DL-33, CMD-only; verdict via
+    fail_codes: list[tuple[int, int]] | None  #   ir.exit_is_success (Q7 cited, DL-58)
     term_run_time_min: int | None
     n_retrys: int = 0
-    box_success: CondAttr | None         # box jobs only; SEM-12
+    box_success: CondAttr | None  # box jobs only; SEM-12
     box_failure: CondAttr | None
     auto_hold: bool = False
-    initial_status: InitialStatus | None # SEM-24 [A]/DL-18: `status:` on insert, limited
-                                         #   to INACTIVE/ON_HOLD/ON_ICE/ON_NOEXEC
+    initial_status: InitialStatus | None  # SEM-24 [A]/DL-18: `status:` on insert, limited
+    #   to INACTIVE/ON_HOLD/ON_ICE/ON_NOEXEC
+
 
 class JobIR(BaseModel):
     name: str
-    job_type: str                        # 'CMD','BOX','FW', + extensible
+    job_type: str  # 'CMD','BOX','FW', + extensible
     box: BoxLinkage
     schedule: ScheduleBlock | None
     exec_: ExecUnion | None
     sem: Semantics
-    annotations: dict[str, str] = {}     # alarms, notifications — no control flow
-    passthrough: dict[str, str] = {}     # unmodeled attrs, AST-sourced text, whitespace-trimmed
-    resources: list[ResourceRef] = []    # `resources:` groups (DL-21), typed carry
-    var_sites: list[VarSite] = []        # indexed $$VAR occurrences across string attrs
-    span: SourceSpan | None              # the statement's own span, for findings
+    annotations: dict[str, str] = {}  # alarms, notifications — no control flow
+    passthrough: dict[str, str] = {}  # unmodeled attrs, AST-sourced text, whitespace-trimmed
+    resources: list[ResourceRef] = []  # `resources:` groups (DL-21), typed carry
+    var_sites: list[VarSite] = []  # indexed $$VAR occurrences across string attrs
+    span: SourceSpan | None  # the statement's own span, for findings
 
-class CatalogIR(BaseModel):              # the compilation unit
-    ir_version: Literal["0.3"]           # §8
+
+class CatalogIR(BaseModel):  # the compilation unit
+    ir_version: Literal["0.3"]  # §8
     jobs: dict[str, JobIR]
-    globals_declared: dict[str, str]     # insert_global
+    globals_declared: dict[str, str]  # insert_global
     external_instances: dict[str, XinstIR]  # xtype typed; plumbing attrs opaque (DL-28)
     machines: dict[str, MachineIR]
-    resources: dict[str, ResourceIR]     # insert_resource, opaque (DL-18); `amount` is
-                                         # the bucket size the oracle draws QUANTITY from
-    calendars: dict[str, CalendarIR]     # autocal exports, opaque; standard+extended share
-                                         # the run_calendar namespace (DL-36); repeatable
-                                         # `condition:` lines in a .conditions lane (DL-57)
-    cycles: dict[str, CycleIR]           # referenced by extended calendars' cyccal (DL-36);
-                                         # start_date/end_date pairs in a .periods lane (DL-57)
-    meta: CatalogMeta                    # source files, parse timestamp, tool version
+    resources: dict[str, ResourceIR]  # insert_resource, opaque (DL-18); `amount` is
+    # the bucket size the oracle draws QUANTITY from
+    calendars: dict[str, CalendarIR]  # autocal exports, opaque; standard+extended share
+    # the run_calendar namespace (DL-36); repeatable
+    # `condition:` lines in a .conditions lane (DL-57)
+    cycles: dict[str, CycleIR]  # referenced by extended calendars' cyccal (DL-36);
+    # start_date/end_date pairs in a .periods lane (DL-57)
+    meta: CatalogMeta  # source files, parse timestamp, tool version
 ```
 
 Lowering rules:
@@ -272,46 +317,51 @@ Lowering rules:
 ## 5. IR-G: derived graph
 
 ```python
-EdgeClass = Literal["exact","assumed","redesign"]      # E/A/R from mapping table
+EdgeClass = Literal["exact", "assumed", "redesign"]  # E/A/R from mapping table
+
 
 class DerivedEdge(BaseModel):
-    src: str; dst: str                    # dst's condition references src
-    via: Literal["success","failure","done","terminated","notrunning","exitcode","global"]
-    atom: StatusAtom | ExitCodeAtom | GlobalAtom   # copy of the IR-F node it came from (DL-73)
+    src: str
+    dst: str  # dst's condition references src
+    via: Literal["success", "failure", "done", "terminated", "notrunning", "exitcode", "global"]
+    atom: StatusAtom | ExitCodeAtom | GlobalAtom  # copy of the IR-F node it came from (DL-73)
     lookback: Lookback | None
     cls: EdgeClass
-    mapping_row: str                      # "M01".."M36"
-    assumption: str | None                # required for "assumed", forbidden for "exact",
-                                          #   permitted on "redesign" as context
-    source_atom: SourceSpan | None        # provenance: the owning attribute's span
+    mapping_row: str  # "M01".."M36"
+    assumption: str | None  # required for "assumed", forbidden for "exact",
+    #   permitted on "redesign" as context
+    source_atom: SourceSpan | None  # provenance: the owning attribute's span
 
     @property
-    def is_start_gate(self) -> bool:      # names a producer JOB that gates dst's START:
-        ...                               #   not a box override (M15/M16 fold a box) and
-                                          #   not a global (names no job). Says nothing
-                                          #   about whether the catalog defines that job
-                                          #   (DL-162)
+    def is_start_gate(self) -> bool:  # names a producer JOB that gates dst's START:
+        ...  #   not a box override (M15/M16 fold a box) and
+        #   not a global (names no job). Says nothing
+        #   about whether the catalog defines that job
+        #   (DL-162)
 
-def local_producer(edge: DerivedEdge,     # the catalog job `edge`'s producer names, or None.
-                   catalog: CatalogIR     #   Read off the ATOM's `instance` -- NEVER by
-                   ) -> str | None:       #   testing `src` against catalog.jobs: for a
-    ...                                   #   cross-instance ref `src` is the composite
-                                          #   `name^INST`, and a catalog job spelt that way
-                                          #   collides with it (DL-162a)
+
+def local_producer(
+    edge: DerivedEdge,  # the catalog job `edge`'s producer names, or None.
+    catalog: CatalogIR,  #   Read off the ATOM's `instance` -- NEVER by
+) -> str | None:  #   testing `src` against catalog.jobs: for a
+    ...  #   cross-instance ref `src` is the composite
+    #   `name^INST`, and a catalog job spelt that way
+    #   collides with it (DL-162a)
+
 
 class DerivedGraph(BaseModel):
     nodes: list[str]
     edges: list[DerivedEdge]
-    mutex_groups: list[list[str]]         # from n() detector (M07)
-    bare_notrunning: dict[str, list[str]] # consumer -> the local jobs its bare n() names
-    or_shapes: list[OrShape]              # M12 classifier output, each with lowering choice
+    mutex_groups: list[list[str]]  # from n() detector (M07)
+    bare_notrunning: dict[str, list[str]]  # consumer -> the local jobs its bare n() names
+    or_shapes: list[OrShape]  # M12 classifier output, each with lowering choice
     box_tree: BoxTree
-    external_boundary: list[JobRef]       # every cross-instance ref: M33 from `condition`,
-                                          #   M16 from a box override
-    redesign_flags: list[RedesignFlag]    # pass 6: per-job R constructs that are not edges
-    chains: list[list[str]]               # pass 7: maximal linear chains (feeds the DSL)
-    parallel_groups: list[list[str]]      # pass 7: same-(preds,succs) sibling groups
-    cycles: list[list[str]]               # pass 7: SCCs > 1 and self-loops (L010)
+    external_boundary: list[JobRef]  # every cross-instance ref: M33 from `condition`,
+    #   M16 from a box override
+    redesign_flags: list[RedesignFlag]  # pass 6: per-job R constructs that are not edges
+    chains: list[list[str]]  # pass 7: maximal linear chains (feeds the DSL)
+    parallel_groups: list[list[str]]  # pass 7: same-(preds,succs) sibling groups
+    cycles: list[list[str]]  # pass 7: SCCs > 1 and self-loops (L010)
 ```
 
 Derivation passes (pure functions IR-F → IR-G, ordered):
@@ -454,7 +504,7 @@ in `oracle.py` imports them and `oracle_state.py` imports nothing from it (DL-91
   strategy (UCS-12) and keeps it out of the IR.
 - Hashing: `equiv.catalog_hash = sha256(canonical IR-F JSON)`. The equivalence CLI uses it to
   short-circuit, and the migration report uses it to pin the verified content. The period
-  model's `catalog_hash_v2` (`period.py`; `period-model.md` §1.1, over the §3.2 canonical
+  model's `catalog_hash_v2` (`run_root.py`; `period-model.md` §1.1, over the §3.2 canonical
   form) is a different hash over a different projection, versioned on its own. The two
   canonicalize differently on purpose, so neither hashes `dump_catalog`'s output.
 

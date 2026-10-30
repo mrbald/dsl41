@@ -8,7 +8,7 @@ The rest of the track is under **Operator** in the
 ## Set the variables and the account
 
 Read this page at a terminal on the run host.
-Set the [section 0 variables](deployment-runbook.md#0-the-operator-path).
+Set the section 0 variables (`deployment-runbook.md`, retired in 2.0.0).
 Run `supervise`, `journal`, `runs` and every read of a file under `$RUN_ROOT` or `$ESTATE_ANCHOR` as the service account.
 Run `release status` as the deployment identity.
 Run `query`, `sendevent`, `off-hold-all` and `host` as yourself; section 0 gives the reasons.
@@ -36,15 +36,15 @@ Replace `EVENT` with the chosen verb and `N` with the last trace sequence read.
    ```
 
 The query exits `0` when the leader answers, or `2` for no engine or a refusal.
-The engine exits `2` for a configuration refusal; read its journal under [What to watch](deployment-runbook.md#what-to-watch).
-The engine exits `3` after a seal; follow **SEALED, NOT OPENED** in [Which move](deployment-runbook.md#which-move).
+The engine exits `2` for a configuration refusal; read its journal under What to watch (`deployment-runbook.md`, retired in 2.0.0).
+The engine exits `3` after a seal; follow **SEALED, NOT OPENED** in Which move (`deployment-runbook.md`, retired in 2.0.0).
 The engine exits `6` for a time-half stop; follow **TIME-HALF STOP** there.
 The engine or supervisor exits `7` for a statechart error; follow **STATECHART ERROR** there.
 
 An `open` head is normal.
 A `closed` head means no new run starts until the next period opens.
 A detached run started before the seal keeps running under the supervisor.
-A `claimed` head means an opener is at work or has crashed; read Day 2 in [section 6a](deployment-runbook.md#6a-the-boundary--sealing-a-period-and-opening-the-next).
+A `claimed` head means an opener is at work or has crashed; read Day 2 in section 6a (`deployment-runbook.md`, retired in 2.0.0).
 
 ## Read the job's state
 
@@ -153,7 +153,7 @@ Catch-up needs an explicit `FORCE_STARTJOB`.
 A run that has not started by its `must_start_times` deadline writes `MUST_START_ALARM` to the trace, and one not complete by its `must_complete_times` deadline writes `MUST_COMPLETE_ALARM`; the deadlines hang on the schedule slot, not on elapsed run time, and neither alarm changes control flow (SEM-34).
 `dsl41 query timers -S "$S"` lists the job's pending `must_start`, `must_complete` and `term_run_time` timers.
 When `term_run_time` passes, the engine ends the run `TERMINATED`.
-[Nightbank exercise 5](../examples/nightbank/RUNBOOK.md#5-incident-the-hung-job-and-term_run_time) works through a hung job and `term_run_time`.
+Nightbank exercise 5 (`RUNBOOK.md`, retired in 2.0.0) works through a hung job and `term_run_time`.
 
 ## The job failed or was terminated
 
@@ -178,7 +178,7 @@ The site rotates those external files between runs.
 
 The trace's `transition` and `cause` name what happened.
 Reset its cursor to `0` when `baseline_id` changes or `last_seq` falls below the cursor (DL-210).
-[Nightbank exercise 4](../examples/nightbank/RUNBOOK.md#4-incident-hard-failure-rerun-after-fix) works through a failure and rerun after a fix.
+Nightbank exercise 4 (`RUNBOOK.md`, retired in 2.0.0) works through a failure and rerun after a fix.
 
 ## The job shows RUNNING or STARTING and nothing runs
 
@@ -196,11 +196,11 @@ A job whose JSON field `held` is true goes to [the routing check](#the-job-has-n
 A restarted supervisor's list is empty; the restart ended the commands it ran.
 A `CMD` job that stays `RUNNING` after its row shows `wrapper_alive: false` needs a look: a completion takes a moment to apply, and the gap alone does not say why it has not.
 Read the engine journal: a `dsl41: input quarantined` line names a quarantined completion, and then you [escalate](#escalate-a-dsl41-fault).
-For a live row with `held: false` and no run in the list, follow **A row left live with nothing behind it** under [What to watch](deployment-runbook.md#what-to-watch) to choose the correction.
+For a live row with `held: false` and no run in the list, follow **A row left live with nothing behind it** under What to watch (`deployment-runbook.md`, retired in 2.0.0) to choose the correction.
 
 ## Send the intervention
 
-Read the runbook's [Manual intervention](deployment-runbook.md#manual-intervention) table for reversibility.
+Read the runbook's Manual intervention (`deployment-runbook.md`, retired in 2.0.0) table for reversibility.
 An intervention can start or end work; choose it from the cause before sending it.
 For `CHANGE_STATUS`, add `-s STATUS` to the form below.
 For `SET_GLOBAL`, use `-G KEY=value` instead of `-J NAME`; read `REV` with `dsl41 query global -N KEY -S "$S"`.
@@ -294,8 +294,8 @@ Collect the output of `dsl41 journal "$RUN_ROOT"`, run as the service account, i
 
 ## What this page does not cover
 
-- Installation and startup: runbook [sections 1 to 3](deployment-runbook.md#1-install).
-- JIL releases and rollback: [the job recipe](deployment-runbook.md#recipe-add-change-or-remove-a-job).
-- Sealing and opening a period: [section 6a](deployment-runbook.md#6a-the-boundary--sealing-a-period-and-opening-the-next).
-- Engine-fault recovery: [Which move](deployment-runbook.md#which-move) and [What to watch](deployment-runbook.md#what-to-watch).
+- Installation and startup: runbook sections 1 to 3 (`deployment-runbook.md`, retired in 2.0.0).
+- JIL releases and rollback: the job recipe (`deployment-runbook.md`, retired in 2.0.0).
+- Sealing and opening a period: section 6a (`deployment-runbook.md`, retired in 2.0.0).
+- Engine-fault recovery: Which move (`deployment-runbook.md`, retired in 2.0.0) and What to watch (`deployment-runbook.md`, retired in 2.0.0).
 - A read-only user at a desk: no page yet; the [access model](access-model.md#1-the-model) defines the read tier they use.

@@ -1,15 +1,11 @@
-"""Period identity: what a period is, and the artifacts that say so.
+"""A run root's identity and layout: what the engine pins, and where it keeps it.
 
-Normative spec: `docs/period-model.md` ss1.1 (estate layout, the sentinel, `source_bundle_hash`,
-`catalog_hash` v2), ss2.1 (the `segment` record, `RuntimeProfile`, the two manifests); DL-130,
-DL-133.
-
-A period's semantics are `(catalog_hash, runtime_hash, state_machine_version)`. This module owns
-the three identities, the two manifest models, and the estate layout (the `period_root`
-sentinel, `wal/`, `seals/`, the staging and quarantine directories; DL-133). The anchor, the
-cutoff barrier and the seal operation are `boundary.py`'s and address every path through the
-functions here. `own_or_refuse` lives here because ss1.1 states one ownership rule for every root
-and anchor.
+The run root holds one period, period 1, for its whole life; the period number and segment
+number stay in the artifacts as constants (DL-130, DL-133). Its semantics are `(catalog_hash,
+runtime_hash, state_machine_version)`. This module owns the three identities, the two manifest
+models, and the layout: the `period_root` sentinel, `wal/`, `periods/000001/` and the content-
+addressed input bundle under `catalogs/`. `own_or_refuse` states the one ownership rule a root
+is claimed under.
 
 `catalog_hash` v2 is sha256 over the ss3.2 canonical form of `CatalogIR` with `meta` projected
 to `{source_files}`; `tool_version` and `parsed_at` leave, spans stay, so a patch release does
@@ -40,8 +36,9 @@ import uuid
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import datetime
-from pathlib import Path, PurePosixPath
-from typing import Annotated, Any, Final, Literal, TypedDict
+from pathlib import Path
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Annotated, Any, Final, Literal, TypedDict
 
 from pydantic import (
     BaseModel,
@@ -49,7 +46,6 @@ from pydantic import (
     Field,
     ValidationError,
     field_validator,
-    model_validator,
 )
 
 from dsl41.canon import (
@@ -58,25 +54,25 @@ from dsl41.canon import (
     canonical_bytes,
     check_artifact_version,
     decode,
-    digest as digest_over,
     hash_over,
-    is_canonical_file,
     is_wire_int,
     require_artifact_version,
-    with_digest,
 )
 from dsl41.ir import CatalogIR
 from dsl41.runner_clock import EngineError
-from dsl41.runner_procid import durable_create, durable_write, fsync_dir, mkdir_durable
+from dsl41.runner_procid import durable_write, fsync_dir, mkdir_durable
 from dsl41.semantics import SemanticSwitches, check_overrides, resolve
 from dsl41.timezones import alias_table
+
+if TYPE_CHECKING:
+    from dsl41.ast_jil import JilFile
 
 #: The one grammar of a stored digest; a native period never opens under another.
 _HASH_RE: Final = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def is_hash_address(value: object) -> bool:
-    """Whether `value` is a spelled sha256 address; the seal artifact uses it too (DL-132)."""
+    """Whether `value` is a spelled sha256 address (DL-132)."""
     return isinstance(value, str) and _HASH_RE.fullmatch(value) is not None
 
 
@@ -98,7 +94,8 @@ FW_DEFAULT_INTERVAL_S: Final[float] = 60.0
 CMD_GRACE_S: Final[float] = 10.0
 RECONCILE_SETTLE_S: Final[float] = 5.0
 SPAWN_WINDOW_S: Final[float] = 5.0
-#: ss9's soft gate. The spec gives no number; 60s is its worked example's value (PR-47e).
+#: dormant: no code reads it in 2.0.0, and it stays in the profile so `runtime_hash` and the
+#: manifest format do not move in this release
 RETRY_HORIZON_S: Final[float] = 60.0
 
 
@@ -294,14 +291,6 @@ class RuntimeProfile(BaseModel):
         (`semantics.check_overrides`), so a resume naming it is not drift."""
         return check_overrides(value)
 
-    def with_deadman(self, deadman_us: "int | None") -> "RuntimeProfile":
-        """This profile with `deadman_us` re-pinned and re-validated.
-
-        A running supervisor keeps its own interval, so the pinned profile carries the observed
-        deadman, not the requested one (DL-126). A changed profile needs a re-hashed
-        `runtime_hash` beside it (DL-152)."""
-        return RuntimeProfile.model_validate({**self.model_dump(), "deadman_us": deadman_us})
-
 
 def runtime_hash(profile: RuntimeProfile) -> str:
     """sha256 over the ss3.2 canonical form of `profile`, `"sha256:..."`."""
@@ -390,8 +379,8 @@ def runtime_profile_from_cli(
 
 
 class StagedManifest(BaseModel):
-    """ss2.1: what the launcher pins about a period, nothing the engine owns. The seal path
-    stages one for the period it proposes; genesis builds one and installs it.
+    """ss2.1: what the launcher pins about a run root, nothing the engine owns. Genesis builds
+    one and installs it.
 
     `strict=True` (DL-168) gives the wire's types on every top-level field of a lax
     `model_validate`, beside `_read_artifact`'s strict parse. The nested `runtime_profile`
@@ -452,7 +441,7 @@ def genesis_manifest(
     """The committed manifest of period 1.
 
     `staged` is what the launcher pinned; without it the default runtime profile over the empty
-    bundle applies. `baseline_id` is minted here unless given, because genesis has no seal to
+    bundle applies. `baseline_id` is minted here unless given, because genesis has nothing to
     take it from (DL-117)."""
     staged = staged or stage_manifest(
         catalog,
@@ -493,7 +482,7 @@ def stage_manifest(
 def bundle_dir(run_root: Path, source_bundle_hash: str) -> Path:
     """`<root>/catalogs/<digest>/`, content-addressed by bytes (ss1.1).
 
-    The name is the digest's hex half: a colon in an archived path reads as a remote host to
+    The name is the digest's hex half: a colon in a copied path reads as a remote host to
     `rsync` and `scp`."""
     return run_root / "catalogs" / source_bundle_hash.split(":")[-1]
 
@@ -503,342 +492,11 @@ def period_dir(run_root: Path, period_id: int) -> Path:
     return run_root / "periods" / f"{period_id:06d}"
 
 
-def seal_dir(run_root: Path) -> Path:
-    """`<root>/seals/` -- one sidecar per closed period (ss1.1)."""
-    return run_root / "seals"
-
-
-def seal_path(run_root: Path, period_id: int) -> Path:
-    """`<root>/seals/<period_id zero-padded to 6>.json` (ss1.1)."""
-    return seal_dir(run_root) / f"{period_id:06d}.json"
-
-
-def attestation_path(run_root: Path, period_id: int) -> Path:
-    """`<root>/seals/<period_id zero-padded to 6>.audit.json`, the attestation `audit` writes
-    and `verify` reads (ss1.3, ss11).
-
-    It sits beside the sidecar it attests, because a physical roll imports the pair together."""
-    return seal_dir(run_root) / f"{period_id:06d}.audit.json"
-
-
-def check_stamp(value: str, field: str) -> None:
-    """ss3.2's timestamp spelling: naive UTC with exactly six fractional digits.
-
-    Every artifact that carries one calls this (`Attestation.audited_at`,
-    `ArchiveReceipt.archived_at`)."""
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError as exc:
-        raise ValueError(f"{field} {value!r}: {exc}") from exc
-    if parsed.tzinfo is not None or "." not in value:
-        raise ValueError(f"{field} {value!r}: naive UTC with six fractional digits (ss3.2)")
-    if len(value.rsplit(".", 1)[1]) != 6:
-        raise ValueError(f"{field} {value!r}: exactly six fractional digits")
-
-
-def check_wire_ints(model: BaseModel, names: Iterable[str]) -> None:
-    """Every named field of `model` is an exact integer, never a bool coercion (ss3.2)."""
-    for name in names:
-        value = getattr(model, name)
-        if not is_wire_int(value):
-            raise ValueError(f"{name} is {value!r}: an exact integer, never a coercion")
-
-
-def check_addresses(pairs: Mapping[str, str], *, cite: str = "") -> None:
-    """Every value in `pairs` is a spelled sha256 address (ss3.2).
-
-    Keys are the caller's display names (`next_period.catalog_hash`). `cite` adds a reason to
-    the refusal (`Seal`'s)."""
-    for name, value in pairs.items():
-        if not is_hash_address(value):
-            if cite:
-                raise ValueError(f"{name} {value!r} is not a sha256 address -- {cite}")
-            raise ValueError(f"{name} {value!r}: not a sha256 address")
-
-
-#: The retention class DL-144 opened; the receipt carries it so a reader knows which policy
-#: removed the inputs (period-model ss12).
-ARCHIVE_CLASS: Final[str] = "archive-inputs"
-
-
-#: ss7's two staging artifacts (DL-145): written under `periods/.staging/<stage_digest>/`,
-#: renamed into `periods/<N>/` on commit, read back by recovery, and licensed by name in an
-#: archive receipt.
-STAGED_MANIFEST_NAME: Final[str] = "staged_manifest.json"
-CANDIDATE_NAME: Final[str] = "candidate.json"
-
-
-def archivable_names(period_id: int) -> tuple[str, str, str]:
-    """The three paths ss12a's `archive-inputs` class may delete for one period, relative to
-    the run root: the segment and the committed candidate's two files.
-
-    The receipt's shape rule and the recovery sweep share it. The paths derive from `wal_path`
-    and `period_dir` against an empty root."""
-    root = Path()
-    directory = period_dir(root, period_id)
-    return (
-        wal_path(root, period_id).as_posix(),
-        (directory / CANDIDATE_NAME).as_posix(),
-        (directory / STAGED_MANIFEST_NAME).as_posix(),
-    )
-
-
-def archive_receipt_path(run_root: Path, period_id: int) -> Path:
-    """`<root>/seals/<period_id zero-padded to 6>.archive.json`, the archive receipt
-    (period-model ss12, DL-144).
-
-    It sits beside the sidecar and attestation under the same name, on `attestation_path`'s
-    rule. It is written durably before the first deletion, so a crash mid-sweep leaves a record
-    of what was licensed and a retry finishes it. Missing evidence with no receipt is loss and
-    refuses."""
-    return seal_dir(run_root) / f"{period_id:06d}.archive.json"
-
-
-def parse_sealed_preamble(data: bytes | str, *, where: str) -> tuple[dict[str, Any], object]:
-    """The preamble `Attestation.from_bytes` and `ArchiveReceipt.from_bytes` share: decode
-    ss3.2-canonical JSON, refuse a non-object, pop the stamped `digest`, check
-    `artifact_format_version`. Returns `(payload, stamped)`.
-
-    `Seal.from_payload` (seal.py) does not share this: it requires `digest` present as a `str`
-    and recomputes it over the raw document before any model is built.
-
-    `decode` refuses a present-but-wrong `artifact_format_version`
-    (`canon.check_artifact_version`); the branch here fires only for an absent key (DL-157),
-    and its message cites PR-08d for the wording."""
-    try:
-        payload = decode(data)
-    except CanonError as exc:
-        raise EngineError(f"{where}: not ss3.2-canonical JSON ({exc})") from exc
-    if not isinstance(payload, dict):
-        raise EngineError(f"{where}: not a JSON object")
-    stamped = payload.pop("digest", None)
-    try:
-        require_artifact_version(payload)
-    except CanonError:
-        raise EngineError(
-            f"{where}: artifact_format_version is missing;"
-            f" this binary implements {ARTIFACT_FORMAT_VERSION} (PR-08d)"
-        ) from None
-    return payload, stamped
-
-
-def read_or_none(path: Path) -> bytes | None:
-    """The file's bytes, or None on ENOENT; any other OSError refuses, because an unreadable
-    file must not read as an empty root.
-
-    `read_sentinel` and `boundary.read_seal` do not call this."""
-    try:
-        return path.read_bytes()
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise EngineError(f"{path}: unreadable: {exc}") from exc
-
-
-class ArchiveReceipt(BaseModel):
-    """ss12's archive receipt: what was deleted, whose proof stands in for it, and under which
-    policy (DL-144).
-
-    `digest` is not a field, on `Seal`'s and `Attestation`'s rule: it derives from the rest.
-    `archived` is the exact licensed list, sorted and relative to the run root, which a retry
-    after a partial deletion completes from."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid", strict=True)
-
-    artifact_format_version: int = ARTIFACT_FORMAT_VERSION
-    estate_id: str = Field(min_length=1)
-    period_id: int = Field(ge=1)
-    #: the sidecar this period closed with; the attestation is bound to it
-    seal_digest: str
-    #: the proof that stands in for the inputs
-    attestation_digest: str
-    #: how far the attestation's induction reached; a reader checks that the licensing
-    #: checkpoint still covers the period
-    chain_through_period: int = Field(ge=1)
-    retention_class: str = Field(min_length=1)
-    #: every path licensed for deletion, relative to the run root, sorted, no repeat
-    archived: tuple[str, ...]
-    #: ss3.2's spelling: naive UTC with exactly six fractional digits
-    archived_at: str
-    #: the interpreter that wrote the receipt
-    dsl41_version: str
-
-    @model_validator(mode="after")
-    def _artifact_invariants(self) -> "ArchiveReceipt":
-        check_wire_ints(self, ("artifact_format_version", "period_id", "chain_through_period"))
-        check_addresses(
-            {"seal_digest": self.seal_digest, "attestation_digest": self.attestation_digest}
-        )
-        if self.chain_through_period < self.period_id:
-            raise ValueError(
-                f"chain_through_period {self.chain_through_period} is below the period"
-                f" it covers ({self.period_id}): a checkpoint that does not reach this"
-                " period licenses nothing (period-model ss12)"
-            )
-        if not self.archived:
-            raise ValueError(
-                "archived is empty: a receipt that licenses no deletion is not a"
-                " receipt, and its presence would say a period was archived when"
-                " nothing was (period-model ss12)"
-            )
-        if len(set(self.archived)) != len(self.archived) or list(self.archived) != sorted(
-            self.archived
-        ):
-            raise ValueError(
-                f"archived {self.archived!r}: the licensed list is sorted and has no"
-                " repeat -- one artifact, one entry"
-            )
-        for entry in self.archived:
-            parts = PurePosixPath(entry).parts
-            if entry.startswith("/") or not parts or any(part in ("..", ".") for part in parts):
-                raise ValueError(
-                    f"archived entry {entry!r}: a relative path inside the run root,"
-                    " never absolute and never traversing out of it"
-                )
-        # ss12a's all-or-nothing rule lives in the artifact: only two shapes validate (DL-144).
-        wal, candidate, staged = archivable_names(self.period_id)
-        shapes = ({wal}, {wal, candidate, staged})
-        if set(self.archived) not in shapes:
-            raise ValueError(
-                f"archived {self.archived!r}: period {self.period_id}'s archive is"
-                f" ALL-OR-NOTHING, so the licensed list is exactly ({wal},) or"
-                f" ({candidate}, {staged}, {wal}) -- a receipt naming anything else"
-                " describes a state this class never produces (period-model ss12a)"
-            )
-        if not self.dsl41_version:
-            raise ValueError("dsl41_version is empty: the interpreter that wrote it is recorded")
-        check_stamp(self.archived_at, "archived_at")
-        return self
-
-    @property
-    def digest(self) -> str:
-        """sha256 over the canonical bytes without the top-level `digest` key (ss3.2, PR-08b)."""
-        return digest_over(self.model_dump(mode="json"))
-
-    def to_bytes(self) -> bytes:
-        return canonical_bytes(with_digest(self.model_dump(mode="json")))
-
-    def licenses(self, run_root: Path, path: Path) -> bool:
-        """Whether this receipt licensed `path`, taken relative to `run_root`."""
-        try:
-            relative = Path(path).relative_to(run_root)
-        except ValueError:
-            return False
-        return relative.as_posix() in self.archived
-
-    @classmethod
-    def from_bytes(cls, data: bytes | str, *, where: str) -> "ArchiveReceipt":
-        """Parse and check the canonical form, the version and the receipt's own digest."""
-        payload, stamped = parse_sealed_preamble(data, where=where)
-        listed = payload.get("archived")
-        if isinstance(listed, list):
-            payload["archived"] = tuple(listed)
-        try:
-            receipt = cls.model_validate(payload)
-        except ValidationError as exc:
-            raise EngineError(
-                f"{where}: not an archive receipt this binary can read ({exc})"
-            ) from exc
-        if stamped != receipt.digest:
-            raise EngineError(
-                f"{where}: stamped digest {stamped!r} but the bytes digest to"
-                f" {receipt.digest} -- a receipt that disagrees with itself licensed"
-                " nothing (period-model ss12)"
-            )
-        if not is_canonical_file(data, receipt.to_bytes()):
-            raise EngineError(
-                f"{where}: the file's bytes are not the receipt's canonical"
-                " serialization -- one artifact has one byte form (period-model ss3.2)"
-            )
-        return receipt
-
-
-def read_archive_receipt(run_root: Path, period_id: int) -> "ArchiveReceipt | None":
-    """This period's archive receipt, or None when there is none.
-
-    A file that exists and does not parse refuses, because falling back to "no receipt" would
-    read a real archive as accidental loss."""
-    path = archive_receipt_path(run_root, period_id)
-    raw = read_or_none(path)
-    if raw is None:
-        return None
-    receipt = ArchiveReceipt.from_bytes(raw, where=str(path))
-    if receipt.retention_class != ARCHIVE_CLASS:
-        # every reader that accepts an absence passes here, so an unknown policy is refused here
-        # (period-model ss12)
-        raise EngineError(
-            f"{path}: retention class {receipt.retention_class!r} -- this binary"
-            f" implements {ARCHIVE_CLASS!r}, and a receipt written by a policy it does"
-            " not know licenses nothing it can check (period-model ss12)"
-        )
-    if receipt.period_id != period_id:
-        raise EngineError(
-            f"{path}: receipts period {receipt.period_id} under another period's"
-            " filename -- an archive receipt licenses one period and is named for it"
-            " (period-model ss12)"
-        )
-    return receipt
-
-
-def write_archive_receipt(run_root: Path, receipt: "ArchiveReceipt") -> Path:
-    """The receipt, durable before any deletion (period-model ss12).
-
-    `durable_create` refuses an existing receipt, whose list a retry completes from; the
-    caller re-reads it."""
-    mkdir_durable(str(seal_dir(run_root)))
-    path = archive_receipt_path(run_root, receipt.period_id)
-    durable_create(str(path), receipt.to_bytes())
-    return path
-
-
-def wrote_period(run_root: Path, period_id: int) -> bool:
-    """Whether this root ran period N, read from `periods/<N>/manifest.json`.
-
-    Genesis and in-place openings install the manifest in the root that runs the period; a
-    physical roll imports only the successor's (ss1.3). A root-local reader can so tell loss
-    from an imported seal (ss12a, DL-144)."""
-    return (period_dir(run_root, period_id) / "manifest.json").is_file()
-
-
-def archived_periods(run_root: Path) -> list[int]:
-    """Every period this root holds an archive receipt for, in order.
-
-    It lists files, not verdicts, on `attestation_periods`' rule."""
-    directory = seal_dir(run_root)
-    if not directory.is_dir():
-        return []
-    return sorted(
-        int(entry.name.split(".")[0])
-        for entry in directory.glob("*.archive.json")
-        if entry.name.split(".")[0].isdigit()
-    )
-
-
-def staging_dir(run_root: Path, stage_digest: str) -> Path:
-    """`<root>/periods/.staging/<stage digest>/` (ss7), named by the hex half on
-    `bundle_dir`'s rule."""
-    return run_root / "periods" / ".staging" / stage_digest.split(":")[-1]
-
-
-def quarantine_dir(run_root: Path, stage_digest: str, manifest_digest: str) -> Path:
-    """`<root>/periods/.quarantine/<old stage digest>/<sha256 of its manifest.json>/` (ss7).
-
-    Two levels, so alternating candidates (S1, S2, S1, S2) quarantine without collision and the
-    same bytes twice are idempotent (PR-30d)."""
-    return (
-        run_root
-        / "periods"
-        / ".quarantine"
-        / stage_digest.split(":")[-1]
-        / manifest_digest.split(":")[-1]
-    )
-
-
 # -------------------------------------------------------- the sentinel and wal
 
 #: ss1.1: the permanent one-line sentinel every periodized root carries. The name is deliberate:
 #: a binary that predates the period model refuses `run` on a root holding `journal.jsonl`. The
-#: file is never absent, so a root that sealed never reads as unused.
+#: file is never absent, so a used root never reads as unused.
 SENTINEL_NAME: Final[str] = "journal.jsonl"
 
 #: ss1.1: `wal/000001.jsonl` is period 1, `000002` is period 2 (I1: one
@@ -854,9 +512,8 @@ _WAL_NAME: Final = re.compile(r"^(\d{6})\.jsonl$")
 class Sentinel(BaseModel):
     """ss1.1's `period_root` record: one line, one schema, every periodized root.
 
-    It names the owning estate, where the records are, and, for a root a physical roll
-    created, the claim that first opened it. For an in-place claim it proves only that this
-    estate owns the root."""
+    It names the owning estate and where the records are, and proves that this estate owns the
+    root. `claim_id` is a 1.x field, always null in 2.0.0."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -864,14 +521,14 @@ class Sentinel(BaseModel):
     artifact_format_version: int = ARTIFACT_FORMAT_VERSION
     estate_id: str = Field(min_length=1)
     see: Literal["wal/"] = WAL_POINTER
-    #: the claim that first opened this root (a physical roll's), or null
+    #: a 1.x field: always null in 2.0.0
     claim_id: str | None = None
 
 
 def split_run_dir(name: str) -> tuple[str, int] | None:
     """`<job>.<run_number>`, split at the last dot (a job name may hold one). Canonical spelling
     only: `b.01` would alias `b.1` and let a directory this estate never wrote answer for a
-    run's evidence (ss11a; DL-137). Retention and the resume sweep both use it."""
+    run's evidence (ss11a; DL-137). The resume sweep uses it."""
     job, dot, tail = name.rpartition(".")
     if not dot or not job or not tail.isdigit():
         return None
@@ -900,7 +557,7 @@ def read_sentinel(run_root: Path) -> Sentinel | None:
 
     A `period_root` record this binary cannot read is an `EngineError` naming it. A
     `journal.jsonl` that is not a `period_root` line is no sentinel, and the caller
-    (`claim_root`, `plan_retention`) names what it found (DL-138)."""
+    (`claim_root`) names what it found (DL-138)."""
     path = sentinel_path(run_root)
     try:
         with path.open("rb") as handle:
@@ -968,52 +625,6 @@ def wal_segments(run_root: Path) -> list[int]:
     return sorted(segments)
 
 
-def sealed_periods(run_root: Path) -> list[int]:
-    """Every period this root holds a sidecar for, in order, with or without its segment.
-
-    It is wider than `closed_periods`, so a reader can notice missing evidence (ss12,
-    DL-144)."""
-    directory = seal_dir(run_root)
-    if not directory.is_dir():
-        return []
-    return sorted(
-        int(entry.stem)
-        for entry in directory.glob("*.json")
-        if entry.stem.isdigit() and not entry.name.endswith(".audit.json")
-    )
-
-
-def closed_periods(run_root: Path) -> list[int]:
-    """Every period this root can audit, in order: a committed seal and the segment that
-    re-derives it.
-
-    A rolled root holds its imported seal without that period's WAL (period-model ss1.3); it
-    verifies that seal and does not audit it."""
-    directory = seal_dir(run_root)
-    if not directory.is_dir():
-        return []
-    return [
-        period_id
-        for period_id in sealed_periods(run_root)
-        if wal_path(run_root, period_id).exists()
-    ]
-
-
-def attestation_periods(run_root: Path) -> list[int]:
-    """Every period this root holds an attestation for, in order.
-
-    It lists files, not verdicts; `dsl41 verify` decides what the newest proves (ss1.3, ss11).
-    The artifact's name is `attestation_path`'s alone to spell (DL-137)."""
-    directory = seal_dir(run_root)
-    if not directory.is_dir():
-        return []
-    return sorted(
-        int(entry.name.split(".")[0])
-        for entry in directory.glob("*.audit.json")
-        if entry.name.split(".")[0].isdigit()
-    )
-
-
 def active_wal(run_root: Path) -> Path:
     """The segment an appender opens: the newest, or segment 1 before genesis writes one."""
     segments = wal_segments(run_root)
@@ -1044,15 +655,6 @@ def root_of_wal(wal: Path) -> Path:
     `<root>/journal.jsonl`; the parent's name tells them apart."""
     wal = Path(wal)
     return wal.parent.parent if wal.parent.name == WAL_DIR else wal.parent
-
-
-def estate_segments(path: Path | str) -> list[Path]:
-    """Every segment this root retains, oldest first (ss1.1, I1)."""
-    wal = resolve_wal(path)
-    root = root_of_wal(wal)
-    if wal.parent.name != WAL_DIR:
-        return [wal]
-    return [wal_path(root, segment_no) for segment_no in wal_segments(root)]
 
 
 def root_is_unused(run_root: Path) -> bool:
@@ -1295,6 +897,17 @@ def require_manifest_fields(
             raise EngineError(f"{where}: runtime_profile missing {', '.join(gone)}")
 
 
+def read_or_none(path: Path) -> bytes | None:
+    """The file's bytes, or None on ENOENT; any other OSError refuses, because an unreadable
+    file must not read as an empty root."""
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise EngineError(f"{path}: unreadable: {exc}") from exc
+
+
 def read_period_manifest(run_root: Path, period_id: int = GENESIS_PERIOD_ID) -> Manifest | None:
     """The committed manifest, or None when this root has none (DL-113 decision 5).
 
@@ -1350,9 +963,8 @@ def segment_record(
     is not in it, because it is per-process, rides on `leader`, and a patch release must not
     move these bytes.
 
-    `opens_from_seal` is null on segment 1 and `{period_id, digest}` later
-    (`seal.open_from_seal` derives it). `at` on an opening segment is the seal's cutoff
-    instant, so two openings of one seal are byte-identical (PR-07)."""
+    `opens_from_seal` is null on segment 1, the only segment a 2.0.0 root holds; the field
+    stays in the record format."""
     return {
         "rec": "segment",
         "segment_no": manifest.segment_no,
@@ -1368,8 +980,7 @@ def segment_record(
         "first_index": manifest.first_index,
         # the boundary's field; genesis passes none
         "opens_from_seal": dict(opens_from_seal) if opens_from_seal is not None else None,
-        # the break-glass paths (ss1.3, ss11), null until an opener takes one; `reclaimed` names
-        # the claim a `dsl41 estate reclaim --force` moved aside and the actor who authorized it
+        # 1.x break-glass fields (ss1.3, ss11): always null in 2.0.0, kept in the record format
         "reclaimed": dict(reclaimed) if reclaimed is not None else None,
         "trust_unaudited": None,
         "at": at.isoformat(),
@@ -1411,7 +1022,7 @@ _SEGMENT_SCHEMA: Final[dict[str, Any]] = {
 }
 
 
-#: The ss2.1 segment field names, for comparing a seal's projection field by field (DL-136).
+#: The ss2.1 segment field names (DL-136).
 SEGMENT_FIELDS = frozenset(_SEGMENT_SCHEMA)
 
 
@@ -1446,7 +1057,7 @@ def check_record_fields(
 
     Refusals, in order: an unknown key (`rec` is never unknown), then per field in schema
     order, missing before mistyped. `where` names the record kind and `cite` its defining
-    section. Callers: `check_segment_record` (ss2.1) and `boundary.check_seal_record` (ss2.2).
+    section. Caller: `check_segment_record` (ss2.1).
 
     It validates the fields of a record whose kind is known; `runner_journal.check_record`
     dispatches the kind (DL-138 D1)."""
@@ -1505,7 +1116,7 @@ def is_opening(record: Mapping[str, Any]) -> bool:
 
 
 def opening_at(record: Mapping[str, Any]) -> datetime:
-    """When the segment was opened; on a boundary opening, the seal's cutoff instant."""
+    """When the segment was opened."""
     stamp = record.get("at")
     if not isinstance(stamp, str):
         raise EngineError(f"opening record carries no timestamp: {record.get('rec')!r}")
@@ -1550,4 +1161,129 @@ def check_manifest_against_segment(manifest: Manifest, segment: Mapping[str, Any
             "period manifest disagrees with the journal's segment record"
             f" ({'; '.join(disagree)}): this manifest is not this segment's"
             " (period-model ss2.1)"
+        )
+
+
+# ------------------------------------------------------------- taking a root
+
+
+@dataclass(frozen=True)
+class OpenedRoot:
+    """What taking possession of a root yields: the owner and the sentinel."""
+
+    estate_id: str
+    sentinel: Sentinel
+    resumed: bool
+
+
+def check_root_unused(run_root: Path) -> None:
+    """ss1.1's unused-root predicate over the whole root, not the sentinel alone.
+
+    A root keeping a WAL, a committed period or a populated runs/ is somebody's work even
+    without its journal.jsonl. What the launcher pre-stages, `catalogs/`, is excluded.
+
+    It is read-only so the CLI can prove a root claimable before staging a bundle into it."""
+    leftovers = [WAL_DIR] if (run_root / WAL_DIR).exists() else []
+    periods = run_root / "periods"
+    if periods.is_dir() and any(periods.iterdir()):
+        leftovers.append("periods (committed)")
+    runs = run_root / "runs"
+    if runs.is_dir() and any(runs.iterdir()):
+        leftovers.append("runs (populated)")
+    if leftovers:
+        raise EngineError(
+            f"{run_root}: no sentinel, but {', '.join(leftovers)} exist(s) --"
+            " not an unused root; a genesis here would relabel foreign work (PR-01c)"
+        )
+
+
+def claim_root(run_root: Path) -> OpenedRoot:
+    """ss1.1's sentinel step, under its ownership rule. The caller holds `leader.lock`, which
+    excludes a concurrent opener.
+
+    A root that already holds this binary's sentinel is resumed; a `journal.jsonl` that is not a
+    sentinel is refused; an unused root is claimed with a fresh estate id."""
+    existing = read_sentinel(run_root)
+    occupied = existing is None and sentinel_path(run_root).exists()
+    if existing is None and not occupied:
+        check_root_unused(run_root)
+    action = own_or_refuse(
+        exists=existing is not None or occupied,
+        ours=existing is not None,
+        what=str(sentinel_path(run_root)),
+        holder="a file this binary does not recognise" if occupied else "nobody",
+    )
+    if action == "resume":
+        assert existing is not None
+        return OpenedRoot(estate_id=existing.estate_id, sentinel=existing, resumed=True)
+    sentinel = Sentinel(estate_id=str(uuid.uuid4()))
+    write_sentinel(run_root, sentinel)
+    return OpenedRoot(estate_id=sentinel.estate_id, sentinel=sentinel, resumed=False)
+
+
+def open_wal(run_root: Path, segment_no: int) -> Path:
+    """Make `wal/` durable and return the segment's path."""
+    directory = run_root / WAL_DIR
+    directory.mkdir(parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    fsync_dir(directory)
+    return wal_path(run_root, segment_no)
+
+
+def stage_period(
+    run_root: Path,
+    parsed: "list[JilFile]",
+    catalog: CatalogIR,
+    profile: RuntimeProfile,
+) -> StagedManifest:
+    """Materialize the run's inputs and pin its identity (DL-130; DL-66).
+
+    `catalogs/<source_bundle_hash>/` holds the post-placeholder source, byte-exact (F1),
+    beside `sources.json`, addressed by those bytes, so a relaunch reuses it. The engine
+    installs the committed `periods/000001/manifest.json` at genesis, because `baseline_id`
+    and `first_index` are its to know.
+
+    Original paths are recorded because `catalog_hash` covers `SourceSpan.file`."""
+    from dsl41.ast_jil import render_preserve
+    from dsl41.runner_ledger import STATE_MACHINE_VERSION
+
+    sources = [SourceFile(path=jf.file, text=render_preserve(jf)) for jf in parsed]
+    return stage_manifest(
+        catalog,
+        source_bundle_hash=write_bundle(run_root, sources),
+        profile=profile,
+        state_machine_version=STATE_MACHINE_VERSION,
+    )
+
+
+def load_bundle_catalog(
+    run_root: Path, source_bundle_hash: str, *, permit_unknown: bool = False
+) -> CatalogIR:
+    """The catalog loaded from the immutable bundle this root holds: the one loader (DL-137). It
+    parses under the original paths `sources.json` records, because the hash covers spans."""
+    from dsl41.ast_jil import JilParseError, parse
+    from dsl41.ir import LoweringError, lower_catalog
+
+    sources: Sequence[SourceFile] = bundle_sources(run_root, source_bundle_hash)
+    try:
+        return lower_catalog(
+            [parse(source.text, file=source.path) for source in sources],
+            permit_unknown=permit_unknown,
+        )
+    except (JilParseError, LoweringError) as exc:
+        raise EngineError(
+            f"{run_root}: bundle {source_bundle_hash} does not load ({exc}): a catalog that"
+            " cannot be rebuilt from its own bundle cannot be replayed"
+        ) from exc
+
+
+def require_period_one(run_root: Path) -> None:
+    """A run root holds period 1 and nothing else (2.0.0). A second segment is a 1.x lineage
+    this build cannot carry: it refuses by name before any replay or write. An opening that
+    names a seal cannot sit in segment 1: `check_segment_record` refuses it."""
+    segments = wal_segments(run_root)
+    if segments and segments != [GENESIS_SEGMENT_NO]:
+        raise EngineError(
+            f"{run_root}: holds WAL segments {segments}; a 2.0.0 run root holds segment 1"
+            " only, and a 1.x lineage with sealed periods cannot be resumed or read"
         )

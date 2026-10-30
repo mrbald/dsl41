@@ -32,20 +32,20 @@ from dsl41.cli import app
 from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, EventKind
+from dsl41.run_root import catalog_hash_v2
 from dsl41.runner import Engine
-from dsl41.runner_startup import start_run
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import ApplyResult, Attempt, fingerprint
 from dsl41.runner_clock import EngineError, VirtualClock
-from dsl41.runner_ledger import STATE_MACHINE_VERSION
-from dsl41.runner_scheduler import Scheduler
-from dsl41.period import catalog_hash_v2
 from dsl41.runner_journal import (
     Journal,
     dsl41_version,
     read_journal,
     replay_inputs,
 )
+from dsl41.runner_ledger import STATE_MACHINE_VERSION
+from dsl41.runner_scheduler import Scheduler
+from dsl41.runner_startup import start_run
 from dsl41.state_machine import Executor
 
 T0 = datetime(2026, 7, 1, 8, 0)
@@ -103,10 +103,7 @@ def test_the_writer_refuses_a_record_kind_this_binary_does_not_write(tmp_path: P
     segment every reader of it -- replay, history, retention, audit --
     refuses, and the file that holds it is append-only.
 
-    One guard at `_write` closes it structurally. `seal` is the one record
-    that does not come through here (the boundary appends it under its own
-    schema check) and it is in the set for the readers' sake."""
-    from dsl41.runner_journal import CURRENT_RECS
+    One guard at `_write` closes it structurally."""
 
     catalog = lower_source(_SOLO_JIL)
     path = tmp_path / "journal.jsonl"
@@ -124,7 +121,6 @@ def test_the_writer_refuses_a_record_kind_this_binary_does_not_write(tmp_path: P
         journal.close()
     # nothing was appended: the segment record still stands alone
     assert [r["rec"] for r in read_journal(path)] == ["segment"]
-    assert "seal" in CURRENT_RECS  # the readers' entry, written elsewhere
 
 
 def _attempt(index: int, event: Event | None, *, source: str | None = "control") -> Attempt:
@@ -879,7 +875,7 @@ def test_cli_journal_refuses_an_older_build_s_log_for_its_version(tmp_path: Path
     state-machine version and a catalog hash over its own `ir_version`. Read
     against the SAME estate file, it is refused for its version, before any
     hash is compared: never "catalog hash mismatch", never a trace."""
-    from dsl41.period import hash_over
+    from dsl41.run_root import hash_over
 
     text = "insert_job: j1\njob_type: c\ncommand: x\nmachine: m1\n"
     jil_path = tmp_path / "estate.jil"
@@ -937,21 +933,6 @@ def test_the_preflight_caveats_a_run_started_under_are_in_the_log(tmp_path: Path
     assert record["rec"] == "preflight"
     assert [i["code"] for i in record["items"]] == ["machine", "timezone"]
     assert [i["severity"] for i in record["items"]] == ["WARN", "WARN"]
-
-
-def test_seal_writes_and_notifies_with_no_lock_held(tmp_path: Path) -> None:
-    """The ss1 fence in `seal` is conditional on a lock actually being held
-    (`self._lock is not None`): a lock-less journal -- a rehearsal or the
-    bisimulation harness, per the constructor's own docstring -- has nothing
-    to check, and `seal` must still write the record and fan it out."""
-    journal = Journal(tmp_path / "j.jsonl", fsync_each=False)
-    assert journal._lock is None
-    queue = journal.subscribe(Executor())
-    journal.seal({"rec": "seal", "period_id": 1})
-    journal.close()
-    assert queue.get_nowait() == {"rec": "seal", "period_id": 1}
-    [line] = (tmp_path / "j.jsonl").read_text().splitlines()
-    assert json.loads(line) == {"rec": "seal", "period_id": 1}
 
 
 def test_unsubscribing_something_that_never_subscribed_is_a_no_op(tmp_path: Path) -> None:
@@ -1030,24 +1011,6 @@ def test_an_embedded_opening_record_refuses_the_journal(tmp_path: Path) -> None:
     assert read_journal(wal)  # restored: clean
 
 
-def test_a_forged_low_seq_never_hides_older_segments(tmp_path: Path) -> None:
-    """I2 at the backfill: cursor containment comes from the validated
-    opening's own first_index, and a record whose seq is below it refuses
-    -- a forged `seq: 0` in the newest segment would otherwise claim the
-    cursor and silently skip every older segment and its chain checks."""
-    from dsl41.canon import canonical_bytes
-    from dsl41.runner_journal import read_backfill
-
-    wal = _write_two_input_journal(tmp_path)
-    records = read_journal(wal)
-    forged = {"rec": "drop", "at": "2026-07-01T08:00:00", "kind": "TICK", "seq": 0}
-    spliced = [*records, forged]
-    # rewrite WITHOUT a seal so this stays the active segment
-    wal.write_bytes(b"".join(canonical_bytes(r) + b"\n" for r in spliced))
-    with pytest.raises(EngineError, match="below this segment's first_index"):
-        read_backfill(wal, since=0)
-
-
 def test_a_zero_first_index_refuses_the_segment(tmp_path: Path) -> None:
     """I2: index 1 is the first index there ever is -- a forged
     `first_index: 0` would make the backfill's positional containment
@@ -1060,3 +1023,13 @@ def test_a_zero_first_index_refuses_the_segment(tmp_path: Path) -> None:
     wal.write_bytes(b"".join(canonical_bytes(r) + b"\n" for r in records))
     with pytest.raises(EngineError, match="first_index"):
         read_journal(wal)
+
+
+def test_a_seal_record_is_a_retired_dialect_refused_by_name() -> None:
+    """A 1.x root that sealed holds a `seal` record; 2.0.0 names it rather than
+    calling the file corrupt (docs/protocol-evolution.md ss6)."""
+    from dsl41.runner_journal import RETIRED_RECS, check_record
+
+    assert RETIRED_RECS["seal"] == "2.0.0"
+    with pytest.raises(EngineError, match="`seal` is a RETIRED record dialect.*since 2.0.0"):
+        check_record({"rec": "seal"}, where="journal j")

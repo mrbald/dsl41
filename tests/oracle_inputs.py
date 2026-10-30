@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any
 
 from estate_gen import Advance, SealPoint, Step, catalog_script, seeded
+from sealed_state import SealedHost, SealedState, _canon_ready
 
 from dsl41.ast_jil import parse_file
 from dsl41.canon import canonical_bytes, digest
@@ -53,7 +54,6 @@ from dsl41.equiv import equiv_scripts
 from dsl41.ir import CatalogIR, lower_catalog, lower_source
 from dsl41.oracle import InputBatch, Oracle
 from dsl41.oracle_state import Event
-from dsl41.seal import SealedHost, SealedState, _canon_ready
 from dsl41.semantics import REGISTRY
 
 CORPUS_DIR = Path(__file__).parent / "corpus"
