@@ -1494,36 +1494,11 @@ class RuntimeState:
         self._replace(job, **{field: value})
 
     def seed_job(
-        self,
-        job: str,
-        *,
-        status: JobStatus = "INACTIVE",
-        status_at: datetime | None = None,
-        last_end_at: datetime | None = None,
-        exit_code: int | None = None,
-        on_ice: bool = False,
-        on_hold: bool = False,
-        on_noexec: bool = False,
-        armed: bool = False,
+        self, job: str, *, on_ice: bool = False, on_hold: bool = False, on_noexec: bool = False
     ) -> None:
-        """Install a row's lifecycle fields as given; not a move, so no machine is taken.
-
-        Callers: the Oracle's genesis seed (SEM-24 definition-time flags) and classify's
-        interpreter rebuild of carried rows. A QUE_WAIT row gets a waiter rank.
-        """
-        self._replace(
-            job,
-            status=status,
-            status_at=status_at,
-            last_end_at=last_end_at,
-            exit_code=exit_code,
-            on_ice=on_ice,
-            on_hold=on_hold,
-            on_noexec=on_noexec,
-            armed=armed,
-        )
-        if status == "QUE_WAIT":
-            self.enqueue_waiter(job)
+        """Install a row's definition-time flags (SEM-24) for the Oracle's genesis seed; not a
+        move, so no machine is taken."""
+        self._replace(job, on_ice=on_ice, on_hold=on_hold, on_noexec=on_noexec)
 
     def set_global(self, name: str, value: str) -> None:
         """Latch a global's value (SEM-06). Only commit_input() moves the revision, and only if

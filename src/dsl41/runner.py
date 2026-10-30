@@ -601,12 +601,6 @@ class Engine:
         against an absent supervisor and marking its job FAILURE."""
         self.inject_host(HostCommand(verb="quarantine", host_id=self.executor_id))
 
-    def host_state(self) -> str | None:
-        """This engine's executor's routing state (ss8), or None with no row: a held SPAWN's
-        resend passes the routing gate a fresh effect passes (DL-416)."""
-        row = self.oracle.store.host(self.executor_id)
-        return row.state if row is not None else None
-
     def note_executor_reachable(self) -> None:
         """Contact restored: the leader clears what it set and restores the state it interrupted
         (a drained host stays drained)."""
@@ -627,15 +621,6 @@ class Engine:
         self._push(
             _Pending(at=ev.at, request_id=request_id, ev=ev, envelope=envelope, future=future)
         )
-
-    def observe_opening(self) -> None:
-        """DL-256: a period opened over a removed job that still holds units owes their release to
-        its first input. Admit a time observation for it now, stamped at the latest of the clock,
-        the last admitted instant and the oracle's clock. A no-op when nothing is owed."""
-        if not self.oracle.opening_release_owed:
-            return
-        floors = [t for t in (self.frontiers.at, self.oracle._now) if t is not None]
-        self._push(_Pending(at=max([self.clock.now(), *floors]), request_id=None))
 
     def _push(self, pending: _Pending) -> None:
         """Put one input on the time-ordered queue and wake the loop; the arrival counter keeps
@@ -1272,7 +1257,6 @@ class Engine:
             journal=self.journal,
             run_id=run_id,
             fence=self.fence,
-            route=self.host_state,
         )
         result = await adapter.run(job_ir, run_number, ctx)
         # (job, run_number) ride along for the ss4 stale-completion gate

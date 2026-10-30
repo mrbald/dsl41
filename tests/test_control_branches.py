@@ -539,6 +539,95 @@ def test_a_cursor_ahead_of_the_log_is_owed_only_the_seqs_above_it(short_root: Pa
     asyncio.run(scenario())
 
 
+def test_a_backfill_that_meets_a_foreign_file_refuses_on_the_stream(short_root: Path) -> None:
+    """ss5 (DL-135): the ack has gone when the backfill reads the WAL, so its refusal goes on
+    the stream as `backfill_refused` and the stream ends; a raising handler would hang the
+    client up unanswered. The twin: with the file gone the same cursor is served."""
+
+    async def scenario() -> None:
+        run_root = short_root / "run"
+        engine, server, loop_task = await _serve(run_root, _ONE_JOB)
+        try:
+            (run_root / "wal" / "notes.txt").write_text("an operator's note\n")
+            reader, writer = await _open(server)
+            try:
+                ack = await _ask(reader, writer, {"cmd": "subscribe", "since": 0})
+                assert ack == {"ok": True, "subscribed": True, "since": 0}
+                [refusal] = await _read_until(reader, lambda got: len(got) == 1)
+                assert refusal["ok"] is False and refusal["code"] == "backfill_refused"
+                assert "not a segment file" in refusal["error"]
+                assert await asyncio.wait_for(reader.readline(), timeout=3.0) == b""
+            finally:
+                await _hang_up(writer)
+            (run_root / "wal" / "notes.txt").unlink()
+            reader, writer = await _open(server)
+            try:
+                await _ask(reader, writer, {"cmd": "subscribe", "since": 0})
+                [first] = await _read_until(reader, lambda got: len(got) == 1)
+                assert first["rec"] == "segment"
+            finally:
+                await _hang_up(writer)
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
+def test_a_cursor_below_a_rewritten_first_index_gets_the_gap_marker_then_the_backfill(
+    short_root: Path,
+) -> None:
+    """ss5's gap protocol on synthetic metadata. The gap branch is unreachable in production:
+    a 2.0.0 root holds period 1 only and retains from index 1. It stays as frozen wire surface,
+    because docs/control-protocol.md still specifies the marker, so the genesis segment's
+    `first_index` is rewritten in place to stand for a root that does not retain from 1. A cursor below `first_index - 1` gets the marker, then every retained record
+    above the cursor, then live delivery. A cursor at `first_index - 1` is contiguous: the
+    same records, no marker."""
+
+    async def scenario() -> None:
+        run_root = short_root / "run"
+        engine, server, loop_task = await _serve(run_root, _ONE_JOB)
+        try:
+            for verb in ("ON_HOLD", "OFF_HOLD") * 3:
+                assert (await _sendevent(server.path, verb, job="s6b_job"))["ok"] is True
+            wal = engine.journal.path
+            raw = wal.read_bytes()
+            at = raw.index(b'"first_index": 1,') + len(b'"first_index": ')
+            with wal.open("r+b") as f:
+                f.seek(at)
+                f.write(b"5")
+            top = max(r["seq"] for r in read_journal(wal) if "seq" in r)
+            assert top >= 6
+            for since, gap in ((3, True), (4, False)):
+                retained = [r for r in read_journal(wal) if r.get("seq", 0) > since]
+                reader, writer = await _open(server)
+                try:
+                    ack = await _ask(reader, writer, {"cmd": "subscribe", "since": since})
+                    assert ack == {"ok": True, "subscribed": True, "since": since}
+                    lines = await _read_until(
+                        reader, lambda got: any(r.get("seq") == top for r in got)
+                    )
+                    marker = [{"gap": True, "earliest_retained": 5}] if gap else []
+                    assert lines[: len(marker)] == marker
+                    body = lines[len(marker) :]
+                    assert not any(r.get("ok") is False or "gap" in r for r in body)
+                    assert [r for r in body if "seq" in r] == [r for r in retained if "seq" in r]
+                    verb = (
+                        "ON_HOLD"
+                        if engine.oracle.store.job["s6b_job"].on_hold is False
+                        else "OFF_HOLD"
+                    )
+                    assert (await _sendevent(server.path, verb, job="s6b_job"))["ok"] is True
+                    live = await _read_until(reader, lambda got: any("seq" in r for r in got))
+                    assert [r["seq"] for r in live if "seq" in r] == [top + 1]
+                    top += 1
+                finally:
+                    await _hang_up(writer)
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())
+
+
 _DISPLACED = (
     "this engine can no longer prove it leads this estate's lineage: the anchor was deleted"
     " or replaced. Nothing is answered from a lineage this process does not lead"

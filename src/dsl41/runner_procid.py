@@ -22,13 +22,10 @@ import fcntl
 import json
 import os
 import re
-import stat
 import subprocess
 import sys
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
-from pathlib import Path
 from datetime import UTC, datetime
 from typing import Any, Final
 
@@ -87,231 +84,6 @@ def flock_exclusive(path: str | os.PathLike[str]) -> int:
     return fd
 
 
-def verify_lock_path(fd: int, path: str | os.PathLike[str]) -> None:
-    """Maintenance excludes engines only while the existing regular inode stays put (DL-390)."""
-    held = os.fstat(fd)
-    current = os.stat(path, follow_symlinks=False)
-    if not stat.S_ISREG(held.st_mode) or not stat.S_ISREG(current.st_mode):
-        raise LockHeld(errno.ESTALE, "lock is not a regular file", os.fspath(path))
-    if (current.st_dev, current.st_ino) != (held.st_dev, held.st_ino):
-        raise LockHeld(errno.ESTALE, "lock path moved", os.fspath(path))
-    if not current.st_mode & 0o444 or not current.st_mode & 0o222:
-        raise PermissionError(errno.EACCES, "lock is unreadable or unwritable", os.fspath(path))
-
-
-def flock_existing(path: str | os.PathLike[str]) -> int:
-    """Take maintenance exclusion without creating, following or truncating evidence (DL-390)."""
-    fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        verify_lock_path(fd, path)
-    except BaseException:
-        os.close(fd)
-        raise
-    return fd
-
-
-class ObservationUnavailable(OSError):
-    """Complete, dedicated service containment cannot be established (DL-390)."""
-
-
-# The supervisor's log names the busctl read of its exit policy once per process (DL-390).
-_busctl_policy_logged = False
-
-
-def _systemd_exit_status_codes(text: str) -> set[int]:
-    """Only the exit-code array of systemd's typed (aiai) status pair admits 8 (DL-390)."""
-    fields = text.split()
-    if (
-        len(fields) < 3
-        or fields[0] != "(aiai)"
-        or any(not re.fullmatch(r"[0-9]+", field) for field in fields[1:])
-    ):
-        raise ObservationUnavailable("malformed typed systemd exit policy")
-    try:
-        values = [int(field) for field in fields[1:]]
-    except ValueError as exc:
-        raise ObservationUnavailable("malformed typed systemd exit policy") from exc
-    count = values[0]
-    if any(value > 2**31 - 1 for value in values) or count > len(values) - 2:
-        raise ObservationUnavailable("invalid typed systemd exit policy counts")
-    if len(values) != count + 2 + values[count + 1]:
-        raise ObservationUnavailable("invalid typed systemd exit policy length")
-    return set(values[1 : count + 1])
-
-
-def _own_systemd_cgroup() -> tuple[str, str, str]:
-    """This process's systemd hierarchy: (controllers, cgroup path, unit), the unit a
-    `.service`. Raises `ObservationUnavailable` when it is not unambiguous."""
-    entries = [line.split(":", 2) for line in Path("/proc/self/cgroup").read_text().splitlines()]
-    candidates = [
-        (controllers, group)
-        for _, controllers, group in entries
-        if "name=systemd" in controllers.split(",")
-    ]
-    if not candidates:
-        candidates = [
-            (controllers, group) for _, controllers, group in entries if controllers == ""
-        ]
-    if len(candidates) != 1:
-        raise ObservationUnavailable("no unambiguous systemd cgroup hierarchy")
-    controllers, group = candidates[0]
-    unit = group.rsplit("/", 1)[-1]
-    if not re.fullmatch(r"[A-Za-z0-9_.@:\\-]+[.]service", unit):
-        raise ObservationUnavailable("supervisor is not in a service cgroup")
-    return controllers, group, unit
-
-
-@dataclass(frozen=True)
-class ServiceContainment:
-    """The qualified Linux systemd hierarchy, including its complete subtree (DL-390)."""
-
-    directory: Path
-    control_group: str
-    unit: str
-    pid: int
-
-    @classmethod
-    def observe(cls) -> ServiceContainment:
-        if not sys.platform.startswith("linux"):
-            raise ObservationUnavailable("maintenance requires Linux service containment")
-        controllers, group, unit = _own_systemd_cgroup()
-        mounts: list[Path] = []
-        for line in Path("/proc/self/mountinfo").read_text().splitlines():
-            left, right = line.split(" - ", 1)
-            fields, fs = left.split(), right.split()
-            expected = "cgroup2" if controllers == "" else "cgroup"
-            if fs[0] != expected:
-                continue
-            if controllers and "name=systemd" not in fs[2].split(","):
-                continue
-            # A restricted mount root cannot prove the manager's whole subtree (DL-390).
-            if fields[3] != "/" or "\\" in fields[4]:
-                raise ObservationUnavailable("unreconciled cgroup mount namespace")
-            mounts.append(Path(fields[4]))
-        if len(mounts) != 1 or not group.startswith("/") or ".." in group.split("/"):
-            raise ObservationUnavailable("no unambiguous complete cgroup mount")
-        proof = cls(mounts[0] / group.lstrip("/"), group, unit, os.getpid())
-        proof.verify_manager()
-        return proof
-
-    def verify_manager(self) -> None:
-        # Identity, containment and exit policy; no stop guard (DL-399, DL-416).
-        # All manager reads share one bound; helpers are reaped before sampling (DL-390).
-        deadline = time.monotonic() + 5.0
-
-        def query(argv: list[str]) -> str:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise ObservationUnavailable("service manager observation timed out")
-            return subprocess.run(
-                argv, capture_output=True, text=True, check=True, timeout=remaining
-            ).stdout
-
-        output = query(
-            [
-                "systemctl",
-                "show",
-                self.unit,
-                "--no-pager",
-                "--property=MainPID",
-                "--property=ControlGroup",
-                "--property=Delegate",
-                "--property=KillMode",
-                "--property=SuccessExitStatus",
-                "--property=RestartPreventExitStatus",
-            ]
-        )
-        properties = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
-        if (
-            properties.get("MainPID") != str(self.pid)
-            or properties.get("ControlGroup") != self.control_group
-            or properties.get("Delegate") != "no"
-            or properties.get("KillMode") != "control-group"
-        ):
-            raise ObservationUnavailable("service ownership, delegation or containment mismatch")
-        statuses = ("SuccessExitStatus", "RestartPreventExitStatus")
-        if any(properties.get(name) == "[unprintable]" for name in statuses):
-            # systemd 239's text formatter cannot print these typed manager values (DL-390).
-            reply = query(
-                [
-                    "busctl",
-                    "--system",
-                    "call",
-                    "org.freedesktop.systemd1",
-                    "/org/freedesktop/systemd1",
-                    "org.freedesktop.systemd1.Manager",
-                    "GetUnit",
-                    "s",
-                    self.unit,
-                ]
-            )
-            signature, _, encoded_path = reply.strip().partition(" ")
-            try:
-                object_path = json.loads(encoded_path)
-            except ValueError as exc:
-                raise ObservationUnavailable("malformed systemd unit object path") from exc
-            if (
-                signature != "o"
-                or not isinstance(object_path, str)
-                or not re.fullmatch(r"/org/freedesktop/systemd1/unit/[A-Za-z0-9_]+", object_path)
-            ):
-                raise ObservationUnavailable("unverified systemd unit object path")
-            for name in statuses:
-                if properties.get(name) == "[unprintable]":
-                    value = query(
-                        [
-                            "busctl",
-                            "--system",
-                            "get-property",
-                            "org.freedesktop.systemd1",
-                            object_path,
-                            "org.freedesktop.systemd1.Service",
-                            name,
-                        ]
-                    )
-                    codes = _systemd_exit_status_codes(value)
-                    properties[name] = " ".join(map(str, codes))
-            global _busctl_policy_logged
-            if not _busctl_policy_logged:
-                # a diagnostic never decides admission: a failed write leaves the verdict and
-                # the flag alone, so the line is tried again on the next read (DL-402)
-                try:
-                    print(
-                        "supervisor: exit policy read through busctl"
-                        " (systemd text formatter printed [unprintable])",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                except OSError:
-                    pass
-                else:
-                    _busctl_policy_logged = True
-        if any("8" not in properties.get(name, "").split() for name in statuses):
-            raise ObservationUnavailable("service exit policy does not retain maintenance stop")
-
-    def members(self) -> set[int]:
-        """Read every subgroup. Missing or unreadable membership is never empty (DL-390)."""
-        self.verify_manager()
-        if self.directory.is_symlink() or not self.directory.is_dir():
-            raise ObservationUnavailable("service cgroup disappeared or became a symlink")
-        members: set[int] = set()
-
-        def fail(error: OSError) -> None:
-            raise error
-
-        for root, directories, _files in os.walk(self.directory, onerror=fail, followlinks=False):
-            if any((Path(root) / name).is_symlink() for name in directories):
-                raise ObservationUnavailable("cgroup subtree contains a symlink")
-            lines = (Path(root) / "cgroup.procs").read_text().splitlines()
-            if any(not line.isdecimal() or int(line) <= 0 for line in lines):
-                raise ObservationUnavailable("malformed cgroup membership")
-            members.update(map(int, lines))
-        if self.pid not in members:
-            raise ObservationUnavailable("supervisor absent from observed service cgroup")
-        return members
-
-
 # ------------------------------------------------------------------ durability
 
 
@@ -359,17 +131,6 @@ def fsync_dir(path: "str | os.PathLike[str]", *, nofollow: bool = False) -> None
         os.close(fd)
 
 
-def fsync_file(path: "str | os.PathLike[str]") -> None:
-    """Make an EXISTING file's bytes durable before a mutation relies on them: recovery
-    reads prove readable, not durable, and a CAS over a line a power cut then removes
-    leaves a successor whose naming record is gone. Read-only open."""
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
 def write_all(fd: int, data: bytes) -> None:
     """Every byte, or an error. `os.write` may write FEWER bytes than given and return the
     count without raising, and the liturgy would then fsync and rename a TRUNCATED record
@@ -383,19 +144,17 @@ def write_all(fd: int, data: bytes) -> None:
         written += count
 
 
-def durable_write(path: str, data: bytes, *, mode: int = 0o600, dir_fd: int | None = None) -> None:
+def durable_write(path: str, data: bytes, *, mode: int = 0o600) -> None:
     """The DL-41a durability liturgy: same-dir temp file, fsync(file), rename,
     fsync(directory). Requires a local filesystem. The file gets MODE whatever the umask,
-    owner-only by default. With DIR_FD, PATH is a name in that open directory and every step
-    goes through the descriptor, so a swap of the directory cannot redirect the write."""
+    owner-only by default."""
     directory = os.path.dirname(path) or "."
     tmp = os.path.join(directory, f".{os.path.basename(path)}.{os.getpid()}.tmp")
-    at: dict[str, int] = {} if dir_fd is None else {"dir_fd": dir_fd}
     try:
-        os.unlink(tmp, **at)  # a failed EARLIER attempt by this pid; O_EXCL would wedge the retry
+        os.unlink(tmp)  # a failed EARLIER attempt by this pid; O_EXCL would wedge the retry
     except FileNotFoundError:
         pass
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode, **at)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
     try:
         try:
             os.fchmod(fd, mode)
@@ -403,73 +162,14 @@ def durable_write(path: str, data: bytes, *, mode: int = 0o600, dir_fd: int | No
             os.fsync(fd)
         finally:
             os.close(fd)
-        if dir_fd is None:
-            os.rename(tmp, path)
-        else:
-            os.rename(tmp, path, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        os.rename(tmp, path)
     except BaseException:
         try:
-            os.unlink(tmp, **at)  # never leave a half-written temp to wedge or mislead
+            os.unlink(tmp)  # never leave a half-written temp to wedge or mislead
         except FileNotFoundError:
             pass
         raise
-    if dir_fd is None:
-        fsync_dir(directory)
-    else:
-        os.fsync(dir_fd)
-
-
-def durable_create(path: str, data: bytes) -> None:
-    """The DL-41a liturgy with CREATE-ONLY publication: the temp is linked into place,
-    never renamed over an existing file. Raises FileExistsError when the name is taken;
-    the caller decides what a lost race means (for a content-addressed or verifiable
-    artifact, the winner IS the answer)."""
-    directory = os.path.dirname(path) or "."
-    tmp = os.path.join(directory, f".{os.path.basename(path)}.{os.getpid()}.tmp")
-    try:
-        os.unlink(tmp)
-    except FileNotFoundError:
-        pass
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        try:
-            write_all(fd, data)
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-        try:
-            os.link(tmp, path)  # fails EEXIST rather than replacing
-        except FileExistsError:
-            # the WINNER's link may not be durable yet (it links, then fsyncs the
-            # directory): a loser who acts on the visible file must make it durable
-            # first, or a power cut can drop the link under the row that points at it
-            make_durable(path)
-            raise
-    finally:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-    dfd = os.open(directory, os.O_RDONLY)
-    try:
-        os.fsync(dfd)
-    finally:
-        os.close(dfd)
-
-
-def make_durable(path: str) -> None:
-    """Fsync an EXISTING file and its directory entry: what a reader owes a file it will
-    durably rely on when the writer may have died between the link and its fsync."""
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    dfd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
-    try:
-        os.fsync(dfd)
-    finally:
-        os.close(dfd)
+    fsync_dir(directory)
 
 
 def durable_write_json(path: str, record: dict[str, Any]) -> None:
@@ -508,58 +208,6 @@ def _linux_stat_fields(pid: int) -> list[str] | None:
     except OSError:
         return None
     return raw.rsplit(")", 1)[1].split()
-
-
-def _cmdline(pid: int) -> list[str] | None:
-    """The argv of a live Linux process, or None when it cannot be read."""
-    try:
-        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
-    except OSError:
-        return None
-    return raw.decode("utf-8", "replace").split("\0")[:-1]
-
-
-def stop_helpers(members: set[int]) -> set[int]:
-    """The supervisor unit's ExecStop helper among `members`: exactly one process whose parent
-    is PID 1 and whose argv is the launcher's `supervisor-stop` mode (`dsl41-launch` ...
-    `supervisor-stop`). A stop that overlaps maintenance keeps it in the unit's cgroup, and
-    it is no residual work (DL-416). With the helper found, these count with it: every member
-    whose parent, field 4 of /proc/PID/stat, is the helper, in any state; every zombie as
-    `_linux_zombie` reads it, so a live process whose main thread exited stays; and every
-    member that has left /proc since the cgroup was read and is gone by kill(pid, 0). Those
-    are its wait loop's `sleep` children, running, ended unreaped, or reaped. Two such
-    helpers, or none, are no helper: an empty set."""
-    helpers = []
-    for pid in members:
-        fields, argv = _linux_stat_fields(pid), _cmdline(pid)
-        if fields is None or argv is None or len(fields) < 2 or fields[1] != "1":
-            continue
-        if argv and argv[-1] == "supervisor-stop":
-            if any(Path(word).name == "dsl41-launch" for word in argv):
-                helpers.append(pid)
-    if len(helpers) != 1:
-        return set()
-    (helper,) = helpers
-    found = {helper}
-    for pid in members - found:
-        fields = _linux_stat_fields(pid)
-        if fields is None:
-            if _gone(pid):
-                found.add(pid)
-        elif _linux_zombie(fields) or (len(fields) > 1 and fields[1] == str(helper)):
-            found.add(pid)
-    return found
-
-
-def _gone(pid: int) -> bool:
-    """kill(pid, 0) proves the pid absent; any other answer is not proof."""
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    except OSError:
-        return False
-    return False
 
 
 def _linux_zombie(fields: list[str]) -> bool:

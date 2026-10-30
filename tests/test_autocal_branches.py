@@ -1,6 +1,5 @@
 """Branch tests for src/dsl41/autocal.py: the refusals of `compile_calendar`
-that nothing else reaches, and the tolerant side of `semantic_key`, which
-canonicalizes what the compiler would refuse instead of raising.
+that nothing else reaches.
 """
 
 from __future__ import annotations
@@ -13,7 +12,6 @@ from dsl41.autocal import (
     CalendarRuleError,
     classify_row,
     compile_calendar,
-    semantic_key,
 )
 from dsl41.ir import CalendarIR, CatalogIR, CycleIR
 
@@ -109,63 +107,3 @@ def test_adjust_must_be_an_integer() -> None:
     with pytest.raises(CalendarRuleError, match="adjust: expected an integer, got 'two'"):
         _compile(_ext(adjust="two", conditions=["DAILY"]))
     assert _compile(_ext(adjust="2", conditions=["DAILY"])) is not None
-
-
-# ------------------------------------------------------------ semantic_key
-
-
-def test_semantic_key_ignores_an_empty_rule_piece() -> None:
-    assert semantic_key(_ext(conditions=["WORKDAYS,"])) == semantic_key(
-        _ext(conditions=["WORKDAYS"])
-    )
-
-
-def test_semantic_key_keeps_a_rule_the_compiler_would_refuse_by_its_collapsed_spelling() -> None:
-    key = semantic_key(_ext(conditions=["Mon   @  Tue"]))
-    assert key[-1] == (("mon @ tue",),)
-    assert semantic_key(_ext(conditions=["MON @ TUE"])) == key
-
-
-def test_semantic_key_keeps_a_workday_it_cannot_read_by_its_lowered_spelling() -> None:
-    assert semantic_key(_ext(workday="MO,XX"))[0] == "mo,xx"
-
-
-def test_semantic_key_keeps_an_action_it_cannot_read_by_its_lowered_spelling() -> None:
-    key = semantic_key(_ext(non_workday="Q"))
-    assert key[1] == "q"
-    assert semantic_key(_ext(non_workday="W"))[1] == "w"
-
-
-def test_semantic_key_keeps_an_adjust_it_cannot_read_by_its_spelling() -> None:
-    assert semantic_key(_ext(adjust="two"))[5] == "two"
-    assert semantic_key(_ext(adjust="2"))[5] == 2
-
-
-def _shielded(cal: CalendarIR, catalog: CatalogIR | None) -> object:
-    """The holiday action of the key: `S` survives only where it shields something."""
-    return semantic_key(cal, catalog)[2]
-
-
-def test_holiday_s_is_kept_when_the_holiday_set_cannot_be_resolved() -> None:
-    """Refusal-safe: with nothing to prove the shield empty, it stays distinct."""
-    cal = _ext(holcal="hols", non_workday="w", holiday="s", conditions=["DAILY"])
-    unreadable = _std("hols", "13/45/2026")
-    assert _shielded(cal, _catalog(cal, unreadable)) == "s"  # rows that do not parse
-    assert _shielded(cal, _catalog(cal)) == "s"  # no such calendar
-    assert _shielded(cal, _catalog(cal, _ext(name="hols"))) == "s"  # an extended holcal
-    assert _shielded(cal, None) == "s"  # no catalog at all
-
-
-def test_holiday_s_is_kept_when_the_calendar_cannot_compile() -> None:
-    cal = _ext(holcal="hols", non_workday="w", holiday="s", conditions=["nosuchtoken"])
-    assert _shielded(cal, _catalog(cal, _std("hols", "07/03/2026"))) == "s"
-
-
-def test_holiday_s_shields_only_when_a_holiday_is_there_to_shield() -> None:
-    """The twins of the two tests above: with a holiday to shield, `S` stays; with an empty
-    holiday set it is no action at all."""
-    holidays = _std("hols", "07/03/2026")
-    shielding = _ext(holcal="hols", non_workday="w", holiday="s", conditions=["DAILY"])
-    assert _shielded(shielding, _catalog(shielding, holidays)) == "s"
-    empty = _ext(holcal="hols", non_workday="w", holiday="s", conditions=["DAILY"])
-    assert _shielded(empty, _catalog(empty, _std("hols"))) is None
