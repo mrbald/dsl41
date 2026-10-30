@@ -29,9 +29,9 @@ from fork_harness import (
     ORACLE_IDLE,
     ORACLE_SHARED,
     STORE_COPIED,
+    STORE_DORMANT,
     STORE_REBUILT,
     STORE_SHARED,
-    history,
     state_bytes,
 )
 
@@ -45,10 +45,8 @@ from dsl41.runner_admission import (
     ApplyResult,
     Attempt,
     Envelope,
-    apply_attempt,
 )
 from dsl41.runner_clock import EngineError, VirtualClock
-from dsl41.runner_hosts import HostCommand, seed_local_executor
 from dsl41.runner_journal import ReplayFault, read_journal, replay_inputs
 from dsl41.runner_startup import resume_run, start_run
 
@@ -127,7 +125,7 @@ def test_the_fork_copies_every_mutable_attribute_and_shares_only_fixed_ones() ->
     rebound to the fork."""
     oracle = Oracle(lower_source(_JIL))
     assert set(vars(oracle)) == ORACLE_COPIED | ORACLE_FRESH | ORACLE_IDLE | ORACLE_SHARED
-    assert set(vars(oracle.store)) == STORE_COPIED | STORE_REBUILT | STORE_SHARED
+    assert set(vars(oracle.store)) == STORE_COPIED | STORE_DORMANT | STORE_REBUILT | STORE_SHARED
     oracle.feed(_start())
     assert oracle._trace and oracle._emitted  # history to leave behind
     oracle._window_starts = [("b", 1, "cause")]  # set only inside a box start
@@ -151,16 +149,14 @@ def test_the_fork_copies_every_mutable_attribute_and_shares_only_fixed_ones() ->
         assert getattr(twin.store, name) == value, name
         if not isinstance(value, (bool, int, str)):
             assert getattr(twin.store, name) is not value, name
+    for name in STORE_DORMANT:
+        assert getattr(twin.store, name) == {} == getattr(oracle.store, name), name
     for name in STORE_REBUILT:  # the twin's own executor
         assert getattr(twin.store, name) is not getattr(oracle.store, name), name
     for name in STORE_SHARED:
         rebound = getattr(twin.store, name)
         assert rebound is not getattr(oracle.store, name), name
         assert getattr(rebound, "__self__", None) is twin, name
-    seed_local_executor(oracle.store, "local", at=T0)
-    assert oracle.fork().store.machines.active("host:local") == frozenset(
-        {"host", "routed", "active"}
-    )
     oracle._window_starts = None
     assert oracle.fork()._window_starts is None
 
@@ -177,74 +173,6 @@ def test_a_row_the_oracle_s_fork_creates_never_reaches_the_parent() -> None:
     assert "ghost" in twin.store.job and "ghost" not in oracle.store.job
     oracle.feed(Event(at=later, kind="STATUS", payload={"job": "j", "exit_code": 0}))
     assert oracle.store.job["j"].status == "SUCCESS"
-
-
-def test_a_dry_host_command_on_a_fork_leaves_the_routing_table_alone() -> None:
-    """The SEM corpus never touches a host row, so the routing table's half
-    of the leak test is here: a drain applied on a fork moves the fork's row
-    and not the original's, and the real apply reaches the fork's result."""
-    oracle = _engine().oracle
-    attempt = _attempt(
-        1,
-        kind=None,
-        host=HostCommand(verb="drain", host_id="local"),
-        source="control",
-        expect={"host:local": oracle.store.revision("host:local")},
-    )
-    before = state_bytes(oracle)
-    since = history(oracle)
-    twin = oracle.fork()
-    dry = apply_attempt(twin, attempt)
-    assert dry.result.decision == "applied"
-    assert twin.store.hosts["local"].state == "passive"
-    assert state_bytes(oracle) == before
-    real = apply_attempt(oracle, attempt)
-    assert real.result == dry.result
-    assert state_bytes(oracle, since) == state_bytes(twin)
-
-
-#: (the commands that build the row's state, the dry-applied command)
-_HOST_DRY = [
-    (build, verb, force)
-    for build in ((), ("drain",), ("quarantine",), ("drain", "quarantine"))
-    for verb in ("activate", "drain", "quarantine", "reinstate", "evict")
-    for force in ((False, True) if verb == "evict" else (False,))
-]
-
-
-@pytest.mark.parametrize(("build", "verb", "force"), _HOST_DRY)
-def test_a_dry_host_command_leaves_the_rows_revisions_and_instance_alone(
-    build: tuple[str, ...], verb: str, force: bool
-) -> None:
-    """The routing table's half of the leak test, for every host verb in
-    each routed and quarantined state: the dry apply moves the fork's row
-    and the fork's instance, and the original's rows, revisions, trace and
-    executor configuration stay byte-equal. The real apply then reaches the
-    fork's result."""
-    oracle = Oracle(lower_source(_JIL))
-    seed_local_executor(oracle.store, "local", at=T0, deadman_s=60.0)
-    for index, step in enumerate(build, start=1):
-        cmd = HostCommand(verb=step, host_id="local")  # type: ignore[arg-type]
-        assert apply_attempt(oracle, _attempt(index, kind=None, host=cmd)).result.decision == (
-            "applied"
-        )
-    attempt = _attempt(
-        len(build) + 1,
-        kind=None,
-        host=HostCommand(verb=verb, host_id="local", force=force),  # type: ignore[arg-type]
-        claimed_actor="alice@ops",
-        at=T0 + timedelta(hours=1),  # past the bound, so a gated eviction applies
-    )
-    before = state_bytes(oracle)
-    since = history(oracle)
-    revisions = {"host:local": oracle.store.revision("host:local")}
-    twin = oracle.fork()
-    dry = apply_attempt(twin, attempt)
-    assert state_bytes(oracle) == before
-    assert {"host:local": oracle.store.revision("host:local")} == revisions
-    real = apply_attempt(oracle, attempt)
-    assert real.result == dry.result
-    assert state_bytes(oracle, since) == state_bytes(twin)
 
 
 def test_a_dry_apply_that_raises_leaves_the_original_untouched(
@@ -292,19 +220,6 @@ _ENVELOPE = Envelope(request_id="r", expect={"job:j": 0})
             False,
         ),
         (_Pending(at=T0, request_id=None, ev=_start()), False),  # unattributed: the bisim harness
-        (
-            _Pending(
-                at=T0,
-                request_id="r",
-                host=HostCommand(verb="drain", host_id="local"),
-                envelope=_ENVELOPE,
-            ),
-            True,
-        ),
-        (
-            _Pending(at=T0, request_id=None, host=HostCommand(verb="quarantine", host_id="local")),
-            False,
-        ),
         (_Pending(at=T0, request_id=None), False),  # a time observation
     ],
 )
@@ -319,9 +234,7 @@ def test_only_a_socket_request_or_a_control_event_is_a_control_input(
 
 def _submit_start(engine: Engine, request_id: str = "r1") -> asyncio.Future[ApplyResult]:
     expect = {"job:j": engine.oracle.store.revision("job:j")}
-    future = engine.submit(
-        _start(), Envelope(request_id=request_id, expect=expect, epoch=engine.epoch)
-    )
+    future = engine.submit(_start(), Envelope(request_id=request_id, expect=expect))
     assert isinstance(future, asyncio.Future)
     return future
 
@@ -373,9 +286,7 @@ def test_a_gate_rejection_is_still_a_logged_decision(tmp_path: Path) -> None:
 
     async def scenario() -> ApplyResult:
         engine = _journaled(tmp_path / "run")
-        future = engine.submit(
-            _start(), Envelope(request_id="stale", expect={"job:j": 7}, epoch=engine.epoch)
-        )
+        future = engine.submit(_start(), Envelope(request_id="stale", expect={"job:j": 7}))
         await engine.run_until_quiescent(T0)
         result = await future
         await _close(engine)
@@ -449,10 +360,6 @@ def test_a_clean_log_replays_without_a_fault(tmp_path: Path) -> None:
         (
             _attempt(3, kind="STARTJOB", payload={"job": "j"}, source="control"),
             "STARTJOB from control",
-        ),
-        (
-            _attempt(3, kind=None, host=HostCommand(verb="drain", host_id="h"), source="control"),
-            "host drain from control",
         ),
         (_attempt(3, kind=None), "time observation from no source"),
     ],

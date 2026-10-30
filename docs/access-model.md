@@ -32,9 +32,8 @@ enum, not a flag matrix.
   `globals` shows runtime values, `subscribe` streams raw WAL records, and
   job logs can hold credentials. Grant it deliberately.
 - **ops**: read, plus every mutating socket verb. That is every
-  `sendevent` verb, `host` activate, drain and evict, and `seal`. Ops is
-  destructive by design: `FORCE_STARTJOB`, `CHANGE_STATUS`, forced
-  eviction and `force_seal` are in it (DL-146). There is no fourth
+  `sendevent` verb. Ops is destructive by design: `FORCE_STARTJOB` and
+  `CHANGE_STATUS` are in it (DL-146). There is no fourth
   "break-glass" tier and no per-verb deny overlay. Either would be a
   second policy axis and a sparse flag matrix. Break-glass is a receipt
   category (§6), not an authorization dimension.
@@ -256,7 +255,7 @@ Per request:
 1. Take the connection's fixed principal (from accept).
 2. Take one immutable policy snapshot (§7) with its generation number.
 3. Classify `cmd` against the closed table (§10). An unknown or unlisted
-   `cmd` is denied. The verb inside `sendevent` or `host` is deliberately
+   `cmd` is denied. The verb inside `sendevent` is deliberately
    NOT a second classification axis. There is one gate, and the
    dispatcher owns verb validity (DL-145 defect 2). The verb appears in
    the receipt label only.
@@ -554,13 +553,8 @@ for the tier it falls under. It is not a second classification axis.
 
 | cmd | verb | tier |
 | --- | --- | --- |
-| `status`, `trace`, `explain`, `spec`, `deps`, `timers`, `plan`, `global`, `globals`, `hosts`, `subscribe` | — | read |
+| `status`, `trace`, `explain`, `spec`, `deps`, `timers`, `plan`, `global`, `globals`, `subscribe` | — | read |
 | `sendevent` | the externally injectable verbs (control-protocol §3): `STARTJOB`, `FORCE_STARTJOB`, `KILLJOB`, `ON_ICE`/`OFF_ICE`, `ON_HOLD`/`OFF_HOLD`, `ON_NOEXEC`/`OFF_NOEXEC`, `DISARM` (DL-158), `RELEASE_RESOURCE` (DL-256), `SET_GLOBAL`, `CHANGE_STATUS`. The internal EventKinds (`STATUS`, `TIMER`, the alarms) have no wire door: the dispatcher refuses them like any unknown verb | ops |
-| `host` | `activate`, `drain`, `evict` (forced included) | ops |
-
-`quarantine` and `reinstate` are leader-only inputs, not operator verbs
-(control-protocol §3). They have no tier because they have no external
-door.
 
 CLI semantic tiers (the only enforcement is filesystem access, and these
 tiers enforce nothing, §2):

@@ -36,8 +36,7 @@ relay).
 An input fails in one of two ways, recorded differently:
 
 - Refused (steps 1-2): bad framing, an absent or malformed `expect`, a `baseline_id` from another
-  run, a reused `request_id`, a stale `epoch`. Nothing is appended, no index is consumed, no
-  clock moves. The dry apply, after step 3's clock check and before the frontier moves, refuses
+  run, a reused `request_id`. Nothing is appended, no index is consumed, no clock moves. The dry apply, after step 3's clock check and before the frontier moves, refuses
   the same way when a control input's apply raises on a fork of the oracle (`apply_faulted`).
 - Rejected (step 6): the envelope was good and the entity moved since the caller's read. It
   consumed an index and its time half fired timers, so it is recorded as a decision.
@@ -48,14 +47,7 @@ its time half applies. If the time half raises too, the engine stops before logg
 (`TimeHalfStop`). Replay classifies an undecided attempt that raises the same way; both ask
 `classify_fault`.
 
-A routing-table command (S5a, concurrency-model ss8) is a second verbless attempt beside the time
-observation. It is admitted and gated by the same order, and applied to the ss3 owner rather than
-fed, because the oracle never reads a host row.
-
-The outbox binds `effect_id` to `executor_id` (S5c, DL-96) and `epoch` names a real leader term
-(S6, DL-99). The epoch check sits in its ss4 place after dedup, so an exact old-epoch retry
-recovers its original result and an unseen old-epoch request is refused. `INERT_EPOCH` is the
-default for an Engine with no election: no run root, no log.
+One engine holds a run root (`leader.lock`, DL-99), so admission checks no leader term.
 """
 
 from __future__ import annotations
@@ -65,7 +57,7 @@ import json
 import reprlib
 import sys
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Final, Literal, get_args
@@ -74,11 +66,9 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from dsl41.oracle import Oracle
 from dsl41.canon import is_scalar_string, is_wire_int
-from dsl41.run_root import CMD_GRACE_S
-from dsl41.oracle_state import LIVE, TERMINAL, Event, EventKind, RuntimeState
+from dsl41.oracle_state import LIVE, TERMINAL, Event, EventKind, JobRuntime, RuntimeState
 from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import Code, Rejection
-from dsl41.runner_hosts import HostCommand, apply_host_command, host_rejection_reason
 from dsl41.state_machine import (
     Context,
     Executor,
@@ -101,15 +91,9 @@ PROTOCOL_VERSION = 3
 #: status. The source field alone decides (DL-68), so replay reaches the live verdict.
 COMPLETION_SOURCES: frozenset[str] = frozenset({"adapter", "reconcile"})
 
-#: The epoch of an Engine with no election. The envelope carries `epoch` so that adding it is
-#: not a second wire break (ss6, S6).
-INERT_EPOCH = 0
-
 #: The request-id prefix the engine reserves. An input the engine makes is named
 #: `engine:<index>` (`Engine._attempt`); a client id in that space could be overwritten by a later
-#: engine-made input. `parse_envelope` refuses such an id (control-protocol ss3). A committed
-#: seal's retry is answered before this check on the control socket, harmlessly: a seal's id never
-#: enters the decision index.
+#: engine-made input. `parse_envelope` refuses such an id (control-protocol ss3).
 ENGINE_REQUEST_ID_PREFIX = "engine:"
 
 #: This build's event alphabet: an `input` record whose kind is outside it refuses by name
@@ -123,30 +107,24 @@ def fingerprint(
     kind: str | None,
     payload: Mapping[str, Any],
     source: str | None,
-    epoch: int = INERT_EPOCH,
     expect: Mapping[str, int] | None = None,
     claimed_actor: str | None = None,
-    host: HostCommand | None = None,
 ) -> str:
     """The complete semantic envelope, hashed (concurrency-model ss6).
 
     `at` and the transport framing are absent: two deliveries of one command differ only there,
     and hashing them would defeat dedup. `expect` is in: the same verb at two revisions is two
-    commands. `host` (S5a, ss8) has its own key, so a host command never hashes equal to a verb,
-    and it is omitted when absent so every earlier fingerprint is unchanged; a changed hash would
-    turn an exact retry across a resume into a `RequestCollision` (ss7 mixed-build hazard).
+    commands.
     """
     return hashlib.sha256(
         json.dumps(
             {
                 "baseline_id": baseline_id,
-                "epoch": epoch,
                 "verb": kind,
                 "payload": payload,
                 "source": source,
                 "expect": dict(expect) if expect is not None else None,
                 "claimed_actor": claimed_actor,
-                **({"host": host.wire()} if host is not None else {}),
             },
             sort_keys=True,
             default=str,
@@ -174,7 +152,6 @@ class Envelope(BaseModel):
     request_id: str
     #: the revisions this command was composed against, ss6-namespaced; mandatory (ss0)
     expect: dict[str, int]
-    epoch: int = INERT_EPOCH
     #: a client hint. Without an access map the claim stands as sent; with one the server
     #: overwrites it with the authenticated principal before it is fingerprinted or journaled
     #: (access-model ss3, DL-146/147).
@@ -198,7 +175,7 @@ def addressed_key(kind: str, payload: Mapping[str, Any]) -> str:
 
 def refuse_reserved_request_id(request_id: str) -> None:
     """Raise `EnvelopeError` for a client request id in the engine's name space
-    (`ENGINE_REQUEST_ID_PREFIX`). `parse_envelope` and offline `dsl41 seal` call it."""
+    (`ENGINE_REQUEST_ID_PREFIX`). `parse_envelope` calls it."""
     if request_id.startswith(ENGINE_REQUEST_ID_PREFIX):
         raise EnvelopeError(
             f"request_id {request_id!r} begins with {ENGINE_REQUEST_ID_PREFIX!r}, a prefix the"
@@ -236,20 +213,13 @@ def parse_envelope(request: Mapping[str, Any], *, addressed: str, baseline_id: s
             code="invalid_argument",
         )
     refuse_reserved_request_id(request_id)
-    epoch = request.get("epoch")
-    if not is_wire_int(epoch):
-        # required, not defaulted, so clients carry it (ss6); every read publishes the epoch
-        # beside the revision
-        raise EnvelopeError(
-            f"epoch is required and must be an integer, got {epoch!r}", code="invalid_argument"
-        )
     actor = request.get("claimed_actor")
     if actor is not None and not isinstance(actor, str):
         raise EnvelopeError(
             f"claimed_actor must be a string, got {actor!r}", code="invalid_argument"
         )
-    # PR-10a: every envelope string that reaches the WAL is a Unicode scalar string, or the
-    # estate could not be sealed. The payload's strings are the verb's business.
+    # PR-10a: every envelope string that reaches the WAL is a Unicode scalar string, so the log
+    # stays canonical JSON. The payload's strings are the verb's business.
     for name, value in (("request_id", request_id), ("claimed_actor", actor)):
         if isinstance(value, str) and not is_scalar_string(value):
             raise EnvelopeError(
@@ -258,7 +228,6 @@ def parse_envelope(request: Mapping[str, Any], *, addressed: str, baseline_id: s
     return Envelope(
         request_id=request_id,
         expect=_parse_expect(request, addressed=addressed),
-        epoch=epoch,
         claimed_actor=actor,
     )
 
@@ -270,7 +239,7 @@ def _parse_expect(request: Mapping[str, Any], *, addressed: str) -> dict[str, in
     if expect is None:
         raise EnvelopeError(
             f'expect is required: name the revision you read, as {{"{addressed}": N}}'
-            f" (read it from `status`/`global`/`hosts`; 0 means the entity is still"
+            f" (read it from `status`/`global`; 0 means the entity is still"
             " absent)",
             code="expect_required",
         )
@@ -296,10 +265,9 @@ def _parse_expect(request: Mapping[str, Any], *, addressed: str) -> dict[str, in
 
 class Attempt(BaseModel):
     """One admitted input, as it goes into the log (concurrency-model ss4
-    step 4). `at` is the leader timestamp and doubles as the batch's
-    `TimeAdvanced`; `kind` absent means an attempt with no ORACLE verb --
-    either a routing-table command (`host` below) or, with neither, a
-    standalone time observation. ss4 admits all three by one rule.
+    step 4). `at` is the engine's timestamp and doubles as the batch's
+    `TimeAdvanced`; `kind` absent means a standalone time observation.
+    ss4 admits both by one rule.
 
     `expect` absent means an input the engine raised itself -- a timer, a
     scheduler tick, an adapter completion. ss0's mandate is on EXTERNALLY
@@ -318,30 +286,18 @@ class Attempt(BaseModel):
     # `str`, not `EventSource`: replayed from the WAL (`Event.source`)
     source: str | None = None
     expect: dict[str, int] | None = None
-    epoch: int = INERT_EPOCH
     claimed_actor: str | None = None
-    #: S5a: a routing-table change (concurrency-model ss8). It carries no oracle event, because a
-    #: job's condition truth cannot depend on where its machine routes (DL-93), and rides the ss4
-    #: seam for an attempt with no verb.
-    host: HostCommand | None = None
-
-    @model_validator(mode="after")
-    def _one_kind_of_input(self) -> Attempt:
-        if self.kind is not None and self.host is not None:
-            raise ValueError("an attempt carries an oracle verb or a host command, never both")
-        return self
 
     @property
     def verbless(self) -> bool:
-        """A standalone time observation: no oracle verb and no host command, such as the
-        opening release and the seal's cutoff. It is all time half, so a fault in it is never
-        quarantined (concurrency-model ss4)."""
-        return self.kind is None and self.host is None
+        """A standalone time observation: no oracle verb, such as the opening release. It is all
+        time half, so a fault in it is never quarantined (concurrency-model ss4)."""
+        return self.kind is None
 
     @property
     def engine_made(self) -> bool:
         """An input the engine made itself, which nobody would hear refused (concurrency-model
-        ss4): a tick, a completion, a routing or time observation. Every other input is a
+        ss4): a tick, a completion, a time observation. Every other input is a
         control input: it crossed the socket with `expect` (ss0), or an in-process script raised
         it with the `control` source. An unattributed event (the bisimulation harness) is
         engine-made. It reads the logged attempt alone, so live and journal narration agree."""
@@ -516,8 +472,7 @@ def report_quarantine(result: ApplyResult) -> None:
 # instance per request id whose attempt line is durable and whose decision is not, keyed by
 # `(index, request_id)`, on the engine's executor or its own when read offline. `note` starts the
 # instance in `admitted`; `record` posts the decision and forgets the now-final instance in the
-# same call. Dedup and the refusals before admission (a stale epoch, a stamp behind the frontier
-# during a seal, a dry apply that refuses) post nothing.
+# same call. Dedup and the refusals before admission (a dry apply that refuses) post nothing.
 #
 # `decide` carries the `ApplyResult`; its decision is the partition the rows in `admitted` read.
 # `input` carries the fingerprint of an input that names an open id; the guards compare it with
@@ -546,9 +501,9 @@ def _applied(ctx: Context) -> bool:
 
 
 def _rejected(ctx: Context) -> bool:
-    """The decision is `rejected`: a precondition, the stale-completion gate or a
-    host guard rejected the input, the input was quarantined, or a replayed
-    durable decision says rejected."""
+    """The decision is `rejected`: a precondition or the stale-completion gate
+    rejected the input, the input was quarantined, or a replayed durable
+    decision says rejected."""
     result: ApplyResult = ctx.event.payload
     return result.decision == "rejected"
 
@@ -565,10 +520,7 @@ def _other(ctx: Context) -> bool:
 
 
 #: One request id from its durable attempt to its durable decision
-#: (concurrency-model ss4), one instance per id in flight. A seal request
-#: never starts one: its decision is the `seal` record. Readiness does ask
-#: `lookup` whether the seal's request_id is already spent on another command
-#: (`boundary._check_request_id`).
+#: (concurrency-model ss4), one instance per id in flight.
 ADMISSION: Final = Statechart(
     name="admission",
     root=State(
@@ -593,7 +545,7 @@ ADMISSION: Final = Statechart(
             "applied",
             guard="applied",
             cite="concurrency-model ss4 steps 5-7, DL-118",
-            note="The decision line, with the outbox entries it implies.",
+            note="The decision line.",
         ),
         Row(
             "admission.03",
@@ -810,6 +762,66 @@ def stale_reason(oracle: Oracle, ev: Event) -> Rejection | None:
     return None
 
 
+#: What a decided input implies for one run: start it, or stop it (runner-design ss4).
+type DispatchKind = Literal["SPAWN", "KILL"]
+
+
+def dispatch_plan(
+    emitted: Sequence[Event],
+    *,
+    runs: Mapping[str, int],
+    dispatched: Mapping[str, int],
+    live: Mapping[str, int],
+    dispatchable: frozenset[str],
+) -> list[tuple[DispatchKind, str, int]]:
+    """The starts and kills one applied input implies, in emitted order: `(kind, job, run)`.
+
+    A pure function of what the oracle emitted and what the shell holds, so replay derives the
+    starts a live engine dispatched (`runner_journal.replay_inputs`). The ghost-run gate
+    (`runs[job] > dispatched[job]`) decides whether a start exists: a CHANGE_STATUS-parity
+    STARTING overwrite re-emits the status without advancing the run, and vendor parity launches
+    nothing. A terminal status for a job with no live run plans no kill. Alarms, boxes,
+    pseudo-entries and job types with no adapter plan nothing.
+
+    One call plans each `(kind, job, run)` once (DL-232): two terminal transitions of one live
+    run in one batch, such as a deadline firing inside a `CHANGE_STATUS SUCCESS` batch, plan one
+    kill. Whether a start is still wanted is `spawn_superseded`'s question, asked when it is
+    dispatched."""
+    plan: list[tuple[DispatchKind, str, int]] = []
+    for ev in emitted:
+        if ev.kind != "STATUS":
+            continue
+        job = ev.job()
+        if job is None or job not in dispatchable:
+            continue
+        status = ev.payload.get("status")
+        item: tuple[DispatchKind, str, int] | None = None
+        if status == "STARTING" and runs.get(job, 0) > dispatched.get(job, 0):
+            item = ("SPAWN", job, runs.get(job, 0))
+        elif status in TERMINAL and job in live:
+            item = ("KILL", job, live[job])
+        if item is not None and item not in plan:
+            plan.append(item)
+    return plan
+
+
+def spawn_superseded(row: JobRuntime | None, run_number: int) -> str | None:
+    """Why run `run_number` must not start now, or None.
+
+    The test is the exact desired state, not a run-number comparison alone: KILLJOB does not
+    advance `run_number`, so a start for run N decided in the batch that then TERMINATED run N
+    is not wanted. An injected INACTIVE sets the run aside without ending it (DL-232)."""
+    if row is None:
+        return "the job has no runtime row"
+    if row.status in TERMINAL:
+        return f"the job is already {row.status}"
+    if row.status not in LIVE:
+        return f"the job is {row.status}: the run is no longer desired running"
+    if row.run_number != run_number:
+        return f"the job is at run {row.run_number}, not {run_number}"
+    return None
+
+
 @dataclass
 class Applied:
     """The outcome of applying one admitted attempt: what to record and what the shell
@@ -825,7 +837,6 @@ def apply_attempt(
     *,
     decided: ApplyResult | None = None,
     forced: Rejection | None = None,
-    grace_s: float = CMD_GRACE_S,
 ) -> Applied:
     """Steps 5-7 for one admitted attempt, live or replayed.
 
@@ -835,12 +846,6 @@ def apply_attempt(
     `forced` is a quarantine (`quarantine_verdict`): the attempt is rejected without the gate
     and only the time half applies. Unlike `decided`, it carries no revisions; the result takes
     the batch's.
-
-    `grace_s` is the period's command grace and reaches only ss8's eviction bound
-    (`runner_hosts.kill_allowance`). The WAL carries none and a replay changes no verdict: a
-    decided attempt never reaches the gate, and an undecided one is gated against a host row the
-    replay seeded at `register_host`, so the elapsed wait is never positive and a gated eviction
-    is rejected whatever the bound is. The value decides only for a live gate.
     """
     ev = attempt.event()
     rejection: Rejection | None = None
@@ -851,15 +856,10 @@ def apply_attempt(
         elif forced is not None:
             rejection, decision = forced, "rejected"
         else:
-            rejection = _gate(oracle, attempt, ev, grace_s=grace_s)  # step 6
+            rejection = _gate(oracle, attempt, ev)  # step 6
             decision = "rejected" if rejection is not None else "applied"
-        if decision == "applied":
-            if ev is not None:
-                batch.feed(ev)
-            elif attempt.host is not None:
-                # ss8's routing state is applied here, not fed: the oracle never reads a host
-                # row, so this writes the ss3 owner inside the same batch
-                apply_host_command(oracle.store, attempt.host, actor=attempt.claimed_actor)
+        if decision == "applied" and ev is not None:
+            batch.feed(ev)
     if decided is not None and decided.revisions != batch.revisions:
         # concurrency-model ss7's mixed-build hazard: identical inputs deriving different
         # revisions mean this build is not the state machine that wrote the log
@@ -886,22 +886,19 @@ def trial_apply(
     attempt: Attempt,
     *,
     forced: Rejection | None = None,
-    grace_s: float = CMD_GRACE_S,
 ) -> Applied | Exception:
     """`apply_attempt` on a fresh fork of `oracle`, which it leaves alone: the result, or the
     exception the apply raised. A `StatechartError` propagates: it is an assertion failure, and
     the tier stops before any durable write (docs/statechart-engine.md §5)."""
     try:
-        return apply_attempt(oracle.fork(), attempt, forced=forced, grace_s=grace_s)
+        return apply_attempt(oracle.fork(), attempt, forced=forced)
     except StatechartError:
         raise
     except Exception as exc:  # noqa: BLE001 -- the caller classifies every fault
         return exc
 
 
-def quarantine_verdict(
-    oracle: Oracle, attempt: Attempt, cause: Exception, *, grace_s: float = CMD_GRACE_S
-) -> Rejection | Exception:
+def quarantine_verdict(oracle: Oracle, attempt: Attempt, cause: Exception) -> Rejection | Exception:
     """What to do with an attempt whose apply raised `cause` on a fork (concurrency-model ss4):
     the rejection that quarantines it, or the exception its time half raises alone.
 
@@ -917,7 +914,7 @@ def quarantine_verdict(
         f" raised {type(cause).__name__}: {cause}. Its time half applied and the"
         " input did not",
     )
-    alone = trial_apply(oracle, attempt, forced=rejection, grace_s=grace_s)
+    alone = trial_apply(oracle, attempt, forced=rejection)
     return alone if isinstance(alone, Exception) else rejection
 
 
@@ -937,9 +934,7 @@ class TimeHalfFault(Exception):
         return _whole_input_note(self.cause, self.full)
 
 
-def classify_fault(
-    oracle: Oracle, attempt: Attempt, *, grace_s: float = CMD_GRACE_S
-) -> tuple[Rejection, Exception] | None:
+def classify_fault(oracle: Oracle, attempt: Attempt) -> tuple[Rejection, Exception] | None:
     """DL-320's rule for one attempt, applied on fresh forks of `oracle` (concurrency-model
     ss4).
 
@@ -951,10 +946,10 @@ def classify_fault(
 
     The live engine asks this for an engine-made input only, since a fault refuses a control
     input. Replay asks it for every undecided attempt."""
-    full = trial_apply(oracle, attempt, grace_s=grace_s)
+    full = trial_apply(oracle, attempt)
     if not isinstance(full, Exception):
         return None
-    verdict = quarantine_verdict(oracle, attempt, full, grace_s=grace_s)
+    verdict = quarantine_verdict(oracle, attempt, full)
     if isinstance(verdict, Exception):
         raise TimeHalfFault(verdict, full)
     return verdict, full
@@ -978,30 +973,16 @@ def describe_input(attempt: Attempt) -> str:
         run = attempt.payload.get("run_number")
         if run is not None:
             what += f" run {run}"
-    elif attempt.host is not None:
-        what = f"host {attempt.host.verb} of {attempt.host.host_id}"
     else:
         what = "time observation"
     return what if attempt.source is None else f"{what} from {attempt.source}"
 
 
-def _gate(
-    oracle: Oracle, attempt: Attempt, ev: Event | None, *, grace_s: float
-) -> Rejection | None:
+def _gate(oracle: Oracle, attempt: Attempt, ev: Event | None) -> Rejection | None:
     if attempt.expect is not None:
         rejection = precondition_reason(oracle, attempt.expect)
         if rejection is not None:
             return rejection  # ss0, and it outranks everything below
-    if attempt.host is not None:
-        # ss8's preconditions sit here as `expect` does: they read mutable state, and replay
-        # has no live host to probe
-        return host_rejection_reason(
-            oracle.store,
-            attempt.host,
-            attempt.at,
-            grace_s=grace_s,
-            actor=attempt.claimed_actor,
-        )
     if ev is None or attempt.source not in COMPLETION_SOURCES:
         return None  # CHANGE_STATUS parity: an external event is never gated
     return stale_reason(oracle, ev)

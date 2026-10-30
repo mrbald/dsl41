@@ -17,7 +17,7 @@ from dsl41.cli_run import _serve_run
 from dsl41.ir import lower_source
 from dsl41.run_root import RuntimeProfile
 from dsl41.runner_clock import EngineError
-from dsl41.runner_journal import Journal
+from dsl41.runner_ledger import LeaderLock
 from dsl41.runner_startup import acquire_run_root, wire_from_profile
 
 
@@ -33,16 +33,16 @@ def test_the_builder_refuses_a_detached_profile_by_name() -> None:
 def test_a_raise_after_genesis_opens_its_segment_closes_the_journal_and_frees_the_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Every raise after the genesis segment opens closes it: here the leader line's. The
+    """Every raise after the genesis segment opens closes it: here the lock note's. The
     error is the original one, no file handle leaks (the suite makes a ResourceWarning an
     error), and the run root's lock can be taken again."""
 
-    def fail(self: Journal, *, epoch: int, at: datetime) -> None:
-        raise OSError("test: the leader line did not land")
+    def fail(self: LeaderLock, *, at: datetime) -> None:
+        raise OSError("test: the lock note did not land")
 
-    monkeypatch.setattr(Journal, "leader", fail)
+    monkeypatch.setattr(LeaderLock, "note", fail)
     run_root = tmp_path / "run"
-    with pytest.raises(OSError, match="the leader line did not land"):
+    with pytest.raises(OSError, match="the lock note did not land"):
         _genesis(run_root)
     acquire_run_root(run_root).release()
 

@@ -84,8 +84,8 @@ Exit codes: 0 is success or clean. 2 means the input never reached the
 tool: an unreadable file, a JIL parse error, a lowering refusal, or a
 preflight refusal. Findings exit 1: `lint`, `equiv`, a failed `decompile` check, and a `build --check` difference. A mid-run engine
 failure in `run` or `rehearse` exits 1 as well. `minify` refusals and a
-`rehearse --check-cadence` deviation exit 3. The control verbs `sendevent`
-and `host` spend a code per outcome: 0 applied, 2 refused, 3
+`rehearse --check-cadence` deviation exit 3. The control verb `sendevent`
+spends a code per outcome: 0 applied, 2 refused, 3
 rejected, 4 outcome unknown. On 4, retry with the printed `request_id`
 instead of re-sending. Each verb's
 `--help` states its own codes.
@@ -379,9 +379,6 @@ dsl41 sendevent STARTJOB -J job_a -S ./run1/control.sock
 dsl41 query status -S ./run1/control.sock       # JSON: statuses, timers, log paths
 dsl41 query status --brief -S ./run1/control.sock   # one line per job, with its rev
 dsl41 query global -N GATE -S ./run1/control.sock   # a global's value and rev
-dsl41 host list -S ./run1/control.sock          # the routing table, with revs
-dsl41 host drain local -S ./run1/control.sock   # stop routing new work here
-dsl41 host activate local -S ./run1/control.sock    # route again; re-dispatch held
 dsl41 ui -S ./run1/control.sock                 # attach the TUI; q detaches
 dsl41 run jobs.jil --run-root ./run1 --ui       # ...or one terminal owning both; q stops it
 dsl41 rehearse jobs.jil --format summary        # virtual clock: a day in seconds
@@ -410,16 +407,8 @@ flag `A`. Verb keys act only while the jobs table has focus. Kill and force
 ask first, naming the box members and the revision they act on. F1 opens
 the help panel.
 
-`host drain` is the maintenance verb: new work stops being dispatched to
-that execution host, and work already running finishes. A job the drain
-keeps from dispatch shows as `held` in `query status`, and `host activate`
-dispatches it again. An operator hold is `on_hold`: `sendevent ON_HOLD`
-sets it, and `sendevent OFF_HOLD` or `off-hold-all` releases it. Jobs the
-drain holds are not failed and not moved. A job is rerun elsewhere only
-after the host is evicted, which needs proof that the old executor is dead
-(docs/concurrency-model.md (retired in 2.0.0)
-§8). The `held` mark matters because a held job reads RUNNING with no
-process behind it.
+An operator hold is `on_hold`: `sendevent ON_HOLD` sets it, and
+`sendevent OFF_HOLD` or `off-hold-all` releases it.
 
 The scheduler obeys `run_calendar` and `exclude_calendar`. Standard
 calendar day sets apply on the job's local day, run minus exclude. A
@@ -496,9 +485,9 @@ repo-only; it is not packaged.
 
 CI also uses it to test the concurrency model
 (docs/concurrency-model.md (retired in 2.0.0)
-§9): seeded interleavings of leader failover, a spawn decided and never
-acted on, duplicated and stale completions, quarantine, and drain, with a
-check that no `(job, run_number)` ever runs twice.
+§9): seeded interleavings of engine failover, a spawn decided and never
+acted on, and duplicated and stale completions, with a check that no
+`(job, run_number)` ever runs twice.
 
 ### Recoverable file processing (examples/file_processing)
 
@@ -654,10 +643,11 @@ Runner:
 
 - `src/dsl41/runner.py`: the engine: the single-writer loop over the
   oracle, with the dispatch table, the time-ordered event queue, the
-  stale-completion gate, admission, and the effect outbox's dispatch.
-- `src/dsl41/runner_startup.py`: taking possession of a run root: genesis,
-  resume, and the takeover barrier (acquire, replay, reconcile every
-  execution host, retire superseded and re-drive pending, dispatch).
+  stale-completion gate, admission, and dispatch behind a `dispatch`
+  record.
+- `src/dsl41/runner_startup.py`: taking possession of a run root: genesis
+  and resume (acquire, replay, reconcile the spool, dispatch the starts
+  the previous engine decided and never launched).
 - `src/dsl41/runner_clock.py`: the Clock protocol, VirtualClock, RealClock,
   and EngineError.
 - `src/dsl41/runner_codes.py`: the stable codes of the control protocol's
@@ -669,14 +659,8 @@ Runner:
   run's outcome.
 - `src/dsl41/runner_admission.py`: the one order every input takes (dedup,
   stamp, append, apply, decide, record), the Attempt and ApplyResult
-  records, the decision index that answers a retry, and the envelope with
-  its mandatory preconditions.
-- `src/dsl41/runner_effects.py`: the effect outbox: what the shell intends
-  to do to an execution host, recorded before the attempt, in the states
-  pending, applied, and indeterminate.
-- `src/dsl41/runner_hosts.py`: the execution-host routing table: the
-  HostCommand vocabulary, eviction's preconditions as a pure function of
-  the row, and the genesis seed.
+  records, the decision index that answers a retry, the envelope with
+  its mandatory preconditions, and the dispatch plan a decision implies.
 - `src/dsl41/runner_access.py`: the access perimeter
   ([docs/access-model.md](docs/access-model.md)):
   the optional `--access-map`, its gates over the control verbs, denial
@@ -698,9 +682,9 @@ Runner:
   `non-idempotent.toml` in the manifest's directory names the jobs whose interrupted
   attempt waits for the operator, with its canonical bytes for the reload
   token, and the four `DSL41_*` variables every launch exports.
-- `src/dsl41/runner_ledger.py`: leadership over one run root: the flock
-  held for the process lifetime, the epoch allocated by appending under
-  it, and the eligibility gate on the opening record.
+- `src/dsl41/runner_ledger.py`: one engine per run root: the flock held
+  for the process lifetime, its holder note, and the eligibility gate on
+  the opening record.
 - `src/dsl41/runner_scheduler.py`: the calendar scheduler: standard day
   sets and windowed extended-calendar generators, turned into UTC instants
   through `timezones.py`.
@@ -919,29 +903,28 @@ Runner:
 - `tests/test_run_history.py`: the `runs` CLI: per-root and multi-root
   folding, the filters, a history spanning a boundary, and the
   `records_only` fidelity degrade.
-- `tests/test_ledger.py`: one leader per run root, the monotone epoch, the
-  eligibility gate, a SIGKILLed holder, the fence, and the takeover
-  barrier.
-- `tests/test_runner_leadership.py`: routing and election under real
+- `tests/test_ledger.py`: one engine per run root, the eligibility gate, a
+  SIGKILLed holder, the fence, and the start a crash left undispatched.
+- `tests/test_runner_leadership.py`: one engine per run root under real
   processes: the flock refused across processes and released by the
-  kernel, the inode fence, the outbox window, and a live eviction bound.
+  kernel, the inode fence, and the dispatch window.
 - `tests/test_admission.py`: the frozen admission order, the frontier
   invariants, the decision index, and two-pass replay.
 - `tests/test_preconditions.py`: mandatory preconditions and the versioned
   wire: the refusals, the check, refused versus rejected in the log, retry
   ordering, and the operator's exit codes and `request_id`.
-- `tests/test_decision_record.py`: the atomic `decision` record: a result
-  and its effects commit as one write, the version handshake, and what the
-  subscribe stream promises.
+- `tests/test_decision_record.py`: the one-line `decision` record and the
+  `dispatch` record after it, a crash at every append, the version
+  handshake, and what the subscribe stream promises.
 - `tests/test_recovery.py`: recovering a mutation whose answer was lost:
   every failure after the write is `delivered`, a torn line at EOF is never
   parsed, and re-running with the printed replay flags is an exact retry.
-- `tests/test_hosts.py`: the routing table: drain, the re-drive that makes
-  `passive` reversible, held-ness derived rather than stored, eviction's
-  refusals and bound, quarantine, and the lease heartbeat.
-- `tests/test_effects.py`: the outbox: its three states, supersession by
-  exact desired state, at-most-once application, and a drain that holds
-  spawns while letting kills through.
+- `tests/test_dispatch.py`: the dispatch plan: the ghost-run gate,
+  supersession by exact desired state, one kill per run, and at-most-once
+  launch.
+- `tests/test_resume_dispatch.py`: resume's decision for a live start that
+  left no run directory: a dispatched one fails or relaunches its watch, a
+  decided one is dispatched, and anything else is left.
 - `tests/test_access.py`: the access perimeter's obligations in order,
   from zero-config unchanged to actor overwrite.
 - `tests/test_runner_adapters.py`: RealClock, LocalCommandAdapter end to

@@ -1,6 +1,6 @@
 """The control-plane verbs: what an operator says to a RUNNING engine (DL-137).
 
-`sendevent`, `host` and `query` speak the ss10 control protocol over the run root's socket
+`sendevent` and `query` speak the ss10 control protocol over the run root's socket
 (docs/control-protocol.md); `ui` and `serve` attach the ss11 TUI to it. Every verb is a client
 and holds no engine state.
 
@@ -59,8 +59,8 @@ def _answer_or_exit(response: dict[str, Any]) -> None:
 
 
 def _mutate(socket_path: Path, request: dict[str, Any]) -> None:
-    """`sendevent`'s and `host`'s exit: one concurrency-model ss6 command envelope, its outcome as
-    this process's status. The ladder is `cli_common.command_outcome` (DL-92, DL-137)."""
+    """`sendevent`'s exit: one concurrency-model ss6 command envelope, its outcome as this
+    process's status. The ladder is `cli_common.command_outcome` (DL-92, DL-137)."""
     raise typer.Exit(command_outcome(socket_path, request))
 
 
@@ -72,10 +72,6 @@ _SOCKET_OPT = typer.Option(
 )
 
 
-_EPOCH_PIN_HELP = (
-    "Use this epoch instead of reading it. An exact retry needs the epoch"
-    " the original carried; the CLI prints it before sending."
-)
 _BASELINE_PIN_HELP = (
     "Use this baseline id instead of reading it. An exact retry needs the"
     " baseline the original carried; the CLI prints it before sending."
@@ -87,13 +83,13 @@ _ACTOR_PIN_HELP = (
 
 
 def _pinned_read(
-    socket_path: Path, key: str, expect: int | None, epoch: int | None, baseline: str | None
-) -> tuple[str, int, int]:
-    """The concurrency-model ss6 read header (`baseline_id`, `epoch`) and the current revision
-    of `key`, with each pin replacing its own read value (DL-217).
+    socket_path: Path, key: str, expect: int | None, baseline: str | None
+) -> tuple[str, int]:
+    """The concurrency-model ss6 read header's `baseline_id` and the current revision of `key`,
+    with each pin replacing its own read value (DL-217).
 
-    The fingerprint covers the revision, the epoch and the baseline, so an id carried back alone
-    after any of them moved is a collision, not a retry. Unpinned values are read as before. The
+    The fingerprint covers the revision and the baseline, so an id carried back alone after
+    either moved is a collision, not a retry. Unpinned values are read as before. The
     read narrows the race to one round trip and cannot remove it; whoever looked at a status page
     and then acts should pass --expect with the revision they looked at."""
     from dsl41.runner_control import read_for, revision_in
@@ -102,13 +98,8 @@ def _pinned_read(
     header = read_header_of(response)
     if header is None:
         raise typer.Exit(2)
-    read_baseline, read_epoch = header
     current = revision_in(response, key)
-    return (
-        read_baseline if baseline is None else baseline,
-        read_epoch if epoch is None else epoch,
-        current if expect is None else expect,
-    )
+    return (header if baseline is None else baseline, current if expect is None else expect)
 
 
 def sendevent(
@@ -143,11 +134,10 @@ def sendevent(
         help="Retry the event that carried this id instead of sending a"
         " new one. An exact retry, same id and same values, is answered"
         " from the original decision and applies nothing twice. It is the"
-        " only safe answer to exit 4. Give it with the --expect, --epoch"
-        " and --baseline the CLI printed; other values make a different"
+        " only safe answer to exit 4. Give it with the --expect and"
+        " --baseline the CLI printed; other values make a different"
         " request, which is refused. Without it a fresh id is generated.",
     ),
-    epoch: int = typer.Option(None, "--epoch", help=_EPOCH_PIN_HELP),
     baseline: str = typer.Option(None, "--baseline", help=_BASELINE_PIN_HELP),
     actor: str = typer.Option(None, "--claimed-actor", help=_ACTOR_PIN_HELP),
 ) -> None:
@@ -167,8 +157,8 @@ def sendevent(
          resending the same request loses the same race.
       4  Unknown. No decision arrived. The event may still be admitted
          and about to apply. Re-read. If you must send it again, repeat
-         the same arguments with the --request-id, --expect, --epoch
-         and --baseline printed on stderr.
+         the same arguments with the --request-id, --expect and
+         --baseline printed on stderr.
 
     Before the first write, one stderr line prints those retry values.
     Keep it: with the original arguments, it is everything a safe retry
@@ -197,14 +187,13 @@ def sendevent(
         key = addressed_key(verb, payload)
     except EngineError as exc:
         raise typer.Exit(refuse(exc)) from exc
-    baseline_id, epoch_value, revision = _pinned_read(socket_path, key, expect, epoch, baseline)
+    baseline_id, revision = _pinned_read(socket_path, key, expect, baseline)
     request = command(
         verb,
         payload,
         key=key,
         revision=revision,
         baseline_id=baseline_id,
-        epoch=epoch_value,
         request_id=request_id,
         claimed_actor=claimed_actor() if actor is None else actor,
     )
@@ -243,7 +232,7 @@ def off_hold_all(
     header = read_header_of(response)
     if header is None:
         raise typer.Exit(2)
-    baseline, epoch = header
+    baseline = header
     rows = response.get("jobs", {})
     # on_hold is the job-verb latch, NOT DL-94's held run-state in the same row; the sweep is named
     # for the event it sends and its scope (DL-423)
@@ -265,7 +254,6 @@ def off_hold_all(
             key=key,
             revision=revision_in(response, key),
             baseline_id=baseline,
-            epoch=epoch,
             request_id=None,
             claimed_actor=claimed_actor(),
         )
@@ -276,75 +264,6 @@ def off_hold_all(
         if command_outcome(socket_path, request, retry_command=retry_command) != 0:
             all_applied = False
     raise typer.Exit(0 if all_applied else 1)
-
-
-def host(
-    action: str = typer.Argument(..., metavar="ACTION", help="list, drain, activate or evict."),
-    host_id: str = typer.Argument(
-        None, metavar="HOST_ID", help="The host id. Needed by every action but list."
-    ),
-    socket_path: Path = _SOCKET_OPT,
-    force: bool = typer.Option(
-        False,
-        "--force",
-        help="evict only: skip the preconditions. Recorded with the actor"
-        " who claimed it. This is the one path that can run a job twice,"
-        " so use it only with proof from outside that the machine is"
-        " dead.",
-    ),  # ss8
-    expect: int = typer.Option(
-        None,
-        "--expect",
-        help="The state_rev you read for the host with 'host list'. The"
-        " command is rejected if the host moved since. Without it, the"
-        " command reads the revision first.",
-    ),
-    request_id: str = typer.Option(
-        None,
-        "--request-id",
-        help="Retry the command that carried this id. See 'dsl41 sendevent --help'.",
-    ),
-    epoch: int = typer.Option(None, "--epoch", help=_EPOCH_PIN_HELP),
-    baseline: str = typer.Option(None, "--baseline", help=_BASELINE_PIN_HELP),
-    actor: str = typer.Option(None, "--claimed-actor", help=_ACTOR_PIN_HELP),
-) -> None:
-    """List, drain, activate or evict execution hosts.
-
-    ACTION is one of:
-      list      Show the routing table with each host's revision.
-      drain     Stop routing new work to the host. Running work finishes.
-                Reversible; use it for planned maintenance.
-      activate  Route work to the host again and dispatch what the drain held.
-      evict     Declare the host's work reroutable to other hosts. Refused
-                unless the leader has recorded the host unreachable, the host
-                runs a deadman, and the kill bound has passed.
-
-    drain, activate and evict use sendevent's exit codes: 0 applied, 2
-    refused, 3 rejected, 4 unknown.
-    """
-    # Design: concurrency-model ss8
-    from dsl41.oracle_state import RuntimeState
-    from dsl41.runner_control import claimed_actor, command
-
-    verb = action.lower()
-    if verb == "list":
-        _answer_or_exit(_control_roundtrip(socket_path, {"cmd": "hosts"}))
-    if not host_id:
-        raise typer.Exit(refuse(f"`host {verb}` needs a host id"))
-    key = RuntimeState.host_key(host_id)
-    baseline_id, epoch_value, revision = _pinned_read(socket_path, key, expect, epoch, baseline)
-    request = command(
-        verb,
-        {"id": host_id, "force": force},
-        key=key,
-        revision=revision,
-        baseline_id=baseline_id,
-        epoch=epoch_value,
-        request_id=request_id,
-        claimed_actor=claimed_actor() if actor is None else actor,
-        cmd="host",
-    )
-    _mutate(socket_path, request)
 
 
 def ui(socket_path: Path = _SOCKET_OPT) -> None:
@@ -426,15 +345,10 @@ def _brief_flags(row: dict[str, object]) -> str:
     return "".join(mark for mark, key in STATUS_FLAG_MARKS if row.get(key))
 
 
-#: a READ verb this surface does NOT forward: `dsl41 control host list` owns `hosts`.
-_QUERY_ELSEWHERE: frozenset[str] = frozenset({"hosts"})
-
 #: the read verbs this surface forwards, derived from `runner_access.REQUIRED_TIER` (DL-152); the
 #: argument's HELP is derived from them (DL-145).
 _QUERY_VERBS: tuple[str, ...] = tuple(
-    verb
-    for verb, tier in REQUIRED_TIER.items()
-    if tier is Tier.READ and verb not in _QUERY_ELSEWHERE
+    verb for verb, tier in REQUIRED_TIER.items() if tier is Tier.READ
 )
 _QUERY_PREDICATES: dict[str, frozenset[str]] = {
     "is-success": frozenset({"SUCCESS"}),

@@ -1,18 +1,17 @@
-"""Durable records and process identity, shared by the lifecycle tier (DL-72).
+"""Durable records and process identity, shared by the wrapper and the engine (DL-72).
 
-The one copy of the helpers the Tier-0 wrapper (runner_wrapper.py) and the Tier-1
-supervisor (runner_supervisor.py) both need: the DL-41a durability liturgy, the
-boot-session id, the (pid, start-time) PID-reuse guard, and the group-kill that tolerates
-an already-dead group. The stdlib-only boundary (DL-42) allows a shared module, and one
-copy cannot drift; its temp files are created 0o600 (the run_root is 0o700 anyway).
+The one copy of the helpers the Tier-0 wrapper (runner_wrapper.py) and the engine both need:
+the DL-41a durability liturgy, the boot-session id, the (pid, start-time) PID-reuse guard, and
+the group-kill that tolerates an already-dead group. The stdlib-only boundary (DL-42) allows a
+shared module, and one copy cannot drift; its temp files are created 0o600 (the run_root is
+0o700 anyway).
 
-STDLIB ONLY, like its two callers: it imports nothing from dsl41 and nothing third-party
-(import-graph tests in tests/test_runner_lifecycle.py and tests/test_runner_supervisor.py
-cover all three files). The wrapper and the supervisor run BY FILE PATH, never ``-m``, and
-import this as a plain top-level module from sys.path[0]. Under PYTHONSAFEPATH=1 both
-prepend their directory and remove it after, because the engine imports them as package
-modules too and a package directory left on sys.path would shadow top-level names. The
-engine imports this module as ``dsl41.runner_procid``.
+STDLIB ONLY, like the wrapper: it imports nothing from dsl41 and nothing third-party (the
+import-graph test in tests/test_runner_lifecycle.py covers both files). The wrapper runs BY
+FILE PATH, never ``-m``, and imports this as a plain top-level module from sys.path[0]. Under
+PYTHONSAFEPATH=1 it prepends its directory and removes it after, because the engine imports it
+as a package module too and a package directory left on sys.path would shadow top-level names.
+The engine imports this module as ``dsl41.runner_procid``.
 """
 
 from __future__ import annotations
@@ -30,9 +29,8 @@ from datetime import UTC, datetime
 from typing import Any, Final
 
 #: the `version` the Tier-0 wrapper stamps on `spawn.json` and `status.json`
-#: (docs/supervisor-protocol.md ss3). ONE integer, held in the one module all
-#: three readers may import: the wrapper writes it, the supervisor and the
-#: engine each check it (DL-152, DL-72).
+#: (docs/wrapper-protocol.md). ONE integer, held in the one module both readers
+#: may import: the wrapper writes it, and the engine checks it (DL-152, DL-72).
 SPOOL_VERSION: Final[int] = 1
 
 

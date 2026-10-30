@@ -60,7 +60,7 @@ The engine prints full status names; there are no two-letter codes.
 | `INACTIVE` | The job's initial status. |
 | `QUE_WAIT` | The job waits in a resource queue. |
 | `STARTING` | The job is live and starting. |
-| `RUNNING` | The job is live; check the JSON field `held` before assuming a process runs. |
+| `RUNNING` | The job is live. |
 | `SUCCESS` | The recorded outcome is success; `CHANGE_STATUS` and a noexec bypass record it too. |
 | `FAILURE` | The recorded outcome is failure. |
 | `TERMINATED` | The recorded outcome is termination: a kill, a timer, a terminator, a cancelled queued start or a `CHANGE_STATUS`; the [generated lifecycle view](job-chart-lifecycle.md) names the events. |
@@ -70,7 +70,6 @@ The `--brief` line: `name  status  status_at  run N  exit N  rev N  FLAGS`.
 Flags: `I` means `on_ice`, `H` `on_hold`, `N` `on_noexec`, `A` `armed`; they join without separators, and a job with none has no flags cell.
 
 Hold, ice and noexec are modes; a job on hold or on ice keeps its status, except that `ON_ICE` on a `QUE_WAIT` job dequeues it and settles it `INACTIVE` (DL-50).
-The JSON field `held` has no brief flag; [the routing check](#the-job-has-not-started) covers it.
 `log_out` and `log_err` name the current run's output targets for a `CMD` job, which exist once the run has written; they are null for a `BOX` or `FW` job.
 `state_rev` is the value that `sendevent --expect` takes; the [query contract](control-protocol.md#4-query-verbs-frozen-response-shapes) defines the fields.
 
@@ -120,13 +119,6 @@ Before `OFF_HOLD`, read [its start effect](#send-the-intervention) (SEM-21).
 
 **Resource queue (`QUE_WAIT`).** `query status` identifies the queue wait.
 If an ended job still holds units, `RELEASE_RESOURCE` targets that holder to free them.
-
-**Host not routing (the JSON field `held` is true).** The engine started the job and dispatched no process.
-The job's executor routes no new effects: its host is drained or quarantined.
-Read the host's `state` in `dsl41 host list -S "$S"`: `passive` is a drain, `quarantined` is the leader's mark for a host it cannot reach.
-A drain is the tool for planned maintenance; confirm the drain is not deliberate before `host activate`.
-`dsl41 host activate HOST_ID -S "$S"` ends a drain and dispatches the held starts.
-On a quarantined host, `host activate` is rejected with `host_quarantined`; wait for the leader to reinstate the host when it answers again.
 
 **Box not `RUNNING`.** `query deps` names the box; a plain start of the member writes `START_REFUSED` to `query trace`.
 `STARTJOB` on the box starts a new box run and resets the jobs it contains to `INACTIVE`, except a `STARTING`, `RUNNING` or `QUE_WAIT` job and everything inside a subbox in one of those states (SEM-10).
@@ -190,13 +182,12 @@ Nightbank exercise 4 (`RUNBOOK.md`, retired in 2.0.0) works through a failure an
 Read `job_type` in [the job's JSON](#read-the-jobs-state) first.
 A `BOX` has no process of its own; `query deps` names its members.
 A running `FW` watches a file and starts no process; its `watching` field names the file.
-A job whose JSON field `held` is true goes to [the routing check](#the-job-has-not-started).
 
 `wrapper_alive` is true while the command's wrapper process runs.
 A restarted supervisor's list is empty; the restart ended the commands it ran.
 A `CMD` job that stays `RUNNING` after its row shows `wrapper_alive: false` needs a look: a completion takes a moment to apply, and the gap alone does not say why it has not.
 Read the engine journal: a `dsl41: input quarantined` line names a quarantined completion, and then you [escalate](#escalate-a-dsl41-fault).
-For a live row with `held: false` and no run in the list, follow **A row left live with nothing behind it** under What to watch (`deployment-runbook.md`, retired in 2.0.0) to choose the correction.
+For a live row with no run in the list, follow **A row left live with nothing behind it** under What to watch (`deployment-runbook.md`, retired in 2.0.0) to choose the correction.
 
 ## Send the intervention
 
@@ -221,7 +212,7 @@ For `SET_GLOBAL`, use `-G KEY=value` instead of `-J NAME`; read `REV` with `dsl4
 | `3` | Rejected; the engine logs the rejection. `precondition_failed` means the target moved: re-read, then decide again. `engine_apply_faulted` means [escalate](#escalate-a-dsl41-fault). |
 | `4` | Unknown; the event may still apply. Re-read before deciding on a retry. |
 
-For exit `4`, any retry repeats the same arguments with the printed `--request-id`, `--expect`, `--epoch`, `--baseline` and `--claimed-actor`; stderr prints them before the first write.
+For exit `4`, any retry repeats the same arguments with the printed `--request-id`, `--expect`, `--baseline` and `--claimed-actor`; stderr prints them before the first write.
 The same user sends the retry from the same host, within the same period (DL-391).
 A refused retry says nothing about the original; re-read the target.
 
@@ -245,15 +236,12 @@ A missing socket reports `control socket PATH: REASON` with `No such file or dir
 After a seal the socket is absent; [check the engine and head](#check-the-engine-and-the-period-first).
 `access_denied` says `PRINCIPAL holds HAVE tier; ACTION needs NEED tier`.
 An armed access map writes the denial to [`$RUN_ROOT/perimeter.jsonl`](access-model.md#6-receipts-the-perimeter-journal) and syncs it; a storage failure can leave no receipt, and the request stays denied.
-`period_sealing` refuses requests during the cutoff; wait for the seal to commit, then [check the head](#check-the-engine-and-the-period-first).
-For `lineage_lost`, send nothing and [escalate](#escalate-a-dsl41-fault).
 
 ## Escalate a dsl41 fault
 
 Escalate `dsl41: statechart error`, `dsl41: input quarantined`, `engine failed:`,
-`engine stopped:`, engine exit `6` or `7`, or `lineage_lost`.
+`engine stopped:`, or engine exit `6` or `7`.
 Keep statechart report lines whole.
-`lineage_lost` means the engine cannot prove it leads the lineage, because someone deleted or replaced the anchor directory.
 A job's own exit code and logs belong to the application, not dsl41.
 `SPEC DRIFT: estate files changed on disk` is a notice that the estate files on disk changed, not a fault; report it with the bundle.
 

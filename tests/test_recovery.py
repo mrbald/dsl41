@@ -206,10 +206,8 @@ async def _resume_served(run_root: Path) -> tuple[Engine, ControlServer, asyncio
 
 
 def test_the_pinned_retry_is_answered_after_a_same_period_restart(short_root: Path) -> None:
-    """The restart takes a new epoch and rebuilds the decision index from
-    the WAL. The pinned retry names the OLD epoch -- the one its original
-    carried -- and dedup precedes the epoch check, so it is answered from
-    the original decision."""
+    """The restart rebuilds the decision index from the WAL, so the pinned
+    retry is answered from the original decision."""
     run_root = short_root / "run"
 
     async def scenario() -> None:
@@ -218,13 +216,11 @@ def test_the_pinned_retry_is_answered_after_a_same_period_restart(short_root: Pa
             args = (*_STATUS_ARGS, "--socket", str(server.path))
             lost = await _lose_the_reply(server, args, "STATUS")
             flags = _advice(lost.stderr)
-            old_epoch = engine.epoch
         finally:
             await _teardown(engine, server, loop_task)
 
         resumed, server, loop_task = await _resume_served(run_root)
         try:
-            assert resumed.epoch > old_epoch
             retry = await asyncio.to_thread(cli, *args, *flags)
             assert retry.returncode == 0, retry.stderr
             assert [rid for rid, _ in resumed.deduped] == [flags[1]]
@@ -235,11 +231,11 @@ def test_the_pinned_retry_is_answered_after_a_same_period_restart(short_root: Pa
     asyncio.run(scenario())
 
 
-def test_an_unseen_original_is_refused_as_stale_after_a_restart(short_root: Path) -> None:
-    """The original never reached the log: the writer was down, the answer
-    was `unknown`. After a restart its pinned replay names a superseded
-    epoch and no decision holds its id, so it is refused with the re-read
-    advice and nothing applies. The refusal does not claim the original
+def test_an_unseen_original_is_admitted_once_after_a_restart(short_root: Path) -> None:
+    """The original never reached the log: the writer was down, the answer was `unknown`.
+    After a restart no decision holds its id, so its pinned replay is a fresh command at the
+    pinned `expect`, admitted once and applied because the job is still at that revision
+    (control-protocol ss3, "Recovering a lost answer"). Nothing printed claims the original
     never applied -- this client cannot know that."""
     run_root = short_root / "run"
 
@@ -259,43 +255,20 @@ def test_an_unseen_original_is_refused_as_stale_after_a_restart(short_root: Path
             await engine.shutdown()
             assert engine.journal is not None
             engine.journal.close()
+        assert _records_for(run_root, flags[1]) == []
 
         resumed, server, loop_task = await _resume_served(run_root)
         try:
             replay = await asyncio.to_thread(cli, *args, *flags)
-            assert replay.returncode == 2, replay.stderr
+            assert replay.returncode == 0, replay.stderr
             answer = json.loads(replay.stdout)
-            assert answer["refused"] is True
-            assert "re-read and re-compose" in answer["error"]
-            assert "original_decision" not in answer
+            assert answer["decision"] == "applied" and answer["request_id"] == flags[1]
             for claim in _NEVER_APPLIED_CLAIMS:
                 assert claim not in replay.stdout + replay.stderr
-            assert resumed.oracle.store.job["j"].status != "SUCCESS"
-            assert _records_for(run_root, flags[1]) == []
+            assert resumed.oracle.store.job["j"].status == "SUCCESS"
+            assert _records_for(run_root, flags[1]) == ["input", "decision"]
         finally:
             await _teardown(resumed, server, loop_task)
-
-    asyncio.run(scenario())
-
-
-def test_a_host_action_recovers_its_lost_reply_through_the_same_pins(short_root: Path) -> None:
-    """`host` composes the same envelope through the same composer, so its
-    lost reply recovers the same way."""
-    run_root = short_root / "run"
-
-    async def scenario() -> None:
-        engine, server, loop_task = await _serve(run_root)
-        try:
-            args = ("host", "drain", engine.executor_id, "--socket", str(server.path))
-            lost = await _lose_the_reply(server, args, "drain")
-            flags = _advice(lost.stderr)
-            assert flags[2:7:2] == ["--expect", "--epoch", "--baseline"]
-            retry = await asyncio.to_thread(cli, *args, *flags)
-            assert retry.returncode == 0, retry.stderr
-            assert json.loads(retry.stdout)["kind"] == "drain"
-            assert [rid for rid, _ in engine.deduped] == [flags[1]]
-        finally:
-            await _teardown(engine, server, loop_task)
 
     asyncio.run(scenario())
 
@@ -346,7 +319,6 @@ def test_a_partial_sync_write_is_delivered_and_the_fragment_is_never_applied(
                     key="job:j",
                     revision=state["jobs"]["j"]["state_rev"],
                     baseline_id=state["baseline_id"],
-                    epoch=state["epoch"],
                     request_id="partial-1",
                 )
             )
@@ -460,7 +432,7 @@ def test_an_unencodable_request_fails_before_any_transport() -> None:
         control.roundtrip(Path("/nowhere.sock"), {"cmd": "status", "bad": object()})
 
 
-_HEADER = {"ok": True, "baseline_id": "base-1", "epoch": 7, "applied_index": 3}
+_HEADER = {"ok": True, "baseline_id": "base-1", "applied_index": 3}
 
 
 async def _fake_engine(
@@ -480,17 +452,14 @@ async def _fake_engine(
         try:
             while line := await reader.readline():
                 request = json.loads(line)
-                if request.get("cmd") in ("sendevent", "host"):
+                if request.get("cmd") == "sendevent":
                     await on_mutation(writer)
                     return
-                if request.get("cmd") == "status":
-                    jobs = {
-                        "j": {"state_rev": 2, "on_hold": True},
-                        "k": {"state_rev": 5, "on_hold": True},
-                    }
-                    answer: dict[str, Any] = _HEADER | {"jobs": jobs}
-                else:
-                    answer = _HEADER | {"hosts": {"h1": {"state_rev": 4}}}
+                jobs = {
+                    "j": {"state_rev": 2, "on_hold": True},
+                    "k": {"state_rev": 5, "on_hold": True},
+                }
+                answer: dict[str, Any] = _HEADER | {"jobs": jobs}
                 writer.write(json.dumps(answer).encode() + b"\n")
                 await writer.drain()
         finally:
@@ -520,7 +489,7 @@ def test_a_reply_that_is_malformed_or_missing_is_delivered_and_exits_4(
         server = await _fake_engine(path, misbehave)
         try:
             request = control.command(
-                "ON_HOLD", {"job": "j"}, key="job:j", revision=2, baseline_id="b", epoch=1
+                "ON_HOLD", {"job": "j"}, key="job:j", revision=2, baseline_id="b"
             )
             with pytest.raises(ControlClientError) as sync_failed:
                 await asyncio.to_thread(control.roundtrip, path, request)
@@ -540,8 +509,6 @@ def test_a_reply_that_is_malformed_or_missing_is_delivered_and_exits_4(
             assert flags[2:] == [
                 "--expect",
                 "2",
-                "--epoch",
-                "7",
                 "--baseline",
                 "base-1",
                 "--claimed-actor",
@@ -574,10 +541,9 @@ def test_each_pin_replaces_only_its_own_read_value(short_root: Path) -> None:
                 "recovery@synthetic",
             )
             cases = [
-                ((), "--expect 2 --epoch 7 --baseline base-1"),
-                (("--epoch", "3"), "--expect 2 --epoch 3 --baseline base-1"),
-                (("--baseline", "old"), "--expect 2 --epoch 7 --baseline old"),
-                (("--expect", "9"), "--expect 9 --epoch 7 --baseline base-1"),
+                ((), "--expect 2 --baseline base-1"),
+                (("--baseline", "old"), "--expect 2 --baseline old"),
+                (("--expect", "9"), "--expect 9 --baseline base-1"),
             ]
             for extra, pins in cases:
                 sent = await asyncio.to_thread(cli, *base, *extra)
@@ -586,14 +552,6 @@ def test_each_pin_replaces_only_its_own_read_value(short_root: Path) -> None:
                 ), (extra, sent.stderr)
             actor = await asyncio.to_thread(cli, *base, "--claimed-actor", "original actor")
             assert _sending(actor.stderr)[-2:] == ["--claimed-actor", "original actor"]
-            host = await asyncio.to_thread(
-                cli, "host", "drain", "h1", "--epoch", "2", "--socket", str(path)
-            )
-            assert host.returncode == 4, host.stderr
-            assert shlex.join(_sending(host.stderr)[2:]) == (
-                "--expect 4 --epoch 2 --baseline base-1 --claimed-actor "
-                + shlex.quote(control.claimed_actor())
-            )
         finally:
             server.close()
             await server.wait_closed()
@@ -627,8 +585,6 @@ def test_off_hold_all_names_the_one_job_retry_with_its_pins(short_root: Path) ->
             assert argv[8:] == [
                 "--expect",
                 str(revision),
-                "--epoch",
-                "7",
                 "--baseline",
                 "base-1",
                 "--claimed-actor",
@@ -1078,7 +1034,7 @@ def test_a_collision_after_a_same_period_restart_carries_the_decision_from_the_w
             )
             assert reused.returncode == 2, reused.stderr
             answer = json.loads(reused.stdout)
-            assert answer["epoch"] == resumed.epoch != first["epoch"]
+            assert answer["baseline_id"] == resumed.baseline_id == first["baseline_id"]
             assert answer["original_decision"] == {
                 "index": first["index"],
                 "request_id": "w-1",
@@ -1105,7 +1061,7 @@ def test_a_rejected_retry_answers_the_stored_code_and_a_record_without_one_omits
     it still replays, and its retry answers without `code` rather than with
     one guessed from the prose."""
     run_root = short_root / "run"
-    header = {"baseline_id", "epoch", "applied_index"}
+    header = {"baseline_id", "applied_index"}
 
     async def scenario() -> tuple[dict, dict, dict, dict]:
         engine, server, loop_task = await _serve(run_root)
@@ -1117,7 +1073,6 @@ def test_a_rejected_retry_answers_the_stored_code_and_a_record_without_one_omits
                     "v": 3,
                     "cmd": "sendevent",
                     "baseline_id": read["baseline_id"],
-                    "epoch": read["epoch"],
                     "request_id": request_id,
                     "verb": "ON_HOLD",
                     "payload": {"job": "j"},

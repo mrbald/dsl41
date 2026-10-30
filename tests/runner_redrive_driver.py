@@ -1,25 +1,16 @@
-"""Engine subprocess that dies inside the outbox window (concurrency-model
-ss5, DL-102).
+"""Engine subprocess that dies between a decision and its dispatch (runner-design ss7,
+DL-102).
 
-`_admit_and_apply` journals the attempt and the effects that batch planned,
-and the loop then dispatches them. An engine that dies BETWEEN those two
-leaves exactly one thing behind: an `effect` record with no
-`effect_result`, and nothing anywhere on the host. That is what a pending
-SPAWN means -- an intent nothing acted on -- and it is what the takeover
-barrier re-drives.
+`_admit_and_apply` journals the attempt and its decision, and then dispatches the starts the
+decision implies, each behind its `dispatch` record. An engine that dies BETWEEN those leaves
+exactly one thing behind: a decided start with no `dispatch` record, and nothing anywhere on the
+host. That is what resume dispatches.
 
-The EARLIER of the two windows an outbox has. The later one -- `_launch`
-ran and the process died before `_resolve_effect` recorded it -- leaves the
-same pending effect and a run directory, and its answer is the opposite
-(reconcile from the spool, never re-drive). Nothing here can produce that
-one on purpose: the two statements have no yield point between them.
-
-The window is real and it is two statements wide, so this driver picks the
-instant rather than racing for it: `_dispatch` is replaced with an
-untrappable `os._exit`. What the patch chooses is WHEN this process dies.
-Every record before that point was written and fsync'd by the ordinary
-path (the real domain fsyncs per record), and nothing after it exists --
-which is the same log a `kill -9` landing in that window would leave.
+The window is real and it is two statements wide, so this driver picks the instant rather than
+racing for it: `_dispatch` is replaced with an untrappable `os._exit`. What the patch chooses is
+WHEN this process dies. Every record before that point was written and fsync'd by the ordinary
+path (the real domain fsyncs per record), and nothing after it exists -- which is the same log a
+`kill -9` landing in that window would leave.
 
 Not a test file: no test_ prefix, imported by the test for its JIL only.
 """
@@ -62,7 +53,7 @@ async def main(run_root: str) -> None:
         adapters={"CMD": LocalCommandAdapter(grace_seconds=2.0)},
     )
 
-    def die() -> None:
+    def die(_emitted: object) -> None:
         os._exit(CRASH_CODE)
 
     engine._dispatch = die  # type: ignore[method-assign]

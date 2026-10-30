@@ -112,37 +112,6 @@ def test_off_hold_all_with_a_header_and_nothing_held_says_so(
     assert "no jobs held" in result.output
 
 
-# ------------------------------------------------------------------------ host
-
-
-def test_host_list_prints_the_engines_answer_and_exits_on_its_flag(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    engine = _engine(monkeypatch, hosts={"ok": True, "hosts": {}})
-    result = _run("host", "list")
-    assert result.exit_code == 0
-    assert result.output.strip() == '{"hosts": {}, "ok": true}'
-    assert engine.requests == [{"cmd": "hosts"}]
-
-
-def test_host_list_exits_two_on_a_refused_answer(monkeypatch: pytest.MonkeyPatch) -> None:
-    _engine(monkeypatch, hosts={"ok": False, "error": "no hosts for you"})
-    result = _run("host", "list")
-    assert result.exit_code == 2
-    assert "no hosts for you" in result.output
-
-
-@pytest.mark.parametrize("action", ["drain", "activate", "evict"])
-def test_a_host_action_without_a_host_id_is_refused(
-    monkeypatch: pytest.MonkeyPatch, action: str
-) -> None:
-    engine = _engine(monkeypatch)
-    result = _run("host", action)
-    assert result.exit_code == 2
-    assert f"`host {action}` needs a host id" in result.output
-    assert engine.requests == []
-
-
 # ----------------------------------------------------------------------- query
 
 
