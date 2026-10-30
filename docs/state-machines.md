@@ -719,3 +719,112 @@ stateDiagram-v2
 | overflows | guard | The record does not fit: the backlog holds a record, and the backlog plus this one would pass the budget (DL-267). |
 | enqueue | action | Queue the record and count its bytes against the budget. Memory only: the queue has no count limit, so this never blocks. |
 | drop_backlog | action | Record why, and drop the backlog. The journal then takes the feed out of its fan-out and, once every other feed has the record, tells the owner, which ends the stream (DL-267). |
+
+## engine_lifecycle
+
+Clock: logical. Time events: abort_deadline.
+
+```mermaid
+stateDiagram-v2
+    state "engine" as s4
+    state s4 {
+        [*] --> s2
+        state "STARTING" as s2
+        state "RUNNING" as s1
+        state "DRAINING" as s0
+        state "STOPPED" as s3
+        s3 --> [*]
+    }
+    s2 --> s1 : engine_lifecycle.01 replay_done
+    s1 --> s0 : engine_lifecycle.02 stop_requested / begin_drain
+    s0 --> s3 : engine_lifecycle.04 all_attempts_settled / clean_shutdown
+    s0 --> s3 : engine_lifecycle.05 abort_deadline / unclean_shutdown
+    s2 --> s3 : engine_lifecycle.06 stop_requested / shutdown_during_startup
+```
+
+| Id | Source | Event | Guard | Action | Target | Kind | Cite |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| engine_lifecycle.01 | STARTING | replay_done |  | The WAL replay is done and the engine serves. | RUNNING | external |  |
+| engine_lifecycle.02 | RUNNING | stop_requested |  | begin_drain | DRAINING | external |  |
+| engine_lifecycle.03 | DRAINING | stop_requested |  | deadline_now |  | internal |  |
+| engine_lifecycle.04 | DRAINING | all_attempts_settled |  | clean_shutdown | STOPPED | external |  |
+| engine_lifecycle.05 | DRAINING | abort_deadline |  | unclean_shutdown | STOPPED | external |  |
+| engine_lifecycle.06 | STARTING | stop_requested |  | shutdown_during_startup | STOPPED | external |  |
+
+| State | In | Entry | Exit | Defers | Waits |
+| --- | --- | --- | --- | --- | --- |
+| engine |  |  |  |  |  |
+| STARTING | engine/phase |  |  |  |  |
+| RUNNING | engine/phase |  |  |  |  |
+| DRAINING | engine/phase |  |  |  |  |
+| STOPPED (final) | engine/phase |  |  |  |  |
+
+| Name | Kind | Prose |
+| --- | --- | --- |
+| begin_drain | action | Set the deadline to now plus both graces plus five seconds. Journal the draining record, send `stop` to every unsettled attempt, cancel the file watchers and arm the deadline. |
+| shutdown_during_startup | action | A stop request during the replay: no attempt is live, so there is nothing to drain. Journal `shutdown_during_startup` and exit 0. |
+| deadline_now | action | A second stop request: the deadline is now. The attempts were already told to stop. |
+| clean_shutdown | action | Every attempt settled: record `clean_shutdown` and exit 0. |
+| unclean_shutdown | action | The deadline passed: record `unclean_shutdown` with the unsettled attempts and exit 0. |
+
+## attempt
+
+Clock: logical. Time events: record_timeout (generation).
+
+```mermaid
+stateDiagram-v2
+    state "attempt" as s4
+    state s4 {
+        [*] --> s2
+        state "SPAWNING" as s2
+        state "RUNNING" as s1
+        state "STOPPING" as s3
+        state "ENDED" as s0
+        s0 --> [*]
+    }
+    s2 --> s1 : attempt.01 spawn_recorded
+    s2 --> s0 : attempt.02 spawn_failed / end_spawn_failed
+    s2 --> s3 : attempt.03 stop / stop
+    s1 --> s3 : attempt.04 stop / stop
+    s1 --> s0 : attempt.05 exit_recorded / end_from_record
+    s3 --> s0 : attempt.06 exit_recorded / end_from_record
+    s3 --> s0 : attempt.07 record_timeout / end_unobservable
+    s3 --> s0 : attempt.10 spawn_failed / end_spawn_failed
+    s2 --> s0 : attempt.11 exit_recorded / end_from_record
+    s2 --> s0 : attempt.12 wrapper_gone / end_unobservable
+    s1 --> s0 : attempt.13 wrapper_gone / end_unobservable
+    s3 --> s0 : attempt.14 wrapper_gone / end_unobservable
+```
+
+| Id | Source | Event | Guard | Action | Target | Kind | Cite |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| attempt.01 | SPAWNING | spawn_recorded |  | `spawn.json` was seen. | RUNNING | external |  |
+| attempt.02 | SPAWNING | spawn_failed |  | end_spawn_failed | ENDED | external |  |
+| attempt.03 | SPAWNING | stop |  | stop | STOPPING | external |  |
+| attempt.04 | RUNNING | stop |  | stop | STOPPING | external |  |
+| attempt.05 | RUNNING | exit_recorded |  | end_from_record | ENDED | external |  |
+| attempt.06 | STOPPING | exit_recorded |  | end_from_record | ENDED | external |  |
+| attempt.07 | STOPPING | record_timeout |  | end_unobservable | ENDED | external |  |
+| attempt.08 | STOPPING | stop |  | The ladder already runs, the first cause stands. |  | ignored |  |
+| attempt.09 | STOPPING | spawn_recorded |  | stop_attempt |  | internal |  |
+| attempt.10 | STOPPING | spawn_failed |  | end_spawn_failed | ENDED | external |  |
+| attempt.11 | SPAWNING | exit_recorded |  | end_from_record | ENDED | external |  |
+| attempt.12 | SPAWNING | wrapper_gone |  | end_unobservable | ENDED | external |  |
+| attempt.13 | RUNNING | wrapper_gone |  | end_unobservable | ENDED | external |  |
+| attempt.14 | STOPPING | wrapper_gone |  | end_unobservable | ENDED | external |  |
+
+| State | In | Entry | Exit | Defers | Waits |
+| --- | --- | --- | --- | --- | --- |
+| attempt |  |  |  |  |  |
+| SPAWNING | attempt/phase |  |  |  |  |
+| RUNNING | attempt/phase |  |  |  |  |
+| STOPPING | attempt/phase |  |  |  |  |
+| ENDED (final) | attempt/phase |  |  |  |  |
+
+| Name | Kind | Prose |
+| --- | --- | --- |
+| stop | action | Take the stop and keep its cause. One `stop_attempt` intent runs the whole ladder or, before the wrapper launched anything, kills the wrapper. The `record_timeout` timer is armed after the KILL, under a new generation. |
+| stop_attempt | action | The wrapper launched before the stop landed: run the ladder again, on the recorded pgid, with the cause the attempt already holds. The timer moves to a new generation, so the first ladder's timer is stale. |
+| end_spawn_failed | action | The attempt never ran: outcome `spawn_failed`, with the error text. |
+| end_from_record | action | The wrapper recorded the command's end: the outcome is derived from the record (`outcome_of`). A command that exited before the TERM is `natural`, a record that names a stop or the lifeline is `stopped`, a wrapper that aborted its own launch is `spawn_failed`. |
+| end_unobservable | action | No record: the wrapper is gone, or none came `grace_kill` after the last KILL. Outcome `unobservable`, with the cause of the stop the attempt took, if any. A record that comes later is kept as evidence and does not reopen the attempt. |

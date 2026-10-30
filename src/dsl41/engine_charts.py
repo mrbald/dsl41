@@ -26,6 +26,7 @@ intent; the attempt arms one timer, `record_timeout`, and only in STOPPING.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final, Literal
 
@@ -131,13 +132,21 @@ class ExitRecord:
     """The payload of `exit_recorded`: the wrapper's `status.json`, with no AutoSys status (the
     oracle computes it from the raw exit code). `terminated_by` is None for a command that ended
     by itself, `lifeline` or `stop` for a kill, `wrapper` when the wrapper aborted its own
-    launch. The times are the wrapper's ISO strings."""
+    launch. The times are the wrapper's ISO strings. `wrapper_outcome`, `cause` and `error` are
+    the record's own fields, which the adapter's oracle mapping reads. `launched` is False only
+    when the wrapper never launched the command; `observed` is the exit the wrapper saw after
+    its own kill (docs/wrapper-protocol.md)."""
 
     exit_code: int | None = None
     signal: int | None = None
     terminated_by: Literal["lifeline", "stop", "wrapper"] | None = None
     started_at: str | None = None
     ended_at: str | None = None
+    wrapper_outcome: str | None = None
+    cause: str | None = None
+    launched: bool = True
+    observed: Mapping[str, Any] | None = None
+    error: str | None = None
 
 
 @dataclass(frozen=True)
@@ -374,9 +383,10 @@ def _end_from_record(ctx: Context) -> Effects:
 
 def _end_unobservable(ctx: Context) -> Effects:
     """No record: the wrapper is gone, or none came `grace_kill` after the last KILL. Outcome
-    `unobservable`. A record that comes later is kept as evidence and does not reopen the
+    `unobservable`, with the cause of the stop the attempt took, if any. A record that comes later is kept as evidence and does not reopen the
     attempt."""
-    return _end(ctx.data, AttemptOutcome("unobservable"))
+    record: AttemptRecord = ctx.data
+    return _end(record, AttemptOutcome("unobservable", cause=record.cause))
 
 
 #: One dispatched run. ENDED carries the outcome as data.
