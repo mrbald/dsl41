@@ -56,12 +56,25 @@ def incident_for(job: str) -> tuple[str, str]:
     return "", ""
 
 
+def write_atomic(target: Path, text: str) -> None:
+    """Temp file in the same directory, fsync, rename: a kill leaves the old
+    file or the whole new one, never a partial."""
+    tmp = target.with_name(f".{target.name}.tmp")
+    tmp.unlink(missing_ok=True)  # a leftover from a killed earlier run
+    with tmp.open("w") as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+    tmp.rename(target)
+
+
 def bump_attempts(job: str, root: Path) -> int:
     state = Path(os.environ.get("NIGHTBANK_STATE", str(root / "state")))
     state.mkdir(parents=True, exist_ok=True)
     marker = state / f"{job}.attempts"
-    attempt = int(marker.read_text()) + 1 if marker.exists() else 1
-    marker.write_text(str(attempt))
+    text = marker.read_text().strip() if marker.exists() else ""
+    attempt = int(text or "0") + 1  # an empty counter file counts as 0
+    write_atomic(marker, str(attempt))
     return attempt
 
 
@@ -70,12 +83,12 @@ def produce_file(root: Path, rel: str, job: str) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     rows = sum(ord(c) for c in rel) % 9000 + 1000  # stable fake row count
     stamp = datetime.now(UTC).isoformat(timespec="seconds")
-    target.write_text(f"# produced by {job} at {stamp}\nrows={rows}\n")
+    write_atomic(target, f"# produced by {job} at {stamp}\nrows={rows}\n")
     log(job, f"produced {rel} ({rows} rows)")
 
 
 def do_flip(root: Path, job: str) -> None:
-    """The new-day activation: pending/ becomes current/. Two recovery
+    """The new-day activation: pending/ becomes current/. Three recovery
     properties an operator can rely on:
 
     - IDEMPOTENT rerun: an empty pending/ beside a populated current/ means
@@ -86,23 +99,36 @@ def do_flip(root: Path, job: str) -> None:
     - destruction LAST: every step before the final rmtree is a rename, so
       a crash mid-flip loses no directory -- worst case leaves previous.old/
       for the next run's cleanup.
+    - every crash point is recognised on rerun: current/ absent beside a
+      populated pending/ means the rotation already ran, so it is not
+      repeated; pending/ absent beside a populated current/ means only the
+      recreation is missing.
     """
     pending, current, previous = root / "pending", root / "current", root / "previous"
     doomed = root / "previous.old"
+    populated = current.is_dir() and any(current.iterdir())
     if not pending.is_dir():
+        if populated:
+            pending.mkdir()  # a prior flip died after pending -> current
+            if doomed.exists():
+                shutil.rmtree(doomed)
+            log(job, "already flipped (pending/ recreated, current/ populated) -- no-op rerun")
+            return
         log(job, f"NOTHING TO FLIP: {pending} missing")
         raise typer.Exit(4)
     if not any(pending.iterdir()):
-        if current.is_dir() and any(current.iterdir()):
+        if populated:
+            if doomed.exists():
+                shutil.rmtree(doomed)
             log(job, "already flipped (pending/ empty, current/ populated) -- no-op rerun")
             return
         log(job, "NOTHING TO FLIP: pending/ is empty and current/ is not populated")
         raise typer.Exit(4)
     if doomed.exists():
         shutil.rmtree(doomed)  # a prior flip crashed after its renames: finish its cleanup
-    if previous.exists():
-        previous.rename(doomed)
-    if current.exists():
+    if current.exists():  # absent only when a prior flip already rotated it into previous/
+        if previous.exists():
+            previous.rename(doomed)
         current.rename(previous)
     pending.rename(current)
     pending.mkdir()
