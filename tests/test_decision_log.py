@@ -14,12 +14,14 @@ ENTRY_LINES = 40
 ENTRY_LINES_WIDE = 60
 COLUMNS = 100
 #: DL-379: the entries granted the wide ceiling, by full identifier (a lettered entry needs its
-#: own), each for changing the engine or freezing a rule of docs/; an entry joins this set in the
-#: PR that lands it.
-WIDE: frozenset[str] = frozenset({"DL-380", "DL-416"})
+#: own), each for changing the engine or freezing a rule of docs/, or because a superseded-by
+#: mark takes it past the ceiling; an entry joins this set in the PR that lands it or the mark.
+WIDE: frozenset[str] = frozenset(
+    {"DL-380", "DL-412", "DL-416", "DL-424"}  # DL-412: its superseded-by mark is line 41
+)
 #: DL-379: the lines of the log up to the end of DL-379. A compression tranche lowers this in
 #: the same PR; only a superseded-by mark raises it, by the lines it adds.
-PREFIX_LINES = 23700
+PREFIX_LINES = 23749
 
 _ENTRY_START = re.compile(r"^- DL-(\d+)([a-z]?) ")
 
