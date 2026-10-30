@@ -38,12 +38,15 @@ from dsl41.runner_attempts import (
     DISPATCH,
     MAX_ATTEMPTS_PER_RUN,
     FEED_STATUS,
+    HOLD_INPUT,
+    ORACLE_KILL,
     SET_ON_HOLD,
     AttemptTier,
     EngineTier,
     FollowUp,
     FollowUpStep,
     Interrupted,
+    Replacement,
     attempt_id,
     attempt_spool_dir,
     command_group,
@@ -53,6 +56,7 @@ from dsl41.runner_attempts import (
     oracle_input_for,
 )
 from dsl41.engine_charts import Intent
+from dsl41.runner_journal import is_valid_run_id
 from dsl41.state_machine import HITS_ENV, Event, Outcome, coverage_items
 
 #: the graces of the scenarios and the time of a stop request
@@ -235,6 +239,11 @@ STOPPED = AttemptOutcome(
 )
 
 
+#: the interrupted attempt's run id, and the one the plan mints for its replacement (DL-118)
+RUN_ID = "5b0c3f0e-6a52-4d3e-9a0b-2f7d6c1e4a10"
+NEXT_ID = "0f6a8f4c-1c2d-4b5e-8f90-a1b2c3d4e5f6"
+
+
 def _plan(outcome: AttemptOutcome = STOPPED, **changes: Any) -> FollowUp:
     facts: dict[str, Any] = {
         "job": "emea.ledger_post",
@@ -243,30 +252,47 @@ def _plan(outcome: AttemptOutcome = STOPPED, **changes: Any) -> FollowUp:
         "in_catalog": True,
         "live_run": (3, "RUNNING"),
         "marked": False,
+        "run_id": RUN_ID,
+        "mint": lambda: NEXT_ID,
     }
     return follow_up_plan(outcome, **{**facts, **changes})
 
 
 def test_an_interrupted_idempotent_job_reruns_the_same_run_under_the_next_attempt_id() -> None:
     plan = _plan()
-    assert plan == FollowUp("rerun", (FollowUpStep(DISPATCH, "emea.ledger_post.3.2"),))
+    assert plan == FollowUp("rerun", (FollowUpStep(DISPATCH, Replacement(NEXT_ID, 2)),))
     assert _plan(AttemptOutcome("unobservable"), attempt=2).steps[0].detail == (
-        "emea.ledger_post.3.3"
+        Replacement(NEXT_ID, 3)
     )
+    # the replacement's identity is a fresh uuid4 unless the caller mints it (DL-118)
+    minted = (
+        follow_up_plan(
+            STOPPED,
+            job="j",
+            run_number=1,
+            attempt=1,
+            in_catalog=True,
+            live_run=(1, "RUNNING"),
+            marked=False,
+        )
+        .steps[0]
+        .detail
+    )
+    assert is_valid_run_id(minted.run_id) and minted.ordinal == 2
 
 
 def test_an_interrupted_marked_job_is_failure_interrupted_then_held_with_its_evidence() -> None:
+    """One step: the FAILURE `interrupted` that holds the job in the same oracle transition
+    (Astra B1), with the evidence; `HOLD_INPUT` is what it feeds."""
     plan = _plan(marked=True)
     evidence = Interrupted(
-        "emea.ledger_post.3.1", "stopped", UPDATE_STOP, STARTED, ENDED_AT, 15, None
+        "emea.ledger_post.3.1", "stopped", UPDATE_STOP, STARTED, ENDED_AT, 15, None, None, RUN_ID
     )
-    assert plan == FollowUp(
-        "hold",
-        (FollowUpStep(FEED_STATUS, Failed("interrupted")), FollowUpStep(SET_ON_HOLD, evidence)),
-    )
-    unseen = _plan(AttemptOutcome("unobservable", cause=ENGINE_STOP), marked=True).steps[1]
+    assert plan == FollowUp("hold", (FollowUpStep(SET_ON_HOLD, evidence),))
+    assert HOLD_INPUT == Failed("interrupted")
+    unseen = _plan(AttemptOutcome("unobservable", cause=ENGINE_STOP), marked=True).steps[0]
     assert unseen.detail == Interrupted(
-        "emea.ledger_post.3.1", "unobservable", ENGINE_STOP, None, None, None, None
+        "emea.ledger_post.3.1", "unobservable", ENGINE_STOP, None, None, None, None, None, RUN_ID
     )
 
 
@@ -283,18 +309,18 @@ def test_held_evidence_takes_the_exit_the_wrapper_observed_after_its_own_kill(
 ) -> None:
     status = {**PARENT_LOST, "observed": observed}
     lifeline = outcome_of(exit_record_from_status(status, stop_in_progress=False), None)
-    evidence = _plan(lifeline, marked=True).steps[1].detail
+    evidence = _plan(lifeline, marked=True).steps[0].detail
     assert (evidence.kind, evidence.cause) == ("stopped", "lifeline")
     assert (evidence.signal, evidence.exit_code) == (signal_, exit_code)
 
 
 def test_the_fourth_attempt_reruns_and_the_fifth_is_held_naming_the_limit() -> None:
     assert MAX_ATTEMPTS_PER_RUN == 5
-    assert _plan(attempt=4) == FollowUp("rerun", (FollowUpStep(DISPATCH, "emea.ledger_post.3.5"),))
+    assert _plan(attempt=4) == FollowUp("rerun", (FollowUpStep(DISPATCH, Replacement(NEXT_ID, 5)),))
     held = _plan(attempt=5)
-    assert held.kind == "hold" and held.steps[0] == FollowUpStep(FEED_STATUS, Failed("interrupted"))
-    assert held.steps[1].detail == Interrupted(
-        "emea.ledger_post.3.5", "stopped", UPDATE_STOP, STARTED, ENDED_AT, 15, None, 5
+    assert held.kind == "hold" and len(held.steps) == 1
+    assert held.steps[0].detail == Interrupted(
+        "emea.ledger_post.3.5", "stopped", UPDATE_STOP, STARTED, ENDED_AT, 15, None, 5, RUN_ID
     )
     assert _plan(attempt=6).kind == "hold"
 
@@ -302,6 +328,14 @@ def test_the_fourth_attempt_reruns_and_the_fifth_is_held_naming_the_limit() -> N
 def test_a_removed_job_gets_no_follow_up() -> None:
     assert _plan(in_catalog=False) == FollowUp("none")
     assert _plan(in_catalog=False, marked=True) == FollowUp("none")
+
+
+def test_an_oracle_kill_gets_no_follow_up_whatever_the_row_says() -> None:
+    """Opus 1: the oracle ended the run itself, so a row put back to RUNNING by a CHANGE_STATUS
+    inside the ladder's window never turns the kill into a relaunch."""
+    killed = AttemptOutcome("stopped", cause=ORACLE_KILL)
+    assert _plan(killed, live_run=(3, "RUNNING")) == FollowUp("none")
+    assert _plan(killed, marked=True, live_run=(3, "STARTING")) == FollowUp("none")
 
 
 def test_a_run_the_oracle_ended_or_a_later_run_gets_no_follow_up() -> None:
@@ -450,7 +484,7 @@ def _tiers(
 
 
 def _running(attempts: AttemptTier, job: str, pgid: int) -> str:
-    attempt = attempts.dispatch(job, 1, 1)
+    attempt = attempts.dispatch(attempt_id(job, 1, 1))
     attempts.spawn_recorded(attempt, spawn(pgid))
     return attempt
 
@@ -561,7 +595,10 @@ def test_a_command_that_ignores_term_is_killed_and_the_timer_armed_after_the_kil
     asyncio.run(scenario())
 
 
-def test_an_exit_during_a_stop_is_the_stops_and_its_ladder_sends_nothing_more() -> None:
+def test_an_exit_during_a_stop_is_the_stops_and_its_ladder_runs_on_to_the_kill() -> None:
+    """Astra R2-M3: the record ends the attempt's observation, never its group's cleanup. The
+    ladder runs on to its closing KILL, and the attempt stays unsettled until it has."""
+
     async def scenario() -> None:
         world = World(gated=True, ignores_term={7})
         attempts, engine = _tiers(world)
@@ -570,13 +607,17 @@ def test_an_exit_during_a_stop_is_the_stops_and_its_ladder_sends_nothing_more() 
         attempts.stop(job, UPDATE_STOP)
         await _turn()
         attempts.status_recorded(job, exited(0))
+        attempts.plan_done(job)
+        assert attempts.unsettled() == (job,) and attempts.ladder_running(job)
         world.gate.set()
         await attempts.join()
         assert world.log == [
             ("TERM", 7),
             ("outcome", job, "stopped", UPDATE_STOP),
             ("cancel_timer", job),
+            ("KILL", 7),
         ]
+        assert attempts.unsettled() == ()
         assert engine.state == "RUNNING"  # an attempt that ends while RUNNING posts no settle
 
     asyncio.run(scenario())
@@ -585,7 +626,7 @@ def test_an_exit_during_a_stop_is_the_stops_and_its_ladder_sends_nothing_more() 
 def test_a_stop_before_spawn_json_kills_the_wrapper_and_the_attempt_is_unobservable() -> None:
     world = World()
     attempts, _ = _tiers(world)
-    job = attempts.dispatch("j", 1, 1)
+    job = attempts.dispatch(attempt_id("j", 1, 1))
     attempts.stop(job, ENGINE_STOP)
     assert world.log == [("kill_wrapper", job), ("arm_timer", job, 1, GRACE_KILL)]
     attempts.wrapper_exited(job, None)
@@ -599,7 +640,7 @@ def test_a_wrapper_that_launched_after_the_stop_gets_a_ladder_and_a_new_generati
     async def scenario() -> None:
         world = World(ignores_term={7})
         attempts, _ = _tiers(world)
-        job = attempts.dispatch("j", 1, 1)
+        job = attempts.dispatch(attempt_id("j", 1, 1))
         attempts.stop(job, UPDATE_STOP)
         first, _ = world.timers[job]
         attempts.spawn_recorded(job, spawn(7))
@@ -630,7 +671,7 @@ def test_a_wrapper_that_exits_before_any_record_ends_the_attempt_unobservable() 
     """A wrapper that refused its spec, or died before `spawn.json`, names no command."""
     world = World()
     attempts, _ = _tiers(world)
-    job = attempts.dispatch("j", 1, 1)
+    job = attempts.dispatch(attempt_id("j", 1, 1))
     attempts.wrapper_exited(job, None)
     assert world.log == [("outcome", job, "unobservable", None), ("cancel_timer", job)]
 
@@ -643,7 +684,7 @@ def test_a_spawn_json_seen_at_the_timeout_stops_the_command_instead() -> None:
     async def scenario() -> None:
         world = World(ignores_term={7})
         attempts, _ = _tiers(world)
-        job = attempts.dispatch("j", 1, 1)
+        job = attempts.dispatch(attempt_id("j", 1, 1))
         attempts.stop(job, UPDATE_STOP)
         world.spool[job] = (spawn(7), None)
         _fire(world, attempts, job)
@@ -696,7 +737,7 @@ def test_a_wrapper_gone_with_its_command_alive_stops_the_command_as_wrapper_lost
     async def scenario() -> None:
         world = World(ignores_term={7}, alive={7})
         attempts, _ = _tiers(world)
-        job = attempts.dispatch("j", 1, 1)
+        job = attempts.dispatch(attempt_id("j", 1, 1))
         attempts.wrapper_exited(job, spawn(7))  # the spawn record not yet seen is posted first
         assert attempts.state(job) == "STOPPING"
         await _turn()
@@ -729,10 +770,10 @@ def test_a_wrapper_gone_while_stopping_ends_the_attempt_unobservable() -> None:
 def test_a_spawn_failure_ends_the_attempt_before_and_during_a_stop() -> None:
     world = World()
     attempts, _ = _tiers(world)
-    first = attempts.dispatch("j", 1, 1)
+    first = attempts.dispatch(attempt_id("j", 1, 1))
     attempts.spawn_failed(first, "EMFILE")
     assert attempts.outcome(first) == AttemptOutcome("spawn_failed", error="EMFILE")
-    second = attempts.dispatch("j", 1, 2)
+    second = attempts.dispatch(attempt_id("j", 1, 2))
     attempts.stop(second, ENGINE_STOP)
     attempts.spawn_failed(second, None)
     assert attempts.outcome(second) == AttemptOutcome("spawn_failed")
@@ -742,7 +783,7 @@ def test_a_record_with_no_spawn_json_ends_the_attempt_from_spawning() -> None:
     world = World()
     attempts, _ = _tiers(world)
     for n, status, launched in ((1, SPAWN_FAILED_STATUS, False), (2, RECORD_FAILED, True)):
-        job = attempts.dispatch("j", 1, n)
+        job = attempts.dispatch(attempt_id("j", 1, n))
         attempts.status_recorded(job, status)
         outcome = attempts.outcome(job)
         assert outcome is not None and outcome.record is not None
@@ -765,7 +806,7 @@ def test_an_ended_attempt_ignores_every_later_observation() -> None:
     ended unobservable. Whatever is seen later changes nothing; a record is kept as evidence."""
     world = World()
     attempts, _ = _tiers(world, command_alive=lambda pgid, token: False)
-    job = attempts.dispatch("j", 1, 1)
+    job = attempts.dispatch(attempt_id("j", 1, 1))
     attempts.stop(job, UPDATE_STOP)
     _fire(world, attempts, job)
     mark = len(world.log)
@@ -858,7 +899,7 @@ def test_a_repeated_spawn_record_posts_once_in_running_and_in_stopping() -> None
         running = _running(attempts, "j", 7)
         attempts.spawn_recorded(running, spawn(7))
         assert attempts.state(running) == "RUNNING"
-        stopping = attempts.dispatch("k", 1, 1)
+        stopping = attempts.dispatch(attempt_id("k", 1, 1))
         attempts.stop(stopping, UPDATE_STOP)
         attempts.spawn_recorded(stopping, spawn(8))
         attempts.spawn_recorded(stopping, spawn(8))
@@ -885,7 +926,7 @@ def test_a_repeated_spawn_failure_or_replay_done_posts_nothing() -> None:
 
 def test_an_ended_attempt_is_settled_only_once_its_plan_is_done() -> None:
     attempts = AttemptTier(World(), grace_term_s=GRACE_TERM, grace_kill_s=GRACE_KILL)
-    job = attempts.dispatch("j", 1, 1)
+    job = attempts.dispatch(attempt_id("j", 1, 1))
     attempts.spawn_failed(job, None)
     assert attempts.state(job) == "ENDED" and attempts.unsettled() == (job,)
     attempts.plan_done(job)  # no engine tier listens: nothing else happens
@@ -901,7 +942,7 @@ def test_an_attempt_whose_plan_is_not_done_cannot_be_forgotten() -> None:
         engine.stop_requested(REQUEST)
         await _turn()
         attempts.status_recorded(job, signaled(signal.SIGTERM))  # ended, its plan not done
-        with pytest.raises(ValueError, match="plan is not done"):
+        with pytest.raises(ValueError, match="plan or its ladder is not done"):
             attempts.forget(job)
         assert attempts.unsettled() == (job,) and engine.state == "DRAINING"
         attempts.plan_done(job)
@@ -916,7 +957,7 @@ def test_an_attempt_whose_plan_is_not_done_cannot_be_forgotten() -> None:
 def test_an_intent_with_no_effect_is_refused() -> None:
     world = World()
     attempts, engine = _tiers(world)
-    job = attempts.dispatch("j", 1, 1)
+    job = attempts.dispatch(attempt_id("j", 1, 1))
     bogus = Outcome(attempts.key(job), Event("x"), "fired", intents=(Intent("bogus"),))
     with pytest.raises(ValueError, match="no effect for the intent 'bogus'"):
         attempts._perform(job, [bogus])
@@ -928,7 +969,7 @@ def test_an_intent_with_no_effect_is_refused() -> None:
 def test_a_spawn_record_that_names_no_group_gets_no_signal_only_the_timer() -> None:
     world = World()
     attempts, _ = _tiers(world)
-    job = attempts.dispatch("j", 1, 1)
+    job = attempts.dispatch(attempt_id("j", 1, 1))
     attempts.spawn_recorded(job, {**spawn(7), "command_pgid": 8})
     attempts.stop(job, UPDATE_STOP)
     assert world.log == [("arm_timer", job, 1, GRACE_KILL)]
@@ -937,7 +978,7 @@ def test_a_spawn_record_that_names_no_group_gets_no_signal_only_the_timer() -> N
 def test_a_forgotten_attempt_drops_a_late_timer_and_an_unknown_one_is_refused() -> None:
     world = World()
     attempts, _ = _tiers(world)
-    job = attempts.dispatch("j", 1, 1)
+    job = attempts.dispatch(attempt_id("j", 1, 1))
     attempts.spawn_failed(job, None)
     attempts.plan_done(job)
     attempts.forget(job)
@@ -946,21 +987,32 @@ def test_a_forgotten_attempt_drops_a_late_timer_and_an_unknown_one_is_refused() 
         attempts.stop(job, UPDATE_STOP)
 
 
-def test_a_ladder_cancelled_after_its_attempt_was_forgotten_arms_nothing() -> None:
+def test_an_ended_attempt_is_forgotten_only_once_its_ladder_ended() -> None:
+    """The ladder of an attempt that ended runs on (Astra R2-M3), so the attempt is not
+    forgotten under it; its end tells the wiring, and a group still alive after the KILL has
+    survived its stop and keeps the attempt unsettled."""
+
     async def scenario() -> None:
-        world = World(gated=True, swallow_cancel=True)
+        world = World(gated=True, ignores_term={7}, unkillable={7})
         attempts, _ = _tiers(world)
+        ended: list[str] = []
+        attempts.on_ladder_done = ended.append
         job = _running(attempts, "j", 7)
+        world.alive.add(7)
         attempts.stop(job, UPDATE_STOP)
         await _turn()
-        ladders = asyncio.all_tasks() - {asyncio.current_task()}
         attempts.status_recorded(job, exited(0))
         attempts.plan_done(job)
-        attempts.forget(job)
-        # the ladder returns after its attempt is gone: no exception, nothing armed
-        assert await asyncio.gather(*ladders, return_exceptions=True) == [None]
+        with pytest.raises(ValueError, match="plan or its ladder is not done"):
+            attempts.forget(job)
+        world.gate.set()
+        await attempts.join()
         await _turn()
-        assert world.log[-1] == ("cancel_timer", job) and world.timers == {}
+        assert ended == [job] and world.timers == {}  # an ended attempt gets no timer
+        assert world.log[-1] == ("command_survived", job)
+        assert attempts.unsettled() == (job,) and attempts.survived(job)  # outlived the KILL
+        with pytest.raises(ValueError, match="plan or its ladder is not done"):
+            attempts.forget(job)  # a surviving command never settles (DL-426)
 
     asyncio.run(scenario())
 
@@ -1024,7 +1076,7 @@ TIER_SCENARIOS = [
     test_a_drain_with_one_attempt_stops_it_and_shuts_down_clean_when_it_ends,
     test_a_drain_with_twenty_attempts_runs_their_ladders_together_and_awaits_none,
     test_a_command_that_ignores_term_is_killed_and_the_timer_armed_after_the_kill,
-    test_an_exit_during_a_stop_is_the_stops_and_its_ladder_sends_nothing_more,
+    test_an_exit_during_a_stop_is_the_stops_and_its_ladder_runs_on_to_the_kill,
     test_a_spawn_json_seen_at_the_timeout_stops_the_command_instead,
     test_a_status_json_seen_at_the_timeout_ends_the_attempt_from_the_record,
     test_a_stop_before_spawn_json_kills_the_wrapper_and_the_attempt_is_unobservable,
@@ -1069,3 +1121,18 @@ def test_the_tiers_alone_reach_every_coverage_item_of_both_charts_but_one(
         missed |= {(chart.name, *item) for item in required} - seen
         assert not {(chart.name, *item) for item in forbidden} & seen
     assert missed == UNREACHABLE_FROM_THE_TIERS
+
+
+def test_an_attempt_tier_alone_lets_its_ladder_end() -> None:
+    """With no engine tier listening, a ladder's end tells nobody and arms its timer."""
+
+    async def scenario() -> None:
+        world = World()
+        attempts = AttemptTier(world, grace_term_s=GRACE_TERM, grace_kill_s=GRACE_KILL)
+        job = _running(attempts, "j", 7)
+        attempts.stop(job, UPDATE_STOP)
+        await attempts.join()
+        await _turn()
+        assert not attempts.ladder_running(job) and job in world.timers
+
+    asyncio.run(scenario())

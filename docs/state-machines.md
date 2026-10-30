@@ -134,6 +134,7 @@ stateDiagram-v2
     s16 --> s16 : job.236 ON_HOLD [queued] / held
     s16 --> s15 : job.237 OFF_HOLD [queued] / released_waiter
     s15 --> s15 : job.238 OFF_HOLD [queued] / released_waiter
+    s15 --> s16 : job.239 STATUS [injects_hold]
     s23 --> s25 : job.301 admitted start [has_demand]
     s14 --> c1 : job.302 admitted start [takes_over]
     s14 --> s25 : job.303 admitted start [on_held_units]
@@ -258,6 +259,7 @@ stateDiagram-v2
 | job.236 | hold_on | ON_HOLD | queued | held | hold_on | external | DL-247 |
 | job.237 | hold_on | OFF_HOLD | queued | released_waiter | hold_off | external | DL-50 |
 | job.238 | hold_off | OFF_HOLD | queued | released_waiter | hold_off | external | DL-50 |
+| job.239 | hold_off | STATUS | injects_hold |  | hold_on | external | DL-424, spec-crash |
 | job.301 | none | admitted start | has_demand |  | reserved | external | DL-120 |
 | job.302 | held | admitted start | takes_over |  | taken over | external | DL-256 |
 | job.303 | held | admitted start | on_held_units |  | reserved | external | DL-256 |
@@ -387,6 +389,7 @@ stateDiagram-v2
 | injects_inactive_job | guard | The payload's status is INACTIVE, the data: a catalog job, not a box. |
 | injects_inactive_box | guard | The payload's status is INACTIVE, the data: a box. |
 | injects_live | guard | The payload's status is STARTING or RUNNING: units the job holds are the run's. |
+| injects_hold | guard | The payload is the engine's interruption hold: a FAILURE that holds the job in the same transition (DL-424, spec-crash). |
 | injected_inactive | guard | The payload's status is INACTIVE. |
 | injected_starting | guard | The payload's status is STARTING. |
 | injected_running | guard | The payload's status is RUNNING. |

@@ -147,6 +147,45 @@ STATUS_FLAG_MARKS: tuple[tuple[str, str], ...] = (
 SUBSCRIBER_BACKLOG_BYTES: int = 4 * LINE_LIMIT
 
 
+#: the widest attempt note a surface shows (the TUI's column, `query --brief`'s status field);
+#: a longer note, a ladder's exception text above all, is cut to it with an ellipsis
+ATTEMPT_NOTE_WIDTH = 32
+
+
+def attempt_note(row: Mapping[str, Any]) -> str:
+    """What a `status` row's attempt adds to its status (DL-426), empty for a first attempt
+    running: "attempt 2, after update_stop", or the attempt's own state while it stops,
+    "STOPPING (engine_stop)", "STOPPING (ladder failed: ...)", or why an attempt keeps the
+    job's starts back, "held: command survived its KILL", "held: stop ladder running". The
+    TUI's attempt column shows it."""
+    attempt = row.get("attempt")
+    if not isinstance(attempt, Mapping):
+        return ""
+    if attempt.get("held"):  # an attempt that keeps the job's starts back
+        note = f"held: {attempt.get('note')}"
+    elif attempt.get("state") == "STOPPING":
+        why = attempt.get("note") or attempt.get("cause")
+        note = f"STOPPING ({why})" if why else "STOPPING"
+    else:
+        parts = [f"attempt {attempt['n']}"] if attempt.get("n", 1) != 1 else []
+        if attempt.get("after"):
+            parts.append(f"after {attempt['after']}")
+        note = ", ".join(parts)
+    if len(note) > ATTEMPT_NOTE_WIDTH:
+        note = note[: ATTEMPT_NOTE_WIDTH - 1] + "…"
+    return note
+
+
+def status_label(row: Mapping[str, Any]) -> str:
+    """A `status` row's status with its attempt beside it, as `query --brief` shows it:
+    "RUNNING (attempt 2, after update_stop)", "STOPPING (ladder failed: ...)" (DL-426)."""
+    status = str(row.get("status", ""))
+    note = attempt_note(row)
+    if not note or note.startswith("STOPPING"):
+        return note or status
+    return f"{status} ({note})"
+
+
 def _failure(code: Code, error: str, *, refused: bool = False) -> dict[str, Any]:
     """Every `ok: false` answer this server builds except the rejected decision (ss2's
     code table). `code` names the reason and `error` keeps the prose. `refused` says
@@ -491,7 +530,25 @@ class ControlServer:
             return self._globals(names)
         if cmd == "plan":
             return self._plan()
+        if cmd == "engine_stop":
+            return await self._engine_stop()
         return _failure("unknown_cmd", f"unknown cmd {cmd!r}", refused=True)
+
+    async def _engine_stop(self) -> dict[str, Any]:
+        """`engine stop`: drain the engine (spec-drain). The request is a step of the single
+        writer, so every mutation is admitted wholly before it or refused after it with
+        `engine_draining`; a second one moves the drain's deadline to now. The answer is the
+        lifecycle state the step left: DRAINING, or STOPPED when nothing was left to settle.
+        The engine then records how it ended and exits."""
+        try:
+            state = await asyncio.wait_for(self.engine.request_stop(), self.DECISION_TIMEOUT_S)
+        except TimeoutError:
+            return _failure(
+                "decision_timeout",
+                f"the stop was not taken within {self.DECISION_TIMEOUT_S}s: the engine loop is"
+                " not draining its queue; it may still take it -- re-read before retrying",
+            )
+        return {"ok": True, "engine": state}
 
     def _check_job(self, job: object) -> dict[str, Any] | None:
         if isinstance(job, str) and job in self.engine.oracle.catalog.jobs:
@@ -710,6 +767,14 @@ class ControlServer:
                 if watching is not None:
                     # DL-68: present ONLY for a live FW run; absence is the "not watching" signal
                     jobs[name]["watching"] = watching
+            attempt = self.engine.attempt_view(name)
+            if attempt is not None:
+                # DL-426: present ONLY while the current run has an unsettled attempt
+                jobs[name]["attempt"] = attempt
+            held = self.engine.evidence.get(name)
+            if held is not None:
+                # spec-crash: the interrupted attempt a hold names, until the job's next start
+                jobs[name]["interrupted"] = held
         return {"ok": True, "jobs": jobs, "spec_drift": self._spec_drift()}
 
     def _globals(self, names: list[Any]) -> dict[str, Any]:

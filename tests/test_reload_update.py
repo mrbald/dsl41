@@ -739,7 +739,11 @@ def test_tombstones_travel_in_the_carried_rows_and_restore(tmp_path: Path) -> No
 def test_the_catalog_hash_is_the_one_the_scheduler_pins(tmp_path: Path) -> None:
     world = _world(tmp_path)
     catalog = world.oracle.catalog
-    assert catalog_hash_v2(catalog) == runner_config.catalog_hash(catalog)
+    assert not hasattr(runner_config, "catalog_hash")  # one function, in reload_diff
+    configuration = runner_config.Configuration(
+        catalog=catalog, profile=runner_config.RuntimeProfile()
+    )
+    assert catalog_hash_v2(catalog) == configuration.catalog_hash
     assert catalog_hash_v2(catalog) == world.scheduler.catalog_hash
 
 

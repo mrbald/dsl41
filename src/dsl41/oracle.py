@@ -383,7 +383,7 @@ ITEM_CEILING: Final = 400_000
 #: and takes about 1,004 frames to evaluate; the engine's and the replays' call sites add their
 #: own stack. Each construction raises the process's limit to this and never lowers it. A logged
 #: input is far inside it (a run root stores no condition deeper than about 250 levels,
-#: `runner_config.catalog_hash`); the headroom serves the paths that hash no catalog: equiv and a
+#: `reload_diff.catalog_hash_v2`); the headroom serves the paths that hash no catalog: equiv and a
 #: directly built oracle.
 RECURSION_LIMIT: Final = 3000
 
@@ -719,7 +719,12 @@ class Oracle(OracleWriters):
         elif not isinstance(status, str) or status not in INJECTABLE_STATUSES:
             raise OracleError(f"unknown status {status!r}")
         code = exit_code if isinstance(exit_code, int) else None
-        payload = StatusInput(status, success, code=code, units=RowUnits(self, job))
+        hold = ev.payload.get("hold", False)
+        if hold is not False and (hold is not True or status != "FAILURE"):
+            raise OracleError(
+                "STATUS payload.hold is true only on a FAILURE (the interruption hold)"
+            )
+        payload = StatusInput(status, success, code=code, hold=hold, units=RowUnits(self, job))
         self._root(job, ChartEvent(STATUS, payload))
 
     def _handle_timer(self, ev: Event) -> bool:

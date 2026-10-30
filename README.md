@@ -653,10 +653,10 @@ Runner:
 - `src/dsl41/runner_codes.py`: the stable codes of the control protocol's
   `ok: false` answers, and the typed rejection a gate returns. It imports
   nothing from dsl41.
-- `src/dsl41/runner_adapters.py`: the adapter contract and every adapter:
-  FakeAdapter, LocalCommandAdapter (each command under the wrapper),
-  FileWatcherAdapter, and the spool ladder that resolves an interrupted
-  run's outcome.
+- `src/dsl41/runner_adapters.py`: the adapter contracts and every adapter:
+  FakeAdapter, LocalCommandAdapter (each command under the wrapper, observed
+  by the attempt tier), FileWatcherAdapter, the spool readers and the stop
+  ladder.
 - `src/dsl41/runner_admission.py`: the one order every input takes (dedup,
   stamp, append, apply, decide, record), the Attempt and ApplyResult
   records, the decision index that answers a retry, the envelope with
@@ -677,7 +677,7 @@ Runner:
   canonical records, an append-only configuration history, snapshots and
   pruning, under one writer with synchronous commits; `MemoryStore` is its
   in-memory twin for rehearsal and tests.
-- `src/dsl41/runner_config.py`: what an engine runs under: `catalog_hash`,
+- `src/dsl41/runner_config.py`: what an engine runs under:
   `RuntimeProfile` and `runtime_hash`, the configuration row that holds the
   catalog, the profile and the marked set, and `engine.toml`'s stop grace,
   snapshot cadence and retention.
@@ -735,14 +735,16 @@ Shared cores:
   it by path.
 - `src/dsl41/machines.py`: the registry of declared state machines.
 - `src/dsl41/engine_charts.py`: the 2.x engine lifecycle and attempt
-  statecharts, declared and not yet wired: STARTING, RUNNING, DRAINING,
-  STOPPED for the engine; SPAWNING, RUNNING, STOPPING, ENDED for one
-  attempt, with the outcome derived from the wrapper's exit record.
-- `src/dsl41/runner_attempts.py`: the 2.x attempt and engine lifecycle tiers,
-  not yet wired: the exit record from `status.json`, the missing-record
-  verdict, the oracle mapping, the interruption rule's plans, and the tiers
-  that post the two charts' events and carry out their intents through
-  injected protocols.
+  statecharts: STARTING, RUNNING, DRAINING, STOPPED for the engine;
+  SPAWNING, RUNNING, STOPPING, ENDED for one attempt, with the outcome
+  derived from the wrapper's exit record.
+- `src/dsl41/runner_attempts.py`: the 2.x attempt and engine lifecycle tiers:
+  the exit record from `status.json`, the missing-record verdict, the oracle
+  mapping, the interruption rule's plans, and the tiers that post the two
+  charts' events and carry out their intents through injected protocols.
+- `src/dsl41/runner_stops.py`: the engine's side of those tiers: the stop
+  ladder on a recorded group, the tiers' timers, an attempt's spool reads,
+  and the hand-back of each outcome and lifecycle intent to the engine.
 - `src/dsl41/estate_manifest.py`: the estate manifest, `estate.toml`: the
   application's one declaration of its catalog files, properties layers,
   timezone and semantic switches, read by the verbs' `--manifest` option.

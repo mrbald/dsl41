@@ -12,6 +12,7 @@ from __future__ import annotations
 from contextlib import closing
 
 import asyncio
+import json
 import contextlib
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -24,13 +25,12 @@ from dsl41.ir import lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event
 from dsl41.runner import Engine
-from dsl41.runner_adapters import FakeAdapter, Failed, Terminated
+from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import Envelope
 from dsl41.runner_clock import VirtualClock
-from dsl41.runner_config import Configuration, EngineSettings, RuntimeProfile
+from dsl41.runner_config import EngineSettings
 from dsl41.runner_journal import (
     Journal,
-    OpenAttempt,
     decode_snapshot,
     oracle_rows,
     read_backfill,
@@ -42,7 +42,8 @@ from dsl41.runner_journal import (
 )
 from dsl41.runner_preflight import PreflightItem
 from dsl41.runner_scheduler import Scheduler
-from dsl41.runner_startup import _interruption_plan, resume_run, settled_outcome, start_run
+from dsl41.runner_startup import resume_run, start_run
+from dsl41.runner_stops import AttemptFacts
 from dsl41.runner_store import MemoryStore
 
 T0 = datetime(2026, 7, 1, 8, 0)
@@ -267,21 +268,38 @@ def test_a_killed_attempt_is_closed_with_no_plan_once_reaped(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize(
-    ("result", "outcome"),
+    ("status", "outcome", "plan"),
     [
-        (0, "natural"),
-        (Terminated("killed by signal 9"), "natural"),
-        (Terminated("parent lost"), "stopped"),
-        (Terminated("wrapper lost; killed at resume"), "stopped"),
-        (Failed("spawn failed: no such file"), "spawn_failed"),
-        (Failed("exit_status_unobservable"), "unobservable"),
-        (Failed("dispatch lost to engine crash (run directory missing)"), "unobservable"),
+        ({"outcome": "exited", "exit_code": 0}, "natural", "complete"),
+        ({"outcome": "signaled", "signal": 9}, "natural", "complete"),
+        ({"outcome": "terminated", "cause": "parent lost"}, "stopped", "rerun"),
+        ({"outcome": "spawn_failed", "error": "no such file"}, "spawn_failed", "complete"),
+        (None, "unobservable", "rerun"),
     ],
+    ids=["exited", "signaled", "lifeline", "spawn_failed", "no_record"],
 )
-def test_the_ladder_s_result_names_how_the_attempt_ended(result: Any, outcome: str) -> None:
-    """spec-wiring 2b's table, read from today's ladder: only the lifeline's kill and the
-    ladder's own are stops."""
-    assert settled_outcome(result) == outcome
+def test_the_spool_record_names_how_the_attempt_ended(
+    tmp_path: Path, status: dict[str, Any] | None, outcome: str, plan: str
+) -> None:
+    """spec-wiring 2b's table at the restart (step 5): the open attempt goes through the attempt
+    chart, fed its `status.json`. Only the lifeline's kill is a stop; a missing record with no
+    command left is unobservable. Both interruptions of an idempotent job rerun."""
+    run_root = tmp_path / "run"
+    _open_attempt(run_root)
+    [dispatch] = _kinds(run_root, "dispatch")
+    if status is not None:
+        spool = Path(dispatch["spool"])
+        spool.mkdir(parents=True)
+        identity = {"version": 1, "run_id": dispatch["attempt"], "job": "j", "run_number": 1}
+        (spool / "status.json").write_text(json.dumps({**identity, **status}))
+
+    async def scenario() -> None:
+        await _close(await _resume(run_root))
+
+    asyncio.run(scenario())
+    [ended] = _kinds(run_root, "outcome")
+    assert (ended["attempt"], ended["outcome"]) == (dispatch["attempt"], outcome)
+    assert [p["plan"] for p in _plans(run_root)] == [plan]
 
 
 def _open_attempt(run_root: Path, text: str = _JIL) -> None:
@@ -325,15 +343,19 @@ def test_the_interruption_rule_reruns_an_idempotent_job_and_holds_a_marked_one(
     k = engine.oracle.store.job["k"]
     assert (k.status, k.on_hold) == ("FAILURE", True)
     fed = [b for b in _kinds(run_root, "input") if b.get("source") == "reconcile"]
-    assert [(b["kind"], b["payload"]["job"]) for b in fed] == [("STATUS", "k"), ("ON_HOLD", "k")]
-    assert fed[0]["payload"]["cause"] == "interrupted"
+    # one input: the FAILURE that holds the job in the same transition (Astra B1)
+    assert [(b["kind"], b["payload"]["job"]) for b in fed] == [("STATUS", "k")]
+    assert (fed[0]["payload"]["cause"], fed[0]["payload"]["hold"]) == ("interrupted", True)
     dispatched = [(b["job"], b["ordinal"]) for b in _kinds(run_root, "dispatch")]
     assert dispatched == [("j", 1), ("k", 1), ("j", 2)]
     first, second = [b for b in _kinds(run_root, "dispatch") if b["job"] == "j"]
     assert second["attempt"] == plans["j"]["steps"][0]["attempt"]
     assert second["env"]["DSL41_RUN_NUMBER"] == first["env"]["DSL41_RUN_NUMBER"] == "1"
     assert second["env"]["DSL41_SCHEDULED_AT"] == first["env"]["DSL41_SCHEDULED_AT"]
-    assert second["env"]["DSL41_ATTEMPT"] == second["attempt"] != first["attempt"]
+    # the identity is the uuid the plan named; the ordinal is DSL41_ATTEMPT (DL-118, DL-426)
+    assert second["attempt"] != first["attempt"]
+    assert (first["env"]["DSL41_ATTEMPT"], second["env"]["DSL41_ATTEMPT"]) == ("1", "2")
+    assert plans["j"]["steps"][0]["after"] == "unobservable"
 
 
 def test_the_interruption_rule_drops_a_removed_job_and_a_run_the_oracle_ended(
@@ -344,18 +366,18 @@ def test_the_interruption_rule_drops_a_removed_job_and_a_run_the_oracle_ended(
     run_root = tmp_path / "run"
     _open_attempt(run_root)
 
+    gone, ended = "0f6a8f4c-1c2d-4b5e-8f90-a1b2c3d4e5f6", "5b0c3f0e-6a52-4d3e-9a0b-2f7d6c1e4a10"
+
     async def scenario() -> None:
         engine = await _resume(run_root)
-        configuration = Configuration(catalog=lower_source(_JIL), profile=RuntimeProfile())
-        gone = OpenAttempt("a", "gone", 1, 1, None, 1, T0.isoformat())
-        plan = _interruption_plan(engine, configuration, gone, {}, T0)
-        assert (plan.payload["plan"], plan.payload["reason"]) == ("none", "removed")
-        ended = OpenAttempt("b", "j", 7, 1, None, 1, T0.isoformat())
-        plan = _interruption_plan(engine, configuration, ended, {}, T0)
-        assert (plan.payload["plan"], plan.payload["reason"]) == ("none", "run ended")
+        for attempt, job, run in ((gone, "gone", 1), (ended, "j", 7)):
+            engine.adopt_attempt(AttemptFacts(attempt, job, run, 1, tmp_path / "none"))
+            engine.attempts.wrapper_exited(attempt, None)  # no record, no command: unobservable
         await _close(engine)
 
     asyncio.run(scenario())
+    plans = {p["attempt"]: p for p in _plans(run_root)}
+    assert (plans[gone]["plan"], plans[ended]["plan"]) == ("none", "none")
 
 
 def test_a_replacement_superseded_before_it_launches_is_closed_with_no_launch(
@@ -812,9 +834,10 @@ def test_a_watch_whose_run_ended_is_closed_with_no_plan_at_a_restart(tmp_path: P
     assert (outcome["outcome"], outcome["cause"]) == ("stopped", "run ended")
 
 
-def test_a_hold_plan_cut_between_its_steps_finishes_only_the_step_left(tmp_path: Path) -> None:
-    """A plan's steps are one transaction each: a crash after the FAILURE feed and before the
-    hold leaves the feed done, and the restart sets the hold alone."""
+def test_a_hold_plan_cut_before_its_step_finishes_it_once(tmp_path: Path) -> None:
+    """A plan's step is one transaction with its effect: a crash at the hold's FAILURE leaves
+    the step open, and the restart feeds it once; the job ends FAILURE and held (the hold is
+    one oracle transition with the FAILURE, Astra B1)."""
     run_root = tmp_path / "run"
     _open_attempt(run_root, _PAIR_JIL)
 
@@ -824,7 +847,8 @@ def test_a_hold_plan_cut_between_its_steps_finishes_only_the_step_left(tmp_path:
         real = engine.journal.append
 
         def die_at_the_hold(*records: Any) -> int:
-            if any(r.kind == "input" and r.payload.get("kind") == "ON_HOLD" for r in records):
+            holds = (r.payload.get("payload", {}).get("hold") for r in records if r.kind == "input")
+            if any(holds):
                 raise RuntimeError("the engine died before the hold")
             return real(*records)
 
@@ -844,7 +868,7 @@ def test_a_hold_plan_cut_between_its_steps_finishes_only_the_step_left(tmp_path:
 
     engine = asyncio.run(repaired())
     fed = [b["kind"] for b in _kinds(run_root, "input") if b.get("source") == "reconcile"]
-    assert fed == ["STATUS", "ON_HOLD"]
+    assert fed == ["STATUS"]
     k = engine.oracle.store.job["k"]
     assert (k.status, k.on_hold) == ("FAILURE", True)
 
@@ -1265,7 +1289,7 @@ def test_a_failed_dispatch_is_not_an_applied_boundary_and_a_restart_recovers_it(
         engine.journal.append = real  # type: ignore[method-assign]
         assert not engine.at_applied_boundary
         await engine.shutdown()
-        _record_shutdown(engine, clean=False, running=True)  # the CLI's failure cleanup
+        _record_shutdown(engine, running=True)  # the CLI's failure cleanup: no record
         engine.journal.close()
         return seq
 
@@ -1366,7 +1390,15 @@ def test_the_command_is_given_the_invocation_its_dispatch_record_holds(tmp_path:
     env = dispatch["env"]
     job, run_number, scheduled, attempt = seen.read_text().split("|")
     assert (job, run_number) == ("j", "1") == (env["DSL41_JOB"], env["DSL41_RUN_NUMBER"])
-    assert (scheduled, attempt) == (env["DSL41_SCHEDULED_AT"], dispatch["attempt"])
+    # DSL41_ATTEMPT is the ordinal; the record's `attempt` is the run id (DL-118, DL-426)
+    assert (
+        (scheduled, attempt)
+        == (env["DSL41_SCHEDULED_AT"], str(dispatch["ordinal"]))
+        == (
+            env["DSL41_SCHEDULED_AT"],
+            "1",
+        )
+    )
 
 
 def test_a_pruned_store_with_no_usable_snapshot_is_refused_by_its_readers() -> None:

@@ -274,3 +274,135 @@ _SERVING = {"ok": True, "incarnation": "a" * 32, "process_state": "serving"}
 
 _DRAINING = "supervisor is draining; wait for the unit to stop"
 _LEASE = {"ok": True, "incarnation": "a" * 32, "token": 3}
+
+
+# ------------------------------------------------------------------ engine stop
+
+
+def _roundtrip(monkeypatch: pytest.MonkeyPatch, answer: Any) -> list[dict[str, Any]]:
+    """`engine stop` calls `runner_control.roundtrip` itself: it tells an unreachable engine
+    from one that took the request."""
+    from dsl41 import runner_control
+
+    sent: list[dict[str, Any]] = []
+
+    def roundtrip(_socket: Path, request: dict[str, Any]) -> Any:
+        sent.append(request)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(runner_control, "roundtrip", roundtrip)
+    return sent
+
+
+def test_engine_stop_sends_the_stop_and_prints_the_answer(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent = _roundtrip(monkeypatch, {"ok": True, "engine": "DRAINING"})
+    result = _run("engine", "stop")
+    assert (result.exit_code, sent) == (0, [{"cmd": "engine_stop"}])
+    assert '"engine": "DRAINING"' in result.output
+
+
+def test_engine_stop_refused_exits_2(monkeypatch: pytest.MonkeyPatch) -> None:
+    _roundtrip(monkeypatch, {"ok": False, "code": "access_denied", "error": "needs adm"})
+    assert _run("engine", "stop", "--wait").exit_code == 2
+
+
+@pytest.mark.parametrize(
+    ("delivered", "wait", "code"),
+    [(False, False, 2), (False, True, 0), (True, True, 2)],
+    ids=["unreachable", "unreachable_waiting", "lost_after_the_write"],
+)
+def test_engine_stop_with_an_engine_that_cannot_be_reached(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, delivered: bool, wait: bool, code: int
+) -> None:
+    """An engine that is not running is stopped, for `--wait` (the unit's ExecStop); a write
+    that may have reached it is an unknown outcome and exits 2."""
+    from dsl41.runner_control import ControlClientError
+
+    _roundtrip(monkeypatch, ControlClientError("refused", delivered=delivered))
+    args = ["engine", "stop", *(["--wait"] if wait else [])]
+    result = _run(*args, socket=tmp_path / "control.sock")
+    assert result.exit_code == code, result.output
+
+
+def test_engine_stop_waits_for_the_socket_and_then_the_lock(
+    monkeypatch: pytest.MonkeyPatch, short_root: Path
+) -> None:
+    """`--wait` returns once the socket refuses connects and `leader.lock` is free."""
+    import fcntl
+    import os
+    import socket as socket_mod
+
+    _roundtrip(monkeypatch, {"ok": True, "engine": "DRAINING"})
+    monkeypatch.setattr(cli_control, "STOP_POLL_S", 0.01)
+    path = short_root / "control.sock"
+    server = socket_mod.socket(socket_mod.AF_UNIX)
+    server.bind(str(path))
+    server.listen(8)
+    lock = os.open(short_root / "leader.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    polls: list[str] = []
+    real_answers, real_held = cli_control._answers, cli_control._lock_held
+
+    def answers(socket_path: Path) -> bool:
+        polls.append("socket")
+        if polls.count("socket") == 2:
+            server.close()
+        return real_answers(socket_path)
+
+    def held(lock_path: Path) -> bool:
+        polls.append("lock")
+        if polls.count("lock") == 2:
+            os.close(lock)
+        return real_held(lock_path)
+
+    monkeypatch.setattr(cli_control, "_answers", answers)
+    monkeypatch.setattr(cli_control, "_lock_held", held)
+    assert _run("engine", "stop", "--wait", socket=path).exit_code == 0
+    assert polls == ["socket", "socket", "lock", "lock"]
+    assert not real_held(short_root / "absent.lock")
+
+
+@pytest.mark.parametrize(
+    ("answers", "held", "code", "sends"),
+    [
+        (["undelivered", "undelivered", {"ok": True, "engine": "DRAINING"}], [True] * 3, 0, 3),
+        (["undelivered", "undelivered"], [True, False], 0, 2),
+        (["undelivered", "delivered"], [True], 2, 2),
+    ],
+    ids=["delivered_once_it_serves", "lock_freed_first", "lost_after_the_write"],
+)
+def test_engine_stop_waits_for_an_engine_that_is_still_starting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    answers: list[Any],
+    held: list[bool],
+    code: int,
+    sends: int,
+) -> None:
+    """`--wait` with no socket and `leader.lock` held: an engine is starting, so the stop is
+    sent again every poll until it is delivered (then the command waits for the exit) or the
+    lock frees (nothing to stop). Waiting on the lock alone would leave it running."""
+    from dsl41 import runner_control
+    from dsl41.runner_control import ControlClientError
+
+    script = iter(answers)
+    sent: list[dict[str, Any]] = []
+
+    def roundtrip(_socket: Path, request: dict[str, Any]) -> Any:
+        sent.append(request)
+        answer = next(script)
+        if isinstance(answer, str):
+            raise ControlClientError(answer, delivered=answer == "delivered")
+        return answer
+
+    locks = iter(held)
+    waited: list[Path] = []
+    monkeypatch.setattr(runner_control, "roundtrip", roundtrip)
+    monkeypatch.setattr(cli_control, "STOP_POLL_S", 0.0)
+    monkeypatch.setattr(cli_control, "_lock_held", lambda _path: next(locks))
+    monkeypatch.setattr(cli_control, "_wait_for_exit", waited.append)
+    result = _run("engine", "stop", "--wait", socket=tmp_path / "control.sock")
+    assert (result.exit_code, len(sent)) == (code, sends), result.output
+    assert waited == ([tmp_path / "control.sock"] if sends == 3 else [])

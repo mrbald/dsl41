@@ -51,6 +51,7 @@ from dsl41.runner_control import (
 )
 from dsl41.runner_startup import start_run
 from dsl41.runner_tui import (
+    _COLUMNS,
     _CONSOLE_VERBS,
     ConfirmScreen,
     RunnerApp,
@@ -2109,6 +2110,10 @@ def test_assemble_detail_trigger_lines_empty_row_yields_nothing() -> None:
     ) == ["watching /f every 60s"]
 
 
+#: the flags cell's position in a jobs-table row (`runner_tui._COLUMNS`)
+_FLAGS = _COLUMNS.index("flags")
+
+
 def test_row_cells_flags_carry_the_armed_latch_in_ihna_order() -> None:
     """The status payload's `armed` boolean (SEM-32; served since DL-54 but
     never rendered) surfaces as flag A, ordered after I/H/N."""
@@ -2120,9 +2125,9 @@ def test_row_cells_flags_carry_the_armed_latch_in_ihna_order() -> None:
         "on_noexec": True,
         "armed": True,
     }
-    assert app._row_cells("j", all_on)[5] == "IHNA"
-    assert app._row_cells("j", {"status": "INACTIVE", "armed": True})[5] == "A"
-    assert app._row_cells("j", {"status": "INACTIVE", "armed": False})[5] == ""
+    assert app._row_cells("j", all_on)[_FLAGS] == "IHNA"
+    assert app._row_cells("j", {"status": "INACTIVE", "armed": True})[_FLAGS] == "A"
+    assert app._row_cells("j", {"status": "INACTIVE", "armed": False})[_FLAGS] == ""
 
 
 def test_row_cells_flags_compose_partial_combinations_in_deterministic_order() -> None:
@@ -2130,9 +2135,9 @@ def test_row_cells_flags_compose_partial_combinations_in_deterministic_order() -
     letters in the fixed I-H-N-A order, never in insertion/dict order."""
     app = RunnerApp(Path("/tmp/unused.sock"))
     i_and_a = {"status": "INACTIVE", "on_ice": True, "armed": True}
-    assert app._row_cells("j", i_and_a)[5] == "IA"
+    assert app._row_cells("j", i_and_a)[_FLAGS] == "IA"
     h_n_and_a = {"status": "INACTIVE", "on_hold": True, "on_noexec": True, "armed": True}
-    assert app._row_cells("j", h_n_and_a)[5] == "HNA"
+    assert app._row_cells("j", h_n_and_a)[_FLAGS] == "HNA"
 
 
 def test_both_surfaces_render_the_flags_column_from_one_alphabet(monkeypatch) -> None:
@@ -2156,7 +2161,7 @@ def test_both_surfaces_render_the_flags_column_from_one_alphabet(monkeypatch) ->
     assert keys == ["on_ice", "on_hold", "on_noexec", "armed"]
     for combination in itertools.product((False, True), repeat=len(keys)):
         row = {"status": "INACTIVE", **dict(zip(keys, combination, strict=True))}
-        assert app._row_cells("j", row)[5] == _brief_flags(row)
+        assert app._row_cells("j", row)[_FLAGS] == _brief_flags(row)
 
     # a FIFTH flag, added where the payload is built: both surfaces publish
     # it, and neither has a table of its own that could miss it
@@ -2164,7 +2169,7 @@ def test_both_surfaces_render_the_flags_column_from_one_alphabet(monkeypatch) ->
     monkeypatch.setattr(runner_control, "STATUS_FLAG_MARKS", moved)
     monkeypatch.setattr(runner_tui, "STATUS_FLAG_MARKS", moved)
     fifth = {"status": "INACTIVE", "on_ice": True, "quarantined": True}
-    assert app._row_cells("j", fifth)[5] == "IZ"
+    assert app._row_cells("j", fifth)[_FLAGS] == "IZ"
     assert _brief_flags(fifth) == "IZ"
 
 

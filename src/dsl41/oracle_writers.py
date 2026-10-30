@@ -493,6 +493,11 @@ class OracleWriters(OracleCascade):
     def _w_hold_on(self, job: str, outcome: Outcome) -> None:
         self._flag(job, "hold_on", "ON_HOLD", "sendevent ON_HOLD")
 
+    def _w_interruption_hold(self, job: str, outcome: Outcome) -> None:
+        """The engine's interruption hold, with the FAILURE it rides on (DL-424): an ordinary
+        ON_HOLD, which OFF_HOLD and FORCE_STARTJOB clear (DL-243)."""
+        self._flag(job, "hold_on", "ON_HOLD", "interrupted attempt held (DL-424)")
+
     def _w_hold_off(self, job: str, outcome: Outcome) -> None:
         self._flag(job, "hold_off", "OFF_HOLD", "sendevent OFF_HOLD")
 
@@ -603,6 +608,7 @@ _WRITERS: Final[dict[str, str]] = {
     "job.218": "_w_ice_on",
     "job.219": "_w_ice_off",
     "job.220": "_w_hold_on",
+    "job.239": "_w_interruption_hold",
     "job.221": "_w_hold_off",
     "job.222": "_w_noexec_on",
     "job.223": "_w_noexec_off",

@@ -289,12 +289,21 @@ def running_boxes(plan: Plan, candidate: CatalogIR, status: Mapping[str, str]) -
 
 def catalog_hash_v2(catalog: CatalogIR) -> str:
     """`"sha256:..."` over the canonical form of `catalog`, `meta` projected to
-    `{source_files}`: the catalog hash an applied configuration records (DL-424 keeps it).
+    `{source_files}`: the catalog hash an applied configuration records (DL-424 keeps it). It is
+    the one catalog hash of a run root: the configuration row, the scheduler and the update all
+    read it."""
+    payload = catalog_payload(catalog)
+    payload["meta"] = {"source_files": list(catalog.meta.source_files)}
+    return hash_over(payload)
+
+
+def catalog_payload(catalog: CatalogIR) -> dict[str, Any]:
+    """`catalog` as the JSON value its canonical form is taken over.
 
     The serializer refuses a condition nested deeper than about 250 grouping levels, so a run
     root holds none deeper (DL-351)."""
     try:
-        payload = catalog.model_dump(mode="json")
+        return catalog.model_dump(mode="json")
     except ValueError as exc:
         if "depth exceeded" not in str(exc):
             raise
@@ -303,8 +312,6 @@ def catalog_hash_v2(catalog: CatalogIR) -> str:
             " (about 250 levels of grouping); flatten the grouping or split"
             " the condition (period-model ss1.1)"
         ) from exc
-    payload["meta"] = {"source_files": list(catalog.meta.source_files)}
-    return hash_over(payload)
 
 
 def plan_token(parts: Sequence[tuple[str, bytes]], live_rev: int) -> str:

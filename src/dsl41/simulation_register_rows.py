@@ -3352,9 +3352,7 @@ PROFILE_ROWS: tuple[Row, ...] = (
 #: the test derives them: a constant is itself, an f-string is its constant
 #: parts with `{}` where a value goes, and anything else is `<dynamic:...>`
 #: qualified by the function that builds it (DL-209, R-a).
-_UNOBSERVABLE = "exit_status_unobservable"
 
-_CRASH_CAUSE = "dispatch lost to engine crash (run directory missing)"
 
 ADAPTER_ROWS: tuple[Row, ...] = (
     _row(
@@ -3385,38 +3383,6 @@ ADAPTER_ROWS: tuple[Row, ...] = (
     ),
     _row(
         surface="adapter_outcome",
-        member=f"Failed={_UNOBSERVABLE}",
-        klass=PROVISIONAL,
-        cite="runner_adapters.resolve_spool, runner-design ss15",
-        label="E7",
-        sites=("runner_adapters.resolve_spool#1",),
-        effect="a resumed attempt with no status record and no live command is unobservable:"
-        " the interruption rule decides it, never a guessed exit code (DL-424)",
-        trigger=f"Failed={_UNOBSERVABLE}",
-    ),
-    _row(
-        surface="adapter_outcome",
-        member=f"Failed={_UNOBSERVABLE} (wrapper exited rc={{}} without a status record)",
-        klass=PROVISIONAL,
-        cite="runner_adapters.LocalCommandAdapter.run, runner-design ss15",
-        label="E7",
-        sites=("runner_adapters.LocalCommandAdapter.run#1",),
-        effect="a wrapper that exited without writing a status record fails the run and"
-        " names the wrapper's own exit code",
-        trigger=f"Failed={_UNOBSERVABLE} (wrapper exited rc={{}} without a status record)",
-    ),
-    _row(
-        surface="adapter_outcome",
-        member=f"Failed={_CRASH_CAUSE}",
-        klass=SUPPORTED,
-        cite="runner_adapters.resolve_spool, DL-118",
-        effect="a dispatch whose run directory is gone never reached the host: the attempt"
-        " is unobservable, and the interruption rule runs it again, holds it or closes it"
-        " (spec-wiring 2b)",
-        trigger=f"Failed={_CRASH_CAUSE}",
-    ),
-    _row(
-        surface="adapter_outcome",
         member="Failed=malformed status record: outcome 'exited' with exit_code={}",
         klass=REFUSED,
         cite="runner_adapters.outcome_from_status",
@@ -3443,14 +3409,6 @@ ADAPTER_ROWS: tuple[Row, ...] = (
     ),
     _row(
         surface="adapter_outcome",
-        member="Failed=wrapper spawn failed: {}",
-        klass=SUPPORTED,
-        cite="runner_adapters.LocalCommandAdapter.run",
-        effect="the engine could not spawn the wrapper at all; the run never started",
-        trigger="Failed=wrapper spawn failed: {}",
-    ),
-    _row(
-        surface="adapter_outcome",
         member="Failed=wrapper_spawn_failed",
         klass=SUPPORTED,
         cite="runner_attempts.oracle_input_for, DL-424",
@@ -3461,10 +3419,14 @@ ADAPTER_ROWS: tuple[Row, ...] = (
     _row(
         surface="adapter_outcome",
         member="Failed=interrupted",
-        klass=SUPPORTED,
+        klass=PROVISIONAL,
         cite="runner_attempts.follow_up_plan, DL-424",
-        effect="an interrupted attempt of a job named in non-idempotent.toml feeds FAILURE"
-        " before the job is put ON_HOLD with the evidence",
+        label="E7",
+        sites=("runner_attempts.follow_up_plan#1",),
+        effect="an interrupted attempt of a job named in non-idempotent.toml, an unobservable"
+        " one included, feeds FAILURE before the job is put ON_HOLD with the evidence; an"
+        " idempotent job's unobservable attempt is run again, so E7's FAILURE default no"
+        " longer applies to an attempt the interruption rule reaches (DL-424)",
         trigger="Failed=interrupted",
     ),
     _row(
@@ -3475,15 +3437,6 @@ ADAPTER_ROWS: tuple[Row, ...] = (
         effect="a signalled or terminated status record carries its own cause text into"
         " the TERMINATED verdict",
         trigger="Terminated=<dynamic:outcome_from_status>",
-    ),
-    _row(
-        surface="adapter_outcome",
-        member="Terminated=wrapper lost; killed at resume",
-        klass=SUPPORTED,
-        cite="runner_adapters.resolve_spool",
-        effect="a resume that finds the wrapper gone kills the surviving command group"
-        " and reports the kill that happened",
-        trigger="Terminated=wrapper lost; killed at resume",
     ),
     _row(
         surface="adapter_outcome",
@@ -3561,10 +3514,10 @@ EVENT_SOURCE_ROWS: tuple[Row, ...] = (
         surface="event_source",
         member="reconcile",
         klass=SUPPORTED,
-        cite="ir-design ss7, DL-68, runner_startup._finish_plans",
+        cite="ir-design ss7, DL-68, runner.Engine.perform_plan",
         effect="the completion came from resolving an incomplete run at restart, not from a"
         " live adapter; it still goes through the ss4 stale gate",
-        trigger="runner_startup._finish_plans",
+        trigger="runner.Engine.perform_plan",
         quiet="runner.Engine.inject",
     ),
     _row(

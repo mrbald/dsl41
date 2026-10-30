@@ -18,10 +18,11 @@ import errno
 import json
 import os
 import socket
+import time
 
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Final, NoReturn, Protocol
 
 from dsl41.runner_procid import LockHeld, flock_exclusive, mkdir_durable
 from dsl41.runner_clock import EngineError
@@ -106,7 +107,10 @@ from dsl41.runner_clock import EngineError
 #: a member that waits; a KILLJOB on a member queued in the run, or made live by an injected
 #: STARTING; or the idle recompute of a never-run subbox from statuses given to its members
 #: (SEM-15). A resolution or off-ice mark decides only while the member reads INACTIVE.
-STATE_MACHINE_VERSION = 24
+#: 25 (DL-426): the follow-up plan's steps are each a STATUS input; a held interrupted attempt is
+#: one FAILURE that carries `hold: true` (job.239), never a FAILURE and an ON_HOLD, so a store
+#: whose open plan holds the older two-step hold refuses by name.
+STATE_MACHINE_VERSION = 25
 
 LOCK_NAME = "leader.lock"
 
@@ -120,6 +124,11 @@ class Proof(Protocol):
     def check(self) -> None: ...
 
     def release(self) -> None: ...
+
+
+#: How long a contended lock is retried before the refusal, and how often (`LeaderLock.acquire`).
+ACQUIRE_PATIENCE_S: Final = 1.0
+ACQUIRE_RETRY_S: Final = 0.1
 
 
 class LeaderLock:
@@ -149,19 +158,32 @@ class LeaderLock:
         return self._fd is not None
 
     def acquire(self) -> None:
-        try:
-            fd = flock_exclusive(self.path)
-        except LockHeld as exc:
-            if exc.errno == errno.ESTALE:
-                raise EngineError(
-                    f"{self.path} was replaced while acquiring it: the lock excludes nobody;"
-                    " retry, and find out what is deleting it"
-                ) from exc
-            raise EngineError(
-                f"{self.path.parent} is held by another {self.held_by} ({self._holder()}):"
-                f" one engine per {self.of} (DL-99)"
-            ) from exc
+        """Take the lock, retrying a contended one every `ACQUIRE_RETRY_S` for
+        `ACQUIRE_PATIENCE_S`: `engine stop --wait`'s probe holds a shared lock for microseconds,
+        and a starting engine must not refuse because of it."""
+        deadline = time.monotonic() + ACQUIRE_PATIENCE_S
+        while True:
+            try:
+                fd = flock_exclusive(self.path)
+            except LockHeld as exc:
+                if exc.errno != errno.ESTALE and time.monotonic() < deadline:
+                    time.sleep(ACQUIRE_RETRY_S)
+                    continue
+                self._refuse(exc)
+            break
         self._fd, self._ino = fd, os.fstat(fd).st_ino
+
+    def _refuse(self, exc: LockHeld) -> NoReturn:
+        """The lock was replaced while acquiring it, or another holds it: named both ways."""
+        if exc.errno == errno.ESTALE:
+            raise EngineError(
+                f"{self.path} was replaced while acquiring it: the lock excludes nobody;"
+                " retry, and find out what is deleting it"
+            ) from exc
+        raise EngineError(
+            f"{self.path.parent} is held by another {self.held_by} ({self._holder()}):"
+            f" one engine per {self.of} (DL-99)"
+        ) from exc
 
     def note(self, *, at: datetime) -> None:
         """Record who holds the lock, for another process's refusal text."""

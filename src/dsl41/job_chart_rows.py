@@ -843,6 +843,9 @@ _FLAG_ROWS: Final = (
     Row("job.236", "hold_on", ON_HOLD, "hold_on", "queued", "held", cite="DL-247"),
     Row("job.237", "hold_on", OFF_HOLD, "hold_off", "queued", "released_waiter", cite="DL-50"),
     Row("job.238", "hold_off", OFF_HOLD, "hold_off", "queued", "released_waiter", cite="DL-50"),
+    # the engine's interruption hold: one transition with the lifecycle's FAILURE (job.119), so
+    # the hold is set before the job's own start or a dependent's is evaluated (DL-424)
+    Row("job.239", "hold_off", STATUS, "hold_on", "injects_hold", cite="DL-424, spec-crash"),
 )
 
 #: The holding rows, `job.3NN`: 301 to 308 are the holding moves.

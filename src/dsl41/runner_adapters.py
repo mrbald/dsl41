@@ -1,11 +1,11 @@
-"""Runner adapters (ss6/ss6a): the adapter protocol, the CMD wrapper path and the file watcher.
+"""Runner adapters (ss6/ss6a): the adapter protocols, the CMD wrapper path and the file watcher.
 
 This module belongs to the runner split of DL-74.
 
 Adapter contract (ss6): ``async run(job_ir, run_number, ctx) -> AdapterResult``. An ``int`` is the
 RAW exit code (SEM-09/DL-33 classification stays oracle-side), ``Terminated`` reports a kill the
 wrapper observed (-> STATUS TERMINATED), and ``Failed`` reports a completion with no raw exit code
-(spawn failure, or the E7 unobservable case -> STATUS FAILURE with its cause). Adapters never retry
+(-> STATUS FAILURE with its cause). The file watcher and the fakes keep this contract. Adapters never retry
 (n_retrys is unmodeled, DL-53 scope: a shell-side retry would fork semantics from the simulator)
 and never time out (term_run_time is the oracle's timer). Under VirtualClock an adapter blocks ONLY
 through ctx.clock.sleep_until, which makes quiescence decidable (Engine._settle counts live tasks
@@ -15,9 +15,8 @@ _settle is a single reaping pass (DL-43 item 5).
 Lifecycle (ss6-ss7; DL-41a and DL-42 pin the semantics): LocalCommandAdapter runs every command
 under the ss6a Tier-0 wrapper (runner_wrapper.py, spawned BY FILE PATH), and the wrapper's
 status.json is the sole outcome channel; the wrapper's exit only notifies the engine to read it.
-Cancel (the oracle said terminal) verifies the recorded (pid, start-time), signals the command
-pgid SIGTERM, waits the grace, then SIGKILLs; the wrapper observes and records; the cancelled
-adapter never reports.
+It is an `ObservedAdapter`: it reports the spool to the attempt tier, which decides the outcome
+and stops the command with `stop_ladder` (spec-wiring 2b, DL-426).
 """
 
 from __future__ import annotations
@@ -27,6 +26,7 @@ import contextlib
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 import uuid
@@ -35,7 +35,7 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Final, Protocol, get_args
+from typing import Any, Final, Protocol, get_args, runtime_checkable
 
 
 from dsl41 import runner_procid as _procid
@@ -48,7 +48,6 @@ from dsl41.canon import (
     decode,
     is_scalar_json,
     is_wire_int,
-    naive_utc,
 )
 from dsl41.ir import ExecSpec, FwSpec, JobIR
 from dsl41.runner_procid import SPOOL_VERSION, fsync_dir, spool_version_supported, write_all
@@ -89,6 +88,69 @@ class AdapterContext:
     #: the invocation environment the attempt's `dispatch` record holds; the wrapper spec
     #: carries it to the command (crash spec)
     env: dict[str, str] = field(default_factory=dict)
+
+
+class AttemptObserver(Protocol):
+    """What an observed adapter reports about one attempt while its wrapper runs: the attempt
+    tier's observations (spec-wiring 2b). Each call returns at once."""
+
+    def spawn_recorded(self, spawn: Mapping[str, Any]) -> None: ...
+
+    def status_recorded(self, status: Mapping[str, Any]) -> None: ...
+
+    def spawn_failed(self, error: str) -> None: ...
+
+    def wrapper_exited(self, spawn: Mapping[str, Any] | None) -> None: ...
+
+
+@dataclass
+class Launch:
+    """One observed attempt's wrapper, as the adapter holds it: what `abort` needs to stop a
+    wrapper that has not recorded a launch (DL-359), and the observer its reports go to."""
+
+    observer: AttemptObserver
+    #: the attempt's spool directory, where `spawn.json` appears
+    spool: Path | None = None
+    proc: asyncio.subprocess.Process | None = None
+    #: True once the wrapper has its whole spec: from then on it may launch the command
+    spec_sent: bool = False
+    #: the lifeline's write end while this process holds it
+    lifeline_w: int | None = None
+    aborted: bool = False
+
+    def abort(self) -> None:
+        """Stop the wrapper before the tier has seen `spawn.json` (the tier's `kill_wrapper`).
+        Before the spec is sent the wrapper has launched nothing and is killed (DL-359). After
+        it, a `spawn.json` already written names the command, and the adapter's next poll
+        posts it, so the tier's ladder stops it; with none, the wrapper may be launching, so
+        the lifeline is closed: the wrapper then ends what it launched and records it, as at
+        engine death. A wrapper not yet spawned is stopped by the adapter as soon as it
+        exists."""
+        self.aborted = True
+        if self.proc is None:
+            return
+        if not self.spec_sent:
+            with contextlib.suppress(ProcessLookupError):
+                self.proc.kill()
+            return
+        if self.spool is not None and (self.spool / "spawn.json").exists():
+            return
+        self.close_lifeline()
+
+    def close_lifeline(self) -> None:
+        if self.lifeline_w is not None:
+            os.close(self.lifeline_w)
+            self.lifeline_w = None
+
+
+@runtime_checkable
+class ObservedAdapter(Protocol):
+    """An adapter whose attempts the attempt tier runs (spec-wiring 2b): it reports what its
+    wrapper leaves in the spool through `ctx`'s `Launch`, and the tier decides the outcome."""
+
+    async def observe(
+        self, job_ir: JobIR, run_number: int, ctx: AdapterContext, launch: Launch
+    ) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -299,9 +361,9 @@ def _build_run_spec(
 
 
 class LocalCommandAdapter:
-    """ss6 CMD adapter: spawn the ss6a Tier-0 wrapper, await it, read status.json, the sole
-    outcome channel. No retries (n_retrys unmodeled, DL-53 scope), no timeouts (term_run_time is
-    the oracle's timer), no classification.
+    """ss6 CMD adapter, an `ObservedAdapter`: spawn the ss6a Tier-0 wrapper, await it, report
+    spawn.json and status.json, the sole outcome channel. No retries (n_retrys unmodeled, DL-53
+    scope), no timeouts (term_run_time is the oracle's timer), no classification.
 
     stdout/stderr APPEND to std_out_file/std_err_file when set (vendor appends), else to
     <run_root>/logs/<job>.<run_number>.{out,err}; std_in_file when set, else /dev/null. `profile`
@@ -309,21 +371,30 @@ class LocalCommandAdapter:
     exit code (PENDING: E5). DL-39 [?] verbatim carry applies: the command string is passed to
     /bin/sh exactly as the IR holds it.
 
-    Cancellation (the oracle said terminal): verify the recorded command (pid, start-time),
-    SIGTERM the command pgid, grace, SIGKILL; the wrapper observes the deaths and records the
-    outcome durably; the cancelled adapter never reports. A cancel before the spec reaches the
-    wrapper SIGKILLs the wrapper, which has launched nothing. The lifeline write end lives in this
-    process ONLY and is closed in a finally: engine death EOFs every wrapper (tethered semantics,
-    ss6a)."""
+    The attempt tier stops the command (`stop_ladder`, `Launch.abort`). A cancel before the spec
+    reaches the wrapper SIGKILLs the wrapper, which has launched nothing. The lifeline write end
+    lives in this process ONLY and is closed in a finally: engine death EOFs every wrapper
+    (tethered semantics, ss6a)."""
 
     def __init__(self, *, grace_seconds: float = GRACE_TERM_S) -> None:
         self.grace_seconds = grace_seconds
 
-    async def run(self, job_ir: JobIR, run_number: int, ctx: AdapterContext) -> AdapterResult:
+    async def observe(
+        self, job_ir: JobIR, run_number: int, ctx: AdapterContext, launch: Launch
+    ) -> None:
+        """Run one attempt under the wrapper for the attempt tier (spec-wiring 2b): report
+        `spawn.json` when it appears, then the wrapper's `status.json`, a failed spawn, or a
+        wrapper that exited with no record. The tier stops the command itself (`stop_ladder`)
+        and decides the outcome; this method only observes. Every spool record must name this
+        attempt's run id (DL-118).
+
+        Cancelled, the engine is leaving: the lifeline is closed, so the wrapper ends its
+        command and records it as at engine death, and the wait for that is bounded."""
         run_dir, spec = _build_run_spec(job_ir, run_number, ctx, grace_seconds=self.grace_seconds)
-        lifeline_r, lifeline_w = os.pipe()
+        run_id = str(spec["run_id"])
+        lifeline_r, launch.lifeline_w = os.pipe()
         try:
-            spec["lifeline_fd"] = lifeline_r  # tethered: the write end lives HERE
+            spec["lifeline_fd"] = lifeline_r
             try:
                 proc = await asyncio.create_subprocess_exec(
                     sys.executable,
@@ -332,43 +403,62 @@ class LocalCommandAdapter:
                     pass_fds=(lifeline_r,),
                 )
             except OSError as exc:
-                # EMFILE/ENOMEM-class glitch: fail THIS job, not the engine (as the wrapper's own
-                # spawn_failed does)
-                return Failed(f"wrapper spawn failed: {exc}")
+                launch.observer.spawn_failed(f"wrapper spawn failed: {exc}")
+                return
             finally:
-                os.close(lifeline_r)  # our copy; the wrapper holds its own now
+                os.close(lifeline_r)
+            launch.proc = proc
+            if launch.aborted:
+                # a stop before the wrapper existed: it has the spec of nothing yet (DL-359)
+                await self._stop_unlaunched(proc)
+                launch.observer.wrapper_exited(None)
+                return
             try:
                 assert proc.stdin is not None
                 proc.stdin.write(json.dumps(spec).encode("utf-8"))
                 await proc.stdin.drain()
                 proc.stdin.close()
             except OSError as exc:
-                # the wrapper died while reading its spec, pre-spawn by construction: it spawns
-                # only after the full spec parses
                 await proc.wait()
-                return Failed(f"wrapper spawn failed: {exc}")
+                launch.observer.spawn_failed(f"wrapper spawn failed: {exc}")
+                return
             except asyncio.CancelledError:
                 await self._stop_unlaunched(proc)
                 raise
-            try:
-                await proc.wait()
-            except asyncio.CancelledError:
-                await self._kill(run_dir, proc, str(spec["run_id"]))
-                raise
-            status = load_json(run_dir / "status.json")
-            if status is None:
-                # the recorder exited without a record (rc 2/3: spec error, ENOSPC): report that
-                # observability is gone, never guess
-                return Failed(  # PENDING: E7
-                    f"exit_status_unobservable (wrapper exited rc={proc.returncode}"
-                    " without a status record)"
-                )
-            # the exclusive mkdir owned the directory at CREATION; the fate file is written
-            # later, so it is held to the run's identity like every other status consumption
-            # (DL-118)
-            return outcome_from_status(_named(status, str(spec["run_id"]), job_ir.name, run_number))
+            launch.spec_sent = True
+            if launch.aborted:
+                launch.abort()  # the stop came while the spec was on its way
+            await self._watch(run_dir, run_id, proc, launch)
         finally:
-            os.close(lifeline_w)
+            launch.close_lifeline()
+
+    async def _watch(
+        self, run_dir: Path, run_id: str, proc: asyncio.subprocess.Process, launch: Launch
+    ) -> None:
+        """Poll for `spawn.json` while the wrapper runs, then read its record."""
+        exited = asyncio.ensure_future(proc.wait())
+        spawn: dict[str, Any] | None = None
+        try:
+            while spawn is None and not exited.done():
+                spawn = spool_record(run_dir / "spawn.json", run_id)
+                if spawn is not None:
+                    launch.observer.spawn_recorded(spawn)
+                else:
+                    await asyncio.wait({exited}, timeout=SPOOL_POLL_S)
+            await asyncio.wait({exited})
+        except asyncio.CancelledError:
+            launch.close_lifeline()
+            await asyncio.wait({exited}, timeout=self.grace_seconds + SPOOL_EXIT_MARGIN_S)
+            raise
+        if spawn is None:
+            spawn = spool_record(run_dir / "spawn.json", run_id)
+            if spawn is not None:
+                launch.observer.spawn_recorded(spawn)  # before the record, as the chart needs
+        status = spool_record(run_dir / "status.json", run_id)
+        if status is not None:
+            launch.observer.status_recorded(status)
+        else:
+            launch.observer.wrapper_exited(spawn)
 
     @staticmethod
     async def _stop_unlaunched(proc: asyncio.subprocess.Process) -> None:
@@ -383,52 +473,70 @@ class LocalCommandAdapter:
             proc.kill()
         await proc.wait()
 
-    async def _kill(self, run_dir: Path, proc: asyncio.subprocess.Process, run_id: str) -> None:
-        """The oracle decided terminal: signal the command pgid (never the wrapper, the recorder
-        is untouchable), escalate after grace, then wait for the wrapper to record and exit.
 
-        The record that NAMES the group to signal is held to this run's identity first (DL-118):
-        the pid-reuse token proves the process the record describes is alive, not that it is
-        OURS, and a spoofed record with a live foreign token would aim the kill at a stranger's
-        process group."""
-        if proc.stdin is not None:
-            proc.stdin.close()  # a wrapper still reading its spec must not hang
-        spawn = None
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            spawn = load_json(run_dir / "spawn.json")
-            if spawn is not None or proc.returncode is not None:
-                break
-            await asyncio.sleep(0.05)
-        if spawn is not None and not spool_names_run(spawn, run_id=run_id):
-            raise EngineError(
-                f"{run_dir.name}: spawn.json reports run_id {spawn.get('run_id')!r} but"
-                f" this run is {run_id!r} -- refusing to signal a stranger's process"
-                " group (DL-118)"
-            )
-        if spawn is None:
-            # reachable when the wrapper died or is frozen pre-record (test pauses); the lifeline
-            # tether covers the residue, so wait bounded, then leave the wrapper to its own record
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=2 * self.grace_seconds)
-            except TimeoutError:
-                pass
-            return
-        pid = spawn.get("command_pid")
-        pgid = spawn.get("command_pgid")
-        token = spawn.get("command_start_time")
-        if (
-            isinstance(pid, int)
-            and isinstance(pgid, int)
-            and isinstance(token, str)
-            and _procid.verify_alive(pid, token)  # the PID-reuse guard
-        ):
-            _procid.killpg_quiet(pgid, signal.SIGTERM)
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=self.grace_seconds)
-            except TimeoutError:
-                _procid.killpg_quiet(pgid, signal.SIGKILL)
-        await proc.wait()  # the wrapper records the outcome, then exits
+#: how often an observed attempt's spool is read for `spawn.json` while its wrapper runs
+SPOOL_POLL_S: Final = 0.05
+#: what a leaving engine waits for a wrapper beyond its grace, once the lifeline is closed
+SPOOL_EXIT_MARGIN_S: Final = 5.0
+
+
+def spool_record(path: Path, run_id: str) -> dict[str, Any] | None:
+    """One spool record of an observed attempt, or None while it is absent or unreadable. A
+    record that names another run id is a stranger's and refuses (DL-118)."""
+    doc = load_json(path)
+    if doc is not None and not spool_names_run(doc, run_id=run_id):
+        raise EngineError(
+            f"{path.parent}: {path.name} reports run_id {doc.get('run_id')!r} but this attempt"
+            f" is {run_id!r} -- refusing to act on a stranger's record (DL-118)"
+        )
+    return doc
+
+
+def group_exists(pgid: int) -> bool:
+    """Whether a process group with this id still has a member this engine may signal."""
+    try:
+        os.killpg(pgid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
+
+
+def group_has_live_member(pgid: int) -> bool:
+    """Whether the process group has a member that is not a zombie: a member that outlived a
+    stop, as opposed to a dead leader its parent has not reaped yet. A listing that fails
+    proves nothing gone, so it reads as a live member (DL-426)."""
+    listing = subprocess.run(
+        ["ps", "-A", "-o", "pgid=,stat="],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "LC_ALL": "C"},
+        check=False,
+    )
+    if listing.returncode != 0:
+        return True
+    for line in listing.stdout.splitlines():
+        group, _, state = line.strip().partition(" ")
+        if group == str(pgid) and not state.strip().startswith("Z"):
+            return True
+    return False
+
+
+async def stop_ladder(pgid: int, start_token: str, grace_term_s: float) -> None:
+    """The stop ladder on a command's group (spec-drain): TERM, wait up to `grace_term_s` for
+    the leader to go, then KILL. TERM goes only to a group whose leader is still the recorded
+    process (the pid-reuse guard). The KILL goes while the leader lives, and also once it is
+    gone while the group still exists, since a member that ignores TERM must not outlive the
+    stop (DL-226; under dash `sh` leads the group and its children can outlive it). A group
+    that vanished gets nothing; a new leader taking that exact id inside the window is the
+    ladder's stated hazard."""
+    if not _procid.verify_alive(pgid, start_token):
+        return
+    _procid.killpg_quiet(pgid, signal.SIGTERM)
+    deadline = time.monotonic() + grace_term_s
+    while time.monotonic() < deadline and _procid.verify_alive(pgid, start_token):
+        await asyncio.sleep(SPOOL_POLL_S)
+    if _procid.verify_alive(pgid, start_token) or group_exists(pgid):
+        _procid.killpg_quiet(pgid, signal.SIGKILL)
 
 
 def default_log_paths(job: str, run_number: int, run_root: Path) -> tuple[Path, Path]:
@@ -824,125 +932,3 @@ def spool_names_run(
     if run_id is not None and doc.get("run_id") != run_id:
         return False
     return True
-
-
-def _named(status: dict[str, Any], run_id: str, job: str, run_number: int) -> dict[str, Any]:
-    """A status record is consumed as a run's FATE, so it must name the run (DL-118): a record
-    carrying a different `run_id` is a stranger's (corruption or a spoof) and is refused before
-    `outcome_from_status` turns it into this job's verdict."""
-    if not spool_names_run(status, run_id=run_id):
-        raise EngineError(
-            f"{job}.{run_number}: status.json reports run_id {status.get('run_id')!r}"
-            f" but this run is {run_id!r} -- refusing to consume a stranger's fate"
-            " (DL-118)"
-        )
-    return status
-
-
-async def resolve_spool(
-    job: str,
-    run_number: int,
-    run_dir: Path | None,
-    boot_now: str,
-    *,
-    settle_seconds: float,
-    grace_seconds: float,
-    expected_run_id: str | None = None,
-) -> tuple[AdapterResult, datetime | None]:
-    """Resolve one incomplete CMD run from its spool directory, walking the ss7 ladder top to
-    bottom. Returns (outcome, true ended_at if known).
-
-    `expected_run_id` is the identity the run's `dispatch` record bound (DL-118): a spool record naming a
-    DIFFERENT run_id refuses loudly before its fate is consumed. It raises, where the (job,
-    run_number) spoof below is dropped, because dropping would read the stranger's presence as
-    this run's absence and fabricate "dispatch lost". None means no bound identity exists to check
-    (a caller with nothing to expect)."""
-    if run_dir is None or not run_dir.is_dir():
-        return Failed("dispatch lost to engine crash (run directory missing)"), None
-    status_path = run_dir / "status.json"
-
-    def _checked(name: str, doc: dict[str, Any] | None) -> dict[str, Any] | None:
-        """The run_id gate, applied to the RAW document at every load: before the tuple filter (a
-        wrong-tuple wrong-id record must refuse, not be cleared into a fabricated absence) and on
-        every settle-window reload (an absent first load does not exempt the last)."""
-        if (
-            expected_run_id is not None
-            and doc is not None
-            and not spool_names_run(doc, run_id=expected_run_id)
-        ):
-            raise EngineError(
-                f"{job}.{run_number}: the spool's {name} reports run_id"
-                f" {doc.get('run_id')!r} but the dispatch record bound"
-                f" {expected_run_id!r} -- refusing to consume a stranger's fate"
-                " (DL-118)"
-            )
-        return doc
-
-    def _tuple_checked(doc: dict[str, Any] | None) -> dict[str, Any] | None:
-        """DL-178y: a spool document naming a DIFFERENT (job, run_number) is a stranger's: dropped,
-        not trusted. Like `_checked` but silent, since existence under the right name is not
-        identity and the mismatch degrades rather than refuses; the caller resolves this run's fate
-        from whatever remains. Applied to every doc load, spawn.json and status.json alike."""
-        return doc if spool_names_run(doc, job=job, run_number=run_number) else None
-
-    def _load_status() -> dict[str, Any] | None:
-        return _tuple_checked(_checked("status.json", load_json(status_path)))
-
-    spawn = _tuple_checked(_checked("spawn.json", load_json(run_dir / "spawn.json")))
-    status = _load_status()
-    if status is None and spawn is not None and spawn.get("boot_id") == boot_now:
-        # same boot: liveness checks mean something (DL-42 item 5)
-        wrapper_pid = spawn.get("wrapper_pid")
-        wrapper_token = spawn.get("wrapper_start_time")
-        if (
-            isinstance(wrapper_pid, int)
-            and isinstance(wrapper_token, str)
-            and _procid.verify_alive(wrapper_pid, wrapper_token)
-        ):
-            # the wrapper is mid-grace (its own parent-loss kill is running): give its status.json
-            # a settle window
-            deadline = time.monotonic() + settle_seconds + grace_seconds
-            while time.monotonic() < deadline:
-                status = _load_status()
-                if status is not None:
-                    break
-                if not _procid.verify_alive(wrapper_pid, wrapper_token):
-                    status = _load_status()  # one last read after death
-                    break
-                await asyncio.sleep(0.1)
-        else:
-            # one last read after death here too: a wrapper that recorded and exited after the
-            # first read is dead now, a zombie included
-            status = _load_status()
-        if status is None:
-            command_pid = spawn.get("command_pid")
-            command_pgid = spawn.get("command_pgid")
-            command_token = spawn.get("command_start_time")
-            if (
-                isinstance(command_pid, int)
-                and isinstance(command_pgid, int)
-                and isinstance(command_token, str)
-                and _procid.verify_alive(command_pid, command_token)
-            ):
-                # command group survived its recorder: kill the verified leader's group
-                # (TERMINATED is truthful, a kill happened). SIGKILL follows once the leader has
-                # died or the grace has passed, whichever is first: a member that ignores SIGTERM
-                # must not outlive the record (DL-226).
-                _procid.killpg_quiet(command_pgid, signal.SIGTERM)
-                deadline = time.monotonic() + grace_seconds
-                try:
-                    while time.monotonic() < deadline:
-                        if not _procid.verify_alive(command_pid, command_token):
-                            break
-                        await asyncio.sleep(0.1)
-                finally:
-                    # a cancel in the grace still ends the group (DL-359)
-                    _procid.killpg_quiet(command_pgid, signal.SIGKILL)
-                return Terminated("wrapper lost; killed at resume"), None
-    if status is not None:
-        ended_at = status.get("ended_at")
-        return (
-            outcome_from_status(status),
-            naive_utc(datetime.fromisoformat(ended_at)) if isinstance(ended_at, str) else None,
-        )
-    return Failed("exit_status_unobservable"), None  # PENDING: E7

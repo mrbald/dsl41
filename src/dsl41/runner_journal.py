@@ -20,9 +20,11 @@ Record kinds (`Record.kind`) and what each payload holds:
 - `dispatch_pending`: a start decision the engine did not dispatch (`event: pending`), and its
   discharge (`event: discharged`).
 - `outcome`: an attempt's end and how it was observed: `natural`, `spawn_failed`, `stopped` or
-  `unobservable`, with the STATUS fields the adapter's result maps to.
+  `unobservable`, with the STATUS fields the adapter's result maps to; `ladder: running` while
+  the cleanup of its group is not done.
 - `follow_up`: the plan the interruption rule chose for one outcome (`event: plan`), appended
-  with the outcome, and each step's done mark (`event: done`), appended with the step's effect.
+  with the outcome; each step's done mark (`event: done`), appended with the step's effect; and
+  `event: ladder_done` once the group of an outcome with `ladder: running` is gone.
 - `drop`: a scheduler tick missed across downtime (E9).
 - `preflight`: the ss8 WARN items the engine started under.
 - `config`: a configuration rev the engine applied (`event: applied`).
@@ -41,12 +43,12 @@ import re
 import sys
 
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
-from dsl41.canon import CanonError, canonical_bytes, decode, is_wire_int
+from dsl41.canon import CanonError, canonical_bytes, decode, is_wire_int, naive_utc
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import CarriedRows, Event
 from dsl41.runner_admission import (
@@ -446,7 +448,7 @@ def wire_record(record: Record) -> dict[str, Any] | None:
             "legacy_batch": False,
         }
     if kind == "dispatch":
-        return {
+        wire = {
             "rec": "dispatch",
             "job": body["job"],
             "run_number": body["run_number"],
@@ -454,6 +456,9 @@ def wire_record(record: Record) -> dict[str, Any] | None:
             "run_dir": body.get("spool"),
             "started_at": body["started_at"],
         }
+        if "after" in body:
+            wire["after"] = body["after"]  # a replacement attempt's (DL-426)
+        return wire
     if kind in ("drop", "preflight"):
         return {"rec": kind, **body}
     if kind == "config" and body.get("event") == "applied":
@@ -473,7 +478,8 @@ def _wire_size(wire: Mapping[str, Any]) -> int:
 
 @dataclass(frozen=True)
 class OpenAttempt:
-    """A dispatched attempt with no `outcome` yet."""
+    """A dispatched attempt the store has not closed: no `outcome` yet, or one committed while
+    the cleanup of its group was not done (`closing`)."""
 
     attempt: str
     job: str
@@ -483,6 +489,15 @@ class OpenAttempt:
     seq: int
     started_at: str
     env: dict[str, str] = field(default_factory=dict)
+    #: the cause of the stop this attempt replaced, None for a run's first attempt
+    after: str | None = None
+    #: the cause of the stop this attempt was taking when the engine left it unsettled
+    #: (`engine_stop`, `update_stop`, `oracle_kill`), from the drain's and the shutdown's
+    #: records; the restart adopts the attempt with it (DL-426)
+    stop: str | None = None
+    #: its outcome is committed while its ladder still runs: it leaves the table only with the
+    #: ladder's end (`follow_up` `ladder_done`), and a restart finishes the ladder first
+    closing: bool = False
 
 
 @dataclass(frozen=True)
@@ -507,6 +522,9 @@ class OpenPlan:
     plan: str
     steps: list[dict[str, Any]]
     done: dict[int, int | None] = field(default_factory=dict)
+    #: the end its `outcome` record holds (the wrapper's, or the completion's instant), which a
+    #: restart stamps the plan's steps with; None when the outcome holds none
+    ended: str | None = None
 
     def next_step(self) -> int | None:
         """The first step not yet done, or None."""
@@ -522,6 +540,8 @@ class OpenTable:
         self.attempts: dict[str, OpenAttempt] = {}
         self.pending: dict[int, PendingDispatch] = {}
         self.plans: dict[str, OpenPlan] = {}
+        #: the end of the outcome just noted, which the plan committed with it carries
+        self._ended: dict[str, str | None] = {}
 
     def note(self, seq: int, record: Record) -> None:
         check_record(record)
@@ -536,12 +556,21 @@ class OpenTable:
                 seq=seq,
                 started_at=str(body["started_at"]),
                 env=dict(body.get("env") or {}),
+                after=body.get("after"),
             )
             self.attempts[attempt.attempt] = attempt
             if is_wire_int(body.get("discharges")):
                 self.pending.pop(body["discharges"], None)
         elif record.kind == "outcome":
-            self.attempts.pop(str(body["attempt"]), None)
+            attempt_id = str(body["attempt"])
+            held = self.attempts.get(attempt_id)
+            if body.get("ladder") == "running" and held is not None:
+                self.attempts[attempt_id] = replace(held, closing=True)
+            else:
+                self.attempts.pop(attempt_id, None)
+            self._ended = {attempt_id: outcome_end(body)}
+        elif record.kind == "engine" and body.get("event") in _STOP_RECORDS:
+            self._note_stops(body)
         elif record.kind == "dispatch_pending":
             if body.get("event") == "pending":
                 self.pending[seq] = PendingDispatch(
@@ -552,8 +581,26 @@ class OpenTable:
         elif record.kind == "follow_up":
             self._note_follow_up(seq, body)
 
+    def _note_stops(self, body: Mapping[str, Any]) -> None:
+        """The stop each unsettled attempt was taking. The first stop an attempt took is its
+        cause: the `draining` record fills only an attempt with none, its own `stops` naming the
+        causes it already knew and `engine_stop` the rest; a shutdown record's `stops`, the
+        engine's last word, replaces whatever is set (DL-426)."""
+        stops = {str(a): c for a, c in dict(body.get("stops") or {}).items() if c is not None}
+        draining = body.get("event") == "draining"
+        if draining:
+            unsettled = [str(a) for a in body.get("unsettled") or ()]
+            stops = {a: stops.get(a, "engine_stop") for a in unsettled}
+        for run_id, cause in stops.items():
+            held = self.attempts.get(run_id)
+            if held is not None and (held.stop is None or not draining):
+                self.attempts[run_id] = replace(held, stop=str(cause))
+
     def _note_follow_up(self, seq: int, body: Mapping[str, Any]) -> None:
         attempt = str(body["attempt"])
+        if body.get("event") == "ladder_done":  # written only for a closing attempt
+            self.attempts.pop(attempt, None)
+            return
         if body.get("event") == "plan":
             steps = [dict(step) for step in body.get("steps") or ()]
             if steps:
@@ -564,6 +611,7 @@ class OpenTable:
                     int(body["run_number"]),
                     str(body["plan"]),
                     steps,
+                    ended=self._ended.get(attempt),
                 )
             return
         plan = self.plans.get(attempt)
@@ -594,6 +642,9 @@ class OpenTable:
                     "seq": a.seq,
                     "started_at": a.started_at,
                     "env": dict(a.env),
+                    "after": a.after,
+                    "stop": a.stop,
+                    "closing": a.closing,
                 }
                 for a in sorted(self.attempts.values(), key=lambda a: a.seq)
             ],
@@ -615,6 +666,7 @@ class OpenTable:
                     "plan": p.plan,
                     "steps": [dict(step) for step in p.steps],
                     "done": [[step, seq] for step, seq in sorted(p.done.items())],
+                    "ended": p.ended,
                 }
                 for p in sorted(self.plans.values(), key=lambda p: p.seq)
             ],
@@ -633,6 +685,9 @@ class OpenTable:
                 seq=a["seq"],
                 started_at=a["started_at"],
                 env=dict(a["env"]),
+                after=a.get("after"),
+                stop=a.get("stop"),
+                closing=bool(a.get("closing")),
             )
         for p in payload.get("pending") or ():
             table.pending[p["seq"]] = PendingDispatch(
@@ -647,11 +702,28 @@ class OpenTable:
                 p["plan"],
                 [dict(step) for step in p["steps"]],
                 {int(step): seq for step, seq in p["done"]},
+                p.get("ended"),
             )
         return table
 
 
 # ---------------------------------------------------------------- the position
+
+
+#: The `engine` records that name the stops of the attempts the engine left unsettled.
+_STOP_RECORDS: Final = frozenset({"draining", "clean_shutdown", "unclean_shutdown"})
+
+
+def outcome_end(body: Mapping[str, Any]) -> str | None:
+    """The end an `outcome` record holds, naive UTC ISO: the wrapper's recorded end, or for a
+    completion with no wrapper record (an adapter's own result) the record's instant; None for
+    an interruption with no record (DL-426, spec-crash step 5)."""
+    ended = (body.get("status") or {}).get("ended_at")
+    if isinstance(ended, str):
+        return naive_utc(datetime.fromisoformat(ended)).isoformat()
+    if body.get("outcome") in ("natural", "spawn_failed") and isinstance(body.get("at"), str):
+        return str(body["at"])
+    return None
 
 
 def _instant(value: object) -> datetime | None:
@@ -765,6 +837,8 @@ class Snapshot:
     #: the run history (`runner_history.run_history`): job -> the runs still open or ended
     #: inside the retention window, so a reader of a pruned store keeps their rows
     runs: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    #: job -> the `Interrupted` evidence its hold carries until its next start (spec-crash)
+    evidence: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def encode_snapshot(
@@ -775,6 +849,7 @@ def encode_snapshot(
     config_rev: int,
     open_table: OpenTable,
     runs: Mapping[str, list[dict[str, Any]]] | None = None,
+    evidence: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> bytes:
     """The snapshot's canonical bytes. The update state is null until an update can be durable
     in STOPPING (3b)."""
@@ -792,6 +867,7 @@ def encode_snapshot(
             "open": open_table.to_payload(),
             "update": None,
             "runs": dict(runs or {}),
+            "evidence": {job: dict(held) for job, held in (evidence or {}).items()},
         }
     )
 
@@ -814,6 +890,7 @@ def decode_snapshot(seq: int, data: bytes, *, where: str) -> Snapshot:
             open=OpenTable.from_payload(raw["open"]),
             update=raw.get("update"),
             runs=dict(raw["runs"]),
+            evidence=dict(raw.get("evidence") or {}),
         )
     except (CanonError, KeyError, TypeError, ValueError) as exc:
         raise EngineError(f"{where}: unreadable snapshot at seq {seq}: {exc}") from exc
@@ -1016,9 +1093,12 @@ def dispatch_record(
     ordinal: int = 1,
     env: Mapping[str, str] | None = None,
     discharges: int | None = None,
+    after: str | None = None,
 ) -> Record:
     """One attempt's launch intent (DL-118, DL-425). An `attempt` outside the ss11a grammar is
-    refused, as a freehand id would split the one key."""
+    refused, as a freehand id would split the one key. `attempt` is the run id, the attempt's
+    durable identity; `ordinal` names its spool directory and its display. `after` is the cause
+    of the stop a replacement follows (DL-426)."""
     if not is_valid_run_id(attempt):
         raise EngineError(
             f"dispatch {job}.{run_number}: run_id {attempt!r} is outside the ss11a uuid4"
@@ -1035,6 +1115,8 @@ def dispatch_record(
     }
     if discharges is not None:
         body["discharges"] = discharges
+    if after is not None:
+        body["after"] = after
     return Record(started_at, "dispatch", None, None, body)
 
 
@@ -1053,6 +1135,12 @@ def pending_record(job: str, run_number: int, scheduled_at: datetime, at: dateti
             "scheduled_at": scheduled_at.isoformat(),
         },
     )
+
+
+def ladder_done_record(attempt: str, at: datetime) -> Record:
+    """An attempt whose outcome was committed while its ladder ran: the ladder has ended and the
+    group is gone, so the attempt leaves the open table (DL-426)."""
+    return Record(at, "follow_up", None, None, {"event": "ladder_done", "attempt": attempt})
 
 
 def follow_up_done(attempt: str, step: int, seq: int | None, at: datetime) -> Record:

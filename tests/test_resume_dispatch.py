@@ -61,9 +61,9 @@ def _count_launches(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, int]]:
     launches: list[tuple[str, int]] = []
     real = Engine._launch
 
-    def counted(self, job_ir, run_number, adapter, *, run_id=None, spool=None, env=None):  # type: ignore[no-untyped-def]
+    def counted(self, job_ir, run_number, adapter, **kwargs):  # type: ignore[no-untyped-def]
         launches.append((job_ir.name, run_number))
-        real(self, job_ir, run_number, adapter, run_id=run_id, spool=spool, env=env)
+        real(self, job_ir, run_number, adapter, **kwargs)
 
     monkeypatch.setattr(Engine, "_launch", counted)
     return launches
@@ -506,11 +506,11 @@ def test_a_refused_resume_stops_the_tasks_it_started_before_it_releases_the_lock
     tasks: list[asyncio.Task[None]] = []
     real_launch = Engine._launch
 
-    def launch(self, job_ir, run_number, adapter, *, run_id=None, spool=None):  # type: ignore[no-untyped-def]
-        real_launch(self, job_ir, run_number, adapter, run_id=run_id, spool=spool)
+    def launch(self, job_ir, run_number, adapter, **kwargs):  # type: ignore[no-untyped-def]
+        real_launch(self, job_ir, run_number, adapter, **kwargs)
         tasks.append(self._live[job_ir.name].task)
 
-    def fail(*_args: object, **_kwargs: object) -> None:
+    async def fail(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("an injected fault after the watch relaunched")
 
     order: list[str] = []
@@ -521,7 +521,7 @@ def test_a_refused_resume_stops_the_tasks_it_started_before_it_releases_the_lock
         real_release(self)
 
     monkeypatch.setattr(Engine, "_launch", launch)
-    monkeypatch.setattr(startup, "_settle", fail)
+    monkeypatch.setattr(startup, "_settle_attempt", fail)
     monkeypatch.setattr(LeaderLock, "release", release)
 
     async def second() -> None:

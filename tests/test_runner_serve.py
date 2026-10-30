@@ -267,5 +267,5 @@ def test_run_ui_operator_stop_when_the_tui_return_code_is_none(short_root, monke
     monkeypatch.setattr("dsl41.runner_tui.RunnerApp", _fake_runner_app(None, captured))
     result = cli_runner.invoke(app, ["run", str(jil_path), "--run-root", str(run_root), "--ui"])
     assert result.exit_code == 0
-    assert "stopping:" in result.output
+    assert "engine stopped: clean_shutdown" in result.output  # quitting the TUI drains the engine
     assert captured["kwargs"].get("owns_run") is True

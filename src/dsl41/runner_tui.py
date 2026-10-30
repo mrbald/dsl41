@@ -140,7 +140,9 @@ from dsl41.runner_control import (
     STATUS_FLAG_MARKS,
     STATUSES,
     ControlClient,
+    ATTEMPT_NOTE_WIDTH,
     ControlClientError,
+    attempt_note,
     claimed_actor,
     command,
     original_decision_text,
@@ -170,12 +172,20 @@ _DETAILS_TAIL_BYTES = 4096
 _DETAILS_TAIL_LINES = 10
 #: pager memory bound: buffer, widget and display list cap here in lockstep.
 _PAGER_BUFFER_LINES = 10_000
-_COLUMNS = ("job", "status", "at", "run", "exit", "flags", "timers", "alarms")
+_COLUMNS = ("job", "status", "attempt", "at", "run", "exit", "flags", "timers", "alarms")
 #: fixed render widths for the bounded columns (the wider of content and header label).
 #: Auto-width stays on job and timers, whose content varies. Fixed widths keep update_cell's
 #: update_width off these columns: textual's width recompute re-measures a whole column per
 #: updated cell, which is O(cells x rows) at estate scale (~25s of blocked loop at 519 jobs).
-_COLUMN_WIDTHS = {"status": 10, "at": 8, "run": 4, "exit": 4, "flags": 5, "alarms": 6}
+_COLUMN_WIDTHS = {
+    "status": 10,
+    "attempt": ATTEMPT_NOTE_WIDTH,
+    "at": 8,
+    "run": 4,
+    "exit": 4,
+    "flags": 5,
+    "alarms": 6,
+}
 #: every first token `:` accepts, sorted: what an unknown verb's error lists and what the
 #: console's HELP lists (DL-187 item 7), from this one source
 _CONSOLE_VERBS = sorted(JOB_EVENT_VERBS | {"SET_GLOBAL", "CHANGE_STATUS"})
@@ -1629,6 +1639,7 @@ class RunnerApp(App[None]):
         return [
             name,
             Text(status, style=_STATUS_STYLE.get(status, "")),
+            attempt_note(row),  # DL-426: beside the status, empty for a first attempt running
             clock_of(at),
             str(row.get("run_number", "")),
             "" if exit_code is None else str(exit_code),

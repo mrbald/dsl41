@@ -109,15 +109,17 @@ from __future__ import annotations
 
 import asyncio
 import heapq
+import time
 import uuid
 
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta
 from enum import Enum, auto
 from pathlib import Path
 from typing import Any, Final
 
+from dsl41.engine_charts import AttemptOutcome, DrainRequest
 from dsl41.ir import CatalogIR, JobIR
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, EventSource, JobRuntime
@@ -126,7 +128,21 @@ from dsl41.runner_adapters import (
     Failed,
     FileWatcherAdapter,
     JobAdapter,
+    Launch,
+    ObservedAdapter,
     status_payload,
+)
+from dsl41.runner_attempts import (
+    FEED_STATUS,
+    HOLD_INPUT,
+    ORACLE_KILL,
+    SET_ON_HOLD,
+    UNSETTLED,
+    AttemptTier,
+    EngineTier,
+    FollowUpStep,
+    Replacement,
+    follow_up_plan,
 )
 from dsl41.runner_admission import (
     ENGINE_REQUEST_ID_PREFIX,
@@ -150,7 +166,7 @@ from dsl41.runner_admission import (
 from dsl41.canon import CanonError, canonical_bytes
 from dsl41.runner_codes import Rejection
 from dsl41.runner_clock import Clock, EngineError, ZeroDelayCycleError
-from dsl41.idempotence import invocation_env
+from dsl41.idempotence import ENV_ATTEMPT, invocation_env
 from dsl41.runner_config import (
     EngineSettings,
     OracleReading,
@@ -160,6 +176,10 @@ from dsl41.runner_config import (
 )
 from dsl41.runner_journal import (
     Journal,
+    OpenAttempt,
+    best_effort_report,
+    ladder_done_record,
+    outcome_end,
     dispatch_record,
     encode_snapshot,
     follow_up_done,
@@ -169,6 +189,14 @@ from dsl41.runner_history import run_history
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, Proof
 from dsl41.runner_store import Record, Store
 from dsl41.runner_scheduler import Scheduler
+from dsl41.runner_stops import (
+    COMMAND_SURVIVED,
+    LADDER_RUNNING,
+    STOP_IN_PROGRESS,
+    AttemptFacts,
+    EngineStops,
+    Observer,
+)
 from dsl41.semantics import ADAPTER_SWITCHES, SCHEDULER_SWITCHES, SemanticSwitches
 from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES
 from dsl41.state_machine import Executor, StatechartError
@@ -191,11 +219,12 @@ class _LiveRun:
 
 @dataclass(frozen=True)
 class Deferred:
-    """A dispatch startup owes and the loop carries out once the due work is processed: a
-    pending start (`pending` is its `dispatch_pending` record's seq) or a plan's replacement
-    attempt (`plan` is the interrupted attempt's id, `step` the step's position, `attempt` the
-    replacement's id). Each is durable before it is deferred, so a crash before its `dispatch`
-    loses none (spec-wiring 1b)."""
+    """A dispatch not launched at once: one startup owes, which the loop carries out once the
+    due work is processed, or one a held group keeps back (DL-426). It is a pending start
+    (`pending` is its `dispatch_pending` record's seq, None on an engine with no store) or a
+    plan's replacement attempt (`plan` is the interrupted attempt's id, `step` the step's
+    position, `attempt` the replacement's id). Each is durable before it waits, so a crash
+    before its `dispatch` loses none (spec-wiring 1b)."""
 
     job: str
     run_number: int
@@ -205,6 +234,27 @@ class Deferred:
     attempt: str | None = None
     ordinal: int = 1
     env: dict[str, str] = field(default_factory=dict)
+    #: the cause of the stop the replacement follows, shown beside its status (DL-426)
+    after: str | None = None
+
+
+@dataclass
+class _Plan:
+    """A follow-up plan the engine is carrying out: the interrupted or ended attempt it answers,
+    its steps as the `follow_up` record holds them, the positions done, and its record's seq,
+    which orders the plans startup finishes (spec-wiring 1b, step 6)."""
+
+    attempt: str
+    job: str
+    run_number: int
+    steps: list[dict[str, Any]]
+    seq: int
+    done: set[int] = field(default_factory=set)
+    #: the end the plan's `outcome` record holds (`runner_journal.outcome_end`)
+    ended: str | None = None
+
+    def next_step(self) -> int | None:
+        return next((i for i in range(len(self.steps)) if i not in self.done), None)
 
 
 @dataclass
@@ -229,7 +279,11 @@ class _Pending:
     `source` is read only when `ev` is absent; an event carries its own (DL-68).
 
     `step` names the follow-up step this input performs: the plan's attempt id and the step's
-    position. Its done mark is appended with the admission (spec-wiring 1b)."""
+    position. Its done mark is appended with the admission (spec-wiring 1b).
+
+    `control` marks a lifecycle step the loop takes in queue order instead of admitting an
+    input: `stop_requested` (SIGTERM, `engine stop`), whose `reply` is the lifecycle state the
+    step left, or `abort_deadline` (spec-wiring 2b)."""
 
     at: datetime
     request_id: str | None
@@ -238,6 +292,8 @@ class _Pending:
     envelope: Envelope | None = None
     future: asyncio.Future[ApplyResult] | None = None
     step: tuple[str, int] | None = None
+    control: str | None = None
+    reply: asyncio.Future[str] | None = None
 
 
 def _without_frames(exc: Exception) -> Exception:
@@ -457,6 +513,538 @@ class Engine:
         #: set once the engine has recorded `engine started`: at genesis, or by the loop at the
         #: end of a restart's recovery
         self.started = asyncio.Event()
+        self._init_tiers(settings or EngineSettings())
+
+    def _init_tiers(self, settings: EngineSettings) -> None:
+        """The attempt and engine lifecycle tiers on this engine's executor (spec-wiring 2b,
+        DL-426), and what the engine keeps of their attempts and plans."""
+        #: the applied configuration's `non-idempotent.toml` names (DL-424)
+        self.marked: frozenset[str] = frozenset()
+        self.stops = EngineStops(self)
+        self.attempts = AttemptTier(
+            self.stops,
+            grace_term_s=settings.grace_term_s,
+            grace_kill_s=settings.grace_kill_s,
+            machines=self._machines,
+            command_alive=self.stops.command_alive,
+        )
+        self.lifecycle = EngineTier(self.stops, self.attempts)
+        self.attempts.on_ladder_done = self._ladder_ended
+        #: the held attempts (`AttemptTier.held`) by run id, with their group: their job starts
+        #: nothing until the group is gone (DL-426)
+        self.held_groups: dict[str, int] = {}
+        #: the plans whose replacement waits for a group: a ladder's end or a group gone
+        #: performs them
+        self._waiting_plans: set[str] = set()
+        #: the starts a held group keeps back, each durable as `dispatch_pending` when the
+        #: engine has a store
+        self._held_starts: list[Deferred] = []
+        #: observed attempts by run id, and each job's latest
+        self._facts: dict[str, AttemptFacts] = {}
+        self._job_attempt: dict[str, str] = {}
+        #: the observed adapter tasks by task id, with their attempt's run id
+        self._observed_tasks: dict[int, str] = {}
+        #: the follow-up plans being carried out, by the attempt they answer
+        self._plans: dict[str, _Plan] = {}
+        self._plan_count = 0
+        #: the `Interrupted` evidence of each held job's interrupted attempt, until its next
+        #: start (spec-crash)
+        self.evidence: dict[str, dict[str, Any]] = {}
+        #: True during startup step 5: an outcome's plan waits for step 6, which carries out
+        #: every open plan in seq order
+        self.settling = False
+        #: the journal's last instant at a restart: what startup's feeds are stamped no earlier
+        #: than
+        self.resume_at: datetime | None = None
+        #: the shutdown record the lifecycle chose, the exit code once STOPPED, whether the
+        #: record is written, and the event set once the engine has left (spec-drain)
+        self._leaving: tuple[str, tuple[str, ...]] | None = None
+        self.exit_code: int | None = None
+        self.shutdown_recorded = False
+        #: what a tier's timer raised outside any task; the loop raises it at its next turn, and
+        #: startup's step 5 at once (`settled_or_failed`)
+        self.fault: Exception | None = None
+        self._faulted = asyncio.Event()
+        self.stopped = asyncio.Event()
+
+    # ---- the attempt and lifecycle tiers (spec-wiring 2b)
+
+    def wake(self) -> None:
+        """Wake a real-domain loop that waits on activity: a tier moved."""
+        self._activity.set()
+
+    def attempt_facts(self, attempt: str) -> AttemptFacts:
+        return self._facts[attempt]
+
+    def fail(self, fault: Exception) -> None:
+        """Keep a fault a tier's timer raised outside any task, for whoever waits next."""
+        self.fault = fault
+        self._faulted.set()
+        self.wake()
+
+    async def settled_or_failed(self, facts: AttemptFacts) -> None:
+        """Wait until the attempt ended or its stop could not be carried out; a fault raised
+        meanwhile ends the wait and is raised here (startup step 5)."""
+        settled = asyncio.ensure_future(facts.settled.wait())
+        faulted = asyncio.ensure_future(self._faulted.wait())
+        try:
+            await asyncio.wait({settled, faulted}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            settled.cancel()
+            faulted.cancel()
+        if self.fault is not None:
+            fault, self.fault = self.fault, None
+            self._faulted.clear()
+            raise fault
+
+    def adopt_attempt(self, facts: AttemptFacts) -> None:
+        """Instantiate an attempt a restart found open (startup step 5), under its run id."""
+        self.attempts.dispatch(facts.run_id)
+        self._facts[facts.run_id] = facts
+        self._job_attempt[facts.job] = facts.run_id
+
+    def request_stop(self) -> asyncio.Future[str]:
+        """SIGTERM or `engine stop`: queue `stop_requested` as a step of the single writer, so
+        each input is admitted wholly before it or wholly after it. The answer is the lifecycle
+        state the step left (spec-wiring 2b)."""
+        reply: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        self._push(
+            _Pending(at=self.clock.now(), request_id=None, control="stop_requested", reply=reply)
+        )
+        return reply
+
+    def post_control(self, name: str) -> None:
+        """Queue a lifecycle step that a timer raised (`abort_deadline`)."""
+        self._push(_Pending(at=self.clock.now(), request_id=None, control=name))
+
+    def _control(self, pending: _Pending) -> None:
+        """Take one queued lifecycle step."""
+        if pending.control == "stop_requested":
+            settings = self.settings or EngineSettings()
+            self.lifecycle.stop_requested(
+                DrainRequest(time.monotonic(), settings.grace_term_s, settings.grace_kill_s)
+            )
+        else:
+            self.lifecycle.abort_deadline()
+        if pending.reply is not None and not pending.reply.done():
+            pending.reply.set_result(self.lifecycle.state)
+
+    @property
+    def draining(self) -> bool:
+        """Whether the engine is draining or has stopped: nothing is dispatched and a control
+        mutation is refused with `engine_draining` (spec-drain)."""
+        return self.lifecycle.state in ("DRAINING", "STOPPED")
+
+    def journal_lifecycle(self, event: str) -> None:
+        """The lifecycle's own record: `draining`, with the attempts it stops."""
+        if self.journal is not None:
+            unsettled = self.attempts.unsettled()
+            # the stops the attempts already take (an oracle's kill) are theirs; the drain's
+            # own stop goes to the rest (DL-426)
+            stops = {a: cause for a in unsettled if (cause := self._stop_cause(a)) is not None}
+            fields = {"unsettled": list(unsettled), "stops": stops} if unsettled else {}
+            self.journal.engine(event, self.clock.now(), **fields)
+
+    @property
+    def leaving_record(self) -> str | None:
+        """The shutdown record the lifecycle chose at STOPPED, None before."""
+        return None if self._leaving is None else self._leaving[0]
+
+    def leave(self, record: str, unsettled: tuple[str, ...]) -> None:
+        """The lifecycle reached STOPPED: the loop writes `record` and leaves at its next turn."""
+        self._leaving = (record, unsettled)
+
+    def _stop_cause(self, attempt: str) -> str | None:
+        """The cause of the stop an attempt the tier still holds is taking, or None: also for
+        a restart's held attempt, which the tier never instantiated."""
+        if not self.attempts.knows(attempt):
+            return None
+        record = self.attempts.machines.data(self.attempts.key(attempt))
+        cause: str | None = record.cause
+        return cause
+
+    def _answer_owed(self) -> bool:
+        """Whether a request queued and due is still unanswered: STOPPED is taken only once each
+        has its answer, a mutation its durable `engine_draining` rejection and a stop the
+        state (spec-drain)."""
+        return bool(self._queue) and self._queue[0][0] <= self.clock.now()
+
+    def _finish_leaving(self) -> None:
+        """Write the shutdown record, then the snapshot that covers it when the drain ended
+        (spec-wiring 2b: none at `shutdown_during_startup`), and mark the engine stopped. A
+        snapshot taken before the record would let a crash between them hide the drain from
+        the restart's fold; covering the record, the two are one durable step for it."""
+        if self._leaving is not None and self.journal is not None and not self.shutdown_recorded:
+            record, unsettled = self._leaving
+            fields: dict[str, Any] = {}
+            if unsettled:
+                # each unsettled attempt with the cause of the stop it was taking, which the
+                # restart adopts it with (DL-426)
+                fields["unsettled"] = list(unsettled)
+                fields["stops"] = {a: self._stop_cause(a) for a in unsettled}
+            self.journal.engine(record, self.clock.now(), **fields)
+            self.shutdown_recorded = True
+            drained = record != "shutdown_during_startup"
+            if drained and self.settings is not None and self.at_applied_boundary:
+                self.take_snapshot()
+        self.stops.cancel_all()
+        self.stopped.set()
+
+    def cancel_unobserved(self) -> None:
+        """The drain cancels every live task the attempt tier does not run: the file watchers.
+        Each keeps its open attempt, which the restart resumes from `watch.jsonl`."""
+        for job, live in list(self._live.items()):
+            if live.attempt not in self._facts:
+                del self._live[job]
+                live.task.cancel()
+                self._reaping.append(live.task)
+
+    def record_outcome(self, attempt: str, outcome: AttemptOutcome) -> None:
+        """An observed attempt ended: journal its outcome and the interruption rule's plan in
+        one transaction, under the applied catalog and marked set, then carry the plan out
+        (startup step 6 does that for the outcomes of step 5)."""
+        facts = self._facts[attempt]
+        job, run = facts.job, facts.run_number
+        row = self.oracle.store.job.get(job)
+        plan = follow_up_plan(
+            outcome,
+            job=job,
+            run_number=run,
+            attempt=facts.ordinal,
+            in_catalog=job in self.oracle.catalog.jobs,
+            live_run=None if row is None else (row.run_number, row.status),
+            marked=job in self.marked,
+            run_id=attempt,
+        )
+        at = self.clock.now()
+        steps = [self._step_body(facts, step, outcome) for step in plan.steps]
+        extra: dict[str, Any] = {}
+        for step in plan.steps:
+            if step.effect == SET_ON_HOLD:
+                extra["evidence"] = asdict(step.detail)
+                self.evidence[job] = {**extra["evidence"], "run_number": run}
+        seq = self._plan_count = self._plan_count + 1
+        ended = outcome_record(
+            attempt, job, run, outcome.kind, _evidence_of(outcome), at, cause=outcome.cause
+        )
+        if self.journal is not None and (
+            self.attempts.ladder_running(attempt) or self.attempts.held(attempt)
+        ):
+            # the record ends the observation, not the stop: the attempt stays open until the
+            # ladder has ended its group, or its held group is gone (DL-426)
+            ended = replace(ended, payload={**ended.payload, "ladder": "running"})
+            facts.closing = True
+        if self.journal is not None:
+            seq = self.journal.append(
+                ended, plan_record(attempt, job, run, plan.kind, steps, at, **extra)
+            )
+        facts.settled.set()
+        end = outcome_end(ended.payload)
+        self._plans[attempt] = _Plan(attempt, job, run, steps, seq, ended=end)
+        if not self.settling:
+            self.perform_plan(attempt)
+
+    def _step_body(
+        self, facts: AttemptFacts, step: FollowUpStep, outcome: AttemptOutcome
+    ) -> dict[str, Any]:
+        """One plan step as the `follow_up` record holds it."""
+        job, run = facts.job, facts.run_number
+        if step.effect == FEED_STATUS:
+            payload: dict[str, Any] = {"job": job, "run_number": run}
+            payload |= status_payload(step.detail, where=f"the plan for {job}.{run}")
+            return {"step": "feed", "payload": payload}
+        if step.effect == SET_ON_HOLD:
+            # the interruption hold, one oracle transition (DL-424)
+            held = status_payload(HOLD_INPUT, where=f"the plan for {job}.{run}")
+            return {
+                "step": "hold",
+                "payload": {"job": job, "run_number": run, **held, "hold": True},
+            }
+        replacement: Replacement = step.detail
+        return {
+            "step": "dispatch",
+            "attempt": replacement.run_id,
+            "ordinal": replacement.ordinal,
+            # the same invocation, a new attempt (spec-crash)
+            "env": {**facts.env, ENV_ATTEMPT: str(replacement.ordinal)},
+            "after": outcome.cause or outcome.kind,
+        }
+
+    def adopt_plans(self) -> None:
+        """Startup step 6's input: every plan the open table holds with an unfinished step, beside
+        the ones step 5 committed."""
+        assert self.journal is not None
+        for plan in self.journal.open.plans.values():
+            if plan.attempt not in self._plans:
+                self._plans[plan.attempt] = _Plan(
+                    plan.attempt,
+                    plan.job,
+                    plan.run_number,
+                    [dict(step) for step in plan.steps],
+                    plan.seq,
+                    set(plan.done),
+                    plan.ended,
+                )
+
+    def perform_plans(self) -> None:
+        """Carry out every plan in seq order: startup step 6."""
+        for plan in sorted(self._plans.values(), key=lambda p: p.seq):
+            self.perform_plan(plan.attempt)
+
+    def perform_plan(self, attempt: str) -> None:
+        """Carry out the next step of `attempt`'s plan, or finish the plan. A feed or a hold is
+        an input whose admission marks the step done; a replacement is dispatched with its done
+        mark, deferred while the engine recovers, and left to the restart while it drains."""
+        plan = self._plans.get(attempt)
+        if plan is None:
+            return
+        position = plan.next_step()
+        if position is None:
+            self._plan_finished(attempt)
+            return
+        step = plan.steps[position]
+        if step["step"] == "dispatch":
+            if self.draining:
+                # the dispatch waits for the restart (startup step 6); the attempt is settled
+                self._plan_finished(attempt)
+                return
+            if self.attempts.knows(attempt) and self.attempts.ladder_running(attempt):
+                self._waiting_plans.add(attempt)  # the ladder's end performs it (`_ladder_ended`)
+                return
+            item = Deferred(
+                plan.job,
+                plan.run_number,
+                plan=attempt,
+                step=position,
+                attempt=str(step["attempt"]),
+                ordinal=int(step["ordinal"]),
+                env=dict(step.get("env") or {}),
+                after=step.get("after"),
+            )
+            if self.recovery is not None:
+                self.defer(item, after=self.resume_at or self.clock.now())
+            else:
+                self._discharge(item)
+            return
+        # a live step is stamped with the engine's clock; a step a restart performs, with the
+        # end its `outcome` record holds, never earlier than the admission frontier, so time
+        # stays monotone and a deadline that fell inside the outage after that end never beats
+        # it (spec-crash step 5, DL-426); an attempt with no recorded end takes the frontier.
+        # The end rides on the input as evidence too (the history's duration)
+        payload = dict(step["payload"])
+        now = self.clock.now()
+        frontier = self.frontiers.at or self.resume_at or now
+        if self.recovery is None:
+            at = max(now, frontier)
+        elif plan.ended is None:
+            at = frontier
+        else:
+            at = max(datetime.fromisoformat(plan.ended), frontier)
+            payload["ended_at"] = plan.ended
+        event = Event(at=at, kind="STATUS", payload=payload)
+        if self.recovery is None:
+            self._enqueue(event, source="adapter", step=(attempt, position))
+        else:
+            self._enqueue(event, source="reconcile", step=(attempt, position))
+
+    def _step_done(self, attempt: str, position: int) -> None:
+        """A step's effect and its done mark are durable: carry out the next."""
+        plan = self._plans.get(attempt)
+        if plan is None:
+            return
+        plan.done.add(position)
+        self.perform_plan(attempt)
+
+    def _plan_finished(self, attempt: str) -> None:
+        """The plan is done: the attempt is settled, and the starts it kept back may go
+        (DL-426)."""
+        plan = self._plans.pop(attempt, None)
+        facts = self._facts.get(attempt)
+        if facts is not None:
+            facts.finished = True
+        if self.attempts.knows(attempt):
+            self.attempts.plan_done(attempt)
+        self._forget_if_over(attempt)
+        job = plan.job if plan is not None else facts.job if facts is not None else None
+        if job is not None:
+            self._release(job)
+
+    def _task_done(self, task: asyncio.Task[None]) -> None:
+        """An observed attempt's adapter task is over: its wrapper has exited."""
+        attempt = self._observed_tasks.pop(id(task), None)
+        if attempt is not None and attempt in self._facts:
+            self._facts[attempt].exited = True
+            self._forget_if_over(attempt)
+
+    def _ladder_ended(self, attempt: str) -> None:
+        """An attempt's ladder ended. A held group (one that outlived the ladder, or a ladder
+        that raised) keeps the attempt open and unsettled until the group is gone. Else an
+        outcome committed while the ladder ran is closed now, a replacement that waited for
+        the group goes, and the attempt may be forgotten (DL-426)."""
+        if self.attempts.held(attempt):
+            return
+        facts = self._facts[attempt]
+        if facts.closing:
+            facts.closing = False
+            assert self.journal is not None  # only an engine with a store marks an attempt closing
+            self.journal.append(ladder_done_record(attempt, self.clock.now()))
+        if attempt in self._waiting_plans:
+            self._waiting_plans.discard(attempt)
+            self.perform_plan(attempt)
+        self._forget_if_over(attempt)
+        self._release(facts.job)  # what it kept back may go now
+
+    def hold_group(self, attempt: str, pgid: int) -> None:
+        """The attempt's group may live with no stop left to end it: nothing of its job is
+        dispatched until the group is gone, which the poll looks for (DL-426)."""
+        self.held_groups[attempt] = pgid
+        self.stops.watch_groups()
+
+    def held_at_restart(self, attempt: OpenAttempt, pgid: int) -> None:
+        """A restart found a closing attempt's group with a live member it cannot prove its
+        own, or one that outlived the ladder the restart ran: it sends nothing more, and the
+        attempt stays open and unsettled, with its rerun and every start of its job held,
+        until the group is gone (DL-426)."""
+        assert attempt.spool is not None  # a closing attempt is a command attempt
+        facts = AttemptFacts(
+            attempt.attempt,
+            attempt.job,
+            attempt.run_number,
+            attempt.ordinal,
+            Path(attempt.spool),
+            dict(attempt.env),
+            attempt.after,
+            note=COMMAND_SURVIVED,
+            exited=True,
+            closing=True,
+        )
+        self._facts[attempt.attempt] = facts
+        self._job_attempt[attempt.job] = attempt.attempt
+        self.attempts.adopt_held(attempt.attempt)
+        self.hold_group(attempt.attempt, pgid)
+        best_effort_report(
+            f"dsl41: {attempt.job}.{attempt.run_number}.{attempt.ordinal}: {COMMAND_SURVIVED};"
+            " nothing of the job starts until its group is gone"
+        )
+
+    def group_gone(self, attempt: str) -> None:
+        """A held attempt's group has no live member left: the attempt ends or settles as its
+        ladder's end would have let it, and the starts its job kept back go (DL-426)."""
+        del self.held_groups[attempt]
+        facts = self._facts[attempt]
+        facts.note = None
+        tier = self.attempts
+        stopping = tier.knows(attempt) and tier.state(attempt) == "STOPPING"
+        tier.group_gone(attempt)
+        if not stopping:
+            self._ladder_ended(attempt)
+        self._release(facts.job)
+
+    def blocked(self, job: str, replacing: str | None = None) -> str | None:
+        """The unsettled attempt of `job` that keeps the job's next dispatch back, a held one
+        first; None when there is none. An attempt settles only once its plan is done, after
+        its record and its ladder, so every stop still in progress is one (DL-426). A plan's
+        replacement (`replacing` names the attempt it replaces) waits only for that attempt's
+        ladder or held group, since its plan is done only by this dispatch: `perform_plan`
+        waits for that ladder, and a held group is found first."""
+        held = next((a for a in self.held_groups if self._facts[a].job == job), None)
+        if held is not None:
+            return held
+        tier = self.attempts
+        for attempt, facts in self._facts.items():
+            if facts.job != job or not tier.knows(attempt):
+                continue
+            if attempt != replacing and tier.is_unsettled(attempt):
+                return attempt
+        return None
+
+    def _must_wait(self, job: str, run_number: int, replacing: str | None = None) -> bool:
+        """Whether a start of `job` the oracle still wants waits for a group of the job
+        (`blocked`). One live attempt per job: an injected INACTIVE (DL-235) leaves the earlier
+        run live in the shell while the oracle's row is not STARTING/RUNNING/QUE_WAIT, so the
+        oracle's DL-81 refusal does not block a restart, and this start is for the new run.
+        The earlier attempt is stopped first, as an oracle kill, and keeps this start back
+        until it settles; the vendor would run both. A task with no process group of
+        its own (a file watch) is cancelled, and nothing waits for it."""
+        if spawn_superseded(self.oracle.store.job.get(job), run_number) is None:
+            earlier = self._live.pop(job, None)
+            if earlier is not None:
+                self._kill(earlier)
+        return self.blocked(job, replacing) is not None
+
+    def _release(self, job: str) -> None:
+        """Carry out what `job`'s unsettled attempts kept back, each once nothing of the job
+        blocks it (`blocked`): the plans' replacements in seq order, then the starts, unless
+        the engine drains (the restart launches those from their `dispatch_pending` records)
+        or recovers (the loop does, once due). Called whenever an attempt of the job settles,
+        its ladder ends or its group is gone."""
+        waiting = [a for a in self._waiting_plans if self._plans[a].job == job]
+        for plan in sorted(waiting, key=lambda a: self._plans[a].seq):  # in seq order (step 6)
+            if plan in self._waiting_plans and self.blocked(job, plan) is None:
+                self._waiting_plans.discard(plan)
+                self.perform_plan(plan)
+        if self.draining or self.blocked(job) is not None:
+            return
+        starts = [item for item in self._held_starts if item.job == job]
+        self._held_starts = [item for item in self._held_starts if item.job != job]
+        for item in starts:
+            if self.recovery is not None:
+                self.defer(item, after=self.clock.now())
+            else:
+                self._discharge(item)
+
+    def _forget_if_over(self, attempt: str) -> None:
+        """An attempt whose plan is done and whose wrapper has exited can get no observation:
+        the tier and the engine forget it."""
+        facts = self._facts.get(attempt)
+        if facts is None or not (facts.exited and facts.finished):
+            return
+        known = self.attempts.knows(attempt)  # a restart's held attempt has no instance
+        if attempt in self.held_groups or (known and self.attempts.ladder_running(attempt)):
+            return  # the ladder's end forgets it; a held group's end does (DL-426)
+        if known:
+            self.attempts.forget(attempt)
+        del self._facts[attempt]
+        if self._job_attempt.get(facts.job) == attempt:
+            del self._job_attempt[facts.job]
+
+    def attempt_view(self, job: str) -> dict[str, Any] | None:
+        """The attempt `query` shows beside the job's status: its ordinal, its state, the cause
+        of the stop it replaced, and why a stop could not be carried out (DL-426). An attempt
+        that keeps the job's starts back (`blocked`) is shown with `held` whatever its state,
+        when its group is held or it belongs to an earlier run than the row's. Else None when
+        the job's current run has no unsettled observed attempt."""
+        row = self.oracle.store.job.get(job)
+        blocking = self.blocked(job)
+        held = (
+            blocking is not None
+            and row is not None
+            and (blocking in self.held_groups or self._facts[blocking].run_number < row.run_number)
+        )
+        attempt = blocking if held else self._job_attempt.get(job)
+        if attempt is None or row is None:
+            return None
+        facts = self._facts[attempt]
+        known = self.attempts.knows(attempt)
+        # a restart's held attempt has its outcome committed and no instance
+        state = self.attempts.state(attempt) if known else "ENDED"
+        if not held and (facts.run_number != row.run_number or state not in UNSETTLED):
+            return None
+        view = {
+            "run_id": attempt,
+            "n": facts.ordinal,
+            "state": state,
+            "after": facts.after,
+            "cause": self._stop_cause(attempt),
+            "note": facts.note,
+        }
+        if held:
+            running = known and self.attempts.ladder_running(attempt)
+            view |= {
+                "held": True,
+                "note": facts.note or (LADDER_RUNNING if running else STOP_IN_PROGRESS),
+            }
+        return view
 
     def _init_live_state(self) -> None:
         """The queue and the live-run books `__init__` starts empty."""
@@ -668,9 +1256,13 @@ class Engine:
             and (self.clock.virtual or eff_due <= now)
         ):
             return _Work(_Do.TIMER, at=eff_due)
+        # an observed attempt the oracle stopped is reaped once its wrapper records the end, and
+        # that record and the plan it implies are still to come (spec-wiring 2b); a cancelled
+        # task brings nothing more
+        busy = bool(self._live) or any(id(task) in self._observed_tasks for task in self._reaping)
         if self.clock.virtual or (
             not self.hold_open
-            and not self._live
+            and not busy
             and not self._queue
             and raw_due is None
             and sched_due is None
@@ -680,7 +1272,7 @@ class Engine:
         if target is not None and target > horizon:
             # a live adapter's completion has no due timestamp and can still land inside the
             # horizon, so with live tasks the loop waits out the horizon (DL-45)
-            if not self._live or now >= horizon:
+            if not busy or now >= horizon:
                 return _Work(_Do.QUIESCE)
             target = horizon
         return _Work(_Do.WAIT, at=target)
@@ -706,6 +1298,13 @@ class Engine:
         instant_events = 0
         instant_budget = max(INSTANT_BUDGET_FLOOR, 100 * len(self.oracle.catalog.jobs))
         while True:
+            if self.fault is not None:
+                fault, self.fault = self.fault, None
+                self._faulted.clear()
+                raise fault
+            if self.exit_code is not None and not self._answer_owed():
+                self._finish_leaving()  # the lifecycle reached STOPPED (spec-drain)
+                return emitted
             await self._settle()
             now = self.clock.now()
             if now != instant:
@@ -723,6 +1322,9 @@ class Engine:
                 continue  # dispatch is not same-instant work: skip the budget
             if work.do is _Do.EVENT:
                 _, _, pending = heapq.heappop(self._queue)
+                if pending.control is not None:
+                    self._control(pending)
+                    continue  # a lifecycle step is not same-instant work: skip the budget
                 out = await self._admit_and_apply(pending)
                 emitted.extend(out)
                 self._maybe_snapshot()
@@ -795,12 +1397,14 @@ class Engine:
                     self._note_corpse(run.task)
                     _raise_if_failed(run.task)
                     del self._live[job]
+                    self._task_done(run.task)
             still_reaping: list[asyncio.Task[None]] = []
             for task in self._reaping:
                 if task.done():
                     self._note_corpse(task)
                     _raise_if_failed(task)
                     self._close_killed(task)
+                    self._task_done(task)
                 else:
                     still_reaping.append(task)
             self._reaping = still_reaping
@@ -850,14 +1454,21 @@ class Engine:
         # before the frontier moves: a refusal or a stop takes no index
         attempt = self._attempt(pending, admitted.committed_index, fp)
         quarantine: tuple[Rejection, Exception] | None = None
-        if not attempt.engine_made:
+        forced: Rejection | None = None
+        if not attempt.engine_made and self.draining:
+            # after `stop_requested`: the mutation is admitted, its time half applies, and its
+            # decision records the refusal, so an exact retry is answered from it (spec-wiring 2b)
+            forced = Rejection(
+                "engine_draining", "the engine is draining: it takes no mutation until it restarts"
+            )
+        elif not attempt.engine_made:
             refusal = self._dry_apply(attempt)
             if refusal is not None:
                 self._refuse(pending, refusal)
                 return []
         else:
             quarantine = self._dry_apply_engine_made(attempt)
-        forced = None if quarantine is None else quarantine[0]
+            forced = None if quarantine is None else quarantine[0]
         await self.clock.wait_until(pending.at)
         if self.journal is not None:
             self.journal.prove()  # an engine that lost the root applies nothing (S6b)
@@ -890,6 +1501,8 @@ class Engine:
         self._dispatch(applied.emitted)
         # every start the input decided has its `dispatch` or its `dispatch_pending` now
         self._applying = False
+        if pending.step is not None:
+            self._step_done(*pending.step)
         return applied.emitted
 
     def _dry_apply(self, attempt: Attempt) -> AdmissionRefused | None:
@@ -991,6 +1604,13 @@ class Engine:
                 self._dispatched[job] = max(self._dispatched.get(job, 0), run_number)
                 if self.recovery is not None:
                     self._owe(job, run_number)
+                elif self.draining:
+                    self._pending(job, run_number)  # launched by the restart (spec-drain)
+                elif self._must_wait(job, run_number):
+                    # held behind its job's group until that is gone (DL-426)
+                    self._held_starts.append(
+                        Deferred(job, run_number, pending=self._pending(job, run_number))
+                    )
                 else:
                     self.spawn(job, run_number)
                 continue
@@ -1000,11 +1620,17 @@ class Engine:
                 self._kill(live)
 
     def _kill(self, live: _LiveRun) -> None:
-        """Cancel a live attempt through its adapter's ladder. Once the task is reaped its
-        attempt is closed with a `stopped` outcome and no plan: the oracle decided the run's end
-        (spec-wiring 2b's interruption rule, step 3)."""
-        live.task.cancel()
+        """Stop a live attempt the oracle ended. An observed attempt gets `stop` with cause
+        `oracle_kill` (one ended already gets nothing), and its task is reaped once the wrapper
+        has recorded the end. Any other task is cancelled through its adapter's ladder, and once
+        it is reaped its attempt is closed with a `stopped` outcome and no plan: the oracle
+        decided the run's end (spec-wiring 2b's interruption rule, step 3)."""
         self._reaping.append(live.task)
+        if live.attempt in self._facts:
+            if self.attempts.state(live.attempt) in UNSETTLED:
+                self.attempts.stop(live.attempt, ORACLE_KILL)
+            return
+        live.task.cancel()
         self._killed[id(live.task)] = live
 
     def _close_killed(self, task: asyncio.Task[None]) -> None:
@@ -1031,6 +1657,17 @@ class Engine:
         seq = self.journal.append(pending_record(job, run_number, scheduled, at))
         self.defer(Deferred(job, run_number, pending=seq), after=self._deferred_after or at)
 
+    def _pending(self, job: str, run_number: int) -> int | None:
+        """A start this engine does not launch now, durable as `dispatch_pending` when it has a
+        store: one decided while the engine drains (the restart launches it, startup step 7,
+        spec-drain), or one a held group keeps back (DL-426). Answers the record's seq."""
+        if self.journal is None:
+            return None
+        at = self.clock.now()
+        row = self.oracle.store.job.get(job)
+        scheduled = row.status_at if row is not None and row.status_at is not None else at
+        return self.journal.append(pending_record(job, run_number, scheduled, at))
+
     def _finish_recovery(self) -> None:
         """Carry out the dispatches startup owes, each removed only once its `dispatch` (or its
         discharge) has committed, so one that raises leaves itself and the rest owed; then run
@@ -1040,6 +1677,7 @@ class Engine:
             self._deferred.pop(0)
         recovery, self.recovery = self.recovery, None
         assert recovery is not None  # the loop finishes only a recovery in progress
+        self.lifecycle.replay_done()  # after startup step 7 (spec-wiring 2b)
         recovery()
         self.started.set()
 
@@ -1054,37 +1692,48 @@ class Engine:
     def _discharge(self, item: Deferred) -> None:
         """Carry out one owed dispatch, or record why it is not carried out: a run the oracle
         has moved past is not launched (DL-232), and its pending record or plan step is closed
-        with no launch (spec-wiring 1b, startup steps 6 and 7)."""
-        assert self.journal is not None  # only startup defers, and startup holds the store
+        with no launch (spec-wiring 1b, startup steps 6 and 7). A plan's dispatch is the plan's
+        last step, so the plan is then done."""
         superseded = spawn_superseded(self.oracle.store.job.get(item.job), item.run_number)
         at = self.clock.now()
-        if item.pending is not None:
+        if item.plan is None:  # a start, pending in the store when the engine has one
             if superseded is not None:
-                self.journal.append(
-                    Record(
-                        at,
-                        "dispatch_pending",
-                        None,
-                        None,
-                        {"event": "discharged", "pending": item.pending, "dispatch": None},
+                if item.pending is not None:
+                    assert self.journal is not None  # a pending record is the store's
+                    self.journal.append(
+                        Record(
+                            at,
+                            "dispatch_pending",
+                            None,
+                            None,
+                            {"event": "discharged", "pending": item.pending, "dispatch": None},
+                        )
                     )
-                )
+                return
+            if self._must_wait(item.job, item.run_number):
+                self._held_starts.append(item)  # until its job's group is gone (DL-426)
                 return
             self._dispatched[item.job] = max(self._dispatched.get(item.job, 0), item.run_number)
             self.spawn(item.job, item.run_number, discharges=item.pending)
             return
-        assert item.plan is not None and item.attempt is not None  # `Deferred`'s two kinds
+        assert item.attempt is not None  # a plan's replacement names its attempt
         if superseded is not None or item.job not in self._dispatchable():
-            self.journal.append(follow_up_done(item.plan, item.step, None, at))
+            if self.journal is not None:
+                self.journal.append(follow_up_done(item.plan, item.step, None, at))
+        elif self._must_wait(item.job, item.run_number, item.plan):
+            self._waiting_plans.add(item.plan)  # performed once the group is gone (DL-426)
             return
-        self.spawn(
-            item.job,
-            item.run_number,
-            attempt=item.attempt,
-            ordinal=item.ordinal,
-            env=item.env,
-            step=(item.plan, item.step),
-        )
+        else:
+            self.spawn(
+                item.job,
+                item.run_number,
+                attempt=item.attempt,
+                ordinal=item.ordinal,
+                env=item.env,
+                step=(item.plan, item.step),
+                after=item.after,
+            )
+        self._step_done(item.plan, item.step)
 
     def _takes_due_work(self, work: _Work, instant: datetime) -> bool:
         """Whether the loop's chosen act processes an input, a timer or a tick due at or before
@@ -1115,31 +1764,39 @@ class Engine:
         env: Mapping[str, str] | None = None,
         discharges: int | None = None,
         step: tuple[str, int] | None = None,
+        after: str | None = None,
     ) -> bool:
         """Start run `run_number` of `job` unless the oracle has moved past it; True if it was
         started. The `dispatch` record, with the attempt's freshly minted id, is durable before
-        the adapter task exists (journal before effect, ss7; DL-118). `attempt`, `ordinal` and
-        `env` name a replacement attempt a plan chose; `discharges` a pending start this
-        dispatch ends; `step` the plan step whose done mark rides with the record."""
+        the adapter task exists (journal before effect, ss7; DL-118). `attempt`, `ordinal`,
+        `env` and `after` name a replacement attempt a plan chose; `discharges` a pending start
+        this dispatch ends; `step` the plan step whose done mark rides with the record.
+
+        An observed adapter's attempt gets its `ATTEMPT` instance first, keyed by its run id, so
+        the tier knows it before anything spawns (spec-wiring 2b)."""
         if spawn_superseded(self.oracle.store.job.get(job), run_number) is not None:
             return False  # the batch ended the run, or another start overtook it (DL-232)
         job_ir = self.oracle.catalog.jobs[job]  # `_dispatchable` holds catalog jobs only
         adapter = self.adapters[job_ir.job_type]
-        stale = self._live.pop(job, None)
-        if stale is not None:
-            # One live attempt per job. An injected INACTIVE (DL-235) leaves the earlier run live
-            # in the shell while the oracle's row is not STARTING/RUNNING/QUE_WAIT, so the
-            # oracle's DL-81 refusal does not block a restart: the job goes through STARTJOB
-            # again and this start is for the new run. The earlier task is cancelled through the
-            # adapter's own ladder; the vendor would run both.
-            self._kill(stale)
         run_id = attempt or str(uuid.uuid4())
         spool = self.spool_of(job_ir, run_number, ordinal)
         now = self.clock.now()
         row = self.oracle.store.job.get(job)
         scheduled = row.status_at if row is not None and row.status_at is not None else now
         # the invocation the process is given is the one the record holds (crash spec)
-        invocation = dict(env) if env else invocation_env(job, run_number, scheduled, run_id)
+        invocation = dict(env) if env else invocation_env(job, run_number, scheduled, ordinal)
+        held = self.evidence.get(job)
+        if held is not None and held["run_number"] != run_number:
+            del self.evidence[job]  # the evidence stays until the job's next start (spec-crash)
+        observed = isinstance(adapter, ObservedAdapter)
+        if observed:
+            if spool is None:
+                raise EngineError("command dispatch needs a run_root (real domain only)")
+            self.attempts.dispatch(run_id)
+            self._facts[run_id] = AttemptFacts(
+                run_id, job, run_number, ordinal, spool, invocation, after
+            )
+            self._job_attempt[job] = run_id
         if self.journal is not None:
             records = [
                 dispatch_record(
@@ -1151,12 +1808,21 @@ class Engine:
                     ordinal=ordinal,
                     env=invocation,
                     discharges=discharges,
+                    after=after,
                 )
             ]
             if step is not None:
                 records.append(follow_up_done(step[0], step[1], self.journal.next_seq(), now))
             self.journal.append(*records)
-        self._launch(job_ir, run_number, adapter, run_id=run_id, spool=spool, env=invocation)
+        self._launch(
+            job_ir,
+            run_number,
+            adapter,
+            run_id=run_id,
+            spool=spool,
+            env=invocation,
+            observed=observed,
+        )
         return True
 
     def _launch(
@@ -1168,14 +1834,30 @@ class Engine:
         run_id: str | None = None,
         spool: Path | None = None,
         env: Mapping[str, str] | None = None,
+        observed: bool = False,
     ) -> None:
         """Create the adapter task, from `spawn` and from a restart's FW re-dispatch, an
         idempotent re-read under the run's recorded `run_id`. None lets the adapter mint its
-        own. `env` is the invocation the process is given."""
+        own. `env` is the invocation the process is given. An `observed` attempt's adapter
+        reports to the attempt tier instead of completing the run itself."""
         loop = asyncio.get_running_loop()
-        task = loop.create_task(
-            self._run_adapter(job_ir, run_number, adapter, run_id, spool, dict(env or {}))
-        )
+        if observed:
+            assert run_id is not None and isinstance(adapter, ObservedAdapter)
+            launch = self._facts[run_id].launch = Launch(Observer(self.stops, run_id), spool)
+            ctx = AdapterContext(
+                clock=self.clock,
+                run_root=self.run_root,
+                run_id=run_id,
+                fence=self.fence,
+                spool=spool,
+                env=dict(env or {}),
+            )
+            task = loop.create_task(adapter.observe(job_ir, run_number, ctx, launch))
+            self._observed_tasks[id(task)] = run_id
+        else:
+            task = loop.create_task(
+                self._run_adapter(job_ir, run_number, adapter, run_id, spool, dict(env or {}))
+            )
         task.add_done_callback(lambda _t: self._activity.set())
         self._live[job_ir.name] = _LiveRun(run_number=run_number, task=task, attempt=run_id)
 
@@ -1188,6 +1870,9 @@ class Engine:
         Anyone parked on a decision is told first (S3) that their input never reached admission,
         so nothing in the log refers to it."""
         for _, _, pending in self._queue:
+            if pending.reply is not None and not pending.reply.done():
+                # a stop queued behind the one that stopped the engine: it is answered too
+                pending.reply.set_result(self.lifecycle.state)
             if pending.future is not None and not pending.future.done():
                 pending.future.set_exception(
                     AdmissionRefused(
@@ -1199,9 +1884,12 @@ class Engine:
         self._live.clear()
         self._reaping = []
         self._killed.clear()
+        self.stops.cancel_all()
         for task in tasks:
             task.cancel()
         results = await asyncio.gather(*tasks, return_exceptions=True)
+        # the stop ladders end within their grace; a ladder that raised was reported already
+        await asyncio.gather(self.attempts.join(), return_exceptions=True)
         for task, result in zip(tasks, results, strict=True):
             if id(task) in self._corpses_raised:
                 continue  # _settle already raised this failure to a caller
@@ -1236,7 +1924,7 @@ class Engine:
             # step, marked done with the admission that feeds it (spec-wiring 1b)
             self.journal.append(
                 outcome_record(run_id, job_ir.name, run_number, outcome_kind(result), payload, at),
-                plan_record(run_id, job_ir.name, run_number, "complete", [_feed(payload)], at),
+                plan_record(run_id, job_ir.name, run_number, "complete", [feed_step(payload)], at),
             )
             step = (run_id, 0)
         # source="adapter" makes this a COMPLETION, subject to the ss4 stale gate
@@ -1258,6 +1946,8 @@ class Engine:
         applied and dispatched: a fully applied boundary."""
         if self.settings is None or self.journal is None or not self.at_applied_boundary:
             return
+        if self.draining:
+            return  # the drain ends in its own snapshot; the restart must see `draining`
         now = self.clock.now()
         if self._snapshot_at is None:
             self._snapshot_at = now
@@ -1282,6 +1972,7 @@ class Engine:
             position=journal.position,
             config_rev=self.config_rev,
             open_table=journal.open,
+            evidence=self.evidence,
             runs=run_history(
                 self.restored_runs,
                 self.oracle.trace(),
@@ -1322,7 +2013,16 @@ def outcome_kind(result: object) -> str:
     return "natural"
 
 
-def _feed(payload: Mapping[str, object]) -> dict[str, Any]:
+def _evidence_of(outcome: AttemptOutcome) -> dict[str, Any]:
+    """What an observed attempt's `outcome` record keeps: the wrapper's record, or the error
+    of a spawn that failed."""
+    body: dict[str, Any] = {} if outcome.record is None else asdict(outcome.record)
+    if outcome.error is not None:
+        body["error"] = outcome.error
+    return {key: value for key, value in body.items() if value is not None}
+
+
+def feed_step(payload: Mapping[str, object]) -> dict[str, Any]:
     """A plan step that feeds the completion STATUS `payload` carries."""
     return {"step": "feed", "payload": dict(payload)}
 

@@ -280,7 +280,9 @@ class DeferToOpening:
 
 @dataclass(frozen=True)
 class StatusInput(Injection):
-    """An injected STATUS with the exit code its write records."""
+    """An injected STATUS with the exit code its write records. Its `hold` is the engine's
+    interruption hold: a FAILURE that also puts the job ON_HOLD in the same transition, before
+    its own start or a dependent's is evaluated (DL-424, spec-crash)."""
 
     code: int | None = field(default=None, compare=False)
 

@@ -35,12 +35,12 @@ from dsl41.runner_config import (
     Configuration,
     EngineSettings,
     RuntimeProfile,
-    catalog_hash,
     load_settings,
     runtime_hash,
     runtime_profile_from_cli,
     to_us,
 )
+from dsl41.reload_diff import catalog_hash_v2 as catalog_hash
 from dsl41.runner_journal import open_reader
 from dsl41.runner_startup import resume_run, start_run
 

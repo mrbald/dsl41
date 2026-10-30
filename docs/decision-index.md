@@ -128,7 +128,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-115 | the directory is not the baseline |  |
 | DL-116 | the lineage fence |  |
 | DL-117 | `baseline_id` is the period's, and derived | [docs/control-protocol.md](control-protocol.md) |
-| DL-118 | the atomic `decision` record and control-protocol v3 | [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/fw-observation.md](blocks/fw-observation.md), [docs/blocks/subscription.md](blocks/subscription.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md), [docs/state-machines.md](state-machines.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
+| DL-118 | the atomic `decision` record and control-protocol v3 | [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/attempts.md](blocks/attempts.md), [docs/blocks/fw-observation.md](blocks/fw-observation.md), [docs/blocks/subscription.md](blocks/subscription.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md), [docs/state-machines.md](state-machines.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
 | DL-119 | the seal artifact and the canonical form |  |
 | DL-120 | capacity decomposed | [docs/blocks/capacity.md](blocks/capacity.md), [docs/state-machines.md](state-machines.md) |
 | DL-121 | `run_id` is minted in the effect; SPAWN idempotency is durable; FW has a spool |  |
@@ -237,7 +237,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-223 | The service drill and the release rehearsal ran and pass on main; DL-218's NOT RUN is retired |  |
 | DL-224 | `run --resume` refuses a root its anchor does not name; DL-219's open item closes | [docs/runner-design.md](runner-design.md) |
 | DL-225 | Specification review: one document per pass, present state only, reconciled with the code; per-document stamps and an advisory gate line | [docs/agent-workflow.md](agent-workflow.md), [docs/writing.md](writing.md) |
-| DL-226 | Resume kill of a surviving command group is a verified-leader group kill, and E8's TERMINATED pin is vendor-cited | [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/runner-design.md](runner-design.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
+| DL-226 | Resume kill of a surviving command group is a verified-leader group kill, and E8's TERMINATED pin is vendor-cited | [docs/blocks/attempts.md](blocks/attempts.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/runner-design.md](runner-design.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
 | DL-227 | protocol-evolution reconciliation: the absent-version rule is restated per row, and three readers get the refusals the matrix promises | [docs/protocol-evolution.md](protocol-evolution.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
 | DL-228 | control-protocol reconciliation: the DISARM audit distinction reads the target's revision, the scalar-string rule covers the fields a verb reads, and a... | [docs/control-protocol.md](control-protocol.md) |
 | DL-229 | supervisor-protocol reconciliation: nine items ruled | [docs/blocks/wrapper.md](blocks/wrapper.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
@@ -246,7 +246,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-232 | concurrency-model reconciliation: a strictly earlier timer goes before a later command, one KILL per run per batch, and a held SPAWN applies only to a job still... | [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/engine-loop.md](blocks/engine-loop.md), [docs/runner-design.md](runner-design.md) |
 | DL-233 | The DISARM audit distinction is the trace reason, not the revisions map | [docs/control-protocol.md](control-protocol.md) |
 | DL-234 | Supersession is decided before the routing hold, and a run has its one identity from the instant its SPAWN is planned | [docs/blocks/engine-loop.md](blocks/engine-loop.md), [docs/glossary.md](glossary.md) |
-| DL-235 | CHANGE_STATUS INACTIVE on a launched run: no KILL, the stale-completion gate rejects a completion whose row is not STARTING or RUNNING, and the state-machine... | [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/box-execution.md](blocks/box-execution.md), [docs/blocks/job-lifecycle.md](blocks/job-lifecycle.md), [docs/runner-design.md](runner-design.md), [docs/state-machines.md](state-machines.md), [docs/statechart-engine.md](statechart-engine.md) |
+| DL-235 | CHANGE_STATUS INACTIVE on a launched run: no KILL, the stale-completion gate rejects a completion whose row is not STARTING or RUNNING, and the state-machine... | [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/attempts.md](blocks/attempts.md), [docs/blocks/box-execution.md](blocks/box-execution.md), [docs/blocks/job-lifecycle.md](blocks/job-lifecycle.md), [docs/runner-design.md](runner-design.md), [docs/state-machines.md](state-machines.md), [docs/statechart-engine.md](statechart-engine.md) |
 | DL-236 | The workflow examples get an opt-in integration lane at the operator's interfaces | [docs/agent-workflow.md](agent-workflow.md) |
 | DL-237 | Joint review of the workflow examples: what was fixed and what stands | [README.md](../README.md) |
 | DL-238 | CLI help is user prose; design citations live in code comments |  |
@@ -434,8 +434,9 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-421 | access-model: the release and estate verbs get their tiers, and the release train's sudo grant is a door of its own, outside the gate | [docs/access-model.md](access-model.md) |
 | DL-422 | The six estate verbs read the manifest through `--manifest`; `estate args` and its `eval` are gone | [docs/access-model.md](access-model.md), [docs/authoring.md](authoring.md) |
 | DL-423 | Release verbs read from their command line: `rollback NAME`, `requalify NAME`, and the OFF_HOLD sweep is `off-hold-all` | [docs/access-model.md](access-model.md), [docs/control-protocol.md](control-protocol.md) |
-| DL-424 | The 2.0.0 charter: three things, a production ceiling, and the owner's rulings | [docs/blocks/attempts.md](blocks/attempts.md), [docs/control-protocol.md](control-protocol.md), [docs/ir-design.md](ir-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-424 | The 2.0.0 charter: three things, a production ceiling, and the owner's rulings | [docs/blocks/attempts.md](blocks/attempts.md), [docs/control-protocol.md](control-protocol.md), [docs/ir-design.md](ir-design.md), [docs/simulation-coverage.md](simulation-coverage.md), [docs/state-machines.md](state-machines.md) |
 | DL-425 | Hosts, effects and the epoch leave the engine; the dispatch record precedes the launch |  |
-| DL-426 | The attempt and engine lifecycle tiers; an attempt settles only when its plan is done |  |
+| DL-426 | The attempt and engine lifecycle tiers; an attempt settles only when its plan is done | [docs/blocks/attempts.md](blocks/attempts.md), [docs/control-protocol.md](control-protocol.md) |
 | DL-427 | The update machine, its admission and its application, unwired; one update in flight |  |
 | DL-428 | The store replaces the journal; `run` resumes by default; the segment record is cut |  |
+| DL-429 | The attempt and engine lifecycle tiers run the engine's stops; `engine stop`; the interruption hold is one oracle transition |  |

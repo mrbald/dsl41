@@ -266,6 +266,121 @@ def off_hold_all(
     raise typer.Exit(0 if all_applied else 1)
 
 
+#: how often `engine stop --wait` looks for the engine's end
+STOP_POLL_S = 0.2
+
+engine_app = typer.Typer(
+    no_args_is_help=True,
+    help="Act on the engine process itself.",
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+
+
+@engine_app.command("stop")
+def engine_stop(
+    socket_path: Path = _SOCKET_OPT,
+    wait: bool = typer.Option(
+        False,
+        "--wait",
+        help="Return only once the engine has exited: its socket is gone and its run root's"
+        " leader.lock is free. An engine still starting (the lock held, no socket yet) gets"
+        " the stop as soon as it serves; one not running (the lock free) counts as stopped.",
+    ),
+) -> None:
+    """Drain the running engine, as SIGTERM does.
+
+    The engine stops admitting mutations (they are refused with
+    engine_draining), asks every running job to stop (TERM, then KILL
+    after the grace), records how each ended, and exits 0. A second
+    stop moves the drain's deadline to now. This is the systemd unit's
+    ExecStop, with --wait. It needs the adm tier when an access map is
+    armed.
+
+    Exit codes: 0 the engine took the stop (with --wait: and exited, or
+    no engine holds the run root); 2 the engine refused it or could not
+    be reached.
+    """
+    # Design: spec-drain, docs/control-protocol.md ss2
+    import json as json_mod
+
+    from dsl41.runner_control import ControlClientError, roundtrip
+
+    try:
+        response = roundtrip(socket_path, {"cmd": "engine_stop"})
+    except ControlClientError as exc:
+        if not wait or exc.delivered:
+            raise typer.Exit(refuse(exc)) from exc
+        retried = _stop_once_reachable(socket_path)
+        if retried is None:
+            typer.echo(f"engine not running: {exc}")
+            return
+        response = retried
+    typer.echo(json_mod.dumps(response, sort_keys=True))
+    if not response.get("ok"):
+        raise typer.Exit(2)
+    if wait:
+        _wait_for_exit(socket_path)
+
+
+def _stop_once_reachable(socket_path: Path) -> dict[str, Any] | None:
+    """`--wait` with no socket to answer: a free `leader.lock` means no engine, so None; a held
+    one means an engine still starting, so the stop is sent again every poll until it is
+    delivered. A send that may have arrived is an unknown outcome and exits 2."""
+    import time
+
+    from dsl41.runner_control import ControlClientError, roundtrip
+
+    while _lock_held(socket_path.parent / "leader.lock"):
+        time.sleep(STOP_POLL_S)
+        try:
+            return roundtrip(socket_path, {"cmd": "engine_stop"})
+        except ControlClientError as exc:
+            if exc.delivered:
+                raise typer.Exit(refuse(exc)) from exc
+    return None
+
+
+def _wait_for_exit(socket_path: Path) -> None:
+    """Block until the engine behind `socket_path` has exited: the socket refuses connects,
+    then the run root's `leader.lock` is free. The engine releases the lock last."""
+    import time
+
+    while _answers(socket_path):
+        time.sleep(STOP_POLL_S)
+    while _lock_held(socket_path.parent / "leader.lock"):
+        time.sleep(STOP_POLL_S)
+
+
+def _answers(socket_path: Path) -> bool:
+    import socket as socket_mod
+
+    with socket_mod.socket(socket_mod.AF_UNIX) as probe:
+        try:
+            probe.connect(str(socket_path))
+        except OSError:
+            return False
+    return True
+
+
+def _lock_held(path: Path) -> bool:
+    """Whether another process holds `path`'s flock. A shared probe, released at once, takes
+    nothing from a waiting engine."""
+    import fcntl
+    import os
+
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except FileNotFoundError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+    return False
+
+
 def ui(socket_path: Path = _SOCKET_OPT) -> None:
     """Open the terminal UI against a running engine.
 
@@ -478,14 +593,20 @@ def query(
         # so a client wanting a single revision need not unwrap a map
         request.update({"name": name[0]} if verb == "global" else {"names": list(name)})
     if verb != "subscribe":
+        from dsl41.runner_control import status_label
+
         response = _control_roundtrip(socket_path, request)
         if brief and response.get("ok"):
-            for job_name in sorted(response.get("jobs", {})):
-                row = response["jobs"][job_name]
+            # the status field is as wide as its widest label, so an attempt beside a status
+            # ("STOPPING (engine_stop)") keeps the columns after it aligned (DL-426)
+            rows = response.get("jobs", {})
+            width = max([10, *(len(status_label(row)) for row in rows.values())])
+            for job_name in sorted(rows):
+                row = rows[job_name]
                 flags = _brief_flags(row)
                 exit_code = row.get("exit_code")
                 typer.echo(
-                    f"{job_name:<44} {row.get('status', ''):<10}"
+                    f"{job_name:<44} {status_label(row):<{width}}"
                     f" {(row.get('status_at') or '-'):<26}"
                     f" run {row.get('run_number', 0):<4}"
                     f" exit {'-' if exit_code is None else exit_code:<4}"

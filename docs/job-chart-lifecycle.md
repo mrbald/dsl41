@@ -88,6 +88,7 @@ hold_off = hold_on + FORCE_STARTJOB [force_clears]
         || hold_on + ON_NOEXEC on its box
 hold_on = hold_off + ON_HOLD [not_live_or_queued]
        || hold_off + ON_HOLD [queued]
+       || hold_off + STATUS [injects_hold]
        || hold_off + box running [has_auto_hold]
 ```
 
@@ -124,4 +125,4 @@ held = reserved + leave STARTING or RUNNING [keeps_held]
 - Internal rows: 35. The configuration does not move: relays, moments and the arm's writes.
 - Self-transitions: 9. A state is left and entered again.
 
-Shown: 69. Folded: 81. Rows in the chart: 150.
+Shown: 70. Folded: 81. Rows in the chart: 151.

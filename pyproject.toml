@@ -219,6 +219,8 @@ include = [
     "src/dsl41/runner_access.py",
     "src/dsl41/runner_adapters.py",
     "src/dsl41/runner_admission.py",
+    # the attempt and engine lifecycle tiers and the engine's side of them (DL-426)
+    "src/dsl41/runner_attempts.py",
     "src/dsl41/runner_clock.py",
     "src/dsl41/runner_control.py",
     "src/dsl41/runner_journal.py",
@@ -226,6 +228,7 @@ include = [
     "src/dsl41/runner_procid.py",
     "src/dsl41/runner_scheduler.py",
     "src/dsl41/runner_startup.py",
+    "src/dsl41/runner_stops.py",
     "src/dsl41/runner_wrapper.py",
     # the shared state-machine core and its registry
     "src/dsl41/state_machine.py",

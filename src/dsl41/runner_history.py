@@ -35,17 +35,16 @@ five decisions shape it.
 
 3. **An incomplete run gets no duration.** A run with no journal-visible and no trace close
    gets `ended_at: None, duration_s: None`. So does a `STATUS` input from `source="reconcile"`
-   whose payload has no `ended_at`: `_inject_completion` and `resolve_spool` in
-   `runner_startup.py` write it only when status.json supplied a true one; E7
-   (`exit_status_unobservable`) and the "wrapper lost; killed at resume" TERMINATED case omit
-   it because the process's real end is unknown and the event's own `at` is only when the
-   engine noticed. Both rows keep their recorded status and a null duration.
+   whose payload has no `ended_at`: a restart's plan step (`runner.Engine.record_outcome`)
+   writes it only when status.json supplied a true one, and a feed with no record omits it
+   because the process's real end is unknown and the event's own `at` is only when the
+   engine noticed. Such a row keeps its recorded status and a null duration.
 
 4. **Segmentation follows the job, not the estate.** Every row carries the `catalog_hash` of its
    segment and this job's own `job_hash`, in every `--format`. The break line `--format table`
    prints between two consecutive rows of one job fires on `job_hash`, falling back to
    `catalog_hash` only when either row has none. The estate hash moves for every job when any
-   job changes (`runner_config.catalog_hash`), so a break on it would mark the whole estate.
+   job changes (`reload_diff.catalog_hash_v2`), so a break on it would mark the whole estate.
    `runner_config.job_fingerprints` states what the per-job hash can say: it fingerprints the
    resolved definition, so an estate whose placeholders vary per run gets no more than
    `catalog_hash` gave it. Rows sort by (job, started_at), so a break lands where that job changed.
@@ -373,9 +372,8 @@ def _box_rows(
 
 def _journal_ended_at(completion: dict[str, Any] | None) -> datetime | None:
     """The terminal STATUS input's truthful end time, or None (decision 3): no completion, or a
-    reconcile completion whose payload has no `ended_at` (E7 / "wrapper lost; killed at
-    resume"; `_inject_completion` writes the key only when `resolve_spool` returned a real
-    one)."""
+    reconcile completion whose payload has no `ended_at` (a restart's plan step writes the
+    key only when the attempt's status.json carried a real one)."""
     if completion is None:
         return None
     payload = completion["payload"]
@@ -720,7 +718,7 @@ def read_spool(
 ) -> SpoolRead | None:
     """One run's spool, validated against (job, run_number) (supervisor-protocol ss3's frozen
     spawn.json/status.json shapes). None when spawn.json is missing, unparseable, or names a
-    different run (the rule `runner_adapters.resolve_spool` applies live).
+    different run (the rule the restart's step 5 applies, `runner_startup._settle_attempt`).
 
     `bound_run_id` is the identity the run's durable SPAWN minted (DL-118): a spool record
     naming a different `run_id` is a stranger's and reads as absent, not refused, so one corrupt
