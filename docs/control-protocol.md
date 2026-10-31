@@ -490,6 +490,17 @@ why: `stop ladder running`, or `stop in progress` when that is all. Clients show
 update_stop)", "STOPPING (ladder failed: …)", "STARTING (held: stop
 ladder running)".
 
+An addition to this section (the process cookie, wrapper protocol
+`DSL41_COOKIE`, DL-431): the attempt of the job's current run that is `ENDED`
+while its stop ladder still runs carries `held: true` too, since it
+keeps the job's starts back. Its `note` is one the engine writes:
+`leaked: n, stopping` while the ladder stops the n processes the
+command left when it exited, `scan failed: <reason>` while a reading of
+`/proc` fails and nothing is released, and `command survived its KILL`
+for a process still there `grace_kill_s` after the ladder's KILL. The
+keys and their types are unchanged. Example: "SUCCESS (held: leaked: 1,
+stopping)".
+
 `interrupted` is present **only** while a job is held for an interrupted
 attempt, until its next start (spec-crash): the attempt's display name and
 run id, the outcome's kind and cause, its start and end, the signal or exit
@@ -650,6 +661,13 @@ does not read them keeps working (§2):
   completion (`"event": "done"`, with `step` and `seq`). A restart that
   finds such an attempt open finishes its ladder before any replacement
   of it is launched. Neither record is on the stream (DL-426).
+- An addition (the process cookie, DL-431): a snapshot's open attempt that is
+  closing carries an optional `outcome`, the kind of its committed
+  outcome (`natural`, `stopped`, …), in the snapshot DL-428 defines. A
+  restart leaves a `natural` one's processes running under
+  `process-leak=leak` and finishes every other one's stop. A snapshot
+  written before the key has none, and its closing attempt is finished
+  as a stop.
 
 **A cursor below the earliest retained record gets a gap marker.** The
 server sends one line, `{"gap": true, "earliest_retained": <index>}`,

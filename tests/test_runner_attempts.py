@@ -396,6 +396,8 @@ class World:
     unkillable: set[int] = field(default_factory=set)
     #: a ladder that swallows its cancellation and returns
     swallow_cancel: bool = False
+    #: `process-leak`: True runs the ladder on what a command left, False leaves it
+    terminate_leaks: bool = True
     #: what each attempt's spool holds now: (spawn.json, status.json)
     spool: dict[str, tuple[dict[str, Any] | None, dict[str, Any] | None]] = field(
         default_factory=dict
@@ -426,6 +428,13 @@ class World:
 
     def command_survived(self, attempt: str) -> None:
         self.log.append(("command_survived", attempt))
+
+    async def outlives(self, pgid: int, start_token: str, grace_kill_s: float) -> bool:
+        return pgid in self.alive
+
+    def leaked(self, attempt: str) -> bool:
+        self.log.append(("leaked", attempt))
+        return self.terminate_leaks
 
     def kill_wrapper(self, attempt: str) -> None:
         self.log.append(("kill_wrapper", attempt))
@@ -1136,3 +1145,67 @@ def test_an_attempt_tier_alone_lets_its_ladder_end() -> None:
         assert not attempts.ladder_running(job) and job in world.timers
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("terminate", [True, False], ids=["terminate", "leak"])
+def test_a_command_that_leaves_processes_behind_has_leaked_them(terminate: bool) -> None:
+    """A leader that exits on its own while `command_alive` still finds its command has
+    leaked processes. Under `process-leak=terminate` the ladder runs on them before the
+    outcome is journaled, so the attempt stays unsettled until the ladder ends; under `leak`
+    nothing is signalled and the attempt settles at once. An exit with nothing left leaks
+    nothing."""
+
+    async def scenario() -> None:
+        world = World(alive={7}, terminate_leaks=terminate)
+        attempts, _ = _tiers(world)
+        job = _running(attempts, "j", 7)
+        attempts.status_recorded(job, exited(0))
+        names = [entry[0] for entry in world.log]
+        assert names.index("leaked") < names.index("outcome")
+        attempts.plan_done(job)
+        assert attempts.ladder_running(job) is terminate
+        assert (job in attempts.unsettled()) is terminate
+        await attempts.join()
+        await _turn()
+        assert (("TERM", 7) in world.log) is terminate
+        assert job not in attempts.unsettled() and not attempts.held(job)
+        other = attempts.dispatch(attempt_id("k", 1, 1))
+        attempts.spawn_recorded(other, spawn(8))
+        attempts.status_recorded(other, exited(0))
+        assert ("leaked", other) not in world.log
+
+    asyncio.run(scenario())
+
+
+def test_a_hold_lifted_during_a_drain_lets_the_drain_end_clean() -> None:
+    """Opus M1, a 2b latent bug: a held attempt already ENDED whose plan is done is unsettled
+    only by its hold. Once `group_gone` lifts it during a drain, the drain ends clean at once,
+    for an attempt of this tier and for one a restart adopted held."""
+
+    async def scenario() -> None:
+        world = World(alive={7}, ignores_term={7}, unkillable={7})
+        attempts, engine = _tiers(world)
+        engine.replay_done()
+        job = _running(attempts, "j", 7)
+        attempts.status_recorded(job, exited(0))  # leaked: its ladder cannot end the group
+        attempts.plan_done(job)
+        await attempts.join()
+        await _turn()
+        assert attempts.held(job)
+        attempts.adopt_held("adopted")
+        engine.stop_requested(REQUEST)
+        assert engine.state == "DRAINING"
+        attempts.group_gone(job)
+        assert engine.state == "DRAINING"  # the adopted one still holds the drain
+        attempts.group_gone("adopted")
+        assert engine.state == "STOPPED" and ("clean_shutdown",) in world.log
+
+    asyncio.run(scenario())
+
+
+def test_a_hold_lifted_with_no_engine_tier_tells_nobody() -> None:
+    """With no engine tier listening, `group_gone` lifts the hold and calls nobody."""
+    attempts = AttemptTier(World(), grace_term_s=GRACE_TERM, grace_kill_s=GRACE_KILL)
+    attempts.adopt_held("adopted")
+    attempts.group_gone("adopted")
+    assert attempts.unsettled() == ()

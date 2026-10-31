@@ -31,7 +31,7 @@ import sys
 import time
 import uuid
 
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -395,12 +395,16 @@ class LocalCommandAdapter:
         lifeline_r, launch.lifeline_w = os.pipe()
         try:
             spec["lifeline_fd"] = lifeline_r
+            # the wrapper carries the attempt's cookie too; every reading of what is left leaves
+            # it out by the pid `spawn.json` names (docs/wrapper-protocol.md)
+            cookie = ctx.env.get(_procid.COOKIE_ENV)
             try:
                 proc = await asyncio.create_subprocess_exec(
                     sys.executable,
                     str(_WRAPPER_PATH),
                     stdin=asyncio.subprocess.PIPE,
                     pass_fds=(lifeline_r,),
+                    env=None if cookie is None else {**os.environ, _procid.COOKIE_ENV: cookie},
                 )
             except OSError as exc:
                 launch.observer.spawn_failed(f"wrapper spawn failed: {exc}")
@@ -503,8 +507,11 @@ def group_exists(pgid: int) -> bool:
 
 def group_has_live_member(pgid: int) -> bool:
     """Whether the process group has a member that is not a zombie: a member that outlived a
-    stop, as opposed to a dead leader its parent has not reaped yet. A listing that fails
-    proves nothing gone, so it reads as a live member (DL-426)."""
+    stop, as opposed to a dead leader its parent has not reaped yet. Linux reads /proc
+    (`runner_procid.linux_group_has_live_member`); elsewhere `ps` lists the groups. A listing
+    that fails proves nothing gone, so it reads as a live member (DL-426)."""
+    if sys.platform.startswith("linux"):
+        return _procid.linux_group_has_live_member(pgid)
     listing = subprocess.run(
         ["ps", "-A", "-o", "pgid=,stat="],
         capture_output=True,
@@ -521,14 +528,40 @@ def group_has_live_member(pgid: int) -> bool:
     return False
 
 
-async def stop_ladder(pgid: int, start_token: str, grace_term_s: float) -> None:
-    """The stop ladder on a command's group (spec-drain): TERM, wait up to `grace_term_s` for
-    the leader to go, then KILL. TERM goes only to a group whose leader is still the recorded
-    process (the pid-reuse guard). The KILL goes while the leader lives, and also once it is
-    gone while the group still exists, since a member that ignores TERM must not outlive the
-    stop (DL-226; under dash `sh` leads the group and its children can outlive it). A group
-    that vanished gets nothing; a new leader taking that exact id inside the window is the
-    ladder's stated hazard."""
+async def stop_ladder(
+    pgid: int,
+    start_token: str,
+    grace_term_s: float,
+    members: Callable[[], Mapping[int, str]] | None = None,
+) -> None:
+    """The stop ladder on a command (spec-drain): TERM, wait up to `grace_term_s`, then KILL.
+    The ladder ends at its KILL.
+
+    `members`, where the process cookie can be read, is one reading of everything left of the
+    attempt, by pid with each one's start token (`runner_stops.EngineStops.left`). Each step
+    reads it afresh and signals every pid once, by itself, through a pidfd after its start
+    token is checked (`runner_procid.signal_ours`); no group signal is sent. A process that
+    moves between groups gets one TERM and one KILL; one forked after a reading gets the next
+    step's. The wait ends early once every process the TERM reached is gone.
+
+    Without `members` the ladder runs on the group: TERM goes only to a group whose leader is
+    still the recorded process (the pid-reuse guard). The KILL goes while the leader lives,
+    and also once it is gone while the group still exists, since a member that ignores TERM
+    must not outlive the stop (DL-226; under dash `sh` leads the group and its children can
+    outlive it). A group that vanished gets nothing; a new leader taking that exact id inside
+    the window is the ladder's stated hazard."""
+    if members is not None:
+        termed = dict(members())
+        for pid, start in termed.items():
+            _procid.signal_ours(pid, start, signal.SIGTERM)
+        deadline = time.monotonic() + grace_term_s
+        while time.monotonic() < deadline and any(
+            _procid.verify_alive(pid, start) for pid, start in termed.items()
+        ):
+            await asyncio.sleep(SPOOL_POLL_S)
+        for pid, start in members().items():
+            _procid.signal_ours(pid, start, signal.SIGKILL)
+        return
     if not _procid.verify_alive(pgid, start_token):
         return
     _procid.killpg_quiet(pgid, signal.SIGTERM)
