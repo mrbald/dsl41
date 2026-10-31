@@ -438,6 +438,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-425 | Hosts, effects and the epoch leave the engine; the dispatch record precedes the launch |  |
 | DL-426 | The attempt and engine lifecycle tiers; an attempt settles only when its plan is done | [docs/blocks/attempts.md](blocks/attempts.md), [docs/control-protocol.md](control-protocol.md) |
 | DL-427 | The update machine, its admission and its application, unwired; one update in flight |  |
-| DL-428 | The store replaces the journal; `run` resumes by default; the segment record is cut |  |
+| DL-428 | The store replaces the journal; `run` resumes by default; the segment record is cut | [docs/control-protocol.md](control-protocol.md) |
 | DL-429 | The attempt and engine lifecycle tiers run the engine's stops; `engine stop`; the interruption hold is one oracle transition |  |
 | DL-430 | Review rounds: a shape note before long rework; a fresh final review after it |  |
+| DL-431 | The process cookie and the leak rule: a process left behind when the command exits is a leak, terminated by default | [docs/blocks/attempts.md](blocks/attempts.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |

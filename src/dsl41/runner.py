@@ -187,6 +187,7 @@ from dsl41.runner_journal import (
 )
 from dsl41.runner_history import run_history
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, Proof
+from dsl41.runner_procid import COOKIE_ENV, cookie
 from dsl41.runner_store import Record, Store
 from dsl41.runner_scheduler import Scheduler
 from dsl41.runner_stops import (
@@ -513,6 +514,9 @@ class Engine:
         #: set once the engine has recorded `engine started`: at genesis, or by the loop at the
         #: end of a restart's recovery
         self.started = asyncio.Event()
+        #: this engine start's token, recorded in `engine started`: the first half of the
+        #: process cookie of every command attempt it dispatches (`runner_procid.cookie`)
+        self.instance = uuid.uuid4().hex
         self._init_tiers(settings or EngineSettings())
 
     def _init_tiers(self, settings: EngineSettings) -> None:
@@ -602,6 +606,7 @@ class Engine:
         self.attempts.dispatch(facts.run_id)
         self._facts[facts.run_id] = facts
         self._job_attempt[facts.job] = facts.run_id
+        self.stops.note_cookie(facts.run_id, facts.env)
 
     def request_stop(self) -> asyncio.Future[str]:
         """SIGTERM or `engine stop`: queue `stop_requested` as a step of the single writer, so
@@ -765,8 +770,11 @@ class Engine:
             "step": "dispatch",
             "attempt": replacement.run_id,
             "ordinal": replacement.ordinal,
-            # the same invocation, a new attempt (spec-crash)
-            "env": {**facts.env, ENV_ATTEMPT: str(replacement.ordinal)},
+            # the same invocation, a new attempt (spec-crash); its dispatch mints its own cookie
+            "env": {
+                **{k: v for k, v in facts.env.items() if k != COOKIE_ENV},
+                ENV_ATTEMPT: str(replacement.ordinal),
+            },
             "after": outcome.cause or outcome.kind,
         }
 
@@ -900,11 +908,14 @@ class Engine:
         self.held_groups[attempt] = pgid
         self.stops.watch_groups()
 
-    def held_at_restart(self, attempt: OpenAttempt, pgid: int) -> None:
-        """A restart found a closing attempt's group with a live member it cannot prove its
-        own, or one that outlived the ladder the restart ran: it sends nothing more, and the
+    def held_at_restart(
+        self, attempt: OpenAttempt, pgid: int, note: str = COMMAND_SURVIVED
+    ) -> None:
+        """A restart found something of a closing attempt's command left after the ladder it
+        ran: the held poll KILLs what it finds of it at each look, and `note` says why it is
+        held (`command survived its KILL`, or `scan failed: ...` while a reading fails). The
         attempt stays open and unsettled, with its rerun and every start of its job held,
-        until the group is gone (DL-426)."""
+        until a reading finds nothing of it left (DL-426)."""
         assert attempt.spool is not None  # a closing attempt is a command attempt
         facts = AttemptFacts(
             attempt.attempt,
@@ -914,23 +925,27 @@ class Engine:
             Path(attempt.spool),
             dict(attempt.env),
             attempt.after,
-            note=COMMAND_SURVIVED,
+            note=note,
             exited=True,
             closing=True,
         )
         self._facts[attempt.attempt] = facts
         self._job_attempt[attempt.job] = attempt.attempt
+        self.stops.note_cookie(attempt.attempt, attempt.env)
+        self.stops.hold(attempt.attempt, COMMAND_SURVIVED)
         self.attempts.adopt_held(attempt.attempt)
         self.hold_group(attempt.attempt, pgid)
         best_effort_report(
-            f"dsl41: {attempt.job}.{attempt.run_number}.{attempt.ordinal}: {COMMAND_SURVIVED};"
-            " nothing of the job starts until its group is gone"
+            f"dsl41: {attempt.job}.{attempt.run_number}.{attempt.ordinal}: {note};"
+            " nothing of the job starts until nothing of it is left"
         )
 
     def group_gone(self, attempt: str) -> None:
         """A held attempt's group has no live member left: the attempt ends or settles as its
-        ladder's end would have let it, and the starts its job kept back go (DL-426)."""
-        del self.held_groups[attempt]
+        ladder's end would have let it, and the starts its job kept back go (DL-426). A second
+        release of the same attempt does nothing."""
+        if self.held_groups.pop(attempt, None) is None:
+            return
         facts = self._facts[attempt]
         facts.note = None
         tier = self.attempts
@@ -1005,6 +1020,7 @@ class Engine:
         if known:
             self.attempts.forget(attempt)
         del self._facts[attempt]
+        self.stops.forget(attempt)
         if self._job_attempt.get(facts.job) == attempt:
             del self._job_attempt[facts.job]
 
@@ -1012,14 +1028,19 @@ class Engine:
         """The attempt `query` shows beside the job's status: its ordinal, its state, the cause
         of the stop it replaced, and why a stop could not be carried out (DL-426). An attempt
         that keeps the job's starts back (`blocked`) is shown with `held` whatever its state,
-        when its group is held or it belongs to an earlier run than the row's. Else None when
-        the job's current run has no unsettled observed attempt."""
+        when its group is held, it belongs to an earlier run than the row's, or it ended and
+        its ladder still runs (a leak being stopped). Else None when the job's current run has
+        no unsettled observed attempt."""
         row = self.oracle.store.job.get(job)
         blocking = self.blocked(job)
         held = (
             blocking is not None
             and row is not None
-            and (blocking in self.held_groups or self._facts[blocking].run_number < row.run_number)
+            and (
+                blocking in self.held_groups
+                or self._facts[blocking].run_number < row.run_number
+                or self._ended_with_its_ladder_running(blocking)
+            )
         )
         attempt = blocking if held else self._job_attempt.get(job)
         if attempt is None or row is None:
@@ -1045,6 +1066,12 @@ class Engine:
                 "note": facts.note or (LADDER_RUNNING if running else STOP_IN_PROGRESS),
             }
         return view
+
+    def _ended_with_its_ladder_running(self, attempt: str) -> bool:
+        tier = self.attempts
+        return (
+            tier.knows(attempt) and tier.state(attempt) == "ENDED" and tier.ladder_running(attempt)
+        )
 
     def _init_live_state(self) -> None:
         """The queue and the live-run books `__init__` starts empty."""
@@ -1792,6 +1819,9 @@ class Engine:
         if observed:
             if spool is None:
                 raise EngineError("command dispatch needs a run_root (real domain only)")
+            # the attempt's processes carry its cookie, and the record holds it for a restart
+            invocation[COOKIE_ENV] = cookie(self.instance, run_id)
+            self.stops.note_cookie(run_id, invocation)
             self.attempts.dispatch(run_id)
             self._facts[run_id] = AttemptFacts(
                 run_id, job, run_number, ordinal, spool, invocation, after

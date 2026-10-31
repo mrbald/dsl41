@@ -21,12 +21,14 @@ import fcntl
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 #: the `version` the Tier-0 wrapper stamps on `spawn.json` and `status.json`
 #: (docs/wrapper-protocol.md). ONE integer, held in the one module both readers
@@ -196,16 +198,50 @@ def current_boot_id() -> str:
     return "unknown"
 
 
-def _linux_stat_fields(pid: int) -> list[str] | None:
-    """The fields of /proc/<pid>/stat after the comm, in one read, or None when the pid is
-    gone. Split after the LAST ')', since comm may contain spaces and parens. fields[0] is
-    field 3 overall (the state), so field N is fields[N - 3]."""
+#: where Linux mounts procfs; a test points it at a stand-in tree
+_PROC = "/proc"
+
+
+def _stat_fields(raw: bytes) -> list[str]:
+    """The fields of one /proc/<pid>/stat line after the comm. Split after the LAST ')',
+    since comm may contain spaces and parens. fields[0] is field 3 overall (the state), so
+    field N is fields[N - 3]."""
+    return raw.decode("ascii", "replace").rsplit(")", 1)[1].split()
+
+
+def proc_entry_error(exc: OSError) -> Literal["gone", "foreign", "failed"]:
+    """What an error reading one /proc/<pid> entry means, for every reader of /proc that
+    decides what is left of a command: ENOENT or ESRCH, the process is gone; EPERM or EACCES,
+    a process that is not ours, since this uid can always open and read its own entries
+    (`hidepid=noaccess`, systemd's `ProtectProc=noaccess`, or an LSM hides the others');
+    anything else (EIO, EMFILE, ENFILE, ENOMEM) a failed reading, which proves nothing."""
+    if exc.errno in (errno.ENOENT, errno.ESRCH):
+        return "gone"
+    if exc.errno in (errno.EPERM, errno.EACCES):
+        return "foreign"
+    return "failed"
+
+
+def _read_stat(pid: int) -> list[str] | None:
+    """The fields of /proc/<pid>/stat after the comm (`_stat_fields`), in one read, or None
+    when the process is gone or not ours (`proc_entry_error`); a failed reading raises."""
     try:
-        with open(f"/proc/{pid}/stat", "rb") as f:
-            raw = f.read().decode("ascii", "replace")
+        with open(f"{_PROC}/{pid}/stat", "rb") as f:
+            raw = f.read()
+    except OSError as exc:
+        if proc_entry_error(exc) == "failed":
+            raise
+        return None
+    return _stat_fields(raw)
+
+
+def _linux_stat_fields(pid: int) -> list[str] | None:
+    """`_read_stat` for one known pid, None for any error: a check of a recorded process's
+    start token or state, where a pid that cannot be read is not the recorded process."""
+    try:
+        return _read_stat(pid)
     except OSError:
         return None
-    return raw.rsplit(")", 1)[1].split()
 
 
 def _linux_zombie(fields: list[str]) -> bool:
@@ -344,6 +380,162 @@ def killpg_quiet(pgid: int, sig: int) -> None:
         os.killpg(pgid, sig)
     except ProcessLookupError:
         pass  # the whole group is already gone
+
+
+def linux_group_pids(pgid: int) -> dict[int, str] | None:
+    """Every process that is not a zombie in process group `pgid`, by pid with its start token,
+    from field 5 (pgrp), field 3 (state) and field 22 (start ticks) of each /proc/<pid>/stat;
+    None when the reading failed: /proc cannot be listed, or an entry's error is a failed
+    reading (`proc_entry_error`). A process whose main thread exited while other threads run
+    is no zombie (`_linux_zombie`). The kernel keeps a group exactly: a process leaves it only
+    by `setsid` or `setpgid`."""
+    try:
+        names = os.listdir(_PROC)
+    except OSError:
+        return None
+    members: dict[int, str] = {}
+    for name in names:
+        try:
+            fields = _read_stat(int(name)) if name.isdigit() else None
+        except OSError:
+            return None
+        if fields is not None and fields[2] == str(pgid) and not _linux_zombie(fields):
+            members[int(name)] = f"ticks:{fields[19]}"
+    return members
+
+
+def linux_group_has_live_member(pgid: int) -> bool:
+    """Whether a process that is not a zombie has process group `pgid` (`linux_group_pids`). A
+    /proc that cannot be listed proves nothing gone, so it reads as a live member (DL-426)."""
+    members = linux_group_pids(pgid)
+    return members is None or bool(members)
+
+
+# ------------------------------------------------------------- the process cookie
+
+#: The variable every process of a command attempt carries, `<engine instance>.<run id>`:
+#: the engine sets it for the wrapper and the command, and the command's children inherit
+#: it, so a scan of the processes this uid can read finds the attempt's own, whatever their
+#: process group (docs/wrapper-protocol.md, an addition). Finding one proves presence; finding
+#: none proves nothing (`runner_stops.EngineStops.left`).
+COOKIE_ENV: Final[str] = "DSL41_COOKIE"
+
+
+def cookie(instance: str, run_id: str) -> str:
+    """The cookie of the attempt `run_id` dispatched by the engine instance `instance`."""
+    return f"{instance}.{run_id}"
+
+
+@dataclass(frozen=True)
+class Ours:
+    """What one scan found: the run id and start token of each pid whose cookie matched, how
+    many processes of this uid it could not read, and the errno that cut the scan short (then
+    `pids` is not the whole answer)."""
+
+    pids: dict[int, tuple[str, str]]
+    skipped: int = 0
+    error: int | None = None
+
+
+def ours(cookie_prefix: str) -> Ours | None:
+    """Every live process of this uid whose `DSL41_COOKIE` starts with `cookie_prefix`, by pid
+    with its run id and start token; None off Linux.
+
+    Each process is read through one directory fd, so its environment and its stat are the
+    same process's even if the pid is reused meanwhile. An error on an entry is classified
+    by `proc_entry_error`: a process gone is skipped; one this uid may not open or read is
+    not ours, skipped and counted in `skipped` (another uid under `hidepid=noaccess`, or a
+    non-dumpable process, which keeps its uid on its directory, the kernel's
+    `task_dump_owner`, while its `environ` becomes unreadable); a failed reading, or a
+    listing that fails, cuts the scan short with its errno in `error`, and the caller knows
+    nothing from it. A zombie has no environment left, so it is never found."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        names = os.listdir(_PROC)
+    except OSError as exc:
+        return Ours({}, error=exc.errno)
+    uid, marker = os.getuid(), f"{COOKIE_ENV}=".encode("ascii")
+    found: dict[int, tuple[str, str]] = {}
+    skipped = 0
+    for name in (n for n in names if n.isdigit()):
+        try:
+            fd = os.open(f"{_PROC}/{name}", os.O_RDONLY | os.O_DIRECTORY)
+        except OSError as exc:
+            kind = proc_entry_error(exc)
+            if kind == "failed":
+                return Ours(found, skipped, exc.errno)
+            skipped += kind == "foreign"
+            continue
+        try:
+            if os.fstat(fd).st_uid != uid:
+                continue
+            environ = _read_at(fd, "environ")
+            value = next((e for e in environ.split(b"\0") if e.startswith(marker)), None)
+            if value is None:
+                continue
+            text = value[len(marker) :].decode("ascii", "replace")
+            if text.startswith(cookie_prefix):
+                start = _stat_fields(_read_at(fd, "stat"))[19]
+                found[int(name)] = (text.partition(".")[2], f"ticks:{start}")
+        except OSError as exc:
+            kind = proc_entry_error(exc)
+            if kind == "failed":
+                return Ours(found, skipped, exc.errno)  # the finally closes the fd
+            skipped += kind == "foreign"
+        finally:
+            os.close(fd)
+    return Ours(found, skipped)
+
+
+def _read_at(directory: int, name: str) -> bytes:
+    fd = os.open(name, os.O_RDONLY, dir_fd=directory)
+    try:
+        chunks = []
+        while chunk := os.read(fd, 65536):
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def pidfd_supported() -> bool:
+    """Whether this Python and kernel can signal through a pidfd: `os.pidfd_open` and
+    `signal.pidfd_send_signal` exist, and opening a pidfd on this process works (a kernel
+    before 5.3 answers ENOSYS). Without it the cookie's processes cannot be signalled safely,
+    so the engine does not scan for them."""
+    pidfd_open = getattr(os, "pidfd_open", None)
+    if pidfd_open is None or getattr(signal, "pidfd_send_signal", None) is None:
+        return False
+    try:
+        os.close(pidfd_open(os.getpid()))
+    except OSError:
+        return False
+    return True
+
+
+def signal_ours(pid: int, start_token: str, sig: int) -> bool:
+    """Send `sig` to `pid` while it is still the process a scan found (`start_token`); True
+    when it was sent. A pidfd pins the process before the token is read again, so a pid
+    reused after the scan is never signalled. A process gone, one under another uid
+    (PermissionError), or no pidfd support sends nothing; nothing raises."""
+    pidfd_open = getattr(os, "pidfd_open", None)
+    send = getattr(signal, "pidfd_send_signal", None)
+    if pidfd_open is None or send is None:
+        return False
+    try:
+        fd = pidfd_open(pid)
+    except OSError:
+        return False
+    try:
+        if proc_start_token(pid) != start_token:
+            return False
+        send(fd, sig)
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+    return True
 
 
 def utc_now_iso() -> str:
