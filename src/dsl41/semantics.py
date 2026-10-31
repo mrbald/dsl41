@@ -152,6 +152,7 @@ OffIceInRunningBox = Literal["next-run", "same-run"]
 BoxTerminatorOnTerminated = Literal["true", "false"]
 BoxStartAllMembersOut = Literal["complete", "wait"]
 IdleBoxIcedMember = Literal["ignore", "vote"]
+ProcessLeak = Literal["terminate", "leak"]
 # DstStartTimes is spelled in `timezones`, the phase-free module that reads it.
 
 
@@ -263,6 +264,17 @@ REGISTRY: Final[Mapping[str, Switch]] = MappingProxyType(
                 " (ignore), or its own status (vote)",
                 affects=_is_box,
             ),
+            Switch(
+                name="process-leak",
+                values=get_args(ProcessLeak),
+                default="terminate",
+                autosys="leak",
+                description="what happens to the processes a job's command leaves running when"
+                " it exits: stopped like any stop, TERM, the grace, then KILL, and the job's"
+                " next run waits for them (terminate), or left running with a warning, as the"
+                " vendor does (leak)",
+                affects=_no_job,
+            ),
         )
     }
 )
@@ -309,6 +321,7 @@ class SemanticSwitches:
     box_terminator_on_terminated: BoxTerminatorOnTerminated
     box_start_all_members_out: BoxStartAllMembersOut
     idle_box_iced_member: IdleBoxIcedMember
+    process_leak: ProcessLeak
 
     def value(self, name: str) -> str:
         """The effective value of the switch called `name`."""

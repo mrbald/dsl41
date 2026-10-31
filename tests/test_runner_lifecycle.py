@@ -683,9 +683,10 @@ def test_sigkill_engine_midrun_then_resume(tmp_path: Path) -> None:
         ]
         assert (first["ordinal"], second["ordinal"]) == (1, 2)
         assert second["attempt"] == plan["steps"][0]["attempt"] != first["attempt"]
-        # the same invocation, a new attempt id
-        assert {k: v for k, v in second["env"].items() if k != "DSL41_ATTEMPT"} == {
-            k: v for k, v in first["env"].items() if k != "DSL41_ATTEMPT"
+        # the same invocation, a new attempt id and the process cookie it names
+        per_attempt = {"DSL41_ATTEMPT", "DSL41_COOKIE"}
+        assert {k: v for k, v in second["env"].items() if k not in per_attempt} == {
+            k: v for k, v in first["env"].items() if k not in per_attempt
         }
     # the oracle is told nothing about an interruption
     assert not [r for r in stored if r.kind == "input" and r.payload.get("source") == "reconcile"]

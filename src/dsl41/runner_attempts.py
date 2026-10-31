@@ -397,6 +397,16 @@ class Processes(Protocol):
         """Report a command still alive when its record timeout fired; the attempt stays
         STOPPING."""
 
+    async def outlives(self, pgid: int, start_token: str, grace_kill_s: float) -> bool:
+        """Whether anything of the command is still left `grace_kill_s` after its ladder's
+        KILL: an ended attempt's survivor verdict, taken where a stopping one's record timeout
+        takes it."""
+
+    def leaked(self, attempt: str) -> bool:
+        """Report an attempt that ends with no stop while processes of its command are left:
+        a leak. True: the tier runs the ladder on them (`process-leak=terminate`); False: they
+        are left running (`leak`, the vendor's reading)."""
+
 
 @dataclass
 class _Attempt:
@@ -500,18 +510,22 @@ class AttemptTier:
         self._adopted_held.add(attempt)
 
     def group_gone(self, attempt: str) -> None:
-        """The held attempt's group has no live member left. An adopted one is released. A
+        """Nothing of the held attempt's command is left. An adopted one is released. A
         stopping one has its record timeout read once more, which ends it now that its
-        command is dead; an ended one may settle (`on_ladder_done`)."""
+        command is dead; an ended one may settle (`on_ladder_done`). Either way `on_settled`
+        is called, so a drain that waited for the hold ends once nothing else is unsettled."""
         if attempt in self._adopted_held:
             self._adopted_held.discard(attempt)
-            return
-        known = self._known(attempt)
-        known.survived = known.failed = False
-        if self.state(attempt) == "STOPPING":
-            self.record_timeout(
-                attempt, self.machines.generation(self.key(attempt), RECORD_TIMEOUT)
-            )
+        else:
+            known = self._known(attempt)
+            known.survived = known.failed = False
+            if self.state(attempt) == "STOPPING":
+                self.record_timeout(
+                    attempt, self.machines.generation(self.key(attempt), RECORD_TIMEOUT)
+                )
+        # the hold is lifted: a drain waiting for it may end now
+        if self.on_settled is not None:
+            self.on_settled()
 
     def ladder_running(self, attempt: str) -> bool:
         """Whether a ladder started for the attempt has not ended yet."""
@@ -665,11 +679,46 @@ class AttemptTier:
             elif name == RECORD_OUTCOME:
                 # the record ends the attempt's observation, never its group's cleanup: a
                 # started ladder runs on to its closing KILL (DL-426)
+                self._what_is_left(attempt, intent.detail)
                 self.processes.record_outcome(attempt, intent.detail)
             elif name == CANCEL_RECORD_TIMEOUT:
                 self.processes.cancel_timer(attempt)
             else:
                 raise ValueError(f"attempt {attempt!r}: no effect for the intent {name!r}")
+
+    def _what_is_left(self, attempt: str, outcome: AttemptOutcome) -> None:
+        """At the record, before the outcome is journaled, a reading of what is left of the
+        command (`command_alive`). Nothing left, or a ladder still running (it takes the
+        verdict at its end), changes nothing. Something left after a `natural` exit is a leak:
+        under `process-leak=terminate` (`Processes.leaked`) the ladder runs on it. Something
+        left after a stop is the stop's, whatever the switch: a stop whose ladder already ended
+        takes the survivor verdict (`_survivor_verdict`), one that ran no ladder (its wrapper was
+        killed before `spawn.json`) gets the ladder now. Either way the task holds the
+        attempt's ladder slot, so the outcome is journaled `ladder: running` and the job's next
+        run waits until a reading finds nothing left. Where only the leader can be told apart,
+        `command_alive` is false once it exited, and nothing is done."""
+        known = self._attempts[attempt]
+        group = command_group(known.spawn)
+        if group is None or self.ladder_running(attempt) or not self.command_alive(*group):
+            return
+        if outcome.kind == "natural" and not self.processes.leaked(attempt):
+            return
+        if known.ladder is None:
+            generation = self.machines.generation(self.key(attempt), RECORD_TIMEOUT)
+            task = self._ladder(attempt, *group, generation)
+        else:
+            task = self._survivor_verdict(attempt, *group)
+        known.ladder = asyncio.get_running_loop().create_task(task)
+        known.ladder.add_done_callback(lambda done: self._ladder_done(attempt, done))
+
+    async def _survivor_verdict(self, attempt: str, pgid: int, token: str) -> None:
+        """An ended attempt's survivor verdict, taken where a stopping one's record timeout
+        takes it: anything of its command still left `grace_kill_s` after the KILL
+        (`Processes.outlives`) has survived its stop (`Processes.command_survived`), and the
+        attempt is held until a reading finds nothing left."""
+        if await self.processes.outlives(pgid, token, self.grace_kill_s):
+            self._attempts[attempt].survived = True
+            self.processes.command_survived(attempt)
 
     def _start_stop(self, attempt: str) -> None:
         """The ladder on the recorded group, or, with no `spawn.json` yet, the wrapper's kill
@@ -693,15 +742,12 @@ class AttemptTier:
         """Run the ladder to its end, then arm `record_timeout` at its KILL. A ladder that raises
         arms nothing: the stop was not carried out, so the attempt stays STOPPING and unsettled,
         and `_ladder_done` reports the failure. An attempt that ended while the ladder ran gets
-        no timer; a group of it that still has a live member after the KILL has survived its
-        stop (`Processes.command_survived`) and keeps the attempt unsettled."""
+        no timer and takes the survivor verdict (`_survivor_verdict`)."""
         await self.processes.ladder(pgid, token, self.grace_term_s)
-        known = self._attempts[attempt]
         if self.state(attempt) != "ENDED":
             self.processes.arm_timer(attempt, generation, self.grace_kill_s)
-        elif self.command_alive(pgid, token):
-            known.survived = True
-            self.processes.command_survived(attempt)
+        else:
+            await self._survivor_verdict(attempt, pgid, token)
 
     def _ladder_done(self, attempt: str, task: asyncio.Task[None]) -> None:
         """Retrieve a finished ladder's failure and report it: a ladder that raised leaves its
