@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 import typer
 
-from dsl41.ast_jil import JilFile, render_statement
+from dsl41.ast_jil import JilFile
 from dsl41.cli_common import (
     ENVIRONMENT_OPT,
     ESTATE_FILES,
@@ -139,15 +139,10 @@ def _naive_utc_arg(text: str, option: str) -> "datetime":
 
 
 def _spec_texts(parsed: "list[JilFile]", catalog: CatalogIR) -> "dict[str, str]":
-    """job -> preserve-rendered block for the ss10 `spec` verb: every statement whose subject is
-    a catalog job, in file order (insert_job plus any later update_job/delete_job)."""
-    texts: dict[str, str] = {}
-    for jf in parsed:
-        for stmt in jf.statements:
-            if stmt.subject in catalog.jobs:
-                block = render_statement(stmt)
-                texts[stmt.subject] = texts.get(stmt.subject, "") + block
-    return texts
+    """job -> preserve-rendered block for the ss10 `spec` verb (`reload_plan.spec_texts`)."""
+    from dsl41.reload_plan import spec_texts
+
+    return spec_texts(parsed, catalog)
 
 
 class OnViolation(str, Enum):
@@ -1352,7 +1347,7 @@ def journal(
     from dsl41.oracle_state import OracleError
     from dsl41.runner_clock import EngineError
     from dsl41.reload_diff import catalog_hash_v2
-    from dsl41.runner_config import Configuration, oracle_reading
+    from dsl41.runner_config import Configuration
     from dsl41.runner_journal import StoreReplay, open_reader, replay_store
     from dsl41.runner_ledger import STATE_MACHINE_VERSION
 
@@ -1375,24 +1370,20 @@ def journal(
             )
         except (OSError, EngineError) as exc:
             raise typer.Exit(refuse(exc)) from exc
-        catalog = configuration.catalog
-        if supplied is not None:
-            if catalog_hash_v2(supplied) != configuration.catalog_hash:
-                raise typer.Exit(
-                    refuse(
-                        "catalog hash mismatch: the estate differs from the one this"
-                        " store ran (runner-design ss7: no silent semantic drift)"
-                    )
+        if supplied is not None and catalog_hash_v2(supplied) != configuration.catalog_hash:
+            raise typer.Exit(
+                refuse(
+                    "catalog hash mismatch: the estate differs from the one this"
+                    " store ran (runner-design ss7: no silent semantic drift)"
                 )
-            catalog = supplied
+            )
         # SEM-35: the run's own alias table (DL-151), since a `ujo_timezones` name is site-local
         # and lives in the profile. The semantic switches (DL-252) and the base zone (DL-253)
         # come from the same profile, so the replay reads a condition as the engine that wrote
-        # it did. A pruned store replays from its latest snapshot, as a restart does
+        # it did; the replay reads both from the store's configuration rows, each from where an
+        # update applied it. A pruned store replays from its latest snapshot, as a restart does
         try:
-            replayed: StoreReplay = replay_store(
-                store, catalog, where=str(journal_file), **oracle_reading(configuration.profile)
-            )
+            replayed: StoreReplay = replay_store(store, where=str(journal_file))
         except (OracleError, EngineError) as exc:
             raise typer.Exit(refuse(exc, prefix="replay failed")) from exc
     finally:

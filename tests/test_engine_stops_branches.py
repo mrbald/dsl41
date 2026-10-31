@@ -701,7 +701,9 @@ def test_the_evidence_folds_from_the_snapshot_and_the_tail(tmp_path: Path) -> No
 
 
 def test_a_dispatch_record_carries_the_cause_it_follows() -> None:
-    record = dispatch_record("j", 1, attempt=RUN_ID, spool=None, started_at=T0, after="engine_stop")
+    record = dispatch_record(
+        "j", 1, attempt=RUN_ID, spool=None, started_at=T0, rev=1, after="engine_stop"
+    )
     assert record.payload["after"] == "engine_stop"
 
 
@@ -1043,9 +1045,9 @@ def test_a_replacement_dispatch_carries_its_cause_on_the_wire() -> None:
     follows; a first attempt's has none."""
     from dsl41.runner_journal import wire_record
 
-    first = dispatch_record("j", 1, attempt=RUN_ID, spool=None, started_at=T0)
+    first = dispatch_record("j", 1, attempt=RUN_ID, spool=None, started_at=T0, rev=1)
     second = dispatch_record(
-        "j", 1, attempt=OTHER_ID, spool=None, started_at=T0, ordinal=2, after="engine_stop"
+        "j", 1, attempt=OTHER_ID, spool=None, started_at=T0, rev=1, ordinal=2, after="engine_stop"
     )
     assert "after" not in (wire_record(first) or {})
     assert (wire_record(second) or {})["after"] == "engine_stop"
@@ -1127,8 +1129,8 @@ def test_a_store_of_another_state_version_refuses_by_name(tmp_path: Path) -> Non
     run_root, _dispatch = _open(tmp_path)
     with closing(sqlite3.connect(run_root / "engine.db", isolation_level=None)) as db:
         db.execute("UPDATE meta SET value = '24' WHERE key = 'state_version'")
-    assert STATE_MACHINE_VERSION == 25
-    with pytest.raises(EngineError, match="state version 24, this binary runs 25"):
+    assert STATE_MACHINE_VERSION == 26
+    with pytest.raises(EngineError, match="state version 24, this binary runs 26"):
         _resume(run_root)
 
 

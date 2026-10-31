@@ -699,16 +699,20 @@ Runner:
   catalogs: a job's definition hash without source spans, the added,
   removed, changed and unchanged sets with the reason for an indirect
   change, the running-box check, and the plan token.
-- `src/dsl41/reload_plan.py`: `reread` as a module, not wired to the engine:
-  it loads the estate from disk, lints it under `--strict`, diffs it against
+- `src/dsl41/reload_plan.py`: `reread` as a module: it loads the estate from disk, lints it under `--strict`, diffs it against
   the live catalog the engine supplies, refuses a running box, and stores
   the candidate files and `plan.json` under `plans/<token>/`, the plan file
   last.
-- `src/dsl41/reload_update.py`: the 2.x update machine, not yet wired: the
+- `src/dsl41/reload_update.py`: the 2.x update machine: the
   declared `UPDATE` statechart (IDLE, STOPPING, APPLIED, REFUSED), the
   admission that re-checks the revision, the running boxes and the stop set,
   the tier that journals the intent, stops each job and applies, and the
   application's per-job carry onto the oracle's state.
+- `src/dsl41/runner_update.py`: the engine's side of the update: the
+  request as one step of the single writer, the candidate loaded from the
+  plan's own bytes, the stops through the attempt tier, the dispatch filter,
+  the outcomes kept back until the application, and the `config intent` and
+  `config applied` records with the new configuration row.
 - `src/dsl41/runner_control.py`: the control plane, both ends: the
   unix-socket server (sendevent parity, queries, subscribe), the wire
   vocabulary, and three clients (persistent async for the TUI, one-shot
@@ -756,9 +760,9 @@ CLI and scripts:
   options, the catalog loader, and the readings that turn an exception or a
   control answer into an exit code), `cli_compile.py`, `cli_run.py`,
   and `cli_control.py`.
-- `src/dsl41/cli_reload.py`: the 2.x `reread` and `update` verbs, not yet
-  registered: their rendering and exit codes, with the engine reached
-  through one function the wiring binds to the control socket.
+- `src/dsl41/cli_reload.py`: the 2.x `reread` and `update` verbs: their
+  rendering and exit codes, with the engine reached through one function
+  bound to the control socket's `catalog` and `update` verbs.
 - `src/dsl41/__main__.py`: `python -m dsl41`, which `serve` uses to spawn
   one `dsl41 ui` per browser session.
 - `src/dsl41/__init__.py`: the module map docstring. No exports.

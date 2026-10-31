@@ -136,3 +136,16 @@ ENDED = SPAWNING + exit_recorded
      || STOPPING + spawn_failed
      || STOPPING + wrapper_gone
 ```
+
+## update
+
+Shown: 3. Folded: 1 (internal 1). Rows in the chart: 4.
+
+### phase
+
+```text
+IDLE <- initial
+STOPPING = IDLE + update_admitted [admitted]
+APPLIED = STOPPING + all_stopped_or_none
+REFUSED = IDLE + update_admitted [refused]
+```

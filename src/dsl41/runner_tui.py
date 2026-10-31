@@ -1178,6 +1178,21 @@ class _ExplainPane(VerticalScroll):
     """
 
 
+def config_line(status: Mapping[str, Any]) -> str:
+    """What the subtitle says of the configuration (spec-reload): `rev N`, and while an update
+    stops its jobs, `update TOKEN stopping: JOB, ...` with the token's first twelve hex digits.
+    Empty for an engine that names no rev."""
+    rev = status.get("config_rev")
+    if not isinstance(rev, int):
+        return ""
+    line = f"rev {rev}"
+    update = status.get("update")
+    if isinstance(update, Mapping):
+        jobs = ", ".join(str(job) for job in update.get("stopping") or ()) or "none"
+        line += f"  [update {str(update.get('token', ''))[:12]} stopping: {jobs}]"
+    return line
+
+
 class RunnerApp(App[None]):
     """The ss11 app: jobs table, explain pane, log tail, event console."""
 
@@ -1269,6 +1284,9 @@ class RunnerApp(App[None]):
         #: highlight handler ignores events until the restore target arrives.
         self._restore_selected: str | None = None
         self._spec_drift = False
+        #: spec-reload: the configuration rev the engine runs and, while an update stops its
+        #: jobs, its token and those jobs, as the subtitle shows them
+        self._config = ""
         self._connected: bool | None = None  # None = never yet reported
         self._refreshing = False
         self._dirty = False
@@ -1390,6 +1408,7 @@ class RunnerApp(App[None]):
                     # concurrency-model ss6 read header: the revisions below belong to THIS log
                     self._baseline = str(status.get("baseline_id") or "")
                     self._set_drift(bool(status.get("spec_drift")))
+                    self._set_config(config_line(status))
                     self._update_table(status.get("jobs", {}))
                 await self._update_explain()
                 if not self._dirty:
@@ -1405,9 +1424,21 @@ class RunnerApp(App[None]):
             base += " (disconnected)"
         if self._query_faults:
             base += " (refused)"
+        if self._config:
+            base += f"  {self._config}"
         if self._spec_drift:
             base += "  [SPEC DRIFT: estate files changed on disk]"
         self.sub_title = base
+
+    def _set_config(self, line: str) -> None:
+        """spec-reload: the subtitle names the configuration rev and an update while it stops;
+        the console says when one starts stopping and when the rev moves."""
+        if line == self._config:
+            return
+        if self._config:
+            self._console_write(Text(line, style="yellow"))
+        self._config = line
+        self._refresh_subtitle()
 
     def _set_connected(self, up: bool, detail: str = "") -> None:
         if up == self._connected:

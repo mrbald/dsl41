@@ -67,12 +67,13 @@ import graphlib
 import hashlib
 import json
 import os
+import re
 import socket as socket_mod
 import time
 import uuid
 
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, get_args
 
@@ -103,6 +104,11 @@ from dsl41.runner_admission import (
 from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import UNKNOWN_OUTCOME_CODES, Code
 from dsl41.runner_journal import best_effort_report, read_backfill
+from dsl41.reload_diff import catalog_hash_v2, catalog_payload
+from dsl41.reload_update import Admitted, Refused
+from dsl41.runner_config import EngineSettings
+from dsl41.reload_plan import spec_texts
+from dsl41.runner_update import APPLICATION_KEYS, OpenedPlan, UpdateRequest
 from dsl41.runner_store import Store
 from dsl41.runner_preflight import and_success_skeleton
 from dsl41.state_machine import StatechartError
@@ -184,6 +190,41 @@ def status_label(row: Mapping[str, Any]) -> str:
     if not note or note.startswith("STOPPING"):
         return note or status
     return f"{status} ({note})"
+
+
+#: A plan token names a directory under `plans/`: a sha256 hex digest, nothing else.
+UPDATE_TOKEN = re.compile(r"[0-9a-f]{64}")
+
+#: The key an update's `expect` names: the configuration rev the caller read.
+CONFIG_KEY = "config"
+
+
+#: The prose of each refusal the update chart makes (spec-reload), with the names it concerns.
+_REFUSALS = {
+    "stale_plan": "the plan was diffed against another configuration rev: run reread again",
+    "box_running": "the plan edits the membership of a running box: {names}",
+    "would_stop_running": "the plan stops running jobs: {names}; stop_running consents to it",
+    "update_in_progress": "another update is stopping its jobs: {names}",
+}
+
+
+def _refusal_text(refusal: Refused) -> str:
+    """The prose of an update's refusal."""
+    return _REFUSALS[refusal.code].format(names=", ".join(refusal.names))
+
+
+def _update_refusal(
+    code: Code, error: str, token: object, names: Sequence[str] = ()
+) -> dict[str, Any]:
+    """An `update` refusal: it writes nothing and names the token and the jobs or boxes it
+    concerns, none for a refusal about the request itself (control-protocol ss2)."""
+    return _failure(code, error, refused=True) | {"token": token, "names": list(names)}
+
+
+def _applied(body: Mapping[str, Any]) -> dict[str, Any]:
+    """What an update's answer says of its application: its `config applied` record's rev,
+    catalog hash and job sets."""
+    return {key: body.get(key) for key in ("rev", "catalog_hash", *APPLICATION_KEYS)}
 
 
 def _failure(code: Code, error: str, *, refused: bool = False) -> dict[str, Any]:
@@ -286,6 +327,16 @@ class ControlServer:
         #: the armed perimeter, or None for the 0600 owner-only model (docs/access-model.md
         #: ss4)
         self.access = access
+        # an update the engine applies swaps the catalog this server describes (spec-reload)
+        engine.update.listeners.append(self.take_applied_plan)
+
+    def take_applied_plan(self, opened: OpenedPlan) -> None:
+        """An update applied: `spec` serves the applied plan's JIL, and `spec_drift` compares
+        the files on disk with the applied plan's bytes, so it keeps saying whether the running
+        catalog differs from disk (DL-65)."""
+        self.spec_texts = spec_texts(opened.estate.parsed, self.engine.oracle.catalog)
+        self.estate_fingerprint = opened.fingerprint()
+        self._drift_checked_at = None  # read the disk again at the next status
 
     async def start(self) -> None:
         """Bind (0600 from birth via umask) after the stale-socket probe: a connect that
@@ -532,7 +583,105 @@ class ControlServer:
             return self._plan()
         if cmd == "engine_stop":
             return await self._engine_stop()
+        if cmd == "catalog":
+            return self._catalog()
+        if cmd == "update":
+            return await self._update(request)
         return _failure("unknown_cmd", f"unknown cmd {cmd!r}", refused=True)
+
+    def _catalog(self) -> dict[str, Any]:
+        """`catalog`: what `reread` diffs a candidate against (spec-reload): the catalog the
+        engine runs with its hash, the estate settings it runs it under, the configuration rev,
+        each row's status and run number, and the flags each tombstone of a removed job kept."""
+        live = self.engine.update.live()
+        return {
+            "ok": True,
+            "catalog": catalog_payload(live.catalog),
+            "catalog_hash": catalog_hash_v2(live.catalog),
+            "settings": dict(live.settings),
+            "revision": live.revision,
+            "status": dict(live.status),
+            "runs": dict(live.runs),
+            "tombstones": {name: list(flags) for name, flags in live.tombstones.items()},
+        }
+
+    async def _update(self, request: dict[str, Any]) -> dict[str, Any]:
+        """`update`: apply the plan `reread` stored under TOKEN (spec-reload). The request
+        carries the mutation envelope: `request_id`, `baseline_id` and `expect` naming the
+        configuration rev the caller read, as `{"config": N}`. The answer is the admission's
+        decision; with `wait`, it comes once the update applied, with the application."""
+        token, stop_running, wait = (
+            request.get("token"),
+            request.get("stop_running", False),
+            request.get("wait", False),
+        )
+        if not (isinstance(token, str) and UPDATE_TOKEN.fullmatch(token)):
+            return _update_refusal(
+                "invalid_argument", f"token must be a plan token, got {token!r}", token
+            )
+        if not isinstance(stop_running, bool) or not isinstance(wait, bool):
+            return _update_refusal(
+                "invalid_argument", "stop_running and wait must be booleans", token
+            )
+        try:
+            envelope = parse_envelope(
+                request, addressed=CONFIG_KEY, baseline_id=self.engine.baseline_id
+            )
+        except EnvelopeError as exc:
+            return _update_refusal(exc.code, str(exc), token)
+        submitted = UpdateRequest(
+            token,
+            stop_running,
+            envelope.expect[CONFIG_KEY],
+            self.engine.baseline_id,
+            envelope.request_id,
+            envelope.claimed_actor,
+        )
+        try:
+            answer = await asyncio.wait_for(
+                self.engine.request_update(submitted), self.DECISION_TIMEOUT_S
+            )
+        except TimeoutError:
+            return _failure(
+                "decision_timeout",
+                f"no decision within {self.DECISION_TIMEOUT_S}s: the engine loop is not"
+                " draining its queue. The update may still be admitted -- re-read before"
+                " retrying, under the same request_id.",
+            )
+        if answer.code is not None:
+            return _update_refusal(answer.code, answer.error or answer.code, token)
+        decision = answer.decision
+        if isinstance(decision, Refused):
+            return _update_refusal(
+                decision.code, _refusal_text(decision), decision.token, decision.names
+            )
+        assert isinstance(decision, Admitted)
+        reply: dict[str, Any] = {
+            "ok": True,
+            "decision": "admitted",
+            "token": decision.token,
+            "request_id": envelope.request_id,
+            "stop": list(decision.stop_set),
+            "application": answer.application and _applied(answer.application),
+        }
+        if wait and reply["application"] is None:
+            assert answer.applied is not None  # an admission's answer carries it
+            try:
+                body = await asyncio.wait_for(
+                    asyncio.shield(answer.applied), self._application_window()
+                )
+            except TimeoutError:
+                reply["pending"] = True
+            else:
+                reply["application"] = _applied(body)
+        return reply
+
+    def _application_window(self) -> float:
+        """How long `update --wait` waits for the application: one stop ladder and the
+        decision window. `status` reports it as `update_window_s`, so a client waits on the
+        socket at least this long (control-protocol ss2)."""
+        settings = self.engine.settings or EngineSettings()
+        return settings.grace_term_s + settings.grace_kill_s + 30 + self.DECISION_TIMEOUT_S
 
     async def _engine_stop(self) -> dict[str, Any]:
         """`engine stop`: drain the engine (spec-drain). The request is a step of the single
@@ -775,7 +924,14 @@ class ControlServer:
             if held is not None:
                 # spec-crash: the interrupted attempt a hold names, until the job's next start
                 jobs[name]["interrupted"] = held
-        return {"ok": True, "jobs": jobs, "spec_drift": self._spec_drift()}
+        answer: dict[str, Any] = {"ok": True, "jobs": jobs, "spec_drift": self._spec_drift()}
+        # spec-reload: the configuration rev the engine runs, and an update while it stops
+        answer["config_rev"] = self.engine.config_rev
+        answer["update_window_s"] = self._application_window()
+        update = self.engine.update.view()
+        if update is not None:
+            answer["update"] = update
+        return answer
 
     def _globals(self, names: list[Any]) -> dict[str, Any]:
         """DL-87 (concurrency-model ss6): answer NAMED globals with `{present, value,
