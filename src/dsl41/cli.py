@@ -10,6 +10,7 @@ verbs live one file per domain (DL-137):
     cli_run.py      run, rehearse, and their offline readers journal, runs
     cli_control.py  what an operator says to a RUNNING engine: sendevent, query, ui, serve,
                     engine stop
+    cli_reload.py   redeploying a RUNNING engine: reread, update
 
 Imports run one way: this file imports the verb modules, the verb modules import `cli_common`,
 and no library module imports any of them.
@@ -31,7 +32,7 @@ from __future__ import annotations
 
 import typer
 
-from dsl41 import cli_compile, cli_control, cli_run
+from dsl41 import cli_compile, cli_control, cli_reload, cli_run
 from dsl41.cli_common import stops_on_statechart_error as stops
 
 app = typer.Typer(
@@ -74,4 +75,6 @@ app.command(rich_help_panel="Control a running engine")(cli_control.sendevent)
 app.command(rich_help_panel="Control a running engine")(cli_control.off_hold_all)
 app.command(rich_help_panel="Control a running engine")(cli_control.ui)
 app.command(rich_help_panel="Control a running engine")(cli_control.serve)
+app.command(rich_help_panel="Control a running engine")(cli_reload.reread)
+app.command(rich_help_panel="Control a running engine")(cli_reload.update)
 app.add_typer(cli_control.engine_app, name="engine", rich_help_panel="Control a running engine")

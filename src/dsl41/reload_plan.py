@@ -25,8 +25,10 @@ compared case-insensitively; `estate.toml`, `non-idempotent.toml`, `invocation.j
 
 The candidate settings (`estate_settings`) are the estate-wide values every job runs under:
 
-- `timezone`: the manifest's base timezone, or None;
-- `timezone_aliases`: the parsed timezone map, or None without one (an empty map is not None);
+- `timezone`: the manifest's base timezone, or `UTC` without one, the zone an engine launched
+  with no `--timezone` runs under (`runner_config.runtime_profile_from_cli`);
+- `timezone_aliases`: the parsed timezone map, or None without one or for an empty one, as the
+  engine reads a map (`timezones.alias_table`);
 - `semantics`: the manifest's semantic switches as `check_overrides` returns them, defaults
   dropped, so one profile is one value;
 - `external_instances`: each `insert_xinst` record without its source span.
@@ -59,7 +61,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from dsl41.ast_jil import JilParseError, parse
+from dsl41.ast_jil import JilFile, JilParseError, parse, render_statement
 from dsl41.canon import ARTIFACT_FORMAT_VERSION, CanonError, canonical_bytes, decode
 from dsl41.estate_manifest import ManifestError, read_regular, resolve_manifest
 from dsl41.ir import CatalogIR, LoweringError, lower_catalog
@@ -70,7 +72,10 @@ from dsl41.runner_preflight import PreflightItem, preflight
 from dsl41.runner_procid import durable_write, mkdir_durable
 from dsl41.semantics import check_overrides
 from dsl41.semantics import resolve as resolve_switches
-from dsl41.timezones import parse_timezone_map, resolve_timezone
+from dsl41.timezones import alias_table, parse_timezone_map, resolve_timezone
+
+#: The base zone of an estate that names none: an engine launched with no `--timezone` runs UTC.
+DEFAULT_TZ = "UTC"
 
 #: Statuses of a job with a process the plan would have to stop (spec-reload `update`).
 STOPPABLE = frozenset({"RUNNING", "STARTING"})
@@ -117,6 +122,10 @@ class Estate:
     parts: tuple[tuple[str, bytes], ...]
     environment: str | None = None
     properties: tuple[str, ...] = ()
+    #: the parsed JIL files, after substitution, in catalog order (`spec_texts`)
+    parsed: tuple[JilFile, ...] = field(default=(), repr=False)
+    #: the estate directory, absolute
+    directory: str = ""
 
 
 @dataclass(frozen=True)
@@ -137,10 +146,12 @@ def estate_settings(
     semantics: Mapping[str, str],
     catalog: CatalogIR,
 ) -> dict[str, object]:
-    """The estate-wide settings `reload_diff.diff` compares (module docstring)."""
+    """The estate-wide settings `reload_diff.diff` compares (module docstring). Each value is
+    spelled as the engine runs it, so the engine's own settings and an unchanged estate's
+    compare equal."""
     return {
-        "timezone": timezone,
-        "timezone_aliases": None if tz_aliases is None else dict(tz_aliases),
+        "timezone": timezone or DEFAULT_TZ,
+        "timezone_aliases": alias_table(tz_aliases),
         "semantics": check_overrides(semantics),
         "external_instances": {
             name: xinst.model_dump(mode="json", exclude={"span"})
@@ -250,6 +261,8 @@ def load_estate(
         parts=tuple(parts),
         environment=environment,
         properties=site_paths,
+        parsed=tuple(parsed),
+        directory=str(directory),
     )
 
 
@@ -313,6 +326,7 @@ def _plan_document(
             {"code": item.code, "job": item.job, "message": item.message} for item in warnings
         ],
         "settings": dict(estate.settings),
+        "estate_dir": estate.directory,
         "environment": estate.environment,
         "properties": list(estate.properties),
         "restored": [{"name": name, "flags": list(flags)} for name, flags in restored],
@@ -321,6 +335,18 @@ def _plan_document(
             for name, data in estate.parts
         ],
     }
+
+
+def spec_texts(parsed: Sequence[JilFile], catalog: CatalogIR) -> dict[str, str]:
+    """job -> its preserve-rendered statements, in file order (the control socket's `spec`
+    verb, DL-64): every statement whose subject is a catalog job, `insert_job` and any later
+    `update_job` or `delete_job`."""
+    texts: dict[str, str] = {}
+    for jil_file in parsed:
+        for stmt in jil_file.statements:
+            if stmt.subject in catalog.jobs:
+                texts[stmt.subject] = texts.get(stmt.subject, "") + render_statement(stmt)
+    return texts
 
 
 def stop_set(plan: Plan, live: Live) -> tuple[str, ...]:
@@ -422,5 +448,6 @@ __all__ = [
     "load_estate",
     "read_plan",
     "reread",
+    "spec_texts",
     "stop_set",
 ]
