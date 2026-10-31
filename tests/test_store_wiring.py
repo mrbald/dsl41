@@ -117,7 +117,7 @@ _SECTION_5: dict[str, set[str]] = {
         "revisions",
         "legacy_batch",
     },
-    "dispatch": {"rec", "job", "run_number", "run_id", "run_dir", "started_at"},
+    "dispatch": {"rec", "job", "run_number", "run_id", "run_dir", "started_at", "rev"},
     "drop": {"rec", "at", "kind", "payload", "reason"},
     "preflight": {"rec", "items"},
 }
@@ -1418,7 +1418,7 @@ def test_a_pruned_store_with_no_usable_snapshot_is_refused_by_its_readers() -> N
     store.prune_before(2, datetime(2999, 1, 1))
     assert _first_decision_index(store, 7) == 7
     with pytest.raises(EngineError, match="state version 999"):
-        replay_store(store, lower_source(_JIL), where="here")
+        replay_store(store, where="here")
     bare = MemoryStore()
     bare.append(Record(T0, "engine", None, None, {"event": "started", "at": T0.isoformat()}))
     bare.append(Record(T0, "engine", None, None, {"event": "started", "at": T0.isoformat()}))

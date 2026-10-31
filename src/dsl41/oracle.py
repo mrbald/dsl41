@@ -229,7 +229,7 @@ from datetime import datetime
 from typing import Final, cast
 
 from dsl41.capacity import CapacityPool
-from dsl41.ir import CatalogIR, Semantics
+from dsl41.ir import CatalogIR, ResourceIR, Semantics
 from dsl41.reload_diff import retyped_jobs
 from dsl41.job_chart import JOB
 from dsl41.job_chart_events import (
@@ -401,6 +401,11 @@ def listed(active: frozenset[str]) -> str:
     return ", ".join(sorted(active))
 
 
+def _with_ghosts(catalog: CatalogIR, ghosts: Mapping[str, ResourceIR]) -> CatalogIR:
+    """`catalog` with the ghost resources beside its own, which win a name: the pool's view."""
+    return catalog.model_copy(update={"resources": {**ghosts, **catalog.resources}})
+
+
 class Oracle(OracleWriters):
     """Deterministic interpreter over one CatalogIR (ir-design ss7).
 
@@ -445,6 +450,10 @@ class Oracle(OracleWriters):
         #: An update swapped the catalog since the last input, so the next one scans the queue
         #: first (`_wake_after_swap`).
         self._wake_owed = carried is not None and carried.wake_owed
+        if carried is not None and carried.ghosts:
+            # the resources an update dropped while units were held or spent keep their
+            # definitions in the pool, as they had before the snapshot (`replace_catalog`)
+            self._pool = CapacityPool(_with_ghosts(catalog, carried.ghosts), self.semantics)
         self.store.keep_job_instances(self._job_instance)
 
     def fork(self) -> Oracle:
@@ -512,8 +521,7 @@ class Oracle(OracleWriters):
         self._tz_cache = {}
         self._index_catalog()
         if ghosts:
-            pooled = catalog.model_copy(update={"resources": {**ghosts, **catalog.resources}})
-            self._pool = CapacityPool(pooled, semantics)
+            self._pool = CapacityPool(_with_ghosts(catalog, ghosts), semantics)
         self._cap = item_cap(len(catalog.jobs))
         for job in added:
             initial = catalog.jobs[job].sem.initial_status
@@ -527,6 +535,15 @@ class Oracle(OracleWriters):
         self.store.restore_instances()
         self._wake_owed = True
         return removed, added
+
+    def ghost_resources(self) -> dict[str, ResourceIR]:
+        """The resources the pool keeps that the catalog does not name, by name: the ghosts
+        `replace_catalog` kept. A snapshot carries them (`CarriedRows.ghosts`)."""
+        return {
+            name: resource
+            for name, resource in self._pool.catalog.resources.items()
+            if name not in self.catalog.resources
+        }
 
     def _wake_after_swap(self) -> None:
         """The input after a catalog swap scans the queue first, as a period's opening does

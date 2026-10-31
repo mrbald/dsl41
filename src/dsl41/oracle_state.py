@@ -30,6 +30,7 @@ from typing import Final, Literal, cast, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from dsl41.ir import ResourceIR
 from dsl41.scan_chart import IDLE as SCAN_IDLE
 from dsl41.scan_chart import QUEUE_SCAN, SCAN_KEY
 from dsl41.state_machine import (
@@ -353,6 +354,9 @@ class CarriedRows(BaseModel):
     #: an update swapped the catalog and no input has run since: the next one scans the queue
     #: first (`Oracle._wake_after_swap`)
     wake_owed: bool = False
+    #: the definitions of the resources an update dropped while a run holds their units or
+    #: `consumed` has a bucket of them (`Oracle.ghost_resources`): the pool keeps their type
+    ghosts: dict[str, ResourceIR] = {}
     period_id: int = 1
     #: T, the instant the seal was taken at. Feed times are non-decreasing across the boundary,
     #: so the opened interpreter starts from T.

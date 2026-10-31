@@ -27,7 +27,10 @@ Record kinds (`Record.kind`) and what each payload holds:
   `event: ladder_done` once the group of an outcome with `ladder: running` is gone.
 - `drop`: a scheduler tick missed across downtime (E9).
 - `preflight`: the ss8 WARN items the engine started under.
-- `config`: a configuration rev the engine applied (`event: applied`).
+- `config`: a configuration rev the engine applied (`event: applied`), with, for an update,
+  the plan's token and what it added, changed and removed; and an update's `event: intent`
+  while it stops: the token, the stop set with each attempt it stops, the dispatch filter,
+  and the request's id (the store's unique column) and fingerprint (spec-wiring 1b).
 - `engine`: the engine's own life: `started`, `draining`, `clean_shutdown`, `unclean_shutdown`,
   `shutdown_during_startup`, `drain_interrupted`, `snapshot`.
 
@@ -49,6 +52,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 from dsl41.canon import CanonError, canonical_bytes, decode, is_wire_int, naive_utc
+from dsl41.engine_charts import UPDATE_STOP
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import CarriedRows, Event
 from dsl41.runner_admission import (
@@ -63,6 +67,7 @@ from dsl41.runner_admission import (
 )
 from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import STORED_CODES
+from dsl41.runner_config import Configuration, oracle_reading
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, Proof
 from dsl41.runner_store import Record, SqliteStore, Store, StoreError
 from dsl41.state_machine import (
@@ -127,6 +132,21 @@ ENGINE_EVENTS: Final[frozenset[str]] = frozenset(
     }
 )
 
+#: The `config` record's events: an update's `intent` while it stops, and an applied rev.
+CONFIG_EVENTS: Final[frozenset[str]] = frozenset({"intent", "applied"})
+
+#: The keys of the wire's `segment` record (control-protocol ss5), which an `applied` record
+#: carries beside the application it describes.
+SEGMENT_KEYS: Final = (
+    "rev",
+    "at",
+    "catalog_hash",
+    "runtime_hash",
+    "state_machine_version",
+    "baseline_id",
+    "clock_domain",
+)
+
 #: How an attempt ended, as its `outcome` record says.
 OUTCOMES: Final[frozenset[str]] = frozenset({"natural", "spawn_failed", "stopped", "unobservable"})
 
@@ -145,6 +165,10 @@ def check_record(record: Record) -> None:
     if kind == "engine" and body.get("event") not in ENGINE_EVENTS:
         raise EngineError(
             f"engine record {body.get('event')!r}: this binary knows {sorted(ENGINE_EVENTS)}"
+        )
+    if kind == "config" and body.get("event") not in CONFIG_EVENTS:
+        raise EngineError(
+            f"config record {body.get('event')!r}: this binary knows {sorted(CONFIG_EVENTS)}"
         )
     if kind == "outcome" and body.get("outcome") not in OUTCOMES:
         raise EngineError(f"outcome {body.get('outcome')!r}: this binary knows {sorted(OUTCOMES)}")
@@ -455,6 +479,7 @@ def wire_record(record: Record) -> dict[str, Any] | None:
             "run_id": body["attempt"],
             "run_dir": body.get("spool"),
             "started_at": body["started_at"],
+            "rev": body["rev"],
         }
         if "after" in body:
             wire["after"] = body["after"]  # a replacement attempt's (DL-426)
@@ -462,7 +487,8 @@ def wire_record(record: Record) -> dict[str, Any] | None:
     if kind in ("drop", "preflight"):
         return {"rec": kind, **body}
     if kind == "config" and body.get("event") == "applied":
-        return {"rec": "segment", **{key: value for key, value in body.items() if key != "event"}}
+        # the segment's own keys: an update's application details stay in the store
+        return {"rec": "segment", **{key: body[key] for key in SEGMENT_KEYS if key in body}}
     return None
 
 
@@ -544,6 +570,9 @@ class OpenTable:
         self.attempts: dict[str, OpenAttempt] = {}
         self.pending: dict[int, PendingDispatch] = {}
         self.plans: dict[str, OpenPlan] = {}
+        #: the update in STOPPING: its `config intent` record's body with the record's seq, until
+        #: a `config applied` names its token (startup step 4); None when no update stops
+        self.update: dict[str, Any] | None = None
         #: the end of the outcome just noted, which the plan committed with it carries
         self._ended: dict[str, str | None] = {}
 
@@ -586,6 +615,22 @@ class OpenTable:
                 self.pending.pop(int(body["pending"]), None)
         elif record.kind == "follow_up":
             self._note_follow_up(seq, body)
+        elif record.kind == "config":
+            self._note_config(seq, body)
+
+    def _note_config(self, seq: int, body: Mapping[str, Any]) -> None:
+        """An update's intent opens it and gives each attempt it stops the cause of its first
+        stop, as the intent names it (`update_stop` unless the attempt took another first), to
+        each one with no stop of its own yet; the application that names its token closes it."""
+        if body.get("event") == "intent":
+            self.update = {**body, "seq": seq}
+            for entry in body.get("stop") or ():
+                held = self.attempts.get(str(entry.get("attempt")))
+                if held is not None and held.stop is None:
+                    cause = str(entry.get("cause") or UPDATE_STOP)
+                    self.attempts[held.attempt] = replace(held, stop=cause)
+        elif self.update is not None and body.get("token") == self.update.get("token"):
+            self.update = None
 
     def _note_stops(self, body: Mapping[str, Any]) -> None:
         """The stop each unsettled attempt was taking. The first stop an attempt took is its
@@ -633,6 +678,8 @@ class OpenTable:
         seqs = [a.seq for a in self.attempts.values()]
         seqs += list(self.pending)
         seqs += [p.seq for p in self.plans.values()]
+        if self.update is not None:
+            seqs.append(int(self.update["seq"]))
         return min(seqs, default=None)
 
     def to_payload(self) -> dict[str, Any]:
@@ -813,8 +860,9 @@ def _canon_ready(value: object) -> Any:
 
 def oracle_rows(oracle: Oracle) -> dict[str, Any]:
     """The oracle's runtime state as the snapshot holds it: every row, the timers in `(due,
-    token)` order, and the three scalars no row holds. `Oracle(catalog, carried=...)` installs
-    it back (`restore_oracle`)."""
+    token)` order, the three scalars no row holds, and what an update leaves behind it: the
+    tombstones of removed jobs, the queue scan owed to the next input, and the definitions of
+    the ghost resources. `Oracle(catalog, carried=...)` installs it back (`restore_oracle`)."""
     store = oracle.store
     rows = CarriedRows(
         jobs=dict(store.job),
@@ -823,6 +871,9 @@ def oracle_rows(oracle: Oracle) -> dict[str, Any]:
         timer_seq=store.timer_seq,
         consumed=dict(store.consumed),
         enqueue_counter=store.enqueue_counter,
+        tombstones=dict(store.tombstones),
+        wake_owed=oracle._wake_owed,
+        ghosts=oracle.ghost_resources(),
         now=oracle._now,
     )
     dumped = _canon_ready(rows.model_dump())
@@ -859,8 +910,8 @@ def encode_snapshot(
     runs: Mapping[str, list[dict[str, Any]]] | None = None,
     evidence: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> bytes:
-    """The snapshot's canonical bytes. The update state is null until an update can be durable
-    in STOPPING (3b)."""
+    """The snapshot's canonical bytes. The update state is the open table's update in STOPPING
+    (its `config intent`), null when none stops."""
     return canonical_bytes(
         {
             "state_version": STATE_MACHINE_VERSION,
@@ -873,11 +924,27 @@ def encode_snapshot(
             "position": position.to_payload(),
             "config_rev": config_rev,
             "open": open_table.to_payload(),
-            "update": None,
+            "update": open_table.update,
             "runs": dict(runs or {}),
             "evidence": {job: dict(held) for job, held in (evidence or {}).items()},
         }
     )
+
+
+def _with_update(table: OpenTable, update: Any) -> OpenTable:
+    """`table` holding the snapshot's update in STOPPING."""
+    table.update = dict(update) if isinstance(update, Mapping) else None
+    return table
+
+
+def _with_revs(runs: dict[str, Any]) -> dict[str, Any]:
+    """A snapshot's retained run history, every run with the configuration rev it opened under
+    (`rev`, required: a reader never derives one), or ValueError."""
+    for job, kept in runs.items():
+        for run in kept:
+            if not is_wire_int(run.get("rev")):
+                raise ValueError(f"retained run {job}.{run.get('run')} records no rev")
+    return runs
 
 
 def decode_snapshot(seq: int, data: bytes, *, where: str) -> Snapshot:
@@ -895,9 +962,9 @@ def decode_snapshot(seq: int, data: bytes, *, where: str) -> Snapshot:
             ),
             position=Position.from_payload(raw["position"]),
             config_rev=int(raw["config_rev"]),
-            open=OpenTable.from_payload(raw["open"]),
+            open=_with_update(OpenTable.from_payload(raw["open"]), raw.get("update")),
             update=raw.get("update"),
-            runs=dict(raw["runs"]),
+            runs=_with_revs(dict(raw["runs"])),
             evidence=dict(raw.get("evidence") or {}),
         )
     except (CanonError, KeyError, TypeError, ValueError) as exc:
@@ -1098,6 +1165,7 @@ def dispatch_record(
     attempt: str,
     spool: str | None,
     started_at: datetime,
+    rev: int,
     ordinal: int = 1,
     env: Mapping[str, str] | None = None,
     discharges: int | None = None,
@@ -1105,8 +1173,9 @@ def dispatch_record(
 ) -> Record:
     """One attempt's launch intent (DL-118, DL-425). An `attempt` outside the ss11a grammar is
     refused, as a freehand id would split the one key. `attempt` is the run id, the attempt's
-    durable identity; `ordinal` names its spool directory and its display. `after` is the cause
-    of the stop a replacement follows (DL-426)."""
+    durable identity; `ordinal` names its spool directory and its display. `rev` is the
+    configuration rev it is dispatched under, the attempt's own (DL-427). `after` is the cause of
+    the stop a replacement follows (DL-426)."""
     if not is_valid_run_id(attempt):
         raise EngineError(
             f"dispatch {job}.{run_number}: run_id {attempt!r} is outside the ss11a uuid4"
@@ -1120,6 +1189,7 @@ def dispatch_record(
         "spool": spool,
         "env": dict(env or {}),
         "started_at": started_at.isoformat(),
+        "rev": rev,
     }
     if discharges is not None:
         body["discharges"] = discharges
@@ -1380,6 +1450,29 @@ class Replay:
     #: input, less the starts `spawn_superseded` refused. A run here with no `dispatch` record
     #: is a start the previous engine decided and never launched (DL-102)
     spawns: set[tuple[str, int]] = field(default_factory=set)
+    #: the configuration rev the oracle runs once the records are replayed
+    rev: int | None = None
+
+
+#: The trace marker an update's application leaves between the inputs it falls between: the
+#: entries after it run under the rev it names (`config_marker`).
+CONFIG_MARKER: Final = "CONFIG"
+
+
+def config_marker(rev: int) -> str:
+    """The cause of a `CONFIG` trace marker for configuration rev `rev`."""
+    return f"configuration rev {rev}"
+
+
+#: A store's configuration rows by rev, as a replay reads them at each `segment`.
+type Configurations = Callable[[int], Configuration]
+
+
+def apply_configuration(oracle: Oracle, configuration: Configuration) -> None:
+    """Swap `oracle`'s catalog for `configuration`'s, read under its profile, as the live
+    update applied it (`Oracle.replace_catalog`): replay meets the swap where the update's
+    `config applied` record stands, between the same two inputs."""
+    oracle.replace_catalog(configuration.catalog, **oracle_reading(configuration.profile))
 
 
 def replay_inputs(
@@ -1388,12 +1481,18 @@ def replay_inputs(
     *,
     machines: Executor | None = None,
     frontiers: Frontiers | None = None,
+    rev: int | None = None,
+    configs: Configurations | None = None,
 ) -> Replay:
     """Apply the recorded attempts through `oracle` in admission order, each under its durable
     decision (concurrency-model ss4): a rejected attempt applies its time half only, and an
     applied one is fed without re-deciding, so this build reproduces the record's history and
     not the one its current gate would write. `frontiers` is where a snapshot left the log, when
     replay continues one.
+
+    `rev` is the configuration rev `oracle` runs. A `segment` naming another rev is an update
+    the engine applied there, and the oracle swaps to that rev's configuration (`configs`) before
+    the next input; a store that applied one and a replay given no `configs` is refused.
 
     An attempt and its decision are one transaction, so an attempt with no decision means the
     store disagrees with itself and is refused. Each applied input's starts are derived as the
@@ -1402,15 +1501,40 @@ def replay_inputs(
     An input that raises stops the replay with a `ReplayFault` that names it; a
     `StatechartError` stops it as itself, naming the input."""
     decisions = read_decisions(records, machines)
-    replay = Replay(decisions=decisions, frontiers=frontiers or Frontiers())
-    dispatchable = frozenset(
-        name for name, job_ir in oracle.catalog.jobs.items() if job_ir.job_type != "BOX"
-    )
+    replay = Replay(decisions=decisions, frontiers=frontiers or Frontiers(), rev=rev)
+
+    def startable() -> frozenset[str]:
+        return frozenset(
+            name for name, job_ir in oracle.catalog.jobs.items() if job_ir.job_type != "BOX"
+        )
+
+    dispatchable = startable()
     # the ghost-run gate starts where the oracle's rows do: a snapshot is taken only when every
     # start it covers has its `dispatch` or its `dispatch_pending`, so a STARTING overwrite of a
     # run the snapshot holds plans no second start (DL-234)
     dispatched = {job: rt.run_number for job, rt in oracle.store.job.items() if rt.run_number}
-    for attempt in read_attempts(records):
+    for record in records:
+        if record.get("rec") == "segment":
+            found = int(record["rev"])
+            if replay.rev is None:
+                replay.rev = found
+            elif found != replay.rev:
+                if configs is None:
+                    raise EngineError(
+                        f"the store applied configuration rev {found} and this replay has no"
+                        " configurations to read it from"
+                    )
+                apply_configuration(oracle, configs(found))
+                # the trace says where the rev moved, as the live application's does
+                oracle.mark(
+                    datetime.fromisoformat(record["at"]), CONFIG_MARKER, config_marker(found)
+                )
+                replay.rev = found
+                dispatchable = startable()
+            continue
+        attempt = _attempt_of(record)
+        if attempt is None:
+            continue
         durable = decisions.for_index(attempt.index)
         if durable is None:
             raise EngineError(
@@ -1449,14 +1573,26 @@ class StoreReplay:
     anchor: Snapshot | None
 
 
-def replay_store(store: Store, catalog: Any, *, where: str, **reading: Any) -> StoreReplay:
-    """Replay a store for a reader, through a fresh oracle over `catalog` read under `reading`.
-    A store whose oldest records were pruned replays from its latest snapshot, as a restart
-    does, and its trace covers what follows the snapshot; a pruned store with no snapshot, or
-    with one another state version wrote, is refused by name."""
+def load_configuration(store: Store, rev: int, *, where: str) -> Configuration:
+    """The store's configuration row `rev`, or refused naming `where`."""
+    try:
+        data = store.get_config(rev)
+    except KeyError as exc:
+        raise EngineError(f"{where}: the store holds no configuration rev {rev}") from exc
+    return Configuration.from_bytes(data, where=where)
+
+
+def replay_store(store: Store, *, where: str, fallback: Configuration | None = None) -> StoreReplay:
+    """Replay a store for a reader, through a fresh oracle over the configuration it ran first,
+    read under that configuration's profile, swapping to each configuration an update applied
+    where its `segment` stands. A store whose oldest records were pruned replays from its latest
+    snapshot, as a restart does, under the snapshot's configuration, and its trace covers what
+    follows the snapshot; a pruned store with no snapshot, or with one another state version
+    wrote, is refused by name. `fallback` stands in for a store that holds no configuration
+    row yet."""
     first = next(iter(store.read_from(0)), None)
     anchor: Snapshot | None = None
-    oracle = Oracle(catalog, **reading)
+    rev = first_rev(store)
     if first is not None and first[0] > 1:
         stored = store.latest_snapshot()
         if stored is None:
@@ -1470,11 +1606,38 @@ def replay_store(store: Store, catalog: Any, *, where: str, **reading: Any) -> S
                 f" {stored.state_version}, this build derives {STATE_MACHINE_VERSION} (DL-424)"
             )
         anchor = decode_snapshot(stored.seq, stored.data, where=where)
+        rev = anchor.config_rev
+    if fallback is not None and first is None:
+        # a store with no record holds no configuration of its own yet
+        configuration = fallback.model_copy()
+    else:
+        configuration = load_configuration(store, rev, where=where)
+    catalog = configuration.catalog
+    reading = oracle_reading(configuration.profile)
+    if anchor is None:
+        oracle = Oracle(catalog, **reading)
+    else:
         oracle = restore_oracle(catalog, anchor.rows, **reading)
     after = 0 if anchor is None else anchor.seq
     records = [w for _, record in store.read_from(after) if (w := wire_record(record)) is not None]
-    replay = replay_inputs(oracle, records, frontiers=None if anchor is None else anchor.frontiers)
+    replay = replay_inputs(
+        oracle,
+        records,
+        frontiers=None if anchor is None else anchor.frontiers,
+        rev=rev,
+        configs=lambda found: load_configuration(store, found, where=where),
+    )
     return StoreReplay(oracle, replay, records, anchor)
+
+
+def first_rev(store: Store) -> int:
+    """The configuration rev a store's records open with: genesis's `config applied`, the
+    first record. A store with none yet runs its lowest rev."""
+    for _, record in store.read_from(0):
+        if record.kind == "config" and record.payload.get("event") == "applied":
+            return int(record.payload["rev"])
+        break
+    return 1
 
 
 def _at_input(exc: StatechartError, attempt: Attempt) -> StatechartError:

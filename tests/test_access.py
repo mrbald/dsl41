@@ -247,6 +247,7 @@ def test_the_query_surface_forwards_exactly_the_read_verbs() -> None:
         "global",
         "globals",
         "subscribe",
+        "catalog",
     )
     read_verbs = {verb for verb, tier in REQUIRED_TIER.items() if tier is Tier.READ}
     assert read_verbs == set(_QUERY_VERBS)

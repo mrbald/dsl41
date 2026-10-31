@@ -89,6 +89,8 @@ Engine:
   backfill to its end.
 - [Attempts and the engine stop](attempts.md): one launch from its dispatch
   to its outcome, and the engine's drain.
+- [Update: reread and update](update.md): a stored plan applied to the
+  running engine.
 - Seal and lineage (`seal-and-lineage.md`, retired in 2.0.0): the anchor head, the period
   registry row and the engine's seal phases.
 
@@ -120,3 +122,4 @@ that explains it.
 | seal_boundary (retired in 2.0.0) | Seal and lineage (`seal-and-lineage.md`, retired in 2.0.0) |
 | [engine_lifecycle](../state-machines.md#engine_lifecycle) | [Attempts](attempts.md) |
 | [attempt](../state-machines.md#attempt) | [Attempts](attempts.md) |
+| [update](../state-machines.md#update) | [Update](update.md) |

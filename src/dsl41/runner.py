@@ -119,7 +119,7 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Any, Final
 
-from dsl41.engine_charts import AttemptOutcome, DrainRequest
+from dsl41.engine_charts import UPDATE_STOP, AttemptOutcome, DrainRequest
 from dsl41.ir import CatalogIR, JobIR
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, EventSource, JobRuntime
@@ -140,6 +140,7 @@ from dsl41.runner_attempts import (
     UNSETTLED,
     AttemptTier,
     EngineTier,
+    FollowUp,
     FollowUpStep,
     Replacement,
     follow_up_plan,
@@ -190,6 +191,7 @@ from dsl41.runner_ledger import STATE_MACHINE_VERSION, Proof
 from dsl41.runner_procid import COOKIE_ENV, cookie
 from dsl41.runner_store import Record, Store
 from dsl41.runner_scheduler import Scheduler
+from dsl41.runner_update import EngineUpdate, UpdateAnswer, UpdateRequest, now_of
 from dsl41.runner_stops import (
     COMMAND_SURVIVED,
     LADDER_RUNNING,
@@ -284,7 +286,9 @@ class _Pending:
 
     `control` marks a lifecycle step the loop takes in queue order instead of admitting an
     input: `stop_requested` (SIGTERM, `engine stop`), whose `reply` is the lifecycle state the
-    step left, or `abort_deadline` (spec-wiring 2b)."""
+    step left, or `abort_deadline` (spec-wiring 2b); `update`, an update request (`update`
+    holds it, `answer` its answer), or `update_exit`, an attempt of the update's stop set that
+    ended (`update` holds its job) (spec-reload)."""
 
     at: datetime
     request_id: str | None
@@ -295,6 +299,8 @@ class _Pending:
     step: tuple[str, int] | None = None
     control: str | None = None
     reply: asyncio.Future[str] | None = None
+    update: UpdateRequest | str | None = None
+    answer: asyncio.Future[UpdateAnswer] | None = None
 
 
 def _without_frames(exc: Exception) -> Exception:
@@ -358,6 +364,20 @@ def adapter_switch(adapters: Mapping[str, JobAdapter], name: str) -> str | None:
     if name in ADAPTER_SWITCHES:
         raise ValueError(f"adapter switch {name!r} has no read in runner.adapter_switch")
     return None
+
+
+def refit_adapters(
+    adapters: Mapping[str, JobAdapter], switches: SemanticSwitches
+) -> dict[str, JobAdapter]:
+    """`adapters` with each one that reads a switch rebuilt under `switches` when it was built
+    under another value (DL-258): the FW adapter's `fw-existence`. The rest are kept."""
+    refit = dict(adapters)
+    fw = refit.get("FW")
+    if isinstance(fw, FileWatcherAdapter) and fw.existence != switches.fw_existence:
+        refit["FW"] = FileWatcherAdapter(
+            default_interval_s=fw.default_interval_s, existence=switches.fw_existence
+        )
+    return refit
 
 
 def _engine_switches(
@@ -491,8 +511,9 @@ class Engine:
         self.fence: Proof | None = fence
         #: `engine.toml` (DL-424); None takes no snapshot and prunes nothing
         self.settings = settings
-        #: the configuration rev the engine runs
+        #: the configuration rev the engine runs, and the one its trace opens under
         self.config_rev = 0
+        self.trace_rev: int | None = None
         #: the clock instant and journal seq of the last snapshot this engine took
         self._snapshot_at: datetime | None = None
         self._snapshot_seq = 0
@@ -570,6 +591,8 @@ class Engine:
         self.fault: Exception | None = None
         self._faulted = asyncio.Event()
         self.stopped = asyncio.Event()
+        #: the update tier's engine side (spec-reload): the request in flight and its stops
+        self.update = EngineUpdate(self)
 
     # ---- the attempt and lifecycle tiers (spec-wiring 2b)
 
@@ -622,8 +645,102 @@ class Engine:
         """Queue a lifecycle step that a timer raised (`abort_deadline`)."""
         self._push(_Pending(at=self.clock.now(), request_id=None, control=name))
 
-    def _control(self, pending: _Pending) -> None:
-        """Take one queued lifecycle step."""
+    def request_update(self, request: UpdateRequest) -> asyncio.Future[UpdateAnswer]:
+        """Queue an update request as one step of the single writer; the answer is its decision
+        (spec-reload). Its `applied` future resolves once the update applied."""
+        answer: asyncio.Future[UpdateAnswer] = asyncio.get_running_loop().create_future()
+        self._push(
+            _Pending(
+                at=self.clock.now(),
+                request_id=None,
+                control="update",
+                update=request,
+                answer=answer,
+            )
+        )
+        return answer
+
+    def post_update_exit(self, job: str | None) -> None:
+        """Queue the end of a stop-set attempt for the update tier (None: a look whether the
+        stop set is down), as a step of the single writer, so an update applies only in the
+        loop and never inside an admission."""
+        self._push(
+            _Pending(at=self.clock.now(), request_id=None, control="update_exit", update=job)
+        )
+
+    def now_admitted(self) -> datetime:
+        """The engine's instant, never before the admission frontier."""
+        return now_of(self.clock.now(), self.frontiers.at)
+
+    async def _update_step(self, pending: _Pending) -> None:
+        """Take one queued update step; an application it reaches is finished inside it: one
+        time advance is fed, so the queue scan the swap owes runs first (DL-427), then the
+        outcomes kept back are committed and the held starts released."""
+        update = self.update
+        update.direct = True
+        try:
+            if pending.control == "update":
+                assert isinstance(pending.update, UpdateRequest) and pending.answer is not None
+                answer = update.admit(pending.update)
+                # a client that gave up on the decision cancelled its future; the step runs in
+                # full all the same, and a retry under the request id is answered from the store
+                if not pending.answer.done():
+                    pending.answer.set_result(answer)
+            else:
+                assert pending.update is None or isinstance(pending.update, str)
+                update.ended(pending.update)
+        finally:
+            update.direct = False
+        if update.applied:
+            await self._admit_and_apply(_Pending(at=self.now_admitted(), request_id=None))
+            update.finish()
+
+    def refit_adapters(self) -> None:
+        """After an update swapped the switches: a wired adapter built under another value of a
+        switch it reads is rebuilt under the new one, then the switches are checked as at
+        construction (runner-design ss8a)."""
+        self.adapters = refit_adapters(self.adapters, self.oracle.semantics)
+        _engine_switches(self.profile, None, self.scheduler, self.adapters)
+
+    def takes_up(self, job: str, run_number: int) -> bool:
+        """Whether a task an update cancelled is launched again: its job is in the applied
+        catalog with an adapter, and its run is still live."""
+        job_ir = self.oracle.catalog.jobs.get(job)
+        return (
+            job_ir is not None
+            and job_ir.job_type in self.adapters
+            and spawn_superseded(self.oracle.store.job.get(job), run_number) is None
+        )
+
+    def resume_cancelled(
+        self, job: str, run_number: int, run_id: str | None, *, take_up: bool
+    ) -> None:
+        """A task the update cancelled (a file watch): launched again under its run id when the
+        application chose to (`takes_up`), as a restart takes up a watch; else its attempt is
+        closed with no plan."""
+        if take_up:
+            job_ir = self.oracle.catalog.jobs[job]
+            self._launch(
+                job_ir,
+                run_number,
+                self.adapters[job_ir.job_type],
+                run_id=run_id,
+                spool=self.spool_of(job_ir, run_number, 1),
+            )
+            return
+        # the update needs a store, and a cancelled task's attempt has no outcome yet
+        assert self.journal is not None and run_id is not None
+        at = self.clock.now()
+        self.journal.append(
+            outcome_record(run_id, job, run_number, "stopped", {}, at, cause=UPDATE_STOP),
+            plan_record(run_id, job, run_number, "none", [], at),
+        )
+
+    async def _control(self, pending: _Pending) -> None:
+        """Take one queued lifecycle or update step."""
+        if pending.control in ("update", "update_exit"):
+            await self._update_step(pending)
+            return
         if pending.control == "stop_requested":
             settings = self.settings or EngineSettings()
             self.lifecycle.stop_requested(
@@ -658,6 +775,10 @@ class Engine:
     def leave(self, record: str, unsettled: tuple[str, ...]) -> None:
         """The lifecycle reached STOPPED: the loop writes `record` and leaves at its next turn."""
         self._leaving = (record, unsettled)
+
+    def stop_cause(self, attempt: str) -> str | None:
+        """The cause of the stop the attempt is taking, None when it takes none."""
+        return self._stop_cause(attempt)
 
     def _stop_cause(self, attempt: str) -> str | None:
         """The cause of the stop an attempt the tier still holds is taking, or None: also for
@@ -707,11 +828,22 @@ class Engine:
     def record_outcome(self, attempt: str, outcome: AttemptOutcome) -> None:
         """An observed attempt ended: journal its outcome and the interruption rule's plan in
         one transaction, under the applied catalog and marked set, then carry the plan out
-        (startup step 6 does that for the outcomes of step 5)."""
+        (startup step 6 does that for the outcomes of step 5). An attempt an update in STOPPING
+        is stopping keeps its outcome back until the update applied (spec-wiring 2b, the
+        interruption rule's step 1)."""
+        facts = self._facts[attempt]
+        if self.update.keeps(attempt, facts.job, outcome):
+            self.update.keep(attempt, facts.job, outcome)  # settles it when its stop is done
+            return
+        self.commit_outcome(attempt, outcome)
+
+    def plan_for(self, attempt: str, outcome: AttemptOutcome) -> FollowUp:
+        """The interruption rule's plan for an ended attempt, under the catalog, the marked set
+        and the rows as they are now (spec-wiring 2b)."""
         facts = self._facts[attempt]
         job, run = facts.job, facts.run_number
         row = self.oracle.store.job.get(job)
-        plan = follow_up_plan(
+        return follow_up_plan(
             outcome,
             job=job,
             run_number=run,
@@ -721,6 +853,15 @@ class Engine:
             marked=job in self.marked,
             run_id=attempt,
         )
+
+    def commit_outcome(
+        self, attempt: str, outcome: AttemptOutcome, plan: FollowUp | None = None
+    ) -> None:
+        """Journal an ended attempt's outcome with its plan, and carry the plan out. `plan` is
+        one chosen earlier (an update's, chosen at its application); else it is chosen now."""
+        facts = self._facts[attempt]
+        job, run = facts.job, facts.run_number
+        plan = plan if plan is not None else self.plan_for(attempt, outcome)
         at = self.clock.now()
         steps = [self._step_body(facts, step, outcome) for step in plan.steps]
         extra: dict[str, Any] = {}
@@ -901,6 +1042,24 @@ class Engine:
             self.perform_plan(attempt)
         self._forget_if_over(attempt)
         self._release(facts.job)  # what it kept back may go now
+        self.update.cleaned(attempt)
+
+    def attempt_of_run(self, job: str, run_number: int) -> str | None:
+        """The run id of run `run_number` of `job`'s latest attempt: the observed one the
+        attempt tier holds, else the live task's; None when the run has neither."""
+        observed = self._job_attempt.get(job)
+        if observed is not None and self._facts[observed].run_number == run_number:
+            return observed
+        live = self._live.get(job)
+        return live.attempt if live is not None and live.run_number == run_number else None
+
+    def stop_done(self, attempt: str) -> bool:
+        """Whether an ended attempt's stop is finished as its job's next run would wait for
+        it: its ladder done and its group not held, so a reading found nothing of it left
+        (DL-431)."""
+        tier = self.attempts
+        running = tier.knows(attempt) and (tier.ladder_running(attempt) or tier.held(attempt))
+        return not running and attempt not in self.held_groups
 
     def hold_group(self, attempt: str, pgid: int) -> None:
         """The attempt's group may live with no stop left to end it: nothing of its job is
@@ -954,6 +1113,7 @@ class Engine:
         if not stopping:
             self._ladder_ended(attempt)
         self._release(facts.job)
+        self.update.cleaned(attempt)
 
     def blocked(self, job: str, replacing: str | None = None) -> str | None:
         """The unsettled attempt of `job` that keeps the job's next dispatch back, a held one
@@ -985,7 +1145,8 @@ class Engine:
             earlier = self._live.pop(job, None)
             if earlier is not None:
                 self._kill(earlier)
-        return self.blocked(job, replacing) is not None
+        # an update that stops keeps every job of its plan from starting (spec-reload)
+        return self.update.holds(job) or self.blocked(job, replacing) is not None
 
     def _release(self, job: str) -> None:
         """Carry out what `job`'s unsettled attempts kept back, each once nothing of the job
@@ -993,6 +1154,8 @@ class Engine:
         the engine drains (the restart launches those from their `dispatch_pending` records)
         or recovers (the loop does, once due). Called whenever an attempt of the job settles,
         its ladder ends or its group is gone."""
+        if self.update.holds(job):
+            return  # the update's application releases it
         waiting = [a for a in self._waiting_plans if self._plans[a].job == job]
         for plan in sorted(waiting, key=lambda a: self._plans[a].seq):  # in seq order (step 6)
             if plan in self._waiting_plans and self.blocked(job, plan) is None:
@@ -1350,7 +1513,7 @@ class Engine:
             if work.do is _Do.EVENT:
                 _, _, pending = heapq.heappop(self._queue)
                 if pending.control is not None:
-                    self._control(pending)
+                    await self._control(pending)
                     continue  # a lifecycle step is not same-instant work: skip the budget
                 out = await self._admit_and_apply(pending)
                 emitted.extend(out)
@@ -1493,6 +1656,9 @@ class Engine:
             if refusal is not None:
                 self._refuse(pending, refusal)
                 return []
+        elif _names_tombstone(self.oracle, attempt):
+            # an engine-made input for a job an update removed: the oracle takes none for it
+            forced = Rejection("stale_completion", "the job was removed by an update")
         else:
             quarantine = self._dry_apply_engine_made(attempt)
             forced = None if quarantine is None else quarantine[0]
@@ -1547,6 +1713,12 @@ class Engine:
             return AdmissionRefused(
                 f"refused before admission: the payload cannot be recorded: {exc}",
                 code="invalid_argument",
+            )
+        named = attempt.payload.get("job")
+        if isinstance(named, str) and named in self.oracle.store.tombstones:
+            return AdmissionRefused(
+                f"refused before admission: job {named!r} was removed by an update",
+                code="unknown_job",
             )
         dry = trial_apply(self.oracle, attempt)
         if isinstance(dry, Exception):
@@ -1835,6 +2007,7 @@ class Engine:
                     attempt=run_id,
                     spool=None if spool is None else str(spool),
                     started_at=now,
+                    rev=self.config_rev,
                     ordinal=ordinal,
                     env=invocation,
                     discharges=discharges,
@@ -2008,6 +2181,8 @@ class Engine:
                 self.oracle.trace(),
                 None if retention is None else now - timedelta(days=retention),
                 self.restored_rows,
+                # an engine built bare (no restart, no genesis) runs one rev from its start
+                self.config_rev if self.trace_rev is None else self.trace_rev,
             ),
         )
         journal.store.put_snapshot(seq, STATE_MACHINE_VERSION, data)
@@ -2022,6 +2197,12 @@ class Engine:
                 retained = _first_decision_index(journal.store, self.frontiers.committed_index + 1)
                 self.decisions.evict_below(retained)
         return seq
+
+
+def _names_tombstone(oracle: Oracle, attempt: Attempt) -> bool:
+    """Whether the input names a job an update removed (its tombstone is no row)."""
+    named = attempt.payload.get("job")
+    return isinstance(named, str) and named in oracle.store.tombstones
 
 
 def _first_decision_index(store: Store, otherwise: int) -> int:

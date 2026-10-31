@@ -283,7 +283,7 @@ def test_a_changed_chart_makes_the_charts_doc_stale() -> None:
 
 def test_the_charts_doc_has_a_section_per_other_chart_in_registry_order() -> None:
     names = [chart.name for chart in MACHINES if chart.name != "job"]
-    assert len(names) == 6 and "queue_scan" in names
+    assert len(names) == 7 and "queue_scan" in names
     sections = [line[3:] for line in rjl.render_charts().splitlines() if line.startswith("## ")]
     assert sections == names
 

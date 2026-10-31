@@ -831,3 +831,48 @@ stateDiagram-v2
 | end_spawn_failed | action | The attempt never ran: outcome `spawn_failed`, with the error text. |
 | end_from_record | action | The wrapper recorded the command's end: the outcome is derived from the record (`outcome_of`). A command that exited before the TERM is `natural`, a record that names a stop or the lifeline is `stopped`, a wrapper that aborted its own launch is `spawn_failed`. |
 | end_unobservable | action | No record: the wrapper is gone, or none came `grace_kill` after the last KILL. Outcome `unobservable`, with the cause of the stop the attempt took, if any. A record that comes later is kept as evidence and does not reopen the attempt. |
+
+## update
+
+Clock: logical.
+
+```mermaid
+stateDiagram-v2
+    state "update" as s4
+    state s4 {
+        [*] --> s1
+        state "IDLE" as s1
+        state "STOPPING" as s3
+        state "APPLIED" as s0
+        state "REFUSED" as s2
+        s0 --> [*]
+        s2 --> [*]
+    }
+    s1 --> s3 : update.01 update_admitted [admitted] / begin_stopping
+    s1 --> s2 : update.02 update_admitted [refused] / refuse
+    s3 --> s0 : update.03 all_stopped_or_none / apply
+```
+
+| Id | Source | Event | Guard | Action | Target | Kind | Cite |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| update.01 | IDLE | update_admitted | admitted | begin_stopping | STOPPING | external |  |
+| update.02 | IDLE | update_admitted | refused | refuse | REFUSED | external |  |
+| update.03 | STOPPING | all_stopped_or_none |  | apply | APPLIED | external |  |
+| update.04 | STOPPING | exit_recorded |  | one_down |  | internal |  |
+
+| State | In | Entry | Exit | Defers | Waits |
+| --- | --- | --- | --- | --- | --- |
+| update |  |  |  |  |  |
+| IDLE | update/phase |  |  |  |  |
+| STOPPING | update/phase |  |  |  |  |
+| APPLIED (final) | update/phase |  |  |  |  |
+| REFUSED (final) | update/phase |  |  |  |  |
+
+| Name | Kind | Prose |
+| --- | --- | --- |
+| admitted | guard |  |
+| refused | guard |  |
+| begin_stopping | action | Keep the token and the stop set, journal the intent, then stop each job in the set. |
+| refuse | action | Keep the refusal, the reply is the tier's. |
+| one_down | action | One job of the stop set ended: it leaves the open set. |
+| apply | action | Every job of the stop set ended: apply the plan, then journal the application. |

@@ -253,16 +253,17 @@ def test_dispatch_record_carries_job_run_number_run_id_run_dir_started_at(
 ) -> None:
     """(runner-design ss7): a dispatch record precedes its attempt's adapter task and names
     the attempt id the wrapper spec carries as `run_id`. The store keeps the ordinal and the
-    invocation; the wire keeps the 1.x shape, with the attempt's spool as `run_dir`."""
+    invocation; the wire keeps the 1.x shape, with the attempt's spool as `run_dir`, and adds
+    the configuration rev the run was dispatched under (DL-427)."""
     journal = _journal(tmp_path)
     run_id = "00000000-0000-4000-8000-000000000001"
     journal.append(
         dispatch_record(
-            "j1", 1, attempt=run_id, spool="/abs/runs/j1.1/1", started_at=T0, env={"A": "1"}
+            "j1", 1, attempt=run_id, spool="/abs/runs/j1.1/1", started_at=T0, rev=1, env={"A": "1"}
         )
     )
     with pytest.raises(EngineError, match="outside the ss11a uuid4 grammar"):
-        dispatch_record("j1", 1, attempt="freehand", spool=None, started_at=T0)
+        dispatch_record("j1", 1, attempt="freehand", spool=None, started_at=T0, rev=1)
     journal.close()
     dispatch = next(r for r in read_journal(tmp_path) if r["rec"] == "dispatch")
     assert dispatch == {
@@ -272,6 +273,7 @@ def test_dispatch_record_carries_job_run_number_run_id_run_dir_started_at(
         "run_id": run_id,
         "run_dir": "/abs/runs/j1.1/1",
         "started_at": T0.isoformat(),
+        "rev": 1,
     }
 
 
@@ -328,7 +330,7 @@ def test_the_open_table_follows_an_attempt_a_pending_start_and_a_plan() -> None:
             },
         ),
     )
-    table.note(5, dispatch_record("j1", 1, attempt=attempt, spool=None, started_at=T0))
+    table.note(5, dispatch_record("j1", 1, attempt=attempt, spool=None, started_at=T0, rev=1))
     plan = {"event": "plan", "attempt": attempt, "job": "j1", "run_number": 1, "plan": "hold"}
     steps = [{"step": "feed", "payload": {}}, {"step": "hold", "payload": {}}]
     table.note(6, Record(T0, "follow_up", None, None, {**plan, "steps": steps}))
@@ -340,7 +342,9 @@ def test_the_open_table_follows_an_attempt_a_pending_start_and_a_plan() -> None:
     table.note(9, follow_up_done(attempt, 1, None, T0))
     assert table.plans == {}
     other = "00000000-0000-4000-8000-000000000002"
-    table.note(10, dispatch_record("p", 1, attempt=other, spool=None, started_at=T0, discharges=3))
+    table.note(
+        10, dispatch_record("p", 1, attempt=other, spool=None, started_at=T0, rev=1, discharges=3)
+    )
     assert table.pending == {} and table.floor() == 10
     # a plan with no steps is never open; a done mark for a closed plan changes nothing
     table.note(11, Record(T0, "follow_up", None, None, {**plan, "plan": "none", "steps": []}))

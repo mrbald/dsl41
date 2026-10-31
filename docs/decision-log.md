@@ -25279,3 +25279,43 @@ relitigate an entry; append a new one.
   DL-429's limit. REJECTED: the cookie as proof of absence; witnesses for a universal negative (a
   cgroup's job, later); numeric-pid kills; leaks reported, left. Opus four rounds plus a
   two-round fresh review, Astra five; rounds past three owner-approved, DL-430.
+- DL-432 The update machine wired: `dsl41 reread` and `dsl41 update` apply a stored plan to the
+  running engine, stopping only the jobs it changes or removes (2026-10-31; slice 3b-b wiring under
+  DL-424; `runner_update.py`, `runner.py`, `runner_startup.py`, `runner_journal.py`,
+  `runner_history.py`, `cli_reload.py`). THE REQUEST. `update` is one single-writer step at adm: the
+  candidate loads from the plan's bytes under `plans/<token>/`; the step checks the live rev and
+  digest (`expect: {"config": N}`; a plan without `estate_dir` predates the engine), the stop set
+  and the running-box rule, refuses `stale_plan`, `update_in_progress`, `box_running`,
+  `would_stop_running` or `engine_draining`, nothing written, else journals `config intent` (token,
+  live rev, the stop set with each attempt's first stop cause, the filter, the consent, the request
+  id) and enters STOPPING. An exact retry is answered from the store even while draining; another
+  request under its id is `request_id_reused`. THE STOP. Each stop-set attempt gets
+  `stop{update_stop}` from the attempt tier; every job the plan touches waits `dispatch_pending`;
+  the outcome of a stop-set attempt, or of an interrupted attempt of a job whose mark the plan
+  changes, is kept until the application, where its plan is chosen once under the new catalog and
+  marked set, named in `stopped`. A stop is finished when its ladder is done and a reading finds
+  nothing left (DL-431), not at its record; an attempt ended before the admission and still cleaning
+  holds the update too. THE SWAP. `all_stopped_or_none` applies in one single-writer step: catalog,
+  settings and marked set swapped, `config applied` with the next configuration rev,
+  `Scheduler.replace` (oracle timers untouched), tombstones kept, stop-set file watches relaunched
+  or closed, one time advance fed at once (the queue scan the swap owes); the spec texts and
+  `spec_drift` baseline follow the applied plan, each part at the path `reread` read it from. THE
+  RESTART. Step 4 restores the update in STOPPING with its filter holding and nothing waits for it;
+  step 5 settles its attempts like any open one; the application is a step of the loop once the
+  stops are finished, wherever the last one finishes, never outside the loop; no plan job dispatches
+  and no kept outcome commits before the application. A root an update touched compares the launch's
+  estate job by job with the configuration it runs, paths ignored; an untouched root keeps today's
+  check. The snapshot carries tombstones, `wake_owed` and dropped resources' definitions. Replay
+  starts from the store's opening configuration; every run records its rev in its `dispatch` record
+  when it opens (required; state version 26), so `runs` reads each run, boxes included, under its
+  own definition, pruned or not. THE WIRE. `docs/control- protocol.md` §2 gains as additions the
+  `update` verb's shape and four codes; §4 the `catalog` read verb, `status.config_rev`, `update`
+  and `update_window_s`; §5 the segment's keys and `dispatch.rev`. The access model §10 gains
+  `catalog` (read) and `update` (adm); `reread` is adm (writes `plans/`). LIMIT. An update whose
+  stop cannot finish waits in STOPPING like a drain; a cancel verb is slice 5's. REJECTED: applying
+  from a callback (it could land inside an admission); a plan committed at the record; a sixth code
+  for an `expect` mismatch or a legacy plan; dropping changed jobs' oracle timers; a run's rev by
+  timestamp, by a read-time fallback or from its attempts' dispatch records; a restart that waits on
+  a stop, bounded or not, or applies the update outside the loop. Opus five rounds, Astra five;
+  rounds four and five owner-approved under DL-430 after a shape note; three round-five findings are
+  known bugs in `TODO.md`.

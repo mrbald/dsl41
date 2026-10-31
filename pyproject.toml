@@ -211,6 +211,8 @@ include = [
     "src/dsl41/oracle_schedule.py",
     "src/dsl41/oracle_state.py",
     "src/dsl41/oracle_writers.py",
+    # the `update` chart, its admission and its application (spec-reload)
+    "src/dsl41/reload_update.py",
     "src/dsl41/runner_config.py",
     "src/dsl41/runner.py",
     # the access perimeter (DL-146) is decision-shaped the same way: an
@@ -229,6 +231,8 @@ include = [
     "src/dsl41/runner_scheduler.py",
     "src/dsl41/runner_startup.py",
     "src/dsl41/runner_stops.py",
+    # the engine's side of the update (spec-reload)
+    "src/dsl41/runner_update.py",
     "src/dsl41/runner_wrapper.py",
     # the shared state-machine core and its registry
     "src/dsl41/state_machine.py",

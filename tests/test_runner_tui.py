@@ -2779,3 +2779,41 @@ def test_pilot_q_closes_the_spec_popup(short_root: Path) -> None:
             await _teardown(engine, server, loop_task)
 
     asyncio.run(scenario())
+
+
+def test_the_subtitle_names_the_configuration_rev_and_an_update_while_it_stops(
+    short_root: Path,
+) -> None:
+    """spec-reload: the subtitle shows the rev the engine runs; while an update stops its jobs it
+    names the update and those jobs, and the console says when that line changes."""
+    from dsl41.runner_tui import config_line
+
+    text = "insert_job: rev_job\njob_type: c\ncommand: x\nmachine: m1\n"
+    stopping = {"config_rev": 1, "update": {"token": "ab" * 32, "stopping": ["a", "b"]}}
+    assert config_line(stopping) == "rev 1  [update abababababab stopping: a, b]"
+    assert config_line({"config_rev": 2}) == "rev 2"
+    assert config_line({}) == ""
+
+    async def scenario() -> None:
+        engine, server, loop_task = await _serve(short_root / "run", text)
+        try:
+            app = RunnerApp(server.path)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await _wait_for_ui(pilot, lambda: "rev 1" in app.sub_title)
+                inner = app._client.request
+
+                async def stopping_update(request):
+                    answer = await inner(request)
+                    if request.get("cmd") == "status" and answer.get("ok"):
+                        answer["update"] = {"token": "cd" * 32, "stopping": ["rev_job"]}
+                    return answer
+
+                app._client.request = stopping_update
+                await app._refresh()
+                await _wait_for_ui(pilot, lambda: "stopping: rev_job" in app.sub_title)
+                console = app.query_one("#console", RichLog)
+                assert any("update cdcdcdcdcdcd stopping" in ln.text for ln in console.lines)
+        finally:
+            await _teardown(engine, server, loop_task)
+
+    asyncio.run(scenario())

@@ -19,6 +19,7 @@ so the grace path could not finish inside the test's own deadline.
 from __future__ import annotations
 
 import asyncio
+import types
 import contextlib
 import json
 import os
@@ -586,6 +587,8 @@ class _FakeEngine:
         self.journal = journal
         self.estate = None
         self.machines = Executor()  # the engine's executor, which runs the feeds
+        # the server hears of an update's application through these (spec-reload)
+        self.update = types.SimpleNamespace(listeners=[])
 
         class _Frontiers:
             committed_index = 0

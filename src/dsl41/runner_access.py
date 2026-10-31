@@ -290,7 +290,8 @@ def peer_principal(sock: socket_mod.socket) -> Principal | None:
 # --------------------------------------------------------------- verb table
 
 #: access-model ss10: the closed table, cmd -> required tier. `sendevent` is OPS whatever its
-#: verb; the dispatcher splits the verbs. `engine_stop` is ADM. A cmd absent here is denied.
+#: verb; the dispatcher splits the verbs. `engine_stop` and `update` are ADM. A cmd absent here is
+#: denied.
 REQUIRED_TIER: dict[str, Tier] = {
     "status": Tier.READ,
     "trace": Tier.READ,
@@ -305,6 +306,10 @@ REQUIRED_TIER: dict[str, Tier] = {
     "sendevent": Tier.OPS,
     # drains the engine and ends the process (spec-wiring 2b)
     "engine_stop": Tier.ADM,
+    # what `reread` diffs against: the running catalog, its settings, rev and statuses
+    "catalog": Tier.READ,
+    # applies a stored plan, stopping the running jobs it changes (spec-reload)
+    "update": Tier.ADM,
 }
 
 
