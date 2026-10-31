@@ -14,7 +14,10 @@ Restart follows spec-wiring 1b's eight steps:
 2. open the store; a `state_version` other than this binary's refuses, naming both;
 3. load the latest snapshot and replay the `input` records after it; rebuild the open table
    from the records after it;
-4. (an update durable in STOPPING is 3b's);
+4. restore an update the last incarnation left in STOPPING (`config intent` with no `config
+   applied`, `runner_update.EngineUpdate.resume`): its dispatch filter holds from here; step 5
+   settles its attempts like any open one, and it applies as a step of the loop once they are
+   down, so no job of its plan dispatches and no outcome it keeps commits before that;
 5. settle every open attempt through the attempt chart: the attempt is instantiated under its
    run id and fed what its spool supports (`spawn.json`, `status.json`, a wrapper still writing
    its record, a command that outlived its wrapper and gets the ladder); its `outcome` is
@@ -58,8 +61,17 @@ from dsl41 import runner_procid as _procid
 from dsl41.engine_charts import ENGINE_STOP, WRAPPER_LOST
 from dsl41.ir import CatalogIR, JobIR
 from dsl41.reload_diff import catalog_hash_v2
+from dsl41.oracle import Oracle
 from dsl41.oracle_state import LIVE, Event
-from dsl41.runner import Deferred, Engine, adapter_switch, feed_step, outcome_record, plan_record
+from dsl41.runner import (
+    Deferred,
+    Engine,
+    adapter_switch,
+    feed_step,
+    outcome_record,
+    plan_record,
+    refit_adapters,
+)
 from dsl41.runner_adapters import (
     JobAdapter,
     load_json,
@@ -89,7 +101,9 @@ from dsl41.runner_journal import (
     ReplayFault,
     decode_snapshot,
     dispatched_runs,
+    first_rev,
     ladder_done_record,
+    load_configuration,
     pending_record,
     replay_inputs,
     restore_oracle,
@@ -379,7 +393,7 @@ def _genesis(
         machines=machines,
         settings=settings,
     )
-    engine.config_rev = rev
+    engine.config_rev = engine.trace_rev = rev
     engine.instance = instance
     engine.marked = frozenset(configuration.non_idempotent)
     engine.decisions.fallback = _decision_lookup(store)
@@ -413,13 +427,19 @@ def _config_applied(
 def _decision_lookup(store: Store) -> Any:
     """The decision index's fallback over the store: a request id's decision and the
     fingerprint it was admitted under, for decisions a snapshot covers (`Store.find_request`)."""
-    from dsl41.runner_admission import ApplyResult
+    from dsl41.runner_admission import ApplyResult, RequestCollision
 
     def lookup(request_id: str) -> tuple[ApplyResult, str] | None:
-        # only a `decision` record carries a request id in the store's unique column
+        # a `decision` record carries a request id in the store's unique column, and so does an
+        # update's `config intent`: an input under an update's id reuses it (spec-reload)
         record = store.find_request(request_id)
         if record is None:
             return None
+        if record.kind != "decision":
+            raise RequestCollision(
+                f"request_id {request_id!r} was admitted for an update: reuse an id only for"
+                " an exact retry"
+            )
         body = record.payload
         result = ApplyResult(
             index=int(body["index"]),
@@ -525,8 +545,13 @@ async def _resume_under_lock(
     try:
         _check_state_version(meta, path)
         snapshot = _latest_snapshot(store, path)
-        rev = snapshot.config_rev if snapshot is not None else store.current_config_rev()
-        configuration = Configuration.from_bytes(store.get_config(rev), where=str(path))
+        # the configuration the records open with, and the one the last `config applied` left
+        first = snapshot.config_rev if snapshot is not None else first_rev(store)
+        after = snapshot.seq if snapshot is not None else 0
+        tail = list(store.read_from(after))
+        rev = _applied_rev(tail, first)
+        start = load_configuration(store, first, where=str(path))
+        configuration = start if rev == first else load_configuration(store, rev, where=str(path))
     except BaseException:
         store.close()
         raise
@@ -539,15 +564,30 @@ async def _resume_under_lock(
     )
     journal.writable = False  # nothing is written until every refusal has had its chance
     journals.append(journal)
-    profile = _check_configuration(configuration, catalog, scheduler, adapters, declared)
-    _check_clock_domain(meta, clock)
-    _require_adapters(catalog, adapters, "resume")
-    _require_scheduler(catalog, scheduler, "resume")
-    after = snapshot.seq if snapshot is not None else 0
-    tail = list(store.read_from(after))
     for seq, record in tail:
         journal.open.note(seq, record)
         journal.position.note(record)
+    if rev == first_rev(store) and journal.open.update is None:
+        # a run root no update has touched runs the estate it was started with
+        profile = _check_configuration(configuration, catalog, scheduler, adapters, declared)
+    else:
+        # the store's configuration rows are the record; the estate given must be the one the
+        # engine runs once step 4 is done (spec-reload, DL-424)
+        profile, scheduler, adapters = _check_updated(
+            configuration,
+            rev,
+            catalog,
+            journal.open.update,
+            run_root,
+            scheduler,
+            adapters,
+            declared,
+            clock,
+        )
+        catalog = configuration.catalog
+    _check_clock_domain(meta, clock)
+    _require_adapters(catalog, adapters, "resume")
+    _require_scheduler(catalog, scheduler, "resume")
     last_at = journal.position.last_at
     # genesis appends the configuration before anything else, and a snapshot keeps the position
     assert last_at is not None
@@ -573,10 +613,11 @@ async def _resume_under_lock(
     )
     engines.append(engine)
     engine.config_rev = rev
+    engine.trace_rev = first  # the trace starts at the snapshot, or at genesis
     engine.marked = frozenset(configuration.non_idempotent)
     engine.resume_at = last_at
     wires = [wire for _, record in tail if (wire := wire_record(record)) is not None]
-    replay = _replay_into_engine(engine, wires, snapshot, profile, path)
+    replay = _replay_into_engine(engine, wires, snapshot, start, path)
     # the identity preflight runs before anything is written, so a refused restart has written
     # nothing
     _preflight_identities(engine)
@@ -591,6 +632,8 @@ async def _resume_under_lock(
     )
     _fold_evidence(engine, snapshot, tail)
     stopping = _interrupted_drain(tail) or frozenset()
+    if journal.open.update is not None:  # step 4: the update in STOPPING, its filter holding
+        engine.update.resume(journal.open.update)
     await _settle_open_attempts(engine, last_at, windows, stopping)  # step 5
     # steps 6 and 7 owe their effects to the loop, which carries them out once the due work has
     # run; `recovery` is step 8, set in full below
@@ -664,20 +707,95 @@ def _check_configuration(
     return configuration.profile
 
 
+def _applied_rev(tail: list[tuple[int, Record]], first: int) -> int:
+    """The configuration rev the last `config applied` of the tail names, else `first`."""
+    rev = first
+    for _, record in tail:
+        if record.kind == "config" and record.payload.get("event") == "applied":
+            rev = int(record.payload["rev"])
+    return rev
+
+
+def _check_updated(
+    configuration: Configuration,
+    rev: int,
+    launched: CatalogIR,
+    intent: Mapping[str, Any] | None,
+    run_root: Path,
+    scheduler: Scheduler | None,
+    adapters: Mapping[str, JobAdapter],
+    declared: RuntimeProfile | None,
+    clock: Clock,
+) -> tuple[RuntimeProfile, Scheduler | None, dict[str, JobAdapter]]:
+    """A restart of a run root an update touched runs the store's last applied configuration,
+    never the estate's files (DL-424). The estate the launch names must be the one the engine
+    runs once startup step 4 is done: the open update's candidate, else the applied catalog,
+    compared job by job under the settings the launch declares (`reload_diff.diff`), so a file
+    path or a comment does not count and a definition or a setting does. The launch's wiring
+    takes the exact path's runtime-profile check against that estate's profile (the machine
+    identity and policy, the FW window, the zone, the map and the switches), so a changed
+    value is refused by name as it is on a root no update touched. The scheduler is built
+    afresh over the configuration and the adapters are refit to its switches, so the engine
+    runs one profile; step 4 then replaces them as the update does.
+
+    Returns the profile, the scheduler and the adapters the engine runs."""
+    from dsl41.reload_diff import diff
+    from dsl41.runner_update import profile_for, reopen_plan, settings_of
+
+    profile = configuration.profile
+    target, target_settings = configuration.catalog, settings_of(profile, configuration.catalog)
+    if intent is not None:
+        estate = reopen_plan(run_root, str(intent["token"])).estate
+        target, target_settings = estate.catalog, dict(estate.settings)
+    given = target_settings if declared is None else settings_of(declared, launched)
+    moved = diff(target, launched, target_settings, given)
+    if moved.added or moved.removed or moved.changed:
+        raise EngineError(
+            "catalog hash mismatch: the estate changed since this store was written"
+            f" (configuration rev {rev}): reread and update once the engine runs, or launch"
+            " with the estate it runs (no silent semantic drift, ss7)"
+        )
+    expected = profile_for(target_settings, profile)
+    derived = _derive_runtime_profile(scheduler, adapters, base=expected, declared=declared)
+    drift = profile_drift(derived, expected)
+    if drift:
+        raise EngineError(
+            f"runtime-profile mismatch on {', '.join(drift)}: the store runs another"
+            " profile; start a fresh run root"
+        )
+    wired = refit_adapters(adapters, switches_of(profile))
+    if scheduler is not None:
+        # the launch wired it from its own estate; a restart re-anchors it at the durable
+        # frontier anyway (step 8), so it is built afresh over the configuration
+        scheduler = Scheduler(
+            configuration.catalog,
+            start=clock.now(),
+            default_tz=profile.default_tz,
+            tz_aliases=tz_aliases_of(profile),
+            semantics=switches_of(profile),
+        )
+    return profile, scheduler, wired
+
+
 def _replay_into_engine(
     engine: Engine,
     wires: list[dict[str, Any]],
     snapshot: Any,
-    profile: RuntimeProfile,
+    start: Configuration,
     path: Path,
 ) -> Any:
-    """Step 3: restore the snapshot's rows, replay the tail's inputs, and install the log's
-    position and decisions on the engine."""
+    """Step 3: restore the snapshot's rows under the configuration they were taken under,
+    replay the tail's inputs, swapping to each configuration an update applied where its
+    `segment` stands, and install the log's position and decisions on the engine."""
     assert engine.journal is not None
+    store = engine.journal.store
     if snapshot is not None:
         engine.oracle = restore_oracle(
-            engine.oracle.catalog, snapshot.rows, **oracle_reading(profile)
+            start.catalog, snapshot.rows, **oracle_reading(start.profile)
         )
+    elif start.catalog_hash != catalog_hash_v2(engine.oracle.catalog):
+        engine.oracle = Oracle(start.catalog, **oracle_reading(start.profile))
+    if snapshot is not None:
         engine.restored_runs = snapshot.runs
         engine.restored_rows = dict(snapshot.rows.jobs)
         # the trace a restart serves starts at its snapshot, and its first line says so
@@ -694,6 +812,8 @@ def _replay_into_engine(
             wires,
             machines=engine.machines,
             frontiers=snapshot.frontiers if snapshot is not None else None,
+            rev=snapshot.config_rev if snapshot is not None else None,
+            configs=lambda rev: load_configuration(store, rev, where=str(path)),
         )
     except ReplayFault as exc:
         # refuse, don't degrade: the same build raises at the same input on every restart
@@ -752,7 +872,9 @@ async def _settle_open_attempts(
     its log (`_resume_watch`). The plans wait for step 6. An attempt the engine left taking a
     stop is adopted with that stop: the cause the open table carries from the shutdown
     records, or `engine_stop` for one an interrupted drain named in its `draining` record
-    (`stopping`), so an exit the stop's TERM caused is `stopped`, never `natural` (DL-426)."""
+    (`stopping`), so an exit the stop's TERM caused is `stopped`, never `natural` (DL-426).
+    An attempt an update in STOPPING stops is adopted with `update_stop` from the open table
+    like any other (startup step 4 restored the update)."""
     assert engine.journal is not None
     engine.settling = True
     try:
@@ -870,6 +992,7 @@ async def _finish_ladder(engine: Engine, attempt: OpenAttempt) -> None:
                 return
     engine.journal.append(ladder_done_record(attempt.attempt, engine.clock.now()))
     engine.stops.forget(attempt.attempt)
+    engine.update.cleaned(attempt.attempt)  # an update's stop of it is finished (step 4)
 
 
 def _interrupted_drain(tail: list[tuple[int, Record]]) -> frozenset[str] | None:

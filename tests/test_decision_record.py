@@ -224,8 +224,8 @@ def test_a_dispatch_record_refuses_a_run_id_outside_the_grammar() -> None:
     journal = Journal(MemoryStore())
     for bad in ("", "not-a-uuid", "00000000-0000-1000-8000-000000000001"):
         with pytest.raises(EngineError, match="grammar"):
-            journal.append(dispatch_record("j", 1, attempt=bad, spool=None, started_at=T0))
-    journal.append(dispatch_record("j", 1, attempt=_RID, spool=None, started_at=T0))
+            journal.append(dispatch_record("j", 1, attempt=bad, spool=None, started_at=T0, rev=1))
+    journal.append(dispatch_record("j", 1, attempt=_RID, spool=None, started_at=T0, rev=1))
     assert [r["rec"] for r in read_journal(journal.store)] == ["dispatch"]
 
 

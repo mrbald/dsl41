@@ -135,6 +135,44 @@ then records `clean_shutdown` or `unclean_shutdown` and exits 0; its
 socket goes with it. A stop the loop does not take within the decision
 window answers `decision_timeout`.
 
+**An addition to this section (`update`, spec-reload, DL-427).**
+Applying a stored plan is `{"cmd": "update", "v": 3, "token", "stop_running",
+"wait", "request_id", "baseline_id", "expect": {"config": N},
+"claimed_actor"}`, the `dsl41 update` verb, at the `adm` tier
+(`docs/access-model.md` §10). `token` is the 64-hex-digit plan token
+`dsl41 reread` printed; the plan is read from `<run_root>/plans/<token>/`.
+`expect` names the configuration rev the caller read (`status`'s
+`config_rev`, or the plan's own); `request_id`, `baseline_id` and
+`claimed_actor` are the mutation envelope of §3. The request is a step of
+the engine's single writer. A refusal writes nothing and answers
+`{"ok": false, "refused": true, "code", "error", "token", "names"}`, with
+`names` the jobs or boxes it concerns, empty for a refusal about the
+request itself (`invalid_argument`, an envelope code, `request_id_reused`,
+`engine_draining`). An admission is journaled before it
+is answered: `{"ok": true, "decision": "admitted", "token", "request_id",
+"stop": [jobs], "application": null}`. With `"wait": true` the answer comes
+once the update applied, its `application` the applied record's `rev`,
+`catalog_hash`, `token`, `added`, `changed`, `removed`, `restored` (each
+re-added name with the flags its tombstone kept) and `stopped` (each job
+of the stop set with what follows its stop, chosen once at the
+application: the plan committed with its outcome, `complete`, `rerun`,
+`hold` or `none`; `rerun` for a file watch taken up again; `none` for a
+job with no attempt to stop, whose held start then goes under the new
+definition). The engine waits for the application `update_window_s`
+seconds, which `status` reports (the stop grace and the decision window);
+past it the answer is `"pending": true`, and a client waits on the socket
+at least that long. An exact retry under the same `request_id` with the
+same token, consent, `expect`, baseline and actor is answered from the
+first admission, and once applied with its application, also while a
+restart finishes it; the same id with another request is
+`request_id_reused`, as is an update under a `sendevent`'s id and the
+reverse. While the update stops, the engine stays `RUNNING`, every job of
+the plan's added, changed and removed sets that the oracle starts waits as
+`dispatch_pending`, and a second `update` is refused with
+`update_in_progress`. A new `update` while the engine drains is refused
+with `engine_draining`; an exact retry of one admitted before is answered
+from its admission.
+
 **No controller lease,** by choice (DL-41a). `sendevent` is multi-writer
 by AutoSys nature, and the engine's single-writer loop serializes every
 injection. The lease guards the supervisor tier, which spawns without
@@ -212,6 +250,15 @@ The client action says what a client does next:
 | `engine_apply_faulted` | rejected | applying an input on a fork of the engine's state raised, and its time half applied alone, so the input was logged with this rejection and only its time half applied: it is quarantined (`docs/concurrency-model.md` §4). The live engine stores it for an engine-made input. Replay stores it for any input admitted with no decision whose apply raises the same way, a control input included. Like every stored code, an exact retry of that control input is answered with it | operator |
 | `engine_error` | refused | an engine refusal whose raise site names no code | operator |
 | `engine_draining` | rejected | the mutation was admitted after `stop_requested` (a SIGTERM or `engine_stop`, below): it is logged with this rejection and only its time half applied; an exact retry is answered with it (spec-drain) | wait |
+| `stale_plan` | refused | the plan was diffed against another configuration rev or catalog than the engine runs (its revision or its catalog hash), `expect` names another rev, or the plan predates the engine (no estate directory) | re-read then decide |
+| `box_running` | refused | the plan adds or removes a member of a box that is `RUNNING` now, or removes it | wait |
+| `would_stop_running` | refused | the plan changes or removes a job that is `RUNNING` or `STARTING`, and the request did not consent with `stop_running` | fix the request |
+| `update_in_progress` | refused | another update is stopping its jobs; `names` holds its token | wait |
+
+The last four rows are an addition to this table (`update`, spec-reload,
+DL-427). They are `update`'s refusals: each writes nothing, and the
+answer's `names` lists the jobs or boxes it concerns. An `update` while the
+engine drains is refused with `engine_draining`, and nothing is logged.
 
 ## 3. Mutating verb: sendevent
 
@@ -513,11 +560,44 @@ deliberately no reload. The flag tells an operator that the running
 catalog differs from disk, and adopting the disk version takes a cold
 restart (DL-65).
 
+An addition to this section (`update`, spec-reload, DL-427): the
+`status` answer carries `config_rev`, the configuration rev the engine
+runs, `update_window_s`, how long an `update` with `wait` waits for its
+application (§2), and, only while an update stops its jobs, `update`:
+`{"token", "stopping": [jobs]}`, the jobs whose attempts it still waits
+for. An attempt an update stops shows its stop cause `update_stop`, and
+its replacement `"after": "update_stop"`. Once an update applied, `spec`
+serves the applied plan's JIL, and `spec_drift` compares the files on disk
+with the applied plan's bytes, so it keeps its meaning: the running
+catalog differs from disk. Adopting the files on disk while the engine
+runs is `dsl41 reread` and `dsl41 update`.
+
+### `catalog`
+
+An addition to this section (`update`, spec-reload, DL-427), the read
+`dsl41 reread` diffs a candidate against, at the `read` tier:
+`{"ok": true, "catalog": {…}, "catalog_hash", "settings": {…},
+"revision": int, "status": {<job>: <status>}, "runs": {<job>: int},
+"tombstones": {<job>: [flags]}}`. `catalog` is the running catalog's
+canonical JSON value, `catalog_hash` its hash, `settings` the estate
+settings it runs under (`timezone`, `timezone_aliases`, `semantics`,
+`external_instances`), `revision` the configuration rev, `status` and
+`runs` each row's status and run number, and `tombstones` the flags each
+removed job's tombstone kept (`ON_HOLD`, `ON_ICE`, `ON_NOEXEC`), for the
+removed names that kept any.
+
 ### `trace [since]`
 
 `{"ok": true, "last_seq": int, "entries": [{seq, at, job, transition,
 cause}]}`. `seq` is a 1-based position in the oracle's trace; `since` is
 exclusive.
+
+An addition to this section (`update`, spec-reload, DL-427): the `trace`
+answer may hold lines that name no job (`"job": ""`) and move no state.
+`RESTART` opens the trace of an engine restarted from a snapshot (the trace
+covers what follows it). `CONFIG` marks where an update's application stands
+between two inputs; its `cause` is `configuration rev N`, the rev the
+entries after it run under.
 
 ### `explain <job>`
 
@@ -628,6 +708,19 @@ The 1.x period fields are retired, and a 2.0.0 engine sends none of
 them: `segment_no`, `estate_id`, `period_id`, `catalog_hash_version`,
 `source_bundle_hash`, `first_index`, `opens_from_seal`, `reclaimed` and
 `trust_unaudited`.
+
+An addition to this section (`update`, spec-reload, DL-427): an
+update's application is a new configuration rev, and the stream carries
+its `segment`, in the same shape, where the engine applied it: the
+records before it ran under the rev before. The update's other records
+(its intent while it stops) are not on the wire. Each `dispatch` carries
+`rev`, the configuration rev that attempt was dispatched under: the
+attempt's own, so a run's replacement after an update names the next rev.
+A run's rev is the rev in force where the run opened. Off the wire, beside
+the run history DL-428's snapshot keeps, each retained run carries it as
+`rev`, required: a snapshot whose retained run lacks it does not read, and
+the state version is 26. `dsl41 runs` reads every run under that rev and
+never under a dispatch's.
 
 **The fields 2.0.0 adds** (DL-426), each additive, so a v3 client that
 does not read them keeps working (§2):

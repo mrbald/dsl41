@@ -59,8 +59,15 @@ Code = Literal[
     # an engine refusal that carries no code of its own
     "engine_error",
     # stored on a rejected decision: a mutation admitted after `stop_requested`
-    # (spec-wiring 2b)
+    # (spec-wiring 2b); an `update` while draining is refused with it
     "engine_draining",
+    # `update`'s refusals (spec-reload): the plan was diffed against another rev, it edits
+    # a running box's membership, it stops running jobs without consent, or another update
+    # is stopping
+    "stale_plan",
+    "box_running",
+    "would_stop_running",
+    "update_in_progress",
 ]
 
 #: every code, for the table test and the decision writer

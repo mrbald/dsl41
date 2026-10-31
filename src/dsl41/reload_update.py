@@ -350,7 +350,7 @@ def _on_stop(
     job: str, run: int, live_state: Oracle, removed: Collection[str], marked: Collection[str]
 ) -> OnStop:
     """The interruption rule's answer for the stopped run `run` of `job` (spec-wiring 2b):
-    removed, or a run that is no longer the oracle's current one in STARTING or RUNNING, is
+    removed, or a run that is not the oracle's current one in STARTING or RUNNING, is
     `none` (step 3); a marked job is `hold`; any other reruns."""
     row = live_state.store.job.get(job)
     if job in removed or row is None or row.status not in STOPPABLE or row.run_number != run:
@@ -504,15 +504,24 @@ class UpdateTier:
         self._settle()
         return decision
 
-    def resume(self, admitted: Admitted, still_open: Collection[str]) -> None:
+    def resume(
+        self, admitted: Admitted, still_open: Collection[str], *, settle: bool = True
+    ) -> None:
         """Restore an update whose intent is journaled and whose application is not (spec-crash
-        step 4): STOPPING with the jobs whose attempt has not ended yet."""
+        step 4): STOPPING with the jobs whose attempt has not ended yet. With `settle` false,
+        an empty set is left for the caller's `settle`, which applies where the caller
+        chooses."""
         self._admitted = admitted
         self._record.token = admitted.token
         self._record.open = set(still_open)
         self._filter = admitted.dispatch_filter
         self._executor = Executor()
         self._executor.restore(UPDATE_KEY, UPDATE, {"update", "STOPPING"}, self._record)
+        if settle:
+            self._settle()
+
+    def settle(self) -> None:
+        """Apply once no job of the stop set is still open: `all_stopped_or_none`."""
         self._settle()
 
     def exit_recorded(self, job: str) -> None:

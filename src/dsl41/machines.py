@@ -5,6 +5,7 @@ from __future__ import annotations
 from dsl41.engine_charts import ATTEMPT, ENGINE_LIFECYCLE
 from dsl41.job_chart import JOB
 from dsl41.oracle_state import RUNTIME_ASSEMBLY
+from dsl41.reload_update import UPDATE
 from dsl41.runner_admission import ADMISSION
 from dsl41.runner_journal import SUBSCRIPTION
 from dsl41.scan_chart import QUEUE_SCAN
@@ -19,4 +20,5 @@ MACHINES: tuple[Statechart, ...] = (
     SUBSCRIPTION,
     ENGINE_LIFECYCLE,
     ATTEMPT,
+    UPDATE,
 )

@@ -110,7 +110,11 @@ from dsl41.runner_clock import EngineError
 #: 25 (DL-426): the follow-up plan's steps are each a STATUS input; a held interrupted attempt is
 #: one FAILURE that carries `hold: true` (job.239), never a FAILURE and an ON_HOLD, so a store
 #: whose open plan holds the older two-step hold refuses by name.
-STATE_MACHINE_VERSION = 25
+#: 26 (DL-427): each `dispatch` record names the configuration rev that attempt was dispatched
+#: under, and every run of a snapshot's retained run history carries `rev`, the rev in force
+#: where the run opened. A snapshot that lacks it refuses by name, so no reader ever derives a
+#: run's rev.
+STATE_MACHINE_VERSION = 26
 
 LOCK_NAME = "leader.lock"
 
