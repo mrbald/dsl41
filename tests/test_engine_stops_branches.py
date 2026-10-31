@@ -17,6 +17,7 @@ import time
 from collections.abc import Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1234,7 +1235,7 @@ def test_a_restart_finishes_the_ladder_of_a_closing_attempt(
     rerun not launched. So does a group that outlives the whole ladder."""
     from store_surgery import append
 
-    from dsl41 import runner_startup
+    from dsl41 import runner_stops
 
     run_root, dispatch = _open(tmp_path)
     run_id, spool = dispatch["attempt"], Path(dispatch["spool"])
@@ -1266,7 +1267,7 @@ def test_a_restart_finishes_the_ladder_of_a_closing_attempt(
             boot_id=runner_procid.current_boot_id(),
         )
     if group == "survivor":
-        monkeypatch.setattr(runner_startup, "group_has_live_member", lambda _pgid: True)
+        monkeypatch.setattr(runner_stops, "group_has_live_member", lambda _pgid: True)
     body = {"attempt": run_id, "job": "j", "run_number": 1, "status": {}, "at": T0.isoformat()}
     append(
         run_root,
@@ -1374,6 +1375,7 @@ def test_a_held_group_keeps_its_job_s_starts_back_until_it_is_gone(
     asyncio.run(scenario())
     failing = subprocess.CompletedProcess(["ps"], 1, stdout="", stderr="")
     monkeypatch.setattr(runner_adapters.subprocess, "run", lambda *_a, **_k: failing)
+    monkeypatch.setattr(runner_adapters, "sys", SimpleNamespace(platform="darwin"))  # `ps`
     assert runner_adapters.group_has_live_member(2**22 + 7)
 
 

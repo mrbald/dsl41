@@ -425,7 +425,9 @@ test_sigkill_engine_midrun_then_resume,
 test_supervisor_spawn_keeps_each_lifeline_write_end_in_one_process).
 
 **Containment honesty:** pgid kill does not catch `setsid`/double-fork
-escapees (`sh -c 'daemon & '`). Vendor agents share this limitation, and
+escapees (`sh -c 'daemon & '`). On Linux the process cookie (§7) does,
+for an escapee that keeps its environment: the ladder signals each process
+that carries the attempt's cookie. Vendor agents share this limitation, and
 supervisord's group-stop flags are the same group kill. A per-run cgroup
 would attribute such a helper to its run; it is a stated limit, not a
 hardening to build (DL-403): a forced stop that meets
@@ -746,6 +748,26 @@ refusals.
    *reattachment*: their parent never died. Then this step reduces to the
    supervisor's LIST.
 
+**How the restart knows a process is ours.** On Linux, where a pidfd can
+signal it, every process of a command attempt carries the process cookie,
+`DSL41_COOKIE=<engine instance>.<run_id>` ([wrapper protocol](wrapper-protocol.md),
+DL-431).
+The engine sets it for the wrapper and the command, and the command's
+children inherit it. The `dispatch` record holds it, so the restart knows
+each open attempt's cookie. What is left of an attempt is its recorded
+group's live members and every process that carries its cookie, whatever
+its group, the wrapper left out; a failed scan is unknown and releases
+nothing. The restart stops what it finds left, one process at a time, as
+the live engine does, unless `process-leak=leak` (§8a) and the outcome is
+a natural exit. A group whose leader fails its start token and none of
+whose members carries the cookie is left alone: it may be the attempt's
+own cookie-less child or a stranger's that took the id after a pid wrap,
+and nothing tells them apart. A process outside the group that the scan
+cannot read is beyond the engine by design; the unit's cgroup is the
+stronger fence. On other platforms,
+and for an attempt dispatched before the cookie, the (pid, start-time)
+checks above decide.
+
 After the ladder, and after the untraced-start sweep and the pending-KILL
 re-drive below, one more rule runs over the wrappers the supervisor lists
 as alive: **a live wrapper under a TERMINAL row is re-driven regardless of
@@ -986,7 +1008,9 @@ a running box with a member that can queue is refused. For
 `off-ice-in-running-box` and `box-terminator-on-terminated`, the members
 the switch names are changed, so a running box that holds one is refused.
 For `box-start-all-members-out` and `idle-box-iced-member`, every box is
-changed, so a running box is refused.
+changed, so a running box is refused. `process-leak` changes no job's
+oracle reading: it decides what the engine does with the processes a
+command leaves running when it exits, so a flip changes no job.
 A switch can also name calendars; then every job that names such a calendar is changed.
 Replay
 refuses a period whose manifest is missing or is not bound to its
@@ -1026,6 +1050,7 @@ its default; only a short allow-list of static callers may.
 | `box-terminator-on-terminated` | `true`, `false` | `true` | `true` | A box member with `box_terminator`, a subbox included, that ends TERMINATED: killed, given the status, killed while queued, or ended by `term_run_time`. `true`: it terminates its running box, as a FAILURE does. "Force the Job or the Box to Stop Running" (AutoSys 12.1 and 24.2) says "if the job completes with a FAILURE or TERMINATED status, the box terminates." `false`: only a FAILURE does, the reading of the value line of the 24.2 `box_terminator` reference page. SEM-14. |
 | `box-start-all-members-out` | `complete`, `wait` | `complete` | unknown | A box whose start leaves no member in the run: every direct member on ice, or no members. `complete`: the start is a completion moment, so the box completes at once through the completion door, overrides first, then the default fold, which is SUCCESS over no member that ran. `wait`: the box stays RUNNING until an operator acts; the rest of DL-304 (an iced member that is live, or holds a live or queued job, is not out of the run) applies under both values. No vendor sentence names the case. "Basic Box Job Concepts" (AutoSys 12.0 and 24.2) keeps a box RUNNING "as long as there are jobs in it with ACTIVATED or RUNNING status", and "Events" (12.0 and 24.2) says of JOB_ON_ICE: "If the job is in a box, the scheduler does not execute the job for the entire run of the box." The runbook's Q15 protocol settles which value AutoSys follows. SEM-11, DL-304. |
 | `idle-box-iced-member` | `ignore`, `vote` | `ignore` | unknown | A box that is not running and re-derives its status when a member changes (SEM-15). `ignore`: an iced member that is out of the run, on ice with nothing inside it live or queued, is dropped from the re-derivation, as an INACTIVE member is, so a completed box does not flip when a job inside an iced subbox, or an iced member given a status, ends later. Nor is such a member's own change a verdict: if no other member votes, the box keeps its status, so a box that never ran stays INACTIVE; when the member that changed is in the run, DL-242's vacuous SUCCESS stands. An iced member that is live, or holds a live or queued job, is not dropped: its own status votes, and a live one blocks the re-derivation. `vote`: the iced member's status counts. A member that is not iced votes under both values. "Basic Box Job Concepts" (AutoSys 12.0 and 24.2) ignores only INACTIVE members and does not name ON_ICE; "Job States" (12.0 and 24.2) says an ON_ICE job "is removed from the job stream but is still defined", and SEM-11's fold already skips such a member (DL-304). The runbook's Q16 protocol settles which value AutoSys follows. SEM-15, SEM-20. |
+| `process-leak` | `terminate`, `leak` | `terminate` | `leak` | The processes a job's command leaves running when it exits: what is left of its recorded process group and every process carrying its `DSL41_COOKIE` (the wrapper protocol). `terminate`: a leak, stopped like any stop, TERM, `grace_term_s`, then KILL, each process by itself; the outcome stays what the command returned, the attempt closes with `ladder_done`, and the job's next run waits for it. `leak`: left running with a warning naming the job, the run and the pids, and the attempt settles at once; the drain and the restart leave them too. KILLJOB "kills the currently running process and the associated process group but does not kill orphan processes" (AutoSys events reference); a command that exits on its own leaves its processes running under the vendor. Linux with pidfd only; elsewhere the leader and the group decide as before the cookie. |
 
 ## 9. Time domains (E2)
 

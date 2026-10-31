@@ -498,6 +498,10 @@ class OpenAttempt:
     #: its outcome is committed while its ladder still runs: it leaves the table only with the
     #: ladder's end (`follow_up` `ladder_done`), and a restart finishes the ladder first
     closing: bool = False
+    #: a closing attempt's committed outcome (`natural`, `stopped`, ...): a `natural` one's
+    #: ladder is a leak's, which `process-leak=leak` leaves alone; None in a snapshot older
+    #: than this field, read as a stop's
+    outcome: str | None = None
 
 
 @dataclass(frozen=True)
@@ -565,7 +569,9 @@ class OpenTable:
             attempt_id = str(body["attempt"])
             held = self.attempts.get(attempt_id)
             if body.get("ladder") == "running" and held is not None:
-                self.attempts[attempt_id] = replace(held, closing=True)
+                self.attempts[attempt_id] = replace(
+                    held, closing=True, outcome=str(body.get("outcome"))
+                )
             else:
                 self.attempts.pop(attempt_id, None)
             self._ended = {attempt_id: outcome_end(body)}
@@ -645,6 +651,7 @@ class OpenTable:
                     "after": a.after,
                     "stop": a.stop,
                     "closing": a.closing,
+                    "outcome": a.outcome,
                 }
                 for a in sorted(self.attempts.values(), key=lambda a: a.seq)
             ],
@@ -688,6 +695,7 @@ class OpenTable:
                 after=a.get("after"),
                 stop=a.get("stop"),
                 closing=bool(a.get("closing")),
+                outcome=a.get("outcome"),
             )
         for p in payload.get("pending") or ():
             table.pending[p["seq"]] = PendingDispatch(

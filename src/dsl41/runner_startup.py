@@ -62,12 +62,10 @@ from dsl41.oracle_state import LIVE, Event
 from dsl41.runner import Deferred, Engine, adapter_switch, feed_step, outcome_record, plan_record
 from dsl41.runner_adapters import (
     JobAdapter,
-    group_has_live_member,
     load_json,
     read_watch_log,
     spool_names_run,
     spool_record,
-    stop_ladder,
 )
 from dsl41.runner_attempts import command_group
 from dsl41.runner_clock import Clock, EngineError
@@ -84,6 +82,7 @@ from dsl41.runner_config import (
 )
 from dsl41.runner_journal import (
     STORE_NAME,
+    best_effort_report,
     Journal,
     OpenAttempt,
     Position,
@@ -98,7 +97,7 @@ from dsl41.runner_journal import (
 )
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, LeaderLock, acquire_run_root
 from dsl41.runner_scheduler import Scheduler
-from dsl41.runner_stops import AttemptFacts
+from dsl41.runner_stops import COMMAND_SURVIVED, AttemptFacts
 from dsl41.runner_store import Record, SqliteStore, Store, StoreError
 from dsl41.semantics import ADAPTER_SWITCHES, SCHEDULER_SWITCHES, check_overrides
 from dsl41.state_machine import Executor
@@ -355,10 +354,11 @@ def _genesis(
         store = SqliteStore(path, created_at=at, identity=identity)
         os.chmod(path, 0o600)
     journal = Journal(store, lock=lock, path=path)
+    instance = uuid.uuid4().hex  # the engine's token, the first half of its cookies
     try:
         rev = store.put_config(configuration.to_bytes(), configuration.digest())
         journal.append(_config_applied(rev, configuration, journal, at))
-        journal.engine("started", at, config_rev=rev)
+        journal.engine("started", at, config_rev=rev, instance=instance)
         if lock is not None:
             lock.note(at=at)
     except BaseException:
@@ -380,6 +380,7 @@ def _genesis(
         settings=settings,
     )
     engine.config_rev = rev
+    engine.instance = instance
     engine.marked = frozenset(configuration.non_idempotent)
     engine.decisions.fallback = _decision_lookup(store)
     engine.lifecycle.replay_done()  # genesis has nothing to replay
@@ -840,26 +841,35 @@ async def _settle_attempt(
 
 async def _finish_ladder(engine: Engine, attempt: OpenAttempt) -> None:
     """An attempt whose outcome was committed while its ladder ran, and whose ladder the last
-    engine never finished, before step 6 performs the plan. Only what is provably the
-    attempt's own is signalled: while the leader `spawn.json` names, in this boot, is still
-    the recorded process, its group gets the whole ladder. Members whose leader is gone may be
-    a stranger's group that took the id during the outage, so they get nothing. A group gone
-    closes the attempt (`ladder_done`); a live member keeps it open and held (`held_at_restart`):
-    no start of its job is launched beside it (DL-426)."""
+    engine never finished, before step 6 performs the plan: the restart stops what it finds
+    left (`EngineStops.finish`). A recorded boot that is not this one proves nothing survived.
+    Nothing left closes the attempt (`ladder_done`); anything left keeps it open and held,
+    `command survived its KILL` (`held_at_restart`): no start of its job is launched beside it
+    (DL-426). Under `process-leak=leak` a leak's ladder (a `natural` outcome) signals nothing:
+    the processes left are named in a warning and the attempt closes, as the vendor would leave
+    them. A stop the crash cut short is finished whatever the switch."""
     assert engine.journal is not None and attempt.spool is not None
     spawn = spool_record(Path(attempt.spool) / "spawn.json", attempt.attempt)
     group = command_group(spawn)
     if group is not None and spawn is not None and spawn.get("boot_id") == engine.stops.boot_id:
-        pgid, token = group
-        if _procid.verify_alive(pgid, token):
-            await stop_ladder(pgid, token, engine.attempts.grace_term_s)
-            deadline = time.monotonic() + engine.attempts.grace_kill_s
-            while group_has_live_member(pgid) and time.monotonic() < deadline:
-                await asyncio.sleep(0.05)
-        if group_has_live_member(pgid):
-            engine.held_at_restart(attempt, pgid)
-            return
+        engine.stops.note_boot(spawn)  # its wrapper is no process of the command
+        engine.stops.note_cookie(attempt.attempt, attempt.env)
+        if engine.stops.leak_policy == "leak" and attempt.outcome == "natural":
+            look = engine.stops.left(*group, attempt.attempt)
+            if look.alive:
+                pids = " ".join(str(pid) for pid in sorted(look.pids)) or "?"
+                best_effort_report(
+                    f"dsl41: {attempt.job}.{attempt.run_number}.{attempt.ordinal}:"
+                    f" leaked: {len(look.pids)}, left running (pids {pids})"
+                )
+        else:
+            look = await engine.stops.finish(attempt.attempt, *group)
+            if look.alive:
+                note = look.reason if look.kind == "unknown" else COMMAND_SURVIVED
+                engine.held_at_restart(attempt, group[0], note)
+                return
     engine.journal.append(ladder_done_record(attempt.attempt, engine.clock.now()))
+    engine.stops.forget(attempt.attempt)
 
 
 def _interrupted_drain(tail: list[tuple[int, Record]]) -> frozenset[str] | None:
@@ -880,7 +890,8 @@ def _interrupted_drain(tail: list[tuple[int, Record]]) -> frozenset[str] | None:
 
 
 def _wrapper_alive(engine: Engine, spawn: dict[str, Any]) -> bool:
-    """Whether the wrapper `spawn.json` names still runs in this boot (DL-42 item 5)."""
+    """Whether the wrapper `spawn.json` names still runs in this boot (DL-42 item 5): the
+    pid-reuse guard on its recorded pid and start token."""
     pid, token = spawn.get("wrapper_pid"), spawn.get("wrapper_start_time")
     return (
         spawn.get("boot_id") == engine.stops.boot_id
@@ -1010,7 +1021,7 @@ def _record_start(
     draining = _interrupted_drain(tail) is not None
     if draining:
         engine.journal.engine("drain_interrupted", at)
-    engine.journal.engine("started", at, config_rev=engine.config_rev)
+    engine.journal.engine("started", at, config_rev=engine.config_rev, instance=engine.instance)
     for tick_ev, reason in missed:
         engine.journal.drop(tick_ev, reason)
 

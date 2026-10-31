@@ -188,6 +188,38 @@ KERN_PROCARGS2 omits the environment for restricted binaries (/bin/sh),
 and Linux /proc/pid/environ is ptrace-gated (DL-41a item 5, probed
 empirically).
 
+### DSL41_COOKIE env variable — the process cookie (an addition)
+
+This section is an addition to the frozen contract (DL-431). The spec keys, the
+spool files and the wrapper's behaviour are unchanged.
+The engine puts `DSL41_COOKIE=<engine instance>.<run_id>` in the spec's
+`env` for every command attempt, and in the wrapper's own environment.
+The instance is a token minted at each engine start and recorded in the
+`engine started` record; `run_id` is the attempt's. The command gets the
+variable through `env`, and its children inherit it.
+On Linux, where a pidfd can signal it, the engine reads
+`/proc/<pid>/environ` of the processes its uid may read. A process that
+carries an attempt's cookie belongs to that attempt, whatever its
+process group (`runner_procid.ours`). The wrapper is left out by the pid
+`spawn.json` names. Same-uid processes are readable, so the ptrace gate
+above does not stop this read.
+What is left of an attempt is its recorded process group's live members
+and the processes that carry its cookie. Both are taken as reliable: the
+engine is an orchestrator, not a jail. A process left when the command
+exits is a leak, stopped or left running by the `process-leak` switch
+(`docs/runner-design.md` §8a).
+The limit: outside the recorded group the engine sees only what the
+scan can read. A process that leaves the group and drops the cookie
+(`setsid` with an exec that removes the variable, or with a main thread
+that exits), one that leaves it and turns non-dumpable (`ssh-agent`
+does both), and one that leaves it under another uid (a setuid helper)
+are beyond the engine by design.
+Calling `setenv`, `unsetenv` or `clearenv` after the exec does not
+change what `/proc/<pid>/environ` shows. The systemd unit's cgroup
+remains the stronger fence. On other platforms, without a pidfd, and for
+an attempt dispatched before the cookie, the (pid, start-time) tuple and
+the process group decide.
+
 ## 4. Wrapper behavior (frozen semantics)
 
 1. The wrapper runs in its own session (`setsid`). The command runs in its

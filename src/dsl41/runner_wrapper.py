@@ -23,10 +23,12 @@ Duties, in order (ss6a Tier 0):
    liturgy: temp file in the same directory, fsync(file), rename, fsync(directory). The
    run dir must be on a local filesystem (rename-over-NFS has ambiguous crash semantics).
 3. Spawn ``/bin/sh -c <command>`` with the DSL41_RUN env tag (base64url JSON: run_id,
-   job, run_number, boot_id). The tag is FORENSICS ONLY: macOS KERN_PROCARGS2 omits env
-   for restricted binaries like /bin/sh and Linux /proc/pid/environ is ptrace-gated
-   (DL-41a). Identity verification uses the (pid, start-time) tuple, ``proc_start_token``
-   / ``start_tokens_match`` (runner_procid), +/-2s on macOS's 1-second ``ps -o lstart=``,
+   job, run_number, boot_id). The tag is FORENSICS ONLY (DL-41a). The spec's ``env``
+   carries the engine's DSL41_COOKIE to the command and its children; on Linux the engine
+   reads /proc/<pid>/environ of its own uid's processes for it, and a process that carries
+   it is the attempt's, whatever its process group (docs/wrapper-protocol.md). The group
+   leader's identity is the (pid, start-time) tuple, ``proc_start_token`` /
+   ``start_tokens_match`` (runner_procid), +/-2s on macOS's 1-second ``ps -o lstart=``,
    tick-exact on Linux.
 4. Portable event loop: SIGCHLD self-pipe + select over {self-pipe, lifeline}. The pipe is
    also the interpreter's wakeup fd, so a SIGCHLD delivered just before the select still

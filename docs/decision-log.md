@@ -25239,3 +25239,43 @@ relitigate an entry; append a new one.
   stated-limit option counts the raiser's review rounds; the owner hand-off gains the shape note
   before it and the fresh review after it. REJECTED: a higher cap (more rounds of the same shape); a
   cap per change that ends review while fixes are unread.
+- DL-431 The process cookie and the leak rule: a process left behind when the command exits is a
+  leak, terminated by default (2026-10-31; owner, after 2b wiring's nine rework rounds on
+  identity; 2c). THE GAP. DL-429 proves only the leader: a dead leader with live members is held;
+  one exiting with live children reads as dead. THE STANCE. The engine is an orchestrator, not a
+  jail: leaks, not hostile payloads. The process group (kernel-kept while any member lives) and
+  the cookie are reliable; a process outside the group the scan cannot read (no cookie,
+  non-dumpable, another uid) is out of scope (attempts card). THE COOKIE. Every CMD attempt's
+  dispatch `env` carries `DSL41_COOKIE=<engine instance>.<run_id>`; the wrapper gets it too, the
+  command's children inherit it, a rerun mints its own; wrapper and spool unchanged;
+  `docs/wrapper-protocol.md` gains the row as an addition. THE SCAN. On Linux with pidfd,
+  `runner_procid.ours` reads `environ` and `stat` of each process of the engine's uid through one
+  directory fd; every signal goes through a pidfd after the token is reread; without pidfd, or
+  off Linux, every check is DL-429's. ONE READING. For every `/proc` reader: ENOENT or ESRCH
+  means gone; EPERM or EACCES means not ours (`hidepid`, an LSM), skipped, counted; anything else
+  is a failed reading. WHAT IS LEFT. One function answers: the processes carrying its cookie,
+  wherever they sit, and the live members of its group while the group is proven its own; `none`
+  when both are empty; `unknown` after a failed reading, never a release. A group is proven only
+  by a reading (at the spawn, each stop step, each held poll) where its leader passes its token
+  or a member carries the cookie; it stays proven, cookie-less members included, until a reading
+  finds it empty; a later non-empty reading of that id with no proof is a stranger's after a pid
+  wrap, unsignalled. THE LEAK RULE. When an outcome is recorded and anything is left, the outcome
+  stands (the command's exit, as fed to the oracle); the attempt is journaled closing (`ladder:
+  running`, note `leaked: n, stopping`) and the leak ladder runs the stop pattern: TERM, the
+  grace, KILL, the record timeout armed at the KILL; a process there `grace_kill_s` later is
+  `command survived its KILL`, re-KILLed per poll; `ladder_done` closes the attempt when nothing
+  is left, and only then may the next run dispatch. The restart finishes what it finds left of a
+  closing attempt likewise; the open table's attempt carries its outcome's kind (`outcome`,
+  optional, a `docs/control-protocol.md` §5 addition; absent in an older snapshot, read as a
+  stop). THE SWITCH. `process-leak`: `terminate` (ours, default) or `leak` (the vendor's: AutoSys
+  ends a job at its command's exit, tracks nothing left); under `leak` a natural exit's leftovers
+  are unsignalled, the attempt settles at once, one warning names the job, run and pids; a stop a
+  crash cut short is finished. THE SIGNALS. With the scan, every pid gets its TERM and KILL by
+  itself from a fresh reading at each step, once per step whatever its group; a stop whose record
+  lands after its KILL is finished only by a reading that finds nothing left (held and re-KILLed
+  meanwhile, under both switch values); without it DL-429's group ladder stands. THE WIRE.
+  `docs/control-protocol.md` §4 gains, as an addition, `held: true` on an ENDED attempt while its
+  ladder runs, and three notes. THE GOLDENS gain the `leak` rows, equal to the defaults. CLOSES
+  DL-429's limit. REJECTED: the cookie as proof of absence; witnesses for a universal negative (a
+  cgroup's job, later); numeric-pid kills; leaks reported, left. Opus four rounds plus a
+  two-round fresh review, Astra five; rounds past three owner-approved, DL-430.

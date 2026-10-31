@@ -3321,6 +3321,24 @@ PROFILE_ROWS: tuple[Row, ...] = (
         ),
         _row(
             surface="profile_alt",
+            member="semantics.process-leak=terminate",
+            klass=SUPPORTED,
+            cite="runner-design ss8a, wrapper-protocol DSL41_COOKIE",
+            effect="the default: the processes a command leaves running when it exits are a"
+            " leak, stopped with TERM, the grace and KILL, and the job's next run waits for them",
+            trigger='{"semantics": {"process-leak": "terminate"}}',
+        ),
+        _row(
+            surface="profile_alt",
+            member="semantics.process-leak=leak",
+            klass=SUPPORTED,
+            cite="runner-design ss8a, wrapper-protocol DSL41_COOKIE",
+            effect="the vendor reading: the processes a command leaves running when it exits run"
+            " on, with a warning naming them, and the attempt settles at once",
+            trigger='{"semantics": {"process-leak": "leak"}}',
+        ),
+        _row(
+            surface="profile_alt",
             member="semantics.box-terminator-on-terminated=true",
             klass=SUPPORTED,
             cite="runner-design ss8a, SEM-14",
