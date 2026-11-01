@@ -4,9 +4,8 @@ Status: frozen at **v3** (DL-118). Entries that rule parts of it include
 DL-133, DL-135, DL-146, DL-147, DL-148, DL-150, DL-151, DL-158, DL-172,
 DL-189, DL-216, DL-217, DL-228, DL-233, DL-256, DL-264, DL-267, DL-272,
 DL-274, DL-292, DL-295, DL-297 and DL-353. This document is normative for
-the control plane of `docs/runner-design.md` §10, as
-`docs/supervisor-protocol.md` is normative for the lifecycle tier of
-runner-design §6a. A change to a frozen item requires a decision-log
+the control plane of `docs/runner-design.md` §10. A change to a frozen item
+requires a decision-log
 entry. Each entry is cited where it applies.
 
 **The engine accepts v3 only.** Every request names the protocol version
@@ -14,17 +13,17 @@ entry. Each entry is cited where it applies.
 that names no version or any other version, v1 and v2 included, with a
 refusal naming the version it speaks.
 
-The two protocols sit on opposite sides of the engine:
-
-```
-operators / TUI / CLI  ──[ this document ]──▶  engine  ──[ supervisor-protocol.md ]──▶  wrappers
-```
-
-The supervisor protocol is the **inner** contract: a tier that records
-process lifecycle facts and knows no job semantics. This one is the
-**outer** contract. It speaks in semantic terms (conditions, boxes,
+The control protocol speaks in semantic terms (conditions, boxes,
 statuses, sendevent verbs), which runner-design §11's scope fence assigns
-to dsl41 permanently.
+to dsl41 permanently. The engine starts wrappers under
+[wrapper-protocol.md](wrapper-protocol.md).
+
+```text
+operators / TUI / CLI ──[ this document ]──▶ engine ──[ wrapper-protocol.md ]──▶ wrappers
+```
+
+This shows the control and wrapper boundaries, not the command processes.
+The supervisor tier and its protocol are retired (DL-424).
 
 Implementation: `src/dsl41/runner_control.py` owns both ends: the server,
 the wire vocabulary, and the three clients.
@@ -42,7 +41,7 @@ the wire vocabulary, and the three clients.
   and `dsl41 off-hold-all` (DL-423).
 - **blocking subscription client** (`subscribe_lines`, DL-172): one
   connection held open for the life of a `subscribe`. It yields the ack
-  and then journal records, and drives `dsl41 query subscribe`. It lets a
+  and then store records, and drives `dsl41 query subscribe`. It lets a
   transport `OSError` propagate and raises `ControlClientError` for a
   protocol failure.
 
@@ -83,7 +82,7 @@ CLI's job.
   `{"ok": false, "code": "<code>", "error": "<message>"}` (DL-272).
   `code` is stable and names the reason. The code table below lists every
   code. `error` is human-readable prose and may change. The other lines a
-  server writes, the §5 journal records and the gap marker, carry no
+  server writes, the §5 store records and the gap marker, carry no
   `ok`.
 - Responses carry the **read header**: `baseline_id` and
   `applied_index` (`docs/concurrency-model.md` §6). A revision means
@@ -148,7 +147,7 @@ the engine's single writer. A refusal writes nothing and answers
 `{"ok": false, "refused": true, "code", "error", "token", "names"}`, with
 `names` the jobs or boxes it concerns, empty for a refusal about the
 request itself (`invalid_argument`, an envelope code, `request_id_reused`,
-`engine_draining`). An admission is journaled before it
+`engine_draining`). An admission is recorded in the store before it
 is answered: `{"ok": true, "decision": "admitted", "token", "request_id",
 "stop": [jobs], "application": null}`. With `"wait": true` the answer comes
 once the update applied, its `application` the applied record's `rev`,
@@ -175,8 +174,7 @@ from its admission.
 
 **No controller lease,** by choice (DL-41a). `sendevent` is multi-writer
 by AutoSys nature, and the engine's single-writer loop serializes every
-injection. The lease guards the supervisor tier, which spawns without
-semantics.
+injection. The supervisor tier and its lease are retired (DL-424).
 
 **Error codes** (DL-272). Every `ok: false` answer carries a `code`:
 headerless answers, query errors and the `ok: false` lines of a
@@ -233,8 +231,8 @@ The client action says what a client does next:
 | `invalid_argument` | refused, query or stream | a field is absent or has the wrong shape or type, or a `request_id` begins with the reserved prefix `engine:` (§3); `error` names the field | fix the request |
 | `plan_cycle` | query | the AND-success skeleton has a cycle, so `plan` is disabled | operator |
 | `unknown_job` | query, or refused on a mutation | the job is not in the catalog (for `status`: in neither the catalog nor the store) | fix the request |
-| `no_journal` | stream | the run has no journal to stream | operator |
-| `backfill_refused` | stream | the backfill met a journal file it cannot read as this estate's | operator |
+| `no_journal` | stream | the run has no store to stream | operator |
+| `backfill_refused` | stream | the backfill met a store it cannot read as this estate's | operator |
 | `unknown_verb` | refused | `verb` names no `sendevent` verb | fix the request |
 | `unknown_status` | refused | `CHANGE_STATUS` names no status | fix the request |
 | `status_not_injectable` | refused | `CHANGE_STATUS` names a status an operator may not send (`QUE_WAIT`) | fix the request |
@@ -272,13 +270,14 @@ engine drains is refused with `engine_draining`, and nothing is logged.
 Each `verb` names exactly one oracle `EventKind`, but the set is not the
 whole alphabet. `CHANGE_STATUS` is the wire name of `STATUS`. `TIMER`,
 `MUST_START_ALARM` and `MUST_COMPLETE_ALARM` are the engine's own and have
-no wire door. Every admitted command is journaled with `source=control`.
-The WAL is the audit trail of engine decisions, and no second log carries
-them. A run started without a journal has no WAL and therefore no audit
+no wire door. Every admitted command is recorded in the store with `source=control`
+(DL-428).
+The store (`engine.db`, DL-428) is the audit trail of engine decisions,
+and no second log carries them. A run started without a store has no audit
 trail. It is the same run `subscribe` refuses in §5, and not a
 configuration an operator meets.
 Access decisions at the DL-146 perimeter go to the perimeter journal
-(DL-148, `docs/access-model.md` §6) and never enter the WAL. Every tier
+(DL-148, `docs/access-model.md` §6) and never enter the store. Every tier
 denial (`access_denied`) attempts a receipt there, and a failed receipt
 write still denies. Every admission of a request that required the ops
 tier or higher writes a receipt there, best effort (DL-146).
@@ -293,13 +292,13 @@ Every string a payload carries must be a **Unicode scalar string**. An
 unpaired surrogate is refused at the door, because one admitted would
 leave the estate unsealable (PR-10a, period-model §3.2). The rule covers
 the strings a verb reads. A field the verb does not read is never copied,
-never journaled, and cannot reach a seal (DL-228).
+never recorded in the store, and cannot reach a seal (DL-228).
 
-`DISARM` (DL-158) is the explicit journaled disarm that period-model
-§10.4 names. It clears the job's SEM-32 armed latch and does nothing else:
+`DISARM` (DL-158) is the explicit disarm that period-model §10.4 names,
+recorded in the store. It clears the job's SEM-32 armed latch and does nothing else:
 no status move, no start, no wake, no timer touched. A target with no
-latch is an accepted, journaled no-op, the `OFF_HOLD` shape. The verb is
-legal at any time, not only before a seal. It drops only the latch
+latch is an accepted no-op recorded in the store, the `OFF_HOLD` shape.
+The verb is legal at any time, not only before a seal. It drops only the latch
 visible at application time: `applied` does not inhibit a later arm, and
 it cancels no start already out of the latch. The trace marker is
 `DISARM`. `SCHED_DISARM` stays the engine's own marker for
@@ -313,16 +312,16 @@ the target's revision whether or not the latch was set (DL-233).
 
 `RELEASE_RESOURCE` (DL-256) is the vendor's `sendevent -E RELEASE_RESOURCE
 -J job`. It is a job verb and takes the job verbs' whole contract: the
-payload, the mandatory `expect` on `job:<name>`, journaling at admission,
-and replay. It adds no frame, field or record kind. It adds one kind to
+payload, the mandatory `expect` on `job:<name>`, recording in the store
+at admission, and replay. It adds no frame, field or record kind. It adds one kind to
 the event alphabet, under protocol-evolution §1's rule: the alphabet
 grows only as an entry-in-service, reader and writer in one release, in
 protocol-evolution §2's order. The verb gives back every resource unit
 that a job that is not live (not `STARTING` or `RUNNING`) still holds,
 and wakes the queue (DL-256). No status moves. The units are on the
 job's row, so a release moves the job's revision. A job holding
-nothing, and a live job, whose units belong to its run, are accepted,
-journaled no-ops. The trace marker
+nothing, and a live job, whose units belong to its run, are accepted
+no-ops recorded in the store. The trace marker
 is `RELEASE_RESOURCE`, and its reason names the outcome:
 `sendevent RELEASE_RESOURCE (frees …)`, `(nothing held)`, or
 `(no effect: <status>; …)` naming the live status, such as
@@ -370,7 +369,7 @@ them gives these answers:
 
 - the original was decided: the retry is answered from that decision and
   takes no index. This holds in the same period, after the entity moved,
-  and after a same-period restart that rebuilt the index from the WAL;
+  and after a same-period restart that rebuilt the index from the store;
 - the original was never admitted: the retry is a fresh command at the
   pinned `expect`. It applies if the entity is still at that revision and
   is rejected if it moved;
@@ -411,8 +410,8 @@ them apart from the answer alone:
 | outcome | on the wire | what happened | the caller's next move |
 |---|---|---|---|
 | applied | `ok: true` | the oracle applied it | — |
-| **refused** | `ok: false`, `refused: true` | nothing admitted, no index consumed, **nothing in the WAL** (a perimeter denial attempts its own synced receipt first, and denies whether or not it lands, access-model §6) | this request never happened: fix and re-send. A refused retry says nothing about its original, which may have applied (DL-217) |
-| **rejected** | `ok: false`, `decision: "rejected"`, an `index` | a decision went against it — over this verb, always the precondition losing its race. Journaled, and its batch's time observation applied | re-**read** and re-decide; the same envelope loses the same race, because `expect` is in it |
+| **refused** | `ok: false`, `refused: true` | nothing admitted, no index consumed, **nothing in the store** (a perimeter denial attempts its own synced receipt first, and denies whether or not it lands, access-model §6) | this request never happened: fix and re-send. A refused retry says nothing about its original, which may have applied (DL-217) |
+| **rejected** | `ok: false`, `decision: "rejected"`, an `index` | a decision went against it — over this verb, always the precondition losing its race. Recorded in the store, and its batch's time observation applied | re-**read** and re-decide; the same envelope loses the same race, because `expect` is in it |
 | **unknown** | `ok: false`, and neither marker | admission is uncertain: no decision arrived within the window below, or a handler raised | re-read. Retry **only** under the same `request_id` |
 
 So `refused: true` carries meaning by its absence. It appears on every
@@ -452,7 +451,7 @@ conditional create names, so the bundled composer reads it that way. Once
 `RUNNING`, `SUCCESS`, `FAILURE` or `TERMINATED` (DL-264). `QUE_WAIT` is
 refused. It is an internal state of the capacity owner (DL-50), and the
 oracle gives an injected `QUE_WAIT` no meaning. The refusal comes before
-the journal append, so it consumes no log index, and it lists the
+the store append, so it consumes no log index, and it lists the
 injectable set. Whether the vendor's `sendevent -s QUE_WAIT` is legal is
 not known; this is a stated support limit, not a claim about the vendor.
 
@@ -673,12 +672,12 @@ its connection** until hangup, so a client opens a separate connection
 for it.
 
 The server answers `{"ok": true, "subscribed": true, "since": <int>}`,
-then streams journal records (`docs/runner-design.md` §7 record kinds) as
+then streams the store's wire records (`docs/runner-design.md` §7 record kinds) as
 raw lines. The ack's `since` is the stream's cursor (DL-267): the
 request's `since` when it named one, otherwise the admission frontier
 sampled for the seam below. Every seq'd record the stream owes is above
 it. It is an additive answer field, which a v3 client ignores
-(`docs/protocol-evolution.md` §1, DL-217). A run with no journal is
+(`docs/protocol-evolution.md` §1, DL-217). A run with no store is
 refused with `{"ok": false, "code": "no_journal", "error": "this run has
 no journal"}`.
 
@@ -838,11 +837,11 @@ keeping up: the engine applies queued commands without yielding
 them. That client resumes from its cursor (§6) and loses nothing. A
 refused record removes the subscription:
 
-- the journal drops the backlog and removes the subscription, after every
-  other subscription has the record;
+- the store writer drops the backlog and removes the subscription, after
+  every other subscription has the record;
 - the server then cancels the handler and aborts the transport at once,
   and reports the reason on its stderr, best effort;
-- the journal append has already succeeded. Nothing from the removal, an
+- the store append has already succeeded. Nothing from the removal, an
   owner that raises or a stderr that cannot be written included, reaches
   the append, the engine loop or any other subscription. A statechart
   error is the one exception: it stops the engine with exit 7;
@@ -902,7 +901,7 @@ what it missed.
   its record lines up to the §5 budget, `4 × LINE_LIMIT`, because an
   escaped input record can be three times a request line (DL-267).
 - A torn line in a `subscribe` stream is skippable: records are a wake-up
-  signal, and the WAL on disk is the truth. `ControlClient` skips a line
+  signal, and the store on disk is the truth. `ControlClient` skips a line
   it cannot parse. `dsl41 query subscribe` instead treats a torn line as
   the end of the stream and exits 2, as below (DL-267).
 - A `subscribe` stream can end at the engine: EOF, a torn last line, or
