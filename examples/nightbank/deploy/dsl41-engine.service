@@ -10,6 +10,10 @@ Description=dsl41 engine (nightbank example)
 # the run root below; no start before its file system is mounted, so an
 # absent mount is never read as an empty root
 RequiresMountsFor=/srv/dsl41/runs/nightbank
+# start after the clock is synchronised, so a boot-time step of the wall clock
+# comes before the engine's first stamp (runner-design §4)
+Wants=time-sync.target
+After=time-sync.target
 # at most five starts in five minutes, then the unit stays failed: bounds a
 # crash that repeats
 StartLimitIntervalSec=300

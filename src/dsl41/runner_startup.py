@@ -14,7 +14,7 @@ up, an engine death ends every running attempt, and at restart the engine owns n
 step of the restart waits on a process, a wrapper or a record:
 
 1. refuse before the first write: `flock leader.lock` with the holder named; the store's
-   `state_version`, its `root_id` and its clock domain; a store from the future; a launch estate
+   `state_version`, its `root_id` and its clock domain; a launch estate
    other than the applied configuration or the open update's candidate, job by job; an open
    update's missing plan directory;
 2. fold: the snapshot and the tail into the oracle, the frontiers, the decisions, the evidence,
@@ -587,11 +587,6 @@ async def _resume_under_lock(
     last_at = journal.position.last_at
     # genesis appends the configuration before anything else, and a snapshot keeps the position
     assert last_at is not None
-    if not clock.virtual and last_at > clock.now():
-        raise EngineError(
-            f"the store is from the future ({last_at.isoformat()} > now): the machine"
-            " clock moved backwards; refusing to feed non-decreasing time backwards"
-        )
     os.chmod(run_root, 0o700)
     engine = Engine(
         catalog,
@@ -614,6 +609,11 @@ async def _resume_under_lock(
     engine.resume_at = last_at
     wires = [wire for _, record in tail if (wire := wire_record(record)) is not None]
     replay = _replay_into_engine(engine, wires, snapshot, start, path)
+    if not clock.virtual:
+        engine.frontiers = engine.frontiers.model_copy(
+            update={"at": max(engine.frontiers.at or last_at, last_at)}
+        )
+        engine.now_admitted()
     journal.writable = True  # every refusal has had its chance (spec-restart §1)
     lock.note(at=clock.now())
     for job, rt in engine.oracle.store.job.items():
@@ -1248,7 +1248,8 @@ def _missed_ticks(engine: Engine, position: Position) -> list[tuple[Event, str]]
     # always inclusive: with several jobs at one instant, a crash between the siblings' inputs
     # leaves the frontier at the tick with a sibling unrecorded
     scheduler.reset(position.frontier)
-    sweep_upto = max(engine.clock.now(), position.frontier)
+    now = engine.clock.now() if engine.clock.virtual else engine.now_admitted()
+    sweep_upto = max(now, position.frontier)
     missed: list[tuple[Event, str]] = []
     for tick_ev in scheduler.pop_due(sweep_upto):
         if (tick_ev.job(), tick_ev.at.isoformat()) in position.ticks:
