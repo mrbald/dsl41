@@ -503,8 +503,8 @@ def _read_at(directory: int, name: str) -> bytes:
 def pidfd_supported() -> bool:
     """Whether this Python and kernel can signal through a pidfd: `os.pidfd_open` and
     `signal.pidfd_send_signal` exist, and opening a pidfd on this process works (a kernel
-    before 5.3 answers ENOSYS). Without it the cookie's processes cannot be signalled safely,
-    so the engine does not scan for them."""
+    before 5.3 answers ENOSYS). The engine selects its signalling primitive once at start
+    (DL-436)."""
     pidfd_open = getattr(os, "pidfd_open", None)
     if pidfd_open is None or getattr(signal, "pidfd_send_signal", None) is None:
         return False
@@ -515,11 +515,24 @@ def pidfd_supported() -> bool:
     return True
 
 
-def signal_ours(pid: int, start_token: str, sig: int) -> bool:
+def signal_ours(pid: int, start_token: str, sig: int, *, pidfd: bool | None = None) -> bool:
     """Send `sig` to `pid` while it is still the process a scan found (`start_token`); True
     when it was sent. A pidfd pins the process before the token is read again, so a pid
-    reused after the scan is never signalled. A process gone, one under another uid
-    (PermissionError), or no pidfd support sends nothing; nothing raises."""
+    reused after the scan is never signalled. Without pidfd support, os.kill follows the
+    same token check; the race between that check and the signal is accepted because the
+    engine is an orchestrator, not a jail (DL-436). A process gone
+    or a signal refused sends nothing; nothing raises. `pidfd` selects the primitive the
+    engine probed at start; None probes for a standalone caller."""
+    if pidfd is None:
+        pidfd = pidfd_supported()
+    if not pidfd:
+        try:
+            if proc_start_token(pid) != start_token:
+                return False
+            os.kill(pid, sig)
+        except OSError:
+            return False
+        return True
     pidfd_open = getattr(os, "pidfd_open", None)
     send = getattr(signal, "pidfd_send_signal", None)
     if pidfd_open is None or send is None:

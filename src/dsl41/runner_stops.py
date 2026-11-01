@@ -10,7 +10,7 @@ attempt tier's observations.
 
 What is left of an attempt's command is one function, `EngineStops.left`, and every caller
 reads it: the tier's `command_alive`, the held poll, the restart. Where the process cookie can
-be read (`runner_procid.ours` on Linux, with pidfd signalling), what is left is the union of the
+be read (`runner_procid.ours` on Linux), what is left is the union of the
 recorded process group's live members and the processes carrying the attempt's
 `DSL41_COOKIE`, whatever their group, the wrapper left out. An attempt with no recorded group
 (`runner_attempts.NO_GROUP`) is its cookie's processes alone (spec-restart §4). The cookie names
@@ -28,7 +28,7 @@ itself (`stop_ladder` with `members`).
 A process left when the command exits is a leak (the `process-leak` switch): `terminate`, the
 default, runs the ladder on it; `leak`, the vendor's reading, leaves it running with a warning.
 
-Elsewhere (macOS, no pidfd, an attempt dispatched before the cookie), the leader's start token
+Elsewhere (macOS, an attempt dispatched before the cookie), the leader's start token
 and the group decide as they did before the cookie, inside the same function, and the ladder
 runs on the group.
 
@@ -152,10 +152,13 @@ class EngineStops:
     def __init__(self, engine: Engine) -> None:
         self.engine = engine
         self.boot_id = _procid.current_boot_id()
-        #: the cookie scan decides only where its processes can also be signalled (a pidfd)
-        self.scan_available = sys.platform.startswith("linux") and _procid.pidfd_supported()
-        if sys.platform.startswith("linux") and not self.scan_available:
-            best_effort_report("dsl41: cookie scan unavailable: no pidfd")
+        #: Linux scans with either primitive (DL-436).
+        self.scan_available = sys.platform.startswith("linux")
+        self.pidfd = self.scan_available and _procid.pidfd_supported()
+        #: Serving starts have a run root; in-memory rehearsals log no primitive (DL-436).
+        if self.scan_available and engine.run_root is not None:
+            primitive = "pidfd" if self.pidfd else "os.kill (start-token check)"
+            best_effort_report(f"dsl41: cookie scan signalling: {primitive}")
         #: by attempt: its cookie and its spawn record; by recorded group: its boot and attempt
         self._cookies: dict[str, str] = {}
         self._spawns: dict[str, Mapping[str, Any]] = {}
@@ -329,9 +332,11 @@ class EngineStops:
         attempt = self._attempt_of(pgid, start_token)
         if attempt in self.termed:
             self.termed.discard(attempt)
-            await stop_ladder(pgid, start_token, grace_term_s, members=members, term=False)
+            await stop_ladder(
+                pgid, start_token, grace_term_s, members=members, term=False, pidfd=self.pidfd
+            )
         else:
-            await stop_ladder(pgid, start_token, grace_term_s, members=members)
+            await stop_ladder(pgid, start_token, grace_term_s, members=members, pidfd=self.pidfd)
 
     def leaked(self, attempt: str) -> bool:
         """The attempt's command ended with no stop while processes of it are left: under
@@ -453,7 +458,7 @@ class EngineStops:
                 if attempt in self._leak_holds:
                     continue  # a leak is never signalled; it waits for a reading
                 for pid, start in look.pids.items():  # every other held one outlived a stop
-                    _procid.signal_ours(pid, start, signal.SIGKILL)
+                    _procid.signal_ours(pid, start, signal.SIGKILL, pidfd=self.pidfd)
         except Exception as exc:  # noqa: BLE001 -- handed to the loop, which raises it
             self.engine.fail(exc)
             return

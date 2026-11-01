@@ -92,3 +92,10 @@ Found after an area was sealed as good enough. Addressed once the scope runs end
 - [ ] After a backward wall-clock step, `dispatch`, `outcome` and `engine` records carry the raw
   wall stamp, so they can sit below an earlier `input` in the store; DL-435 floors admission
   stamps only (W2 drill builder, clock-step scenario; clock, DL-435).
+- [ ] The pidfd probe tests `pidfd_open` but never `pidfd_send_signal`: a seccomp profile that
+  allows only the first, or an EMFILE from `pidfd_open`, sends no signal with no fallback; the
+  attempt stays held, but its note says it survived a KILL that was never sent (Opus, slice
+  proc-cookie round 1, F2; restart, DL-436).
+- [ ] No operator doc names the `dsl41: cookie scan signalling: <primitive>` start line, and
+  `examples/file_processing/README.md` trims output with `tail -n 2`, which hides it (Opus, slice
+  proc-cookie round 2; docs, DL-436).
