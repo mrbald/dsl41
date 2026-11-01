@@ -17,6 +17,7 @@ the process, and it must not take pytest down with it.
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import subprocess
 import sys
@@ -160,6 +161,7 @@ def test_sem10_a_cascade_past_the_limit_names_its_first_start() -> None:
     cascade, not the frame that broke. It is still a RecursionError, and an
     OracleError, so a caller that reports oracle errors reports it."""
     built = Oracle(lower_source(_deep_jil(400)))
+    gc.collect()
     sys.setrecursionlimit(_depth() + 300)
     with pytest.raises(CascadeDepthError) as raised:
         built.feed(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "a"}))
@@ -303,15 +305,18 @@ def _frames_needed(shape: str, jobs: int) -> int:
 
     def fits(frames: int) -> bool:
         built = Oracle(catalog)
+        gc.collect()
         sys.setrecursionlimit(100_000)
         for event in setup:
             built.feed(event)
+        gc.collect()
         sys.setrecursionlimit(_depth() + frames)
         try:
             built.feed(last)
         except RecursionError:
             return False
         finally:
+            gc.collect()
             sys.setrecursionlimit(100_000)
         assert {row.status for row in built.store.job.values()} == {status}
         return True
@@ -361,6 +366,7 @@ def test_sem10_equiv_tier_c_runs_a_long_cascade_without_a_fit() -> None:
     start a cascade as long as a live one; the limit is the oracle's fixed
     headroom, whatever the job count."""
     large = lower_source(_box_chain(JOBS)[0])
+    gc.collect()
     sys.setrecursionlimit(1000)
     result = equivalent_tier_c(large, large, [[_force_q0()]])
     assert result.equivalent
@@ -382,6 +388,7 @@ def _deepest_lowered() -> CatalogIR:
     found: dict[str, Any] = {}
 
     def search() -> None:
+        gc.collect()
         sys.setrecursionlimit(1000)
         low, high = 1, 2000
         while low < high:
@@ -424,6 +431,7 @@ def test_sem10_the_deepest_condition_that_lowers_evaluates_at_the_engine_s_call_
     raises it to `RECURSION_LIMIT`, so `a`'s completion wakes `b`, whose
     condition is grouped as deep as the lowering accepts."""
     catalog = _deepest_lowered()
+    gc.collect()
     sys.setrecursionlimit(1000)
     assert _engine_wakes_b(catalog) in ("STARTING", "RUNNING", "SUCCESS")
 
@@ -436,6 +444,7 @@ def test_sem10_without_the_headroom_the_deepest_condition_does_not_evaluate(
     error, so the headroom is what lets it evaluate."""
     catalog = _deepest_lowered()
     monkeypatch.setattr(oracle, "RECURSION_LIMIT", 1000)
+    gc.collect()
     sys.setrecursionlimit(1000)
     assert _engine_wakes_b(catalog) == "INACTIVE"
 
@@ -467,6 +476,7 @@ def test_sem10_a_run_root_stores_no_deeper_condition_than_its_replay_evaluates(
     depth = _deepest_stored()
     # pydantic's bound: 252 in a fresh process, one more after some suites
     assert 240 <= depth <= 260
+    gc.collect()
     sys.setrecursionlimit(1000)
 
     (tmp_path / "estate.jil").write_text(_deep_jil(depth))
@@ -490,6 +500,7 @@ def test_sem10_a_run_root_stores_no_deeper_condition_than_its_replay_evaluates(
         ],
     )
     assert played.exit_code == 0, played.output
+    gc.collect()
     sys.setrecursionlimit(1000)
     replayed = invoke(app, ["journal", str(root)])
     assert replayed.exit_code == 0, replayed.output

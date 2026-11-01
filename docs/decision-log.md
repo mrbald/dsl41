@@ -25368,3 +25368,20 @@ relitigate an entry; append a new one.
   THE REASON. No code executes these files. `tests/test_docs_hygiene.py` and
   `scripts/arch_check.py` read them, and the docs gate runs both, plus every test file that
   names a changed path. An instruction-only change ran the whole suite for nothing.
+
+- DL-435 A backward step of the wall clock never refuses an input or stops the engine
+  (2026-11-01; owner and boss, release plan item 2; `runner.py`, `runner_admission.py`,
+  `runner_startup.py`, runner-design §§4 and 9, control-protocol §2, the nightbank unit)
+  THE RULE. In the real domain every admission stamp is `max(wall, frontier)`, and the loop
+  takes inputs, timers and ticks due at or before that instant. Already-due inputs keep their
+  arrival order, so a queued `stop_requested` is never overtaken. A restart below the store's
+  last stamp starts at that floor; store identity, version and clock-domain checks still
+  apply. The engine reports the step on stderr (`dsl41: WARNING:`, wall, frontier, gap) once
+  per observed step, with no store record or status field. `clock_regressed` stays registered
+  as an engine invariant failure; valid real control traffic cannot emit it. The virtual
+  domain is unchanged. The example unit starts after `time-sync.target`.
+  THE REASON. The wall clock can step back (a boot-time NTP step, `date -s`, a VM resume).
+  The old rule refused operator requests and refused a restart until the wall caught up.
+  Oracle time never runs backwards; the engine waits rather than inventing time.
+  NOT BUILT. No bound on the gap: a store stamped far ahead holds ticks and timers until the
+  wall catches up, with one warning line (Known bugs). Built by Sol; Opus two rounds.

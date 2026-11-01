@@ -486,6 +486,7 @@ class Engine:
         self.drops: list[tuple[Event, str]] = []
         self.baseline_id = journal.baseline_id if journal is not None else ""
         self.frontiers = Frontiers()
+        self._last_wall: datetime | None = None
         #: retries answered from the index rather than re-applied (CM-05)
         self.deduped: list[tuple[str, ApplyResult]] = []
         #: refused before admission (concurrency-model ss4), so this list is
@@ -728,7 +729,35 @@ class Engine:
 
     def now_admitted(self) -> datetime:
         """The engine's instant, never before the admission frontier."""
-        return now_of(self.clock.now(), self.frontiers.at)
+        wall = self.clock.now()
+        self._note_clock_step(wall)
+        return now_of(wall, self.frontiers.at)
+
+    def _note_clock_step(self, wall: datetime) -> None:
+        """Report real-clock steps and keep ready inputs in arrival order (runner-design ss4,
+        ss9). Future work keeps its timestamp."""
+        if self.clock.virtual:
+            return
+        frontier = self.frontiers.at
+        previous = self._last_wall
+        if frontier is not None and wall < frontier:
+            if previous is None or previous >= frontier or wall < previous:
+                best_effort_report(
+                    "dsl41: WARNING: wall clock below admission frontier:"
+                    f" wall={wall.isoformat()} frontier={frontier.isoformat()}"
+                    f" gap_s={(frontier - wall).total_seconds()}"
+                )
+        cutoff = max(wall, frontier or wall, previous or wall)
+        if wall < cutoff:
+            at = now_of(wall, frontier)
+            self._queue[:] = [
+                (at, seq, replace(pending, at=min(pending.at, at)))
+                if queued_at <= cutoff
+                else (queued_at, seq, pending)
+                for queued_at, seq, pending in self._queue
+            ]
+            heapq.heapify(self._queue)
+        self._last_wall = wall
 
     async def _update_step(self, pending: _Pending) -> None:
         """Take one queued update step; an application it reaches is finished inside it: one
@@ -856,7 +885,10 @@ class Engine:
         """Whether a request queued and due is still unanswered: STOPPED is taken only once each
         has its answer, a mutation its durable `engine_draining` rejection and a stop the
         state (spec-drain)."""
-        return bool(self._queue) and self._queue[0][0] <= self.clock.now()
+        now = self.clock.now()
+        if not self.clock.virtual:
+            now = now_of(now, self.frontiers.at)
+        return bool(self._queue) and self._queue[0][0] <= now
 
     def _finish_leaving(self) -> None:
         """Write the shutdown record, then the snapshot that covers it when the drain ended
@@ -1383,6 +1415,15 @@ class Engine:
     def _push(self, pending: _Pending) -> None:
         """Put one input on the time-ordered queue and wake the loop; the arrival counter keeps
         inputs stamped alike in raised order."""
+        wall = self.clock.now()
+        self._note_clock_step(wall)
+        if (
+            not self.clock.virtual
+            and self.frontiers.at is not None
+            and wall < self.frontiers.at
+            and pending.at <= self.frontiers.at
+        ):
+            pending = replace(pending, at=self.frontiers.at)
         self._queue_seq += 1
         heapq.heappush(self._queue, (pending.at, self._queue_seq, pending))
         self._activity.set()
@@ -1434,6 +1475,9 @@ class Engine:
         an earlier instant is waited out interruptibly, so a control injection or completion
         arriving mid-wait re-plans instead of feeding behind an already-journaled advance.
         Virtual jumps never yield."""
+        if not self.clock.virtual:
+            now = now_of(now, self.frontiers.at)
+            horizon = now_of(horizon, self.frontiers.at)
         head_at = self._queue[0][0] if self._queue else None
         due = [
             t
@@ -1537,13 +1581,15 @@ class Engine:
                 return emitted
             await self._settle()
             now = self.clock.now()
+            self._note_clock_step(now)
             if now != instant:
                 instant, instant_events = now, 0
             work = self._next_work(horizon, now)
+            ready_at = now if self.clock.virtual else now_of(now, self.frontiers.at)
             if (
                 self.recovery is not None
                 and not self._catch_up
-                and not self._takes_due_work(work, max(now, self._deferred_after or now))
+                and not self._takes_due_work(work, max(ready_at, self._deferred_after or ready_at))
             ):
                 # the barrier lifts once the catch-up's steps are taken and this pass has
                 # processed every input, timer and tick due at or before the current instant, so
@@ -1565,7 +1611,8 @@ class Engine:
                 # enqueue the tick's STARTJOB(s), stamped at the tick; the next iteration takes them
                 # like any external input (feed() fires timers due <= tick first)
                 assert work.at is not None and self.scheduler is not None
-                await self.clock.wait_until(work.at)
+                if self.clock.virtual:
+                    await self.clock.wait_until(work.at)
                 for tick_ev in self.scheduler.pop_due(work.at):
                     self._enqueue(tick_ev, source="scheduler")
             elif work.do is _Do.TIMER:
@@ -1693,6 +1740,10 @@ class Engine:
                 self.deduped.append((pending.request_id, prior))
                 self._answer(pending, prior)
                 return []  # a retry advances no logical time (CM-05)
+        if not self.clock.virtual:
+            wall = self.clock.now()
+            self._note_clock_step(wall)
+            pending = replace(pending, at=now_of(min(pending.at, wall), self.frontiers.at))
         admitted = self.frontiers.admit(pending.at)
         # before the frontier moves: a refusal or a stop takes no index
         attempt = self._attempt(pending, admitted.committed_index, fp)
@@ -1715,7 +1766,8 @@ class Engine:
         else:
             quarantine = self._dry_apply_engine_made(attempt)
             forced = None if quarantine is None else quarantine[0]
-        await self.clock.wait_until(pending.at)
+        if self.clock.virtual:
+            await self.clock.wait_until(pending.at)
         if self.journal is not None:
             self.journal.prove()  # an engine that lost the root applies nothing (S6b)
         # nothing moves before the wait: a cancel there leaves the engine as the store has it

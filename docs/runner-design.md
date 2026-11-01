@@ -120,6 +120,20 @@ steps:
    appends its `dispatch` record and then launches; each kill cancels the
    live task.
 
+Real-domain admission floors each input's stamp at the admission frontier
+after deduplication. A control input captured at wall time `wall` is admitted
+at `max(wall, frontier)`, even while the wall clock is below the frontier.
+The oracle sees no backward time. Admission does not wait for the wall clock
+to catch up; timers and future ticks wait for their wall-clock deadlines.
+Scheduler ticks and recovered outcomes keep their chosen stamps, subject to
+the same floor. `Frontiers.admit` guards the non-decreasing invariant: a
+stamp below the frontier reaching it is an engine bug.
+The real-domain loop takes inputs, timers and ticks due at or before
+`max(wall, frontier)`, including frontier-stamped completion plans. A backward
+step rebases already-due queued inputs to that instant in arrival order.
+Inputs queued during the gap keep that order, including `stop_requested`.
+Future queued inputs retain their deadlines.
+
 Dispatch table (emitted event → effect → what applying it does):
 
 | emitted                                   | effect | applying it                     |
@@ -1059,6 +1073,20 @@ None and 0 to them. **RealClock** sleeps
 (interruptible by queue activity). **VirtualClock** jumps to the next wake
 instantly. The oracle takes explicit timestamps everywhere, which makes
 this jump possible.
+
+In the real domain, a backward wall-clock step does not refuse an input
+(§4). The loop and enqueue path report a warning on stderr with the fixed
+prefix `dsl41: WARNING:`, the wall reading, admission frontier
+and gap in seconds on the first observation below the frontier and on each
+further observed backward step there. Inputs while the wall clock catches
+up do not repeat the warning. A broken stderr does not stop the engine.
+The observation state is local to the engine
+process; it adds no store record or status field. Oracle time stays at the
+frontier until the wall clock passes it. The virtual domain keeps its
+existing stamp and jump rules. A real-domain restart below the store's last
+stamp restores that admission floor and reports the step. It starts without
+waiting for the wall to catch up. Store identity, configuration, version
+and clock-domain checks still apply.
 
 - `dsl41 run` — RealClock + real adapters + control socket.
 - `dsl41 rehearse` — VirtualClock + FakeAdapter + optional scenario, in
