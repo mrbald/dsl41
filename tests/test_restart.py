@@ -1099,9 +1099,9 @@ def test_the_fold_writes_nothing_for_file_watches_either(tmp_path: Path) -> None
 def test_a_completed_watch_a_resumed_update_touches_is_fed_before_the_application(
     tmp_path: Path,
 ) -> None:
-    """spec-restart §6, DL-432: a file watch is never in an update's stop set (the live update
-    cancels it and takes it up after the application), so the resumed update keeps nothing of
-    it. `w`'s watch completed while the engine was down and the plan changes `w`: its outcome,
+    """spec-restart §6, DL-432: a file watch in an update's stop set is neither waited for nor
+    kept (the live update cancels it and takes it up after the application; the resumed update
+    leaves it out of the stops it waits for). `w`'s watch completed while the engine was down and the plan changes `w`: its outcome,
     its `complete` plan and its STATUS feed land under the old catalog, before `config
     applied`, as every recovered outcome outside the stop set does; a completed run is not
     taken up again."""
