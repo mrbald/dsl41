@@ -1,40 +1,48 @@
 # IR Design
 
-Status: normative for the parser, the linter, the visualizer, the equivalence validator, the
-oracle, the UC backend, and the DSL decompiler. This document depends on
-`autosys-semantics.md` (SEM-xx) and on `stonebranch-semantics.md` (UCS-xx, M-xx).
+For the architect, this document defines the parser, linter, graph, equivalence,
+oracle and DSL representations. It is normative for those components. Continue through
+[the architect track](../README.md#documents). [AutoSys semantics](autosys-semantics.md)
+defines the SEM rules; [runner-design.md](runner-design.md) covers execution and recovery.
 
-Design stance: the IR is **AutoSys-shaped first**. It captures JIL semantics faithfully.
-Vendor neutrality appears at Layer G only where the UC backend forces a distinction. The
-compiler is pure, with no runtime. A failed translation is a loud, classified error, never
-silent loss.
+The IR is **AutoSys-shaped first**. IR-F captures JIL semantics faithfully; IR-G derives
+analysis from it. The compiler is pure. Unsupported semantic input fails loudly (DL-07).
+The UC backend is outside the product boundary (DL-424).
 
 ---
 
 ## 1. Pipeline & representations
 
-```
-JIL text ──parse──▶ AST ──lower──▶ IR-F ──derive──▶ IR-G ──compile──▶ UC record bundle (JSON)
-   ▲                 │               │                 │        └────▶ migration report (md)
-   └───render────────┘               │                 ├────▶ Mermaid
-        (fidelity round trip)        │                 └────▶ DSL source (decompiler)
-                                     ├────▶ linter findings
-                                     └────▶ oracle (discrete-event interpreter)
+```mermaid
+flowchart LR
+    JIL[JIL text] -->|parse| AST[AST]
+    AST -->|render| JIL
+    AST -->|lower| F[IR-F]
+    F -->|derive| G[IR-G]
+    F --> L[Linter findings]
+    G --> L
+    F --> V[Mermaid]
+    G --> V
+    F --> D[DSL source]
+    G --> D
+    F --> O[Oracle traces]
+    F --> E[Equivalence results]
+    G --> E
 ```
 
-Every leg right of IR-F takes IR-F as its input and derives IR-G beside it, rather than
-consuming IR-G alone: `compile_to_uc(catalog, graph=None)`, `to_mermaid(catalog, graph)` and
-`decompile(catalog, graph)` all need the faithful layer. The linter has the same shape:
+The flow shows compiler representations and their consumers; it leaves out runner wiring.
+
+Graph consumers take IR-F and derive IR-G beside it: `to_mermaid(catalog, graph)` and
+`decompile(catalog, graph)` need the faithful layer. The linter has the same shape:
 L001–L007, L015–L020 and L023–L025 read IR-F; L008–L014, L021 and L022 read IR-G next to it.
 
-The four representations have four contracts:
+The three representations have three contracts:
 
 | repr | contract | loss policy |
 |---|---|---|
 | **AST** | byte-faithful syntax; `render∘parse == id` on the source text (preserve mode, F1); `render∘parse∘render == render` (canonical mode is a fixpoint, F2) | zero loss. Unknown attributes, comments, ordering, and whitespace style all survive |
 | **IR-F** (faithful) | semantics-complete per SEM entries; `AST→IR-F` total on the supported attribute set, hard error on semantically load-bearing constructs the IR does not model | lowering can normalize syntax (abbreviations, formats) but never semantics |
 | **IR-G** (derived) | analysis product: dependency graph plus classifications; regenerable from IR-F at any time (`derive` is pure) | explicitly lossy. Every loss is materialized as an annotation |
-| **UC record bundle** | CREATE-ONLY UC workflow records in the frozen base schema (`uc-edge-schema.md`), carried in one self-describing JSON bundle beside its own quarantine and exclusion ledgers; only E/A-classified edges compile | R-classified constructs become migration-report items; compile refuses to emit them silently. Twin lowering drops what UC has no edge condition for (an R row, an `n()` edge) into the bundle's exclusion ledger. An edge that survives lowering but has no base wire form withholds its whole workflow (DL-55), never part of it |
 
 `IR-F` is the source of truth for equivalence and simulation. Never hand-edit `IR-G`, and
 never serialize it as authority.
@@ -316,8 +324,14 @@ Lowering rules:
 
 ## 5. IR-G: derived graph
 
+`derive.py` retains E/A/R classes and M-row identifiers as analysis metadata (DL-12,
+DL-73, DL-153). They classify edges, OR shapes and redesign flags; they do not select an
+output backend. `derive.py` defines the surviving assignments and assumption text.
+The migration rules behind these labels are recorded in the [decision log](decision-log.md);
+DL-424 excludes the UC backend.
+
 ```python
-EdgeClass = Literal["exact", "assumed", "redesign"]  # E/A/R from mapping table
+EdgeClass = Literal["exact", "assumed", "redesign"]  # E/A/R analysis labels
 
 
 class DerivedEdge(BaseModel):
@@ -453,9 +467,8 @@ class RuntimeState:                       # SEM-01 latching store; the ONE write
     job: Mapping[str, JobRuntime]         # read-only view; rows are FROZEN — a change is a
     globals_: Mapping[str, GlobalRuntime] #   replacement, and every write names what changed
                                           # the two members the interpreter reads. The same
-                                          # owner also holds the timer heap and the runner's
-                                          # published state (hosts, capacity); the oracle
-                                          # never reads a host row (DL-93)
+                                          # owner also holds the timer heap and capacity
+                                          # state (DL-86, DL-120)
 
 class Oracle:                             # one concrete interpreter, no protocol
     def feed(self, ev: Event) -> list[Event]     # returns emitted events (starts, alarms)
@@ -475,9 +488,8 @@ in `oracle.py` imports them and `oracle_state.py` imports nothing from it (DL-91
 - Box status is derived state, recomputed on member transitions (SEM-11/12/15 rules).
 - Every SEM trace test (dossier §8) is `(catalog, event script, expected trace)`, written one
   test per behavior. Tier (c) scripts come from the caller; `equiv_scripts()` is a seeded
-  deterministic generator so CLI runs reproduce. The expected-divergence pairs (P-Mxx) are
-  fixed scripts run through both interpreters. Hypothesis fuzzes oracle and canonical-form
-  properties beside all three; it does not author the scripts.
+  deterministic generator so CLI runs reproduce. Hypothesis fuzzes oracle and canonical-form
+  properties beside those scripts; it does not author the scripts.
 - The oracle models machines/load and `resources:` as capacity buckets (DL-50). A job
   acquires an atomic demand vector (job_load vs machine max_load, QUANTITY vs insert_resource
   `amount`) before RUNNING. If the job cannot acquire the vector, it goes to QUE_WAIT (a real
@@ -495,24 +507,24 @@ in `oracle.py` imports them and `oracle_state.py` imports nothing from it (DL-91
 - `ir.dump_catalog` / `ir.load_catalog` are the REFERENCE SPELLING of that sentence, and the
   round-trip test in `tests/test_ir.py` holds them to it (DL-193). No CLI verb reads or
   writes an IR-F file: `dsl41 run` consumes JIL bytes only,
-  because JIL is the input of record (DL-51) and the run root stores the byte-exact
-  post-placeholder JIL bundle (DL-130). The Python DSL is the bridge:
+  because JIL is the input of record (DL-51). The runner stores applied configurations
+  in SQLite (DL-424, DL-428). The Python DSL is the bridge:
   `CatalogBuilder.to_jil()` renders a builder's statements as JIL, and `dsl41 build MODULE`
   writes the JIL that the module's `estate()` declares (DL-410). A decompiled module also writes its
   JIL on stdout when run as a script.
-- `sys_id`-free: all identity is by name. The UC backend owns the name→sys_id/retainSysIds
-  strategy (UCS-12) and keeps it out of the IR.
+- All IR identity is by name; the IR carries no `sys_id`.
 - Hashing: `equiv.catalog_hash = sha256(canonical IR-F JSON)`. The equivalence CLI uses it to
-  short-circuit, and the migration report uses it to pin the verified content. The runner's
-  `catalog_hash_v2` (`reload_diff.py`, over the §3.2 canonical
-  form) is a different hash over a different projection, versioned on its own. The two
-  canonicalize differently on purpose, so neither hashes `dump_catalog`'s output.
+  short-circuit. The runner's `reload_diff.catalog_hash_v2` hashes the catalog payload
+  with `meta` projected to `source_files`, using `canon.py`'s canonical bytes
+  (DL-122, DL-128, DL-429). It is a different hash over a different projection,
+  versioned on its own. Neither hashes `dump_catalog`'s output.
 
 ## 9. Linter architecture (findings, not treatments)
 
 `Violation(code, severity, message, jobs, span, detail)`, with stable codes,
 `exit_code(strict)`, and `--strict`. The rule inventory follows; each rule is traceable to a
-SEM/M row:
+SEM rule or a decision-log entry. Some rules retain migration-oriented messages and
+classifications in `lint.py`; their presence does not imply a supported UC output (DL-424):
 
 | code | severity | rule | source |
 |---|---|---|---|
@@ -529,13 +541,13 @@ SEM/M row:
 | L011 | warn | dangling job: no schedule, no derived wiring in or out (edges, globals, mutex groups), no box membership either way, and not an FW source; only reachable by a manual sendevent | hygiene |
 | L012 | info | `n()` atoms → mutex candidates (suggest M07 modeling) | M07 |
 | L013 | warn | box member with own schedule (double-gate; often unintended) | SEM-31 note |
-| L014 | error | job names that collide case-insensitively, which UC addresses as one task. An exact duplicate never reaches the linter: lowering refuses it (§4) | UCS-12 |
+| L014 | error | job names that collide case-insensitively; the check keeps UC's case-insensitive addressing (UCS-12) as implemented. An exact duplicate never reaches the linter: lowering refuses it (§4) | `lint.rule_l014` |
 | L015 | warn/info | lookback format pitfalls in raw: single-digit minutes (`2.5` = 2h05m) warn; bare hours (`30` = 30h) info, valid and unambiguous (DL-24); parse-time | SEM-04 |
-| L016 | warn | dangling resource reference: `resources:` names a resource with no insert_resource in the set (the UC backend cannot size the Virtual Resource; DL-25) | M34/UCS-09 |
+| L016 | warn | dangling resource reference: `resources:` names a resource with no insert_resource in the set (DL-25) | DL-25 |
 | L017 | warn | dangling machine reference, only when the set defines at least one machine (job-only slices stay quiet; comma lists checked per name; DL-25) | hygiene |
 | L018 | warn | dangling calendar reference: run_calendar/exclude_calendar, and holcal/cyccal inside extended-calendar definitions, name no definition in the set; only when the set carries at least one calendar/cycle (DL-36) | M24 |
-| L019 | warn | date_conditions + `condition` composition: arm-and-wait start semantics (Q3, DL-58) have no UC-side arm concept; a per-estate migration-attention item | SEM-32/M02 |
-| L020 | warn | iced consumer, two directions (DL-151, split by DL-243). (1) EVERY immediate predecessor translates to a UC Skip (ON_ICE under M19, ON_NOEXEC under M21) and each is read as satisfied (a success/done/notrunning atom, and against ON_ICE also any lookback-qualified atom): AutoSys runs the consumer while UC cascades the skip. One live predecessor converges. (2) at least one iced or noexec predecessor is gated only by a failure/terminated/exitcode atom that reads false against it (against ON_ICE only without a lookback qualifier; against ON_NOEXEC always, DL-281): AutoSys can never run the consumer through it, while UC's skip cascade may still resolve the dependency and run it. Box-override edges and global gates are not start gates and do not count either way | M19/UCS-02 |
+| L019 | warn | date_conditions + `condition` composition: arm-and-wait start semantics (Q3, DL-58); the finding asks for review before migration | SEM-32/M02 |
+| L020 | warn | iced consumer, two directions (DL-151, split by DL-243). (1) EVERY immediate predecessor translates to a UC Skip (ON_ICE under M19, ON_NOEXEC under M21) and each is read as satisfied (a success/done/notrunning atom, and against ON_ICE also any lookback-qualified atom): AutoSys runs the consumer while UC cascades the skip. One live predecessor converges. (2) at least one iced or noexec predecessor is gated only by a failure/terminated/exitcode atom that reads false against it (against ON_ICE only without a lookback qualifier; against ON_NOEXEC always, DL-281): AutoSys can never run the consumer through it, while UC's skip cascade may still resolve the dependency and run it. Box-override edges and global gates are not start gates and do not count either way | DL-151, DL-152, DL-243, DL-281; `lint.rule_l020` |
 | L021 | warn | condition-only multi-fire: an unscheduled, unboxed consumer with at least two wake sources and at least one unqualified latching atom can fire more than once per cycle, up to once per source when every latch is unqualified: the `s(A)&s(B)` double fire, and a bare `n()` guard doubling as a trigger. Wake sources are start-gate edges (undefined local producers dropped) and the consumer's own bare `n()` targets (`bare_notrunning`, self included). Scheduled consumers (SEM-32 arm) and box members (SEM-10 once-per-execution) are exempt; lookback-qualified atoms and `n()` atoms (local or cross-instance) wake but never latch; global gates are outside the rule both ways, because flag staleness is reset discipline the catalog cannot see (DL-180) | SEM-01/DL-13 |
 | L022 | info | stranded-on-failure consumer, L021's counterpart: a condition-only, unboxed consumer misses at least one cycle when a producer it cannot do without fails and no start gate in the estate reads that failure; release waits for that producer's next SUCCESS (its own next tick, a rerun, or an operator; indefinite only for an unscheduled producer). "Cannot do without" is tier-b: the producer's status pinned to FAILURE, the condition asked whether any state still satisfies it, so OR escapes and `f()`/`d()`/`e()` gates stay quiet. "Reads that failure" is a live consumer's start-gate `f`/`d`/`t`/`e` edge from the producer or an ancestor box (SEM-11 default fold; overrides can defeat it, an accepted quiet-direction approximation; box-override edges classify a fold and start nothing, so they do not count). Alarms cannot exempt: observability, not control flow (DL-32); SEM-14 terminators kill, they release nothing. Scheduled consumers (L019's arm case), box members (the hung-box family), skip-translated jobs on either side, and cross-instance producers are out of scope. Info: an inventory of where control flow ends, not a defect list (DL-181) | SEM-01/SEM-11 |
 | L023 | warn/info | a schedule time that a DST change moves, drops, merges with another, or runs twice, in the job's zone. The job's own `timezone` decides the zone, else the base zone (`dsl41 lint --timezone`, UTC by default, resolved as `dsl41 run --timezone` does; `--timezone-map` supplies a site alias table); a zone that does not resolve is skipped. On each day the zone's clock skips or repeats minutes, in the reference year (the current date by default) and the next, the rule runs every configured time through the runner's own functions in `timezones.py`: `start_time_instants` for `start_times` (default `dst-start-times=vendor`), `must_instant` for absolute `must_start_times` and `must_complete_times`, and `window_spans_near` with `wall_window_contains` for `run_window`. It restates no runner rule. A time is flagged when the result is not one instant at its written wall time, and the message prints the computed local result: a new time, no run, two runs, one pass of a repeated hour, the same tick as another start time, a must time never armed, or each opening of the window that differs from the usual day, a second opening in the repeated hour included, with the day and, in a repeated hour, the pass of each end; an opening that spans the whole change day says the window does not close that day (DL-318). Shapes the docs do not cover (a change away from 02:00, a half-hour change, London's spring gap at 01:00) are marked unverified, as are the DL-260 pins for start times that merge into one tick; the runner converts those start and must times at fold=0 and compares the run_window by wall time (DL-249, DL-253, DL-260). A `start_mins` job crosses every hour, so a zone with DST draws one info finding per job, with its tick results, not one per minute. The advice is to move the time out of the affected hour; a job with its own `timezone` may set it to UTC, and an estate that runs around the clock across regions may use UTC as the base zone. Output is deterministic for a given reference date. The rule changes no runtime behaviour | SEM-32/DL-249/DL-253 |
@@ -553,12 +565,8 @@ SEM/M row:
   the declaration verbs (`global_()`, `machine()`, `resource()`, `xinst()`, the calendar
   family). The fold registry is closed at T-001–T-007 (DL-38). The surface is extracted from
   corpus patterns, never designed ahead of them.
-- D3: UC record emission. The base subset is emitted (U3a, DL-55: CREATE-ONLY records per
-  docs/uc-edge-schema.md). Rich condition forms need U3b (a live controller's
-  openapi.json). D3 is open on U3b alone, and U3b is descoped with the UC backend
-  (DL-288).
-- D4: the UC twin shares `Event` and `TraceEntry` with the AutoSys oracle, so one comparator
-  reads both traces.
+- D3: UC emission (U3a/U3b) is retired; see DL-424 and the emission ruling in DL-55.
+- D4: the UC twin is retired; see DL-424. The oracle trace contract is in §7.
 
 ## 11. Impact ledger: where Q1/Q2/Q3 live
 
@@ -571,6 +579,6 @@ section names where the code holds them.
   DL-54). A dependent that never ended satisfies the qualifier, and the producer's status
   must still match (Q2b, DL-58). The IR models carry nothing for it.
 - Q3 (arm-and-wait, DL-54, DL-58): the oracle holds the arm in `JobRuntime.armed`, and L019
-  flags the UC-side gap. `ScheduleBlock` has no switch for it, because nothing suggests the
-  behavior is configurable. The residue is Q3c: a member's unconsumed arm ends with the box
+  flags schedule-and-condition composition. `ScheduleBlock` has no switch for it, because
+  nothing suggests the behavior is configurable. The residue is Q3c: a member's unconsumed arm ends with the box
   run, until a live instance settles it.
