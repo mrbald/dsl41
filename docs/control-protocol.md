@@ -243,7 +243,7 @@ The client action says what a client does next:
 | `decision_timeout` | unknown | no decision arrived within the window | re-read; retry a mutation only under the same request_id |
 | `apply_faulted` | refused | applying the command on a fork of the engine's state raised, so it was refused before it was logged (`docs/concurrency-model.md` §4, DL-292) | operator |
 | `precondition_failed` | rejected | the addressed entity is not at the revision `expect` names | re-read then decide |
-| `clock_regressed` | refused | admission time moved backwards during the cutoff | operator |
+| `clock_regressed` | engine invariant failure | a stamp below the admission frontier reached `Frontiers.admit`; real-domain admission floors stamps, so valid control requests cannot emit it; direct guard calls and backdated in-process virtual inputs can | engine bug |
 | `stale_completion` | rejected, stored only | the stale-completion gate rejected an engine-made completion; it is stored, and no client request is answered with it | none |
 | `engine_apply_faulted` | rejected | applying an input on a fork of the engine's state raised, and its time half applied alone, so the input was logged with this rejection and only its time half applied: it is quarantined (`docs/concurrency-model.md` §4). The live engine stores it for an engine-made input. Replay stores it for any input admitted with no decision whose apply raises the same way, a control input included. Like every stored code, an exact retry of that control input is answered with it | operator |
 | `engine_error` | refused | an engine refusal whose raise site names no code | operator |

@@ -531,35 +531,58 @@ def _resume_with(run_root: Path, at: datetime, jil: str, adapters: dict):
     )
 
 
-def test_a_journal_stamped_in_the_future_refuses_to_resume(tmp_path: Path) -> None:
-    """The machine clock moved backwards. Feeding a log whose instants are
-    ahead of `now` would either feed time backwards -- which the oracle
-    forbids -- or silently fast-forward every timer in the estate."""
+def test_a_journal_stamped_in_the_future_resumes_at_its_frontier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A restart below the store's last stamp restores its floor and reports the step
+    without waiting for the wall clock (runner-design ss9)."""
     run_root = tmp_path / "run"
+    clock = RealClock()
+    wall = T0
+    monkeypatch.setattr(clock, "now", lambda: wall)
     engine = start_run(
         lower_source(_SOLO_JIL),
         run_root,
-        clock=RealClock(),
+        clock=clock,
         adapters={"CMD": FakeAdapter(default=None)},
     )
     _close(engine)
-    append(  # a record stamped ahead of the machine clock
+    frontier = T0 + timedelta(minutes=5)
+    append(
         run_root,
         "drop",
-        {"at": "2099-01-01T00:00:00", "kind": "STARTJOB", "payload": {}, "reason": "x"},
-        at=datetime(2099, 1, 1),
+        {"at": frontier.isoformat(), "kind": "STARTJOB", "payload": {}, "reason": "x"},
+        at=frontier,
     )
+    wall = T0 + timedelta(minutes=2)
 
     async def scenario() -> None:
-        with pytest.raises(EngineError, match="the store is from the future"):
-            await resume_run(
-                lower_source(_SOLO_JIL),
-                run_root,
-                clock=RealClock(),
-                adapters={"CMD": FakeAdapter(default=None)},
-            )
+        resumed = await resume_run(
+            lower_source(_SOLO_JIL),
+            run_root,
+            clock=clock,
+            adapters={"CMD": FakeAdapter(default=None)},
+        )
+        try:
+            assert resumed.frontiers.at == frontier
+            async with asyncio.timeout(5):
+                await resumed.run_until_quiescent(clock.now())
+            assert resumed.started.is_set()
+            assert resumed.frontiers.at == frontier
+            assert resumed.exit_code is None
+            assert clock.now() == wall
+        finally:
+            await resumed.shutdown()
+            _close(resumed)
 
     asyncio.run(scenario())
+    reports = capsys.readouterr().err.splitlines()
+    assert reports == [
+        "dsl41: WARNING: wall clock below admission frontier:"
+        f" wall={wall.isoformat()} frontier={frontier.isoformat()} gap_s=180.0"
+    ]
 
 
 def test_the_sweep_reads_what_is_there_and_ignores_what_is_not(tmp_path: Path) -> None:
