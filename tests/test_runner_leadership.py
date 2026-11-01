@@ -329,7 +329,6 @@ def test_cm09_a_spawn_that_never_reached_the_host_is_redriven_at_resume(
             run_root,
             clock=RealClock(),
             adapters={"CMD": LocalCommandAdapter(grace_seconds=2.0)},
-            settle_seconds=1.0,
             grace_seconds=2.0,
         )
         try:

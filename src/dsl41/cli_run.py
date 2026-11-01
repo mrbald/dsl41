@@ -432,9 +432,9 @@ class _RunEnd(NamedTuple):
 
 
 async def _await_started(engine: "Engine", loop_task: "asyncio.Task[Any]") -> bool:
-    """Wait for the engine loop to finish a restart's recovery and record `engine started`
-    (startup step 8), or for the loop to end first: a crash, or a stop request during the
-    recovery, which records `shutdown_during_startup` and exits 0. True when it started."""
+    """Wait for the engine loop to finish a restart's catch-up and record `engine started` at
+    the barrier, or for the loop to end first: a crash, or a stop request during the catch-up,
+    which records `shutdown_during_startup` and exits 0. True when it started."""
     import asyncio
 
     started = asyncio.ensure_future(engine.started.wait())
@@ -700,11 +700,18 @@ async def _serve_run(
         )
         # Handlers go in BEFORE the socket is bound, so a SIGHUP after this engine bound
         # control.sock is a reload, not a kill. A stop that came while the engine was built
-        # (the replay, step 5) is the lifecycle's now: STARTING + stop_requested
+        # (the fold) is the lifecycle's now: STARTING + stop_requested
         early.hand_to(engine)
         _install_signal_handlers(engine.request_stop, access)
-        # the loop carries out the restart's steps 6 and 7 and records step 8; the socket is
-        # bound only then (spec-wiring 1b)
+        # the socket binds before the loop takes its first step, so every verb is served during
+        # a restart's catch-up and `status` says STARTING (spec-restart §8, ruling R2)
+        try:
+            await server.start()
+        except EngineError as exc:
+            # the handlers stay until `loop.close()`, as on the success path; the tasks the
+            # restart started stop before the store closes and the lock is released below
+            await engine.shutdown()
+            return refuse(exc)
         loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
         # a control handler's StatechartError stops the run as one from the loop does
         # (statechart-engine ss5): the handler cancels the loop at once and the run wakes on
@@ -714,15 +721,6 @@ async def _serve_run(
             done = {loop_task} if loop_task.done() else set()
             code = await _stop_and_judge(engine, server, _RunEnd(loop_task, None, None, done))
             return code
-        try:
-            await server.start()
-        except EngineError as exc:
-            # the handlers stay until `loop.close()`, as on the success path; the tasks the
-            # restart started stop before the store closes and the lock is released below
-            loop_task.cancel()
-            await asyncio.wait({loop_task})
-            await engine.shutdown()
-            return refuse(exc)
         running = True
         typer.echo(f"engine up; control socket: {server.path}")
         end = await _await_run_end(engine, server, loop_task, ui)

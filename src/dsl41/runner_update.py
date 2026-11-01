@@ -24,8 +24,10 @@ engine then feeds one time advance, so the queue scan the swap owes runs before 
 (DL-427), commits the outcomes it kept back, and releases what the dispatch filter held.
 
 A restart that finds a `config intent` with no `config applied` resumes the update in STOPPING
-(startup step 4, spec-crash): the attempts it stops are settled first, then it applies, before
-any other attempt is settled or anything is dispatched.
+(spec-restart §2): the catch-up observes the attempts it stops like any open one, and it applies
+as a step of the loop once its stops are finished. The recovered outcomes of jobs outside its
+stop set are fed under the old catalog before it; no job of its plan dispatches and no outcome
+it keeps commits before it (spec-restart §6, ruling R1, DL-433).
 
 An exact retry of an admitted request, under its request id with the same token, consent and
 precondition, is answered from its `config intent` record and, once applied, from its
@@ -38,6 +40,7 @@ import asyncio
 import hashlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from functools import partial
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
@@ -230,6 +233,8 @@ class EngineUpdate:
         #: kept attempts whose stop's cleanup is not done yet, and kept interruptions of jobs
         #: whose mark the plan changes, each by run id with its job
         self._cleaning: dict[str, str] = {}
+        #: the stop-set jobs that ended during a restart's catch-up, for its first look
+        self._ended_meanwhile: list[str] = []
         self._others: dict[str, str] = {}
         #: the jobs whose `non-idempotent.toml` mark the plan adds or removes
         self._moved: frozenset[str] = frozenset()
@@ -421,14 +426,15 @@ class EngineUpdate:
             answer.applied.set_result(answer.application)
         return answer
 
-    # ---- restart step 4
+    # ---- the restart
 
     def resume(self, intent: Mapping[str, Any]) -> None:
-        """Restore the update a restart found in STOPPING from its `config intent` record
-        (startup step 4): its dispatch filter holds from here, and it waits for each attempt of
-        its stop set the open table holds, file watches excepted (step 5 takes a watch up).
-        Step 5 settles those attempts like any open one; their ends, and a first look at a stop
-        set already down, are steps of the single writer, so the update applies in the loop.
+        """Restore the update a restart found in STOPPING from its `config intent` record (the
+        fold, spec-restart §2): its dispatch filter holds from here, and it waits for each
+        attempt of its stop set the open table holds, file watches excepted (the fold takes a
+        watch up). The catch-up observes those attempts like any open one; their ends are steps
+        of the single writer, and the catch-up's owed step queues the first look at a stop set
+        already down (`look`), so the update applies in the loop (DL-432, spec-restart §6).
         Nothing is appended or applied here."""
         engine = self.engine
         assert engine.journal is not None and engine.run_root is not None
@@ -454,17 +460,24 @@ class EngineUpdate:
         still = {
             job: run_id
             for job, run_id in self._attempts.items()
-            if run_id in table and catalog[job].job_type != "FW"  # step 5 takes a watch up
+            if run_id in table and catalog[job].job_type != "FW"  # the fold takes a watch up
         }
-        # an attempt whose outcome is in while its cleanup was cut short is down once step 5
-        # has finished that cleanup (`runner_startup._finish_ladder`)
+        # an attempt whose outcome is in while its cleanup was cut short is down once the
+        # catch-up's cleanup step has finished it (`cleaned`)
         self._cleaning = {run_id: job for job, run_id in still.items() if table[run_id].closing}
         self.tier = UpdateTier(self, self._prepare)
         # the request's own answer: a retry under its id while it still stops waits on it
         self._answer = UpdateAnswer(admitted)
         self._answer.applied = asyncio.get_running_loop().create_future()
         self._post(lambda tier: tier.resume(admitted, still.keys(), settle=False))
-        self.engine.post_update_exit(None)  # the loop's first look: a stop set already down
+
+    def look(self) -> None:
+        """Queue the loop's first look at a resumed update's stop set, after every catch-up
+        step: it takes the stops that ended during the catch-up and applies the update once
+        none is left, so the recovered outcomes of jobs outside the stop set are fed first
+        (DL-432, spec-restart §6)."""
+        if self.tier is not None:
+            self.engine.post_update_exit(None)
 
     # ---- an attempt of the stop set ended
 
@@ -473,7 +486,6 @@ class EngineUpdate:
         is down once its stop is finished (`Engine.stop_done`: the ladder done, nothing of it
         left), which may come after its record (`cleaned`); any other is only kept."""
         self._kept[run_id] = outcome
-        self.engine.attempt_facts(run_id).settled.set()  # its record is in
         if self._attempts.get(job) != run_id:
             self._others[run_id] = job
         elif self.engine.stop_done(run_id):
@@ -494,9 +506,16 @@ class EngineUpdate:
         inside a step of the single writer, which finishes an application it reaches; from
         anywhere else, queue it as such a step (`Engine.post_update_exit`). The update applies
         only in the loop."""
-        if not self.direct:
+        if not self.direct and self.engine.catching_up:
+            # the catch-up's own first look takes it (`look`, spec-restart §6)
+            if job is not None:
+                self._ended_meanwhile.append(job)
+        elif not self.direct:
             self.engine.post_update_exit(job)
         elif job is None:
+            ended, self._ended_meanwhile = self._ended_meanwhile, []
+            for one in ended:
+                self._post(partial(UpdateTier.exit_recorded, job=one))
             self._post(lambda tier: tier.settle())
         else:
             self._post(lambda tier: tier.exit_recorded(job))

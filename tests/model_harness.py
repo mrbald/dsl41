@@ -399,7 +399,7 @@ class ModelRun:
         if self.engine is None:
             return False
         await self.crash()
-        await self.resume(settle_seconds=0.0, grace_seconds=0.0)
+        await self.resume()
         return True
 
     async def fault_lost_dispatch(self) -> bool:
@@ -426,7 +426,7 @@ class ModelRun:
         await self.crash()
         parked, self.adapter.park_next = self.adapter.parked, False
         cut = parked is not None and self._cut_dispatch(parked)
-        await self.resume(settle_seconds=0.0, grace_seconds=0.0)
+        await self.resume()
         return cut
 
     async def fault_duplicate_completion(self) -> bool:
@@ -485,7 +485,7 @@ class ModelRun:
     async def settle(self, horizon: datetime) -> None:
         """Resume if the last fault left no engine, then run to quiescence."""
         if self.engine is None:
-            await self.resume(settle_seconds=0.0, grace_seconds=0.0)
+            await self.resume()
         await self.run_to(horizon)
 
     async def resume(self, **kwargs: object) -> Engine:

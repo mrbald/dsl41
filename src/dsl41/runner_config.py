@@ -39,8 +39,6 @@ from dsl41.timezones import alias_table
 
 #: The FW default poll interval, in seconds as the CLI spells it (ss2.1).
 FW_DEFAULT_INTERVAL_S: Final[float] = 60.0
-#: How long resume waits for a live wrapper's record before it acts on the process (ss7).
-RECONCILE_SETTLE_S: Final[float] = 5.0
 #: The default stop grace: from TERM to KILL, and from KILL to the wrapper's record (DL-424).
 GRACE_TERM_S: Final[float] = 10.0
 GRACE_KILL_S: Final[float] = 5.0

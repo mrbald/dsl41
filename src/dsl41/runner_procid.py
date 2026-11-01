@@ -413,17 +413,18 @@ def linux_group_has_live_member(pgid: int) -> bool:
 
 # ------------------------------------------------------------- the process cookie
 
-#: The variable every process of a command attempt carries, `<engine instance>.<run id>`:
-#: the engine sets it for the wrapper and the command, and the command's children inherit
-#: it, so a scan of the processes this uid can read finds the attempt's own, whatever their
-#: process group (docs/wrapper-protocol.md, an addition). Finding one proves presence; finding
-#: none proves nothing (`runner_stops.EngineStops.left`).
+#: The variable every process of a command attempt carries, `<root_id>.<run id>`: the engine
+#: sets it for the wrapper and the command, and the command's children inherit it, so a scan of
+#: the processes this uid can read finds the attempt's own, whatever their process group
+#: (docs/wrapper-protocol.md, an addition). `root_id` names the run root, so one prefix reads
+#: every attempt of the root, whichever engine start launched it (spec-restart §3, DL-433).
+#: Finding one proves presence; finding none proves nothing (`runner_stops.EngineStops.left`).
 COOKIE_ENV: Final[str] = "DSL41_COOKIE"
 
 
-def cookie(instance: str, run_id: str) -> str:
-    """The cookie of the attempt `run_id` dispatched by the engine instance `instance`."""
-    return f"{instance}.{run_id}"
+def cookie(root_id: str, run_id: str) -> str:
+    """The cookie of the attempt `run_id` dispatched in the run root `root_id`."""
+    return f"{root_id}.{run_id}"
 
 
 @dataclass(frozen=True)
