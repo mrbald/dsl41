@@ -72,10 +72,14 @@ def _substitute_known(text: str, bindings: Mapping[str, str]) -> str:
 
 
 def _parse_properties(path: Path) -> list[_Entry]:
+    return parse_properties(path.read_bytes().decode("utf-8"), path)
+
+
+def parse_properties(text: str, path: Path) -> list[_Entry]:
+    """Parse captured text with its original diagnostic path (DL-437)."""
     entries: list[_Entry] = []
     seen: dict[str, int] = {}
     findings: list[str] = []
-    text = path.read_bytes().decode("utf-8")
     for lineno, raw_line in enumerate(text.split("\n"), start=1):
         line = raw_line.rstrip("\r").strip()
         if not line or line.startswith(("#", "!")):
@@ -108,9 +112,26 @@ def load_properties(paths: Iterable[str | Path]) -> dict[str, str]:
     Later files override earlier ones by raw key. Raises PlaceholderError listing every parse
     error, stuck entry (cycle or undefined reference), key collision and non-identifier key.
     """
+    return resolve_properties(_parse_properties(Path(path)) for path in paths)
+
+
+def properties_from_bytes(parts: Iterable[tuple[str, bytes]]) -> dict[str, str]:
+    """Interpret captured properties without reopening their paths (DL-437)."""
+    layers = []
+    for path, data in parts:
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise PlaceholderError([f"{path}: invalid UTF-8: {exc}"]) from exc
+        layers.append(parse_properties(text, Path(path)))
+    return resolve_properties(layers)
+
+
+def resolve_properties(layers: Iterable[list[_Entry]]) -> dict[str, str]:
+    """Layer parsed entries, then resolve their references (DL-19)."""
     layered: dict[str, _Entry] = {}
-    for path in paths:
-        for entry in _parse_properties(Path(path)):
+    for entries in layers:
+        for entry in entries:
             layered[entry.key] = entry  # later file wins (raw-key layering)
 
     resolved: dict[str, str] = {}

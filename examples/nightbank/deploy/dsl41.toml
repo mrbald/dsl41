@@ -1,0 +1,13 @@
+format_version = 1
+
+[engine]
+run_root = "/srv/dsl41/runs/nightbank"
+
+[estate]
+include = ["/opt/nightbank/cfg/*.jil"]
+properties = ["/opt/nightbank/cfg/night.properties"]
+timezone = "UTC"
+
+[lint]
+refuse = "none"
+ignore = []

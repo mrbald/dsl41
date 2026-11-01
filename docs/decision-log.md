@@ -25405,3 +25405,30 @@ relitigate an entry; append a new one.
   Supersedes DL-431's no-pidfd scan exclusion and rejection of numeric-pid signals within
   this token-checked fallback. Wrapper inputs, spool and wire formats are unchanged.
   Built by Sol; Opus two rounds.
+
+- DL-437 One main config: include globs collapse every estate input into one catalog, with an
+  explicit lint policy (2026-11-01; owner direction, boss spec and rulings; spec-main-config;
+  `main_config.py`, `cli_run.py`, `cli_reload.py`, `reload_plan.py`, `runner_startup.py`,
+  `runner_config.py`, `docs/deploy.md`, `docs/protocol-evolution.md`, the nightbank unit)
+  THE RULE. `/etc/dsl41/dsl41.toml`, or an absolute `--config`, selects one engine: its root,
+  host settings, inputs, interpretation and lint policy, in strict version-1 TOML. Paths anchor
+  at the config. Ordinary globs expand in sorted order; `**` refuses. Unreadable inputs,
+  duplicate selections and duplicate jobs refuse, naming both origins (DL-07). JIL and DL-410
+  `estate()` modules compile as one set; Python renders captured JIL. Each plan binds the
+  config, the source mapping and every captured byte; `update` applies the plan and never
+  re-reads sources or imports Python. `lint.refuse` is `none` (default), `error` or `warn` over
+  unignored findings; input, lowering and preflight errors stay hard. Reread prints each changed
+  job's source. A rehearsal root never equals, contains or lies inside the engine root.
+  RESTART. A main-config restart resumes on the last applied revision (snapshot plus journal),
+  never re-reading sources: estate, lint and `engine.environment` edits stay pending and never
+  refuse it. The host settings `as_machine`, `machine_policy` and the access map apply from
+  disk; invalid ones refuse with exit 2. A missing interrupted-update plan refuses before any
+  write or signal. Legacy invocations keep their checks. `estate.toml` stays for tests and
+  rehearsal. Configuration v1 now refuses unknown fields; plan v2 is added.
+  THE REASON. App teams deploy config under `/opt/<app>/cfg` on their own schedule; the engine
+  release and the estate move independently, and a reboot must not become an outage or an
+  unreviewed deploy (ruling A; restart-and-apply rejected).
+  NOT BUILT. Restart recompiles captured bytes (K1); no preflight at main-config restart (K2);
+  no path from a legacy root to the new unit (K4); the pending scan blocks the loop (K5);
+  unknown `[engine]` keys are ignored at restart (K7). Known bugs in `TODO.md`. Built by Sol;
+  Opus two rounds.

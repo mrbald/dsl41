@@ -62,6 +62,10 @@ Deferred to the next milestone, active/standby on HA Oracle and the 200-job esta
   - [x] Decide a supported Python execution entry point before adding
     domain-specific decompiler recognition: `estate()` and `dsl41 build` (DL-410).
 
+- [ ] Discuss an explicit restart-and-apply policy for main config: who reviews, stop consent,
+  running boxes, interruption decisions and audit records (boss ruling 2026-11-01; the owner
+  liked force-accept; restart today resumes on the stored catalog, DL-437).
+
 # Known bugs
 
 Found after an area was sealed as good enough. Addressed once the scope runs end to end.
@@ -108,3 +112,13 @@ Found after an area was sealed as good enough. Addressed once the scope runs end
   round 1, Low 2; wrapper, DL-431).
 - [ ] The Darwin EPERM tests fake both killpg and `ps`; no test reads real `ps` output on a real
   zombie group (Opus, slice killpg-eperm round 1, Low 3; test gap, DL-431).
+- [ ] Main-config restart recompiles the captured bytes and refuses when the current binary
+  rejects them (Opus, slice main-config round 1, K1; DL-437).
+- [ ] Main-config restart skips preflight; legacy restart runs it (Opus, slice main-config
+  round 1, K2; DL-437).
+- [ ] A root started with the legacy unit cannot resume under the main-config unit, and nothing
+  documents a path (Opus, slice main-config round 1, K4; DL-437).
+- [ ] The pending-source scan at restart runs synchronously on the engine loop (Opus, slice
+  main-config round 1, K5; DL-437).
+- [ ] Restart ignores unknown `[engine]` keys, so a typo such as `machine_polcy` silently runs the
+  default until the next reread refuses it (Opus, slice main-config round 2, K7; DL-437).

@@ -409,7 +409,18 @@ def test_an_environment_without_a_manifest_is_refused(tmp_path: Path, verb: str)
 
 
 @pytest.mark.parametrize("verb", list(VERBS))
-def test_neither_files_nor_a_manifest_is_refused(tmp_path: Path, verb: str) -> None:
+def test_neither_files_nor_a_manifest_is_refused(
+    tmp_path: Path, verb: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if verb in {"lint", "run", "rehearse"}:
+        from dsl41 import main_config
+
+        missing = tmp_path / "not-installed.toml"
+        monkeypatch.setattr(main_config, "DEFAULT_CONFIG", missing)
+        result = _invoke(verb)
+        assert result.exit_code == 2 and str(missing) in result.stderr
+        assert result.stdout == ""
+        return
     _refused_before_any_write(tmp_path, verb, [], "give FILES or --manifest.")
 
 

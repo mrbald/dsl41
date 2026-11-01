@@ -40,6 +40,7 @@ from dsl41.ir import CatalogIR, LoweringError, lower_catalog
 from dsl41.idempotence import IdempotenceError, load_exceptions
 from dsl41.lint import lint_catalog
 from dsl41.placeholders import PlaceholderError, load_properties, substitute
+from dsl41.main_config import CONFIG_OPT, selected_config
 
 if TYPE_CHECKING:  # type-only: equiv's runtime import stays deferred
     from dsl41.dsl import CatalogBuilder
@@ -61,6 +62,7 @@ def _emit(body: str, out: "Path | None") -> None:
 
 
 def lint(
+    ctx: typer.Context,
     files: list[Path] = ESTATE_FILES,
     strict: bool = typer.Option(False, "--strict", help="Also fail on warnings."),
     permit_unknown: bool = PERMIT_UNKNOWN,
@@ -81,6 +83,7 @@ def lint(
     ),  # SEM-35/DL-62
     manifest: Path | None = MANIFEST_OPT,
     environment: str | None = ENVIRONMENT_OPT,
+    config: str | None = CONFIG_OPT,
 ) -> None:
     """Check JIL files and report linter findings.
 
@@ -95,6 +98,16 @@ def lint(
     """
     from dsl41.lint import RULE_CODES
 
+    main_path = selected_config(ctx, config, bool(files) or manifest is not None)
+    if main_path is not None:
+        from dsl41.main_config import emit_policy, prepare
+        from dsl41.reload_plan import RereadRefused
+
+        try:
+            candidate = prepare(main_path)
+        except RereadRefused as exc:
+            raise typer.Exit(refuse(exc)) from exc
+        raise typer.Exit(1 if emit_policy(candidate, refuse=False) else 0)
     files, properties, timezone, timezone_map, _ = estate_args(
         manifest, environment, files, properties, timezone, timezone_map
     )
