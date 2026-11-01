@@ -188,6 +188,13 @@ def test_needles_quote_each_component_in_both_styles() -> None:
     assert "docs/" not in found
 
 
+def test_instruction_files_are_docs_and_settings_are_code() -> None:
+    assert prepush.is_docs_only(["CLAUDE.md", ".claude/skills/x/SKILL.md"]) is True
+    assert prepush.is_docs_only(["CLAUDE.md", ".claude/settings.json"]) is False
+    assert prepush.is_docs_only([".claude/skills/x/run.py"]) is False
+    assert prepush.is_docs_only(["AGENTS.md"]) is False
+
+
 def test_an_empty_change_set_is_code(repo: Path) -> None:
     assert prepush.is_docs_only([]) is False
     assert _run(repo, "--classify").stdout.strip() == "code=true"

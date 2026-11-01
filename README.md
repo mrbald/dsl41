@@ -44,7 +44,7 @@ the other three.
 
 **Maintainer**: contribute code or documents, or run an agent that does.
 
-1. [CLAUDE.md](CLAUDE.md) - the shared agent contract with task-specific reading routes; [docs/agent-workflow.md](docs/agent-workflow.md) - setup, verification commands, review recipes
+1. [CLAUDE.md](CLAUDE.md) - the shared agent contract with role and task reading routes; [docs/agent-workflow.md](docs/agent-workflow.md) - implementation, setup and verification
 2. [docs/writing.md](docs/writing.md) - the rules for human-facing documents; [docs/cli-tui-qualification.md](docs/cli-tui-qualification.md) - how a release's CLI and TUI are qualified
 3. [docs/live-instance-runbook.md](docs/live-instance-runbook.md) - probing a live AutoSys instance to settle an open semantic question
 
