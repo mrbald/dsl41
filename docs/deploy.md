@@ -2,55 +2,157 @@
 
 For the operator installing, starting, watching and recovering one engine on
 one Linux box. The rest of the [operator track](../README.md#documents)
-covers incidents and worked estates. This page leaves
-[active/standby and the 200-job estate](../TODO.md#release-2026-11-02-one-box)
-to the next milestone.
+covers incidents and worked estates. This page leaves application authoring
+to the [job author guide](authoring.md) and site qualification to the
+[one-box milestone](../TODO.md#release-2026-11-02-one-box).
 
 ## Install the package and unit
 
-1. Install the release using the [package instructions](../README.md#install).
-   Install it in `/opt/dsl41/releases/<version>`, with its executable at
-   `/opt/dsl41/releases/<version>/bin/dsl41`. Substitute the concrete installed
-   version in the commands and unit below.
-2. Prepare the `dsl41` user and group. Give that user a writable run root at
-   `/srv/dsl41/runs/nightbank` and access to the estate and its job commands.
-3. Install application inputs separately under `/opt/nightbank/cfg`.
-   Install the [example main config](../examples/nightbank/deploy/dsl41.toml)
-   as `/etc/dsl41/dsl41.toml`. Its include glob selects the application's JIL;
-   its properties path selects the site's bindings. Python inputs may use an
-   `estate()` function returning `CatalogBuilder`, as with `dsl41 build`.
-   The [Nightbank example](../examples/nightbank/README.md) is synthetic and
-   repo-only; installing the Python package does not install that estate.
-   Set `engine.run_root`, input patterns and properties in the main config.
-   Paths may be absolute or relative to that config. The engine root must be
-   absolute. Patterns support `*`, `?` and brackets; `**` is refused.
-   The config is a regular file, never a symlink. Keep `estate.toml` for
-   explicit portable fixtures and legacy `--manifest` invocations.
-4. Copy the [engine unit](../examples/nightbank/deploy/dsl41-engine.service)
+1. As root, create the release environment and install the selected version.
+   Substitute a concrete version for `<version>` in every command and in
+   the unit. The [package instructions](../README.md#install) describe extras.
+
+   ```sh
+   python3.12 -m venv /opt/dsl41/releases/<version>
+   /opt/dsl41/releases/<version>/bin/pip install dsl41==<version>
+   ```
+
+2. Prepare the `dsl41` system user and group using the site's account tools.
+   Jobs run as this user; an `owner` naming another user refuses preflight.
+   As root, create the service and application directories:
+
+   ```sh
+   install -d -m 0755 /etc/dsl41 /opt/nightbank /opt/nightbank/cfg
+   install -d -m 0755 /srv/dsl41 /srv/dsl41/runs /srv/dsl41/nightbank
+   install -d -o dsl41 -g dsl41 -m 0700 /srv/dsl41/runs/nightbank
+   ```
+
+3. From the checkout, install the synthetic small Nightbank inputs as root:
+
+   ```sh
+   cp examples/nightbank/estate/small/*.jil /opt/nightbank/cfg/
+   cp -R examples/nightbank/bin /opt/nightbank/
+   install -m 0644 examples/nightbank/deploy/dsl41.toml /etc/dsl41/dsl41.toml
+   ```
+
+   Use an empty application config directory so its glob cannot select stray
+   JIL. The Python package does not install this repo-only estate.
+   Read [what the main config selects](#what-the-main-config-selects).
+
+4. Generate the night's properties and directories with the installed
+   interpreter, from the same checkout. Replace `<version>` first.
+   Choose a fresh night directory; preparing over an existing night's data
+   would mix its incident counters and outputs.
+
+   ```sh
+   /opt/dsl41/releases/<version>/bin/python - <<'PY'
+   import runpy
+   import sys
+   from datetime import UTC, datetime, timedelta
+   from pathlib import Path
+
+   night = Path("/srv/dsl41/nightbank/night")
+   if night.exists():
+       raise SystemExit("Choose a fresh night directory")
+   prepare = runpy.run_path("tests/nightbank_props.py")["prepare_night"]
+   props = prepare(night, "small", anchor_utc=datetime.now(UTC) + timedelta(minutes=15))
+   props["OWNER"] = "dsl41"
+   (night / "night.properties").unlink()
+   Path("/opt/nightbank/cfg/night.properties").write_text(
+       "".join(f"{key}={value}\n" for key, value in props.items())
+   )
+   (night / "profile.env").write_text(
+       f'export NIGHTBANK_DATA="{night}/data"\n'
+       f'export NIGHTBANK_STATE="{night}/data/state"\n'
+       f'export NIGHTBANK_INCIDENTS="{night}/incidents.conf"\n'
+       'export NIGHTBANK_SOCKET="/srv/dsl41/runs/nightbank/control.sock"\n'
+       f'export PATH="/opt/nightbank/bin:{Path(sys.executable).parent}:$PATH"\n'
+   )
+   PY
+   ```
+
+5. Give the service user its night's files:
+
+   ```sh
+   chown -R dsl41:dsl41 /srv/dsl41/nightbank/night
+   chmod 0600 /srv/dsl41/nightbank/night/profile.env
+   chmod 0644 /opt/nightbank/cfg/night.properties
+   ```
+
+   Inspect the copied `incidents.conf`; it intentionally injects training
+   failures. The profile puts `fakework` and the installed engine on PATH
+   and supplies the socket used by the estate's `SET_GLOBAL` commands.
+   The [Nightbank preparation](../examples/nightbank/README.md#quick-start)
+   gives a checkout-only alternative.
+
+6. Check the installed inputs as the service user before starting the unit:
+
+   ```sh
+   sudo -u dsl41 /opt/dsl41/releases/<version>/bin/dsl41 lint --config /etc/dsl41/dsl41.toml
+   ```
+
+   Inspect findings even after exit 0; the shipped lint policy is `none`.
+
+7. Copy the [engine unit](../examples/nightbank/deploy/dsl41-engine.service)
    to `/etc/systemd/system/dsl41-engine.service`.
    Substitute `<version>` in both executable paths. Set `RequiresMountsFor`
    to the configured run root and every required input filesystem.
    Set `ExecStop`'s socket to that root's `control.sock`.
-5. As root, reload systemd's unit definitions:
+   Include the profile, worker and data filesystems in the mount dependencies.
+   Keep the unit's time-sync ordering so a boot-time clock correction happens
+   before engine timestamps. Verify the installed unit as root:
+
+   ```sh
+   systemd-analyze verify /etc/systemd/system/dsl41-engine.service
+   ```
+8. As root, reload systemd's unit definitions:
 
    ```sh
    systemctl daemon-reload
    ```
 
-6. As root, enable the unit and start it:
+9. After the checks and unit edits, set the training start times last.
+   As root, refresh only the properties using the same checkout:
 
    ```sh
-   systemctl enable --now dsl41-engine.service
+   /opt/dsl41/releases/<version>/bin/python - <<'PY'
+   import runpy
+   from datetime import UTC, datetime, timedelta
+   from pathlib import Path
+
+   compute = runpy.run_path("tests/nightbank_props.py")["compute_properties"]
+   props = compute(Path("/srv/dsl41/nightbank/night"), datetime.now(UTC) + timedelta(minutes=15), 3)
+   props["OWNER"] = "dsl41"
+   Path("/opt/nightbank/cfg/night.properties").write_text(
+       "".join(f"{key}={value}\n" for key, value in props.items())
+   )
+   PY
    ```
 
-   The [systemctl manual](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html)
-   defines these unit-management commands.
+10. As root, enable the unit and start it within ten minutes of step 9:
+
+    ```sh
+    systemctl enable --now dsl41-engine.service
+    ```
+
+    The [systemctl manual](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html)
+    defines these unit-management commands.
+
+If the first region's start time passes before the first start, remove the
+training night directory and repeat steps 4–6 and 9 before starting.
+Removing `/srv/dsl41/nightbank/night` discards its synthetic data and counters;
+keep any evidence you need first. A root with `engine.db` keeps its stored
+revision. For that root, use [reread and update](#reload-a-changed-estate)
+while the engine runs to adopt refreshed properties, or select a fresh run
+root in both the main config and the unit's `ExecStop` socket before starting.
+A restart alone does not adopt the refreshed times.
 
 Read the unit in these groups:
 
 | Lines | What they do for the operator |
 | --- | --- |
 | `[Unit]`, `Description`, `RequiresMountsFor` | Name the service and require the run root's filesystem before starting. An absent mount must not look like a fresh root. |
+| `Wants`, `After` | Order startup after `time-sync.target`; the host must provide clock synchronization. |
 | `StartLimitIntervalSec`, `StartLimitBurst` | Allow at most five starts in 300 seconds, then leave a repeated crash failed. |
 | `[Service]`, `Type`, `User`, `Group` | Run the engine directly as `dsl41:dsl41`. |
 | `ExecStart` | Read the main config. A root containing `engine.db` resumes its stored active catalog. |
@@ -72,6 +174,27 @@ systemctl reset-failed dsl41-engine.service
 This resets the failed state and start counter; it does not start the engine.
 Then follow [recovery](#recover-after-the-engine-or-box-dies).
 See [systemctl reset-failed](https://www.freedesktop.org/software/systemd/man/latest/systemctl.html#reset-failed%20%5BPATTERN%E2%80%A6%5D).
+
+## What the main config selects
+
+The main config selects these JIL files directly, not `estate.toml`.
+Its properties path supplies schedule anchors, owner, data, log and
+profile paths. It has no environment tables, so no environment selection
+is needed. If a site's main config declares `[estate.environments.NAME]`,
+set `engine.environment = "NAME"`; environment properties follow base
+properties. Portable manifest fixtures select their environments with
+`--environment NAME` instead.
+
+Set `engine.run_root`, input patterns and properties in the main config.
+Input paths may be absolute or relative to that file; the run root must
+be absolute. Patterns support `*`, `?` and brackets; `**` is refused.
+The config is a regular file, never a symlink. For exception jobs, set
+`estate.non_idempotent` to the exceptions file's path; its default is
+`non-idempotent.toml` beside the main config, not beside the JIL.
+Python inputs may supply `estate()` returning `CatalogBuilder`, as with
+`dsl41 build`; see [authoring](authoring.md) for that input form.
+Keep `estate.toml` for explicit portable fixtures and legacy `--manifest`
+invocations. These input rules are [DL-437](decision-log.md).
 
 ## Start the estate
 
@@ -118,14 +241,14 @@ journalctl -u dsl41-engine.service
 ```
 
 Under the unit, read `engine stopped: ...`, startup refusals and exit-6/7
-reports here ([refusals](../src/dsl41/cli_common.py#L412),
-[fault reports](../src/dsl41/cli_run.py#L559)).
+reports here. The [incident guide](incident-triage.md) covers collecting fault evidence.
 The unit leaves output routing to systemd's defaults:
 stdout goes to the journal and stderr follows it, unless the host overrides
 those defaults. See [systemd output routing](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#StandardOutput=)
 and [journalctl's unit filter](https://www.freedesktop.org/software/systemd/man/latest/journalctl.html#-u).
-The engine prints its shutdown record in
-[the run command](../src/dsl41/cli_run.py#L611).
+The foreground run prints the same shutdown record to its terminal.
+Output and refusal handling: [run CLI](../src/dsl41/cli_run.py) and
+[shared CLI](../src/dsl41/cli_common.py).
 
 ## Watch the engine and jobs
 
@@ -214,7 +337,7 @@ view. Once the engine exits, its socket cannot answer status.
 1. Prepare the changed estate on disk, then build a plan:
 
    ```sh
-   /opt/dsl41/releases/<version>/bin/dsl41 reread
+   sudo -u dsl41 /opt/dsl41/releases/<version>/bin/dsl41 reread
    ```
 
    The command prints added, changed and removed jobs, the unchanged count,
@@ -229,7 +352,7 @@ view. Once the engine exits, its socket cannot answer status.
    before submitting.
 
    ```sh
-   /opt/dsl41/releases/<version>/bin/dsl41 update TOKEN --wait
+   sudo -u dsl41 /opt/dsl41/releases/<version>/bin/dsl41 update TOKEN --wait
    ```
 
    The engine checks the plan against its current state.
@@ -363,3 +486,35 @@ and DL-433 in the [decision log](decision-log.md) for the restart rule.
    A fast restart may already report RUNNING on the first query.
    The [status response](../src/dsl41/runner_control.py#L860) reads the
    [engine lifecycle](../src/dsl41/engine_charts.py#L251).
+
+## Exercise the unit before site use
+
+Run these only on a disposable drill host with Podman, Git and uv available,
+from the checkout. The scripts create a systemd container and install a
+synthetic estate; they do not qualify a production workload.
+
+1. Run the Ubuntu service drill:
+
+   ```sh
+   examples/nightbank/deploy/drill-local.sh --image ubuntu all
+   ```
+
+2. Run the EL8 service drill:
+
+   ```sh
+   examples/nightbank/deploy/drill-local.sh --image el8 all
+   ```
+
+The scripts print a result for each row and stop on failure. They cover
+install, start, restart, container reboot, engine kill, drain, reload,
+process leaks, startup refusal, start limit and executable upgrade.
+The `refusal` row verifies that a pending source edit leaves the stored
+revision active after restart, then tests a foreign store version refusal.
+The `leak` row checks that a restart TERMs a job's leftover process through
+the cookie scan. A container reboot retains the kernel boot id.
+
+[DRILL.md](../examples/nightbank/deploy/DRILL.md) supplies maintainer setup
+and diagnostics; [drill-steps.sh](../examples/nightbank/deploy/drill-steps.sh)
+defines the executable row checks. Use the row behavior above when reading
+its refusal, manifest and upgrade descriptions. The scripts install a
+main config and versioned executable, independently of application inputs.
