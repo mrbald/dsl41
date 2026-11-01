@@ -5,20 +5,13 @@ DL-144, DL-146, DL-147, DL-150, DL-151, DL-157, DL-158, DL-168, DL-170,
 DL-217, DL-227, DL-252, DL-263 and DL-401. A change to what this document
 fixes requires a decision-log entry. Each entry is cited where it applies.
 
-This document is the contract for every versioned protocol and every durable
-artifact in the runner. It answers four questions:
-
-- what each protocol tolerates;
-- how long an instance of it can still arrive;
-- how a new dialect enters service;
-- what must be true before an old dialect is retired.
-
-It invents no tolerance rule. Each tolerance rule lives in the document
-that defines it: `docs/control-protocol.md` §2, `docs/supervisor-protocol.md`
-§2, §3 and
-§5, `docs/period-model.md` §1.1, §2, §3.2, §3.5 and §12a, and
-`docs/access-model.md` §4 and §6 (DL-147). This document collects them per
-protocol. A change to one rule is then argued against the whole set.
+For the architect: this page fixes format tolerance, version entry and
+retirement for runner protocols and durable evidence. The
+[architect track](../README.md#documents) links the runtime contracts.
+The [wrapper protocol](wrapper-protocol.md),
+[control protocol](control-protocol.md) and [access model](access-model.md)
+own their wire rules. [Runner design §7](runner-design.md#7-journal-and-recovery-e1-prod-grade)
+owns recovery; this page does not define an upgrade procedure.
 
 ## 0. Why a contract and not a habit
 
@@ -32,8 +25,7 @@ made. Two separate questions decide every evolution step:
   version.
 - **Lifetime**: how long an instance of the dialect can still be met. A wire
   request ends when it is answered. A durable artifact ends when the last
-  **retained** copy is gone (§3 scopes that word). Under
-  `deployment-runbook.md` §2a that may be never.
+  **retained** copy is gone (§3 scopes that word). Operator policy can keep evidence indefinitely.
 
 Retirement needs both answers. A dialect may be retired only when no
 instance of it remains (§3), and the lifetime column decides when that is
@@ -55,235 +47,97 @@ reader treats the same share a row. Two artifacts in one directory that a
 reader treats differently are two rows. A dispatcher test is written against
 a row.
 
-| protocol / artifact set | discriminator | unknown FIELDS | unsupported VERSIONS | absent VERSION (DL-157) | lifetime | retirement precondition |
-| --- | --- | --- | --- | --- | --- | --- |
-| **WAL journal records** — `docs/period-model.md` §2, `docs/runner-design.md` §7 | the record's `rec` kind, plus the `catalog_hash_version` and `state_machine_version` of the `segment` that opens the file. Those two also ride on closed artifacts, where their gates are wider than this row's (see the two notes below) | as each record's own schema declares; this contract changes none of them. The **kind** is dispatched strictly: a current kind proceeds, a retired kind refuses by name, an unknown kind refuses by name | refused | not applicable: the row's own discriminator is a kind, not a version | the retention lifetime of the root that holds the segment | no retained segment holds one |
-| **Closed estate artifacts** — the seal sidecar, the attestation, the period manifest, `staged_manifest.json`, `candidate.json`, `anchor.json`, the claim file, the sentinel (`docs/period-model.md` §3.2), and the archive receipt `seals/<period>.archive.json` (§12a, DL-144, DL-150) | `artifact_format_version` | refused. §3.2 puts every typed field on the wire, so an unknown field is corruption, not an extension | refused, naming the version (PR-08d) | refused, naming it absent, on every member | the retention lifetime of the estate. period-model §12's floor keeps several of them for the life of the lineage. §12a's three (the archive receipt, and the attestation and seal sidecar of an archived period) may never be pruned by any class | no retained instance |
-| **Tolerant estate files** — `sources.json` (`docs/period-model.md` §1.1), and every `watch.jsonl` line written by the FW adapter (§3.5) | `artifact_format_version` | ignored: the reader takes the fields it needs. §3.2's canonical form binds the writer, not the reader | refused, naming the version (PR-08d) | refused, the same as an unsupported one | `sources.json`: as durable as its catalog bundle. A watch line: as durable as the run spool that holds it | no retained instance |
-| **Tolerant supervisor artifacts** — `receipt.json`, `reply.json`, the `run_id` index entry (`docs/supervisor-protocol.md` §3) | `artifact_format_version` | ignored, by that section's forward-compatibility rule | refused | refused: the evidence schema requires the field | as durable as the spool. The retention floor also holds the `run_id` index while its SPAWN can still be replayed | no retained instance |
-| **Wrapper-owned spool files** — `spawn.json` and `status.json`, and only those two (`docs/supervisor-protocol.md` §3) | their own `version` field | ignored | refused | passed (`runner_procid.spool_version_supported`) | as durable as the run directory | no retained spool holds one |
-| **Supervisor maintenance record** — `maintenance.json` in the run root (`docs/supervisor-protocol.md` §5, DL-401) | its own `version` field | ignored | refused, naming the version | refused, the same as unsupported: every instance was written with one | until the next admission on the root replaces it, or the root goes | no retained root holds one |
-| **Supervisor start note** — the content of `supervisor.lock` (`docs/supervisor-protocol.md` §5, DL-401) | its own `version` field | ignored | refused, naming the version | refused, as are an empty, partial or unparsable note: a record it should vouch for is refused | until the next start on the root rewrites it | no retained root holds one |
-| **Wrapper input spec** — the one JSON object on the wrapper's stdin (`docs/supervisor-protocol.md` §2, DL-150) | its own `version` field | **refused**, unlike the two spool files the same wrapper writes. §2 is frozen and the whole object is fingerprinted. A key the schema does not pin has no pinned type, and the fingerprint is injective only over pinned types | refused **by the wrapper, after the fork**. The supervisor's gate pins the types; the value is the wrapper's own check. An unimplemented `version` exits 2 with no spawn record. A spec that is not readable JSON exits 1, before the version is read | refused. The supervisor's gate refuses a spec with no `version` key before the fork, as a missing key (supervisor-protocol §2, DL-150). A spec that reaches the wrapper without one exits 2, the same as unimplemented (supervisor-protocol §4 step 6) | the fork it is passed to. The wrapper points stdin at `/dev/null` after the read | none beyond the door |
-| **Perimeter journal** — `perimeter.jsonl` (`docs/access-model.md` §6, DL-146, DL-147) | the record's `rec` kind; no per-record version field | ignored. Evolution is additive: an incompatible change takes a NEW kind name, as in the WAL | not applicable by construction. No engine dispatches this journal: seq recovery reads only `access_seq`, and the rest is audit. An unknown kind is skipped, not refused | not applicable: there is no version field | as durable as its run root. Pruned only with the whole root: truncating it in place would restart `access_seq` and forge duplicate keys | no retained root holds one |
-| **Access role map** — the `--access-map` file (`docs/access-model.md` §4, DL-150) | `format_version` | refused. The map is a closed table, and the loader cannot check the meaning of a key it does not pin | refused, naming the integer this loader implements | refused, the same as unsupported | the operator's own file. It lives outside the estate: it is policy, not evidence, and a reload replaces it whole | no operator's map still names it |
-| **Stored configurations** — `engine.db` configuration rows (DL-437) | `configuration_format_version`, 1 or 2 | refused, for both versions | refused by name | selects the supported legacy version 1 | the retention lifetime of the root | no retained row needs the reader |
-| **Reload plans** — `plans/TOKEN/plan.json` (DL-437) | `plan_format_version`, 1 or 2 | ignored | refused by name | selects the supported legacy version 1 | the retention lifetime of the plan and any interrupted update that needs it | no retained plan needs the reader |
-| **Main-config input mapping** — `main-inputs.json`, in a plan or stored capture (DL-437) | `format_version = 1` | ignored | refused by name | refused | as durable as its configuration row or plan | no retained capture needs the reader |
-| **Control socket** — `docs/control-protocol.md` §2 | `"v"` on every request, queries and `subscribe` included | ignored | refused. The refusal does not close the connection | refused, the same as unsupported | the request that carries it (DL-150). The version is per request, not per connection: one connection may carry several requests, and a refusal ends none of them. `subscribe` is the exception. Its request opens a stream that owns the connection until hangup (§5), so its instance lasts as long as the connection | none beyond the door: nothing durable holds the dialect |
-| **Supervisor socket** — `docs/supervisor-protocol.md` §5 | `"v"` on every request, plus `incarnation` on every mutating verb except `ACQUIRE`, which grants a free lease without one (§5). MAINTENANCE_STOP has its own version, 2; every other verb is 1 (DL-401) | ignored | refused as `unsupported_version`. The refusal does not close the connection. A retired version is refused by name: MAINTENANCE_STOP v 1 carries a `detail` naming DL-401 | refused, the same as unsupported | the request that carries it, as on the control socket | as on the control socket |
-| **`state_machine_version`** — `docs/period-model.md` §2.1 | the field itself, on `segment`, on the seal, on `staged_manifest.json`, on `candidate.json`, on the committed period manifest and on the attestation | not a format question: one executable implements exactly one version and refuses every other | refused | refused by construction: no carrier defaults it | the estate | not retired but **replaced**: a full drain and a new-estate genesis (the last note below; `docs/period-model.md` §2.1) |
+| Protocol / artifact set | Producer → reader | Discriminator | Unknown fields | Unsupported / absent version | Lifetime |
+| --- | --- | --- | --- | --- | --- |
+| SQLite store | `SqliteStore` → store readers | `meta.schema_version = 1` | Each record's own schema; this is not a field-extension promise | Foreign or missing schema refuses | Retained root |
+| Engine state and snapshots | Engine → startup and replay | `meta.state_version`, snapshot `state_version`; `STATE_MACHINE_VERSION` | Each payload's schema | Foreign state refuses; no default or migration (DL-424, DL-433) | Retained store and snapshots |
+| Store journal records | `Journal` → replay and history | `Record.kind`; input event `kind` | As the record reader declares | No per-record version; unknown record and event kinds refuse by name | Snapshot and retention floor (DL-428) |
+| FW evidence | `FileWatcherAdapter` → `read_watch_log` | `artifact_format_version` on every `watch.jsonl` line | Ignored | Unsupported or absent refuses | Retained spool |
+| Wrapper-owned spool files | Wrapper → adapter and startup (`spool_version_supported`) | `version = 1` on `spawn.json`, `status.json` | Ignored | Unsupported refuses; absent passes (DL-227) | Retained attempt directory |
+| Wrapper input spec | Adapter → wrapper | `version = 1` | Refused by contract (§2 of wrapper protocol) | Unsupported refuses at the wrapper, exit 2; absent version also exits 2 | One launch |
+| Perimeter journal | Access perimeter → audit; sequence recovery reads `access_seq` | `rec`; no version | Ignored | Not applicable; no engine decision dispatches it (DL-147) | Retained root |
+| Access role map | Operator → `runner_access` loader | `format_version` | Refused | Unsupported or absent refuses | Operator's retained map |
+| Stored configurations | Startup/update → `Configuration.from_bytes` | `configuration_format_version`, 1 or 2 | Refused for both | Unsupported refuses; absent selects supported version 1 (DL-437) | Retained `configs` rows |
+| Reload plans | `reread` → `read_plan` and update | `plan_format_version`, 1 or 2; `artifact_format_version` (PR-08d) | Ignored | Unsupported plan version refuses by name; absent plan version selects supported version 1 (DL-437). Unsupported artifact version makes `read_plan` return no plan; absent artifact version passes | Retained plan; an interrupted update requires it |
+| Main-config input mapping | `main_config.prepare` → `from_parts` | `format_version = 1` in `main-inputs.json` | Ignored | Unsupported or absent refuses (DL-437) | Retained plan or stored capture |
+| Main config | Site → `load_config` | `format_version = 1` | Refused; restart host loading has the limit below | Unsupported or absent refuses (DL-437) | Site's config file |
+| Control socket | Client → `ControlServer` | `v` on every request | Ignored | Unsupported or absent refuses, connection stays open | One request; `subscribe` lasts to hangup |
 
-An **absent version** (DL-157) is refused on every row that carries a
-version, except wrapper-owned spool files (DL-227), stored configurations
-and reload plans (DL-437). The latter two select their supported legacy
-version 1 when the discriminator is absent.
-The closed row is strict on a missing version: §3.2 puts every
-typed field on the wire, so an unknown field is corruption, and an absent
-field is corruption for the same reason, because no retained instance omits
-one. The wrapper-owned spool reader is
-`runner_procid.spool_version_supported`. It passes an
-absent `version` because the Tier-0 wrapper writes the file before any
-reader exists to require one (DL-227). Tolerance of unknown fields decides
-nothing about the version column: the supervisor's evidence files,
-`sources.json` and `watch.jsonl` all ignore an unknown field and still
-require the version. The closed row refuses an absent version on every
-member, `staged_manifest.json` included.
+A durable format can retire only when no retained instance needs its reader
+(§3). Wire retirement needs the door to refuse the old dialect. SQLite
+schema and engine state are distinct gates: a schema-compatible store can
+still carry state this executable cannot interpret. One executable handles
+one state version (DL-424); drain with the old binary before changing that
+version, then use a fresh root. No snapshot migration is provided.
+
+`root_id` is mandatory store identity, not a format version (DL-433).
+Startup refuses a store without it. Clock domain is also checked separately.
+A new binary version alone does not change the catalog or runtime hashes.
 
 ### Notes on the rows
 
-**Main-config captures and plans (DL-437).** Configuration rows with a
-`source_capture` use `configuration_format_version = 2`; readers retain
-the unversioned legacy row as version 1. Both refuse unknown fields and
-unsupported versions by name. DL-437 changes the legacy version 1 reader
-from ignoring unknown top-level fields to refusing them.
-No snapshot or state-version migration is implied.
-Main-config plans use `plan_format_version = 2`; an absent version
-selects the supported legacy plan reader. Plan readers tolerate unknown
-fields and refuse unsupported versions by name. `main-inputs.json` requires
-`format_version = 1`, refuses unsupported versions by name and ignores
-unknown fields. It binds the config, environment, policy,
-source paths, membership and collision-free part names into the token.
-Each Python source part is retained with its generated JIL; generated JIL
-alone is executed at update and replay. Every part has a SHA-256 in
-`plan.json`, which is published last. Configuration rows retain the same
-captured bytes, including the mapping. These formats live as long as the
-run root and its retained plans. A reader cannot retire a supported
-version while a retained instance needs it.
+**Store and wire are different formats (DL-428).** Store kinds are
+`input`, `decision`, `dispatch`, `dispatch_pending`, `outcome`, `follow_up`,
+`drop`, `preflight`, `config` and `engine`. The stream projects `segment`
+from an applied configuration and `advance` from a verbless input.
+[Control protocol §5](control-protocol.md#5-streaming-verb-subscribe) defines the stream;
+its admission `seq` is not the SQLite row sequence. `check_record` refuses
+unknown store kinds, engine/config events, outcome kinds and plan kinds.
+The input event alphabet is strict too (DL-158).
 
-**The WAL row: the kind is the discriminator, and it is strict.** A record
-kind is not an optional field. The version is gated at the opening
-`segment`. An unknown `rec` inside a version-matched segment is therefore
-corruption, not an extension this reader is too old to see. The dispatch has
-three outcomes in one place: current, retired, unknown. Skipping an unknown
-kind would let a reader walk past evidence and report a complete replay.
+**Main-config captures and plans (DL-437).** A configuration with captured
+sources uses version 2; the unversioned legacy row reads as version 1.
+Both reject unknown top-level fields. Main-config plans use version 2;
+the unversioned legacy plan reads as version 1. `main-inputs.json` binds
+config bytes, environment, lint policy, source mapping, membership and part
+names. Each Python part retains its generated JIL. Every part has a SHA-256
+in `plan.json`, published last. Update validates the token and captured
+bytes and executes generated JIL; it never rereads sources or imports Python.
+Stored configuration rows retain the capture for replay and restart.
 
-The event alphabet inside an `input` record's `kind` field is a second
-strict discriminator under the same rule (DL-158). An event kind outside the
-reading build's alphabet refuses by name at replay. The alphabet grows only
-by §2's order: reader and writer enter service in one release.
+The main config selects one engine through `/etc/dsl41/dsl41.toml` or an
+absolute `--config`. Paths anchor at that file. Ordinary globs expand in
+sorted order; `**`, unreadable inputs, duplicate selections and duplicate
+jobs refuse. JIL and `estate()` inputs compile together. `lint.refuse` is
+`none` (default), `error` or `warn`; it considers unignored findings.
+Input, lowering and preflight errors remain hard errors. A rehearsal root
+must neither equal nor contain the engine root, nor lie inside it.
 
-**`catalog_hash_version` outlives the row it is dispatched on.** It rides on
-the `segment`, on the seal, on the period manifest (`docs/period-model.md`
-§1.1), and on the two staging artifacts that feed a manifest:
-`staged_manifest.json` and `candidate.json`. period-model §12 retains both
-while the candidate is uncommitted. An instance can therefore sit in a closed
-artifact after every segment that names it is gone, and its retirement gate
-is the union of all five (DL-150). `state_machine_version` reaches further: the
-attestation carries it too, and the last note below says why it is never
-retired. **The row a version is listed under is where a reader dispatches on
-it, not every place it can be found.**
+Main-config restart restores the last applied revision. Estate, lint and
+`engine.environment` edits stay pending. Disk host identity,
+`machine_policy` and the access map apply at launch; invalid values exit 2.
+A missing interrupted-update plan refuses before writes or signals.
+Implementation limits recorded by DL-437 remain: restart recompiles captured
+bytes, runs no preflight, offers no legacy-root conversion, and ignores
+unknown `[engine]` keys in its host-only load; the pending scan blocks the
+loop. These are limits, not permission to change the rules in this pass.
 
-**The closed-artifact row is strict on both counts.** §3.2's canonical form
-puts every typed field on the wire, with an explicit `null` for an unset
-optional. That rule makes a digest reproducible. For these readers an
-unknown field is corruption: nothing legitimate can produce one. The tolerant
-estate files share the writer-side canonical form, but their readers take
-only the fields they need. A writer rule is not a reader refusal.
+**Wrapper evidence and input.** Spool readers ignore unknown fields but
+reject a present version other than the integer 1; booleans and floats do
+not count (DL-151). Only the two wrapper spool files allow an absent
+`version` (DL-157, DL-227). Stored configurations and plans separately
+support an absent discriminator as legacy version 1 (DL-437).
+Unread or mismatched restart evidence is quarantined under DL-433;
+missing evidence follows the interruption rule, not a guessed outcome.
 
-The same rule covers an absent field (DL-157). §3.2's canonical form has no
-optional `artifact_format_version`. A retained instance without the key is
-not a narrower dialect that this binary declines to read; it is not this
-artifact at all. Each reader requires the key before it validates the rest
-of the document. In 2.0.0 the period sentinel and manifest that were its
-readers are gone: the store's rows are written and read by one binary under
-`meta.schema_version` (`runner_store.py`), and a row that does not read is
-refused (`runner_config.py`'s `Configuration.from_bytes`).
+The wrapper input schema is frozen (DL-150). Its field/type restrictions
+remain [wrapper protocol §2](wrapper-protocol.md#2-wrapper-input-spec-frozen).
+The adapter launches the wrapper by file path; the wrapper reads stdin
+once and replaces it with `/dev/null`. A refused spec writes no spawn
+record. A spec-version change requires coordinating the adapter and wrapper.
 
-A third gate stands beside unknown and absent (DL-168): a field of the WRONG
-TYPE is refused, never coerced. **A closed artifact or staged identity is
-validated strict in the JSON sense from its bytes. A wire ingress of one is
-validated strict from its payload.** `true` never becomes `1`, and a numeric
-string never becomes the integer it spells.
+**Socket additions.** Unknown answer fields are ignored. An added field
+that leaves reply classification unchanged needs no new dialect (DL-217).
+A field that changes classification needs a new dialect. Version is per
+request, not per connection: a refusal ends one request, then the next line
+is read normally. `subscribe` owns its connection until hangup.
 
-- `boundary._read_artifact`, behind `read_candidate` and
-  `read_staged_manifest`, reads `model_validate_json(raw, strict=True)`. This
-  is the mechanism `period.read_period_manifest` uses for the committed
-  manifest.
-- `StagedManifest` and `Candidate` also set `strict=True` in their model
-  config. This second check is for a future caller that builds either model
-  with a lax `model_validate`.
-- That model-level check covers top-level fields only. Pydantic validates a
-  nested-model field under that model's own config, whatever the outer
-  model sets. Only a call-time override, as in `_read_artifact`, reaches
-  nested fields. So `StagedManifest.runtime_profile`, a nested
-  `RuntimeProfile`, is not covered by `StagedManifest`'s config.
-  `Candidate.next_period` is covered, because `StagedNextPeriod` sets
-  `strict=True` itself.
-- `StagedNextPeriod` is also the wire's copy of a staged identity, validated
-  at `runner_control.py`'s `_seal`. Every field in it is a scalar, so its
-  config alone closes that wire ingress. No call-time override is needed.
-- `EstateAnchor.read` and `EstateAnchor.read_claim` read
-  `model_validate_json(raw, strict=True)` after the decode and version gates,
-  and the anchor after its head-state check too (DL-263). Every field
-  refuses a coerced value, nested fields included: `head.period_id`, a period
-  row's `segment_durable`, and `next_period` in a claim or a reclaimed entry.
-
-`SealRequest`, the wire's copy of the seal ENVELOPE that carries
-`next_period`, is validated at the same `_seal` and also sets `strict=True`
-(DL-170). That covers six more fields: `baseline_id`, `epoch`, `request_id`,
-`stage_digest`, `force_seal` and `claimed_actor`.
-
-- `runner_control._seal_wire_error` runs first on the live socket. It owns
-  the pinned refusal PROSE, which this row's strictness rule does not
-  promise: a `ValidationError` uses pydantic's words, not the operator's.
-- One field is not fully covered by either check alone. `_seal` builds
-  `claimed_actor=request.get("claimed_actor") or ""`, which turns a falsy
-  non-string into a legal empty string before the model sees it. For that
-  field `_seal_wire_error` is the only check.
-
-**The two spool rows are tolerant on fields and strict on versions.** The
-supervisor and the wrapper write these files, and they may be a different
-build from the engine that reads them. A field added by a newer writer must
-not stop an older reader. A `version` the reader does not implement must
-stop it, because the version exists to say the meaning changed.
-
-Both readers check the `spawn.json` and `status.json` `version` (DL-151),
-each in its own terms:
-
-- The engine treats an unsupported version as an UNREAD record. A
-  `status.json` read that way loses its outcome, and the run lands on
-  `exit_status_unobservable`. A record whose meaning changed does not decide
-  a verdict.
-- The supervisor treats it as PRESENT AND UNREADABLE, never as absent,
-  because in period-model §11a's table absence authorizes a spawn.
-
-`true` and `1.0` are not the integer 1 on either side.
-
-Neither reader refuses an **absent** `version`. These two files are the one
-row in the matrix that passes it (DL-157, DL-227). Tolerance of an unknown
-field is not the reason: the supervisor's own evidence files ignore an
-unknown field and still require the version. The reason is that the Tier-0
-wrapper writes the file before any reader exists to require one.
-
-**The wrapper input spec is strict on fields, while the spool files the same
-wrapper writes are tolerant. The fingerprint is the reason.** A spool file is
-read for the fields a reader needs. The input spec is hashed **whole**. A
-replayed SPAWN is answered from `receipt.json`'s `spec_fingerprint`, a
-sha256 over the canonical form of the §2 object with `lifeline_fd` removed
-(`docs/supervisor-protocol.md` §3, period-model §11a). That hash is
-injective only over pinned types. An unpinned key would let two different
-specs compare equal, and a replay would be answered from another spec's
-receipt. Tolerance is safe on a record read field by field. It is unsafe on
-a record hashed as a whole.
-
-The wrapper checks the version value **after** the fork. On refusal it exits
-and writes no spawn record, and the engine reads the absence:
-supervisor-protocol §3's E7 case. The two ends can be different builds. The
-engine composes the spec. The supervisor forks the wrapper file that sits
-beside its own module, and the supervisor may have started before the
-current engine. A spec-version change is therefore a coordinated deploy of
-both, never a rolling one.
-
-**The access map is the one row outside the estate.** No engine writes it;
-it is the operator's file. Its lifetime is whatever the operator keeps, and
-its retirement gate is met when no map still names the version. It is strict
-on both counts, as any frozen table is: the loader cannot check the meaning
-of a key it does not pin, and a version it does not implement describes a
-policy it cannot enforce.
-
-**The two socket rows have no durable instance.** A wire dialect is retired
-on the day the door refuses it. `control-protocol.md` §2 states the pattern
-for a breaking change: a new version number, and the door refuses the old
-one by name. A v2 client is refused with a message naming v3. Nothing waits
-and nothing is swept. The version rides on every request, so an instance is
-a **request**, not a connection. A refusal answers one line, and the next
-line on the same connection is read normally. `subscribe` is the one request
-that outlives its answer: it owns its connection until hangup
-(`control-protocol.md` §5). That instance ends with the connection.
-
-**MAINTENANCE_STOP's version 2 is its own dialect, and v 1 is retired**
-(DL-401). Version 2 answers at admission. A client that expects an answer
-only at completion would read an admission answer as an unknown completion.
-So the answer changes how a reply is classified, and the verb carries a
-version of its own rather than an added field. The version is per verb, so
-no other verb's clients are affected. §2 allows its four steps in one
-release for a wire row, and this one takes them so: the CLI that sends the
-verb ships with the supervisor. A v 1 request is refused
-`unsupported_version` with a `detail` naming DL-401, which a v 1 client
-reads as a refusal: exit 2, nothing changed. A v 2 request that a
-supervisor refuses `unsupported_version` also exits 2.
-
-**An additive answer field is not a new dialect** (DL-217). The basis is
-`control-protocol.md` §2: consumers must ignore unknown fields. Every current
-client therefore reads an answer with an added field as it reads one
-without it. The change takes no version bump and none of §2's four steps.
-An example is `original_decision` on a `sendevent` or `host` collision refusal
-(`control-protocol.md` §3). It nests the earlier decision under its own key,
-so a client that ignores it still reads the refusal as a refusal. Two tests
-in `tests/test_recovery.py` hold this:
-`test_a_collision_carries_the_ids_earlier_decision_applied_or_rejected`
-checks that the answer still classifies as `refused`, and
-`test_a_collision_with_an_undecided_original_carries_nothing_nested` checks
-the answer without the field. A field that changes how an answer is
-classified does not qualify; it is a new dialect.
-
-**The last row is semantics, not format.** `state_machine_version` names how
-the interpreter derives state, not how bytes are laid out. §2.1 freezes it
-across a transition: one binary implements one version and can neither lead
-nor replay another. It does not evolve in place. A semantics change is a
-full drain and a new-estate genesis. The binary that produced the old estate
-audits it (`docs/period-model.md` §11).
+**Excluded artifact families.** DL-424 excludes closed estate artifacts,
+supervisor receipts, maintenance records, leases and the supervisor socket.
+DL-424's RETIRED list is the pointer for supervisor-protocol §§2, 3 and 5,
+period-model §§1.1, 2, 3.2, 3.5 and 12a, and deployment-runbook §2a.
+DL-401 defines the excluded maintenance-record dialect. These are
+decision-log pointers, not required recovery inputs.
 
 ## 2. Entering service
 
@@ -328,17 +182,9 @@ wire dialect. An instance is one request, gone once it is answered, or one
 `subscribe` stream, gone at hangup. There is no instance to be absent, so
 retirement needs only the door refusing the version.
 
-For a durable row, the gate means every instance is gone from every root the
-operator keeps, whatever its retention verdict:
-
-- an artifact **floored** by `docs/period-model.md` §12 may never be
-  deleted, so its dialect cannot be retired while the floor holds it;
-- an artifact **held** by an operator's own policy is present, so its
-  dialect is not retired;
-- an artifact that is **prunable but present** is present. Pruning is
-  optional and policy-driven (DL-135): a run that names no class deletes
-  nothing, so a prunable artifact can stay readable indefinitely.
-  "Prunable" is a verdict, not a deletion.
+For a durable row, the gate means every instance is gone from every root
+or file the operator keeps. Held evidence is present. Prunable but present
+evidence is present too; eligibility to delete is not deletion (DL-150).
 
 **"Exists" is scoped to what the operator keeps** (DL-150). A copy that has
 left the retained set is not an instance this gate can see: an archive tape,
@@ -354,16 +200,10 @@ reader alone. §6 says how.
 This contract has two operations: dual-read and retire. Migration is
 neither.
 
-A transformation, if one is ever needed, is **its own decision-log entry**,
-with its own lineage record and its own verification proof. The retired
-estate-adoption path is an example of such a shape: a fenced source, a
-translated target, a proof that the translation is lossless against the
-retained original, and a recovery matrix over every crash point.
-
-**An in-place rewrite of an immutable digest-bound artifact is never
-permitted.** The WAL, the seal sidecar and the attestation are bound by
-digests that other artifacts carry. Rewriting one breaks every proof that
-names it, including proofs held in roots the rewriter cannot reach.
+A transformation needs its own decision-log entry and verification proof.
+No in-place rewrite of immutable digest-bound evidence is permitted.
+Engine state-version changes use the drain and fresh-root rule in §1
+(DL-424), not a snapshot migration.
 
 ## 5. The reset clause
 
@@ -386,11 +226,7 @@ ever written. It does not by itself prove it. An entry that shows only the
 first has shown that no estate would notice, not that there is nothing to
 find.
 
-**DL-138 uses this clause. Once an estate runs in production, no entry can
-use it.** An entry that uses the clause must state the condition it claims,
-so a later reader can check the claim rather than infer it. DL-138 states
-both halves (§8): no dsl41 estate ran in production on 2026-08-21, so no
-instance of any of the seven retired dialects could exist anywhere.
+DL-138 supplies the retirement ruling for the dialects listed in §8.
 
 A reset makes pre-reset roots unreadable. That is its cost, and the entry
 that takes it states it.
@@ -441,30 +277,25 @@ One decision-log entry, plus **dispatcher tests on every affected row**:
 Cases 3 and 4 are tested separately. A single test with a message that has
 both an unknown field and an unknown version proves neither.
 
-One row has no version and is the only exception to case 4 (DL-150): the
-perimeter journal, by construction, because no engine dispatches it
-(DL-147). A row may join that exception only the same way: by an entry
-showing that nothing reads the artifact for a decision. "We did not add one"
-is not a construction.
+The perimeter journal has no version and is exempt from case 4 by
+construction: no engine dispatches it (DL-147, DL-150). A row may join
+that exception only the same way: by an entry showing that nothing reads
+the artifact for a decision. "We did not add one" is not a construction.
+
+Store records meet case 4 through the store row's schema and state-version
+tests (DL-428); they are not a case-4 exception.
 
 ## 8. The DL-138 retirement
 
-DL-138 retires seven dialects, under the reset clause of §5 (DL-150).
-§5 records the condition DL-138 states.
+DL-138 and DL-150 define the named refusals for `header`, `result`,
+standalone `effect`, `legacy_batch: true`, catalog hash version 1,
+the `manifest/` layout and the `adopting` anchor state.
+DL-424 excludes the JSONL/period artifact families; DL-428 refuses legacy
+roots with no SQLite store. These pointers preserve the dialect names;
+they do not promise that the SQLite reader accepts a legacy root.
 
-| dialect | row | replaced by |
-| --- | --- | --- |
-| the `header` journal record | WAL | `segment` (`docs/period-model.md` §2.1) |
-| the `result` record | WAL | `decision` (`docs/period-model.md` §2.3) |
-| the standalone `effect` record | WAL | the `effects` list nested in `decision` (`docs/period-model.md` §2.3) |
-| `legacy_batch: true` on a `decision` | WAL | nothing. The value marks a batch folded from a legacy estate's separate fsyncs, and no path folds one. The field stays, required and `false` (`docs/period-model.md` §2.3) |
-| `catalog_hash` version 1 | WAL, and the closed artifacts that carry the field: the seal, the period manifest, `staged_manifest.json` and `candidate.json` | version 2 (`docs/concurrency-model.md` §7) |
-| the `manifest/` run-root layout | closed artifacts | `catalogs/<bundle>/` + `periods/<id>/` (`docs/period-model.md` §1.1) |
-| the `adopting` lineage head state | closed artifacts | nothing: no path adopts an estate |
+Citation pointers:
 
-Each is refused by name, and each refusal names DL-138. Four sit in an
-owner-local registry: the retired record kinds, the retired `catalog_hash`
-recipe, the retired head state and the retired layout. `legacy_batch: true`
-is refused in the same record validator as the kinds, with no registry of
-its own: it is one value of one field of one record, and a registry with a
-single row is a table nobody consults.
+- DL-135 — retention eligibility is distinct from absence (§3, DL-150).
+- E7 — interrupted attempts follow runner-design §7 (DL-424, DL-433).
+- PR-08d — `canon.check_artifact_version` gates watch lines, reload plans and store payloads; see §1.

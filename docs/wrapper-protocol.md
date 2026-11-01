@@ -2,10 +2,11 @@
 
 Status: frozen. DL-42 item 3 freezes the spool format and the wrapper
 input spec. Each change to a frozen item needs a decision-log entry.
-These sections are §§2-4 of the retired supervisor protocol, trimmed to
-the wrapper: its input, the two spool files it writes, and its behaviour.
-The code is `src/dsl41/runner_wrapper.py` and `src/dsl41/runner_procid.py`.
-
+For the architect: this page fixes wrapper input, process evidence and
+recording behavior. The [architect track](../README.md#documents) links
+the engine design. [Runner design §7](runner-design.md#7-journal-and-recovery-e1-prod-grade)
+owns interruption plans and restart; the wrapper does not choose them.
+The implementation is `runner_wrapper.py` and `runner_procid.py`.
 
 ## 2. Wrapper input spec (frozen)
 
@@ -18,11 +19,11 @@ library.
 ```json
 {
   "version": 1,
-  "run_id": "uuid4 string, from the decision that planned the SPAWN (DL-118); the spawner mints only on effect-less paths",
+  "run_id": "uuid4 string identifying this attempt, from its dispatch (DL-428, DL-429)",
   "job": "job name",
   "run_number": 3,
   "command": "exact /bin/sh -c command line (profile already composed)",
-  "run_dir": "/abs/path/runs/<job>.<run_number>",
+  "run_dir": "/abs/path/runs/<job>.<run_number>/<ordinal>",
   "lifeline_fd": 3,
   "stdout_path": "/abs/path (opened APPEND)",
   "stderr_path": "/abs/path (opened APPEND)",
@@ -33,16 +34,15 @@ library.
 
 `run_id` must match a **filename-safe grammar** at the wire:
 `^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`.
-This is the canonical uuid4 string form that the adapter mints (DL-129;
-period-model §11a). The `run_id` names a directory entry (§3), so any
-other value is refused before anything is created.
+This is the canonical uuid4 string form (DL-118, DL-129).
+Any other value is refused before anything is created.
 
-`run_dir` must be `<run_root>/runs/<job>.<run_number>`. The spawner
-owns that path. The mapping is one to one in both directions: one
-`run_id`, one `(job, run_number)`, one directory. The two paths are
-compared as **resolved paths**, not as strings. The engine and the
-spec name the run root separately, and `./r`, `/abs/r` and a
-symlinked `/tmp/r` are one directory.
+`run_dir` is `<run_root>/runs/<job>.<run_number>/<ordinal>/` (DL-428,
+DL-429). The ordinal starts at 1 for each run. One attempt has one
+`run_id` and one directory; replacement attempts of the same run have
+different ids and directories. The spawner owns the path. Path identity
+uses resolved paths, so relative, absolute and symlinked paths to the
+same directory agree.
 
 - `lifeline_fd`: the read end of a pipe. Its **write end lives in exactly
   one process, the spawner** (fd-hygiene invariant, leak-tested). EOF on
@@ -56,8 +56,8 @@ symlinked `/tmp/r` are one directory.
   wrapper's environment, the invocation the attempt's `dispatch` record
   holds. Any other value is the spec refusal.
 
-Every key above is required except `lifeline_fd`, which the
-spawner fills (DL-150). `version`, `run_number` and `lifeline_fd` are integers,
+Every key in the JSON example is required; the spawner fills
+`lifeline_fd` (DL-150). `env` is optional (DL-428). `version`, `run_number` and `lifeline_fd` are integers,
 never booleans. `run_id`, `job`, `command`, `run_dir`, `stdout_path` and
 `stderr_path` are strings. `stdin_path` is a string or null.
 `grace_seconds` is a **finite** number, representable as a double, zero
@@ -90,13 +90,11 @@ on an incompatible change.
 A consumer of `spawn.json` or `status.json` must **refuse** a `version`
 that it does not implement. `true` and `1.0` are not the integer 1
 (DL-151). The rule is tolerant on fields and strict on versions: the
-`Wrapper-owned spool files` row of `docs/protocol-evolution.md`. The two
-consumers state the refusal in their own terms. In the engine, the record
-reads as unread. An unread `status.json` loses its outcome and the run
-becomes `exit_status_unobservable`, so a record whose meaning changed
-cannot decide a verdict (DL-151, DL-229).
+`Wrapper-owned spool files` row of `docs/protocol-evolution.md`. The engine treats an unsupported version as unread, so it cannot
+supply an outcome (DL-151, DL-229). At restart an unread record is
+quarantined under DL-433; it does not become a guessed completion.
 
-An **absent** `version` passes both readers. These two files form the
+An **absent** `version` passes the spool reader. These two files form the
 wrapper-owned spool row of the evolution matrix, and that row alone passes
 an absent version: the Tier-0 wrapper writes them before any reader exists
 to require one (`docs/protocol-evolution.md` §1, DL-227, DL-229).
@@ -142,12 +140,12 @@ to require one (`docs/protocol-evolution.md` §1, DL-227, DL-229).
 
 The wrapper writes this record before it reaps, on every path where
 `spawn.json` landed. One path is the exception: the `spawn.json` write
-itself failed. That run has no `spawn.json`, so no process identity is
+itself failed. That attempt has no `spawn.json`, so no process identity is
 recorded. The wrapper kills what it started, reaps it, then
 attempts the `status.json` write as a best effort and exits 3. E7 covers
 the file's absence on that path (DL-229).
 
-Each run has at most one `status.json`, and it holds exactly one outcome:
+Each attempt has at most one `status.json`, and it holds exactly one outcome:
 
 | outcome       | extra fields        | meaning                                    |
 |---------------|---------------------|--------------------------------------------|
@@ -160,25 +158,34 @@ No outcome of a command that ran is written as an absent file. The
 **absence** of `status.json` means one of four things: the recorder itself
 was killed (-9); the machine died; the wrapper refused the spec before it
 spawned anything (§4 step 6, exit 1 or 2); or the record write itself
-failed (exit 3) (DL-150). The first two are the orchestrator's E7
-unobservable case. In the last two, the wrapper says on stderr and in its
-exit code that no run started or that no record survived.
+failed (exit 3) (DL-150). These are evidence gaps; the attempt's first stop
+and the interruption rule decide their consumer meaning (DL-424).
+The wrapper also reports a spec refusal or write failure on stderr.
 
-The orchestrator decides no outcome from the exit code; it may quote the
-code in the cause and nothing more. It reports an absence as FAILURE
-`exit_status_unobservable` once no verified survivor remains, and it never
-guesses. A command group verified alive at resume is killed and recorded
-TERMINATED instead; the survivor rule is DL-226's (DL-229).
+The wrapper's exit code only tells the engine to read evidence. It never
+decides an oracle status. The engine first translates the spool into an
+attempt outcome (DL-426), then chooses its follow-up plan
+([runner design §7](runner-design.md#7-journal-and-recovery-e1-prod-grade),
+DL-424, DL-429):
 
-Orchestrator mapping (dsl41's, recorded here as the reference consumer):
+| Evidence | Attempt outcome | Consumer action |
+| --- | --- | --- |
+| `exited`, before a stop | `natural{exit_code}` | Feed the raw code through SEM-09. |
+| `signaled`, before a stop | `natural{signal}` | Feed TERMINATED (E8). |
+| Exit or signal during the attempt's stop | `stopped{cause}` | Apply the interruption rule. |
+| `terminated`, `parent lost` | `stopped{lifeline}` | Apply the interruption rule. |
+| `spawn_failed`, or a spawn-record write failure | `spawn_failed` | Feed FAILURE `wrapper_spawn_failed`; retain whether launch occurred. |
+| No readable record (wrapper gone, record timeout, unread version, or restart) | `unobservable` | Apply the interruption rule. |
 
-- `exited` → the raw exit_code through the SEM-09 boundary
-- `signaled` and `terminated` → STATUS TERMINATED (a kill that actually
-  happened)
-- `spawn_failed` → STATUS FAILURE
-- absence → STATUS FAILURE `exit_status_unobservable` (PENDING: E7) once
-  no verified survivor remains; a command group verified alive at resume is
-  killed and recorded TERMINATED (DL-226, DL-229)
+The interruption rule can replace an idempotent attempt without ending its
+run, hold a marked job or a run at its attempt limit, or preserve an oracle
+end. Missing records are not unconditional FAILURE `exit_status_unobservable`:
+DL-424 limits E7 to unobserved exits outside the interruption rule.
+At restart, a missing record carries the first stop's cause or
+`engine_death`. A restart reads each open attempt once and waits for no
+previous wrapper (DL-433). Cleanup of found processes runs in the live engine loop.
+Mismatched or unreadable records cause quarantine with evidence; a missing
+record or failed process scan does not (DL-433).
 
 ### DSL41_RUN env tag — forensics only
 
@@ -190,8 +197,9 @@ empirically).
 
 ### DSL41_COOKIE env variable — the process cookie (an addition)
 
-This section is an addition to the frozen contract (DL-431). The spec keys, the
-spool files and the wrapper's behaviour are unchanged.
+DL-431 and DL-433 fix the process cookie. The spec keys, the spool files
+and the wrapper's behaviour are unchanged (DL-436). The cookie uses the
+optional `env` field.
 The engine puts `DSL41_COOKIE=<root_id>.<run_id>` in the spec's
 `env` for every command attempt, and in the wrapper's own environment.
 `root_id` names the run root: a uuid written to the store's `meta` at
@@ -203,10 +211,12 @@ On Linux, with or without pidfd support, the engine reads
 `/proc/<pid>/environ` of the processes its uid may read. A process that
 carries an attempt's cookie belongs to that attempt, whatever its
 process group (`runner_procid.ours`). The wrapper is left out by the pid
-`spawn.json` names. Same-uid processes are readable, so the ptrace gate
-above does not stop this read.
-What is left of an attempt is its recorded process group's live members
-and the processes that carry its cookie. Both are taken as reliable: the
+`spawn.json` names. EACCES/EPERM skips an unreadable process and counts it; ENOENT/ESRCH
+means gone. Other read failures hold cleanup as unknown (DL-431).
+What is left of an attempt is the live membership of its proven process
+group and the processes that carry its cookie. A leader's start token or
+a member's cookie proves the group. Proof lasts until a reading finds it
+empty; a later nonempty group with no proof is left alone (DL-431). Both are taken as reliable: the
 engine is an orchestrator, not a jail. A process left when the command
 exits is a leak, stopped or left running by the `process-leak` switch
 (`docs/runner-design.md` §8a).
@@ -218,7 +228,8 @@ does both), and one that leaves it under another uid (a setuid helper)
 are beyond the engine by design.
 Calling `setenv`, `unsetenv` or `clearenv` after the exec does not
 change what `/proc/<pid>/environ` shows. The systemd unit's cgroup
-remains the stronger fence. Signals use a pidfd where supported. Without it,
+remains the stronger fence. Signals use a pidfd where supported (DL-436). A pidfd open or send
+failure never falls back to `os.kill`. Without it,
 the engine re-reads the start token (`proc_start_token`, `/proc/<pid>/stat`
 field 22) and calls `os.kill` only if it still matches the scanned token.
 The race between that check and the signal is accepted: the engine is an
@@ -238,7 +249,7 @@ the process group decide.
 2. The wrapper ignores SIGTERM, SIGINT, SIGHUP, SIGQUIT, SIGUSR1 and
    SIGUSR2. SIGKILL, SIGABRT, any other signal whose default action
    terminates and that the wrapper does not ignore, or machine death
-   silences it, and E7 then reports the run (DL-229).
+   silences it. The engine applies the attempt rule above (DL-229, DL-424).
 3. The event loop is a SIGCHLD self-pipe plus select over {self-pipe,
    lifeline}. The self-pipe is also the interpreter's wakeup fd, so the
    signal writes to it at delivery. A command that exits just before the
@@ -269,3 +280,8 @@ the process group decide.
    its own: `stdin_path` (null, meaning /dev/null) and `grace_seconds`
    (10.0). status.json is the sole data
    channel, and its absence reads the same way whatever the exit code was.
+
+Citation pointers:
+
+- DL-226 — the engine outcome and interruption mapping is defined in §3 (DL-424, DL-426).
+- period-model §11a (`period-model.md`, retired) — DL-424 defines the exclusion; DL-428 fixes the current attempt spool and invocation.

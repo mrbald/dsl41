@@ -122,3 +122,8 @@ Found after an area was sealed as good enough. Addressed once the scope runs end
   main-config round 1, K5; DL-437).
 - [ ] Restart ignores unknown `[engine]` keys, so a typo such as `machine_polcy` silently runs the
   default until the next reread refuses it (Opus, slice main-config round 2, K7; DL-437).
+- [ ] The standalone wrapper's spec validator (`runner_wrapper.py` `_spec_refusal`) checks the
+  version, optional env, lifeline type and grace, but not frozen wrapper-protocol §2's unknown-field,
+  run-id grammar, job-component and NUL refusals; a probe passed an unknown key, a non-uuid
+  run_id, `job=../outside` and a NUL command. The engine's adapter supplies valid values, so this
+  is the public input contract only (Sol, docs batch 1A; wrapper, DL-428).
