@@ -25319,3 +25319,41 @@ relitigate an entry; append a new one.
   a stop, bounded or not, or applies the update outside the loop. Opus five rounds, Astra five;
   rounds four and five owner-approved under DL-430 after a shape note; three round-five findings are
   known bugs in `TODO.md`.
+- DL-433 The restart is the live engine starting with a non-empty state (2026-11-01; owner's rule of
+  2026-10-31; spec-restart; `runner_startup.py`, `runner.py`, `runner_attempts.py`,
+  `runner_stops.py`, `engine_charts.py`, `runner_update.py`). THE RULE. The engine is always up; an
+  engine death ends every running attempt; at a restart the engine owns nothing alive. No function
+  of the restart awaits a process, a wrapper, a spool or a timer. THE ORDER. Refuse before the first
+  write (lock, `state_version`, `root_id`, clock domain, estate, an update's plan directory); fold
+  the snapshot and the tail, every open command attempt instantiated in the attempt tier before the
+  loop's first step, a closing one restored ENDED with its committed outcome and never observed
+  again, nothing written; the first reading: one cookie scan of the run root, each open attempt read
+  through `left` with it (a group a cookie member proves stays proven), then a TERM of what is left
+  of an attempt the engine's death ended or that was taking a stop (no `natural` record in its
+  spool; a closing one under `terminate`), the first rung of the ladder whose grace and KILL run in
+  the loop; an attempt that ended by its own record follows the live leak rule at its observation,
+  so `process-leak` holds at a restart; then the loop catches up in record order, each step stamped
+  at the journal's last instant: one observation per open attempt (`spawn_recorded`, the recorded
+  first stop, then `status_recorded` or `engine_died`, rows attempt.15–17: `unobservable` with the
+  first stop's cause or `engine_death`, no ladder, no timer; what is left is the live cleanup), one
+  cleanup per closing attempt (its `spawn.json` alone), each file watch taken up, the owed plans in
+  seq order, the pending starts, a resumed update's one look (the update takes no step of its own
+  during the catch-up), and the time jump last, after which the barrier lifts, the deferred
+  dispatches go and `engine started` is recorded. The control socket binds before the first step;
+  `status.engine` says STARTING until then (a §4 addition); a stop during the catch-up drops the
+  steps not taken, records `shutdown_during_startup`, and the next restart takes them again. THE
+  COOKIE. `DSL41_COOKIE=<root_id>.<run_id>`, `root_id` a store meta key written at genesis (state
+  version 27; a store without it refuses by name): one prefix reads every attempt of the root
+  whichever engine start launched it. QUARANTINE, for records only: an attempt whose records name
+  another run or do not read, or a watch whose log splits, ends with one `unobservable{quarantined}`
+  outcome carrying the reason and the pids found, committed or kept as any outcome; its plan holds
+  the job with the evidence wherever the interruption rule would rerun or hold, `none` where the
+  oracle ended the run; its cleanup is the live one through the cookie. A failed reading is never a
+  quarantine: the record decides, what is left is held `scan failed` and re-read per poll, under
+  both switch values. THE WRAPPER stays: it records a command's exit across an engine death and its
+  tether ends the command where no unit does. RETIRES the restart's wait on a live wrapper and the
+  waiting sentences of DL-426, DL-428 and DL-429 step 5, DL-431 ("finishes what it finds left") and
+  DL-432 ("step 5 settles"); spec-crash is superseded. REJECTED: a watcher or a bound on a previous
+  engine's wrapper; the previous instance read from `engine started`; one stamping rule live and at
+  restart; a PDEATHSIG wrapper; quarantine of a KILL survivor, a missing record or a failed reading.
+  Opus two rounds, Astra two; round-two findings are known bugs in `TODO.md` under the owner's seal.

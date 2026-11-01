@@ -182,7 +182,7 @@ def test_cm14_a_run_lost_to_an_engine_crash_is_rerun_once(tmp_path: Path) -> Non
         await run.crash()
         assert run.log.spawns[0].outcome == "cancelled"  # died with the engine, reported nothing
 
-        engine = await run.resume(settle_seconds=0.0, grace_seconds=0.0)
+        engine = await run.resume()
         await run.run_to(at + timedelta(seconds=3600))
 
         assert [(s.job, s.run_number, s.incarnation) for s in run.log.execs()] == [
@@ -213,7 +213,7 @@ def test_cm14_a_resumed_file_watch_rearms_without_executing(tmp_path: Path) -> N
         assert [(s.job, s.run_number, s.mode) for s in run.log.spawns] == [("watcher", 1, "watch")]
 
         await run.crash()
-        await run.resume(settle_seconds=0.0, grace_seconds=0.0)
+        await run.resume()
         await run.run_to(at + timedelta(seconds=60))
 
         modes = [(s.job, s.run_number, s.mode) for s in run.log.spawns]

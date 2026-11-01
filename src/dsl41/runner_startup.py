@@ -1,64 +1,64 @@
-"""Taking possession of a run root: genesis and restart (DL-74, DL-106, DL-424).
+"""Taking possession of a run root: genesis and restart (DL-74, DL-106, DL-424, DL-433).
 
 The Engine is the single-writer loop over a live estate. What lives here runs once per
-incarnation, before that loop exists: it creates or opens the run root's store under its lock,
-restores and replays it, settles what the last incarnation left open, and hands back an Engine
-ready to run. The name avoids "lifecycle", which DL-42 gives to the wrapper tier.
+incarnation, before that loop takes its first step: it creates or opens the run root's store
+under its lock, restores and replays it, and hands back an Engine whose loop catches up with what
+the last incarnation left open. The name avoids "lifecycle", which DL-42 gives to the wrapper
+tier.
 
 A run root holds `engine.db` (the store), `leader.lock`, `engine.toml`, `runs/` (the wrapper
 spools) and `plans/`.
 
-Restart follows spec-wiring 1b's eight steps:
+A restart is the live engine starting with a non-empty state (spec-restart). The engine is always
+up, an engine death ends every running attempt, and at restart the engine owns nothing alive. No
+step of the restart waits on a process, a wrapper or a record:
 
-1. take `flock leader.lock`, refusing with the holder named;
-2. open the store; a `state_version` other than this binary's refuses, naming both;
-3. load the latest snapshot and replay the `input` records after it; rebuild the open table
-   from the records after it;
-4. restore an update the last incarnation left in STOPPING (`config intent` with no `config
-   applied`, `runner_update.EngineUpdate.resume`): its dispatch filter holds from here; step 5
-   settles its attempts like any open one, and it applies as a step of the loop once they are
-   down, so no job of its plan dispatches and no outcome it keeps commits before that;
-5. settle every open attempt through the attempt chart: the attempt is instantiated under its
-   run id and fed what its spool supports (`spawn.json`, `status.json`, a wrapper still writing
-   its record, a command that outlived its wrapper and gets the ladder); its `outcome` is
-   appended with its `follow_up` plan (`runner_attempts.follow_up_plan`);
-6. finish every plan with an unfinished step, in seq order, without reclassifying it;
-7. discharge every pending dispatch whose run is still the oracle's current run in STARTING;
-   a start the tail decided with no `dispatch` becomes a `dispatch_pending` first;
-8. record `engine started` (and `drain_interrupted` when the last incarnation was draining),
-   and skip and report the scheduler ticks missed while down (E9). The loop runs this step once
-   steps 6 and 7 have taken effect (`Engine.recovery`); the caller binds the control socket
-   after it (`Engine.started`).
+1. refuse before the first write: `flock leader.lock` with the holder named; the store's
+   `state_version`, its `root_id` and its clock domain; a store from the future; a launch estate
+   other than the applied configuration or the open update's candidate, job by job; an open
+   update's missing plan directory;
+2. fold: the snapshot and the tail into the oracle, the frontiers, the decisions, the evidence,
+   the open table, the update in STOPPING with its filter (`EngineUpdate.resume`); every open
+   attempt instantiated in the attempt tier, in SPAWNING, or in ENDED with its committed outcome
+   when it is closing; file watches taken up from `watch.jsonl` (DL-242);
+3. the first reading: one cookie scan of the run root, where the cookie can be read; what it
+   finds of an attempt whose stop is owed is TERMed, the first rung of the ladder the loop runs;
+4. the catch-up, as steps of the loop: one observation of each attempt without an outcome
+   (`spawn_recorded`, its recorded stop, then its record or `engine_died`) and one cleanup of
+   each closing one, in seq order; then the owed plans in seq order and the pending starts; then
+   the time jump, after which the barrier lifts: the deferred dispatches go and `engine started`
+   is recorded with the scheduler ticks missed while down (E9).
 
-The plans of step 5 follow the interruption rule (spec-wiring 2b): a natural end or a failed
-launch completes; a stopped or unobservable attempt is dropped when its job left the catalog or
-the oracle ended its run, held when its job is named in `non-idempotent.toml` (FAILURE with
-cause `interrupted`, then ON_HOLD), and otherwise run again as a new attempt of the same run with
-the same invocation. Steps 6 and 7 feed through the engine's queue and launch through its
-deferred dispatch, so the reconciliation inputs and the overdue timers apply first (DL-425); a
-start one of those inputs decides is owed the same way. The engine lifecycle leaves STARTING
-after step 7 (`replay_done`). A restart from a snapshot opens its trace with a `RESTART` line:
-the trace covers what follows the snapshot.
+An attempt whose records do not read, or whose processes cannot be read, is quarantined: one
+`unobservable` outcome with cause `quarantined`, its job held with the evidence, the engine up.
+The plans follow the interruption rule (spec-wiring 2b): a natural end or a failed launch
+completes; a stopped or unobservable attempt is dropped when its job left the catalog or the
+oracle ended its run, held when its job is named in `non-idempotent.toml`, and otherwise run
+again as a new attempt of the same run with the same invocation. A recovered plan step is
+stamped at the end its outcome holds, never before the admission frontier, and fed before any
+outage deadline. The engine lifecycle leaves STARTING at the barrier (`replay_done`). A restart
+from a snapshot opens its trace with a `RESTART` line: the trace covers what follows the
+snapshot.
 
-`start_run` is genesis: an empty store has nothing to replay, settle or dispatch.
+`start_run` is genesis: an empty store has nothing to replay or catch up with.
 """
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import os
-import time
+import signal
 import uuid
 
-from collections.abc import Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any, cast
 
 from dsl41 import runner_procid as _procid
-from dsl41.engine_charts import ENGINE_STOP, WRAPPER_LOST
+from dsl41.engine_charts import ENGINE_STOP, AttemptOutcome, ExitRecord
 from dsl41.ir import CatalogIR, JobIR
 from dsl41.reload_diff import catalog_hash_v2
 from dsl41.oracle import Oracle
@@ -67,9 +67,6 @@ from dsl41.runner import (
     Deferred,
     Engine,
     adapter_switch,
-    feed_step,
-    outcome_record,
-    plan_record,
     refit_adapters,
 )
 from dsl41.runner_adapters import (
@@ -77,12 +74,10 @@ from dsl41.runner_adapters import (
     load_json,
     read_watch_log,
     spool_names_run,
-    spool_record,
 )
-from dsl41.runner_attempts import command_group
+from dsl41.runner_attempts import NO_GROUP, command_group, exit_record_from_status
 from dsl41.runner_clock import Clock, EngineError
 from dsl41.runner_config import (
-    RECONCILE_SETTLE_S,
     Configuration,
     EngineSettings,
     RuntimeProfile,
@@ -102,7 +97,6 @@ from dsl41.runner_journal import (
     decode_snapshot,
     dispatched_runs,
     first_rev,
-    ladder_done_record,
     load_configuration,
     pending_record,
     replay_inputs,
@@ -111,7 +105,7 @@ from dsl41.runner_journal import (
 )
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, LeaderLock, acquire_run_root
 from dsl41.runner_scheduler import Scheduler
-from dsl41.runner_stops import COMMAND_SURVIVED, AttemptFacts
+from dsl41.runner_stops import AttemptFacts
 from dsl41.runner_store import Record, SqliteStore, Store, StoreError
 from dsl41.semantics import ADAPTER_SWITCHES, SCHEDULER_SWITCHES, check_overrides
 from dsl41.state_machine import Executor
@@ -354,6 +348,8 @@ def _genesis(
         "state_version": str(STATE_MACHINE_VERSION),
         "baseline_id": str(uuid.uuid4()),
         "clock_domain": _clock_domain(clock),
+        # the run root's identity, the first half of every process cookie (spec-restart §3)
+        "root_id": uuid.uuid4().hex,
     }
     store: Store
     path: Path | None = None
@@ -368,7 +364,7 @@ def _genesis(
         store = SqliteStore(path, created_at=at, identity=identity)
         os.chmod(path, 0o600)
     journal = Journal(store, lock=lock, path=path)
-    instance = uuid.uuid4().hex  # the engine's token, the first half of its cookies
+    instance = uuid.uuid4().hex  # this engine start's token, recorded in `engine started`
     try:
         rev = store.put_config(configuration.to_bytes(), configuration.digest())
         journal.append(_config_applied(rev, configuration, journal, at))
@@ -462,19 +458,22 @@ async def resume_run(
     adapters: Mapping[str, JobAdapter],
     scheduler: Scheduler | None = None,
     hold_open: bool = False,
-    settle_seconds: float | None = None,
     grace_seconds: float | None = None,
     lock: LeaderLock | None = None,
     declared: RuntimeProfile | None = None,
     machines: Executor | None = None,
     settings: EngineSettings | None = None,
 ) -> Engine:
-    """Restart (module docstring). Returns an Engine with the reconciliation inputs queued and
-    the owed dispatches deferred; the caller runs the loop to process them and continue.
+    """Restart (module docstring). `grace_seconds`, when given, is the live ladder's TERM grace
+    for this incarnation over the settings' `grace_term_s`. Returns an Engine with the catch-up's steps queued; the
+    caller runs the loop, which takes them and lifts the barrier. Nothing here awaits a
+    process, a wrapper, a spool or a timer (spec-restart, DL-433).
 
     A refused restart holds nothing: every task it started is cancelled and collected, the store
     is closed with `shutdown_during_startup` recorded when it was opened, and the lock is
     released last."""
+    if grace_seconds is not None:
+        settings = (settings or EngineSettings()).overridden(grace_term_s=grace_seconds)
     # acquire first (S6a, DL-99): a mutex taken after the first read or side effect is not a
     # mutex
     lock = lock or acquire_run_root(run_root)
@@ -491,8 +490,6 @@ async def resume_run(
             adapters=adapters,
             scheduler=scheduler,
             hold_open=hold_open,
-            settle_seconds=settle_seconds,
-            grace_seconds=grace_seconds,
             declared=declared,
             machines=machines,
             settings=settings,
@@ -522,15 +519,13 @@ async def _resume_under_lock(
     adapters: Mapping[str, JobAdapter],
     scheduler: Scheduler | None,
     hold_open: bool,
-    settle_seconds: float | None,
-    grace_seconds: float | None,
     declared: RuntimeProfile | None,
     journals: list[Journal],
     engines: list[Engine],
     machines: Executor | None,
     settings: EngineSettings | None,
 ) -> Engine:
-    """Steps 2 to 8, with the lock held (S6a)."""
+    """The refusals, the fold and the first reading, with the lock held (S6a)."""
     refuse_old_root(run_root)
     path = run_root / STORE_NAME
     if not path.exists():
@@ -544,6 +539,7 @@ async def _resume_under_lock(
     meta = store.meta()
     try:
         _check_state_version(meta, path)
+        _check_root_id(meta, path)
         snapshot = _latest_snapshot(store, path)
         # the configuration the records open with, and the one the last `config applied` left
         first = snapshot.config_rev if snapshot is not None else first_rev(store)
@@ -618,33 +614,25 @@ async def _resume_under_lock(
     engine.resume_at = last_at
     wires = [wire for _, record in tail if (wire := wire_record(record)) is not None]
     replay = _replay_into_engine(engine, wires, snapshot, start, path)
-    # the identity preflight runs before anything is written, so a refused restart has written
-    # nothing
-    _preflight_identities(engine)
-    journal.writable = True
+    journal.writable = True  # every refusal has had its chance (spec-restart §1)
     lock.note(at=clock.now())
     for job, rt in engine.oracle.store.job.items():
         if rt.run_number:
             engine._dispatched[job] = rt.run_number
-    windows = (
-        settle_seconds if settle_seconds is not None else RECONCILE_SETTLE_S,
-        grace_seconds if grace_seconds is not None else (settings or EngineSettings()).grace_term_s,
-    )
     _fold_evidence(engine, snapshot, tail)
-    stopping = _interrupted_drain(tail) or frozenset()
-    if journal.open.update is not None:  # step 4: the update in STOPPING, its filter holding
+    # the fold: every open attempt instantiated before the loop's first step, then the first
+    # reading, then the catch-up's steps in seq order and the owed work after them (§§2-6)
+    steps = _adopt_open_attempts(engine, _interrupted_drain(tail) or frozenset(), last_at)
+    scan = _first_reading(engine, tail, _interrupted_drain(tail) or frozenset())
+    for step in steps:
+        engine.catch_up(partial(step, scan))
+    engine.catch_up(partial(_owed, engine, wires, replay, last_at))
+    if journal.open.update is not None:  # the update in STOPPING, its filter holding
         engine.update.resume(journal.open.update)
-    await _settle_open_attempts(engine, last_at, windows, stopping)  # step 5
-    # steps 6 and 7 owe their effects to the loop, which carries them out once the due work has
-    # run; `recovery` is step 8, set in full below
-    engine.recovery = lambda: None
-    engine.adopt_plans()  # step 6
-    engine.perform_plans()
-    _discharge_pending(engine, wires, replay, last_at)  # step 7
-    # the scheduler re-anchors now, so no tick missed while down fires late; step 8 records the
-    # drops with `engine started` once the loop has carried out steps 6 and 7
+    # the scheduler re-anchors now, so no tick missed while down fires late; the barrier
+    # records the drops with `engine started` once the catch-up is done (§6, item 4)
     missed = _missed_ticks(engine, journal.position)
-    engine.recovery = lambda: _record_start(engine, tail, missed)  # step 8
+    engine.recovery = lambda: _record_start(engine, tail, missed)
     return engine
 
 
@@ -655,6 +643,15 @@ def _check_state_version(meta: Mapping[str, str], path: Path) -> None:
         raise EngineError(
             f"{path}: state version {found}, this binary runs {STATE_MACHINE_VERSION}: drain"
             " and snapshot with the binary that wrote it, or start a fresh run root (DL-424)"
+        )
+
+
+def _check_root_id(meta: Mapping[str, str], path: Path) -> None:
+    """The store names its run root: every process cookie starts with it (spec-restart §3)."""
+    if not meta.get("root_id"):
+        raise EngineError(
+            f"{path}: the store has no root_id, which every process cookie names: start a fresh"
+            " run root (spec-restart, DL-433)"
         )
 
 
@@ -729,7 +726,7 @@ def _check_updated(
 ) -> tuple[RuntimeProfile, Scheduler | None, dict[str, JobAdapter]]:
     """A restart of a run root an update touched runs the store's last applied configuration,
     never the estate's files (DL-424). The estate the launch names must be the one the engine
-    runs once startup step 4 is done: the open update's candidate, else the applied catalog,
+    runs once the resumed update applies: the open update's candidate, else the applied catalog,
     compared job by job under the settings the launch declares (`reload_diff.diff`), so a file
     path or a comment does not count and a definition or a setting does. The launch's wiring
     takes the exact path's runtime-profile check against that estate's profile (the machine
@@ -766,7 +763,7 @@ def _check_updated(
     wired = refit_adapters(adapters, switches_of(profile))
     if scheduler is not None:
         # the launch wired it from its own estate; a restart re-anchors it at the durable
-        # frontier anyway (step 8), so it is built afresh over the configuration
+        # frontier anyway (the time jump), so it is built afresh over the configuration
         scheduler = Scheduler(
             configuration.catalog,
             start=clock.now(),
@@ -828,171 +825,282 @@ def _replay_into_engine(
     return replay
 
 
-# ---------------------------------------------------------------- step 5
+# ---------------------------------------------------------------- the fold and the first reading
 
 
-def _preflight_identities(engine: Engine) -> None:
-    """Every open attempt's spool must name the attempt its `dispatch` record bound (DL-118).
-    One sweep before anything is written, so a refusal leaves the store as it was."""
+def _adopt_open_attempts(
+    engine: Engine, stopping: frozenset[str], last_at: datetime
+) -> list[Callable[[_procid.Ours | None], None]]:
+    """Every open attempt in seq order, before the loop's first step (spec-restart §2, §5): a
+    command attempt is instantiated in the attempt tier, in SPAWNING, or in ENDED with its
+    committed outcome when it is closing. Answers the catch-up step of each, in the same order:
+    an observation, a cleanup, or a file watch taken up from its log. An attempt the engine
+    left taking a stop keeps that stop: the cause the open table carries, or `engine_stop` for
+    one an interrupted drain named (`stopping`, DL-426). The fold writes nothing."""
     assert engine.journal is not None
-    for attempt in sorted(engine.journal.open.attempts.values(), key=lambda a: a.seq):
-        # a restart holds a run root, and every attempt dispatched under one names its spool
-        assert attempt.spool is not None
-        spool = Path(attempt.spool)
-        for name in ("spawn.json", "status.json"):
-            doc = load_json(spool / name)
-            if doc is not None:
-                _refuse_identity_split(attempt, doc.get("run_id"), f"the spool's {name}")
-        watch = read_watch_log(spool)
-        if watch is not None:
-            _refuse_identity_split(attempt, watch.run_id, "the spool's watch.jsonl")
-
-
-def _refuse_identity_split(attempt: OpenAttempt, observed: object, source: str) -> None:
-    """One key runs through the store and the spool (DL-118, PR-36a). A different id is a
-    store/spool split: corruption, a spoofed record, or a directory from another estate, and
-    acting on that process would act on a run the store never dispatched."""
-    observed_id = str(observed) if observed is not None else None
-    if observed_id != attempt.attempt:
-        raise EngineError(
-            f"{attempt.job}.{attempt.run_number}: {source} reports run_id {observed_id!r} but"
-            f" the dispatch record bound {attempt.attempt!r} -- refusing to act on a run the"
-            " store did not dispatch (DL-118)"
-        )
-
-
-async def _settle_open_attempts(
-    engine: Engine,
-    last_at: datetime,
-    windows: tuple[float, float],
-    stopping: frozenset[str] = frozenset(),
-) -> None:
-    """Step 5: every open attempt gets its `outcome` and its plan. A command attempt goes
-    through the attempt chart (`_settle_attempt`), all of them together; a watch resumes from
-    its log (`_resume_watch`). The plans wait for step 6. An attempt the engine left taking a
-    stop is adopted with that stop: the cause the open table carries from the shutdown
-    records, or `engine_stop` for one an interrupted drain named in its `draining` record
-    (`stopping`), so an exit the stop's TERM caused is `stopped`, never `natural` (DL-426).
-    An attempt an update in STOPPING stops is adopted with `update_stop` from the open table
-    like any other (startup step 4 restored the update)."""
-    assert engine.journal is not None
-    engine.settling = True
-    try:
-        settling = []
-        for attempt in sorted(engine.journal.open.attempts.values(), key=lambda a: a.seq):
-            job_ir = engine.oracle.catalog.jobs.get(attempt.job)
-            if job_ir is not None and job_ir.job_type == "FW":
-                _resume_watch(engine, job_ir, attempt, last_at)
-                continue
-            if attempt.closing:  # its outcome is in; its ladder never ended
-                settling.append(_finish_ladder(engine, attempt))
-                continue
-            # the stop the open table carries (the shutdown records'), cross-checked by the
-            # list an interrupted drain left (DL-426)
+    table = engine.journal.open
+    steps: list[Callable[[_procid.Ours | None], None]] = []
+    for attempt in sorted(table.attempts.values(), key=lambda a: a.seq):
+        job_ir = engine.oracle.catalog.jobs.get(attempt.job)
+        if job_ir is not None and job_ir.job_type == "FW":
+            steps.append(partial(_watch, engine, job_ir, attempt, last_at))
+            continue
+        facts = _facts_of(attempt)
+        if attempt.closing:
+            # a snapshot older than the outcome's kind reads as a stop's (DL-431)
+            outcome = AttemptOutcome(cast("Any", attempt.outcome or "stopped"), cause=attempt.stop)
+            owed = attempt.attempt in table.plans
+            engine.adopt_attempt(facts, outcome, plan_done=not owed, restart=True)
+            steps.append(partial(_cleanup, engine, attempt))
+        else:
+            engine.adopt_attempt(facts, restart=True)
             stop = attempt.stop or (ENGINE_STOP if attempt.attempt in stopping else None)
-            settling.append(_settle_attempt(engine, attempt, *windows, stop=stop))
-        await asyncio.gather(*settling)
-    finally:
-        engine.settling = False
+            steps.append(partial(_observe, engine, attempt, stop))
+    return steps
 
 
-async def _settle_attempt(
-    engine: Engine,
-    attempt: OpenAttempt,
-    settle_seconds: float,
-    grace_seconds: float,
-    *,
-    stop: str | None = None,
-) -> None:
-    """One open command attempt, instantiated in the attempt chart under its run id and fed the
-    events its spool supports (spec-crash, Restart step 5). `spawn.json` is posted first. A
-    `status.json` is the record. With none, a wrapper still alive in this boot gets
-    `settle_seconds + grace_seconds` to write it (its own lifeline ladder is running) and, if
-    it never does, the ladder runs on its command (`stop` with cause `wrapper_lost`); a wrapper
-    gone is `wrapper_exited`, whose verdict reads the command's liveness. The step returns once
-    the attempt ended, or once its stop could not be carried out (it stays STOPPING, unsettled,
-    and the next restart reads its spool again)."""
+def _facts_of(attempt: OpenAttempt) -> AttemptFacts:
     # a restart holds a run root, and every attempt dispatched under one names its spool
     assert attempt.spool is not None
-    spool = Path(attempt.spool)
-    facts = AttemptFacts(
+    return AttemptFacts(
         attempt.attempt,
         attempt.job,
         attempt.run_number,
         attempt.ordinal,
-        spool,
+        Path(attempt.spool),
         dict(attempt.env),
         attempt.after,
         exited=True,  # its wrapper was the previous engine's
+        closing=attempt.closing,
     )
-    engine.adopt_attempt(facts)
+
+
+def _first_reading(
+    engine: Engine, tail: list[tuple[int, Record]], stopping: frozenset[str]
+) -> _procid.Ours | None:
+    """The cookie scan, before the loop's first step, where the cookie can be read (spec-restart
+    §3): one scan of every process carrying a cookie of this run root, then, for each open
+    command attempt, a reading of what is left of it through `left` with that shared scan, as
+    the held poll reads, so a group a cookie member proves stays proven when that member exits.
+    It finishes what the engine's death ended: what the reading found of an attempt with no
+    outcome whose spool holds no natural record (none, a stop's, or a spool that does not
+    read), or of a closing attempt but a `natural` one under `process-leak=leak`, is TERMed,
+    the first rung of the attempt's ladder, whose grace and KILL run in the loop. What ended by
+    its own record follows the live rule at its observation. A closing `natural` one's under
+    `leak` is left running and named in one warning; a process of no open attempt is reported
+    once and left alone. A scan that failed reads nothing and TERMs nothing: each attempt's
+    live readings then hold it while they fail. None where no scan can be made."""
+    assert engine.journal is not None
+    scan = engine.stops.scan()
+    if scan is None or scan.error is not None:
+        return scan
+    table = engine.journal.open.attempts
+    leak = engine.stops.leak_policy == "leak"
+    for attempt in sorted(table.values(), key=lambda a: a.seq):
+        if not engine.attempts.knows(attempt.attempt):
+            continue  # a file watch carries no cookie
+        run_id = attempt.attempt
+        spawn = _spawn_record(attempt)
+        if isinstance(spawn, dict):
+            engine.stops.note_boot(spawn)
+        group = command_group(spawn if isinstance(spawn, dict) else None)
+        look = engine.stops.left(*(group or (NO_GROUP, run_id)), run_id, scan)
+        if not look.pids:
+            continue
+        if attempt.closing and attempt.outcome == "natural" and leak:
+            best_effort_report(
+                f"dsl41: {attempt.job}.{attempt.run_number}.{attempt.ordinal}: leaked:"
+                f" {len(look.pids)}, left running (pids {_pids(look.pids)})"
+            )
+        elif not attempt.closing and _ended_by_its_record(attempt, stopping):
+            # the scan finishes what the engine's death ended; what ended by its own record
+            # follows the live rule at its observation (spec-restart §3, DL-433)
+            continue
+        else:
+            for pid, start in look.pids.items():
+                if _procid.signal_ours(pid, start, signal.SIGTERM):
+                    engine.stops.termed.add(run_id)
+    named = {
+        str(record.payload["attempt"]): (record.payload["job"], record.payload["run_number"])
+        for _, record in tail
+        if record.kind == "dispatch"
+    }
+    strangers: dict[str, list[int]] = {}
+    for pid, (run_id, _start) in sorted(scan.pids.items()):
+        if run_id not in table:
+            strangers.setdefault(run_id, []).append(pid)
+    for run_id, pids in strangers.items():
+        job, run = named.get(run_id, ("?", "?"))
+        best_effort_report(
+            f"dsl41: {job}.{run}: run id {run_id} has no open attempt; its processes are left"
+            f" alone (pids {_pids(pids)})"
+        )
+    return scan
+
+
+def _ended_by_its_record(attempt: OpenAttempt, stopping: frozenset[str]) -> bool:
+    """Whether an open attempt's spool holds a natural record: one its wrapper wrote with no
+    stop of the attempt in progress (spec-restart §3). A spool that does not read holds none.
+    The observation reads the spool again; a record is written once."""
+    assert attempt.spool is not None
+    records = _records(Path(attempt.spool), attempt)
+    if isinstance(records, str) or records[1] is None:
+        return False
+    stop = attempt.stop or (ENGINE_STOP if attempt.attempt in stopping else None)
+    record = exit_record_from_status(records[1], stop_in_progress=stop is not None)
+    return record.terminated_by is None
+
+
+def _pids(pids: Iterable[int]) -> str:
+    return " ".join(str(pid) for pid in sorted(pids)) or "?"
+
+
+# ---------------------------------------------------------------- the catch-up's steps
+
+
+def _record(spool: Path, name: str, attempt: OpenAttempt) -> dict[str, Any] | None | str:
+    """One spool record of an attempt: None when absent, unreadable as JSON, or naming another
+    (job, run) (DL-178y); or why it does not read, for a quarantine: it names another run id
+    than the dispatch bound (DL-118), or it cannot be read (spec-restart §7)."""
+    path = spool / name
+    try:
+        path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return f"{name} unreadable: {exc.strerror or exc}"
+    doc = load_json(path)
+    if doc is not None and doc.get("run_id") != attempt.attempt:
+        return (
+            f"{name} reports run_id {doc.get('run_id')!r} but the dispatch record bound"
+            f" {attempt.attempt!r} (DL-118)"
+        )
+    return doc if spool_names_run(doc, job=attempt.job, run_number=attempt.run_number) else None
+
+
+def _spool_listing(spool: Path) -> str | None:
+    """Why a spool directory cannot be listed, or None (a missing one is an empty spool)."""
+    try:
+        os.listdir(spool)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return f"spool unreadable: {exc.strerror or exc}"
+    return None
+
+
+def _records(spool: Path, attempt: OpenAttempt) -> tuple[Any, Any] | str:
+    """An attempt's `spawn.json` and `status.json` (`_record`), or why the records do not read,
+    for a quarantine: the spool directory, or either record (spec-restart §7)."""
+    listing = _spool_listing(spool)
+    if listing is not None:
+        return listing
+    spawn, status = _record(spool, "spawn.json", attempt), _record(spool, "status.json", attempt)
+    for doc in (spawn, status):
+        if isinstance(doc, str):
+            return doc
+    return spawn, status
+
+
+def _spawn_record(attempt: OpenAttempt) -> dict[str, Any] | None | str:
+    """An attempt's `spawn.json` alone: the identity its cleanup and the first reading need,
+    whatever its `status.json` says (`_record`)."""
+    assert attempt.spool is not None
+    spool = Path(attempt.spool)
+    return _spool_listing(spool) or _record(spool, "spawn.json", attempt)
+
+
+def _watch_split(attempt: OpenAttempt) -> str | None:
+    """Why a file watch's log does not read as this attempt's (DL-118, spec-restart §7), or
+    None."""
+    assert attempt.spool is not None
+    try:
+        watch = read_watch_log(Path(attempt.spool))
+    except EngineError as exc:
+        return str(exc)
+    if watch is not None and watch.run_id != attempt.attempt:
+        return (
+            f"watch.jsonl reports run_id {watch.run_id!r} but the dispatch record bound"
+            f" {attempt.attempt!r} (DL-118)"
+        )
+    return None
+
+
+def _watch(
+    engine: Engine, job_ir: JobIR, attempt: OpenAttempt, last_at: datetime, _scan: object
+) -> None:
+    """One open file watch, as a catch-up step in seq order (spec-restart §2): taken up from its
+    log, or quarantined when its log does not read as this attempt's (§7)."""
+    split = _watch_split(attempt)
+    if split is None:
+        _resume_watch(engine, job_ir, attempt, last_at)
+        return
+    engine.adopt_attempt(_facts_of(attempt), observed=False, restart=True)
+    engine.quarantine(attempt.attempt, split)
+
+
+def _observe(engine: Engine, attempt: OpenAttempt, stop: str | None, scan: object) -> None:
+    """One open attempt without an outcome, observed once (spec-restart §4): its spool read
+    once, then `spawn_recorded`, the recorded first stop before any status, so an exit the
+    previous engine's TERM caused is `stopped` (DL-426), and the end: the wrapper's record, or
+    `engine_died` when there is none. The live record path does the rest: the reading of what
+    is left, the ladder on it, the outcome and its plan; a reading that fails holds it as
+    live. Records that do not read quarantine the attempt, the pids the first reading found
+    named (spec-restart §7)."""
+    assert attempt.spool is not None
     run_id = attempt.attempt
-
-    def read(name: str) -> dict[str, Any] | None:
-        # the run id was checked by the preflight; a record naming another (job, run) is a
-        # stranger's and is read as absent (DL-178y)
-        doc = spool_record(spool / name, run_id)
-        return doc if spool_names_run(doc, job=attempt.job, run_number=attempt.run_number) else None
-
+    records = _records(Path(attempt.spool), attempt)
+    if isinstance(records, str):
+        found = scan.pids if isinstance(scan, _procid.Ours) else {}
+        pids = [pid for pid, (run, _start) in found.items() if run == run_id]
+        engine.quarantine(run_id, f"{records} (pids {_pids(pids)})" if pids else records)
+        return
+    spawn, status = records
     tier = engine.attempts
-    spawn, status = read("spawn.json"), read("status.json")
-    wrapper_alive = False
     if spawn is not None:
         engine.stops.note_boot(spawn)
-        tier.spawn_recorded(run_id, spawn)
-        wrapper_alive = _wrapper_alive(engine, spawn)
+        tier.spawn_recorded(run_id, spawn)  # a record never proves a group: no first reading
     if stop is not None:
-        tier.stop(run_id, stop)  # the stop outlived the engine that sent it
-    if status is None and wrapper_alive:
-        assert spawn is not None  # `wrapper_alive` reads it
-        deadline = time.monotonic() + settle_seconds + grace_seconds
-        while status is None and wrapper_alive and time.monotonic() < deadline:
-            await asyncio.sleep(0.1)
-            status, wrapper_alive = read("status.json"), _wrapper_alive(engine, spawn)
-    # every verdict that reads the attempt as dead reads the spool once more first: a wrapper
-    # may write its record and die between the first read and the liveness check (DL-426)
-    status = status or read("status.json")
+        tier.restored_stop(run_id, stop)  # the stop outlived the engine that sent it
     if status is not None:
         tier.status_recorded(run_id, status)
-    elif wrapper_alive:
-        tier.stop(run_id, WRAPPER_LOST)
     else:
-        tier.wrapper_exited(run_id, spawn)
-    await engine.settled_or_failed(facts)
+        tier.engine_died(run_id)
 
 
-async def _finish_ladder(engine: Engine, attempt: OpenAttempt) -> None:
-    """An attempt whose outcome was committed while its ladder ran, and whose ladder the last
-    engine never finished, before step 6 performs the plan: the restart stops what it finds
-    left (`EngineStops.finish`). A recorded boot that is not this one proves nothing survived.
-    Nothing left closes the attempt (`ladder_done`); anything left keeps it open and held,
-    `command survived its KILL` (`held_at_restart`): no start of its job is launched beside it
-    (DL-426). Under `process-leak=leak` a leak's ladder (a `natural` outcome) signals nothing:
-    the processes left are named in a warning and the attempt closes, as the vendor would leave
-    them. A stop the crash cut short is finished whatever the switch."""
-    assert engine.journal is not None and attempt.spool is not None
-    spawn = spool_record(Path(attempt.spool) / "spawn.json", attempt.attempt)
+def _cleanup(engine: Engine, attempt: OpenAttempt, _scan: object) -> None:
+    """A closing attempt, restored ENDED with its committed outcome: one reading of what is left
+    and the ladder on it, as at a live record (spec-restart §5). It reads `spawn.json` alone,
+    its identity; one that does not read is reported and the cookie's processes are then all
+    that is read. Nothing left closes it (`ladder_done`); a `natural` one's processes under
+    `process-leak=leak` are reported and it closes; a ladder's end closes it; a survivor of
+    the KILL, or a reading that fails, holds it as live."""
+    run_id = attempt.attempt
+    spawn = _spawn_record(attempt)
+    if isinstance(spawn, str):
+        best_effort_report(f"dsl41: {attempt.job}.{attempt.run_number}: {spawn}")
+        spawn = None
+    tier = engine.attempts
     group = command_group(spawn)
-    if group is not None and spawn is not None and spawn.get("boot_id") == engine.stops.boot_id:
-        engine.stops.note_boot(spawn)  # its wrapper is no process of the command
-        engine.stops.note_cookie(attempt.attempt, attempt.env)
-        if engine.stops.leak_policy == "leak" and attempt.outcome == "natural":
-            look = engine.stops.left(*group, attempt.attempt)
-            if look.alive:
-                pids = " ".join(str(pid) for pid in sorted(look.pids)) or "?"
-                best_effort_report(
-                    f"dsl41: {attempt.job}.{attempt.run_number}.{attempt.ordinal}:"
-                    f" leaked: {len(look.pids)}, left running (pids {pids})"
-                )
-        else:
-            look = await engine.stops.finish(attempt.attempt, *group)
-            if look.alive:
-                note = look.reason if look.kind == "unknown" else COMMAND_SURVIVED
-                engine.held_at_restart(attempt, group[0], note)
-                return
-    engine.journal.append(ladder_done_record(attempt.attempt, engine.clock.now()))
-    engine.stops.forget(attempt.attempt)
-    engine.update.cleaned(attempt.attempt)  # an update's stop of it is finished (step 4)
+    if spawn is not None:
+        engine.stops.note_boot(spawn)
+        tier.spawn_recorded(run_id, spawn)  # ENDED takes no event; the tier keeps the group
+    if group is not None:
+        # its ladder was running when the engine died: a member left in its group outlived a
+        # stop, as live (DL-426)
+        engine.stops.note_laddered(group[0])
+    tier.cleanup(run_id)  # the reading is the live one, after the first reading's TERM
+    if not (tier.ladder_running(run_id) or tier.held(run_id) or run_id in engine.held_groups):
+        engine._ladder_ended(run_id)  # nothing to stop: closed now
+
+
+def _owed(engine: Engine, wires: list[dict[str, Any]], replay: Any, last_at: datetime) -> None:
+    """The catch-up's owed work, once every observation and cleanup is taken (spec-restart §6):
+    the plans the store holds unfinished, in seq order, then the pending starts; then the first
+    look at a resumed update's stop set (DL-432)."""
+    engine.perform_owed_plans()
+    _discharge_pending(engine, wires, replay, last_at)
+    engine.update.look()
 
 
 def _interrupted_drain(tail: list[tuple[int, Record]]) -> frozenset[str] | None:
@@ -1010,18 +1118,6 @@ def _interrupted_drain(tail: list[tuple[int, Record]]) -> frozenset[str] | None:
         elif event in ("started", "clean_shutdown", "unclean_shutdown"):
             stopping = None
     return stopping
-
-
-def _wrapper_alive(engine: Engine, spawn: dict[str, Any]) -> bool:
-    """Whether the wrapper `spawn.json` names still runs in this boot (DL-42 item 5): the
-    pid-reuse guard on its recorded pid and start token."""
-    pid, token = spawn.get("wrapper_pid"), spawn.get("wrapper_start_time")
-    return (
-        spawn.get("boot_id") == engine.stops.boot_id
-        and isinstance(pid, int)
-        and isinstance(token, str)
-        and _procid.verify_alive(pid, token)
-    )
 
 
 def _fold_evidence(engine: Engine, snapshot: Any, tail: list[tuple[int, Record]]) -> None:
@@ -1066,7 +1162,6 @@ def _resume_watch(engine: Engine, job_ir: JobIR, attempt: OpenAttempt, last_at: 
         job_ir, adapter.existence
     )
     immediate_first_poll = immediate and watch is not None and watch.watch_seq == 2
-    at = engine.clock.now()
     if watch is not None and (watch.complete or (immediate_first_poll and watch.qualifying)):
         # PR-34a: the engine died between the completing poll and the STATUS input: the
         # completion is fed from the log, never re-polled
@@ -1075,31 +1170,25 @@ def _resume_watch(engine: Engine, job_ir: JobIR, attempt: OpenAttempt, last_at: 
                 "a complete or immediately-qualifying watch has at least one poll"
                 " line, so last_at cannot be None (WatchLog invariant)"
             )
-        payload: dict[str, object] = {
-            "job": job,
-            "run_number": run,
-            "exit_code": 0,
-            "ended_at": watch.last_at.isoformat(),
-        }
-        engine.journal.append(
-            outcome_record(attempt.attempt, job, run, "natural", payload, at),
-            plan_record(attempt.attempt, job, run, "complete", [feed_step(payload)], at),
+        # the outcome goes the live way, so an update in STOPPING may keep it (spec-restart §6)
+        ended = ExitRecord(
+            exit_code=0, ended_at=watch.last_at.isoformat(), wrapper_outcome="exited"
         )
+        engine.adopt_attempt(_facts_of(attempt), observed=False, restart=True)
+        engine.record_outcome(attempt.attempt, AttemptOutcome("natural", record=ended))
         return
     rt = engine.oracle.store.job.get(job)
     if rt is None or rt.run_number != run or rt.status not in LIVE:
-        # DL-242: only a live row is watched again
-        engine.journal.append(
-            outcome_record(attempt.attempt, job, run, "stopped", {}, at, cause="run ended"),
-            plan_record(attempt.attempt, job, run, "none", [], at, reason="run ended"),
-        )
+        # DL-242: only a live row is watched again; the oracle ended the run, so plan `none`
+        engine.adopt_attempt(_facts_of(attempt), observed=False, restart=True)
+        engine.record_outcome(attempt.attempt, AttemptOutcome("stopped", cause="run ended"))
         return
     # an idempotent read: the adapter reconstructs progress from the log and appends no second
     # `start` line, under the attempt's recorded id (DL-118)
     engine._launch(job_ir, run, adapter, run_id=attempt.attempt, spool=spool)
 
 
-# ---------------------------------------------------------------- steps 6 to 8
+# ---------------------------------------------------------------- the owed work and the barrier
 
 
 def _discharge_pending(
@@ -1136,7 +1225,7 @@ def _discharge_pending(
 def _record_start(
     engine: Engine, tail: list[tuple[int, Record]], missed: list[tuple[Event, str]]
 ) -> None:
-    """Step 8, run by the loop once steps 6 and 7 have taken effect: `drain_interrupted` when
+    """The barrier's record, run by the loop once the catch-up is done: `drain_interrupted` when
     the last incarnation's records show a `draining` after its last start with no shutdown
     record, `engine started`, and the drop of each scheduler tick missed while down (E9)."""
     assert engine.journal is not None
@@ -1152,7 +1241,7 @@ def _record_start(
 def _missed_ticks(engine: Engine, position: Position) -> list[tuple[Event, str]]:
     """E9: the scheduler re-anchors at its durable frontier, inclusive, and every tick between
     it and now that the records did not adjudicate is dropped, never fired late (DL-45,
-    DL-166). The drops go on `engine.drops` now and into the store at step 8."""
+    DL-166). The drops go on `engine.drops` now and into the store at the barrier."""
     scheduler = engine.scheduler
     if scheduler is None or position.frontier is None:
         return []

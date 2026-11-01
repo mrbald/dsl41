@@ -226,7 +226,6 @@ async def _resume(run_root: Path, estate: Estate) -> Engine:
         clock=RealClock(),
         adapters=_adapters(GRACE),
         hold_open=True,
-        settle_seconds=0.2,
         settings=GRACE,
     )
 
@@ -509,7 +508,7 @@ def test_a_crash_between_intent_and_application_resumes_to_applied_before_any_di
     tmp_path: Path,
 ) -> None:
     """spec-crash step 4: the engine dies while the update stops a job that ignores TERM. The
-    restart resumes the update STOPPING, settles its attempts in step 5, and applies it as a
+    restart resumes the update STOPPING, observes its attempts in the catch-up, and applies it as a
     loop step before any dispatch of a plan job: the removed job is not rerun, the changed
     idempotent one is, a marked one is held as interrupted, and a running job whose mark the
     plan adds is held under the applied marked set."""
@@ -683,7 +682,6 @@ def test_a_snapshot_taken_while_the_update_stops_carries_it(tmp_path: Path) -> N
             run_root,
             clock=RealClock(),
             adapters=_adapters(GRACE),
-            settle_seconds=0.2,
             settings=GRACE,
             declared=RuntimeProfile(as_machine=("elsewhere",)),
         )
@@ -700,7 +698,6 @@ def test_a_snapshot_taken_while_the_update_stops_carries_it(tmp_path: Path) -> N
             run_root,
             clock=RealClock(),
             adapters=cast("dict[str, JobAdapter]", adapters),
-            settle_seconds=0.2,
             settings=GRACE,
         )
 
@@ -716,7 +713,6 @@ def test_a_snapshot_taken_while_the_update_stops_carries_it(tmp_path: Path) -> N
             adapters=_adapters(GRACE),
             scheduler=Scheduler(estate.catalog, start=RealClock().now(), default_tz="UTC"),
             hold_open=True,
-            settle_seconds=0.2,
             settings=GRACE,
             declared=RuntimeProfile(),
         )

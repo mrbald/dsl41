@@ -36,11 +36,13 @@ from dsl41.engine_charts import (
     ATTEMPT,
     CANCEL_RECORD_TIMEOUT,
     CANCEL_WATCHERS,
+    ENGINE_DIED,
     ENGINE_KEY,
     ENGINE_LIFECYCLE,
     EXIT_PROCESS,
     EXIT_RECORDED,
     JOURNAL_DRAINING,
+    QUARANTINED,
     JOURNAL_SHUTDOWN_DURING_STARTUP,
     RECORD_CLEAN_SHUTDOWN,
     RECORD_OUTCOME,
@@ -82,6 +84,10 @@ MAX_ATTEMPTS_PER_RUN: Final = 5
 ORACLE_KILL: Final = "oracle_kill"
 #: The attempt states that are not settled.
 UNSETTLED: Final = frozenset({"SPAWNING", "RUNNING", "STOPPING"})
+#: The pgid an attempt with no recorded group is read and stopped under: the processes carrying
+#: its cookie are all that is left of it, and the ladder signals each by itself (spec-restart §4,
+#: DL-433). No command runs in process group 0.
+NO_GROUP: Final = 0
 _ATTEMPT_STATES: Final = frozenset({*UNSETTLED, "ENDED"})
 _ENGINE_STATES: Final = frozenset({"STARTING", "RUNNING", "DRAINING", "STOPPED"})
 
@@ -262,6 +268,9 @@ class Interrupted:
     limit: int | None = None
     #: the attempt's run id; `attempt` is its display name
     run_id: str | None = None
+    #: why a restart could not read the attempt, with the pids known (a quarantine, spec-restart
+    #: §7); None otherwise, and then left out of the record
+    note: str | None = None
 
 
 @dataclass(frozen=True)
@@ -307,6 +316,7 @@ def follow_up_plan(
     marked: bool,
     run_id: str | None = None,
     mint: Callable[[], str] = lambda: str(uuid.uuid4()),
+    quarantined: str | None = None,
 ) -> FollowUp:
     """The interruption rule (DL-424), as a plan for the outcome of attempt `attempt` of run
     `run_number` of `job`.
@@ -323,6 +333,10 @@ def follow_up_plan(
     that holds the job in the same transition, with the evidence, which names the limit in the
     second case. Else `rerun`: one dispatch of the next attempt of the same run, under a run id `mint`
     gives. `run_id` is the interrupted attempt's own, which the evidence carries.
+
+    `quarantined` is the reason a restart could not read the attempt: it forces `hold` wherever
+    the job would rerun, whatever its marking, and the evidence carries the reason (spec-restart
+    §7, DL-433). The oracle's own end still stands.
     """
     if outcome.kind in ("natural", "spawn_failed"):
         return FollowUp("complete", (FollowUpStep(FEED_STATUS, oracle_input_for(outcome)),))
@@ -335,7 +349,7 @@ def follow_up_plan(
     limited = attempt >= MAX_ATTEMPTS_PER_RUN
     # PENDING: E7 -- an unobservable attempt takes this rule; the FAILURE it feeds is a marked
     # job's `interrupted`, never `exit_status_unobservable` (DL-424 narrows E7)
-    if marked or limited:
+    if marked or limited or quarantined is not None:
         record = outcome.record or ExitRecord()
         observed = record.observed or {}
         sig, code = (
@@ -352,6 +366,7 @@ def follow_up_plan(
             code,
             MAX_ATTEMPTS_PER_RUN if limited else None,
             run_id,
+            quarantined,
         )
         # one oracle transition: the FAILURE holds the job before its own start or a dependent's
         # is evaluated, so a marked job never runs again on its own failure (DL-424)
@@ -419,6 +434,8 @@ class _Attempt:
     survived: bool = False
     #: its ladder raised: the stop was not carried out, so its group is unproven
     failed: bool = False
+    #: a restart is posting the stop the previous engine took: no ladder starts (`restored_stop`)
+    quiet: bool = False
 
 
 class AttemptTier:
@@ -438,21 +455,22 @@ class AttemptTier:
         grace_kill_s: float,
         machines: Executor | None = None,
         command_alive: Callable[[int, str], bool] = verify_alive,
+        unnamed_alive: Callable[[str], bool] | None = None,
     ) -> None:
         self.processes = processes
         self.grace_term_s = grace_term_s
         self.grace_kill_s = grace_kill_s
         self.machines = machines if machines is not None else Executor()
         self.command_alive = command_alive
+        #: whether anything is left of an attempt with no recorded group: the processes carrying
+        #: its cookie (`NO_GROUP`); None where nothing can tell
+        self.unnamed_alive = unnamed_alive
         self.on_settled: Callable[[], None] | None = None
         #: called when an attempt's ladder ended: the wiring may forget it now
         self.on_ladder_done: Callable[[str], None] | None = None
         #: records that came after their attempt ended: evidence, never an outcome (DL-424)
         self.late_records: dict[str, list[ExitRecord]] = {}
         self._attempts: dict[str, _Attempt] = {}
-        #: attempts a restart found closing whose group it could not prove gone: no instance,
-        #: unsettled until `group_gone` (DL-426)
-        self._adopted_held: set[str] = set()
 
     def key(self, attempt: str) -> tuple[AttemptTier, str]:
         """The executor's key of an attempt: this tier and the id."""
@@ -474,10 +492,8 @@ class AttemptTier:
 
     def unsettled(self) -> tuple[str, ...]:
         """The attempts not yet ENDED, and the ENDED ones whose plan is not done, whose ladder
-        still runs, or whose group is held (`held`), in dispatch order; then the held attempts
-        a restart adopted."""
-        live = tuple(a for a in self._attempts if self.is_unsettled(a))
-        return live + tuple(sorted(self._adopted_held))
+        still runs, or whose group is held (`held`), in dispatch order."""
+        return tuple(a for a in self._attempts if self.is_unsettled(a))
 
     def is_unsettled(self, attempt: str) -> bool:
         """Whether an attempt this tier instantiated is not ENDED, or its plan is not done, or
@@ -496,8 +512,7 @@ class AttemptTier:
     def held(self, attempt: str) -> bool:
         """Whether the group of an attempt this tier instantiated may still live with no stop
         left to end it: it outlived its ladder's KILL, or its ladder raised. Such an attempt
-        does not settle and is not forgotten until `group_gone` (DL-426). One a restart
-        adopted held (`adopt_held`) has no instance; it is unsettled all the same."""
+        does not settle and is not forgotten until `group_gone` (DL-426)."""
         known = self._attempts.get(attempt)
         return known is not None and (known.survived or known.failed)
 
@@ -505,24 +520,22 @@ class AttemptTier:
         """The command group the attempt's `spawn.json` names, or None."""
         return command_group(self._known(attempt).spawn)
 
-    def adopt_held(self, attempt: str) -> None:
-        """A restart found the attempt closing and could not prove its group gone (`held`)."""
-        self._adopted_held.add(attempt)
+    def cleanup_group(self, attempt: str) -> tuple[int, str]:
+        """What the attempt's cleanup reads and stops: its recorded group, else `NO_GROUP`
+        with its run id, where the processes carrying its cookie are all that is left."""
+        return self.group(attempt) or (NO_GROUP, attempt)
 
     def group_gone(self, attempt: str) -> None:
-        """Nothing of the held attempt's command is left. An adopted one is released. A
-        stopping one has its record timeout read once more, which ends it now that its
-        command is dead; an ended one may settle (`on_ladder_done`). Either way `on_settled`
-        is called, so a drain that waited for the hold ends once nothing else is unsettled."""
-        if attempt in self._adopted_held:
-            self._adopted_held.discard(attempt)
-        else:
-            known = self._known(attempt)
-            known.survived = known.failed = False
-            if self.state(attempt) == "STOPPING":
-                self.record_timeout(
-                    attempt, self.machines.generation(self.key(attempt), RECORD_TIMEOUT)
-                )
+        """Nothing of the held attempt's command is left. A stopping one has its record timeout
+        read once more, which ends it now that its command is dead; an ended one may settle
+        (`on_ladder_done`). Either way `on_settled` is called, so a drain that waited for the
+        hold ends once nothing else is unsettled."""
+        known = self._known(attempt)
+        known.survived = known.failed = False
+        if self.state(attempt) == "STOPPING":
+            self.record_timeout(
+                attempt, self.machines.generation(self.key(attempt), RECORD_TIMEOUT)
+            )
         # the hold is lifted: a drain waiting for it may end now
         if self.on_settled is not None:
             self.on_settled()
@@ -531,6 +544,20 @@ class AttemptTier:
         """Whether a ladder started for the attempt has not ended yet."""
         ladder = self._known(attempt).ladder
         return ladder is not None and not ladder.done()
+
+    def hold_unread(self, attempt: str) -> None:
+        """A reading of the attempt's command failed and no ladder will run on it: its group
+        may live with no stop to end it, so it is held (`held`) until a reading succeeds
+        (`group_gone`)."""
+        self._known(attempt).survived = True
+
+    def ladder_task(self, attempt: str) -> asyncio.Task[None] | None:
+        """The attempt's ladder task, None when none was started."""
+        return self._known(attempt).ladder
+
+    def running_ladders(self) -> list[asyncio.Task[None]]:
+        """The ladders started and not ended yet: work the loop still waits for."""
+        return [a.ladder for a in self._attempts.values() if a.ladder and not a.ladder.done()]
 
     def knows(self, attempt: str) -> bool:
         """Whether `attempt` was dispatched here and not forgotten."""
@@ -554,6 +581,38 @@ class AttemptTier:
         self._attempts[attempt] = _Attempt()
         self.machines.run()
         return attempt
+
+    def restore_ended(self, attempt: str, outcome: AttemptOutcome, *, plan_done: bool) -> None:
+        """A restart's closing attempt: its instance in ENDED with the outcome the store holds,
+        never observed again; `plan_done` when its plan finished before the crash
+        (spec-restart §5, DL-433)."""
+        record = AttemptRecord(cause=outcome.cause, outcome=outcome)
+        self.machines.restore(self.key(attempt), ATTEMPT, {"attempt", "ENDED"}, record)
+        self._attempts[attempt] = _Attempt(plan_done=plan_done)
+
+    def restored_stop(self, attempt: str, cause: str) -> None:
+        """The stop the previous engine was taking, posted before any record so an exit its
+        TERM caused reads as the stop's (DL-426). Nothing is signalled: what is left of the
+        command is the cleanup's (`_what_is_left`), as for any ended attempt (spec-restart §4)."""
+        known = self._known(attempt)
+        known.quiet = True
+        try:
+            self._post(attempt, Event(STOP, cause))
+        finally:
+            known.quiet = False
+
+    def engine_died(self, attempt: str, outcome: AttemptOutcome | None = None) -> None:
+        """A restart found no record: the attempt ended with the engine that ran it, as
+        `unobservable` with its first stop's cause or `engine_death`, or with `outcome` (a
+        quarantine). What is left of its command is cleanup (spec-restart §4, DL-433)."""
+        self._post(attempt, Event(ENGINE_DIED, outcome))
+
+    def cleanup(self, attempt: str) -> None:
+        """A restart's closing attempt: the reading of what is left of its command, and the
+        ladder on it, as at the record (`_what_is_left`, spec-restart §5)."""
+        outcome = self.outcome(attempt)
+        assert outcome is not None  # a closing attempt is restored with its outcome
+        self._what_is_left(attempt, outcome)
 
     def spawn_recorded(self, attempt: str, spawn: Mapping[str, Any]) -> None:
         """`spawn.json` appeared. Post it before any record found in the same poll; a second
@@ -696,10 +755,20 @@ class AttemptTier:
         killed before `spawn.json`) gets the ladder now. Either way the task holds the
         attempt's ladder slot, so the outcome is journaled `ladder: running` and the job's next
         run waits until a reading finds nothing left. Where only the leader can be told apart,
-        `command_alive` is false once it exited, and nothing is done."""
+        `command_alive` is false once it exited, and nothing is done. With no recorded group,
+        the processes carrying the attempt's cookie are what is left (`unnamed_alive`); a
+        quarantined attempt is read that way whatever its records say, since they prove no
+        group (spec-restart §7)."""
         known = self._attempts[attempt]
-        group = command_group(known.spawn)
-        if group is None or self.ladder_running(attempt) or not self.command_alive(*group):
+        if self.ladder_running(attempt):
+            return
+        group = None if outcome.cause == QUARANTINED else command_group(known.spawn)
+        if group is None:
+            # no recorded group: the processes carrying its cookie (spec-restart §4)
+            if self.unnamed_alive is None or not self.unnamed_alive(attempt):
+                return
+            group = (NO_GROUP, attempt)
+        elif not self.command_alive(*group):
             return
         if outcome.kind == "natural" and not self.processes.leaked(attempt):
             return
@@ -726,6 +795,8 @@ class AttemptTier:
         timer. The timer's generation is read now, right after the macrostep that moved it."""
         generation = self.machines.generation(self.key(attempt), RECORD_TIMEOUT)
         known = self._attempts[attempt]
+        if known.quiet:
+            return  # a restart's recorded stop: the cleanup runs the ladder (`restored_stop`)
         if known.spawn is None:
             self.processes.kill_wrapper(attempt)
         else:

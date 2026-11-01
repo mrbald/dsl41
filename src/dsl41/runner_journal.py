@@ -571,7 +571,7 @@ class OpenTable:
         self.pending: dict[int, PendingDispatch] = {}
         self.plans: dict[str, OpenPlan] = {}
         #: the update in STOPPING: its `config intent` record's body with the record's seq, until
-        #: a `config applied` names its token (startup step 4); None when no update stops
+        #: a `config applied` names its token (the restart resumes it); None when no update stops
         self.update: dict[str, Any] | None = None
         #: the end of the outcome just noted, which the plan committed with it carries
         self._ended: dict[str, str | None] = {}
@@ -772,7 +772,7 @@ _STOP_RECORDS: Final = frozenset({"draining", "clean_shutdown", "unclean_shutdow
 def outcome_end(body: Mapping[str, Any]) -> str | None:
     """The end an `outcome` record holds, naive UTC ISO: the wrapper's recorded end, or for a
     completion with no wrapper record (an adapter's own result) the record's instant; None for
-    an interruption with no record (DL-426, spec-crash step 5)."""
+    an interruption with no record (DL-426, spec-restart §4)."""
     ended = (body.get("status") or {}).get("ended_at")
     if isinstance(ended, str):
         return naive_utc(datetime.fromisoformat(ended)).isoformat()
@@ -1000,6 +1000,9 @@ class Journal:
         #: concurrency-model ss2: this store's identity, part of every fingerprint
         self.baseline_id = meta.get("baseline_id", "")
         self.clock_domain = meta.get("clock_domain", "virtual")
+        #: the run root's identity, the first half of every process cookie (spec-restart §3);
+        #: None for a store written before it, which a restart refuses
+        self.root_id = meta.get("root_id")
         self._lock = lock
         self._subscribers: list[Subscription] = []
         #: False while a restart has not passed every refusal: nothing is recorded then, not

@@ -1039,7 +1039,6 @@ def test_a_restart_refuses_a_store_that_lost_a_verdict(tmp_path: Path) -> None:
             run_root,
             clock=RealClock(),
             adapters={"CMD": LocalCommandAdapter(grace_seconds=2.0)},
-            settle_seconds=0.0,
         )
 
     with pytest.raises(EngineError, match="has no decision"):

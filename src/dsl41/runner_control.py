@@ -927,6 +927,8 @@ class ControlServer:
         answer: dict[str, Any] = {"ok": True, "jobs": jobs, "spec_drift": self._spec_drift()}
         # spec-reload: the configuration rev the engine runs, and an update while it stops
         answer["config_rev"] = self.engine.config_rev
+        # spec-restart ss8: the lifecycle's state, STARTING until a restart's barrier lifts
+        answer["engine"] = self.engine.lifecycle.state
         answer["update_window_s"] = self._application_window()
         update = self.engine.update.view()
         if update is not None:

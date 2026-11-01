@@ -117,7 +117,7 @@ STOPPED = STARTING + stop_requested
 
 ## attempt
 
-Shown: 12. Folded: 2 (ignored 1, internal 1). Rows in the chart: 14.
+Shown: 15. Folded: 2 (ignored 1, internal 1). Rows in the chart: 17.
 
 ### phase
 
@@ -126,11 +126,14 @@ SPAWNING <- initial
 RUNNING = SPAWNING + spawn_recorded // `spawn.json` was seen
 STOPPING = SPAWNING + stop
         || RUNNING + stop
-ENDED = SPAWNING + exit_recorded
+ENDED = SPAWNING + engine_died
+     || SPAWNING + exit_recorded
      || SPAWNING + spawn_failed
      || SPAWNING + wrapper_gone
+     || RUNNING + engine_died
      || RUNNING + exit_recorded
      || RUNNING + wrapper_gone
+     || STOPPING + engine_died
      || STOPPING + exit_recorded
      || STOPPING + record_timeout
      || STOPPING + spawn_failed
