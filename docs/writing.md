@@ -1,5 +1,11 @@
 # Writing for readers
 
+For maintainers writing or reviewing a human-facing document so its named
+reader can complete a task. Follow the maintainer track under
+[Documents](../README.md#documents).
+Implementation gates belong to [agent-workflow.md](agent-workflow.md);
+this page covers the document's reader, content and presentation.
+
 Status: binding for every human-facing document (DL-405, DL-406): the README, the
 pages under `docs/` that are not frozen contracts, the block cards, and the
 READMEs and runbooks under `examples/`. The `spec-review` procedure (DL-225)
