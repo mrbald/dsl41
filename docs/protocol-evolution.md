@@ -67,17 +67,22 @@ a row.
 | **Wrapper input spec** — the one JSON object on the wrapper's stdin (`docs/supervisor-protocol.md` §2, DL-150) | its own `version` field | **refused**, unlike the two spool files the same wrapper writes. §2 is frozen and the whole object is fingerprinted. A key the schema does not pin has no pinned type, and the fingerprint is injective only over pinned types | refused **by the wrapper, after the fork**. The supervisor's gate pins the types; the value is the wrapper's own check. An unimplemented `version` exits 2 with no spawn record. A spec that is not readable JSON exits 1, before the version is read | refused. The supervisor's gate refuses a spec with no `version` key before the fork, as a missing key (supervisor-protocol §2, DL-150). A spec that reaches the wrapper without one exits 2, the same as unimplemented (supervisor-protocol §4 step 6) | the fork it is passed to. The wrapper points stdin at `/dev/null` after the read | none beyond the door |
 | **Perimeter journal** — `perimeter.jsonl` (`docs/access-model.md` §6, DL-146, DL-147) | the record's `rec` kind; no per-record version field | ignored. Evolution is additive: an incompatible change takes a NEW kind name, as in the WAL | not applicable by construction. No engine dispatches this journal: seq recovery reads only `access_seq`, and the rest is audit. An unknown kind is skipped, not refused | not applicable: there is no version field | as durable as its run root. Pruned only with the whole root: truncating it in place would restart `access_seq` and forge duplicate keys | no retained root holds one |
 | **Access role map** — the `--access-map` file (`docs/access-model.md` §4, DL-150) | `format_version` | refused. The map is a closed table, and the loader cannot check the meaning of a key it does not pin | refused, naming the integer this loader implements | refused, the same as unsupported | the operator's own file. It lives outside the estate: it is policy, not evidence, and a reload replaces it whole | no operator's map still names it |
+| **Stored configurations** — `engine.db` configuration rows (DL-437) | `configuration_format_version`, 1 or 2 | refused, for both versions | refused by name | selects the supported legacy version 1 | the retention lifetime of the root | no retained row needs the reader |
+| **Reload plans** — `plans/TOKEN/plan.json` (DL-437) | `plan_format_version`, 1 or 2 | ignored | refused by name | selects the supported legacy version 1 | the retention lifetime of the plan and any interrupted update that needs it | no retained plan needs the reader |
+| **Main-config input mapping** — `main-inputs.json`, in a plan or stored capture (DL-437) | `format_version = 1` | ignored | refused by name | refused | as durable as its configuration row or plan | no retained capture needs the reader |
 | **Control socket** — `docs/control-protocol.md` §2 | `"v"` on every request, queries and `subscribe` included | ignored | refused. The refusal does not close the connection | refused, the same as unsupported | the request that carries it (DL-150). The version is per request, not per connection: one connection may carry several requests, and a refusal ends none of them. `subscribe` is the exception. Its request opens a stream that owns the connection until hangup (§5), so its instance lasts as long as the connection | none beyond the door: nothing durable holds the dialect |
 | **Supervisor socket** — `docs/supervisor-protocol.md` §5 | `"v"` on every request, plus `incarnation` on every mutating verb except `ACQUIRE`, which grants a free lease without one (§5). MAINTENANCE_STOP has its own version, 2; every other verb is 1 (DL-401) | ignored | refused as `unsupported_version`. The refusal does not close the connection. A retired version is refused by name: MAINTENANCE_STOP v 1 carries a `detail` naming DL-401 | refused, the same as unsupported | the request that carries it, as on the control socket | as on the control socket |
 | **`state_machine_version`** — `docs/period-model.md` §2.1 | the field itself, on `segment`, on the seal, on `staged_manifest.json`, on `candidate.json`, on the committed period manifest and on the attestation | not a format question: one executable implements exactly one version and refuses every other | refused | refused by construction: no carrier defaults it | the estate | not retired but **replaced**: a full drain and a new-estate genesis (the last note below; `docs/period-model.md` §2.1) |
 
 An **absent version** (DL-157) is refused on every row that carries a
-version, except one (DL-227). A row that is strict on an unknown field is
-strict on a missing version too. The closed row shows why: §3.2 puts every
+version, except wrapper-owned spool files (DL-227), stored configurations
+and reload plans (DL-437). The latter two select their supported legacy
+version 1 when the discriminator is absent.
+The closed row is strict on a missing version: §3.2 puts every
 typed field on the wire, so an unknown field is corruption, and an absent
 field is corruption for the same reason, because no retained instance omits
-one. The one row that passes an absent version is the wrapper-owned spool
-files. Its reader is `runner_procid.spool_version_supported`. It passes an
+one. The wrapper-owned spool reader is
+`runner_procid.spool_version_supported`. It passes an
 absent `version` because the Tier-0 wrapper writes the file before any
 reader exists to require one (DL-227). Tolerance of unknown fields decides
 nothing about the version column: the supervisor's evidence files,
@@ -86,6 +91,25 @@ require the version. The closed row refuses an absent version on every
 member, `staged_manifest.json` included.
 
 ### Notes on the rows
+
+**Main-config captures and plans (DL-437).** Configuration rows with a
+`source_capture` use `configuration_format_version = 2`; readers retain
+the unversioned legacy row as version 1. Both refuse unknown fields and
+unsupported versions by name. DL-437 changes the legacy version 1 reader
+from ignoring unknown top-level fields to refusing them.
+No snapshot or state-version migration is implied.
+Main-config plans use `plan_format_version = 2`; an absent version
+selects the supported legacy plan reader. Plan readers tolerate unknown
+fields and refuse unsupported versions by name. `main-inputs.json` requires
+`format_version = 1`, refuses unsupported versions by name and ignores
+unknown fields. It binds the config, environment, policy,
+source paths, membership and collision-free part names into the token.
+Each Python source part is retained with its generated JIL; generated JIL
+alone is executed at update and replay. Every part has a SHA-256 in
+`plan.json`, which is published last. Configuration rows retain the same
+captured bytes, including the mapping. These formats live as long as the
+run root and its retained plans. A reader cannot retire a supported
+version while a retained instance needs it.
 
 **The WAL row: the kind is the discriminator, and it is strict.** A record
 kind is not an optional field. The version is gated at the opening

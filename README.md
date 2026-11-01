@@ -759,6 +759,8 @@ Shared cores:
 - `src/dsl41/runner_stops.py`: the engine's side of those tiers: the stop
   ladder on a recorded group, the tiers' timers, an attempt's spool reads,
   and the hand-back of each outcome and lifecycle intent to the engine.
+- `src/dsl41/main_config.py`: the host config, include globs, captured compiler inputs,
+  lint policy and original source mapping (DL-437).
 - `src/dsl41/estate_manifest.py`: the estate manifest, `estate.toml`: the
   application's one declaration of its catalog files, properties layers,
   timezone and semantic switches, read by the verbs' `--manifest` option.

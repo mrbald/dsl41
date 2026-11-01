@@ -1069,7 +1069,12 @@ class _Lowerer:
             # DL-39: the catalog key is the semantic name, `\:` unescaped as in condition refs
             name = unescape_job_name(name)
         if name is not None and name in self.jobs:
-            self.err(f"duplicate job name {name!r} in compilation set", stmt.span)
+            first = self.jobs[name].span
+            origin = first.at if first is not None else "unknown"
+            self.err(
+                f"duplicate job name {name!r} in compilation set; first defined at {origin}",
+                stmt.span,
+            )
             return
         attrs = self._collect_attrs(stmt)
         if name is None or attrs is None:

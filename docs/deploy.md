@@ -9,16 +9,28 @@ to the next milestone.
 ## Install the package and unit
 
 1. Install the release using the [package instructions](../README.md#install).
-   Arrange for its executable to be available at `/opt/dsl41/bin/dsl41`.
+   Install it in `/opt/dsl41/releases/<version>`, with its executable at
+   `/opt/dsl41/releases/<version>/bin/dsl41`. Substitute the concrete installed
+   version in the commands and unit below.
 2. Prepare the `dsl41` user and group. Give that user a writable run root at
    `/srv/dsl41/runs/nightbank` and access to the estate and its job commands.
-3. Install your estate and its manifest. The unit uses
-   `/opt/dsl41/nightbank/estate/small/estate.toml`.
+3. Install application inputs separately under `/opt/nightbank/cfg`.
+   Install the [example main config](../examples/nightbank/deploy/dsl41.toml)
+   as `/etc/dsl41/dsl41.toml`. Its include glob selects the application's JIL;
+   its properties path selects the site's bindings. Python inputs may use an
+   `estate()` function returning `CatalogBuilder`, as with `dsl41 build`.
    The [Nightbank example](../examples/nightbank/README.md) is synthetic and
    repo-only; installing the Python package does not install that estate.
-   For a site estate, set the unit's manifest and run-root paths to match it.
+   Set `engine.run_root`, input patterns and properties in the main config.
+   Paths may be absolute or relative to that config. The engine root must be
+   absolute. Patterns support `*`, `?` and brackets; `**` is refused.
+   The config is a regular file, never a symlink. Keep `estate.toml` for
+   explicit portable fixtures and legacy `--manifest` invocations.
 4. Copy the [engine unit](../examples/nightbank/deploy/dsl41-engine.service)
    to `/etc/systemd/system/dsl41-engine.service`.
+   Substitute `<version>` in both executable paths. Set `RequiresMountsFor`
+   to the configured run root and every required input filesystem.
+   Set `ExecStop`'s socket to that root's `control.sock`.
 5. As root, reload systemd's unit definitions:
 
    ```sh
@@ -41,7 +53,7 @@ Read the unit in these groups:
 | `[Unit]`, `Description`, `RequiresMountsFor` | Name the service and require the run root's filesystem before starting. An absent mount must not look like a fresh root. |
 | `StartLimitIntervalSec`, `StartLimitBurst` | Allow at most five starts in 300 seconds, then leave a repeated crash failed. |
 | `[Service]`, `Type`, `User`, `Group` | Run the engine directly as `dsl41:dsl41`. |
-| `ExecStart` | Run the manifest on the named root. A root containing `engine.db` resumes its stored run. |
+| `ExecStart` | Read the main config. A root containing `engine.db` resumes its stored active catalog. |
 | `ExecStop` | Ask for a drain with `engine stop --wait`. Wait for the socket to stop answering and `leader.lock` to become free. |
 | `TimeoutStopSec` | Give the stop 45 seconds with the default graces. Revisit this if you change the engine's grace settings. |
 | `Restart`, `RestartSec` | Restart after any exit, including 0, after five seconds. A CLI stop outside systemd therefore comes back on the same root. A systemd stop keeps the service down. |
@@ -67,15 +79,29 @@ Do not launch a second engine on the service's root. For a foreground run
 with the service stopped, run this as the service user:
 
 ```sh
-/opt/dsl41/bin/dsl41 run \
-  --manifest /opt/dsl41/nightbank/estate/small/estate.toml \
-  --run-root /srv/dsl41/runs/nightbank
+/opt/dsl41/releases/<version>/bin/dsl41 run --config /etc/dsl41/dsl41.toml
 ```
 
 The engine prints `engine up; control socket: ...` when startup finishes.
 It keeps running and accepts commands from another terminal.
 It stores inputs in the root's `engine.db` and creates `engine.toml` with
 default settings on the first run. The same command resumes an existing root.
+Keep stop graces, snapshot interval and retention in `RUN_ROOT/engine.toml`.
+With the default graces, the unit allows 45 seconds for a stop.
+Check that timeout before changing either grace.
+
+The main config's `[lint]` defaults are `refuse = "none"` and `ignore = []`.
+Findings stay visible. `error` blocks unignored errors; `warn` also blocks
+warnings. Info never blocks. Only registered lint codes may be ignored.
+This policy cannot suppress input, lowering, exception or preflight errors.
+`dsl41 lint --config /etc/dsl41/dsl41.toml` exits 1 for blocking findings and
+2 for refused inputs. Exit 0 under `none` may include findings.
+`dsl41 rehearse --config /etc/dsl41/dsl41.toml` uses the same interpretation;
+its optional output `--run-root` must neither equal, contain nor lie inside
+the engine's root.
+Python preparation executes authoring code. Captured generated JIL is the
+authority for update and replay; imported dependencies are not fully tracked.
+Use prebuilt JIL when the deployment requires reproducible builds.
 
 | Exit | What it means when `run` returns |
 | --- | --- |
@@ -92,19 +118,19 @@ journalctl -u dsl41-engine.service
 ```
 
 Under the unit, read `engine stopped: ...`, startup refusals and exit-6/7
-reports here ([refusals](../src/dsl41/cli_common.py#L406),
-[fault reports](../src/dsl41/cli_run.py#L496)).
+reports here ([refusals](../src/dsl41/cli_common.py#L412),
+[fault reports](../src/dsl41/cli_run.py#L559)).
 The unit leaves output routing to systemd's defaults:
 stdout goes to the journal and stderr follows it, unless the host overrides
 those defaults. See [systemd output routing](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#StandardOutput=)
 and [journalctl's unit filter](https://www.freedesktop.org/software/systemd/man/latest/journalctl.html#-u).
 The engine prints its shutdown record in
-[the run command](../src/dsl41/cli_run.py#L524).
+[the run command](../src/dsl41/cli_run.py#L611).
 
 ## Watch the engine and jobs
 
 ```sh
-/opt/dsl41/bin/dsl41 query status \
+/opt/dsl41/releases/<version>/bin/dsl41 query status \
   --socket /srv/dsl41/runs/nightbank/control.sock
 ```
 
@@ -134,12 +160,12 @@ To keep it down, run this step as root:
    ```
 
    Systemd runs the drain through the unit's
-   [ExecStop](../examples/nightbank/deploy/dsl41-engine.service#L28).
+   [ExecStop](../examples/nightbank/deploy/dsl41-engine.service#L30).
 
 For a foreground engine, request the drain directly:
 
 ```sh
-/opt/dsl41/bin/dsl41 engine stop --wait \
+/opt/dsl41/releases/<version>/bin/dsl41 engine stop --wait \
   --socket /srv/dsl41/runs/nightbank/control.sock
 ```
 
@@ -175,7 +201,7 @@ or in the foreground terminal. The stored record says how the stop ended:
 | `shutdown_during_startup` | The operator stopped restart catch-up; the next restart takes the remaining steps. This stop exits 0. |
 
 The [shutdown actions](../src/dsl41/engine_charts.py#L213) define these
-records; [catch-up handling](../src/dsl41/runner.py#L692) retains the work.
+records; [catch-up handling](../src/dsl41/runner.py#L687) retains the work.
 
 The TUI does not show the drain, its deadline, the stored plan or the
 interruption evidence. Use `dsl41 query status` and the exit status of
@@ -187,11 +213,8 @@ view. Once the engine exits, its socket cannot answer status.
 
 1. Prepare the changed estate on disk, then build a plan:
 
-   Repeat any site `--properties` and `--environment` selections used at start.
-
    ```sh
-   /opt/dsl41/bin/dsl41 reread /opt/dsl41/nightbank/estate/small \
-     --run-root /srv/dsl41/runs/nightbank
+   /opt/dsl41/releases/<version>/bin/dsl41 reread
    ```
 
    The command prints added, changed and removed jobs, the unchanged count,
@@ -206,8 +229,7 @@ view. Once the engine exits, its socket cannot answer status.
    before submitting.
 
    ```sh
-   /opt/dsl41/bin/dsl41 update TOKEN \
-     --run-root /srv/dsl41/runs/nightbank --wait
+   /opt/dsl41/releases/<version>/bin/dsl41 update TOKEN --wait
    ```
 
    The engine checks the plan against its current state.
@@ -228,6 +250,34 @@ view. Once the engine exits, its socket cannot answer status.
 
 3. Run the status command above to check `config_rev`, any pending `update`
    and held interruption evidence.
+
+Both reload commands use `/etc/dsl41/dsl41.toml`; use `--config PATH` for a
+different host config. Reread prints job origins and retains findings with
+the plan. A source move alone keeps jobs running. Update uses only the
+reviewed plan's captured bytes and policy, even after sources are edited or
+removed. Update reads only `engine.run_root` from the selected TOML file.
+Changes to `as_machine`, `machine_policy` or access-map selection need restart.
+Reread names any changed host settings and requests that restart first.
+Changing `engine.run_root` selects another root; it does not migrate an engine.
+
+## Upgrade the engine
+
+Only select a release documented as compatible with the existing store and
+state-machine version. The stored active estate must match what that release
+can interpret. Compatibility is allocated per release; arbitrary upgrades
+and rollbacks are not supported.
+
+A root created through legacy files or a manifest has no main-config capture.
+It cannot resume through `--config`. Keep its legacy invocation or select a
+fresh root for the main-config service. There is no root migration command.
+
+1. Drain the engine with `systemctl stop dsl41-engine.service`.
+2. Install the new release in its own `/opt/dsl41/releases/<version>` directory.
+3. Select that executable in both `ExecStart` and `ExecStop`.
+4. Run `systemctl daemon-reload`.
+5. Run `systemctl start dsl41-engine.service` and check status.
+
+Application inputs and reviewed updates are independent of that selection.
 
 ## Recover after the engine or box dies
 
@@ -280,18 +330,36 @@ A stop during catch-up leaves the remaining work for the next restart.
 
 A refused resume leaves the unit down on exit 2. Read its named refusal;
 do not erase the root to bypass it. The restart checks the lock, store
-version and identity, clock domain, estate and any pending update's plan.
+version and identity, clock domain and any pending update's captured plan.
+A missing or unreadable interrupted-update plan refuses before a journal
+write or process signal.
+
+Main-config restart restores the last applied estate interpretation from
+captured bytes. Estate and lint edits remain pending, including invalid
+`engine.environment` selections. Restart still reads the selected config
+as TOML and requires its supported format. It applies current `as_machine`,
+`machine_policy` and access-map settings; invalid host settings refuse with
+exit 2. An omitted access map selects owner-only access. These settings stay
+effective while an interrupted update applies its captured plan.
+Other runtime-profile fields retain their stored values and checks (DL-437).
+
+Restart checks machine placement against the stored catalog and current
+host settings. It does not repeat the general launch preflight or lint.
+The captured JIL is recompiled without opening the original sources or
+importing Python. After startup a synchronous source scan reports
+`N pending source changes; run dsl41 reread` once, including a zero count.
+Legacy file and manifest starts keep their matching-estate checks.
 See [runner recovery](runner-design.md#7-journal-and-recovery-e1-prod-grade)
 and DL-433 in the [decision log](decision-log.md) for the restart rule.
 
 2. Read the engine state as the service user:
 
    ```sh
-   /opt/dsl41/bin/dsl41 query status \
+   /opt/dsl41/releases/<version>/bin/dsl41 query status \
      --socket /srv/dsl41/runs/nightbank/control.sock
    ```
 
    Look for `engine: STARTING` during catch-up, then `engine: RUNNING`.
    A fast restart may already report RUNNING on the first query.
-   The [status response](../src/dsl41/runner_control.py#L930) reads the
+   The [status response](../src/dsl41/runner_control.py#L860) reads the
    [engine lifecycle](../src/dsl41/engine_charts.py#L251).

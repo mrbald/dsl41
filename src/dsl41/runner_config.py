@@ -192,6 +192,19 @@ def profile_drift(derived: RuntimeProfile, pinned: RuntimeProfile) -> list[str]:
     )
 
 
+def with_host_settings(
+    profile: RuntimeProfile, as_machine: Iterable[str], machine_policy: str
+) -> RuntimeProfile:
+    """Override only this incarnation's host identity and placement policy (DL-437)."""
+    return RuntimeProfile.model_validate(
+        {
+            **profile.model_dump(mode="json"),
+            "as_machine": list(as_machine),
+            "machine_policy": machine_policy,
+        }
+    )
+
+
 # ------------------------------------------------------------ configuration row
 
 
@@ -205,6 +218,7 @@ class Configuration(BaseModel):
     catalog: CatalogIR
     profile: RuntimeProfile
     non_idempotent: dict[str, str] = {}
+    source_capture: dict[str, str] = {}
 
     @property
     def catalog_hash(self) -> str:
@@ -216,13 +230,14 @@ class Configuration(BaseModel):
 
     def to_bytes(self) -> bytes:
         """The row's canonical bytes."""
-        return canonical_bytes(
-            {
-                "catalog": catalog_payload(self.catalog),
-                "profile": self.profile.model_dump(mode="json"),
-                "non_idempotent": dict(self.non_idempotent),
-            }
-        )
+        payload: dict[str, Any] = {
+            "catalog": catalog_payload(self.catalog),
+            "profile": self.profile.model_dump(mode="json"),
+            "non_idempotent": dict(self.non_idempotent),
+        }
+        if self.source_capture:
+            payload.update(configuration_format_version=2, source_capture=self.source_capture)
+        return canonical_bytes(payload)
 
     def digest(self) -> str:
         """The row's address: sha256 over its canonical bytes."""
@@ -233,10 +248,25 @@ class Configuration(BaseModel):
         """A row read back; a row that does not read as one is refused naming `where`."""
         try:
             raw: Any = decode(data)
+            if not isinstance(raw, dict):
+                raise TypeError("configuration must be an object")
+            version = raw.get("configuration_format_version", 1)
+            if type(version) is not int or version not in (1, 2):
+                raise EngineError(f"{where}: unsupported configuration_format_version {version!r}")
+            allowed = {"catalog", "profile", "non_idempotent", "configuration_format_version"}
+            if version == 2:
+                allowed |= {"configuration_format_version", "source_capture"}
+                if not raw.get("source_capture"):
+                    raise EngineError(f"{where}: configuration version 2 needs source_capture")
+            if set(raw) - allowed:
+                raise EngineError(
+                    f"{where}: unknown configuration fields {sorted(set(raw) - allowed)}"
+                )
             return cls(
                 catalog=CatalogIR.model_validate(raw["catalog"]),
                 profile=RuntimeProfile.model_validate(raw["profile"]),
                 non_idempotent=dict(raw.get("non_idempotent") or {}),
+                source_capture=dict(raw.get("source_capture") or {}),
             )
         except (CanonError, KeyError, TypeError, ValidationError) as exc:
             raise EngineError(f"{where}: unreadable configuration row: {exc}") from exc

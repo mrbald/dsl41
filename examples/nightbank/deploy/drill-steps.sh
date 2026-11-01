@@ -18,26 +18,27 @@ source "$(dirname "${BASH_SOURCE[0]}")/drill-lib.sh"
 ROWS=(install start restart reboot kill-engine drain reload leak refusal start-limit upgrade)
 
 step_install() { # the wheel, the nightbank estate, the drill's jobs, the unit and its user
-    local wheel out
+    local wheel out version
     sudo install -d -o "$(id -un)" -g "$(id -gn)" "$STATE"
     # the unit's User= and Group=; the drill's own user is `runner`
     getent group dsl41 >/dev/null || sudo groupadd --system dsl41
     id dsl41 >/dev/null 2>&1 || sudo useradd --system --gid dsl41 --create-home \
         --home-dir /var/lib/dsl41 --shell /usr/sbin/nologin dsl41
-    # the wheel built from the checkout, with the lock's dependencies; the upgrade row
-    # installs the newer one into the same venv
+    # Engine releases occupy separate versioned directories (DL-437).
     wheel=$(find "$DELIVERY" -maxdepth 1 -name 'dsl41-*.whl' ! -name '*.post*' | head -n 1)
     [ -n "$wheel" ] || fail "no dsl41 wheel in $DELIVERY"
+    version=$(basename "$wheel")
+    version=${version#dsl41-}
+    version=${version%%-*}
+    VENV=/opt/dsl41/releases/$version
+    DSL41=$VENV/bin/dsl41
     sudo python3.12 -m venv "$VENV"
     sudo "$VENV/bin/pip" install --quiet --disable-pip-version-check \
         -r "$DELIVERY/requirements.txt"
     sudo "$VENV/bin/pip" install --quiet --disable-pip-version-check --no-deps "$wheel"
-    # docs/deploy.md: the executable at /opt/dsl41/bin/dsl41
-    sudo install -d -m 0755 /opt/dsl41/bin
-    sudo ln -sfn "$VENV/bin/dsl41" "$DSL41"
     installed_version | tee "$STATE/version-installed"
     # the estate is root's and read-only to the service, as a release's would be
-    sudo install -d -m 0755 "$NIGHTBANK/estate"
+    sudo install -d -m 0755 "$NIGHTBANK"
     sudo cp -R "$REPO/examples/nightbank/estate/small" "$ESTATE"
     sudo cp -R "$REPO/examples/nightbank/bin" "$NIGHTBANK/bin"
     sudo install -d -m 0755 "$(dirname "$DRILL_JOB")"
@@ -63,22 +64,9 @@ esac
 SH
     sudo chmod 0755 "$DRILL_JOB"
     write_drill_jil v1
-    # The site's manifest: the estate's files and the drill's jobs, the night's properties as a
-    # layer, and no environments, since the unit's ExecStart names none and a manifest that
-    # declares any refuses a start without one (DL-407).
-    "$VENV/bin/python" -I - "$MANIFEST" <<'PY' | sudo tee "$MANIFEST.site" >/dev/null
-import json
-import sys
-import tomllib
-
-shipped = tomllib.load(open(sys.argv[1], "rb"))
-print(f"name = {json.dumps(shipped['name'])}")
-print(f"files = {json.dumps([*shipped['files'], 'drill.jil'])}")
-print('properties = ["night.properties"]')
-print(f"timezone = {json.dumps(shipped['timezone'])}")
-PY
-    sudo mv "$MANIFEST.site" "$MANIFEST"
-    sudo chmod 0644 "$MANIFEST"
+    # The host config owns the application input glob and properties (DL-437).
+    sudo install -d -m 0755 /etc/dsl41
+    sudo install -m 0644 "$REPO/examples/nightbank/deploy/dsl41.toml" "$CONFIG"
     # The region anchors are six hours out, so no calendar start falls inside the drill.
     "$VENV/bin/python" -I - "$NIGHT" <<'PY' | sudo tee "$ESTATE/night.properties" >/dev/null
 import sys
@@ -118,11 +106,12 @@ ENV
     # docs/deploy.md: the run root is the service user's; the engine creates what is inside
     sudo install -d -m 0755 /srv/dsl41/runs
     sudo install -d -o dsl41 -g dsl41 -m 0700 "$ROOT"
-    # clean means no finding at all: reread refuses a warning as it refuses an error
-    out=$(as_dsl41 "$DSL41" lint --manifest "$MANIFEST") || fail "lint refused the estate: $out"
+    # The main config's declared lint policy determines admission (DL-437).
+    out=$(as_dsl41 "$DSL41" lint --config "$CONFIG") || fail "lint refused the estate: $out"
     [ -z "$out" ] || fail "the installed estate does not lint clean: $out"
-    sudo install -m 0644 "$REPO/examples/nightbank/deploy/dsl41-engine.service" \
-        "/etc/systemd/system/$UNIT"
+    sed "s/<version>/$version/g" "$REPO/examples/nightbank/deploy/dsl41-engine.service" | \
+        sudo tee "/etc/systemd/system/$UNIT" >/dev/null
+    sudo systemd-analyze verify "/etc/systemd/system/$UNIT"
     sudo systemctl daemon-reload
     sudo systemctl enable "$UNIT"
     [ "$(systemctl is-enabled "$UNIT")" = enabled ] || fail "$UNIT is not enabled"
@@ -237,7 +226,7 @@ step_reload() { # reread and update with a live job and a changed definition (DL
     wait_for 60 "DRILL_LONG_C is running" attempt_is DRILL_LONG_C 1 RUNNING
     rev=$(status | jq .config_rev)
     write_drill_jil v2
-    out=$(cli reread "$ESTATE" --run-root "$ROOT") || rc=$?
+    out=$(cli reread) || rc=$?
     printf '%s\n' "$out"
     [ "$rc" = 1 ] || fail "reread exited $rc, not 1 (a plan that stops a running job)"
     grep -qx 'changed: DRILL_LONG_C' <<<"$out" || fail "reread does not name DRILL_LONG_C changed"
@@ -245,10 +234,10 @@ step_reload() { # reread and update with a live job and a changed definition (DL
     token=$(sed -n 's/^token: //p' <<<"$out")
     [ -n "$token" ] || fail "reread printed no token"
     rc=0
-    out=$(cli update "$token" --run-root "$ROOT" --wait) || rc=$?
+    out=$(cli update "$token" --wait) || rc=$?
     printf '%s\n' "$out"
     [ "$rc" = 2 ] || fail "update without consent exited $rc, not 2"
-    out=$(cli update "$token" --run-root "$ROOT" --stop-running --wait) ||
+    out=$(cli update "$token" --stop-running --wait) ||
         fail "update --stop-running --wait failed: $out"
     printf '%s\n' "$out"
     grep -q '^applied: catalog revision' <<<"$out" || fail "update printed no application"
@@ -367,21 +356,40 @@ assert_stays_failed() { # assert_stays_failed CODE
     [ "$(prop ExecMainStatus)" = "$1" ] || fail "exit $(prop ExecMainStatus), expected $1"
 }
 
-step_refusal() { # an estate changed without an update: exit 2, and no restart loop
-    local mark
+step_refusal() { # pending source changes cannot deploy or refuse restart (DL-437)
+    local mark rev
     # the estate the row found, restored afterwards whichever rows ran before it
     cp "$DRILL_JIL" "$STATE/drill.jil.before"
+    rev=$(status | jq .config_rev)
     write_drill_jil v3
     mark=$(date +%s)
     manual restart
-    assert_stays_failed 2
-    wait_for 10 "the journal names the changed estate" \
-        journal_has "$mark" "catalog hash mismatch: the estate changed"
-    ok "the changed estate was refused with exit 2 and the unit stayed down"
+    wait_running
+    wait_for 10 "the journal reports pending sources" \
+        journal_has "$mark" "1 pending source changes; run dsl41 reread"
+    [ "$(status | jq .config_rev)" = "$rev" ] || fail "restart applied an unreviewed source"
+    ok "restart retained revision $rev and reported the pending source"
     sudo install -m 0644 "$STATE/drill.jil.before" "$DRILL_JIL"
+    # A store version mismatch still refuses startup (DL-433, DL-437).
+    sudo systemctl stop "$UNIT"
+    sudo "$VENV/bin/python" - "$ROOT/engine.db" <<'PY'
+import sqlite3
+import sys
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("UPDATE meta SET value = '999' WHERE key = 'state_version'")
+PY
+    manual start
+    assert_stays_failed 2
+    sudo "$VENV/bin/python" - "$ROOT/engine.db" <<'PY'
+import sqlite3
+import sys
+from dsl41.runner_ledger import STATE_MACHINE_VERSION
+with sqlite3.connect(sys.argv[1]) as db:
+    db.execute("UPDATE meta SET value = ? WHERE key = 'state_version'", (str(STATE_MACHINE_VERSION),))
+PY
     manual start
     wait_running
-    ok "reset-failed and a start resumed $ROOT once the estate matched again"
+    ok "a named state version refusal kept the unit down; restoring the store recovered it"
 }
 
 step_start_limit() { # five crashes in 300 s leave the unit failed; reset-failed recovers
@@ -405,16 +413,28 @@ step_start_limit() { # five crashes in 300 s leave the unit failed; reset-failed
     ok "reset-failed and a start recovered the engine on $ROOT"
 }
 
-step_upgrade() { # a newer wheel in the same venv; the restart resumes the same root
-    local wheel before after rev
+step_upgrade() { # select a compatible engine release independently of app inputs (DL-437)
+    local wheel before after rev version
     wheel=$(find "$DELIVERY" -maxdepth 1 -name 'dsl41-*.post*.whl' | head -n 1)
     [ -n "$wheel" ] || fail "no newer dsl41 wheel in $DELIVERY"
     before=$(installed_version)
     rev=$(status | jq .config_rev)
+    sudo systemctl stop "$UNIT"
+    version=$(basename "$wheel")
+    version=${version#dsl41-}
+    version=${version%%-*}
+    VENV=/opt/dsl41/releases/$version
+    DSL41=$VENV/bin/dsl41
+    sudo python3.12 -m venv "$VENV"
+    sudo "$VENV/bin/pip" install --quiet --disable-pip-version-check -r "$DELIVERY/requirements.txt"
     sudo "$VENV/bin/pip" install --quiet --disable-pip-version-check --no-deps "$wheel"
     after=$(installed_version)
     [ "$after" != "$before" ] || fail "the venv still has dsl41 $before"
-    manual restart
+    sed "s/<version>/$version/g" "$REPO/examples/nightbank/deploy/dsl41-engine.service" | \
+        sudo tee "/etc/systemd/system/$UNIT" >/dev/null
+    sudo systemctl daemon-reload
+    installed_version >"$STATE/version-installed"
+    manual start
     wait_running
     sudo grep -qF "$VENV/bin/python" "/proc/$(prop MainPID)/cmdline" ||
         fail "the engine does not run from $VENV"

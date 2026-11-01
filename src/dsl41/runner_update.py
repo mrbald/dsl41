@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 from dsl41.canon import digest
 from dsl41.engine_charts import UPDATE_STOP, AttemptOutcome
@@ -75,7 +75,7 @@ from dsl41.reload_update import (
 from dsl41.runner_attempts import UNSETTLED, FollowUp
 from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import Code
-from dsl41.runner_config import Configuration, RuntimeProfile, tz_aliases_of
+from dsl41.runner_config import Configuration, RuntimeProfile, tz_aliases_of, with_host_settings
 from dsl41.runner_journal import CONFIG_MARKER, config_marker
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
 from dsl41.runner_store import Record, Store
@@ -186,6 +186,10 @@ class OpenedPlan:
         `spec_drift` baseline, DL-65): each part at its place in the estate directory `reread`
         read (`plan.json`'s `estate_dir`), each site layer at the original path `reread` was
         given, never the plan directory's copy, with the plan's own bytes."""
+        if self.estate.metadata:
+            from dsl41.main_config import fingerprint
+
+            return fingerprint(self.estate)
         directory = str(self.plan["estate_dir"])
         site = {Path(path).name: path for path in self.site}
         prints: dict[str, str] = {}
@@ -205,11 +209,21 @@ def open_plan(run_root: Path, token: str) -> OpenedPlan:
     from dsl41.canon import decode
 
     plans = run_root / PLANS
-    plan = read_plan(plans, token)
+    try:
+        plan = read_plan(plans, token)
+    except RereadRefused as exc:
+        raise PlanUnreadable(str(exc)) from exc
     if plan is None:
         raise PlanUnreadable(f"no complete plan {token} under {plans}: run reread first")
     plan_dir = plans / token
     try:
+        if plan.get("plan_format_version") == 2:
+            from dsl41.main_config import from_parts
+
+            estate = from_parts(
+                [(p["name"], (plan_dir / p["name"]).read_bytes()) for p in plan["parts"]]
+            )
+            return OpenedPlan(plan, estate, Exceptions(estate.metadata["non_idempotent"]))
         invocation: Any = decode((plan_dir / INVOCATION).read_bytes())
         layers = [plan_dir / "site" / Path(str(path)).name for path in invocation["properties"]]
         estate = load_estate(plan_dir, layers, invocation["environment"])
@@ -304,9 +318,20 @@ class EngineUpdate:
     def live(self) -> Live:
         engine = self.engine
         profile = engine.profile or RuntimeProfile()
-        return live_of(
+        live = live_of(
             engine.oracle, settings_of(profile, engine.oracle.catalog), engine.config_rev
         )
+        if engine.source_capture:
+            from dataclasses import replace
+            import base64
+            from dsl41.canon import decode
+            from dsl41.main_config import CAPTURE
+
+            metadata = cast(
+                dict[str, Any], decode(base64.b64decode(engine.source_capture[CAPTURE]))
+            )
+            live = replace(live, launch=engine.launch_settings or metadata["launch"])
+        return live
 
     # ---- the request (one single-writer step)
 
@@ -428,7 +453,7 @@ class EngineUpdate:
 
     # ---- the restart
 
-    def resume(self, intent: Mapping[str, Any]) -> None:
+    def resume(self, intent: Mapping[str, Any], *, opened: OpenedPlan | None = None) -> None:
         """Restore the update a restart found in STOPPING from its `config intent` record (the
         fold, spec-restart §2): its dispatch filter holds from here, and it waits for each
         attempt of its stop set the open table holds, file watches excepted (the fold takes a
@@ -439,7 +464,7 @@ class EngineUpdate:
         engine = self.engine
         assert engine.journal is not None and engine.run_root is not None
         admitted = admitted_of(intent)
-        opened = reopen_plan(engine.run_root, admitted.token)
+        opened = opened if opened is not None else reopen_plan(engine.run_root, admitted.token)
         self._request = UpdateRequest(
             admitted.token,
             bool(intent.get("stop_running")),
@@ -628,12 +653,19 @@ class EngineUpdate:
         assert journal is not None  # `admit` and `resume` refuse an engine with none
         # `catalog_hash` is `catalog_hash_v2` of this catalog (`plan_application`), the hash the
         # configuration row derives
+        profile = engine.profile or RuntimeProfile()
+        if self._opened.estate.metadata:
+            # History retains the admitted plan's host profile across a restart (DL-437).
+            launch = self._opened.estate.metadata["launch"]
+            profile = with_host_settings(profile, launch["as_machine"], launch["machine_policy"])
         configuration = Configuration(
             catalog=application.catalog,
-            profile=engine.profile or RuntimeProfile(),
+            profile=profile,
             non_idempotent=dict(self._opened.marked.reasons),
+            source_capture=_source_capture(self._opened.estate),
         )
         store_config(journal.store, configuration, rev)
+        engine.source_capture = dict(configuration.source_capture)
         stopped = self._choose_follow_ups()
         at = engine.now_admitted()
         body = {
@@ -721,6 +753,12 @@ def admitted_of(intent: Mapping[str, Any]) -> Admitted:
         frozenset(str(name) for name in intent.get("filter") or ()),
         tuple((str(entry["job"]), int(entry["run_number"])) for entry in stop),
     )
+
+
+def _source_capture(estate: Estate) -> dict[str, str]:
+    from dsl41.main_config import encoded_parts
+
+    return encoded_parts(estate) if estate.metadata else {}
 
 
 def store_config(store: Store, configuration: Configuration, rev: int) -> None:

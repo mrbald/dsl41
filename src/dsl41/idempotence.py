@@ -131,6 +131,11 @@ def load_exceptions(estate_dir: Path) -> Exceptions:
         text = path.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise IdempotenceError(f"{path}: cannot read the declaration: {exc}") from exc
+    return parse_exceptions(text, path)
+
+
+def parse_exceptions(text: str, path: Path) -> Exceptions:
+    """Interpret a captured exception declaration at its original path (DL-437)."""
     try:
         document = tomllib.loads(text)
     except tomllib.TOMLDecodeError as exc:

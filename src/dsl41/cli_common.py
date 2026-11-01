@@ -207,7 +207,9 @@ def load_catalog_or_exit_2(
 _EXIT_2_ERRORS = (JilParseError, LoweringError, PlaceholderError, OSError, UnicodeDecodeError)
 
 
-def module_builder(module: Path, params: "Mapping[str, str] | None" = None) -> "CatalogBuilder":
+def module_builder(
+    module: Path, params: "Mapping[str, str] | None" = None, *, source: bytes | None = None
+) -> "CatalogBuilder":
     """Import MODULE from its path and return what its estate() returns, or exit 2 (DL-410).
 
     MODULE is a file or a package directory with an `__init__.py`, whose modules import each
@@ -247,7 +249,11 @@ def module_builder(module: Path, params: "Mapping[str, str] | None" = None) -> "
     write_bytecode, sys.dont_write_bytecode = sys.dont_write_bytecode, True
     try:
         try:
-            spec.loader.exec_module(loaded)
+            if source is None:
+                spec.loader.exec_module(loaded)
+            else:
+                # Main-config preparation executes the captured top module (DL-437).
+                exec(compile(source, str(module), "exec"), loaded.__dict__)
         except (Exception, SystemExit) as exc:
             raise typer.Exit(
                 refuse(f"{module}: importing the module raised {type(exc).__name__}: {exc}")

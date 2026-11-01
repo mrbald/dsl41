@@ -35,6 +35,7 @@ from dsl41.cli_common import (
     statechart_report,
 )
 from dsl41.ir import CatalogIR
+from dsl41.main_config import CONFIG_OPT, selected_config
 from dsl41.state_machine import EXIT_STATECHART_ERROR, STATECHART_LOG_PREFIX, StatechartError
 
 if TYPE_CHECKING:
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
     from dsl41.runner_admission import DecisionIndex
     from dsl41.runner_preflight import PreflightItem
     from dsl41.semantics import SemanticSwitches
+    from dsl41.reload_plan import Estate
 
 
 # ------------------------------------------------------------------- runner
@@ -115,6 +117,13 @@ def _preflight_or_exit(
         tz_aliases=tz_aliases,
         semantics=semantics,
     )
+    return _preflight_items_or_exit(items, warns_to_stderr=warns_to_stderr)
+
+
+def _preflight_items_or_exit(
+    items: "list[PreflightItem]", *, warns_to_stderr: bool = False
+) -> "list[PreflightItem]":
+    """Report preflight and refuse ERRORs before acquiring runtime effects (DL-437, DL-41)."""
     for item in items:
         target = f" {item.job}" if item.job else ""
         typer.echo(
@@ -157,7 +166,7 @@ def run(
     ctx: typer.Context,
     files: list[Path] = ESTATE_FILES,
     run_root: Path = typer.Option(
-        ...,
+        None,
         "--run-root",
         help="Directory for this run: the journal, runs/, logs/ and control.sock.",
     ),
@@ -234,6 +243,7 @@ def run(
         help="Days of journal kept behind the latest snapshot, for this run only."
         " Default: retention_days in engine.toml.",
     ),
+    config: str | None = CONFIG_OPT,
 ) -> None:
     """Run an estate on this machine with real processes and a wall clock.
 
@@ -269,11 +279,31 @@ def run(
 
     from datetime import UTC, datetime
 
-    files, properties, timezone, timezone_map, semantics = estate_args(
-        manifest, environment, files, properties, timezone, timezone_map, semantics
+    main_path = selected_config(
+        ctx,
+        config,
+        bool(files) or manifest is not None,
+        (
+            "run_root",
+            "as_machine",
+            "machine_policy",
+            "access_map",
+            "grace_term",
+            "grace_kill",
+            "snapshot_interval",
+            "retention_days",
+        ),
     )
     if on_violation is not None:
         typer.echo(INERT_VIOLATION_OPTION, err=True)
+    if main_path is not None:
+        _run_main_config(main_path, ui=ui)
+        return
+    if run_root is None:
+        raise typer.Exit(refuse("legacy run requires --run-root"))
+    files, properties, timezone, timezone_map, semantics = estate_args(
+        manifest, environment, files, properties, timezone, timezone_map, semantics
+    )
     if ui:
         import_tui_or_exit_2()  # fail before the engine starts, not after
     catalog, parsed, fingerprint = load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)
@@ -334,6 +364,62 @@ def run(
         )
     except EngineError as exc:
         # start/resume gates (existing journal, hash/domain mismatch, live socket): never started
+        raise typer.Exit(refuse(exc)) from exc
+
+
+def _run_main_config(path: Path, *, ui: bool) -> None:
+    """Prepare a new root; an existing root loads its stored capture under lock (DL-437)."""
+    import asyncio
+    from datetime import UTC, datetime
+
+    from dsl41 import main_config
+    from dsl41.reload_plan import RereadRefused
+    from dsl41.runner_clock import EngineError
+    from dsl41.runner_config import RuntimeProfile
+    from dsl41.semantics import resolve
+
+    try:
+        host = main_config.load_host(path)
+        root = Path(host.run_root)
+        estate = None if (root / "engine.db").exists() else main_config.prepare(path)
+        launch = main_config.launch_settings(host, path)
+        if estate is not None and launch != estate.metadata["launch"]:
+            raise RereadRefused([f"{path}: changed during preparation"])
+        profile = RuntimeProfile() if estate is None else main_config.profile_of(estate)
+        catalog = CatalogIR() if estate is None else estate.catalog
+        warns = []
+        if estate is not None:
+            main_config.emit_policy(estate)
+            warns = _preflight_or_exit(
+                catalog,
+                execution=True,
+                machine_policy=host.machine_policy,
+                as_machine=host.as_machine,
+                start=datetime.now(UTC).replace(tzinfo=None),
+                default_tz=profile.default_tz,
+                tz_aliases=profile.tz_aliases,
+                semantics=resolve(profile.semantics),
+            )
+        if ui:
+            import_tui_or_exit_2()
+        access = launch["access_map"]
+        raise typer.Exit(
+            asyncio.run(
+                _serve_run(
+                    catalog,
+                    root,
+                    False,
+                    warns,
+                    profile=profile,
+                    ui=ui,
+                    access_map=None if access is None else Path(str(access)),
+                    main_config_path=path,
+                    captured_estate=estate,
+                    main_launch=launch,
+                )
+            )
+        )
+    except (RereadRefused, EngineError, OSError) as exc:
         raise typer.Exit(refuse(exc)) from exc
 
 
@@ -572,6 +658,9 @@ async def _serve_run(
     access_map: "Path | None" = None,
     non_idempotent: "dict[str, str] | None" = None,
     overrides: "dict[str, float | int | None] | None" = None,
+    main_config_path: Path | None = None,
+    captured_estate: "Estate | None" = None,
+    main_launch: dict[str, object] | None = None,
 ) -> int:
     """`dsl41 run`, from the acquire to the last teardown.
 
@@ -594,6 +683,7 @@ async def _serve_run(
     from dsl41.runner_config import load_settings
 
     from dsl41.runner_ledger import acquire_run_root
+    from dsl41.reload_plan import RereadRefused
 
     clock = RealClock()
     try:
@@ -620,6 +710,39 @@ async def _serve_run(
     code = 1
     running = False
     try:
+        if main_config_path is not None:
+            from dsl41 import main_config
+            from dsl41.runner_startup import active_configuration
+
+            try:
+                if resume:
+                    stored = active_configuration(run_root)
+                    if not stored.source_capture:
+                        return refuse("main-config restart requires a stored main-config capture")
+                    captured_estate = main_config.decoded_parts(stored.source_capture)
+                    catalog, profile = stored.catalog, stored.profile
+                    assert main_launch is not None
+                    from dsl41.runner_config import with_host_settings
+                    from dsl41.runner_preflight import host_preflight
+
+                    profile = with_host_settings(
+                        profile,
+                        cast(list[str], main_launch["as_machine"]),
+                        str(main_launch["machine_policy"]),
+                    )
+                    warns = _preflight_items_or_exit(
+                        host_preflight(
+                            catalog,
+                            as_machine=frozenset(profile.as_machine),
+                            machine_policy=profile.machine_policy,
+                        )
+                    )
+                assert captured_estate is not None
+                spec_texts = _spec_texts(list(captured_estate.parsed), catalog)
+                estate_fingerprint = main_config.fingerprint(captured_estate)
+                non_idempotent = captured_estate.metadata["non_idempotent"]
+            except (EngineError, ValueError, RereadRefused) as exc:
+                return refuse(exc)
         try:
             # read, not written: a root the restart refuses gains no file
             settings = load_settings(run_root, create=False).overridden(**(overrides or {}))
@@ -649,6 +772,7 @@ async def _serve_run(
                     declared=profile,
                     machines=wiring.machines,
                     settings=settings,
+                    stored_sources=main_config_path is not None,
                 )
             else:
                 engine = start_run(
@@ -663,6 +787,11 @@ async def _serve_run(
                     non_idempotent=non_idempotent,
                     machines=wiring.machines,
                     settings=settings,
+                    source_capture=(
+                        None
+                        if captured_estate is None
+                        else main_config.encoded_parts(captured_estate)
+                    ),
                 )
         except StatechartError as exc:
             # a replayed input that meets one: the report names the input, and exit 7 keeps
@@ -672,6 +801,7 @@ async def _serve_run(
             return refuse(exc)
         # the first run writes the defaults out (spec-wiring 1b); the read above already
         # refused a file that does not read
+        engine.launch_settings = dict(main_launch or {})
         load_settings(run_root)
         # what the restart did not apply: E9's missed scheduler ticks (DL-91)
         for ev, reason in engine.drops:
@@ -723,6 +853,13 @@ async def _serve_run(
             return code
         running = True
         typer.echo(f"engine up; control socket: {server.path}")
+        if resume and captured_estate is not None:
+            from dsl41.main_config import pending_source_changes
+
+            typer.echo(
+                f"{pending_source_changes(main_config.decoded_parts(engine.source_capture))} pending source changes; run dsl41 reread",
+                err=True,
+            )
         end = await _await_run_end(engine, server, loop_task, ui)
         code = await _stop_and_judge(engine, server, end)
         # the CLI wrapper reports a statechart error as exit 7
@@ -1063,6 +1200,7 @@ def _rehearsal_engine(
 
 
 def rehearse(
+    ctx: typer.Context,
     files: list[Path] = ESTATE_FILES,
     scenario: Path = typer.Option(
         None,
@@ -1119,6 +1257,7 @@ def rehearse(
     properties: list[Path] = PROPERTIES,
     manifest: Path | None = MANIFEST_OPT,
     environment: str | None = ENVIRONMENT_OPT,
+    config: str | None = CONFIG_OPT,
 ) -> None:
     r"""Play an estate under a virtual clock and print what would happen.
 
@@ -1175,9 +1314,41 @@ def rehearse(
     from dsl41.runner_scheduler import Scheduler
     from dsl41.semantics import resolve as resolve_switches
 
-    files, properties, timezone, timezone_map, semantics = estate_args(
-        manifest, environment, files, properties, timezone, timezone_map, semantics
-    )
+    main_path = selected_config(ctx, config, bool(files) or manifest is not None)
+    prepared = None
+    if main_path is not None:
+        from dsl41 import main_config
+        from dsl41.reload_plan import RereadRefused
+
+        try:
+            prepared = main_config.prepare(main_path)
+        except RereadRefused as exc:
+            raise typer.Exit(refuse(exc)) from exc
+        if run_root is not None and (
+            run_root.resolve().is_relative_to(
+                Path(prepared.metadata["launch"]["run_root"]).resolve()
+            )
+            or Path(prepared.metadata["launch"]["run_root"])
+            .resolve()
+            .is_relative_to(run_root.resolve())
+        ):
+            raise typer.Exit(
+                refuse(
+                    "rehearsal --run-root must differ from the engine run root and cannot contain or lie inside it"
+                )
+            )
+        main_config.emit_policy(prepared)
+        profile = main_config.profile_of(prepared)
+        tz_aliases: dict[str, str] | None = profile.tz_aliases
+        timezone, overrides = profile.default_tz, profile.semantics
+        catalog = prepared.catalog
+    else:
+        files, properties, timezone, timezone_map, semantics = estate_args(
+            manifest, environment, files, properties, timezone, timezone_map, semantics
+        )
+        catalog, _, _ = load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)
+        overrides = load_semantics(semantics)
+        tz_aliases = load_tz_aliases(timezone_map)
     if cadence_policy is not None and not check_cadence:
         raise typer.Exit(refuse("--cadence-policy requires --check-cadence"))
     sweeps = list(sweep or [])
@@ -1189,14 +1360,11 @@ def rehearse(
                 "--sweep refuses --run-root: a sweep replays the estate, one journal claims one run"
             )
         )
-    catalog, _, _ = load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)
-    overrides = load_semantics(semantics)
     start_dt = (
         _naive_utc_arg(start, "--start")
         if start
         else datetime.now(UTC).replace(tzinfo=None, microsecond=0)
     )
-    tz_aliases = load_tz_aliases(timezone_map)
     check_base_tz(timezone, tz_aliases)
     switches = resolve_switches(overrides)
     warns = _preflight_or_exit(

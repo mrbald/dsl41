@@ -10,11 +10,9 @@
 set -euo pipefail
 
 UNIT=dsl41-engine.service
-VENV=/opt/dsl41/venv
-DSL41=/opt/dsl41/bin/dsl41
-NIGHTBANK=/opt/dsl41/nightbank
-ESTATE=$NIGHTBANK/estate/small
-MANIFEST=$ESTATE/estate.toml
+NIGHTBANK=/opt/nightbank
+ESTATE=$NIGHTBANK/cfg
+CONFIG=/etc/dsl41/dsl41.toml
 ROOT=/srv/dsl41/runs/nightbank
 SOCK=$ROOT/control.sock
 # the night's data, logs and profile, the service user's own
@@ -28,6 +26,10 @@ LEAK_MARK=$NIGHT/leak-child.signal
 LEAK_DROP_IN=/run/systemd/system/$UNIT.d/90-drill-leak.conf
 # what the drill keeps between rows; not /tmp, which a container restart empties
 STATE=/var/lib/dsl41-drill
+# Each row selects the installed immutable engine release (DL-437).
+VERSION=$(cat "$STATE/version-installed" 2>/dev/null || true)
+VENV=/opt/dsl41/releases/$VERSION
+DSL41=$VENV/bin/dsl41
 # the wheels and the locked requirements drill-local.sh delivered
 DELIVERY=${DRILL_DELIVERY:-/delivery/dist}
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)

@@ -603,6 +603,7 @@ class ControlServer:
             "status": dict(live.status),
             "runs": dict(live.runs),
             "tombstones": {name: list(flags) for name, flags in live.tombstones.items()},
+            "launch": dict(live.launch),
         }
 
     async def _update(self, request: dict[str, Any]) -> dict[str, Any]:

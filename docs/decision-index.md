@@ -447,3 +447,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-434 | `CLAUDE.md` and the skill bodies count as docs in the docs-only classification | [docs/agent-workflow.md](agent-workflow.md), [docs/agents/coordination.md](agents/coordination.md) |
 | DL-435 | A backward step of the wall clock never refuses an input or stops the engine |  |
 | DL-436 | The Linux cookie scan runs without pidfd support |  |
+| DL-437 | One main config: include globs collapse every estate input into one catalog, with an explicit lint policy | [README.md](../README.md), [docs/deploy.md](deploy.md), [docs/protocol-evolution.md](protocol-evolution.md) |
