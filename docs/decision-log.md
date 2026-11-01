@@ -25459,3 +25459,15 @@ relitigate an entry; append a new one.
   restart and in `dsl41 runs`. An interrupted update's equality check ignores job order (a
   Known bug; the token-bound plan cannot produce a reordered row today).
   Built by Sol; Opus two rounds.
+  SUPERSEDED BY DL-439: the Packager builds the runtime package and service configuration;
+  DL-424 retired this release infrastructure.
+- DL-439 The Packager builds and installs the runtime package and site service configuration
+  (2026-11-01; owner ruling; docs/writing.md §1, README "Documents", docs/deploy.md)
+  THE RULE. The Packager builds and installs the runtime package and the site's service
+  configuration: the main config (DL-437), the unit and the release venv described in
+  docs/deploy.md. The project ships reference guidance and a reference implementation.
+  A site may customize and repackage them for its Python runtime requirements.
+  THE REASON. DL-424 retired DL-408's release train. A client site will most likely need
+  its own packaging because its Python runtime requirements differ.
+  Supersedes writing.md §1's Packager definition, which rested on DL-408. The other reader
+  definitions and writing rules under DL-405 are unchanged.

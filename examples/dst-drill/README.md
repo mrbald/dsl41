@@ -1,5 +1,7 @@
 # DST drill
 
+For the maintainer checking engine behavior across clock changes; follow the [maintainer track](../../README.md#documents).
+
 This drill runs the real engine on a fake clock that runs 60 times as fast.
 It crosses the DST changes of Europe/London and America/New_York, and a local midnight.
 One scenario steps the wall clock backward on a clock that runs at the real rate (DL-435).
