@@ -485,6 +485,10 @@ operator's response. Start with
 [examples/nightbank/README.md](examples/nightbank/README.md). The example is
 repo-only; it is not packaged.
 
+The service drill runs the engine unit in a podman container on Ubuntu 24.04 and
+Rocky 8: `examples/nightbank/deploy/drill-local.sh --image ubuntu|el8 all`
+([DRILL.md](examples/nightbank/deploy/DRILL.md)).
+
 CI also uses it to test the concurrency model
 (docs/concurrency-model.md (retired in 2.0.0)
 §9): seeded interleavings of engine failover, a spawn decided and never
