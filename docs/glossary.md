@@ -1,241 +1,259 @@
 # Glossary of the runner contracts
 
-This page is a reader's index to the runner contracts. It is not normative.
-Each entry says what a thing is and links the section that defines it.
-The rules live in the linked sections.
-Entries are in alphabetical order, ignoring case and punctuation.
+For the architect resolving v2 engine terms and finding their defining
+contracts. Continue through the [architect track](../README.md#documents)
+and [architecture map](architecture.md). This index holds no rules;
+[deploy](deploy.md) covers operating procedures.
+Entries are alphabetical, ignoring case and punctuation.
+
+### attempt
+
+One execution of a logical job run. A command attempt has its own `run_id`,
+ordinal and spool. An interruption may produce another attempt of the same
+run and invocation; an application failure does not.
+See [DL-424, DL-428 and DL-433](decision-log.md) and the generated
+[ATTEMPT reference](state-machines.md).
 
 ### baseline_id
 
-The identity of one period on the control wire. Request envelopes and
-revision-bearing reads carry it, and each period derives a fresh one.
-See period-model.md §4 (`period-model.md`, retired in 2.0.0) and
-concurrency-model.md §6 (`concurrency-model.md`, retired in 2.0.0).
-The code is [`runner_startup.py`](../src/dsl41/runner_startup.py).
+The store's control-wire identity, created at genesis and preserved across
+restart and configuration update. It scopes revisions; it does not prove
+that a request id remains in the retry index.
+See [control headers](control-protocol.md#2-transport-and-framing-frozen)
+and [retry lifetime](control-protocol.md#3-mutating-verb-sendevent).
 
 ### catalog_hash
 
-The runner's versioned hash of a loaded catalog (`CatalogIR`). It is a
-different hash from `equiv.catalog_hash`, which serves equivalence checks.
-See period-model.md §1.1 (`period-model.md`, retired in 2.0.0).
-The code is [`runner_config.py`](../src/dsl41/runner_config.py).
+The fingerprint of the loaded catalog's canonical definition. The runner
+uses `reload_diff.py`'s catalog hash; equivalence checking has its own hash.
+See [configuration adoption](control-protocol.md#2-transport-and-framing-frozen)
+and [runner_config.py](../src/dsl41/runner_config.py).
 
 ### code
 
-The stable error code on every `ok: false` control answer, beside the prose
-`error`. A client branches on `code`; the prose may change. A code names the
-reason, not the outcome. A rejected `decision` stores its code, so an exact
-retry answers the same one; a decision written before DL-272 stores none.
-The control-protocol code table lists every code and the client's next move;
-`runner_codes.py` holds the same set.
-See [control-protocol.md §2](control-protocol.md#2-transport-and-framing-frozen)
-and period-model.md §2.3 (`period-model.md`, retired in 2.0.0).
+The stable reason beside `error` on every `ok: false` control answer.
+A code alone does not classify the outcome. A rejected decision stores its
+code for exact retries.
+See [the code table](control-protocol.md#2-transport-and-framing-frozen)
+and [DL-272](decision-log.md).
 
 ### decision
 
-The WAL record that closes one admitted input. One `decision` line holds the
-outcome (`applied` or `rejected`), the revisions that moved and the effects the
-input implies. A rejected one also stores its [code](#code).
-See period-model.md §2.3 (`period-model.md`, retired in 2.0.0) and
-concurrency-model.md §4 (`concurrency-model.md`, retired in 2.0.0).
+The engine's recorded verdict on an admitted input, with the revisions it
+moved. The input and decision commit in one SQLite transaction. The decision
+is not evidence of command completion.
+See [DL-428](decision-log.md) and
+[control outcomes](control-protocol.md#3-mutating-verb-sendevent).
 
 ### detached
 
-The lifecycle mode chosen with `dsl41 run --detached`. A supervisor holds the
-wrappers' lifelines, so an engine restart reattaches to running jobs instead
-of ending them, unless a `--deadman` interval runs out first.
-See [runner-design.md §1](runner-design.md#1-mission-and-scope),
-[§6a](runner-design.md#6a-process-lifecycle-tiers-dl-41a) and, for the deadman,
-concurrency-model.md §8 (`concurrency-model.md`, retired in 2.0.0).
+Detached mode and `--detached` resolve to [DL-424](decision-log.md); see [tethered](#tethered).
 
 ### estate
 
-In the period model, one lineage of periods from genesis until retirement,
-named by `estate_id`, a uuid4 minted once at genesis. Outside the period model,
-the word also means the jobs one catalog defines.
-See period-model.md §1 (`period-model.md`, retired in 2.0.0) and
-§1.2 (`period-model.md`, retired in 2.0.0).
-The code is [`estate_manifest.py`](../src/dsl41/estate_manifest.py).
+The jobs and referenced definitions that form the loaded catalog.
+The engine runs them on one host.
+See [runner scope](runner-design.md#1-mission-and-scope);
+`estate_id` and the period lineage resolve to [DL-424](decision-log.md).
 
 ### expect
 
-The envelope field that names the revision the caller read: a map from one
-entity key (`job:` or `global:`) to its `state_rev`. Admission
-compares it with the current revision.
-See concurrency-model.md §0 (`concurrency-model.md`, retired in 2.0.0) and
-§6 (`concurrency-model.md`, retired in 2.0.0).
-The code is [`control-protocol.md`](control-protocol.md).
+The precondition naming the entity revision the caller read. Job mutations
+address `job:<name>`; global mutations address `global:<name>`. Configuration
+update uses the configuration revision. Zero names an absent entity row.
+See [mutation envelopes](control-protocol.md#3-mutating-verb-sendevent)
+and [update admission](control-protocol.md#2-transport-and-framing-frozen).
 
 ### fail-stop
 
-The engine stops instead of refusing, and runs no abort. It is used where an
-abort would reopen admission over a state the WAL does not describe. The seal
-gets no answer, and recovery rebuilds from the WAL. A seal fail-stops in two
-kinds of case. Before the `seal` append: a fence loss, and DL-274's three
-cases, which are an exception while an attempt admitted during the seal is
-not fully applied, a failed WAL append, and a `clock_regressed` on an
-engine-made input. After those, the period stays open. At or after the `seal`
-append, including an anchor close after a durable seal line, the outcome is
-unknown. Recovery commits the seal when the line is complete and its `fsync`
-succeeds; it truncates a torn or absent line and reopens the period (PR-28d).
-See period-model.md §7 (`period-model.md`, retired in 2.0.0) and
-concurrency-model.md §4 (`concurrency-model.md`, retired in 2.0.0).
-The code is [`statechart-engine.md`](statechart-engine.md).
+Seal fail-stop (PR-28d) resolves to [DL-274 and DL-424](decision-log.md); engine fault outcomes belong to [control §2](control-protocol.md#2-transport-and-framing-frozen).
 
 ### fencing token
 
-The integer `token` a supervisor issues with each lease. Mutating supervisor
-verbs carry it beside the incarnation.
-See supervisor-protocol.md §5 (`supervisor-protocol.md`, retired in 2.0.0)
-and concurrency-model.md §1 (`concurrency-model.md`, retired in 2.0.0).
-The code is [`runner_ledger.py`](../src/dsl41/runner_ledger.py).
+Supervisor fencing tokens resolve to [DL-424](decision-log.md); one engine holds the run root's `leader.lock`.
 
 ### gateway
 
-A proposed HTTP and WebSocket front for `control.sock`: one process per
-exposed tier, each a client of the socket. Its status is proposed, and
-nothing of it is built (DL-273).
-See [gateway.md](gateway.md).
+The HTTP/WebSocket proposal resolves through [gateway](gateway.md) and [DL-273](decision-log.md); the built browser path is [served TUI](runner-design.md#11-ui--one-textual-app-terminal-and-web-e3).
 
 ### ghost
 
-A status row with no job definition in the current catalog, so `status`
-reports `job_type: null` for it. `CHANGE_STATUS` invents one for a `JOB^INST`
-target, and a job the next period's catalog drops while it is not live stays
-as one.
-See [control-protocol.md §3](control-protocol.md#3-mutating-verb-sendevent),
-[§4](control-protocol.md#status-job) and
-period-model.md §10.1 (`period-model.md`, retired in 2.0.0).
+A status row without a definition in the current catalog; its `job_type` is
+null. `CHANGE_STATUS` can create one for a cross-instance `JOB^INST` target.
+See [sendevent](control-protocol.md#3-mutating-verb-sendevent)
+and [status](control-protocol.md#status-job).
 
 ### ghost run
 
-A `STARTING` that an injected `CHANGE_STATUS` writes without advancing the
-job's run number, so it is not a start the oracle decided. The ghost-run gate,
-the engine's `_dispatched` map, keeps per job the last run number a SPAWN was
-planned for, held or retired ones included (DL-234), and plans no SPAWN for a
-ghost run.
-See [runner-design.md §4](runner-design.md#4-engine-loop--single-writer) and
-period-model.md §3.3 (`period-model.md`, retired in 2.0.0).
+A `CHANGE_STATUS STARTING` overwrite that does not advance the run number.
+It does not request a command launch. The dispatch frontier prevents a
+second SPAWN for the same logical run.
+See [the ghost-run gate](runner-design.md#4-engine-loop--single-writer)
+and [DL-234](decision-log.md).
 
 ### incarnation
 
-A hex id the supervisor mints at every start and reports from `PING`, `LIST`
-and `ACQUIRE`. A changed incarnation tells a controller that the supervisor it
-knew is gone.
-See supervisor-protocol.md §5 (`supervisor-protocol.md`, retired in 2.0.0).
-The code is [`runner_startup.py`](../src/dsl41/runner_startup.py).
+Supervisor incarnation resolves to [DL-424](decision-log.md); [baseline_id](#baseline_id) identifies the engine store on the control wire.
+
+### interruption rule
+
+The rule for an attempt ended by engine death or a requested stop.
+An idempotent job gets a replacement attempt of the same logical run and
+invocation; a named non-idempotent job is held with failure evidence.
+Application failure is not retried.
+See [DL-424 and DL-433](decision-log.md).
 
 ### lease
 
-The single-controller right to change a supervisor's runs, taken with
-`ACQUIRE` and kept with `RENEW` before its TTL runs out. Read-only clients need
-none, and the engine's leadership lock is not a lease.
-See supervisor-protocol.md §5 (`supervisor-protocol.md`, retired in 2.0.0),
-[runner-design.md §6a](runner-design.md#6a-process-lifecycle-tiers-dl-41a)
-and, for the leadership lock,
-concurrency-model.md §1 (`concurrency-model.md`, retired in 2.0.0).
+Supervisor leases, `ACQUIRE` and `RENEW` resolve to [DL-424](decision-log.md); the engine uses a local `leader.lock` flock.
+
+### main config
+
+The engine selector at `/etc/dsl41/dsl41.toml`, or an absolute `--config`.
+It names the root, host settings, included inputs, interpretation and lint
+policy. Restart uses the stored applied revision without re-reading sources.
+See [control §2](control-protocol.md#2-transport-and-framing-frozen)
+and [DL-437](decision-log.md).
+
+### non-idempotent job
+
+A job named in the configured idempotence exceptions. An interruption holds
+it with failure evidence instead of launching a replacement attempt.
+See [the interruption rule](#interruption-rule) and [DL-424](decision-log.md).
 
 ### perimeter
 
-The access gate in front of `control.sock` and the served web TUI. It maps an
-authenticated principal to a tier (read, ops or adm) and writes its receipts to
-its own journal, `perimeter.jsonl`.
-See [access-model.md §1](access-model.md#1-the-model),
-[§2](access-model.md#2-the-boundary) and
-[§6](access-model.md#6-receipts-the-perimeter-journal).
+The access gate on `control.sock`. With an access map, it authenticates an
+OS peer, assigns read, ops or adm, and writes access receipts separately
+from engine decisions. Served TUI children use the same gate.
+See [the boundary](access-model.md#2-the-boundary),
+[receipts](access-model.md#6-receipts-the-perimeter-journal) and
+[the web tier](access-model.md#9-the-web-tier).
+
+### plan token
+
+The 64-hex-digit identity printed by `dsl41 reread` for its captured plan
+under `plans/<token>/`. `dsl41 update TOKEN` asks the engine to apply those
+captured bytes against the named configuration revision.
+See [control §2](control-protocol.md#2-transport-and-framing-frozen)
+and [DL-437](decision-log.md).
 
 ### preflight
 
-The checks a catalog passes before `run` or `rehearse` starts. An ERROR
-finding refuses the run; a WARN finding is printed and journaled.
-See [runner-design.md §8](runner-design.md#8-preflight--refuse-loudly-run-honestly).
+The checks before `run` or `rehearse`. Errors refuse startup; warnings
+identify limitations under which execution proceeds.
+See [runner preflight](runner-design.md#8-preflight--refuse-loudly-run-honestly).
 
 ### rehearse
 
-The engine's second duty, `dsl41 rehearse`: the same engine code under a
-virtual clock with scripted adapters. A day of an estate plays in seconds, and
-no process is spawned.
-See [runner-design.md §1](runner-design.md#1-mission-and-scope).
+The engine running with a virtual clock and scripted adapters instead of
+real job processes. It exercises the engine's semantics path.
+See [runner duties](runner-design.md#1-mission-and-scope).
 
 ### request_id
 
-The id a client puts on each mutating request. With the envelope's
-fingerprint, it lets the engine answer an exact retry from the recorded
-decision.
-See concurrency-model.md §4 (`concurrency-model.md`, retired in 2.0.0)
-and [control-protocol.md §3](control-protocol.md#3-mutating-verb-sendevent).
+The client-supplied identity of a mutation. An exact retained retry uses
+that id and the same fingerprint to retrieve its original decision.
+Pruning frees the id; it is not a permanent deduplication key.
+See [retry obligations](control-protocol.md#3-mutating-verb-sendevent).
+
+### root_id
+
+The persistent UUID in store metadata used as the prefix of
+`DSL41_COOKIE=<root_id>.<run_id>`. It identifies processes for attempt
+cleanup; it is distinct from the control-wire baseline.
+See [the process cookie](wrapper-protocol.md#dsl41_cookie-env-variable--the-process-cookie-an-addition)
+and [DL-433](decision-log.md).
+
+### run
+
+One logical execution of a job, identified within a run root by job name
+and run number. Replacement attempts preserve that run number and its
+invocation. A box has a logical run without a command wrapper.
+See [DL-424](decision-log.md) and [run history](runner-design.md#7-journal-and-recovery-e1-prod-grade).
 
 ### run root
 
-The directory one engine runs in, given by `--run-root`; the period model also
-calls it the estate root. It holds the sockets, the WAL segments, the seals and
-the `runs/` spool, and it is a path only, not an identity.
-See period-model.md §1 (`period-model.md`, retired in 2.0.0) and
-§1.1 (`period-model.md`, retired in 2.0.0).
-The code is [`runner_journal.py`](../src/dsl41/runner_journal.py).
+The local directory owned by one engine: `engine.db`, `leader.lock`,
+`engine.toml`, `control.sock`, plans, logs and attempt spools. It is a path,
+not a wire identity. The main config selects it by default.
+`dsl41 run --run-root PATH` belongs to the legacy explicit-input path;
+`--config` refuses `--run-root` ([DL-437](decision-log.md)).
+See [deploy](deploy.md) and [runner_startup.py](../src/dsl41/runner_startup.py).
 
 ### runtime profile
 
-The launch options that change how a period interprets or dispatches its
-catalog, such as the timezone basis, the machine identity, the deadman and the
-semantic switches. The period manifest stores it, and `runtime_hash` is its
-hash.
-See period-model.md §2.1 (`period-model.md`, retired in 2.0.0)
-and [runner-design.md §8a](runner-design.md#8a-semantic-switches).
+The recorded interpretation settings, including timezone basis, machine
+identity and semantic switches. Its fingerprint is `runtime_hash`.
+See [semantic switches](runner-design.md#8a-semantic-switches)
+and [runner_config.py](../src/dsl41/runner_config.py).
+Deadman and period-manifest fields resolve to [DL-424 and DL-428](decision-log.md).
 
 ### scheduler frontier
 
-The latest instant a segment's journal proves the scheduler reached; the
-linked section lists which records count. Resume re-derives schedule ticks
-from it.
-See period-model.md §6 (`period-model.md`, retired in 2.0.0).
-The code is [`runner_scheduler.py`](../src/dsl41/runner_scheduler.py).
+The recovered scheduler position used to resume calendar scheduling.
+Missed downtime ticks are skipped and recorded, rather than fired late.
+See [scheduler rules](runner-design.md#5-scheduler--the-calendar-the-oracle-deliberately-lacks)
+and [snapshot recovery](runner-design.md#7-journal-and-recovery-e1-prod-grade).
 
 ### segment
 
-One WAL file, `wal/<segment_no>.jsonl`, whose first record is a `segment`
-record. Segment N holds period N.
-See period-model.md §1 (`period-model.md`, retired in 2.0.0) and
-§2.1 (`period-model.md`, retired in 2.0.0).
-The code is [`runner_journal.py`](../src/dsl41/runner_journal.py).
+The subscribe stream's configuration record, projected from a configuration
+application. It is not a WAL file or a period identity.
+See [the stream record](control-protocol.md#5-streaming-verb-subscribe)
+and [DL-428](decision-log.md).
+
+### snapshot
+
+A stored recovery boundary containing oracle and scheduler state,
+configuration revision, open work and retained run history. Restart restores
+it before replaying the retained journal tail.
+See [DL-428](decision-log.md) and [store](#store).
 
 ### SPAWN
 
-The start of one run of a CMD or FW job; an FW run is a watch inside the
-engine, not a process. Its `dispatch` record, naming the run's `run_id`, is
-written before it is attempted.
-See runner-design.md §7 (`runner-design.md`).
-The code is [`runner_admission.py`](../src/dsl41/runner_admission.py).
+A dispatch instruction for a CMD or FW run. A command gets a wrapper;
+a file watch polls inside the engine. A durable dispatch precedes launch.
+See [dispatch](runner-design.md#4-engine-loop--single-writer)
+and [DL-428](decision-log.md).
 
 ### state_rev
 
-A revision counter on one job or global row. It moves when a committed
-input changes the row's semantic projection.
-See concurrency-model.md §3 (`concurrency-model.md`, retired in 2.0.0).
-The code is [`oracle_state.py`](../src/dsl41/oracle_state.py).
+A per-entity revision counter. It advances when an admitted batch changes
+the entity's semantic projection and supplies a mutation's `expect` value.
+It is distinct from the admission index and the store's record sequence.
+See [status revisions](control-protocol.md#status-job).
+
+### store
+
+The engine's SQLite `engine.db`, holding its journal, configuration history,
+metadata and snapshots. Input and decision commit together.
+See [DL-428](decision-log.md) and [runner_store.py](../src/dsl41/runner_store.py).
 
 ### supervisor
 
-The per-run-root process that spawns wrappers for a detached engine and holds
-their lifelines across engine restarts. It speaks a line protocol on
-`supervisor.sock` and keeps no scheduling policy.
-See supervisor-protocol.md §1 (`supervisor-protocol.md`, retired in 2.0.0) and
-[runner-design.md §6a](runner-design.md#6a-process-lifecycle-tiers-dl-41a).
+The supervisor process, `supervisor.sock` and its verbs resolve to [DL-424](decision-log.md); the engine directly owns [wrappers](#wrapper).
 
 ### tethered
 
-The default lifecycle mode. The engine is the wrappers' parent, so engine
-death ends every running job, and each wrapper records the outcome.
-See [runner-design.md §1](runner-design.md#1-mission-and-scope) and
-[§6a](runner-design.md#6a-process-lifecycle-tiers-dl-41a).
+The execution posture in which engine death ends running command attempts.
+The wrapper's lifeline detects parent loss, ends the command's process group
+and records the observed outcome.
+Before catch-up, restart TERMs what its root cookie scan finds of interrupted
+attempts; the loop runs grace and KILL cleanup (DL-433, DL-436).
+Restart applies the interruption rule instead of adopting live commands.
+See [wrapper behavior](wrapper-protocol.md#4-wrapper-behavior-frozen-semantics)
+and [DL-433](decision-log.md).
 
 ### wrapper
 
-The small stdlib-only process, `runner_wrapper.py`, that is the direct parent
-of one run's command. It writes `spawn.json` and `status.json` to the run's
-spool directory and kills the command's process group when its lifeline
-closes.
-See supervisor-protocol.md §1 (`supervisor-protocol.md`, retired in 2.0.0) and
-§4 (`supervisor-protocol.md`, retired in 2.0.0).
-The code is [`runner_wrapper.py`](../src/dsl41/runner_wrapper.py).
+The stdlib-only recorder that parents one command attempt. It writes
+`spawn.json` and `status.json`, with the latter as the sole outcome channel.
+Its lifeline's write end belongs to the engine. Process-group containment
+and Linux cookie cleanup have the limits the contract states.
+See [input](wrapper-protocol.md#2-wrapper-input-spec-frozen),
+[spool and cookie](wrapper-protocol.md#3-spool-format-frozen) and
+[behavior](wrapper-protocol.md#4-wrapper-behavior-frozen-semantics).
 
+`period-model.md`, `concurrency-model.md` and `supervisor-protocol.md`
+resolve to [DL-424](decision-log.md); the defining sections above supply the v2 contracts.

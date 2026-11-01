@@ -1,207 +1,88 @@
 # Risk map of the runner machines
 
-Measured on src at main `b6b8a55`, with the tests at that commit, on 2026-10-09.
-
-This page lists each runner machine with its branch coverage and its open findings.
-Low coverage and open findings show a reviewer where to look first.
-It is a measurement, not a contract: the linked contracts hold the rules.
-Branch coverage is branches only: covered over total, from `scripts/branch_coverage.py`.
-The last column lists the open findings of each machine.
-
-| Machine | Owning modules | Contract | Branch coverage per module | Open findings |
-| --- | --- | --- | --- | --- |
-| Job lifecycle and flags | `oracle_state.py`, `oracle.py`, `conditions.py` | [autosys-semantics §0](autosys-semantics.md#0-execution-model-the-frame-everything-else-hangs-on); [runner-design §3](runner-design.md#3-architecture--functional-core-imperative-shell) | `oracle_state.py` 112/112 (100.00%); `oracle.py` 638/638 (100.00%); `conditions.py` 46/46 (100.00%) | [unbounded trace and counters](#unbounded-trace-and-counters) |
-| Box execution | `oracle.py`, `oracle_state.py` | [autosys-semantics §2](autosys-semantics.md#2-boxes); period-model §3.5 (`period-model.md`, retired in 2.0.0) | `oracle.py` 638/638 (100.00%); `oracle_state.py` 112/112 (100.00%) | [open vendor readings](#open-vendor-readings-for-a-box-and-its-members); [a completed box and an iced member](#a-completed-box-and-an-iced-member); [instant cascades that do not end](#instant-cascades-that-do-not-end) |
-| Capacity waiter and reservation | `capacity.py`, `oracle.py`, `oracle_state.py` | period-model §5 (`period-model.md`, retired in 2.0.0); DL-50, DL-255, DL-256 | `capacity.py` 84/84 (100.00%); `oracle.py` 638/638 (100.00%); `oracle_state.py` 112/112 (100.00%) | [held-unit circular wait](#held-unit-circular-wait) |
-| Scheduler and timer frontier | `runner_scheduler.py`, `runner.py`, `runner_clock.py`, `runner_startup.py`, `runner_journal.py`, `autocal.py` | [runner-design §5](runner-design.md#5-scheduler--the-calendar-the-oracle-deliberately-lacks); period-model §6 (`period-model.md`, retired in 2.0.0) | `runner_scheduler.py` 66/66 (100.00%); `runner.py` 216/216 (100.00%); `runner_clock.py` 16/16 (100.00%); `runner_startup.py` 188/188 (100.00%); `runner_journal.py` 152/152 (100.00%); `autocal.py` 216/216 (100.00%) | none |
-| Engine work choice | `runner.py` | [runner-design §4](runner-design.md#4-engine-loop--single-writer) | `runner.py` 216/216 (100.00%) | [unbounded trace and counters](#unbounded-trace-and-counters) |
-| Admission and idempotency | `runner_admission.py`, `runner_codes.py`, `runner.py`, `runner_journal.py` | concurrency-model §4 (`concurrency-model.md`, retired in 2.0.0) | `runner_admission.py` 92/92 (100.00%); `runner_codes.py` no branches; `runner.py` 216/216 (100.00%); `runner_journal.py` 152/152 (100.00%) | [a replayed oracle fault](#a-replayed-oracle-fault-stops-every-resume); [instant cascades that do not end](#instant-cascades-that-do-not-end) |
-| Leadership and takeover | `runner_ledger.py`, `runner_startup.py`, `runner_procid.py` | concurrency-model §7 (`concurrency-model.md`, retired in 2.0.0); period-model §2.4 (`period-model.md`, retired in 2.0.0) | `runner_ledger.py` 22/22 (100.00%); `runner_startup.py` 188/188 (100.00%); `runner_procid.py` 32/32 (100.00%) | [one-host limit](#stated-limits); [a journal stays open when genesis fails late](#a-journal-stays-open-when-genesis-fails-late); [a host's boot_id check](#a-hosts-boot_id-check-reads-a-foreign-live-run-as-dead) |
-| Control exchange and subscription | `runner_control.py`, `runner_codes.py`, `runner_journal.py`, `cli_control.py` | [control-protocol §2](control-protocol.md#2-transport-and-framing-frozen); [§5](control-protocol.md#5-streaming-verb-subscribe) | `runner_control.py` 316/316 (100.00%); `runner_codes.py` no branches; `runner_journal.py` 152/152 (100.00%); `cli_control.py` 94/94 (100.00%) | [control-protocol known gaps](#stated-limits) |
-| Access policy and stream authorization | `runner_access.py` | [access-model §5](access-model.md#5-the-enforcement-point); [§7](access-model.md#7-reload-and-revocation) | `runner_access.py` 90/90 (100.00%) | none |
-| Supervisor ownership, transport, lease | `runner_adapters.py`, `runner_procid.py` | supervisor-protocol §1 (`supervisor-protocol.md`, retired in 2.0.0); §5 (`supervisor-protocol.md`, retired in 2.0.0) | `runner_adapters.py` 348/348 (100.00%); `runner_procid.py` 32/32 (100.00%) | none |
-| SPAWN idempotency | `runner_adapters.py`, `runner_procid.py`, `canon.py`, `runner_startup.py` | supervisor-protocol §3 (`supervisor-protocol.md`, retired in 2.0.0); period-model §11a (`period-model.md`, retired in 2.0.0) | `runner_adapters.py` 348/348 (100.00%); `runner_procid.py` 32/32 (100.00%); `canon.py` 58/58 (100.00%); `runner_startup.py` 188/188 (100.00%) | [a host's boot_id check](#a-hosts-boot_id-check-reads-a-foreign-live-run-as-dead) |
-| Wrapper and command | `runner_wrapper.py`, `runner_adapters.py`, `runner_procid.py` | supervisor-protocol §2 (`supervisor-protocol.md`, retired in 2.0.0); §4 (`supervisor-protocol.md`, retired in 2.0.0) | `runner_wrapper.py` 54/54 (100.00%); `runner_adapters.py` 348/348 (100.00%); `runner_procid.py` 32/32 (100.00%) | none |
-| FW observation | `runner_adapters.py`, `runner.py`, `runner_startup.py` | [runner-design §6](runner-design.md#6-adapters); period-model §13.6 (PR-34) (`period-model.md`, retired in 2.0.0) | `runner_adapters.py` 348/348 (100.00%); `runner.py` 216/216 (100.00%); `runner_startup.py` 188/188 (100.00%) | none |
-
-`runner_wrapper.py` runs as a subprocess of the engine.
-Its numbers depend on the suite measuring subprocesses (DL-265).
-A process a test ends with SIGKILL loses its data, so these numbers are floors.
-`runner_codes.py` holds the error-code registry (DL-272) and has no branches, so it adds nothing to a pooled total.
-Totals exclude branches that a `pragma: no branch` or `pragma: no cover` comment, `if TYPE_CHECKING:` or `raise AssertionError` excludes (DL-105, DL-269).
-The 30 gated modules carry 33 such pragma comments.
-So 100% means every remaining branch ran, not that each one was asserted.
+For the architect finding the engine map and its known limits. Use the
+[architecture map](architecture.md), [CLI/TUI qualification](cli-tui-qualification.md)
+and [simulation coverage](simulation-coverage.md) in the
+[architect track](../README.md#documents). A qualification result must name
+its revision and executed lane. This page supplies reference pointers and
+known limits; [deploy](deploy.md) covers operating procedures.
 
 ## Least-tested machines
 
-Ranking rule: only a machine with an owning module below 100.00% ranks. It ranks by the lowest branch percent among its owning modules.
-A tie goes to the lower pooled percent, which is the sum of covered branches over the sum of total branches of its owning modules.
-A remaining tie keeps the table's order.
-
-At this stamp every owning module that has branches is at 100.00%, so no machine ranks.
-A rank returns when a module falls below 100.00%.
+See [the registered machines](../src/dsl41/machines.py) and [generated reference](state-machines.md).
 
 ## Closed by DL-263..DL-275
 
-- DL-263: a hand-edited or corrupted anchor or claim file can no longer pass with a coerced field value, because both reads are strict.
-- DL-264: control no longer accepts a status change the oracle cannot replay; `QUE_WAIT` is refused before the log append, so it cannot stop a resume.
-- DL-265: the supervisor and wrapper subprocesses are measured, and branch-only numbers for the whole package are printed.
-- DL-266: a managed supervisor can be stopped for a backup without restarting, the upgrade section has one decision table, and the service drill runs locally.
-- DL-267: a subscriber that stops reading is removed at a fixed byte budget, and a peer that stops reading can no longer hang a handler or a shutdown.
-- DL-268: an operator has a short path at the front of the runbook, a retirement procedure and a monitoring table.
-- DL-269: the 100% branch gate grew from nine to seventeen modules, adding the oracle, capacity, scheduler, control, seal, period, retention and boundary modules.
-- DL-270: the release note states the three facts that select an upgrade row, and citations in tests added by DL-264, DL-267, DL-268 and DL-269 were corrected.
-- DL-271: the drill's steps run as an unprivileged user with sudo, as on the GitHub runner, so a failure that showed only there now shows locally.
-- DL-272: every `ok: false` control answer carries a stable `code`, and a rejected decision stores it; control-protocol §7 gap 4, errors as prose, is closed.
-- DL-274: during a seal, an exception while an admitted attempt is not fully applied, a failed WAL append, or a `clock_regressed` on an engine-made input stops the engine instead of refusing the seal. This closes the OPEN item of DL-272. A request refused on `clock_regressed` during a seal is now answered.
-- DL-273: closes nothing; it specifies a gateway as proposed (see [Stated limits](#stated-limits)).
-- DL-275: the engine and the supervisor install their signal handlers before they publish a socket, so, with an access map, a SIGHUP sent once `control.sock` answers is a reload, never the default action.
+See [the decision index](decision-index.md).
 
 ## Closed by DL-289..DL-306
 
-- DL-289, DL-290, DL-291, DL-293, DL-295: the runner's state machines have transition tables, 5 in all, registered in `src/dsl41/machines.py`. The generated [state-machines page](state-machines.md) lists each one's source state, trigger, guard, effect and target. An event the oracle ignores is a declared internal transition, except the two no-op trace lines of `RELEASE_RESOURCE` (DL-293), declared since ([closed by DL-353](#closed-by-dl-353)). `scripts/transition_coverage.py` fails when an unmarked transition has no hit from a test.
-- DL-296: every machine has a test that builds each state its builder reaches and applies every event the code accepts. It asserts a declared transition or the code's own refusal. This closes the old finding "no transition inventory". The runner parts that are policies or calculations have no table, and [the policies page](blocks/policies.md) says why (DL-302).
-- DL-294, DL-298, DL-299: every owning module that has branches is in the 100% branch gate (`[tool.coverage.report] include` in `pyproject.toml`). The three steps added the supervisor, the wrapper and process identity, then seven more modules, then the engine-side adapters. DL-299 closes DL-269's list of modules still outside. `runner_codes.py` has no branches and is not listed. `state_machine.py` and `machines.py` (DL-289) are in the gate and are not owning modules of a row in the table. A branch that only forged state reaches carries a pragma that names the invariant.
-- DL-303: the service drill runs the rollbacks of upgrade rows 2, 3 and 4, the stop and recover bullets, the configure recipe, the command of every row in the runbook's watch table, and a SIGKILL of the engine unit and of the supervisor unit. What it does not reach stays open under [operator procedures not exercised](#operator-procedures-not-exercised).
-- DL-292, DL-297, DL-304, DL-306: part of the old finding "a replayed oracle fault" is closed. The engine dry-applies each control input on a fork before it admits it, so a faulting operator input is refused and never reaches the log (DL-292). Nothing raises on replay for an oracle transition violation, and a replay that faults names its input. A client request id that starts with `engine:` is refused, so it cannot overwrite an engine-made input's decision (DL-297). A start of a job whose own cascade already holds two of its starts is refused, so a nested re-trigger loop ends (DL-304). A long instant cascade no longer fails every resume: since DL-351 the oracle's cascade is iterative and needs no recursion limit fitted to the job count (DL-306 fitted one before). What stays open is under [a replayed oracle fault](#a-replayed-oracle-fault-stops-every-resume).
+See [the decision index](decision-index.md).
 
 ## Closed by DL-353
 
-- DL-353: the three job tables leave and the `job` chart is registered, so every event the oracle ignores is a declared row: `RELEASE_RESOURCE`'s two no-op trace lines are the chart's ignored rows `job.315` and `job.316`. The old finding "RELEASE_RESOURCE no-op trace lines" is closed. No machine records a transition violation any more; `--on-transition-violation` is inert.
+See [the generated machine reference](state-machines.md).
 
 ## Open findings
 
+See [the qualification scope](cli-tui-qualification.md).
+
 ### Torn sole opening segment of a rolled root
 
-A rolled root holds exactly one segment.
-If that segment's first line is torn or empty, resume refuses.
-The refusal names the missing segment record.
-It is a refusal, not damage.
-`_drop_never_opened_segment` in `src/dsl41/runner_startup.py` returns without repair when fewer than two segments exist.
-An identical retry of the roll refuses the same way.
-The rule is in the period-model §11 (`period-model.md`, retired in 2.0.0) recovery table and DL-144.
-The runbook has a recipe (`deployment-runbook.md`, retired in 2.0.0) (DL-278): the operator removes the torn segment and the identical opener reopens in place.
-Period-model §1.3 (`period-model.md`, retired in 2.0.0) says an ordinary crash between the claim and the head move never needs `--force`.
-A fix would let the opener recreate a torn sole segment itself when the head is claimed by that root.
-DL-278 records it as not built.
+See [DL-424](decision-log.md).
 
 ### Held-unit circular wait
 
-Two jobs in one catalog can each hold a resource unit the other needs, and neither can start.
-A reproduction, with renewable resources X and Y of amount 1: job `a` (priority 1) needs X with `FREE=N` and Y with `FREE=A`; job `b` (priority 2) needs Y with `FREE=Y`.
-After each job runs once and fails, `a` holds X and `b` holds Y.
-When both start again, `a` waits in `QUE_WAIT` for Y, and `b` waits behind `a`'s priority (DL-255).
-Only an operator act ends the wait: `RELEASE_RESOURCE` on `b`, which holds the unit `a` lacks, or `KILLJOB` on either job and then `FORCE_STARTJOB` on it.
-A forced start of a holder runs on its held units and does not check or take the unit it lacks (DL-256's reuse rule), so a forced `a` runs without Y.
-`RELEASE_RESOURCE` on `a` frees X, but `a` is still short on Y and still blocks `b`.
-[DL-286](decision-log.md) records the cycle as a stated limit, with no static check.
-`test_dl256_a_circular_wait_over_held_units_breaks_by_an_operator_act` and `test_dl256_releasing_the_blockers_own_held_unit_leaves_the_circular_wait` reproduce it.
-The [capacity card](blocks/capacity.md) lists it under its gaps.
+See [capacity limits](blocks/capacity.md#open-findings) and [DL-286](decision-log.md).
 
 ### A replayed oracle fault stops every resume
 
-An attempt admitted with no decision is applied through the gate at resume (DL-156).
-`replay_inputs` in `src/dsl41/runner_journal.py` runs `apply_attempt` on it again.
-If the oracle raised on that attempt because of the attempt itself, it raises again, and the engine fails at every resume.
-DL-292 closes this for control inputs, and the [closed section](#closed-by-dl-289dl-306) lists the other closed causes.
-An engine-made input, such as an adapter completion or a scheduled start, is dry-applied too. If its apply raises and its time half applies alone, it is logged with a rejected decision under `engine_apply_faulted` and the engine runs on; replay classifies an undecided attempt the same way (concurrency-model §4).
-Two cases stay open:
-
-- A fault in the time half of an engine-made input, the timers due at its stamp, stops the engine with exit 6 before the input is logged. Every later input meets the same timers.
-- A fault that a code change introduces stops every resume of a log the earlier build wrote, at an input with a durable decision (DL-292).
-
-In both, the estate stays down until a fixed build ships, or the release rolls back to one without the fault. The error names the input and says so (DL-292).
+A faulting time half stops the engine with exit 6. Replaying a faulting
+input can stop every resume until a fixed build or rollback makes replay
+possible. See [DL-292](decision-log.md) and
+[statechart fault handling](statechart-engine.md#11-instances-and-boundaries).
 
 ### Instant cascades that do not end
 
-The oracle runs the starts that follow one another in one instant on its executor's worklist, iteratively (DL-350). A box that completes at its start can start the next box in the same input.
-DL-304 refuses a start of a job that already has two starts in progress, which ends a loop.
-A box that its own end starts again loops without nesting a start; the one such loop the harness met, the job_terminator cascade reaching the new run, ends since DL-348.
-Any other cascade that does not end stops at the item cap: a root dispatch takes fewer items than four times the square of the estate's job count, at least 100,000 and at most 400,000 (DL-351). The count is the same live and on replay; the input is refused or quarantined like any input whose apply raises.
-The cap is a count, not a depth, so a legitimate cascade larger than the cap is refused too. Its margin over the largest measured (a fan-in of wakes, a queue scan, DL-304's shapes) is 4.7x at 200 jobs and 3.1x at 400; a dense estate near 720 jobs can reach it.
-The dry apply runs on the engine's loop, so a cascade longer than the lease's lapse (40 s) stops the lease's renewal, and a supervisor deadman then ends every running job on the host. A cascade that does not end stops in about 4.5 s at 200 jobs and 15 to 17 s at 400 to 1,000 on an M-series laptop. The ceiling is the largest round count that keeps it under half the lapse there, re-derived when the loop's cost per item changes.
-A legitimate dense cascade takes about 33 s at 700 jobs, so the engine's envelope for dense estates ends near 700 jobs whatever the cap.
-A loop across one input's root dispatches, or inside one condition or fact, is not stopped by the cap; with a deadman it ends the host's running jobs, as for any hung engine.
+A per-root item cap stops a cascade that does not end. It does not bound
+loops across root dispatches or a computation that does not end inside one
+action, guard or fact. See [DL-351](decision-log.md) and
+[the engine loop](runner-design.md#4-engine-loop--single-writer).
 
 ### Open vendor readings for a box and its members
 
-These rest on readings of the vendor manuals or on no vendor statement. Each but SEM-23 has a probe in [the live-instance runbook](live-instance-runbook.md). The question numbers are in [autosys-semantics §9](autosys-semantics.md).
-
-- Q13 (DL-301): what CHANGE_STATUS RUNNING does to a box. The oracle writes the status. There is no switch.
-- Q14 (DL-301): what CHANGE_STATUS FAILURE or TERMINATED does to a running box and to its `job_terminator` members. There is no switch.
-- Q15 (DL-304): whether a box whose start leaves no member in the run completes at its start. No vendor page names the case. The switch `box-start-all-members-out` defaults to `complete`.
-- SEM-23 (DL-301): the oracle models the `RESTRICT_FORCE_STARTJOB` configuration. An estate with that variable unset can diverge.
-- SEM-20 (DL-301): the default `off-ice-in-running-box=next-run` follows the reference pages. The 24.0 Web UI help says the opposite.
+See [open semantics questions](autosys-semantics.md#9-open-questions-and-their-pinned-defaults).
 
 ### A completed box and an iced member
 
-DL-309 closes the first two items DL-304 left open.
-SEM-15's idle recompute drops an iced member that is out of the run, under the default `idle-box-iced-member=ignore`, so a completed box no longer flips through it.
-The walk from a job's change up to its ancestors skips an ancestor that the same moment completed and started again (SEM-12).
-One vendor reading stays open:
-
-- Q16: whether an iced member votes when a box that is not running re-derives its status. No vendor sentence names the case. The runbook has a probe. `vote` keeps the earlier reading.
-
-A member that is not iced still flips a completed box, and its failure consumers start. That is SEM-15's documented vendor behavior, not a finding.
+See [box execution](blocks/box-execution.md).
 
 ### A journal stays open when genesis fails late
 
-`start_run` does not close the journal when a step after `Journal.create` raises (DL-305).
-Every caller exits on that error, the file holds no lock, and its bytes were flushed.
-A later fix detaches the journal as DL-305 does in `open_next_period`.
+See [runner recovery](runner-design.md#7-journal-and-recovery-e1-prod-grade).
 
 ### Anchor machine items
 
-Two items stay open (DL-290):
-
-- `anchor_head.06` declares a move that the refusals in `reclaim` and in the resume step call unreachable. One rule should replace the two.
-- `open_claimed` does not check its `period_id` against the claim's `next_period`. Both production callers pass the claim's own, so this is a hardening item.
+See [DL-424](decision-log.md).
 
 ### Unbounded trace and counters
 
-The oracle's trace, and the engine's `drops`, `deduped` and `refused_inputs` lists, grow for the life of the process with no bound (DL-307).
-A capacity measurement, not yet run, must state a limit.
+The oracle trace and the engine's drop, dedupe and refusal counters grow
+without a bound during the process's life. A capacity measurement must
+establish a limit; none is recorded here. See [DL-307](decision-log.md).
 
 ### A host's boot_id check reads a foreign live run as dead
 
-Resume and the spool ladder read a different `boot_id` as "the process is dead".
-On a spool written by another host, that reading is false, and a live run on a partitioned host would read as dead (DL-307).
-It matters only when more than one host exists, which is not built.
+See [DL-424](decision-log.md).
 
 ### Operator procedures not exercised
 
-DL-303 added drilled steps for the rollbacks of upgrade rows 2, 3 and 4, the stop and recover bullets, the configure recipe and the watch table. They passed on GitHub's runner too (DL-308). What they do not reach stays open:
-
-- The runbook lists the watch-table meanings that the drill does not reach, after the table.
-- The drill runs the resume-safe row with two installs of one build. No release pair qualifies for that row today (DL-266).
-- Auditing an estate of an older release with this build refuses with the seal's canonical-form message. The message does not name the version. A refusal that names the version first is open (DL-303).
+See [CLI/TUI qualification](cli-tui-qualification.md).
 
 ### Stated limits
 
-- Leadership rests on a local file lock and holds for one host (concurrency-model §1 (`concurrency-model.md`, retired in 2.0.0)).
-- One engine runs every job on its own host; there is no routing table and no second host.
-- Control is Unix-domain only ([control-protocol §7](control-protocol.md#7-known-gaps-recorded-not-fixed--dl-78)). An HTTP and WebSocket [gateway](gateway.md) is specified as proposed, and nothing of it is built (DL-273).
-- On an estate with no access map, the socket's mode and file ownership are the whole access control; a configured estate closes this (DL-146, [control-protocol §7](control-protocol.md#7-known-gaps-recorded-not-fixed--dl-78)).
-- `CHANGE_STATUS` refuses `QUE_WAIT` as a stated support limit (DL-264).
+See [runner scope and limits](runner-design.md#12-non-goals).
 
 ## Refresh
 
-Run from the repository root, in this order:
-
-```sh
-uv sync --frozen --extra dev
-uv run coverage erase
-uv run coverage run -m pytest -q -n 4 --dist loadfile
-uv run coverage combine
-uv run coverage report
-uv run python scripts/branch_coverage.py
-git fetch
-git diff --quiet origin/main -- src && git rev-parse --short origin/main
-```
-
-Take each module's `covered` and `branches` columns from the coverage table.
-Percent is 100 times covered over branches.
-Stamp the main commit whose `src/` was measured, never a branch commit: a rebase merge gives a branch's commits new ids.
-The last command prints that commit when the tree's `src/` matches main; when it prints nothing, measure on a tree that matches.
-Then update the stamp, the table and the ranking.
-Run `uv run pytest -q tests/test_docs_links.py` to check the links.
+See [verification commands](agent-workflow.md#verify-a-change).
