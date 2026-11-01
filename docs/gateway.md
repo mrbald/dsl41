@@ -10,9 +10,9 @@ stay the contracts.
 ## 1. Process model
 
 - One gateway process per exposed tier, read and ops, each under its own
-  OS service account (`svc-dsl41-gw-read`, `svc-dsl41-gw-ops`). Adm has no
-  socket verbs ([access-model §1](access-model.md#1-the-model)), so it has
-  no gateway.
+  OS service account (`svc-dsl41-gw-read`, `svc-dsl41-gw-ops`). The proposal
+  exposes read and ops only. Adm's `engine_stop` and `update` verbs are
+  outside this proposed API ([access-model §1](access-model.md#1-the-model)).
 - The gateway is a client of `control.sock`, never in-process with the
   engine. The engine's perimeter tells tiers apart by kernel credential;
   an in-process gateway would bypass the per-tier OS account
@@ -42,7 +42,7 @@ One route per control `cmd`. The set is the `cmd` column of the verb table
 | `timers`, `plan` | `GET /api/v1/timers`, `GET /api/v1/plan` | none |
 | `global`, `globals` | `GET /api/v1/global`, `GET /api/v1/globals` | `name`; `names`, repeated |
 | `subscribe` | `GET /api/v1/subscribe`, WebSocket upgrade (§5) | `since`, optional integer |
-| `sendevent`, `seal` | `POST /api/v1/sendevent` (and `/seal`) | JSON body |
+| `sendevent` | `POST /api/v1/sendevent` | JSON body |
 
 - `GET /api/v1/health`, the one route without a `cmd`, touches no engine
   state. It runs criterion 11's socket check and answers `503` when that
@@ -60,10 +60,8 @@ One route per control `cmd`. The set is the `cmd` column of the verb table
   ([access-model §3](access-model.md#3-local-authentication-kernel-peer-credentials),
   [§9](access-model.md#9-the-web-tier)), so a guessable id could collide
   with another person's command.
-- `POST /api/v1/seal` commits an existing stage. Staging writes under the
-  run root, so it stays an adm act on the host
-  ([access-model §10](access-model.md#10-the-verb-table)). The adm hands
-  the browser the staged `next_period` and `stage_digest` out of band.
+- The seal route, stage, `next_period` and `stage_digest` resolve to
+  [DL-424](decision-log.md).
 - A success is `200` with the control answer as the body, unchanged. The
   read header (`baseline_id`, `applied_index`) stays in the body,
   and no HTTP header copies it: two copies could disagree.
@@ -89,7 +87,7 @@ prose; clients branch on `code`. Every other answer field is an extension
 member: `code`, the markers, `index`, `request_id`, `original_decision`,
 the read header.
 
-**Mutations: the markers decide the class.** For `sendevent` and `seal`,
+**Mutations: the markers decide the class.** For `sendevent`,
 the outcome table of
 [control-protocol §3](control-protocol.md#3-mutating-verb-sendevent)
 rules: `refused: true`, `decision: "rejected"`, or neither, which is
@@ -169,26 +167,20 @@ no marker: a failure after a write attempt is `delivered` (control-protocol §2)
   engine's is `DECISION_TIMEOUT_S` (5 s), above many proxy defaults. After its own `504` the gateway still reads
   and logs the late answer.
 
-**Seal and roll.** After a committed seal the engine exits, and the next
-period's engine answers the seal's exact retry, one seal back
-(control-protocol §3). A physical roll opens a new run root: the gateway
-is repointed at its `control.sock` and restarted. Until then
-`gateway_upstream_unavailable` refuses that request only and says nothing
-about the seal.
+**Seal and roll.** Seal retries, physical roll and successor-period routing
+resolve to [DL-424](decision-log.md).
 
 **Browser obligations.**
 
-1. Save the `request_id` and the pins (`expect`, `baseline_id`;
-   a seal's whole body) before the first send, where a reload keeps them.
+1. Save the `request_id` and the pins (`expect`, `baseline_id`) before
+   the first send, where a reload keeps them.
 2. For a mutation the body decides, never the status. Only a `200`
    answer or a problem with a marker is a known outcome. All else after
    the send is unknown: a proxy's `502` or `504`, a network error.
 3. After an unknown outcome, re-read and retry only under the same id and
    pins (control-protocol §3, "Recovering a lost answer"). A refused retry
    says nothing about the original, which may have applied (DL-217).
-4. Retry a seal whose answer was lost until an engine gives a known
-   outcome. On the engine's refusal, stop and re-read; never re-send a
-   seal the engine refused. A `gateway_` refusal is not the engine's.
+4. The seal-specific retry obligation resolves to [DL-424](decision-log.md).
 
 ## 5. The stream
 
@@ -234,7 +226,7 @@ browser socket gets its own upstream `subscribe`, with its `since`.
 
 With a map armed, the engine overwrites `claimed_actor` with the gateway's
 account ([access-model §3](access-model.md#3-local-authentication-kernel-peer-credentials)).
-The WAL names `os/svc-dsl41-gw-ops`; a perimeter receipt names realm `os`,
+The store names `os/svc-dsl41-gw-ops`; a perimeter receipt names realm `os`,
 principal `svc-dsl41-gw-ops`. **Neither names the human: a known limit of
 this version.** Per-human attribution by the engine needs the deferred
 seam `web-session-principal-v2`
@@ -244,11 +236,11 @@ seam `web-session-principal-v2`
 - **The gateway access log** joins a human to a command. It is
   append-only, one line per request: time, proxy user, tier, route,
   `request_id`, outcome class, `code`, and `index` when present; no body
-  or credential. It is kept at least as long as the WAL segments it joins.
-- The join is by `request_id` to WAL `input` and `decision` records, so it
+  or credential. It is kept at least as long as the retained store records it joins.
+- The join is by `request_id` to store `input` and `decision` records, so it
   covers journaled mutations only: perimeter receipts carry no id, read
   admissions are not receipted, and queries carry none. The engine
-  attests none of the log.
+  verifies none of the log.
 - The engine cannot revoke one human inside a tier. The proxy stops
   routing the session, and the gateway closes its sockets (§7).
 
@@ -288,13 +280,13 @@ seam `web-session-principal-v2`
     is 0. Before each upstream connect it checks that it does not own
     `control.sock` and that the socket mode has group bits; a failure
     refuses the request as `gateway_upstream_unavailable` and is logged.
-    A socket missing between periods is the same refusal, not a start
+    A missing socket is the same refusal, not a start
     failure. An unarmed or owner-run gateway would admit every verb.
 
 ## 8. Out of scope
 
-The web application and its seal flow, several engines per gateway, HA,
-and log file serving. Access-model §9 makes log visibility an explicit
+The web application, several engines per gateway, HA, and log file serving.
+The seal flow resolves to [DL-424](decision-log.md). Access-model §9 makes log visibility an explicit
 per-tier deployment grant to the web tier's service account, read by the
 TUI child; the gateway serves no log file.
 
@@ -324,7 +316,7 @@ fixture that implements §4's browser obligations and §5's resume.
 5. A stalled browser closes with `4001`, also mid-backfill, while another
    keeps receiving. Its resume delivers each `seq`'d record once, with no
    gap marker, and the reference client drops a repeated `decision`. A
-   rolled root's gap marker passes intact. An upstream refusal and an
+   pruned store's gap marker passes intact. An upstream refusal and an
    engine EOF close with `4002`, an over-long line with `4003`, an inbound
    data frame with `1008`.
 6. Missing trusted headers, an unlisted `Origin` on a `POST` and on an
@@ -333,13 +325,11 @@ fixture that implements §4's browser obligations and §5's resume.
    and global limits refuse. An expired session closes with `4004`. Every
    response carries `no-store`. A log scan finds no credential.
 7. With a map armed, an ops mutation is journaled with the gateway's `os/`
-   account, and its access log line joins the WAL decision by
+   account, and its access log line joins the store decision by
    `request_id`.
 8. A read-gateway `POST` answers `403` `access_denied`; the perimeter
-   journal holds the denial and the WAL is untouched. A deployment test
+   journal holds the denial and the store is untouched. A deployment test
    maps each account to its tier. Criterion 11 refuses root at start, and
    per request an owner-run gateway, a socket without group bits, or none.
-9. An adm-staged seal commits, and one slower than the mutation window
-   still returns the engine's answer. A seal whose answer is dropped,
-   retried after a physical roll with the gateway repointed, answers `200`
-   `applied` from the record.
+9. The staged-seal and physical-roll acceptance case resolves to
+   [DL-424](decision-log.md).
