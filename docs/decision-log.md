@@ -25356,4 +25356,5 @@ relitigate an entry; append a new one.
   DL-432 ("step 5 settles"); spec-crash is superseded. REJECTED: a watcher or a bound on a previous
   engine's wrapper; the previous instance read from `engine started`; one stamping rule live and at
   restart; a PDEATHSIG wrapper; quarantine of a KILL survivor, a missing record or a failed reading.
-  Opus two rounds, Astra two; round-two findings are known bugs in `TODO.md` under the owner's seal.
+  Opus two rounds, Astra four (two on a CI race fix built by Sol); round-two findings are known bugs
+  in `TODO.md` under the owner's seal.
