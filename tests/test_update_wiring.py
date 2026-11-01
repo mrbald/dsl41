@@ -10,8 +10,11 @@ never elapsed time. A crash is the loop cancelled with no shutdown record, then 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
+import os
+import signal
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -27,7 +30,7 @@ from dsl41.oracle_state import CarriedRows, Event
 from dsl41.reload_plan import load_estate, reread, spec_texts
 from dsl41.reload_update import Admitted, Refused
 from dsl41.runner import Engine
-from dsl41.runner_adapters import JobAdapter, LocalCommandAdapter
+from dsl41.runner_adapters import JobAdapter, Launch, LocalCommandAdapter
 from dsl41.runner_admission import AdmissionRefused, Envelope, Frontiers
 from dsl41.runner_clock import EngineError, RealClock
 from dsl41.runner_config import EngineSettings, RuntimeProfile
@@ -45,9 +48,11 @@ from dsl41.runner_scheduler import Scheduler
 from dsl41.runner_startup import resume_run, start_run
 from dsl41.runner_store import MemoryStore, SqliteStore
 from dsl41.runner_update import UpdateAnswer, UpdateRequest
+from dsl41.runner_wrapper import PAUSE_ENV
 
 GRACE = EngineSettings(grace_term_s=0.5, grace_kill_s=1.0)
 TIMEOUT_S = 30.0
+RECORD_WAITS = EngineSettings(grace_term_s=GRACE.grace_term_s, grace_kill_s=TIMEOUT_S)
 T0 = datetime(2026, 7, 1, 1)
 
 
@@ -206,15 +211,21 @@ def _adapters(settings: EngineSettings) -> dict[str, JobAdapter]:
     return {"CMD": cast(JobAdapter, LocalCommandAdapter(grace_seconds=settings.grace_term_s))}
 
 
-def _start(run_root: Path, estate: Estate, *, scheduler: Scheduler | None = None) -> Engine:
+def _start(
+    run_root: Path,
+    estate: Estate,
+    *,
+    scheduler: Scheduler | None = None,
+    settings: EngineSettings = GRACE,
+) -> Engine:
     return start_run(
         estate.catalog,
         run_root,
         clock=RealClock(),
-        adapters=_adapters(GRACE),
+        adapters=_adapters(settings),
         scheduler=scheduler,
         hold_open=True,
-        settings=GRACE,
+        settings=settings,
         non_idempotent=estate.marked,
     )
 
@@ -241,12 +252,12 @@ async def _until(predicate: Callable[[], object]) -> None:
             await asyncio.sleep(0.01)
 
 
-async def _running(engine: Engine, *jobs: str) -> None:
+async def _running(engine: Engine, *jobs: str, ordinal: int = 1) -> None:
     await _until(lambda: all(engine.attempt_view(job) is not None for job in jobs))
     run_root = engine.run_root
     assert run_root is not None
     for job in jobs:
-        await _until((run_root / "runs" / f"{job}.1" / "1" / "spawn.json").exists)
+        await _until((run_root / "runs" / f"{job}.1" / str(ordinal) / "spawn.json").exists)
 
 
 async def _finish(engine: Engine, loop: asyncio.Future[Any]) -> None:
@@ -328,6 +339,7 @@ def test_two_running_jobs_are_stopped_and_eighteen_untouched_with_the_engine_run
         states.append(engine.lifecycle.state)
         for job in ("j03", "j07"):
             await _until((marker / job).exists)
+        await _running(engine, "j03", "j07", ordinal=2)
         await _finish(engine, loop)
         return refused, admitted, body, engine
 
@@ -362,6 +374,140 @@ def test_two_running_jobs_are_stopped_and_eighteen_untouched_with_the_engine_run
     assert sorted(d["job"] for d in second) == ["j03", "j07"]
     assert all(d["after"] == "update_stop" for d in second)
     assert engine.config_rev == 2
+
+
+class _RerunBarrier(LocalCommandAdapter):
+    """Hold the two replacement wrappers at the protocol's phase boundary (DL-42).
+
+    Before the record, also hold observation until the wrapper exits: publication and
+    the adapter's next poll can straddle the wrapper's lifeline handling (DL-359).
+    """
+
+    def __init__(self, *, before_record: bool) -> None:
+        super().__init__(grace_seconds=GRACE.grace_term_s)
+        self.before_record = before_record
+        self.ready = asyncio.Event()
+        self.release = asyncio.Event()
+        self.launches: dict[str, Launch] = {}
+
+    async def _watch(
+        self, run_dir: Path, run_id: str, proc: asyncio.subprocess.Process, launch: Launch
+    ) -> None:
+        if run_dir.name == "2":
+            stopped = await asyncio.to_thread(
+                os.waitid, os.P_PID, proc.pid, os.WSTOPPED | os.WNOWAIT
+            )
+            assert stopped is not None and stopped.si_status == signal.SIGSTOP
+            self.launches[run_dir.parent.name] = launch
+            if len(self.launches) == 2:
+                self.ready.set()
+            if self.before_record:
+                await self.release.wait()
+                await proc.wait()
+        await super()._watch(run_dir, run_id, proc, launch)
+
+    def resume(self) -> None:
+        self.release.set()
+        for launch in self.launches.values():
+            assert launch.proc is not None
+            with contextlib.suppress(ProcessLookupError):
+                launch.proc.send_signal(signal.SIGCONT)
+
+
+@pytest.mark.parametrize(
+    ("pause", "cause"),
+    [("post_spawn_pre_record", "lifeline"), ("post_record", "engine_stop")],
+    ids=["pre-record", "post-record"],
+)
+def test_draining_updated_reruns_on_each_side_of_the_spawn_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pause: str, cause: str
+) -> None:
+    """DL-359: child markers precede a spawn record; only the record protects the lifeline.
+
+    Both orderings keep the update's two replacements and the other eighteen attempts
+    distinct, with exact stop causes and no surviving commands or wrappers.
+    """
+    jobs = {f"j{i:02}": "exec sleep 30" for i in range(20)}
+    updated = ("j03", "j07")
+    estate = Estate(tmp_path, _jil(jobs))
+    run_root = tmp_path / "run"
+    marker = tmp_path / "new"
+    marker.mkdir()
+    barrier = _RerunBarrier(before_record=pause == "post_spawn_pre_record")
+
+    async def scenario() -> Engine:
+        # The record timeout outlasts the barrier, so only the paused ordering decides the cause.
+        engine = _start(run_root, estate, settings=RECORD_WAITS)
+        engine.adapters["CMD"] = cast(JobAdapter, barrier)
+        loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
+        try:
+            _start_jobs(engine, *jobs)
+            await _running(engine, *jobs)
+            monkeypatch.setenv(PAUSE_ENV, pause)
+            estate.write(
+                _jil(dict(jobs, **{j: f"touch {marker}/{j}; exec sleep 30" for j in updated}))
+            )
+            answer = await _update(engine, _plan(engine, estate), stop=True)
+            assert isinstance(answer.decision, Admitted)
+            assert answer.decision.stop_set == updated
+            applied = await _applied(answer)
+            assert (applied["rev"], applied["changed"], applied["stopped"]) == (
+                2,
+                list(updated),
+                [[j, "rerun"] for j in updated],
+            )
+            async with asyncio.timeout(TIMEOUT_S):
+                await barrier.ready.wait()
+            assert set(barrier.launches) == {"j03.1", "j07.1"}
+            for job in updated:
+                await _until((marker / job).exists)
+                spawn = run_root / "runs" / f"{job}.1" / "2" / "spawn.json"
+                assert spawn.exists() is (pause == "post_record")
+            assert engine.lifecycle.state == "RUNNING"
+            assert await engine.request_stop() == "DRAINING"
+            for launch in barrier.launches.values():
+                assert launch.spec_sent
+                assert (launch.lifeline_w is None) is barrier.before_record
+        finally:
+            barrier.resume()
+            await _finish(engine, loop)
+        return engine
+
+    engine = asyncio.run(scenario())
+    outcomes: dict[str, list[tuple[str, str]]] = {}
+    for outcome in _kinds(run_root, "outcome"):
+        outcomes.setdefault(outcome["job"], []).append((outcome["outcome"], outcome["cause"]))
+    assert set(outcomes) == set(jobs)
+    for job in updated:
+        assert outcomes[job] == [("stopped", "update_stop"), ("stopped", cause)]
+    for job in set(jobs) - set(updated):
+        assert outcomes[job] == [("stopped", "engine_stop")]
+    dispatches = _kinds(run_root, "dispatch")
+    assert sorted((d["job"], d["ordinal"]) for d in dispatches) == sorted(
+        [(j, 1) for j in jobs] + [(j, 2) for j in updated]
+    )
+    assert all(d["after"] == "update_stop" for d in dispatches if d["ordinal"] == 2)
+    assert (engine.config_rev, engine.lifecycle.state, engine.exit_code, engine.leaving_record) == (
+        2,
+        "STOPPED",
+        0,
+        "clean_shutdown",
+    )
+    assert engine.held_groups == {}
+    assert all(engine.attempt_view(j) is None for j in jobs)
+    spawns = list((run_root / "runs").glob("*/*/spawn.json"))
+    assert len(spawns) == 22
+    for path in spawns:
+        spawn = json.loads(path.read_text())
+        with pytest.raises(ProcessLookupError):
+            os.kill(spawn["wrapper_pid"], 0)
+        with pytest.raises(ProcessLookupError):
+            os.killpg(spawn["command_pgid"], 0)
+        status = json.loads(path.with_name("status.json").read_text())
+        if path.parent.name == "2" and barrier.before_record:
+            assert (status["outcome"], status["cause"]) == ("terminated", "parent lost")
+        else:
+            assert (status["outcome"], status["signal"]) == ("signaled", signal.SIGTERM)
 
 
 def test_a_plan_job_the_oracle_starts_while_the_update_stops_waits_for_the_application(
