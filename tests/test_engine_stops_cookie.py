@@ -1,6 +1,6 @@
 """The engine's stops by the process group and the process cookie (`DSL41_COOKIE`): every process
-of a command attempt carries `<root_id>.<run id>`, so where the cookie can be read (Linux,
-with pidfd signalling) the engine knows its own processes whatever their group.
+of a command attempt carries `<root_id>.<run id>`, so where the cookie can be read (Linux)
+the engine knows its own processes whatever their group.
 
 The owner's rule: what is left of an attempt (`EngineStops.left`) is the recorded group's live
 members and the processes carrying its cookie, both taken as reliable; a scan that fails is
@@ -49,7 +49,7 @@ from dsl41.ir import lower_source
 from dsl41.oracle_state import Event
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter, LocalCommandAdapter
-from dsl41.runner_attempts import missing_record_verdict
+from dsl41.runner_attempts import NO_GROUP, missing_record_verdict
 from dsl41.runner_clock import RealClock, VirtualClock
 from dsl41.runner_config import EngineSettings, RuntimeProfile
 from dsl41.runner_control import status_label
@@ -121,7 +121,7 @@ class _World:
     def _alive(self, pid: int) -> bool:
         return self.leader if pid == PGID else False
 
-    def _signal(self, pid: int, _start: str, sig: int) -> bool:
+    def _signal(self, pid: int, _start: str, sig: int, **_kwargs: Any) -> bool:
         self.sent.append((pid, sig))
         if sig == signal.SIGKILL:
             self.killed_at = asyncio.get_running_loop().time()
@@ -497,37 +497,112 @@ def test_a_forgotten_attempt_leaves_nothing_in_the_stops(tmp_path: Path) -> None
 
 
 @pytest.mark.parametrize("pidfd", [True, False], ids=["pidfd", "no-pidfd"])
-def test_without_pidfd_the_engine_does_not_scan_and_says_so(
+def test_the_engine_scans_with_either_primitive_and_names_it_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pidfd: bool
 ) -> None:
-    """Astra M1, Opus M2: the scan decides only where its processes can be signalled through
-    a pidfd; without one the engine keeps the group checks for its life and says so once at
-    start (a log line, not a record)."""
+    """Linux scans with either primitive, probed once per engine start (DL-436).
+    Repeated readings do not repeat the log line or the probe."""
     said: list[str] = []
+    probes: list[bool] = []
+    scans: list[str] = []
+
+    def probe() -> bool:
+        probes.append(pidfd)
+        return pidfd
+
+    def scan(prefix: str) -> runner_procid.Ours:
+        scans.append(prefix)
+        return _found()
+
     monkeypatch.setattr(runner_stops, "sys", SimpleNamespace(platform="linux"))
-    monkeypatch.setattr(runner_procid, "pidfd_supported", lambda: pidfd)
+    monkeypatch.setattr(runner_procid, "pidfd_supported", probe)
+    monkeypatch.setattr(runner_procid, "ours", scan)
     monkeypatch.setattr(runner_stops, "best_effort_report", said.append)
 
     async def scenario() -> bool:
         engine = _engine(tmp_path)
         available = engine.stops.scan_available
+        assert engine.stops.pidfd is pidfd
+        for _ in range(2):
+            assert engine.stops.scan() == _found()
         await engine.shutdown()
         _close(engine)
         return available
 
-    assert asyncio.run(scenario()) is pidfd
-    assert said == ([] if pidfd else ["dsl41: cookie scan unavailable: no pidfd"])
+    assert asyncio.run(scenario())
+    assert probes == [pidfd]
+    assert len(scans) == 2
+    primitive = "pidfd" if pidfd else "os.kill (start-token check)"
+    assert said == [f"dsl41: cookie scan signalling: {primitive}"]
+
+
+@pytest.mark.parametrize("pidfd", [True, False], ids=["pidfd", "no-pidfd"])
+def test_cached_primitive_reaches_restart_ladders_and_held_poll(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pidfd: bool
+) -> None:
+    """Every signal uses the engine's cached primitive (DL-436)."""
+    world = _World(monkeypatch)
+    monkeypatch.setattr(runner_stops, "sys", SimpleNamespace(platform="linux"))
+    probes: list[bool] = []
+    sent: list[tuple[int, int, bool]] = []
+
+    def probe() -> bool:
+        probes.append(pidfd)
+        return pidfd
+
+    def signal_ours(pid: int, _token: str, sig: int, *, pidfd: bool) -> bool:
+        sent.append((pid, sig, pidfd))
+        return True
+
+    monkeypatch.setattr(runner_procid, "pidfd_supported", probe)
+    monkeypatch.setattr(runner_procid, "signal_ours", signal_ours)
+    run_root, dispatch = _open_with_cookie(tmp_path)
+    run_id = dispatch["attempt"]
+    world.scans = [_found(42, run_id=run_id)]
+
+    async def scenario() -> None:
+        engine = await resume_run(
+            lower_source(_JIL),
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+        )
+        try:
+            assert engine.stops.pidfd is pidfd
+            assert sent == [(42, signal.SIGTERM, pidfd)]
+            await engine.stops.ladder(NO_GROUP, run_id, 0.0)
+            assert sent[-1] == (42, signal.SIGKILL, pidfd)
+            await engine.stops.ladder(NO_GROUP, run_id, 0.0)
+            assert sent[-2:] == [(42, signal.SIGTERM, pidfd), (42, signal.SIGKILL, pidfd)]
+            engine.stops.hold(run_id, COMMAND_SURVIVED)
+            engine.hold_group(run_id, NO_GROUP)
+            engine.stops._look()
+            assert sent == [
+                (42, signal.SIGTERM, pidfd),
+                (42, signal.SIGKILL, pidfd),
+                (42, signal.SIGTERM, pidfd),
+                (42, signal.SIGKILL, pidfd),
+                (42, signal.SIGKILL, pidfd),
+            ]
+            assert probes == [pidfd, pidfd]
+        finally:
+            await engine.shutdown()
+            _close(engine)
+
+    asyncio.run(scenario())
 
 
 def test_a_restart_cannot_fail_for_want_of_pidfd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Opus M2: a restart's ladder whose process cannot be signalled (no pidfd) sends nothing,
-    raises nothing, and holds the attempt."""
-    me = os.getpid()
-    token = runner_procid.proc_start_token(me)
-    assert token is not None
+    """Without pidfd a restart's cleanup TERMs and KILLs by pid after the token check. A
+    survivor still holds the attempt (DL-436)."""
+    me, token = PGID + 1, "ticks:91"
+    sent: list[tuple[int, int]] = []
     monkeypatch.delattr(os, "pidfd_open", raising=False)
+    monkeypatch.setattr(runner_stops, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(runner_procid, "proc_start_token", lambda _pid: token)
+    monkeypatch.setattr(runner_procid.os, "kill", lambda pid, sig: sent.append((pid, sig)))
     found = runner_procid.Ours({me: (RUN_ID, token)})
     monkeypatch.setattr(runner_procid, "ours", lambda _prefix: found)
 
@@ -542,6 +617,7 @@ def test_a_restart_cannot_fail_for_want_of_pidfd(
         return held
 
     assert asyncio.run(scenario()) == [RUN_ID]
+    assert [(pid, sig) for pid, sig in sent if sig] == [(me, signal.SIGTERM), (me, signal.SIGKILL)]
 
 
 # ------------------------------------------------------------------- the restart
@@ -798,7 +874,7 @@ class _Procs:
             return None
         return {pid: f"ticks:{pid}" for pid, (g, _c, _i) in self.procs.items() if g == pgid}
 
-    def _signal(self, pid: int, _start: str, sig: int) -> bool:
+    def _signal(self, pid: int, _start: str, sig: int, **_kwargs: Any) -> bool:
         self.sent.append((pid, sig))
         if self.on_signal is not None:
             self.on_signal(pid, sig)
@@ -1012,7 +1088,7 @@ def test_a_process_gone_within_the_grace_is_never_reported_survived(
     world = _World(monkeypatch)
     torn: list[int] = []
 
-    def tearing_down(pid: int, _start: str, sig: int) -> bool:
+    def tearing_down(pid: int, _start: str, sig: int, **_kwargs: Any) -> bool:
         world.sent.append((pid, sig))
         return True
 

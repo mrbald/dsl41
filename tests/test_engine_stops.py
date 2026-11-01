@@ -16,6 +16,7 @@ import os
 import signal
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1060,20 +1061,20 @@ def test_a_group_that_survives_its_ladder_never_settles(
     """Astra R2-M3 reopened: an attempt whose group outlives its ladder's KILL (here a survivor
     the engine is told of) is never forgotten. It stays unsettled, the drain cannot end clean,
     and the shutdown record names it with its stop. The survivor is told through the group
-    check, so the engine runs without the cookie scan (no pidfd)."""
-    from dsl41 import runner_procid, runner_stops
+    check, so the engine runs with the cookie scan disabled."""
+    from dsl41 import runner_stops
 
     run_root = tmp_path / "run"
     children = tmp_path / "children"
     text = _jil({"j": _leader_and_stubborn_child(tmp_path, children)})
-    monkeypatch.setattr(runner_procid, "pidfd_supported", lambda: False)
+    monkeypatch.setattr(runner_stops, "sys", SimpleNamespace(platform="darwin"))
     monkeypatch.setattr(runner_stops, "group_has_live_member", lambda _pgid: True)
     real_ladder = runner_stops.stop_ladder
 
     async def ladder_outlasting_the_record(
-        pgid: int, token: str, grace: float, members: Any = None
+        pgid: int, token: str, grace: float, members: Any = None, **kwargs: Any
     ) -> None:
-        await real_ladder(pgid, token, grace, members)
+        await real_ladder(pgid, token, grace, members, **kwargs)
         await asyncio.sleep(0.3)  # the wrapper's record lands before the ladder has ended
 
     monkeypatch.setattr(runner_stops, "stop_ladder", ladder_outlasting_the_record)
@@ -1171,19 +1172,21 @@ def test_a_crash_between_the_outcome_and_the_closing_kill_never_overlaps_a_rerun
     """Astra R3-M1, R4-M2, R4-M3: the leader exits on the drain's TERM and its record lands
     while the ladder still waits; a TERM-ignoring child lives on, and the engine dies before
     the closing KILL. The attempt stayed open (its outcome committed while the ladder ran).
-    Where the process cookie cannot be read (made so here: no pidfd), the restart cannot prove
+    Where the process cookie cannot be read (the scan is disabled here), the restart cannot prove
     the leaderless child its own, so it signals nothing and holds the attempt: attempt 2 is
     not launched, and `status` names why. Once the child is gone, the attempt closes and
     attempt 2 launches. The cookie's own case is
     `test_a_restart_stops_a_leaked_child_whatever_the_crash_window`."""
-    from dsl41 import runner_procid, runner_stops
+    from dsl41 import runner_stops
 
     run_root = tmp_path / "run"
     children = tmp_path / "children"
     text = _jil({"j": _leader_and_stubborn_child(tmp_path, children)})
-    monkeypatch.setattr(runner_procid, "pidfd_supported", lambda: False)
+    monkeypatch.setattr(runner_stops, "sys", SimpleNamespace(platform="darwin"))
 
-    async def term_then_hang(pgid: int, token: str, grace: float, members: Any = None) -> None:
+    async def term_then_hang(
+        pgid: int, token: str, grace: float, members: Any = None, **kwargs: Any
+    ) -> None:
         os.killpg(pgid, signal.SIGTERM)
         await asyncio.Event().wait()  # the engine dies before this ladder's KILL
 
@@ -1260,7 +1263,9 @@ def test_a_ladder_that_raises_after_the_record_leaves_the_attempt_held(
     children = tmp_path / "children"
     text = _jil({"j": _leader_and_stubborn_child(tmp_path, children)})
 
-    async def term_then_raise(pgid: int, token: str, grace: float, members: Any = None) -> None:
+    async def term_then_raise(
+        pgid: int, token: str, grace: float, members: Any = None, **kwargs: Any
+    ) -> None:
         os.killpg(pgid, signal.SIGTERM)
         await _until(lambda: len(_kinds(run_root, "outcome")) == 1)
         raise PermissionError("EPERM")
@@ -1305,10 +1310,10 @@ def test_a_new_run_waits_while_its_job_s_group_survives(
     is held. A start of the job decided now is durable as `dispatch_pending` and not
     launched while the member lives, and `status` shows why; once it is gone, run 2 launches
     under that pending record. The ladder that sends no KILL is the survivor, so the engine
-    runs without the cookie scan (no pidfd), whose held poll would KILL it."""
-    from dsl41 import runner_procid, runner_stops
+    runs with the cookie scan disabled, whose held poll would KILL it."""
+    from dsl41 import runner_stops
 
-    monkeypatch.setattr(runner_procid, "pidfd_supported", lambda: False)
+    monkeypatch.setattr(runner_stops, "sys", SimpleNamespace(platform="darwin"))
     from dsl41.runner_control import status_label
 
     run_root = tmp_path / "run"
@@ -1316,7 +1321,9 @@ def test_a_new_run_waits_while_its_job_s_group_survives(
     text = _jil({"j": _leader_and_stubborn_child(tmp_path, children)})
     real_ladder = runner_stops.stop_ladder
 
-    async def term_only(pgid: int, token: str, grace: float, members: Any = None) -> None:
+    async def term_only(
+        pgid: int, token: str, grace: float, members: Any = None, **kwargs: Any
+    ) -> None:
         os.killpg(pgid, signal.SIGTERM)  # the member ignores it; no KILL follows
         await _until(lambda: len(_kinds(run_root, "outcome")) == 1)
 
@@ -1374,9 +1381,9 @@ def test_a_new_run_waits_for_the_stop_ladder_of_the_run_before(
     real_ladder = runner_stops.stop_ladder
 
     async def ladder_outlasting_the_record(
-        pgid: int, token: str, grace: float, members: Any = None
+        pgid: int, token: str, grace: float, members: Any = None, **kwargs: Any
     ) -> None:
-        await real_ladder(pgid, token, grace, members)
+        await real_ladder(pgid, token, grace, members, **kwargs)
         await _until(lambda: len(_kinds(run_root, "outcome")) == 1)
 
     monkeypatch.setattr(runner_stops, "stop_ladder", ladder_outlasting_the_record)
@@ -1433,9 +1440,9 @@ def test_a_restart_after_an_injected_inactive_waits_for_the_earlier_run_s_ladder
     real_ladder = runner_stops.stop_ladder
 
     async def ladder_outlasting_the_record(
-        pgid: int, token: str, grace: float, members: Any = None
+        pgid: int, token: str, grace: float, members: Any = None, **kwargs: Any
     ) -> None:
-        await real_ladder(pgid, token, grace, members)
+        await real_ladder(pgid, token, grace, members, **kwargs)
         await _until(lambda: len(_kinds(run_root, "outcome")) == 1)
 
     async def scenario() -> tuple[list[int], bool, list[int]]:

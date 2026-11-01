@@ -25385,3 +25385,23 @@ relitigate an entry; append a new one.
   Oracle time never runs backwards; the engine waits rather than inventing time.
   NOT BUILT. No bound on the gap: a store stamped far ahead holds ticks and timers until the
   wall catches up, with one warning line (Known bugs). Built by Sol; Opus two rounds.
+
+- DL-436 The Linux cookie scan runs without pidfd support
+  (2026-11-01; owner ruling; proc-cookie; runner_procid.py, runner_stops.py,
+  runner_adapters.py, runner_startup.py, docs/runner-design.md §§7 and 8a,
+  docs/wrapper-protocol.md §3, docs/blocks/attempts.md)
+  THE RULE. On Linux the cookie scan reads /proc/<pid>/ with or without pidfd support.
+  The engine probes once at start. Only a serving start with a run root logs the primitive,
+  once; an in-memory virtual play or rehearse sweep logs none. Where supported,
+  every signal uses a pidfd after re-reading the start token. Otherwise every signal uses
+  os.kill only after proc_start_token (/proc/<pid>/stat field 22) still matches the scanned
+  token. A mismatch or a missing token sends nothing. The scan, TERM, grace, KILL and held
+  poll are the same with either primitive, live and at restart (DL-433). Once pidfd is
+  selected, an open or send failure never falls back to os.kill. The attempt is not
+  released while processes remain; the held poll retries the KILL.
+  THE LIMIT. The race between the final token check and os.kill is accepted. The engine is
+  an orchestrator, not a jail; defeating both the group and the cookie is out of scope.
+  Off Linux, and for attempts dispatched without the cookie, the group checks still decide.
+  Supersedes DL-431's no-pidfd scan exclusion and rejection of numeric-pid signals within
+  this token-checked fallback. Wrapper inputs, spool and wire formats are unchanged.
+  Built by Sol; Opus two rounds.
