@@ -20,7 +20,8 @@ Contracts (DL-17):
   successes. Zero or ambiguous joins stay explicit. Everything else is an explicit
   job(condition=...) call. The output is a module whose estate() returns a CatalogBuilder for
   the original's canonical form; importing it builds nothing, and run as a script it prints
-  the rebuilt JIL. `dsl41 build` writes that JIL from the module.
+  the rebuilt JIL with no arguments or dispatches navigation with `nav`.
+  `dsl41 build` writes that JIL from the module.
 - FW jobs round-trip through job(watch_file=...) kwargs.
 - Folds (DL-38) are the closed set FOLDS (T-001..T-007). Each is derived from graph shape or
   typed lanes alone, detected by exact shape, reconstructed canonical-hash-neutral, and backed
@@ -36,7 +37,7 @@ from __future__ import annotations
 import dataclasses
 import keyword
 import re
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from typing import NamedTuple
 
 from dsl41.ast_jil import JilFile, value_opens_comment
@@ -788,6 +789,18 @@ def _job_kwargs(
     return out
 
 
+def job_to_source(job: JobIR) -> str:
+    """Render one complete job definition using the decompiler's keyword renderer."""
+    job_type = {"CMD": "c", "BOX": "b", "FW": "f"}.get(job.job_type, job.job_type)
+    kwargs = [f"job_type={_py(job_type)}"]
+    if job.box.box_name is not None:
+        kwargs.append(f"box_name={_py(escape_job_name(job.box.box_name))}")
+    kwargs.extend(
+        _job_kwargs(job, condition=None if job.sem.condition is None else job.sem.condition.cond)
+    )
+    return f"c.job({_py(job.name)}, {', '.join(kwargs)})"
+
+
 def _plain_status_atom(cond: Cond | None) -> tuple[str, str] | None:
     """(producer, letter) iff cond is exactly one plain foldable status atom."""
     if (
@@ -1366,7 +1379,8 @@ def decompile(
     elsewhere: Collection[str] | None = None,
 ) -> str:
     """Emit a Python module whose estate() returns a builder for a catalog canonically equal to
-    this one. Importing the module builds nothing; run as a script it prints the JIL (DL-410).
+    this one. Importing builds nothing; a script without arguments prints JIL (DL-410).
+    The script's nav command inspects the in-memory estate through main().
 
     `permit_unknown` is the flag the catalog was lowered with; the module's script footer and its
     header's `dsl41 build` hint carry it, so an estate with unknown attributes still renders.
@@ -1409,14 +1423,32 @@ def decompile(
         "",
         "",
         'if __name__ == "__main__":',
-        "    import sys",
+        "    from dsl41.dsl import main",
         "",
-        "    c = estate()",
-        "    c.build(permit_unknown=True)" if permit_unknown else "    c.build()",
-        "    sys.stdout.write(c.to_jil())",
+        "    main(estate, permit_unknown=True)" if permit_unknown else "    main(estate)",
         "",
     ]
     return "\n".join(lines)
+
+
+def main(
+    estate: Callable[[], CatalogBuilder],
+    *,
+    permit_unknown: bool = False,
+    argv: Sequence[str] | None = None,
+) -> None:
+    """Print the estate's JIL with no arguments, or dispatch its navigation command."""
+    import sys
+
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments:
+        from dsl41.cli_nav import estate_main
+
+        estate_main(estate, arguments, permit_unknown=permit_unknown)
+        return
+    builder = estate()
+    builder.build(permit_unknown=permit_unknown)
+    sys.stdout.write(builder.to_jil())
 
 
 # ------------------------------------------------------------- placeholders and packages

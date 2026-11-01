@@ -25,6 +25,7 @@ the other three.
 1. [docs/incident-triage.md](docs/incident-triage.md) - on shift: why a job failed, is late or has not started, the intervention and its read-back, the escalation bundle for a dsl41 fault
 2. [examples/nightbank/README.md](examples/nightbank/README.md) - the 82-job training estate
 3. [examples/file_processing/README.md](examples/file_processing/README.md) - the operator CLI and procedures of the file-processing block
+4. [docs/nav.md](docs/nav.md) - inspect job dependencies and box membership from the CLI or an agent
 
 **Job author**: write an estate in JIL or the Python DSL, or bring an existing one in, and get it accepted.
 
@@ -533,6 +534,10 @@ Front end and IR:
 - `src/dsl41/derive.py`: IR-F to IR-G. Seven analysis passes produce the
   edges, mutex pairs, box tree, same-cycle detection, and the M01-M36
   mapping-row classification.
+- `src/dsl41/nav.py`: pure job navigation over IR-G: dependency neighbors,
+  transitive reachability, paths and box membership.
+- `src/dsl41/cli_nav.py`: the `nav` command, JSON and text output, and
+  navigation from a decompiled module's in-memory estate.
 
 Visualization:
 
