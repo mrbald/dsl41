@@ -27,10 +27,11 @@ operate and administer.
 There are three tiers, strictly nested: **read < ops < adm**. They are one
 enum, not a flag matrix.
 
-- **read**: every query verb, the journal stream and the observer TUI.
+- **read**: every query verb, the store stream (DL-428) and the observer TUI.
   Read discloses data; it is not harmless. `spec` shows job commands,
-  `globals` shows runtime values, `subscribe` streams raw WAL records, and
-  job logs can hold credentials. Grant it deliberately.
+  `globals` shows runtime values, `subscribe` streams the store's wire
+  records (control-protocol §5), and job logs can hold credentials. Grant it
+  deliberately.
 - **ops**: read, plus every mutating socket verb. That is every
   `sendevent` verb. Ops is destructive by design: `FORCE_STARTJOB` and
   `CHANGE_STATUS` are in it (DL-146). There is no fourth
@@ -60,24 +61,13 @@ Guarded: the control socket (`control.sock`) and the served web TUI.
 Not guarded, by ruling:
 
 - **A local CLI with filesystem access to the estate root is adm by
-  definition.** Anyone who can read the WAL and write the spool needs no
+  definition.** Anyone who can read the store and write the spool needs no
   socket. The CLI verb tables below are therefore *semantic* tiers: they
   say what a verb means, and they enforce nothing. The exemption covers
   the filesystem path only. A CLI request that arrives through
   `control.sock` passes the same gate as every other client (§5). The
   gate knows no client identity, only the peer credential.
-- **`supervisor.sock` is governed but not tiered** (DL-146). It keeps
-  both controls of supervisor-protocol §5: owner-only `0600` mode, and the
-  same-uid peer-credential check on every accept. That check refuses a
-  peer uid that differs from the owner's. It admits a peer for which the
-  platform supplies no uid; there the `0600` mode is the whole boundary.
-  §3 does not copy that fallback. The kernel supplies the credential and
-  enforces the mode; the supervisor makes the comparison. Either way the
-  socket is owner-only. The local owner is adm by definition (previous
-  bullet), and adm contains every lower tier. This holds when the run root
-  opens to `0710` traversal too (§8). `supervise shutdown` can kill every
-  managed command, and it stays an owner-only act. It may later move
-  behind the same gate; nothing in this model blocks that.
+- The supervisor socket and its access rules are retired (DL-424).
 - **The release train's service side is a door of its own** (DL-421). The
   deployment identity that runs `dsl41 release` can neither read the run
   root nor write under a release. It holds a sudoers grant: `dsl41 release
@@ -97,7 +87,7 @@ Not guarded, by ruling:
   next service call, not at a reload; an apply caught between calls stops
   with its record kept, for an account that holds the grant to resume it,
   or to roll it back once its period has opened. The identity's tier on
-  the wire is the map's, and §7 revokes it. The WAL inputs the apply's
+  the wire is the map's, and §7 revokes it. The store inputs the apply's
   hold and release requests produce carry the actor the gate wrote,
   `os/<name>` (§3), under the request id the apply recorded for each; a
   request the gate denies or the engine refuses produces none. The seal
@@ -109,7 +99,7 @@ Not guarded, by ruling:
 
 At connection accept, the engine reads the peer's credentials from the
 kernel: `SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on macOS. The gate uses
-`runner_supervisor.peer_uid` for the uid and adds the following:
+`runner_access.peer_uid` for the uid and adds the following:
 
 - It maps the uid to a passwd name, then to groups through
   `getgrouplist`, on both platforms. macOS's `xucred.cr_groups` truncates
@@ -123,8 +113,8 @@ kernel: `SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on macOS. The gate uses
   of the connection. A change to OS groups takes effect on reconnect;
   that is an administrative fact, not a reload defect (§7).
 - **No credential: the connection is refused** when access control is
-  configured, with the same code `peer_unauthenticated`. The supervisor's
-  `None` fallback is not copied; the gate fails closed.
+  configured, with the same code `peer_unauthenticated`. The gate fails
+  closed.
 
 `claimed_actor` stays a wire field but carries no authority. When access
 is configured, the server **overwrites** the actor with the canonical
@@ -214,13 +204,13 @@ wrapped into the same refusal (DL-149), so every loader failure on
 reload attempts a receipt. A configured path never falls back to owner-wide authority.
 
 The preflight refusal writes nothing. Before the run root is claimed or
-the WAL opened, the CLI runs the same loader that arming runs, read-only.
+the store opened, the CLI runs the same loader that arming runs, read-only.
 `socket_group` resolution is part of that load (DL-152). Arming validates
 the map again after the root is claimed. A failure at that point still
-refuses, but the claimed root and its WAL already exist. Such a failure
-can come from the second validation, from journal recovery, from the
-sync of the arming receipt, or from the group grant. The receipt trail
-differs by failure:
+refuses, but the claimed root and its store already exist. Such a failure
+can come from the second validation, from perimeter journal recovery,
+from the sync of the arming receipt, or from the group grant. The receipt
+trail differs by failure:
 
 - A failure of the second validation writes no receipt.
 - An existing `perimeter.jsonl` that this engine cannot read refuses at
@@ -247,7 +237,7 @@ The gate sits in `ControlServer._handle`, before the `cmd` split. That is
 the one place both `_respond` and `_subscribe` pass through. `subscribe`
 owns its connection and skips `_respond`, for the same reason as the
 version check (DL-90). Nothing reaches `Engine.submit` unauthorized. The
-engine, the oracle and the journal hold no authorization logic.
+engine, the oracle and the store hold no authorization logic.
 
 Two doors precede the gate, in this order. The line must decode to a JSON
 object, and the request must name `v: 3` (control-protocol §2). A
@@ -281,7 +271,7 @@ v4, no dialect event and no tombstone. Refusals use the
 
 ## 6. Receipts: the perimeter journal
 
-Access decisions never enter the engine WAL. A denial is not an engine
+Access decisions never enter the engine store. A denial is not an engine
 input, and replay must not see policy. The decisions go to a separate
 append-only journal:
 
@@ -299,7 +289,7 @@ the schema depends on the kind:
   - `privileged_admitted` is written for every admitted request that
     required ops or higher. It is the break-glass ledger. It records a
     pass through the perimeter only. The engine's own decision on that
-    request is the WAL's to record. So a verb that the dispatcher then
+    request is the store's to record. So a verb that the dispatcher then
     refuses still shows a perimeter admission here.
   - Fields: `realm`, `principal`, `action`, `required_tier`,
     `granted_tier`, `policy_generation` and `policy_digest`.
@@ -341,7 +331,7 @@ Durability depends on the kind, and each rule is deliberate:
   result is ignored. It reports a failure that keeping the old policy has
   already answered.
 - `privileged_admitted` is best effort and unsynced. The admission stands
-  when the receipt write fails. The WAL is the authoritative record of
+  when the receipt write fails. The store is the authoritative record of
   what the engine then did. Gating every ops verb on receipt storage would
   turn a full disk into a total operations outage while reads stayed
   open. The corroborating ledger is best effort by ruling.
@@ -386,7 +376,7 @@ loader read.
 - The discriminator is the record's `rec` kind.
 - Evolution is additive. A writer may add fields, and a reader must
   ignore fields it does not know. An incompatible change takes a NEW kind
-  name, as the WAL does for record kinds.
+  name, as the store does for record kinds.
 - Unknown kinds are skipped, not refused. No engine dispatches this
   journal: seq recovery reads only `access_seq`, and every other reader
   reads it as an audit trail. So there is no per-record version field to
@@ -488,7 +478,7 @@ deliberately. Arming has two modes, and the map chooses:
   group and other bits never widen, owner bits can change, and for a
   symlink child the target changes (§4). Later artifacts land inside
   those directories. A test asserts that nothing but the socket is
-  group-accessible after arming. `supervisor.sock` stays `0600` (§2).
+  group-accessible after arming. The supervisor socket is retired (DL-424).
 - Access not configured. Everything stays as in the zero-config model:
   `0700` root, `0600` socket. No gate and no actor overwrite is active,
   and no new perimeter receipt is attempted (§4). A `perimeter.jsonl`
@@ -566,7 +556,7 @@ for the tier it falls under. It is not a second classification axis.
 CLI semantic tiers (the only enforcement is filesystem access, and these
 tiers enforce nothing, §2):
 
-- Read-shaped: `query *`, `host list`, `supervise list`, `journal`,
+- Read-shaped: `query *`, `host list`, `journal`,
   `runs`, `verify`, offline `rehearse`, `release status` (it reads
   `ACTIVE`, the releases, the apply record and the receipts, and sends
   `query`; DL-421), and every pure-compiler verb, `estate diff` and
@@ -575,15 +565,14 @@ tiers enforce nothing, §2):
   DL-422).
 - Ops: `sendevent`, `off-hold-all` (a sweep of `sendevent
   OFF_HOLD` requests, so ops by composition; DL-311, DL-423), `host
-  activate`/`drain`/`evict` and `supervise shutdown`.
+  activate`/`drain`/`evict`.
 - Adm: `run`, `engine stop` (the socket's `engine_stop`, the systemd unit's
   `ExecStop`), `reread` (it writes the plan under the run root's `plans/`;
   its socket verb is the read-tier `catalog`), `update` (the socket's
   `update`), `serve`, `audit` (it writes attestations and registry
   state), `seal` (it stages C2 files before the ops verb; staging may
   later be split from committing), `estate prune`, `estate reclaim`,
-  `supervise start` (it creates the run root and writes the supervisor
-  log there; DL-311), `release prepare` and `release requalify` (each
+  `release prepare` and `release requalify` (each
   stages or re-records the release that `ACTIVE` and the seal later
   select, as `seal` stages C2 files; DL-421, DL-423), `release apply`,
   `release resume` and `release rollback` (ops socket verbs, the seal and
@@ -594,10 +583,7 @@ tiers enforce nothing, §2):
   account, and the deployment identity reaches it through the door of §2
   alone; DL-421).
 
-`supervise shutdown` is ops-shaped: it operates and configures nothing.
-Its only door is the owner-`0600` supervisor socket (§2). So the
-enforcement (owner = adm by definition) exceeds the tier the verb needs.
-Adm contains ops, so there is no contradiction.
+The `supervise` CLI verbs and their tier rules are retired (DL-424).
 
 `ui` has no single tier. Its panes are reads and its console sends ops
 verbs, so each request meets the table above on its own.
@@ -613,7 +599,7 @@ courtesy. The server's refusal is the authority either way.
 - No plugin API. The seams are the role map and, later, the asserted
   principal. They are protocol seams, not loader seams.
 - `web-session-principal-v2` (§9): per-session web identity.
-- The supervisor socket under the gate: possible later (§2).
+- The supervisor socket and its deferred gate are retired (DL-424).
 - Splitting CLI `seal` staging (adm) from committing (ops) (§10).
 
 ## 12. Test obligations
@@ -629,7 +615,7 @@ Tests are named `test_access_*`. These obligations hold (DL-146):
 4. Gate coverage: every dispatcher `cmd` has a row (the completeness
    gate), `subscribe` is gated, and a denial consumes no engine index.
 5. Denied mutation: `refused: true`, the receipt synced before the
-   answer, and the WAL untouched. A receipt write that fails still denies
+   answer, and the store untouched. A receipt write that fails still denies
    (§6).
 6. `privileged_admitted` is attempted for every ops admission. A failed
    write does not block the admission (§6).
@@ -637,15 +623,15 @@ Tests are named `test_access_*`. These obligations hold (DL-146):
    A live subscribe stream that lost read closes, and its
    `stream_revoked` receipt is attempted (revocation mandatory, receipt
    best effort, §6).
-8. Modes: armed group-open gives `0710`/`0660`, with an owner-only WAL
+8. Modes: armed group-open gives `0710`/`0660`, with an owner-only store
    asserted. Armed owner-only (no `socket_group`) leaves `0700`/`0600`
    unchanged with the gate live. Unconfigured leaves `0700`/`0600`
    unchanged.
 9. Peer credential absent with access configured: the connection is
    refused.
 10. With access configured, the authenticated spelling replaces the claim
-    in every journaled record and in the seal fingerprint. A role-map edit
-    changes no fingerprint: an ADMITTED retry survives reload, while
+    in every record stored by the engine and in the seal fingerprint. A
+    role-map edit changes no fingerprint: an ADMITTED retry survives reload, while
     admission itself is decided under the current policy (§3: a lost tier
     means a denied retry). Without access, actor bytes pass through
     unchanged.
