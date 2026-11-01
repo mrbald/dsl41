@@ -1,5 +1,9 @@
 # Media processing and publication
 
+For the job author exercising media publication before adapting an estate.
+Follow the [job author track](../../README.md#documents). Engine service recovery
+is covered by [deploy](../../docs/deploy.md).
+
 This example runs real FFmpeg work under the dsl41 engine.
 It generates a two-second synthetic video with audio.
 The fixed JIL catalog makes two H.264/AAC renditions and a PNG poster.
@@ -20,7 +24,7 @@ Each invocation creates a fresh private directory and prints its path.
 `--run-dir /runs/media-example` selects a path that must not already exist.
 The default scenario is `failed-rendition`.
 The launcher stops its engines and loopback HTTP server on exit.
-It retains inputs, work files, immutable releases, engine journals, command
+It retains inputs, work files, immutable releases, engine SQLite stores, command
 responses, process histories, tool versions, and HTTP check evidence.
 The printed HTTP URL is local to the runtime and lasts only for that invocation.
 
@@ -32,6 +36,8 @@ MEDIA_INPUT
   ├── MEDIA_HIGH ───┼── MEDIA_STAGE → MEDIA_PUBLISH → MEDIA_VERIFY
   └── MEDIA_POSTER ─┘
 ```
+
+This flow shows rendition dependencies and publication; it omits worker internals.
 
 `MEDIA_STAGE`'s `s(JOB,0)` zero lookback asks for a rendition success since
 staging's own last end (SEM-04); each revision runs in a fresh engine root where
@@ -101,7 +107,8 @@ Finally, a revision-1 worker attempts publication after revision 2 is current.
 The application refuses the stale revision.
 The demo fetches revision 2 again and checks that revision 1's files did not change.
 Each revision uses a fresh engine root.
-This does not demonstrate a dsl41 period roll.
+Scheduler periods and period roll are outside the engine scope (DL-424 in the
+[decision log](../../docs/decision-log.md)); media releases are application artifacts.
 
 ## Inspection and manual recovery
 
@@ -191,11 +198,15 @@ The HTTP service has no authentication and binds only to loopback.
 The audio check distinguishes these synthetic revisions, whose video is identical.
 It does not prove transform provenance for arbitrary media or compare image content.
 
-Further work should kill an encoder at a confirmed output boundary, exercise
-detached survival and reattachment with process identity evidence, and kill the
-engine during publication.
-Lease/deadman limits, long encodes, concurrent readers during replacement,
-physical resource limits, and throughput need separate drills.
-The opt-in integration lane in `examples/workflows/tests` runs this
-launcher and its checker; see the Integration lane section of
-`../workflows/README.md`.
+Encoder termination at a confirmed output boundary and engine death during
+publication need separate drills, as do long encodes, concurrent readers during
+replacement, physical resource limits and throughput. Detached survival,
+reattachment and lease/deadman behavior are outside the engine scope (DL-424).
+The opt-in [integration lane](../workflows/README.md#integration-lane) runs this
+launcher and its checker.
+
+An ordinary encode failure needs the explicit rerun shown here. An interrupted
+command can get another attempt of the same run automatically; see the
+[job interruption contract](../../docs/authoring.md#62-write-every-job-to-survive-interruption).
+The application's binding checks and publication lock must remain safe across
+those repetitions.

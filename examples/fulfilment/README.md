@@ -1,5 +1,9 @@
 # Fulfilment
 
+For the job author exercising inventory and carrier reconciliation before
+adapting an estate. Follow the [job author track](../../README.md#documents).
+The [operator recovery section](#operator-recovery) covers this training wave;
+engine service recovery is in [deploy](../../docs/deploy.md).
 See [offline snapshot examples](../snapshots/README.md) for synthetic observations on this graph.
 
 A fixed synthetic warehouse wave runs under the real dsl41 engine.
@@ -66,8 +70,8 @@ HTTP 409. Final checks require the original payload to remain intact.
 
 Retained files include `config.json`, the carrier database and log, the private
 worker profile, generated properties, control commands and retry pins, engine
-logs/WAL/spools, scheduler status snapshots, independent check results, and
-offline run history. `carrier-ready.json` records the endpoint and SQLite version.
+logs, SQLite store and attempt spools, scheduler status snapshots, independent
+check results, and offline run history. `carrier-ready.json` records the endpoint and SQLite version.
 The profile contains `DATABASE_URL`. Treat the whole run directory as private.
 Do not add these artifacts to this public repository.
 
@@ -85,7 +89,8 @@ substitute a cached successful check result. Run the checker without Python `-O`
 
 ## Operator recovery
 
-For a live engine, inspect the failed worker and external receipt before rerunning:
+For the operator completing a synthetic wave. For a live engine, inspect the
+failed worker and external receipt before rerunning:
 
 ```sh
 R=/runs/fulfilment-drop
@@ -96,9 +101,12 @@ python -m dsl41 sendevent FORCE_STARTJOB --socket "$R/engine/control.sock" --job
 
 These commands apply while the engine and carrier are running. The automatic demo
 performs them before it stops. A control command that exits 4 has an unknown
-outcome. Preserve its printed request ID, revision, epoch, and baseline with the
-original command. An exact retry of that control request is distinct from a new
-worker rerun. Do not treat a new request ID as recovery of the old request.
+outcome. Preserve its printed request ID, expected revision, baseline and claimed actor
+with the original command. Use the exact retry pins from the
+[exact-retry rule in control-protocol §3](../../docs/control-protocol.md#3-mutating-verb-sendevent)
+and `dsl41 sendevent --help`. The engine has no epoch
+(DL-424 in the [decision log](../../docs/decision-log.md)).
+An exact retry of that control request is distinct from a new worker rerun. Do not treat a new request ID as recovery of the old request.
 
 To exercise completion without dsl41, first create a stopped incident:
 
@@ -147,8 +155,10 @@ resume after manual changes is outside this exercise.
 
 For removal, stop all processes first. Drop only the unique schema named in this
 run's `config.json`. Remove the whole stopped training directory, including its
-engine anchor, only when its evidence is no longer needed. Do not delete a live
-run or remove only the engine's journal and leave its anchor behind.
+`engine/engine.db` and attempt spools, only when its evidence is no longer needed.
+Do not delete a live run. The engine has no lineage anchor (DL-424); the
+[runner recovery](../../docs/runner-design.md#7-journal-and-recovery-e1-prod-grade)
+defines the durable root.
 
 ## Limits and later drills
 
@@ -161,10 +171,15 @@ The visible JIL catalog owns ordering. Workers enforce inventory conservation,
 business revision, cancellation cutoff, and operation identity. A scheduler
 success is not independent proof that those business rules held.
 
-Later drills remain unbuilt: competing orders for the last item; an external kill
-at the commit boundary; post-dispatch cancellation and a corrective shipment;
-supervisor reattachment; a business operation spanning scheduler periods;
-repeated waves; hold/release and access-role refusals; UC migration evidence;
-and installed-artifact, capacity, and soak qualification. The opt-in
-integration lane in `examples/workflows/tests` runs this launcher and its
-checker; see the Integration lane section of `../workflows/README.md`.
+Separate drills are needed for competing orders for the last item, an external
+kill at the commit boundary, post-dispatch cancellation and a corrective shipment,
+repeated waves, hold/release and access-role refusals, and installed-artifact,
+capacity and soak qualification. Supervisor reattachment, scheduler periods and
+UC migration are outside the engine scope (DL-424).
+The opt-in [integration lane](../workflows/README.md#integration-lane) runs this
+launcher and its checker.
+
+An ordinary worker failure needs the explicit rerun shown here. An interrupted
+command can get another attempt of the same run automatically. The warehouse
+operation key and carrier reconciliation protect the business effect across both
+kinds of repetition; see the [job interruption contract](../../docs/authoring.md#62-write-every-job-to-survive-interruption).
