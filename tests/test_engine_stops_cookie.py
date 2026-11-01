@@ -366,6 +366,42 @@ def test_a_leak_is_noted_and_its_pids_named(
     assert "leaked: 2, left running (pids 42 43)" in capfd.readouterr().err
 
 
+def test_under_leak_a_successful_reading_releases_a_failed_scan_hold_without_signalling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capfd: pytest.CaptureFixture[str]
+) -> None:
+    """A failed reading holds a leak without signalling. The first successful reading names
+    its live processes and releases it (spec-restart §3, DL-433)."""
+    world = _World(monkeypatch)
+    _leak(monkeypatch)
+
+    async def scenario() -> None:
+        engine = _engine(tmp_path)
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "j"}))
+        await engine.run_until_quiescent(T0)
+        _adopt(engine)
+        world.scans = [_found(error=errno.EMFILE)]
+        engine.attempts.spawn_recorded(RUN_ID, SPAWN)
+        engine.attempts.status_recorded(RUN_ID, {"version": 1, "outcome": "exited", "exit_code": 0})
+        await engine.run_until_quiescent(T0)
+        engine.stops._look()
+        assert engine.blocked("j") == RUN_ID and world.sent == []
+        assert engine.attempt_facts(RUN_ID).note == "scan failed: EMFILE"
+
+        world.scans = [_found(43, 42)]
+        engine.stops._look()
+        assert engine.blocked("j") is None and engine.held_groups == {}
+        assert world.sent == [] and engine.oracle.store.job["j"].status == "SUCCESS"
+        engine.stops._look()
+        await engine.shutdown()
+        _close(engine)
+
+    asyncio.run(scenario())
+    warning = "j.1.1: leaked: 2, left running (pids 42 43)"
+    assert capfd.readouterr().err.count(warning) == 1
+    events = [b.get("event") for _, k, b in rows(tmp_path / "run") if k == "follow_up"]
+    assert events.count("ladder_done") == 1
+
+
 # ------------------------------------------------------------------- the ladder and the poll
 
 

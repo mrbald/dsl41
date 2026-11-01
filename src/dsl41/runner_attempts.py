@@ -429,6 +429,8 @@ class _Attempt:
 
     spawn: Mapping[str, Any] | None = None
     ladder: asyncio.Task[None] | None = None
+    #: The ladder owns the attempt until its done callback takes completion (DL-433).
+    ladder_pending: bool = False
     plan_done: bool = False
     #: its group still had a live member after the ladder's KILL
     survived: bool = False
@@ -541,9 +543,8 @@ class AttemptTier:
             self.on_settled()
 
     def ladder_running(self, attempt: str) -> bool:
-        """Whether a ladder started for the attempt has not ended yet."""
-        ladder = self._known(attempt).ladder
-        return ladder is not None and not ladder.done()
+        """Whether the ladder's done callback still owes its completion (DL-433)."""
+        return self._known(attempt).ladder_pending
 
     def hold_unread(self, attempt: str) -> None:
         """A reading of the attempt's command failed and no ladder will run on it: its group
@@ -778,6 +779,7 @@ class AttemptTier:
         else:
             task = self._survivor_verdict(attempt, *group)
         known.ladder = asyncio.get_running_loop().create_task(task)
+        known.ladder_pending = True
         known.ladder.add_done_callback(lambda done: self._ladder_done(attempt, done))
 
     async def _survivor_verdict(self, attempt: str, pgid: int, token: str) -> None:
@@ -805,6 +807,7 @@ class AttemptTier:
                 known.ladder = asyncio.get_running_loop().create_task(
                     self._ladder(attempt, *group, generation)
                 )
+                known.ladder_pending = True
                 known.ladder.add_done_callback(lambda task: self._ladder_done(attempt, task))
                 return
         self.processes.arm_timer(attempt, generation, self.grace_kill_s)
@@ -828,9 +831,13 @@ class AttemptTier:
         if task.cancelled():
             return
         error = task.exception()
+        known = self._attempts[attempt]
         if error is not None:
-            self._attempts[attempt].failed = True
+            known.failed = True
             self.processes.ladder_failed(attempt, error)
+        # Failure holds precede release; this callback takes every closing effect without
+        # yielding, including replacement dispatch and forget (spec-restart, DL-433).
+        known.ladder_pending = False
         if self.on_ladder_done is not None:
             self.on_ladder_done(attempt)
         if self.on_settled is not None:
