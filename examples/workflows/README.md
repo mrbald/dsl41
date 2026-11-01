@@ -1,6 +1,11 @@
 # Local workflow examples
 
-Three synthetic businesses run through the public dsl41 CLI:
+For the job author running synthetic estates against local services and checking
+their business results. Follow the [job author track](../../README.md#documents)
+and [example index](../README.md). Engine installation and recovery are covered
+by [deploy](../../docs/deploy.md).
+
+Two synthetic businesses run through the public dsl41 CLI:
 
 | Example | Real work | Incident |
 | --- | --- | --- |
@@ -35,8 +40,8 @@ FFmpeg, and an example-only PostgreSQL driver. The driver does not change the
 package dependencies or root lockfile. Python and PostgreSQL image references
 include digests. Each pin is the multi-platform index digest, never one
 platform's manifest, so the pins resolve on amd64 and arm64 alike.
-A root `.dockerignore` admits only the three example directories and the
-files the Dockerfile copies.
+The root `.dockerignore` limits the build context. The workflow Dockerfile copies
+workflow support and the fulfilment and media sources into the image.
 Debian packages, including FFmpeg, resolve at build time.
 Record the resulting image ID and package versions when retaining evidence:
 
@@ -102,7 +107,7 @@ The container path is the maintained recipe for these examples.
 ## Retain and inspect evidence
 
 The run volume outlives the disposable runner containers. Run directories hold
-business files, engine logs and journals, control responses, and checker results.
+business files, engine logs, SQLite stores and attempt spools, control responses, and checker results.
 The PostgreSQL volume holds one schema per database-backed run. The carrier's
 SQLite database belongs to its fulfilment run directory.
 
@@ -126,7 +131,11 @@ docker --context "$WORKFLOW_CONTEXT" compose -f examples/workflows/compose.yaml 
 After all launchers have stopped and the evidence is no longer needed,
 `docker --context "$WORKFLOW_CONTEXT" compose -f examples/workflows/compose.yaml down --volumes`
 deletes this example project's database and run volumes. Do not remove a live
-engine root. A run's lineage anchor and root must remain together.
+engine root. Keep the complete stopped root, including `engine.db`, attempt
+spools and any captured plans. The engine has no lineage anchor
+(DL-424 in the [decision log](../../docs/decision-log.md)); the
+[runner recovery](../../docs/runner-design.md#7-journal-and-recovery-e1-prod-grade)
+defines the store.
 
 ## Integration lane
 
@@ -166,14 +175,16 @@ runs only on manual dispatch and uploads the evidence.
 
 ## Next regression slice
 
-The fault drills are not built: engine loss, detached-worker recovery,
-control-response loss, database restart, concurrent scarce-stock orders, and
-concurrent publication. The present examples make no claims about those faults.
-Each drill is a separate slice. Keep each fault at a named boundary with an
-observable outcome and a bounded wait.
+These examples do not exercise engine loss, control-response loss, database
+restart, concurrent scarce-stock orders or concurrent publication. Each needs
+a named fault boundary, an observable outcome and a bounded wait.
+Detached-worker recovery is outside the engine scope (DL-424); interruption
+replacement follows the [job contract](../../docs/authoring.md#62-write-every-job-to-survive-interruption).
 
 `support.py` contains CLI invocation, private properties, atomic JSON writes,
 and owned-process lifecycle only. Business operations and checks stay in each
-example. No example imports dsl41 internals. The examples use the public CLI and
-documented run-root layout, including manifests, journals, and the leader lock.
+example. No example imports dsl41 internals. The examples select the engine root
+with `--run-root`, address its `control.sock` and read offline history with
+`dsl41 runs`. The engine has no period manifests (DL-424); business manifests
+remain application data.
 This keeps the integration lane at the interfaces an operator uses.
