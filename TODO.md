@@ -22,6 +22,9 @@ disjoint files.
   recording `lifeline` instead of the test's `engine_stop`; the normal case waits for each rerun's
   record and barriers force both orderings with exact causes and cleanup (boss ruling
   2026-11-01; main c8e8dfe; DL-359).
+- [x] Blocker for code merges: CLI read-error coverage of `cli_control.py` `_control_roundtrip`
+  depended on incidental socket-readiness failures; isolated tests now assert exit 2, the
+  diagnostic and no traceback (boss ruling 2026-11-01; PR #292).
 - [x] 3. Terms sweep of `docs/control-protocol.md` and `docs/access-model.md`: replace
   retired terms (the journal where DL-428 replaced it with the store, the old supervisor
   model); no rule changes. Builds now.
@@ -127,3 +130,6 @@ Found after an area was sealed as good enough. Addressed once the scope runs end
   run-id grammar, job-component and NUL refusals; a probe passed an unknown key, a non-uuid
   run_id, `job=../outside` and a NUL command. The engine's adapter supplies valid values, so this
   is the public input contract only (Sol, docs batch 1A; wrapper, DL-428).
+- [ ] The opt-in installed-CLI help test (`tests/test_installed_cli.py`) still expects the retired
+  `host` command and omits `nav`, `reread`, `update` and `engine stop`; align it with `cli.py` and
+  run it on installed core-only and ui-extra candidates (docs batch 2F, Opus).
