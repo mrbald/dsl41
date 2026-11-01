@@ -33,6 +33,8 @@ from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import ApplyResult, Attempt, Frontiers, fingerprint
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.reload_diff import catalog_hash_v2 as catalog_hash
+from dsl41.reload_plan import load_estate, reread
+from dsl41.runner_config import Configuration
 from dsl41.runner_journal import (
     BackfillRefused,
     Journal,
@@ -45,12 +47,14 @@ from dsl41.runner_journal import (
     read_backfill,
     read_journal,
     replay_inputs,
+    replay_store,
     wire_record,
 )
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
 from dsl41.runner_scheduler import Scheduler
-from dsl41.runner_startup import start_run
+from dsl41.runner_startup import active_configuration, resume_run, start_run
 from dsl41.runner_store import MemoryStore, Record, SqliteStore
+from dsl41.runner_update import UpdateRequest
 from dsl41.state_machine import Executor
 
 T0 = datetime(2026, 7, 1, 8, 0)
@@ -876,3 +880,104 @@ def test_unsubscribing_something_that_never_subscribed_is_a_no_op() -> None:
     journal.drop(Event(at=T0, kind="STARTJOB", payload={"job": "j"}), "for the fan-out")
     assert queue.empty()  # unsubscribed means unsubscribed
     journal.close()
+
+
+_ORDER_GATE = "insert_job: GATE\njob_type: c\ncommand: x\nmachine: m1\n\n"
+_ORDER_JIL = (
+    _ORDER_GATE
+    + "insert_resource: SHARED\nres_type: R\namount: 1\n\n"
+    + "".join(
+        f"insert_job: {name}\njob_type: c\ncommand: x\nmachine: m1\n"
+        "condition: s(GATE)\nresources: (SHARED, QUANTITY=1, FREE=A)\n\n"
+        for name in ("LOW", "HIGH")
+    )
+)
+
+
+@pytest.mark.parametrize(
+    "route", ["live", "restart", "restart_tail", "reload", "reload_restart", "reload_restart_tail"]
+)
+def test_catalog_order_survives_store_replay_restart_and_reload(tmp_path: Path, route: str) -> None:
+    async def scenario() -> None:
+        root = tmp_path / "run"
+        clock = VirtualClock(start=T0)
+        adapter = FakeAdapter(default=None)
+        engine = start_run(
+            lower_source(_ORDER_GATE if "reload" in route else _ORDER_JIL),
+            root,
+            clock=clock,
+            adapters={"CMD": adapter},
+        )
+        expected_rev = 1
+        try:
+            if "reload" in route:
+                estate = tmp_path / "estate"
+                estate.mkdir()
+                (estate / "estate.toml").write_text('name = "order"\nfiles = ["jobs.jil"]\n')
+                (estate / "jobs.jil").write_text(_ORDER_JIL)
+                candidate = load_estate(estate)
+                plan = reread(
+                    estate, engine.update.live(), root / "plans", candidate=candidate, start=T0
+                )
+                pending = engine.request_update(
+                    UpdateRequest(plan.token, False, 1, engine.baseline_id, "order-update")
+                )
+                await engine.run_until_quiescent(T0)
+                answer = pending.result()
+                assert answer.applied is not None
+                assert answer.applied.result()["rev"] == 2
+                expected_rev = 2
+            if "restart" in route:
+                if not route.endswith("_tail"):
+                    await engine.shutdown()
+                assert engine.journal is not None
+                engine.journal.close()
+                stored = active_configuration(root)
+                engine = await resume_run(
+                    stored.catalog,
+                    root,
+                    clock=clock,
+                    adapters={"CMD": adapter},
+                    stored_sources=True,
+                )
+                await engine.run_until_quiescent(T0)
+            assert engine.config_rev == expected_rev
+            engine.inject(ev("STARTJOB", job="GATE"))
+            engine.inject(ev("STATUS", 1, job="GATE", status="SUCCESS"))
+            await engine.run_until_quiescent(T0 + timedelta(minutes=1))
+            assert {name: row.status for name, row in engine.oracle.store.job.items()} == {
+                "GATE": "SUCCESS",
+                "LOW": "RUNNING",
+                "HIGH": "QUE_WAIT",
+            }
+            engine.inject(ev("STATUS", 2, job="LOW", status="SUCCESS"))
+            engine.inject(ev("STATUS", 3, job="HIGH", status="SUCCESS"))
+            await engine.run_until_quiescent(T0 + timedelta(minutes=3))
+            assert all(row.status == "SUCCESS" for row in engine.oracle.store.job.values())
+            assert [t.job for t in engine.oracle.trace() if t.transition.endswith("STARTING")] == [
+                "GATE",
+                "LOW",
+                "HIGH",
+            ]
+            assert engine.journal is not None
+            stored = Configuration.from_bytes(
+                engine.journal.store.get_config(expected_rev), where="order regression"
+            )
+            replayed = replay_store(engine.journal.store, where="order regression")
+            assert list(stored.catalog.jobs) == ["GATE", "LOW", "HIGH"]
+            assert replayed.replay.rev == expected_rev
+            assert replayed.oracle.store.job == engine.oracle.store.job
+            assert [t.model_dump() for t in replayed.oracle.trace() if t.job] == [
+                t.model_dump() for t in engine.oracle.trace() if t.job
+            ]
+            assert {name: row.state_rev for name, row in replayed.oracle.store.job.items()} == {
+                "GATE": 2,
+                "LOW": 2,
+                "HIGH": 3,
+            }
+        finally:
+            await engine.shutdown()
+            assert engine.journal is not None
+            engine.journal.close()
+
+    asyncio.run(scenario())

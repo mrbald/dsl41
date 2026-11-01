@@ -429,6 +429,7 @@ def test_09_partial_plan_and_format_dispatch(tmp_path: Path) -> None:
             payload.pop("configuration_format_version")
         else:
             payload["configuration_format_version"] = 2
+        payload.pop("job_order")
         payload["unknown"] = True
         with pytest.raises(EngineError, match="unknown configuration fields"):
             Configuration.from_bytes(json.dumps(payload).encode(), where="test")
