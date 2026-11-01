@@ -1,8 +1,10 @@
 # AutoSys Semantics Dossier
 
-Status: normative reference for the IR design, the linter rule set, the semantics oracle
-(discrete-event interpreter), and the AutoSys→Stonebranch mapping table
-(stonebranch-semantics.md). Verified against cited public vendor sources where marked.
+For the architect, this dossier defines the AutoSys behavior that the IR, linter and
+semantics oracle model. It is normative for those components. Continue through
+[the architect track](../README.md#documents). [IR design](ir-design.md) defines the
+representations; [runner-design.md](runner-design.md) covers engine operation.
+Claims marked verified cite public vendor sources.
 
 Every numbered SEM entry has a behavior pin unless §8 records it as a non-goal. Most pins are
 trace tests against the semantics oracle; §8's layer note names the entries pinned elsewhere.
@@ -56,7 +58,7 @@ annotations, never the primary representation.
 `condition: s(JobA)` is satisfied if JobA's *current recorded status* is SUCCESS; the time
 when that status was set does not matter. If no lookback qualifier restricts it, a JobA
 success from last Tuesday satisfies `s(JobA)` today. This is the single most important
-difference from run-scoped DAG engines (Stonebranch workflow edges are per-run).
+difference from run-scoped DAG engines.
 *Trace test:* JobA succeeds at T0. JobB is defined later with `condition: s(JobA)`. A
 FORCE-triggered evaluation at T0+72h → JobB starts.
 
@@ -165,8 +167,8 @@ modeled universe.
 - In conditions: `value(NAME) = X` (also `>`, `<`, `!=` comparisons). *Model note:* the
   comparand is a string in JIL. The oracle compares numerically when both sides parse as
   base-10 integers, and lexicographically when either does not. The rule covers all six
-  operators, so `value(N) = 5` is true against a stored `05`. The UC twin and the equivalence
-  checker call the same comparison function, so the three layers cannot disagree.
+  operators, so `value(N) = 5` is true against a stored `05`. The equivalence
+  checker calls the same comparison function as the oracle.
 - In attribute strings (command, std_out_file, …): `$$NAME` or `$${NAME}` substitution at
   runtime. Single-`$` is shell/environment, double-`$$` is AutoSys global; the parser keeps
   these distinct. A global-variable set is an event that triggers condition re-evaluation.
@@ -186,7 +188,7 @@ on BOX and FW:
 - `fail_codes` — explicit failure codes, same format. Absence-default: "any non-zero exit
   code is failure". **[V]**
 The verdict is `f(exit_code; max_exit_success, success_codes, fail_codes)`, with a single
-source, `ir.exit_is_success`, shared with the UC twin (M31).
+source, `ir.exit_is_success`, used by the oracle (DL-58).
 Support limit: lowering refuses a negative exit code in either list. The vendor allows one: "The
 exit code must be an integer in the range -2147483647 to 2147483647" ("success_codes Attribute"
 and "fail_codes Attribute", AutoSys 24.2). dsl41 refuses it because it can never match: on
@@ -580,9 +582,9 @@ whole tree. A member bypasses on its own flag or on any containing box's. No ven
 states that inheritance **[?]**. A box ON_NOEXEC event flags every job in the tree (DL-254),
 so the inheritance decides only the corners where a member lacks the flag under a flagged
 box. These are a box flagged at definition time, whose members do not take the flag
-(SEM-24); a member taken OFF_NOEXEC alone under a flagged box; and a job that a later
-period's catalog adds to, or moves under, a flagged box. The bypass counts as that member's
-start for the run: it joins the box's ran set. So the SEM-11 fold waits for every member's
+(SEM-24); a member taken OFF_NOEXEC alone under a flagged box; and a job that a
+configuration update adds to, or moves under, a flagged box (DL-427). The bypass counts
+as that member's start for the run: it joins the box's ran set. So the SEM-11 fold waits for every member's
 bypass, and a member whose condition never fires keeps the box RUNNING like any member that
 never ran. The bypass is also the tick's run for SEM-34, so a bypassed job raises no
 MUST_START_ALARM. The vendor text states one box level; applying it per level is this
@@ -702,12 +704,9 @@ jobs complete and utilize this job as a dependency."
   `ON_HOLD` / `ON_ICE` / `ON_NOEXEC`. Lowering refuses `SUCCESS`, `FAILURE` and `TERMINATED`
   loudly. Each would seed a SEM-01 latch at definition time, which is not modeled. Supporting
   them is a separate decision.
-- Lowering: `Semantics.initial_status`.
+- Lowering: `Semantics.initial_status` (DL-18).
 - Oracle: seeds the SEM-20/21/22 flags before the first event. No trace entry (definition
   state, not a transition).
-- UC mapping: M20 (Hold, E-class) covers `ON_HOLD`. Ice/noexec follow their SEM-20/22 rows.
-  The compile twin does not model definition-time state and records it in the exclusion
-  ledger instead (DL-18).
 
 ---
 ## 4. Date/time scheduling
@@ -818,8 +817,8 @@ cross midnight. Both endpoints are inclusive: an attempt at exactly the opening 
 minute is inside the window. Equal endpoints (`"02:00-02:00"`) are a zero-width window, not a
 24-hour one: only that one instant is inside. An attempt exactly midway between the previous
 close and the next opening resolves to the next opening. Both readings are **[?]**: undocumented
-ties, pinned this way until a live instance is available. The "closer edge" rule is a prime
-migration hazard with no direct Stonebranch analog; always flag it in mapping.
+ties, pinned this way until a live instance is available. IR-G records run_window as an
+M27 redesign flag; `derive.py` defines the classification (DL-246).
 DST changes (DL-249). **[V]** TechDocs 12.1 and 24.2, "Daylight Time Changes" and
 "Standard Time Changes" (same text in both). Near a change, each window is a concrete
 interval of instants, and containment and the closer-edge rule run on that interval. The
@@ -887,8 +886,8 @@ decides at its own start, so a member of a subbox is decided when the subbox sta
 decision is made for a held member, an iced one, a live one, or one that already ran in this
 execution. The held exclusion is this project's reading, since a held job does not take the
 box start's status change. A member's deferred start belongs to its box and box run. If the
-box starts again before the opening, or a rebaseline moves the member to another box, the
-old deferral is refused when it fires, and the current run decides afresh. A deferral is
+box starts again before the opening, or a configuration update moves the member to another
+box (DL-427), the old deferral is refused when it fires, and the current run decides afresh. A deferral is
 deduplicated against a deferred start to the same opening, not against a deadline timer.
 **[?]** The deferred STARTJOB's interaction with the member's own start_times is not
 documented. Provisional (DL-246): the deferred STARTJOB is a start attempt with a schedule
@@ -1040,8 +1039,8 @@ Other shapes keep the fold=0 conversion, as run_window does. Under the default
 ### SEM-35 · timezone **[V]**
 A per-job `timezone:` re-bases all time attributes of that job. The IR carries the zone per
 schedule block. Equivalence of schedules is zone-aware. A job with no `timezone:` reads its time
-attributes in the run's base zone (`--timezone`, pinned as the period's `default_tz`). The
-scheduler ticks in it, and the engine's oracle and every replay read slots, absolute must times
+attributes in the run's base zone (`--timezone`, stored as `RuntimeProfile.default_tz`;
+DL-122, DL-428). The scheduler ticks in it, and the engine's oracle and every replay read slots, absolute must times
 and run_window in it too (DL-155, DL-253).
 Scope (DL-23): TechDocs' own `date_conditions` page lists `timezone`, with `run_window` and
 `must_*_times`, among the attributes date_conditions gates. The `timezone` page describes
@@ -1370,7 +1369,7 @@ the materialization horizon does not exist for it. Only cycle-bound calendars tr
 | `chk_files` | pre-start disk-space gate **[V]**: the agent checks required space; unmet → alarm and the job does NOT start; Resource-Wait class. Opaque carry, no oracle gate (a real disk level is out of a pure simulator's reach; distinct from `resources:`, which the oracle honors as capacity semaphores, DL-50); real execution refuses it at preflight (DL-240) |
 | `heartbeat_interval` | MISSING_HEARTBEAT alarm only **[V]**; observability (DL-32) |
 | `avg_runtime` | statistics seed at insert **[V]**; inert carry (DL-32) |
-| `resources` + `insert_resource`/`update_resource`/`delete_resource` | 11.3+ resource objects **[V]** (TechDocs 12.x): `resources: (name, QUANTITY=n[, FREE=Y\|N\|A]) AND (...)`; FREE: Y=free on success, N=never, A=unconditionally; `res_type: D\|R\|T` (depletable/renewable/threshold), `amount` required, optional agent-level `machine`. Typed carry (DL-21); the oracle honors these as capacity semaphores (DL-50): `amount` is the bucket size, QUANTITY the demand, res_type sets the default release (R free-on-success / D depletable-never / T level-gate) and FREE overrides it. FREE is "Optional for renewable virtual resources only" ("resources Attribute", AutoSys 24.2, quoted in DL-256); no vendor text says what FREE does on a depletable (Q12, descoped, DL-288). Preflight refuses FREE=Y and FREE=A on a depletable as unknown release semantics and accepts FREE=N, which matches the depletable default (DL-287); the oracle still applies the code to a direct caller (DL-50); UCS-09 → UC Virtual Resources. **[V]** TechDocs 24.2, How AutoSys Workload Automation Queues Jobs (DL-255): "A job in the RESWAIT state for one resource name automatically blocks all the lower priority jobs that specify the same resource name. It does not automatically block higher or equal priority jobs that specify the same resource name or a job that specifies a different resource name." dsl41 has no RESWAIT status; such a job is QUE_WAIT. The oracle applies the rule to a fresh start, forced or not, and to the readmission scan. The blocker has a positive priority, names a resource the blocked job names, and is short on any resource it names; the blocked job has a positive priority, since an unset or zero priority "is not queued behind other jobs". A blocker short on one resource blocks on every resource it names: "AutoSys jobs/resources issue: job stuck in RESWAIT" (Broadcom KB 240816, AutoSys 12.0) shows a job waiting for its second resource blocking lower-priority jobs that needed only its first, which was available, and gives the same queueing sentence as the cause. Resources are evaluated "after the load balancing attributes are evaluated and the machine has available load units", and jobs that "enter the QUE_WAIT state do not consume load units or resources. These jobs do not automatically block lower priority jobs that specify the same resource attribute and a different machine attribute value." So a waiter blocks on its resources only once its load fits and no higher-priority load waiter blocks it. Jobs "that enter the RESWAIT state after the load balancing attributes are successfully evaluated do not consume any load units" and do not block on the machine; a queued job holds no units for the run it waits to start (units held from an earlier run stay held, DL-256). Preflight refuses a QUANTITY above `amount` at every priority. A depletable or FREE=N resource can still leave a waiter that never fits, and it then blocks lower priorities naming that resource, as the vendor's rule implies. The vendor documents FREE's default as Y, free on success only ("resources Attribute", AutoSys 24.2: "Default: Y"). dsl41 follows it (Qr1, DL-256); the `renewable-free=A` semantic switch selects free on every completion. A renewable's units that FREE does not free (N; Y after FAILURE or TERMINATED) stay held by the job until `sendevent -E RELEASE_RESOURCE -J job` ("resources Attribute": "To free the resources, issue the following command") or the job's next run, which re-uses them. A FORCE_STARTJOB of a FAILURE or TERMINATED job that still holds units "schedules the job using the held virtual resources" and "does not re-evaluate other resource dependencies" ("Define Virtual Resource Types", AutoSys 24.2). Support limits, each a loud lowering refusal: `QUANTITY=ALL`, "all the units of the resource" (workaround for a renewable resource: write its `amount` as the quantity; for a depletable resource this is not exact, since its free units fall below `amount` after use); a real-resource group with `VALUEOP`/`VALUE` (the page's `SYSTEM_OS_TYPE` example; no workaround); and one resource name defined on several machines, which the vendor allows ("insert_resource Subcommand", AutoSys 24.2: "You can define the same virtual resource on multiple machines") and dsl41 refuses as a duplicate `insert_resource` (no workaround) |
+| `resources` + `insert_resource`/`update_resource`/`delete_resource` | 11.3+ resource objects **[V]** (TechDocs 12.x): `resources: (name, QUANTITY=n[, FREE=Y\|N\|A]) AND (...)`; FREE: Y=free on success, N=never, A=unconditionally; `res_type: D\|R\|T` (depletable/renewable/threshold), `amount` required, optional agent-level `machine`. Typed carry (DL-21); the oracle honors these as capacity semaphores (DL-50): `amount` is the bucket size, QUANTITY the demand, res_type sets the default release (R free-on-success / D depletable-never / T level-gate) and FREE overrides it. FREE is "Optional for renewable virtual resources only" ("resources Attribute", AutoSys 24.2, quoted in DL-256); no vendor text says what FREE does on a depletable (Q12, descoped, DL-288). Preflight refuses FREE=Y and FREE=A on a depletable as unknown release semantics and accepts FREE=N, which matches the depletable default (DL-287); the oracle still applies the code to a direct caller (DL-50). **[V]** TechDocs 24.2, How AutoSys Workload Automation Queues Jobs (DL-255): "A job in the RESWAIT state for one resource name automatically blocks all the lower priority jobs that specify the same resource name. It does not automatically block higher or equal priority jobs that specify the same resource name or a job that specifies a different resource name." dsl41 has no RESWAIT status; such a job is QUE_WAIT. The oracle applies the rule to a fresh start, forced or not, and to the readmission scan. The blocker has a positive priority, names a resource the blocked job names, and is short on any resource it names; the blocked job has a positive priority, since an unset or zero priority "is not queued behind other jobs". A blocker short on one resource blocks on every resource it names: "AutoSys jobs/resources issue: job stuck in RESWAIT" (Broadcom KB 240816, AutoSys 12.0) shows a job waiting for its second resource blocking lower-priority jobs that needed only its first, which was available, and gives the same queueing sentence as the cause. Resources are evaluated "after the load balancing attributes are evaluated and the machine has available load units", and jobs that "enter the QUE_WAIT state do not consume load units or resources. These jobs do not automatically block lower priority jobs that specify the same resource attribute and a different machine attribute value." So a waiter blocks on its resources only once its load fits and no higher-priority load waiter blocks it. Jobs "that enter the RESWAIT state after the load balancing attributes are successfully evaluated do not consume any load units" and do not block on the machine; a queued job holds no units for the run it waits to start (units held from an earlier run stay held, DL-256). Preflight refuses a QUANTITY above `amount` at every priority. A depletable or FREE=N resource can still leave a waiter that never fits, and it then blocks lower priorities naming that resource, as the vendor's rule implies. The vendor documents FREE's default as Y, free on success only ("resources Attribute", AutoSys 24.2: "Default: Y"). dsl41 follows it (Qr1, DL-256); the `renewable-free=A` semantic switch selects free on every completion. A renewable's units that FREE does not free (N; Y after FAILURE or TERMINATED) stay held by the job until `sendevent -E RELEASE_RESOURCE -J job` ("resources Attribute": "To free the resources, issue the following command") or the job's next run, which re-uses them. A FORCE_STARTJOB of a FAILURE or TERMINATED job that still holds units "schedules the job using the held virtual resources" and "does not re-evaluate other resource dependencies" ("Define Virtual Resource Types", AutoSys 24.2). Support limits, each a loud lowering refusal: `QUANTITY=ALL`, "all the units of the resource" (workaround for a renewable resource: write its `amount` as the quantity; for a depletable resource this is not exact, since its free units fall below `amount` after use); a real-resource group with `VALUEOP`/`VALUE` (the page's `SYSTEM_OS_TYPE` example; no workaround); and one resource name defined on several machines, which the vendor allows ("insert_resource Subcommand", AutoSys 24.2: "You can define the same virtual resource on multiple machines") and dsl41 refuses as a duplicate `insert_resource` (no workaround) |
 | `alarm_if_fail`, `alarm_if_terminated`, `min/max_run_alarm`, `send_notification` + `notification_*` family (msg, template, alarm_types, emailaddress[_on_alarm/_on_failure/_on_success/_on_terminated]), `must_*_times` | observability annotations, no control flow (family per 12.x notification services, DL-32) |
 | `std_out_file` etc. with `$$VAR` | string substitution sites (SEM-08); real execution refuses an unsubstituted site on an exec field at preflight (DL-240) |
 | `watch_file`, `watch_interval`, `watch_file_min_size` (FW jobs) | file-watcher job type: terminal SUCCESS when the file condition is met; a *source* node in derived graphs |
@@ -1407,17 +1406,23 @@ the materialization horizon does not exist for it. Only cycle-bound calendars tr
    configuration (SEM-30). Nothing is dropped on any lane; byte-exact text is the AST's job,
    not IR-F's.
 
-## 7. Migration risk register (seed; completed in the stonebranch mapping table)
+<a id="7-migration-risk-register-seed-completed-in-the-stonebranch-mapping-table"></a>
 
-| # | AutoSys behavior | Risk when mapping to run-scoped DAG (Stonebranch) |
+## 7. Risks in a run-scoped graph
+
+These labels identify AutoSys behavior that a run-scoped graph can misrepresent.
+The supported compiler outputs are defined in [IR design §1](ir-design.md#1-pipeline--representations);
+DL-424 excludes another scheduler as a target.
+
+| # | AutoSys behavior | Risk in a run-scoped graph |
 |---|---|---|
 | R1 | Latching conditions, no lookback (SEM-01) | Stale success satisfies dependency across days. Naive edge translation *tightens* semantics: it can block flows that relied on latching, or the reverse, where the AutoSys flow relied on staleness as a feature |
-| R2 | Lookback windows (SEM-04) | No native equivalent. Needs time-window guard tasks or acceptance of changed semantics |
-| R3 | on_ice downstream-satisfied (SEM-20) | For each edge type, make sure that "skipped counts as satisfied" holds in Stonebranch skip semantics |
-| R4 | Box success gating on external refs (SEM-12) | The hung-RUNNING pattern has no analog; redesign it, do not translate it |
-| R5 | run_window closer-edge rule (SEM-33) | Behavioral cliff at the window midpoint. No analog |
+| R2 | Lookback windows (SEM-04) | A plain edge omits the time window or since-last-end anchor |
+| R3 | on_ice downstream-satisfied (SEM-20) | Replacing ON_ICE with a skipped node can change which downstream predicates are true (SEM-05/20) |
+| R4 | Box success gating on external refs (SEM-12) | A completion fold gated by an external reference can leave a box RUNNING |
+| R5 | run_window closer-edge rule (SEM-33) | A gate with a closer-edge rule can defer a start or skip it; a plain edge represents neither outcome |
 | R6 | local unqualified `n()` atoms in `condition` | These are *not* dependencies. Translation as edges creates false ordering; map them to resource/mutex constructs. Only the bare local form reads as mutual exclusion: a lookback-qualified, cross-instance, or `box_success`/`box_failure` `n()` stays an ordinary edge (DL-12) |
-| R7 | Global-variable conditions (SEM-08) | Needs a UC variable + event-trigger equivalent. The re-evaluation-on-set semantics must match |
+| R7 | Global-variable conditions (SEM-08) | A variable comparison alone omits the re-evaluation on SET_GLOBAL |
 | R8 | FORCE start satisfying downstream latches (SEM-23) | Operators' habits change: a force start feeds downstream latches |
 
 ## 8. Trace test index (oracle regression set, one per SEM unless noted)
@@ -1558,9 +1563,9 @@ carve-out contrast; a rerun member's INACTIVE edge comes from the box-start rese
 not from the skip: `test_sem33_box_skip_on_a_rerun_member_follows_the_box_start_reset`,
 `test_sem33_box_skip_after_the_box_start_reset_leaves_downstream_atoms_false`), T33 the
 box-start disposition: the vendor's Box1 example at 04:05 and 16:05, an in-window box start,
-a held member, a subbox member, both catalog orders, a deferral beside a deadline timer, a
-stale deferral after a box restart (and after a rebaseline moves the member, in the
-classification suite), RUNNING wakes in the same pass, a pass bound to its box run, and the
+a held member, a subbox member, both catalog orders, a deferral beside a deadline timer,
+a stale deferral after a box restart or after the member moves to another box
+(`test_sem33_a_carried_deferral_*`), RUNNING wakes in the same pass, a pass bound to its box run, and the
 provisional deferred-start rule; T33b a standalone
 skip moves a prior result to INACTIVE and does not cascade from a box (SEM-33, DL-246:
 `test_sem33_vendor_box1_*`, `test_sem33_box_start_*`, `test_sem33_subbox_skip_*`,
@@ -1639,7 +1644,7 @@ each open question.
   box_success names a member that is iced at its start stays RUNNING, the literal "not
   scheduled" reading.
 - Q7 (SEM-09): closed (DL-58). SEM-09 holds the composition rule. `ir.exit_is_success`
-  implements it for the oracle and the UC twin (M31); `test_dl33_exit_is_success_*` and
+  implements it for the oracle; `test_dl33_exit_is_success_*` and
   `test_sem09*` pin it.
 - Q8 (SEM-37/38/39, DL-57): extended-calendar generation corners. Every Q8 item closes
   mechanically on any live instance: define the calendar, let autocal materialize the

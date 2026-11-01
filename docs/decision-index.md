@@ -103,7 +103,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-90 | preconditions become mandatory, and the wire breaks once | [docs/access-model.md](access-model.md), [docs/blocks/admission.md](blocks/admission.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md) |
 | DL-91 | architecture review | [docs/ir-design.md](ir-design.md) |
 | DL-92 | the operator gets the vocabulary S3 built |  |
-| DL-93 | how S5 is built, and where host state lives | [docs/citation-index.md](citation-index.md), [docs/ir-design.md](ir-design.md) |
+| DL-93 | how S5 is built, and where host state lives | [docs/citation-index.md](citation-index.md) |
 | DL-94 | the routing table lands: four states, three operator verbs, and a drain that holds work instead of losing it | [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md) |
 | DL-95 | the deadman: one interval, one exit, and the two producers the eviction bound was missing |  |
 | DL-96 | the effect outbox: intent before the attempt, and the orphaned run that proves why | [docs/runner-design.md](runner-design.md) |
@@ -129,18 +129,18 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-116 | the lineage fence |  |
 | DL-117 | `baseline_id` is the period's, and derived | [docs/control-protocol.md](control-protocol.md) |
 | DL-118 | the atomic `decision` record and control-protocol v3 | [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/attempts.md](blocks/attempts.md), [docs/blocks/fw-observation.md](blocks/fw-observation.md), [docs/blocks/subscription.md](blocks/subscription.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md), [docs/state-machines.md](state-machines.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
-| DL-119 | the seal artifact and the canonical form |  |
-| DL-120 | capacity decomposed | [docs/blocks/capacity.md](blocks/capacity.md), [docs/state-machines.md](state-machines.md) |
+| DL-119 | the seal artifact and the canonical form | [docs/jil-statement-syntax.md](jil-statement-syntax.md) |
+| DL-120 | capacity decomposed | [docs/blocks/capacity.md](blocks/capacity.md), [docs/ir-design.md](ir-design.md), [docs/state-machines.md](state-machines.md) |
 | DL-121 | `run_id` is minted in the effect; SPAWN idempotency is durable; FW has a spool |  |
-| DL-122 | `catalog_hash` v2, `source_bundle_hash`, `RuntimeProfile` |  |
+| DL-122 | `catalog_hash` v2, `source_bundle_hash`, `RuntimeProfile` | [docs/autosys-semantics.md](autosys-semantics.md), [docs/ir-design.md](ir-design.md) |
 | DL-123 | classification, latches, the retry horizon |  |
 | DL-124 | the seal operation |  |
 | DL-125 | adoption |  |
 | DL-126 | `deadman_s` leaves the host semantic projection |  |
 | DL-127 | retention floors |  |
-| DL-128 | canonical form: "control character" is Unicode Cc |  |
+| DL-128 | canonical form: "control character" is Unicode Cc | [docs/ir-design.md](ir-design.md), [docs/jil-statement-syntax.md](jil-statement-syntax.md) |
 | DL-129 | SPAWN idempotency outlives the supervisor, and the watch keeps a log | [docs/blocks/fw-observation.md](blocks/fw-observation.md), [docs/runner-design.md](runner-design.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
-| DL-130 | a period gets its name, its inputs and its launch options | [docs/ir-design.md](ir-design.md), [docs/runner-design.md](runner-design.md) |
+| DL-130 | a period gets its name, its inputs and its launch options | [docs/runner-design.md](runner-design.md) |
 | DL-131 | the classifier reads a graph nobody had, in two directions | [docs/citation-index.md](citation-index.md) |
 | DL-132 | the period writes itself down: one sidecar, and the two functions over it | [docs/state-machines.md](state-machines.md) |
 | DL-133 | the period gets a boundary: the anchor, the cutoff, and the three writes that end a period | [docs/blocks/subscription.md](blocks/subscription.md), [docs/citation-index.md](citation-index.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md) |
@@ -162,8 +162,8 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-149 | the DL-148 code follow-ups land and the loader's escape class closes whole | [docs/access-model.md](access-model.md) |
 | DL-150 | the conformance round over the whole spec set: what eighteen sweeps found, what the code still owes, and what was deliberately left open | [docs/access-model.md](access-model.md), [docs/control-protocol.md](control-protocol.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
 | DL-151 | the DL-150 code ledger is paid: what the fixes closed, what verification refuted, and what stays owed with its blocking question | [docs/access-model.md](access-model.md), [docs/citation-index.md](citation-index.md), [docs/control-protocol.md](control-protocol.md), [docs/ir-design.md](ir-design.md), [docs/jil-statement-syntax.md](jil-statement-syntax.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
-| DL-152 | the review after the perimeter: what the access work and two conformance rounds left behind | [docs/access-model.md](access-model.md) |
-| DL-153 | f()/d() joins the latch discipline: every M04/M05 edge is A-class and the same-cycle detector picks the assumption, never the class |  |
+| DL-152 | the review after the perimeter: what the access work and two conformance rounds left behind | [docs/access-model.md](access-model.md), [docs/ir-design.md](ir-design.md) |
+| DL-153 | f()/d() joins the latch discipline: every M04/M05 edge is A-class and the same-cycle detector picks the assumption, never the class | [docs/ir-design.md](ir-design.md) |
 | DL-154 | the run_window skip inside a live box is a bypass: the member goes INACTIVE, casts no vote, and the box runs the completion door | [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/box-execution.md](blocks/box-execution.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/state-machines.md](state-machines.md) |
 | DL-155 | the E10 timezone half closes by citation: a job without a timezone runs on the scheduler's own clock, which the oracle's engine clock already was | [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/scheduler.md](blocks/scheduler.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/runner-design.md](runner-design.md) |
 | DL-156 | the crash window closes to the fold's own authority: replay's recovered verdicts are read, and records alone refuse to decide | [docs/risk-map.md](risk-map.md), [docs/runner-design.md](runner-design.md) |
@@ -299,7 +299,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-285 | An ON_ICE on a member that has not run re-runs its RUNNING box's completion check | [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/box-execution.md](blocks/box-execution.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/simulation-coverage.md](simulation-coverage.md), [docs/state-machines.md](state-machines.md) |
 | DL-286 | A circular wait over held units is a stated limit | [docs/blocks/capacity.md](blocks/capacity.md), [docs/risk-map.md](risk-map.md) |
 | DL-287 | Preflight refuses FREE=Y and FREE=A on a depletable resource | [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/capacity.md](blocks/capacity.md), [docs/citation-index.md](citation-index.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
-| DL-288 | The UC backend and Q12 are descoped until further notice | [docs/authoring.md](authoring.md), [docs/autosys-semantics.md](autosys-semantics.md), [docs/citation-index.md](citation-index.md), [docs/ir-design.md](ir-design.md), [docs/live-instance-runbook.md](live-instance-runbook.md) |
+| DL-288 | The UC backend and Q12 are descoped until further notice | [docs/authoring.md](authoring.md), [docs/autosys-semantics.md](autosys-semantics.md), [docs/citation-index.md](citation-index.md), [docs/live-instance-runbook.md](live-instance-runbook.md) |
 | DL-289 | Runner state machines get transition tables, and a gate requires every transition to be taken by a test | [docs/citation-index.md](citation-index.md), [docs/risk-map.md](risk-map.md), [docs/runner-design.md](runner-design.md), [docs/statechart-engine.md](statechart-engine.md) |
 | DL-290 | The anchor head and the period row are state machines, and an undeclared move refuses the boundary operation before any write | [docs/risk-map.md](risk-map.md) |
 | DL-291 | The supervisor tier is three state machines, and lease renewal never stops while the client is open | [docs/risk-map.md](risk-map.md) |
@@ -434,12 +434,12 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-421 | access-model: the release and estate verbs get their tiers, and the release train's sudo grant is a door of its own, outside the gate | [docs/access-model.md](access-model.md) |
 | DL-422 | The six estate verbs read the manifest through `--manifest`; `estate args` and its `eval` are gone | [docs/access-model.md](access-model.md), [docs/authoring.md](authoring.md) |
 | DL-423 | Release verbs read from their command line: `rollback NAME`, `requalify NAME`, and the OFF_HOLD sweep is `off-hold-all` | [docs/access-model.md](access-model.md), [docs/control-protocol.md](control-protocol.md) |
-| DL-424 | The 2.0.0 charter: three things, a production ceiling, and the owner's rulings | [README.md](../README.md), [docs/access-model.md](access-model.md), [docs/blocks/attempts.md](blocks/attempts.md), [docs/blocks/update.md](blocks/update.md), [docs/control-protocol.md](control-protocol.md), [docs/ir-design.md](ir-design.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md), [docs/state-machines.md](state-machines.md) |
+| DL-424 | The 2.0.0 charter: three things, a production ceiling, and the owner's rulings | [README.md](../README.md), [docs/access-model.md](access-model.md), [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/attempts.md](blocks/attempts.md), [docs/blocks/update.md](blocks/update.md), [docs/control-protocol.md](control-protocol.md), [docs/ir-design.md](ir-design.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md), [docs/state-machines.md](state-machines.md) |
 | DL-425 | Hosts, effects and the epoch leave the engine; the dispatch record precedes the launch |  |
 | DL-426 | The attempt and engine lifecycle tiers; an attempt settles only when its plan is done | [docs/blocks/attempts.md](blocks/attempts.md), [docs/control-protocol.md](control-protocol.md) |
-| DL-427 | The update machine, its admission and its application, unwired; one update in flight | [docs/access-model.md](access-model.md), [docs/blocks/update.md](blocks/update.md), [docs/control-protocol.md](control-protocol.md) |
-| DL-428 | The store replaces the journal; `run` resumes by default; the segment record is cut | [README.md](../README.md), [docs/access-model.md](access-model.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md) |
-| DL-429 | The attempt and engine lifecycle tiers run the engine's stops; `engine stop`; the interruption hold is one oracle transition | [docs/access-model.md](access-model.md) |
+| DL-427 | The update machine, its admission and its application, unwired; one update in flight | [docs/access-model.md](access-model.md), [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/update.md](blocks/update.md), [docs/control-protocol.md](control-protocol.md) |
+| DL-428 | The store replaces the journal; `run` resumes by default; the segment record is cut | [README.md](../README.md), [docs/access-model.md](access-model.md), [docs/autosys-semantics.md](autosys-semantics.md), [docs/control-protocol.md](control-protocol.md), [docs/ir-design.md](ir-design.md), [docs/runner-design.md](runner-design.md) |
+| DL-429 | The attempt and engine lifecycle tiers run the engine's stops; `engine stop`; the interruption hold is one oracle transition | [docs/access-model.md](access-model.md), [docs/ir-design.md](ir-design.md) |
 | DL-430 | Review rounds: a shape note before long rework; a fresh final review after it | [docs/agents/review.md](agents/review.md) |
 | DL-431 | The process cookie and the leak rule: a process left behind when the command exits is a leak, terminated by default | [docs/blocks/attempts.md](blocks/attempts.md), [docs/blocks/update.md](blocks/update.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
 | DL-432 | The update machine wired: `dsl41 reread` and `dsl41 update` apply a stored plan to the running engine, stopping only the jobs it changes or removes |  |
