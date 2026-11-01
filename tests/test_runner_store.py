@@ -32,6 +32,8 @@ from dsl41.ir import CatalogIR, lower_catalog, lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import CarriedRows, Event, TraceEntry
 from dsl41.placeholders import load_properties, substitute
+from dsl41.runner_clock import EngineError
+from dsl41.runner_config import Configuration, RuntimeProfile
 from dsl41.runner_store import MemoryStore, Record, SqliteStore, Store, StoreError
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1093,3 +1095,108 @@ def test_a_snapshot_that_loses_state_fails_the_resume_check(
 ) -> None:
     found = resume_mismatches(nights[name], mutation)
     assert expected in found, found
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("capture", [{}, {"main-inputs.json": "captured bytes"}])
+def test_configuration_round_trip_keeps_catalog_order(
+    kind: str, capture: dict[str, str], tmp_path: Path
+) -> None:
+    catalog = lower_source(
+        "".join(f"insert_job: {name}\njob_type: c\ncommand: x\n\n" for name in ("z", "a", "m"))
+    )
+    configuration = Configuration(catalog=catalog, profile=RuntimeProfile(), source_capture=capture)
+    with open_store(kind, tmp_path) as store:
+        rev = store.put_config(configuration.to_bytes(), configuration.digest())
+        restored = Configuration.from_bytes(store.get_config(rev), where="order regression")
+        assert list(restored.catalog.jobs) == ["z", "a", "m"]
+        assert restored.source_capture == capture
+        assert restored.to_bytes() == configuration.to_bytes()
+        assert restored.digest() == configuration.digest()
+
+
+@pytest.mark.parametrize("version", [None, 1])
+def test_legacy_configuration_keeps_its_recorded_order(version: int | None) -> None:
+    configuration = Configuration(
+        catalog=lower_source(
+            "insert_job: z\njob_type: c\ncommand: x\n\ninsert_job: a\njob_type: c\ncommand: x\n"
+        ),
+        profile=RuntimeProfile(),
+        non_idempotent={"z": "synthetic external effect"},
+    )
+    payload = decode(configuration.to_bytes())
+    payload.pop("job_order")
+    if version is None:
+        payload.pop("configuration_format_version")
+    else:
+        payload["configuration_format_version"] = version
+    data = canonical_bytes(payload)
+    restored = Configuration.from_bytes(data, where="legacy store")
+    assert list(restored.catalog.jobs) == ["a", "z"]
+    assert restored.catalog == configuration.catalog
+    assert restored.profile == configuration.profile
+    assert restored.non_idempotent == configuration.non_idempotent
+    assert restored.source_capture == configuration.source_capture
+    reread = Configuration.from_bytes(restored.to_bytes(), where="legacy round trip")
+    assert list(reread.catalog.jobs) == ["a", "z"]
+    assert reread == restored
+
+
+@pytest.mark.parametrize(
+    "order", [None, "z,a", {}, ["z"], ["z", "z"], ["z", "other"], ["z", 1], [["z"], "a"]]
+)
+def test_configuration_refuses_malformed_job_order(order: Any) -> None:
+    configuration = Configuration(
+        catalog=lower_source(
+            "insert_job: z\njob_type: c\ncommand: x\n\ninsert_job: a\njob_type: c\ncommand: x\n"
+        ),
+        profile=RuntimeProfile(),
+    )
+    payload = decode(configuration.to_bytes())
+    payload["job_order"] = order
+    with pytest.raises(
+        EngineError, match="bad-order: job_order must name every catalog job exactly once"
+    ):
+        Configuration.from_bytes(canonical_bytes(payload), where="bad-order")
+    payload.pop("job_order")
+    with pytest.raises(EngineError, match="job_order"):
+        Configuration.from_bytes(canonical_bytes(payload), where="missing-order")
+
+
+@pytest.mark.parametrize("version", [1, 2, 3])
+def test_configuration_versions_refuse_unknown_fields(version: int) -> None:
+    configuration = Configuration(catalog=CatalogIR(), profile=RuntimeProfile())
+    payload = decode(configuration.to_bytes())
+    payload["configuration_format_version"] = version
+    if version < 3:
+        payload.pop("job_order")
+    if version == 2:
+        payload["source_capture"] = {"main-inputs.json": "captured bytes"}
+    payload["unknown"] = True
+    with pytest.raises(EngineError, match="unknown configuration fields.*unknown"):
+        Configuration.from_bytes(canonical_bytes(payload), where="unknown-field")
+
+
+def test_configuration_version_and_order_are_digest_bound() -> None:
+    configuration = Configuration(
+        catalog=lower_source(
+            "insert_job: z\njob_type: c\ncommand: x\n\ninsert_job: a\njob_type: c\ncommand: x\n"
+        ),
+        profile=RuntimeProfile(),
+    )
+    payload = decode(configuration.to_bytes())
+    assert payload["configuration_format_version"] == 3
+    assert list(payload["catalog"]["jobs"]) == ["a", "z"]
+    assert payload["job_order"] == ["z", "a"]
+    payload["job_order"].reverse()
+    reordered = Configuration.from_bytes(canonical_bytes(payload), where="reordered")
+    assert reordered.catalog_hash == configuration.catalog_hash
+    assert reordered.digest() != configuration.digest()
+    with pytest.raises(EngineError, match="unsupported configuration_format_version 4"):
+        Configuration.from_bytes(b'{"configuration_format_version":4}', where="foreign-version")
+
+
+def test_empty_configuration_has_an_empty_job_order() -> None:
+    configuration = Configuration(catalog=CatalogIR(), profile=RuntimeProfile())
+    assert decode(configuration.to_bytes())["job_order"] == []
+    assert Configuration.from_bytes(configuration.to_bytes(), where="empty") == configuration

@@ -762,19 +762,22 @@ def _source_capture(estate: Estate) -> dict[str, str]:
 
 
 def store_config(store: Store, configuration: Configuration, rev: int) -> None:
-    """Put `configuration` as the store's configuration row `rev`. A row with its digest already
-    at `rev` is the one an engine wrote before it died short of `config applied`, and is kept;
-    any other row at `rev` refuses, naming both revs."""
-    found = store.find_config(configuration.digest())
-    stored = (
-        found
-        if found == rev
-        else store.put_config(configuration.to_bytes(), configuration.digest())
+    """Append the next rev, or keep an equal decoded row already at it (DL-438).
+
+    A row written before `config applied` survives a format change. Every refusal precedes
+    a write, so retrying a mismatched revision cannot grow the configuration history.
+    """
+    current = store.current_config_rev()
+    if current == rev - 1:
+        store.put_config(configuration.to_bytes(), configuration.digest())
+        return
+    if current == rev and rev > 0:
+        existing = Configuration.from_bytes(store.get_config(rev), where=f"configuration rev {rev}")
+        if existing == configuration:
+            return
+    raise EngineError(
+        f"the store's configuration rev {current} does not match the update's configuration rev {rev}"
     )
-    if stored != rev:
-        raise EngineError(
-            f"the store took configuration rev {stored}, the update applies rev {rev}"
-        )
 
 
 def reopen_plan(run_root: Path, token: str) -> OpenedPlan:
