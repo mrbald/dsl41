@@ -25,7 +25,7 @@ import pytest
 from store_surgery import rows
 
 from dsl41 import runner_adapters, runner_procid
-from dsl41.engine_charts import AttemptOutcome, ExitRecord
+from dsl41.engine_charts import AttemptOutcome, DrainRequest, ExitRecord
 from dsl41.ir import lower_source
 from dsl41.oracle_state import Event
 from dsl41.runner import Engine
@@ -467,6 +467,83 @@ def test_attempt_view_and_plan_bookkeeping_branches(tmp_path: Path) -> None:
         _adopt(engine, run=2, attempt=OTHER_ID)
         assert engine.attempt_view("j") is None  # another run than the row's
         assert engine._job_attempt["j"] == OTHER_ID
+        await engine.shutdown()
+        assert engine.journal is not None
+        engine.journal.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failed", [False, True], ids=["ended", "raised"])
+def test_a_completed_ladder_retains_its_attempt_until_its_callback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed: bool
+) -> None:
+    """Task completion retains the attempt until the callback takes the ladder's effects:
+    a failure holds it, and a successful close settles the drain (spec-restart, DL-433)."""
+
+    async def scenario() -> None:
+        engine = _engine(tmp_path)
+        engine.lifecycle.replay_done()
+        facts = _adopt(engine)
+        tier = engine.attempts
+        done = tier._ladder_done
+        callbacks: list[tuple[str, asyncio.Task[None]]] = []
+
+        async def ladder(_pgid: int, _token: str, _grace: float) -> None:
+            if failed:
+                raise OSError("signal denied")
+
+        async def outlives(_pgid: int, _token: str, _grace: float) -> bool:
+            return False
+
+        monkeypatch.setattr(engine.stops, "ladder", ladder)
+        monkeypatch.setattr(engine.stops, "outlives", outlives)
+        monkeypatch.setattr(engine.stops, "arm_abort_deadline", lambda _deadline: None)
+        monkeypatch.setattr(engine.stops, "watch_groups", lambda: None)
+        monkeypatch.setattr(
+            tier, "_ladder_done", lambda attempt, task: callbacks.append((attempt, task))
+        )
+        spawn = {"command_pgid": 2**22 + 7, "command_pid": 2**22 + 7, "command_start_time": "t"}
+        tier.spawn_recorded(RUN_ID, spawn)
+        tier.stop(RUN_ID, "engine_stop")
+        tier.status_recorded(RUN_ID, {"version": 1, "outcome": "signaled", "signal": 9})
+        assert facts.finished and facts.closing
+        task = tier.ladder_task(RUN_ID)
+        assert task is not None and tier.ladder_running(RUN_ID)
+        engine.lifecycle.stop_requested(DrainRequest(0.0, 0.1, 0.1))
+        assert engine.lifecycle.state == "DRAINING"
+        engine._forget_if_over(RUN_ID)
+        assert tier.knows(RUN_ID)
+        with pytest.raises(ValueError, match="ladder is not done"):
+            tier.forget(RUN_ID)
+
+        [result] = await asyncio.gather(task, return_exceptions=True)
+        assert isinstance(result, OSError) if failed else result is None
+        assert callbacks == [(RUN_ID, task)] and task.done() and tier.ladder_running(RUN_ID)
+        engine._forget_if_over(RUN_ID)
+        assert tier.knows(RUN_ID) and engine.attempt_facts(RUN_ID) is facts
+        with pytest.raises(ValueError, match="ladder is not done"):
+            tier.forget(RUN_ID)
+        assert engine.lifecycle.state == "DRAINING"
+        done(*callbacks.pop())
+        closed = [
+            b
+            for _, k, b in rows(tmp_path / "run")
+            if k == "follow_up" and b["event"] == "ladder_done"
+        ]
+        if failed:
+            assert tier.knows(RUN_ID) and tier.held(RUN_ID) and not tier.ladder_running(RUN_ID)
+            assert facts.note == "ladder failed: signal denied" and facts.closing
+            assert engine.held_groups == {RUN_ID: 2**22 + 7}
+            assert engine.blocked("j") == RUN_ID and closed == []
+            assert engine.lifecycle.state == "DRAINING" and engine.exit_code is None
+        else:
+            assert not tier.knows(RUN_ID) and RUN_ID not in engine._facts
+            assert len(closed) == 1
+            assert engine.lifecycle.state == "STOPPED"
+            assert (engine.exit_code, engine.leaving_record) == (0, "clean_shutdown")
+            await engine.run_until_quiescent(T0)
+        assert engine.fault is None
         await engine.shutdown()
         assert engine.journal is not None
         engine.journal.close()
@@ -1446,10 +1523,13 @@ def test_a_held_group_keeps_its_job_s_starts_back_until_it_is_gone(
     assert runner_adapters.group_has_live_member(2**22 + 7)
 
 
-def test_a_replacement_waits_for_the_ladder_of_the_attempt_it_replaces(tmp_path: Path) -> None:
+def test_a_replacement_waits_for_the_ladder_of_the_attempt_it_replaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Astra R3-M1 live: the attempt ends while its ladder still runs, so its outcome is
     committed with `ladder: running` and its rerun waits. The ladder's end closes the attempt
-    (`ladder_done`), and only then is attempt 2 dispatched."""
+    (`ladder_done`), and only then is attempt 2 dispatched. Task completion alone releases
+    nothing before the done callback takes those effects (DL-433)."""
     run_root = tmp_path / "run"
     spawn = {"command_pgid": 2**22 + 7, "command_pid": 2**22 + 7, "command_start_time": "t"}
 
@@ -1458,11 +1538,22 @@ def test_a_replacement_waits_for_the_ladder_of_the_attempt_it_replaces(tmp_path:
         engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "j"}))
         await engine.run_until_quiescent(T0)
         _adopt(engine)
+        tier = engine.attempts
+        done = tier._ladder_done
+        callbacks: list[tuple[str, asyncio.Task[None]]] = []
+        monkeypatch.setattr(tier, "_ladder_done", lambda one, task: callbacks.append((one, task)))
         engine.attempts.spawn_recorded(RUN_ID, spawn)
         engine.attempts.stop(RUN_ID, "update_stop")  # its ladder is a task not yet run
         engine.attempts.wrapper_exited(RUN_ID, spawn)  # the end lands while the ladder runs
         assert RUN_ID in engine._waiting_plans
-        await asyncio.sleep(0.05)  # the ladder ends
+        task = tier.ladder_task(RUN_ID)
+        assert task is not None
+        await task
+        assert callbacks == [(RUN_ID, task)] and task.done() and tier.ladder_running(RUN_ID)
+        engine.perform_plan(RUN_ID)
+        assert RUN_ID in engine._waiting_plans and tier.knows(RUN_ID)
+        assert not any(k == "dispatch" and b.get("ordinal") == 2 for _, k, b in rows(run_root))
+        done(*callbacks.pop())
         assert RUN_ID not in engine._waiting_plans
         await engine.shutdown()
         assert engine.journal is not None
