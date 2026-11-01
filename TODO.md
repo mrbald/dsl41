@@ -23,7 +23,7 @@ disjoint files.
   drains; `dsl41 reread` then `dsl41 update` reloads; `dsl41 query status`), the unit in
   `examples/nightbank/deploy/dsl41-engine.service`, and the TUI's missing drain view.
   Builds now.
-- [ ] 6. Merge `v2` into `main`.
+- [x] 6. Merge `v2` into `main` (#277, no tag; owner: tag later).
 
 The sweeps edit frozen contracts, so they are semantic class: one reviewer of the other
 vendor than the implementer. Review items 3 and 4 in one batch each.
@@ -89,3 +89,6 @@ Found after an area was sealed as good enough. Addressed once the scope runs end
   races: a drain that closes the lifeline before the wrapper writes `spawn.json` records the
   stop as `lifeline`, not `engine_stop`. Failed once in a Linux cell; reproduces on 7be633b with
   a paused wrapper (Sol and Opus, slice clock; update, DL-432).
+- [ ] After a backward wall-clock step, `dispatch`, `outcome` and `engine` records carry the raw
+  wall stamp, so they can sit below an earlier `input` in the store; DL-435 floors admission
+  stamps only (W2 drill builder, clock-step scenario; clock, DL-435).

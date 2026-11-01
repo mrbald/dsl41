@@ -45,6 +45,9 @@ builds one for a chosen UTC anchor.
 - `deploy/dsl41-engine.service` — one systemd unit for the engine: `run`
   resumes the root it names, and the unit's stop is the engine's drain
   (`dsl41 engine stop --wait`).
+- [`deploy/DRILL.md`](deploy/DRILL.md) — the service drill, for a
+  maintainer: the unit's start, stop, restart, reload and recovery in a
+  container with systemd.
 
 ## Notes
 
