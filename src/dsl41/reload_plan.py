@@ -59,7 +59,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from dsl41.ast_jil import JilFile, JilParseError, parse, render_statement
 from dsl41.canon import ARTIFACT_FORMAT_VERSION, CanonError, canonical_bytes, decode
@@ -69,6 +69,7 @@ from dsl41.lint import lint_catalog
 from dsl41.placeholders import PlaceholderError, load_properties, substitute
 from dsl41.reload_diff import Plan, catalog_hash_v2, diff, plan_token, running_boxes
 from dsl41.runner_preflight import PreflightItem, preflight
+from dsl41.runner_config import MachinePolicy
 from dsl41.runner_procid import durable_write, mkdir_durable
 from dsl41.semantics import check_overrides
 from dsl41.semantics import resolve as resolve_switches
@@ -111,6 +112,7 @@ class Live:
     tombstones: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     #: each row's current run number, beside its status: the run a stop interrupts
     runs: Mapping[str, int] = field(default_factory=dict)
+    launch: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -126,6 +128,7 @@ class Estate:
     parsed: tuple[JilFile, ...] = field(default=(), repr=False)
     #: the estate directory, absolute
     directory: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -277,7 +280,7 @@ def _lint_findings(estate: Estate) -> list[str]:
 
 
 def _preflight(estate: Estate, start: datetime | None) -> list[PreflightItem]:
-    """The ss8 preflight without the launch-profile rules (module docstring)."""
+    """Main config checks its launch settings; legacy plans defer them (DL-437, DL-432)."""
     base_tz = estate.settings["timezone"]
     aliases = estate.settings["timezone_aliases"]
     semantics = estate.settings["semantics"]
@@ -291,8 +294,12 @@ def _preflight(estate: Estate, start: datetime | None) -> list[PreflightItem]:
         default_tz=base_tz,
         tz_aliases=aliases,
         semantics=resolve_switches(semantics),
+        machine_policy=cast(
+            MachinePolicy, estate.metadata.get("launch", {}).get("machine_policy", "strict")
+        ),
+        as_machine=frozenset(estate.metadata.get("launch", {}).get("as_machine", ())),
     )
-    return [item for item in items if item.code not in _LAUNCH_CODES]
+    return items if estate.metadata else [item for item in items if item.code not in _LAUNCH_CODES]
 
 
 def _plan_document(
@@ -304,7 +311,7 @@ def _plan_document(
     warnings: Sequence[PreflightItem],
     restored: Sequence[tuple[str, tuple[str, ...]]],
 ) -> dict[str, Any]:
-    return {
+    document = {
         "artifact_format_version": ARTIFACT_FORMAT_VERSION,
         "token": token,
         "live_rev": live.revision,
@@ -335,6 +342,17 @@ def _plan_document(
             for name, data in estate.parts
         ],
     }
+    if estate.metadata:
+        from dsl41.main_config import policy_report
+
+        policy, report = policy_report(estate)
+        document.update(
+            plan_format_version=2,
+            lint_policy=policy.model_dump(mode="json"),
+            lint_findings=[v.model_dump(mode="json") for v in report.violations],
+            source_mapping=estate.metadata["records"],
+        )
+    return document
 
 
 def spec_texts(parsed: Sequence[JilFile], catalog: CatalogIR) -> dict[str, str]:
@@ -370,10 +388,30 @@ def reread(
     environment: str | None = None,
     *,
     start: datetime | None = None,
+    candidate: Estate | None = None,
 ) -> RereadResult:
     """Spec-reload steps 1 to 6: refuse, or store the plan and return it."""
-    estate = load_estate(estate_dir, properties, environment)
-    findings = _lint_findings(estate)
+    estate = candidate or load_estate(estate_dir, properties, environment)
+    if estate.metadata:
+        from dsl41.main_config import policy_report
+
+        policy, report = policy_report(estate)
+        findings = [v.render() for v in report.violations if policy.blocks(v.severity)]
+        if live.launch != estate.metadata["launch"]:
+            changed = sorted(
+                key
+                for key in estate.metadata["launch"]
+                if live.launch.get(key) != estate.metadata["launch"][key]
+            )
+            raise RereadRefused(
+                [
+                    "engine host launch settings changed: "
+                    + ", ".join(changed)
+                    + "; restart the selected engine to apply them before reread"
+                ]
+            )
+    else:
+        findings = _lint_findings(estate)
     if findings:
         raise RereadRefused(findings)
     items = _preflight(estate, start)
@@ -421,8 +459,18 @@ def read_plan(plans_dir: Path, token: str) -> dict[str, Any] | None:
         document = decode((plan_dir / PLAN_JSON).read_bytes())
         if not isinstance(document, dict) or document.get("token") != token:
             return None
+        version = document.get("plan_format_version", 1)
+        if type(version) is not int or version not in (1, 2):
+            raise RereadRefused([f"unsupported plan_format_version {version!r}"])
         parts: list[tuple[str, bytes]] = []
         for part in document["parts"]:
+            name = part["name"]
+            if (
+                not isinstance(name, str)
+                or Path(name).is_absolute()
+                or any(p in ("", ".", "..") for p in name.split("/"))
+            ):
+                return None
             data = (plan_dir / part["name"]).read_bytes()
             if hashlib.sha256(data).hexdigest() != part["sha256"]:
                 return None

@@ -677,6 +677,18 @@ def _skeleton_cycle_preflight(catalog: CatalogIR) -> list[PreflightItem]:
     return items
 
 
+def host_preflight(
+    catalog: CatalogIR, *, as_machine: frozenset[str], machine_policy: MachinePolicy
+) -> list[PreflightItem]:
+    """Check the stored catalog's placement under current host settings (DL-437)."""
+    local = _local_identity(as_machine)
+    return [
+        item
+        for name, job in sorted(catalog.jobs.items())
+        for item in _machine_preflight(name, job, catalog, local, machine_policy)
+    ]
+
+
 def preflight(
     catalog: CatalogIR,
     *,

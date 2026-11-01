@@ -9,7 +9,7 @@
 Description=dsl41 engine (nightbank example)
 # the run root below; no start before its file system is mounted, so an
 # absent mount is never read as an empty root
-RequiresMountsFor=/srv/dsl41/runs/nightbank
+RequiresMountsFor=/srv/dsl41/runs/nightbank /opt/nightbank/cfg /etc/dsl41
 # start after the clock is synchronised, so a boot-time step of the wall clock
 # comes before the engine's first stamp (runner-design §4)
 Wants=time-sync.target
@@ -25,11 +25,9 @@ User=dsl41
 Group=dsl41
 # a run root that holds engine.db resumes the run it records, so a restart
 # reruns this same line (DL-428); a missing root is created
-ExecStart=/opt/dsl41/bin/dsl41 run \
-    --manifest /opt/dsl41/nightbank/estate/small/estate.toml \
-    --run-root /srv/dsl41/runs/nightbank
+ExecStart=/opt/dsl41/releases/<version>/bin/dsl41 run --config /etc/dsl41/dsl41.toml
 # the drain: returns once the socket is gone and leader.lock is free
-ExecStop=/opt/dsl41/bin/dsl41 engine stop --wait \
+ExecStop=/opt/dsl41/releases/<version>/bin/dsl41 engine stop --wait \
     --socket /srv/dsl41/runs/nightbank/control.sock
 # grace_term_s + grace_kill_s + 30 with engine.toml's defaults (10 + 5 + 30);
 # the engine's own deadline ends the drain at grace_term_s + grace_kill_s + 5

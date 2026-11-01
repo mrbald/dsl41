@@ -29,6 +29,7 @@ from dsl41.idempotence import IdempotenceError, load_exceptions
 from dsl41 import reload_plan
 from dsl41.reload_plan import Live, RereadRefused, read_plan
 from dsl41.reload_update import WOULD_STOP_RUNNING, Admitted, Application, Refused
+from dsl41.main_config import CONFIG_OPT, selected_config
 
 #: The engine as the commands reach it: a verb and its arguments in, the reply out.
 type Send = Callable[[str, Mapping[str, object]], object]
@@ -66,6 +67,7 @@ def reread_command(
     send: Send,
     properties: Sequence[Path] = (),
     environment: str | None = None,
+    config: Path | None = None,
 ) -> int:
     """Diff ESTATE_DIR against the engine's catalog and store the plan under RUN_ROOT/plans.
 
@@ -77,8 +79,21 @@ def reread_command(
     live = _live(send)
     plans = run_root / PLANS
     try:
-        result = reload_plan.reread(estate_dir, live, plans, properties, environment)
-        marked = load_exceptions(result.plan_dir)
+        candidate = None
+        if config is not None:
+            from dsl41.main_config import prepare, emit_policy
+
+            candidate = prepare(config)
+            emit_policy(candidate, refuse=False)
+        result = reload_plan.reread(
+            estate_dir, live, plans, properties, environment, candidate=candidate
+        )
+        if candidate is None:
+            marked = load_exceptions(result.plan_dir)
+        else:
+            from dsl41.idempotence import Exceptions
+
+            marked = Exceptions(candidate.metadata["non_idempotent"])
     except (RereadRefused, IdempotenceError) as exc:
         findings = exc.findings if isinstance(exc, RereadRefused) else (str(exc),)
         for finding in findings:
@@ -96,6 +111,32 @@ def reread_command(
     ]
     typer.echo(f"changed: {_names(changed)}")
     typer.echo(f"removed: {_names(plan.removed)}")
+    if candidate is not None:
+        old = {
+            name: job.span.file for name, job in live.catalog.jobs.items() if job.span is not None
+        }
+        new = candidate.metadata["origins"]
+        for name in plan.added:
+            typer.echo(f"source added {name}: {new[name]}")
+        for name in plan.removed:
+            typer.echo(f"source removed {name}: {old.get(name, 'unknown')}")
+        for change in plan.changed:
+            prior, after = old.get(change.name, "unknown"), new[change.name]
+            typer.echo(
+                f"source changed {change.name}: {prior} -> {after}"
+                if prior != after
+                else f"source changed {change.name}: {after}"
+            )
+        for name in plan.unchanged:
+            if old.get(name) != new[name]:
+                typer.echo(f"source moved {name}: {old.get(name, 'unknown')} -> {new[name]}")
+        if live.settings != candidate.settings:
+            supporting = [
+                r["path"]
+                for r in candidate.metadata["records"]
+                if r["role"] in ("config", "timezone_map", "properties", "jil", "generated")
+            ]
+            typer.echo(f"shared settings sources: {', '.join(dict.fromkeys(supporting))}")
     typer.echo(f"unchanged: {len(plan.unchanged)} jobs")
     typer.echo(f"stops running: {_names(result.stop)}")
     flagged = [job for job in result.stop if not marked.is_idempotent(job)]
@@ -225,6 +266,7 @@ def live_of_answer(answer: Mapping[str, Any]) -> Live:
         dict(answer["status"]),
         {name: tuple(flags) for name, flags in dict(answer.get("tombstones") or {}).items()},
         {name: int(run) for name, run in dict(answer.get("runs") or {}).items()},
+        dict(answer.get("launch") or {}),
     )
 
 
@@ -272,18 +314,19 @@ _CHART_CODES = frozenset({"stale_plan", "box_running", "would_stop_running", "up
 def _run(command: Callable[[], int]) -> None:
     try:
         code = command()
-    except SendFailed as exc:
+    except (SendFailed, RereadRefused) as exc:
         typer.echo(str(exc), err=True)
         code = 2
     raise typer.Exit(code)
 
 
-_RUN_ROOT = typer.Option(..., "--run-root", help="The running engine's run root.")
+_RUN_ROOT = typer.Option(None, "--run-root", help="The running engine's run root.")
 
 
 def reread(
+    ctx: typer.Context,
     estate_dir: Path = typer.Argument(
-        ..., help="The estate directory: estate.toml, its JIL files, non-idempotent.toml."
+        None, help="The estate directory: estate.toml, its JIL files, non-idempotent.toml."
     ),
     run_root: Path = _RUN_ROOT,
     properties: list[Path] = typer.Option(
@@ -295,6 +338,7 @@ def reread(
     environment: str | None = typer.Option(
         None, "--environment", metavar="NAME", help="The manifest's environment."
     ),
+    config: str | None = CONFIG_OPT,
 ) -> None:
     """Diff the estate on disk against the running engine's catalog.
 
@@ -310,6 +354,18 @@ def reread(
     running box the plan edits, an unreachable engine).
     """
     # Design: spec-reload, docs/control-protocol.md ss4
+    from dsl41.main_config import load_config
+    from dsl41.cli_common import refuse
+
+    main_path = selected_config(ctx, config, estate_dir is not None, ("run_root",))
+    if main_path is not None:
+        try:
+            run_root = Path(load_config(main_path).engine.run_root)
+            estate_dir = main_path.parent
+        except RereadRefused as exc:
+            raise typer.Exit(refuse(exc)) from exc
+    elif run_root is None:
+        raise typer.Exit(refuse("legacy reread requires --run-root"))
     _run(
         lambda: reread_command(
             estate_dir,
@@ -317,11 +373,13 @@ def reread(
             send=socket_send(run_root),
             properties=properties or (),
             environment=environment,
+            config=main_path,
         )
     )
 
 
 def update(
+    ctx: typer.Context,
     token: str = typer.Argument(..., help="The token `dsl41 reread` printed."),
     run_root: Path = _RUN_ROOT,
     stop_running: bool = typer.Option(
@@ -338,6 +396,7 @@ def update(
         "--request-id",
         help="Retry an update whose outcome is unknown under the id it printed.",
     ),
+    config: str | None = CONFIG_OPT,
 ) -> None:
     """Apply the plan TOKEN to the running engine.
 
@@ -358,6 +417,19 @@ def update(
     could not be reached.
     """
     # Design: spec-reload, docs/control-protocol.md ss2
+    from dsl41.main_config import load_run_root
+    from dsl41.cli_common import refuse
+
+    if config is not None and run_root is not None:
+        raise typer.Exit(refuse("--config refuses --run-root"))
+    if config is not None or run_root is None:
+        from dsl41.main_config import DEFAULT_CONFIG, config_path
+
+        try:
+            selected = DEFAULT_CONFIG if config is None else config_path(config)
+            run_root = load_run_root(selected)
+        except RereadRefused as exc:
+            raise typer.Exit(refuse(exc)) from exc
     _run(
         lambda: update_command(
             token,

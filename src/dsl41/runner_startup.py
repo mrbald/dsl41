@@ -86,6 +86,7 @@ from dsl41.runner_config import (
     switches_of,
     to_us,
     tz_aliases_of,
+    with_host_settings,
 )
 from dsl41.runner_journal import (
     STORE_NAME,
@@ -265,6 +266,7 @@ def start_run(
     non_idempotent: Mapping[str, str] | None = None,
     machines: Executor | None = None,
     settings: EngineSettings | None = None,
+    source_capture: Mapping[str, str] | None = None,
 ) -> Engine:
     """Genesis: a new store with configuration rev 1, and an Engine over it.
 
@@ -285,6 +287,7 @@ def start_run(
             non_idempotent=non_idempotent,
             machines=machines,
             settings=settings,
+            source_capture=source_capture,
         )
     lock = lock or acquire_run_root(run_root)
     try:
@@ -309,6 +312,7 @@ def start_run(
             non_idempotent=non_idempotent,
             machines=machines,
             settings=settings,
+            source_capture=source_capture,
         )
     except BaseException:
         lock.release()
@@ -328,6 +332,7 @@ def _genesis(
     non_idempotent: Mapping[str, str] | None,
     machines: Executor | None,
     settings: EngineSettings | None,
+    source_capture: Mapping[str, str] | None = None,
 ) -> Engine:
     at = clock.now()
     _require_adapters(catalog, adapters, "genesis")
@@ -342,7 +347,10 @@ def _genesis(
             " (period-model ss2.1)"
         )
     configuration = Configuration(
-        catalog=catalog, profile=profile, non_idempotent=dict(non_idempotent or {})
+        catalog=catalog,
+        profile=profile,
+        non_idempotent=dict(non_idempotent or {}),
+        source_capture=dict(source_capture or {}),
     )
     identity = {
         "state_version": str(STATE_MACHINE_VERSION),
@@ -390,6 +398,7 @@ def _genesis(
         settings=settings,
     )
     engine.config_rev = engine.trace_rev = rev
+    engine.source_capture = dict(configuration.source_capture)
     engine.instance = instance
     engine.marked = frozenset(configuration.non_idempotent)
     engine.decisions.fallback = _decision_lookup(store)
@@ -463,6 +472,7 @@ async def resume_run(
     declared: RuntimeProfile | None = None,
     machines: Executor | None = None,
     settings: EngineSettings | None = None,
+    stored_sources: bool = False,
 ) -> Engine:
     """Restart (module docstring). `grace_seconds`, when given, is the live ladder's TERM grace
     for this incarnation over the settings' `grace_term_s`. Returns an Engine with the catch-up's steps queued; the
@@ -493,6 +503,7 @@ async def resume_run(
             declared=declared,
             machines=machines,
             settings=settings,
+            stored_sources=stored_sources,
         )
     except BaseException:
         for engine in engines:
@@ -524,6 +535,7 @@ async def _resume_under_lock(
     engines: list[Engine],
     machines: Executor | None,
     settings: EngineSettings | None,
+    stored_sources: bool = False,
 ) -> Engine:
     """The refusals, the fold and the first reading, with the lock held (S6a)."""
     refuse_old_root(run_root)
@@ -563,8 +575,16 @@ async def _resume_under_lock(
     for seq, record in tail:
         journal.open.note(seq, record)
         journal.position.note(record)
-    if rev == first_rev(store) and journal.open.update is None:
-        # a run root no update has touched runs the estate it was started with
+    opened_update = None
+    if stored_sources:
+        if journal.open.update is not None:
+            from dsl41.runner_update import reopen_plan
+
+            opened_update = reopen_plan(run_root, str(journal.open.update["token"]))
+        profile = _check_configuration(
+            configuration, catalog, scheduler, adapters, declared, host_settings=True
+        )
+    elif rev == first_rev(store) and journal.open.update is None:
         profile = _check_configuration(configuration, catalog, scheduler, adapters, declared)
     else:
         # the store's configuration rows are the record; the estate given must be the one the
@@ -604,6 +624,7 @@ async def _resume_under_lock(
     )
     engines.append(engine)
     engine.config_rev = rev
+    engine.source_capture = dict(configuration.source_capture)
     engine.trace_rev = first  # the trace starts at the snapshot, or at genesis
     engine.marked = frozenset(configuration.non_idempotent)
     engine.resume_at = last_at
@@ -628,12 +649,29 @@ async def _resume_under_lock(
         engine.catch_up(partial(step, scan))
     engine.catch_up(partial(_owed, engine, wires, replay, last_at))
     if journal.open.update is not None:  # the update in STOPPING, its filter holding
-        engine.update.resume(journal.open.update)
+        engine.update.resume(journal.open.update, opened=opened_update)
     # the scheduler re-anchors now, so no tick missed while down fires late; the barrier
     # records the drops with `engine started` once the catch-up is done (§6, item 4)
     missed = _missed_ticks(engine, journal.position)
     engine.recovery = lambda: _record_start(engine, tail, missed)
     return engine
+
+
+def active_configuration(run_root: Path) -> Configuration:
+    """Read the last applied configuration, excluding an uncommitted row (DL-437)."""
+    path = run_root / STORE_NAME
+    try:
+        opened = SqliteStore(path, read_only=True)
+    except StoreError as exc:
+        raise EngineError(f"{path}: {exc}") from exc
+    with contextlib.closing(opened) as store:
+        _check_state_version(store.meta(), path)
+        _check_root_id(store.meta(), path)
+        snapshot = _latest_snapshot(store, path)
+        first = snapshot.config_rev if snapshot is not None else first_rev(store)
+        after = snapshot.seq if snapshot is not None else 0
+        rev = _applied_rev(list(store.read_from(after)), first)
+        return load_configuration(store, rev, where=str(path))
 
 
 def _check_state_version(meta: Mapping[str, str], path: Path) -> None:
@@ -684,24 +722,27 @@ def _check_configuration(
     scheduler: Scheduler | None,
     adapters: Mapping[str, JobAdapter],
     declared: RuntimeProfile | None,
+    *,
+    host_settings: bool = False,
 ) -> RuntimeProfile:
-    """The launch must run the configuration the store applied: the same catalog, and wiring
-    that reads the same profile. A change is an update (3b), never a silent drift (ss7)."""
+    """Require the applied catalog and interpretation; main-config host settings may vary
+    for this incarnation only (DL-437). Legacy launches require the whole profile (ss7)."""
     if configuration.catalog_hash != catalog_hash_v2(catalog):
         raise EngineError(
             "catalog hash mismatch: the estate changed since this store was written;"
             " start a fresh run root (no silent semantic drift, ss7)"
         )
-    derived = _derive_runtime_profile(
-        scheduler, adapters, base=configuration.profile, declared=declared
-    )
-    drift = profile_drift(derived, configuration.profile)
+    expected = configuration.profile
+    if host_settings and declared is not None:
+        expected = with_host_settings(expected, declared.as_machine, declared.machine_policy)
+    derived = _derive_runtime_profile(scheduler, adapters, base=expected, declared=declared)
+    drift = profile_drift(derived, expected)
     if drift:
         raise EngineError(
             f"runtime-profile mismatch on {', '.join(drift)}: the store runs another"
             " profile; start a fresh run root"
         )
-    return configuration.profile
+    return expected
 
 
 def _applied_rev(tail: list[tuple[int, Record]], first: int) -> int:

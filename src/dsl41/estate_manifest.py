@@ -71,7 +71,7 @@ def _release(version: str) -> tuple[int, ...]:
     return tuple(int(part) for part in match.group().split(".")) if match else (0,)
 
 
-def _check_requirement(path: Path, requirement: str, installed: str) -> None:
+def check_requirement(path: Path, requirement: str, installed: str) -> None:
     """`>=X.Y[.Z]` against the installed version as a dotted-integer tuple (DL-407).
 
     Only the leading integers count, so a pre-release or dev build of X counts as X."""
@@ -175,7 +175,7 @@ def parse_manifest(path: Path, raw: bytes | None = None) -> Manifest:
     except ValidationError as exc:
         raise ManifestError(_validation_sentence(path, exc)) from exc
     if manifest.requires_dsl41 is not None:
-        _check_requirement(path, manifest.requires_dsl41, tool_version())
+        check_requirement(path, manifest.requires_dsl41, tool_version())
     try:
         check_overrides(manifest.semantics)
     except ValueError as exc:

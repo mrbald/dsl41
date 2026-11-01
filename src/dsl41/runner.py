@@ -515,6 +515,8 @@ class Engine:
         self.settings = settings
         #: the configuration rev the engine runs, and the one its trace opens under
         self.config_rev = 0
+        self.source_capture: dict[str, str] = {}
+        self.launch_settings: dict[str, object] = {}
         self.trace_rev: int | None = None
         #: the clock instant and journal seq of the last snapshot this engine took
         self._snapshot_at: datetime | None = None
