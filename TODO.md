@@ -18,6 +18,10 @@ disjoint files.
   a lifeline stop into unobservable; suppress only after a successful group reread proves no live
   members, preserve observed status, and cover zombie-only, live-member and unreadable cases (boss
   ruling 2026-11-01; DL-431); docs-only train may proceed.
+- [x] Blocker for code merges: update_wiring drained reruns before `spawn.json` was published,
+  recording `lifeline` instead of the test's `engine_stop`; the normal case waits for each rerun's
+  record and barriers force both orderings with exact causes and cleanup (boss ruling
+  2026-11-01; main c8e8dfe; DL-359).
 - [x] 3. Terms sweep of `docs/control-protocol.md` and `docs/access-model.md`: replace
   retired terms (the journal where DL-428 replaced it with the store, the old supervisor
   model); no rule changes. Builds now.
@@ -93,10 +97,6 @@ Found after an area was sealed as good enough. Addressed once the scope runs end
 - [ ] Nothing bounds a backward gap: a store stamped far ahead starts and holds every tick and
   timer until the wall catches up, with one warning line as the only trace (Opus, slice clock
   round 2, N2; clock, DL-435).
-- [ ] `tests/test_update_wiring.py::test_two_running_jobs_are_stopped_and_eighteen_untouched_with_the_engine_running`
-  races: a drain that closes the lifeline before the wrapper writes `spawn.json` records the
-  stop as `lifeline`, not `engine_stop`. Failed once in a Linux cell; reproduces on 7be633b with
-  a paused wrapper (Sol and Opus, slice clock; update, DL-432).
 - [ ] After a backward wall-clock step, `dispatch`, `outcome` and `engine` records carry the raw
   wall stamp, so they can sit below an earlier `input` in the store; DL-435 floors admission
   stamps only (W2 drill builder, clock-step scenario; clock, DL-435).
