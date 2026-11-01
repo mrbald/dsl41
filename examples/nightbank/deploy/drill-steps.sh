@@ -101,6 +101,7 @@ PY
 export NIGHTBANK_DATA="$NIGHT/data"
 export NIGHTBANK_STATE="$NIGHT/data/state"
 export NIGHTBANK_INCIDENTS="$NIGHT/incidents.conf"
+export NIGHTBANK_SOCKET="$SOCK"
 export PATH="$NIGHTBANK/bin:$VENV/bin:\$PATH"
 ENV
     # docs/deploy.md: the run root is the service user's; the engine creates what is inside
@@ -262,33 +263,29 @@ some_termed() {
     sudo grep -qx '[0-9][0-9]* TERM' "$LEAK_MARK" 2>/dev/null && gone drill-leak-child
 }
 
-# Whether this image's Python can signal through a pidfd, decided from the image, never from
-# the engine's log. Ubuntu 24.04's python3.12 can, so the cookie scan is required there.
-# Rocky 8's python3.12 has no os.pidfd_open, so the engine keeps DL-429's checks (DL-431)
-# and must say so in the journal; there it does not see a child outside the command's group.
+# The image fixes the expected signalling primitive; the log only proves it (DL-436).
 os_field() { sed -n "s/^$1=//p" /etc/os-release | tr -d '"'; }
-scan_expected() {
+scan_primitive_expected() {
     local id version
     id=$(os_field ID)
     version=$(os_field VERSION_ID)
     case $id:$version in
-        ubuntu:24.04) return 0 ;;
-        rocky:8*) return 1 ;;
+        ubuntu:24.04) echo "pidfd" ;;
+        rocky:8*) echo "os.kill (start-token check)" ;;
         *) fail "no leak expectation for image $id $version" ;;
     esac
 }
-journal_says_unavailable() {
-    sudo journalctl -u "$UNIT" -o cat --no-pager | grep -qF "cookie scan unavailable"
+scan_primitive_is() { # scan_primitive_is EXPECTED -- this serving invocation only (DL-436)
+    local actual
+    actual=$(sudo journalctl -u "$UNIT" "_SYSTEMD_INVOCATION_ID=$(prop InvocationID)" \
+        -o cat --no-pager | sed -n 's/^dsl41: cookie scan signalling: //p')
+    [ "$actual" = "$1" ]
 }
 
-step_leak() { # a job's leftover child is TERMed: live (DL-431) and at a restart (DL-433)
-    local main child
-    if ! scan_expected; then
-        leak_without_scan
-        return
-    fi
-    ! journal_says_unavailable ||
-        fail "the engine logged 'cookie scan unavailable' on $(os_field PRETTY_NAME)"
+step_leak() { # a job's leftover child is TERMed: live and at restart (DL-433, DL-436)
+    local main child primitive
+    primitive=$(scan_primitive_expected)
+    wait_for 10 "the startup cookie scan uses $primitive" scan_primitive_is "$primitive"
     # live: the command exits 0 and leaves a child that carries its cookie
     sudo rm -f "$LEAK_MARK"
     request FORCE_STARTJOB DRILL_LEAK_C
@@ -314,6 +311,7 @@ step_leak() { # a job's leftover child is TERMed: live (DL-431) and at a restart
     wait_for 60 "systemd restarted the engine" replaced "$main"
     wait_for 60 "the restarted engine TERMed the child $child left from before" termed "$child"
     wait_running
+    wait_for 10 "the restart cookie scan uses $primitive" scan_primitive_is "$primitive"
     sudo rm -f "$LEAK_DROP_IN"
     sudo systemctl daemon-reload
     ok "the child a command left was TERMed live and at the restart"
@@ -321,25 +319,6 @@ step_leak() { # a job's leftover child is TERMed: live (DL-431) and at a restart
     request KILLJOB DRILL_LEAK_LIVE_C
     wait_for 60 "DRILL_LEAK_LIVE_C settled" attempt_settled DRILL_LEAK_LIVE_C
     wait_for 30 "no child is left" gone drill-leak-child
-}
-
-# Without the cookie scan: the child a command left outlives its attempt, and the unit's
-# stop ends it (KillMode=control-group).
-leak_without_scan() {
-    local child
-    wait_for 10 "the engine logged 'cookie scan unavailable'" journal_says_unavailable
-    sudo rm -f "$LEAK_MARK"
-    request FORCE_STARTJOB DRILL_LEAK_C
-    wait_for 60 "DRILL_LEAK_C succeeded" job_is DRILL_LEAK_C SUCCESS
-    wait_for 30 "DRILL_LEAK_C settled" attempt_settled DRILL_LEAK_C
-    child=$(pids_of drill-leak-child)
-    [ "$(wc -w <<<"$child")" = 1 ] || fail "not one child: '$child'"
-    ! sudo grep -q TERM "$LEAK_MARK" 2>/dev/null || fail "the child was signalled"
-    ok "without the cookie scan the child $child outlives its attempt"
-    manual restart
-    wait_for 60 "the unit's stop TERMed the child $child" termed "$child"
-    wait_running
-    ok "the unit's control-group stop ended the child the engine could not see"
 }
 
 # The unit failed with exit CODE and systemd left it there: no new invocation and no restart
