@@ -186,3 +186,54 @@ def test_peer_runs_codex_with_the_documented_arguments(tmp_path: Path) -> None:
         'sandbox_mode="read-only"',
         "-",
     ]
+
+
+def test_peer_containers_mode_uses_the_workspace_profile_with_network(tmp_path: Path) -> None:
+    repo, brief, env = stub_codex(tmp_path, STARTED + SAID_OK)
+    seen = Path(env["SEEN"])
+    out = tmp_path / "out"
+    profile = [
+        "-c",
+        'permissions.containers.extends=":workspace"',
+        "-c",
+        "permissions.containers.network.enabled=true",
+        "-c",
+        'default_permissions="containers"',
+    ]
+    done = peer(repo, "gpt-x", str(brief), str(out), "60", "--sandbox", "containers", env=env)
+    assert done.returncode == 0, done.stderr
+    assert seen.read_text(encoding="utf-8").splitlines() == [
+        "exec",
+        *profile,
+        "--json",
+        "-m",
+        "gpt-x",
+        "-c",
+        'model_reasoning_effort="xhigh"',
+        "-",
+    ]
+    resumed = peer(
+        repo,
+        "gpt-x",
+        str(brief),
+        str(out),
+        "60",
+        "--resume",
+        "t-9",
+        "--sandbox",
+        "containers",
+        env=env,
+    )
+    assert resumed.returncode == 0, resumed.stderr
+    assert seen.read_text(encoding="utf-8").splitlines() == [
+        "exec",
+        "resume",
+        "t-9",
+        "--json",
+        "-m",
+        "gpt-x",
+        "-c",
+        'model_reasoning_effort="high"',
+        *profile,
+        "-",
+    ]
