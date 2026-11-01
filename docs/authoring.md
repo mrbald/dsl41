@@ -12,7 +12,8 @@ Every job in hand-written JIL needs `job_type`: `c` for CMD, `b` for BOX, or `f`
 The DSL sets this attribute.
 The DSL uses the same pipeline: it emits JIL, parses it, and lowers it into a catalog.
 `dsl41 build` turns the module into a JIL file.
-The engine and run root take JIL bytes only.
+The main config can select JIL and trusted Python modules together.
+Preparation renders each module to captured JIL; the engine runs those bytes ([§6](#6-hand-over-for-rollout)).
 
 The [README's DSL example](../README.md#dsl---jil-build) declares an estate:
 
@@ -179,7 +180,8 @@ Lowering also refuses duplicate job names.
 At definition time, `status:` accepts only INACTIVE, ON_HOLD, ON_ICE and ON_NOEXEC.
 Lowering refuses resource groups using `QUANTITY=ALL` or `VALUEOP`/`VALUE`.
 Write whole job definitions rather than `update_job`, `delete_job` or `override_job`.
-Follow the job-edit recipe (`deployment-runbook.md`, retired in 2.0.0).
+Hand over changed definitions through [§6](#6-hand-over-for-rollout).
+The operational boundary for `deployment-runbook.md` is [DL-424](decision-log.md).
 
 Use these SEM entries for a construct's meaning:
 
@@ -344,7 +346,8 @@ Its default `report` format writes Markdown with a chart per independent workflo
 Check the file-watcher and schedule triggers, condition paths and box membership.
 Read the appendices for standalone jobs, assumptions, redesign flags, OR shapes and cycles.
 Edges use solid, dashed and thick red lines for E, A and R classes.
-The glossary defines R/A classification (UC backend) (retired in 2.0.0).
+The [graph contract](ir-design.md#5-ir-g-derived-graph) defines the edge classes.
+The UC backend boundary is [DL-288](decision-log.md), as ruled by DL-424.
 Other formats are `chart`, `html`, `html-chart` and `explore`.
 Use `-o/--out PATH` to write a file rather than stdout.
 The `html` format writes a self-contained offline page.
@@ -392,7 +395,9 @@ Decompile the template JIL, with its `~{$NAME}~` placeholders, not a copy bound 
 The module keeps placeholders as written, but it cannot recover them from bound values.
 `--params` adds a `Params` dataclass with one field per placeholder, and a comment above each field names the attributes it fills.
 `estate()` with no argument keeps every token.
-`dsl41 build estate.py --stdout --param HOST=prod1` fills `HOST` for a local look; a release fills placeholders through the manifest's layers, and `estate build` refuses `--param`.
+`dsl41 build estate.py --stdout --param HOST=prod1` fills `HOST` for a local look.
+For rollout, the main config supplies the properties layers ([§6](#6-hand-over-for-rollout)).
+The authority for `estate build` and its `--param` boundary is [DL-413](decision-log.md), as ruled by DL-424.
 Decompile refuses a placeholder named as a Python keyword, starting with `__`, or named as a name the module itself uses, such as `str` or `Params`.
 
 Give several files, in the manifest's `files` order, and an output directory to get a package, one module per file ([§1](#1-write-jil-or-use-the-python-dsl)):
@@ -474,27 +479,115 @@ See the [minify instructions](../README.md#de-identify-an-estate-minify) for its
 
 ## 6. Hand over for rollout
 
-Use the [gate procedure in §4.4](#44-run-the-checks-in-order) away from the production run.
-The manifest declares the timezone, its map and the semantic switches ([§6.1](#61-declare-the-estate-in-estatetoml); DL-407).
-The runbook's check block (`deployment-runbook.md`, retired in 2.0.0) passes it to `lint` and `rehearse` through `--manifest`, with the site's properties file after the manifest's layers.
+Give the operator the checked estate inputs, their source revision, the intended
+schedule and outcomes, and every interruption exception in [§6.2](#62-write-every-job-to-survive-interruption).
+Use the [checks in §4.4](#44-run-the-checks-in-order) before the handoff.
+Agree the properties, environment, timezone, aliases and semantic switches with the operator.
 
-After the checks pass, commit and tag the estate edit under the
-job recipe (`deployment-runbook.md`, retired in 2.0.0).
-The tag holds the estate's manifest ([§6.1](#61-declare-the-estate-in-estatetoml)).
-Give the operator the checked, tagged estate for the rollout window.
-The operator rolls it out by the same recipe: `dsl41 release prepare`, then `dsl41 release apply` in the same run root.
-Deployment-runbook §6 (`deployment-runbook.md`, retired in 2.0.0) explains the two cycles an estate changes in.
+The engine's main config selects the rollout inputs (DL-437).
+Its default path is `/etc/dsl41/dsl41.toml`; `--config` selects another absolute path.
+The operator owns the engine root and host settings.
+For example, this complete config selects the `jobs.jil` from §1:
+
+```toml
+format_version = 1
+
+[engine]
+run_root = "/srv/dsl41/runs/payments"
+as_machine = ["prod1"]
+
+[estate]
+include = ["jobs.jil"]
+timezone = "UTC"
+
+[lint]
+refuse = "error"
+ignore = []
+```
+
+Relative input paths start at the config's directory.
+Place `jobs.jil` beside this example config, or agree absolute input paths with the operator.
+The optional `estate.properties` list supplies properties layers in order.
+Later layers override earlier ones.
+`estate.timezone_map` selects the alias file; `[estate.semantics]` sets the
+[switches](runner-design.md#8a-semantic-switches).
+`engine.environment` selects a declared `[estate.environments.NAME]` table.
+It is required when the config declares environments.
+Its properties follow the base layers.
+
+`estate.include` accepts ordinary globs, with selected inputs compiled in sorted order
+as one catalog. Recursive `**` patterns are refused.
+A glob that matches nothing is reported, not refused, unless the whole selection is empty.
+Check reread's removed list.
+A missing literal input path is refused.
+An unreadable input, duplicate selection or duplicate job is refused with its origins.
+A condition may refer to a job in another selected input.
+Select each JIL or Python definition once; do not include a module and its generated JIL together.
+
+Selecting Python executes trusted authoring code during preparation.
+Preparation captures the generated JIL for the plan; update does not import Python.
+Imported dependencies are not fully tracked.
+Use prebuilt JIL from [§1](#1-write-jil-or-use-the-python-dsl) when the handoff needs a reproducible build.
+
+The following checks use the installed candidate config.
+The operator supplies access to its paths; a job author can use an agreed absolute
+config path in a separate check area instead.
+With `--config`, dsl41 refuses `--strict`, `--suppress`, positional files and `-p` with exit 2.
+Use `[lint]` for policy and the config for the input files and properties.
+
+1. Check the selected inputs and lint findings.
+
+   ```sh
+   dsl41 lint --config /etc/dsl41/dsl41.toml
+   ```
+
+2. Rehearse the intended night, using a scenario for these job names as in [§4.2](#42-play-the-intended-night).
+
+   ```sh
+   dsl41 rehearse --config /etc/dsl41/dsl41.toml --scenario scenario.json \
+       --start 2026-01-15T00:00:00 --hours 24 --format summary
+   ```
+
+The main config's lint policy defaults to `refuse = "none"` and `ignore = []`.
+`error` blocks unignored errors; `warn` blocks warnings too; info never blocks.
+Under `none`, exit 0 can include findings.
+Lint exits 1 for blocking findings and 2 for refused inputs.
+Blocking findings make `rehearse --config` and `reread` refuse with exit 2.
+For an estate brought in under [§5](#5-bring-an-existing-autosys-estate-in),
+set `refuse = "warn"` to apply the `--strict` migration gate in [§4.4](#44-run-the-checks-in-order).
+Input, lowering, exception and preflight errors cannot be suppressed by this policy.
+A rehearsal output `--run-root` must neither equal, contain nor lie inside the engine root.
+Compare the rehearsal's trace, counts and statuses with the intended runs before handoff.
+
+The operator follows [Reload a changed estate](deploy.md#reload-a-changed-estate).
+The operator owns engine restarts and host settings.
+Reread captures a plan and prints the changed jobs, their sources, and running jobs it would stop.
+Update applies the captured bytes against the revision reread saw, even if source files change.
+A later source edit needs another reread and reviewed update.
+
+The operator must consent with `--stop-running` when the update would stop running jobs.
+Without that consent, the engine refuses the update (DL-427, DL-432).
+Unchanged jobs keep running.
+An edit to `estate.timezone`, `estate.timezone_map`, `[estate.semantics]` or
+`insert_xinst` records marks every job changed and can stop every running job.
+Affected jobs wait while the engine stops their attempts and applies the plan.
+A changed job's replacement uses the new definition and exception set;
+a removed job gets no replacement.
+[§6.2](#62-write-every-job-to-survive-interruption) defines what follows an interruption.
+
+The authority for `release prepare/apply`, `seal`, `estate quiesce`,
+`estate build/diff` and the release-train part of DL-422 is [DL-424](decision-log.md).
 
 ### 6.1. Declare the estate in estate.toml
 
-The manifest, `estate.toml`, declares the estate's inputs once, beside its JIL (DL-407).
-The launcher, `dsl41 release` and your checks take the file list, the properties layers,
-the timezone and the semantic switches from it.
-This example declares four files, one layer for every environment and one more for `prod`:
+`estate.toml` declares a file list and interpretation for tests and rehearsal
+(DL-407, DL-437).
+It is separate from the engine's main config in [§6](#6-hand-over-for-rollout).
+This example declares four JIL files, a base properties layer and two environments:
 
 ```toml
 name = "payments"
-requires_dsl41 = ">=1.14"
+requires_dsl41 = ">=1.13"
 files = ["calendars.jil", "global.jil", "eod.jil", "reports.jil"]
 properties = ["base.properties"]
 timezone = "UTC"
@@ -513,137 +606,198 @@ properties = ["prod.properties"]
 | `name` | yes | The estate's name; dsl41 does not use it. |
 | `requires_dsl41` | no | The lowest dsl41 version the estate needs, as `">=X.Y"` or `">=X.Y.Z"`. |
 | `files` | yes | The catalog files, in command-line order. |
-| `properties` | no | The properties layers every environment applies; a later layer overrides an earlier one. |
-| `timezone` | no | The base zone; without it, every verb works in UTC. |
+| `properties` | no | The base properties layers; a later layer overrides an earlier one. |
+| `timezone` | no | The base zone; UTC when omitted. |
 | `timezone_map` | no | The site's timezone alias file. |
 | `semantics` | no | A table of the [semantic switches](runner-design.md#8a-semantic-switches), each `NAME = "VALUE"`. |
-| `environments.NAME.properties` | no | The layers environment `NAME` applies after the base ones. |
+| `environments.NAME.properties` | no | Layers applied after the base layers for environment `NAME`. |
 
-The order of `files` is part of the catalog's hash, so a reorder is a catalog change.
-Every name is a path relative to the manifest in normal form, with no `.` or `..` part, no `//` and no `/` at either end, and names an existing file under the manifest's directory.
-No name may be a `.py` file: no Python enters a release (DL-410, DL-413).
-dsl41 refuses an unknown key at any level, and a path that `files`, or the base and one environment's layers, name twice.
-`requires_dsl41` accepts only `>=`, and compares the leading integers of the version, so a pre-release or dev build of X counts as X.
+Use the file order consistently; it participates in the catalog hash.
+Every named path is relative to the manifest, in normal form: no `.` or `..` part,
+no `//`, and no `/` at either end.
+Each names an existing file under the manifest's directory.
+A `.py` path is refused here; render it with `dsl41 build` first (DL-410, DL-413).
+Unknown keys and duplicate paths within the files or the selected properties layers are refused.
+`requires_dsl41` accepts only `>=` and compares leading version integers;
+a pre-release or dev build of X counts as X.
 
-The environment layers follow the base layers.
-The launcher and `dsl41 release` always pass the host's `ENVIRONMENT`, and `--manifest` refuses an environment the manifest does not declare.
-Declare every environment a host's `ENVIRONMENT` names, with an empty table when it adds no layer.
-`[environments.uat]` above declares one that applies the base layers only.
-The site's own properties file comes after every layer, so the site's values win.
-One tag serves every environment.
+When the manifest declares environments, choose one with `--environment`.
+An undeclared environment is refused.
+An empty table such as `[environments.uat]` selects only the base layers.
+Repeated `-p/--properties` options add site layers after the manifest's layers.
 
-Every verb that reads the estate takes the manifest directly: `dsl41 lint --manifest /work/payments/estate.toml --environment uat -p site.properties`, and the same option on `rehearse`, `run`, `seal`, `viz` and `estate quiesce` (DL-422).
-`MANIFEST` must be an absolute path, because the bundle hash covers each path string as the manifest's directory joins it.
-The manifest supplies the files, the layers, the timezone, its map and the switches, so the verb refuses those on the command line beside `--manifest`; `-p` adds the site's layers after the manifest's.
-For the example above, `lint --manifest /work/payments/estate.toml --environment uat` lints the four files with `base.properties` and `UTC`.
-A refusal is one sentence and exit `2`.
+For this example, put the manifest and all its named inputs under `/work/payments`.
+Choose a minimum version supported by the installed runtime before checking it.
 
-Run the runbook's check block (`deployment-runbook.md`, retired in 2.0.0) in CI on the commit you are about to tag.
-It runs `lint` and `rehearse` with `--manifest` and the site's properties file.
-A manifest the option refuses fails that check, before the tag exists.
-Before the window, the operator runs the block again on the tag, then `dsl41 release prepare` runs `lint` and `rehearse` again as the service account (the job recipe's step 2 (`deployment-runbook.md`, retired in 2.0.0)).
-Prepare's run is the one apply enforces: apply refuses a release whose files are not the ones prepare checked.
+1. Lint the declared catalog with the base properties and UTC.
 
-When a file such as `eod.jil` comes from a Python module, `dsl41 estate build . --emit eod.jil=eod.py -o dist/v42` assembles the release directory, and `dsl41 release prepare v42 dist/v42` takes it (DL-413).
-With a package, `--emit eod.jil=estate` takes `eod.jil` from it; give one `--emit` per file the package renders.
-It renders each `--emit` file as `dsl41 build` does, copies the manifest and every other file it names, and loads the result for every environment.
-It refuses a named file that is missing and not emitted, an `--emit` that `files` does not name or that is also a file in the directory, a symlink, and an `--out` that is not empty.
-No Python enters the release; `--check` compares with an existing directory and exits `1` on a difference.
+   ```sh
+   dsl41 lint --manifest /work/payments/estate.toml --environment uat
+   ```
 
-For the weekly release review, `dsl41 estate diff OLD/estate.toml NEW/estate.toml --environment prod -p SITE.properties` lists what the new release adds, removes and changes: jobs, boxes, calendars, cycles, resources, machines, globals and instances.
-It compares each record by the seal's own definition test, so a description edit on a machine is not a change.
-Under each changed calendar and resource it lists the jobs that name it.
-It does not follow a change through other records to the jobs it reaches, and it does not say whether a job is running, armed or latent: that classification is the seal's alone.
-The base zone, each timezone alias and each semantic switch are listed apart.
-It exits `0` with no difference and `1` with one; `--format json` prints one object for the ticket.
+2. Rehearse it with a scenario for its job names and the intended night.
+
+   ```sh
+   dsl41 rehearse --manifest /work/payments/estate.toml --environment uat \
+       --scenario scenario.json --start 2026-01-15T00:00:00 --hours 24 --format summary
+   ```
+
+`lint`, `rehearse`, `viz` and the explicit-manifest form of `run` accept
+`--manifest` with `--environment`.
+The manifest path must be absolute.
+Do not combine it with positional files or command-line timezone, timezone-map or semantics options.
+`viz` uses the file list and properties, with no timezone options.
+A manifest refusal exits 2 before work begins.
+The `--manifest` expansion rule is [DL-422](decision-log.md); DL-424 rules its excluded verbs.
 
 ### 6.2. Write every job to survive interruption
 
-dsl41 may end any job while its command runs.
-Write every job so that a second run, or a run after a kill in the middle, leaves the same result as one run.
+Write each command so repeating an invocation after a kill leaves the result of one invocation.
+A **run** is the job invocation the scheduler or operator starts.
+An **attempt** is one launch of that run's command.
+An interruption can cause another attempt of the same run automatically (DL-424).
 
-These events end a running command:
-
-- an operator's KILLJOB, or the job's own `term_run_time` ([runner-design §6](runner-design.md#6-adapters));
-- an operator's CHANGE_STATUS of the running job to SUCCESS, FAILURE or TERMINATED;
-- a `job_terminator` or `box_terminator` cascade ([SEM-14](autosys-semantics.md#sem-14--box_terminator--job_terminator-vc));
-- the loss of the supervisor that started the command, by a crash, a `kill -9` or its deadman (supervisor-protocol §4 (`supervisor-protocol.md`, retired in 2.0.0), step 5, and §5 (`supervisor-protocol.md`, retired in 2.0.0), "The deadman");
-- the stop or loss of an engine that runs without a supervisor ([runner-design §15](runner-design.md#15-open-questions-e-series), E4);
-- a stop of the supervisor unit: the supervisor drains while the engine stays up, so a command still running at the drain's bound, 840 s in the example unit, gets SIGTERM, then SIGKILL after the grace (supervisor-protocol §5 (`supervisor-protocol.md`, retired in 2.0.0), "The drain", DL-416);
-- a host shutdown or reboot: the engine stops first, so the drain has no leaseholder; with a deadman set it ends at the deadman, and the wrapper sends the command SIGTERM, then SIGKILL after the grace, recording `terminated / parent lost`; with none it runs to its bound (supervisor-protocol §5 (`supervisor-protocol.md`, retired in 2.0.0), "The drain", DL-205, DL-416);
-- the operator's forced maintenance, `--force=terminate` (DL-390, DL-394).
-
-Under a supervisor with no deadman, an engine restart ends no command: the engine reattaches to the running commands ([runner-design §6a](runner-design.md#6a-process-lifecycle-tiers-dl-41a)).
-Without a supervisor, or when the engine stays away longer than the supervisor's deadman, the engine's loss ends every command.
-
-dsl41 sends SIGTERM to the command's process group and waits the command grace.
-If the command is still running when the grace ends, dsl41 sends SIGKILL to its process group.
-A helper process that outlives the command may get no SIGKILL from dsl41.
-A helper that leaves the group with `setsid` gets none.
-The job ends its own helpers itself (DL-403).
-
-| Bound | Value | Source |
-| --- | --- | --- |
-| Command grace, from SIGTERM to SIGKILL | 10 s by default | `grace_term_s` in the run root's `engine.toml` (`src/dsl41/runner_config.py`); `dsl41 run --grace-term` overrides it for one run |
-| Drain at a supervisor stop | 840 s in the example unit | `Environment=DSL41_DRAIN_S` in the supervisor unit (supervisor-protocol §5 (`supervisor-protocol.md`, retired in 2.0.0), DL-416) |
-| Host shutdown with a deadman | the deadman plus the 10 s grace | `dsl41 run --deadman`, when the site sets one, and `CMD_GRACE_S` (DL-205, DL-416) |
-| Whole supervisor stop | 900 s in the example unit, 1800 s for a hung supervisor | `TimeoutStopSec` in the supervisor unit bounds its `ExecStop=`, the drain and the wait; when that overruns, systemd sends SIGTERM to every process in the unit and a second `TimeoutStopSec` bounds it before SIGKILL. The site package sizes it against `MAX_JOBS` and `MAX_GRACE_S` (site-package §5 (`site-package.md`, retired in 2.0.0), DL-401, DL-416) |
-
-Your SIGTERM cleanup has the command grace to finish.
-Ask the packager for your site's stop bound.
-
-What dsl41 records depends on who ended the run:
-
-| Who ended the run | Recorded status |
-| --- | --- |
-| KILLJOB, `term_run_time` or a terminator cascade | TERMINATED, whatever the command does after the signal |
-| CHANGE_STATUS to a terminal status | That status |
-| The loss of the supervisor, or of an engine that runs without one | TERMINATED (`parent lost`), unless the command ended before the signal |
-| A host shutdown, forced maintenance or an engine stop, and the signal killed the command | TERMINATED ([runner-design §15](runner-design.md#15-open-questions-e-series), E8) |
-| A host shutdown, forced maintenance or an engine stop, and the command caught SIGTERM and exited | SUCCESS or FAILURE, by the job's exit-code rules ([SEM-09](autosys-semantics.md#sem-09--max_exit_success-shifts-successfailure-boundary-v)) |
-| Any of these, and no record of the command's end exists | FAILURE, cause `exit_status_unobservable` ([runner-design §15](runner-design.md#15-open-questions-e-series), E7) |
-
-Warning: on a host shutdown, a forced maintenance or an engine stop, a command that catches SIGTERM and then exits 0 records SUCCESS, and its successors start.
-A command that catches SIGTERM finishes its cleanup within the grace.
-Then it resets the trap and sends itself SIGTERM, so the run records TERMINATED as an untrapped kill would.
-
-The engine never runs an interrupted job again by itself.
-dsl41 does not act on `n_retrys`, and preflight warns when a job sets it above 0
-([the `n_retrys` row](autosys-semantics.md#5-attributes-with-control-flow-teeth-quick-inventory); Q4 in [§9](autosys-semantics.md#9-open-questions-and-their-pinned-defaults)).
-The next run comes from the job's schedule, its conditions, its box's next start, or an operator's STARTJOB or FORCE_STARTJOB.
-A start time missed while the engine is down is skipped, not run late ([runner-design §15](runner-design.md#15-open-questions-e-series), E9).
-The next run finds whatever the interrupted run left behind.
-
-Write each job in one of two ways:
-
-- idempotent: a second run leaves the same result as one run;
-- restartable: the job records its own checkpoints and resumes from the last one.
-
-Its side effects must also tolerate a second run.
-That covers every file it moves, every row it writes and every message it sends.
-
-A safe shape writes to a temporary name and renames the file at the end:
+For example, a report command can write a temporary file and rename it at the end:
 
 ```sh
 make_report > /data/out/report.csv.tmp && mv /data/out/report.csv.tmp /data/out/report.csv
 ```
 
-A kill before the `mv` leaves only the temporary file, and the next run overwrites it.
-The rename is atomic when both names are on one filesystem.
-
-An unsafe shape appends without a marker:
+A kill before `mv` leaves the temporary file; the replacement attempt overwrites it.
+The rename is atomic when both paths are on one filesystem.
+Appending without an invocation marker is unsafe:
 
 ```sh
 extract_rows >> /data/out/ledger.csv
 ```
 
-A kill in the middle leaves part of the rows in the file.
-The next run appends every row again, so the file holds duplicates.
-Write each batch to its own file by the safe shape, or record a key per batch and skip a batch whose key is present.
+A replacement can append rows already written by the interrupted attempt.
+Use a durable invocation key to prevent duplicate database writes, messages and other side effects.
+A checkpoint is sufficient only if resuming it also prevents duplicate effects.
+
+Every command gets these variables:
+
+| Variable | Meaning across attempts of one run |
+| --- | --- |
+| `DSL41_JOB` | Job name; unchanged. |
+| `DSL41_RUN_NUMBER` | Run number; unchanged. |
+| `DSL41_SCHEDULED_AT` | Invocation instant in ISO-8601 UTC with `Z`, truncated to seconds; unchanged. |
+| `DSL41_ATTEMPT` | Attempt ordinal; changes for each replacement. |
+
+Use the first three as the stable invocation key.
+Do not use `DSL41_ATTEMPT` to deduplicate the run's work.
+Each attempt also has a distinct `run_id` and evidence directory
+`runs/<job>.<run_number>/<attempt>/` (DL-429).
+
+An operator stop or engine upgrade drains running attempts.
+SIGINT, SIGTERM and `dsl41 engine stop` use that drain.
+Engine death ends the running attempts through their wrappers' lifelines;
+a host reboot can also leave no exit record.
+An update stops the running attempts of jobs it changes or removes while the engine stays up.
+KILLJOB, `term_run_time`, terminator cascades and CHANGE_STATUS use the oracle's stop rule;
+they do not request an automatic replacement (DL-429).
+[SEM-14](autosys-semantics.md#sem-14--box_terminator--job_terminator-vc) defines terminator cascades.
+
+The engine asks a command to stop with TERM, then KILL after the command grace.
+Your SIGTERM cleanup must finish within that grace.
+A stop already recorded remains an interruption even if the command catches TERM and exits 0.
+It does not become a successful completion that releases successors.
+A command that ended naturally before the stop follows its real outcome through
+[SEM-09](autosys-semantics.md#sem-09--max_exit_success-shifts-successfailure-boundary-v).
+A spawn failure is FAILURE; an ordinary application failure gets no automatic retry.
+
+The [attempt outcome contract](control-protocol.md#5-streaming-verb-subscribe)
+and [recovery contract](runner-design.md#7-journal-and-recovery-e1-prod-grade)
+govern the evidence (DL-433).
+At restart, the engine reads each open command attempt once without waiting for its wrapper.
+A missing exit record is an interrupted, unobservable attempt with cause `engine_death`
+or its recorded first stop cause.
+E7's `exit_status_unobservable` applies only outside the interruption rule (DL-424).
+For a job still in the applied catalog whose run is still STARTING or RUNNING:
+
+- an idempotent job gets the next attempt of the same run and invocation;
+- a job marked non-idempotent gets FAILURE with cause `interrupted` and ON_HOLD together;
+- an interruption at the attempt limit also gets FAILURE and ON_HOLD, with the limit in its evidence;
+- unreadable or mismatched attempt records are quarantined and hold the job with evidence.
+
+A removed job, an oracle kill or a run the oracle already ended gets no replacement.
+A replacement does not report a failure to the oracle, fail its box or fire a successor condition.
+Held FAILURE is a real status; dependent failure conditions can observe it.
+The engine starts no next attempt or run while the job's previous attempt remains unsettled.
+A failed process scan or surviving process keeps cleanup held and polled; it is not record quarantine.
+The [status response](control-protocol.md#status-job) shows `attempt` and `interrupted` evidence.
+
+| Bound | Default | Where the operator sets it |
+| --- | --- | --- |
+| TERM to KILL | 10 s | `grace_term_s` in the run root's `engine.toml`. |
+| Confirmation after KILL | 5 s | `grace_kill_s` in the run root's `engine.toml`. |
+| Attempts per run | 5 | Engine limit; an interruption on attempt 5 holds the job. |
+
+The explicit-file or manifest form of `run` accepts `--grace-term` and `--grace-kill`
+as overrides for one engine start.
+The main-config form takes the graces from `engine.toml`.
+Ask the operator for the site's grace and unit stop timeout.
+
+Declare a job that cannot safely repeat in `non-idempotent.toml`:
+
+```toml
+[jobs]
+"ledger_post" = "posts duplicate ledger entries if interrupted and repeated"
+```
+
+Each key names a command job defined in the estate, and each value is a non-empty, one-line reason.
+A box, file watcher or unknown job name is refused by L025, whatever the lint policy.
+Quote names containing dots.
+The default file is beside the main config; `estate.non_idempotent` can select another path.
+With a manifest, the file is beside `estate.toml`.
+An absent default file means every job is idempotent.
+A selected exception file that cannot be read or parsed is refused.
+The applied configuration stores the exception set; editing the file alone changes no running policy.
+Include exception edits in the reviewed reread/update handoff.
+
+Give the operator a recovery procedure for each marked job.
+It must establish whether the interrupted invocation already committed its side effects,
+repair or complete them, and explain when another invocation is safe.
+After checking the evidence, the operator can use FORCE_STARTJOB to clear the interruption hold
+and start a new run (DL-243).
+OFF_HOLD clears the hold; the job starts at once if its starting conditions already hold
+([SEM-21](autosys-semantics.md#sem-21--on_hold-v)).
+An operator's deliberate new run can repeat business work too; its invocation key is different.
+
+The engine does not implement `n_retrys` application retries
+([attribute inventory](autosys-semantics.md#5-attributes-with-control-flow-teeth-quick-inventory),
+[Q4](autosys-semantics.md#9-open-questions-and-their-pinned-defaults)).
+That limit does not prevent interruption replacements within one run.
+Start times missed during downtime are skipped and reported (DL-45).
+A backward wall-clock step keeps admission time at the recorded frontier;
+it does not refuse operator inputs or startup (DL-435).
+A frontier ahead of the wall can delay ticks and timers until the wall catches up.
+
+Keep the inherited `DSL41_COOKIE` when launching helpers.
+On Linux, the engine finds live members of the recorded process group and readable processes
+carrying the attempt's cookie, including helpers that call `setsid` (DL-431, DL-436).
+This scan works with or without pidfd support.
+A helper outside the group that drops the cookie, becomes unreadable or changes uid can escape it.
+Off Linux, the process group and validated leader identity decide.
+The job must stop its own helpers; the unit's control group is the stronger final boundary.
+The [wrapper's cookie contract](wrapper-protocol.md#dsl41_cookie-env-variable--the-process-cookie-an-addition)
+defines the limits.
+The `process-leak` [semantic switch](runner-design.md#8a-semantic-switches) decides whether
+processes left after a natural exit are stopped or left running with a warning.
+Failed scans and survivors under cleanup block another launch.
+
+The authority for DL-205, DL-390, DL-394, DL-401, DL-416 and the supervisor,
+deadman, forced-maintenance, `supervisor-protocol.md` and `site-package.md` references is [DL-424](decision-log.md).
+The same ruling covers `--deadman`, `--force=terminate`, `DSL41_DRAIN_S`,
+`CMD_GRACE_S`, `MAX_JOBS` and `MAX_GRACE_S`.
+Runner E4, E7, E8 and E9 resolve through [§15](runner-design.md#15-open-questions-e-series),
+with interruption governed by DL-424 and DL-433.
+The process-group limit in DL-403 is governed by DL-431 and DL-436 on Linux.
 
 ## 7. Follow the other tracks for engine work
 
-This page leaves engine operation to the operator track (`deployment-runbook.md`, retired in 2.0.0),
+This page leaves installation and engine operation to the [operator guide](deploy.md),
 compiler internals to the [architect track](architecture.md),
-the descoped UC backend to its specification (`stonebranch-semantics.md`, retired in 2.0.0) ([DL-288](decision-log.md)),
-and the meaning of each `--semantics` switch to the [switch contract](runner-design.md#8a-semantic-switches).
+and each `--semantics` choice to the [switch contract](runner-design.md#8a-semantic-switches).
+The authority for `stonebranch-semantics.md` and the UC backend is [DL-288](decision-log.md)
+as ruled by DL-424.
