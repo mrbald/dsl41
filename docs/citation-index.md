@@ -1,12 +1,19 @@
 # Citation index — every reference namespace the sources use
 
-Status: NORMATIVE 2026-08-12 · DL-75. The sources carry roughly 2000
-citation references. Traceability is this project's core discipline, so
-they stay — but a reader must be able to follow each one to a document.
-This index is the map: one row per namespace, giving the token shape, what
-the token means, and the document that defines it.
+For maintainers resolving citation tokens or registering a namespace.
+Follow the maintainer track under [Documents](../README.md#documents).
+Writing rules belong to [writing.md](writing.md); verification belongs to
+[agent-workflow.md](agent-workflow.md#verify-a-change).
 
-Two rules follow from it:
+Status: normative (DL-75). Each row gives a token's shape, meaning and authority.
+An excluded namespace keeps a decision-log destination so existing references resolve.
+The authority for excluded UC, multihost, supervisor and period mechanisms is
+[DL-424](decision-log.md). That exclusion does not retire every CM or PR label.
+A label cited by current source or a named obligation test remains live;
+its defining entry or test supplies the rule. The rows distinguish these labels
+from excluded mechanisms.
+
+The registry rules and scanner limits follow:
 
 - **A citation must resolve.** A token in `src/dsl41/*.py` whose namespace
   has no row here is a defect; `scripts/arch_check.py` fails the build on
@@ -26,32 +33,48 @@ Two rules follow from it:
 | Token shape | Namespace | Means | Defined in |
 | --- | --- | --- | --- |
 | `SEM-\d{2}` | AutoSys semantics | One observed/cited AutoSys behavior. §8 of the dossier records its trace coverage: one oracle test per entry unless that entry names another suite, and two recorded oracle non-goals with no trace test: SEM-16's definition-time mutation of a running box and SEM-17's ACTIVATED label. An entry never splits by letter — a `SEM-10c`-shaped token in prose names a lettered test subcase (`test_sem10c_*`), not an entry of its own. | `docs/autosys-semantics.md` |
-| `UCS-\d{1,2}` | UC semantics | One Stonebranch Universal Controller behavior. | `docs/stonebranch-semantics.md` Part I |
-| `M\d{2}` | Mapping row | One AutoSys→UC mapping row, M01–M36. Provenance on every compiled UC edge (`UcEdge.mapping_row`). NOT a review finding — see the note below. | `docs/stonebranch-semantics.md` Part II |
-| `P-M\d{2}` | Mapping trace pair | The oracle-pair test for one mapping row where migration can change behavior: same script, both interpreters. The expected result is a divergence for some rows and an alignment pin for others, and the row's class may be E, A, A/R or R — P-M27 pairs an R row, because absence is what that pair shows. Tests are named `test_pMxx_*`. | `docs/stonebranch-semantics.md` Part IV |
-| `[EAR](/[EAR])?-(row\|rows\|class\|classified)` | Mapping-row class | How a mapping row migrates, in Part II's own words: **E** exact, **A** equivalent under stated assumption (the edge records it), **R** redesign required — no faithful translation, so the UC backend refuses the construct and emits a migration-report item instead. A slashed class (**A/R**, **E/A**) means the row splits by case; where a discriminator is implemented every derived edge still carries exactly one class. | `docs/stonebranch-semantics.md` Part II |
-| `R\d` | Migration risk | One row of the migration risk register, R1–R8 — an AutoSys construct with no clean UC analog. NOT the same R as `R-classified` above. | `docs/autosys-semantics.md` §7 |
+| `UCS-\d{1,2}` | UC semantics | Excluded UC behavior labels; UCS numbers resolve through the UC exclusion. | `docs/decision-log.md` DL-288 as ruled by DL-424 |
+| `M\d{2}` | Mapping row | Mapping labels M01–M36; M07 remains graph vocabulary. These are not review findings. The UC target is excluded. | `docs/decision-log.md` DL-424; surviving graph use in `docs/ir-design.md` §5 |
+| `P-M\d{2}` | Mapping trace pair | Excluded mapping-pair labels P-M01–P-M36 and their `test_pMxx_*` spelling; no current pair-test qualification is implied. | `docs/decision-log.md` DL-424 |
+| `[EAR](/[EAR])?-(row\|rows\|class\|classified)` | Mapping-row class | Excluded mapping verdicts: E exact, A equivalent under an assumption, R redesign required; A/R and E/A split by case. | `docs/decision-log.md` DL-424 |
+| `R\d` | Migration risk | One run-scoped graph risk, R1–R8, from the AutoSys semantics dossier. NOT the same R as `R-classified` above. | `docs/autosys-semantics.md` §7 |
 | `DL-\d{1,3}[a-z]?` | Decision log | A settled decision. Append-only: never edit, renumber or delete an entry, except a superseded-by mark and a DL-379 compression tranche. | `docs/decision-log.md` |
 | `L\d{3}` | Linter rule | One linter rule, L001–L025, with its stable code and severity. The house rule is a corpus fixture that trips the rule and one that does not; the lint suite names the exceptions it holds instead — L003 and L004 are defensive and structurally unreachable on real input, L017 is registered but quiet because the corpus defines every machine it references, L023 is tested on inline JIL because its zones and reference dates are part of each case, and L024 and L025 are tested on inline JIL and a loaded exceptions object because their input is the sidecar, not a JIL file. | `docs/ir-design.md` §9 |
-| `CM-\d{2}` | Concurrency obligation | One obligation of the frozen concurrency model, CM-01–CM-23 — a property the multihost design must be *tested* to hold, not asserted to. Tests are named `test_cmNN_*`. The series runs past its first document: CM-01–CM-14 are the frozen contract's own, CM-15–CM-23 are the second host's and the second site's. A draft CM-24–CM-38 set was written in the ops plan and superseded by the `PR-` series (DL-230), so those numbers name nothing. None of them is cited by code: the pure run-history fold in `runner_history.py` cited `CM-37` and now cites DL-113, the entry that landed that pair with no obligation row. The regex still admits the drafted range, and a reader who follows one of those numbers should expect to find nothing. | `docs/concurrency-model.md` §9; the withdrawn HA plan, DL-189 |
-| `S\d[a-f]?\|H` | Concurrency stage | One build stage of the frozen concurrency model, S0–S8 (S1 split into S1b/S1c; S5 into S5a–S5d by DL-93; S6 into S6a–S6c by DL-99; S7 into S7a–S7c by DL-108/DL-109/DL-112; S8 opened by the HA plan and split into S8a–S8f). One stage carries no number: **H**, the model harness, which comes before the code it validates. The stage order is normative: it fixes what must be frozen before what, and which single owner holds which file while a stage is open. | `docs/concurrency-model.md` §10; the withdrawn HA plan, DL-189 |
+| `CM-\d{2}` | Concurrency obligation | CM-01–CM-14 identify single-host obligations, including admission and replay. Tests are named `test_cmNN_*`. DL-84 defines CM-01–CM-14; DL-89 defines CM-04, CM-05 and CM-07 at S2; DL-93 defines the CM-09–CM-13 and S5 split. CM-15–CM-23 concern the excluded multihost/HA mechanisms (DL-424). CM-24–CM-38 are withdrawn draft labels (DL-230); CM-37 run-history references resolve to DL-113. | `docs/decision-log.md` DL-89 and DL-93; `tests/test_runtime_state.py`, `tests/test_admission.py`, `tests/test_dispatch.py` and `tests/test_runner_leadership.py` for retained single-host checks; DL-424, DL-230 and DL-113 for the excluded or draft labels |
+| `S\d[a-f]?\|H` | Concurrency stage | Stage labels H and S0–S8, including S1b/S1c. S2 admission is DL-89. DL-93 defines S5a–S5d; DL-99 defines S6a–S6c; DL-108, DL-109 and DL-112 define S7a, S7b and S7c. S8a–S8f resolve through DL-189. Definitions remain citable; DL-424 rules which mechanisms are excluded. | `docs/decision-log.md` DL-89, DL-93, DL-99, DL-108, DL-109, DL-112 and DL-189; DL-424 for mechanism exclusions |
 | `T-\d{3}` | Decompiler fold | One fold in the closed decompiler registry, T-001–T-007 (DL-38). The registry itself is `FOLDS` in `src/dsl41/dsl.py`. **Not `T01`** — see the note below. | `docs/decision-log.md` DL-38 |
 | `T\d{2}[a-z]?` | AutoSys trace test | One entry of the oracle regression set, T01–T34 with lettered splits (T04a, T09b, T12a, T20a, T33a). One per SEM unless noted. **Not `T-001`** — see the note below. | `docs/autosys-semantics.md` §8 |
 | `D\d` | IR design decision | One of the four IR/design decisions D1–D4. D1, D2 and D4 are closed; the numbers stay because the sources cite them. A `D\d` that sits beside a DL citation is that entry's own outline label, not this series — see the note below. | `docs/ir-design.md` §10 |
 | `F[1-4]` | Fidelity test | One of the four scanner fidelity tests: **F1** preserve-mode identity over the corpus, **F2** canonical fixpoint, **F3** fuzz, **F4** lexical torture matrix. | `docs/jil-statement-syntax.md` |
-| `ss\d{1,2}[a-z]?(\.\d{1,2})?` | Section reference | Section N **of the document named next to it** — "runner-design ss7", "dossier ss0", "ss6a". A subsection is spelled with a dot: `ss1.3`, `ss12.10`, `ss8a.4`. There is no repo-wide default for a bare `ssN`. A module says in its docstring which document a bare `ssN` names (`runner_admission.py`: "Bare `ssN` elsewhere in the runner means docs/runner-design.md"); a module that cites several resolves each token from its own sentence, so `cli_common.py`'s `ss1.3` is the period model's and its `ss6` the concurrency model's. | the named document |
-| `Q\d{1,2}[a-z]?` | AutoSys open question | One question of the AutoSys semantics series, Q1–Q17 plus lettered splits (Q2a/Q2b, Q3a–Q3d, Q8a–Q8e). `Q8x` means "the Q8 family". The defining document says which are live and which are closed. A live one carries a `# PENDING: Qn` code marker only where the code holds a provisional default; Q10 has one in `semantics.iced_atom_truth`, Q15 one in `oracle_cascade.OracleCascade._window_pass` and Q16 one in `oracle_facts.RecomputeFacts._recompute`, and Q6, Q13, Q14 and Q17 are live with none. Q11 is closed (DL-259). Q12 is descoped (DL-288): preflight refuses FREE=Y and FREE=A on a depletable (DL-287). **Unrelated to `Qr\d`** — see the note below. | `docs/autosys-semantics.md` §9; a later split may be recorded at the SEM entry that raised it (Q3d at SEM-32) |
+| `ss\d{1,2}[a-z]?(\.\d{1,2})?` | Section reference | Section N **of the document named next to it** — "runner-design ss7", "dossier ss0", "ss6a". A subsection is spelled with a dot: `ss1.3`, `ss12.10`, `ss8a.4`. There is no repo-wide default for a bare `ssN`. A module says in its docstring which document a bare `ssN` names (`runner_admission.py`: "Bare `ssN` elsewhere in the runner means docs/runner-design.md"). A module that cites several documents resolves each token from its own sentence. For example, `cli_common.py` names concurrency-model `ss6` for the control read header; the current envelope rule is `control-protocol.md` §3. | The named document; `docs/decision-log.md` DL-424 for excluded documents |
+| `Q\d{1,2}[a-z]?` | AutoSys open question | One question of the AutoSys semantics series, Q1–Q17 plus lettered splits (Q2a/Q2b, Q3a–Q3d, Q8a–Q8e). `Q8x` means "the Q8 family". The defining document says which are live and which are closed. A live one carries a `# PENDING: Qn` code marker only where the code holds a provisional default; Q10 has one in `semantics.iced_atom_truth`, Q15 one in `oracle_cascade.py` and Q16 one in `oracle_facts.py`, and Q6, Q13, Q14 and Q17 are live with none. Q11 is closed (DL-259). Q12 is descoped (DL-288): preflight refuses FREE=Y and FREE=A on a depletable (DL-287). **Unrelated to `Qr\d`** — see the note below. | `docs/autosys-semantics.md` §9; a later split may be recorded at the SEM entry that raised it (Q3d at SEM-32) |
 | `Qr\d` | Resource-manager open question | One question of the resource-manager series, Qr1–Qr7. No dossier backs these; they are a runner-side series. **Unrelated to `Q\d`** — see the note below. | `docs/decision-log.md` DL-50 (DL-49 opened the resource work; every `Qr` number is stated in DL-50) |
-| `U\d[a-z]?` | UC open question | One question of the Stonebranch series, U1–U8 plus lettered splits (U3a/U3b, U6a/U6b). The defining document says which are live and which are closed. | `docs/stonebranch-semantics.md` Part III |
-| `E\d{1,2}` | Runner open question | One question of the runner/execution series, E1–E23. Implemented defaults carry a `# PENDING: En` marker. E1–E3 are answered in the sections that raise them (`runner-design.md` §7, §9, §11); §15 lists E4 onward. E12–E15 were opened by the HA plan, E16–E23 by the ops plan (DL-230). | `docs/runner-design.md` §7, §9, §11, §15; the withdrawn HA plan, DL-189 |
-| `PR-\d{2}[a-z]?` | Period-model obligation | One obligation of the frozen period model (DL-114), PR-01–PR-57 with lettered splits — a property the seal, the lineage fence and the classifier must be *tested* to hold **while the row is active**. Tests are named `test_prNN_*` / `test_prNNx_*`. A row has a state: a **retired** row cites the DL entry that retired it and names the replacement refusal tests, and it stays in the table so its citations still resolve (DL-138). | `docs/period-model.md` §13 |
-| `PR-Q\d` | Period-model open question | One question of the frozen period model, PR-Q1–PR-Q5; §16 says which are live. A DIFFERENT series from `PR-\d{2}` above: that one is an obligation a test holds the code to, this one is a question no test can settle yet. A live one carries a `# PENDING: <token>` code marker where it has a code switch, naming the runner question it is carried as; PR-Q5 has none, because the anchor it asks about is a deployment shape and not a branch. | `docs/period-model.md` §16 |
-| `I[12]` | Period invariant | The frozen period model's two structural invariants: **I1** — a period is exactly one segment (no size rolls; to roll, seal), **I2** — indices, epochs and run_numbers are monotone across the estate. | `docs/period-model.md` §1 |
-| `B[12]` | Period baseline | The two `baseline_id`s one boundary spans: **B1** is the closing period's, **B2** the opening one's. Paired with `C[12]` and not the same thing — `C` names the `(catalog, RuntimeProfile)` side, `B` names the identity a client's `expect` was composed under, which is what makes an ordinary revision-bearing retry composed under B1 unanswerable after B2 opens. One command is exempt: a committed seal's exact retry is answered ahead of the baseline gate, because it necessarily carries B1 while B2 is the one answering (PR-30e). | `docs/period-model.md` §2.2, §4 |
-| `C[12]` | Period side | The two sides of one boundary: **C1** is the closing period's `(catalog, RuntimeProfile)` pair, **C2** the staged opening one. Not an index into a numbered list — the name the period model gives its two inputs, and the vocabulary the classifier and the seal are written in. | `docs/decision-log.md` DL-131; used throughout `docs/period-model.md` §7, §10 |
-| `# PENDING: (Q\d{1,2}[a-z]?\|Qr\d\|U\d[a-z]?\|E\d{1,2})` | Code marker | The house convention for a documented default standing in for an open question. The token is a `Q`/`Qr`/`U`/`E` reference from the rows above; a `PR-Q` question is carried under the runner question it maps to, never under its own number. The hash belongs to the comment: in a docstring the marker is written `PENDING: E10`, without it. | `CLAUDE.md`; `docs/runner-design.md` §15 for the E half |
-| `[a-z][a-z_]*\.\d{2,3}` | State-machine transition | One transition in a runner state machine's transition table. The machine's name comes first, then the transition's number: `host.03` is transition 3 of the machine `host`. Lowercase and dotted on purpose, so the scanner never offers it and it cannot collide with an uppercase namespace; `well_formed` in `state_machine.py` enforces the shape. The composite `job` chart keeps the id spaces of the three job tables it replaced (DL-353) as hundreds, so an older entry's `job_status.NN` is `job.1NN`, `job_flags.NN` is `job.2NN` and `job_holding.NN` is `job.3NN` (DL-337); `job.100` and the numbers past a table's last row are rows no table declared (a split source, a cell the table lacked, the start bound, a box's ON_NOEXEC on the jobs it contains); `job.4NN` continues the status rows no table declared once `job.199` is taken (an attempt's owed settlement, an admitted start's moves, DL-349; the admission's move to STARTING, the skip of an inactive member, the cascade's moments, and the cells no input reaches, DL-350). A reader-facing row. | `docs/state-machines.md`, generated from `src/dsl41/machines.py` (DL-289) |
-| `\[(V\|C\|F\|\?\|V/C\|V/\?\|C/\?)\]` | Evidence tier | How well a claim is backed: **[V]** verified against a cited public source, **[C]** corroborated by several secondary sources, **[F]** one unverified field observation — the weakest tier, **[?]** open. A slashed pair splits one entry — the first letter backs the core, the second the named residue. Only three pairs are in use: **[V/C]**, **[V/?]**, **[C/?]**. | `docs/autosys-semantics.md` header; `docs/stonebranch-semantics.md` header for the pairs |
+| `U\d[a-z]?` | UC open question | Excluded UC questions U1–U8, including U3a/U3b and U6a/U6b. Unrelated to runner E questions. | `docs/decision-log.md` DL-288 as ruled by DL-424 |
+| `E\d{1,2}` | Runner open question | One question of the runner/execution series, E1–E23. Implemented defaults carry a `# PENDING: En` marker. E1–E3 are answered in the sections that raise them (`runner-design.md` §7, §9, §11); §15 lists E4 onward. DL-189 and DL-230 resolve the HA and ops-plan labels. §15 states which questions remain in scope under DL-424. | `docs/runner-design.md` §7, §9, §11, §15; `docs/decision-log.md` DL-189 and DL-230 as ruled by DL-424 |
+| `PR-\d{2}[a-z]?` | Period-model obligation | Obligation labels PR-01–PR-57 and lettered subcases. A label cited in current source or carrying a `test_prNN_*` / `test_prNNx_*` test is live. Canonical-form rules remain under DL-119 and DL-128; the live-label destinations below identify other retained rules. DL-424 excludes period, seal, carry and lineage mechanisms, not the entire PR namespace. Retired-row interpretation is recorded in DL-138. | `docs/decision-log.md` DL-119 and DL-128; the current source and test destinations below; DL-114 and DL-138 as ruled by DL-424 for excluded mechanisms |
+| `PR-Q\d` | Period-model open question | Excluded period questions PR-Q1–PR-Q5. These are not PR obligation rows. Runner-carried questions resolve through the E series. | `docs/decision-log.md` DL-114 as ruled by DL-424; `docs/runner-design.md` §15 |
+| `I[12]` | Period invariant | Excluded period invariants I1 (one segment per period) and I2 (monotone indices, epochs and run numbers across an estate). They define no current store invariant. | `docs/decision-log.md` DL-114 as ruled by DL-424 |
+| `B[12]` | Period baseline | Excluded boundary-side names B1 and B2; PR-30e is a seal-retry label. The current `baseline_id` identifies an engine store and survives restart. | `docs/decision-log.md` DL-424; `docs/control-protocol.md` §3 for current retry identity |
+| `C[12]` | Period side | Excluded boundary inputs C1 and C2, the closing and opening `(catalog, RuntimeProfile)` pairs. | `docs/decision-log.md` DL-131 as ruled by DL-424 |
+| `# PENDING: (Q\d{1,2}[a-z]?\|Qr\d\|U\d[a-z]?\|E\d{1,2})` | Code marker | The house convention for a documented default standing in for an open question. The token is a `Q`/`Qr`/`U`/`E` reference from the rows above; a `PR-Q` question is carried under the runner question it maps to, never under its own number. The hash belongs to the comment: in a docstring the marker is written `PENDING: E10`, without it. | `docs/citation-index.md`, this row; the Q/Qr/U/E destinations above define each question |
+| `[a-z][a-z_]*\.\d{2,3}` | State-machine transition | A declared transition id, such as `job.101`: machine name, dot, transition number. The generated reference defines each current row. Composite job ids retain the job_status.NN to job.1NN, job_flags.NN to job.2NN and job_holding.NN to job.3NN correspondence (DL-337, DL-353). | `docs/state-machines.md`, generated from `src/dsl41/machines.py` (DL-289) |
+| `\[(V\|C\|F\|\?\|V/C\|V/\?\|C/\?)\]` | Evidence tier | How well a claim is backed: **[V]** verified against a cited public source, **[C]** corroborated by several secondary sources, **[F]** one unverified field observation — the weakest tier, **[?]** open. A slashed pair splits one entry — the first letter backs the core, the second the named residue. Only three pairs are in use: **[V/C]**, **[V/?]**, **[C/?]**. | `docs/autosys-semantics.md` header; `docs/decision-log.md` DL-424 for excluded UC uses |
+
+Live PR labels resolve by the rule they name:
+
+- PR-08, PR-08d, PR-09, PR-10, PR-10a, PR-11, PR-12 and PR-13:
+  DL-119 and DL-128, with `tests/test_canon.py` and `tests/test_oracle_branches.py`.
+- PR-08a, PR-08c, PR-15 and PR-15a: `tests/test_period_identity.py`
+  and `tests/test_semantics.py` pin catalog/runtime hashes and resolved profile values.
+- PR-19, PR-19a, PR-20, PR-21, PR-22 and PR-52:
+  `tests/test_capacity_decomposition.py` pins capacity state and its validation.
+- PR-01c: `tests/test_runner_leadership.py`; PR-03:
+  `tests/test_control_branches.py`; PR-25a: `tests/test_runner_scheduler.py`.
+- PR-34 and PR-34a: `tests/test_fw_spool.py`; PR-35 and PR-36a:
+  `tests/test_decision_record.py` and `tests/test_runner_adapters.py`.
+- PR-50's retained field citation is in `src/dsl41/oracle_state.py`;
+  its period mechanism is subject to DL-424. A retained label does not
+  authorize an excluded mechanism.
 
 ## Five collisions worth stating plainly
 
@@ -62,25 +85,16 @@ They have different owners, different documents, and different resolution
 paths (a live AutoSys instance vs. a design decision). Reading one as the
 other will send you to the wrong document.
 
-**`M\d{2}` is a mapping row, not a review finding.** `M07` is mapping row 7
-in the stonebranch dossier. Sources used to also carry `review M-1`-shaped
-tokens pointing at review conversations; those had no in-repo index, so a
-reader could not follow them. DL-75 deleted every one in `src/dsl41/`,
-where the gate runs, and inlined the reason it stood for. That sweep did
-not reach `tests/`; DL-151 finished it there — the eighteen it left
-(spread over `test_runner_lifecycle.py` and other test files), hyphenated (`Review M-1`, `Review E-1`),
-unhyphenated (`Review M3`, `Review B1`) and compound (`review U6A-05`,
-`review U6AR3-04`), now state their reason instead of pointing at it. Two
-kinds of residue are left and neither is a citation: some test FUNCTION
-NAMES still carry the finding they were written for (`test_review_m2_*`,
-`test_m3_*`, `test_b1_*`), and severity-labelled pointers (`Review MAJOR
-2`, `Review BLOCKER`) remain in four other test files. An `M`-shaped
-citation in `src/` is always a mapping row.
+**`M\d{2}` is a mapping row, not a review finding.** M07 names a mapping
+row. Review M-1, Review E-1, Review M3, Review B1, review U6A-05 and
+review U6AR3-04 resolve through DL-75 and DL-151; they are not citation
+namespaces. Test-name fragments (`test_review_m2_*`, `test_m3_*`,
+`test_b1_*`) and severity labels (Review MAJOR 2, Review BLOCKER) do not
+define citations. An M-shaped citation uses the namespace table above.
 
 **The two `R`s are different things.** `R3` is risk-register row 3 in the
-AutoSys dossier (a construct with no clean UC analog); `R-classified` is
-the migration verdict on a mapping row (the UC backend refuses to compile
-it). They are related in spirit and unrelated in numbering — an `R\d` never
+AutoSys dossier (a risk in a run-scoped graph); `R-classified` is
+the excluded UC mapping verdict defined through DL-424. An `R\d` never
 names a mapping row.
 
 **`T01` and `T-001` differ by one hyphen and share nothing else.** `T05` is
@@ -101,26 +115,38 @@ Some documents number the rows of their own tables. Those labels look like
 citations and are not: they mean nothing outside the section that defines
 them, and several of them shadow a real namespace.
 
-- `period-model.md` §14, the worked estate: `B1` is the boundary that
-  commits and `B2` the one that refuses — two worked scenarios, not the two
-  `baseline_id`s of the row above.
+- The period-model.md §14 worked-estate labels B1 (commit) and B2 (refusal)
+  resolve through DL-114 as ruled by DL-424; they are not baseline ids.
 - `docs/decision-log.md` build units: `U6b`–`U9` and `L1`/`L2` name a unit
   of work in one entry, not a UC question and not a linter rule. `U6b` is
   the one that reads both ways: the ledger's is a build unit (DL-133), and
   a bare `U6b` in a source file is the UC question of the row above.
 
-None of these gets a row. A reader who meets one inside its own document
-reads it there; a token of that shape anywhere else belongs to the table
-above.
+None of these gets a row. A reader resolves a local label in its named decision or section;
+a token of that shape elsewhere belongs to the namespace table above.
 
 ## Retired namespaces — do not reintroduce
 
 | Token shape | Why it went |
 | --- | --- |
-| `sol #\d+` | Pointed at a numbered solution in a review conversation with no in-repo index. DL-75 inlined the actual reason at all five sites (all of them "this artifact is owner-only because of what it holds") and deleted the token. |
-| `review [A-Z]-\d+`, `Review [A-Z]\d+`, `review [A-Z0-9]+-\d+` | All three shapes pointed at findings in review conversations with no in-repo index. DL-75 inlined the reason at every `src/dsl41/` site; where the finding restated a dossier entry, the dossier citation replaced it. The sweep did not reach `tests/`. |
+| `sol #\d+` | Conversation-local solution label; authority: DL-75. State the owner-only artifact rule directly instead of citing a conversation. |
+| `review [A-Z]-\d+`, `Review [A-Z]\d+`, `review [A-Z0-9]+-\d+` | Conversation-local finding labels; authority: DL-75 and DL-151. State the rule and cite its defining entry or dossier. |
 
 A citation whose target is a conversation is not a citation — it is a note
 to the one person who was in the room. If a review produces something worth
 keeping, the reason goes in the comment and the decision goes in
 `docs/decision-log.md`.
+
+The stonebranch-semantics.md Parts I–IV, concurrency-model.md §§9–10,
+period-model.md §§1, 2.2, 4, 7, 10, 13–14 and 16, and the HA plan references
+resolve through DL-424 and the per-label decision pointers above.
+
+Stage-split references resolve to their definitions: S5a–S5d in DL-93,
+S6a–S6c in DL-99, and S7a/S7b/S7c in DL-108/DL-109/DL-112.
+The host.03 transition reference resolves through DL-424; job.100, job.199 and job.4NN
+labels resolve through DL-337, DL-349 and DL-350 and the generated transition reference.
+The `ss1.3` spelling illustrates subsection notation; it is not a current source citation.
+The concurrency `ss6` read-header references in `cli_common.py` resolve to
+[control-protocol §3](control-protocol.md#3-mutating-verb-sendevent).
+Current store recovery is [runner-design §7](runner-design.md#7-journal-and-recovery-e1-prod-grade),
+and mutation envelopes are [control-protocol §3](control-protocol.md#3-mutating-verb-sendevent).
