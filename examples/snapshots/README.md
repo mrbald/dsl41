@@ -1,5 +1,14 @@
 # Offline snapshot examples
 
+For the operator inspecting offline observations on an emitted graph.
+The dsl41 engine writes no snapshot sidecar (DL-385).
+Read live state through the [engine status query](../../docs/deploy.md#watch-the-engine-and-jobs).
+Use this page to generate the example HTML, import a matching JSON sidecar,
+and inspect raw values and coverage. The rest of the
+[operator track](../../README.md#documents) covers engine operation and incidents.
+This page leaves engine startup and recovery to the
+[deployment guide](../../docs/deploy.md).
+
 These files attach invented observations to the existing synthetic Nightbank
 and fulfilment graphs. The values are independent examples, not a captured run.
 A box's supplied state is separate from the observations supplied for its
@@ -9,28 +18,33 @@ Each JSON sidecar contains only `nodes` and a string `state` for every entry.
 No source, timestamp, version or state vocabulary is required. IDs match the
 emitted graph exactly. Optional metadata is described in the viewer's Format
 section. Replacement drops observations omitted from the new file.
+Invalid input keeps the previous snapshot.
 
 ## Nightbank
 
-From the repository root, emit either profile:
+1. From the repository root, emit either profile:
 
-```sh
-uv run dsl41 viz --format explore \
-  -p examples/snapshots/viewer.properties \
-  -o /tmp/nightbank-small-explore.html \
-  examples/nightbank/estate/small/*.jil
+   ```sh
+   uv run dsl41 viz --format explore \
+     -p examples/snapshots/viewer.properties \
+     -o /tmp/nightbank-small-explore.html \
+     examples/nightbank/estate/small/*.jil
 
-uv run dsl41 viz --format explore \
-  -p examples/snapshots/viewer.properties \
-  -o /tmp/nightbank-bank-explore.html \
-  examples/nightbank/estate/bank/*.jil
-```
+   uv run dsl41 viz --format explore \
+     -p examples/snapshots/viewer.properties \
+     -o /tmp/nightbank-bank-explore.html \
+     examples/nightbank/estate/bank/*.jil
+   ```
 
-Open the generated HTML locally. Open Snapshot, choose Import JSON, and select
-[nightbank-small.json](nightbank-small.json) or
-[nightbank-bank.json](nightbank-bank.json) for the matching profile.
-Display starts at Generic. Select AutoSys to see its built-in display aids for
-literal codes such as `SU`, `FA` and `RU`. Raw strings remain unchanged.
+2. Open the generated HTML locally.
+3. Open Snapshot.
+4. Choose Import JSON and select
+   [nightbank-small.json](nightbank-small.json) or
+   [nightbank-bank.json](nightbank-bank.json) for the matching profile.
+5. Display starts at Generic. Select AutoSys to see its built-in display aids
+   for literal codes such as `SU`, `FA` and `RU`.
+
+Raw strings remain unchanged.
 
 | Observation | Small | Bank |
 | --- | --- | --- |
@@ -69,17 +83,21 @@ completion percentages.
 
 ## Generic business vocabulary
 
-Emit the existing eight-node fulfilment graph:
+1. From the repository root, emit the existing eight-node fulfilment graph:
 
-```sh
-uv run dsl41 viz --format explore \
-  -p examples/snapshots/viewer.properties \
-  -o /tmp/fulfilment-generic-explore.html \
-  examples/fulfilment/estate.jil
-```
+   ```sh
+   uv run dsl41 viz --format explore \
+     -p examples/snapshots/viewer.properties \
+     -o /tmp/fulfilment-generic-explore.html \
+     examples/fulfilment/estate.jil
+   ```
 
-Open the HTML and import [fulfilment-generic.json](fulfilment-generic.json).
-Keep Display at Generic. Four of eight catalog nodes have observations.
+2. Open the generated HTML locally.
+3. Open Snapshot.
+4. Choose Import JSON and select [fulfilment-generic.json](fulfilment-generic.json).
+5. Keep Display at Generic.
+
+Four of eight catalog nodes have observations.
 `FF_WAVE_B` has its own `awaiting handover` value and leaf coverage 3 / 7.
 Its supplied leaf values are `stock allocated`, `parcel packed` and
 `carrier label pending`, once each. The box value is excluded from that list.
@@ -99,33 +117,38 @@ output file. No AutoSys connection or project installation is needed.
 
 [autorep-summary.txt](autorep-summary.txt) is manually synthetic text, based on
 documented columns and public Nightbank IDs. It is not an AutoSys capture.
-From the repository root:
 
-```sh
-python3 scripts/autorep_snapshot.py examples/snapshots/autorep-summary.txt \
-  -o /tmp/nightbank-autorep.json
-```
+1. From the repository root, convert the synthetic table:
 
-Import `/tmp/nightbank-autorep.json` into the small Nightbank page above. There
-are three catalog observations and one exact external match. `EMEA_EOD_B` keeps
-`RU/NE`; `EMEA_EXE_B` keeps `RU`; its supplied order-freeze child keeps `SU`.
+   ```sh
+   python3 scripts/autorep_snapshot.py examples/snapshots/autorep-summary.txt \
+     -o /tmp/nightbank-autorep.json
+   ```
+
+2. In the small Nightbank page above, choose Import JSON, or Replace JSON if
+   a snapshot is loaded, and select `/tmp/nightbank-autorep.json`.
+
+There are three catalog observations and one exact external match.
+`EMEA_EOD_B` keeps `RU/NE`; `EMEA_EXE_B` keeps `RU`; its supplied order-freeze child keeps `SU`.
 The external `GROUP_TREASURY_EOD^PRD` keeps the invented `Z?` value. The AutoSys
 display preset recognizes only its built-in literal codes/names. Composite
 values such as `RU/NE` and unknown values such as `Z?` remain raw and neutral.
 
 For an actual capture, redirect stdout directly to a file outside this checkout.
-Check producer success and empty, separately captured stderr before conversion:
 
-```sh
-if autorep -J ALL -s > /tmp/autorep-summary.txt 2> /tmp/autorep-summary.err \
-  && test ! -s /tmp/autorep-summary.err; then
-  python3 scripts/autorep_snapshot.py /tmp/autorep-summary.txt \
-    -o /tmp/autorep-snapshot.json
-else
-  printf '%s\n' 'autorep failed or wrote stderr; conversion skipped' >&2
-  false
-fi
-```
+1. Capture and convert only after producer success and empty, separately
+   captured stderr:
+
+   ```sh
+   if autorep -J ALL -s > /tmp/autorep-summary.txt 2> /tmp/autorep-summary.err \
+     && test ! -s /tmp/autorep-summary.err; then
+     python3 scripts/autorep_snapshot.py /tmp/autorep-summary.txt \
+       -o /tmp/autorep-snapshot.json
+   else
+     printf '%s\n' 'autorep failed or wrote stderr; conversion skipped' >&2
+     false
+   fi
+   ```
 
 The supported columns and capture flags come from the English
 [AutoSys 12.0 reference](https://techdocs.broadcom.com/us/en/ca-enterprise-software/intelligent-automation/autosys-workload-automation/12-0/reference/ae-commands/monitor-and-report-on-workload/autorep-command-report-job-machine-and-variable-information.html)
