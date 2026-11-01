@@ -1,0 +1,23 @@
+/* The clock-step drill's estate (DL-435): invented names, one machine. One job
+   starts every minute and runs 25 seconds, so a run is open when the wall clock
+   steps and its status arrives while the wall is below the frontier. A second
+   starts after it. */
+
+insert_machine: dd_host
+type: a
+node_name: localhost
+max_load: 20
+
+insert_job: DS_TICK
+job_type: c
+date_conditions: 1
+days_of_week: all
+start_mins: "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59"
+command: sleep 25
+machine: dd_host
+
+insert_job: DS_AFTER
+job_type: c
+condition: s(DS_TICK)
+command: sh -c 'echo DS_AFTER $(date -u +%FT%TZ)'
+machine: dd_host
