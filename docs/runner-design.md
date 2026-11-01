@@ -4,7 +4,7 @@ Status: frozen (DL-41); a frozen item changes only through a decision-log
 entry. This document is normative for the runner in the same way that
 ir-design.md is normative for the compiler. The runner is prod grade (E1,
 §7), runs in two time domains (E2, §9), and serves the web behind a proxy
-or a tunnel (E3, §11). Every tier this document describes is built (§14).
+or a tunnel (E3, §11). The supervisor tier is retired (DL-424).
 
 ## 1. Mission and scope
 
@@ -28,10 +28,7 @@ does not do. Prod grade does not mean highly available.
 
 Lifecycle stance (DL-41a): the default is **tethered**. Engine death
 terminates all jobs, and the record is durable even under `kill -9` (§6a).
-This is a documented semantic choice. For long-running estates, operators
-expect an engine restart (an upgrade) not to kill active work. So the
-**detached** supervisor tier (§6a Tier 1) is part of prod grade. Without
-it, the engine is prod grade for restartable workloads only.
+The detached supervisor tier (§6a Tier 1) is retired (DL-424).
 
 ## 2. Position in the pipeline
 
@@ -50,7 +47,7 @@ control surface.
               ┌─ engine daemon (asyncio, one process per run) ──┐
  wall clock ─▶│  Oracle.feed / .advance   ◀── pure core         │
  completions ▶│  dispatch table ──▶ JobAdapter (subprocess/FW)  │
- control ────▶│  WAL journal (JSONL, fsync-before-feed)         │
+ control ────▶│  SQLite store (engine.db, DL-428)              │
               └───────────────┬──────────────────────────────────┘
                               │ control socket (unix domain, JSON lines)
                 ┌─────────────┴─────────────┐
@@ -157,8 +154,8 @@ business. A CMD cancellation signals the command pgid (§6a) and the wrapper
 records the outcome. An FW cancellation only stops polling — a watch owns
 no process. ON_NOEXEC needs
 no row. The SEM-22 bypass emits SUCCESS and never emits STARTING, so
-nothing spawns by construction. The alarm row writes no WAL record of its
-own: emitted events are never journaled (§7), so an alarm exists in the
+nothing spawns by construction. The alarm row writes no store record of its
+own: emitted events are never recorded in the store (§7), so an alarm exists in the
 replayed trace and nowhere else.
 
 The two STARTING rows carry one more condition, the **ghost-run gate**: a
@@ -259,9 +256,8 @@ engine to read it. Cancel (the oracle said terminal, §4): the engine
 signals the command pgid SIGTERM, grace, then SIGKILL. The wrapper
 observes the deaths and durably records the outcome like any other
 completion. A cancel before the spec is handed over SIGKILLs the
-wrapper, which has launched nothing. A cancel during a detached SPAWN,
-its duplicate check included, sends the supervisor kill unless a
-detach-stop is under way (DL-359).
+wrapper, which has launched nothing.
+The detached-SPAWN cancellation rule is retired (DL-424; DL-359).
 When `std_out_file` / `std_err_file` are set, stdout/stderr
 **append** to them (the vendor appends). Otherwise they append to
 `<run_root>/logs/<job>.<run_number>.{out,err}`. Whether the engine
@@ -291,8 +287,8 @@ one line per poll, fsynced, *including* polls that changed nothing. The line
 is appended **before** progress moves or a completion is emitted, so an
 observation that changed the watch is never one an audit cannot see.
 `next_poll_at` is exactly: after `start` and no poll line, `start.at`; after
-a poll line, `poll.at + interval`. A torn final line truncates on open, as
-the WAL's does. A resumed watch reconstructs from the log and appends no
+a poll line, `poll.at + interval`. A torn final line truncates on open.
+A resumed watch reconstructs from the log and appends no
 second `start`.
 
 **FakeAdapter** (tests, rehearse): scripted `(job, run_number) →
@@ -313,70 +309,26 @@ structural: a process that cannot miss the observation writes it to a
 durable location. Prior art: containerd-shim, Slurm's slurmstepd, and
 HTCondor's starter. Every serious scheduler keeps a small local process
 that reaps and reports after the control daemon disconnects. There are
-three tiers, outermost first:
+three tiers, outermost first; Tier 1 is retired (DL-424):
 
 **Tier 2 — init-system backstop** (deployment note, not code): run the
 runner under systemd (Linux) / launchd (macOS). On Linux the unit's
 cgroup contains the whole estate; containment of one run is its process
 group, and the escapee that leaves it is a stated limit (DL-403, below).
 
-**Tier 1 — supervisor** (the availability tier): engine →
-supervisor → wrappers. The supervisor exists for exactly one reason: jobs
-that must SURVIVE engine restarts (upgrades, crash isolation). The
-supervisor is deliberately dumb (postmaster / s6-supervise philosophy):
-it forks wrappers, reaps them, and answers SPAWN, SIGNAL, LIST and
-SHUTDOWN and guarded MAINTENANCE_STOP, plus PING and the lease verbs ACQUIRE, RENEW and RELEASE
-(`docs/supervisor-protocol.md` §5). It has no scheduling timers, no conditions, and no configuration reload.
-Its only time bounds are lifecycle bounds, which the
-supervisor-protocol preamble (`supervisor-protocol.md`, retired in 2.0.0) lists (DL-150). Its own-bug
-crash surface is near zero. Wrappers hold ITS lifeline (below). Thus even
-`kill -9` of the supervisor keeps
-"supervisor death ⇒ all jobs terminate and are recorded". On restart, the
-engine reattaches and LISTs. No job is orphaned, because its parent did not
-die, so nothing is adopted (E4). Who starts the supervisor is a launch
-option, not part of the runtime profile (DL-396). Under a supervisor
-service, `dsl41 supervise start` starts it and the engine attaches
-(`run --detached --supervisor attach`); with none answering, the engine
-forks nothing and exits 1. Without a service, `run --detached` starts one
-when none answers (`--supervisor spawn`, the default). The offline
-`dsl41 seal` attaches by default. Linux hardening:
-`PR_SET_CHILD_SUBREAPER`, so that a killed wrapper's command reparents to
-the supervisor for reaping/killing.
+**Tier 1 — supervisor** is retired, including its socket, lease and verbs (DL-424; DL-129, DL-150, DL-289, DL-396).
 
-The supervisor speaks a **versioned line protocol over a named unix
-socket** (0600 + same-uid peer-cred check), not an inherited socketpair.
-The reason: the protocol plus the spool format
-(spawn.json/status.json) is the tier's public contract and the boundary
-along which it can be extracted (DL-42). The supervisor also writes `receipt.json`,
-`reply.json` and the `runs/.by_run_id/<run_id>` index, and those three
-plus the run directory itself are what make SPAWN idempotent across its
-own restart (DL-129). Clients split into **unlimited read-only
-observers** and **exactly one controller**. Mutating verbs require a
-controller lease (controller_id, expiry, fencing token). Every mutation
-carries the incarnation and the fencing token. Only SPAWN carries an
-idempotency key, and it is the `run_id` itself; SIGNAL and SHUTDOWN carry
-none, because neither is a second act when it repeats. This lease is a
-correctness feature, not ceremony. A TUI, a script, and the engine that race SPAWN/SIGNAL on
-the same job graph corrupt scheduler semantics long before security is at
-risk. dsl41's own *engine* socket (§10) deliberately has no lease:
-sendevent is multi-writer by AutoSys nature, and the single-writer engine
-loop serializes it. The lease guards the tier that spawns without
-semantics. When its trigger fires (DL-42), the supervisor tier is set for
-extraction as a standalone permissively-licensed package. Until then, it
-lives here under an enforced import boundary. The wrapper and the
-supervisor import nothing third-party and nothing through the dsl41
-package. Their only imports outside the standard library are sibling
-stdlib-only modules, imported by top-level name from their own directory
-(DL-72): `runner_procid` for both, and also `canon` (DL-129) and
-`state_machine` (DL-289) for the supervisor. Tests pin both import sets.
+The engine socket (§10) has no lease: the single-writer loop serializes
+sendevent (DL-42).
 
 **Tier 0 — per-run wrapper** (the correctness tier, always present). This
 tier is a dumb stdlib-only shim (`runner_wrapper.py`, no
-third-party imports). Both spawners run it BY FILE PATH, never as
+third-party imports). The engine runs it BY FILE PATH, never as
 `python -m`: `-m` would import the `dsl41` package first and drag
-third-party imports into the recorder. The shim is parent-agnostic: it
-does not know whether the engine or the supervisor spawned it. So both
-tiers run the same shim.
+third-party imports into the recorder. The shim is parent-agnostic (DL-41a).
+Its import boundary is stdlib-only sibling modules by top-level name:
+`runner_procid` (DL-42, DL-72). It imports nothing through the dsl41
+package, and a test pins the import set.
 Duties:
 
 1. `setsid()` — its own session. The command is spawned into its **own
@@ -418,7 +370,7 @@ Duties:
    write `status.json` — the same identity fields, an `outcome`, `ended_at`,
    and whichever of `exit_code` or `signal` applies — *then* reap. This
    order narrows the observe-to-record hole to a few syscalls. Both spool
-   records are frozen field by field in `docs/supervisor-protocol.md` §3,
+   records are frozen field by field in `docs/wrapper-protocol.md` §3,
    which is the schema; this list is what each duty owes. The status
    file is the **authority**. The live reaping chain is only a
    notification that the file exists.
@@ -432,11 +384,9 @@ Duties:
 in exactly one process — the parent. One write end that leaks into any
 other process silently disables parent-loss detection for that wrapper.
 Python's default non-inheritable fds enforce this rule: the engine's
-adapter passes only the read end by `pass_fds`, and the supervisor makes
-only the read end inheritable for `posix_spawn`. Tests hold it for each
+adapter passes only the read end by `pass_fds`. Tests hold it for this
 path (test_lifeline_write_end_leaks_nowhere,
-test_sigkill_engine_midrun_then_resume,
-test_supervisor_spawn_keeps_each_lifeline_write_end_in_one_process).
+test_sigkill_engine_midrun_then_resume). The supervisor spawn path is retired (DL-424).
 
 **Containment honesty:** pgid kill does not catch `setsid`/double-fork
 escapees (`sh -c 'daemon & '`). On Linux the process cookie (§7) does,
@@ -456,18 +406,10 @@ at reconciliation (§7) and reported truthfully, not guessed.
 
 ## 7. Journal and recovery (E1: prod grade)
 
-The journal is an append-only JSONL WAL, one file per SEGMENT, and a period
-holds one or more segments (DL-133; `docs/period-model.md` §1.1 and §7). A
-root's records live in `wal/<segment_no>.jsonl`, and `journal.jsonl` holds
-one line, the permanent
-`period_root` sentinel `{rec, artifact_format_version, estate_id, see,
-claim_id}`. The NAME is kept deliberately: the file is never absent, so a
-root that sealed and exited never reads as *unused* to a build that would
-genesis into it. Every reader follows the sentinel's `see` through one
-function (`period.resolve_wal`), so a caller holding a run root, the
-sentinel or a segment reads the same records. A root where `journal.jsonl`
-IS the WAL is a retired layout (DL-138): the first record's kind tells the
-two apart, and a `header` there is refused by name rather than read.
+The store is one SQLite file per run root, `engine.db` (DL-428).
+`SqliteStore` is the only durable record; it holds the inputs, configuration
+history and snapshots. Each append commits synchronously. A 1.x root with
+`journal.jsonl` or `wal/` and no store is refused by name.
 
 Record kinds:
 
@@ -502,7 +444,7 @@ Record kinds:
 - `dispatch` — `{job, run_number, run_id, run_dir, started_at}`: one
   start, appended after its decision and before its adapter task exists.
   The `run_id` is minted here and the wrapper spec carries it (PR-36a), so
-  the WAL and the spool name one process identity. An engine that dies
+  the store and the spool name one process identity. An engine that dies
   between the decision and this record leaves a decided start with no
   trace, which resume dispatches; one that dies after it leaves a record
   whose run directory says how far the start got (§7 resume). The
@@ -557,23 +499,21 @@ Resume's side effects are bounded to this list:
 - the live cleanup kills what is left of a command whose attempt ended
   with the engine, as at a live record; nothing waits for a wrapper
   (DL-226, DL-433);
-- a pending SPAWN is re-driven (DL-102), and a supervised SPAWN that was
-  applied (or is indeterminate), with a bound `run_id` and no spool, is
-  replayed (DL-129, DL-315);
+- a pending SPAWN is re-driven (DL-102);
+- the supervised-SPAWN replay rule is retired (DL-424; DL-129, DL-315);
 - an FW watch is resumed from its log, or, with no trace and an applied
   SPAWN, dispatched again under that SPAWN's `run_id`, because a watch is
   an idempotent read (DL-44 item 7, DL-129). A watch whose SPAWN was
   retired, or that no decision gave a SPAWN, is not launched
   (DL-315);
-- a live wrapper under a terminal row is killed (DL-133).
+- the live-wrapper kill re-drive is retired (DL-424; DL-133).
 
-Nothing else. Without the re-driven kill, the sweep would walk past a detached run whose parent is the supervisor, because its
-row is already TERMINAL and reads as "completion already replayed".
+Nothing else. The detached-run kill re-drive rule is retired (DL-424).
 
 `dsl41 runs` is not a new record kind: its rows are a projection folded from
 the records above (`dispatch`, `input(kind=STATUS)`, and each `decision`,
 both the effects nested in it and its verdict) plus the replayed trace and
-the spool, offline, with nothing appended to the journal (DL-113). The
+the spool, offline, with nothing appended to the store (DL-113). The
 **verdict** is read for the same reason §4's gate writes it (DL-151): a
 completion that gate REJECTED never reached the oracle, so the fold skips it
 too; read without the verdict, a late `exit 0` would decide the row over the
@@ -595,7 +535,7 @@ it. Only an explicit or recovered `rejected` is skipped.
 The row is `{job, run_number, catalog_hash, job_hash, started_at,
 ended_at, duration_s, status, exit_code, started_by, run_dir,
 box_name, clock_source, fidelity, undecided}` (DL-113, DL-136, DL-141). `clock_source` says whether the timing came from
-the wrapper's spool or fell back to the journal; `fidelity` says how much of
+the wrapper's spool or fell back to the store; `fidelity` says how much of
 the row could be established when the period's manifest is gone. The
 caller names the run roots, or names the lineage anchor alone and the
 registry supplies every root in period order. The stable key across a
@@ -621,7 +561,7 @@ vendor's own run-history surface is E22 (§15).
 
 **Inputs-only principle**: emitted events and the trace are pure functions
 of the input sequence, external events plus time observations (oracle
-determinism). Thus they are never journaled. `dsl41 journal` replays
+determinism). Thus they are never recorded in the store. `dsl41 journal` replays
 inputs and advances through a fresh Oracle to reconstruct the full trace.
 One source of truth, no divergence possible. Write-ahead discipline: fsync
 per record before `feed()`/`advance()` in run mode, batched in rehearse.
@@ -642,81 +582,28 @@ nor read, and a root that has one where the period manifest is absent is
 refused naming the layout (`docs/protocol-evolution.md`). The catalog hash
 covers `SourceSpan.file`, so byte-exact replay against relocated copies
 still needs the recorded original paths. Relocation-independent hashing
-is deliberately not built: it would fail every existing journal's resume
+is deliberately not built: it would fail every existing store's resume
 gate.
 
 **Permissions** (DL-66): run roots are `0700` (created and re-tightened
-at resume); the journal, wrapper spool files, and job stdout/stderr are
-`0600` at creation. The WAL carries globals and every control input, and
+at resume); the store, wrapper spool files, and job stdout/stderr are
+`0600` at creation. The store carries globals and every control input, and
 job output carries whatever commands print: owner-only, not
 umask-hopeful. One deliberate exception: arming the DL-146 perimeter with a
 named `socket_group` opens the run root to `0710` for traversal and the
 socket to `0660`, and tightens every direct child first
-(`docs/access-model.md` §8). Nothing else moves. The re-tightening at
-resume may happen on a resume that is then refused by period-model §1.3's
-resume rule (DL-224). A CLI refusal never tightens the root; its
-confirmation under the locks takes the anchor lock, which tightens the
-anchor directory. It is one of the few writes such a refusal may make:
-`leader.lock` and `anchor.lock`, created or taken; the `0700` tightening of
-the root and of the anchor directory; and the directory fsyncs those imply.
-None of them carries estate state.
+(`docs/access-model.md` §8). Nothing else moves. The anchor-refusal write list is retired (DL-424; DL-224).
 
 **Resume** (`dsl41 run <files> --run-root <root> --resume`):
 
-**A root the anchor does not name is refused before the steps below**
-(DL-224). After the `estate_id` check, resume applies period-model §1.3's
-resume rule: the anchor must name this root, and the registry row for the
-period of the root's newest opened segment must name it too (or, with no
-row, the head must be this root's claim). The check reads and never
-repairs, so it runs before a torn tail is cut or a never-opened segment is
-removed. A refused resume releases both locks and creates, changes or
-removes no WAL, journal, segment, sidecar, `anchor.json`, claim or
-supervisor file. `dsl41 run --resume` and the offline `dsl41 seal` run the
-same check first, before they stage anything or wire a supervisor, and
-confirm a refusal under both locks before they act on it, since a read with
-no anchor lock can be stale. Any refusal met under the locks (a busy anchor
-lock; a missing, corrupt or foreign anchor; or the rule) is the command's
-refusal, in its own words. A root that fails the rule when the command
-starts is therefore refused with no supervisor started. The scope is this
-rule: a missing anchor or another estate's anchor passes that first check
-and keeps its order and side effects, and if the anchor changes between the
-first check and the locks, admission is still refused but what the command
-staged or wired may remain.
-
-**Four steps run before step 1 below, and they decide which segment step 1
-is about** (DL-133; period-model §11). First, the sentinel is read and
-§1.1's ownership rule applied to it, exactly as it is applied at creation.
-Second, `anchor.lock` is taken and the anchor's `estate_id` must be this
-root's. Third, the SEAL is selected by lineage from what this root holds:
-the active segment's `opens_from_seal` when it has one, else the newest
-**committed** `seal` record in this root's last segment, else this is
-period 1 before any seal and replay starts at genesis. For a selected seal,
-the sidecar's recomputed digest is verified against the digest the naming
-record carries, and so is every field the two duplicate. Fourth, the head
-is acted on, which repairs whichever window the last process died in:
-`open` with a `seal` record present performs the CAS the crashed sealer
-did not; `claimed` with our claim and a durable segment moves the head to
-`open`; `claimed` with another refuses, naming the holder. When the
-selected seal is committed and has no
-successor segment, resume **opens the next period** first: it claims the
-successor, writes `wal/<N+1>.jsonl` with its opening `segment` at T, moves
-the head, and seeds the interpreter from the sidecar; carried rows install
-verbatim, revisions included, and only genuinely new rows are seeded from
-the catalog. Step 1 then gates on THAT segment's pins, which are C2's.
-
-A `journal.jsonl` whose first record is a `header` is refused as a
-**retired dialect**, citing DL-138 (the refusal sits on `--resume`,
-DL-134), and there is no verb that lifts it. The
-question asked is narrow: the first record is a `header`. A `journal.jsonl`
-that opens with a `segment` is not legacy and is held to its own
-refusals.
+The anchor, seal and segment resume rules are retired (DL-424; DL-133, DL-134, DL-138, DL-224).
 
 1. On catalog-hash mismatch, refuse: no silent semantic drift. A changed
    estate re-baselines explicitly. A clock-domain mismatch refuses on the
    same pin: a real run and a rehearsal are not one record.
 2. Replay inputs in seq order through a fresh Oracle (original timestamps).
-3. Reconcile from the §6a records, sweep = union(journal dispatch records,
-   `runs/` directory, and what the supervisor LISTs when there is one). In
+3. Reconcile from the §6a records, sweep = union(store dispatch records,
+   `runs/` directory). The supervisor LIST rule is retired (DL-424). In
    tethered mode, the wrappers self-terminated their groups and recorded
    that fact when the engine died (lifeline EOF). Thus resume normally only
    *reads* outcomes. Signals are for the residual crash matrix only. First
@@ -731,7 +618,7 @@ refusals.
      its wrapper writes later is read by nobody.
    - `status.json` present → the attempt chart reads it: a natural end
      feeds the real completion (raw exit_code through SEM-09 as usual) at
-     `max(ended_at, last journal at)`, with the true `ended_at` carried in
+     `max(ended_at, last store at)`, with the true `ended_at` carried in
      the payload (feed times are non-decreasing); `parent lost` or a
      recorded stop is `stopped`, and the interruption rule plans it.
    - No record → the attempt ended with the engine,
@@ -744,20 +631,13 @@ refusals.
      itself where the cookie decides, else the group while its leader is
      still the recorded process (DL-226, DL-431); a survivor or a failed
      reading holds the attempt, and its job starts nothing meanwhile.
-   - A SUPERVISED run whose durable effect bound a `run_id` and whose spool
-     holds neither `spawn.json` nor `status.json` → the SPAWN is
-     **replayed** (DL-129): period-model §11a makes it idempotent, so the
-     supervisor's directory answers first-application, duplicate,
-     in-progress, or indeterminate/collision, and the run happens once,
-     resumes, or fails naming the supervisor's own reason (PR-36a).
+   - The supervised-SPAWN replay rule is retired (DL-424; DL-129, PR-36a).
    - A command attempt with no record is never `exit_status_unobservable`
      (PENDING: E7, which DL-424 narrows): the interruption rule above plans
      it. Not TERMINATED either: that status is reserved for kills that the
      engine or the oracle actually performed or observed.
-   All reconciliation injections journal with source=reconcile. When the
-   supervisor (§6a Tier 1) exists, jobs survive engine restarts by
-   *reattachment*: their parent never died. Then this step reduces to the
-   supervisor's LIST.
+   All reconciliation injections are recorded in the store with source=reconcile.
+   The supervisor reattachment rule is retired (DL-424).
 
 **How the restart knows a process is ours.** On Linux, where a pidfd can
 signal it, every process of a command attempt carries the process cookie,
@@ -779,28 +659,9 @@ stronger fence. On other platforms,
 and for an attempt dispatched before the cookie, the (pid, start-time)
 checks above decide.
 
-After the ladder, and after the untraced-start sweep and the pending-KILL
-re-drive below, one more rule runs over the wrappers the supervisor lists
-as alive: **a live wrapper under a TERMINAL row is re-driven regardless of
-the KILL effect's recorded state**, and regardless of whether a KILL effect
-exists at all (DL-133; period-model §3.5, PR-33). `_apply_kill` records
-`applied` when the cancellation is delivered and the TERM/grace/KILL ladder
-runs on the way out of the task, so an engine that dies mid-ladder leaves a
-live wrapper under a terminal row with the effect already resolved. The row
-being terminal is what makes the process an orphan: the ladder skips
-TERMINAL rows, a re-drive of PENDING kills alone would read that state and
-walk past it, and nothing else ever looks again.
+The supervisor live-wrapper kill re-drive rule is retired (DL-424; DL-133, PR-33).
 
-This ladder is the middle of `docs/concurrency-model.md` §7's takeover
-barrier (DL-102, S6c): ACQUIRE, reconcile every execution host, retire
-superseded and re-drive pending, dispatch. Two of its steps follow from
-that name.
-
-**The sweep is over every host, not every local directory.** What the
-supervisor LISTs joins the union above. A step that concluded "never
-spawned" from absence, where absence only meant "the run directory is
-gone", would let the barrier start a second process for a run the host is
-still holding.
+The multi-host takeover barrier and supervisor LIST sweep are retired (DL-424; DL-102, S6c).
 
 **A live start with no run directory is decided by the log** (DL-102, DL-315). A start's
 `dispatch` record is durable before its adapter task exists, and its run directory is made
@@ -833,7 +694,7 @@ Re-polling would decide the watch again against a world that has moved on.
 ## 8. Preflight — refuse loudly, run honestly
 
 This is the backend_uc R/A discipline applied to execution: ERROR refuses
-the run, and WARN prints, journals, and runs. Every rule ships the house
+the run, and WARN prints, records in the store, and runs. Every rule ships the house
 fixture pair.
 
 ERROR:
@@ -1142,12 +1003,13 @@ frozen inventory; what follows is what each is for.
   the running catalog does not match the disk (DL-65). The CLI adds
   scriptable predicates `is-success`/`is-failed` (print status, exit
   0/1) over the status verb.
-- **subscribe** — stream journal records from a seq (the UI feed).
+- **subscribe** — stream the store's wire records from a seq (the UI feed;
+  control-protocol §5, DL-428).
 
-Every control input is journaled like any other injected event
-(source=control). The WAL is the audit trail of engine decisions — no
+Every control input is recorded in the store like any other injected event
+(source=control). The store is the audit trail of engine decisions — no
 second log carries them. Access decisions at the DL-146 perimeter go to
-the perimeter journal (`docs/access-model.md` §6) and never enter the WAL
+the perimeter journal (`docs/access-model.md` §6) and never enter the store
 (DL-148).
 
 ## 11. UI — one Textual app, terminal and web (E3)
@@ -1197,12 +1059,8 @@ proxy or an SSH tunnel; the README's deployment notes show both, and
 authentication of its own.
 
 Scope fence (DL-42): the dashboard of *meaning* — conditions, boxes,
-explain, sendevent — is dsl41's and stays here. The §6a supervisor tier,
-extracted or not, ships at most a boring JSON CLI and an optional
-read-only top view. "free dashboard via textual-serve" is free as a demo
-only. Production dashboard semantics (auth, audit of signals, history,
-log redaction, retention) are orchestrator concerns, never the
-supervisor's.
+explain, sendevent — is dsl41's and stays here. The supervisor dashboard
+scope rule is retired (DL-424).
 
 ## 12. Non-goals
 
@@ -1214,10 +1072,10 @@ DL-56; the SEM-36..39 extended-calendar freeze is interpreted, DL-57; open
 composition corners run on pinned defaults, DL-59; only doc-defective
 tokens stay materialize-on-a-live-instance).
 Also retry semantics (Q4, DL-53: kept deliberately unmodeled by scope
-decision). Also non-child orphan adoption (not needed: the supervisor makes
-survival a *reattachment*, never an adoption, E4).
+decision). Also non-child orphan adoption (E4).
+The supervisor reattachment rule is retired (DL-424).
 Also alarm delivery beyond the replayed trace and the UI (no mail/pager
-integrations; an alarm is never a WAL record of its own, §4).
+integrations; an alarm is never a store record of its own, §4).
 Also cgroup/scope containment (documented Linux hardening path, §6a).
 Resource/load management is single-node (DL-50): the oracle honors it as
 capacity buckets, and preflight refuses the unmodelable. Out of scope:
@@ -1235,11 +1093,11 @@ a distributed concern, DL-49).
 2. **Hypothesis**: random event scripts (the oracle's strategies) run through
    both paths with the same property. The suite also compares feed-only
    and advance+feed timer schedules.
-3. **Journal**: replay reproduces the trace (property test). Crash-recovery
+3. **Store**: replay reproduces the trace (property test). Crash-recovery
    integration test: real sleep jobs, SIGKILL the engine, resume, assert
    reconciliation records and terminal states.
    The lifecycle tier lives or dies on its failure matrix. Thus the
-   wrapper and supervisor suites test kills at every phase boundary, not
+   wrapper suite tests kills at every phase boundary, not
    only mid-run. The boundaries:
    before/after spawn.json, after fork before exec, after wait
    observation before status write, and after status write before reap.
@@ -1264,7 +1122,7 @@ the split cannot decay into a second name for one file.
 - `runner.py`: the §4 engine loop.
 - `runner_control.py`: the §10 control plane, the socket server, its wire
   vocabulary, and both clients; frozen in `docs/control-protocol.md`, the
-  outer counterpart to the lifecycle tier's `docs/supervisor-protocol.md`.
+  control contract. The supervisor protocol is retired (DL-424).
   The server owns its own file (DL-78): every query handler is a pure
   projection, and what it shares with the loop is the loop's *task*, not
   its single-writer invariant.
@@ -1279,7 +1137,7 @@ the split cannot decay into a second name for one file.
   naive-UTC ↔ local conversion, phase-free and shared with the oracle,
   DL-163).
 - `runner_adapters.py`: the §6/§6a adapter contract and every adapter.
-- `runner_journal.py`: the §7 WAL and its replay.
+- `runner_journal.py`: the §7 store records, wire projection and replay (DL-428).
 - `runner_preflight.py`: the §8 rules.
 - `runner_wrapper.py`: the §6a Tier-0 shim, stdlib-only with no third-party
   imports; its dumbness is a correctness property.
@@ -1304,7 +1162,7 @@ estates use these:
 
 - `cli_run.py`: `run`, `rehearse`, `journal`, `runs`.
 - `cli_control.py`: `sendevent`, `off-hold-all`, `ui`, `serve`,
-  `query`, `supervise`.
+  `query`. The `supervise` verbs are retired (DL-424).
 
 Module docstrings name the runner's build phases 11a to 11f; DL-41 and
 DL-41a map them to parts.
@@ -1315,11 +1173,9 @@ The house rule applies: implemented defaults are marked `# PENDING: En` in
 code. None is guess-resolved. A settled entry keeps its token and states
 its rule, with the entry or section that holds it.
 
-- **E4** — jobs that survive engine restarts are reattached, never adopted
-  as non-children (DL-41a, DL-48). The supervisor keeps parenthood alive
-  (`run --detached`), whether the engine started it or attaches to it
-  (§6a, DL-396). On the default tethered path, engine death terminates
-  jobs, and resume uses §7's reconciliation ladder.
+- **E4** — on the tethered path, engine death terminates jobs and resume
+  uses §7's reconciliation ladder (DL-41a, DL-424). The supervisor
+  reattachment rule is retired (DL-424; DL-48, DL-396).
 - **E5** — profile sourcing failure semantics [?]. Default: the job fails
   with sh's exit code (§6).
 - **E6** — FW steady-size semantics are the `fw-existence` switch (§8a,
@@ -1360,7 +1216,7 @@ its rule, with the entry or section that holds it.
   kill.
 - **E9** — scheduler ticks missed across engine DOWNTIME (crash/stop →
   resume) (DL-45). Default: skip-and-report. Resume drops each missed tick
-  AND journals it (a WAL `drop` record), and it never fires the tick late.
+  AND records it in the store (a `drop` record), and it never fires the tick late.
   A live-but-stalled engine, in contrast, fires its backlog, stamped at the
   tick. The downtime/live boundary is pinned to the resume-sweep instant
   (wall-now when `resume_run` re-anchors). Ticks at or before that
