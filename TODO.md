@@ -17,7 +17,7 @@ disjoint files.
 - [x] 3. Terms sweep of `docs/control-protocol.md` and `docs/access-model.md`: replace
   retired terms (the journal where DL-428 replaced it with the store, the old supervisor
   model); no rule changes. Builds now.
-- [ ] 4. Terms sweep of `docs/runner-design.md` and `README.md`, as item 3. Starts after
+- [x] 4. Terms sweep of `docs/runner-design.md` and `README.md`, as item 3. Starts after
   items 1 and 2 merge.
 - [x] 5. One deployment page: the operating commands (`dsl41 run`; `dsl41 engine stop`
   drains; `dsl41 reread` then `dsl41 update` reloads; `dsl41 query status`), the unit in

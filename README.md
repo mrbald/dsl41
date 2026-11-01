@@ -392,7 +392,7 @@ dsl41 serve -S ./run1/control.sock              # the same TUI over the web
 ```
 
 `run` executes the estate on the wall clock with real processes, a
-write-ahead journal, the calendar scheduler, and a control socket. Stop it
+durable store (DL-428), the calendar scheduler, and a control socket. Stop it
 with SIGINT or SIGTERM. `rehearse` drives the same engine under a virtual
 clock with scripted adapters, so a day of the estate plays in seconds.
 `sendevent` and `query` are clients of the control socket; every mutation
@@ -469,7 +469,7 @@ dsl41 runs ./run1 ./run2 --job extract       # multiple roots, one job
 dsl41 runs ./run1 --format json
 ```
 
-`runs` folds run history from a run root's journal, manifest, and spool.
+`runs` folds run history from a run root's store, configuration row, and spool (DL-428).
 It is offline only: no control socket, no live engine. `--format`
 is `table` (default), `json`, or `csv`. Every row carries its
 `catalog_hash`, so a caller can segment a series by watching that field
@@ -506,8 +506,8 @@ jobs with `add_file_processing_jobs` and deploys
 `python -m dsl41.file_processing_worker` with their own handler
 ([authoring §1.1](docs/authoring.md#11-add-file-processing-to-an-estate)).
 The handler and operator CLIs under `examples/` are samples. The README's
-exercise runs the example estate under the real engine and supervisor on one
-host, through a stop and an operator's rejection.
+exercise runs the example estate under the real engine on one host, through
+a stop and an operator's rejection (DL-424).
 
 ## Implementation memo
 
@@ -679,7 +679,7 @@ Runner:
   starts and follow-up plans, the snapshot, `read_journal`, `replay_inputs`
   and `read_backfill`.
 - `src/dsl41/runner_store.py`: the engine's only durable record: one SQLite
-  file per run root, `engine.db`, holding an append-only journal of
+  file per run root, `engine.db`, holding append-only
   canonical records, an append-only configuration history, snapshots and
   pruning, under one writer with synchronous commits; `MemoryStore` is its
   in-memory twin for rehearsal and tests.
@@ -712,8 +712,8 @@ Runner:
 - `src/dsl41/reload_update.py`: the 2.x update machine: the
   declared `UPDATE` statechart (IDLE, STOPPING, APPLIED, REFUSED), the
   admission that re-checks the revision, the running boxes and the stop set,
-  the tier that journals the intent, stops each job and applies, and the
-  application's per-job carry onto the oracle's state.
+  the tier that records the intent in the store, stops each job and applies,
+  and the application's per-job carry onto the oracle's state.
 - `src/dsl41/runner_update.py`: the engine's side of the update: the
   request as one step of the single writer, the candidate loaded from the
   plan's own bytes, the stops through the attempt tier, the dispatch filter,
@@ -730,7 +730,7 @@ Runner:
   kills and records.
 - `src/dsl41/runner_procid.py`: the durable-write sequence (fsync, rename,
   fsync) and process identity (boot id, pid plus start time, group kill)
-  shared by the wrapper and the supervisor.
+  shared by the wrapper and the engine. The supervisor tier is retired (DL-424).
 - `src/dsl41/runner_tui.py`: the Textual TUI, a thin client of the control
   socket. Every view comes from the idempotent queries; subscribe is only
   a wake-up signal.
@@ -741,8 +741,8 @@ Shared cores:
 - `src/dsl41/state_machine.py`: the statechart executor of
   `docs/statechart-engine.md`: `Statechart` declarations, the `Executor`,
   its errors under `StatechartError`, `well_formed`, and the hit recording
-  the test suite turns on. Standard library only, so the supervisor can load
-  it by path.
+  the test suite turns on. Standard library only. The supervisor use is
+  retired (DL-424).
 - `src/dsl41/machines.py`: the registry of declared state machines.
 - `src/dsl41/engine_charts.py`: the 2.x engine lifecycle and attempt
   statecharts: STARTING, RUNNING, DRAINING, STOPPED for the engine;
@@ -1111,7 +1111,7 @@ runbook's §7, in its order:
 git tag -a vX.Y.Z -m "X.Y.Z: one-line summary" \
   -m "State-machine version: unchanged (or from N to M)." \
   -m "Resume-safe: yes (or no)." \
-  -m "Wrapper spec and supervisor protocol: unchanged (or which changed)."
+  -m "Wrapper spec: unchanged (or which changed)."
 git push origin vX.Y.Z
 ```
 
