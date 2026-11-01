@@ -1,5 +1,9 @@
 # Access model — three tiers at the perimeter
 
+For architects tracing control-plane identity, authorization and policy reload.
+The architect track under [Documents](../README.md#documents) supplies the wider design.
+Deployment procedures are in [deploy.md](deploy.md).
+
 Status: **frozen (DL-231).** Design DL-146; rules from DL-147, DL-148,
 DL-149, DL-150, DL-151, DL-152, DL-158, DL-256, DL-272, DL-275, DL-311,
 DL-314, DL-421, DL-422 and DL-423. This
@@ -32,22 +36,17 @@ enum, not a flag matrix.
   `globals` shows runtime values, `subscribe` streams the store's wire
   records (control-protocol §5), and job logs can hold credentials. Grant it
   deliberately.
-- **ops**: read, plus every mutating socket verb. That is every
+- **ops**: read, plus every
   `sendevent` verb. Ops is destructive by design: `FORCE_STARTJOB` and
   `CHANGE_STATUS` are in it (DL-146). There is no fourth
   "break-glass" tier and no per-verb deny overlay. Either would be a
   second policy axis and a sparse flag matrix. Break-glass is a receipt
   category (§6), not an authorization dimension.
-- **adm**: ops, plus configuration. Every configuration surface is on the
-  filesystem: profiles, timezone maps, anchors, the role map, retention,
-  and `estate prune` and `reclaim`. So adm has **no socket verbs of its
-  own**. Over the wire, adm and ops admit the same set. The tier exists in
-  the map and the model for two reasons: a mapping can say what a
-  principal *is*, and a future adm-grade verb has a home.
+- **adm**: ops, plus `engine_stop` (DL-429) and `update` (DL-432).
+  Configuration files and retention settings also require filesystem
+  authority (§2). A socket tier does not grant filesystem access.
 
-An addition to this section (`update`, spec-reload, DL-427): adm now has
-socket verbs of its own, `engine_stop` (DL-429) and `update`, so the two
-tiers no longer admit the same set over the wire (§10).
+DL-427 defines update admission; DL-424 rules the excluded anchor, prune and reclaim surfaces.
 
 A **principal** is `(realm, name, groups)`. The realm names the identity
 source: `os` for a peer the kernel authenticates, anything else for a
@@ -68,32 +67,12 @@ Not guarded, by ruling:
   `control.sock` passes the same gate as every other client (§5). The
   gate knows no client identity, only the peer credential.
 - The supervisor socket and its access rules are retired (DL-424).
-- **The release train's service side is a door of its own** (DL-421). The
-  deployment identity that runs `dsl41 release` can neither read the run
-  root nor write under a release. It holds a sudoers grant: `dsl41 release
-  service *` as the service account, and `systemctl start` of the engine
-  unit as root (DL-412). Sudo and the service dispatcher decide what that
-  door admits, as the kernel decides the filesystem path above. The role
-  map, the tiers and §11 govern the guarded doors only. The dispatcher
-  accepts nine actions: prepare, requalify, receipt, check, changes, seal,
-  committed, holds and pins. Each has a fixed shape: release names,
-  request ids and a job name, which the service side checks; prepare's
-  source directory, which it reads only where the deployment identity
-  could; and a receipt's JSON body, which it stores as given. The grant's
-  service line reaches `release_service.service` and the checks it calls
-  on its arguments, so a change there changes the door with no sudoers
-  edit and takes the semantic review class; §12's obligation 12 pins the
-  action list. Revoking the door is removing the grant. It lands at the
-  next service call, not at a reload; an apply caught between calls stops
-  with its record kept, for an account that holds the grant to resume it,
-  or to roll it back once its period has opened. The identity's tier on
-  the wire is the map's, and §7 revokes it. The store inputs the apply's
-  hold and release requests produce carry the actor the gate wrote,
-  `os/<name>` (§3), under the request id the apply recorded for each; a
-  request the gate denies or the engine refuses produces none. The seal
-  claims `os/<service account>` under its own id. The release receipt,
-  once written, holds the ids of the holds it settled and of the seal
-  that committed. The root act, starting one unit, is outside this model.
+- The DL-412 and DL-421 release-service door resolves to DL-424.
+
+Service management and filesystem grants are OS responsibilities.
+The main config selects the access-map path at engine startup (DL-437).
+Its path is a host setting; changing it requires a restart. Reloading
+the contents at that path follows §7.
 
 ## 3. Local authentication: kernel peer credentials
 
@@ -119,20 +98,19 @@ kernel: `SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on macOS. The gate uses
 `claimed_actor` stays a wire field but carries no authority. When access
 is configured, the server **overwrites** the actor with the canonical
 authenticated spelling (`os/<name>`) before anything is fingerprinted or
-logged. The seal fingerprint contains the actor (`boundary.SealRequest`),
-so the invariant is precise: the fingerprint carries *identity*, never
+logged. Mutation fingerprints contain the actor (control-protocol §3),
+so the fingerprint carries *identity*, never
 *tier*. A role-map edit changes no fingerprint, so an admitted retry still
 matches its original attempt. Admission is a separate question. Every
 request, a retry included, is decided under the current policy (§5, §7).
-A principal whose tier dropped below ops is denied at the perimeter before
-the retry route is reached. A different authenticated principal that
-retries someone else's boundary mismatches by design. The existing
-re-read-and-re-decide path answers it. When access is not configured, the
-claim passes through untouched, byte for byte. One transition corner is
-named. Arming or disarming access **between** a seal attempt and its retry
-changes the actor spelling. The retry then mismatches the committed
-stand-in and takes the same re-read-and-re-decide path. This is an
-operational note for the arming runbook, not a wire change.
+A principal whose tier drops below the command's required tier is denied
+before the retry route. A different authenticated principal changes the
+fingerprint and gets `request_id_reused` while the id is retained.
+When access is not configured, the claim passes through untouched, byte
+for byte. Arming or disarming access between a mutation and its retry can
+change the actor spelling and cause the same collision. Retry lifetime
+is control-protocol §3's retention rule (DL-428).
+The seal-fingerprint rule resolves to DL-424.
 
 ## 4. The role map
 
@@ -192,7 +170,7 @@ the opened descriptor:
 One residual is named. The loader does not walk the ancestors ABOVE the
 parent. Place the map under a root-owned path, such as `/etc` or the
 estate owner's home, and not under a world-writable tree. The map lives
-outside the sealed estate artifacts: it is policy, not evidence.
+outside the estate inputs: it is policy, not captured job configuration.
 
 **Configured and absent are explicit states.** With no `access_map`
 configured, the zero-config model stands: socket `0600`, owner-only, and
@@ -260,8 +238,8 @@ Per request:
    denial carries no read header, like every answer sent before routing:
    the malformed line, the version refusal and the credential refusal.
    The header is stamped only on the answer to a request that passed
-   routing and the lineage proof (control-protocol §2, DL-148). A
-   perimeter denial is sent before either.
+   routing (control-protocol §2, DL-148, DL-424). A
+   perimeter denial is sent before routing.
 6. Admitted: stamp the authenticated principal and continue to the
    dispatcher unchanged.
 
@@ -396,15 +374,15 @@ loader read.
   process may have created it unsynced. Its first synced append is the
   arming receipt, so the name is durable before the engine serves, and
   arming is refused if that fsync fails. Each recovery, heal and append
-  resolves the name again. The run root has been owner-only since before
+  resolves the name again. The run root is owner-only before
   arming (§8), so anything planted at that name is the owner's own act. The one-file
   lifetime holds only while the owner keeps the name bound to the same
   regular file.
-- The journal is outside the period-model §12 lineage floor. No replay
-  reads it, and nothing in the lineage reaches it.
-- Which roots may be pruned, and when, is the same business decision as
-  every other retention choice (`deployment-runbook.md` §2a). The act is
-  adm.
+- Engine replay and store retention never read or prune this journal.
+  The period-model §12 lineage-floor rule resolves to DL-424.
+- Choosing when to delete a whole run root is a site retention decision.
+  It requires filesystem authority (§2), the adm semantic tier.
+  The deployment-runbook §2a retention procedure resolves to DL-424.
 
 ## 7. Reload and revocation
 
@@ -415,6 +393,13 @@ explicit: write a temp file, fsync it, rename it over the map, and send
 reload. A socket file alone proves nothing. A crashed run can leave one
 behind, and before the handler is armed the signal keeps its default
 action, which stops the process.
+
+`SIGHUP` reloads the armed access map's contents only. It does not reread
+the main config or apply estate changes. Main-config host settings,
+including the access-map path, apply at restart (DL-437).
+`dsl41 reread` and `dsl41 update` adopt job configuration through the
+[control protocol §2](control-protocol.md#2-transport-and-framing-frozen)
+(DL-432).
 
 Install is receipt-gated, in this order: validate the complete candidate,
 sync the `policy_loaded` receipt, then install the snapshot. A policy
@@ -550,40 +535,25 @@ for the tier it falls under. It is not a second classification axis.
 | `status`, `trace`, `explain`, `spec`, `deps`, `timers`, `plan`, `global`, `globals`, `subscribe` | — | read |
 | `sendevent` | the externally injectable verbs (control-protocol §3): `STARTJOB`, `FORCE_STARTJOB`, `KILLJOB`, `ON_ICE`/`OFF_ICE`, `ON_HOLD`/`OFF_HOLD`, `ON_NOEXEC`/`OFF_NOEXEC`, `DISARM` (DL-158), `RELEASE_RESOURCE` (DL-256), `SET_GLOBAL`, `CHANGE_STATUS`. The internal EventKinds (`STATUS`, `TIMER`, the alarms) have no wire door: the dispatcher refuses them like any unknown verb | ops |
 | `engine_stop` (`dsl41 engine stop`: drains the engine and ends its process) | — | adm |
-| `catalog` (`dsl41 reread`: the running catalog, its settings, rev and statuses) | — | read |
+| `catalog` (`dsl41 reread`: the running catalog, settings, rev, statuses and host settings; DL-437) | — | read |
 | `update` (`dsl41 update`: applies a stored plan, stopping the running jobs it changes or removes) | — | adm |
 
 CLI semantic tiers (the only enforcement is filesystem access, and these
 tiers enforce nothing, §2):
 
-- Read-shaped: `query *`, `host list`, `journal`,
-  `runs`, `verify`, offline `rehearse`, `release status` (it reads
-  `ACTIVE`, the releases, the apply record and the receipts, and sends
-  `query`; DL-421), and every pure-compiler verb, `estate diff` and
-  `estate build` among them (diff writes nothing; build writes its `--out`
-  directory and runs the author's modules as `build` does; DL-421,
-  DL-422).
+- Read-shaped: `query *`, `journal`, `runs`, offline `rehearse`, and
+  compiler commands (`lint`, `viz`, `equiv`, `decompile`, `build`, `nav`,
+  `folds`, `minify`, `resolve`). These can read local inputs or write output files;
+  their socket tier grants no filesystem rights (§2).
 - Ops: `sendevent`, `off-hold-all` (a sweep of `sendevent
-  OFF_HOLD` requests, so ops by composition; DL-311, DL-423), `host
-  activate`/`drain`/`evict`.
+  OFF_HOLD` requests, so ops by composition; DL-311, DL-423).
 - Adm: `run`, `engine stop` (the socket's `engine_stop`, the systemd unit's
   `ExecStop`), `reread` (it writes the plan under the run root's `plans/`;
   its socket verb is the read-tier `catalog`), `update` (the socket's
-  `update`), `serve`, `audit` (it writes attestations and registry
-  state), `seal` (it stages C2 files before the ops verb; staging may
-  later be split from committing), `estate prune`, `estate reclaim`,
-  `release prepare` and `release requalify` (each
-  stages or re-records the release that `ACTIVE` and the seal later
-  select, as `seal` stages C2 files; DL-421, DL-423), `release apply`,
-  `release resume` and `release rollback` (ops socket verbs, the seal and
-  the write of `ACTIVE`, so adm by composition; DL-421, DL-423), `estate
-  quiesce` (seal, audit and `supervise shutdown`, so adm by composition;
-  DL-421), and `release service` (the seal and its writes under
-  `ESTATE_RELEASES`, so adm by composition; it runs only as the service
-  account, and the deployment identity reaches it through the door of §2
-  alone; DL-421).
+  `update`, DL-432), and `serve` (it exposes the web service).
 
-The `supervise` CLI verbs and their tier rules are retired (DL-424).
+DL-421, DL-422 and DL-423's release/estate tier rules resolve to DL-424.
+The host, supervise, seal, audit and verify surfaces also resolve to DL-424.
 
 `ui` has no single tier. Its panes are reads and its console sends ops
 verbs, so each request meets the table above on its own.
@@ -600,7 +570,7 @@ courtesy. The server's refusal is the authority either way.
   principal. They are protocol seams, not loader seams.
 - `web-session-principal-v2` (§9): per-session web identity.
 - The supervisor socket and its deferred gate are retired (DL-424).
-- Splitting CLI `seal` staging (adm) from committing (ops) (§10).
+- The CLI `seal` staging/commit seam resolves to DL-424.
 
 ## 12. Test obligations
 
@@ -630,7 +600,7 @@ Tests are named `test_access_*`. These obligations hold (DL-146):
 9. Peer credential absent with access configured: the connection is
    refused.
 10. With access configured, the authenticated spelling replaces the claim
-    in every record stored by the engine and in the seal fingerprint. A
+    in every stored mutation and its fingerprint. A
     role-map edit changes no fingerprint: an ADMITTED retry survives reload, while
     admission itself is decided under the current policy (§3: a lost tier
     means a denied retry). Without access, actor bytes pass through
@@ -638,6 +608,4 @@ Tests are named `test_access_*`. These obligations hold (DL-146):
 11. `runner_access.py` is under CI's 100% branch-coverage gate
     (`[tool.coverage.report]`). A test exercises every refusal arm; no
     arm is only claimed.
-12. The door of §2: the actions §2 lists are exactly the ones
-    `release_service.service` accepts, as obligation 4 holds the socket
-    table to the dispatcher (DL-421).
+12. The DL-421 release-service action-list obligation resolves to DL-424.

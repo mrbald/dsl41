@@ -1,5 +1,9 @@
 # Control protocol — the engine's public contract
 
+For architects tracing control requests, replies and retry guarantees.
+The architect track under [Documents](../README.md#documents) supplies the wider design.
+Deployment procedures are in [deploy.md](deploy.md).
+
 Status: frozen at **v3** (DL-118). Entries that rule parts of it include
 DL-133, DL-135, DL-146, DL-147, DL-148, DL-150, DL-151, DL-158, DL-172,
 DL-189, DL-216, DL-217, DL-228, DL-233, DL-256, DL-264, DL-267, DL-272,
@@ -84,18 +88,16 @@ CLI's job.
   code. `error` is human-readable prose and may change. The other lines a
   server writes, the §5 store records and the gap marker, carry no
   `ok`.
-- Responses carry the **read header**: `baseline_id` and
-  `applied_index` (`docs/concurrency-model.md` §6). A revision means
-  nothing without the period it was read from (`baseline_id` names the
-  period, DL-117). A client that cannot name the period cannot be told it
-  holds a stale one. The header is stamped in one
-  place (DL-148): on the answer to a request that passed routing and the
-  §4 lineage proof. Everything else is headerless: an answer sent before
-  routing (the malformed line, the version refusal, the DL-146
-  perimeter's credential refusal and denial), the lineage refusal itself
-  (§4, PR-03), the internal-error answer of a handler that raised, and
-  every line `subscribe` writes on its own connection (§5). None of them
-  names a revision.
+- Routed responses carry the **read header**: `baseline_id` and
+  `applied_index` (`docs/concurrency-model.md` §6). `baseline_id` is the
+  identity stored at engine-store creation. It survives engine restarts
+  and configuration updates (DL-424, DL-428). `applied_index` is the
+  engine's applied admission index, not a configuration revision or the
+  SQLite journal seq. The header is stamped after routing
+  (DL-148). Headerless answers are the pre-routing malformed-line,
+  version, credential and access refusals, the internal-error answer of
+  a handler that raised, and every line `subscribe` writes (§5).
+  DL-117's period identity and PR-03's lineage proof under DL-133 resolve to DL-424.
 - A malformed line answers `{"ok": false, "code": "malformed_request",
   "error": "bad request: …"}`, and the stream stays in sync. That holds
   for invalid JSON **within** `LINE_LIMIT`. A line over the limit is a
@@ -134,7 +136,7 @@ then records `clean_shutdown` or `unclean_shutdown` and exits 0; its
 socket goes with it. A stop the loop does not take within the decision
 window answers `decision_timeout`.
 
-**An addition to this section (`update`, spec-reload, DL-427).**
+**Applying a configuration plan** (DL-427, DL-432).
 Applying a stored plan is `{"cmd": "update", "v": 3, "token", "stop_running",
 "wait", "request_id", "baseline_id", "expect": {"config": N},
 "claimed_actor"}`, the `dsl41 update` verb, at the `adm` tier
@@ -158,7 +160,10 @@ application: the plan committed with its outcome, `complete`, `rerun`,
 `hold` or `none`; `rerun` for a file watch taken up again; `none` for a
 job with no attempt to stop, whose held start then goes under the new
 definition). The engine waits for the application `update_window_s`
-seconds, which `status` reports (the stop grace and the decision window);
+seconds, which `status` reports: both stop graces from `EngineSettings`
+in `runner_config.py`, a fixed margin in `runner_control.py`, and
+`ControlServer.DECISION_TIMEOUT_S` in `runner_control.py`.
+Clients read `update_window_s`;
 past it the answer is `"pending": true`, and a client waits on the socket
 at least that long. An exact retry under the same `request_id` with the
 same token, consent, `expect`, baseline and actor is answered from the
@@ -171,6 +176,21 @@ the plan's added, changed and removed sets that the oracle starts waits as
 `update_in_progress`. A new `update` while the engine drains is refused
 with `engine_draining`; an exact retry of one admitted before is answered
 from its admission.
+
+`wait` changes only when the reply is sent; it is outside the retry
+fingerprint. Retry safety lasts while the store retains the admission
+(§3, DL-428). Unlike `sendevent` and `update`, `engine_stop` carries no
+`request_id`, `baseline_id`, `expect` or actor envelope (DL-429).
+
+`dsl41 reread` prepares the plan; it does not change the live engine.
+With the main config, `/etc/dsl41/dsl41.toml` or an absolute `--config`
+selects the engine and its inputs (DL-437). `reread` compiles the selected
+inputs together and captures the config, source mapping and input bytes.
+It prints changed jobs' sources. `update` applies those captured bytes
+without reading the sources or importing Python modules. Host settings
+(`as_machine`, `machine_policy`, `access_map`) take effect at restart;
+`reread` refuses a candidate whose host settings differ from the running
+engine's. The [deployment guide](deploy.md) defines the commands and lint policy.
 
 **No controller lease,** by choice (DL-41a). `sendevent` is multi-writer
 by AutoSys nature, and the engine's single-writer loop serializes every
@@ -186,9 +206,9 @@ under more than one outcome: `unknown_job` is a query error under
 carries `refused`, whatever its code.
 
 A rejected answer's `code` is the one its `decision` record stores
-(`docs/period-model.md` §2.3). An exact retry is answered from that
+(DL-428). An exact retry is answered from that
 record, so it answers the same code as the first answer. A `decision`
-record may store no code: one written before DL-272 has none. An answer
+record may store no code. An answer
 replayed from it omits the field, so a client must tolerate a missing
 `code`.
 
@@ -196,8 +216,8 @@ replayed from it omits the field, so a client must tolerate a missing
 (above), so a client that does not read it keeps working. A code is
 never renamed in place; a new code, or a retired one, is a decision-log
 entry. `transition_violation` is a retired code, and this engine never
-answers it (DL-353). In 2.0.0 the engine answers none of the 1.x election,
-routing-table and seal codes: `stale_epoch`, `lineage_lost`,
+answers it (DL-353). This engine answers none of the election,
+routing-table and seal codes DL-424 excludes: `stale_epoch`, `lineage_lost`,
 `period_sealing`, the host codes (`unknown_host`, `host_quarantined`,
 `host_evicted`, `host_already_evicted`, `force_needs_actor`,
 `host_not_quarantined`, `host_no_deadman`, `host_never_contacted`,
@@ -236,7 +256,7 @@ The client action says what a client does next:
 | `unknown_verb` | refused | `verb` names no `sendevent` verb | fix the request |
 | `unknown_status` | refused | `CHANGE_STATUS` names no status | fix the request |
 | `status_not_injectable` | refused | `CHANGE_STATUS` names a status an operator may not send (`QUE_WAIT`) | fix the request |
-| `baseline_mismatch` | refused | `baseline_id` is not this period's (DL-117) | re-read then decide |
+| `baseline_mismatch` | refused | `baseline_id` differs from the engine store's identity (DL-424, DL-428) | re-read then decide |
 | `expect_required` | refused | a mutation that addresses a row carries no `expect` | fix the request |
 | `request_id_reused` | refused | the `request_id` was admitted for a different command | fix the request |
 | `engine_shutting_down` | refused | the engine shut down before the input was admitted | wait |
@@ -253,8 +273,7 @@ The client action says what a client does next:
 | `would_stop_running` | refused | the plan changes or removes a job that is `RUNNING` or `STARTING`, and the request did not consent with `stop_running` | fix the request |
 | `update_in_progress` | refused | another update is stopping its jobs; `names` holds its token | wait |
 
-The last four rows are an addition to this table (`update`, spec-reload,
-DL-427). They are `update`'s refusals: each writes nothing, and the
+The last four rows are `update`'s refusals (DL-432): each writes nothing, and the
 answer's `names` lists the jobs or boxes it concerns. An `update` while the
 engine drains is refused with `engine_draining`, and nothing is logged.
 
@@ -289,16 +308,15 @@ tier or higher writes a receipt there, best effort (DL-146).
 | `CHANGE_STATUS` | `job`, `status`, optional int `exit_code` | injected as `STATUS`, keeping overwrite parity |
 
 Every string a payload carries must be a **Unicode scalar string**. An
-unpaired surrogate is refused at the door, because one admitted would
-leave the estate unsealable (PR-10a, period-model §3.2). The rule covers
-the strings a verb reads. A field the verb does not read is never copied,
-never recorded in the store, and cannot reach a seal (DL-228).
+unpaired surrogate is refused at the door (DL-228). The rule covers
+the strings a verb reads. A field the verb does not read is never copied
+or recorded in the store.
+PR-10a's seal obligation resolves to DL-424; scalar validation remains DL-228's rule.
 
-`DISARM` (DL-158) is the explicit disarm that period-model §10.4 names,
-recorded in the store. It clears the job's SEM-32 armed latch and does nothing else:
+`DISARM` (DL-158) clears the job's SEM-32 armed latch and does nothing else:
 no status move, no start, no wake, no timer touched. A target with no
 latch is an accepted no-op recorded in the store, the `OFF_HOLD` shape.
-The verb is legal at any time, not only before a seal. It drops only the latch
+The verb is legal at any time. It drops only the latch
 visible at application time: `applied` does not inhibit a later arm, and
 it cancels no start already out of the latch. The trace marker is
 `DISARM`. `SCHED_DISARM` stays the engine's own marker for
@@ -309,6 +327,8 @@ no-op. The revisions map cannot tell them apart, because it carries every
 revision the batch moved, the target's own timers included. A timer of
 the target's due at the DISARM's instant fires in the same batch and moves
 the target's revision whether or not the latch was set (DL-233).
+
+period-model §10.4's seal-time disarm resolves to DL-424.
 
 `RELEASE_RESOURCE` (DL-256) is the vendor's `sendevent -E RELEASE_RESOURCE
 -J job`. It is a job verb and takes the job verbs' whole contract: the
@@ -368,8 +388,8 @@ values on stderr before the first write, as the flags `--request-id`,
 them gives these answers:
 
 - the original was decided: the retry is answered from that decision and
-  takes no index. This holds in the same period, after the entity moved,
-  and after a same-period restart that rebuilt the index from the store;
+  takes no index. This holds after the entity moved and after a restart,
+  while the store retains the original decision (DL-428);
 - the original was never admitted: the retry is a fresh command at the
   pinned `expect`. It applies if the entity is still at that revision and
   is rejected if it moved;
@@ -378,8 +398,13 @@ them gives these answers:
   original: the envelope differs, and the answer is a collision carrying
   `original_decision`, not a replay.
 
-This recovery holds within one protocol version, and within the period
-whose decision index holds the id.
+This recovery holds within one protocol version and while the store
+retains the request's records (DL-428). Journal retention defaults to
+90 days. Pruning also depends on the snapshot and open work; it is not
+an exact expiry at 90 days. Pruning evicts the corresponding decisions
+from the retry index. A pruned id is free again, so a late resend can be
+admitted as new work. An unchanged baseline does not prove that the id
+is still retained. Do not use an expired retry to recover an unknown outcome.
 
 `baseline_id` must match the engine's. A revision read from another
 baseline names nothing here.
@@ -411,7 +436,7 @@ them apart from the answer alone:
 |---|---|---|---|
 | applied | `ok: true` | the oracle applied it | — |
 | **refused** | `ok: false`, `refused: true` | nothing admitted, no index consumed, **nothing in the store** (a perimeter denial attempts its own synced receipt first, and denies whether or not it lands, access-model §6) | this request never happened: fix and re-send. A refused retry says nothing about its original, which may have applied (DL-217) |
-| **rejected** | `ok: false`, `decision: "rejected"`, an `index` | a decision went against it — over this verb, always the precondition losing its race. Recorded in the store, and its batch's time observation applied | re-**read** and re-decide; the same envelope loses the same race, because `expect` is in it |
+| **rejected** | `ok: false`, `decision: "rejected"`, an `index` | the engine recorded a rejection, such as `precondition_failed` or `engine_draining`; its batch's time observation applied (DL-429) | re-read and re-decide; an exact retry returns the same decision |
 | **unknown** | `ok: false`, and neither marker | admission is uncertain: no decision arrived within the window below, or a handler raised | re-read. Retry **only** under the same `request_id` |
 
 So `refused: true` carries meaning by its absence. It appears on every
@@ -457,26 +482,14 @@ not known; this is a stated support limit, not a claim about the vendor.
 
 ## 4. Query verbs (frozen response shapes)
 
-**A read is refused when this engine cannot prove it leads the estate's
-LINEAGE** (DL-133; period-model §1.3). Every answer below carries the §2
-read header (headerless exceptions are listed there, DL-148): a baseline
-and a log position. Those are exactly the coordinates a
-displaced leader cannot speak for. So a `status` immediately after the
-anchor directory is deleted or replaced is refused rather than answered,
-and the refusal carries no header (PR-03).
+Queries are served by the engine holding the run root's `leader.lock`.
+There is no lineage or anchor proof at the read door (DL-424).
+DL-133, PR-03 and CM-14's lineage/read-fence clauses resolve to DL-424.
+The engine re-proves it holds the run root before it applies an input
+or writes a snapshot (DL-99, DL-100).
 
-Two proofs have two rules. Losing the RUN ROOT's proof is
-`concurrency-model.md` §7's rule, and it stops dispatch on the way into
-admission's first append rather than at this door. Refusing at this door
-would leave a displaced leader answering nothing and stopping never. It
-would also refuse the read a client composes its `expect` from, so the
-very mutation that stops the engine could never be sent (CM-14).
-
-A `subscribe` response is a read and is refused on the same rule
-(DL-148). It shares the lineage proof, not the header: no `subscribe`
-line (the ack, a refusal, a marker or a record) carries the read header
-(§2). A subscription is not a `concurrency-model.md` §6 revision-bearing
-read.
+No `subscribe` line carries the read header (§2, DL-148). A subscription
+is not a `concurrency-model.md` §6 revision-bearing read.
 
 Every query is a **pure projection** of (oracle, catalog, scheduler,
 spool paths). None changes protocol-visible engine state, and
@@ -486,8 +499,8 @@ task because `feed()` never yields, so a handler can never observe a
 half-applied event.
 
 Every §4 query that is answered carries the read header in addition to
-the fields listed below. The lineage refusal and the internal-error
-answer are headerless (§2, DL-148). These are the reads an
+the fields listed below. The internal-error
+answer is headerless (§2, DL-148). These are the reads an
 `expect` is composed from: per-job `state_rev` in `status`,
 and `global`/`globals` for a named global. Revision-bearing reads come
 from the one engine that holds the run root's `leader.lock` (DL-90,
@@ -536,8 +549,8 @@ why: `stop ladder running`, or `stop in progress` when that is all. Clients show
 update_stop)", "STOPPING (ladder failed: …)", "STARTING (held: stop
 ladder running)".
 
-An addition to this section (the process cookie, wrapper protocol
-`DSL41_COOKIE`, DL-431): the attempt of the job's current run that is `ENDED`
+Under the process-cookie rule (wrapper protocol `DSL41_COOKIE`, DL-431),
+the attempt of the job's current run that is `ENDED`
 while its stop ladder still runs carries `held: true` too, since it
 keeps the job's starts back. Its `note` is one the engine writes:
 `leaked: n, stopping` while the ladder stops the n processes the
@@ -553,14 +566,20 @@ run id, the outcome's kind and cause, its start and end, the signal or exit
 code the wrapper saw, the attempt limit when that is why it is held, and
 the run number.
 
-`spec_drift` is a lazy re-hash of the input files the run loaded, at most
-every 15 s. `null` means the server holds no fingerprint. There is
-deliberately no reload. The flag tells an operator that the running
-catalog differs from disk, and adopting the disk version takes a cold
-restart (DL-65).
+`spec_drift` is a lazy re-hash of the input files the engine loaded, at most
+every 15 s. `null` means the server holds no fingerprint (DL-65).
+An unreadable or deleted captured path counts as drift. It does not
+adopt disk changes. `dsl41 reread` and `dsl41 update` apply a captured
+candidate while the engine runs (DL-432, DL-437).
 
-An addition to this section (`update`, spec-reload, DL-427): the
-`status` answer carries `config_rev`, the configuration rev the engine
+A main-config restart resumes the last applied revision from the store;
+estate, lint and `engine.environment` edits stay pending (DL-437).
+The host settings named in §2 come from disk at restart. Invalid host
+settings refuse startup. A missing plan for an interrupted update
+refuses before any write or signal. Legacy invocations retain their
+startup checks; the [deployment guide](deploy.md) describes the boundary.
+
+The `status` answer carries `config_rev`, the configuration rev the engine
 runs, `update_window_s`, how long an `update` with `wait` waits for its
 application (§2), and, only while an update stops its jobs, `update`:
 `{"token", "stopping": [jobs]}`, the jobs whose attempts it still waits
@@ -569,9 +588,9 @@ its replacement `"after": "update_stop"`. Once an update applied, `spec`
 serves the applied plan's JIL, and `spec_drift` compares the files on disk
 with the applied plan's bytes, so it keeps its meaning: the running
 catalog differs from disk. Adopting the files on disk while the engine
-runs is `dsl41 reread` and `dsl41 update`.
+runs follows §2 (DL-427, DL-432).
 
-An addition to this section (the restart, DL-433): the `status` answer
+The `status` answer (DL-433)
 carries `engine`, the engine lifecycle's state: `STARTING` while a
 restart catches up, then `RUNNING`, `DRAINING`. The control socket is
 bound before the catch-up, so every verb is served from the restart's
@@ -583,17 +602,19 @@ unchanged.
 
 ### `catalog`
 
-An addition to this section (`update`, spec-reload, DL-427), the read
-`dsl41 reread` diffs a candidate against, at the `read` tier:
+This is the read `dsl41 reread` diffs a candidate against, at the `read`
+tier (DL-432):
 `{"ok": true, "catalog": {…}, "catalog_hash", "settings": {…},
 "revision": int, "status": {<job>: <status>}, "runs": {<job>: int},
-"tombstones": {<job>: [flags]}}`. `catalog` is the running catalog's
+"tombstones": {<job>: [flags]}, "launch": {…}}`. `catalog` is the running catalog's
 canonical JSON value, `catalog_hash` its hash, `settings` the estate
 settings it runs under (`timezone`, `timezone_aliases`, `semantics`,
 `external_instances`), `revision` the configuration rev, `status` and
 `runs` each row's status and run number, and `tombstones` the flags each
 removed job's tombstone kept (`ON_HOLD`, `ON_ICE`, `ON_NOEXEC`), for the
-removed names that kept any.
+removed names that kept any. `launch` reports the main-config engine location
+and host settings (`run_root`, `as_machine`, `machine_policy`, `access_map`), or an empty object for a
+legacy engine (DL-437).
 
 ### `trace [since]`
 
@@ -601,7 +622,7 @@ removed names that kept any.
 cause}]}`. `seq` is a 1-based position in the oracle's trace; `since` is
 exclusive.
 
-An addition to this section (`update`, spec-reload, DL-427): the `trace`
+Under DL-432, the `trace`
 answer may hold lines that name no job (`"job": ""`) and move no state.
 `RESTART` opens the trace of an engine restarted from a snapshot (the trace
 covers what follows it). `CONFIG` marks where an update's application stands
@@ -689,8 +710,9 @@ Delivery guarantees:
   as "covered" though it was never backfilled.
 - every other record kind carries no `seq` and is **at-least-once**
   inside the backfill race window. These are `dispatch`, `drop` and
-  `decision` on the live stream, plus `segment` and `preflight`, which a
-  backfill can carry but no live subscription meets. `decision` carries its attempt's number under
+  `decision` on the live stream, plus `segment` on configuration
+  application (DL-432). A backfill can also carry `preflight`.
+  `decision` carries its admission index under
   `index` rather than `seq` for this reason: two records sharing one
   cursor value would leave the second undeliverable to a resuming
   subscriber (DL-89).
@@ -709,17 +731,16 @@ first. `since` is an index, the cut is positional, and the seam keys on
 the presence of `seq`, so the exactly-once and at-least-once guarantees
 above hold over the whole retained store.
 
-**The `segment` record in 2.0.0** is the configuration the engine
-applied (DL-424): `{"rec": "segment", "rev", "at", "catalog_hash",
+**The `segment` record** is the configuration the engine
+applied (DL-428): `{"rec": "segment", "rev", "at", "catalog_hash",
 "runtime_hash", "state_machine_version", "baseline_id",
-"clock_domain"}`. `rev` is the configuration rev and is new in 2.0.0.
-The 1.x period fields are retired, and a 2.0.0 engine sends none of
-them: `segment_no`, `estate_id`, `period_id`, `catalog_hash_version`,
+"clock_domain"}`. `rev` is the configuration rev.
+A segment carries none of the period fields DL-428 retires:
+`segment_no`, `estate_id`, `period_id`, `catalog_hash_version`,
 `source_bundle_hash`, `first_index`, `opens_from_seal`, `reclaimed` and
 `trust_unaudited`.
 
-An addition to this section (`update`, spec-reload, DL-427): an
-update's application is a new configuration rev, and the stream carries
+An update's application is a new configuration rev (DL-432), and the stream carries
 its `segment`, in the same shape, where the engine applied it: the
 records before it ran under the rev before. The update's other records
 (its intent while it stops) are not on the wire. Each `dispatch` carries
@@ -728,16 +749,16 @@ attempt's own, so a run's replacement after an update names the next rev.
 A run's rev is the rev in force where the run opened. Off the wire, beside
 the run history DL-428's snapshot keeps, each retained run carries it as
 `rev`, required: a snapshot whose retained run lacks it does not read, and
-the state version is 26. `dsl41 runs` reads every run under that rev and
+the store must use the binary's state version. `dsl41 runs` reads every run under that rev and
 never under a dispatch's.
 
-**The fields 2.0.0 adds** (DL-426), each additive, so a v3 client that
+**Attempt and recovery fields** (DL-426), each additive, so a v3 client that
 does not read them keeps working (§2):
 
 - `dispatch` carries `after` on a replacement attempt: the cause of the
   stop the attempt it replaces took (`engine_stop`, `lifeline`,
   `unobservable`, …). A run's first attempt has none.
-- An addition (the restart, DL-433): an `unobservable` outcome carries
+- An `unobservable` outcome (DL-433) carries
   cause `engine_death` when the engine that ran the attempt died and no
   record came, and the attempt took no stop first; a replacement of it
   carries `"after": "engine_death"`. It carries cause `quarantined`, with
@@ -779,12 +800,12 @@ does not read them keeps working (§2):
   completion (`"event": "done"`, with `step` and `seq`). A restart that
   finds such an attempt open finishes its ladder before any replacement
   of it is launched. Neither record is on the stream (DL-426).
-- An addition (the process cookie, DL-431): a snapshot's open attempt that is
-  closing carries an optional `outcome`, the kind of its committed
+- A snapshot's open attempt that is closing (DL-431)
+  carries an optional `outcome`, the kind of its committed
   outcome (`natural`, `stopped`, …), in the snapshot DL-428 defines. A
   restart leaves a `natural` one's processes running under
   `process-leak=leak` and finishes every other one's stop. A snapshot
-  written before the key has none, and its closing attempt is finished
+  without the key has its closing attempt finished
   as a stop.
 
 **A cursor below the earliest retained record gets a gap marker.** The
@@ -804,8 +825,8 @@ reads as 0. So on a store that still retains from index 1 no cursor is
 ever a gap, but on a pruned store `since: 0` is one. A client that does
 not read the marker sees a record it does not recognise and skips it, as
 it does with any record kind it has no case for. The marker is a
-response like any other, so the leader re-proves the lineage in front of
-it (PR-03).
+stream marker and carries no read header (§2). PR-03's lineage proof
+resolves to DL-424.
 
 **The backfill can refuse on the stream** (DL-135). It reads records
 this subscription did not see appended, so it can meet one it cannot
