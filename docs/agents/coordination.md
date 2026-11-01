@@ -232,6 +232,9 @@ scripts/peer.sh "${PEER_MODEL:?set from role binding}" brief.md "$build_dir/buil
 
 Run from the checkout or worktree the slice owns.
 The brief names the allowed paths and the gates to run, as for a peer.
+A slice that runs containers passes `--sandbox containers` instead: workspace writes plus
+network, so podman, docker and uv work. Inside it, set `UV_CACHE_DIR` under `/tmp`. Apple
+`container` stays refused; use podman for a Linux cell.
 Resume the same implementer for rework. If the sandbox blocks a required gate,
 record the blocked command and request the needed access through the client's
 permission controls.
