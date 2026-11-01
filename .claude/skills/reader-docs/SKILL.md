@@ -95,11 +95,9 @@ Visuals and state machines (§6, §7)
   `state-machines.md` as a chart's reference. No hand-copied rows. A chart
   without a view gets a renderer change first, as its own slice.
 
-Cross-vendor drafting: DL-405 lets Sol (`codex exec -m gpt-6.1-sol`, xhigh,
-`--sandbox workspace-write`) write the draft of a reader page from the brief
-and the sheet, one page per run, with this checklist in its prompt. The
-top level rules on the voice, and the diff gets the same review as any
-other.
+The engineer may draft a reader page from the brief and fact sheet, one page
+per run, with this checklist in its prompt (DL-405). The operator supplies the
+engineer's binding. The boss rules on the voice; the reviewer checks the diff.
 
 ## Step 3: reconciliation
 
@@ -110,9 +108,10 @@ and line. The page changes neither a rule nor the code.
 
 ## Step 4: verification and review
 
-Stage the new or changed page first (`git add` the path): the decision
-index renderer and its test select tracked paths only, so a new untracked page
-leaves `docs/decision-index.md` stale and CI red. Then run the full local
+A new page must be visible to Git first: before dispatch the operator
+creates it empty and marks it with `git add -N PATH`. The decision index renderer and its test
+select tracked paths only, so a new untracked page leaves
+`docs/decision-index.md` stale and CI red. Then run the applicable local
 gates listed under "Verify a change" in `docs/agent-workflow.md`, starting
 with `scripts/arch_check.py` (test names in backticks, the source map,
 links) and `scripts/render_decision_index.py`. The tests most likely to trip on a
@@ -121,7 +120,7 @@ the nightbank example and deploy tests, the architecture and block-card
 tests, the lifecycle view and the simulation register. Report each command
 with its exit status.
 
-Then one Opus reviewer, read-only, that writes its findings to a scratch
+Then the reviewer seat, read-only, writes its findings to a scratch
 file and reports a ranked table. Its hunt order: false claims against the
 code and the fact sheet; a fact the reader needs that is missing; a rule
 restated instead of linked; history that survived; then the checklist above,
@@ -129,8 +128,10 @@ and last, broken links and anchors. The reviewer reads the page once more as
 the brief's reader and says whether they could do the task.
 
 A page that touches instruction policy, or restates how a frozen contract
-is used, also gets the Astra pass the repository's "Self-review" requires.
-Rule on every finding before the commit; three rounds at most.
+is used, is semantic class under `docs/agents/review.md` "Required passes".
+That section sets additional passes and fallbacks. Rule on every finding
+before commit; follow `docs/agents/review.md` "Review rounds" for the caps
+and escalation.
 
 ## Step 5: delivery
 

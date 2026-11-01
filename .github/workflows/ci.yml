@@ -16,7 +16,8 @@
 # matches pyproject.toml instead of re-resolving.
 #
 # `classify` decides whether a change can affect anything but documentation:
-# a change whose every path is README.md, docs/**/*.md or examples/**/*.md is
+# a change whose every path is README.md, CLAUDE.md, docs/**/*.md,
+# examples/**/*.md or .claude/skills/**/*.md (DL-434) is
 # docs-only, and the suite jobs skip; `docs` runs the docs gate of
 # scripts/prepush_checks.py on every change. A pull request compares with
 # its base branch, a branch push with the commit it replaced; a tag push, a

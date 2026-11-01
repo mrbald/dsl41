@@ -80,19 +80,20 @@ Code fixes are separate slices with their own review.
 
 ## Step 4: verification
 
-Run the full local gates listed under "Verify a change" in
+Run the applicable local gates listed under "Verify a change" in
 `docs/agent-workflow.md`, starting with `scripts/arch_check.py`: it fails
 on a `test_...` name in backticks that no test defines, which is the
 gate a rewritten document is most likely to trip. Report each command with
 its exit status.
 
-Then a fresh adversarial review of the new text against the code, by an
-Opus reviewer that writes its findings to a scratch file and reports a
+Then a fresh adversarial review of the new text against the code, by the
+reviewer seat, which writes its findings to a scratch file and reports a
 ranked table. It hunts, in this order: false claims against the code,
 present facts dropped, history that survived, broken links or section
-references. A frozen contract also gets the Astra pass CLAUDE.md
-"Self-review" requires for the semantic class. Rule on
-every finding before the commit.
+references. A frozen contract is semantic class under `docs/agents/review.md`
+"Required passes", which sets additional passes and fallbacks. Rule on
+every finding before commit; follow `docs/agents/review.md` "Review rounds"
+for the caps and escalation.
 
 ## Step 5: delivery and stamp
 

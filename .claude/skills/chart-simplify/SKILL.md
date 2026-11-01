@@ -13,7 +13,7 @@ it worse. Run it on any chart in `src/dsl41/machines.py`, whole or as a pass
 when a slice touches one.
 
 Words used below: a *T item* is a decision the engineer made that the brief
-left open, listed for the top level's ruling; *the gate* is the full suite under
+left open, listed for the boss's ruling; *the gate* is the full suite under
 CI's coverage form, the transition gate, the chart's replay, ruff and mypy, run
 with no other agent running coverage in the checkout.
 
@@ -40,13 +40,13 @@ with no other agent running coverage in the checkout.
   the engine itself does not raise, so a chart with another hook needs its own
   rejection of a marked row before the step relies on it.
 - The version constant moves by DL-235 alone.
-- Review class by CLAUDE.md: semantic when rows, events, a frozen rule or the
-  oracle's writes change (one Opus reviewer and one Astra pass); otherwise one
-  Opus reviewer (DL-370 was the second kind). CLAUDE.md "Self-review" sets the
-  classes and the fallback. Each reviewer attacks with
+- Review class: semantic when rows, events, a frozen rule or the
+  oracle's writes change. `docs/agents/review.md` "Required passes" sets the required
+  passes and fallbacks; `docs/agents/coordination.md` supplies the bindings. Each reviewer attacks with
   constructed input sequences, or with random fact vectors over the guards when
   only guard bodies changed, and a differential run of HEAD against the tree;
-  the reviewer that raised a finding confirms its fix; three rounds at most.
+  the raiser or its named stand-in confirms a fix. Follow `docs/agents/review.md`
+  "Review rounds" for the caps and escalation.
 - Merging is the owner's call, or a standing owner rule that names the scope.
   This skill never adds a scope.
 
@@ -78,9 +78,8 @@ other state is still state if an interval exists where the derivation does not
 hold (the holding region: a terminal job is `reserved` until settled).
 
 Rank the findings by harm to readability and write the steps as a table with
-size and what each reopens. Probe the structural rulings with Codex (Astra,
-`gpt-6-astra`) before the
-first brief; on the `job` chart the probe reversed two of four.
+size and what each reopens. Take the structural rulings to the boss before
+the first implementation brief; the boss may consult the advisor.
 
 Which steps apply: 1, 5, 6 and 7 fit any chart with rows and guards; 2 and 8
 need completion rows and entry actions; 3 needs a payload that can carry a fact
@@ -166,7 +165,7 @@ whose rows carry no actions (`runtime_assembly`) gets 5 and the view only.
 
 Brief with goal, non-goals, the invariants above, the conditions as STOP
 clauses, the exact acceptance commands, a 25-line report. Engineer builds; the
-top level reads the diff and rules on the T items; the reviews of §0 with
+boss rules on the T items; the reviewer reads the diff and performs the reviews of §0 with
 probes aimed at the step's own risk (the cell table under the id mapping, the
 first-read order of lazy facts, the busy cells); fixes confirmed by their
 raiser; the gate; the entry appended and the index re-rendered; commit by
