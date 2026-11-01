@@ -90,22 +90,48 @@ All ten compiler phases in DL-03 are implemented; their order remains normative.
   `.claude/skills/chart-simplify/SKILL.md`; Codex discovers it through
   `.agents/skills/chart-simplify`.
 
-## Boss and peer work
+## Operating model (owner 2026-11-01; review it on 2026-11-08)
 
-The boss uses the configured top-level model and effort. A Claude boss
-runs Opus 5.5 at `high` (DL-262); a Codex boss runs at the setting in
-`.codex/config.toml`.
-It sends a single hard ruling to Fable in a read-only advisor role,
-instead of raising the whole session (DL-262, DL-395).
-Sol (`gpt-6.1-sol`) at `xhigh`, run by `codex exec` in the workspace-write
-sandbox, builds bounded, low-risk edge code with a settled design. Its
-observed strength is reusing established designs and libraries. Opus keeps
-design-sensitive and core work (DL-395).
-The boss chooses the model, effort, and delegation for other work.
-Use both vendors for the highest-impact exploration, planning, and review.
-For review, that is Opus and Astra in the semantic class under
-"Self-review". Fable only advises; it reviews nothing.
-Exchange independent findings before reconciling material disagreements.
+Six roles, each bound to a model; the binding can change, the authority cannot.
+
+| Role | Authority | Binding |
+| --- | --- | --- |
+| boss | project definition of done, scope, allocation, binding rulings, release decisions | Astra (`scripts/peer.sh gpt-6-astra`, high; xhigh for one named hard question) |
+| advisor | one bounded hard question, recommendation only | Fable, xhigh, read-only; rarely |
+| operator | the interactive Claude Code session: briefs, dispatch, receipts, records, the train, the Linux-cell gate; applies rulings, never invents them | Opus, medium |
+| builder | a settled approach; routine details | Sol (`peer.sh gpt-6.1-sol --sandbox workspace-write`, medium), in the slice worktree |
+| engineer | settled behaviour where the method needs judgment | Sol, xhigh, in the slice worktree |
+| reviewer | independent acceptance against the definition of done: code, tests, evidence provenance | Opus, high, fresh context, read-only |
+
+Routes: the owner talks to the operator; the operator takes definitions, exceptions and release
+decisions to the boss and brings back the ruling unchanged; the boss may ask the advisor; the
+implementer hands a candidate and its evidence to the reviewer; the reviewer's verdict
+(accepted, rework, blocked) goes to the operator, which routes rework to the same implementer
+and accepted work to the train. One findings queue per change; only the raiser or a named
+stand-in closes a finding. Builder and engineer are alternatives, never stages.
+
+Second round only on out-of-BAU steering: a ruling that changes a spec, a frozen contract,
+scope or policy; a release decision; a binding change; a destructive or outward action. The
+seat gets one "are you sure: review your own answer adversarially" turn before anything acts.
+Dispatch, rework routing and receipts get none.
+
+The operator does not read the full diff; the reviewer owns conformance to the spec. The
+operator reads the status, the diffstat, the implementer's judgment calls and what it could
+not honour, and the hunks a ruling or a finding names. Hooks are deterministic checks and
+review nothing. A sealed area's later findings are one-line Known bugs entries, no rework; a
+sealed finding that contradicts release acceptance goes to the owner.
+
+Fallbacks: Opus unavailable as reviewer, a fresh Astra at high stands in and the record says
+it is same-vendor acceptance; Fable unavailable, a fresh Astra at xhigh advises and the record
+says so; no qualified reviewer, acceptance waits and other work continues. No timeout is a
+verdict. Judge the bindings by accepted work, escaped defects, rework and elapsed time, not by
+benchmark charts.
+
+Release: accepted slices alone do not finish the project. The reviewer checks the release
+candidate against the project's definition of done and the boss decides from that verdict.
+The current release target (Monday 2026-11-02) is one box: restart, reload and drain as built
+and tested. Active/standby on HA Oracle and the 200-job estate are the next milestone.
+
 Use `docs/agent-workflow.md` for CLI recipes and review handoffs.
 
 ## Git workflow
@@ -133,13 +159,14 @@ Run an adversarial review before committing a change in one of these
 classes. The class sets the reviewers, whoever built the change (DL-262,
 DL-395). A reviewer-grade model is Opus 5.5 or Astra (`gpt-6-astra`), at the
 round efforts DL-262 sets.
-- Semantic class, at any size: one Opus reviewer subagent and one Astra
-  pass. It covers a change to what a compiled or run estate does: lowering,
+- Semantic class, at any size: one Opus reviewer (independent acceptance; the
+  implementer is Codex, so the vendors already differ) and, where the boss asks for
+  it, one Astra pass. It covers a change to what a compiled or run estate does: lowering,
   the oracle, the runner, the scheduler, or calendars. It also covers any
   version constant, any rule `docs/` freezes, and instruction policy. The
   frozen rules are the runner contracts listed under "Read for the task"
   and the rules DL-225 names.
-- Any other multi-file change: one Opus reviewer subagent. Examples are a
+- Any other multi-file change: one Opus reviewer. Examples are a
   refactor that keeps behavior, tests, docs, tooling, and the browser or
   TUI front ends.
 - In addition, slices built apart and integrated together get one Astra
@@ -208,10 +235,9 @@ Four local amendments override it where they differ (DL-206):
   not fully-forced work.
 - Frozen contracts are a named review trigger, with semantics. The
   contracts are listed under "Read for the task".
-- The orchestrator does NOT re-run the executor's gates here. It reads the
-  diff against the spec and rules on disagreements. The prior's misleads
-  clause allows re-running after a tier drop; this project does not, and
-  answers low-tier report risk by not dropping the tier that far.
+- The operator does NOT re-run the executor's gates and does not read the
+  full diff; the reviewer owns conformance to the spec ("Operating model").
+  The operator rules on disagreements and reads the hunks a ruling names.
 - The prior's exceptions never waive this file's gates: the full suite and
   the adversarial review above are required whatever it would
   allow skipping (see "Python and verification").
