@@ -1,3 +1,38 @@
+# Release 2026-11-02: one box
+
+The target is one box: restart, reload and drain as built and tested. Builds run in
+parallel; merges go through the train in the order below. Slices run in parallel only on
+disjoint files.
+
+- [x] Restart (DL-433).
+- [ ] 1. Nav verb: rebase the built `v2-nav` branch onto the `v2` tip and train it. Edits
+  `README.md` (the source map names the new modules).
+- [ ] 2. Backward clock step: the engine admits at `max(wall, frontier)` and records the
+  step; one review. Edits the runner and its sections of `docs/runner-design.md`.
+- [ ] 3. Terms sweep of `docs/control-protocol.md` and `docs/access-model.md`: replace
+  retired terms (the journal where DL-428 replaced it with the store, the old supervisor
+  model); no rule changes. Builds now.
+- [ ] 4. Terms sweep of `docs/runner-design.md` and `README.md`, as item 3. Starts after
+  items 1 and 2 merge.
+- [ ] 5. One deployment page: the operating commands (`dsl41 run`; `dsl41 engine stop`
+  drains; `dsl41 reread` then `dsl41 update` reloads; `dsl41 query status`), the unit in
+  `examples/nightbank/deploy/dsl41-engine.service`, and the TUI's missing drain view.
+  Builds now.
+- [ ] 6. Merge `v2` into `main`.
+
+The sweeps edit frozen contracts, so they are semantic class: one reviewer of the other
+vendor than the implementer. Review items 3 and 4 in one batch each.
+
+Deferred to the next milestone, active/standby on HA Oracle and the 200-job estate:
+
+- The control and TUI re-cut. Gap: the TUI does not show the drain, its deadline, the
+  stored plan or the interruption evidence. Workaround: `dsl41 query status` and the
+  `dsl41 engine stop` exit status.
+- Short rewrites of `docs/runner-design.md`, `docs/control-protocol.md` and
+  `docs/access-model.md`, the second deployment page and the nav verb page. Gap: the
+  contracts are long and keep history. Workaround: items 3 and 4 remove the retired terms
+  without changing a rule.
+
 # Next work
 
 - [ ] After the file-processing building block: improve the Python estate interface

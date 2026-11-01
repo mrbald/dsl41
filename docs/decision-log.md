@@ -25358,3 +25358,13 @@ relitigate an entry; append a new one.
   restart; a PDEATHSIG wrapper; quarantine of a KILL survivor, a missing record or a failed reading.
   Opus two rounds, Astra four (two on a CI race fix built by Sol); round-two findings are known bugs
   in `TODO.md` under the owner's seal.
+
+- DL-434 `CLAUDE.md` and the skill bodies count as docs in the docs-only classification
+  (2026-11-01; owner ruling; scripts/prepush_checks.py, .github/workflows/ci.yml,
+  docs/agents/coordination.md, docs/agent-workflow.md)
+  THE RULE. A change is docs-only when every changed path is `README.md`, `CLAUDE.md`, or a
+  Markdown file under `docs/`, `examples/` or `.claude/skills/`. DL-415 otherwise stands:
+  `AGENTS.md`, `.agents/` and `.claude/settings.json` count as code.
+  THE REASON. No code executes these files. `tests/test_docs_hygiene.py` and
+  `scripts/arch_check.py` read them, and the docs gate runs both, plus every test file that
+  names a changed path. An instruction-only change ran the whole suite for nothing.

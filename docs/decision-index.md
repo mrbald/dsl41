@@ -217,7 +217,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-203 | the lint rule set is named in pyproject rather than inherited from ruff's default |  |
 | DL-204 | the explore page keeps its controls in two compact header rows |  |
 | DL-205 | ss14 B2 row 3 pins its instant instead of racing it `test_b2_a_restarted_supervisor_cannot_prove_the_seal` asserted the ss8 reconciliation refusal over a window... | [docs/authoring.md](authoring.md) |
-| DL-206 | the hats block holds the core's wiring stanza and nothing else |  |
+| DL-206 | the hats block holds the core's wiring stanza and nothing else | [docs/agents/coordination.md](agents/coordination.md) |
 | DL-207 | `minify` emits a de-identified estate, and an unclassified attribute stops it |  |
 | DL-208 | `minify` takes `--properties` like every other catalog-consuming verb |  |
 | DL-209 | Simulation closure by classification: the coverage register (S1 of five) | [docs/live-instance-runbook.md](live-instance-runbook.md) |
@@ -236,7 +236,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-222 | Actions are pinned to commits and the `pypi` environment requires the owner's approval; a tag ruleset and `skip-existing` are declined |  |
 | DL-223 | The service drill and the release rehearsal ran and pass on main; DL-218's NOT RUN is retired |  |
 | DL-224 | `run --resume` refuses a root its anchor does not name; DL-219's open item closes | [docs/runner-design.md](runner-design.md) |
-| DL-225 | Specification review: one document per pass, present state only, reconciled with the code; per-document stamps and an advisory gate line | [docs/agent-workflow.md](agent-workflow.md), [docs/writing.md](writing.md) |
+| DL-225 | Specification review: one document per pass, present state only, reconciled with the code; per-document stamps and an advisory gate line | [docs/agent-workflow.md](agent-workflow.md), [docs/agents/review.md](agents/review.md), [docs/writing.md](writing.md) |
 | DL-226 | Resume kill of a surviving command group is a verified-leader group kill, and E8's TERMINATED pin is vendor-cited | [docs/blocks/attempts.md](blocks/attempts.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/runner-design.md](runner-design.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
 | DL-227 | protocol-evolution reconciliation: the absent-version rule is restated per row, and three readers get the refusals the matrix promises | [docs/protocol-evolution.md](protocol-evolution.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
 | DL-228 | control-protocol reconciliation: the DISARM audit distinction reads the target's revision, the scalar-string rule covers the fields a verb reads, and a... | [docs/control-protocol.md](control-protocol.md) |
@@ -273,7 +273,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-259 | WEKR selects a week of the year; the wekr-first-week switch places week 1; Q11 closed | [docs/autosys-semantics.md](autosys-semantics.md), [docs/citation-index.md](citation-index.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
 | DL-260 | Start times follow the vendor's DST rules by default; fold=0 stays selectable as `dst-start-times=fold0` | [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/scheduler.md](blocks/scheduler.md), [docs/ir-design.md](ir-design.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
 | DL-261 | Production paths run under the pinned switches |  |
-| DL-262 | Review by change class, single-ruling escalation, and narrower peer passes | [docs/agent-workflow.md](agent-workflow.md) |
+| DL-262 | Review by change class, single-ruling escalation, and narrower peer passes | [docs/agents/coordination.md](agents/coordination.md), [docs/agents/review.md](agents/review.md) |
 | DL-263 | Anchor and claim reads are strict | [docs/protocol-evolution.md](protocol-evolution.md), [docs/risk-map.md](risk-map.md) |
 | DL-264 | CHANGE_STATUS refuses a status the oracle cannot inject | [docs/blocks/capacity.md](blocks/capacity.md), [docs/blocks/job-lifecycle.md](blocks/job-lifecycle.md), [docs/control-protocol.md](control-protocol.md), [docs/risk-map.md](risk-map.md), [docs/state-machines.md](state-machines.md) |
 | DL-265 | Subprocess coverage is measured and reported | [README.md](../README.md), [docs/agent-workflow.md](agent-workflow.md), [docs/risk-map.md](risk-map.md) |
@@ -405,7 +405,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-392 | Blocking supervisor requests have one monotonic deadline |  |
 | DL-393 | TUI recovery pins the running Python launch path | [docs/cli-tui-qualification.md](cli-tui-qualification.md) |
 | DL-394 | Forced maintenance waits for each whole command group | [docs/authoring.md](authoring.md) |
-| DL-395 | Opus reviews multi-file changes, Astra joins semantic and integration ones, Sol builds bounded edge code, and Fable only advises | [docs/agent-workflow.md](agent-workflow.md) |
+| DL-395 | Opus reviews multi-file changes, Astra joins semantic and integration ones, Sol builds bounded edge code, and Fable only advises | [docs/agents/review.md](agents/review.md) |
 | DL-396 | A detached launch names how it gets its supervisor: attach or spawn | [docs/runner-design.md](runner-design.md) |
 | DL-397 | Offline manufacturing consumes bound release exports |  |
 | DL-398 | One verb stops a shape 1 estate: `dsl41 estate quiesce` |  |
@@ -415,7 +415,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-402 | The example launcher passes `--supervisor attach` only to a `dsl41` whose `run` accepts it; the supervisor logs the busctl read of its exit policy |  |
 | DL-403 | A `setsid` escapee is a stated limit of process-group containment, not a hardening to build | [docs/authoring.md](authoring.md), [docs/runner-design.md](runner-design.md) |
 | DL-404 | Recoverable file processing is a building block of two ordinary jobs, a contract and an operator interface, qualified through slice 3 | [README.md](../README.md) |
-| DL-405 | A human-facing document is written for one of five readers under docs/writing.md; the reader-docs skill is the procedure | [README.md](../README.md), [docs/writing.md](writing.md) |
+| DL-405 | A human-facing document is written for one of five readers under docs/writing.md; the reader-docs skill is the procedure | [README.md](../README.md), [docs/agents/coordination.md](agents/coordination.md), [docs/writing.md](writing.md) |
 | DL-406 | docs/writing.md states the project's own reader rules and names no standard; eight rules are added | [docs/writing.md](writing.md) |
 | DL-407 | The estate manifest, `estate.toml`, is the application's one declaration of its estate inputs; `dsl41 estate args` is the one builder of the verbs' arguments | [docs/authoring.md](authoring.md) |
 | DL-408 | The site package is the infrastructure and keeps fixed what a JIL release runs within; a JIL release is the application's and travels on its own train through... | [docs/writing.md](writing.md) |
@@ -440,7 +440,8 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-427 | The update machine, its admission and its application, unwired; one update in flight | [docs/access-model.md](access-model.md), [docs/blocks/update.md](blocks/update.md), [docs/control-protocol.md](control-protocol.md) |
 | DL-428 | The store replaces the journal; `run` resumes by default; the segment record is cut | [docs/control-protocol.md](control-protocol.md) |
 | DL-429 | The attempt and engine lifecycle tiers run the engine's stops; `engine stop`; the interruption hold is one oracle transition | [docs/access-model.md](access-model.md) |
-| DL-430 | Review rounds: a shape note before long rework; a fresh final review after it |  |
+| DL-430 | Review rounds: a shape note before long rework; a fresh final review after it | [docs/agents/review.md](agents/review.md) |
 | DL-431 | The process cookie and the leak rule: a process left behind when the command exits is a leak, terminated by default | [docs/blocks/attempts.md](blocks/attempts.md), [docs/blocks/update.md](blocks/update.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
 | DL-432 | The update machine wired: `dsl41 reread` and `dsl41 update` apply a stored plan to the running engine, stopping only the jobs it changes or removes |  |
 | DL-433 | The restart is the live engine starting with a non-empty state | [docs/blocks/attempts.md](blocks/attempts.md), [docs/blocks/update.md](blocks/update.md), [docs/blocks/wrapper.md](blocks/wrapper.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md), [docs/state-machines.md](state-machines.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
+| DL-434 | `CLAUDE.md` and the skill bodies count as docs in the docs-only classification | [docs/agent-workflow.md](agent-workflow.md), [docs/agents/coordination.md](agents/coordination.md) |
