@@ -1,7 +1,11 @@
 # Implement and verify a change
 
-For the builder or engineer, and maintainers implementing a change.
+For maintainers implementing and verifying a change, including agents assigned
+the builder or engineer role. Follow the maintainer track under
+[Documents](../README.md#documents).
 Read the [shared contract](../CLAUDE.md) and the task's design contracts.
+This page leaves document-writing rules to [writing.md](writing.md) and
+CLI/TUI evidence limits to [cli-tui-qualification.md](cli-tui-qualification.md).
 The builder follows a settled approach. The engineer chooses the method for
 settled behavior. Neither role changes scope or policy.
 
@@ -27,11 +31,12 @@ settled behavior. Neither role changes scope or policy.
 
 ## Setup
 
-Use a trusted checkout and the locked development environment:
+1. Select a trusted checkout in the assigned worktree.
+2. Install the locked development environment:
 
-```sh
-uv sync --frozen --extra dev
-```
+   ```sh
+   uv sync --frozen --extra dev
+   ```
 
 CI installs with `--locked`, which also checks the lock against `pyproject.toml`;
 a stale lock passes `--frozen` locally and fails in CI.
@@ -86,11 +91,15 @@ Every test runs under a leak detector (`tests/leak_detector_plugin.py`,
 DL-355). A test that leaves global process state changed fails at teardown,
 naming the state before and after. The probes are listed in the plugin: among
 them an environment variable, the working directory, sys.path, a signal
-handler, a child process not yet reaped and a live non-daemon thread. A restore
-fixture puts back a production path's own change and nothing else: the
-oracle's recursion limit, the supervisor's subreaper flag and signal handlers,
-and the defaults `dsl41 run` leaves on SIGINT, SIGTERM and SIGHUP. The check
-compares each test with itself, so the order of the tests and the worker do not
+handler, a child process not yet reaped and a live non-daemon thread.
+A restore fixture undoes only a production path's deliberate state change,
+so the detector still sees a test's own change (DL-355).
+The restore fixtures in `tests/conftest.py` put back the oracle's recursion-limit
+raise, the Linux child-subreaper flag, and the defaults `dsl41 run` leaves on
+SIGINT, SIGTERM and SIGHUP. Tests must restore any other state they change.
+The subreaper fixture remains in the suite; the supervisor runtime is excluded
+by DL-424.
+The check compares each test with itself, so the order of the tests and the worker do not
 matter. Two limits: a child or thread that ends on its own a moment after the
 test is reported only when it is still there at the check, and a module- or
 session-scoped fixture is outside the check.
@@ -101,8 +110,9 @@ The coverage invocation runs the full suite once, in four pytest-xdist
 workers that each take whole test files (DL-354). The worker count is pinned
 at 4, never `auto`, so the run is the configuration CI measured. The flags live
 in the commands, not in `addopts`, so a run of one test stays one process.
-It also measures every Python subprocess the suite starts, the supervisor and
-the wrapper included (DL-265). Each process writes its own data file, so
+The subprocess patch in `pyproject.toml` also measures Python child processes,
+including engines and wrappers (DL-265). Each measured process writes its own
+data file, so
 `coverage combine` must run before `coverage report`. A process that a test
 ends with SIGKILL loses its data.
 The coverage report enforces the scoped branch-coverage requirement.
@@ -122,9 +132,11 @@ Under xdist the controller writes that file from every worker's hits.
 The golden replay runs the oracle over the whole harness sample, about a minute,
 and names the first run, entry and component that differ from
 `tests/oracle_goldens.txt`; CI runs it as its own `goldens` job (DL-351).
-Keep this list aligned with `.github/workflows/ci.yml`. CI also runs what this
-list does not: the `docs` job, the `explore-page` browser job, and the
-`audit`, `secrets` and `release` workflows.
+Keep this list aligned with `.github/workflows/ci.yml`. Its `docs` job runs
+the docs gate on every change; `explore-page` runs the explore-page browser
+tests and the autorep viewer-import check on code changes.
+The served-TUI browser lane runs on demand through the qualification procedure.
+The `audit`, `secrets` and `release` workflows have their own triggers. They are outside the local command list.
 The workflow examples lane is opt-in and needs a container engine (DL-236):
 `WORKFLOW_CONTEXT=<context> uv run pytest -q -o faulthandler_timeout=0 examples/workflows/tests`.
 `scripts/arch_check.py --spec-status` prints every specification with its spec
@@ -134,9 +146,10 @@ CI measures coverage in a separate `coverage` job on Python 3.14 only
 (DL-211), and that job is also the suite's only 3.14 leg. `sys.monitoring`
 makes branch measurement nearly free there; the same measurement costs 2-3x
 on the C tracer every other supported version uses.
-For browser changes, also follow its browser job: collect the opt-in tests,
-verify that they ran, and exercise the interactions in Chromium, WebKit,
-and Firefox. A skipped suite is not validation.
+For browser changes, follow the `explore-page` job and the
+[CLI/TUI interaction inventory](cli-tui-qualification.md#tui-interaction-inventory)
+for the affected surface. Collect the opt-in tests and verify that they ran
+in Chromium, WebKit and Firefox. A skipped suite is not validation.
 
 ## Handoff and rework
 

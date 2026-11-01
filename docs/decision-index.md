@@ -94,12 +94,12 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-81 | an explicit start against a live job is no longer silent | [docs/state-machines.md](state-machines.md) |
 | DL-82 | StatusStore owns every JobRuntime field and every global |  |
 | DL-83 | a signal in the spawn window is retryable, not a no-op; and the state-owner gate derives what it watches |  |
-| DL-84 | the concurrency model is frozen: mandatory optimistic locking, globally at-most-once effects, and an operator-owned host lifecycle |  |
+| DL-84 | the concurrency model is frozen: mandatory optimistic locking, globally at-most-once effects, and an operator-owned host lifecycle | [docs/citation-index.md](citation-index.md) |
 | DL-85 | the model harness lands before the code it validates, and an adapter call turns out not to be an effect application |  |
 | DL-86 | the state owner: frozen rows, maps that cannot escape, and one verb per kind of change | [docs/blocks/job-lifecycle.md](blocks/job-lifecycle.md), [docs/ir-design.md](ir-design.md) |
 | DL-87 | every entity carries a revision, and one input moves it at most once | [docs/blocks/job-lifecycle.md](blocks/job-lifecycle.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md), [docs/state-machines.md](state-machines.md) |
 | DL-88 | the capacity pool gets its own module |  |
-| DL-89 | admission lands: one order for every input, and the log becomes a ledger | [docs/blocks/subscription.md](blocks/subscription.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md) |
+| DL-89 | admission lands: one order for every input, and the log becomes a ledger | [docs/blocks/subscription.md](blocks/subscription.md), [docs/citation-index.md](citation-index.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md) |
 | DL-90 | preconditions become mandatory, and the wire breaks once | [docs/access-model.md](access-model.md), [docs/blocks/admission.md](blocks/admission.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md) |
 | DL-91 | architecture review | [docs/ir-design.md](ir-design.md) |
 | DL-92 | the operator gets the vocabulary S3 built |  |
@@ -129,7 +129,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-116 | the lineage fence |  |
 | DL-117 | `baseline_id` is the period's, and derived | [docs/control-protocol.md](control-protocol.md) |
 | DL-118 | the atomic `decision` record and control-protocol v3 | [docs/blocks/admission.md](blocks/admission.md), [docs/blocks/attempts.md](blocks/attempts.md), [docs/blocks/fw-observation.md](blocks/fw-observation.md), [docs/blocks/subscription.md](blocks/subscription.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md), [docs/state-machines.md](state-machines.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
-| DL-119 | the seal artifact and the canonical form | [docs/jil-statement-syntax.md](jil-statement-syntax.md) |
+| DL-119 | the seal artifact and the canonical form | [docs/citation-index.md](citation-index.md), [docs/jil-statement-syntax.md](jil-statement-syntax.md) |
 | DL-120 | capacity decomposed | [docs/blocks/capacity.md](blocks/capacity.md), [docs/ir-design.md](ir-design.md), [docs/state-machines.md](state-machines.md) |
 | DL-121 | `run_id` is minted in the effect; SPAWN idempotency is durable; FW has a spool |  |
 | DL-122 | `catalog_hash` v2, `source_bundle_hash`, `RuntimeProfile` | [docs/autosys-semantics.md](autosys-semantics.md), [docs/ir-design.md](ir-design.md) |
@@ -138,7 +138,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-125 | adoption |  |
 | DL-126 | `deadman_s` leaves the host semantic projection |  |
 | DL-127 | retention floors |  |
-| DL-128 | canonical form: "control character" is Unicode Cc | [docs/ir-design.md](ir-design.md), [docs/jil-statement-syntax.md](jil-statement-syntax.md) |
+| DL-128 | canonical form: "control character" is Unicode Cc | [docs/citation-index.md](citation-index.md), [docs/ir-design.md](ir-design.md), [docs/jil-statement-syntax.md](jil-statement-syntax.md) |
 | DL-129 | SPAWN idempotency outlives the supervisor, and the watch keeps a log | [docs/blocks/fw-observation.md](blocks/fw-observation.md), [docs/runner-design.md](runner-design.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
 | DL-130 | a period gets its name, its inputs and its launch options | [docs/runner-design.md](runner-design.md) |
 | DL-131 | the classifier reads a graph nobody had, in two directions | [docs/citation-index.md](citation-index.md) |
@@ -229,8 +229,8 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-215 | The release publishes only what passed the CI gates and an installed-artifact smoke test, built from locked inputs |  |
 | DL-216 | A client that attempted a write reports any failure as delivered, and the server drops an unterminated request | [docs/control-protocol.md](control-protocol.md) |
 | DL-217 | A lost answer is recovered by a pinned exact retry, and a collision says what the id already decided | [docs/blocks/admission.md](blocks/admission.md), [docs/control-protocol.md](control-protocol.md), [docs/gateway.md](gateway.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/state-machines.md](state-machines.md) |
-| DL-218 | The deployment example: one launcher holds the command line, the reattach line is the process's own, the units are verified statically, and the service drill is... |  |
-| DL-219 | A restoration drill: quiescent backup and restore, over the real machinery, at a fixed path |  |
+| DL-218 | The deployment example: one launcher holds the command line, the reattach line is the process's own, the units are verified statically, and the service drill is... | [docs/cli-tui-qualification.md](cli-tui-qualification.md) |
+| DL-219 | A restoration drill: quiescent backup and restore, over the real machinery, at a fixed path | [docs/cli-tui-qualification.md](cli-tui-qualification.md) |
 | DL-220 | Two mypy flags, not `strict`: `warn_return_any` and `disallow_any_generics`, and `list_runs()` returns a typed reply |  |
 | DL-221 | Architecture review of DL-215 through DL-220: twenty-four findings acted, five items declined with their re-find triggers |  |
 | DL-222 | Actions are pinned to commits and the `pypi` environment requires the owner's approval; a tag ruleset and `skip-existing` are declined |  |
@@ -434,7 +434,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-421 | access-model: the release and estate verbs get their tiers, and the release train's sudo grant is a door of its own, outside the gate | [docs/access-model.md](access-model.md) |
 | DL-422 | The six estate verbs read the manifest through `--manifest`; `estate args` and its `eval` are gone | [docs/access-model.md](access-model.md), [docs/authoring.md](authoring.md) |
 | DL-423 | Release verbs read from their command line: `rollback NAME`, `requalify NAME`, and the OFF_HOLD sweep is `off-hold-all` | [docs/access-model.md](access-model.md), [docs/control-protocol.md](control-protocol.md) |
-| DL-424 | The 2.0.0 charter: three things, a production ceiling, and the owner's rulings | [README.md](../README.md), [docs/access-model.md](access-model.md), [docs/architecture.md](architecture.md), [docs/authoring.md](authoring.md), [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/attempts.md](blocks/attempts.md), [docs/blocks/update.md](blocks/update.md), [docs/control-protocol.md](control-protocol.md), [docs/gateway.md](gateway.md), [docs/glossary.md](glossary.md), [docs/incident-triage.md](incident-triage.md), [docs/ir-design.md](ir-design.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/risk-map.md](risk-map.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md), [docs/state-machines.md](state-machines.md), [docs/statechart-engine.md](statechart-engine.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
+| DL-424 | The 2.0.0 charter: three things, a production ceiling, and the owner's rulings | [README.md](../README.md), [docs/access-model.md](access-model.md), [docs/agent-workflow.md](agent-workflow.md), [docs/architecture.md](architecture.md), [docs/authoring.md](authoring.md), [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/attempts.md](blocks/attempts.md), [docs/blocks/update.md](blocks/update.md), [docs/citation-index.md](citation-index.md), [docs/cli-tui-qualification.md](cli-tui-qualification.md), [docs/control-protocol.md](control-protocol.md), [docs/gateway.md](gateway.md), [docs/glossary.md](glossary.md), [docs/incident-triage.md](incident-triage.md), [docs/ir-design.md](ir-design.md), [docs/live-instance-runbook.md](live-instance-runbook.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/risk-map.md](risk-map.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md), [docs/state-machines.md](state-machines.md), [docs/statechart-engine.md](statechart-engine.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
 | DL-425 | Hosts, effects and the epoch leave the engine; the dispatch record precedes the launch | [docs/runner-design.md](runner-design.md), [docs/statechart-engine.md](statechart-engine.md) |
 | DL-426 | The attempt and engine lifecycle tiers; an attempt settles only when its plan is done | [docs/blocks/attempts.md](blocks/attempts.md), [docs/control-protocol.md](control-protocol.md), [docs/runner-design.md](runner-design.md), [docs/statechart-engine.md](statechart-engine.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
 | DL-427 | The update machine, its admission and its application, unwired; one update in flight | [docs/access-model.md](access-model.md), [docs/authoring.md](authoring.md), [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/update.md](blocks/update.md), [docs/control-protocol.md](control-protocol.md) |
