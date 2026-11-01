@@ -24463,6 +24463,8 @@ relitigate an entry; append a new one.
   the ceiling declared in the manifest and checked against the launcher's (the units' limits
   are the infrastructure's facts); one branch or tag per environment (layers in one repository,
   one tag for every environment).
+  SUPERSEDED BY DL-439: the Packager builds the runtime package and service configuration;
+  DL-424 retired this release infrastructure.
 - DL-409 A lease renewal with no reply within ten seconds is a failed renewal (2026-10-27;
   src/dsl41/runner_adapters.py, concurrency-model §8, supervisor-protocol §5)
   THE RULE. Each renewal has one deadline, `_RENEW_TIMEOUT_S`, 10 s, over every request it
@@ -25459,8 +25461,7 @@ relitigate an entry; append a new one.
   restart and in `dsl41 runs`. An interrupted update's equality check ignores job order (a
   Known bug; the token-bound plan cannot produce a reordered row today).
   Built by Sol; Opus two rounds.
-  SUPERSEDED BY DL-439: the Packager builds the runtime package and service configuration;
-  DL-424 retired this release infrastructure.
+
 - DL-439 The Packager builds and installs the runtime package and site service configuration
   (2026-11-01; owner ruling; docs/writing.md §1, README "Documents", docs/deploy.md)
   THE RULE. The Packager builds and installs the runtime package and the site's service
