@@ -1,13 +1,11 @@
-# The estate's inputs, which the launcher and every seal take from here
-# (DL-407). The files are in command-line order, which the catalog address
-# hashes. The site's properties file is the launcher's, added after these
-# layers; nightbank's application has no layers of its own.
+# Rehearsal inputs in catalog order, with site properties supplied by -p (DL-407).
+# The installed service selects inputs through its main config (DL-437).
 name = "nightbank-small"
 files = ["amer.jil", "apac.jil", "calendars.jil", "emea.jil", "global.jil", "infra.jil"]
 timezone = "UTC"
 
-# a service host's environment; no service example ships in 2.0.0
+# The wargame rehearsal environment (DL-407).
 [environments.wargame]
 
-# a night run from the checkout; the sandbox launcher returns in a later slice
+# A night rehearsed from the checkout (DL-407).
 [environments.sandbox]

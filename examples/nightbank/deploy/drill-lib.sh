@@ -120,7 +120,7 @@ write_drill_jil() { # write_drill_jil VARIANT
     sudo tee "$DRILL_JIL" >/dev/null <<JIL
 /* The service drill's jobs (examples/nightbank/deploy/drill-steps.sh); only the drill's
    FORCE_STARTJOB starts them. The gate on a global nobody sets keeps each one from lint's
-   L011 (a dangling job), which reread refuses as a warning. */
+   L011 (a dangling job). */
 insert_global: DRILL_GATE
 value: CLOSED
 
