@@ -446,3 +446,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-433 | The restart is the live engine starting with a non-empty state | [docs/blocks/attempts.md](blocks/attempts.md), [docs/blocks/update.md](blocks/update.md), [docs/blocks/wrapper.md](blocks/wrapper.md), [docs/control-protocol.md](control-protocol.md), [docs/deploy.md](deploy.md), [docs/runner-design.md](runner-design.md), [docs/state-machines.md](state-machines.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
 | DL-434 | `CLAUDE.md` and the skill bodies count as docs in the docs-only classification | [docs/agent-workflow.md](agent-workflow.md), [docs/agents/coordination.md](agents/coordination.md) |
 | DL-435 | A backward step of the wall clock never refuses an input or stops the engine |  |
+| DL-436 | The Linux cookie scan runs without pidfd support |  |

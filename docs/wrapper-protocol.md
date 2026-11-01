@@ -199,7 +199,7 @@ genesis and read at every restart (state version 27, DL-433), so one
 prefix covers every attempt of the root, whichever engine start launched
 it. `run_id` is the attempt's. The command gets the variable through
 `env`, and its children inherit it.
-On Linux, where a pidfd can signal it, the engine reads
+On Linux, with or without pidfd support, the engine reads
 `/proc/<pid>/environ` of the processes its uid may read. A process that
 carries an attempt's cookie belongs to that attempt, whatever its
 process group (`runner_procid.ours`). The wrapper is left out by the pid
@@ -218,8 +218,14 @@ does both), and one that leaves it under another uid (a setuid helper)
 are beyond the engine by design.
 Calling `setenv`, `unsetenv` or `clearenv` after the exec does not
 change what `/proc/<pid>/environ` shows. The systemd unit's cgroup
-remains the stronger fence. On other platforms, without a pidfd, and for
-an attempt dispatched before the cookie, the (pid, start-time) tuple and
+remains the stronger fence. Signals use a pidfd where supported. Without it,
+the engine re-reads the start token (`proc_start_token`, `/proc/<pid>/stat`
+field 22) and calls `os.kill` only if it still matches the scanned token.
+The race between that check and the signal is accepted: the engine is an
+orchestrator, not a jail. The scan, TERM, grace and KILL are the same with
+either primitive. One log line per serving start with a run root names the
+primitive; in-memory rehearsals print none.
+On other platforms, and for an attempt dispatched before the cookie, the (pid, start-time) tuple and
 the process group decide.
 
 ## 4. Wrapper behavior (frozen semantics)

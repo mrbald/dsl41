@@ -24,7 +24,7 @@ from typing import Any
 import pytest
 from store_surgery import rows
 
-from dsl41 import runner_adapters, runner_procid
+from dsl41 import runner_adapters, runner_procid, runner_stops
 from dsl41.engine_charts import AttemptOutcome, DrainRequest, ExitRecord
 from dsl41.ir import lower_source
 from dsl41.oracle_state import Event
@@ -753,7 +753,7 @@ def test_a_closing_attempt_s_cleanup_reads_its_spawn_record_alone(
         real_killpg(pgid, sig)
 
     monkeypatch.setattr(runner_procid, "killpg_quiet", recorded)
-    monkeypatch.setattr(runner_procid, "pidfd_supported", lambda: False)
+    monkeypatch.setattr(runner_stops, "sys", SimpleNamespace(platform="darwin"))
     child, token = _group(["/bin/sh", "-c", "trap '' TERM; exec sleep 30"])
     try:
         _write(

@@ -918,7 +918,7 @@ def _first_reading(
             continue
         else:
             for pid, start in look.pids.items():
-                if _procid.signal_ours(pid, start, signal.SIGTERM):
+                if _procid.signal_ours(pid, start, signal.SIGTERM, pidfd=engine.stops.pidfd):
                     engine.stops.termed.add(run_id)
     named = {
         str(record.payload["attempt"]): (record.payload["job"], record.payload["run_number"])

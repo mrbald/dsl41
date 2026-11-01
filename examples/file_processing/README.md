@@ -509,7 +509,7 @@ kill -TERM "$(cat "$work/engine.pid")"
 
 <!-- exercise: engine-stopped repeat -->
 ```sh
-cat "$work/engine.log"
+tail -n 2 "$work/engine.log"
 # engine up; control socket: …/control.sock
 # engine stopped: clean_shutdown
 ```

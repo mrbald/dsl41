@@ -262,7 +262,16 @@ def test_the_scan_finds_a_real_process_and_its_children() -> None:
     start tokens; a process without the cookie is not."""
     mine = procid.cookie("realscan", RUN_ID)
     env = {**os.environ, procid.COOKIE_ENV: mine}
-    parent = subprocess.Popen(["/bin/sh", "-c", "sleep 30 & echo $!; wait"], env=env, stdout=-1)
+    parent = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess;child=subprocess.Popen(['sleep','30']);"
+            "print(child.pid,flush=True);child.wait()",
+        ],
+        env=env,
+        stdout=-1,
+    )
     stranger = subprocess.Popen(["sleep", "30"])
     try:
         assert parent.stdout is not None
@@ -284,9 +293,16 @@ def test_the_scan_finds_a_real_process_and_its_children() -> None:
 
 
 @linux_only
-def test_a_signal_goes_only_to_the_process_the_scan_found() -> None:
-    """The pidfd pins the process and its start token is read again: a token that no longer
-    matches gets nothing, a gone pid gets nothing, the matching one gets the signal."""
+@pytest.mark.parametrize("pidfd", [True, False], ids=["pidfd", "no-pidfd"])
+def test_a_signal_goes_only_to_the_process_the_scan_found(
+    monkeypatch: pytest.MonkeyPatch, pidfd: bool
+) -> None:
+    """Both primitives recheck the start token: a mismatch and a gone pid get nothing;
+    the matching process gets the signal (DL-436)."""
+    supported = procid.pidfd_supported()
+    if pidfd and not supported:
+        pytest.skip("this Python or kernel has no pidfd")
+    monkeypatch.setattr(procid, "pidfd_supported", lambda: pidfd)
     proc = subprocess.Popen(["sleep", "30"])
     try:
         token = None
@@ -303,9 +319,13 @@ def test_a_signal_goes_only_to_the_process_the_scan_found() -> None:
 
 
 @linux_only
+@pytest.mark.parametrize("pidfd", [True, False], ids=["pidfd", "no-pidfd"])
 def test_a_process_that_ends_before_its_signal_is_not_an_error(
     monkeypatch: pytest.MonkeyPatch,
+    pidfd: bool,
 ) -> None:
+    if pidfd and not procid.pidfd_supported():
+        pytest.skip("this Python or kernel has no pidfd")
     proc = subprocess.Popen(["sleep", "30"])
     try:
         token = procid.proc_start_token(proc.pid)
@@ -314,9 +334,14 @@ def test_a_process_that_ends_before_its_signal_is_not_an_error(
         def gone(*_args: Any) -> None:
             raise ProcessLookupError
 
-        monkeypatch.setattr(procid.signal, "pidfd_send_signal", gone)
+        monkeypatch.setattr(procid, "pidfd_supported", lambda: pidfd)
+        if pidfd:
+            monkeypatch.setattr(procid.signal, "pidfd_send_signal", gone)
+        else:
+            monkeypatch.setattr(procid.os, "kill", gone)
         assert not procid.signal_ours(proc.pid, token, signal.SIGTERM)
     finally:
+        monkeypatch.undo()
         proc.kill()
         proc.wait()
 
@@ -333,7 +358,7 @@ class _Signals:
         monkeypatch.setattr(procid, "signal_ours", self._one)
         monkeypatch.setattr(runner_adapters, "SPOOL_POLL_S", 0.0)
 
-    def _one(self, pid: int, start: str, sig: int) -> bool:
+    def _one(self, pid: int, start: str, sig: int, **_kwargs: Any) -> bool:
         self.sent.append(("pid", pid, sig))
         return True
 
@@ -396,15 +421,19 @@ def test_the_ladder_without_members_is_the_group_ladder(monkeypatch: pytest.Monk
 # ------------------------------------------------------------------- the pidfd gate
 
 
-def test_without_pidfd_nothing_is_signalled_and_nothing_raises(
+def test_the_probe_selects_pidfd_or_token_checked_os_kill(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Astra M1, Opus M2: a Python without `os.pidfd_open` or `signal.pidfd_send_signal`, or a
-    kernel that answers ENOSYS, has no pidfd: the gate says so, and `signal_ours` sends
-    nothing instead of raising. So does a process under another uid (PermissionError)."""
+    """Missing APIs and ENOSYS select os.kill; a signal refused on an available pidfd
+    never retries by pid (DL-436)."""
     sent: list[int] = []
+    killed: list[tuple[int, int]] = []
     fake_os = SimpleNamespace(
-        pidfd_open=lambda _pid: 3, getpid=os.getpid, close=lambda _fd: None, getuid=os.getuid
+        pidfd_open=lambda _pid: 3,
+        getpid=os.getpid,
+        close=lambda _fd: None,
+        getuid=os.getuid,
+        kill=lambda pid, sig: killed.append((pid, sig)),
     )
     fake_signal = SimpleNamespace(pidfd_send_signal=lambda _fd, sig: sent.append(sig))
     monkeypatch.setattr(procid, "os", fake_os)
@@ -419,27 +448,77 @@ def test_without_pidfd_nothing_is_signalled_and_nothing_raises(
 
     fake_signal.pidfd_send_signal = refused
     assert not procid.signal_ours(5, "t", 9)
+    assert killed == []
 
     def no_pidfd(_pid: int) -> int:
         raise OSError(errno.ENOSYS, "no pidfd")
 
     fake_os.pidfd_open = no_pidfd
     assert not procid.pidfd_supported()
-    assert not procid.signal_ours(5, "t", 9)
+    assert not procid.signal_ours(5, "t", 9, pidfd=True)
+    assert procid.signal_ours(5, "t", 9)
     del fake_os.pidfd_open
     assert not procid.pidfd_supported()
-    assert not procid.signal_ours(5, "t", 9)
+    assert not procid.signal_ours(5, "t", 9, pidfd=True)
+    assert procid.signal_ours(5, "t", 9)
     fake_os.pidfd_open = lambda _pid: 3
     del fake_signal.pidfd_send_signal
     assert not procid.pidfd_supported()
-    assert not procid.signal_ours(5, "t", 9)
+    assert not procid.signal_ours(5, "t", 9, pidfd=True)
+    assert procid.signal_ours(5, "t", 9)
     assert sent == [9]
+    assert killed == [(5, 9)] * 3
+    fake_os.kill = refused
+    assert not procid.signal_ours(5, "t", 9)
+
+
+@pytest.mark.parametrize("pidfd", [True, False], ids=["pidfd", "no-pidfd"])
+@pytest.mark.parametrize("new_start", [901, None], ids=["reused", "gone"])
+def test_a_token_changed_after_the_scan_is_never_signalled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pidfd: bool, new_start: int | None
+) -> None:
+    """A scan's token must still match at the signal, for either primitive (DL-436)."""
+    _platform(monkeypatch, "linux")
+    monkeypatch.setattr(procid, "_PROC", str(tmp_path))
+    entry = _proc(
+        tmp_path, 31, environ=_env(DSL41_COOKIE="inst." + RUN_ID), stat=_stat(31, "S", 31, 900)
+    )
+    scan = procid.ours("inst.")
+    assert scan is not None and scan.pids == {31: (RUN_ID, "ticks:900")}
+    if new_start is None:
+        (entry / "stat").unlink()
+    else:
+        (entry / "stat").write_bytes(_stat(31, "S", 31, new_start))
+    sent: list[tuple[int, int]] = []
+    closed: list[int] = []
+    monkeypatch.setattr(
+        procid,
+        "os",
+        SimpleNamespace(
+            pidfd_open=lambda _pid: 7,
+            close=closed.append,
+            kill=lambda pid, sig: sent.append((pid, sig)),
+        ),
+    )
+    monkeypatch.setattr(
+        procid, "signal", SimpleNamespace(pidfd_send_signal=lambda fd, sig: sent.append((fd, sig)))
+    )
+    monkeypatch.setattr(procid, "pidfd_supported", lambda: pidfd)
+    assert not procid.signal_ours(31, scan.pids[31][1], signal.SIGTERM)
+    assert sent == []
+    assert closed == ([7] if pidfd else [])
 
 
 @linux_only
-def test_the_ladder_stops_a_setsid_escape_that_ignores_term() -> None:
+@pytest.mark.parametrize("pidfd", [True, False], ids=["pidfd", "no-pidfd"])
+def test_the_ladder_stops_a_setsid_escape_that_ignores_term(
+    monkeypatch: pytest.MonkeyPatch, pidfd: bool
+) -> None:
     """A real `setsid` child carrying the cookie and ignoring TERM is outside the leader's
     group, so a group kill misses it; the ladder finds it by its cookie and KILLs it."""
+    if pidfd and not procid.pidfd_supported():
+        pytest.skip("this Python or kernel has no pidfd")
+    monkeypatch.setattr(procid, "pidfd_supported", lambda: pidfd)
     mine = procid.cookie("realladder", RUN_ID)
     escape = (
         "import os,signal,time;os.setsid();signal.signal(signal.SIGTERM,signal.SIG_IGN);"

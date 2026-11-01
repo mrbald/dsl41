@@ -45,8 +45,8 @@ from dsl41.runner_startup import resume_run, start_run
 T0 = datetime(2026, 7, 1, 8, 0)
 GRACE = EngineSettings(grace_term_s=0.2, grace_kill_s=0.3)
 linux_cookie = pytest.mark.skipif(
-    not (sys.platform.startswith("linux") and runner_procid.pidfd_supported()),
-    reason="the process cookie is read on Linux with pidfd only",
+    not sys.platform.startswith("linux"),
+    reason="the process cookie is read on Linux only",
 )
 
 
@@ -396,7 +396,7 @@ def test_a_failed_first_reading_lets_the_record_decide_and_holds_what_is_left(
     _write(dispatch, "status.json", outcome="exited", exit_code=0)
     sent: list[int] = []
 
-    def signal_ours(pid: int, *_: object) -> bool:
+    def signal_ours(pid: int, *_: object, **_kwargs: Any) -> bool:
         sent.append(pid)
         return True
 
@@ -754,7 +754,7 @@ def test_the_first_reading_terms_what_is_owed_and_reports_the_rest(
     }
     sent: list[tuple[int, int]] = []
 
-    def signal_ours(pid: int, _token: str, sig: int) -> bool:
+    def signal_ours(pid: int, _token: str, sig: int, **_kwargs: Any) -> bool:
         sent.append((pid, sig))
         return pid != 12  # 12 exited meanwhile
 
@@ -800,6 +800,72 @@ def test_grace_seconds_is_the_live_ladder_s_grace(tmp_path: Path) -> None:
     assert asyncio.run(scenario()) == 0.7
 
 
+@linux_cookie
+@pytest.mark.parametrize("pidfd", [True, False], ids=["pidfd", "no-pidfd"])
+def test_the_restart_cookie_scan_stops_an_escape_with_either_primitive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pidfd: bool
+) -> None:
+    """A restart finds an unrecorded escape by cookie, TERMs it before the loop, then runs
+    the grace and KILL with either primitive (DL-433, DL-436)."""
+    if pidfd and not runner_procid.pidfd_supported():
+        pytest.skip("this Python or kernel has no pidfd")
+    run_root = tmp_path / "run"
+    text = _jil("j")
+    [dispatch] = _open(run_root, text, ["j"])
+    _set_cookie(run_root)
+    [dispatch] = [body for _, kind, body in rows(run_root) if kind == "dispatch"]
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import os,signal,time;os.setsid();"
+            "signal.signal(signal.SIGTERM,signal.SIG_IGN);print('ready',flush=True);time.sleep(30)",
+        ],
+        env={**os.environ, **dispatch["env"]},
+        stdout=subprocess.PIPE,
+    )
+    sent: list[int] = []
+    try:
+        assert child.stdout is not None and child.stdout.readline() == b"ready\n"
+        monkeypatch.setattr(runner_procid, "pidfd_supported", lambda: pidfd)
+        if pidfd:
+            real_send = signal.pidfd_send_signal
+
+            def send(fd: int, sig: int) -> None:
+                sent.append(sig)
+                real_send(fd, sig)
+
+            monkeypatch.setattr(signal, "pidfd_send_signal", send)
+        else:
+            real_kill = os.kill
+
+            def kill(pid: int, sig: int) -> None:
+                if pid == child.pid and sig:
+                    sent.append(sig)
+                real_kill(pid, sig)
+
+            monkeypatch.setattr(os, "kill", kill)
+
+        async def scenario() -> None:
+            engine = await _resume(run_root, text)
+            try:
+                assert sent == [signal.SIGTERM]
+                assert child.poll() is None
+                await engine.run_until_quiescent(engine.clock.now())
+                await engine.attempts.join()
+                assert child.wait(5) == -signal.SIGKILL
+                assert sent == [signal.SIGTERM, signal.SIGKILL]
+            finally:
+                await _close(engine)
+
+        asyncio.run(scenario())
+    finally:
+        child.kill()
+        child.wait()
+        assert child.stdout is not None
+        child.stdout.close()
+
+
 # ------------------------------------------------------------------ §3: what ended by its record
 
 
@@ -825,7 +891,7 @@ def test_the_first_reading_leaves_what_ended_by_its_own_record_to_the_live_rule(
     def ours(*_: object) -> runner_procid.Ours:
         return runner_procid.Ours({p: (x["attempt"], f"ticks:{p}") for p, x in alive.items()})
 
-    def signal_ours(pid: int, _token: object, sig: int) -> bool:
+    def signal_ours(pid: int, _token: object, sig: int, **_kwargs: Any) -> bool:
         sent.append((pid, sig))
         if sig == signal.SIGKILL:
             alive.pop(pid, None)
@@ -935,7 +1001,7 @@ class _Box:
     def _group(self, pgid: int) -> dict[int, str]:
         return {p: f"ticks:{p}" for p, (g, _c, _i) in self.procs.items() if g == pgid}
 
-    def _signal(self, pid: int, _start: str, sig: int) -> bool:
+    def _signal(self, pid: int, _start: str, sig: int, **_kwargs: Any) -> bool:
         self.sent.append((pid, sig))
         if pid in self.procs and (sig == signal.SIGKILL or not self.procs[pid][2]):
             del self.procs[pid]

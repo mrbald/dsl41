@@ -19,10 +19,12 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
 
+from dsl41 import runner_procid, runner_stops
 from dsl41.cli import app
 from dsl41.conditions import StatusAtom, iter_atoms
 from dsl41.derive import derive_graph
@@ -857,6 +859,19 @@ def test_render_text_emits_the_table_the_coverage_line_and_the_note() -> None:
 
 
 # ---------------------------------------------------------------------- play_once
+
+
+@pytest.mark.parametrize("pidfd", [True, False], ids=["pidfd", "no-pidfd"])
+def test_two_virtual_plays_print_no_signalling_primitive(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], pidfd: bool
+) -> None:
+    """Virtual plays report no serving engine's signalling primitive (DL-436)."""
+    monkeypatch.setattr(runner_stops, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(runner_procid, "pidfd_supported", lambda: pidfd)
+    catalog = lower_source("insert_job: j\njob_type: c\ncommand: x\n")
+    for _ in range(2):
+        play_once(catalog, start=START, horizon=HORIZON, adapter=FakeAdapter({}))
+    assert capsys.readouterr().err == ""
 
 
 def test_play_once_smoke_estate_run_counts() -> None:

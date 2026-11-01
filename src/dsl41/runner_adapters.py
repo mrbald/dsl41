@@ -535,6 +535,7 @@ async def stop_ladder(
     members: Callable[[], Mapping[int, str]] | None = None,
     *,
     term: bool = True,
+    pidfd: bool | None = None,
 ) -> None:
     """The stop ladder on a command (spec-drain): TERM, wait up to `grace_term_s`, then KILL.
     The ladder ends at its KILL. `term` False starts the cookie's ladder at the wait: a
@@ -542,8 +543,9 @@ async def stop_ladder(
 
     `members`, where the process cookie can be read, is one reading of everything left of the
     attempt, by pid with each one's start token (`runner_stops.EngineStops.left`). Each step
-    reads it afresh and signals every pid once, by itself, through a pidfd after its start
-    token is checked (`runner_procid.signal_ours`); no group signal is sent. A process that
+    reads it afresh and signals every pid once, by itself, after its start token is checked:
+    through a pidfd where supported, else os.kill (`runner_procid.signal_ours`, DL-436);
+    no group signal is sent. A process that
     moves between groups gets one TERM and one KILL; one forked after a reading gets the next
     step's. The wait ends early once every process the TERM reached is gone.
 
@@ -556,14 +558,14 @@ async def stop_ladder(
     if members is not None:
         termed = dict(members())
         for pid, start in termed.items() if term else ():
-            _procid.signal_ours(pid, start, signal.SIGTERM)
+            _procid.signal_ours(pid, start, signal.SIGTERM, pidfd=pidfd)
         deadline = time.monotonic() + grace_term_s
         while time.monotonic() < deadline and any(
             _procid.verify_alive(pid, start) for pid, start in termed.items()
         ):
             await asyncio.sleep(SPOOL_POLL_S)
         for pid, start in members().items():
-            _procid.signal_ours(pid, start, signal.SIGKILL)
+            _procid.signal_ours(pid, start, signal.SIGKILL, pidfd=pidfd)
         return
     if not _procid.verify_alive(pgid, start_token):
         return
