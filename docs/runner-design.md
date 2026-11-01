@@ -708,8 +708,9 @@ refusals.
    *reads* outcomes. Signals are for the residual crash matrix only. First
    the boot_id shortcut: a spawn record whose boot_id differs from the
    current boot means that the machine rebooted. Then nothing survived:
-   skip all liveness checks and resolve each run from status.json or E7
-   directly. Otherwise, per incomplete run, in order:
+   skip all liveness checks and resolve each run from status.json, or end
+   it `unobservable{engine_death}` under the interruption rule (DL-433).
+   Otherwise, per incomplete run, in order:
    - The engine waits for no wrapper (DL-433): each open attempt's spool is
      read once, as a step of the engine's loop, and an attempt with no
      record ended with the engine, `unobservable{engine_death}`. A record
