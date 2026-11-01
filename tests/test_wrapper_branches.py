@@ -434,6 +434,39 @@ def _event_count(events: Path) -> int:
     return events.read_bytes().count(b"\n") if events.exists() else 0
 
 
+@pytest.mark.parametrize(
+    "mode", ["eperm_term_zombie", "eperm_term_empty", "eperm_kill_zombie", "eperm_kill_empty"]
+)
+def test_wrapper_records_the_real_exit_after_darwin_killpg_eperm(tmp_path: Path, mode: str) -> None:
+    """DL-229: absence after EPERM does not replace the child's observed exit status."""
+    run_dir = tmp_path / "j1.1"
+    run_dir.mkdir()
+    events = tmp_path / "events"
+    go = Path(str(events) + ".go")
+    ready = tmp_path / "ready"
+    lifeline_r, lifeline_w = os.pipe()
+    command = f"trap '' TERM; touch '{ready}'; while [ ! -f '{go}' ]; do sleep 0.01; done; exit 7"
+    spec = json.loads(_spec(run_dir, command, lifeline_r))
+    spec["grace_seconds"] = 0.0
+    proc = _drive(mode, events, json.dumps(spec).encode(), lifeline_r)
+    os.close(lifeline_r)
+    try:
+        wait_for(lambda: (run_dir / "spawn.json").exists())
+        wait_for(ready.exists)
+        os.close(lifeline_w)
+        lifeline_w = -1
+        assert proc.wait(timeout=30) == 0
+        status = read_json(run_dir / "status.json")
+        assert status["outcome"] == "terminated"
+        assert status["cause"] == "parent lost"
+        assert status["observed"] == {"outcome": "exited", "exit_code": 7}
+        assert _event_count(events) == 2
+    finally:
+        if lifeline_w >= 0:
+            os.close(lifeline_w)
+        _cleanup(proc, run_dir, go)
+
+
 def _cleanup(proc: subprocess.Popen[bytes], run_dir: Path, go: Path) -> None:
     """Whatever the test did, release the command, kill its process group and
     stop the driver, so a failing test leaves nothing behind. The group is

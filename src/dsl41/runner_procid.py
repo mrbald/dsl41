@@ -380,6 +380,44 @@ def killpg_quiet(pgid: int, sig: int) -> None:
         os.killpg(pgid, sig)
     except ProcessLookupError:
         pass  # the whole group is already gone
+    except PermissionError as exc:
+        if (
+            sys.platform != "darwin"
+            or exc.errno != errno.EPERM
+            or not _darwin_group_has_no_live_member(pgid)
+        ):
+            raise
+
+
+def _darwin_group_has_no_live_member(pgid: int) -> bool:
+    """Prove absence from a complete group reading, never the leader alone (DL-431).
+
+    A complete listing includes pid 1 and the caller. A failed or unreadable listing
+    proves nothing. The recorder still observes the child's real exit before writing
+    its outcome (DL-229).
+    """
+    try:
+        out = subprocess.run(
+            ["ps", "-A", "-o", "pid=,pgid=,stat="],
+            capture_output=True,
+            text=True,
+            env={**os.environ, "LC_ALL": "C"},
+            check=False,
+            timeout=5.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if out.returncode != 0:
+        return False
+    missing = {1, os.getpid()}
+    for line in out.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 3 or not all(f.isascii() and f.isdigit() for f in fields[:2]):
+            return False
+        missing.discard(int(fields[0]))
+        if int(fields[1]) == pgid and not fields[2].startswith("Z"):
+            return False
+    return not missing
 
 
 def linux_group_pids(pgid: int) -> dict[int, str] | None:

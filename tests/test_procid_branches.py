@@ -11,6 +11,7 @@ that does not trigger it.
 from __future__ import annotations
 
 import io
+import errno
 import os
 import subprocess
 import sys
@@ -453,3 +454,127 @@ def test_procid_killpg_quiet_swallows_only_a_gone_group(
     with pytest.raises(PermissionError):
         procid.killpg_quiet(2, 15)
     assert calls == [(1, 15), (2, 15)]
+
+
+@pytest.mark.parametrize("listing", ["", "42 42 Z\n43 42 Z+\n44 43 S\n", "44 43 R+\n"])
+def test_darwin_killpg_eperm_rereads_the_whole_group_before_suppressing(
+    monkeypatch: pytest.MonkeyPatch, listing: str
+) -> None:
+    _platform(monkeypatch, "darwin")
+    calls: list[str] = []
+    listing = f"1 1 S\n{os.getpid()} 2 S\n{listing}"
+
+    def killpg(pgid: int, sig: int) -> None:
+        assert (pgid, sig) == (42, 15)
+        calls.append("killpg")
+        raise PermissionError(errno.EPERM, "denied")
+
+    def scan(argv: list[str], **kwargs: Any) -> Any:
+        assert calls == ["killpg"]
+        assert argv == ["ps", "-A", "-o", "pid=,pgid=,stat="]
+        assert kwargs["env"]["LC_ALL"] == "C" and kwargs["timeout"] > 0
+        calls.append("scan")
+        return SimpleNamespace(returncode=0, stdout=listing)
+
+    monkeypatch.setattr(procid.os, "killpg", killpg)
+    monkeypatch.setattr(procid.subprocess, "run", scan)
+    procid.killpg_quiet(42, 15)
+    assert calls == ["killpg", "scan"]
+
+
+@pytest.mark.parametrize(
+    "listing",
+    ["", "42 42 Z\n", "1 1 S\n42 42 Z\n", "{caller} 2 S\n42 42 Z\n"],
+)
+def test_darwin_killpg_eperm_keeps_the_error_without_both_listing_witnesses(
+    monkeypatch: pytest.MonkeyPatch, listing: str
+) -> None:
+    _platform(monkeypatch, "darwin")
+    denied = PermissionError(errno.EPERM, "denied")
+
+    def killpg(pgid: int, sig: int) -> None:
+        raise denied
+
+    monkeypatch.setattr(procid.os, "killpg", killpg)
+    monkeypatch.setattr(procid.subprocess, "run", _fake_run(0, listing.format(caller=os.getpid())))
+    with pytest.raises(PermissionError) as caught:
+        procid.killpg_quiet(42, 15)
+    assert caught.value is denied
+
+
+@pytest.mark.parametrize(
+    ("returncode", "listing"),
+    [
+        (0, "42 42 Z\n43 42 S+\n"),
+        (0, "42 42 R\n"),
+        (0, "42 42 ?\n"),
+        (0, "42 42 Z\n43 ? S\n"),
+        (0, "42 42 Z\n? 43 S\n"),
+        (0, "42 42 Z\n43 43\n"),
+        (0, "42 42 Z\n43 43 S extra\n"),
+        (1, ""),
+        (1, "42 42 Z\n"),
+    ],
+)
+def test_darwin_killpg_eperm_keeps_the_error_with_live_or_unreadable_members(
+    monkeypatch: pytest.MonkeyPatch, returncode: int, listing: str
+) -> None:
+    _platform(monkeypatch, "darwin")
+    denied = PermissionError(errno.EPERM, "denied")
+    listing = f"1 1 S\n{os.getpid()} 2 S\n{listing}"
+
+    def killpg(pgid: int, sig: int) -> None:
+        raise denied
+
+    monkeypatch.setattr(procid.os, "killpg", killpg)
+    monkeypatch.setattr(procid.subprocess, "run", _fake_run(returncode, listing))
+    with pytest.raises(PermissionError) as caught:
+        procid.killpg_quiet(42, 15)
+    assert caught.value is denied
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OSError(errno.EIO, "scan failed"),
+        PermissionError(errno.EPERM, "ps denied"),
+        subprocess.TimeoutExpired("ps", 5.0),
+    ],
+)
+def test_darwin_killpg_eperm_keeps_the_original_error_after_a_failed_scan(
+    monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    _platform(monkeypatch, "darwin")
+    denied = PermissionError(errno.EPERM, "kill denied")
+
+    def killpg(pgid: int, sig: int) -> None:
+        raise denied
+
+    def scan(*args: Any, **kwargs: Any) -> Any:
+        raise failure
+
+    monkeypatch.setattr(procid.os, "killpg", killpg)
+    monkeypatch.setattr(procid.subprocess, "run", scan)
+    with pytest.raises(PermissionError) as caught:
+        procid.killpg_quiet(42, 9)
+    assert caught.value is denied
+
+
+@pytest.mark.parametrize(("platform", "error"), [("linux", errno.EPERM), ("darwin", errno.EACCES)])
+def test_killpg_permission_errors_outside_the_darwin_eperm_case_never_scan(
+    monkeypatch: pytest.MonkeyPatch, platform: str, error: int
+) -> None:
+    _platform(monkeypatch, platform)
+    denied = PermissionError(error, "denied")
+
+    def killpg(pgid: int, sig: int) -> None:
+        raise denied
+
+    def scan(*args: Any, **kwargs: Any) -> Any:
+        pytest.fail("only Darwin EPERM may scan")
+
+    monkeypatch.setattr(procid.os, "killpg", killpg)
+    monkeypatch.setattr(procid.subprocess, "run", scan)
+    with pytest.raises(PermissionError) as caught:
+        procid.killpg_quiet(42, 15)
+    assert caught.value is denied
