@@ -229,14 +229,16 @@ class Configuration(BaseModel):
         return runtime_hash(self.profile)
 
     def to_bytes(self) -> bytes:
-        """The row's canonical bytes."""
+        """The row's canonical bytes, with semantic job order explicit (DL-438)."""
         payload: dict[str, Any] = {
+            "configuration_format_version": 3,
+            "job_order": list(self.catalog.jobs),
             "catalog": catalog_payload(self.catalog),
             "profile": self.profile.model_dump(mode="json"),
             "non_idempotent": dict(self.non_idempotent),
         }
         if self.source_capture:
-            payload.update(configuration_format_version=2, source_capture=self.source_capture)
+            payload["source_capture"] = self.source_capture
         return canonical_bytes(payload)
 
     def digest(self) -> str:
@@ -245,25 +247,60 @@ class Configuration(BaseModel):
 
     @classmethod
     def from_bytes(cls, data: bytes, *, where: str) -> Configuration:
-        """A row read back; a row that does not read as one is refused naming `where`."""
+        """Restore explicit v3 order or hash-matched v2 capture order (DL-438).
+
+        A row that does not read as one is refused naming `where`.
+        """
         try:
             raw: Any = decode(data)
             if not isinstance(raw, dict):
                 raise TypeError("configuration must be an object")
             version = raw.get("configuration_format_version", 1)
-            if type(version) is not int or version not in (1, 2):
+            if type(version) is not int or version not in (1, 2, 3):
                 raise EngineError(f"{where}: unsupported configuration_format_version {version!r}")
             allowed = {"catalog", "profile", "non_idempotent", "configuration_format_version"}
             if version == 2:
                 allowed |= {"configuration_format_version", "source_capture"}
                 if not raw.get("source_capture"):
                     raise EngineError(f"{where}: configuration version 2 needs source_capture")
+            if version == 3:
+                allowed |= {"job_order", "source_capture"}
             if set(raw) - allowed:
                 raise EngineError(
                     f"{where}: unknown configuration fields {sorted(set(raw) - allowed)}"
                 )
+            catalog = CatalogIR.model_validate(raw["catalog"])
+            order = list(catalog.jobs)
+            if version == 3:
+                raw_order = raw.get("job_order")
+                if (
+                    not isinstance(raw_order, list)
+                    or any(not isinstance(name, str) for name in raw_order)
+                    or len(raw_order) != len(catalog.jobs)
+                    or set(raw_order) != set(catalog.jobs)
+                ):
+                    raise EngineError(
+                        f"{where}: job_order must name every catalog job exactly once"
+                    )
+                order = raw_order
+            elif version == 2:
+                from dsl41.main_config import decoded_parts
+                from dsl41.reload_plan import RereadRefused
+
+                try:
+                    captured = decoded_parts(raw["source_capture"]).catalog
+                except (ValueError, RereadRefused) as exc:
+                    raise EngineError(
+                        f"{where}: unreadable configuration source_capture: {exc}"
+                    ) from exc
+                if catalog_hash_v2(captured) != catalog_hash_v2(catalog):
+                    raise EngineError(f"{where}: configuration source_capture catalog hash differs")
+                order = list(captured.jobs)
+            catalog = catalog.model_copy(
+                update={"jobs": {name: catalog.jobs[name] for name in order}}
+            )
             return cls(
-                catalog=CatalogIR.model_validate(raw["catalog"]),
+                catalog=catalog,
                 profile=RuntimeProfile.model_validate(raw["profile"]),
                 non_idempotent=dict(raw.get("non_idempotent") or {}),
                 source_capture=dict(raw.get("source_capture") or {}),

@@ -25432,3 +25432,30 @@ relitigate an entry; append a new one.
   no path from a legacy root to the new unit (K4); the pending scan blocks the loop (K5);
   unknown `[engine]` keys are ignored at restart (K7). Known bugs in `TODO.md`. Built by Sol;
   Opus two rounds.
+
+- DL-438 Stored configurations keep catalog job order
+  (2026-11-01; boss ruling on configuration-order replay; `runner_config.py`,
+  `runner_update.py`, `docs/protocol-evolution.md`)
+  THE RULE. Catalog order is semantic: dependency wakes and box members run in catalog order
+  (DL-13). New configuration rows use version 3 and list every catalog job once in `job_order`.
+  The catalog map stays canonical and sorted. Every reader rebuilds it in that order before
+  scheduling, restart, replay or `dsl41 runs`. A missing, repeated or added name refuses the row.
+  The configuration digest covers the format version and job order. `catalog_hash` stays
+  order-free, so a reorder alone is no catalog change. Versions 1 and 2 stay readable and are
+  never rewritten; no dialect retires. Version 2 recompiles its stored source capture, verifies
+  the catalog hash against the stored catalog, and restores the captured compile order. An
+  unreadable or mismatched capture refuses. Legacy rows without capture keep sorted job order;
+  their original live order is lost. Recovery opens no original source or captured Python module.
+  An interrupted update keeps an equal decoded row already at its expected revision, including
+  a row written by an older format before `config applied`. A different row or unexpected
+  revision refuses before writing; a new row is appended only at the next revision.
+  THE REASON. Canonical JSON sorted the catalog map, so a restored catalog admitted jobs in a
+  different order from the live run and replay diverged. Explicit order preserves scheduling
+  while retaining canonical encoding. Decoded-row equality preserves the update crash boundary
+  across the writer switch without rewriting digest-bound evidence. Replay still refuses a
+  revision divergence; live scheduling is not alphabetized to match persistence.
+  NOT BUILT. A version 2 row stays readable only while recompiling its capture gives the stored
+  catalog hash; a build that lowers the same JIL differently refuses every version 2 row at
+  restart and in `dsl41 runs`. An interrupted update's equality check ignores job order (a
+  Known bug; the token-bound plan cannot produce a reordered row today).
+  Built by Sol; Opus two rounds.

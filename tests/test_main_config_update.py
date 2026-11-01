@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+from contextlib import closing
 import json
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
-from dsl41 import main_config as main
+from dsl41 import main_config as main, runner_update
+from dsl41.canon import canonical_bytes
 from dsl41.oracle_state import Event
 from dsl41.reload_plan import reread
 from dsl41.reload_update import Admitted, Refused
 from dsl41.runner_adapters import FakeAdapter
-from dsl41.runner_clock import VirtualClock
+from dsl41.runner_clock import EngineError, VirtualClock
+from dsl41.runner_config import Configuration, RuntimeProfile
 from dsl41.runner_journal import replay_store
 from dsl41.runner_startup import active_configuration, resume_run, start_run
-from dsl41.runner_store import Record
+from dsl41.runner_store import MemoryStore, Record, SqliteStore
 from dsl41.runner_update import UpdateRequest
 from test_main_config import JOB, PYTHON, T0, config_file, estate_file
 
@@ -227,3 +231,239 @@ def test_09_capture_format_dispatch(tmp_path: Path) -> None:
                     (main.CAPTURE, json.dumps(payload).encode()),
                 ]
             )
+
+
+@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("kind", ["memory", "sqlite"])
+def test_legacy_config_row_retry_never_appends(tmp_path: Path, version: int, kind: str) -> None:
+    candidate = main.prepare(estate_file(tmp_path))
+    configuration = Configuration(
+        catalog=candidate.catalog,
+        profile=main.profile_of(candidate),
+        source_capture=main.encoded_parts(candidate) if version == 2 else {},
+    )
+    payload = json.loads(configuration.to_bytes())
+    payload.pop("job_order")
+    if version == 1:
+        payload.pop("configuration_format_version")
+    else:
+        payload["configuration_format_version"] = 2
+    legacy = canonical_bytes(payload)
+    store = MemoryStore() if kind == "memory" else SqliteStore(tmp_path / "boundary.db")
+    with closing(store):
+        for invalid in (0, 2):
+            with pytest.raises(EngineError, match="configuration rev"):
+                runner_update.store_config(store, configuration, invalid)
+            assert store.current_config_rev() == 0
+        assert store.put_config(b"initial", "sha256:initial") == 1
+        assert store.put_config(legacy, "sha256:" + hashlib.sha256(legacy).hexdigest()) == 2
+        runner_update.store_config(store, configuration, 2)
+        assert store.current_config_rev() == 2
+        assert store.get_config(2) == legacy
+        changed = configuration.model_copy(
+            update={"profile": RuntimeProfile(default_tz="Europe/Zurich")}
+        )
+        with pytest.raises(EngineError, match="configuration rev"):
+            runner_update.store_config(store, changed, 2)
+        assert store.current_config_rev() == 2
+        assert store.get_config(2) == legacy
+        for invalid in (0, 1, 4):
+            with pytest.raises(EngineError, match="configuration rev"):
+                runner_update.store_config(store, configuration, invalid)
+            assert store.current_config_rev() == 2
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_older_build_crash_after_config_row_resumes_without_another_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: int
+) -> None:
+    from dsl41.reload_plan import load_estate
+
+    path = estate_file(tmp_path)
+    jobs = JOB + "\ninsert_job: B\njob_type: c\ncommand: true\ncondition: s(A)\n"
+    (tmp_path / "a.jil").write_text(jobs)
+    (tmp_path / "estate.toml").write_text('name = "boundary"\nfiles = ["a.jil"]\n')
+    initial = main.prepare(path) if version == 2 else load_estate(tmp_path)
+    profile = main.profile_of(initial) if version == 2 else RuntimeProfile()
+    capture = main.encoded_parts(initial) if version == 2 else {}
+    root = tmp_path / "run"
+
+    async def scenario() -> None:
+        clock = VirtualClock(start=T0)
+        engine = start_run(
+            initial.catalog,
+            root,
+            clock=clock,
+            adapters={"CMD": FakeAdapter()},
+            launched=profile,
+            source_capture=capture,
+        )
+        assert engine.journal is not None
+        try:
+            (tmp_path / "a.jil").write_text(jobs.replace("true", "echo captured"))
+            candidate = main.prepare(path) if version == 2 else load_estate(tmp_path)
+            plan = reread(
+                tmp_path, engine.update.live(), root / "plans", candidate=candidate, start=T0
+            )
+            append = engine.journal.append
+
+            def old_writer(store, configuration, rev):
+                payload = json.loads(configuration.to_bytes())
+                payload.pop("job_order")
+                if version == 1:
+                    payload.pop("configuration_format_version")
+                else:
+                    payload["configuration_format_version"] = 2
+                data = canonical_bytes(payload)
+                assert store.put_config(data, "sha256:" + hashlib.sha256(data).hexdigest()) == rev
+
+            def crash_before_applied(*records):
+                if any(r.kind == "config" and r.payload.get("event") == "applied" for r in records):
+                    raise RuntimeError("crash before config applied")
+                return append(*records)
+
+            with monkeypatch.context() as old:
+                old.setattr(runner_update, "store_config", old_writer)
+                old.setattr(engine.journal, "append", crash_before_applied)
+                engine.request_update(
+                    UpdateRequest(plan.token, False, 1, engine.baseline_id, "old-build")
+                )
+                with pytest.raises(RuntimeError, match="crash before config applied"):
+                    await engine.run_until_quiescent(T0)
+            assert engine.journal.store.current_config_rev() == 2
+            legacy = engine.journal.store.get_config(2)
+        finally:
+            engine.journal.close()
+        (tmp_path / "a.jil").unlink()
+        stored = active_configuration(root)
+        assert stored.catalog.jobs["A"].exec_.command == "true"
+        resumed = await resume_run(
+            stored.catalog if version == 2 else candidate.catalog,
+            root,
+            clock=clock,
+            adapters={"CMD": FakeAdapter()},
+            declared=stored.profile,
+            stored_sources=version == 2,
+        )
+        try:
+            await resumed.run_until_quiescent(T0)
+            assert resumed.config_rev == 2 and not resumed.update.stopping
+            assert resumed.oracle.catalog.jobs["A"].exec_.command == "echo captured"
+            assert resumed.journal.store.current_config_rev() == 2
+            assert resumed.journal.store.get_config(2) == legacy
+            applied = [
+                r
+                for _, r in resumed.journal.store.read_from(0)
+                if r.kind == "config" and r.payload.get("event") == "applied"
+            ]
+            assert [r.payload["rev"] for r in applied] == [1, 2]
+            assert replay_store(resumed.journal.store, where="legacy update").replay.rev == 2
+        finally:
+            await resumed.shutdown()
+            resumed.journal.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("snapshot", [False, True])
+def test_v2_main_config_restart_replays_captured_catalog_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, snapshot: bool
+) -> None:
+    from dsl41.runner_journal import oracle_rows
+    from test_runner_journal import _ORDER_GATE, _ORDER_JIL
+
+    path = config_file(tmp_path)
+    (tmp_path / "00_gate.jil").write_text(_ORDER_GATE)
+    (tmp_path / "10_workers.jil").write_text(_ORDER_JIL.removeprefix(_ORDER_GATE))
+    candidate = main.prepare(path)
+    root = tmp_path / "run"
+    original_bytes = Configuration.to_bytes
+
+    def legacy_bytes(configuration):
+        payload = json.loads(original_bytes(configuration))
+        payload.pop("job_order")
+        payload["configuration_format_version"] = 2
+        return canonical_bytes(payload)
+
+    async def scenario() -> None:
+        clock = VirtualClock(start=T0)
+        with monkeypatch.context() as old:
+            old.setattr(Configuration, "to_bytes", legacy_bytes)
+            engine = start_run(
+                candidate.catalog,
+                root,
+                clock=clock,
+                adapters={"CMD": FakeAdapter(default=None)},
+                launched=main.profile_of(candidate),
+                source_capture=main.encoded_parts(candidate),
+            )
+        try:
+            engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "GATE"}))
+            await engine.run_until_quiescent(T0)
+            if snapshot:
+                engine.take_snapshot()
+            for minute, name in enumerate(("GATE", "LOW", "HIGH"), 1):
+                engine.inject(
+                    Event(
+                        at=T0 + timedelta(minutes=minute),
+                        kind="STATUS",
+                        payload={"job": name, "status": "SUCCESS"},
+                    )
+                )
+            await engine.run_until_quiescent(T0 + timedelta(minutes=3))
+            assert all(row.status == "SUCCESS" for row in engine.oracle.store.job.values())
+            assert [t.job for t in engine.oracle.trace() if t.transition.endswith("STARTING")] == [
+                "GATE",
+                "LOW",
+                "HIGH",
+            ]
+            expected = oracle_rows(engine.oracle)
+            legacy = engine.journal.store.get_config(1)
+            assert list(json.loads(legacy)["catalog"]["jobs"]) == ["GATE", "HIGH", "LOW"]
+        finally:
+            engine.journal.close()
+        for source in tmp_path.glob("*.jil"):
+            source.unlink()
+        stored = active_configuration(root)
+        assert list(stored.catalog.jobs) == ["GATE", "LOW", "HIGH"]
+        resumed = await resume_run(
+            stored.catalog,
+            root,
+            clock=clock,
+            adapters={"CMD": FakeAdapter(default=None)},
+            declared=stored.profile,
+            stored_sources=True,
+        )
+        try:
+            await resumed.run_until_quiescent(clock.now())
+            assert oracle_rows(resumed.oracle) == expected
+            replayed = replay_store(resumed.journal.store, where="v2 main config")
+            assert oracle_rows(replayed.oracle) == expected
+            assert resumed.journal.store.get_config(1) == legacy
+            assert resumed.journal.store.current_config_rev() == 1
+        finally:
+            await resumed.shutdown()
+            resumed.journal.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("damage", ["catalog", "encoding", "capture"])
+def test_v2_configuration_refuses_untrusted_capture_order(tmp_path: Path, damage: str) -> None:
+    candidate = main.prepare(estate_file(tmp_path))
+    configuration = Configuration(
+        catalog=candidate.catalog,
+        profile=main.profile_of(candidate),
+        source_capture=main.encoded_parts(candidate),
+    )
+    payload = json.loads(configuration.to_bytes())
+    payload.pop("job_order")
+    payload["configuration_format_version"] = 2
+    if damage == "catalog":
+        payload["catalog"]["jobs"]["A"]["exec_"]["command"] = "echo other"
+    elif damage == "encoding":
+        payload["source_capture"] = {"main-inputs.json": "!"}
+    else:
+        payload["source_capture"] = {"main-inputs.json": "e30="}
+    with pytest.raises(EngineError, match="untrusted: .*source_capture"):
+        Configuration.from_bytes(canonical_bytes(payload), where="untrusted")

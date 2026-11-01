@@ -1160,8 +1160,9 @@ def test_a_stored_configuration_row_is_kept_on_a_retry_and_another_at_its_rev_re
     store_config(store, second, 2)
     store_config(store, second, 2)  # the row an engine wrote before it died: kept
     assert store.current_config_rev() == 2
-    with pytest.raises(EngineError, match="took configuration rev 3, the update applies rev 2"):
+    with pytest.raises(EngineError, match="configuration rev 2 does not match"):
         store_config(store, first, 2)
+    assert store.current_config_rev() == 2
 
 
 def test_the_record_and_replay_seams_refuse_what_they_cannot_read() -> None:

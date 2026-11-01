@@ -133,3 +133,7 @@ Found after an area was sealed as good enough. Addressed once the scope runs end
 - [ ] The opt-in installed-CLI help test (`tests/test_installed_cli.py`) still expects the retired
   `host` command and omits `nav`, `reread`, `update` and `engine stop`; align it with `cli.py` and
   run it on installed core-only and ui-extra candidates (docs batch 2F, Opus).
+- [ ] An interrupted update keeps an equal decoded configuration row at its revision, but the
+  equality ignores job order, so a row with a different `job_order` would be kept and replay
+  would diverge; the token-bound plan cannot produce one today (`runner_update.py` `store_config`;
+  Opus, slice config-order; DL-438).

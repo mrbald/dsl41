@@ -2,7 +2,7 @@
 
 Status: **normative (DL-138).** Entries that rule parts of it include
 DL-144, DL-146, DL-147, DL-150, DL-151, DL-157, DL-158, DL-168, DL-170,
-DL-217, DL-227, DL-252, DL-263 and DL-401. A change to what this document
+DL-217, DL-227, DL-252, DL-263, DL-401 and DL-438. A change to what this document
 fixes requires a decision-log entry. Each entry is cited where it applies.
 
 For the architect: this page fixes format tolerance, version entry and
@@ -57,7 +57,7 @@ a row.
 | Wrapper input spec | Adapter → wrapper | `version = 1` | Refused by contract (§2 of wrapper protocol) | Unsupported refuses at the wrapper, exit 2; absent version also exits 2 | One launch |
 | Perimeter journal | Access perimeter → audit; sequence recovery reads `access_seq` | `rec`; no version | Ignored | Not applicable; no engine decision dispatches it (DL-147) | Retained root |
 | Access role map | Operator → `runner_access` loader | `format_version` | Refused | Unsupported or absent refuses | Operator's retained map |
-| Stored configurations | Startup/update → `Configuration.from_bytes` | `configuration_format_version`, 1 or 2 | Refused for both | Unsupported refuses; absent selects supported version 1 (DL-437) | Retained `configs` rows |
+| Stored configurations | Startup/update → `Configuration.from_bytes` | `configuration_format_version`, 1, 2 or 3 | Refused for all three | Unsupported refuses; absent selects supported version 1 (DL-437, DL-438) | Retained `configs` rows |
 | Reload plans | `reread` → `read_plan` and update | `plan_format_version`, 1 or 2; `artifact_format_version` (PR-08d) | Ignored | Unsupported plan version refuses by name; absent plan version selects supported version 1 (DL-437). Unsupported artifact version makes `read_plan` return no plan; absent artifact version passes | Retained plan; an interrupted update requires it |
 | Main-config input mapping | `main_config.prepare` → `from_parts` | `format_version = 1` in `main-inputs.json` | Ignored | Unsupported or absent refuses (DL-437) | Retained plan or stored capture |
 | Main config | Site → `load_config` | `format_version = 1` | Refused; restart host loading has the limit below | Unsupported or absent refuses (DL-437) | Site's config file |
@@ -85,9 +85,25 @@ its admission `seq` is not the SQLite row sequence. `check_record` refuses
 unknown store kinds, engine/config events, outcome kinds and plan kinds.
 The input event alphabet is strict too (DL-158).
 
-**Main-config captures and plans (DL-437).** A configuration with captured
-sources uses version 2; the unversioned legacy row reads as version 1.
-Both reject unknown top-level fields. Main-config plans use version 2;
+**Main-config captures and plans (DL-437, DL-438).** New configuration rows use version 3.
+A required `job_order` list names every catalog job exactly once. The catalog
+map remains canonical and sorted; readers rebuild it in `job_order` order
+before scheduling or replay. `source_capture` is optional in version 3.
+Versions 1 and 2 remain readable. Version 2 requires captured sources; an
+absent discriminator selects version 1. A version-2 reader recompiles only
+the stored capture, checks that its catalog hash matches the stored catalog,
+and restores that capture's job order. An unreadable or mismatched capture
+refuses the row. Legacy rows without capture keep sorted job order; their
+original live order is lost. No existing row is rewritten. All three versions reject
+unknown top-level fields. The configuration digest covers the format version
+and job order; `catalog_hash` remains order-free.
+
+An interrupted update keeps an equal decoded row already at its expected
+revision, including one written by a version-1 or version-2 writer before
+`config applied`. A different row or an unexpected revision refuses before
+any write. Otherwise the update appends exactly the next revision (DL-438).
+
+Main-config plans use version 2;
 the unversioned legacy plan reads as version 1. `main-inputs.json` binds
 config bytes, environment, lint policy, source mapping, membership and part
 names. Each Python part retains its generated JIL. Every part has a SHA-256
