@@ -27,10 +27,14 @@ Not a test file: no test_ prefix, imported by nothing.
 from __future__ import annotations
 
 import os
+import errno
 import select
 import signal
+import subprocess
 import sys
 import threading
+import time
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 
@@ -124,11 +128,61 @@ def exit_lands_in_select(event_path: str) -> None:
     runner_wrapper.select = SimpleNamespace(select=select_)  # type: ignore[assignment]
 
 
+def killpg_eperm(event_path: str, *, at_kill: bool, empty: bool) -> None:
+    """DL-229: the record carries the real exit even when signalling races its exit."""
+    procid = sys.modules[runner_wrapper.killpg_quiet.__module__]
+    procid.sys = SimpleNamespace(platform="darwin")
+    real_killpg, real_run = os.killpg, subprocess.run
+    group: list[int] = []
+    target = signal.SIGKILL if at_kill else signal.SIGTERM
+
+    def killpg(pgid: int, sig: int) -> None:
+        if sig != target:
+            real_killpg(pgid, sig)
+            return
+        with open(event_path + ".go", "w"):
+            pass
+        deadline = time.monotonic() + 5.0
+        while True:
+            state = real_run(
+                ["ps", "-o", "stat=", "-p", str(pgid)],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=5.0,
+            ).stdout.strip()
+            if state.startswith("Z"):
+                break
+            if time.monotonic() >= deadline:
+                raise AssertionError("command did not exit")
+            time.sleep(0.01)
+        group.append(pgid)
+        _note(event_path)
+        raise PermissionError(errno.EPERM, "killpg denied")
+
+    def run(argv: list[str], **kwargs: Any) -> Any:
+        if argv != ["ps", "-A", "-o", "pid=,pgid=,stat="]:
+            return real_run(argv, **kwargs)
+        assert len(group) == 1
+        _note(event_path)
+        listing = f"1 1 S\n{os.getpid()} {os.getpgrp()} S\n"
+        if not empty:
+            listing += f"{group[0]} {group[0]} Z\n"
+        return subprocess.CompletedProcess(argv, 0, listing, "")
+
+    procid.os.killpg = killpg
+    procid.subprocess.run = run
+
+
 MODES = {
     "count_observes": count_observes,
     "full_self_pipe": full_self_pipe,
     "completion_beats_parent_loss": completion_beats_parent_loss,
     "exit_lands_in_select": exit_lands_in_select,
+    "eperm_term_zombie": partial(killpg_eperm, at_kill=False, empty=False),
+    "eperm_term_empty": partial(killpg_eperm, at_kill=False, empty=True),
+    "eperm_kill_zombie": partial(killpg_eperm, at_kill=True, empty=False),
+    "eperm_kill_empty": partial(killpg_eperm, at_kill=True, empty=True),
 }
 
 
