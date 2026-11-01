@@ -2,6 +2,11 @@
 
 Status: frozen (DL-324). Each change to a frozen item needs a decision-log entry.
 
+For the architect: this page fixes executor semantics and chart ownership.
+The [architect track](../README.md#documents) links the runtime design.
+[Runner design §7](runner-design.md#7-journal-and-recovery-e1-prod-grade)
+owns durability and recovery; this page defines how declarations execute.
+
 This document fixes the executor semantics that every declared runner state machine runs under.
 Each machine declares its transitions, and the declaration is the only spec (DL-289, DL-324).
 This document says how the executor reads it. Cross-machine invariants and vendor requirements
@@ -141,15 +146,17 @@ A macrostep is iterative on one executor worklist and never recursive.
    protocol carries the intents out:
    - the oracle's effects go through the decision record and then one `dispatch` record per
      start, after DL-320's dry apply on `Oracle.fork()`;
-   - the supervisor's go through its index, receipt, spawn and reply protocol;
-   - the engine's go through the WAL decision.
+   - the engine commits admission input and decision together, then records
+     each dispatch before launch (DL-428);
+   - attempt outcomes commit with their follow-up plans, and an update's
+     intent precedes its stop effects (DL-426, DL-432).
 
    The executor itself does no I/O. A tier whose later items read what an earlier item's intents
    write passes `run` a hook. The executor calls it with each outcome as the microstep ends, before
    the next item pops, under the macrostep: it may read, and a post, dispatch, resolve or fork from
    it raises `ReentrantDispatch`; it reports no item. The oracle's hook writes the store the fired
-   rows' moves, since the guards of the items a row chains read the store; the engine and the
-   supervisor carry their intents out after the run.
+   rows' moves, since the guards of the items a row chains read the store; the engine
+   carries its intents out after the run.
 
 A tier may read how an event would be selected without running it. `Executor.resolve` runs the
 selection of §3 for one instance and one event against the instance's present configuration:
@@ -163,8 +170,7 @@ as it stands: its configuration, its deferred queue, its generations and its ent
 history rings. The two share each instance's record until a dispatch on either side writes it. A
 write stores a new record on its own side, so neither side sees the other's moves. A fork costs one
 reference copy per instance, a copy of each history ring, and one new record per instance the tier
-gives new data; the state owner gives every host instance new data, bound to the fork's rows, so the
-rest of its fork's cost is one record per host. Data not given a new value, and every event payload,
+gives new data; the state owner rebinds each copied job instance to the fork's rows (DL-339). Data not given a new value, and every event payload,
 stay shared by design, so a tier treats them as immutable. A fork inside a macrostep raises
 `ReentrantDispatch`. A fork with a root item in the pool raises a `StatechartError`, because that
 item would run on one side only (DL-339).
@@ -173,13 +179,13 @@ The executor's errors, among them `AmbiguousTransition` (§3), `ReentrantDispatc
 `UnhandledEvent` (§10), subclass one base, `StatechartError`. Each is an assertion failure, not a
 fault to contain. DL-320's classification never catches it: `trial_apply` and `classify_fault`
 re-raise it, and nothing is appended. No tier may swallow it. The tier stops before any further
-durable write of its own; a record already durable, a seal record among them, stays.
+durable write of its own; an already committed record stays.
 
 The error is structured. It carries the machine, the instance key, the active configuration, the
 item and a summary of its payload, the item's ancestry, the candidates found, the deferred queue,
 and a ring of the last microsteps of the machine that raised. The executor keeps one ring per
 machine. Its size is the executor's `history` argument; the default is 64. `str()` of the error
-renders all of it, one fact per line. The engine and the supervisor print it on stderr, each line
+renders all of it, one fact per line. The engine prints it on stderr, each line
 under the prefix `dsl41: statechart error`, and exit 7. The units list 7 in
 `RestartPreventExitStatus`.
 
@@ -207,8 +213,11 @@ Stale-identity events are refused by a guard row. They are never deferred.
 
 ## 7. Clocks and time events
 
-Each machine declares its clock. The clock is logical for the engine tier and the oracle, and
-monotonic for the supervisor's lease and process.
+Each machine declares its clock. All registered machines declare `logical`.
+The executor reads no wall or monotonic clock; the owning tier supplies events.
+The engine schedules attempt grace and abort deadlines outside the executor
+(DL-426, DL-429). Real-clock admission follows DL-435; it never regresses
+the oracle's time.
 
 A time event is a declared trigger. How the owning tier produces it is the tier's: an armed
 timer, or a deadline it samples on its clock. The executor reads no clock.
@@ -262,9 +271,7 @@ lowering accepts evaluates. A cascade that does not end takes items instead. The
 counts a root dispatch's items, and the item that reaches the cap for the estate's job count, four
 times its square, at least 100,000 and at most 400,000, raises `CascadeDepthError`, an
 `OracleError`; the input is refused or quarantined as any input whose apply raises (DL-351). The
-ceiling bounds a cascade that does not end to half the engine's lease lapse at every measured
-estate size, up to 1,000 jobs. `classify._TruthOracle` builds only the oracle's reads
-(`OracleReads`), to read conditions.
+ceiling bounds the work of one cascade (DL-351).
 
 ## 9. Wait states
 
@@ -316,20 +323,19 @@ The generated test is in §13.
 
 ## 11. Instances and boundaries
 
-A declaration is a type. Instances are per job, per lease, per subscription, and so on; a box is a
-variant of the job machine (§16).
+A declaration is a type. Instances are per job, command attempt, admission,
+subscription, engine lifecycle or update; a box is a variant of the job
+machine (§16).
 
-One executor per tier object (an `Oracle`, a `Supervisor`, an `Engine`) owns one worklist for all
-its instances. A process with an `Engine` has one executor for the engine tier's machines: the
-wiring builds it before the engine and hands it to the supervisor client first, then to the engine
-(DL-330). The oracle's state owner (`RuntimeState`) has its own executor, for the machines whose
-state it owns (DL-333). A fork has its own executor; a fork of the owner copies the source's
-(`Executor.fork`, §5) and binds each host instance's data to the fork's rows (DL-339). A durable
-file that no process owns has an executor per move: the lineage anchor's methods each build one from
-the file they read under the anchor lock, post the move's events, read and settle the outcomes
-before the one anchor write (a claim writes its claim file first, then the head), and drop it
-(DL-336). `ReentrantDispatch` is per executor; a call from one tier into another tier's executor is
-not re-entrance.
+One executor per tier object owns one worklist for its instances.
+The engine shares its executor among admission, subscription, attempt and
+engine-lifecycle machines (DL-426, DL-429). The update tier owns an executor
+for its one update instance (DL-432). `RuntimeState` owns the oracle's
+executor for runtime assembly, jobs and queue scan. A fork copies that
+executor and rebinds its job data (`Executor.fork`, §5, DL-339).
+`ReentrantDispatch` is per executor; a call to another tier's executor is
+not re-entrance. Supervisor and anchor ownership are outside this contract
+(DL-424).
 
 The oracle runs one composite `job` machine per job, with named regions for its status, its flags
 and its holding, its box variant as rows and its writes through `RuntimeState` (§16).
@@ -341,7 +347,7 @@ registered in `machines.MACHINES`, and is the one declaration of a job's moves (
 
 The oracle, `Oracle` in `src/dsl41/oracle.py`, drives it (DL-341). Each job row has one `job`
 instance on the state owner's executor under the row's key; the owner restores them from the rows
-where it restores the host instances, and a fork copies them. Every input that moves a job row is a
+when it rebuilds the executor, and a fork copies them. Every input that moves a job row is a
 root item on the job's instance, and its whole cascade runs on the executor's worklist (§8, DL-350).
 The chart decides every move. A row's action takes the items it sends beyond its own move from the
 tier's handle on its payload (`Units.consequences`), as a guard takes its facts: the chart declares
@@ -481,7 +487,8 @@ INACTIVE cascade (`box set INACTIVE`, then `notify step` per row), ON_NOEXEC's f
 decisions at a box start and the completion of a box run that left no member in the run are the
 `window pass`: a box started inside another's pass registers with it, and the outermost pass
 decides them all. The parent's recompute after an operator's INACTIVE is `after inject`. The
-period's first input gives a removed job's held units back (`job.308`). Each payload computes its
+`PERIOD_OPENING` path gives a removed job's held units back (`job.308`);
+that path remains dormant in the engine (DL-425). Each payload computes its
 facts where the rule reads them. A box rule's target is the chart's choice.
 
 A RUNNING box's completion door is RUNNING's region `door` (DL-371): `settled` between items, and
@@ -538,22 +545,22 @@ still drops (`job.418`).
 ## 12. Durability of deferred queues
 
 A deferred input is admitted and applied. The apply's effect is the enqueue. Deferral adds no
-admission outcome and no WAL format change: the outcomes are applied and rejected.
+admission outcome and no journal format change: the outcomes are applied and rejected.
 
 A deferred queue is durable state of its tier, or the tier's protocol provably recovers its
 loss. Release runs inside the transaction of the input that moves the configuration, each
 released item as its own macrostep.
 
 The admission decision is final at the gate: `expect` and the preconditions run there, and
-release does not re-check them. That narrows concurrency-model §4 step 6 for a released control
-input; the entry that first makes a machine defer a control input amends concurrency-model §4 and
+release does not re-check them. That narrows concurrency-model §4 (`concurrency-model.md`, retired in 2.0.0) step 6 for a released control
+input; the entry that first makes a machine defer a control input amends concurrency-model §4 (`concurrency-model.md`, retired in 2.0.0) and
 control-protocol.md's meaning of `applied` for that input, and says so. A released event that no
 longer fits takes its declared row.
 
 The representation of a deferred queue inside the oracle (its place in the store's inventory and
-projection, concurrency-model §3; the seal format), its dry apply, and the handling of a fault at
+projection, concurrency-model §3 (`concurrency-model.md`, retired in 2.0.0)), its dry apply, and the handling of a fault at
 release under DL-292 and DL-320 are ruled by the entry that first makes an oracle machine defer.
-That entry narrows concurrency-model §4, DL-292 and DL-320 and says so. DL-292's violation channel
+That entry narrows concurrency-model §4 (`concurrency-model.md`, retired in 2.0.0), DL-292 and DL-320 and says so. DL-292's violation channel
 is retired (DL-353). No oracle machine defers until that entry exists. A fork of the state owner
 carries its deferred queues into DL-320's dry apply, so an event the trial releases is released on
 the twin only (DL-339).
@@ -618,8 +625,7 @@ prose in its `note`, which the generated table shows in the action column.
 The executor is built in this repository, not adopted. It is standard library only and one
 module.
 `src/dsl41/state_machine.py` holds the declarations, the executor and its hit recording
-(DL-356). The module imports nothing from its package, so the supervisor tier loads it by
-path, with its own directory on `sys.path`, as it loads `canon.py`. It is deterministic and has
+(DL-356). The module imports nothing from its package. It is deterministic and has
 no clock. It does no I/O in production; under the test variable `DSL41_TRANSITION_HITS` it
 records the coverage items it hits (§13).
 
@@ -629,36 +635,33 @@ python-statemachine v3's SCXML conformance suite as references only.
 
 ## 16. Machines and acceptance
 
-Each machine's entry rules its declaration: `supervisor_lease` (DL-326), `seal_boundary` (DL-327),
-`supervisor_process` (DL-328), `subscription` (DL-329), `supervisor_client` (DL-330), `effect`
-(DL-331), `host` (DL-333), `admission` (DL-334), `runtime_assembly` (DL-335), `anchor_head` and
-`period_row` (DL-336), the oracle's `job` (DL-337), and its queue scan's `queue_scan` (DL-372).
+The registry contains eight charts (`machines.MACHINES`):
 
-`supervisor_lease` has token guards, a monotonic clock and time events.
+| Chart | Declaration | Owner and lifetime |
+| --- | --- | --- |
+| `job` | `job_chart.py` (DL-337) | One per oracle job, including boxes; see §11. |
+| `queue_scan` | `scan_chart.py` (DL-372) | Oracle capacity readmission coordinator; see §11. |
+| `runtime_assembly` | `oracle_state.py` (DL-335) | One per state owner. |
+| `admission` | `runner_admission.py` (DL-334) | One per in-flight request id on the engine executor. |
+| `subscription` | `runner_journal.py` (DL-329) | One per feed on the engine executor, join to end. |
+| `engine_lifecycle` | `engine_charts.py` (DL-426) | One per engine start, including restart catch-up (DL-433). |
+| `attempt` | `engine_charts.py` (DL-426) | One per command attempt; settlement includes plan completion and cleanup (DL-429, DL-431). |
+| `update` | `reload_update.py` (DL-432) | One on the update tier's executor; unfinished intent restores STOPPING. |
 
-Subscription's declared contract is the one its own document states
-([docs/blocks/subscription.md](blocks/subscription.md)): a bounded buffer in both phases, not a
-deferral. It runs on the engine's executor, one instance per feed from its join to its end, and
-a statechart error that a control handler meets stops the engine as one from the loop does.
+The declarations' generated references are in
+[state-machines.md](state-machines.md) and
+[chart-lifecycles.md](chart-lifecycles.md). These generated views own the
+states and rows; this inventory does not copy them.
 
-`seal_boundary` defers nothing: an input after the cutoff refuses the boundary (`period-model.md`
-§6, DL-327).
+Subscription's contract is [blocks/subscription.md](blocks/subscription.md):
+a bounded buffer in both phases, not a deferral. A statechart error in a
+control handler stops the engine as an error in the loop does.
 
-`supervisor_client` (DL-330) runs on the process's one executor, which the wiring builds before
-the engine and hands to both; the client posts nothing once closed, and a statechart error that
-its reader, renewal or LIST task meets stops the engine as one from the loop does.
-
-`effect` (DL-331) is retired in 2.0.0: the engine dispatches a decided start behind its
-`dispatch` record and keeps no outbox.
-
-`host` (DL-333) is retired in 2.0.0: one engine runs every job on its own host, and the
-state owner's routing table stays empty.
-
-`admission` (DL-334) runs on the engine's executor, one instance per request id from its durable
-attempt to its durable decision; the decided state is final and forgotten, and the stored decision
-answers an exact retry, or refuses a reused id, before any post. Replay rebuilds the index in WAL
-order on the resuming engine's executor. A statechart error at an attempt, a decision or the seal's
-readiness lookup stops the engine as one from the loop does, and in replay names the WAL record.
+`admission` runs from admission to decision. The final instance is forgotten;
+the retained decision answers an exact retry or refuses a reused id before
+any post. Input and decision commit together; replay rebuilds the decision
+index in record order (DL-428). A statechart error stops the engine and
+replay identifies its record.
 
 `runtime_assembly` (DL-335) is the state owner's own life. Its one instance lives on the store's
 executor from construction, and the configuration carries the phase's leaf and the group above
@@ -668,13 +671,9 @@ work of the verb. Each refusal preserves the exception class and message fixed b
 `OracleError` or a `ValueError`. A cell with no row is a statechart error that stops the tier at the
 verb that meets it; the constructor meets the genesis cells.
 
-`anchor_head` and `period_row` (DL-336) run on an executor per move, built from `anchor.json` read
-under the anchor lock; the head's tag and each row's flags are the instances' configurations, and
-no file or no row means no instance. A refusal row is the anchor method's `EngineError`, with its
-text, before any write; the checks that read the method's own facts and the idempotent repeats
-come before the post. A gap is a statechart error, also before any write: at the seal's close CAS
-it stops the engine with the `seal` record durable and the head open, and at resume, at genesis,
-in the roll and in `estate reclaim` it reaches the CLI's stop, exit 7.
+DL-424 excludes supervisor lease/process/client, seal boundary, effect,
+host, anchor-head and period-row machines. Their decision-log pointers are
+listed below; none is in `machines.MACHINES`.
 
 A machine is accepted when:
 
@@ -684,7 +683,7 @@ A machine is accepted when:
 - the coverage gate passes;
 - the existing tests pass unchanged;
 - protocol and output are unchanged, or the entry says what changes and why;
-- for oracle-tier machines also: fork isolation, replay, seal and reopen, and per-input
+- for oracle-tier machines also: fork isolation, replay, snapshot restore, and per-input
   revision equality against the decision code it replaces.
 
 Each slice is a semantic-class change with its own decision-log entry.
@@ -718,3 +717,12 @@ builds carries no previous end, and job.314, since a live status never stands on
   prose, such as `docs/autosys-semantics.md`'s SEM-33 and `docs/simulation-coverage.md`, still
   calls it a deferred start. Its identifiers, its cause strings and the `RUN_WINDOW_DEFER` trace
   line keep their names, because they are the trace contract.
+
+Citation pointers:
+
+- DL-326 — supervisor_lease is outside the engine inventory (§16, DL-424).
+- DL-327 — seal_boundary is outside the engine inventory (§16, DL-424).
+- DL-328 — supervisor_process is outside the engine inventory (§16, DL-424).
+- DL-330 — supervisor_client is outside the engine inventory (§16, DL-424).
+- DL-331 — effect is outside the engine inventory (§16, DL-424).
+- DL-336 — anchor_head and period_row is outside the engine inventory (§16, DL-424).
