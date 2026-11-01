@@ -1,10 +1,14 @@
 # Runner design — executing IR-F with AutoSys semantics
 
+For the architect: this page describes execution, durability and recovery.
+The [architect track](../README.md#documents) links the related contracts.
+Access policy is covered by [access-model.md](access-model.md).
+
 Status: frozen (DL-41); a frozen item changes only through a decision-log
 entry. This document is normative for the runner in the same way that
 ir-design.md is normative for the compiler. The runner is prod grade (E1,
 §7), runs in two time domains (E2, §9), and serves the web behind a proxy
-or a tunnel (E3, §11). The supervisor tier is retired (DL-424).
+or a tunnel (E3, §11). The engine owns every attempt (DL-424).
 
 ## 1. Mission and scope
 
@@ -89,8 +93,8 @@ Both are deterministic and pure-core-compatible. Bisimulation (§13) pins
 that `feed`-only and `advance`+`feed` schedules produce identical traces.
 
 The engine uses more of the oracle than these two methods. `fork` and
-`batch` (`InputBatch`) serve the admission order and the host table serves
-routing (`docs/concurrency-model.md` §4 and §8). `trace_since` serves the
+`batch` (`InputBatch`) serve admission (§7, DL-428).
+The host table stays empty: there is no remote routing (DL-425). `trace_since` serves the
 control `trace` verb (DL-310). The cascade's bound is §4's item cap
 (DL-351). Constructing an oracle raises the process's recursion limit to
 the fixed `RECURSION_LIMIT` and never lowers it (DL-351, DL-352).
@@ -106,12 +110,12 @@ steps:
    clock.next_sleeper_due(), first queued event)`.
 2. The clock waits (§9). A real clock sleeps until `next_wake` and wakes
    early when the queue gains an event. A virtual clock jumps.
-3. **Journal first** (§7): WAL-append and fsync the injected event, *then*
-   run `feed()` / `advance()`. The oracle runs a cascade of instant
+3. Dry-apply the input on a fork through `feed()` / `advance()`,
+   then commit its input and decision together (§7, DL-428). The oracle runs a cascade of instant
    starts on its executor's worklist, iteratively, and stops a cascade that
    does not end at an item cap set by the estate's job count (DL-351).
-4. Append the attempt's `decision` record (`docs/concurrency-model.md` §4
-   step 7).
+4. Publish the admitted state after that transaction commits
+   (§7, DL-428).
 5. Dispatch what the decision implies, in emitted order
    (`runner_admission.dispatch_plan`, `Engine._dispatch`): each start
    appends its `dispatch` record and then launches; each kill cancels the
@@ -164,13 +168,13 @@ engine dispatched. A CHANGE_STATUS overwrite re-emits STARTING without
 advancing the run number, and vendor parity launches nothing.
 
 **Stale-completion gate.** Completions carry `(job, run_number)`. Every
-completion enters the common admission order first, so it is durable before
-it is judged (§7). The gate then rejects one whose run_number does not match
+completion enters the common admission order (§7). The dry apply rejects
+one whose run_number does not match
 the current one, or whose row is not STARTING or RUNNING: a terminal
 status, a status an operator injected, such as INACTIVE, or QUE_WAIT after
 a restart queued behind a reservation (DL-235). An INACTIVE cascaded from the
-job's box (SEM-18) counts as injected (DL-242). The rejection is that
-attempt's `decision` record with its reason; no `drop` record is written.
+job's box (SEM-18) counts as injected (DL-242). The admission commits the completion and its rejection decision together,
+with the reason; no `drop` record is written.
 This gate closes the race between a natural exit and a concurrent
 KILLJOB/term_run_time kill. The gate must live in the shell. The oracle
 contract deliberately lets injected STATUS overwrite terminal statuses
@@ -278,11 +282,10 @@ A file that appears at a later poll waits for a steady size, as under
 `stable`. A job with a minimum size always needs the steady-size rule. The
 adapter completes with exit 0.
 
-**Its progress is evidence, not memory** (DL-129; period-model §3.5). Last
+**Its progress is evidence, not memory** (DL-129; §7). Last
 observed size and stable-poll count decide when
-a watch completes, and a restart resets both. So the watch has a spool, and it
-is append-only: `runs/<job>.<run_number>/watch.jsonl`, a `start` line on
-dispatch — the first durable record, so a dispatched watch always has one — then
+a watch completes, and restart restores both from the evidence log. So the watch has an append-only log in its dispatch
+spool: `watch.jsonl`, a `start` line when polling begins — its first durable observation — then
 one line per poll, fsynced, *including* polls that changed nothing. The line
 is appended **before** progress moves or a completion is emitted, so an
 observation that changed the watch is never one an audit cannot see.
@@ -321,7 +324,7 @@ group, and the escapee that leaves it is a stated limit (DL-403, below).
 The engine socket (§10) has no lease: the single-writer loop serializes
 sendevent (DL-42).
 
-**Tier 0 — per-run wrapper** (the correctness tier, always present). This
+**Tier 0 — per-attempt wrapper** (the correctness tier, always present). This
 tier is a dumb stdlib-only shim (`runner_wrapper.py`, no
 third-party imports). The engine runs it BY FILE PATH, never as
 `python -m`: `-m` would import the `dsl41` package first and drag
@@ -337,7 +340,7 @@ Duties:
    member, and a wrapper inside the group dies *before it writes the
    record*. The wrapper stays outside the group that it (or the engine)
    signals.
-2. Durably write `runs/<job>.<run_number>/spawn.json`: a schema `version`,
+2. Durably write `runs/<job>.<run_number>/<ordinal>/spawn.json`: a schema `version`,
    run_id, job, run_number, wrapper pid + start-time, command pid,
    command pgid, command start-time, started_at, and
    **boot_id** (`kern.bootsessionuuid` /
@@ -406,300 +409,226 @@ at reconciliation (§7) and reported truthfully, not guessed.
 
 ## 7. Journal and recovery (E1: prod grade)
 
-The store is one SQLite file per run root, `engine.db` (DL-428).
-`SqliteStore` is the only durable record; it holds the inputs, configuration
-history and snapshots. Each append commits synchronously. A 1.x root with
-`journal.jsonl` or `wal/` and no store is refused by name.
+The durable engine record is `<run_root>/engine.db` (DL-424, DL-428).
+`SqliteStore` holds `journal`, `configs`, `snapshots` and `meta` tables.
+It commits each append with SQLite `synchronous=FULL`; macOS also enables
+`fullfsync`. The wrapper spool and FW evidence log remain separate evidence
+(§6, §6a). A root with `journal.jsonl` or `wal/` but no store refuses.
+Periods, seals, lineage anchors and catalog bundles are outside this design
+(DL-424); the store carries the catalog and its interpretation.
 
-Record kinds:
+Record kinds (`runner_journal.KINDS`):
 
-- `segment` — the first record of every segment, and the whole identity of
-  the period it opens: `{rec, segment_no, estate_id, period_id,
-  baseline_id, catalog_hash, catalog_hash_version, source_bundle_hash,
-  runtime_hash, state_machine_version, clock_domain,
-  first_index, opens_from_seal, reclaimed, trust_unaudited, at}`
-  (`docs/period-model.md` §2.1, DL-130). Self-describing on purpose: a
-  reader that opens it knows the period, the catalog and the semantics
-  without reading an earlier file. `catalog_hash` + `state_machine_version`
-  are what resume eligibility is an exact match on (S6a);
-  `catalog_hash_version` says which recipe the hash was taken under, so the
-  gate compares like for like. The build's version is deliberately NOT
-  here: a patch release must not move these bytes (PR-07).
-- `input` — `{seq, at, kind, payload, source, request_id, fingerprint}`
-  plus `expect` and `claimed_actor` where the input was externally
-  requested, source ∈ {scheduler, adapter, control, reconcile}.
-- `advance` — `{seq, at, request_id, fingerprint}`: a time observation that
-  the engine acted on (`Oracle.advance`), written before the advance (DL-44).
-  The input alphabet has two halves: external events and time observations.
-  Without the latter, an advance-fired term_run_time kill vanishes from
-  replay, and a late natural-exit record can resurrect the job.
-- `decision` — `{index, request_id, decision, reason, code, revisions,
-  legacy_batch}`: the concurrency-model §4 step-7 record in one line
-  (DL-118, `docs/period-model.md` §2.3): the decision the attempt at
-  `index` got and the revisions it moved. `index`, not `seq`, because it
-  shares its attempt's number and `seq` is the §10 subscribe cursor.
-  `legacy_batch` is **required false**: this writer pins it, `true` is a
-  retired dialect refused naming DL-138, and missing or non-boolean is
-  malformed and refused as its own error.
-- `dispatch` — `{job, run_number, run_id, run_dir, started_at}`: one
-  start, appended after its decision and before its adapter task exists.
-  The `run_id` is minted here and the wrapper spec carries it (PR-36a), so
-  the store and the spool name one process identity. An engine that dies
-  between the decision and this record leaves a decided start with no
-  trace, which resume dispatches; one that dies after it leaves a record
-  whose run directory says how far the start got (§7 resume). The
-  wrapper's `spawn.json` is the authoritative spawn record, written by the
-  process that did the spawn. The pgid is the wrapper's child's business;
-  the engine never observes it (DL-44).
-- `drop` — an input refused BEFORE admission, which means only scheduler
-  ticks missed across downtime, skipped-and-recorded at resume (E9, DL-45).
-  A completion the §4 gate rejects is not a `drop`: it is admitted like
-  every other input, and its rejection is that attempt's `decision`, which
-  replay can honour rather than guess at (DL-89).
-- `seal` — `{rec, estate_id, period_id, closes_at_index, at, digest,
-  next_period_id, next_baseline_id, catalog_hash_version, source,
-  request_id, request_fingerprint, claimed_actor, force_seal}`: the last
-  record of a period's last segment and the boundary's commit point
-  (`docs/period-model.md` §2.2, which owns the schema). It names the period
-  it closes, the index it closes at, the sidecar digest that must verify,
-  and the identity the next period opens with. Not an input: replay applies
-  nothing from it. **Any record after one in the same segment is refused at
-  the read**, not tolerated as a torn tail.
-- `preflight` — the §8 WARN items that the run started under (DL-45:
-  "prints, journals, and runs" made literal). This record is not an
-  input, and replay ignores it.
-- Retired kinds are refused by name, citing DL-138: `header` (a
-  once-per-log header cannot describe a log made of segments, DL-130), and
-  `result` and standalone `effect` (the decision and its intents as
-  separate records, DL-118). The 1.x `leader`, `host` and `effect_result`
-  records are refused by name, citing 2.0.0: one engine holds a root with
-  no election, no routing table and no outbox. A
-  `catalog_hash_version` of 1 is refused the same way. An **unknown** `rec`
-  is refused too, naming the kind, as its own error: the version gate sits
-  on the opening `segment`, so an unrecognised kind inside a version-matched
-  segment is corruption (`docs/protocol-evolution.md`).
+| Kind | Durable fact |
+| --- | --- |
+| `input` | An admission's index, time, request id and fingerprint; an event also carries its kind, payload and source ∈ {scheduler, adapter, control, reconcile}. A verbless input is a time observation. External requests carry `expect` and `claimed_actor` where supplied. |
+| `decision` | The admission's verdict, fingerprint and moved revisions. Input and decision commit in one transaction. |
+| `dispatch` | An attempt's launch intent: job, run number, uuid4 `attempt`, ordinal, spool, invocation environment and start time. The opening run also records its configuration `rev` (DL-432). |
+| `dispatch_pending` | A decided start awaiting dispatch, or its discharge. |
+| `outcome` | An attempt's `natural`, `spawn_failed`, `stopped` or `unobservable` end and its evidence; `ladder: running` keeps cleanup open. |
+| `follow_up` | The plan committed with an outcome, each step's done mark committed with its effect, and `ladder_done` after cleanup. |
+| `drop` | A scheduler tick missed across downtime (E9, DL-45). |
+| `preflight` | The WARN items the engine starts under. |
+| `config` | An update intent or an applied configuration revision. |
+| `engine` | Started, draining, clean or unclean shutdown, shutdown during startup, interrupted drain, or snapshot. |
 
-The admission fields (DL-89, DL-90; `docs/concurrency-model.md` §4 is
-normative for the order, this section for what the records hold):
-`expect` and `claimed_actor` ride only where they exist: an
-input the engine raised has neither, and writing nulls for them would blur
-the one distinction the log has to keep, which inputs were externally
-requested and therefore had to name a revision. Replay reads `expect` back,
-because an attempt admitted without a result is re-decided through the same
-gate, and the revision it named is half of what that gate reads.
+`segment` and `advance` are wire projections, not store kinds: `subscribe`
+projects an applied configuration as `segment` and a verbless input as
+`advance`. [Control-protocol §5](control-protocol.md#5-streaming-verb-subscribe) owns the
+wire shapes. The store sequence and admission index are different counters.
+An unknown store kind refuses by name. The event alphabet is also strict
+(DL-158); an unknown event cannot disappear from replay.
 
-Resume's side effects are bounded to this list:
+**Commit before effect.** The engine applies an input on a fork, commits
+input and decision, then publishes the resulting state and answers the
+request. Each launch has its own durable `dispatch` before its task exists
+(DL-425, DL-428). A decided start remains `dispatch_pending` until represented
+by a dispatch or its discharge. Snapshots cannot lose that start.
+An outcome commits with its follow-up plan. A plan step commits its done
+mark with its effect. Exact request-id retries read the retained decision;
+pruning its record ends that retry horizon.
 
-- an attempt admitted with no `decision` record gets that record, with the
-  effects its recovered verdict implies and a SPAWN's `run_id` minted in
-  it, before the ladder runs (DL-156, DL-315). A start recovered
-  this way is then a pending SPAWN like any other;
-- a kill the engine decided and recorded, then died before delivering, is
-  re-driven (DL-96);
-- the live cleanup kills what is left of a command whose attempt ended
-  with the engine, as at a live record; nothing waits for a wrapper
-  (DL-226, DL-433);
-- a pending SPAWN is re-driven (DL-102);
-- the supervised-SPAWN replay rule is retired (DL-424; DL-129, DL-315);
-- an FW watch is resumed from its log, or, with no trace and an applied
-  SPAWN, dispatched again under that SPAWN's `run_id`, because a watch is
-  an idempotent read (DL-44 item 7, DL-129). A watch whose SPAWN was
-  retired, or that no decision gave a SPAWN, is not launched
-  (DL-315);
-- the live-wrapper kill re-drive is retired (DL-424; DL-133).
+**Runs and attempts.** A run is the oracle's `(job, run_number)`.
+An interrupted run can have several command attempts (DL-424, DL-426,
+DL-429). Each attempt has its own uuid4 `run_id`, ordinal and spool:
+`runs/<job>.<run_number>/<ordinal>/`. The invocation variables
+`DSL41_JOB`, `DSL41_RUN_NUMBER` and `DSL41_SCHEDULED_AT` remain stable across
+replacement attempts. `DSL41_ATTEMPT` and `DSL41_COOKIE` identify the attempt.
+Application failures are never retried (§6, Q4, DL-53).
 
-Nothing else. The detached-run kill re-drive rule is retired (DL-424).
+The interruption rule chooses one plan from the committed outcome:
 
-`dsl41 runs` is not a new record kind: its rows are a projection folded from
-the records above (`dispatch`, `input(kind=STATUS)`, and each `decision`,
-both the effects nested in it and its verdict) plus the replayed trace and
-the spool, offline, with nothing appended to the store (DL-113). The
-**verdict** is read for the same reason §4's gate writes it (DL-151): a
-completion that gate REJECTED never reached the oracle, so the fold skips it
-too; read without the verdict, a late `exit 0` would decide the row over the
-real FAILURE.
+- `complete`: feed a natural completion or spawn failure to the oracle.
+- `none`: preserve the oracle's own end, including an oracle kill; also
+  applies when the job left the catalog or the current run is different.
+- `hold`: feed FAILURE `interrupted` with ON_HOLD in the same transition
+  for a job marked in `non-idempotent.toml`, a quarantined attempt, or the
+  fifth interrupted attempt (`MAX_ATTEMPTS_PER_RUN = 5`). Evidence names
+  the reason and any signal, exit code or limit. FORCE_STARTJOB clears
+  the hold (DL-243).
+- `rerun`: dispatch the next attempt of the same live run. The oracle
+  receives no completion, so interruption alone triggers no condition or
+  box failure.
 
-**The fold decides the crash window itself** (DL-156). An attempt whose
-`decision` record was never written is re-decided through the §4 gate on
-replay. The full-fidelity fold uses those recovered verdicts
-(`Replay.recovered`, returned by `replay_trace`). A recovered rejection is
-skipped exactly as a durable one, and a recovered application decides the
-row. This adds no new authority: it is the same gate over the same records,
-deterministic and version-gated (`check_replay_version`), and a resume
-derives the same verdict from the same log. A fold reading records alone cannot run the gate and REFUSES
-to decide instead: the row's status stands on what the records do decide,
-an earlier durable verdict or the pre-completion RUNNING, and it carries
-`undecided`, so the operator is told the newest completion did not decide
-it. Only an explicit or recovered `rejected` is skipped.
+A job's next dispatch waits until its previous attempt settles: its plan
+is done and cleanup is finished. A natural outcome stands while the leak
+ladder runs (DL-431). The `process-leak` switch (§8a) controls natural
+leftovers; it never exempts a stop cut short by engine death.
 
-The row is `{job, run_number, catalog_hash, job_hash, started_at,
+**Snapshots and retention.** At applied boundaries the engine snapshots
+its oracle, scheduler position, configuration rev, open attempts, pending
+starts, unfinished plans and retained run history (DL-428). The engine uses
+a configurable snapshot interval (`engine.toml`); shutdown also snapshots. Journal retention is
+90 days by default. Pruning stays behind the latest snapshot and the floor
+required by open work. A cursor below the floor receives a gap marker.
+`journal` and `runs` restore the latest snapshot before folding the tail;
+a run that starts before the retained anchor is `partial`. Missing end
+evidence yields the reader marker `UNKNOWN`, never an invented oracle
+status. Each run is read under its opening configuration revision (DL-432).
+Emitted trace events remain derived from inputs and are not stored.
+
+**Run history.** `dsl41 runs` is an offline projection, not a new record
+kind (DL-113). The row is `{job, run_number, catalog_hash, job_hash, started_at,
 ended_at, duration_s, status, exit_code, started_by, run_dir,
-box_name, clock_source, fidelity, undecided}` (DL-113, DL-136, DL-141). `clock_source` says whether the timing came from
-the wrapper's spool or fell back to the store; `fidelity` says how much of
-the row could be established when the period's manifest is gone. The
-caller names the run roots, or names the lineage anchor alone and the
-registry supplies every root in period order. The stable key across a
-lineage is `(estate, job, run_number)`, with the estate supplied by the
-lineage named, not by a field. An open run gets a row with a null
-`ended_at` and a null duration, never a fabricated one. A run that spans a
-boundary keeps its row in the period that dispatched it and stays RUNNING
-there, because its terminal input is in the next segment. Every CMD and FW
-start gets a `dispatch` record, so a file watch has a row like a command. A box
-gets no `dispatch` record, so its row comes from the replay, as does a leaf run that
-KILLJOB or a `term_run_time` kill ended. A duration series breaks where
-the row's `job_hash` moved, falling back to `catalog_hash` only when either
-row lacks a job hash; both ride on every row in the JSON and CSV formats,
-so an external consumer can segment either way; the table shows
-`catalog_hash` and marks a break where `job_hash` moved, or where
-`catalog_hash` moved for a row without a job hash. A start that produced
-no run is not a row: a dropped tick, a held job and a refused command are
-`drop` records and trace entries, and "why did it not run" is a different
-question from "how long did it take". dsl41 emits these facts and
+box_name, clock_source, fidelity, undecided}` (DL-113, DL-136, DL-141).
+`clock_source` says whether the timing came from the wrapper's spool or
+fell back to the store. `fidelity` says how much of the row could be
+established: `full`, `records_only` or `partial`. A run that begins before
+the retained snapshot is `partial`; missing retained end evidence yields
+`UNKNOWN`, a reader marker, never an oracle status (DL-428).
+`undecided` marks a completion with no decision that a records-only fold
+cannot re-decide. It does not decide the row: the earlier durable verdict
+or pre-completion status stands. A full-fidelity replay uses the recovered
+verdict (DL-156).
+
+An open run gets a row with a null `ended_at` and a null duration, never a
+fabricated one. Every CMD and FW start gets a `dispatch` record, so a file
+watch has a row like a command. A box's row comes from replay, as does a
+leaf run that KILLJOB or a `term_run_time` kill ended.
+A duration series breaks where the row's `job_hash` moved, falling back to
+`catalog_hash` only when either row lacks a job hash; both ride on every
+row in the JSON and CSV formats, so an external consumer can segment
+either way. The table shows `catalog_hash` and marks a break where
+`job_hash` moved, or where `catalog_hash` moved for a row without a job hash.
+A start that produced no run is not a row: a dropped tick, a held job and
+a refused command produce no run-history row. dsl41 emits these facts and
 decides nothing about them: trends, thresholds and paging are the site's
 monitoring (§12). Whether a migrated estate expects parity with the
 vendor's own run-history surface is E22 (§15).
 
-**Inputs-only principle**: emitted events and the trace are pure functions
-of the input sequence, external events plus time observations (oracle
-determinism). Thus they are never recorded in the store. `dsl41 journal` replays
-inputs and advances through a fresh Oracle to reconstruct the full trace.
-One source of truth, no divergence possible. Write-ahead discipline: fsync
-per record before `feed()`/`advance()` in run mode, batched in rehearse.
+**Main config** (DL-437). `/etc/dsl41/dsl41.toml`, or an absolute
+`--config`, selects the engine root, host settings, estate inputs,
+interpretation and lint policy. Paths anchor at the config; ordinary globs
+expand in sorted order. Recursive `**`, unreadable inputs, duplicate
+selections and duplicate jobs refuse. JIL and `estate()` modules compile
+as one catalog. `lint.refuse` is `none` (default), `error` or `warn` over
+unignored findings; input, lowering and preflight errors remain hard.
+`estate.toml` remains a test and rehearsal input. Rehearsal and engine
+roots cannot equal or contain each other.
 
-**Self-contained artifact** (DL-66, DL-130): `dsl41 run` materializes the
-inputs into `catalogs/<source_bundle_hash>/` before baselining, the
-post-placeholder JIL the run loaded (byte-exact, F1) plus `sources.json`
-(the ordered vector of original paths and their sha256), and the engine
-installs `periods/000001/manifest.json` (`artifact_format_version`,
-`catalog_hash` + its version, `source_bundle_hash`, the `RuntimeProfile`
-and its `runtime_hash`, `state_machine_version`, and the five fields only
-the opening knows: `period_id`, `baseline_id`, `clock_domain`,
-`segment_no`, `first_index`). The bundle is addressed by its own bytes, so
-a relaunch on unchanged inputs reuses the directory rather than rewriting
-it. The run root outlives the estate files it was launched from. A
-`manifest/` directory is a retired layout (DL-138): it is neither written
-nor read, and a root that has one where the period manifest is absent is
-refused naming the layout (`docs/protocol-evolution.md`). The catalog hash
-covers `SourceSpan.file`, so byte-exact replay against relocated copies
-still needs the recorded original paths. Relocation-independent hashing
-is deliberately not built: it would fail every existing store's resume
-gate.
+A main-config restart uses the last applied revision. Source, lint and
+`engine.environment` edits stay pending. Host `as_machine`,
+`machine_policy` and access policy load from disk; invalid host or access
+settings refuse with exit 2. Legacy invocations retain their launch checks.
+The limits DL-437 records remain: restart recompiles captures without
+preflight, has no legacy-root conversion, ignores unknown `[engine]` keys
+in host-only loading, and the pending-source scan blocks the loop.
 
-**Permissions** (DL-66): run roots are `0700` (created and re-tightened
-at resume); the store, wrapper spool files, and job stdout/stderr are
-`0600` at creation. The store carries globals and every control input, and
-job output carries whatever commands print: owner-only, not
-umask-hopeful. One deliberate exception: arming the DL-146 perimeter with a
-named `socket_group` opens the run root to `0710` for traversal and the
-socket to `0660`, and tightens every direct child first
-(`docs/access-model.md` §8). Nothing else moves. The anchor-refusal write list is retired (DL-424; DL-224).
+**Configuration.** A `configs` row holds the catalog, `RuntimeProfile` and
+non-idempotent marks. Main-config rows also hold captured source bytes and
+mapping (DL-437). `reread` captures a candidate and returns a token;
+`update TOKEN` applies exactly those bytes against the revision it read
+(DL-432). It stops only changed or removed jobs. Touched jobs wait behind
+its dispatch filter. A structural edit of a RUNNING box refuses; a changed
+box with the same members swaps in place. The engine commits `config intent`,
+stops its set through the attempt tier, then swaps the catalog, settings and
+marks in one loop step with `config applied`. It replaces scheduler entries,
+preserves oracle timers and tombstones, and advances time for the owed scan.
+Stopped outcomes choose their plans under the applied catalog and marks.
+An unfinished stop keeps the update in STOPPING; this path has no cancel verb.
 
-**Resume** (`dsl41 run <files> --run-root <root> --resume`):
+**Resume.** `dsl41 run` resumes an existing store automatically;
+`--resume` is accepted as a no-op (DL-428). Restart is the live engine
+starting with non-empty state (DL-433):
 
-The anchor, seal and segment resume rules are retired (DL-424; DL-133, DL-134, DL-138, DL-224).
+1. Hold `leader.lock`. Refuse foreign schema/state versions, a missing
+   `root_id`, a different clock domain, an invalid launch configuration,
+   or a missing interrupted-update plan before writes or signals.
 
-1. On catalog-hash mismatch, refuse: no silent semantic drift. A changed
-   estate re-baselines explicitly. A clock-domain mismatch refuses on the
-   same pin: a real run and a rehearsal are not one record.
-2. Replay inputs in seq order through a fresh Oracle (original timestamps).
-3. Reconcile from the §6a records, sweep = union(store dispatch records,
-   `runs/` directory). The supervisor LIST rule is retired (DL-424). In
-   tethered mode, the wrappers self-terminated their groups and recorded
-   that fact when the engine died (lifeline EOF). Thus resume normally only
-   *reads* outcomes. Signals are for the residual crash matrix only. First
-   the boot_id shortcut: a spawn record whose boot_id differs from the
-   current boot means that the machine rebooted. Then nothing survived:
-   skip all liveness checks and resolve each run from status.json, or end
-   it `unobservable{engine_death}` under the interruption rule (DL-433).
-   Otherwise, per incomplete run, in order:
-   - The engine waits for no wrapper (DL-433): each open attempt's spool is
-     read once, as a step of the engine's loop, and an attempt with no
-     record ended with the engine, `unobservable{engine_death}`. A record
-     its wrapper writes later is read by nobody.
-   - `status.json` present → the attempt chart reads it: a natural end
-     feeds the real completion (raw exit_code through SEM-09 as usual) at
-     `max(ended_at, last store at)`, with the true `ended_at` carried in
-     the payload (feed times are non-decreasing); `parent lost` or a
-     recorded stop is `stopped`, and the interruption rule plans it.
-   - No record → the attempt ended with the engine,
-     `unobservable{engine_death}` (or the cause of the stop it took
-     first), and the interruption rule plans it: rerun the same run as
-     the next attempt, hold a job named in `non-idempotent.toml`, or
-     nothing where the oracle ended the run (DL-424).
-   - Something of the command left → the live cleanup: the ladder TERMs,
-     waits the grace and KILLs what a reading finds left, each process by
-     itself where the cookie decides, else the group while its leader is
-     still the recorded process (DL-226, DL-431); a survivor or a failed
-     reading holds the attempt, and its job starts nothing meanwhile.
-   - The supervised-SPAWN replay rule is retired (DL-424; DL-129, PR-36a).
-   - A command attempt with no record is never `exit_status_unobservable`
-     (PENDING: E7, which DL-424 narrows): the interruption rule above plans
-     it. Not TERMINATED either: that status is reserved for kills that the
-     engine or the oracle actually performed or observed.
-   All reconciliation injections are recorded in the store with source=reconcile.
-   The supervisor reattachment rule is retired (DL-424).
+   For a legacy launch: on a root no update touched, a catalog-hash mismatch
+   refuses, so semantics never drift silently; a changed estate needs a fresh
+   run root, or `dsl41 reread` then `dsl41 update`. On a root an update touched, compare the launch's estate
+   job by job with the applied configuration, or the open update's
+   candidate, ignoring paths (DL-432). A runtime-profile mismatch refuses
+   by name. A resume with different switches is refused, the same as a changed
+   `--timezone` (§8a). A main-config restart skips the launch
+   estate check and uses the stored revision (DL-437).
+2. Restore snapshot plus tail. Instantiate every open command attempt
+   before the first loop step. Restore a closing attempt ENDED with its
+   committed outcome; never observe its status again.
+3. Take one root cookie scan. Read what is left of each attempt and TERM
+   leftovers requiring cleanup. Grace, KILL and held polls run in the live
+   loop; startup awaits no process, wrapper, spool or timer.
+4. Bind the control socket before catch-up. `status.engine` stays STARTING.
+   In record order, observe each open attempt once, clean each closing
+   attempt, and take up each FW log. Missing command records mean
+   `unobservable{engine_death}`, or the first recorded stop's cause. A
+   wrapper record written after this observation is not read.
+5. Complete owed plans in sequence order, discharge pending starts, and
+   take one look at a resumed update. Its application stays a loop step.
+   Advance time last, lift the recovery barrier, release deferred
+   dispatches, then record `engine started` and missed-tick drops (E9).
+   Catch-up steps use the journal's last instant. A stop during catch-up
+   records `shutdown_during_startup`; the next restart takes unfinished
+   steps again.
 
-**How the restart knows a process is ours.** On Linux, every process of a command attempt carries the process cookie,
-`DSL41_COOKIE=<root_id>.<run_id>` ([wrapper protocol](wrapper-protocol.md),
-DL-431, DL-433); `root_id` names the run root.
-The engine sets it for the wrapper and the command, and the command's
-children inherit it. The `dispatch` record holds it, so the restart knows
-each open attempt's cookie. What is left of an attempt is its recorded
-group's live members and every process that carries its cookie, whatever
-its group, the wrapper left out; a failed scan is unknown and releases
-nothing. The restart stops what it finds left, one process at a time, as
-the live engine does, unless `process-leak=leak` (§8a) and the outcome is
-a natural exit. A group whose leader fails its start token and none of
-whose members carries the cookie is left alone: it may be the attempt's
-own cookie-less child or a stranger's that took the id after a pid wrap,
-and nothing tells them apart. A process outside the group that the scan
-cannot read is beyond the engine by design; the unit's cgroup is the
-stronger fence. Each signal uses a pidfd where supported. Without pidfd support,
-the engine re-reads `/proc/<pid>/stat` field 22 through `proc_start_token`
-and calls `os.kill` only if it still matches the scanned start token.
-The race between this check and the signal is accepted: the engine is an
-orchestrator, not a jail. TERM, grace, KILL and the held poll use the same
-scan with either primitive. One log line per serving start with a run root
-names the primitive; in-memory rehearsals print none.
-On other platforms, and for an attempt dispatched before the cookie, the (pid, start-time)
-checks above decide.
+A command attempt with a dispatch record and no directory follows the
+interruption rule, including replacement for an idempotent run (DL-428).
+An FW watch with a dispatch record and no directory is relaunched as an
+idempotent read (DL-425). A derived start with no dispatch is pending work;
+reconciliation and overdue deadlines run before launch. A run with neither
+a dispatch record nor a derived start is left as it stands, for the
+operator (DL-425). A start superseded by the current oracle row is not
+launched (DL-232). All reconciliation injections are recorded in the store
+with source=reconcile.
 
-The supervisor live-wrapper kill re-drive rule is retired (DL-424; DL-133, PR-33).
+A mismatched or unreadable attempt record, or a split FW log, is quarantined
+with its reason and found pids (DL-433). Quarantine forces a hold wherever
+the interruption rule would rerun or hold; the oracle's own end still
+stands. Missing records and failed process scans are not quarantine.
+A failed scan holds cleanup as `scan failed` and is retried under both leak
+policies. A KILL survivor remains held and is KILLed again per poll.
+An FW resumes its progress from `watch.jsonl` without a second `start`;
+a completing poll supplies its completion without re-polling (DL-129).
 
-The multi-host takeover barrier and supervisor LIST sweep are retired (DL-424; DL-102, S6c).
+**Process identity.** Every CMD dispatch carries
+`DSL41_COOKIE=<root_id>.<run_id>` (DL-431, DL-433).
+The store creates `root_id` at genesis; the same prefix covers attempts
+across restarts. The wrapper and command inherit the cookie; scans exclude
+the wrapper pid recorded in `spawn.json`. On Linux the scan works with or
+without pidfd (DL-436). Where supported, the engine opens a pidfd, rechecks the start token, then
+signals through it; without pidfd, it uses a token-checked `os.kill`. A selected
+pidfd path never falls back after open or send failure. The final
+check-to-`os.kill` race is accepted.
 
-**A live start with no run directory is decided by the log** (DL-102, DL-315). A start's
-`dispatch` record is durable before its adapter task exists, and its run directory is made
-after, so the log tells three cases apart:
+What is left is the cookie-bearing processes plus live members of a group
+proven by its leader's token or a member's cookie. Proof lasts until a
+reading finds the group empty. A later nonempty group with no proof is not
+signalled. ENOENT/ESRCH means gone; EACCES/EPERM means unreadable and skipped;
+other read failures make the result unknown. Processes outside the group
+that drop the cookie, change uid or become unreadable are outside this
+orchestrator's scope. Off Linux, or without a recorded cookie, group and
+start-token checks decide. [Wrapper protocol §3](wrapper-protocol.md#3-spool-format-frozen)
+states the identity limits.
 
-- a `dispatch` record and no directory: the start was launched and the crash took it before
-  it made its directory. A tethered command start is FAILED with cause `dispatch lost to
-  engine crash (never spawned)`, because a run provably never started is never silently
-  re-executed. An FW watch is dispatched again under its recorded `run_id`, because a watch
-  is an idempotent read (DL-44 item 7);
-- no record, and replay derives the start (`Replay.spawns`): the previous engine decided it
-  and died before dispatching it, or the attempt's decision never landed and resume has just
-  written it. Nothing ran, so resume dispatches it now, at the run number the oracle already
-  decided, through the supersession check a fresh start passes;
-- neither: the live engine launched nothing for the run and never would, such as a STARTING
-  overwrite at a run that never started. It is left as it is, RUNNING or STARTING with
-  nothing running, for the operator to end or restart.
-
-An FW watch leaves a run directory, its spool (§6), so the sweep finds
-watches too, and the ladder has two rules for them (DL-129; period-model
-§3.5). A dispatched watch whose run directory holds a `start` line carrying
-its `run_id` is relaunched as an idempotent read: the adapter reconstructs
-its progress from the log and appends no second `start` line, so the fold
-stays one watch (PR-34). A `watch.jsonl` whose last line is a **completing** observation
-while the row is still RUNNING is the sibling window, the poll appended and
-the engine dead before the STATUS input; the completion is **injected from
-the log**, exactly as a CMD's is injected from `status.json` (PR-34a).
-Re-polling would decide the watch again against a world that has moved on.
+**Permissions** (DL-66). Run roots are 0700; store, spool and command output
+files are 0600 at creation. Resume tightens the root. An armed access map
+with `socket_group` opens traversal to 0710 and the socket to 0660 after
+tightening direct children ([access-model §8](access-model.md#8-filesystem-modes)).
 
 ## 8. Preflight — refuse loudly, run honestly
 
-This is the backend_uc R/A discipline applied to execution: ERROR refuses
-the run, and WARN prints, records in the store, and runs. Every rule ships the house
+ERROR refuses the run. WARN prints, records in the store, and runs. Every rule ships the house
 fixture pair.
 
 ERROR:
@@ -865,35 +794,19 @@ entry has a name, its allowed values, its default, the value that matches
 documented AutoSys behavior, and a one-line description. An unknown name
 or value is refused with the allowed names or values. Nothing is dropped.
 
-Set a switch with `--semantics NAME=VALUE` on `dsl41 run` and
-`dsl41 rehearse`. The option is repeatable. `dsl41 seal` takes
-`--next-semantics NAME=VALUE` for the period it opens. `dsl41 run --help`
-lists every switch and its values.
+Set a switch with repeatable `--semantics NAME=VALUE` on legacy
+`dsl41 run` and `dsl41 rehearse`, or in the main config's estate settings
+(DL-437). The run help lists every switch and value.
 
-Overrides are recorded in the period's runtime profile (`semantics`,
-period-model §2.1), so they are part of `runtime_hash`. An explicit
-default, such as `ice-lookback=true`, is the same as no override. Replay, `journal`,
-`runs`, audit and the boundary classifier read the switches from that
-profile, and so use the values the engine ran. A resume or a period
-opening with different switches is refused, the same as a changed
-`--timezone`. A new value takes effect at a period boundary, and the
-boundary classifier treats the jobs each switch names as changed: a
-running box whose `box_success` reads a lookback atom is refused, an
-armed job gated on one is carried with a recorded assumption. For
-`queued-recheck`, a queued job is carried with a recorded assumption, and
-a running box with a member that can queue is refused. For
-`off-ice-in-running-box` and `box-terminator-on-terminated`, the members
-the switch names are changed, so a running box that holds one is refused.
-For `box-start-all-members-out` and `idle-box-iced-member`, every box is
-changed, so a running box is refused. `process-leak` changes no job's
-oracle reading: it decides what the engine does with the processes a
-command leaves running when it exits, so a flip changes no job.
-A switch can also name calendars; then every job that names such a calendar is changed.
-Replay
-refuses a period whose manifest is missing or is not bound to its
-segment, because it cannot know which switches the engine ran. Only
-explicit overrides are recorded, and a profile with none writes
-`"semantics": {}`.
+Overrides live in the stored configuration's runtime profile and contribute
+to `runtime_hash` (DL-252, DL-428). An explicit default is the same as no
+override; no overrides writes `"semantics": {}`. Replay and offline readers
+use that stored interpretation. Adopt changed interpretation through
+`reread` and `update` (§7, DL-432), not a restart. Main-config restart
+uses the applied revision; legacy launch drift checks still apply (DL-437).
+A switch can affect a job's definition, its calendars or estate-wide
+settings; the reload plan identifies the changed jobs and box refusals.
+`process-leak` changes cleanup policy, not oracle job semantics.
 
 Defaults live in code. Changing a default changes how existing estates are
 read, so it is a state-machine change and bumps `STATE_MACHINE_VERSION`.
@@ -901,8 +814,7 @@ read, so it is a state-machine change and bumps `STATE_MACHINE_VERSION`.
 Static tools that have no runtime profile use the defaults: `equiv`,
 `lint`, `derive`, and the genesis credit of `rehearse --check-cadence`.
 Preflight's oracle and calendar checks use the run's switches: `run` and
-`rehearse` pass their `--semantics`, and a boundary's preflight the staged
-profile's. The cadence sweeps and the expected
+`rehearse` pass their `--semantics`, and reread uses the candidate's profile (DL-432). The cadence sweeps and the expected
 tick counts use the rehearsal's own switches. The scheduler compiles
 extended calendars under the calendar switches and places start instants
 under `dst-start-times` (DL-260). Those switches are read back from the
@@ -976,8 +888,8 @@ The control plane is a Unix domain socket in the run directory, mode 0600
 (0660 to a named `socket_group` when the DL-146 access perimeter is armed —
 `docs/access-model.md` §8), with a JSON-lines protocol.
 
-There is one mutating command — `sendevent` — a set of queries, and the
-streaming `subscribe`. `docs/control-protocol.md` is the
+Mutations are `sendevent`, `engine_stop` and `update` (DL-429, DL-432).
+The socket also serves queries and streaming `subscribe`. `docs/control-protocol.md` is the
 frozen inventory; what follows is what each is for.
 
 - **sendevent parity** (maps 1:1 onto oracle EventKind): STARTJOB,
@@ -1004,8 +916,8 @@ frozen inventory; what follows is what each is for.
   false: one engine dispatches every start it decides, DL-94), plus,
   for a live FW run, a `watching {file, interval, min_size}`
   object (DL-68), and a `spec_drift` flag — a lazy fingerprint re-check of the
-  loaded input files; there is no reload, the flag tells the operator
-  the running catalog does not match the disk (DL-65). The CLI adds
+  loaded input files; the flag tells the operator the running catalog
+  differs from disk. `reread` and `update` adopt disk changes (DL-432). The CLI adds
   scriptable predicates `is-success`/`is-failed` (print status, exit
   0/1) over the status verb.
 - **subscribe** — stream the store's wire records from a seq (the UI feed;
@@ -1048,8 +960,8 @@ A refused query is reported in the console and the subtitle, never shown
 as an empty estate.
 The trace cursor and alarm tally reset (DL-210) on a changed `baseline_id`
 or disagreement between the status and trace baselines, with one
-console notice and a read from zero on the next poll; a same-period restart
-preserves the cursor because replay restores the whole trace prefix.
+console notice and a read from zero on the next poll. A restart retains
+the stored baseline (DL-428); retention can limit the available prefix.
 
 `dsl41 run --ui` starts the engine and attaches the TUI in the terminal, and
 that terminal owns the run. `dsl41 ui --socket <path>` attaches the same app
@@ -1119,8 +1031,8 @@ a distributed concern, DL-49).
 
 ## 14. Module layout and phasing
 
-The house layout is flat, with no `runner` subpackage: twenty
-`runner*.py` sibling modules. Each module owns one seam (DL-74, DL-78);
+The house layout is flat, with no `runner` subpackage.
+Sibling modules own separate responsibilities. Each module owns one seam (DL-74, DL-78);
 the entry that built a module documents it. Nothing is re-exported: every import site names the module that owns the symbol, so
 the split cannot decay into a second name for one file.
 
@@ -1150,15 +1062,22 @@ the split cannot decay into a second name for one file.
   stdlib-only for the same reason (DL-72).
 - `runner_tui.py`: the §11 TUI (guarded textual import).
 - `runner_startup.py`: taking possession of a run root: genesis, resume and
-  the takeover barrier (DL-106). §7's resume ladder lives there, not in
-  `runner.py`.
-- `runner_admission.py`: the one admission order (`docs/concurrency-model.md`
-  §4).
+  the recovery barrier (DL-433). It prepares the catch-up steps that
+  `runner.py` runs.
+- `runner_admission.py`: the one admission order (§7, DL-428).
 - `runner_ledger.py`: one engine per run root: the lock and the version
   pins (DL-99).
 - `runner_history.py`: the offline `dsl41 runs` projection (DL-113).
 - `runner_access.py`: the control-socket access perimeter
   (`docs/access-model.md`).
+
+- `runner_store.py`: SQLite transactions, configuration rows and snapshots (DL-428).
+- `runner_attempts.py` and `runner_stops.py`: interruption plans and process cleanup (DL-429).
+- `engine_charts.py`: attempt and engine lifecycle declarations (DL-426).
+- `reload_update.py` and `runner_update.py`: update declaration and wiring (DL-432).
+- `main_config.py`, `reload_plan.py` and `cli_reload.py`: main config,
+  captured candidates, `reread` and `update` (DL-437).
+
 
 The CLI keeps one module per domain (DL-137). `cli.py` builds the app and
 registers every verb; `cli_common.py` holds the shared options and exit-code
@@ -1168,9 +1087,6 @@ estates use these:
 - `cli_run.py`: `run`, `rehearse`, `journal`, `runs`.
 - `cli_control.py`: `sendevent`, `off-hold-all`, `ui`, `serve`,
   `query`. The `supervise` verbs are retired (DL-424).
-
-Module docstrings name the runner's build phases 11a to 11f; DL-41 and
-DL-41a map them to parts.
 
 ## 15. Open questions (E-series)
 
@@ -1191,7 +1107,8 @@ its rule, with the entry or section that holds it.
   Watcher Job" says a job with no watch_interval checks the file every 30
   seconds. The adapter's 60 s default stays pinned until a decision
   resolves that disagreement (DL-250).
-- **E7** — verdict for an unobservable exit status (§7). Default: FAILURE
+- **E7** — an interrupted attempt follows §7, including a missing record
+  (DL-424, DL-433). Only an unobserved exit outside that rule uses FAILURE
   with cause `exit_status_unobservable`. TERMINATED is reserved for kills
   that actually happened. The vendor's "Lost Control" is the same
   verdict: a job whose PID the agent can no longer find, and whose exit
@@ -1256,32 +1173,24 @@ its rule, with the entry or section that holds it.
   occurrence lies more than 366 days out (KB 442457); the generator
   computes occurrences directly and does not.
 - **E12** to **E15** — withdrawn with the HA plan (DL-189). Not open.
-- **E16** — seal cadence. Every boundary is an operator act (automatic
-  sealing on a timer is a period-model §12 non-goal) and costs a restart,
-  so whether the boundary is per estate, per booking centre or per
-  regulatory period is the estate's choice; the answer sets the replay
-  bound and with it the takeover time. Open (DL-230).
-- **E17** — what a standby readiness check must assert before continuity
-  governance accepts a green. Open; waits for follower mode (DL-230).
-- **E18** — whether an A-classified boundary truth flip needs an operator
-  acknowledgement before the period opens, or reporting it is enough. The
-  classification and every A assumption are carried in the seal
-  (period-model §3.1), so the record exists either way. Open (DL-230).
-- **E19** — a member changed while its box executes is R, even when the
-  member is INACTIVE (period-model §10.3, PR-42).
-- **E20** — a seal-only archive may stand in for pruned inputs
-  (period-model §12a, DL-144).
-- **E21** — whether a follower can run on the file substrate by tailing
-  the WAL another process appends. The WAL is append-only and
-  line-framed, so the proposal is yes. Open; waits for follower mode
-  (DL-230).
+- **E16** — outside the engine contract; see DL-424 for the period,
+  seal and follower exclusions.
+- **E17** — outside the engine contract; see DL-424 for the period,
+  seal and follower exclusions.
+- **E18** — outside the engine contract; see DL-424 for the period,
+  seal and follower exclusions.
+- **E19** — outside the engine contract; see DL-424 for the period,
+  seal and follower exclusions.
+- **E20** — outside the engine contract; see DL-424 for the period,
+  seal and follower exclusions.
+- **E21** — outside the engine contract; see DL-424 for the period,
+  seal and follower exclusions.
 - **E22** — whether a migrated estate expects parity with the vendor's own
   run-history surface (`autorep -r`, and the average-run-time notion
   behind its runtime alarms). A dossier question with a citation sweep in
   front of it [?] (DL-230).
-- **E23** — audit runs the interpreter that produced the period, and old
-  versions stay installable; a state-machine bump is not a transition
-  (period-model §11 and §2.1).
+- **E23** — state-version changes require drain and a fresh root; no
+  snapshot migration is provided (DL-424; protocol-evolution §1).
 - Inherited from the oracle: Q3 (SEM-32 arm-and-wait, DL-58; the Q3c
   box-arm-scope residue is oracle-side) and Q4 (n_retrys, DL-53, kept
   deliberately unmodeled by scope decision). The runner implements the
@@ -1295,3 +1204,31 @@ its rule, with the entry or section that holds it.
   pinned in SEM-36, and both record spellings are accepted on input. The
   rest closes mechanically against a live autocal date-set diff
   (docs/live-instance-runbook.md has the protocols).
+
+Citation pointers:
+
+- DL-102 — dispatch and restart are defined in §7 (DL-425, DL-428, DL-433).
+- DL-106 — dispatch and restart are defined in §7 (DL-425, DL-428, DL-433).
+- DL-118 — admission identity and transaction order are defined in §§4 and 7 (DL-428).
+- DL-130 — the excluded period and supervisor rules are defined by DL-424; current recovery is §7.
+- DL-133 — the excluded period and supervisor rules are defined by DL-424; current recovery is §7.
+- DL-134 — the excluded period and supervisor rules are defined by DL-424; current recovery is §7.
+- DL-136 — retained run history and replay are defined in §7 (DL-428, DL-432).
+- DL-138 — the dialect reset is defined in protocol-evolution §8; current recovery is §7.
+- DL-141 — retained run history and replay are defined in §7 (DL-428, DL-432).
+- DL-144 — the excluded period and supervisor rules are defined by DL-424; current recovery is §7.
+- DL-151 — retained run history and replay are defined in §7 (DL-428, DL-432).
+- DL-156 — retained run history and replay are defined in §7 (DL-428, DL-432).
+- DL-224 — the excluded period and supervisor rules are defined by DL-424; current recovery is §7.
+- DL-315 — dispatch and restart are defined in §7 (DL-425, DL-428, DL-433).
+- DL-89 — admission identity and transaction order are defined in §§4 and 7 (DL-428).
+- DL-90 — admission identity and transaction order are defined in §§4 and 7 (DL-428).
+- DL-96 — dispatch and restart are defined in §7 (DL-425, DL-428, DL-433).
+- PR-07 — the excluded period and supervisor rules are defined by DL-424; current recovery is §7.
+- PR-33 — the excluded period and supervisor rules are defined by DL-424; current recovery is §7.
+- PR-34 — FW evidence and completion recovery are defined in §§6–7 (DL-129).
+- PR-34a — FW evidence and completion recovery are defined in §§6–7 (DL-129).
+- PR-36a — dispatch and restart are defined in §7 (DL-425, DL-428, DL-433).
+- PR-42 — the excluded period and supervisor rules are defined by DL-424; current recovery is §7.
+- S6a — dispatch and restart are defined in §7 (DL-425, DL-428, DL-433).
+- S6c — the excluded period and supervisor rules are defined by DL-424; current recovery is §7.
