@@ -14,6 +14,10 @@ disjoint files.
   on test order. A stray asyncio loop's `__del__` raises an unraisable `RecursionError` under
   the test's lowered recursion limit. Fix: `gc.collect()` before each
   `sys.setrecursionlimit` in that test (owner 2026-11-01). The clock slice carries it.
+- [ ] Blocker for wrapper stop-path acceptance: Darwin killpg EPERM can crash the recorder and turn
+  a lifeline stop into unobservable; suppress only after a successful group reread proves no live
+  members, preserve observed status, and cover zombie-only, live-member and unreadable cases (boss
+  ruling 2026-11-01; DL-431); docs-only train may proceed.
 - [x] 3. Terms sweep of `docs/control-protocol.md` and `docs/access-model.md`: replace
   retired terms (the journal where DL-428 replaced it with the store, the old supervisor
   model); no rule changes. Builds now.
