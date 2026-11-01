@@ -382,7 +382,7 @@ class Frontiers(BaseModel):
         return self
 
     def admit(self, at: datetime) -> Frontiers:
-        """Steps 3-4: take the next index at a non-decreasing stamp."""
+        """Steps 3-4: guard the engine's non-decreasing stamp (runner-design ss4)."""
         if self.at is not None and at < self.at:
             raise EngineError(
                 f"admission time went backwards: {at} < {self.at}", code="clock_regressed"
