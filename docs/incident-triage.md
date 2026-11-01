@@ -7,65 +7,81 @@ The rest of the track is under **Operator** in the
 
 ## Set the variables and the account
 
-Read this page at a terminal on the run host.
-Set the section 0 variables (`deployment-runbook.md`, retired in 2.0.0).
-Run `supervise`, `journal`, `runs` and every read of a file under `$RUN_ROOT` or `$ESTATE_ANCHOR` as the service account.
-Run `release status` as the deployment identity.
-Run `query`, `sendevent`, `off-hold-all` and `host` as yourself; section 0 gives the reasons.
-Queries and `host list` need the `read` tier; `sendevent`, `off-hold-all` and mutating `host` verbs need `ops` ([access model](access-model.md#1-the-model)).
-In commands, replace `NAME` with the job, `HOST_ID` with the host, and `REV` with its revision.
-Replace `EVENT` with the chosen verb and `N` with the last trace sequence read.
+Read this page at a terminal on the run host. Select the executable version
+from the installed unit:
 
-## Check the engine and the period first
+```sh
+systemctl cat dsl41-engine.service
+```
+
+Use its `ExecStart` version in the variables below:
+
+```sh
+DSL41=/opt/dsl41/releases/<version>/bin/dsl41
+RUN_ROOT=/srv/dsl41/runs/nightbank
+S="$RUN_ROOT/control.sock"
+```
+
+Replace `<version>` with the installed version before running commands.
+These paths match the [single-engine installation](deploy.md#install-the-package-and-unit).
+Run the commands below as the service account for its owner-only socket and
+run-root files. Use root or the site's journal-reading account for systemd
+output. With an access map, your own account needs `read` for queries and
+`ops` for interventions; a socket tier grants no filesystem access.
+[Stop and update require adm](access-model.md#10-the-verb-table).
+Replace `NAME`, `REV`, `EVENT` and `N` with the job, its revision, the chosen
+verb and the last trace sequence read. Use `0` for a fresh trace read.
+
+<a id="check-the-engine-and-the-period-first"></a>
+## Check the engine and stored revision first
 
 1. Read the engine unit's state and exit status:
+
    ```sh
    systemctl show -p ActiveState -p ExecMainStatus -p NRestarts dsl41-engine.service
    ```
-2. Read the state of the lineage head in `anchor.json` as the service account (`jq` must be installed):
+
+2. Read its output:
+
    ```sh
-   jq -r .head.state "$ESTATE_ANCHOR/anchor.json"
-   ```
-3. Read the supervisor's runs as the service account:
-   ```sh
-   dsl41 supervise list --run-root "$RUN_ROOT"
-   ```
-4. Query the leader:
-   ```sh
-   dsl41 query status --brief -S "$S"
+   journalctl -u dsl41-engine.service -n 100 --no-pager
    ```
 
-The query exits `0` when the leader answers, or `2` for no engine or a refusal.
-The engine exits `2` for a configuration refusal; read its journal under What to watch (`deployment-runbook.md`, retired in 2.0.0).
-The engine exits `3` after a seal; follow **SEALED, NOT OPENED** in Which move (`deployment-runbook.md`, retired in 2.0.0).
-The engine exits `6` for a time-half stop; follow **TIME-HALF STOP** there.
-The engine or supervisor exits `7` for a statechart error; follow **STATECHART ERROR** there.
+3. Query the engine, including its lifecycle and configuration revision:
 
-An `open` head is normal.
-A `closed` head means no new run starts until the next period opens.
-A detached run started before the seal keeps running under the supervisor.
-A `claimed` head means an opener is at work or has crashed; read Day 2 in section 6a (`deployment-runbook.md`, retired in 2.0.0).
+   ```sh
+   "$DSL41" query status -S "$S"
+   ```
+
+Query exit `0` means the engine answered, even if a job failed.
+Exit `2` means refusal or a communication failure; read the error text.
+`engine` is STARTING during catch-up, RUNNING while serving, or DRAINING
+during stop. `config_rev` identifies the applied estate; `update` identifies
+an update still stopping jobs. Follow the [status contract](control-protocol.md#4-query-verbs-frozen-response-shapes)
+for the response fields.
+
+If the engine cannot answer, continue with the
+[engine-down evidence collection](#escalate-a-dsl41-fault).
+Run exit `2` is a startup refusal; exit `6` is a time-half fault; exit `7`
+is a statechart fault. Do not loop restarts of exits `6` or `7`.
+[Recovery](deploy.md#recover-after-the-engine-or-box-dies) explains what to
+preserve and which checks can refuse a restart.
 
 ## Read the job's state
 
 1. Read the job's JSON:
    ```sh
-   dsl41 query status -S "$S" --job NAME
+   "$DSL41" query status -S "$S" --job NAME
    ```
 
-The engine prints full status names; there are no two-letter codes.
-
-| Status | What it says |
-| --- | --- |
-| `INACTIVE` | The job's initial status. |
-| `QUE_WAIT` | The job waits in a resource queue. |
-| `STARTING` | The job is live and starting. |
-| `RUNNING` | The job is live. |
-| `SUCCESS` | The recorded outcome is success; `CHANGE_STATUS` and a noexec bypass record it too. |
-| `FAILURE` | The recorded outcome is failure. |
-| `TERMINATED` | The recorded outcome is termination: a kill, a timer, a terminator, a cancelled queued start or a `CHANGE_STATUS`; the [generated lifecycle view](job-chart-lifecycle.md) names the events. |
+The engine prints full status names, not two-letter codes. Use the
+[status fields](control-protocol.md#4-query-verbs-frozen-response-shapes)
+and [generated job lifecycle](job-chart-lifecycle.md) to distinguish queued,
+live and terminal jobs. `SUCCESS` can also follow an operator's
+`CHANGE_STATUS` or a noexec bypass; it does not alone prove a command ran.
 
 The `--brief` line: `name  status  status_at  run N  exit N  rev N  FLAGS`.
+Its status label can include attempt or cleanup notes. Use JSON for evidence.
 `status_at` and `exit` use `-` when absent.
 Flags: `I` means `on_ice`, `H` `on_hold`, `N` `on_noexec`, `A` `armed`; they join without separators, and a job with none has no flags cell.
 
@@ -75,29 +91,29 @@ Hold, ice and noexec are modes; a job on hold or on ice keeps its status, except
 
 | AutoSys habit | dsl41 command |
 | --- | --- |
-| `autorep -J job` (the default `-s` summary) | `dsl41 query status --brief --job NAME -S "$S"` |
-| `autorep -J job -d` | `dsl41 query status --job NAME -S "$S"` |
-| `job_depends -c` | `dsl41 query deps --job NAME -S "$S"`; `dsl41 query explain --job NAME -S "$S"` |
-| `autosyslog` | `dsl41 query trace -S "$S"`; `dsl41 journal "$RUN_ROOT"` as the service account |
-| `sendevent -E X -J job` | `dsl41 sendevent EVENT -J NAME -S "$S"` |
+| `autorep -J job` (the default `-s` summary) | `"$DSL41" query status --brief --job NAME -S "$S"` |
+| `autorep -J job -d` | `"$DSL41" query status --job NAME -S "$S"` |
+| `job_depends -c` | `"$DSL41" query deps --job NAME -S "$S"`; `"$DSL41" query explain --job NAME -S "$S"` |
+| `autosyslog` | `"$DSL41" query trace -S "$S"`; `"$DSL41" journal "$RUN_ROOT"` as the service account |
+| `sendevent -E X -J job` | `"$DSL41" sendevent EVENT -J NAME -S "$S"` |
 
 ## The job has not started
 
 1. Read the condition:
    ```sh
-   dsl41 query explain -S "$S" --job NAME
+   "$DSL41" query explain -S "$S" --job NAME
    ```
 2. Read the upstream jobs, globals, downstream jobs and box membership:
    ```sh
-   dsl41 query deps -S "$S" --job NAME
+   "$DSL41" query deps -S "$S" --job NAME
    ```
 3. Read pending timers and the next calendar tick:
    ```sh
-   dsl41 query timers -S "$S"
+   "$DSL41" query timers -S "$S"
    ```
 4. Read the planned dependency waves:
    ```sh
-   dsl41 query plan -S "$S"
+   "$DSL41" query plan -S "$S"
    ```
 
 `plan` covers the AND-success skeleton; `plan_cycle` names a cycle.
@@ -124,28 +140,33 @@ If an ended job still holds units, `RELEASE_RESOURCE` targets that holder to fre
 `STARTJOB` on the box starts a new box run and resets the jobs it contains to `INACTIVE`, except a `STARTING`, `RUNNING` or `QUE_WAIT` job and everything inside a subbox in one of those states (SEM-10).
 `FORCE_STARTJOB` on the member bypasses the box gate instead (SEM-23).
 
-**Tick missed during downtime.** Resume writes one `drop` record per missed tick to the WAL; nothing fires late.
-Read the records as the service account; `.payload.job` names the job, `.at` the tick and `.reason` the cause:
-```sh
-jq -c 'select(.rec == "drop")' "$RUN_ROOT"/wal/*.jsonl
-```
-At resume the engine also prints `dropped KIND JOB @ AT: REASON` on stderr, which the engine unit's journal keeps.
-Catch-up needs an explicit `FORCE_STARTJOB`.
+**Tick missed during downtime.** Restart skips and records missed ticks;
+nothing fires late. Read the unit output from the incident window:
 
-**Outside `run_window`.** `dsl41 query spec -S "$S" --job NAME` shows the loaded window.
+```sh
+journalctl -u dsl41-engine.service --since "YYYY-MM-DD HH:MM:SS" --no-pager
+```
+
+The engine reports `dropped KIND JOB @ AT: REASON`.
+The durable `drop` evidence lives in `engine.db`; `wal/*.jsonl` resolves to
+the [SQLite store rule (DL-428)](decision-log.md).
+Catch-up needs an explicit `FORCE_STARTJOB` after checking downstream effects.
+
+**Outside `run_window`.** `"$DSL41" query spec -S "$S" --job NAME` shows the loaded window.
 `FORCE_STARTJOB` still respects it; the next start follows SEM-33.
 
 ## The job is late
 
 1. Read the trace after the last sequence read:
    ```sh
-   dsl41 query trace -S "$S" --since N
+   "$DSL41" query trace -S "$S" --since N
    ```
 
 A run that has not started by its `must_start_times` deadline writes `MUST_START_ALARM` to the trace, and one not complete by its `must_complete_times` deadline writes `MUST_COMPLETE_ALARM`; the deadlines hang on the schedule slot, not on elapsed run time, and neither alarm changes control flow (SEM-34).
-`dsl41 query timers -S "$S"` lists the job's pending `must_start`, `must_complete` and `term_run_time` timers.
+`"$DSL41" query timers -S "$S"` lists the job's pending `must_start`, `must_complete` and `term_run_time` timers.
 When `term_run_time` passes, the engine ends the run `TERMINATED`.
-Nightbank exercise 5 (`RUNBOOK.md`, retired in 2.0.0) works through a hung job and `term_run_time`.
+For a synthetic hung-job exercise, use [Nightbank](../examples/nightbank/README.md#quick-start)
+and its incident settings; `RUNBOOK.md` exercise 5 resolves to that preparation.
 
 ## The job failed or was terminated
 
@@ -155,13 +176,13 @@ Job logs can hold credentials. Check their contents before sharing them.
    ```sh
    tail -n 100 -- LOG_OUT LOG_ERR
    ```
-2. Read the trace after the last sequence read; use `0` for the whole current period:
+2. Read the trace after the last sequence read; use `0` for all trace entries the engine currently serves:
    ```sh
-   dsl41 query trace -S "$S" --since N
+   "$DSL41" query trace -S "$S" --since N
    ```
 3. Read this job's run history as the service account:
    ```sh
-   dsl41 runs --job NAME "$RUN_ROOT"
+   "$DSL41" runs --job NAME "$RUN_ROOT"
    ```
 
 Default logs are `$RUN_ROOT/logs/<job>.<run>.out` and `.err`.
@@ -169,51 +190,77 @@ The runner appends to `std_out_file` and `std_err_file` when the JIL sets them.
 The site rotates those external files between runs.
 
 The trace's `transition` and `cause` name what happened.
-Reset its cursor to `0` when `baseline_id` changes or `last_seq` falls below the cursor (DL-210).
-Nightbank exercise 4 (`RUNBOOK.md`, retired in 2.0.0) works through a failure and rerun after a fix.
+Reset its cursor to `0` when `baseline_id` changes or `last_seq` falls below
+the cursor. A restart from a snapshot can begin with `RESTART`; `CONFIG`
+marks a configuration change. Trace is a view, not complete retained history.
+DL-210's period-roll instructions resolve to the
+[current trace contract](control-protocol.md#4-query-verbs-frozen-response-shapes).
+`RUNBOOK.md` exercise 4 resolves to [Nightbank preparation](../examples/nightbank/README.md#quick-start);
+use the intervention below only after correcting the application's fault.
 
 ## The job shows RUNNING or STARTING and nothing runs
 
-1. Read the supervisor's list as the service account:
+1. Read the job's full status, including attempt and interruption evidence:
+
    ```sh
-   dsl41 supervise list --run-root "$RUN_ROOT"
+   "$DSL41" query status -S "$S" --job NAME
    ```
 
-Read `job_type` in [the job's JSON](#read-the-jobs-state) first.
-A `BOX` has no process of its own; `query deps` names its members.
-A running `FW` watches a file and starts no process; its `watching` field names the file.
+2. Read its stored run history:
 
-`wrapper_alive` is true while the command's wrapper process runs.
-A restarted supervisor's list is empty; the restart ended the commands it ran.
-A `CMD` job that stays `RUNNING` after its row shows `wrapper_alive: false` needs a look: a completion takes a moment to apply, and the gap alone does not say why it has not.
-Read the engine journal: a `dsl41: input quarantined` line names a quarantined completion, and then you [escalate](#escalate-a-dsl41-fault).
-For a live row with no run in the list, follow **A row left live with nothing behind it** under What to watch (`deployment-runbook.md`, retired in 2.0.0) to choose the correction.
+   ```sh
+   "$DSL41" runs --job NAME --format json "$RUN_ROOT"
+   ```
+
+A `BOX` has no process; `query deps` names its members.
+A live `FW` polls a file; its `watching` field identifies the watch.
+For a `CMD`, read `attempt.state`, `after`, `cause` and `note`.
+A stop ladder, failed process scan or surviving process can keep a start
+held even after an outcome. Do not infer a missing process from status alone.
+Command evidence is under `runs/<job>.<run>/<ordinal>/` in the run root;
+`spawn.json` and `status.json` identify that attempt.
+Do not signal an unverified PID or edit those records.
+`wrapper_alive` inspection resolves to this attempt and cleanup evidence.
+
+An engine death ends the attempt. A restart can launch a replacement of the
+same run; marked non-idempotent jobs, quarantined records and the attempt
+limit can hold instead. Read `interrupted` before releasing a hold.
+The [recovery procedure](deploy.md#recover-after-the-engine-or-box-dies)
+explains natural completions, interruptions and residual cleanup.
+A quarantined engine input or repeated cleanup fault needs
+[escalation](#escalate-a-dsl41-fault).
 
 ## Send the intervention
 
-Read the runbook's Manual intervention (`deployment-runbook.md`, retired in 2.0.0) table for reversibility.
+Read the [intervention contract](control-protocol.md#3-mutating-verb-sendevent)
+and the [job's interruption requirements](authoring.md#62-write-every-job-to-survive-interruption).
+The `deployment-runbook.md` Manual intervention table resolves to those rules.
 An intervention can start or end work; choose it from the cause before sending it.
 For `CHANGE_STATUS`, add `-s STATUS` to the form below.
-For `SET_GLOBAL`, use `-G KEY=value` instead of `-J NAME`; read `REV` with `dsl41 query global -N KEY -S "$S"`.
+For `SET_GLOBAL`, use `-G KEY=value` instead of `-J NAME`; read `REV` with `"$DSL41" query global -N KEY -S "$S"`.
 
 1. Send the chosen verb with the revision from the read:
    ```sh
-   dsl41 sendevent EVENT -J NAME -S "$S" --expect REV
+   "$DSL41" sendevent EVENT -J NAME -S "$S" --expect REV
    ```
 2. Read back the effect; for `SET_GLOBAL`, repeat the global query above instead:
    ```sh
-   dsl41 query status -S "$S" --job NAME
+   "$DSL41" query status -S "$S" --job NAME
    ```
 
 | Exit | Meaning and next action |
 | --- | --- |
 | `0` | Applied; read back the effect. |
-| `2` | Refused: the request was not admitted to the engine's WAL; a perimeter receipt may exist. |
+| `2` | Refused: the request was not admitted to the engine's store; a perimeter receipt may exist. |
 | `3` | Rejected; the engine logs the rejection. `precondition_failed` means the target moved: re-read, then decide again. `engine_apply_faulted` means [escalate](#escalate-a-dsl41-fault). |
 | `4` | Unknown; the event may still apply. Re-read before deciding on a retry. |
 
 For exit `4`, any retry repeats the same arguments with the printed `--request-id`, `--expect`, `--baseline` and `--claimed-actor`; stderr prints them before the first write.
-The same user sends the retry from the same host, within the same period (DL-391).
+Keep the same user, host and actor envelope (DL-391).
+Retry only while the store retains the original request; the default journal
+retention is 90 days, and pruning also depends on snapshots and open work.
+An unchanged baseline does not prove the request remains retained.
+The [retry contract](control-protocol.md#3-mutating-verb-sendevent) rules this limit.
 A refused retry says nothing about the original; re-read the target.
 
 - `FORCE_STARTJOB` clears a non-live job's hold or ice first; the flag stays cleared (SEM-23).
@@ -225,7 +272,7 @@ A refused retry says nothing about the original; re-read the target.
 - The engine ignores `ON_HOLD` or `ON_ICE` on a `STARTING` or `RUNNING` job (SEM-21, SEM-20).
 - Send `KILLJOB` to members, not boxes.
 - `CHANGE_STATUS` cannot set `QUE_WAIT`; the engine reports `status_not_injectable`.
-- `dsl41 off-hold-all -S "$S"` sends one `OFF_HOLD` per job on hold at its status read.
+- `"$DSL41" off-hold-all -S "$S"` sends one `OFF_HOLD` per job on hold at its status read.
   Exit `1` means at least one did not report applied; read each job's line, because an unknown one may still apply. `--dry-run` lists the jobs and sends nothing.
   The sweep cannot be retried as a whole.
 
@@ -233,57 +280,94 @@ A refused retry says nothing about the original; re-read the target.
 
 For query exit `2`, read the command's error text.
 A missing socket reports `control socket PATH: REASON` with `No such file or directory`.
-After a seal the socket is absent; [check the engine and head](#check-the-engine-and-the-period-first).
+A missing socket alone does not identify a cause;
+[check the unit and engine](#check-the-engine-and-stored-revision-first).
 `access_denied` says `PRINCIPAL holds HAVE tier; ACTION needs NEED tier`.
 An armed access map writes the denial to [`$RUN_ROOT/perimeter.jsonl`](access-model.md#6-receipts-the-perimeter-journal) and syncs it; a storage failure can leave no receipt, and the request stays denied.
 
 ## Escalate a dsl41 fault
 
-Escalate `dsl41: statechart error`, `dsl41: input quarantined`, `engine failed:`,
-`engine stopped:`, or engine exit `6` or `7`.
-Keep statechart report lines whole.
-A job's own exit code and logs belong to the application, not dsl41.
-`SPEC DRIFT: estate files changed on disk` is a notice that the estate files on disk changed, not a fault; report it with the bundle.
+Escalate `dsl41: statechart error`, `dsl41: input quarantined`,
+`engine failed:`, unexplained shutdowns, or engine exit `6` or `7`.
+A normal `engine stopped: clean_shutdown` is a stop record, not a fault.
+Keep statechart report lines whole. A job's own exit code and logs belong
+to the application. `SPEC DRIFT: estate files changed on disk` and
+`N pending source changes; run dsl41 reread` report pending sources;
+[review an update](deploy.md#reload-a-changed-estate) to adopt them.
 
-When the engine is down (exit `6` or `7`, or a `closed` head), steps 3 and 4 fail.
-Collect the output of `dsl41 journal "$RUN_ROOT"`, run as the service account, instead.
+Evidence can contain credentials or private estate data. Check every file
+before sharing. Preserve the original run root; do not delete or edit its
+store, plans or spool to bypass a refusal.
 
-1. Collect both units' journal; replace the timestamp with the incident's start:
+1. Collect the engine unit's journal from the incident start:
+
    ```sh
-   journalctl -u dsl41-engine.service -u dsl41-supervisor.service --since "YYYY-MM-DD HH:MM:SS"
+   journalctl -u dsl41-engine.service --since "YYYY-MM-DD HH:MM:SS" --no-pager
    ```
-2. Collect the supervisor's list as the service account:
+
+2. Collect the unit definition and its executable selection:
+
    ```sh
-   dsl41 supervise list --run-root "$RUN_ROOT"
+   systemctl cat dsl41-engine.service
    ```
-3. Collect the job's status JSON:
+
+3. Record the selected executable's version:
+
    ```sh
-   dsl41 query status -S "$S" --job NAME
+   "$(dirname "$DSL41")/python" -c 'from importlib.metadata import version; print(version("dsl41"))'
    ```
-4. Collect the current period's trace:
+
+4. With the engine up, collect the job status:
+
    ```sh
-   dsl41 query trace -S "$S" --since 0
+   "$DSL41" query status -S "$S" --job NAME
    ```
-5. Collect the lineage head as the service account:
+
+5. With the engine up, collect its available trace:
+
    ```sh
-   jq -c .head "$ESTATE_ANCHOR/anchor.json"
+   "$DSL41" query trace -S "$S" --since 0
    ```
-6. Collect the active release and last apply's outcome as the deployment identity:
+
+6. With the engine down, replay the retained store as the service account:
+
    ```sh
-   dsl41 release status
+   "$DSL41" journal "$RUN_ROOT"
    ```
-7. Record the runtime the engine runs under; its interpreter path names the directory under `/opt/dsl41/.venvs/`:
+
+7. Collect run history whether the engine is up or down:
+
    ```sh
-   tr '\0' ' ' < /proc/"$(systemctl show -p MainPID --value dsl41-engine.service)"/cmdline
+   "$DSL41" runs --format json "$RUN_ROOT"
    ```
-   When the engine is down, record `readlink /opt/dsl41/.venv` instead; the link may have moved since the engine started.
-8. Attach `$RUN_ROOT/supervisor.log`, read as the service account; it holds the supervisor's statechart report.
-9. Attach the run's `log_out` and `log_err` files after the credential check above.
+
+   These offline readers need no socket or source estate files. Exit `0`
+   means read; exit `2` means refusal. Preserve the refusal text if replay
+   fails. Retention can limit history; `partial` or `UNKNOWN` is evidence of
+   missing history, not an inferred application result.
+
+8. Attach the selected `/etc/dsl41/dsl41.toml`, `engine.toml`, relevant
+   `plans/` and attempt spool records after checking their contents.
+   Record the `config_rev`, plan token and request envelope when available.
+9. Attach the job's `log_out` and `log_err` after checking for credentials.
 
 ## What this page does not cover
 
-- Installation and startup: runbook sections 1 to 3 (`deployment-runbook.md`, retired in 2.0.0).
-- JIL releases and rollback: the job recipe (`deployment-runbook.md`, retired in 2.0.0).
-- Sealing and opening a period: section 6a (`deployment-runbook.md`, retired in 2.0.0).
-- Engine-fault recovery: Which move (`deployment-runbook.md`, retired in 2.0.0) and What to watch (`deployment-runbook.md`, retired in 2.0.0).
-- A read-only user at a desk: no page yet; the [access model](access-model.md#1-the-model) defines the read tier they use.
+- Installation, startup, drain and recovery: [deploy.md](deploy.md).
+- JIL edits and rollback by a reviewed candidate: [reload a changed estate](deploy.md#reload-a-changed-estate).
+- Application idempotence and manual hold release: [authoring contract](authoring.md#62-write-every-job-to-survive-interruption).
+- Read access at a desk: [access model](access-model.md#1-the-model).
+
+The `deployment-runbook.md` installation, job recipe, Which move and What to
+watch references resolve to these procedures. Its section 6a sealing and
+opening instructions resolve to the [v2 charter (DL-424)](decision-log.md).
+
+`anchor.json` resolves to engine status and the stored revision (DL-424).
+Periods, seals, detached runs and `run` exit `3` resolve to DL-424 in the [decision log](decision-log.md).
+`supervise` resolves to the engine queries and offline readers above (DL-424).
+`host` resolves to the one-box scope in DL-424.
+`release status` resolves to the applied `config_rev` in engine status (DL-424).
+`dsl41-supervisor.service` resolves to the engine unit's journal (DL-424).
+`supervisor.log` resolves to that same journal (DL-424).
+`$ESTATE_ANCHOR` resolves to the run-root evidence above (DL-424).
+`.venv` and `.venvs` executable references resolve to the unit's versioned `ExecStart` path.

@@ -20,6 +20,14 @@ Python input executes its source through the same loader as `dsl41 build`.
 Use `--param NAME=VALUE` for a Python module's Params bindings.
 Use `-p FILE` for JIL properties and `--environment NAME` for a manifest environment.
 The [author guide](authoring.md) covers those inputs and their bindings.
+The TOML input here is an `estate.toml` manifest, not the engine's
+`dsl41.toml` main config. A manifest with declared environments requires
+`--environment NAME`. Navigation reads the files on disk; it does not select
+the running engine's applied revision. To inspect the live catalog, use
+[query deps and spec](incident-triage.md#the-job-has-not-started).
+To navigate an installed multi-file JIL estate offline, write an `estate.toml`
+listing its files, or use `query deps` on the live engine.
+This page leaves engine state and interventions to that incident guide.
 
 | Verb | Result |
 | --- | --- |
