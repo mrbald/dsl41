@@ -797,6 +797,9 @@ stateDiagram-v2
     s2 --> s0 : attempt.12 wrapper_gone / end_unobservable
     s1 --> s0 : attempt.13 wrapper_gone / end_unobservable
     s3 --> s0 : attempt.14 wrapper_gone / end_unobservable
+    s2 --> s0 : attempt.15 engine_died / end_engine_died
+    s1 --> s0 : attempt.16 engine_died / end_engine_died
+    s3 --> s0 : attempt.17 engine_died / end_engine_died
 ```
 
 | Id | Source | Event | Guard | Action | Target | Kind | Cite |
@@ -815,6 +818,9 @@ stateDiagram-v2
 | attempt.12 | SPAWNING | wrapper_gone |  | end_unobservable | ENDED | external |  |
 | attempt.13 | RUNNING | wrapper_gone |  | end_unobservable | ENDED | external |  |
 | attempt.14 | STOPPING | wrapper_gone |  | end_unobservable | ENDED | external |  |
+| attempt.15 | SPAWNING | engine_died |  | end_engine_died | ENDED | external |  |
+| attempt.16 | RUNNING | engine_died |  | end_engine_died | ENDED | external |  |
+| attempt.17 | STOPPING | engine_died |  | end_engine_died | ENDED | external |  |
 
 | State | In | Entry | Exit | Defers | Waits |
 | --- | --- | --- | --- | --- | --- |
@@ -831,6 +837,7 @@ stateDiagram-v2
 | end_spawn_failed | action | The attempt never ran: outcome `spawn_failed`, with the error text. |
 | end_from_record | action | The wrapper recorded the command's end: the outcome is derived from the record (`outcome_of`). A command that exited before the TERM is `natural`, a record that names a stop or the lifeline is `stopped`, a wrapper that aborted its own launch is `spawn_failed`. |
 | end_unobservable | action | No record: the wrapper is gone, or none came `grace_kill` after the last KILL. Outcome `unobservable`, with the cause of the stop the attempt took, if any. A record that comes later is kept as evidence and does not reopen the attempt. |
+| end_engine_died | action | The engine that ran the attempt died and no record came: outcome `unobservable`, with the cause of the stop the attempt took first, else `engine_death`, or the outcome the restart gives (a quarantine). No ladder runs and no timer is armed (spec-restart §4, DL-433). |
 
 ## update
 

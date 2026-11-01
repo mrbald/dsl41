@@ -42,7 +42,7 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 
 ## Failure and recovery
 
-- A crash between `config intent` and `config applied` is resumed by startup step 4, which restores the update in STOPPING with its dispatch filter holding; nothing waits for it. Step 5 settles its attempts like any open one, stopping each as a live engine does (ask to stop, TERM; ask to abort, KILL; the reading after), and the engine starts. The update applies as a step of the loop once its stops are finished, wherever the last one finishes. No job of the plan is dispatched and no kept outcome is committed before the application.
+- A crash between `config intent` and `config applied` is resumed by the restart's fold, which restores the update in STOPPING with its dispatch filter holding; nothing waits for it. The catch-up observes its attempts like any open one, and what is left of each gets the live cleanup (the ladder, the reading after). The update applies as a step of the loop once its stops are finished, wherever the last one finishes: in the catch-up, at the first look the catch-up queues when every stop was finished before the crash, or later. The recovered outcomes of jobs outside its stop set are fed under the old catalog before it. No job of the plan is dispatched and no kept outcome is committed before the application (DL-433).
 - A plan an older `reread` wrote (no estate directory) is refused `stale_plan` before anything is written.
 - A plan directory removed while an update stops refuses the restart by name.
 - The admission checks the plan's revision and the catalog hash `reread` saw before it writes anything, so the application's own check of them cannot fail after the intent. Any other raise while applying is a crash, not a state: the engine dies, and the restart resumes the update; a raise the same input meets every time stops every restart, and the operator restores or removes the run root.
@@ -53,7 +53,7 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 
 - `src/dsl41/reload_plan.py`, `src/dsl41/reload_diff.py`: `reread`.
 - `src/dsl41/reload_update.py`: the chart, the admission and the application.
-- `src/dsl41/runner_update.py`, `src/dsl41/runner.py`, `src/dsl41/runner_startup.py`: the engine's side and step 4.
+- `src/dsl41/runner_update.py`, `src/dsl41/runner.py`, `src/dsl41/runner_startup.py`: the engine's side and the restart's resume of an update.
 - `src/dsl41/cli_reload.py`, `src/dsl41/runner_control.py`: the verbs.
 - `src/dsl41/runner_history.py`: `dsl41 runs` across revs.
 

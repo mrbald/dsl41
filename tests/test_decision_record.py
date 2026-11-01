@@ -46,6 +46,7 @@ from dsl41.runner_admission import (
 )
 from dsl41.runner_clock import EngineError, VirtualClock
 from dsl41.runner_journal import Journal, dispatch_record, dispatched_runs, read_journal
+from dsl41.runner import Engine
 from dsl41.runner_startup import resume_run, start_run
 from dsl41.runner_store import MemoryStore
 
@@ -144,8 +145,6 @@ async def _resume(run_root: Path):
         run_root,
         clock=VirtualClock(start=T0 + timedelta(minutes=2)),
         adapters={"CMD": FakeAdapter(default=None)},
-        settle_seconds=0.0,
-        grace_seconds=0.0,
     )
 
 
@@ -247,10 +246,11 @@ def test_the_dispatch_reader_refuses_a_bad_id_and_names_each_run_s_latest_attemp
             dispatched_runs([dispatch(bad)])
 
 
-def test_pr36a_a_restart_refuses_a_split_and_appends_nothing(tmp_path: Path) -> None:
+def test_pr36a_a_restart_quarantines_a_split_and_keeps_running(tmp_path: Path) -> None:
     """The whole restart, against a real store whose own `dispatch` record bound the attempt's
-    id. A spool record naming a stranger refuses the restart, and the refusal appends NOTHING
-    to the store: the identity preflight runs before step 5 writes."""
+    id. A spool record naming a stranger is never acted on: the restart quarantines the attempt
+    (spec-restart §7, DL-433), one `unobservable` outcome with cause `quarantined` naming both
+    ids, its job held with that evidence, and the engine starts."""
     run_root = tmp_path / "run"
     engine = start_run(
         lower_source(_SOLO_JIL),
@@ -267,21 +267,36 @@ def test_pr36a_a_restart_refuses_a_split_and_appends_nothing(tmp_path: Path) -> 
         engine.journal.close()
 
     asyncio.run(scenario())
-    before = _kinds(run_root)
     [run_id] = dispatched_runs(_records(run_root)).values()
     run_dir = run_root / "runs" / "j.1" / "1"
     run_dir.mkdir(parents=True)
     (run_dir / "spawn.json").write_text(json.dumps({"run_id": "rid-else"}))
-    with pytest.raises(EngineError, match=f"'rid-else'.*{run_id!r}"):
-        asyncio.run(
-            resume_run(
-                lower_source(_SOLO_JIL),
-                run_root,
-                clock=VirtualClock(start=T0),
-                adapters={"CMD": FakeAdapter(default=None)},
-            )
+
+    async def restart() -> Engine:
+        again = await resume_run(
+            lower_source(_SOLO_JIL),
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
         )
-    assert _kinds(run_root) == before
+        await again.run_until_quiescent(T0)
+        await again.shutdown()
+        assert again.journal is not None
+        again.journal.close()
+        return again
+
+    again = asyncio.run(restart())
+    from dsl41.runner_journal import read_records
+
+    bodies = [(r.kind, r.payload) for _, r in read_records(run_root)]
+    [outcome] = [b for k, b in bodies if k == "outcome"]
+    assert (outcome["outcome"], outcome["cause"]) == ("unobservable", "quarantined")
+    assert "'rid-else'" in outcome["status"]["note"] and repr(run_id) in outcome["status"]["note"]
+    [plan] = [b for k, b in bodies if k == "follow_up" and b.get("event") == "plan"]
+    assert plan["plan"] == "hold" and "rid-else" in plan["evidence"]["note"]
+    # the outcome record closes it as live: no `ladder_done` of its own (Opus round 1, R1)
+    assert ("follow_up", {"event": "ladder_done", "attempt": run_id}) not in bodies
+    assert again.started.is_set() and again.oracle.store.job["j"].on_hold
 
 
 # ------------------------------------------------- 4. the stream and the wire

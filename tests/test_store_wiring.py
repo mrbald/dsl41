@@ -85,8 +85,6 @@ async def _resume(
         run_root,
         clock=VirtualClock(start=T0 + timedelta(minutes=minutes)),
         adapters={"CMD": adapter or FakeAdapter(default=None)},
-        settle_seconds=0.0,
-        grace_seconds=0.0,
         **kwargs,
     )
 
@@ -281,9 +279,10 @@ def test_a_killed_attempt_is_closed_with_no_plan_once_reaped(tmp_path: Path) -> 
 def test_the_spool_record_names_how_the_attempt_ended(
     tmp_path: Path, status: dict[str, Any] | None, outcome: str, plan: str
 ) -> None:
-    """spec-wiring 2b's table at the restart (step 5): the open attempt goes through the attempt
-    chart, fed its `status.json`. Only the lifeline's kill is a stop; a missing record with no
-    command left is unobservable. Both interruptions of an idempotent job rerun."""
+    """spec-wiring 2b's table at the restart's observation (spec-restart §4): the open attempt
+    goes through the attempt chart, fed its `status.json` in the loop. Only the lifeline's kill
+    is a stop; a missing record is unobservable, ended by the engine's death. Both
+    interruptions of an idempotent job rerun."""
     run_root = tmp_path / "run"
     _open_attempt(run_root)
     [dispatch] = _kinds(run_root, "dispatch")
@@ -294,11 +293,15 @@ def test_the_spool_record_names_how_the_attempt_ended(
         (spool / "status.json").write_text(json.dumps({**identity, **status}))
 
     async def scenario() -> None:
-        await _close(await _resume(run_root))
+        engine = await _resume(run_root)
+        await engine.run_until_quiescent(engine.clock.now())
+        await _close(engine)
 
     asyncio.run(scenario())
     [ended] = _kinds(run_root, "outcome")
     assert (ended["attempt"], ended["outcome"]) == (dispatch["attempt"], outcome)
+    if status is None:
+        assert ended["cause"] == "engine_death"
     assert [p["plan"] for p in _plans(run_root)] == [plan]
 
 
@@ -355,7 +358,8 @@ def test_the_interruption_rule_reruns_an_idempotent_job_and_holds_a_marked_one(
     # the identity is the uuid the plan named; the ordinal is DSL41_ATTEMPT (DL-118, DL-426)
     assert second["attempt"] != first["attempt"]
     assert (first["env"]["DSL41_ATTEMPT"], second["env"]["DSL41_ATTEMPT"]) == ("1", "2")
-    assert plans["j"]["steps"][0]["after"] == "unobservable"
+    # the cause the replacement follows: the engine's death (spec-restart §4)
+    assert plans["j"]["steps"][0]["after"] == "engine_death"
 
 
 def test_the_interruption_rule_drops_a_removed_job_and_a_run_the_oracle_ended(
@@ -668,6 +672,7 @@ def test_a_snapshot_with_an_unsettled_attempt_keeps_its_dispatch_across_a_prune(
 
     async def restart() -> None:
         engine = await _resume(run_root, _PAIR_JIL, minutes=3 * 24 * 60)
+        await engine.run_until_quiescent(engine.clock.now())  # the catch-up observes it
         await _close(engine)
 
     asyncio.run(restart())
@@ -825,6 +830,7 @@ def test_a_watch_whose_run_ended_is_closed_with_no_plan_at_a_restart(tmp_path: P
             clock=VirtualClock(start=T0 + timedelta(minutes=3)),
             adapters={"FW": FakeAdapter(default=None)},
         )
+        await engine.run_until_quiescent(engine.clock.now())  # the watch's catch-up step
         await _close(engine)
         return engine
 
@@ -1045,7 +1051,8 @@ def test_owed_starts_stay_pending_until_each_dispatch_commits(tmp_path: Path) ->
     async def crashed() -> None:
         engine = await _resume(run_root, _PAIR_JIL)
         assert engine.journal is not None
-        assert {p.job for p in engine.journal.open.pending.values()} == {"j", "k"}
+        # the catch-up's owed step makes them pending, in the loop (spec-restart §6)
+        assert engine.journal.open.pending == {}
         real = engine.journal.append
         dispatches: list[int] = []
 
@@ -1098,9 +1105,9 @@ def _latest_snapshot_data(run_root: Path) -> bytes:
 def test_startup_records_engine_started_after_steps_6_and_7_and_then_the_drops(
     tmp_path: Path,
 ) -> None:
-    """spec-wiring 1b's order: the restart's settlement, its plan's replacement dispatch, then
-    `engine started` and the missed-tick drops. Nothing of step 8 is durable before the loop has
-    carried out steps 6 and 7."""
+    """spec-restart §6's order: the observation's outcome and plan, its replacement dispatch
+    behind the barrier, then `engine started` and the missed-tick drops. The fold writes
+    nothing: every record of the catch-up is the loop's."""
     text = _JIL + "\ninsert_job: t\njob_type: c\ncommand: y\ndate_conditions: 1\n"
     text += 'days_of_week: all\nstart_times: "08:30"\n'
     run_root = tmp_path / "run"
@@ -1125,7 +1132,7 @@ def test_startup_records_engine_started_after_steps_6_and_7_and_then_the_drops(
         catalog = lower_source(text)
         engine = await _resume(run_root, text, minutes=60, scheduler=Scheduler(catalog, start=T0))
         assert not engine.started.is_set()
-        assert [kind for _, kind, _ in rows(run_root)[before:]] == ["outcome", "follow_up"]
+        assert [kind for _, kind, _ in rows(run_root)[before:]] == []
         await _close(await _recovered(engine))
 
     asyncio.run(restart())

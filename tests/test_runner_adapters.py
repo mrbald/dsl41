@@ -88,7 +88,7 @@ def _live_status(text: str, result: object) -> dict:
 
 
 def _resumed_status(run_root: Path, text: str, status: dict) -> dict:
-    """What the restart's step 5 feeds for the same record: the open attempt goes through the
+    """What the restart's observation feeds for the same record: the open attempt goes through the
     attempt chart with `status` as its `status.json`, and its plan's feed step carries the
     STATUS fields the record maps to."""
     import json
@@ -121,6 +121,7 @@ def _resumed_status(run_root: Path, text: str, status: dict) -> dict:
             clock=VirtualClock(start=T0),
             adapters={"CMD": FakeAdapter(default=None)},
         )
+        await resumed.run_until_quiescent(T0)  # the catch-up observes it (spec-restart §4)
         await resumed.shutdown()
         assert resumed.journal is not None
         resumed.journal.close()
