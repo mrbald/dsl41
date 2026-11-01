@@ -27,6 +27,7 @@ the other three.
 3. [examples/nightbank/README.md](examples/nightbank/README.md) - the 82-job training estate
 4. [examples/file_processing/README.md](examples/file_processing/README.md) - the operator CLI and procedures of the file-processing block
 5. [docs/nav.md](docs/nav.md) - inspect job dependencies and box membership from the CLI or an agent
+6. [examples/snapshots/README.md](examples/snapshots/README.md) - inspect offline observations on the Nightbank and fulfilment graphs; convert a bounded AutoSys summary table
 
 **Job author**: write an estate in JIL or the Python DSL, or bring an existing one in, and get it accepted.
 
