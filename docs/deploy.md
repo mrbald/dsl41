@@ -5,6 +5,7 @@ one Linux box. The rest of the [operator track](../README.md#documents)
 covers incidents and worked estates. This page leaves application authoring
 to the [job author guide](authoring.md) and site qualification to the
 [one-box milestone](../TODO.md#release-2026-11-02-one-box).
+A Packager uses the install steps as the reference implementation (DL-439).
 
 ## Install the package and unit
 

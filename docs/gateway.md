@@ -1,5 +1,7 @@
 # Gateway — HTTP and WebSocket in front of the control socket
 
+For the architect reading an unbuilt gateway proposal; continue through the [architect track](../README.md#documents).
+
 Status: **proposed.** Not normative until a decision-log entry accepts it.
 Nothing is built. The control error codes it maps (§3) are built (DL-272).
 

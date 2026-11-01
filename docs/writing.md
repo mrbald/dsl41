@@ -28,9 +28,10 @@ An existing page meets a rule added by DL-406 at its next change.
 Every document is written for one of five readers and says so in its first
 paragraph, with the task the reader comes with:
 
-- **Packager**: builds the site package (the RPM or equivalent that installs
-  dsl41 and the site's services), and keeps fixed what the application's JIL
-  releases run within (DL-408).
+- **Packager**: builds and installs the runtime package and the site's service
+  configuration: the main config, unit and release venv. May adapt and repackage
+  the project's reference guidance and implementation for the site's Python
+  runtime requirements (DL-439).
 - **Operator**: starts, watches, recovers and retires the engine; drills and
   incidents.
 - **Job author**: writes an estate in JIL or in the Python DSL, or brings an

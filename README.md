@@ -16,47 +16,68 @@ socket, a terminal UI and access roles. Jobs are tethered to the engine.
 
 ## Documents
 
-Each document is written for one reader ([docs/writing.md](docs/writing.md),
-DL-405). Pick your track; the architect's track is the background reading for
-the other three.
+Each document is written for a named reader ([docs/writing.md](docs/writing.md),
+DL-405). Pick your track. The architect's track supplies background for the other four.
+
+**Packager**: build and install the runtime package and the site's service
+configuration (DL-439). The project supplies reference guidance and a reference
+implementation. A site may adapt and repackage them for its Python runtime requirements.
+
+1. [Install](#install) - the runtime package, Python requirement and optional UI dependency
+2. [docs/deploy.md](docs/deploy.md) - the reference installation, release venv and service configuration
+3. [Example unit](examples/nightbank/deploy/dsl41-engine.service) and [main config](examples/nightbank/deploy/dsl41.toml) - the reference implementation to adapt for the site
 
 **Operator**: start, watch and recover the engine; incidents.
 
-1. [docs/deploy.md](docs/deploy.md) - install, start, drain, reload and recover one engine on one Linux box
-2. [docs/incident-triage.md](docs/incident-triage.md) - on shift: why a job failed, is late or has not started, the intervention and its read-back, the escalation bundle for a dsl41 fault
-3. [examples/nightbank/README.md](examples/nightbank/README.md) - the 82-job training estate
-4. [examples/file_processing/README.md](examples/file_processing/README.md) - the operator CLI and procedures of the file-processing block
-5. [docs/nav.md](docs/nav.md) - inspect job dependencies and box membership from the CLI or an agent
+1. [docs/deploy.md](docs/deploy.md) - install the main config, application inputs and unit; start, drain, update, recover and drill one Linux engine
+2. [docs/incident-triage.md](docs/incident-triage.md) - diagnose jobs and attempts, send a checked intervention, and collect evidence with the engine up or down
+3. [examples/nightbank/README.md](examples/nightbank/README.md) - prepare a synthetic training night, rehearse it, and run its incident workers
+4. [examples/file_processing/README.md](examples/file_processing/README.md) - inspect storage, repair it, recover interrupted work and follow the stop/resume exercise
+5. [docs/nav.md](docs/nav.md) - inspect dependencies and box membership from estate files; use triage for the active engine catalog
 6. [examples/snapshots/README.md](examples/snapshots/README.md) - inspect offline observations on the Nightbank and fulfilment graphs; convert a bounded AutoSys summary table
 
 **Job author**: write an estate in JIL or the Python DSL, or bring an existing one in, and get it accepted.
 
-1. [docs/authoring.md](docs/authoring.md) - the author guide: JIL or the Python DSL, what dsl41 accepts, conditions, lint, rehearse, viz, bringing an estate in, the estate manifest and the interruption contract every job meets
+1. [docs/authoring.md](docs/authoring.md) - write or import JIL or Python estates, check the main-config inputs, hand over a reread/update candidate, and make jobs safe across interrupted attempts; estate.toml supports tests and rehearsal
 2. [Lint a catalog](#lint-a-catalog) - the rules L001-L025, and `rehearse` and `viz` under [CLI](#cli)
-3. [DSL -> JIL (build)](#dsl---jil-build) - the Python DSL builders (`job`, `box`, `sequence`, `parallel`) and `to_jil()`; [examples/file_processing/estate.py](examples/file_processing/estate.py) is a worked Python estate; `examples/nightbank`, `fulfilment` and `media` hold worked JIL estates
-4. [JIL -> DSL (decompile)](#jil---dsl-decompile) and [Prove two catalogs equivalent](#prove-two-catalogs-equivalent) - bringing an existing estate in and checking a rewrite; [examples/README.md](examples/README.md) indexes the worked estates
-5. [docs/autosys-semantics.md](docs/autosys-semantics.md) - the meaning of JIL (SEM entries); [docs/simulation-coverage.md](docs/simulation-coverage.md) - what the runner models, refuses, or assumes; [docs/jil-statement-syntax.md](docs/jil-statement-syntax.md) - the statement scanner spec
+3. [DSL -> JIL (build)](#dsl---jil-build) - the Python DSL builders (`job`, `box`, `sequence`, `parallel`) and `to_jil()`; [examples/file_processing/estate.py](examples/file_processing/estate.py) is a worked Python estate
+4. [JIL -> DSL (decompile)](#jil---dsl-decompile) and [Prove two catalogs equivalent](#prove-two-catalogs-equivalent) - bring an existing estate in and check a rewrite
+5. [examples/README.md](examples/README.md) - choose a worked estate: file archival and processing, or fulfilment carrier reconciliation; [workflow setup](examples/workflows/README.md) is shared by fulfilment and [media publication](examples/media/README.md)
+6. [docs/deploy.md#reload-a-changed-estate](docs/deploy.md#reload-a-changed-estate) - the operator's adoption procedure for the checked candidate; authoring defines replacement and hold outcomes
+7. [Architect references](#architect-references) - the meaning of JIL, simulation limits and statement syntax
 
 **Architect**: the design and the implementation.
 
-1. [docs/architecture.md](docs/architecture.md) - the reader's map, then the [block cards](docs/blocks/README.md), then [docs/glossary.md](docs/glossary.md)
-2. [docs/runner-design.md](docs/runner-design.md) - the runner's design; [docs/ir-design.md](docs/ir-design.md) - AST, IR-F, IR-G, oracle, and equivalence; [Implementation memo](#implementation-memo) - the compiler side and the source map
+1. [docs/architecture.md](docs/architecture.md) - the v2 engine map and contract routes; [docs/glossary.md](docs/glossary.md) - the vocabulary; [block cards](docs/blocks/README.md) - component references
+2. [docs/runner-design.md](docs/runner-design.md) - execution, durability, recovery and the built served TUI (§11); [docs/ir-design.md](docs/ir-design.md) - AST, IR-F, IR-G, oracle and equivalence; [Implementation memo](#implementation-memo) - the compiler side and source map
 3. [docs/state-machines.md](docs/state-machines.md), [docs/job-chart-lifecycle.md](docs/job-chart-lifecycle.md) and [docs/chart-lifecycles.md](docs/chart-lifecycles.md) - the generated views of every declared chart
-4. [docs/gateway.md](docs/gateway.md) - a proposed HTTP and WebSocket gateway; nothing of it is built
-5. [docs/decision-log.md](docs/decision-log.md) - the reasons for the decisions, indexed by [docs/decision-index.md](docs/decision-index.md); [docs/citation-index.md](docs/citation-index.md) - what every reference token in the sources means; [docs/risk-map.md](docs/risk-map.md) - each runner machine with its branch coverage and open findings
+4. [docs/gateway.md](docs/gateway.md) - the unbuilt HTTP and WebSocket proposal; the built served TUI follows runner design §11 and access model §9 in the references below
+5. [docs/decision-log.md](docs/decision-log.md) - the decision authority, indexed by [docs/decision-index.md](docs/decision-index.md); [docs/risk-map.md](docs/risk-map.md) - known limits and evidence pointers, without a current coverage measurement
+6. [Architect references](#architect-references) - semantic and protocol contracts; qualification evidence belongs to the maintainer track
 
 **Maintainer**: contribute code or documents, or run an agent that does.
 
-1. [CLAUDE.md](CLAUDE.md) - the shared agent contract with role and task reading routes; [docs/agent-workflow.md](docs/agent-workflow.md) - implementation, setup and verification
-2. [docs/writing.md](docs/writing.md) - the rules for human-facing documents; [docs/cli-tui-qualification.md](docs/cli-tui-qualification.md) - how a release's CLI and TUI are qualified
-3. [docs/live-instance-runbook.md](docs/live-instance-runbook.md) - probing a live AutoSys instance to settle an open semantic question
+1. [CLAUDE.md](CLAUDE.md) - role and task routes; [docs/agent-workflow.md](docs/agent-workflow.md) - setup, required checks and implementation handoff; [role guides](docs/agents/coordination.md) - coordination and links to the builder, reviewer and advisor duties
+2. [docs/writing.md](docs/writing.md) - reader rules; [docs/cli-tui-qualification.md](docs/cli-tui-qualification.md) - source, installed and display evidence and its limits; listing checks does not establish a passing qualification run
+3. [docs/live-instance-runbook.md](docs/live-instance-runbook.md) - probe a live AutoSys instance to settle an open semantic question
+4. [docs/citation-index.md](docs/citation-index.md) - resolve reference tokens, including excluded namespaces, or register a namespace
+5. [Make a release](#make-a-release) - verify, build, rehearse and publish a package
+6. [examples/dst-drill/README.md](examples/dst-drill/README.md) - compare the real engine and rehearsal across clock changes; [Nightbank drill](examples/nightbank/deploy/DRILL.md) - the service drill procedure and its limits
 
-The runner's frozen contracts are
+### Architect references
+
+[docs/autosys-semantics.md](docs/autosys-semantics.md) defines the meaning of JIL;
+[docs/simulation-coverage.md](docs/simulation-coverage.md) lists what simulation models,
+refuses or assumes; [docs/jil-statement-syntax.md](docs/jil-statement-syntax.md)
+defines the statement scanner and fidelity rules. Job authors use these as references.
+
+The runner's frozen protocol references are
 [docs/control-protocol.md](docs/control-protocol.md),
+[docs/wrapper-protocol.md](docs/wrapper-protocol.md),
 [docs/protocol-evolution.md](docs/protocol-evolution.md),
 [docs/access-model.md](docs/access-model.md),
 and [docs/statechart-engine.md](docs/statechart-engine.md).
-They are reference, cited from the pages above, not reading.
+The architect pages above link the relevant sections.
 
 ## Status
 
@@ -490,11 +511,12 @@ The service drill runs the engine unit in a podman container on Ubuntu 24.04 and
 Rocky 8: `examples/nightbank/deploy/drill-local.sh --image ubuntu|el8 all`
 ([DRILL.md](examples/nightbank/deploy/DRILL.md)).
 
-CI also uses it to test the concurrency model
-(docs/concurrency-model.md (retired in 2.0.0)
-§9): seeded interleavings of engine failover, a spawn decided and never
-acted on, and duplicated and stale completions, with a check that no
-`(job, run_number)` ever runs twice.
+[tests/test_nightbank_example.py](tests/test_nightbank_example.py) checks seeded
+interleavings of engine restart, a spawn decided and never acted on, and
+duplicated and stale completions. The harness permits an interrupted run to
+execute in a later engine incarnation (DL-424); it rejects duplicate execution
+within one incarnation and repetition after an uninterrupted execution.
+`concurrency-model.md` §9 resolves to [the decision log](docs/decision-log.md).
 
 ### Recoverable file processing (examples/file_processing)
 
@@ -854,7 +876,7 @@ Compiler:
   oracle access, including the cross-order safety and liveness property.
 - `tests/test_semantics.py`: the semantic-switch registry, the
   runtime-profile field that records overrides, the path from the command
-  line to the period's pin, and the `ice-lookback` switch across the
+  line to the stored configuration, and the `ice-lookback` switch across the
   manifest, the engine and replay (DL-252).
 - `tests/test_autocal.py`: every worked example the vendor docs contain,
   plus one test per pinned default or refusal.
@@ -1016,16 +1038,10 @@ Training estate:
 
 ## What is not built
 
-- The remote relay and shared store that multihost execution needs. They
-  are designed in
-  docs/concurrency-model.md (retired in 2.0.0)
-  §7.
-- Follower mode, `standby check` and the multi-executor rig (DL-230). They
-  wait for the relay above.
-- Fingerprints on tombstones (DL-111). They are specified in
-  docs/concurrency-model.md (retired in 2.0.0) §5.
-- The HTTP and WebSocket gateway that [docs/gateway.md](docs/gateway.md)
-  proposes.
+- Multihost execution, the remote relay and shared store are outside the product boundary (DL-424); `concurrency-model.md` resolves to [the decision log](docs/decision-log.md).
+- Follower mode, `standby check` and the multi-executor rig (DL-230) are outside the product boundary (DL-424).
+- Fingerprints on effect tombstones (DL-111) have no subject: effects are outside the engine (DL-425). See [the decision log](docs/decision-log.md).
+- The HTTP and WebSocket gateway is an unbuilt [proposal](docs/gateway.md); the built browser path is the [served TUI](docs/runner-design.md#11-ui--one-textual-app-terminal-and-web-e3).
 - The decompiler's custom-pattern option (`--patterns` recognizer and
   expander pairs).
 
@@ -1064,10 +1080,10 @@ behavior change. A module that was never documented as an API may leave the
 package inside a minor bump; the tag message names it.
 
 The annotated tag's message is the release note. Its first line is the
-summary. Its body answers the questions that
-the runbook's upgrade section (`deployment-runbook.md`, retired in 2.0.0)
-reads to pick an upgrade row, in the order of the template under "Make a
-release". It also names any Python module that left the package.
+summary. Its body states the compatibility facts in the template under
+"Make a release" and names any Python module removed from the package.
+`deployment-runbook.md` resolves to the operator's
+[engine upgrade procedure](docs/deploy.md#upgrade-the-engine).
 
 ### Make a release
 
@@ -1077,15 +1093,15 @@ The list follows CI, including format checking and the scoped 100% branch
 coverage requirement.
 
 Set the new version in `pyproject.toml` and run `uv lock`, which writes the
-same version into `uv.lock`. Update the wheel filename and RPM version
-examples in docs/offline-installation.md (retired in 2.0.0)
-to the same version. Build locally and compare the wheel's file list with
+same version into `uv.lock`. `offline-installation.md` resolves to
+[package installation](docs/deploy.md#install-the-package-and-unit);
+it is not a release input. Build locally and compare the wheel's file list with
 the previous release's (`uv build`, then `unzip -Z1` on both): the
-difference must be what the tag message is about to say. Commit the three
-files and push them:
+difference must be what the tag message is about to say. Commit the two
+version files and push them:
 
 ```sh
-git commit pyproject.toml uv.lock docs/offline-installation.md \
+git commit pyproject.toml uv.lock \
   -m "chore: X.Y.Z (one-line summary)"
 git push origin main
 ```
@@ -1111,8 +1127,8 @@ bash scripts/export-release-inputs.sh dist/*.whl exports
 ```
 
 Then tag that commit and push the tag. The first `-m` is the summary; the
-others are the release note's body, one line per question of the
-runbook's §7, in its order:
+others state the state-machine version, resume compatibility and wrapper
+specification compatibility:
 
 ```sh
 git tag -a vX.Y.Z -m "X.Y.Z: one-line summary" \
