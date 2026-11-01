@@ -1,10 +1,13 @@
 # JIL Statement-Level Syntax (hand-scanner spec)
 
-Why not lark: JIL statements are line-oriented, with raw-to-EOL values, escaped colons, and
-attribute-specific multi-line continuation. A hand scanner does this context-sensitive lexing in
-a few hundred lines. A CFG does it badly. The compiler uses lark only for condition expressions
-(`grammars/condition.lark`). This document is the normative spec for the scanner,
-`src/dsl41/ast_jil.py`. Each rule here gets a fidelity test (AST contract, `ir-design.md` §2).
+For the architect, this document defines the JIL scanner's input and fidelity contracts.
+Continue through [the architect track](../README.md#documents). It is normative for
+`src/dsl41/ast_jil.py`; [IR design §2](ir-design.md#2-ast-layer) defines the AST.
+[AutoSys semantics](autosys-semantics.md) covers behavior after lowering.
+
+JIL statements have raw-to-EOL values, escaped colons and attribute-specific continuation.
+The hand scanner handles statement lexing. The compiler uses lark for condition expressions
+(`grammars/condition.lark`). Each scanner rule has a fidelity test.
 A `[?]` marks a corner that needs a live instance to settle; the scanner runs a documented
 default there.
 
@@ -12,7 +15,8 @@ default there.
 
 0. **Input contract**: the file is UTF-8. Invalid UTF-8 fails at decode. The scanner takes
    Unicode scalar strings only. An unpaired surrogate is a scanner error that names its line:
-   a span is a UTF-8 byte offset, and a surrogate has no UTF-8 spelling (period-model PR-10a).
+   a span is a UTF-8 byte offset, and a surrogate has no UTF-8 spelling (DL-119, DL-128).
+   `test_pr10a_surrogate_refused_at_jil_ingress` pins it.
    "Whitespace" below means space or tab. The blank-line and after-comment tests are the two
    exceptions: they accept every character Python `str.strip()` removes.
 1. **Attribute line** = `key ':' value`, where `key` matches `/[A-Za-z_][A-Za-z0-9_]*/` at line

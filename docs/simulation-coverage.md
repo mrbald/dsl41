@@ -1,18 +1,18 @@
 # Simulation coverage register
 
-This register lists every behaviour the simulation side of dsl41 can meet
-and says what the simulation does with it. The compiler side fails closed:
-lowering refuses unknown attributes that are not allow-listed (DL-07), the
-UC backend refuses R-rows and records every A-row assumption, and `minify`
+For the architect, this register lists every behaviour the simulation side of dsl41 can
+meet and says what the simulation does with it. Continue through
+[the architect track](../README.md#documents). The compiler side fails closed:
+lowering refuses unknown attributes that are not allow-listed (DL-07), and `minify`
 refuses what it cannot classify. The simulation side runs on classified
 choices and on pinned defaults. A pinned default that waits on an open
 question is a `provisional` row. Rows are chosen by classification, not by
 how often an estate meets the behaviour. If a construct can occur, it is
 modelled, refused, or listed here as an explicit assumption.
 
-The register covers estate-facing behaviour. It does not restate the runner
-protocol vocabularies, such as host states and verbs. The frozen runner
-contracts own those.
+The register covers estate-facing behaviour. The runner's
+[control](control-protocol.md), [wrapper](wrapper-protocol.md) and
+[statechart](statechart-engine.md) contracts define protocol vocabularies.
 
 Each row has one of four classes.
 
@@ -75,9 +75,9 @@ A row for a regex-bodied member carries the exact pattern. An edit to the
 pattern fails the test until the row is revisited.
 
 Every simulation `PENDING` marker site in `src/dsl41` is claimed by exactly
-one row. The claiming row names the open question. The UC backend's `U`
-markers are not simulation defaults and are not in the register. The `Q8x`
-marker in the calendar module's docstring names the Q8 family and pins
+one row. The claiming row names the open question. The test excludes `U`-series
+analysis markers, including `derive.py`'s `U1` OR-shape assumption; these are not simulation
+defaults. The `Q8x` marker in the calendar module's docstring names the Q8 family and pins
 nothing.
 
 <!-- register:begin -->
