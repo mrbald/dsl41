@@ -1,21 +1,30 @@
 # Live-instance runbook — probes for the open questions
 
-This runbook holds the probe protocols for the open AutoSys behavior
-questions. Each protocol runs on a Workload Automation AE instance. The
-runbook also lists the sources behind the dossier's citations. It is a
-companion to the §9 register of the dossier (docs/autosys-semantics.md)
-and to the live-instance route in CLAUDE.md.
+For the maintainer who needs to check an AutoSys behavior question on a
+Workload Automation AE instance. Use this page to choose a probe, capture
+its result, and prepare evidence for a semantics change. The
+[maintainer track](../README.md#documents) gives the contribution and
+verification workflow.
 
-Scope: the questions here are the AutoSys ones. Q10 and Q11 have no
-protocol here; §9 names the observation that would settle each. Two
-groups sit outside the scope. U1, U3b and U6b need a Universal Controller
-instance, not an AE box, and DL-288 puts them out of scope.
-docs/stonebranch-semantics.md Part III states all three, and
-docs/uc-edge-schema.md states U3b's write-path test. The runner's own
-parity defaults E5, E6, E7, E9 and E10 have no probe here
-(docs/runner-design.md ss15 states each default).
+The [Q register](autosys-semantics.md#9-open-questions-and-their-pinned-defaults)
+is the authority for question status and pinned defaults. Q10 has no
+protocol here; its register entry names the observation needed. Q11 is
+closed (DL-259), but its first-week default (`wekr-first-week`, `first-full`)
+is unverified; its [register entry](autosys-semantics.md#9-open-questions-and-their-pinned-defaults)
+names the live observation that settles it. No protocol here.
+The runner's E5, E6, E7, E9 and E10 have no probe here; see
+[runner-design §15](runner-design.md#15-open-questions-e-series).
+Q12 is descoped (DL-288). Its optional AutoSys protocol is below.
 
-Ground rules (corpus hygiene per CLAUDE.md and LICENSING.md):
+U1, U3b and U6b need a Universal Controller instance; DL-288 descoped them and DL-424
+removed the UC backend. This runbook has no UC probe.
+
+This page does not cover engine deployment or recovery; use
+[deploy.md](deploy.md).
+
+Ground rules (corpus hygiene per [CLAUDE.md](../CLAUDE.md) and
+[LICENSING.md](../LICENSING.md)):
+
 - Give each object that you create on the instance the prefix `dsl41_`.
   If a schedule is involved, use a future date. Delete each object the
   same day.
@@ -41,8 +50,9 @@ Ground rules (corpus hygiene per CLAUDE.md and LICENSING.md):
   none.
 - A semantic switch stays selectable after its question is settled
   (DL-252). The answer sets the switch's `autosys` value in the registry
-  (`src/dsl41/semantics.py`). The default then follows DL-252's rule
-  (runner-design §8a): it is the vendor's behavior where that is as safe
+  ([src/dsl41/semantics.py](../src/dsl41/semantics.py)). The default follows
+  DL-252's rule in [runner-design §8a](runner-design.md#8a-semantic-switches):
+  it is the vendor's behavior where that is as safe
   as dsl41's reading, and dsl41 keeps its own default where its reading
   is safer or more useful, as `queued-recheck` and `fw-existence` do. Either way the
   other value stays selectable. Keeping a default that differs from the
@@ -92,6 +102,22 @@ quoted text against the fetched bytes. A summary is not a source.
 
 ## 2. Protocols, cheapest first
 
+Run one protocol at a time. The command blocks below are AutoSys commands
+unless they start with `uv run`. They are not dsl41 control commands.
+
+A probe result is evidence for review. It does not authorize a code change,
+a switch change, or a different default. References below to closing a
+question or changing behavior describe follow-up work under the ground
+rules.
+
+1. Obtain access and permission for the selected probe on the AE instance.
+2. Read the protocol's setup, expected observations and cleanup before creating objects.
+3. Replace its placeholders and choose future schedule times before running its commands.
+4. Capture the definition response, status readbacks and relevant log lines.
+5. Delete the probe objects and restore any agent settings the protocol changes.
+6. Propose the change as the ground rules above say (SEM amendment, DL entry,
+   tests), through the [maintainer workflow](agent-workflow.md).
+
 Replace `<M>` with the name of an existing machine (`autorep -M ALL`,
 read-only). Run the commands in bash: the cleanup lines use here-strings
 (`<<<`). All `jil` blocks are heredocs: `jil <<'EOF' … EOF`. Cleanup
@@ -108,9 +134,17 @@ jobs). "The scheduler log" is the event_demon log of the instance.
 autotimezone -l > ujo_timezones.txt
 ```
 
-Feed the file to the runner verbatim: `dsl41 run|rehearse --timezone-map
-ujo_timezones.txt …`. Without it, a city name falls back to the unique
-zoneinfo city match, with a preflight WARN per job. With it, an OS zone
+Pass the export with the estate it came from. Keep both outside the
+repository. Run the rehearsal from that external directory. Replace
+`estate.jil` with that estate's path and `/path/to/dsl41` with the checkout path:
+
+```sh
+uv run --project /path/to/dsl41 dsl41 rehearse estate.jil --timezone-map ujo_timezones.txt
+```
+
+`dsl41 run` also accepts `--timezone-map`; use the
+[deployment guide](deploy.md) for an engine invocation. Without the map,
+a city name falls back to the unique zoneinfo city match, with a preflight WARN per job. With it, an OS zone
 name still resolves first, and a name that neither the OS nor the map
 knows is refused. If an estate carries admin-added entries
 (`autotimezone -a/-c`), only the export knows them.
@@ -134,8 +168,8 @@ amendment, not as a relitigation.
 
 ### Q8b / Q8c / Q8d — calendar sandbox (inert; no job ever runs)
 
-The probe calendars are defined in **`docs/probes/dsl41_q8_cals.txt`** in
-this repo. The weekday facts in it are correct for 2026. Day tokens in a
+The probe calendars are in
+[docs/probes/dsl41_q8_cals.txt](probes/dsl41_q8_cals.txt). The weekday facts in it are correct for 2026. Day tokens in a
 `condition:` line are the SEM-37 three-letter forms (`mon`, `wed`), not
 the two-letter codes that `workday:` takes. A two-letter token is
 refused, and that refusal answers nothing. Copy the file to the box
@@ -200,7 +234,7 @@ What each August/December 2026 observation means:
   dsl41 implements replace-then-shift, (15, 18), as its pinned default
   (DL-59). The probe checks that the vendor and dsl41 agree; it does not
   choose dsl41's behavior. If the pair is different, record the
-  divergence, then correct it.
+  divergence for review under the ground rules.
 - **Q8c_1** (does the N walk skip holidays? Mon Aug 17 is a holiday, and
   holiday action S keeps holcal dates out of non-workday treatment):
   Saturdays map to Mondays 3, 10, ?, 24, 31. The `?` decides:
@@ -284,9 +318,9 @@ dsl41_q6_box -d` in each case. Cleanup: run
 
 ### Q12 — FREE on a depletable resource (~3 minutes, runs up to four short jobs)
 
-Q12 is out of scope (DL-288). The protocol is here for a reader who
-needs the case. "resources Attribute" (AutoSys 24.2) documents FREE as "Optional
-for renewable virtual resources only". dsl41's preflight refuses FREE=Y
+Q12 is descoped (DL-288). Run this optional protocol only when the
+maintainer needs vendor evidence for that case. "resources Attribute"
+(AutoSys 24.2) documents FREE as "Optional for renewable virtual resources only". dsl41's preflight refuses FREE=Y
 and FREE=A on a depletable and accepts FREE=N (DL-287). The oracle
 applies the code. This probe reads what the vendor does from job
 behavior. Each resource has 2 units. Each `_b` job asks for both, so it
@@ -822,8 +856,8 @@ schedule ticks daily: `jil <<< "delete_box: dsl41_q3c_box"` and
 
 The pin "a pre-existing arm survives ON_ICE/OFF_ICE untouched" (SEM-32,
 DL-54) is uncited. Q3d (DL-69) is the open question (`# PENDING: Q3d`,
-oracle_writers.py), and the pin is the deterministic default until this probe
-runs. If the vendor instead discards the queued start on ice, ON_ICE is
+[oracle_writers.py](../src/dsl41/oracle_writers.py)). The pin is the
+deterministic default until this probe runs. If the vendor instead discards the queued start on ice, ON_ICE is
 the vendor's only way to drop a latched tick: the vendor sendevent set
 has no other, and dsl41's own `DISARM` control (DL-158) has no vendor
 counterpart. Same shape as Q3c, standalone job, about 3 minutes:
@@ -855,12 +889,12 @@ sleep 60; autorep -J dsl41_q3ice%
 If `dsl41_q3ice` runs on the edge, the arm survived the ice round-trip
 and dsl41's pin holds. Note the tension with SEM-20's "conditions must
 reoccur": the tick, not the condition, is what carried over. If it does
-not run, ice discards the queued start. Then amend SEM-20/SEM-32, clear
-`armed` in the oracle's ON_ICE handler (`SCHED_DISARM` trace record),
-and rewrite any operator exercise that names the `DISARM` verb (the
-nightbank exercises are retired in 2.0.0 and return in a later slice): ON_ICE
-becomes the vendor's way to drop a latched tick, with its
-downstream-satisfaction cost stated. Delete both jobs the same
+not run, ice discards the queued start. Record that result for review.
+The proposed follow-up would amend SEM-20/SEM-32, clear `armed` in the
+oracle's ON_ICE handler (`SCHED_DISARM` trace record), and reconcile
+operator procedures that name `DISARM`. That change would need to state
+ON_ICE's downstream-satisfaction cost. The probe itself changes none of
+these rules. Delete both jobs the same
 day, because the schedule ticks daily: `jil <<< "delete_job: dsl41_q3ice"`
 and `jil <<< "delete_job: dsl41_q3ice_gate"`.
 
@@ -869,8 +903,8 @@ and `jil <<< "delete_job: dsl41_q3ice_gate"`.
 E8's default maps an external signal death to TERMINATED. The vendor
 documents TERMINATED for an operator's UNIX kill, and the scheduler's
 KillSignals default `2,9` "usually" returns TERMINATED (DL-226,
-runner-design ss15). Two parts stay open under the `# PENDING: E8`
-marker: the mechanism, recorded intent versus wait status, which e8b
+[runner-design §15](runner-design.md#15-open-questions-e-series)).
+Two parts stay open under the `# PENDING: E8` marker: the mechanism, recorded intent versus wait status, which e8b
 discriminates; and signal deaths no operator sent (segfault, OOM kill),
 which the read-only archaeology below can show. e8 checks the documented
 case. Each probe sleeps for its own number of seconds, so that its
@@ -898,14 +932,16 @@ means an external signal death is FAILURE, but only if the killed
 process was the agent's direct child. If its parent is a shell and the
 run shows exit code 137, the shell exited normally with 128+9, and the
 run decides nothing about E8: run it again and kill the shell, the
-agent's direct child. On a FA that decides, flip the TERMINATED default
-for the EXTERNAL death ONLY. A `signaled` record produced by a kill the
-engine itself asked for must stay TERMINATED: `_kill_outcome_from_spool`
-(runner_startup.py) reads `outcome_from_status`'s `Terminated` as the
-proof that a recorded kill landed, so a blanket flip in
-`outcome_from_status` (runner_adapters.py) would retire live kills.
+agent's direct child. Record a deciding FA as evidence for a change to
+external signal handling. The current mapping is in
+[outcome_from_status](../src/dsl41/runner_adapters.py). Engine-requested
+stops use the separate interruption path in
+[runner_attempts.py](../src/dsl41/runner_attempts.py); their treatment must
+be reviewed independently. The probe does not establish a replacement
+rule for interrupted attempts.
 
-Variant e8b is the trap test of DL-226 and runner-design ss15: does the
+Variant e8b tests DL-226 and
+[runner-design §15](runner-design.md#15-open-questions-e-series): does the
 KILLJOB verdict come from recorded intent or from the wait status? The
 command exits 0 on the first INT or TERM it receives. The sleep runs in
 the background under `wait`, so the trap runs at once rather than after
@@ -951,8 +987,8 @@ sleep ignores INT, so it can outlive its shell.
 
 dsl41 follows the `/*`-format majority: a whitespace-preceded `/*` with
 no `*/` on its line opens a comment that spans lines
-(jil-statement-syntax.md rule 5, [?] against the live binary). The
-vendor's answer is one insert away. The job has no start condition, so
+([jil-statement-syntax.md](jil-statement-syntax.md) rule 5, [?] against the live
+binary). The vendor's answer is one insert away. The job has no start condition, so
 it never runs:
 
 ```sh
