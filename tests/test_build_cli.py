@@ -86,7 +86,7 @@ def test_decompile_properties_help_warns_that_tokens_are_lost() -> None:
 
 
 def test_decompile_permit_unknown_reaches_the_check_the_footer_and_the_hint(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     jil = "insert_job: a\njob_type: c\ncommand: x\nmachine: m1\nfrob: 1\n"
     source = _write(tmp_path, "unknown.jil", jil)
@@ -97,12 +97,13 @@ def test_decompile_permit_unknown_reaches_the_check_the_footer_and_the_hint(
     assert module.startswith(
         "# Decompiled by dsl41 (phase 10). Write its JIL with: dsl41 build --permit-unknown"
     )
-    assert "    c.build(permit_unknown=True)\n" in module
+    assert "    main(estate, permit_unknown=True)\n" in module
+    monkeypatch.setattr(sys, "argv", ["estate.py"])
     namespace: dict[str, object] = {"__name__": "__main__"}
     exec(compile(module, "<main>", "exec"), namespace)  # noqa: S102
     assert capsys.readouterr().out == jil
     plain = decompile(lower_catalog([parse_file(SOURCE_JIL)]))
-    assert "--permit-unknown" not in plain and "    c.build()\n" in plain
+    assert "--permit-unknown" not in plain and "    main(estate)\n" in plain
 
 
 # ------------------------------------------------------------------ dsl41 build

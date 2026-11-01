@@ -35,7 +35,7 @@ from dsl41.cli_common import (
     parse_files_or_exit_2,
     refuse,
 )
-from dsl41.ast_jil import JilFile
+from dsl41.ast_jil import JilFile, parse
 from dsl41.ir import CatalogIR, LoweringError, lower_catalog
 from dsl41.idempotence import IdempotenceError, load_exceptions
 from dsl41.lint import lint_catalog
@@ -510,6 +510,29 @@ def _param_values(param: list[str]) -> dict[str, str] | None:
             raise typer.Exit(refuse(f"--param {name}: given twice"))
         values[name] = value
     return values
+
+
+def load_navigation_catalog(
+    estate: Path,
+    permit_unknown: bool = False,
+    properties: list[Path] | None = None,
+    environment: str | None = None,
+    param: list[str] | None = None,
+) -> CatalogIR:
+    """Load a navigation input through build's module loader or the JIL/manifest door."""
+    if estate.suffix.lower() == ".py" or estate.is_dir():
+        if properties or environment is not None:
+            raise typer.Exit(refuse("Python estates use --param, not -p or --environment"))
+        rendered = module_jil(estate, permit_unknown, _param_values(param or []))
+        return lower_catalog(
+            [parse(rendered.whole.decode("utf-8"), file=str(estate))],
+            permit_unknown=permit_unknown,
+        )
+    if param:
+        raise typer.Exit(refuse("--param needs a Python estate"))
+    manifest = estate.absolute() if estate.suffix.lower() == ".toml" else None
+    inputs = estate_args(manifest, environment, None if manifest else [estate], properties)
+    return load_catalog_or_exit_2(inputs.files, permit_unknown, inputs.properties)
 
 
 def _build_files(

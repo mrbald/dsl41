@@ -1354,6 +1354,7 @@ def test_decompile_code_ranges_single_code_and_full_span_roundtrip() -> None:
 
 def test_decompiled_module_footer_prints_jil_when_run_as_main(
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """DL-37 finding (4): the emitted module ends with an
     `if __name__ == "__main__":` footer that prints c.to_jil() -- running
@@ -1362,8 +1363,9 @@ def test_decompiled_module_footer_prints_jil_when_run_as_main(
     itself be valid JIL that lowers to a hash-equal catalog."""
     catalog = lower_catalog([parse_file(p) for p in LOWERABLE_CORPUS])
     source = decompile(catalog)
-    assert source.endswith("    sys.stdout.write(c.to_jil())\n")
+    assert source.endswith("    main(estate)\n")
     assert '\nif __name__ == "__main__":\n' in source
+    monkeypatch.setattr("sys.argv", ["estate.py"])
     namespace: dict[str, object] = {"__name__": "__main__"}
     exec(compile(source, "<decompiled-main>", "exec"), namespace)  # noqa: S102
     printed = capsys.readouterr().out

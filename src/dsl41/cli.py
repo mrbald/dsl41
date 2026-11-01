@@ -7,13 +7,14 @@ verbs live one file per domain (DL-137):
                     or a control answer into an exit code
     cli_compile.py  a catalog in, an artifact out: lint, equiv, decompile, build, minify,
                     folds, resolve, viz
+    cli_nav.py      read-only job navigation from a loaded or in-memory estate
     cli_run.py      run, rehearse, and their offline readers journal, runs
     cli_control.py  what an operator says to a RUNNING engine: sendevent, query, ui, serve,
                     engine stop
     cli_reload.py   redeploying a RUNNING engine: reread, update
 
-Imports run one way: this file imports the verb modules, the verb modules import `cli_common`,
-and no library module imports any of them.
+This file imports the verb modules, and the verb modules import `cli_common`.
+The DSL script entry point loads `cli_nav` lazily for navigation.
 
 Exit-code contract for catalog-consuming commands: 0 success (for lint: clean); 1 linter findings
 at or above the failing severity (errors, or warnings too with --strict); 2 the input never
@@ -32,7 +33,7 @@ from __future__ import annotations
 
 import typer
 
-from dsl41 import cli_compile, cli_control, cli_reload, cli_run
+from dsl41 import cli_compile, cli_control, cli_nav, cli_reload, cli_run
 from dsl41.cli_common import stops_on_statechart_error as stops
 
 app = typer.Typer(
@@ -63,6 +64,7 @@ app.command(rich_help_panel="Compile JIL")(cli_compile.viz)
 app.command(rich_help_panel="Compile JIL")(cli_compile.equiv)
 app.command(rich_help_panel="Compile JIL")(cli_compile.decompile)
 app.command(rich_help_panel="Compile JIL")(cli_compile.build)
+app.command(rich_help_panel="Compile JIL")(cli_nav.nav)
 app.command(rich_help_panel="Compile JIL")(cli_compile.folds)
 app.command(rich_help_panel="Compile JIL")(cli_compile.minify)
 app.command(rich_help_panel="Compile JIL")(cli_compile.resolve)
