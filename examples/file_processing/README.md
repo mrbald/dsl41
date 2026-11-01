@@ -1,14 +1,20 @@
 # Experimental file processing
 
-This is code as documentation for one host and a local POSIX filesystem.
-Slices 1 to 4 of [HANDOVER.md](HANDOVER.md) are built. The authoring API is
+For the job author adding archival and recoverable processing on one host
+with a local POSIX filesystem. Follow the [job author track](../../README.md#documents)
+and [authoring guide](../../docs/authoring.md). The named operator sections
+cover local inspection, storage repair and the runner exercise. Engine service
+installation is covered by [deploy](../../docs/deploy.md).
+The library contract is [CONTRACT.md](CONTRACT.md); [HANDOVER.md](HANDOVER.md)
+records the prototype scope. The authoring API is
 `add_file_processing_jobs` and the worker command
 `python -m dsl41.file_processing_worker`; the job author's guide shows both
 ([authoring §1.1](../../docs/authoring.md#11-add-file-processing-to-an-estate)).
 The [exercise](#exercise-run-the-estate-under-the-runner) runs the example estate
 under the real engine on one host (DL-417): repeated arrivals, a long handler,
-an engine stop and resume, a toxic delivery and an operator's ruling. It does not exercise what slice 5 also names: batch limits, resource
-waits and missed wakes. It adds no compiler or scheduler behavior.
+an engine stop and resume, a toxic delivery and an operator's ruling. It does not
+exercise batch limits, resource waits or missed wakes. It adds no compiler or
+scheduler behavior.
 The worker imports the existing statechart executor, but no scheduler.
 The Python estate uses ordinary `CatalogBuilder.job` calls.
 
@@ -34,6 +40,8 @@ root/
   process.lock          one processor; independent from archive.lock
 ```
 
+This layout shows the worker root; the engine has a separate run root.
+
 Each published directory stages inside itself, under the reserved name `.tmp`.
 Publication is a nonreplacing hard link from that staging directory into its
 parent, so it never crosses a filesystem. Only the archiver stages, under
@@ -51,7 +59,7 @@ with exit 65 before anything changes; it is never migrated.
 
 ## Filesystem requirements
 
-`CONTRACT.md` "Filesystem" governs. The inbox, objects, TODOs and the ledger
+[CONTRACT.md, Filesystem](CONTRACT.md#filesystem-owner-do-not-assume-one-filesystem) governs. The inbox, objects, TODOs and the ledger
 may be separate mounts.
 
 - `inbox/` must be readable, traversable and writable by the worker UID, so the
@@ -86,20 +94,10 @@ physical arrival or earliest arrival of that content.
 
 ## Declared state changes
 
-These equations name the events in `file_processing_charts.py`:
-
-```text
-FILE_ARCHIVED = FILE_RECEIVED + archive_committed // object and receipt/work committed; TODO follows
-RUNNING = READY + claim                       // commit before calling the handler
-DONE = RUNNING + completed                    // durable completion evidence; terminal
-READY = RUNNING + retry_safe                  // explicit proof that another attempt is safe
-UNKNOWN = RUNNING + uncertain                 // unexpected exception or interrupted claim
-DONE = UNKNOWN + completed                    // reconciliation verified the effect; terminal
-READY = UNKNOWN + retry_safe                  // reconciliation proved safe retry
-UNKNOWN = UNKNOWN + uncertain                 // insufficient evidence; no process call
-REJECTED = READY + rejected                   // operator only: no further attempt; terminal
-REJECTED = UNKNOWN + rejected                 // operator only; the uncertainty stays recorded
-```
+The [file-processing charts](../../src/dsl41/file_processing_charts.py) define
+`archive_committed`, `claim`, `completed`, `retry_safe`, `uncertain` and `rejected`.
+The [callback rules](#callbacks-recovery-and-selection) explain completion and
+uncertainty; the [operator CLI](#operator-cli) explains rulings.
 
 `RUNNING + rejected` is excluded: a stale claim is converted through `.04` first.
 Every SQL state write uses the executor's resulting leaf. The charts do not
@@ -225,8 +223,10 @@ Exits 75 and 65 print no summary and one line on stderr.
 
 ## Operator CLI
 
-The library's `list_work`, `show_work` and `rule_work` back a sample operator
-CLI with the worker's exit codes and JSON on stdout:
+For the operator inspecting work or ruling on an uncertain effect. The library's
+`list_work`, `show_work` and `rule_work` back a sample CLI with the worker's
+exit codes and JSON on stdout. Set `key` to the `work_key` printed by `list`.
+The ruling below applies only to an UNKNOWN row at attempt 2:
 
 ```sh
 .venv/bin/python -m examples.file_processing.operate --root "$root" list
@@ -265,11 +265,13 @@ stuck head blocks the queue until an operator rules it.
 
 ## Operator procedures
 
-Four archiver refusals are not work states, and no ruling repairs them. The
+For the operator repairing worker storage. Four archiver refusals are not work
+states, and no ruling repairs them. The
 procedures below are manual. A storage repair holds both `archive.lock` and
 `process.lock` for its whole duration, because either role can read what it
-changes. With util-linux `flock(1)`, which takes the same `flock(2)` locks as
-the workers:
+changes. Replace `the repair commands` in either lock template with the repair
+you selected below. With util-linux `flock(1)`, which takes the same `flock(2)`
+locks as the workers:
 
 ```sh
 flock --nonblock "$root/archive.lock" \
@@ -360,19 +362,38 @@ without bound. The counts in `rearm.json` also see no progress when two runs in 
 row stop mid-run and the second returns one claim and takes another; that work
 waits for the next delivery too. Nothing is lost.
 
-These cases leave the watch down until an operator sends
-`dsl41 sendevent STARTJOB -J INBOX_FW`:
-- an archiver that fails, so no processor runs;
-- a REARM that fails, for example because the engine was stopped while it ran and
-  its STARTJOB found no socket;
-- a REARM ended by an engine stop.
+An archiver or REARM that ends with an ordinary application failure leaves the
+watch down. Inspect the failure, repair its cause, then send
+`dsl41 sendevent STARTJOB -J INBOX_FW -S "$S"`, with `S` set to the engine's
+`control.sock`, as in the [exercise](#exercise-run-the-estate-under-the-runner).
 
-`--resume` starts nothing by itself. It re-arms only when the stopped processor's
-end, recorded at resume, completes REARM's condition, as in the exercise. Without
-`--rearm` the estate has three jobs and one cycle.
+A drain can refuse REARM's STARTJOB with `engine_draining`. If that answer, or a
+missing-socket error, makes REARM exit before its attempt takes a stop, the engine
+records its natural exit as FAILURE and schedules no replacement (DL-426). The
+watch stays down after restart until an operator sends
+`dsl41 sendevent STARTJOB -J INBOX_FW -S "$S"` (DL-417).
 
-The CLI catalog loader accepts JIL, so the module prints the estate as JIL;
-`dsl41 run` does not load a `.py` file. The process job names the sample handler
+An attempt that the drain actually stops follows the interruption rule. On
+restart, an unmarked PROCESSOR or REARM gets a replacement attempt of the same run
+and invocation (DL-424, DL-433). A processor completion can then satisfy REARM.
+An interrupted REARM repeats its signal checks and STARTJOB. If its first attempt
+stores the progress counts in `rearm.json` and stops before publishing the signal,
+the replacement can see no progress and arm the watch without a signal; READY
+work then waits for the next delivery or an operator's run. Nothing is lost
+(DL-417, DL-424).
+
+A marked job, a run at the five-attempt limit or an attempt with quarantined
+records requires operator recovery (DL-424, DL-426, DL-433). Follow the
+[interruption contract](../../docs/authoring.md#62-write-every-job-to-survive-interruption)
+and [engine recovery](../../docs/deploy.md#recover-after-the-engine-or-box-dies).
+
+A root containing `engine.db` resumes automatically. `--resume` is accepted and
+ignored; it does not select a recovery mode. Without `--rearm` the estate has
+three jobs and one cycle.
+
+The explicit-file CLI invocation in this exercise accepts JIL, so the module
+prints the estate as JIL. Main-config Python inputs use a zero-argument `estate()`
+function; this example needs the arguments supplied by its module CLI. The process job names the sample handler
 as `--handler examples.file_processing.worker:counts_handler`, so the repository
 root must be importable by that process. A real estate names its own installed
 handler module.
@@ -383,7 +404,9 @@ processor run can become stale before that processor ends. A one-item batch
 can leave backlog that only a later invocation drains. The oracle test
 demonstrates that overlap, then invokes the processor explicitly to drain the
 backlog. Closing this edge belongs to the activation the estate author chooses.
-This example claims neither automatic retry nor `n_retrys` behavior.
+The worker reconciles uncertain effects; it does not blindly retry them.
+The engine can replace interrupted command attempts, but does not retry ordinary
+application failures or implement `n_retrys`.
 
 Focused tests interrupt one archival with an abrupt subprocess exit after each
 durable boundary: object staged, object published, receipt and work committed,
@@ -531,7 +554,7 @@ rm "$root/hold"
 
 <!-- exercise: resume -->
 ```sh
-dsl41 run --resume "$work/estate.jil" --run-root "$RUN_ROOT" \
+dsl41 run "$work/estate.jil" --run-root "$RUN_ROOT" \
   --as-machine localhost >"$work/resume.log" 2>&1 &
 echo $! >"$work/engine.pid"
 ```
@@ -565,8 +588,12 @@ cat "$root/calls"
 # 0f4e46db9c5790070c51a1033536d8a01a2efe460cae74be8194256fb3176509
 ```
 
-If REARM had failed or been stopped, the watch would stay down: send
-`dsl41 sendevent STARTJOB -J INBOX_FW -S "$S"` yourself.
+If REARM ends with an ordinary application failure, including a STARTJOB refused
+with `engine_draining` or a missing-socket error before its attempt takes a stop,
+inspect and repair it. After restart, send
+`dsl41 sendevent STARTJOB -J INBOX_FW -S "$S"` yourself (DL-417, DL-426).
+An interrupted REARM follows the replacement-or-hold rule above, including the
+no-progress limit; do not start a competing cycle while its attempt is unsettled.
 
 ### 5. A toxic delivery
 
