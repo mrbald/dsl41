@@ -75,7 +75,6 @@ async def _resume(run_root: Path, text: str, *, settings: EngineSettings = GRACE
         clock=RealClock(),
         adapters={"CMD": LocalCommandAdapter(grace_seconds=settings.grace_term_s)},
         hold_open=True,
-        settle_seconds=0.2,
         settings=settings,
     )
 
@@ -707,7 +706,9 @@ def test_records_after_the_record_timeout_are_evidence_only(
     not reopen the attempt. The wrapper is frozen after it launched the command and before
     `spawn.json`; a KILLJOB stops the attempt, whose timeout ends it `unobservable` with plan
     `none`. Continued, the wrapper then writes `spawn.json` and its record (ENDED +
-    spawn_recorded, ENDED + exit_recorded); killed, it exits with neither (ENDED +
+    spawn_recorded, ENDED + exit_recorded): `parent lost`, or, where the cookie names the
+    command with no `spawn.json`, the signal the cleanup's ladder sent; killed, it exits with
+    neither (ENDED +
     wrapper_gone); killed once `spawn.json` names the live command, the tier's verdict is a
     stop with cause `wrapper_lost` (ENDED + stop). None of them reopens the attempt."""
     from dsl41.runner_wrapper import PAUSE_ENV
@@ -754,7 +755,14 @@ def test_records_after_the_record_timeout_are_evidence_only(
     assert [p["plan"] for p in _plans(run_root)] == ["none"]
     assert engine.oracle.store.job["j"].status == "TERMINATED"
     late = engine.attempts.late_records.get(run_id, [])
-    assert [r.cause for r in late] == (["parent lost"] if then == "continued" else [])
+    if then != "continued":
+        assert late == []
+    elif engine.stops.scan_available:
+        # the cookie names the command with no `spawn.json`: the cleanup's ladder ended it
+        # before the wrapper resumed, which records the signal (spec-restart §4)
+        assert [r.wrapper_outcome for r in late] == ["signaled"]
+    else:
+        assert [r.cause for r in late] == ["parent lost"]
 
 
 def test_an_empty_drain_answers_every_queued_request_before_it_stops(tmp_path: Path) -> None:
@@ -889,10 +897,10 @@ def test_a_command_that_outlived_its_wrapper_is_stopped_at_the_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Opus R2-3, the successor of the resume ladder's survivor case: the wrapper is killed and
-    the engine dies with it, while the command runs on. The restart finds `spawn.json`, no
-    record and a dead wrapper with a live command: `stop` with cause `wrapper_lost`, the
-    ladder ends the survivor, and with no record after the KILL the chart ends the attempt
-    `unobservable{wrapper_lost}` (attempt.07): an interruption, so the idempotent job reruns."""
+    the engine dies with it, while the command runs on. The restart finds `spawn.json` and no
+    record: the attempt ended with the engine, `unobservable{engine_death}` (attempt.16), and
+    the cleanup's ladder ends the survivor in the loop: an interruption, so the idempotent job
+    reruns once nothing of it is left (spec-restart §4)."""
     from dsl41.runner_stops import Observer
 
     run_root = tmp_path / "run"
@@ -939,7 +947,7 @@ def test_a_command_that_outlived_its_wrapper_is_stopped_at_the_restart(
         with contextlib.suppress(ProcessLookupError):
             os.kill(survivor, signal.SIGKILL)
     ended = _kinds(run_root, "outcome")[0]
-    assert (ended["outcome"], ended["cause"]) == ("unobservable", "wrapper_lost")
+    assert (ended["outcome"], ended["cause"]) == ("unobservable", "engine_death")
     assert _plans(run_root)[0]["plan"] == "rerun"
 
 
@@ -1198,6 +1206,10 @@ def test_a_crash_between_the_outcome_and_the_closing_kill_never_overlaps_a_rerun
         assert engine.journal is not None
         engine.journal.close()
 
+    def run_id_held(engine: Engine) -> bool:
+        view = engine.attempt_view("j")
+        return view is not None and view.get("note") == runner_stops.COMMAND_SURVIVED
+
     try:
         asyncio.run(crash())
         [outcome] = _kinds(run_root, "outcome")
@@ -1209,6 +1221,8 @@ def test_a_crash_between_the_outcome_and_the_closing_kill_never_overlaps_a_rerun
             engine = await _resume(run_root, text)
             loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
             await _until(engine.started.is_set)
+            # the cleanup's ladder ends and its survivor verdict holds the attempt
+            await _until(lambda: run_id_held(engine))
             await asyncio.sleep(1.0)  # two looks at the group
             os.kill(first_child, 0)  # nothing was sent to it
             assert [b["ordinal"] for b in _kinds(run_root, "dispatch")] == [1]

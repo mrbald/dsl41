@@ -60,7 +60,7 @@ flowchart TD
 ## Failure and recovery
 
 - The parent dies, engine or supervisor: the wrapper kills the group and records `terminated` with cause `parent lost` (§4 step 5). In tethered mode, engine death therefore ends and records every job ([runner-design §6a](../runner-design.md#6a-process-lifecycle-tiers-dl-41a)).
-- The wrapper alone, or the whole tree, is killed with -9, and no `status.json` lands. Resume's spool ladder kills a verified survivor and records TERMINATED, or else reports FAILURE `exit_status_unobservable` ([runner-design §7](../runner-design.md#7-journal-and-recovery-e1-prod-grade); §3, status.json; DL-41a item 6).
+- The wrapper alone, or the whole tree, is killed with -9, and no `status.json` lands. The restart ends the attempt `unobservable{engine_death}` and its cleanup stops what is left of the command; it never waits for a wrapper, and a record a live wrapper writes after the restart's reading is read by nobody ([runner-design §7](../runner-design.md#7-journal-and-recovery-e1-prod-grade); §3, status.json; DL-41a item 6, DL-433).
 - A reboot: a `boot_id` mismatch voids liveness checks and proves nothing survived (§3, spawn.json; DL-42 item 5).
 - A full disk: the record write fails and the wrapper exits 3. The missing record reads as E7 (§4 step 6).
 - An oracle kill in tethered mode: the engine sends TERM to the group, waits the grace, then sends KILL, and the wrapper records the death ([runner-design §6](../runner-design.md#6-adapters)).
@@ -77,7 +77,7 @@ flowchart TD
 - Boundary: `test_wrapper_imports_are_stdlib_only`, `test_wrapper_records_under_pythonsafepath`.
 - Recording: `test_wrapper_records_natural_exit_and_appends_stdout`, `test_wrapper_survives_external_group_kill_and_records_signal`, `test_wrapper_survives_sigusr1_and_sigusr2_and_still_records`, `test_wrapper_refuses_mistyped_spec_field_before_spawning`.
 - Parent loss: `test_wrapper_graceful_sigterm_reaches_command_on_parent_loss`, `test_lifeline_write_end_leaks_nowhere`, `test_sigkill_engine_midrun_then_resume`.
-- The restart's reading of the spool: `test_a_live_wrapper_gets_its_window_to_record`, `test_a_live_wrapper_that_never_records_gets_the_ladder`, `test_the_spool_record_names_how_the_attempt_ended`, `test_a_crash_while_draining_is_reported_at_the_restart`.
+- The restart's reading of the spool: `test_a_record_a_live_wrapper_writes_after_the_observation_is_read_by_nobody`, `test_a_live_wrapper_that_never_records_gets_the_ladder`, `test_the_spool_record_names_how_the_attempt_ended`, `test_a_crash_while_draining_is_reported_at_the_restart`.
 - Identity: `test_a_kill_refuses_a_spawn_record_naming_a_stranger`, `test_a_record_that_names_another_run_tuple_is_read_as_absent`, `test_a_group_recorded_under_another_boot_is_dead`.
 - Write failures: `test_rc3_a_spawn_that_cannot_be_recorded_kills_what_it_started`, `test_rc3_a_status_that_cannot_be_written_never_reports_an_outcome`, `test_rc3_a_full_disk_at_spawn_leaves_no_record_and_exits_three`.
 - Outcome mapping: `test_m3_malformed_status_records_map_truthfully`.

@@ -1,6 +1,7 @@
 """The branches of the stop wiring that the scenarios of `test_engine_stops.py` do not take: the
-adapter's observed launch, the stop ladder, the engine's side of the tiers, the restart's step 5
-and the reads that show an attempt (spec-wiring 2b, DL-426). Real processes where a branch
+adapter's observed launch, the stop ladder, the engine's side of the tiers, the restart's
+observations and cleanups, and the reads that show an attempt (spec-wiring 2b, DL-426,
+spec-restart). Real processes where a branch
 needs one; a stand-in where the branch is about a race or a failure the host cannot produce on
 demand."""
 
@@ -363,6 +364,18 @@ def _adopt(engine: Engine, job: str = "j", run: int = 1, attempt: str = RUN_ID) 
     return facts
 
 
+def _held_closing(engine: Engine, attempt: str, job: str, pgid: int) -> None:
+    """A restart's closing attempt whose command outlived its KILL: restored ENDED with its
+    plan done, and held as the live survivor verdict holds one (spec-restart §5)."""
+    from dsl41.engine_charts import AttemptOutcome
+    from dsl41.runner_stops import COMMAND_SURVIVED
+
+    facts = AttemptFacts(attempt, job, 1, 1, Path("/nonexistent"), exited=True, closing=True)
+    engine.adopt_attempt(facts, AttemptOutcome("stopped"), plan_done=True)
+    engine.stops.hold(attempt, COMMAND_SURVIVED)
+    engine.hold_group(attempt, pgid)
+
+
 def test_a_group_recorded_under_another_boot_is_dead(tmp_path: Path) -> None:
     async def scenario() -> None:
         engine = _engine(tmp_path)
@@ -395,7 +408,7 @@ def test_a_stop_that_cannot_be_carried_out_is_noted_and_shown(tmp_path: Path) ->
         engine.attempts.spawn_recorded(RUN_ID, spawn)
         engine.stops.ladder_failed(RUN_ID, OSError("EPERM"))
         assert engine.held_groups == {RUN_ID: 2**22 + 7} and engine.blocked("j") == RUN_ID
-        assert facts.note == "ladder failed: EPERM" and facts.settled.is_set()
+        assert facts.note == "ladder failed: EPERM"
         engine.stops.command_survived(RUN_ID)
         assert facts.note == COMMAND_SURVIVED
         engine.stops.kill_wrapper(RUN_ID)  # a restart's attempt has no wrapper of ours
@@ -558,7 +571,7 @@ def test_a_start_decided_while_draining_is_owed_to_the_restart(tmp_path: Path) -
     assert [b["job"] for _, k, b in rows(tmp_path / "run") if k == "dispatch"] == ["j"]
 
 
-# ------------------------------------------------------------------- the restart's step 5
+# ------------------------------------------------------------------- the restart's catch-up
 
 
 def _open(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
@@ -585,8 +598,6 @@ def _resume(run_root: Path) -> Engine:
             run_root,
             clock=VirtualClock(start=T0 + timedelta(minutes=1)),
             adapters={"CMD": FakeAdapter(default=None)},
-            settle_seconds=0.3,
-            grace_seconds=0.0,
             settings=EngineSettings(grace_term_s=0.2, grace_kill_s=0.3),
         )
         await engine.run_until_quiescent(engine.clock.now())
@@ -603,9 +614,15 @@ def _write(spool: Path, name: str, dispatch: dict[str, Any], **fields: Any) -> N
     (spool / name).write_text(json.dumps({**identity, **fields}))
 
 
-def test_a_live_wrapper_gets_its_window_to_record(tmp_path: Path) -> None:
-    """Step 5: a wrapper still alive in this boot is given the settle window; the record it
-    writes in that window is the attempt's."""
+def test_a_record_a_live_wrapper_writes_after_the_observation_is_read_by_nobody(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ruling R3 (spec-restart §4): a wrapper still alive in this boot is not awaited. The
+    attempt ends `engine_death` at its observation and its command gets the ladder; the
+    record the wrapper writes right after the observation is read by nobody (Astra round 1,
+    N2: the test orders the record after the observation itself, no wall timer)."""
+    from dsl41 import runner_startup
+
     run_root, dispatch = _open(tmp_path)
     spool = Path(dispatch["spool"])
     me = os.getpid()
@@ -623,23 +640,78 @@ def test_a_live_wrapper_gets_its_window_to_record(tmp_path: Path) -> None:
             command_start_time=child_token,
             boot_id=runner_procid.current_boot_id(),
         )
-        timer = __import__("threading").Timer(
-            0.1, _write, (spool, "status.json", dispatch), {"outcome": "exited", "exit_code": 0}
-        )
-        timer.start()
+        real = runner_startup._observe
+
+        def observe_then_record(*args: Any) -> None:
+            real(*args)
+            _write(spool, "status.json", dispatch, outcome="exited", exit_code=0)
+
+        monkeypatch.setattr(runner_startup, "_observe", observe_then_record)
         _resume(run_root)
-        timer.join()
+        assert child.wait(5) == -signal.SIGTERM
     finally:
-        child.kill()
-        child.wait()
+        if child.poll() is None:
+            child.kill()
+            child.wait()
     [ended] = [b for _, k, b in rows(run_root) if k == "outcome"]
-    assert ended["outcome"] == "natural"
+    assert (ended["outcome"], ended["cause"]) == ("unobservable", "engine_death")
+
+
+def test_a_closing_attempt_s_cleanup_reads_its_spawn_record_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Astra round 1 M4 (spec-restart §5): a closing attempt's cleanup reads `spawn.json`, its
+    identity, and never `status.json` again. With a foreign `status.json`, a valid spawn record
+    and a live leader that ignores TERM, on the path without the cookie, the group is not
+    released: the ladder TERMs and KILLs it, and the rerun waits for `ladder_done`."""
+    from store_surgery import append
+
+    run_root, dispatch = _open(tmp_path)
+    run_id, spool = dispatch["attempt"], Path(dispatch["spool"])
+    sent: list[tuple[int, int]] = []
+    real_killpg = runner_procid.killpg_quiet
+
+    def recorded(pgid: int, sig: int) -> None:
+        sent.append((pgid, sig))
+        real_killpg(pgid, sig)
+
+    monkeypatch.setattr(runner_procid, "killpg_quiet", recorded)
+    monkeypatch.setattr(runner_procid, "pidfd_supported", lambda: False)
+    child, token = _group(["/bin/sh", "-c", "trap '' TERM; exec sleep 30"])
+    try:
+        _write(
+            spool,
+            "spawn.json",
+            dispatch,
+            command_pid=child.pid,
+            command_pgid=child.pid,
+            command_start_time=token,
+            boot_id=runner_procid.current_boot_id(),
+        )
+        foreign = {**dispatch, "attempt": "00000000-0000-4000-8000-00000000beef"}
+        _write(spool, "status.json", foreign, outcome="exited", exit_code=0)
+        body = {"attempt": run_id, "job": "j", "run_number": 1, "status": {}}
+        body |= {"at": T0.isoformat(), "outcome": "stopped", "cause": "engine_stop"}
+        append(run_root, "outcome", {**body, "ladder": "running"}, at=T0)
+        step = {"step": "dispatch", "attempt": OTHER_ID, "ordinal": 2, "env": {}, "after": "x"}
+        plan = {"event": "plan", "attempt": run_id, "job": "j", "run_number": 1, "plan": "rerun"}
+        append(run_root, "follow_up", {**plan, "steps": [step]}, at=T0)
+        _resume(run_root)
+        assert child.wait(5) == -signal.SIGKILL
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+    assert sent == [(child.pid, signal.SIGTERM), (child.pid, signal.SIGKILL)]
+    order = rows(run_root)
+    [done] = [s for s, k, b in order if k == "follow_up" and b.get("event") == "ladder_done"]
+    [rerun] = [s for s, k, b in order if k == "dispatch" and b["ordinal"] == 2]
+    assert done < rerun
 
 
 def test_a_live_wrapper_that_never_records_gets_the_ladder(tmp_path: Path) -> None:
-    """Step 5: a wrapper alive past its window with no record is lost; its command gets the
-    ladder (`stop` with cause `wrapper_lost`), and with no record after the KILL the attempt
-    is unobservable."""
+    """spec-restart §4: an attempt whose wrapper lives and left no record ended with the
+    engine; its command gets the cleanup's ladder at once, with no window."""
     run_root, dispatch = _open(tmp_path)
     spool = Path(dispatch["spool"])
     me = os.getpid()
@@ -663,7 +735,7 @@ def test_a_live_wrapper_that_never_records_gets_the_ladder(tmp_path: Path) -> No
             child.kill()
             child.wait()
     [ended] = [b for _, k, b in rows(run_root) if k == "outcome"]
-    assert (ended["outcome"], ended["cause"]) == ("unobservable", "wrapper_lost")
+    assert (ended["outcome"], ended["cause"]) == ("unobservable", "engine_death")
 
 
 def test_a_record_that_names_another_run_tuple_is_read_as_absent(tmp_path: Path) -> None:
@@ -924,11 +996,10 @@ def test_a_stop_still_queued_at_teardown_is_answered() -> None:
     assert asyncio.run(scenario()) == "STARTING"
 
 
-def test_a_timer_fault_during_startup_fails_the_restart(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Astra M3: a fault a tier's timer raises while step 5 waits ends the wait; the restart
-    fails, shuts down and releases the lock."""
+def test_a_restart_arms_no_record_timer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Astra M3's window is gone (spec-restart §4): no step of the restart waits on a timer.
+    A record timeout that would raise never fires: the attempt ends `engine_death`, its
+    command gets the cleanup's ladder, and the lock is released at the close."""
     from dsl41.runner_attempts import AttemptTier
     from dsl41.runner_ledger import acquire_run_root
 
@@ -953,12 +1024,15 @@ def test_a_timer_fault_during_startup_fails_the_restart(
             command_start_time=child_token,
             boot_id=runner_procid.current_boot_id(),
         )
-        with pytest.raises(EngineError, match="a stranger's record at the timeout"):
-            _resume(run_root)
+        _resume(run_root)
+        assert child.wait(5) == -signal.SIGTERM
     finally:
-        child.kill()
-        child.wait()
-    acquire_run_root(run_root).release()  # the refused restart let the lock go
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+    [ended] = [b for _, k, b in rows(run_root) if k == "outcome"]
+    assert ended["cause"] == "engine_death"
+    acquire_run_root(run_root).release()  # the closed engine let the lock go
 
 
 def test_a_starting_engine_waits_out_a_probe_and_refuses_a_holder(tmp_path: Path) -> None:
@@ -1022,8 +1096,6 @@ def test_a_restart_keeps_each_plan_step_s_time_monotone(tmp_path: Path) -> None:
             run_root,
             clock=VirtualClock(start=T0 + timedelta(minutes=1)),
             adapters={"CMD": FakeAdapter(default=None)},
-            settle_seconds=0.0,
-            grace_seconds=0.0,
         )
         await engine.run_until_quiescent(engine.clock.now())
         await engine.shutdown()
@@ -1103,8 +1175,6 @@ def test_a_success_recorded_before_an_outage_deadline_stands(tmp_path: Path) -> 
             run_root,
             clock=VirtualClock(start=T0 + timedelta(minutes=30)),
             adapters={"CMD": FakeAdapter(default=None)},
-            settle_seconds=0.0,
-            grace_seconds=0.0,
         )
         await engine.run_until_quiescent(T0 + timedelta(minutes=31))
         await engine.shutdown()
@@ -1129,8 +1199,8 @@ def test_a_store_of_another_state_version_refuses_by_name(tmp_path: Path) -> Non
     run_root, _dispatch = _open(tmp_path)
     with closing(sqlite3.connect(run_root / "engine.db", isolation_level=None)) as db:
         db.execute("UPDATE meta SET value = '24' WHERE key = 'state_version'")
-    assert STATE_MACHINE_VERSION == 26
-    with pytest.raises(EngineError, match="state version 24, this binary runs 26"):
+    assert STATE_MACHINE_VERSION == 27
+    with pytest.raises(EngineError, match="state version 24, this binary runs 27"):
         _resume(run_root)
 
 
@@ -1181,8 +1251,6 @@ def test_a_live_plan_cut_before_its_feed_is_stamped_at_the_recorded_end(
             run_root,
             clock=VirtualClock(start=T0 + timedelta(minutes=5)),
             adapters={"CMD": FakeAdapter(default=None)},
-            settle_seconds=0.0,
-            grace_seconds=0.0,
         )
         await engine.run_until_quiescent(T0 + timedelta(minutes=6))
         await engine.shutdown()
@@ -1199,24 +1267,25 @@ def test_a_live_plan_cut_before_its_feed_is_stamped_at_the_recorded_end(
     assert feed["at"] == (T0 + timedelta(minutes=2)).isoformat()
 
 
-def test_a_record_written_as_the_wrapper_died_is_read_before_the_dead_verdict(
+def test_a_record_written_before_the_observation_ends_the_attempt_natural(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Astra R2-M1, the successor of the resume ladder's record-before-the-first-check case:
-    step 5 reads no status, then the wrapper writes exit 0 and dies before the liveness check.
-    The dead verdict re-reads the spool first, so the attempt ends `natural` and completes;
-    nothing is rerun."""
+    """Astra R2-M1's case without the window: the wrapper wrote exit 0 as the engine died. The
+    restart reads the spool once, at the attempt's observation in the loop, after the fold,
+    so the record written meanwhile ends the attempt `natural` and it completes; nothing is
+    rerun (spec-restart §4)."""
     from dsl41 import runner_startup
 
     run_root, dispatch = _open(tmp_path)
     spool = Path(dispatch["spool"])
     _write(spool, "spawn.json", dispatch, wrapper_pid=1, wrapper_start_time="t", boot_id="b")
+    real = runner_startup._first_reading
 
-    def dies_after_recording(_engine: Any, _spawn: Any) -> bool:
+    def records_after_the_fold(engine: Any, tail: Any, stopping: Any) -> Any:
         _write(spool, "status.json", dispatch, outcome="exited", exit_code=0)
-        return False
+        return real(engine, tail, stopping)
 
-    monkeypatch.setattr(runner_startup, "_wrapper_alive", dies_after_recording)
+    monkeypatch.setattr(runner_startup, "_first_reading", records_after_the_fold)
     _resume(run_root)
     [ended] = [b for _, k, b in rows(run_root) if k == "outcome"]
     assert ended["outcome"] == "natural"
@@ -1313,7 +1382,6 @@ def test_a_held_group_keeps_its_job_s_starts_back_until_it_is_gone(
     process listing that fails proves nothing gone."""
     from dsl41.engine_charts import DrainRequest
     from dsl41.runner import Deferred, _Plan
-    from dsl41.runner_journal import OpenAttempt
     from dsl41.runner_stops import GROUP_POLL_S
 
     spawn = {"command_pgid": 2**22 + 7, "command_pid": 2**22 + 7, "command_start_time": "t"}
@@ -1329,8 +1397,7 @@ def test_a_held_group_keeps_its_job_s_starts_back_until_it_is_gone(
         await asyncio.sleep(0.05)
         engine.stops.command_survived(RUN_ID)
         # a second held attempt of the job, one a restart found (any unsettled one would do)
-        other = OpenAttempt(OTHER_ID, "j", 1, 1, str(tmp_path / "other"), 0, T0.isoformat())
-        engine.held_at_restart(other, 2**22 + 7)
+        _held_closing(engine, OTHER_ID, "j", 2**22 + 7)
         assert engine.blocked("j") in (RUN_ID, OTHER_ID)
         owed = Deferred("j", 1)
         engine._discharge(owed)
@@ -1358,9 +1425,7 @@ def test_a_held_group_keeps_its_job_s_starts_back_until_it_is_gone(
         assert engine._held_starts == [owed]  # the restart launches it
         engine.hold_group(third, 2**22 + 7)
         fourth = "1e2d3c4b-5a69-4788-9a0b-c1d2e3f4a5b6"
-        open_attempt = OpenAttempt(fourth, "k", 1, 1, str(tmp_path / "spool"), 0, T0.isoformat())
-        engine.held_at_restart(open_attempt, 2**22 + 7)
-        engine._facts[fourth].finished = True  # a hold plan done while the group lives
+        _held_closing(engine, fourth, "k", 2**22 + 7)  # its hold plan done while the group lives
         engine._forget_if_over(fourth)
         assert engine.blocked("k") == fourth  # kept: its group is still held
 

@@ -540,9 +540,9 @@ Resume's side effects are bounded to this list:
   this way is then a pending SPAWN like any other;
 - a kill the engine decided and recorded, then died before delivering, is
   re-driven (DL-96);
-- the ladder below kills a verified command group that outlived its
-  wrapper's record: the wrapper dead, or alive and silent past the settle
-  window plus the grace (DL-226);
+- the live cleanup kills what is left of a command whose attempt ended
+  with the engine, as at a live record; nothing waits for a wrapper
+  (DL-226, DL-433);
 - a pending SPAWN is re-driven (DL-102), and a supervised SPAWN that was
   applied (or is indeterminate), with a bound `run_id` and no spool, is
   replayed (DL-129, DL-315);
@@ -710,39 +710,35 @@ refusals.
    current boot means that the machine rebooted. Then nothing survived:
    skip all liveness checks and resolve each run from status.json or E7
    directly. Otherwise, per incomplete run, in order:
-   - Wrapper alive per the (pid, start-time) check → the wrapper is
-     mid-grace. Allow a short settle window for its `status.json` to
-     land. A wrapper found dead, a zombie included, gets one more read of
-     `status.json`, since it may have written it just before it died.
-   - `status.json` present → inject the real completion (raw exit_code
-     through SEM-09 as usual, recorded signal/parent-lost → TERMINATED).
-     Inject it at `max(ended_at, last journal at)`, with the true
-     `ended_at` carried in the payload (feed times are non-decreasing).
-   - Command group alive after the settle window — its wrapper dead, or
-     alive and silent past the settle window plus the grace → verify the
-     group leader's (pid, start-time), SIGTERM the pgid, then SIGKILL the
-     pgid once the leader has died or the grace has passed (DL-226; the
-     vendor's default cancel signals the process group too). Inject
-     `STATUS TERMINATED` cause `wrapper lost; killed at resume` (a kill
-     that actually happened; TERMINATED is truthful). A group whose leader
-     is already dead is not signalled, and its run takes the E7 bullet
-     below: `FAILURE`, never TERMINATED. A zombie leader (exited, not yet
-     reaped) is dead, so a member still running in its group is not
-     signalled either (DL-322).
+   - The engine waits for no wrapper (DL-433): each open attempt's spool is
+     read once, as a step of the engine's loop, and an attempt with no
+     record ended with the engine, `unobservable{engine_death}`. A record
+     its wrapper writes later is read by nobody.
+   - `status.json` present → the attempt chart reads it: a natural end
+     feeds the real completion (raw exit_code through SEM-09 as usual) at
+     `max(ended_at, last journal at)`, with the true `ended_at` carried in
+     the payload (feed times are non-decreasing); `parent lost` or a
+     recorded stop is `stopped`, and the interruption rule plans it.
+   - No record → the attempt ended with the engine,
+     `unobservable{engine_death}` (or the cause of the stop it took
+     first), and the interruption rule plans it: rerun the same run as
+     the next attempt, hold a job named in `non-idempotent.toml`, or
+     nothing where the oracle ended the run (DL-424).
+   - Something of the command left → the live cleanup: the ladder TERMs,
+     waits the grace and KILLs what a reading finds left, each process by
+     itself where the cookie decides, else the group while its leader is
+     still the recorded process (DL-226, DL-431); a survivor or a failed
+     reading holds the attempt, and its job starts nothing meanwhile.
    - A SUPERVISED run whose durable effect bound a `run_id` and whose spool
      holds neither `spawn.json` nor `status.json` → the SPAWN is
      **replayed** (DL-129): period-model §11a makes it idempotent, so the
      supervisor's directory answers first-application, duplicate,
      in-progress, or indeterminate/collision, and the run happens once,
      resumes, or fails naming the supervisor's own reason (PR-36a).
-   - Nothing alive, no `status.json`, and nothing to replay → the status is
-     unobservable: inject `STATUS FAILURE` cause `exit_status_unobservable`
-     (PENDING: E7). Not TERMINATED: that status is reserved for kills that
-     the engine or the oracle actually performed or observed. Also never a
-     status that can satisfy a success-dependent downstream. FAILURE routes
-     the estate's common f()-recovery paths. Either way, the runner reports
-     loudly. This verdict is the tethered path's and the identity-less
-     chain's, where nothing can be replayed safely.
+   - A command attempt with no record is never `exit_status_unobservable`
+     (PENDING: E7, which DL-424 narrows): the interruption rule above plans
+     it. Not TERMINATED either: that status is reserved for kills that the
+     engine or the oracle actually performed or observed.
    All reconciliation injections journal with source=reconcile. When the
    supervisor (§6a Tier 1) exists, jobs survive engine restarts by
    *reattachment*: their parent never died. Then this step reduces to the
@@ -750,8 +746,8 @@ refusals.
 
 **How the restart knows a process is ours.** On Linux, where a pidfd can
 signal it, every process of a command attempt carries the process cookie,
-`DSL41_COOKIE=<engine instance>.<run_id>` ([wrapper protocol](wrapper-protocol.md),
-DL-431).
+`DSL41_COOKIE=<root_id>.<run_id>` ([wrapper protocol](wrapper-protocol.md),
+DL-431, DL-433); `root_id` names the run root.
 The engine sets it for the wrapper and the command, and the command's
 children inherit it. The `dispatch` record holds it, so the restart knows
 each open attempt's cookie. What is left of an attempt is its recorded

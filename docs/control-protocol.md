@@ -572,6 +572,16 @@ with the applied plan's bytes, so it keeps its meaning: the running
 catalog differs from disk. Adopting the files on disk while the engine
 runs is `dsl41 reread` and `dsl41 update`.
 
+An addition to this section (the restart, DL-433): the `status` answer
+carries `engine`, the engine lifecycle's state: `STARTING` while a
+restart catches up, then `RUNNING`, `DRAINING`. The control socket is
+bound before the catch-up, so every verb is served from the restart's
+first loop step, and `query` and `status` show the folded state as it
+is, attempts still open included. An `interrupted` block carries
+`note` when the restart quarantined the attempt: the reason its records
+could not be trusted and the pids the restart's first reading found. The other keys and their types are
+unchanged.
+
 ### `catalog`
 
 An addition to this section (`update`, spec-reload, DL-427), the read
@@ -728,6 +738,22 @@ does not read them keeps working (§2):
 - `dispatch` carries `after` on a replacement attempt: the cause of the
   stop the attempt it replaces took (`engine_stop`, `lifeline`,
   `unobservable`, …). A run's first attempt has none.
+- An addition (the restart, DL-433): an `unobservable` outcome carries
+  cause `engine_death` when the engine that ran the attempt died and no
+  record came, and the attempt took no stop first; a replacement of it
+  carries `"after": "engine_death"`. It carries cause `quarantined`, with
+  the reason and the pids found in its record's `note`, when a restart
+  could not trust the attempt's records: a spool record naming another
+  run id, or a spool or record that cannot be read. Its plan is the
+  interruption rule's with `hold` forced wherever the rule would rerun or
+  hold, whatever the job's marking; where the oracle already ended the run
+  or the job left the catalog, the plan is `none` and the evidence stays
+  in the outcome record. The outcome closes the attempt as any outcome
+  does. A failed reading of what is left is never a quarantine: the
+  record decides the outcome, and what is left is held as live. A restart
+  neither awaits nor
+  watches a previous engine's wrapper: a record that lands after the
+  attempt's observation is read by nobody.
 - An engine-made `input` that holds an interrupted attempt is a `STATUS`
   whose payload is `{"job", "run_number", "status": "FAILURE", "cause":
   "interrupted", "hold": true}`: one oracle transition sets the job's

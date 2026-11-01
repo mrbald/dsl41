@@ -533,9 +533,12 @@ async def stop_ladder(
     start_token: str,
     grace_term_s: float,
     members: Callable[[], Mapping[int, str]] | None = None,
+    *,
+    term: bool = True,
 ) -> None:
     """The stop ladder on a command (spec-drain): TERM, wait up to `grace_term_s`, then KILL.
-    The ladder ends at its KILL.
+    The ladder ends at its KILL. `term` False starts the cookie's ladder at the wait: a
+    restart's first reading, which reads the cookie, sent the TERM already (spec-restart §3).
 
     `members`, where the process cookie can be read, is one reading of everything left of the
     attempt, by pid with each one's start token (`runner_stops.EngineStops.left`). Each step
@@ -552,7 +555,7 @@ async def stop_ladder(
     the window is the ladder's stated hazard."""
     if members is not None:
         termed = dict(members())
-        for pid, start in termed.items():
+        for pid, start in termed.items() if term else ():
             _procid.signal_ours(pid, start, signal.SIGTERM)
         deadline = time.monotonic() + grace_term_s
         while time.monotonic() < deadline and any(

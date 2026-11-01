@@ -5,7 +5,7 @@ docs/supervisor-protocol.md (the frozen spool format). DL-42 item 8 pins
 the phase-boundary kill matrix exercised here via the wrapper's
 DSL41_WRAPPER_TEST_PAUSE scaffolding: the wrapper SIGSTOPs itself at a
 named boundary, the test SIGKILLs (or SIGCONTs) it there, and the
-restart's step 5 (the attempt chart, `runner_startup._settle_attempt`)
+restart's observation (the attempt chart, `runner_startup._observe`)
 must report what actually happened -- truthfully, never guessed. The
 "post-fork pre-exec" boundary from DL-42 is covered by post_spawn_pre_record: from the recorder's point
 of view both mean "command pid exists, spawn.json does not" (wrapper
@@ -643,7 +643,6 @@ def test_sigkill_engine_midrun_then_resume(tmp_path: Path) -> None:
             run_root,
             clock=RealClock(),
             adapters={"CMD": LocalCommandAdapter(grace_seconds=2.0)},
-            settle_seconds=1.0,
             grace_seconds=2.0,
         )
         loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
@@ -1178,7 +1177,6 @@ def test_enospc_on_the_runs_dir_fails_loudly_and_resolves_at_resume(
             run_root,
             clock=RealClock(),
             adapters={"CMD": LocalCommandAdapter(grace_seconds=2.0)},
-            settle_seconds=0.2,
             grace_seconds=2.0,
         )
         await engine.run_until_quiescent(datetime.max)

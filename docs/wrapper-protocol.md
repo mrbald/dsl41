@@ -192,11 +192,13 @@ empirically).
 
 This section is an addition to the frozen contract (DL-431). The spec keys, the
 spool files and the wrapper's behaviour are unchanged.
-The engine puts `DSL41_COOKIE=<engine instance>.<run_id>` in the spec's
+The engine puts `DSL41_COOKIE=<root_id>.<run_id>` in the spec's
 `env` for every command attempt, and in the wrapper's own environment.
-The instance is a token minted at each engine start and recorded in the
-`engine started` record; `run_id` is the attempt's. The command gets the
-variable through `env`, and its children inherit it.
+`root_id` names the run root: a uuid written to the store's `meta` at
+genesis and read at every restart (state version 27, DL-433), so one
+prefix covers every attempt of the root, whichever engine start launched
+it. `run_id` is the attempt's. The command gets the variable through
+`env`, and its children inherit it.
 On Linux, where a pidfd can signal it, the engine reads
 `/proc/<pid>/environ` of the processes its uid may read. A process that
 carries an attempt's cookie belongs to that attempt, whatever its

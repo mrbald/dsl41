@@ -24,6 +24,7 @@ from dsl41.engine_charts import (
     ATTEMPT,
     CANCEL_RECORD_TIMEOUT,
     CANCEL_WATCHERS,
+    ENGINE_DIED,
     ENGINE_KEY,
     ENGINE_LIFECYCLE,
     ENGINE_STOP,
@@ -91,7 +92,15 @@ def test_the_states_and_events_are_the_designs_and_an_update_has_no_engine_event
         [REPLAY_DONE, STOP_REQUESTED, ALL_ATTEMPTS_SETTLED, ABORT_DEADLINE]
     )
     assert alphabet(ATTEMPT) == sorted(
-        [SPAWN_RECORDED, SPAWN_FAILED, STOP, EXIT_RECORDED, WRAPPER_GONE, RECORD_TIMEOUT]
+        [
+            SPAWN_RECORDED,
+            SPAWN_FAILED,
+            STOP,
+            EXIT_RECORDED,
+            WRAPPER_GONE,
+            RECORD_TIMEOUT,
+            ENGINE_DIED,
+        ]
     )
     assert not any("update" in event for event in alphabet(ENGINE_LIFECYCLE))
     assert ENGINE_LIFECYCLE.guards == {} and ATTEMPT.guards == {}
@@ -246,11 +255,13 @@ ATTEMPT_DESIGN: Design = {
         STOP: ("attempt.03", "STOPPING", "stop"),
         EXIT_RECORDED: ("attempt.11", "ENDED", "end_from_record"),
         WRAPPER_GONE: ("attempt.12", "ENDED", "end_unobservable"),
+        ENGINE_DIED: ("attempt.15", "ENDED", "end_engine_died"),
     },
     "RUNNING": {
         STOP: ("attempt.04", "STOPPING", "stop"),
         EXIT_RECORDED: ("attempt.05", "ENDED", "end_from_record"),
         WRAPPER_GONE: ("attempt.13", "ENDED", "end_unobservable"),
+        ENGINE_DIED: ("attempt.16", "ENDED", "end_engine_died"),
     },
     "STOPPING": {
         STOP: ("ignored attempt.08", "", ""),
@@ -259,6 +270,7 @@ ATTEMPT_DESIGN: Design = {
         SPAWN_RECORDED: ("attempt.09", "", "stop_attempt"),
         SPAWN_FAILED: ("attempt.10", "ENDED", "end_spawn_failed"),
         WRAPPER_GONE: ("attempt.14", "ENDED", "end_unobservable"),
+        ENGINE_DIED: ("attempt.17", "ENDED", "end_engine_died"),
     },
     "ENDED": {event: ("ignored in ENDED", "", "") for event in alphabet(ATTEMPT)},
 }

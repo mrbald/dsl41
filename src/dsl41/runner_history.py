@@ -832,7 +832,7 @@ def read_spool(
 ) -> SpoolRead | None:
     """One run's spool, validated against (job, run_number) (supervisor-protocol ss3's frozen
     spawn.json/status.json shapes). None when spawn.json is missing, unparseable, or names a
-    different run (the rule the restart's step 5 applies, `runner_startup._settle_attempt`).
+    different run (the rule the restart's observation applies, `runner_startup._records`).
 
     `bound_run_id` is the identity the run's durable SPAWN minted (DL-118): a spool record
     naming a different `run_id` is a stranger's and reads as absent, not refused, so one corrupt

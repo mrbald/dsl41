@@ -134,6 +134,11 @@ def test_an_engine_that_never_reaches_running_records_shutdown_during_startup(
     with monkeypatch.context() as patched:
         patched.setattr(ControlServer, "start", bind_fails)
         assert asyncio.run(_serve_run(catalog, run_root, False, [], profile=RuntimeProfile())) == 2
+
+    async def bound(self: ControlServer) -> None:
+        return None  # the socket is not under test here
+
+    monkeypatch.setattr(ControlServer, "start", bound)
     monkeypatch.setattr(cli_run, "_await_started", stopped_while_recovering)
     assert asyncio.run(_serve_run(catalog, run_root, False, [], profile=RuntimeProfile())) == 0
     # the restart never recorded `engine started`: the stop came before its recovery ended
@@ -147,12 +152,13 @@ def test_an_engine_that_never_reaches_running_records_shutdown_during_startup(
     assert (run_root / "engine.toml").exists()  # the refusals had passed
 
 
-def test_the_socket_is_bound_only_after_the_restart_records_engine_started(
+def test_the_socket_is_bound_before_the_restart_s_catch_up(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """spec-wiring 1b step 8: `engine started` is recorded once steps 6 and 7 took effect, and
-    the control socket is bound after it. A bind that fails leaves an engine that never
-    reached RUNNING: `shutdown_during_startup`, no snapshot."""
+    """spec-restart §8, ruling R2: genesis binds after its `engine started`; a restart binds
+    before its loop takes the first catch-up step, so before `engine started`. A bind that
+    fails leaves an engine that never reached RUNNING: `shutdown_during_startup`, no
+    snapshot."""
     from dsl41.runner_control import ControlServer
 
     seen: list[list[str]] = []
@@ -166,22 +172,25 @@ def test_the_socket_is_bound_only_after_the_restart_records_engine_started(
     monkeypatch.setattr(ControlServer, "start", start)
     assert asyncio.run(_serve_run(catalog, run_root, False, [], profile=RuntimeProfile())) == 2
     assert asyncio.run(_serve_run(catalog, run_root, False, [], profile=RuntimeProfile())) == 2
-    # genesis and the restart each bound only once `engine started` was durable
-    assert seen == [["started"], ["started", "shutdown_during_startup", "started"]]
+    # genesis bound once `engine started` was durable; the restart before its own
+    assert seen == [["started"], ["started", "shutdown_during_startup"]]
     assert _engine_records(run_root)[-1] == "shutdown_during_startup", _engine_records(run_root)
 
 
 def _stop_once_serving(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Bind the control socket as `run` does, then stop the engine as SIGTERM does."""
-    from dsl41.runner_control import ControlServer
+    """Stop the engine as SIGTERM does once `run` has seen it started: after a restart's
+    catch-up, with the control socket bound."""
+    from dsl41 import cli_run
 
-    real = ControlServer.start
+    real = cli_run._await_started
 
-    async def start(self: ControlServer) -> None:
-        await real(self)
-        asyncio.get_running_loop().call_soon(self.engine.request_stop)
+    async def await_started(engine: Any, loop_task: Any) -> bool:
+        started = await real(engine, loop_task)
+        if started:
+            asyncio.get_running_loop().call_soon(engine.request_stop)
+        return started
 
-    monkeypatch.setattr(ControlServer, "start", start)
+    monkeypatch.setattr(cli_run, "_await_started", await_started)
 
 
 def test_a_crash_while_draining_leaves_the_drain_for_the_restart(
@@ -241,7 +250,7 @@ def test_a_stop_while_the_engine_is_built_reaches_the_lifecycle(
     short_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Astra M2: every SIGTERM is `stop_requested`. One that lands while a restart is built
-    (the replay, step 5) is kept and handed to the engine once it exists: STARTING +
+    (the fold) is kept and handed to the engine once it exists: STARTING +
     stop_requested records `shutdown_during_startup` and exits 0."""
     import signal
 

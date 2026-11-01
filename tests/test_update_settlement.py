@@ -368,11 +368,11 @@ def test_runs_reads_each_run_under_the_configuration_it_ran_under(tmp_path: Path
 def _park_ladders(
     monkeypatch: pytest.MonkeyPatch, survivor: bool = False
 ) -> tuple[asyncio.Event, asyncio.Event]:
-    """Every stop ladder (and a restart's finish of a cut-short one) waits for `release`;
-    `entered` is set once one waits. The test releases it after it has looked. With
-    `survivor`, the finish then finds a process left, which the held poll later finds gone."""
+    """Every stop ladder waits for `release`; `entered` is set once one waits. The test releases
+    it after it has looked. `j`'s command (group `PGID`) reads alive until the release, so a
+    restart's reading finds it and its cleanup runs the ladder (spec-restart §4, §5). With
+    `survivor`, something of it outlives the KILL, which the held poll later finds gone."""
     from dsl41 import runner_stops
-    from dsl41.runner_stops import NOTHING_LEFT, Left
 
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -380,13 +380,15 @@ def _park_ladders(
         entered.set()
         await release.wait()
 
-    async def finish(_self: Any, _attempt: str, _pgid: int, _token: str) -> Any:
-        entered.set()
-        await release.wait()
-        return Left("ours", {42: "ticks:42"}) if survivor else NOTHING_LEFT
+    async def outlives(_self: Any, _pgid: int, _token: str, _grace: float) -> bool:
+        return survivor
+
+    def alive(_self: Any, pgid: int, _token: str) -> bool:
+        return pgid == PGID and not release.is_set()
 
     monkeypatch.setattr(runner_stops.EngineStops, "ladder", ladder)
-    monkeypatch.setattr(runner_stops.EngineStops, "finish", finish)
+    monkeypatch.setattr(runner_stops.EngineStops, "outlives", outlives)
+    monkeypatch.setattr(runner_stops.EngineStops, "command_alive", alive)
     return entered, release
 
 
@@ -422,12 +424,14 @@ def test_an_attempt_ended_before_the_admission_still_cleaning_holds_the_update(
     assert seen == [(True, 1), (False, 2)]
 
 
-def _crashed_update(tmp_path: Path, *, closing: bool, idle: bool = False) -> tuple[Path, str]:
+def _crashed_update(
+    tmp_path: Path, *, closing: bool, idle: bool = False, mark_b: bool = False
+) -> tuple[Path, str]:
     """A run root whose engine died while an update stopped `j`, with `b` running beside it;
     both attempts' spools hold their records (`j` signalled, `b` exited 0). With `closing`,
     `j`'s outcome was committed while its cleanup ladder ran. With `idle`, the estate also has
-    `p`, which the plan changes, and `u`, which it leaves, neither running. Answers the run
-    root and `j`'s attempt id."""
+    `p`, which the plan changes, and `u`, which it leaves, neither running. With `mark_b`, the
+    plan also names `b` in `non-idempotent.toml`. Answers the run root and `j`'s attempt id."""
     from dsl41.runner import outcome_record, plan_record
     from dsl41.runner_store import Record
 
@@ -465,7 +469,8 @@ def _crashed_update(tmp_path: Path, *, closing: bool, idle: bool = False) -> tup
             step |= {"after": "wrapper_lost"}
             engine.journal.append(ended, plan_record(attempts["j"], "j", 1, "rerun", [step], at))
         changed = {"p": "y", "u": "x"} if idle else {}
-        _estate(tmp_path, _jil({"j": "sleep 31", "b": "sleep 30", **changed}))
+        marked = {"b": "posts twice"} if mark_b else None
+        _estate(tmp_path, _jil({"j": "sleep 31", "b": "sleep 30", **changed}), marked)
         token = _plan(engine, tmp_path)
         fingerprint = UpdateRequest(token, True, 1, engine.baseline_id, "u1").fingerprint
         intent = {
@@ -602,13 +607,13 @@ def test_a_plan_written_before_the_estate_directory_was_recorded_is_stale(
 def test_a_restart_starts_with_the_update_stopping_and_applies_it_as_a_loop_step(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, closing: bool
 ) -> None:
-    """Startup step 4 restores the update and nothing waits for it: the engine starts with the
-    update STOPPING and its filter holding while `j`'s stop is not finished (a ladder the
-    restart runs, parked; or, for an attempt whose cleanup the crash cut short, a survivor the
-    restart's finish leaves held). A job of the plan the oracle starts waits
-    `dispatch_pending`; a job outside it runs. Once the test releases the stop, the update
-    applies as a step of the loop, before any dispatch of a plan job; a closing attempt's rerun
-    plan dispatches exactly one replacement, after it."""
+    """The fold restores the update and nothing waits for it: the engine starts with the
+    update STOPPING and its filter holding while `j`'s stop is not finished (the cleanup's
+    ladder on its command, parked; or, for an attempt whose cleanup the crash cut short, a
+    survivor of that ladder, held). A job of the plan the oracle starts waits
+    `dispatch_pending`; a job outside it runs. Once the stop is finished, the update applies as
+    a step of the loop, before any dispatch of a plan job; a closing attempt's rerun plan
+    dispatches exactly one replacement, after it (spec-restart §6, DL-432)."""
     from dsl41.reload_plan import load_estate
     from dsl41.runner_startup import resume_run
 
@@ -621,34 +626,34 @@ def test_a_restart_starts_with_the_update_stopping_and_applies_it_as_a_loop_step
         return [(k, b.get("event"), b.get("job"), b.get("ordinal")) for _, k, b in rows(run_root)]
 
     async def restart() -> None:
-        resumed = asyncio.ensure_future(
-            resume_run(
-                load_estate(tmp_path / "estate").catalog,
-                run_root,
-                clock=VirtualClock(start=T0 + timedelta(minutes=1)),
-                adapters={"CMD": FakeAdapter(default=None)},
-                settle_seconds=0.0,
-                grace_seconds=0.0,
-                settings=EngineSettings(grace_term_s=0.05, grace_kill_s=0.1),
-            )
+        engine = await resume_run(
+            load_estate(tmp_path / "estate").catalog,
+            run_root,
+            clock=VirtualClock(start=T0 + timedelta(minutes=1)),
+            adapters={"CMD": FakeAdapter(default=None)},
+            settings=EngineSettings(grace_term_s=0.05, grace_kill_s=0.1),
         )
+        # the catch-up runs in the loop; quiescence waits for the parked ladder
+        loop = asyncio.ensure_future(engine.run_until_quiescent(engine.clock.now()))
         async with asyncio.timeout(30):
             await entered.wait()
             if closing:
-                release.set()  # the finish returns: something is left, and held
-            engine = await resumed
-        await engine.run_until_quiescent(engine.clock.now())
-        seen["view"] = engine.update.view()
-        for job in ("p", "u"):
-            engine.inject(Event(at=engine.clock.now(), kind="FORCE_STARTJOB", payload={"job": job}))
-        await engine.run_until_quiescent(engine.clock.now())
-        seen["before"] = order()
-        if closing:
-            engine.stops._look()  # the held poll finds nothing left: the stop is finished
-        else:
-            release.set()
-            await engine.attempts.join()
-        seen["queued"] = engine.update.stopping  # the end waits for its loop step
+                release.set()  # the ladder ends: something is left, and held
+                await loop
+                loop = asyncio.ensure_future(engine.run_until_quiescent(engine.clock.now()))
+            seen["view"] = engine.update.view()
+            for job in ("p", "u"):
+                at = engine.clock.now()
+                engine.inject(Event(at=at, kind="FORCE_STARTJOB", payload={"job": job}))
+            while not [o for o in order() if o[0] == "dispatch" and o[2] == "u"]:
+                await asyncio.sleep(0.01)
+            seen["before"] = order()
+            if closing:
+                engine.stops._look()  # the held poll finds nothing left: the stop is finished
+            else:
+                release.set()
+            seen["queued"] = engine.update.stopping  # the end waits for its loop step
+            await loop
         await engine.run_until_quiescent(engine.clock.now())
         seen["after"] = order()
         seen["rev"] = engine.config_rev
@@ -672,6 +677,165 @@ def test_a_restart_starts_with_the_update_stopping_and_applies_it_as_a_loop_step
     assert plan_jobs and min(plan_jobs) > applied  # no plan job before the application
     replacements = [o for o in after[intent:] if o[0] == "dispatch" and o[2] == "j"]
     assert replacements == [("dispatch", None, "j", 2)]  # exactly one, the rerun's
+
+
+@pytest.mark.parametrize("look", [True, False], ids=["first-look", "no-look"])
+def test_an_update_whose_stops_all_finished_before_the_crash_applies_at_the_first_look(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, look: bool
+) -> None:
+    """R5-1 (DL-432, spec-restart §6): every attempt of the stop set was down before the
+    engine died, so no observation ends it at the restart. The catch-up's queued first look
+    applies the update as a loop step, after the recovered outcome of `b`, outside the stop
+    set, is fed under the old catalog. Without the look the update stays STOPPING."""
+    from store_surgery import append
+
+    from dsl41.reload_plan import load_estate
+    from dsl41.runner import outcome_record, plan_record
+    from dsl41.runner_startup import resume_run
+    from dsl41.runner_update import EngineUpdate
+
+    run_root, j = _crashed_update(tmp_path, closing=False)
+    ended = outcome_record(j, "j", 1, "stopped", {}, T0, cause="update_stop")
+    append(run_root, "outcome", ended.payload, at=T0)
+    append(run_root, "follow_up", plan_record(j, "j", 1, "none", [], T0).payload, at=T0)
+    if not look:
+        monkeypatch.setattr(EngineUpdate, "look", lambda _self: None)
+    seen: dict[str, Any] = {}
+
+    async def restart() -> None:
+        engine = await resume_run(
+            load_estate(tmp_path / "estate").catalog,
+            run_root,
+            clock=VirtualClock(start=T0 + timedelta(minutes=1)),
+            adapters={"CMD": FakeAdapter(default=None)},
+            settings=EngineSettings(grace_term_s=0.05, grace_kill_s=0.1),
+        )
+        await engine.run_until_quiescent(engine.clock.now())
+        seen["rev"], seen["stopping"] = engine.config_rev, engine.update.stopping
+        await engine.shutdown()
+        _close(engine)
+
+    asyncio.run(restart())
+    order = [(s, k, b) for s, k, b in rows(run_root)]
+    applied = [s for s, k, b in order if k == "config" and b.get("event") == "applied"][1:]
+    if not look:
+        assert applied == [] and (seen["rev"], seen["stopping"]) == (1, True)
+        return
+    assert (seen["rev"], seen["stopping"]) == (2, False)
+    [b_feed] = [
+        s
+        for s, k, b in order
+        if k == "input" and b.get("source") == "reconcile" and b["payload"]["job"] == "b"
+    ]
+    started = [s for s, k, b in order if k == "engine" and b.get("event") == "started"][-1]
+    assert b_feed < applied[0] < started  # fed under the old catalog (Opus round 1, R7)
+
+
+def _split(run_root: Path, attempt: str) -> None:
+    """The attempt's `status.json` names another run: its records cannot be trusted."""
+    [spool] = [Path(b["spool"]) for _, k, b in rows(run_root) if b.get("attempt") == attempt]
+    doc = json.loads((spool / "status.json").read_text())
+    (spool / "status.json").write_text(
+        json.dumps({**doc, "run_id": "0" * 8 + "-0000-4000-8000-" + "0" * 12})
+    )
+
+
+@pytest.mark.parametrize("job", ["j", "b"], ids=["stop-set", "mark-changed"])
+def test_a_quarantine_an_update_keeps_survives_a_second_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, job: str
+) -> None:
+    """Opus round 1 R1, Astra round 1 B2 (spec-restart §7): a quarantined attempt whose outcome
+    the resumed update keeps (`j`, in its stop set; `b`, whose mark the plan changes) writes
+    nothing until the application: no `ladder_done` closes it early. The engine dies before
+    the update applies; the second restart quarantines it again, the update applies, and
+    exactly one quarantine outcome and one hold survive."""
+    from dsl41.reload_plan import load_estate
+    from dsl41.runner_journal import OpenTable
+    from dsl41.runner_startup import resume_run
+    from dsl41.runner_store import SqliteStore
+    from dsl41.runner_update import EngineUpdate
+
+    run_root, j = _crashed_update(tmp_path, closing=False, mark_b=True)
+    attempt = (
+        j
+        if job == "j"
+        else next(b["attempt"] for _, k, b in rows(run_root) if k == "dispatch" and b["job"] == "b")
+    )
+    _split(run_root, attempt)
+
+    async def restart(apply: bool) -> None:
+        with monkeypatch.context() as held:
+            if not apply:  # as if another stop still laddered: the update never applies
+                held.setattr(EngineUpdate, "look", lambda _self: None)
+            engine = await resume_run(
+                load_estate(tmp_path / "estate").catalog,
+                run_root,
+                clock=VirtualClock(start=T0 + timedelta(minutes=1)),
+                adapters={"CMD": FakeAdapter(default=None)},
+                settings=EngineSettings(grace_term_s=0.05, grace_kill_s=0.1),
+            )
+            await engine.run_until_quiescent(engine.clock.now())
+            await engine.shutdown()
+            _close(engine)  # dies: no shutdown record
+
+    asyncio.run(restart(apply=False))
+    table = OpenTable()
+    store = SqliteStore(run_root / "engine.db")
+    for seq, record in store.read_from(0):
+        table.note(seq, record)
+    store.close()
+    assert attempt in table.attempts  # still open: nothing closed it
+    asyncio.run(restart(apply=True))
+    outcomes = [b for _, k, b in rows(run_root) if k == "outcome" and b["attempt"] == attempt]
+    assert [(o["outcome"], o["cause"]) for o in outcomes] == [("unobservable", "quarantined")]
+    plans = [b for _, k, b in rows(run_root) if k == "follow_up" and b.get("attempt") == attempt]
+    assert [p["plan"] for p in plans if p["event"] == "plan"] == ["hold"]
+    assert not [p for p in plans if p["event"] == "ladder_done"]
+
+
+@pytest.mark.parametrize("all_down_before", [True, False], ids=["first-look", "last-stop"])
+def test_the_outside_job_s_feed_lands_before_the_application_at_equal_stamps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, all_down_before: bool
+) -> None:
+    """Astra round 1 M1, Opus round 1 R7/R8 (spec-restart §6): on a clock that reads the
+    journal's last instant, every catch-up step and feed is stamped alike. The update takes no
+    step of its own during the catch-up; the owed step's one look takes the stops that ended
+    meanwhile. So `b`'s recovered STATUS feed, outside the stop set, lands before `config
+    applied`: when every stop was down before the crash, and when the last stop (`j`) ends
+    at its observation, ahead of `b`'s."""
+    from store_surgery import append
+
+    from dsl41.reload_plan import load_estate
+    from dsl41.runner import outcome_record, plan_record
+    from dsl41.runner_startup import resume_run
+
+    run_root, j = _crashed_update(tmp_path, closing=False)
+    if all_down_before:
+        ended = outcome_record(j, "j", 1, "stopped", {}, T0, cause="update_stop")
+        append(run_root, "outcome", ended.payload, at=T0)
+        append(run_root, "follow_up", plan_record(j, "j", 1, "none", [], T0).payload, at=T0)
+
+    async def restart() -> None:
+        engine = await resume_run(
+            load_estate(tmp_path / "estate").catalog,
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+            settings=EngineSettings(grace_term_s=0.05, grace_kill_s=0.1),
+        )
+        await engine.run_until_quiescent(engine.clock.now())
+        await engine.shutdown()
+        _close(engine)
+
+    asyncio.run(restart())
+    order = rows(run_root)
+    [applied] = [s for s, k, b in order if k == "config" and b.get("event") == "applied"][1:]
+    [feed] = [
+        s
+        for s, k, b in order
+        if k == "input" and b.get("source") == "reconcile" and b["payload"]["job"] == "b"
+    ]
+    assert feed < applied
 
 
 def test_a_box_run_keeps_its_rev_through_snapshot_prune_resume_update_snapshot_prune(
@@ -713,8 +877,6 @@ def test_a_box_run_keeps_its_rev_through_snapshot_prune_resume_update_snapshot_p
             run_root,
             clock=VirtualClock(start=T0 + timedelta(minutes=1)),
             adapters={"CMD": FakeAdapter()},
-            settle_seconds=0.0,
-            grace_seconds=0.0,
             settings=EngineSettings(grace_term_s=0.05, grace_kill_s=0.1),
         )
         await engine.run_until_quiescent(engine.clock.now())

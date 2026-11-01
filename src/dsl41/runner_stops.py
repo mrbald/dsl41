@@ -12,7 +12,10 @@ What is left of an attempt's command is one function, `EngineStops.left`, and ev
 reads it: the tier's `command_alive`, the held poll, the restart. Where the process cookie can
 be read (`runner_procid.ours` on Linux, with pidfd signalling), what is left is the union of the
 recorded process group's live members and the processes carrying the attempt's
-`DSL41_COOKIE`, whatever their group, the wrapper left out. Both are taken as reliable: the
+`DSL41_COOKIE`, whatever their group, the wrapper left out. An attempt with no recorded group
+(`runner_attempts.NO_GROUP`) is its cookie's processes alone (spec-restart §4). The cookie names
+the run root, so one scan reads every attempt of the root, whichever engine start launched it
+(spec-restart §3, DL-433). Both are taken as reliable: the
 kernel keeps a group exactly, and a process that leaves the group and drops the cookie did so on
 purpose and is beyond the engine by design. A reading that fails is `unknown`: its group members
 are still signalled, and nothing is released on it. A group is proven the attempt's only by a
@@ -51,7 +54,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 from dsl41 import runner_procid as _procid
 from dsl41.engine_charts import AttemptOutcome
 from dsl41.runner_adapters import Launch, group_has_live_member, spool_record, stop_ladder
-from dsl41.runner_attempts import command_group
+from dsl41.runner_attempts import NO_GROUP, command_group
 from dsl41.runner_journal import best_effort_report
 
 if TYPE_CHECKING:  # annotation only
@@ -89,8 +92,6 @@ class AttemptFacts:
     finished: bool = False
     #: its outcome was committed while its ladder ran: the ladder's end is recorded too
     closing: bool = False
-    #: set once the attempt ended, or once its stop could not be carried out
-    settled: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class Observer:
@@ -135,6 +136,12 @@ class Left:
 
 
 NOTHING_LEFT: Final = Left("none")
+
+
+def _pids(pids: Mapping[int, str]) -> str:
+    return " ".join(str(pid) for pid in sorted(pids)) or "?"
+
+
 #: a shared scan not yet made: `left` scans for itself
 _UNSCANNED: Final = object()
 
@@ -162,6 +169,12 @@ class EngineStops:
         self._laddered: set[int] = set()
         #: each held attempt's own note, which a failed reading's note only covers while it lasts
         self._holds: dict[str, str] = {}
+        #: the attempts whose processes a restart's first reading TERMed: their ladder's first
+        #: rung is that TERM (spec-restart §3)
+        self.termed: set[str] = set()
+        #: the attempts held under `process-leak=leak` only while a reading fails: released at
+        #: the first reading that succeeds, nothing signalled (`leaked`)
+        self._leak_holds: set[str] = set()
         #: the poll that looks for the held attempts' groups, while any is held
         self._poll: asyncio.TimerHandle | None = None
 
@@ -210,6 +223,8 @@ class EngineStops:
         """Drop everything kept of an attempt the engine forgets, in one place."""
         self._cookies.pop(attempt, None)
         self._holds.pop(attempt, None)
+        self.termed.discard(attempt)
+        self._leak_holds.discard(attempt)
         for group in [g for g, run in self._runs.items() if run == attempt]:
             del self._runs[group]
             self._boots.pop(group, None)
@@ -218,8 +233,9 @@ class EngineStops:
         self._spawns.pop(attempt, None)
 
     def scan(self) -> _procid.Ours | None:
-        """One scan of every cookie process of this uid, None where the scan cannot decide."""
-        return _procid.ours("") if self.scan_available else None
+        """One scan of every process of this uid carrying a cookie of this run root, None where
+        the scan cannot decide (spec-restart §3)."""
+        return _procid.ours(f"{self.engine.root_id}.") if self.scan_available else None
 
     def left(
         self, pgid: int, start_token: str, attempt: str | None = None, scan: object = _UNSCANNED
@@ -227,12 +243,17 @@ class EngineStops:
         """What is left of the command recorded as group `pgid` with leader token
         `start_token`, the attempt's run id found from the group when not given (module
         docstring). A group recorded under another boot left nothing (DL-42 item 5). `scan` is
-        a shared scan of every cookie (the held poll's)."""
+        a shared scan of every cookie (the held poll's, the restart's first reading). `NO_GROUP`
+        reads the cookie's processes alone, the attempt named by `start_token` when not given."""
         if self._boots.get((pgid, start_token), self.boot_id) != self.boot_id:
             return NOTHING_LEFT
+        if pgid == NO_GROUP:
+            attempt = attempt or start_token
         attempt = attempt or self._runs.get((pgid, start_token))
         cookie = None if attempt is None else self._cookies.get(attempt)
-        leader = _procid.verify_alive(pgid, start_token)
+        if pgid == NO_GROUP and (cookie is None or not self.scan_available):
+            return NOTHING_LEFT  # nothing names a process of it
+        leader = pgid != NO_GROUP and _procid.verify_alive(pgid, start_token)
         if cookie is None or not self.scan_available:
             # the checks from before the cookie: the leader's token, then a live member of a
             # group a ladder signalled or a held attempt's
@@ -245,7 +266,7 @@ class EngineStops:
         found = _procid.ours(cookie) if scan is _UNSCANNED else scan
         if not isinstance(found, _procid.Ours):  # a scan that could not be made at all
             found = _procid.Ours({}, error=errno.EIO)
-        group = _procid.linux_group_pids(pgid)
+        group = {} if pgid == NO_GROUP else _procid.linux_group_pids(pgid)
         wrapper = self._spawns.get(attempt or "", {}).get("wrapper_pid")
         mine = {pid: start for pid, (run, start) in found.pids.items() if run == attempt}
         members = group or {}
@@ -265,10 +286,13 @@ class EngineStops:
     def _members(self, pgid: int, start_token: str, attempt: str) -> Mapping[int, str]:
         return self.left(pgid, start_token, attempt).pids
 
+    def _attempt_of(self, pgid: int, start_token: str) -> str | None:
+        return start_token if pgid == NO_GROUP else self._runs.get((pgid, start_token))
+
     def _ladder_members(self, pgid: int, start_token: str) -> Any:
         """The ladder's `members` for the attempt's group where the cookie decides, else None
         (the group ladder)."""
-        attempt = self._runs.get((pgid, start_token))
+        attempt = self._attempt_of(pgid, start_token)
         if attempt is None or attempt not in self._cookies or not self.scan_available:
             return None
         return partial(self._members, pgid, start_token, attempt)
@@ -277,19 +301,10 @@ class EngineStops:
         """Whether anything of the recorded command is left (`left`)."""
         return self.left(pgid, start_token).alive
 
-    async def finish(self, attempt: str, pgid: int, start_token: str) -> Left:
-        """A restart stops what an ended command left: the ladder on it, then a look every
-        `SETTLE_POLL_S` until nothing is left or `grace_kill_s` after the KILL, as the record
-        timeout gives a live attempt; the last look."""
-        self.note_laddered(pgid)
-        members = self._ladder_members(pgid, start_token)
-        await stop_ladder(pgid, start_token, self.engine.attempts.grace_term_s, members=members)
-        deadline = time.monotonic() + self.engine.attempts.grace_kill_s
-        look = self.left(pgid, start_token, attempt)
-        while look.alive and time.monotonic() < deadline:
-            await asyncio.sleep(SETTLE_POLL_S)
-            look = self.left(pgid, start_token, attempt)
-        return look
+    def unnamed_alive(self, attempt: str) -> bool:
+        """Whether a process carrying the cookie of an attempt with no recorded group is left
+        (`left` under `NO_GROUP`, spec-restart §4)."""
+        return self.left(NO_GROUP, attempt, attempt).alive
 
     async def outlives(self, pgid: int, start_token: str, grace_kill_s: float) -> bool:
         """Whether anything of the command is left `grace_kill_s` after the ladder's KILL,
@@ -306,21 +321,34 @@ class EngineStops:
 
     async def ladder(self, pgid: int, start_token: str, grace_term_s: float) -> None:
         """The ladder, by process where the cookie decides, else on the group; it ends at its
-        KILL, where the tier arms the record timeout."""
+        KILL, where the tier arms the record timeout. An attempt whose processes the restart's
+        first reading TERMed starts at the grace: that TERM was its first rung (spec-restart
+        §3)."""
         self.note_laddered(pgid)
         members = self._ladder_members(pgid, start_token)
-        await stop_ladder(pgid, start_token, grace_term_s, members=members)
+        attempt = self._attempt_of(pgid, start_token)
+        if attempt in self.termed:
+            self.termed.discard(attempt)
+            await stop_ladder(pgid, start_token, grace_term_s, members=members, term=False)
+        else:
+            await stop_ladder(pgid, start_token, grace_term_s, members=members)
 
     def leaked(self, attempt: str) -> bool:
         """The attempt's command ended with no stop while processes of it are left: under
         `process-leak=terminate`, its note says so and the tier runs the ladder on them (True);
-        under `leak`, they are left running with a warning naming them (False)."""
+        under `leak`, they are left running with a warning naming them (False). Under `leak` a
+        reading that failed releases nothing: the attempt is held, signalled never, until a
+        reading succeeds, which then leaves what it finds with the warning (DL-431)."""
         facts = self.engine.attempt_facts(attempt)
-        group = self.engine.attempts.group(attempt)
-        assert group is not None  # `command_alive` read a recorded group
-        look = self.left(*group, attempt)
+        pgid, token = self.engine.attempts.cleanup_group(attempt)
+        look = self.left(pgid, token, attempt)
         pids = " ".join(str(pid) for pid in sorted(look.pids)) or "?"
         terminate = self.leak_policy == "terminate"
+        if look.kind == "unknown" and not terminate:
+            self.engine.attempts.hold_unread(attempt)
+            self._leak_holds.add(attempt)
+            self._stuck(attempt, look.reason)
+            return False
         facts.note = f"leaked: {len(look.pids)}, {'stopping' if terminate else 'left running'}"
         if look.kind == "unknown":
             facts.note = look.reason
@@ -347,8 +375,8 @@ class EngineStops:
 
     def _record_timeout(self, key: str, generation: int) -> None:
         """The timer fired, outside any task: what it raises (a spool record that names another
-        run, DL-118) stops the engine at the loop's next turn, or fails startup's step 5,
-        instead of vanishing into the event loop's handler."""
+        run, DL-118) stops the engine at the loop's next turn instead of vanishing into the event
+        loop's handler."""
         self._timers.pop(key, None)
         try:
             self.engine.attempts.record_timeout(key, generation)
@@ -376,12 +404,10 @@ class EngineStops:
         """A stop that could not be carried out: the attempt stays unsettled, its job starts
         nothing until nothing of it is left, and the log and `query` say why (DL-426)."""
         facts = self.engine.attempt_facts(attempt)
-        group = self.engine.attempts.group(attempt)
-        assert group is not None  # a ladder or a timer needs a recorded group
+        pgid, _ = self.engine.attempts.cleanup_group(attempt)
         facts.note = note
-        facts.settled.set()
         self.hold(attempt, note)
-        self.engine.hold_group(attempt, group[0])
+        self.engine.hold_group(attempt, pgid)
         best_effort_report(f"dsl41: {facts.job}.{facts.run_number}.{facts.ordinal}: {note}")
 
     def hold(self, attempt: str, note: str) -> None:
@@ -399,14 +425,24 @@ class EngineStops:
     def _look(self) -> None:
         """One scan for every held attempt (`left`): an attempt with nothing left is released;
         what is found of one that outlived a stop is KILLed; one whose reading failed keeps its
-        hold, and its note says why while the readings fail, its own note once one succeeds.
+        hold, and its note says why while the readings fail, its own note once one succeeds. A
+        leak held under `process-leak=leak` while its reading failed is never signalled; the
+        first reading that succeeds releases it, naming what it found (`leaked`).
         What that raises stops the engine at the loop's next turn (`_record_timeout`)."""
         self._poll = None
         try:
             scan = self.scan()
             for attempt, pgid in list(self.engine.held_groups.items()):
                 token = self._spawns.get(attempt, {}).get("command_start_time")
+                token = attempt if pgid == NO_GROUP else token
                 look = self.left(pgid, token if isinstance(token, str) else "", attempt, scan)
+                if attempt in self._leak_holds and look.kind == "ours":
+                    facts = self.engine.attempt_facts(attempt)
+                    best_effort_report(
+                        f"dsl41: {facts.job}.{facts.run_number}.{facts.ordinal}: leaked:"
+                        f" {len(look.pids)}, left running (pids {_pids(look.pids)})"
+                    )
+                    look = NOTHING_LEFT  # a leak's reading that succeeds releases it
                 if look.kind == "none":
                     self._holds.pop(attempt, None)
                     self.engine.group_gone(attempt)
@@ -414,7 +450,9 @@ class EngineStops:
                 facts = self.engine.attempt_facts(attempt)
                 own = self._holds.get(attempt, facts.note)
                 facts.note = look.reason if look.kind == "unknown" else own
-                for pid, start in look.pids.items():  # every held attempt outlived a stop
+                if attempt in self._leak_holds:
+                    continue  # a leak is never signalled; it waits for a reading
+                for pid, start in look.pids.items():  # every other held one outlived a stop
                     _procid.signal_ours(pid, start, signal.SIGKILL)
         except Exception as exc:  # noqa: BLE001 -- handed to the loop, which raises it
             self.engine.fail(exc)

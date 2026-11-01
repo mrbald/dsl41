@@ -1,5 +1,5 @@
 """The engine's stops by the process group and the process cookie (`DSL41_COOKIE`): every process
-of a command attempt carries `<engine instance>.<run id>`, so where the cookie can be read (Linux,
+of a command attempt carries `<root_id>.<run id>`, so where the cookie can be read (Linux,
 with pidfd signalling) the engine knows its own processes whatever their group.
 
 The owner's rule: what is left of an attempt (`EngineStops.left`) is the recorded group's live
@@ -26,7 +26,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from store_surgery import rows, update
@@ -55,6 +55,7 @@ from dsl41.runner_config import EngineSettings, RuntimeProfile
 from dsl41.runner_control import status_label
 from dsl41.runner_journal import OpenAttempt
 from dsl41.runner_startup import resume_run, start_run
+from dsl41.engine_charts import AttemptOutcome
 from dsl41.runner_stops import COMMAND_SURVIVED, NOTHING_LEFT, AttemptFacts, Left
 
 linux_only = pytest.mark.skipif(
@@ -152,11 +153,15 @@ def _prove(engine: Engine, attempt: str = RUN_ID) -> None:
 
 
 def _held(engine: Engine, tmp_path: Path, attempt: str, job: str) -> None:
+    """A restart's closing attempt whose cleanup found its command outlived the KILL: restored
+    ENDED and held, as the live survivor verdict holds one (spec-restart §5)."""
     env = {"DSL41_COOKIE": runner_procid.cookie("inst", attempt)}
-    held = OpenAttempt(attempt, job, 1, 1, str(tmp_path / attempt), 0, T0.isoformat(), env)
+    facts = AttemptFacts(attempt, job, 1, 1, tmp_path / attempt, env, exited=True, closing=True)
+    engine.adopt_attempt(facts, AttemptOutcome("stopped"), plan_done=True)
     engine.stops.scan_available = True
     engine.stops.note_boot({**SPAWN, "run_id": attempt})
-    engine.held_at_restart(held, PGID, COMMAND_SURVIVED)
+    engine.stops.hold(attempt, COMMAND_SURVIVED)
+    engine.hold_group(attempt, PGID)
 
 
 def _leak(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -296,7 +301,8 @@ def test_a_failed_scan_with_a_live_group_child_is_stopped_and_never_released(
     The attempt has leaked: under `terminate` the ladder TERMs and KILLs the group's member
     by pid; it survives, so the attempt is held, and no look while the scan fails releases
     it. The first look that finds nothing releases it in one call, and the attempt closes.
-    Under `leak` nothing is signalled and the attempt settles at once."""
+    Under `leak` nothing is ever signalled, but a failed reading releases nothing either: the
+    attempt is held until a reading succeeds (Astra round 1, M3)."""
     world = _World(monkeypatch)
     if policy == "leak":
         _leak(monkeypatch)
@@ -330,8 +336,8 @@ def test_a_failed_scan_with_a_live_group_child_is_stopped_and_never_released(
         assert notes == ["command survived its KILL", "scan failed: EMFILE"]
         assert "ladder_done" in events
     else:
-        assert not held and world.sent == [] and notes == ["scan failed: EMFILE"]
-        assert "ladder_done" not in events
+        assert held and world.sent == [] and notes == ["scan failed: EMFILE"] * 2
+        assert "ladder_done" in events
 
 
 def test_a_leak_is_noted_and_its_pids_named(
@@ -493,7 +499,7 @@ def test_a_restart_cannot_fail_for_want_of_pidfd(
         engine = _engine(tmp_path)
         engine.stops.scan_available = True
         closing = _closing_attempt(tmp_path, engine, {**SPAWN, "command_start_time": "ticks:1"})
-        await runner_startup._finish_ladder(engine, closing)
+        await _clean_up(engine, closing)
         held = list(engine.held_groups)
         await engine.shutdown()
         _close(engine)
@@ -503,6 +509,27 @@ def test_a_restart_cannot_fail_for_want_of_pidfd(
 
 
 # ------------------------------------------------------------------- the restart
+
+
+async def _clean_up(engine: Engine, closing: OpenAttempt) -> None:
+    """The restart's cleanup of a closing attempt (spec-restart §5): restored ENDED with its
+    committed outcome, one reading of what is left and the ladder on it, run to their end."""
+    assert closing.spool is not None
+    facts = AttemptFacts(
+        closing.attempt,
+        closing.job,
+        closing.run_number,
+        closing.ordinal,
+        Path(closing.spool),
+        dict(closing.env),
+        exited=True,
+        closing=True,
+    )
+    outcome = AttemptOutcome(cast(Any, closing.outcome or "stopped"))
+    engine.adopt_attempt(facts, outcome, plan_done=True)
+    runner_startup._cleanup(engine, closing, None)
+    await engine.attempts.join()
+    await asyncio.sleep(0)
 
 
 def _closing_attempt(
@@ -525,18 +552,23 @@ def _closing_attempt(
 def test_a_restart_stops_what_it_finds_left_of_a_closing_attempt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, look: Left
 ) -> None:
-    """The restart stops what it finds left (`EngineStops.finish`): nothing left closes the
-    attempt; a survivor holds it as `command survived its KILL` (Opus n2), KILLed at each
-    look; a failed scan holds it with its reason."""
-
-    async def finish(_self: Any, _attempt: str, _pgid: int, _token: str) -> Left:
-        return look
-
-    monkeypatch.setattr(runner_stops.EngineStops, "finish", finish)
+    """The restart's cleanup stops what it finds left as the live record path does
+    (spec-restart §5): nothing left closes the attempt; a survivor of the KILL holds it as
+    `command survived its KILL` (Opus n2), KILLed at each look; a failed scan, which never
+    releases, holds it the same way."""
+    world = _World(monkeypatch)
+    world.scans = [
+        _found()
+        if look.kind == "none"
+        else _found(42)
+        if look.kind == "ours"
+        else _found(error=errno.EIO)
+    ]
 
     async def scenario() -> tuple[list[str], str | None, bool]:
         engine = _engine(tmp_path)
-        await runner_startup._finish_ladder(engine, _closing_attempt(tmp_path, engine, SPAWN))
+        engine.stops.scan_available = True
+        await _clean_up(engine, _closing_attempt(tmp_path, engine, SPAWN, outcome="stopped"))
         held = list(engine.held_groups)
         note = engine.attempt_facts(RUN_ID).note if held else None
         rekill = RUN_ID in engine.stops._holds
@@ -550,7 +582,7 @@ def test_a_restart_stops_what_it_finds_left_of_a_closing_attempt(
         assert (held, events) == ([], ["ladder_done"])
     else:
         assert held == [RUN_ID] and events == [] and rekill
-        assert note == (COMMAND_SURVIVED if look.kind == "ours" else "scan failed: EIO")
+        assert note == COMMAND_SURVIVED
 
 
 @pytest.mark.parametrize("found", [True, False], ids=["leaked", "nothing"])
@@ -566,7 +598,7 @@ def test_a_restart_under_leak_names_what_is_left_and_closes(
     async def scenario() -> None:
         engine = _engine(tmp_path)
         engine.stops.scan_available = True
-        await runner_startup._finish_ladder(engine, _closing_attempt(tmp_path, engine, SPAWN))
+        await _clean_up(engine, _closing_attempt(tmp_path, engine, SPAWN))
         assert not engine.held_groups
         await engine.shutdown()
         _close(engine)
@@ -589,7 +621,7 @@ def test_a_stranger_in_the_recorded_group_is_never_signalled_and_the_attempt_clo
     async def scenario() -> None:
         engine = _engine(tmp_path)
         engine.stops.scan_available = True
-        await runner_startup._finish_ladder(engine, _closing_attempt(tmp_path, engine, SPAWN))
+        await _clean_up(engine, _closing_attempt(tmp_path, engine, SPAWN))
         assert not engine.held_groups
         await engine.shutdown()
         _close(engine)
@@ -599,33 +631,42 @@ def test_a_stranger_in_the_recorded_group_is_never_signalled_and_the_attempt_clo
     assert events == ["ladder_done"] and world.sent == []
 
 
-def test_the_restart_reads_the_wrapper_by_its_start_token_alone(
+def test_the_restart_never_reads_the_previous_engine_s_wrapper(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """F-m1: the restart's wrapper check is the pid-reuse guard on the recorded pid and token,
-    with no cookie scan: one would never change its answer and costs a /proc pass per look."""
-    alive = [False]
-    monkeypatch.setattr(runner_procid, "verify_alive", lambda *_: alive[0])
+    """Ruling R3 (spec-restart §4, DL-433): the restart neither awaits nor watches a previous
+    engine's wrapper. Its wrapper alive in this boot, an attempt with no record ends
+    `engine_death` at its observation, and the wrapper's pid is never read."""
+    read: list[int] = []
 
-    def no_scan(_prefix: str) -> None:
-        raise AssertionError("the wrapper check scans nothing")
+    def verify(pid: int, _token: str) -> bool:
+        read.append(pid)
+        return pid == 41  # the recorded wrapper lives; its command does not
 
-    monkeypatch.setattr(runner_procid, "ours", no_scan)
+    monkeypatch.setattr(runner_procid, "verify_alive", verify)
+    monkeypatch.setattr(runner_stops.EngineStops, "scan", lambda _self: None)
+    run_root, dispatch = _open_with_cookie(tmp_path)
+    spool = Path(dispatch["spool"])
+    spawn = {**SPAWN, "run_id": dispatch["attempt"], "boot_id": runner_procid.current_boot_id()}
+    (spool / "spawn.json").write_text(json.dumps(spawn))
 
-    async def scenario() -> list[bool]:
-        engine = _engine(tmp_path)
-        _adopt(engine)
-        spawn = {**SPAWN, "boot_id": engine.stops.boot_id}
-        seen = [runner_startup._wrapper_alive(engine, spawn)]
-        alive[0] = True
-        seen.append(runner_startup._wrapper_alive(engine, spawn))
-        seen.append(runner_startup._wrapper_alive(engine, {**spawn, "wrapper_start_time": 7}))
-        seen.append(runner_startup._wrapper_alive(engine, {**spawn, "boot_id": "another"}))
+    async def scenario() -> None:
+        engine = await resume_run(
+            lower_source(_JIL),
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+            settings=EngineSettings(grace_term_s=0.05, grace_kill_s=0.1),
+        )
+        engine.stops.scan_available = False
+        await engine.run_until_quiescent(T0)
         await engine.shutdown()
         _close(engine)
-        return seen
 
-    assert asyncio.run(scenario()) == [False, True, False, False]
+    asyncio.run(scenario())
+    [outcome] = [b for _, k, b in rows(run_root) if k == "outcome"]
+    assert (outcome["outcome"], outcome["cause"]) == ("unobservable", "engine_death")
+    assert 41 not in read
 
 
 def _open_with_cookie(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
@@ -650,9 +691,10 @@ def _open_with_cookie(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
 def test_a_restart_stops_the_leak_a_record_it_reads_shows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Opus m4, the crash before the outcome was journaled: step 5 reads the record, finds
-    the ended command's process and runs the leak ladder on it, as the live engine would;
-    once nothing is left the attempt closes."""
+    """Opus m4, the crash before the outcome was journaled: the attempt ended by its own
+    natural record, so the first reading leaves its process to the live rule; the observation
+    reads the record and the leak ladder TERMs and KILLs it, as the live engine would; once
+    nothing is left the attempt closes (spec-restart §3, §4)."""
     world = _World(monkeypatch)
     monkeypatch.setattr(runner_stops, "sys", SimpleNamespace(platform="linux"))
     monkeypatch.setattr(runner_procid, "pidfd_supported", lambda: True)
@@ -662,7 +704,8 @@ def test_a_restart_stops_the_leak_a_record_it_reads_shows(
     (spool / "spawn.json").write_text(json.dumps(spawn))
     status = {**{k: SPAWN[k] for k in ("version", "job", "run_number")}, "run_id": run_id}
     (spool / "status.json").write_text(json.dumps({**status, "outcome": "exited", "exit_code": 0}))
-    # the wrapper's look, the outcome's, the leak's, the TERM's, the KILL's, then nothing
+    # the first reading (which leaves a natural end to the live rule), the outcome's, the
+    # leak's, the TERM's, the KILL's, then nothing
     world.scans = [_found(42, run_id=run_id)] * 5 + [_found(run_id=run_id)]
 
     async def scenario() -> None:
@@ -671,10 +714,9 @@ def test_a_restart_stops_the_leak_a_record_it_reads_shows(
             run_root,
             clock=VirtualClock(start=T0),
             adapters={"CMD": FakeAdapter(default=None)},
-            settle_seconds=0.1,
-            grace_seconds=0.0,
             settings=EngineSettings(grace_term_s=0.05, grace_kill_s=0.1),
         )
+        await engine.run_until_quiescent(T0)
         await engine.attempts.join()
         await asyncio.sleep(0)
         await engine.shutdown()
@@ -744,7 +786,7 @@ def test_a_proven_group_stays_ours_after_its_last_cookie_process_exits_on_term(
         engine.stops.scan_available = True
         if path == "restart":
             closing = _closing_attempt(tmp_path, engine, SPAWN, outcome="stopped")
-            await runner_startup._finish_ladder(engine, closing)
+            await _clean_up(engine, closing)
         else:
             _adopt(engine)
             engine.attempts.spawn_recorded(RUN_ID, SPAWN)
@@ -974,7 +1016,7 @@ def test_under_leak_a_stop_the_crash_cut_short_is_still_finished(
         engine = _engine(tmp_path)
         engine.stops.scan_available = True
         closing = _closing_attempt(tmp_path, engine, SPAWN, outcome="stopped")
-        await runner_startup._finish_ladder(engine, closing)
+        await _clean_up(engine, closing)
         assert not engine.held_groups
         await engine.shutdown()
         _close(engine)
@@ -1364,3 +1406,39 @@ def test_a_drain_stops_a_setsid_child_by_its_cookie(tmp_path: Path) -> None:
     assert engine.leaving_record == "clean_shutdown"
     [ended] = _kinds(run_root, "outcome")
     assert (ended["outcome"], ended["cause"]) == ("stopped", "engine_stop")
+
+
+@pytest.mark.parametrize("outcome", ["natural", "stopped"])
+@pytest.mark.parametrize("policy", ["terminate", "leak"])
+def test_an_unknown_cleanup_reading_keeps_the_live_hold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, policy: str
+) -> None:
+    """Astra round 1 M3 (spec-restart §5, §7): a closing attempt's cleanup reading fails. The
+    attempt keeps its one outcome and plan and is held as live until a reading succeeds,
+    under either `process-leak` value and for a natural or a stopped outcome; a leak under
+    `leak` is never signalled, and the first good reading releases it and closes it."""
+    world = _World(monkeypatch)
+    world.scans = [_found(error=errno.EIO)]
+    if policy == "leak":
+        _leak(monkeypatch)
+
+    async def scenario() -> tuple[list[str], list[str]]:
+        engine = _engine(tmp_path)
+        engine.stops.scan_available = True
+        await _clean_up(engine, _closing_attempt(tmp_path, engine, SPAWN, outcome=outcome))
+        held = list(engine.held_groups)
+        engine.stops._look()  # still failing: still held
+        assert list(engine.held_groups) == held
+        world.scans = [_found()]
+        engine.stops._look()  # a reading that succeeds and finds nothing
+        released = list(engine.held_groups)
+        await engine.shutdown()
+        _close(engine)
+        return held, released
+
+    held, released = asyncio.run(scenario())
+    assert held == [RUN_ID] and released == []
+    events = [b.get("event") for _, k, b in rows(tmp_path / "run") if k == "follow_up"]
+    assert events == ["ladder_done"]  # closed once, by the good reading
+    if policy == "leak" and outcome == "natural":
+        assert world.sent == []

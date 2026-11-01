@@ -8,10 +8,12 @@ An attempt instance is keyed by the attempt id, never by the job or the run: a l
 settled attempt must not reach its successor.
 
 Events of the attempt: `spawn_recorded`, `spawn_failed`, `stop` (cause `engine_stop`,
-`update_stop` or `wrapper_lost`), `exit_recorded`, `wrapper_gone` and `record_timeout`.
-`wrapper_gone` means the wrapper exited without a record and the command is dead; the tier
-establishes both before it posts. A wrapper lost while its command lives is a `stop` with cause
-`wrapper_lost`.
+`update_stop` or `wrapper_lost`), `exit_recorded`, `wrapper_gone`, `record_timeout` and
+`engine_died`. `wrapper_gone` means the wrapper exited without a record and the command is dead;
+the tier establishes both before it posts. A wrapper lost while its command lives is a `stop`
+with cause `wrapper_lost`. `engine_died` is a restart's: the engine that ran the attempt died
+and its wrapper left no record, so the attempt ended with that engine, whatever is left of its
+command (spec-restart §4, DL-433).
 
 The charts do no I/O and read no clock. A tier posts the events, with the time it read in the
 payload, and carries out the `Intent`s an outcome reports. Both charts end in a final state, which
@@ -73,12 +75,23 @@ WRAPPER_GONE: Final = "wrapper_gone"
 #: `grace_kill` passed after the last KILL and no record came. It is re-armable: the tier posts
 #: it with the generation the chart holds when the timer was armed.
 RECORD_TIMEOUT: Final = "record_timeout"
+#: A restart found the attempt open with no record: the engine that ran it died, and so did the
+#: attempt (spec-restart §4, DL-433). The payload is None, or the `AttemptOutcome` the restart
+#: gives it instead (a quarantine, ss7). What is left of its command is cleanup, never this
+#: event's.
+ENGINE_DIED: Final = "engine_died"
 
 #: The causes of `stop`. `WRAPPER_LOST` is for a wrapper that exited with no record while its
 #: command may still live.
 ENGINE_STOP: Final = "engine_stop"
 UPDATE_STOP: Final = "update_stop"
 WRAPPER_LOST: Final = "wrapper_lost"
+#: The cause of an `unobservable` outcome an engine's death ended with no stop taken first
+#: (spec-restart §4, DL-433).
+ENGINE_DEATH: Final = "engine_death"
+#: The cause of an `unobservable` outcome a restart could not read: its records name another run
+#: or do not read, or its processes cannot be read (spec-restart §7, DL-433).
+QUARANTINED: Final = "quarantined"
 
 #: The seconds the drain's deadline adds to `grace_term_s + grace_kill_s`.
 DRAIN_MARGIN_S: Final = 5.0
@@ -152,12 +165,14 @@ class ExitRecord:
 @dataclass(frozen=True)
 class AttemptOutcome:
     """How an attempt ended: the data of ENDED, not a state. `record` is the evidence of an
-    outcome that came from a wrapper record; `error` is the text of a failed spawn."""
+    outcome that came from a wrapper record; `error` is the text of a failed spawn; `note` says
+    why a restart could not read the attempt (a quarantine's reason, spec-restart §7)."""
 
     kind: Literal["natural", "stopped", "unobservable", "spawn_failed"]
     cause: str | None = None
     record: ExitRecord | None = None
     error: str | None = None
+    note: str | None = None
 
 
 @dataclass
@@ -389,6 +404,16 @@ def _end_unobservable(ctx: Context) -> Effects:
     return _end(record, AttemptOutcome("unobservable", cause=record.cause))
 
 
+def _end_engine_died(ctx: Context) -> Effects:
+    """The engine that ran the attempt died and no record came: outcome `unobservable`, with the
+    cause of the stop the attempt took first, else `engine_death`; or the outcome the restart
+    gives (a quarantine). No ladder runs and no timer is armed (spec-restart §4, DL-433)."""
+    record: AttemptRecord = ctx.data
+    given: AttemptOutcome | None = ctx.event.payload
+    death = AttemptOutcome("unobservable", cause=record.cause or ENGINE_DEATH)
+    return _end(record, given if given is not None else death)
+
+
 #: One dispatched run. ENDED carries the outcome as data.
 ATTEMPT: Final = Statechart(
     name="attempt",
@@ -434,6 +459,9 @@ ATTEMPT: Final = Statechart(
         Row("attempt.12", "SPAWNING", WRAPPER_GONE, "ENDED", action="end_unobservable"),
         Row("attempt.13", "RUNNING", WRAPPER_GONE, "ENDED", action="end_unobservable"),
         Row("attempt.14", "STOPPING", WRAPPER_GONE, "ENDED", action="end_unobservable"),
+        Row("attempt.15", "SPAWNING", ENGINE_DIED, "ENDED", action="end_engine_died"),
+        Row("attempt.16", "RUNNING", ENGINE_DIED, "ENDED", action="end_engine_died"),
+        Row("attempt.17", "STOPPING", ENGINE_DIED, "ENDED", action="end_engine_died"),
     ),
     actions={
         "stop": _stop,
@@ -441,6 +469,7 @@ ATTEMPT: Final = Statechart(
         "end_spawn_failed": _end_spawn_failed,
         "end_from_record": _end_from_record,
         "end_unobservable": _end_unobservable,
+        "end_engine_died": _end_engine_died,
     },
     time_events=(TimeEvent(RECORD_TIMEOUT, generation=True),),
     clock="logical",

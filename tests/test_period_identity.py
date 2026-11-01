@@ -469,8 +469,6 @@ def test_a_pinned_scheduled_root_refuses_a_schedulerless_resume(tmp_path: Path) 
                 tmp_path / "root",
                 clock=VirtualClock(start=t0 + timedelta(minutes=1)),
                 adapters={"CMD": FakeAdapter(default=None)},
-                settle_seconds=0.0,
-                grace_seconds=0.0,
             )
 
     _asyncio.run(scenario())
@@ -503,8 +501,6 @@ def test_a_pinned_root_refuses_resume_with_a_missing_adapter(tmp_path: Path) -> 
                 tmp_path / "root",
                 clock=VirtualClock(start=t0 + timedelta(minutes=1)),
                 adapters={},
-                settle_seconds=0.0,
-                grace_seconds=0.0,
             )
 
     _asyncio.run(scenario())
@@ -713,8 +709,6 @@ def test_resume_refuses_wiring_that_moved_off_the_pin(tmp_path: Path) -> None:
                 scheduler=Scheduler(
                     catalog, start=t0 + timedelta(minutes=1), default_tz="Europe/Zurich"
                 ),
-                settle_seconds=0.0,
-                grace_seconds=0.0,
             )
 
     _asyncio.run(scenario())
@@ -871,6 +865,7 @@ def test_the_profile_defaults_are_the_engine_s_own() -> None:
     assert LocalCommandAdapter().grace_seconds == GRACE_TERM_S == EngineSettings().grace_term_s
     assert FileWatcherAdapter().default_interval_s == FW_DEFAULT_INTERVAL_S
     parameters = inspect.signature(resume_run).parameters
-    # None = "resolve from the settings": only an explicit caller override departs from them
-    assert parameters["settle_seconds"].default is None
+    # None = "resolve from the settings": only an explicit caller override departs from them;
+    # a restart waits for nothing, so it has no settle window (spec-restart, DL-433)
+    assert not [name for name in parameters if name.startswith("settle")]
     assert parameters["grace_seconds"].default is None

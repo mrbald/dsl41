@@ -114,7 +114,10 @@ from dsl41.runner_clock import EngineError
 #: under, and every run of a snapshot's retained run history carries `rev`, the rev in force
 #: where the run opened. A snapshot that lacks it refuses by name, so no reader ever derives a
 #: run's rev.
-STATE_MACHINE_VERSION = 26
+#: 27 (DL-433): the store's meta holds `root_id`, written at genesis, and every command
+#: attempt's process cookie is `<root_id>.<run id>`, so one scan reads every attempt of the run
+#: root whichever engine start launched it. A store with no `root_id` refuses by name.
+STATE_MACHINE_VERSION = 27
 
 LOCK_NAME = "leader.lock"
 

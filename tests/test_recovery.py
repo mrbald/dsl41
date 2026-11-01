@@ -195,8 +195,6 @@ async def _resume_served(run_root: Path) -> tuple[Engine, ControlServer, asyncio
         clock=RealClock(),
         adapters={"CMD": FakeAdapter(default=None)},
         hold_open=True,
-        settle_seconds=0.0,
-        grace_seconds=0.0,
     )
     return await _serve_engine(engine)
 

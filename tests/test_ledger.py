@@ -528,8 +528,6 @@ def _resume_with(run_root: Path, at: datetime, jil: str, adapters: dict):
         run_root,
         clock=VirtualClock(start=at),
         adapters=adapters,
-        settle_seconds=0.0,
-        grace_seconds=0.0,
     )
 
 

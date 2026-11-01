@@ -85,8 +85,6 @@ async def _resume(run_root: Path, jil: str, adapter: FakeAdapter, minutes: float
         run_root,
         clock=VirtualClock(start=T0 + timedelta(minutes=minutes)),
         adapters={job_type: adapter},
-        settle_seconds=0.0,
-        grace_seconds=0.0,
     )
 
 
@@ -255,14 +253,14 @@ def test_a_start_dispatched_at_a_restart_is_dispatched_once(short_root: Path) ->
     asyncio.run(scenario())
 
 
-def test_a_refused_resume_writes_nothing(short_root: Path) -> None:
+def test_a_watch_whose_log_names_another_run_is_quarantined(short_root: Path) -> None:
     """A dispatched watch whose `watch.jsonl` names another run_id than the attempt the store
-    bound: a store/spool identity split (DL-118). The restart checks every open attempt's spool
-    before it writes, so the refused restart appends nothing."""
+    bound: a store/spool identity split (DL-118). The restart never takes that watch up: it
+    quarantines the attempt (spec-restart §7, DL-433), one `unobservable` outcome with cause
+    `quarantined` naming the split, the job held, and the engine starts."""
     from store_surgery import rows
 
     from dsl41.runner_adapters import ARTIFACT_FORMAT_VERSION, append_watch_line
-    from dsl41.runner_clock import EngineError
 
     async def scenario() -> None:
         run_root = short_root / "run"
@@ -279,10 +277,14 @@ def test_a_refused_resume_writes_nothing(short_root: Path) -> None:
                 "run_id": None,
             },
         )
-        before = rows(run_root)
-        with pytest.raises(EngineError, match="watch.jsonl reports run_id None"):
-            await _resume(run_root, _WATCH_JIL, _CountingWatch())
-        assert rows(run_root) == before
+        watch = _CountingWatch()
+        engine = await _resume(run_root, _WATCH_JIL, watch)
+        await engine.run_until_quiescent(engine.clock.now())
+        assert engine.started.is_set() and engine.oracle.store.job["w"].on_hold
+        await _close_engine(engine)
+        [outcome] = [b for _, k, b in rows(run_root) if k == "outcome"]
+        assert (outcome["outcome"], outcome["cause"]) == ("unobservable", "quarantined")
+        assert "watch.jsonl reports run_id None" in outcome["status"]["note"]
 
     asyncio.run(scenario())
 
@@ -479,8 +481,9 @@ def test_an_overdue_deadline_applies_before_a_recovered_start_dispatches(
 def test_a_refused_resume_stops_the_tasks_it_started_before_it_releases_the_lock(
     short_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A resume that fails after it relaunched a watch cancels and collects that task before
-    the journal detaches and the lock is released, so no adapter outlives the refusal."""
+    """A resume that fails after its fold has started no adapter task: the fold takes the watch
+    up only as a catch-up step of the loop (spec-restart §2, Opus round 1, R5), so a refusal
+    leaves no adapter behind when the journal detaches and the lock is released."""
     import dsl41.runner_startup as startup
     from dsl41.runner_ledger import LeaderLock
     from dsl41.runner_startup import acquire_run_root
@@ -510,8 +513,8 @@ def test_a_refused_resume_stops_the_tasks_it_started_before_it_releases_the_lock
         real_launch(self, job_ir, run_number, adapter, **kwargs)
         tasks.append(self._live[job_ir.name].task)
 
-    async def fail(*_args: object, **_kwargs: object) -> None:
-        raise RuntimeError("an injected fault after the watch relaunched")
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("an injected fault after the fold")
 
     order: list[str] = []
     real_release = LeaderLock.release
@@ -521,23 +524,21 @@ def test_a_refused_resume_stops_the_tasks_it_started_before_it_releases_the_lock
         real_release(self)
 
     monkeypatch.setattr(Engine, "_launch", launch)
-    monkeypatch.setattr(startup, "_settle_attempt", fail)
+    monkeypatch.setattr(startup, "_first_reading", fail)  # after the fold
     monkeypatch.setattr(LeaderLock, "release", release)
 
     async def second() -> None:
-        with pytest.raises(RuntimeError, match="after the watch relaunched"):
+        with pytest.raises(RuntimeError, match="after the fold"):
             await resume_run(
                 lower_source(jil),
                 run_root,
                 clock=VirtualClock(start=T0 + timedelta(minutes=2)),
                 adapters={"FW": _CountingWatch(), "CMD": FakeAdapter(default=None)},
-                settle_seconds=0.0,
-                grace_seconds=0.0,
             )
 
     asyncio.run(second())
-    assert len(tasks) == 1 and tasks[0].cancelled()
-    assert order[0] == "released with True"
+    assert tasks == []  # the watch's step never ran
+    assert order[0] == "released with "
     acquire_run_root(run_root).release()
 
 

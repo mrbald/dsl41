@@ -26,7 +26,9 @@ from dsl41.engine_charts import (
     RECORD_OUTCOME,
     ATTEMPT,
     ENGINE_LIFECYCLE,
+    ENGINE_DEATH,
     ENGINE_STOP,
+    QUARANTINED,
     UPDATE_STOP,
     WRAPPER_LOST,
     AttemptOutcome,
@@ -39,6 +41,7 @@ from dsl41.runner_attempts import (
     MAX_ATTEMPTS_PER_RUN,
     FEED_STATUS,
     HOLD_INPUT,
+    NO_GROUP,
     ORACLE_KILL,
     SET_ON_HOLD,
     AttemptTier,
@@ -1078,6 +1081,123 @@ def test_a_second_stop_request_moves_the_deadline_to_now() -> None:
     asyncio.run(scenario())
 
 
+# ---- a restart's attempts (spec-restart, DL-433)
+
+
+def test_an_engine_death_ends_an_open_attempt_from_any_state_and_ladders_nothing() -> None:
+    """spec-restart ss4: with no record the attempt ended with the engine that ran it,
+    `unobservable` with the cause of its first stop, else `engine_death`, from SPAWNING, RUNNING
+    and STOPPING alike. A restart's recorded stop signals nothing and arms no timer: what is
+    left is the cleanup's. An ended attempt ignores a later engine death."""
+
+    async def scenario() -> None:
+        world = World()
+        attempts, _ = _tiers(world)
+        spawning = attempts.dispatch(attempt_id("a", 1, 1))
+        running = _running(attempts, "b", 7)
+        stopping = _running(attempts, "c", 8)
+        attempts.restored_stop(stopping, ENGINE_STOP)
+        assert attempts.state(stopping) == "STOPPING" and not attempts.ladder_running(stopping)
+        for attempt in (spawning, running, stopping):
+            attempts.engine_died(attempt)
+        attempts.engine_died(running)
+        await _turn()
+        assert world.log == [
+            ("outcome", spawning, "unobservable", ENGINE_DEATH),
+            ("cancel_timer", spawning),
+            ("outcome", running, "unobservable", ENGINE_DEATH),
+            ("cancel_timer", running),
+            ("outcome", stopping, "unobservable", ENGINE_STOP),
+            ("cancel_timer", stopping),
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_an_engine_death_with_the_command_alive_runs_the_ladder_as_cleanup() -> None:
+    """spec-restart ss4: the outcome is journaled at the record and the live record path reads
+    what is left: a command still alive gets the ladder, the outcome stays open until it ends."""
+
+    async def scenario() -> None:
+        world = World(alive={7})
+        attempts, _ = _tiers(world)
+        job = _running(attempts, "j", 7)
+        attempts.engine_died(job)
+        assert attempts.ladder_running(job)
+        await attempts.join()
+        assert world.log == [
+            ("outcome", job, "unobservable", ENGINE_DEATH),
+            ("cancel_timer", job),
+            ("TERM", 7),
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_a_quarantined_attempt_ends_with_its_reason_and_reads_nothing() -> None:
+    """spec-restart ss7: a quarantine gives the outcome itself; nothing is read or signalled,
+    whatever is alive."""
+    world = World(alive={7})
+    attempts, _ = _tiers(world, command_alive=lambda pgid, token: pytest.fail("a reading"))
+    job = _running(attempts, "j", 7)
+    attempts.restored_stop(job, UPDATE_STOP)
+    given = AttemptOutcome("unobservable", cause=QUARANTINED, note="status.json names run x")
+    attempts.engine_died(job, given)
+    assert attempts.outcome(job) == given and not attempts.ladder_running(job)
+
+
+def test_a_closing_attempt_is_restored_ended_and_its_cleanup_reads_what_is_left() -> None:
+    """spec-restart ss5: a closing attempt is restored ENDED with its committed outcome, never
+    observed again; its cleanup runs the ladder on a live command, and nothing on a dead one.
+    One with no recorded group is read through its cookie alone (`NO_GROUP`)."""
+
+    async def scenario() -> None:
+        world = World(alive={7})
+        unnamed: list[str] = []
+        attempts = AttemptTier(
+            world,
+            grace_term_s=GRACE_TERM,
+            grace_kill_s=GRACE_KILL,
+            command_alive=lambda pgid, token: pgid in world.alive,
+            unnamed_alive=lambda attempt: unnamed.append(attempt) is None,
+        )
+        stopped = AttemptOutcome("stopped", cause=ENGINE_STOP)
+        alive, dead, bare = (attempt_id(job, 1, 1) for job in ("a", "b", "c"))
+        attempts.restore_ended(alive, stopped, plan_done=False)
+        attempts.restore_ended(dead, stopped, plan_done=True)
+        attempts.restore_ended(bare, stopped, plan_done=True)
+        assert attempts.state(alive) == "ENDED" and attempts.outcome(alive) == stopped
+        attempts.status_recorded(alive, exited(0))  # never observed again
+        assert attempts.outcome(alive) == stopped
+        assert attempts.unsettled() == (alive,)
+        attempts.spawn_recorded(alive, spawn(7))
+        attempts.spawn_recorded(dead, spawn(8))
+        for attempt in (alive, dead, bare):
+            attempts.cleanup(attempt)
+        assert attempts.ladder_running(alive) and not attempts.ladder_running(dead)
+        assert attempts.ladder_running(bare) and unnamed == [bare]
+        assert attempts.cleanup_group(bare) == (NO_GROUP, bare)
+        await attempts.join()
+        assert ("TERM", 7) in world.log and ("TERM", NO_GROUP) in world.log
+
+    asyncio.run(scenario())
+
+
+def test_a_quarantine_holds_the_job_whatever_its_marking_with_the_reason() -> None:
+    """spec-restart ss7: `quarantined` forces the hold where the job would rerun, and the
+    evidence carries the reason; the oracle's own end still stands."""
+    outcome = AttemptOutcome("unobservable", cause=QUARANTINED, note="scan failed: EIO (pids 9)")
+    common: dict[str, Any] = dict(
+        job="j", run_number=3, attempt=1, in_catalog=True, marked=False, run_id="r"
+    )
+    plan = follow_up_plan(outcome, live_run=(3, "RUNNING"), quarantined=outcome.note, **common)
+    assert plan.kind == "hold"
+    assert plan.steps[0].detail.note == "scan failed: EIO (pids 9)"
+    assert plan.steps[0].detail.cause == QUARANTINED
+    ended = follow_up_plan(outcome, live_run=(3, "SUCCESS"), quarantined=outcome.note, **common)
+    assert ended.kind == "none"
+
+
 # ---- the charts' coverage through the tiers alone
 
 TIER_SCENARIOS = [
@@ -1103,6 +1223,7 @@ TIER_SCENARIOS = [
     test_a_stop_request_during_startup_journals_it_and_exits_0,
     test_the_deadline_ends_a_drain_unclean_with_the_unsettled_attempts,
     test_a_second_stop_request_moves_the_deadline_to_now,
+    test_an_engine_death_ends_an_open_attempt_from_any_state_and_ladders_nothing,
 ]
 
 #: The one coverage item the tiers never reach, and why: the engine tier posts
@@ -1179,8 +1300,7 @@ def test_a_command_that_leaves_processes_behind_has_leaked_them(terminate: bool)
 
 def test_a_hold_lifted_during_a_drain_lets_the_drain_end_clean() -> None:
     """Opus M1, a 2b latent bug: a held attempt already ENDED whose plan is done is unsettled
-    only by its hold. Once `group_gone` lifts it during a drain, the drain ends clean at once,
-    for an attempt of this tier and for one a restart adopted held."""
+    only by its hold. Once `group_gone` lifts it during a drain, the drain ends clean at once."""
 
     async def scenario() -> None:
         world = World(alive={7}, ignores_term={7}, unkillable={7})
@@ -1192,12 +1312,9 @@ def test_a_hold_lifted_during_a_drain_lets_the_drain_end_clean() -> None:
         await attempts.join()
         await _turn()
         assert attempts.held(job)
-        attempts.adopt_held("adopted")
         engine.stop_requested(REQUEST)
-        assert engine.state == "DRAINING"
+        assert engine.state == "DRAINING"  # the held one holds the drain
         attempts.group_gone(job)
-        assert engine.state == "DRAINING"  # the adopted one still holds the drain
-        attempts.group_gone("adopted")
         assert engine.state == "STOPPED" and ("clean_shutdown",) in world.log
 
     asyncio.run(scenario())
@@ -1205,7 +1322,22 @@ def test_a_hold_lifted_during_a_drain_lets_the_drain_end_clean() -> None:
 
 def test_a_hold_lifted_with_no_engine_tier_tells_nobody() -> None:
     """With no engine tier listening, `group_gone` lifts the hold and calls nobody."""
-    attempts = AttemptTier(World(), grace_term_s=GRACE_TERM, grace_kill_s=GRACE_KILL)
-    attempts.adopt_held("adopted")
-    attempts.group_gone("adopted")
-    assert attempts.unsettled() == ()
+
+    async def scenario() -> None:
+        world = World(alive={7}, ignores_term={7}, unkillable={7})
+        attempts = AttemptTier(
+            world,
+            grace_term_s=GRACE_TERM,
+            grace_kill_s=GRACE_KILL,
+            command_alive=lambda pgid, token: pgid in world.alive,
+        )
+        job = _running(attempts, "j", 7)
+        attempts.status_recorded(job, exited(0))
+        attempts.plan_done(job)
+        await attempts.join()
+        await _turn()
+        assert attempts.held(job)
+        attempts.group_gone(job)
+        assert attempts.unsettled() == ()
+
+    asyncio.run(scenario())
