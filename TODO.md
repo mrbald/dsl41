@@ -25,6 +25,10 @@ disjoint files.
 - [x] Blocker for code merges: CLI read-error coverage of `cli_control.py` `_control_roundtrip`
   depended on incidental socket-readiness failures; isolated tests now assert exit 2, the
   diagnostic and no traceback (boss ruling 2026-11-01; PR #292).
+- [x] Blocker for code merges: the update_wiring barrier assumed `os.waitid` (absent on macOS
+  Python 3.12) and could hang in unbounded teardown; it now uses portable acknowledgements, a
+  persistent release, supervised waits and bounded cleanup, and six injected faults each end
+  within their budget with diagnostics and no surviving process (boss ruling 2026-11-02; PR #293).
 - [x] 3. Terms sweep of `docs/control-protocol.md` and `docs/access-model.md`: replace
   retired terms (the journal where DL-428 replaced it with the store, the old supervisor
   model); no rule changes. Builds now.
@@ -137,3 +141,6 @@ Found after an area was sealed as good enough. Addressed once the scope runs end
   equality ignores job order, so a row with a different `job_order` would be kept and replay
   would diverge; the token-bound plan cannot produce one today (`runner_update.py` `store_config`;
   Opus, slice config-order; DL-438).
+- [ ] The update_wiring barrier cleanup's last-resort kill SIGKILLs a hung wrapper but not its
+  command group, so the command is orphaned until it exits; kill the group through the live wrapper
+  first (`tests/update_wiring_barrier.py` `kill_wrappers`; Opus, slice barrier-fix).
