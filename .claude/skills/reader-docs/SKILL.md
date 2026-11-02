@@ -136,8 +136,9 @@ and escalation.
 ## Step 5: delivery
 
 One document per PR, on a branch named `docs/<stem>`. The PR body carries
-the brief, the reconciliation findings, and the review table. Ask before
-merging. This skill stamps nothing: a specification's `spec-review` stamp
+the brief, the reconciliation findings, and the review table. Merge through
+[coordination's Git workflow](../../../docs/agents/coordination.md#git-workflow).
+This skill stamps nothing: a specification's `spec-review` stamp
 and its 800-line clock belong to that procedure, and a reader page, a card
 or a page under `examples/` has no stamp. The README "Documents" tracks are
 updated in the same PR as any page they list.

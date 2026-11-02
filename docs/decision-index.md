@@ -405,7 +405,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-392 | Blocking supervisor requests have one monotonic deadline |  |
 | DL-393 | TUI recovery pins the running Python launch path | [docs/cli-tui-qualification.md](cli-tui-qualification.md) |
 | DL-394 | Forced maintenance waits for each whole command group | [docs/authoring.md](authoring.md) |
-| DL-395 | Opus reviews multi-file changes, Astra joins semantic and integration ones, Sol builds bounded edge code, and Fable only advises | [docs/agents/review.md](agents/review.md) |
+| DL-395 | Opus reviews multi-file changes, Astra joins semantic and integration ones, Sol builds bounded edge code, and Fable only advises | [docs/agents/operating-model.md](agents/operating-model.md), [docs/agents/review.md](agents/review.md) |
 | DL-396 | A detached launch names how it gets its supervisor: attach or spawn | [docs/runner-design.md](runner-design.md) |
 | DL-397 | Offline manufacturing consumes bound release exports |  |
 | DL-398 | One verb stops a shape 1 estate: `dsl41 estate quiesce` |  |
@@ -450,4 +450,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-437 | One main config: include globs collapse every estate input into one catalog, with an explicit lint policy | [README.md](../README.md), [docs/access-model.md](access-model.md), [docs/architecture.md](architecture.md), [docs/authoring.md](authoring.md), [docs/control-protocol.md](control-protocol.md), [docs/deploy.md](deploy.md), [docs/glossary.md](glossary.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |
 | DL-438 | Stored configurations keep catalog job order | [docs/protocol-evolution.md](protocol-evolution.md) |
 | DL-439 | The Packager builds and installs the runtime package and site service configuration | [README.md](../README.md), [docs/deploy.md](deploy.md), [docs/writing.md](writing.md) |
-| DL-440 | The owner approves operating model v3, with explicit role limits and owner escalations | [docs/agents/operating-model.md](agents/operating-model.md) |
+| DL-440 | The owner approves operating model v3, with explicit role limits and owner escalations | [docs/agent-workflow.md](agent-workflow.md), [docs/agents/coordination.md](agents/coordination.md), [docs/agents/operating-model.md](agents/operating-model.md), [docs/agents/review.md](agents/review.md) |

@@ -7,10 +7,12 @@ Role bindings and dispatch procedures are in the [coordination guide](coordinati
 
 Status: approved by the owner on 2026-11-02 (DL-440).
 
-During the transition, the stricter of this page and the guides applies.
-The owner's standing instructions, such as merge on green, keep applying.
+The guides agree with this page. For the semantic class,
+[review.md](review.md#required-passes) keeps DL-395's stricter two-vendor passes
+and same-vendor fallback. DL-430's review-round terms remain whole. Standing
+owner instructions, including merge on green under rule 27, keep applying (DL-440).
 Where a rule summarizes a guide or a decision, that guide or decision keeps
-its exact terms. A later slice reconciles the guides with this page.
+its exact terms.
 
 ## Where it lives
 1. Every operating rule is in git: `CLAUDE.md`, `docs/agents/` and `docs/agent-workflow.md`.
