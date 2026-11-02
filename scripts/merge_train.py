@@ -31,18 +31,23 @@ checks the accepted candidate and tested base. It never deletes a branch. Clean
 rebases carry acceptance only when every commit, in order, has identical exact
 blob/mode changes, message and author. No whitespace normalization or patch IDs
 are used. The original acceptance and each old/new head/base are journalled.
-Unproved equivalence pauses: record independent acceptance by updating the queued
-accepted_commit and accepted_base to the candidate in state.json. Every conflict
+Unproved equivalence pauses: copy the candidate head and base from state.json into
+accepted_commit and accepted_base in queue.json after independent acceptance. Every conflict
 resolution additionally requires integration_reviewed_commit equal to that SHA.
 Then restart. Publication uses the recorded remote head as an explicit lease.
-Only decision-log tail appends and derived index conflicts may be resolved; a
-failed resolution aborts the rebase and restores the branch.
+The train rebases only the tip. Conflicts abort and restore the branch, then pause
+for the implementer to fetch, rebase --autostash, resolve or escalate, and push with
+--force-with-lease --force-if-includes. Record independent acceptance and the
+integration_reviewed_commit in queue.json, then restart with --recover. Recovery
+accepts only that reviewed remote head; never hand-edit state.json.
+A withdrawn pending entry clears its local journal state without publishing it.
 
-GitHub's merge API has no expected-base precondition. This implementation stops
-with atomic-base-guard-unavailable after green CI. Enabling merges needs a
-server-side compare-and-merge operation that atomically guards both tested head
-and base while enforcing branch protection and required checks. Neither a fetch
-nor --match-head-commit closes that race. No main push or bypass is attempted.
+Before merging, the API must prove strict required-status-check protection and
+enforce_admins.enabled on the default branch, or the train stops with
+atomic-base-guard-unavailable.
+GitHub enforces the up-to-date base atomically; --match-head-commit pins the head.
+Base movement repeats rebase, gates and CI for the tip only (DL-442).
+No main push, administrator bypass or auto-merge is attempted.
 Only PRs whose branches are queued participate in the one-open-PR rule.
 
 An uncertain push/create/merge is journalled before sending. On restart remote
@@ -62,6 +67,7 @@ import json
 import math
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -70,10 +76,9 @@ import time
 from contextlib import contextmanager
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
+from urllib.parse import quote
 
-LOG = "docs/decision-log.md"
-INDEX = "docs/decision-index.md"
 MARKER = re.compile(rb"^(?:<{7}|>{7}|\|{7}|={7})(?:\s|$)", re.MULTILINE)
 REQUIRED = {"classify", "docs", "test (3.12)", "test (3.13)", "goldens", "coverage", "explore-page"}
 DOC_SKIPS = REQUIRED - {"classify", "docs"}
@@ -405,31 +410,6 @@ class Train:
         )
         return path
 
-    def resolve(self, path: Path) -> None:
-        conflicts = self.git("diff", "--name-only", "--diff-filter=U", "-z", cwd=path)
-        names = {p.decode() for p in conflicts.split(b"\0") if p}
-        require(names and names <= {LOG, INDEX}, "rebase-conflict")
-        expected_log = self.git("show", f"HEAD:{LOG}", cwd=path)
-        if LOG in names:
-            old = self.git("show", f"REBASE_HEAD^:{LOG}", cwd=path)
-            new = self.git("show", f"REBASE_HEAD:{LOG}", cwd=path)
-            require(new.startswith(old) and len(new) > len(old), "log-not-tail-append")
-            expected_log += new[len(old) :]
-            (path / LOG).write_bytes(expected_log)
-        else:
-            # Rule 34 applies to regeneration even without a decision-log change.
-            expected_log = (path / LOG).read_bytes()
-        (path / INDEX).write_bytes(self.git("show", f"HEAD:{INDEX}", cwd=path))
-        self.run("uv", "run", "python", "scripts/render_decision_index.py", cwd=path)
-        # Rule 33 preserves both reviewed byte strings; a renderer may alter only the index.
-        require((path / LOG).read_bytes() == expected_log, "log-render-changed")
-        self.no_markers(path)
-        self.git("diff", "--check", cwd=path)
-        self.run("uv", "run", "pytest", "-q", "tests/test_docs_hygiene.py", cwd=path)
-        self.git("add", "--", LOG, INDEX, cwd=path)
-        self.git("diff", "--cached", "--check", cwd=path)
-        self.git("rebase", "--continue", cwd=path)
-
     def signatures(self, path: Path, base: str, head: str) -> list[tuple[bytes, ...]] | None:
         commits = (
             self.git("rev-list", "--reverse", f"{base}..{head}", cwd=path).decode().splitlines()
@@ -460,7 +440,54 @@ class Train:
             parent = commit
         return signatures if signatures else None
 
+    def require_ancestor(self, base: str, head: str, *, cwd: Path | None = None) -> None:
+        try:
+            self.git("merge-base", "--is-ancestor", base, head, cwd=cwd)
+        except Stop as exc:
+            if exc.reason != "command-failed":
+                raise
+            raise Stop(
+                "rebase-ancestry-unproven",
+                f"cannot prove {base} is an ancestor of {head}: {exc.detail}",
+            ) from exc
+
     def accepted_candidate(self, entry: dict[str, Any]) -> dict[str, Any] | None:
+        pending = self.state.get("rebase_pending")
+        if pending:
+            require(pending["entry"]["branch"] == entry["branch"], "candidate-owner-changed")
+            require(
+                entry["accepted_commit"] != pending["old_head"]
+                and entry.get("integration_reviewed_commit") == entry["accepted_commit"],
+                "integration-review-required",
+                pending["detail"],
+            )
+            self.require_ancestor(pending["base"], entry["accepted_base"])
+            self.require_ancestor(entry["accepted_base"], entry["accepted_commit"])
+            remote = self.remote_head(entry)
+            require(
+                remote in (pending["remote_head"], entry["accepted_commit"]), "remote-head-changed"
+            )
+            require(
+                remote == entry["accepted_commit"], "implementer-push-required", pending["detail"]
+            )
+            require(
+                self.args.recover,
+                "recovery-required",
+                "integration-reviewed head is published; restart the train with --recover",
+            )
+            self.save(
+                candidate={
+                    **pending,
+                    "entry": entry,
+                    "acceptance": entry,
+                    "head": entry["accepted_commit"],
+                    "base": entry["accepted_base"],
+                    "remote_head": remote,
+                    "review_required": False,
+                },
+                rebase_pending=None,
+            )
+            self.event(event="implementer-push-recovered", **self.state["candidate"])
         candidate = self.state.get("candidate")
         if not candidate:
             return None
@@ -486,13 +513,46 @@ class Train:
             require(candidate["entry"] == entry, "candidate-owner-changed")
         return cast(dict[str, Any], candidate)
 
+    def rebase_conflict(self, path: Path, candidate: dict[str, Any]) -> NoReturn:
+        # DL-442: the implementer owns conflict resolution and its integration receipt.
+        conflicts = [
+            os.fsdecode(p)
+            for p in self.git("diff", "--name-only", "--diff-filter=U", "-z", cwd=path).split(b"\0")
+            if p
+        ]
+        require(conflicts, "command-failed", "rebase failed without merge conflicts")
+        detail = (
+            f"implementer: cd {shlex.quote(str(path))}; git fetch {shlex.quote(self.remote)}; "
+            f"git rebase --autostash {shlex.quote(f'{self.remote}/{self.base}')}; "
+            "resolve or escalate to the boss; run git diff --check and, for Markdown, "
+            "uv run pytest -q tests/test_docs_hygiene.py; inspect git diff --name-only "
+            "--diff-filter=U at each conflicting commit, resolve and git add -- each resolved path; "
+            "git diff --cached --check; git rebase --continue; repeat for every conflict. "
+            "Publish with git push --force-with-lease --force-if-includes "
+            f"{shlex.quote(self.remote)} {shlex.quote(candidate['entry']['branch'])}; "
+            "obtain integration-delta review of git rev-parse HEAD on git rev-parse "
+            f"{shlex.quote(f'{self.remote}/{self.base}')}; "
+            "set accepted_commit, accepted_base and integration_reviewed_commit "
+            "in queue.json before restarting the train with --recover"
+        )
+        self.save(
+            rebase_pending={
+                **candidate,
+                "conflict": True,
+                "review_required": True,
+                "detail": detail,
+                "conflicting_paths": conflicts,
+            }
+        )
+        raise Stop("rebase-conflict", detail)
+
     def rebase(self, entry: dict[str, Any], path: Path, base: str) -> None:
         current = self.accepted_candidate(entry)
         old_head = current["head"] if current else entry["accepted_commit"]
         old_base = current["base"] if current else entry["accepted_base"]
         if current and base == old_base:
             return
-        self.git("merge-base", "--is-ancestor", old_base, old_head, cwd=path)
+        self.require_ancestor(old_base, old_head, cwd=path)
         remote_head = current["remote_head"] if current else self.remote_head(entry)
         require(self.remote_head(entry) == remote_head, "remote-head-changed")
         if not current:
@@ -512,11 +572,13 @@ class Train:
             "equivalent": False,
         }
         self.save(candidate=candidate, tested=None, ci=None)
-        conflict = False
+        if base == old_base:
+            return
         try:
             try:
                 self.git(
                     "rebase",
+                    "--autostash",
                     "--merge",
                     "--no-update-refs",
                     "--reapply-cherry-picks",
@@ -529,8 +591,7 @@ class Train:
             except Stop as exc:
                 if exc.exit_status != 1:
                     raise
-                conflict = True
-                self.resolve(path)
+                self.rebase_conflict(path, candidate)
             head = self.git("rev-parse", "HEAD", cwd=path).decode().strip()
         except BaseException:
             # A failed rebase restores its branch before any later inventory (rule 46).
@@ -550,9 +611,8 @@ class Train:
         equivalent = old is not None and old == new
         candidate.update(
             head=head,
-            conflict=conflict,
             equivalent=equivalent,
-            review_required=conflict or not equivalent,
+            review_required=not equivalent,
             range_proof={
                 "old": [hashlib.sha256(b"\0".join(s)).hexdigest() for s in old or []],
                 "new": [hashlib.sha256(b"\0".join(s)).hexdigest() for s in new or []],
@@ -572,6 +632,7 @@ class Train:
                 require(not MARKER.search(contents), "conflict-marker", os.fsdecode(name))
 
     def prepare(self, entry: dict[str, Any], raw: bytes) -> bool:
+        self.accepted_candidate(entry)
         path = self.worktree(entry)
         self.git("fetch", "--", self.remote)
         base = self.git("rev-parse", f"refs/remotes/{self.remote}/{self.base}").decode().strip()
@@ -869,11 +930,59 @@ class Train:
             and self.state["ci"]["head"] == self.head(entry),
             "ci-candidate-mismatch",
         )
-        raise Stop(
+        host, repository = self.slug.split("/", 1)
+        try:
+            protection = json.loads(
+                self.run(
+                    "gh",
+                    "api",
+                    "--hostname",
+                    host,
+                    f"repos/{repository}/branches/{quote(self.base, safe='')}/protection",
+                )
+            )
+        except (Stop, ValueError) as exc:
+            raise Stop(
+                "atomic-base-guard-unavailable", "cannot prove server-side strict/admin protection"
+            ) from exc
+        checks = protection.get("required_status_checks") if isinstance(protection, dict) else None
+        admins = protection.get("enforce_admins") if isinstance(protection, dict) else None
+        require(
+            isinstance(checks, dict)
+            and checks.get("strict") is True
+            and isinstance(admins, dict)
+            and admins.get("enabled") is True,
             "atomic-base-guard-unavailable",
-            "need a server-side expected-base compare-and-merge that preserves branch "
-            "protection and required checks; gh --match-head-commit guards only the head",
+            "server-side protection must require up-to-date branches (strict) and enforce_admins.enabled",
         )
+        pr = self.view(number, entry)
+        require(pr["state"] == "OPEN" and not pr["isDraft"], "pr-not-open")
+        require(pr["baseRefOid"] == self.state["ci"]["base"], "base-moved")
+        self.unchanged(raw)
+        self.intent("merge", entry, raw, pr=number)
+        try:
+            self.run(
+                "gh",
+                "--repo",
+                self.slug,
+                "pr",
+                "merge",
+                str(number),
+                "--rebase",
+                "--match-head-commit",
+                self.head(entry),
+            )
+        except Stop as exc:
+            if exc.exit_status is None:
+                raise
+            # Rule 46: only proven non-delivery at the pinned head permits a new attempt.
+            pr = self.view(number, entry)
+            if pr["state"] == "OPEN" and pr["baseRefOid"] != self.state["ci"]["base"]:
+                self.save(intent=None)
+                raise Stop(
+                    "base-moved", "strict protection refused the obsolete tested base"
+                ) from None
+            raise
 
     def enqueue(self) -> None:
         assert self.records
@@ -894,6 +1003,25 @@ class Train:
             if self.reconcile():
                 continue
             raw, queue = self.queue()
+            pending = self.state.get("rebase_pending")
+            if pending:
+                branch = pending["entry"]["branch"]
+                if not any(e["branch"] == branch for e in queue["entries"]):
+                    self.event(event="conflict-entry-withdrawn", pending=pending)
+                    self.save(
+                        rebase_pending=None,
+                        candidate=None,
+                        tested=None,
+                        ci=None,
+                        branch=None,
+                        detail=None,
+                    )
+                else:
+                    require(
+                        queue["entries"][0]["branch"] == branch,
+                        "pending-conflict-not-tip",
+                        f"restore {branch} to the queue tip to resume review, or withdraw its entry",
+                    )
             if not queue["entries"]:
                 require(not self.state.get("intent"), "queue-owner-changed")
                 self.save(status="idle", reason=None)
@@ -902,9 +1030,16 @@ class Train:
             self.save(status="working", reason=None, branch=entry["branch"])
             docs = self.prepare(entry, raw)
             number = self.publish(entry, raw)
-            self.green(number, entry, docs)
-            self.unchanged(raw)
-            self.merge(number, entry, raw)
+            try:
+                self.green(number, entry, docs)
+                self.unchanged(raw)
+                self.merge(number, entry, raw)
+            except Stop as exc:
+                if exc.reason != "base-moved":
+                    raise
+                self.event(event="base-moved", tested=self.state["tested"])
+                self.save(tested=None, ci=None)
+                continue
             self.finish(number, entry, raw, queue)
 
 
