@@ -39,12 +39,10 @@ only when every row passed.
 | `DRILL_KEEP=1` | Keep the container. `scripts/wargame.sh --base BASE join NAME` opens a shell in it; the script prints the command. |
 | `PODMAN='sudo podman'` | Use a rootful engine. The workflow sets it. |
 
-The workflow [`service-drill.yml`](../../../.github/workflows/service-drill.yml)
-runs the same script for both images on a GitHub runner, with fail-fast disabled.
-It runs nightly on main at 01:37 UTC, on relevant PR paths, and on manual dispatch
-(DL-441). Every leg uploads setup, drill and build logs and available diagnostics,
-including failed runs. It is not a globally required check; the operator blocks
-affected merges on red. See the [nightly triage policy](../../workflows/README.md#integration-lane).
+[Integration testing §3](../../../docs/integration-testing.md#3-choose-the-lane-that-exercises-the-boundary)
+owns the service CI matrix, triggers, timeouts and evidence uploads.
+Its [failure procedure](../../../docs/integration-testing.md#4-run-a-selected-scenario-and-keep-its-evidence)
+owns nightly triage and merge blocking.
 
 ## What each row checks
 

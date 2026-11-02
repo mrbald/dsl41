@@ -80,13 +80,10 @@ The mount must allow `chmod` on a socket: a macOS bind mount through a Linux VM 
 and the engine then fails to bind its control socket.
 Copy the directory out with `docker cp` instead.
 
-The workflow `.github/workflows/dst-drill.yml` runs the same three lanes as isolated
-matrix jobs, with one step per scenario and fail-fast disabled.
-It runs nightly on main at 02:17 UTC, on relevant PR paths, and on manual dispatch.
-It uploads work directories, build logs and scenario exit statuses as
-`dst-drill-evidence-<lane>` artifacts even after failure.
-The drill is not a globally required check; the operator blocks affected merges on red.
-See the [nightly triage policy](../workflows/README.md#integration-lane).
+[Integration testing §3](../../docs/integration-testing.md#3-choose-the-lane-that-exercises-the-boundary)
+owns the CI triggers, lane matrix, timeouts and evidence uploads.
+Its [failure procedure](../../docs/integration-testing.md#4-run-a-selected-scenario-and-keep-its-evidence)
+owns nightly triage and merge blocking.
 
 ## Scenarios
 
