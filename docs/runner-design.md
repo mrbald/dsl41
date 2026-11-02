@@ -142,7 +142,7 @@ Dispatch table (emitted event → effect → what applying it does):
 | `STATUS STARTING`, job_type CMD           | SPAWN  | start a LocalCommandAdapter task |
 | `STATUS STARTING`, job_type FW            | SPAWN  | start a FileWatcherAdapter task |
 | terminal status, job has a live task      | KILL   | cancel the adapter task (see below) |
-| `MUST_START_ALARM` / `MUST_COMPLETE_ALARM`| none   | none; they reach the operator through the trace and the UI |
+| `MUST_START_ALARM` / `MUST_COMPLETE_ALARM`| none   | trace, UI and the optional site status hook (DL-446) |
 | anything on a BOX                         | none   | none (folds are oracle logic)   |
 
 An effect is applied only after its decision is durable, and a start only
@@ -160,7 +160,78 @@ no process. ON_NOEXEC needs
 no row. The SEM-22 bypass emits SUCCESS and never emits STARTING, so
 nothing spawns by construction. The alarm row writes no store record of its
 own: emitted events are never recorded in the store (§7), so an alarm exists in the
-replayed trace and nowhere else.
+replayed trace. The optional hook observes a newly committed alarm without
+adding a delivery record (DL-446).
+
+**Site status hook (DL-446).** Main TOML `[engine] status_hook` is an absolute
+executable path. Omission disables it. No arguments, expansion or shell parsing
+are accepted. Wrong types, empty or relative paths and NUL refuse with exit 2.
+A missing or nonexecutable target is a logged delivery failure, never a startup
+blocker. `status_hook_long_running_s` is a strict nonnegative integer, default
+`0` (disabled). Both are host settings loaded on restart; `reread` requires a
+restart when either changes. Rehearsal never executes hooks.
+One selected TOML byte sequence supplies the hook, host and reported launch
+settings. A fresh capture refuses if that file changes during preparation.
+
+The engine captures live writes in transition order and queues them only after
+their admission commits. Recovery admissions and committed time-half effects
+are included. Dry application, historical replay and request deduplication
+produce no notifications. Initial and restored flags and no-op writes are silent.
+
+| Event | Observation |
+| --- | --- |
+| `job_failure` | Every actual transition from another status into FAILURE at `OracleWriters._write`, including BOX and injected statuses. |
+| `alarm` | A SEM-34 timer emits `MUST_START_ALARM` or `MUST_COMPLETE_ALARM`. No reinterpretation of `alarm_if_*`, notification attributes or `min/max_run_alarm`. |
+| `job_hold` | A false→true `on_hold` write at `OracleWriters._flag`, including auto-hold and interruption hold. |
+| `job_long_running` | Once per RUNNING interval per engine invocation when admitted time minus its `status_at` reaches the configured threshold. Check once per second and recheck the row before enqueueing. Restart may notify again. Scheduling is unchanged. |
+| `engine_refused` | Startup reaches exit 2 after valid hook settings were obtained; attempt delivery before exit. |
+| `engine_down` | The systemd failure unit activates. It observes unit failure, not every engine crash. |
+
+Each invocation receives one UTF-8 JSON object and newline on stdin, then EOF:
+
+```json
+{"v":1,"id":"UUID4","event":"job_failure","at":"UTC RFC3339","host":"hostname","run_root":"/absolute/path","job":"name","run_number":1,"transition":"RUNNING->FAILURE","exit_code":1,"unit":null,"threshold_s":null}
+```
+
+Every key is mandatory. Unavailable or inapplicable values are null.
+`run_number` describes the observed row, including alarms. `transition` is the
+oracle transition or marker, otherwise null. `threshold_s` applies only to
+long-running notifications. `exit_code` is the code supplied by a `job_failure`
+transition, or the literal `2` for `engine_refused`; otherwise it is null.
+An old code retained in the row is never used. Consumers ignore unknown fields. Incompatible
+changes increment `v`.
+
+One asynchronous worker consumes a FIFO of 64 events, at most 16 KiB per event.
+Overflow and oversize drop the newest event. Diagnostics count failures and
+are rate-limited. Each notification invokes at most one process during this
+engine invocation. There is no retry, spool, replay or durable delivery record.
+Crash and shutdown may lose queued events; shutdown drops the backlog.
+A five-second monotonic deadline covers spawn, stdin and exit. Process creation
+and process I/O run off the engine's event loop. After every invocation, including
+exit 0 and timeout, TERM remaining group members, allow 0.5 seconds, then KILL.
+Use the remaining 0.5 seconds to verify group cleanup and reap. The worker holds
+the concurrency slot until cleanup completes; unconfirmed cleanup disables
+delivery with a diagnostic that is never rate-limited away. Shutdown requests
+cleanup without waiting for a stalled spawn. A retained off-loop owner cleans up
+a child that appears late, including after the caller's loop closes. No later
+invocation starts while that owner is unresolved. Hook and logging errors never
+reach admission or dispatch.
+
+The child runs as the engine account with `argv=[path]`, cwd `/`, umask 077,
+closed inherited descriptors and exactly `PATH=/usr/bin:/bin` and `LANG=C` in
+its environment. It receives no job environment or profile. Its stdout and
+stderr are discarded. Same-UID execution trusts the hook; the boundary cannot
+confine malicious hook code. Hooks must not detach: group cleanup cannot contain
+processes that escape with `setsid`.
+
+The engine unit sets `OnFailure=dsl41-engine-down.service`. The oneshot calls
+the installed `dsl41-status-hook` helper with literal hook path, run root and
+engine-unit arguments. It reads neither TOML nor the store. It uses the same
+delivery bounds, account and child environment, `Restart=no`,
+`TimeoutStartSec=7` and `KillMode=control-group`, without recursive OnFailure.
+Installation must match the TOML and helper hook paths. At most one engine
+hook and one failure helper run concurrently. Both Ubuntu and EL8 service
+drills exercise systemd's platform-specific restart behavior.
 
 The two STARTING rows carry one more condition, the **ghost-run gate**: a
 STARTING spawns only when the job's run number is past the last one this
@@ -995,8 +1066,9 @@ tokens stay materialize-on-a-live-instance).
 Also retry semantics (Q4, DL-53: kept deliberately unmodeled by scope
 decision). Also non-child orphan adoption (E4).
 The supervisor reattachment rule is retired (DL-424).
-Also alarm delivery beyond the replayed trace and the UI (no mail/pager
-integrations; an alarm is never a store record of its own, §4).
+Mail and pager integrations remain site-owned. The optional best-effort status
+hook is §4's notification boundary (DL-446); delivery guarantees and durable
+alarm delivery are non-goals. An alarm is never a store record of its own.
 Also cgroup/scope containment (documented Linux hardening path, §6a).
 Resource/load management is single-node (DL-50): the oracle honors it as
 capacity buckets, and preflight refuses the unmodelable. Out of scope:
@@ -1041,6 +1113,7 @@ the entry that built a module documents it. Nothing is re-exported: every import
 the split cannot decay into a second name for one file.
 
 - `runner.py`: the §4 engine loop.
+- `status_hook.py`: the §4 site notification worker and independent failure helper (DL-446).
 - `runner_control.py`: the §10 control plane, the socket server, its wire
   vocabulary, and both clients; frozen in `docs/control-protocol.md`, the
   control contract. The supervisor protocol is retired (DL-424).

@@ -115,7 +115,12 @@ admission frontier and gap in seconds in the [engine's output](#read-the-engines
 
 7. Copy the [engine unit](../examples/nightbank/deploy/dsl41-engine.service)
    to `/etc/systemd/system/dsl41-engine.service`.
-   Substitute `<version>` in both executable paths. Set `RequiresMountsFor`
+   Copy the [failure unit](../examples/nightbank/deploy/dsl41-engine-down.service)
+   to `/etc/systemd/system/dsl41-engine-down.service`.
+   Install the site's executable hook at `/etc/dsl41/status-hook`, executable
+   by `dsl41`. Set that same absolute path in TOML and the failure unit's
+   literal arguments. Set its run root and engine-unit arguments to match.
+   Substitute `<version>` in all three executable paths. Set `RequiresMountsFor`
    to the configured run root and every required input filesystem.
    Set `ExecStop`'s socket to that root's `control.sock`.
    Include the profile, worker and data filesystems in the mount dependencies.
@@ -141,7 +146,7 @@ admission frontier and gap in seconds in the [engine's output](#read-the-engines
    Verify the installed engine unit as root:
 
    ```sh
-   systemd-analyze verify /etc/systemd/system/dsl41-engine.service
+   systemd-analyze verify /etc/systemd/system/dsl41-engine.service /etc/systemd/system/dsl41-engine-down.service
    ```
 8. As root, reload systemd's unit definitions:
 
@@ -301,6 +306,35 @@ It must leave everything else in the run root untouched, including `runs/`,
 The host's monitoring must watch disk space.
 
 ## Watch the engine and jobs
+
+The site's optional status hook receives JSON on stdin for job failure, hold,
+SEM-34 deadline alarms and configured long-running intervals. Startup refusal
+attempts delivery after valid hook settings load. The failure unit reports unit
+failure even when TOML or the store cannot be read. A normal systemd stop does
+not activate it. A crash may restart without a failure-unit activation;
+the service drills check refusal and restart exhaustion on both supported systems.
+
+Omitting `[engine] status_hook` disables engine notifications. If the site
+disables notifications altogether, also remove the engine unit's `OnFailure`
+setting. `status_hook_long_running_s = 0` disables runtime-length notifications;
+a positive integer sets their threshold in seconds. These are host settings:
+restart after editing them. Rehearsal never invokes the hook.
+
+Delivery is best effort: one worker, 64 queued events, 16 KiB per payload,
+no retry or spool. New events are dropped on overflow or oversize. Shutdown
+drops the backlog. Process creation runs off the engine's event loop. Each
+invocation has five seconds. After every invocation, including exit 0, the worker
+TERMs its group, allows 0.5 seconds, then KILLs it and uses the remaining
+0.5 seconds to verify cleanup and reap. The slot stays occupied until cleanup
+finishes; unconfirmed cleanup disables delivery and always logs that transition.
+Other errors are counted in rate-limited journal diagnostics. Hooks must not
+detach: group cleanup cannot contain `setsid` escapees.
+Site hooks must not write inside the run root; that root belongs to the engine.
+The hook runs as `dsl41` from `/` with
+umask 077, closed inherited descriptors, only `PATH=/usr/bin:/bin` and
+`LANG=C`, and discarded stdout/stderr. It is trusted code with the service
+account's permissions. See the [payload and event contract](runner-design.md#4-engine-loop--single-writer)
+before writing a consumer; consumers must ignore unknown fields (DL-446).
 
 ```sh
 /opt/dsl41/releases/<version>/bin/dsl41 query status \
@@ -488,7 +522,8 @@ different host config. Reread prints job origins and retains findings with
 the plan. A source move alone keeps jobs running. Update uses only the
 reviewed plan's captured bytes and policy, even after sources are edited or
 removed. Update reads only `engine.run_root` from the selected TOML file.
-Changes to `as_machine`, `machine_policy` or access-map selection need restart.
+Changes to `as_machine`, `machine_policy`, access-map selection, `status_hook`
+or `status_hook_long_running_s` need restart (DL-446).
 Reread names any changed host settings and requests that restart first.
 Changing `engine.run_root` selects another root; it does not migrate an engine.
 
@@ -505,7 +540,8 @@ fresh root for the main-config service. There is no root migration command.
 
 1. Drain the engine with `systemctl stop dsl41-engine.service`.
 2. Install the new release in its own `/opt/dsl41/releases/<version>` directory.
-3. Select that executable in both `ExecStart` and `ExecStop`.
+3. Select that release in the engine's `ExecStart` and `ExecStop` and the
+   failure unit's helper `ExecStart`.
 4. Run `systemctl daemon-reload`.
 5. Run `systemctl start dsl41-engine.service` and check status.
 
@@ -570,7 +606,7 @@ Main-config restart restores the last applied estate interpretation from
 captured bytes. Estate and lint edits remain pending, including invalid
 `engine.environment` selections. Restart still reads the selected config
 as TOML and requires its supported format. It applies current `as_machine`,
-`machine_policy` and access-map settings; invalid host settings refuse with
+`machine_policy`, access-map and status-hook settings; invalid host settings refuse with
 exit 2. An omitted access map selects owner-only access. These settings stay
 effective while an interrupted update applies its captured plan.
 Other runtime-profile fields retain their stored values and checks (DL-437).
@@ -616,7 +652,11 @@ synthetic estate; they do not qualify a production workload.
 
 The scripts print a result for each row and stop on failure. They cover
 install, start, restart, container reboot, engine kill, drain, reload,
-process leaks, startup refusal, start limit and executable upgrade.
+process leaks, startup refusal, start limit, malformed TOML and executable upgrade.
+The refusal row requires `engine_refused` and `engine_down`; crash-loop
+exhaustion requires `engine_down`; normal stop requires no `engine_down`.
+Malformed TOML requires the independent helper's `engine_down` and no
+`engine_refused`. The rows check delivered payloads, not only journal text.
 The `refusal` row verifies that a pending source edit leaves the stored
 revision active after restart, then tests a foreign store version refusal.
 The `leak` row checks that a restart TERMs a job's leftover process through

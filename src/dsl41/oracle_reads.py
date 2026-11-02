@@ -43,6 +43,7 @@ from dsl41.oracle_state import (
     JobRuntime,
     OracleError,
     RuntimeState,
+    StatusObservation,
     TraceEntry,
 )
 from dsl41.semantics import DEFAULTS as DEFAULT_SWITCHES
@@ -105,6 +106,7 @@ class OracleReads:
             self.store.seed_period(carried.period_id)
         self._trace: list[TraceEntry] = []
         self._emitted: list[Event] = []
+        self.status_observations: list[StatusObservation] | None = None
         #: ss3.3: feed times are non-decreasing across the boundary, so an opened interpreter
         #: starts from the instant the seal was taken.
         self._now: datetime | None = carried.now if carried is not None else None
@@ -170,6 +172,7 @@ class OracleReads:
         twin.store = self.store.fork()
         twin._trace = []
         twin._emitted = []
+        twin.status_observations = None
         twin._tz_cache = dict(self._tz_cache)
         twin._calendars = dict(self._calendars)
         return twin
@@ -200,6 +203,26 @@ class OracleReads:
     def _emit(self, kind: EventKind, **payload: object) -> None:
         assert self._now is not None
         self._emitted.append(Event(at=self._now, kind=kind, payload=dict(payload)))
+
+    def _observe_status(
+        self, event: str, job: str, transition: str, exit_code: int | None = None
+    ) -> None:
+        """Capture live rows in memory without hook I/O (DL-446).
+
+        Recording errors propagate; delivery failures are isolated after commit.
+        """
+        if self.status_observations is not None and self._now is not None:
+            row = self._runtime(job)
+            self.status_observations.append(
+                StatusObservation(
+                    event,
+                    self._now,
+                    job,
+                    row.run_number,
+                    transition,
+                    exit_code,
+                )
+            )
 
     def _record(self, job: str, transition: str, cause: str) -> None:
         assert self._now is not None

@@ -451,9 +451,9 @@ def test_06_run_never_mixes_two_config_reads(
     path = estate_file(tmp_path)
     prepare = main.prepare
 
-    def changed(selected: Path):
+    def changed(selected: Path, raw: bytes | None = None):
         selected.write_text(selected.read_text().replace('/run"', '/other"'))
-        return prepare(selected)
+        return prepare(selected, raw)
 
     import dsl41.cli_run
 
@@ -519,29 +519,35 @@ def test_02_shell_tokens_stay_literal(tmp_path: Path) -> None:
 
 def boot_and_stop(path: Path) -> str:
     root = Path(main.load_config(path).engine.run_root)
-    with subprocess.Popen(
-        [sys.executable, "-m", "dsl41", "run", "--config", str(path)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    ) as child:
+    resumed = (root / "engine.db").exists()
+    log = path.parent / "boot.log"
+    with (
+        log.open("w") as output,
+        subprocess.Popen(
+            [sys.executable, "-m", "dsl41", "run", "--config", str(path)],
+            stdout=output,
+            stderr=subprocess.STDOUT,
+        ) as child,
+    ):
         try:
             deadline = time.monotonic() + 30
-            while (
-                not (root / "control.sock").exists()
-                and child.poll() is None
-                and time.monotonic() < deadline
-            ):
+            while child.poll() is None:
+                text = log.read_text()
+                ready = "engine up; control socket:" in text
+                if ready and (not resumed or "pending source changes; run dsl41 reread" in text):
+                    break
+                assert time.monotonic() < deadline, text
                 time.sleep(0.05)
             if child.poll() is None:
                 child.terminate()
-            output, _ = child.communicate(timeout=30)
-            assert child.returncode == 0, output
-            return output
+            child.wait(timeout=30)
+            text = log.read_text()
+            assert child.returncode == 0, text
+            return text
         finally:
             if child.poll() is None:
                 child.kill()
-                child.communicate(timeout=10)
+                child.wait(timeout=10)
 
 
 def test_10_restart_uses_stored_catalog_and_reports_pending(short_root: Path) -> None:

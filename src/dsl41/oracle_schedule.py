@@ -576,6 +576,7 @@ class OracleSchedule(OracleReads):
             # inverted run check: alarm iff NO new run began since the tick
             if ev.payload.get("run") == rt.run_number:
                 self._emit("MUST_START_ALARM", job=job)
+                self._observe_status("alarm", job, "MUST_START_ALARM")
                 self._record(job, "MUST_START_ALARM", "must_start_times deadline (SEM-34)")
             return
         if check == "must_complete":
@@ -583,6 +584,7 @@ class OracleSchedule(OracleReads):
             # tick asked for has not completed, including when it never began
             if not self._slot_run_completed(rt, ev.payload.get("run")):
                 self._emit("MUST_COMPLETE_ALARM", job=job)
+                self._observe_status("alarm", job, "MUST_COMPLETE_ALARM")
                 self._record(job, "MUST_COMPLETE_ALARM", "must_complete_times deadline (SEM-34)")
 
 

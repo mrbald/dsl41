@@ -57,12 +57,13 @@ synthetic stores and wrapper spools. A wait polls with a deadline.
 | `restart` | `systemctl restart` | A new invocation, `engine stopped: clean_shutdown`, the holds are still there |
 | `reboot` | Restarts the container | The enabled unit starts at boot and resumes the same root |
 | `kill-engine` | SIGKILL of the engine with a job running | The unit restarts it; attempt 1 ended (`lifeline` or `engine_death`) and attempt 2 of the same run runs |
-| `drain` | `systemctl stop` with a job that ignores TERM | The stop waits the TERM grace, `ExecStop` exits 0, `clean_shutdown`; after the start the rerun follows `engine_stop` |
+| `drain` | `systemctl stop` with a job that ignores TERM | The stop waits the TERM grace, `ExecStop` exits 0, `clean_shutdown`, no `engine_down`; after the start the rerun follows `engine_stop` |
 | `reload` | `dsl41 reread`, then `dsl41 update` with a running job and a changed definition | Exit 1 from reread, a refusal without `--stop-running`, `config_rev` + 1, a rerun after `update_stop` on the new command |
 | `leak` | A job leaves a child in its own session | Both images require the engine's cookie-scan TERM at the job's exit and at restart; the startup log names the image's expected primitive (DL-431, DL-433, DL-436) |
 | `restart-faults` | Runs the [listed synthetic fault cases](restart_faults.py) under the installed interpreter in transient systemd units | Independent process witnesses, effect counts and record order pin interrupted attempts, quarantine, deadlines, holds and FW progress |
-| `refusal` | Restarts with pending source edits, then with an unsupported store version | Source edits stay pending at the same revision; the store mismatch exits 2 and stays failed; restoring the version recovers |
-| `start-limit` | SIGKILL of the engine until the unit gives up | Failed at the sixth kill, `repeated too quickly`; `reset-failed` and a start recover |
+| `refusal` | Restarts with pending source edits, then with an unsupported store version | Source edits stay pending at the same revision; the store mismatch exits 2 and stays failed; one `engine_refused` and one `engine_down` are delivered; restoring the version recovers |
+| `start-limit` | SIGKILL of the engine until the unit gives up | Failed at the sixth kill, `repeated too quickly`, `engine_down` delivered; `reset-failed` and a start recover |
+| `malformed-toml` | Starts with unreadable TOML syntax | Exit 2 stays failed; the independent helper delivers `engine_down` with literal root and unit, without `engine_refused`; restoring TOML recovers |
 | `upgrade` | Installs the same tree as version `X.post1` into a separate release venv, selects it in the unit and restarts | The engine runs from the new venv; the root, its revision and the holds are kept |
 
 The `restart-faults` cases print hash and environment receipts. The evidence
@@ -82,6 +83,10 @@ failure.
   procedure](../../../docs/deploy.md).
 - The night's profile supplies `NIGHTBANK_SOCKET` for the estate's own
   `SET_GLOBAL` commands.
+- The drill installs both units and a hook at `/etc/dsl41/status-hook`.
+  It appends stdin to `/srv/dsl41/nightbank/night/status-hooks.jsonl`,
+  which the drill owns outside the engine's run root.
+  Production delivery remains the site's responsibility (DL-446).
 - The region anchors are six hours out, and the `start` row holds every job
   the calendar starts, so only the drill's requests start a job.
 - The drill's jobs wait on a global nobody sets. That gate avoids lint's

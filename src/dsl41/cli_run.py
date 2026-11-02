@@ -9,6 +9,7 @@ oracle, and run history folded out of one or more run roots.
 from __future__ import annotations
 
 from enum import Enum
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
@@ -38,6 +39,7 @@ from dsl41.ir import CatalogIR
 from dsl41.main_config import CONFIG_OPT, selected_config
 from dsl41.runner_config import tz_aliases_of
 from dsl41.state_machine import EXIT_STATECHART_ERROR, STATECHART_LOG_PREFIX, StatechartError
+from dsl41.status_hook import HookSettings, StatusHooks, notify_once
 
 if TYPE_CHECKING:
     import asyncio
@@ -372,6 +374,42 @@ def run(
 
 
 def _run_main_config(path: Path, *, ui: bool) -> None:
+    """Obtain valid hook settings before any other startup refusal (DL-446)."""
+    import asyncio
+
+    from dsl41.main_config import read_document
+    from dsl41.estate_manifest import read_regular, ManifestError
+    from dsl41.reload_plan import RereadRefused
+
+    try:
+        raw = read_regular(path)
+        document = read_document(path, raw)
+        engine = document.get("engine", {})
+        if not isinstance(engine, dict):
+            raise ValueError("engine must be a table")
+        hooks = HookSettings.model_validate(
+            {key: engine[key] for key in HookSettings.model_fields if key in engine}
+        )
+    except (RereadRefused, ValueError, OSError, ManifestError) as exc:
+        raise typer.Exit(refuse(exc)) from exc
+    root_value = engine.get("run_root")
+    root = (
+        Path(root_value)
+        if isinstance(root_value, str) and os.path.isabs(root_value) and "\x00" not in root_value
+        else None
+    )
+    try:
+        _run_main_config_checked(path, ui=ui, hooks=hooks, raw=raw)
+    except typer.Exit as exc:
+        if exc.exit_code == 2 and hooks.status_hook is not None:
+            try:
+                asyncio.run(notify_once(hooks.status_hook, root, "engine_refused", exit_code=2))
+            except Exception:
+                pass
+        raise
+
+
+def _run_main_config_checked(path: Path, *, ui: bool, hooks: HookSettings, raw: bytes) -> None:
     """Prepare a new root; an existing root loads its stored capture under lock (DL-437)."""
     import asyncio
     from datetime import UTC, datetime
@@ -383,9 +421,9 @@ def _run_main_config(path: Path, *, ui: bool) -> None:
     from dsl41.semantics import resolve
 
     try:
-        host = main_config.load_host(path)
+        host = main_config.load_host(path, raw)
         root = Path(host.run_root)
-        estate = None if (root / "engine.db").exists() else main_config.prepare(path)
+        estate = None if (root / "engine.db").exists() else main_config.prepare(path, raw)
         launch = main_config.launch_settings(host, path)
         if estate is not None and launch != estate.metadata["launch"]:
             raise RereadRefused([f"{path}: changed during preparation"])
@@ -421,6 +459,7 @@ def _run_main_config(path: Path, *, ui: bool) -> None:
                     main_config_path=path,
                     captured_estate=estate,
                     main_launch=launch,
+                    hook_settings=hooks,
                 )
             )
         )
@@ -666,6 +705,7 @@ async def _serve_run(
     main_config_path: Path | None = None,
     captured_estate: "Estate | None" = None,
     main_launch: dict[str, object] | None = None,
+    hook_settings: HookSettings | None = None,
 ) -> int:
     """`dsl41 run`, from the acquire to the last teardown.
 
@@ -807,6 +847,8 @@ async def _serve_run(
         # the first run writes the defaults out (spec-wiring 1b); the read above already
         # refused a file that does not read
         engine.launch_settings = dict(main_launch or {})
+        if hook_settings is not None and hook_settings.status_hook is not None:
+            engine.status_hooks = StatusHooks(engine, hook_settings)
         load_settings(run_root)
         # what the restart did not apply: E9's missed scheduler ticks (DL-91)
         for ev, reason in engine.drops:

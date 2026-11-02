@@ -681,6 +681,7 @@ Tools:
 
 Runner:
 
+- `src/dsl41/status_hook.py`: the bounded site notification worker and failure-unit helper (DL-446).
 - `src/dsl41/runner.py`: the engine: the single-writer loop over the
   oracle, with the dispatch table, the time-ordered event queue, the
   stale-completion gate, admission, and dispatch behind a `dispatch`

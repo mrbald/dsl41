@@ -1,0 +1,15 @@
+# Site failure delivery uses literal arguments and never reads TOML or the store (DL-446).
+[Unit]
+Description=dsl41 engine failure notification (nightbank example)
+
+[Service]
+Type=oneshot
+User=dsl41
+Group=dsl41
+WorkingDirectory=/
+UMask=0077
+Environment=PATH=/usr/bin:/bin LANG=C
+ExecStart=/opt/dsl41/releases/<version>/bin/dsl41-status-hook /etc/dsl41/status-hook /srv/dsl41/runs/nightbank dsl41-engine.service
+Restart=no
+TimeoutStartSec=7
+KillMode=control-group
