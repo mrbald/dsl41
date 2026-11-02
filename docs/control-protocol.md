@@ -188,7 +188,8 @@ selects the engine and its inputs (DL-437). `reread` compiles the selected
 inputs together and captures the config, source mapping and input bytes.
 It prints changed jobs' sources. `update` applies those captured bytes
 without reading the sources or importing Python modules. Host settings
-(`as_machine`, `machine_policy`, `access_map`) take effect at restart;
+(`as_machine`, `machine_policy`, `access_map`, `status_hook`,
+`status_hook_long_running_s`) take effect at restart (DL-446);
 `reread` refuses a candidate whose host settings differ from the running
 engine's. The [deployment guide](deploy.md) defines the commands and lint policy.
 
@@ -613,7 +614,8 @@ settings it runs under (`timezone`, `timezone_aliases`, `semantics`,
 `runs` each row's status and run number, and `tombstones` the flags each
 removed job's tombstone kept (`ON_HOLD`, `ON_ICE`, `ON_NOEXEC`), for the
 removed names that kept any. `launch` reports the main-config engine location
-and host settings (`run_root`, `as_machine`, `machine_policy`, `access_map`), or an empty object for a
+and host settings (`run_root`, `as_machine`, `machine_policy`, `access_map`,
+`status_hook`, `status_hook_long_running_s`), or an empty object for a
 legacy engine (DL-437).
 
 ### `trace [since]`

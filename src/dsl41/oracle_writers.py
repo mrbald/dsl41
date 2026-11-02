@@ -132,14 +132,19 @@ class OracleWriters(OracleCascade):
         self.store.transition(job, new, self._now, line.code, clear_exit_code=line.clear)
         self._record(job, f"{old}->{new}", line.cause)
         self._emit("STATUS", job=job, status=new)
+        if new == "FAILURE" and old != new:
+            self._observe_status("job_failure", job, f"{old}->{new}", line.code)
 
     def _status_reached(self, job: str) -> JobStatus:
         """The status the job's instance is in."""
         return status_of(self.store.machines.active(self.store.job_key(job)))
 
     def _flag(self, job: str, target: FlagState, marker: str, cause: str) -> None:
+        held = self._runtime(job).on_hold
         self.store.move_flag(job, target)
         self._record(job, marker, cause)
+        if not held and self._runtime(job).on_hold:
+            self._observe_status("job_hold", job, marker)
 
     def _mark_resolved(self, job: str) -> None:
         """An operator's INACTIVE on a member of a RUNNING box resolves it,

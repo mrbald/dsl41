@@ -122,7 +122,8 @@ from typing import Any, Final
 from dsl41.engine_charts import QUARANTINED, UPDATE_STOP, AttemptOutcome, DrainRequest
 from dsl41.ir import CatalogIR, JobIR
 from dsl41.oracle import Oracle
-from dsl41.oracle_state import Event, EventSource, JobRuntime
+from dsl41.oracle_state import Event, EventSource, JobRuntime, StatusObservation
+from dsl41.status_hook import StatusHooks
 from dsl41.runner_adapters import (
     AdapterContext,
     Failed,
@@ -479,6 +480,7 @@ class Engine:
         self.adapters = dict(adapters)  # job_type -> adapter; no BOX row
         self.journal = journal
         self.run_root = run_root
+        self.status_hooks: StatusHooks | None = None
         self.scheduler = scheduler
         self.hold_open = hold_open
         #: events not applied: step 6's gate rejections and resume's missed
@@ -1777,7 +1779,12 @@ class Engine:
         self.frontiers = admitted
         self.decisions.note(attempt)
         self._applying = True
-        applied = apply_attempt(self.oracle, attempt, forced=forced)
+        observations: list[StatusObservation] = []
+        self.oracle.status_observations = observations if self.status_hooks is not None else None
+        try:
+            applied = apply_attempt(self.oracle, attempt, forced=forced)
+        finally:
+            self.oracle.status_observations = None
         # the index takes the decision before the store does, so a statechart error stops the
         # engine before any durable write of it (statechart-engine ss5)
         self.decisions.record(applied.result)
@@ -1790,6 +1797,11 @@ class Engine:
                 also.append(follow_up_done(plan, position, self.journal.next_seq(), pending.at))
             self.journal.admission(attempt, applied.result, *also)
         self.frontiers = self.frontiers.record(attempt.index)
+        if self.status_hooks is not None:
+            try:
+                self.status_hooks.delivery.observe(observations)
+            except Exception:
+                pass
         if quarantine is not None:  # loud once the quarantine is durable
             self.quarantined.append((applied.result, quarantine[1]))
             report_quarantine(applied.result)
@@ -2181,6 +2193,8 @@ class Engine:
 
         Anyone parked on a decision is told first (S3) that their input never reached admission,
         so nothing in the log refers to it."""
+        if self.status_hooks is not None:
+            await self.status_hooks.close()
         for _, _, pending in self._queue:
             if pending.reply is not None and not pending.reply.done():
                 # a stop queued behind the one that stopped the engine: it is answered too

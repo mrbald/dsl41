@@ -7,6 +7,7 @@
 # and exit 0; it returns once the engine has exited.
 [Unit]
 Description=dsl41 engine (nightbank example)
+OnFailure=dsl41-engine-down.service
 # the run root below; no start before its file system is mounted, so an
 # absent mount is never read as an empty root
 RequiresMountsFor=/srv/dsl41/runs/nightbank /opt/nightbank/cfg /etc/dsl41

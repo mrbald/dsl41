@@ -15,8 +15,16 @@ ESTATE=$NIGHTBANK/cfg
 CONFIG=/etc/dsl41/dsl41.toml
 ROOT=/srv/dsl41/runs/nightbank
 SOCK=$ROOT/control.sock
+
+hook_count() { # hook_count EVENT -- count independently delivered notifications (DL-446)
+    as_dsl41 cat "$HOOK_EVENTS" | jq -s --arg event "$1" '[.[] | select(.event == $event)] | length'
+}
+hook_count_is() { [ "$(hook_count "$1")" = "$2" ]; }
+hook_count_at_least() { [ "$(hook_count "$1")" -ge "$2" ]; }
 # the night's data, logs and profile, the service user's own
 NIGHT=/srv/dsl41/nightbank/night
+# The drill owns hook evidence outside the engine-owned run root (DL-446).
+HOOK_EVENTS=$NIGHT/status-hooks.jsonl
 # the drill's own jobs and their command, installed beside the estate
 DRILL_JIL=$ESTATE/drill.jil
 DRILL_JOB=/opt/dsl41/drill/bin/drill-job

@@ -24,6 +24,7 @@ import copy
 import heapq
 
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from types import MappingProxyType
 from typing import Final, Literal, cast, get_args
@@ -43,6 +44,18 @@ from dsl41.state_machine import (
     StatechartError,
 )
 from dsl41.state_machine import Event as ChartEvent
+
+
+@dataclass(frozen=True)
+class StatusObservation:
+    """An ephemeral live write observation, never an oracle event or stored row (DL-446)."""
+
+    event: str
+    at: datetime
+    job: str
+    run_number: int
+    transition: str
+    exit_code: int | None
 
 
 class OracleError(ValueError):
