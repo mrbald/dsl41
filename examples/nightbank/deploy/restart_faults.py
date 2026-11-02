@@ -214,15 +214,34 @@ async def engine_worker(root: Path, mode: str) -> None:
     def refused(*_args: object) -> None:
         raise OSError(errno.EPERM, "synthetic send refusal")
 
-    if mode == "probe-send":
-        signal.pidfd_send_signal = refused
-    elif mode == "probe-emfile":
+    @contextlib.contextmanager
+    def probe_fault() -> Any:
+        # DL-436 selects once at startup; asyncio's child watcher also uses pidfds.
+        original_open = getattr(os, "pidfd_open", None)
+        original_send = getattr(signal, "pidfd_send_signal", None)
 
         def exhausted(*_args: object) -> int:
             raise OSError(errno.EMFILE, "synthetic probe exhaustion")
 
-        os.pidfd_open = exhausted
-    elif mode == "scan-failed":
+        if mode == "probe-send":
+            signal.pidfd_send_signal = refused
+        elif mode == "probe-emfile":
+            os.pidfd_open = exhausted
+        try:
+            yield
+        finally:
+            if mode == "probe-send":
+                if original_send is None:
+                    del signal.pidfd_send_signal
+                else:
+                    signal.pidfd_send_signal = original_send
+            elif mode == "probe-emfile":
+                if original_open is None:
+                    del os.pidfd_open
+                else:
+                    os.pidfd_open = original_open
+
+    if mode == "scan-failed":
         runner_procid.ours = lambda *_: runner_procid.Ours({}, error=errno.EIO)
     kwargs = dict(
         clock=RealClock(),
@@ -233,7 +252,10 @@ async def engine_worker(root: Path, mode: str) -> None:
     catalog = lower_source((root / "estate.jil").read_text())
     run = root / "run"
     if (run / "engine.db").exists():
-        engine = await resume_run(catalog, run, **kwargs)
+        with probe_fault():
+            engine = await resume_run(catalog, run, **kwargs)
+        if mode in ("probe-send", "probe-emfile"):
+            assert not engine.stops.pidfd
         if mode == "send-refused":
             # Selection already succeeded. DL-436 forbids a per-target fallback now.
             real_send = signal.pidfd_send_signal if engine.stops.pidfd else os.kill
@@ -306,7 +328,8 @@ async def engine_worker(root: Path, mode: str) -> None:
         while not (root / "continue").exists():
             await asyncio.sleep(0.01)
     else:
-        engine = start_run(catalog, run, **kwargs)
+        with probe_fault():
+            engine = start_run(catalog, run, **kwargs)
         engine.inject(Event(at=engine.clock.now(), kind="ON_HOLD", payload={"job": "guard"}))
         engine.inject(Event(at=engine.clock.now(), kind="STARTJOB", payload={"job": "j"}))
     server = ControlServer(engine, run / "control.sock")

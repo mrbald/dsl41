@@ -59,6 +59,13 @@ jobs:
           PODMAN: sudo podman
         run: |
           bash examples/nightbank/deploy/drill-local.sh --image ${{ matrix.image }} all 2>&1 | tee "$DRILL_EVIDENCE/drill.log"
+      - name: make restart evidence readable
+        if: always()
+        run: |
+          if sudo test -d "$DRILL_EVIDENCE/restart-faults"; then
+            sudo chown -R -- "$(id -u):$(id -g)" "$DRILL_EVIDENCE/restart-faults"
+            sudo chmod -R -- u+rX "$DRILL_EVIDENCE/restart-faults"
+          fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
