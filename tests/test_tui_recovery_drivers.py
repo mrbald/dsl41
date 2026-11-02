@@ -11,6 +11,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import sys
@@ -24,7 +25,13 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from dsl41.runner_control import ControlClient, ControlClientError
-from tui_terminal import Terminal, selected_filter_ready, table_focus_ready
+from tui_diagnostics import install_recorder
+from tui_terminal import (
+    Terminal,
+    TerminalAcknowledgementError,
+    selected_filter_ready,
+    table_focus_ready,
+)
 
 _TEXT = (
     "insert_job: recovery_box\njob_type: b\n\n"
@@ -33,11 +40,11 @@ _TEXT = (
     "insert_job: recovery_other\njob_type: c\ncommand: x\nmachine: m1\n"
 )
 _TIMEOUT = 15.0
-# DL-391: after Esc clears the filter, the driver waits for the table title that only a cleared
+# After Esc clears the filter, the driver waits for the table title that only a cleared
 # filter renders. The event log already names every job, so a job name proves nothing, and a `q`
 # sent within textual's escape delay of the Esc is parsed as alt+q and never detaches.
 _UNFILTERED = "jobs 3/3"
-# DL-391: the footer draws "esc clear" only while the filter line has focus, so it proves `/`
+# The footer draws "esc clear" only while the filter line has focus, so it proves `/`
 # opened the line. A kept filter shows its value, and the event log already names that job.
 _FILTER_OPEN = "esc clear"
 _SGR = re.compile(rb"\x1b\[[\d;:]*m")
@@ -258,6 +265,157 @@ def test_barrier_wait_preserves_the_drivers_early_error() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("eof", [False, True])
+def test_failed_terminal_wait_reports_raw_model_and_child_observations(
+    tmp_path: Path, eof: bool
+) -> None:
+    async def scenario() -> None:
+        terminal = Terminal(tmp_path, 0.01)
+        terminal.recording = True
+        observation = {
+            "kind": "wrapper-start",
+            "COLUMNS": "150",
+            "LINES": "44",
+            "TERM": "xterm-256color",
+            "python_executable": "/test/python",
+            "python_version": "3.12.3 diagnostic",
+        }
+        calls = [
+            {"kind": "call", "sequence": 1, "result": [150, 44]},
+            {"kind": "call", "sequence": 2, "result": [110, 36]},
+        ]
+        terminal.observation_path.write_text(
+            "\n".join(json.dumps(record) for record in [observation, *calls]) + "\n"
+        )
+        footer = b" s start  k kill  q detach ".ljust(150)
+        terminal.raw.extend(b"excluded-prefix" + b"x" * 4096 + b"\x1b[44;1H" + footer)
+        terminal.eof = eof
+        try:
+            with pytest.raises(TerminalAcknowledgementError) as caught:
+                await terminal.until("missing acknowledgement", lambda _data: False, after=0)
+            message = str(caught.value)
+            assert "missing acknowledgement" in message
+            assert f"raw_tail={bytes(terminal.raw[-4096:])!r}" in message
+            assert "excluded-prefix" not in message
+            assert "parsed_screen_size=(150, 44)" in message
+            assert f"parsed_footer={footer.decode()!r}" in message
+            assert "observed_cursor_extent=(1, 44)" in message
+            for key, value in observation.items():
+                assert f'"{key}": {json.dumps(value)}' in message
+            for call in calls:
+                assert json.dumps(call, sort_keys=True) in message
+        finally:
+            terminal.close()
+
+    asyncio.run(scenario())
+
+
+def test_child_environment_retains_inherited_geometry(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COLUMNS", "999")
+    monkeypatch.setenv("LINES", "888")
+    monkeypatch.setenv("PYTHONPATH", "/not-inherited")
+    assert _environment()["COLUMNS"] == "999"
+    assert _environment()["LINES"] == "888"
+    assert "PYTHONPATH" not in _environment()
+
+
+def test_startup_only_record_says_no_observed_call_and_keeps_environment_values_private(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sentinel = "value-that-must-not-be-logged-482719"
+    monkeypatch.setenv("TUI_PRIVATE_SENTINEL", sentinel)
+    monkeypatch.setattr(shutil, "get_terminal_size", shutil.get_terminal_size)
+
+    async def scenario() -> None:
+        terminal = Terminal(tmp_path, 0.01)
+        terminal.recording = True
+        install_recorder(terminal.observation_path)
+        try:
+            message = str(terminal.failure("startup-only"))
+            assert "no observed call" in message
+            assert '"kind": "wrapper-start"' in message
+            assert "TUI_PRIVATE_SENTINEL" in message
+            assert sentinel not in message
+            assert len(terminal.observation()["records"]) == 1
+        finally:
+            terminal.close()
+
+    asyncio.run(scenario())
+
+
+def test_size_recorder_preserves_arguments_result_and_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    size = os.terminal_size((222, 33))
+    arguments: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+    def original(*args: Any, **kwargs: Any) -> os.terminal_size:
+        arguments.append((args, kwargs))
+        return size
+
+    monkeypatch.setattr(shutil, "get_terminal_size", original)
+    monkeypatch.setenv("COLUMNS", "999")
+    monkeypatch.setenv("LINES", "888")
+    before = dict(os.environ)
+    path = tmp_path / "observations.jsonl"
+    install_recorder(path)
+    assert shutil.get_terminal_size((90, 20)) is size
+    assert shutil.get_terminal_size(fallback=(91, 21)) is size
+    assert arguments == [(((90, 20),), {}), ((), {"fallback": (91, 21)})]
+    assert dict(os.environ) == before
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert records[0]["kind"] == "wrapper-start" and "result" not in records[0]
+    assert records[0]["COLUMNS"] == "999" and records[0]["LINES"] == "888"
+    assert records[1:] == [
+        {"kind": "call", "sequence": 1, "result": [222, 33]},
+        {"kind": "call", "sequence": 2, "result": [222, 33]},
+    ]
+
+
+@pytest.mark.parametrize("override", ["DSL41_TUI_EXECUTABLE", "DSL41_INSTALLED_EXECUTABLE"])
+def test_installed_terminal_command_is_launched_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, override: str
+) -> None:
+    for name in ("DSL41_TUI_EXECUTABLE", "DSL41_INSTALLED_EXECUTABLE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(override, "/not-a-python-script/dsl41")
+    invoked: list[tuple[str, ...]] = []
+
+    async def spawn(*command: str, **kwargs: Any) -> None:
+        invoked.append(command)
+        assert kwargs["env"]["COLUMNS"] == "999"
+        assert kwargs["env"]["LINES"] == "888"
+        assert kwargs["env"]["TERM"] == "xterm-256color"
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+
+    async def scenario() -> None:
+        terminal = Terminal(tmp_path, _TIMEOUT)
+        command = _command("ui", "--socket", "/test/control.sock")
+        try:
+            await terminal.start(command, {"COLUMNS": "999", "LINES": "888"})
+            assert invoked == [tuple(command)]
+            assert not terminal.recording and not terminal.observation_path.exists()
+        finally:
+            terminal.close()
+
+    asyncio.run(scenario())
+
+
+def test_terminal_failure_names_the_last_reset_control_and_offset(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        terminal = Terminal(tmp_path, _TIMEOUT)
+        try:
+            terminal.raw.extend(b"prefix\x1b[2J" + b"x" * 4096)
+            message = str(terminal.failure("reset", after=2))
+            assert '"offset": 6' in message
+            assert f'"token": {json.dumps(repr(b"\x1b[2J"))}' in message
+        finally:
+            terminal.close()
+
+    asyncio.run(scenario())
+
+
 _FILTERED_SELECTION = b"\x1b[2;91H explain: recovery_child \x1b[5;1H jobs 1/3 /recovery_child/ "
 
 
@@ -299,7 +457,7 @@ def test_terminal_freshness_excludes_history_and_waits_for_complete_bytes(tmp_pa
             assert not waiter.done()
             terminal.raw.extend(_FILTERED_SELECTION[:-2])
             terminal.changed.set()
-            # DL-391: another observation must be consumed before asserting a partial repaint blocks.
+            # Another observation must be consumed before asserting a partial repaint blocks.
             terminal.waiting["selected"].clear()
             await asyncio.wait_for(terminal.waiting["selected"].wait(), _TIMEOUT)
             assert not waiter.done()
@@ -388,7 +546,7 @@ async def _filter_and_hold(terminal: Terminal) -> int:
 
 @pytest.mark.parametrize("barriers", [False, True], ids=["cli", "withheld-acks"])
 def test_real_terminal_filter_selection_resize_confirm_cancel_and_detach(
-    short_root: Path, tmp_path: Path, barriers: bool
+    short_root: Path, tmp_path: Path, barriers: bool, request: pytest.FixtureRequest
 ) -> None:
     async def scenario() -> None:
         estate = _Estate(short_root, tmp_path)
@@ -434,6 +592,9 @@ def test_real_terminal_filter_selection_resize_confirm_cancel_and_detach(
                 await loop.sock_sendall(parent, b"r")
             mark = await driver
             await _wait_held(client)
+            if terminal.recording:
+                records = terminal.observation()["records"]
+                assert records and records[0]["kind"] == "wrapper-start"
 
             async def until(text: str, *, after: int) -> None:
                 await terminal.until(
@@ -457,6 +618,10 @@ def test_real_terminal_filter_selection_resize_confirm_cancel_and_detach(
             assert await asyncio.wait_for(terminal.process.wait(), timeout=5) == 0
             assert await _held(client)
             assert estate.socket.exists()
+        except TerminalAcknowledgementError:
+            raise
+        except Exception as exc:
+            raise terminal.failure(f"{type(exc).__name__}: {exc}") from exc
         finally:
             if driver is not None and not driver.done():
                 driver.cancel()
@@ -467,11 +632,18 @@ def test_real_terminal_filter_selection_resize_confirm_cancel_and_detach(
             terminal.close()
             parent.close()
             child.close()
+            observations = {
+                "parent_pty_sizes": terminal.pty_sizes,
+                "parent_environment": terminal.parent_environment,
+                "tui": terminal.observation(),
+            }
+            request.node.user_properties.append(("tui_observations", json.dumps(observations)))
             (tmp_path / "driver-evidence.json").write_text(
                 json.dumps(
                     {
                         "sent": [data.decode() for data in terminal.sent],
                         "marks": terminal.marks,
+                        "observations": observations,
                     },
                     indent=2,
                 )
@@ -484,7 +656,7 @@ def test_real_terminal_filter_selection_resize_confirm_cancel_and_detach(
 
 
 def _footer_ready(rendered: bytes, columns: int, rows: int) -> bool:
-    """DL-391: require a complete footer at its acknowledged size and table focus."""
+    """Require a complete footer at its acknowledged size and table focus."""
     if columns <= 0 or rows <= 0:
         return False
     cells: list[str | None] = [None] * columns
@@ -508,7 +680,7 @@ def _footer_ready(rendered: bytes, columns: int, rows: int) -> bool:
                 cells = [None] * columns
                 row, column = 0, 0
                 continue
-            # DL-391: only observed one-cell writes prove this footer; unknown controls
+            # Only observed one-cell writes prove this footer; unknown controls
             # or widths invalidate it until another complete, positioned repaint.
             for char in text:
                 if char == "\n" and 1 <= row < rows:
