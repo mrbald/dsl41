@@ -42,6 +42,8 @@ The subscribe stream sends the records of docs/control-protocol.md ss5 in the sh
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import re
 import sys
 
@@ -51,7 +53,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
-from dsl41.canon import CanonError, canonical_bytes, decode, is_wire_int, naive_utc
+from dsl41.canon import CanonError, canonical_bytes, decode, hash_over, is_wire_int, naive_utc
 from dsl41.engine_charts import UPDATE_STOP
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import CarriedRows, Event
@@ -154,12 +156,111 @@ OUTCOMES: Final[frozenset[str]] = frozenset({"natural", "spawn_failed", "stopped
 PLANS: Final[frozenset[str]] = frozenset({"complete", "hold", "rerun", "none"})
 
 
+def check_dispatch(body: Mapping[str, Any]) -> None:
+    """Require the durable invocation and literal paths of state version 28 (DL-447)."""
+    from dsl41.runner_environment import NAME, STREAM_ATTRIBUTES, GENERATED_NAMES, INSTANCE_NAMES
+
+    try:
+        for key in ("first_dispatch_seq", "run_number", "ordinal", "rev"):
+            if not is_wire_int(body[key]) or body[key] < (0 if key == "rev" else 1):
+                raise ValueError(f"invalid {key}")
+        if body["spool"] is not None and (
+            not isinstance(body["spool"], str) or "\0" in body["spool"]
+        ):
+            raise ValueError("invalid spool")
+        if not isinstance(body["job"], str) or not body["job"]:
+            raise ValueError("invalid job")
+        if not is_valid_run_id(body["attempt"]):
+            raise ValueError("invalid attempt")
+        for key in ("env", "inherited"):
+            values = body[key]
+            if not isinstance(values, dict) or any(
+                not isinstance(k, str)
+                or NAME.fullmatch(k) is None
+                or not isinstance(v, str)
+                or "\0" in v
+                for k, v in values.items()
+            ):
+                raise ValueError(f"invalid {key}")
+        env = body["env"]
+        expected = {
+            "DSL41_JOB": body["job"],
+            "AUTO_JOB_NAME": body["job"],
+            "DSL41_RUN_NUMBER": str(body["run_number"]),
+            "DSL41_ATTEMPT": str(body["ordinal"]),
+            "AUTORUN": f"{body['first_dispatch_seq']}-{body['ordinal']}",
+        }
+        if any(env.get(k) != value for k, value in expected.items()):
+            raise ValueError("invocation identity disagrees with dispatch")
+        if not env.get("DSL41_RUN"):
+            raise ValueError("missing DSL41_RUN")
+        tag = json.loads(base64.urlsafe_b64decode(env["DSL41_RUN"]))
+        if not isinstance(tag, dict) or any(
+            tag.get(k) != body[v]
+            for k, v in (("run_id", "attempt"), ("job", "job"), ("run_number", "run_number"))
+        ):
+            raise ValueError("DSL41_RUN disagrees with dispatch")
+        datetime.fromisoformat(env["DSL41_SCHEDULED_AT"])
+        datetime.fromisoformat(body["started_at"])
+        if set(body["inherited"]) & (set(env) | GENERATED_NAMES | INSTANCE_NAMES):
+            raise ValueError("invalid referenced inherited names")
+        cwd = body["cwd"]
+        if not isinstance(cwd, str) or "\0" in cwd or not Path(cwd).is_absolute():
+            raise ValueError("invalid cwd")
+        paths = body["paths"]
+        if not isinstance(paths, dict) or set(paths) not in (set(), set(STREAM_ATTRIBUTES)):
+            raise ValueError("invalid paths")
+        if any(
+            value is not None
+            and (not isinstance(value, str) or "\0" in value or not Path(value).is_absolute())
+            for value in paths.values()
+        ):
+            raise ValueError("invalid absolute stream path")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise EngineError(f"invalid version-28 dispatch data: {exc} (DL-447)") from exc
+
+
+def _check_dispatch_seq(
+    body: Mapping[str, Any],
+    seq: int,
+    prior: Mapping[str, Any] | None = None,
+    *,
+    history: bool = True,
+) -> None:
+    first = body["first_dispatch_seq"]
+    if first > seq or (
+        not history
+        and body["ordinal"] == 1
+        and first != seq
+        and (prior is None or prior["run_number"] != body["run_number"])
+    ):
+        raise EngineError("version-28 dispatch sequence disagrees with S (DL-447)")
+    if (
+        prior is not None
+        and prior["run_number"] == body["run_number"]
+        and (prior["first_dispatch_seq"] != first)
+    ):
+        raise EngineError("version-28 replacement changes S (DL-447)")
+
+
+def _check_steps(steps: Any) -> None:
+    for step in steps:
+        if step.get("step") == "dispatch":
+            env = step.get("env")
+            if not isinstance(env, dict) or not isinstance(env.get("DSL41_SCHEDULED_AT"), str):
+                raise EngineError("version-28 replacement env lacks DSL41_SCHEDULED_AT (DL-447)")
+
+
 def check_record(record: Record) -> None:
     """Refuse, by name, a record this binary does not know: a kind outside `KINDS`, an engine
     event outside `ENGINE_EVENTS`, an outcome outside `OUTCOMES`, a plan outside `PLANS`
     (protocol-evolution: an unknown kind refuses by name). The writer checks before the append
     and every reader before it acts on the record."""
     kind, body = record.kind, record.payload
+    if kind == "dispatch":
+        check_dispatch(body)
+    if kind == "follow_up" and body.get("event") == "plan":
+        _check_steps(body.get("steps", []))
     if kind not in KINDS:
         raise EngineError(f"record kind {kind!r}: this binary knows {sorted(KINDS)}")
     if kind == "engine" and body.get("event") not in ENGINE_EVENTS:
@@ -528,6 +629,7 @@ class OpenAttempt:
     #: ladder is a leak's, which `process-leak=leak` leaves alone; None in a snapshot older
     #: than this field, read as a stop's
     outcome: str | None = None
+    dispatch: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -568,6 +670,8 @@ class OpenTable:
 
     def __init__(self) -> None:
         self.attempts: dict[str, OpenAttempt] = {}
+        #: Each job's latest dispatched attempt, including closed runs (DL-447).
+        self.dispatches: dict[str, dict[str, Any]] = {}
         self.pending: dict[int, PendingDispatch] = {}
         self.plans: dict[str, OpenPlan] = {}
         #: the update in STOPPING: its `config intent` record's body with the record's seq, until
@@ -580,6 +684,8 @@ class OpenTable:
         check_record(record)
         body = record.payload
         if record.kind == "dispatch":
+            _check_dispatch_seq(body, seq, self.dispatches.get(body["job"]), history=False)
+            self.dispatches[str(body["job"])] = {**body, "seq": seq}
             attempt = OpenAttempt(
                 attempt=str(body["attempt"]),
                 job=str(body["job"]),
@@ -590,6 +696,7 @@ class OpenTable:
                 started_at=str(body["started_at"]),
                 env=dict(body.get("env") or {}),
                 after=body.get("after"),
+                dispatch={**body, "seq": seq},
             )
             self.attempts[attempt.attempt] = attempt
             if is_wire_int(body.get("discharges")):
@@ -684,7 +791,8 @@ class OpenTable:
 
     def to_payload(self) -> dict[str, Any]:
         """The table as the snapshot holds it: three lists, each in seq order."""
-        return {
+        body = {
+            "dispatches": {job: dict(body) for job, body in self.dispatches.items()},
             "attempts": [
                 {
                     "attempt": a.attempt,
@@ -699,6 +807,7 @@ class OpenTable:
                     "stop": a.stop,
                     "closing": a.closing,
                     "outcome": a.outcome,
+                    "dispatch": dict(a.dispatch),
                 }
                 for a in sorted(self.attempts.values(), key=lambda a: a.seq)
             ],
@@ -725,11 +834,59 @@ class OpenTable:
                 for p in sorted(self.plans.values(), key=lambda p: p.seq)
             ],
         }
+        body["dispatch_hash"] = hash_over(
+            {
+                "dispatches": body["dispatches"],
+                "attempts": [
+                    a.dispatch for a in sorted(self.attempts.values(), key=lambda a: a.seq)
+                ],
+            }
+        )
+        return body
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> OpenTable:
         table = cls()
+        if payload["dispatch_hash"] != hash_over(
+            {
+                "dispatches": payload["dispatches"],
+                "attempts": [a["dispatch"] for a in payload.get("attempts", ())],
+            }
+        ):
+            raise ValueError("invalid version-28 dispatch snapshot hash")
+        held = payload["dispatches"]
+        if not isinstance(held, dict):
+            raise ValueError("invalid version-28 snapshot dispatches")
+        for job, body in held.items():
+            check_dispatch(body)
+            if body["job"] != job or not is_wire_int(body["seq"]) or body["seq"] < 1:
+                raise ValueError("invalid version-28 snapshot dispatch identity")
+            _check_dispatch_seq(body, body["seq"])
+            table.dispatches[job] = dict(body)
         for a in payload.get("attempts") or ():
+            body = a["dispatch"]
+            check_dispatch(body)
+            _check_dispatch_seq(body, a["seq"])
+            if any(
+                a[key] != body[key]
+                for key in (
+                    "attempt",
+                    "job",
+                    "run_number",
+                    "ordinal",
+                    "spool",
+                    "seq",
+                    "started_at",
+                    "env",
+                )
+            ):
+                raise ValueError("snapshot attempt disagrees with its dispatch")
+            latest = table.dispatches[a["job"]]
+            if (
+                latest["run_number"] == a["run_number"]
+                and latest["first_dispatch_seq"] != body["first_dispatch_seq"]
+            ):
+                raise ValueError("snapshot attempt disagrees with retained S")
             table.attempts[a["attempt"]] = OpenAttempt(
                 attempt=a["attempt"],
                 job=a["job"],
@@ -743,12 +900,14 @@ class OpenTable:
                 stop=a.get("stop"),
                 closing=bool(a.get("closing")),
                 outcome=a.get("outcome"),
+                dispatch=dict(body),
             )
         for p in payload.get("pending") or ():
             table.pending[p["seq"]] = PendingDispatch(
                 p["seq"], p["job"], p["run_number"], p["scheduled_at"]
             )
         for p in payload.get("plans") or ():
+            _check_steps(p["steps"])
             table.plans[p["attempt"]] = OpenPlan(
                 p["seq"],
                 p["attempt"],
@@ -951,7 +1110,12 @@ def decode_snapshot(seq: int, data: bytes, *, where: str) -> Snapshot:
     """A stored snapshot read back; one that does not read is refused naming `where`."""
     try:
         raw: Any = decode(data)
+        if type(raw["state_version"]) is not int or raw["state_version"] != STATE_MACHINE_VERSION:
+            raise ValueError("incompatible snapshot state_version")
         front = raw["frontiers"]
+        opened = OpenTable.from_payload(raw["open"])
+        if any(d["seq"] > seq for d in opened.dispatches.values()):
+            raise ValueError("snapshot dispatch lies beyond its sequence")
         return Snapshot(
             seq=seq,
             rows=CarriedRows.model_validate(raw["oracle"]),
@@ -962,7 +1126,7 @@ def decode_snapshot(seq: int, data: bytes, *, where: str) -> Snapshot:
             ),
             position=Position.from_payload(raw["position"]),
             config_rev=int(raw["config_rev"]),
-            open=_with_update(OpenTable.from_payload(raw["open"]), raw.get("update")),
+            open=_with_update(opened, raw.get("update")),
             update=raw.get("update"),
             runs=_with_revs(dict(raw["runs"])),
             evidence=dict(raw.get("evidence") or {}),
@@ -1021,8 +1185,14 @@ class Journal:
     def append(self, *records: Record) -> int:
         """Append `records` in one transaction; answer the last seq. A record this binary does
         not know is refused before anything is written (`check_record`)."""
-        for record in records:
+        dispatches = dict(self.open.dispatches)
+        for seq, record in enumerate(records, start=self.next_seq()):
             check_record(record)
+            if record.kind == "dispatch":
+                _check_dispatch_seq(
+                    record.payload, seq, dispatches.get(record.payload["job"]), history=False
+                )
+                dispatches[record.payload["job"]] = dict(record.payload)
         self.prove()
         last = self.store.append(*records)
         first = last - len(records) + 1
@@ -1173,6 +1343,10 @@ def dispatch_record(
     env: Mapping[str, str] | None = None,
     discharges: int | None = None,
     after: str | None = None,
+    first_dispatch_seq: int | None = None,
+    inherited: Mapping[str, str] | None = None,
+    paths: Mapping[str, str | None] | None = None,
+    cwd: str | None = None,
 ) -> Record:
     """One attempt's launch intent (DL-118, DL-425). An `attempt` outside the ss11a grammar is
     refused, as a freehand id would split the one key. `attempt` is the run id, the attempt's
@@ -1194,6 +1368,13 @@ def dispatch_record(
         "started_at": started_at.isoformat(),
         "rev": rev,
     }
+    if first_dispatch_seq is not None:
+        body.update(
+            first_dispatch_seq=first_dispatch_seq,
+            inherited=dict(inherited or {}),
+            paths=dict(paths or {}),
+            cwd=cwd,
+        )
     if discharges is not None:
         body["discharges"] = discharges
     if after is not None:

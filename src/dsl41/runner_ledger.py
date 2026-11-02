@@ -117,7 +117,8 @@ from dsl41.runner_clock import EngineError
 #: 27 (DL-433): the store's meta holds `root_id`, written at genesis, and every command
 #: attempt's process cookie is `<root_id>.<run id>`, so one scan reads every attempt of the run
 #: root whichever engine start launched it. A store with no `root_id` refuses by name.
-STATE_MACHINE_VERSION = 27
+#: 28 (DL-447): dispatches and snapshots retain runtime environments and absolute stream paths.
+STATE_MACHINE_VERSION = 28
 
 LOCK_NAME = "leader.lock"
 

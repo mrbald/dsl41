@@ -578,7 +578,6 @@ def test_wrapper_records_the_exit_of_a_command_that_was_stopped_and_continued(
     assert "cause" not in status
 
 
-@pytest.mark.skipif(not hasattr(os, "waitid"), reason="the race needs os.waitid's WNOWAIT")
 def test_wrapper_completion_beats_parent_loss_when_the_exit_lands_with_the_eof(
     tmp_path: Path,
 ) -> None:

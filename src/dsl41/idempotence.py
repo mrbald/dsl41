@@ -184,6 +184,6 @@ def invocation_env(
     return {
         ENV_JOB: job,
         ENV_RUN_NUMBER: str(run_number),
-        ENV_SCHEDULED_AT: instant.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        ENV_SCHEDULED_AT: instant.isoformat(timespec="seconds").replace("+00:00", "Z"),
         ENV_ATTEMPT: str(attempt),
     }

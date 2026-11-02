@@ -207,9 +207,9 @@ nothing.
 | job_attr:start_mins | supported | SEM-32 | - |  |  |  | generic | the minutes past each hour a schedule tick fires at on an eligible day |
 | job_attr:start_times | supported | SEM-32 | - |  |  |  | generic | the wall-clock times a schedule tick fires at on an eligible day |
 | job_attr:status | supported | SEM-24 | - |  |  |  | generic | the definition-time status: only the out-of-band states are modelled, run states refuse |
-| job_attr:std_err_file | supported | runner_adapters.job_log_paths | - |  |  |  | generic | the child's stderr appends here instead of the default run log; inert on a BOX (SEM-10) |
-| job_attr:std_in_file | supported | runner_adapters._build_run_spec | - |  |  |  | generic | the child reads stdin from here instead of /dev/null; inert on a BOX (SEM-10) |
-| job_attr:std_out_file | supported | runner_adapters.job_log_paths | - |  |  |  | generic | the child's stdout appends here instead of the default run log; inert on a BOX (SEM-10) |
+| job_attr:std_err_file | supported | runner_environment.resolve_streams, DL-447 | - |  |  |  | generic | the child's stderr appends here instead of the default run log; inert on a BOX (SEM-10); $VAR and ${VAR} resolve once before profile execution |
+| job_attr:std_in_file | supported | runner_adapters._build_run_spec | - |  |  |  | generic | the child reads stdin from here instead of /dev/null; inert on a BOX (SEM-10); $VAR and ${VAR} resolve once before profile execution (DL-447) |
+| job_attr:std_out_file | supported | runner_environment.resolve_streams, DL-447 | - |  |  |  | generic | the child's stdout appends here instead of the default run log; inert on a BOX (SEM-10); $VAR and ${VAR} resolve once before profile execution |
 | job_attr:success_codes | supported | SEM-09, DL-33 | - |  |  |  | generic | the explicit success set; with no fail_codes beside it, it alone decides the verdict |
 | job_attr:term_run_time | supported | dossier ss5, oracle.Oracle._arm_term_run_time | - |  |  |  | generic | arms a timer that TERMINATEs the run after n minutes; zero means no limit and arms no timer (DL-241) |
 | job_attr:timezone | supported | SEM-35 | - |  |  |  | generic | the zone every schedule time on this job is read in |
@@ -614,6 +614,7 @@ nothing.
 | profile_field:default_tz | supported | DL-122, SEM-35 | - |  |  |  | generic | the zone a job with no timezone of its own is read in |
 | profile_field:fw_default_interval_us | supported | runner-design ss6, DL-122 | - |  |  |  | generic | the poll interval an FW job with no watch_interval uses |
 | profile_field:fw_default_interval_us#rounding | provisional | runner_startup.wire_from_profile, DL-122 | - |  |  |  | none | no shipped surface sets a value that is not whole seconds. A hand-pinned one is wired rounded half to even (at least 1 s), not at the pinned interval, and resume refuses it as profile drift. No label was opened for the conversion |
+| profile_field:job_env | supported | DL-447, runner_environment.validate_job_env | - |  |  |  | generic | literal job environment overrides applied through configuration revisions; instance variables come exclusively from this map |
 | profile_field:machine_policy | supported | DL-122, DL-49 | - |  |  |  | generic | how the one ambiguous machine verdict resolves |
 | profile_field:semantics | supported | DL-122, runner-design ss8a, DL-252 | - |  |  |  | generic | explicit semantic-switch overrides only, an explicit default normalized away; written {} when there is none |
 | profile_field:tz_aliases | supported | DL-122, DL-62 | - |  |  |  | generic | the site-local zone-name table; a name only it resolves fails without it |
@@ -718,6 +719,7 @@ nothing.
 | preflight_code:oracle | refused | runner_preflight._oracle_preflight | - |  |  |  | unreachable | an oracle that will not construct over this catalog refuses the run; no JIL reaches this gate, because lowering builds no such catalog |
 | preflight_code:owner | refused | runner_preflight._owner_preflight | - |  |  |  | generic | an owner other than the invoking user refuses the run: there is no setuid |
 | preflight_code:resources | refused | runner_preflight._resource_preflight, DL-50 | - |  |  |  | generic | a resource the oracle cannot model faithfully refuses the run |
+| preflight_code:runtime-variable | refused | runner_preflight.runtime_variable_preflight, DL-447 | - |  |  |  | generic | unavailable variables or unsupported dollar syntax in stream paths refuse real execution; variable-bearing watch_file is refused |
 | preflight_code:skeleton-cycle | supported | runner_preflight._skeleton_cycle_preflight, DL-13 | - |  |  |  | generic | a cycle in the AND-success skeleton is legal AutoSys; it warns and disables `plan` rather than refusing the run |
 | preflight_code:timezone | refused | runner_preflight._timezone_preflight, SEM-35 | - |  |  |  | generic | a timezone name the SEM-35 ladder cannot resolve refuses the run |
 

@@ -70,6 +70,25 @@ still carry state this executable cannot interpret. One executable handles
 one state version (DL-424); drain with the old binary before changing that
 version, then use a fresh root. No snapshot migration is provided.
 
+State version 28 requires dispatch environments and resolved stream paths
+(DL-447). Version 27 and other foreign state versions refuse under the
+same drain and fresh-root policy. Dispatches retain S, the logical run's
+first committed dispatch sequence, their explicit environment overlay,
+referenced inherited values, dispatch cwd and absolute stream paths.
+Snapshots retain each job's latest dispatch even after completion or
+journal pruning. Their required `dispatch_hash` binds the retained dispatches
+and each open attempt's original dispatch. Replay never re-expands these paths.
+Stored `RuntimeProfile` includes `job_env`, applied through configuration
+revisions. Wrapper input remains version 1; the adapter sends resolved
+paths through its existing fields. Control `status` reads these stored
+paths and returns null before dispatch, within dialect 3.
+An empty `job_env` is omitted from canonical profiles and hashes (DL-447).
+Version-28 dispatches and snapshots require valid invocation data and S.
+Missing or damaged data refuses before recovery effects; S is never inferred.
+The catalog's environment view depends on authenticated authority:
+READ receives names only and no inherited names; OPS/ADM keep the full
+view. The client rejects redacted input for `reread`.
+
 `root_id` is mandatory store identity, not a format version (DL-433).
 Startup refuses a store without it. Clock domain is also checked separately.
 A new binary version alone does not change the catalog or runtime hashes.
@@ -123,8 +142,9 @@ Main-config restart restores the last applied revision. Estate, lint and
 `engine.environment` edits stay pending. Disk host identity,
 `machine_policy` and the access map apply at launch; invalid values exit 2.
 A missing interrupted-update plan refuses before writes or signals.
-Implementation limits recorded by DL-437 remain: restart recompiles captured
-bytes, runs no preflight, offers no legacy-root conversion, and ignores
+Restart recompiles captured bytes and checks placement and runtime
+variables (DL-437, DL-447). Other preflight rules remain unrun there.
+It offers no legacy-root conversion and ignores
 unknown `[engine]` keys in its host-only load; the pending scan blocks the
 loop. These are limits, not permission to change the rules in this pass.
 

@@ -255,7 +255,7 @@ def test_a_closing_attempt_is_never_observed_again(tmp_path: Path) -> None:
         at=T0,
     )
     step = {"step": "dispatch", "attempt": "9d1f2e3c-4b5a-4c6d-8e7f-0a1b2c3d4e5f", "ordinal": 2}
-    step |= {"env": {}, "after": "engine_stop"}
+    step |= {"env": {"DSL41_SCHEDULED_AT": T0.isoformat()}, "after": "engine_stop"}
     plan = {"event": "plan", "attempt": run_id, "job": "j", "run_number": 1, "plan": "rerun"}
     append(run_root, "follow_up", {**plan, "steps": [step]}, at=T0)
     _restart(run_root, text)
@@ -560,7 +560,7 @@ def test_a_store_with_no_root_id_or_another_state_version_refuses_by_name(
             db.execute("DELETE FROM meta WHERE key = 'root_id'")
         else:
             db.execute("UPDATE meta SET value = '26' WHERE key = 'state_version'")
-    match = "no root_id" if damage == "no_root_id" else "state version 26, this binary runs 27"
+    match = "no root_id" if damage == "no_root_id" else "state version 26, this binary runs 28"
     with pytest.raises(EngineError, match=match):
         asyncio.run(_resume(run_root, text))
     assert rows(run_root) == before
@@ -742,7 +742,22 @@ def test_the_first_reading_terms_what_is_owed_and_reports_the_rest(
     body |= {"at": T0.isoformat(), "outcome": "natural", "ladder": "running"}
     append(run_root, "outcome", body, at=T0)
     gone = "00000000-0000-4000-8000-0000000000aa"
-    append(run_root, "dispatch", {**first, "attempt": gone, "ordinal": 9}, at=T0)
+    append(
+        run_root,
+        "dispatch",
+        {
+            **first,
+            "attempt": gone,
+            "ordinal": 9,
+            "env": {
+                **first["env"],
+                "DSL41_ATTEMPT": "9",
+                "AUTORUN": f"{first['first_dispatch_seq']}-9",
+                "DSL41_RUN": runner_procid.invocation_tag(gone, first["job"], 1, None),
+            },
+        },
+        at=T0,
+    )
     append(run_root, "outcome", {**body, "attempt": gone, "job": "a"} | {"ladder": None}, at=T0)
     _set_cookie(run_root)  # the first reading reads each attempt through its cookie
     found = {

@@ -25638,3 +25638,43 @@ relitigate an entry; append a new one.
   THE REASON. Loss is intentional; MUST_COMPLETE is not runtime. OnFailure reports unit failure.
   THE BOUNDARY. Amends §§4/12 with no new oracle event or durable delivery state. Mail/pager stays
   site-owned; gates and independent review stand. The boundary cannot confine malicious hook code.
+- DL-447 Durable runtime variables and stream paths (2026-11-02;
+  runner_environment.py, runner_journal.py, runner_config.py)
+  AUTO_JOB_NAME is the exact job name. AUTORUN is decimal S-N without padding.
+  S is the logical run's first committed dispatch store sequence; N starts at 1.
+  Replacements retain S and scheduled identity and increment N. Per-job run numbers stay.
+  Uniqueness covers one continuous root history, including restart and pruning.
+  Fresh roots and restored branches can repeat values; separate output namespaces.
+  The literal engine.job_env string map defaults empty and belongs to RuntimeProfile.
+  Empty job_env is omitted from canonical profiles and hashes; existing vectors stay.
+  Invalid names, NULs, DSL41_* and AUTO_JOB_NAME/AUTORUN overrides refuse.
+  AUTOSERV, AUTOSYS, AUTOUSER and AUTOROOT come only from that map; absent means unset.
+  Other names inherit startup values, then job_env and generated values override them.
+  No installation paths are inferred. Generated names never resolve from inheritance.
+  DSL41_RUN uses the same forensic tag in dispatch and child. DSL41_COOKIE preflight
+  assumes the production observed CMD adapter; other adapters may lack the cookie.
+  Only std_in_file/std_out_file/std_err_file expand $VAR and ${VAR}, once, literally.
+  Names match [A-Za-z_][A-Za-z0-9_]*. Other dollar syntax, including bare $$, refuses.
+  No recursive, shell, glob or tilde expansion. Commands retain shell expansion after
+  profile sourcing; profiles receive no runner substitution. Variable watch_file refuses.
+  DL-240 global-reference, envvars and chk_files refusals remain.
+  Real startup, reload candidates and replacements share the resolver; preflight knows
+  generated values symbolically. runtime-variable names unavailable variables and says:
+  job <job>: <attribute> references unavailable variable <VAR>; paths resolve before
+  profile execution; set engine.job_env.<VAR>.
+  Unavailable reserved names never recommend forbidden overrides. Diagnostics omit values.
+  Unsupported syntax names the attribute and forms. Empty paths and NULs refuse.
+  Profile-only command variables remain legal; no shell-program analysis.
+  Dispatches and snapshots require and validate S, the overlay, referenced inherited
+  values, captured startup cwd and absolute stream paths before launch or recovery effects.
+  Missing or damaged v28 data refuses; replay never re-expands or invents S.
+  Relative paths anchor at captured cwd; defaults, append modes and permissions stay.
+  Status/tail use the current run's latest dispatched paths after completion; null before.
+  job_env stays in token-bound runtime revisions and is excluded only from job-definition
+  hashes. An environment-only update advances the rev while boxes run and stops nothing.
+  Later dispatches and replacements use the applied map; running attempts keep theirs.
+  READ catalog replies contain job_env names only and no inherited names. Authenticated
+  authority selects redaction, which removes values. OPS/ADM retain the complete view.
+  Reread requires that OPS view and refuses redacted input; it never uses client fallback.
+  State version 28 refuses foreign stores under DL-424's drain/fresh-root policy.
+  Wrapper input v1 and control v3 remain; access/control contracts fix their projections.

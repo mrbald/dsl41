@@ -24,6 +24,7 @@ from dsl41.lint import RULE_CODES, LintReport, lint_catalog, rule_l025
 from dsl41.placeholders import PlaceholderError, properties_from_bytes, substitute
 from dsl41.reload_plan import Estate, RereadRefused, estate_settings
 from dsl41.runner_config import RuntimeProfile, runtime_profile_from_cli
+from dsl41.runner_environment import JobEnvironment
 from dsl41.semantics import check_overrides
 from dsl41.timezones import parse_timezone_map, resolve_timezone
 from dsl41.status_hook import HookSettings
@@ -52,6 +53,7 @@ class HostConfig(HookSettings, StrictModel):
 
 class EngineConfig(HostConfig):
     environment: str | None = None
+    job_env: JobEnvironment = {}
 
 
 class EstateConfig(StrictModel):
@@ -386,7 +388,13 @@ def from_parts(parts: Sequence[tuple[str, bytes]]) -> Estate:
         metadata = {**metadata, "origins": origins, "non_idempotent": dict(marked.reasons)}
         return Estate(
             catalog,
-            estate_settings(config.estate.timezone, aliases, config.estate.semantics, catalog),
+            estate_settings(
+                config.estate.timezone,
+                aliases,
+                config.estate.semantics,
+                catalog,
+                job_env=config.engine.job_env,
+            ),
             tuple(parts),
             config.engine.environment,
             tuple(r["path"] for r in records if r["role"] == "properties"),
@@ -439,6 +447,7 @@ def profile_of(estate: Estate) -> RuntimeProfile:
         semantics=cast(dict[str, str], estate.settings["semantics"]),
         as_machine=launch["as_machine"],
         machine_policy=launch["machine_policy"],
+        job_env=cast(dict[str, str], estate.settings.get("job_env", {})),
     )
 
 

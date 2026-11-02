@@ -33,7 +33,9 @@ The candidate settings (`estate_settings`) are the estate-wide values every job 
   dropped, so one profile is one value;
 - `external_instances`: each `insert_xinst` record without its source span.
 
-The engine must build `Live.settings` with the same function.
+The engine must build `Live.settings` with the same function. `job_env` is retained in these
+settings and the token-bound runtime revision but excluded from job-definition hashes
+(DL-447). An environment-only update stops nothing and may apply while boxes run.
 
 Refusals, all as `RereadRefused`: a load error, a lint finding of error or warning severity
 (`--strict`), a preflight ERROR, and a running box the plan edits. The preflight is the
@@ -113,6 +115,7 @@ class Live:
     #: each row's current run number, beside its status: the run a stop interrupts
     runs: Mapping[str, int] = field(default_factory=dict)
     launch: Mapping[str, object] = field(default_factory=dict)
+    path_environment: Mapping[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -148,6 +151,8 @@ def estate_settings(
     tz_aliases: Mapping[str, str] | None,
     semantics: Mapping[str, str],
     catalog: CatalogIR,
+    *,
+    job_env: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """The estate-wide settings `reload_diff.diff` compares (module docstring). Each value is
     spelled as the engine runs it, so the engine's own settings and an unchanged estate's
@@ -156,6 +161,7 @@ def estate_settings(
         "timezone": timezone or DEFAULT_TZ,
         "timezone_aliases": alias_table(tz_aliases),
         "semantics": check_overrides(semantics),
+        "job_env": dict(job_env or {}),
         "external_instances": {
             name: xinst.model_dump(mode="json", exclude={"span"})
             for name, xinst in catalog.external_instances.items()
@@ -279,7 +285,9 @@ def _lint_findings(estate: Estate) -> list[str]:
     return [v.render() for v in report.violations if v.severity != "info"]
 
 
-def _preflight(estate: Estate, start: datetime | None) -> list[PreflightItem]:
+def _preflight(
+    estate: Estate, start: datetime | None, startup_env: Mapping[str, str] | None = None
+) -> list[PreflightItem]:
     """Main config checks its launch settings; legacy plans defer them (DL-437, DL-432)."""
     base_tz = estate.settings["timezone"]
     aliases = estate.settings["timezone_aliases"]
@@ -295,6 +303,8 @@ def _preflight(estate: Estate, start: datetime | None) -> list[PreflightItem]:
         tz_aliases=aliases,
         timezone_map_source="estate.timezone_map" if estate.metadata else "timezone_map",
         semantics=resolve_switches(semantics),
+        job_env=cast(dict[str, str], estate.settings.get("job_env", {})),
+        startup_env=startup_env,
         machine_policy=cast(
             MachinePolicy, estate.metadata.get("launch", {}).get("machine_policy", "strict")
         ),
@@ -415,7 +425,7 @@ def reread(
         findings = _lint_findings(estate)
     if findings:
         raise RereadRefused(findings)
-    items = _preflight(estate, start)
+    items = _preflight(estate, start, live.path_environment)
     errors = [item for item in items if item.severity == "ERROR"]
     if errors:
         raise RereadRefused(
