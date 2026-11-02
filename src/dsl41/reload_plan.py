@@ -293,6 +293,7 @@ def _preflight(estate: Estate, start: datetime | None) -> list[PreflightItem]:
         start=start,
         default_tz=base_tz,
         tz_aliases=aliases,
+        timezone_map_source="estate.timezone_map" if estate.metadata else "timezone_map",
         semantics=resolve_switches(semantics),
         machine_policy=cast(
             MachinePolicy, estate.metadata.get("launch", {}).get("machine_policy", "strict")

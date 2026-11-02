@@ -1544,7 +1544,9 @@ def test_preflight_timezone_map_is_estate_truth() -> None:
     )
     catalog = lower_source(text)
     aliases = parse_timezone_map("Zurich City Europe/Zurich\n")
-    items = preflight(catalog, execution=False, tz_aliases=aliases)
+    items = preflight(
+        catalog, execution=False, tz_aliases=aliases, timezone_map_source="--timezone-map"
+    )
     tz_items = {i.job: i for i in items if i.code == "timezone"}
     assert "tzm" not in tz_items  # mapped: resolves silently, no assumption
     assert tz_items["tzx"].severity == "ERROR"

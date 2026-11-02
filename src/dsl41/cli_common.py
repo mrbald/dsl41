@@ -18,7 +18,7 @@ import typer
 from dsl41.ast_jil import JilFile, JilParseError, parse
 from dsl41.estate_manifest import ManifestError, check_absolute, resolve_manifest
 from dsl41.ir import CatalogIR, LoweringError, lower_catalog
-from dsl41.timezones import parse_timezone_map, resolve_timezone
+from dsl41.timezones import alias_table, parse_timezone_map, resolve_timezone
 from dsl41.placeholders import PlaceholderError, load_properties, substitute
 from dsl41.semantics import help_text, parse_assignments
 from dsl41.state_machine import EXIT_STATECHART_ERROR, StatechartError
@@ -373,11 +373,11 @@ def load_catalog_and_ast_or_exit_2(
 
 
 def load_tz_aliases(path: "Path | None") -> "dict[str, str] | None":
-    """Parse --timezone-map (DL-62); unreadable/malformed exits 2."""
+    """Parse --timezone-map (DL-62); empty means absent (DL-163); malformed exits 2."""
     if path is None:
         return None
     try:
-        return parse_timezone_map(path.read_text(encoding="utf-8"))
+        return alias_table(parse_timezone_map(path.read_text(encoding="utf-8")))
     except (OSError, ValueError) as exc:
         raise typer.Exit(refuse(exc, prefix=f"--timezone-map {path}")) from exc
 
