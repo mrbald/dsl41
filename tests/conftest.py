@@ -154,3 +154,12 @@ def _configuration(state, phase):
             if below is not None:
                 return below | {state.name}
     return None
+
+
+def pytest_terminal_summary(terminalreporter):
+    """TestReport properties reach the controller under xdist and are visible on passing runs."""
+    for outcome in ("passed", "failed", "error"):
+        for report in terminalreporter.stats.get(outcome, []):
+            for name, value in getattr(report, "user_properties", ()):
+                if name == "tui_observations":
+                    terminalreporter.write_line(f"TUI observations {report.nodeid}: {value}")
