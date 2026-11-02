@@ -25472,3 +25472,32 @@ relitigate an entry; append a new one.
   its own packaging because its Python runtime requirements differ.
   Supersedes writing.md §1's Packager definition, which rested on DL-408. The other reader
   definitions and writing rules under DL-405 are unchanged.
+
+- DL-440 The owner approves operating model v3, with explicit role limits and owner escalations
+  (2026-11-02; owner approval; docs/agents/operating-model.md, docs/agents/coordination.md)
+  THE RULE. The owner approved operating model v3 after the operator and the boss agreed
+  on the same candidate, as the owner's approval required. The owner chats mainly with the
+  operator, which sees all traffic, checks every participant against the rules and reports
+  every breach.
+  Every change gets independent review before it lands. Beyond that new minimum, this entry
+  changes no review passes; they stay as docs/agents/review.md states them. The operator
+  applies settled rules; it may make named exact non-semantic fixes, render generated files
+  and add accepted Known-bugs lines, but never edits code, tests or contract meaning.
+  Ambiguity and exceptions go to the boss. The boss rules on release readiness before
+  the owner approves a tag or release. While a seat waits, the operator may gather facts
+  within its own access, identified as facts rather than a ruling or acceptance. The page's
+  escalation list states what only the owner decides and how the operator brings it to
+  the owner.
+  THE REASON. Authority, evidence and acceptance need separate limits.
+  Explicit operator checks and owner hand-offs prevent routing or a passing check from
+  becoming an unapproved ruling.
+  THE BOUNDARY. No old decision-log entry is superseded by this entry. This entry narrows
+  the advisor routing in DL-262, DL-395 and DL-430: semantic disagreements and hard rulings
+  go to the boss, who may consult the advisor; the advisor only recommends (rules 31, 39
+  and 40). It does not narrow DL-395 on review passes. DL-430's review rounds, shape notes,
+  fresh final review and stated limits stay whole under rule 49.
+  No earlier decision-log entry assigns release decisions to the boss. The coordination
+  guide's release-decision wording is constrained by this model: the boss rules on readiness;
+  the owner approves tagging or releasing. During the transition, the stricter of the model
+  and the guides applies, standing owner instructions keep applying, and summarized guides
+  and decisions retain their exact terms. A later slice reconciles the guides.

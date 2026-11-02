@@ -8,6 +8,7 @@ This page leaves document-writing rules to [writing.md](writing.md) and
 CLI/TUI evidence limits to [cli-tui-qualification.md](cli-tui-qualification.md).
 The builder follows a settled approach. The engineer chooses the method for
 settled behavior. Neither role changes scope or policy.
+Read the [approved operating model](agents/operating-model.md) for authority, role limits and owner escalations.
 
 ## Your task
 

@@ -3,6 +3,7 @@
 For the advisor and maintainers assigning a bounded design question.
 Read the [shared contract](../../CLAUDE.md) and the evidence named in the brief.
 The boss supplies the question and owns the ruling.
+Read the [approved operating model](operating-model.md) for authority, role limits and owner escalations.
 
 - Stay read-only and within the named question. Call no other model.
 - Test the proposed answer against the constraints and a concrete failure case.
