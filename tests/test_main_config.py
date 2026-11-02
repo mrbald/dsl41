@@ -593,3 +593,112 @@ def test_11_cli_modes_and_rehearsal_root(tmp_path: Path, monkeypatch: pytest.Mon
     manifest = tmp_path / "estate.toml"
     manifest.write_text('name = "synthetic"\nfiles = ["a.jil"]\n')
     assert runner.invoke(app, ["lint", "--manifest", str(manifest)]).exit_code == 0
+
+
+@pytest.mark.parametrize("command", ["run", "rehearse"])
+@pytest.mark.parametrize("source", ["config", "flags", "manifest"])
+@pytest.mark.parametrize(
+    ("zone", "map_state", "message"),
+    [
+        ("Zurich", "absent", "pin it with"),
+        ("Zurich", "empty", "pin it with"),
+        ("Zurich", "missing-name", "not in the supplied"),
+        ("Indianapolis", "absent", "zone name or a map via"),
+        ("Not/AZone", "absent", "listing in via"),
+    ],
+)
+def test_city_timezone_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    source: str,
+    zone: str,
+    map_state: str,
+    message: str,
+) -> None:
+    """DL-62/DL-163: findings name the input; empty maps retain the warned city default."""
+    from dsl41 import cli_run
+
+    jil = tmp_path / "a.jil"
+    jil.write_text(JOB + f'date_conditions: 1\nstart_times: "08:00"\ntimezone: {zone}\n')
+    zones = tmp_path / "zones"
+    zones.write_text("LOCAL UTC\n" if map_state == "missing-name" else "")
+    map_setting = 'timezone_map = "zones"\n' if map_state != "absent" else ""
+    if source == "config":
+        path = config_file(tmp_path, estate=map_setting)
+        args = [command, "--config", str(path)]
+        map_source = "estate.timezone_map"
+    elif source == "manifest":
+        path = tmp_path / "estate.toml"
+        path.write_text('name = "synthetic"\nfiles = ["a.jil"]\n' + map_setting)
+        args = [command, "--manifest", str(path)]
+        map_source = "timezone_map"
+    else:
+        args = [command, str(jil)]
+        if map_state != "absent":
+            args += ["--timezone-map", str(zones)]
+        map_source = "--timezone-map"
+    if command == "run" and source != "config":
+        args += ["--run-root", str(tmp_path / "run")]
+    if command == "rehearse":
+        args += ["--start", "2026-07-01T05:59:00", "--hours", "0.05", "--format", "json"]
+
+    served = []
+
+    async def serve(*args: object, **kwargs: object) -> int:
+        served.append(True)
+        return 0
+
+    monkeypatch.setattr(cli_run, "_serve_run", serve)
+    result = CliRunner().invoke(app, args)
+    assert f"{message} {map_source}" in result.output
+    if source != "flags":
+        assert "--timezone-map" not in result.output
+    if zone != "Zurich" or map_state == "missing-name":
+        assert result.exit_code == 2, result.output
+        assert "preflight ERROR [timezone] A" in result.output
+        assert not served
+    else:
+        assert result.exit_code == 0, result.output
+        assert "preflight WARN [timezone] A" in result.output
+        assert "timezone 'Zurich' assumed to be Europe/Zurich" in result.output
+        assert served == ([True] if command == "run" else [])
+        if command == "rehearse":
+            trace = json.loads(result.stdout)["trace"]
+            starts = [row["at"] for row in trace if row["transition"].endswith("->STARTING")]
+            assert starts[0] == "2026-07-01T06:00:00"
+
+
+@pytest.mark.parametrize("source", ["config", "manifest"])
+@pytest.mark.parametrize(
+    ("zone", "supplied_map", "message"),
+    [
+        ("Zurich", False, "pin it with"),
+        ("Zurich", True, "not in the supplied"),
+        ("Indianapolis", False, "zone name or a map via"),
+        ("Not/AZone", False, "listing in via"),
+    ],
+)
+def test_reload_timezone_message_source(
+    tmp_path: Path, source: str, zone: str, supplied_map: bool, message: str
+) -> None:
+    from dsl41 import reload_plan
+
+    (tmp_path / "a.jil").write_text(
+        JOB + f'date_conditions: 1\nstart_times: "08:00"\ntimezone: {zone}\n'
+    )
+    (tmp_path / "zones").write_text("LOCAL UTC\n")
+    map_setting = 'timezone_map = "zones"\n' if supplied_map else ""
+    if source == "config":
+        estate = main.prepare(config_file(tmp_path, estate=map_setting))
+        map_source = "estate.timezone_map"
+    else:
+        (tmp_path / "estate.toml").write_text(
+            'name = "synthetic"\nfiles = ["a.jil"]\n' + map_setting
+        )
+        estate = reload_plan.load_estate(tmp_path)
+        map_source = "timezone_map"
+    items = [item for item in reload_plan._preflight(estate, T0) if item.code == "timezone"]
+    assert len(items) == 1
+    assert f"{message} {map_source}" in items[0].message
+    assert "--timezone-map" not in items[0].message

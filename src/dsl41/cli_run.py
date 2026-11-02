@@ -36,6 +36,7 @@ from dsl41.cli_common import (
 )
 from dsl41.ir import CatalogIR
 from dsl41.main_config import CONFIG_OPT, selected_config
+from dsl41.runner_config import tz_aliases_of
 from dsl41.state_machine import EXIT_STATECHART_ERROR, STATECHART_LOG_PREFIX, StatechartError
 
 if TYPE_CHECKING:
@@ -92,6 +93,7 @@ def _preflight_or_exit(
     start: "datetime | None" = None,
     default_tz: "str | None" = None,
     tz_aliases: "dict[str, str] | None" = None,
+    timezone_map_source: str = "timezone map",
     semantics: "SemanticSwitches | None" = None,
     warns_to_stderr: bool = False,
 ) -> "list[PreflightItem]":
@@ -115,6 +117,7 @@ def _preflight_or_exit(
         start=start,
         default_tz=default_tz,
         tz_aliases=tz_aliases,
+        timezone_map_source=timezone_map_source,
         semantics=semantics,
     )
     return _preflight_items_or_exit(items, warns_to_stderr=warns_to_stderr)
@@ -320,6 +323,7 @@ def run(
         start=datetime.now(UTC).replace(tzinfo=None),
         default_tz=timezone,
         tz_aliases=tz_aliases,
+        timezone_map_source="timezone_map" if manifest is not None else "--timezone-map",
         semantics=resolve_switches(overrides),
     )
     from dsl41.idempotence import IdempotenceError, load_exceptions
@@ -397,7 +401,8 @@ def _run_main_config(path: Path, *, ui: bool) -> None:
                 as_machine=host.as_machine,
                 start=datetime.now(UTC).replace(tzinfo=None),
                 default_tz=profile.default_tz,
-                tz_aliases=profile.tz_aliases,
+                tz_aliases=tz_aliases_of(profile),
+                timezone_map_source="estate.timezone_map",
                 semantics=resolve(profile.semantics),
             )
         if ui:
@@ -1339,7 +1344,8 @@ def rehearse(
             )
         main_config.emit_policy(prepared)
         profile = main_config.profile_of(prepared)
-        tz_aliases: dict[str, str] | None = profile.tz_aliases
+        tz_aliases: dict[str, str] | None = tz_aliases_of(profile)
+        timezone_map_source = "estate.timezone_map"
         timezone, overrides = profile.default_tz, profile.semantics
         catalog = prepared.catalog
     else:
@@ -1349,6 +1355,7 @@ def rehearse(
         catalog, _, _ = load_catalog_and_ast_or_exit_2(files, permit_unknown, properties)
         overrides = load_semantics(semantics)
         tz_aliases = load_tz_aliases(timezone_map)
+        timezone_map_source = "timezone_map" if manifest is not None else "--timezone-map"
     if cadence_policy is not None and not check_cadence:
         raise typer.Exit(refuse("--cadence-policy requires --check-cadence"))
     sweeps = list(sweep or [])
@@ -1373,6 +1380,7 @@ def rehearse(
         start=start_dt,
         default_tz=timezone,
         tz_aliases=tz_aliases,
+        timezone_map_source=timezone_map_source,
         semantics=switches,
         warns_to_stderr=output is RehearseFormat.json,
     )
