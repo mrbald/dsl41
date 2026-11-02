@@ -3071,7 +3071,7 @@ _PROFILE_FACETS: tuple[Row, ...] = (
         member="fw_default_interval_us",
         facet="rounding",
         klass=PROVISIONAL,
-        cite="runner_startup.wire_from_profile, period-model ss2.1",
+        cite="runner_startup.wire_from_profile, DL-122",
         effect="no shipped surface sets a value that is not whole seconds. A hand-pinned one"
         " is wired rounded half to even (at least 1 s), not at the pinned interval, and"
         " resume refuses it as profile drift. No label was opened for the conversion",
@@ -3085,37 +3085,37 @@ PROFILE_ROWS: tuple[Row, ...] = (
         _profile_row(
             "default_tz",
             '"Europe/Berlin"',
-            "period-model ss2.1, SEM-35",
+            "DL-122, SEM-35",
             "the zone a job with no timezone of its own is read in",
         ),
         _profile_row(
             "tz_aliases",
             '{"EST5EDT": "America/New_York"}',
-            "period-model ss2.1, DL-62",
+            "DL-122, DL-62",
             "the site-local zone-name table; a name only it resolves fails without it",
         ),
         _profile_row(
             "as_machine",
             '["greezy_spoon"]',
-            "period-model ss2.1, DL-52",
+            "DL-122, DL-52",
             "the machine names this runner answers to, sorted and de-duplicated",
         ),
         _profile_row(
             "machine_policy",
             '"local-eligible"',
-            "period-model ss2.1, DL-49",
+            "DL-122, DL-49",
             "how the one ambiguous machine verdict resolves",
         ),
         _profile_row(
             "fw_default_interval_us",
             "30000000",
-            "period-model ss2.1",
+            "runner-design ss6, DL-122",
             "the poll interval an FW job with no watch_interval uses",
         ),
         _profile_row(
             "semantics",
             '{"ice-lookback": "ordinary"}',
-            "period-model ss2.1, runner-design ss8a, DL-252",
+            "DL-122, runner-design ss8a, DL-252",
             "explicit semantic-switch overrides only, an explicit default normalized away;"
             " written {} when there is none",
         ),
@@ -3125,7 +3125,7 @@ PROFILE_ROWS: tuple[Row, ...] = (
             surface="profile_alt",
             member="machine_policy=strict",
             klass=SUPPORTED,
-            cite="period-model ss2.1",
+            cite="runner-design ss8, DL-49",
             effect="a job whose machine does not resolve local is refused",
             trigger='{"machine_policy": "strict"}',
         ),
@@ -3133,7 +3133,7 @@ PROFILE_ROWS: tuple[Row, ...] = (
             surface="profile_alt",
             member="machine_policy=local-eligible",
             klass=SUPPORTED,
-            cite="period-model ss2.1",
+            cite="runner-design ss8, DL-49",
             effect="only a MIXED pool runs here, with a warning that pool placement was"
             " ignored; a foreign or unreadable machine still refuses",
             trigger='{"machine_policy": "local-eligible"}',
@@ -3636,9 +3636,8 @@ TRACE_MARKER_ROWS: tuple[Row, ...] = (
         member="RELEASE_RESOURCE",
         klass=SUPPORTED,
         cite="ir-design ss7, DL-256, oracle.Oracle._record",
-        effect="the units the job still held go back to the pool: an operator release, or a"
-        " removed job's units at a period opening; a recorded no-op when it holds nothing"
-        " or is running",
+        effect="the operator returns the units the job still held to the pool; a recorded"
+        " no-op when the job holds nothing or is running",
         trigger=_scn(BASE_JIL, "0 RELEASE_RESOURCE job=J0"),
     ),
     _row(
@@ -3957,7 +3956,7 @@ WRAPPER_OUTCOME_ROWS: tuple[Row, ...] = (
         surface="wrapper_outcome",
         member="exited",
         klass=SUPPORTED,
-        cite="runner-design ss6, supervisor-protocol ss3, SEM-09",
+        cite="runner-design ss6, wrapper-protocol ss3, SEM-09",
         effect="the command ended on its own; the raw exit code goes to the oracle and"
         " SEM-09 decides the verdict",
         trigger="wrapper=exited",
@@ -3975,9 +3974,10 @@ WRAPPER_OUTCOME_ROWS: tuple[Row, ...] = (
         surface="wrapper_outcome",
         member="terminated",
         klass=SUPPORTED,
-        cite="runner-design ss6, DL-41a",
-        effect="the wrapper killed the command when it lost its parent; the engine injects"
-        " STATUS TERMINATED with the recorded cause",
+        cite="wrapper-protocol ss3, DL-424, DL-429",
+        effect="the wrapper killed the command when it lost its parent; stopped{lifeline}"
+        " follows the interruption rule: replace an idempotent attempt, hold a marked job"
+        " or a run at its attempt limit, or preserve the oracle end",
         trigger="wrapper=terminated",
     ),
     _row(
