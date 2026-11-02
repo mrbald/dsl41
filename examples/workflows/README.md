@@ -12,7 +12,7 @@ Two synthetic businesses run through the public dsl41 CLI:
 | [Fulfilment](../fulfilment/README.md) | PostgreSQL inventory and an HTTP carrier backed by SQLite | Carrier commits a label, then drops the reply |
 | [Media](../media/README.md) | FFmpeg workers and files served over HTTP | One rendition fails before publication |
 
-These are runnable examples with independent result checks. An opt-in pytest
+These are runnable examples with independent result checks. A pytest integration
 lane runs them through Docker Compose (see "Integration lane"). They
 complement [Nightbank](../nightbank/README.md), which covers a larger
 operator estate. They do not establish production readiness.
@@ -182,9 +182,16 @@ digest, and the versions inside the image.
 Each test directory holds
 `command.json` with every command's exit code, duration, stdout, and stderr,
 `database.sql` from `pg_dump`, plus the run volume as numbered
-`runs-N.tar` archives and the extracted copy of the last one. The lane is
-opt-in in CI too: the `workflow-examples` workflow
-runs only on manual dispatch and uploads the evidence.
+`runs-N.tar` archives and the extracted copy of the last one.
+The `workflow-examples` workflow runs on code PRs through CI's classifier,
+nightly on main at 01:17 UTC, and on manual dispatch (DL-441).
+It uploads evidence and JUnit even on failure. Docs-only PRs receive an explicit
+`workflow-examples-required` pass without starting containers.
+Classification errors fail that check. Required-check activation belongs to the operator.
+The operator checks all three nightly rehearsal results, including missing runs,
+before each merge train, triages failures and blocks affected merges until resolved.
+GitHub sends failure notifications to schedule actor `mrbald`; rollout must verify
+notification settings and receipt. No extra notifier runs.
 
 ## Next regression slice
 

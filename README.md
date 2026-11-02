@@ -1096,6 +1096,14 @@ summary. Its body states the compatibility facts in the template under
 
 Start from a clean working tree with `main` pushed. Run the
 [full local gates](docs/agent-workflow.md#verify-a-change).
+Container rehearsals run on code PRs and nightly on main (DL-441).
+The [workflow lane](examples/workflows/README.md#integration-lane) uses CI's classifier;
+docs-only PRs receive an explicit required-check pass.
+The [service drill](examples/nightbank/deploy/DRILL.md) and
+[DST drill](examples/dst-drill/README.md#run-it) run on relevant PR paths and nightly,
+and all three support manual dispatch. The operator checks nightly results before
+merging affected changes. Local commands and evidence limits are in those runbooks.
+
 The list follows CI, including format checking and the scoped 100% branch
 coverage requirement.
 

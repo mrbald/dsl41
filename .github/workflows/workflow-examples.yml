@@ -1,11 +1,10 @@
-# DL-236: the opt-in integration lane for the fulfilment, energy and media
+# DL-236: the integration lane for the fulfilment, energy and media
 # examples (examples/workflows/tests). It drives docker compose on the runner
 # the way an operator does: one compose project per test, torn down with its
 # volumes. A missing engine or a failed image build errors every test; the
 # lane never skips.
 #
-# Manual only (workflow_dispatch). It is not part of the default gate; the
-# owner decides when it runs. Evidence (per-test commands, outputs and the
+# DL-441: code PRs call this lane; main runs nightly. Evidence (commands, outputs and the
 # run volume, plus the session's provider record) is uploaded whether the
 # lane passes or fails.
 
@@ -13,6 +12,9 @@ name: workflow-examples
 
 on:
   workflow_dispatch:
+  workflow_call:
+  schedule:
+    - cron: '17 1 * * *'
 
 permissions:
   contents: read

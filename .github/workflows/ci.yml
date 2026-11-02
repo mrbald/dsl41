@@ -22,7 +22,8 @@
 # scripts/prepush_checks.py on every change. A pull request compares with
 # its base branch, a branch push with the commit it replaced; a tag push, a
 # manual run and a call from release.yml always count as code. A classify
-# failure leaves its output empty, which also counts as code. A change to
+# failure retains code=true and reports valid=false for the required rehearsal
+# check (DL-441). An empty output also counts as code. A change to
 # scripts/prepush_checks.py or anything under .github/ counts as code without
 # asking the script, so a pull request never classifies itself with its own
 # classifier.
@@ -45,6 +46,7 @@ jobs:
     outputs:
       code: ${{ steps.classify.outputs.code }}
       base: ${{ steps.classify.outputs.base }}
+      valid: ${{ steps.classify.outputs.valid }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -67,18 +69,60 @@ jobs:
               && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
             base="$BEFORE"
           fi
-          code="code=true"
+          code=true
+          valid=true
           if [ -n "$base" ]; then
-            changed=$(git diff --name-only --no-renames "$base...HEAD")
-            echo "$changed"
-            if ! grep -Eq '^(scripts/prepush_checks\.py|\.github/)' <<< "$changed"; then
-              code=$(python3 scripts/prepush_checks.py --classify --base "$base") || code="code=true"
+            if changed=$(git diff --name-only --no-renames "$base...HEAD"); then
+              echo "$changed"
+              if ! grep -Eq '^(scripts/prepush_checks\.py|\.github/)' <<< "$changed"; then
+                if result=$(python3 scripts/prepush_checks.py --classify --base "$base"); then
+                  case "$result" in
+                    code=true) code=true ;;
+                    code=false) code=false ;;
+                    *) valid=false ;;
+                  esac
+                else
+                  valid=false
+                fi
+              fi
+            else
+              valid=false
             fi
           else
             base="HEAD~1"
           fi
-          echo "$code base=$base"
-          { echo "$code"; echo "base=$base"; } >> "$GITHUB_OUTPUT"
+          echo "code=$code valid=$valid base=$base"
+          { echo "code=$code"; echo "valid=$valid"; echo "base=$base"; } >> "$GITHUB_OUTPUT"
+
+  # DL-441: only an exact successful classification can bypass the rehearsal.
+  workflow-examples:
+    needs: classify
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && needs.classify.outputs.code != 'false' }}
+    uses: ./.github/workflows/workflow-examples.yml
+
+  workflow-examples-required:
+    needs: [classify, workflow-examples]
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: decide required rehearsal result
+        env:
+          CLASSIFY_RESULT: ${{ needs.classify.result }}
+          CLASSIFY_VALID: ${{ needs.classify.outputs.valid }}
+          CODE: ${{ needs.classify.outputs.code }}
+          LANE_RESULT: ${{ needs.workflow-examples.result }}
+        run: |
+          set -euo pipefail
+          if [ "$CLASSIFY_RESULT" != success ] || [ "$CLASSIFY_VALID" != true ]; then
+            echo "classification failed or was invalid" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          case "$CODE:$LANE_RESULT" in
+            false:skipped) echo "docs-only: rehearsal not needed" >> "$GITHUB_STEP_SUMMARY" ;;
+            true:success) echo "workflow rehearsal passed" >> "$GITHUB_STEP_SUMMARY" ;;
+            *) echo "invalid classification or rehearsal result: $CODE:$LANE_RESULT" >> "$GITHUB_STEP_SUMMARY"; exit 1 ;;
+          esac
 
   # The docs gate on every change: the doc tests, the tests that name a
   # changed Markdown file, and the DL-75 architecture gate.

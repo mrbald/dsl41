@@ -1,4 +1,4 @@
-"""Fixtures for the workflow examples' opt-in integration lane (DL-236).
+"""Fixtures for the workflow examples' integration lane (DL-236, DL-441).
 
 A missing engine, compose or image build fails the session fixture, so every
 test errors by name. The lane has no skip of any kind.

@@ -69,10 +69,12 @@ Deferred to the next milestone, active/standby on HA Oracle and the 200-job esta
     race), the service drill installs dependencies from a wheelhouse layer, and
     `scripts/dst-drill-local.sh` runs the DST drill on Podman. Podman's layer cache already reused
     the image; the lane's time is the tests (owner 2026-11-02).
-  - [ ] CI: the workflow lane runs on code PRs through `classify` with an explicit docs-only pass, and
+  - [x] CI: the workflow lane runs on code PRs through `classify` with an explicit docs-only pass, and
     nightly on main; the service and DST drills run nightly and on their change paths; the DST drill
     runs as three parallel lanes (about 8.5 minutes instead of 22); a DL entry supersedes DL-236's
-    dispatch-only rule and shared runner tag; nightly failures notify mrbald (owner 2026-11-01).
+    dispatch-only rule and shared runner tag (DL-441); nightly failures notify mrbald (owner 2026-11-01).
+  - [ ] Operator: hosted evidence (a code PR, a docs-only PR, each workflow's dispatch, the first
+    nightly runs), then make `workflow-examples-required` a required check (owner approval).
 
 # Next work
 

@@ -115,11 +115,42 @@ def test_dst_preserves_status_and_exports_before_cleanup(
     if build:
         assert [command[0] for command in commands] == ["build"]
         return
-    assert [command[0] for command in commands] == ["build", "create", "start", "cp", "rm", "image"]
-    assert commands[-1][1:3] == ["rm", "--no-prune"]
+    assert commands[-1][0:3] == ["image", "rm", "--no-prune"]
     assert commands[-1][-1].startswith("localhost/dsl41-dst:")
-    assert "--init" in commands[1] and "--pull" in commands[1] and "never" in commands[1]
-    assert not any(arg in commands[1] for arg in ["--user", "--volume", "-v"])
+    creates = [c for c in commands if c[0] == "create"]
+    expected_names = {
+        "london-fall",
+        "newyork-fall",
+        "london-fall-restart",
+        "london-spring",
+        "london-midnight",
+        "clock-step",
+        "newyork-spring",
+    }
+    assert {c[-1] for c in creates} == expected_names
+    for create in creates:
+        assert "--init" in create and "--pull" in create and "never" in create
+        assert not any(arg in create for arg in ["--user", "--volume", "-v"])
+        name = create[create.index("--name") + 1]
+        start = next(i for i, c in enumerate(commands) if c[0] == "start" and c[-1] == name)
+        export_i = next(
+            i for i, c in enumerate(commands) if c[0] == "cp" and c[1].startswith(name + ":")
+        )
+        remove = next(i for i, c in enumerate(commands) if c[0] == "rm" and c[-1] == name)
+        assert start < export_i < remove
+        record = json.loads((tmp_path / "evidence" / create[-1] / "scenario.json").read_text())
+        assert record["exit"] == (scenario or (1 if export or cleanup else 0))
+        verdict = "PASS" if record["exit"] == 0 else "FAIL"
+        summary = f"{verdict} {create[-1]}: exit {record['exit']},"
+        assert summary in result.stdout
+        lines = result.stdout.splitlines()
+        lane_records = [i for i, line in enumerate(lines) if line.startswith('{"duration_s":')]
+        assert len(lane_records) == 3
+        assert (
+            next(i for i, line in enumerate(lines) if line.startswith(summary)) > lane_records[-1]
+        )
+    for lane in ["falls", "restart", "clock"]:
+        assert (tmp_path / "evidence" / f"{lane}.json").exists()
 
 
 @pytest.mark.parametrize("service", [False, True])

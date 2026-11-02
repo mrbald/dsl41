@@ -107,15 +107,20 @@ def test_dst_drill_step_estate_ticks_every_minute_and_keeps_a_run_open() -> None
 def test_dst_drill_workflow_runs_every_scenario() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     assert "workflow_dispatch:" in text
-    assert "push:" not in text and "pull_request" not in text
+    assert "push:" not in text and "pull_request:" in text
+    assert "lane: [falls, restart, clock]" in text
+    assert "fail-fast: false" in text
     assert "--init" in text and "examples/dst-drill/drill.py" in text
     assert "Dockerfile" in text and "docker build" in text
     mount = '-v "$RUNNER_TEMP/dst-drill:/tmp/dst-drill"'
     for name in BY_NAME:
-        assert f"--init {mount} dsl41-dst-drill python examples/dst-drill/drill.py {name}\n" in text
+        assert (
+            f"--pull never --init {mount} dsl41-dst-drill python examples/dst-drill/drill.py {name} || status=$?\n"
+            in text
+        )
     # GitHub allows the runner context in a step, not in a job's env
     assert "runner." not in text.split("steps:")[0]
-    assert "if: failure()" in text and "upload-artifact" in text
+    assert "if: always()" in text and "upload-artifact" in text
 
 
 # ----------------------------------------------------- against the virtual clock
