@@ -558,10 +558,10 @@ bugs cover those limits. It does not qualify all clock movement.
 [restart tests]: ../tests/test_restart.py
 [attempt tests]: ../tests/test_runner_attempts.py
 [leadership tests]: ../tests/test_runner_leadership.py
-[storage probe child]: ../examples/nightbank/deploy/storage_probe.py#L206
-[storage unit]: ../examples/nightbank/deploy/storage_probe.py#L264
-[storage admission]: ../examples/nightbank/deploy/storage_probe.py#L407
-[storage space]: ../examples/nightbank/deploy/storage_probe.py#L385
+[storage probe child]: ../examples/nightbank/deploy/storage_probe.py#L213
+[storage unit]: ../examples/nightbank/deploy/storage_probe.py#L271
+[storage admission]: ../examples/nightbank/deploy/storage_probe.py#L414
+[storage space]: ../examples/nightbank/deploy/storage_probe.py#L392
 [main restart]: ../tests/test_main_config_restart.py
 [main update]: ../tests/test_main_config_update.py
 [update wiring]: ../tests/test_update_wiring.py

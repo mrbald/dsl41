@@ -5,6 +5,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -151,7 +152,8 @@ def test_rehearsal_ci_wiring():
 
 
 @pytest.mark.parametrize("failure", [0, 43])
-def test_service_exports_before_cleanup_on_build_failure(tmp_path, failure):
+@pytest.mark.parametrize("permission_failure", [False, True])
+def test_service_exports_before_cleanup_on_build_failure(tmp_path, failure, permission_failure):
     tree = tmp_path / "tree"
     deploy = tree / "examples/nightbank/deploy"
     deploy.mkdir(parents=True)
@@ -174,12 +176,25 @@ def test_service_exports_before_cleanup_on_build_failure(tmp_path, failure):
     for name, body in {
         "uv": "exit 0",
         "git": "printf 'pyproject.toml\\0'",
-        "podman": 'echo "podman $*" >> "$TEST_LOG"; echo evidence',
+        "podman": 'echo "podman $*" >> "$TEST_LOG"; '
+        'if [ "$1:$2:$3" = "inspect:--format:{{.Id}}" ]; then echo recorded-container-id; '
+        'elif [ "$1:$2" = "inspect:--format" ]; then echo "$PWD"; '
+        'elif [ "$1" = cp ]; then mkdir -p "$3"; printf captured >"$3/captured"; '
+        "else echo evidence; fi",
+        "chown": f'echo "chown $*" >> "$TEST_LOG"; exec {shutil.which("chown")} "$@"',
+        "chmod": 'echo "chmod $*" >> "$TEST_LOG"; '
+        'if [ "$TEST_MODE_FAILURE" = 1 ]; then exit 37; fi; '
+        f'exec {shutil.which("chmod")} "$@"',
     }.items():
         path = tools / name
         path.write_text("#!/bin/bash\n" + body + "\n")
         path.chmod(0o755)
     evidence = tmp_path / "evidence"
+    evidence.mkdir()
+    unrelated = evidence / "unrelated"
+    unrelated.write_text("other evidence")
+    unrelated.chmod(0o200)
+    original = unrelated.stat()
     result = subprocess.run(
         ["bash", str(deploy / "drill-local.sh"), "all"],
         cwd=tree,
@@ -190,17 +205,35 @@ def test_service_exports_before_cleanup_on_build_failure(tmp_path, failure):
             "DRILL_EVIDENCE": str(evidence),
             "TEST_LOG": str(log),
             "TEST_FAILURE": str(failure),
+            "TEST_MODE_FAILURE": "1" if permission_failure else "0",
         },
         capture_output=True,
         timeout=30,
     )
-    assert result.returncode == failure, result.stderr
+    assert result.returncode == (failure or int(permission_failure)), result.stderr
     commands = log.read_text()
-    assert commands.index("podman inspect") < commands.index("wargame --base ubuntu dispose")
-    assert commands.index("podman logs") < commands.index("wargame --base ubuntu dispose")
+    removed = commands.index("podman rm --force recorded-container-id")
+    assert commands.index("podman inspect") < removed
+    assert commands.index("podman logs") < removed
     assert commands.index("drill-steps.sh diagnostics") < commands.index(
-        "wargame --base ubuntu dispose"
+        "podman rm --force recorded-container-id"
     )
+    assert removed < commands.index("chown -Rh") < commands.index("chmod -R u+rX")
+    targets = [evidence / "storage", evidence / "storage-filesystem"]
+    if permission_failure:
+        targets = targets[:1]
+    assert [line for line in commands.splitlines() if line.startswith("chown ")] == [
+        f"chown -Rh {os.getuid()}:{os.getgid()} {path}" for path in targets
+    ]
+    assert [line for line in commands.splitlines() if line.startswith("chmod ")] == [
+        f"chmod -R u+rX {path}" for path in targets
+    ]
+    assert (unrelated.stat().st_mode, unrelated.stat().st_uid, unrelated.stat().st_gid) == (
+        original.st_mode,
+        original.st_uid,
+        original.st_gid,
+    )
+    assert (evidence / "container.id").read_text().strip() == "recorded-container-id"
     for filename in [
         "container.json",
         "container.log",
