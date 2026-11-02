@@ -15,13 +15,27 @@ import hashlib
 import json
 import os
 import signal
+import subprocess
+import sys
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
+from types import SimpleNamespace
 
 import pytest
 from store_surgery import rows
+from update_wiring_barrier import (
+    FAULT_DEADLINES_S,
+    FAULT_WAIT_S,
+    SCENARIO_S,
+    READINESS_FAULTS,
+    WATCHDOG_GRACE_S,
+    RerunBarrier,
+    Supervision,
+    descendants,
+    process_table,
+)
 
 from dsl41.canon import canonical_bytes, decode
 from dsl41.ir import CatalogIR, lower_source
@@ -30,7 +44,7 @@ from dsl41.oracle_state import CarriedRows, Event
 from dsl41.reload_plan import load_estate, reread, spec_texts
 from dsl41.reload_update import Admitted, Refused
 from dsl41.runner import Engine
-from dsl41.runner_adapters import JobAdapter, Launch, LocalCommandAdapter
+from dsl41.runner_adapters import JobAdapter, LocalCommandAdapter
 from dsl41.runner_admission import AdmissionRefused, Envelope, Frontiers
 from dsl41.runner_clock import EngineError, RealClock
 from dsl41.runner_config import EngineSettings, RuntimeProfile
@@ -48,7 +62,6 @@ from dsl41.runner_scheduler import Scheduler
 from dsl41.runner_startup import resume_run, start_run
 from dsl41.runner_store import MemoryStore, SqliteStore
 from dsl41.runner_update import UpdateAnswer, UpdateRequest
-from dsl41.runner_wrapper import PAUSE_ENV
 
 GRACE = EngineSettings(grace_term_s=0.5, grace_kill_s=1.0)
 TIMEOUT_S = 30.0
@@ -261,13 +274,35 @@ async def _running(engine: Engine, *jobs: str, ordinal: int = 1) -> None:
 
 
 async def _finish(engine: Engine, loop: asyncio.Future[Any]) -> None:
-    if not engine.draining:
-        await engine.request_stop()
-    async with asyncio.timeout(TIMEOUT_S):
-        await loop
-    await engine.shutdown()
-    assert engine.journal is not None
-    engine.journal.close()
+    original: BaseException | None = None
+    try:
+        async with asyncio.timeout(TIMEOUT_S):
+            if loop.done():
+                await loop
+            if not engine.draining:
+                stop = engine.request_stop()
+                done, _ = await asyncio.wait({stop, loop}, return_when=asyncio.FIRST_COMPLETED)
+                if loop in done:
+                    await loop
+                if not stop.done():
+                    stop.cancel()
+                else:
+                    stop.result()
+            await loop
+    except BaseException as exc:
+        original = exc
+        raise
+    finally:
+        try:
+            async with asyncio.timeout(TIMEOUT_S):
+                await engine.shutdown()
+        except BaseException as exc:
+            if original is None:
+                raise
+            original.add_note("cleanup: " + repr(exc))
+        finally:
+            assert engine.journal is not None
+            engine.journal.close()
 
 
 async def _crash(engine: Engine, loop: asyncio.Future[Any]) -> None:
@@ -376,42 +411,82 @@ def test_two_running_jobs_are_stopped_and_eighteen_untouched_with_the_engine_run
     assert engine.config_rev == 2
 
 
-class _RerunBarrier(LocalCommandAdapter):
-    """Hold the two replacement wrappers at the protocol's phase boundary (DL-42).
+async def _barrier_scenario(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pause: str, barrier: RerunBarrier
+) -> Engine:
+    from dsl41 import runner_adapters
 
-    Before the record, also hold observation until the wrapper exits: publication and
-    the adapter's next poll can straddle the wrapper's lifeline handling (DL-359).
-    """
-
-    def __init__(self, *, before_record: bool) -> None:
-        super().__init__(grace_seconds=GRACE.grace_term_s)
-        self.before_record = before_record
-        self.ready = asyncio.Event()
-        self.release = asyncio.Event()
-        self.launches: dict[str, Launch] = {}
-
-    async def _watch(
-        self, run_dir: Path, run_id: str, proc: asyncio.subprocess.Process, launch: Launch
-    ) -> None:
-        if run_dir.name == "2":
-            stopped = await asyncio.to_thread(
-                os.waitid, os.P_PID, proc.pid, os.WSTOPPED | os.WNOWAIT
+    monkeypatch.setattr(
+        runner_adapters, "_WRAPPER_PATH", Path(__file__).with_name("update_wiring_wrapper.py")
+    )
+    jobs = {f"j{i:02}": "exec sleep 300" for i in range(20)}
+    updated = ("j03", "j07")
+    estate = Estate(tmp_path, _jil(jobs))
+    engine = _start(tmp_path / "run", estate, settings=RECORD_WAITS)
+    engine.adapters["CMD"] = cast(JobAdapter, barrier)
+    supervision = Supervision(engine, barrier)
+    barrier.supervision = supervision
+    original: BaseException | None = None
+    try:
+        async with asyncio.timeout(SCENARIO_S):
+            _start_jobs(engine, *jobs)
+            await supervision.wait(barrier.initial_ready.wait(), "initial-spawn-records")
+            estate.write(_jil(dict(jobs, **{j: "exec sleep 301" for j in updated})))
+            answer = await supervision.wait(
+                _update(engine, _plan(engine, estate), stop=True), "update-admission"
             )
-            assert stopped is not None and stopped.si_status == signal.SIGSTOP
-            self.launches[run_dir.parent.name] = launch
-            if len(self.launches) == 2:
-                self.ready.set()
-            if self.before_record:
-                await self.release.wait()
-                await proc.wait()
-        await super()._watch(run_dir, run_id, proc, launch)
-
-    def resume(self) -> None:
-        self.release.set()
-        for launch in self.launches.values():
-            assert launch.proc is not None
-            with contextlib.suppress(ProcessLookupError):
-                launch.proc.send_signal(signal.SIGCONT)
+            assert isinstance(answer.decision, Admitted)
+            assert answer.decision.stop_set == updated
+            applied = await supervision.wait(_applied(answer), "update-applied")
+            assert (applied["rev"], applied["changed"], applied["stopped"]) == (
+                2,
+                list(updated),
+                [[j, "rerun"] for j in updated],
+            )
+            if barrier.fault == "late-registration":
+                await supervision.wait(barrier.arrived.wait(), "late-registration-arrival")
+                assert not barrier.launches
+                barrier.resume()
+                barrier.registration.set()
+            if barrier.fault in READINESS_FAULTS:
+                await supervision.wait(barrier.arrived.wait(), "readiness-withheld-entered")
+                assert len(barrier.launches) == 2 and not barrier.ready.is_set()
+            await supervision.wait(
+                barrier.ready.wait(),
+                "rerun-readiness",
+                timeout=(FAULT_WAIT_S if barrier.fault in READINESS_FAULTS else SCENARIO_S),
+            )
+            assert set(barrier.launches) == {"j03.1", "j07.1"}
+            for job in updated:
+                spawn = tmp_path / "run/runs" / f"{job}.1" / "2/spawn.json"
+                assert spawn.exists() is (pause == "post_record")
+            assert engine.lifecycle.state == "RUNNING"
+            assert await supervision.wait(engine.request_stop(), "drain-admission") == "DRAINING"
+            for launch in barrier.launches.values():
+                assert launch.spec_sent
+                assert (launch.lifeline_w is None) is barrier.before_record
+            barrier.resume()
+            if barrier.fault == "withheld-exit":
+                await supervision.wait(barrier.exit_withheld.wait(), "exit-withheld-entered")
+                assert len(barrier.exited) == 2 and not barrier.exit_ack.is_set()
+            await supervision.wait(
+                supervision.task,
+                "wrapper-exit-acknowledgement",
+                timeout=(FAULT_WAIT_S if barrier.fault == "withheld-exit" else SCENARIO_S),
+            )
+    except BaseException as exc:
+        original = exc
+        exc.add_note(supervision.diagnostic())
+        raise
+    finally:
+        try:
+            await supervision.cleanup()
+        except BaseException as exc:
+            if original is None:
+                exc.add_note(supervision.diagnostic())
+                raise
+            original.add_note("cleanup: " + repr(exc) + "; " + supervision.diagnostic())
+    return engine
 
 
 @pytest.mark.parametrize(
@@ -422,58 +497,16 @@ class _RerunBarrier(LocalCommandAdapter):
 def test_draining_updated_reruns_on_each_side_of_the_spawn_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pause: str, cause: str
 ) -> None:
-    """DL-359: child markers precede a spawn record; only the record protects the lifeline.
+    """Pause after command creation on each side of spawn-record publication (DL-359).
 
     Both orderings keep the update's two replacements and the other eighteen attempts
     distinct, with exact stop causes and no surviving commands or wrappers.
     """
-    jobs = {f"j{i:02}": "exec sleep 30" for i in range(20)}
+    jobs = {f"j{i:02}": "exec sleep 300" for i in range(20)}
     updated = ("j03", "j07")
-    estate = Estate(tmp_path, _jil(jobs))
     run_root = tmp_path / "run"
-    marker = tmp_path / "new"
-    marker.mkdir()
-    barrier = _RerunBarrier(before_record=pause == "post_spawn_pre_record")
-
-    async def scenario() -> Engine:
-        # The record timeout outlasts the barrier, so only the paused ordering decides the cause.
-        engine = _start(run_root, estate, settings=RECORD_WAITS)
-        engine.adapters["CMD"] = cast(JobAdapter, barrier)
-        loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
-        try:
-            _start_jobs(engine, *jobs)
-            await _running(engine, *jobs)
-            monkeypatch.setenv(PAUSE_ENV, pause)
-            estate.write(
-                _jil(dict(jobs, **{j: f"touch {marker}/{j}; exec sleep 30" for j in updated}))
-            )
-            answer = await _update(engine, _plan(engine, estate), stop=True)
-            assert isinstance(answer.decision, Admitted)
-            assert answer.decision.stop_set == updated
-            applied = await _applied(answer)
-            assert (applied["rev"], applied["changed"], applied["stopped"]) == (
-                2,
-                list(updated),
-                [[j, "rerun"] for j in updated],
-            )
-            async with asyncio.timeout(TIMEOUT_S):
-                await barrier.ready.wait()
-            assert set(barrier.launches) == {"j03.1", "j07.1"}
-            for job in updated:
-                await _until((marker / job).exists)
-                spawn = run_root / "runs" / f"{job}.1" / "2" / "spawn.json"
-                assert spawn.exists() is (pause == "post_record")
-            assert engine.lifecycle.state == "RUNNING"
-            assert await engine.request_stop() == "DRAINING"
-            for launch in barrier.launches.values():
-                assert launch.spec_sent
-                assert (launch.lifeline_w is None) is barrier.before_record
-        finally:
-            barrier.resume()
-            await _finish(engine, loop)
-        return engine
-
-    engine = asyncio.run(scenario())
+    barrier = RerunBarrier(tmp_path / "barrier", before_record=pause == "post_spawn_pre_record")
+    engine = asyncio.run(_barrier_scenario(tmp_path, monkeypatch, pause, barrier))
     outcomes: dict[str, list[tuple[str, str]]] = {}
     for outcome in _kinds(run_root, "outcome"):
         outcomes.setdefault(outcome["job"], []).append((outcome["outcome"], outcome["cause"]))
@@ -508,6 +541,131 @@ def test_draining_updated_reruns_on_each_side_of_the_spawn_record(
             assert (status["outcome"], status["cause"]) == ("terminated", "parent lost")
         else:
             assert (status["outcome"], status["signal"]) == ("signaled", signal.SIGTERM)
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "no-waitid",
+        "observer-failure",
+        "late-registration",
+        "withheld-readiness",
+        "withheld-exit",
+        "inventory-failure",
+    ],
+)
+def test_barrier_faults_finish_under_an_external_watchdog(tmp_path: Path, fault: str) -> None:
+    command = [
+        sys.executable,
+        str(Path(__file__).with_name("update_wiring_faults.py")),
+        fault,
+        str(tmp_path),
+    ]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        output, _ = process.communicate(timeout=FAULT_DEADLINES_S[fault] + WATCHDOG_GRACE_S)
+    except subprocess.TimeoutExpired:
+        table = process_table()
+        owned = descendants(table, {process.pid})
+        wrappers = set()
+        inventory = tmp_path / "barrier/owned.json"
+        if inventory.exists():
+            wrappers = {
+                pid
+                for pid in json.loads(inventory.read_text())
+                if pid in table and table[pid][0] == process.pid
+            }
+        for pid in owned - {process.pid}:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGCONT)
+                if pid not in wrappers:
+                    os.kill(pid, signal.SIGKILL)
+        try:
+            output, _ = process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            for pid in wrappers:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
+            process.kill()
+            output, _ = process.communicate(timeout=5)
+        pytest.fail(f"external watchdog: {fault}; ps={table}; owned={owned}; {output}")
+    assert process.returncode == 0, output
+    report = json.loads((tmp_path / "report.json").read_text())
+    assert report["survivors"] == []
+    assert not (set(report["owned"]) & process_table().keys())
+    assert report["released"] and report["engine_task_done"] and report["shutdown_done"]
+    assert report["wrappers_reaped"] and report["open_fifos"] == []
+    diagnostic = report["diagnostic"]
+    assert all(
+        key in diagnostic
+        for key in ("phase", "attempts", "pid", "engine_task_exception", "outstanding_waits")
+    )
+    if fault == "observer-failure":
+        assert report["exception"] == "RuntimeError('injected observer failure')"
+        assert "injected observer failure" in diagnostic
+        assert report["engine_exception_preserved"]
+    elif fault in READINESS_FAULTS | {"withheld-exit"}:
+        assert report["exception_type"] == "TimeoutError"
+        assert report["failed_phase"] == (
+            "rerun-readiness" if fault in READINESS_FAULTS else "wrapper-exit-acknowledgement"
+        )
+        assert report["failed_phase"] in diagnostic
+        blocked = "release" if fault in READINESS_FAULTS else "exit-acknowledgement"
+        assert f'"wait": "{blocked}"' in diagnostic
+    else:
+        assert report["exception"] is None
+    if fault == "inventory-failure":
+        assert "TimeoutExpired" in diagnostic and "CalledProcessError" in diagnostic
+        assert len(report["inventory_errors"]) >= 2
+        assert "cleanup:" in diagnostic
+    else:
+        assert report["inventory_errors"] == []
+
+
+def test_closed_fifo_objects_remain_closed_when_their_fd_numbers_are_reused(tmp_path: Path) -> None:
+    barrier = RerunBarrier(tmp_path / "barrier", before_record=True)
+    read_fd, write_fd = os.pipe()
+    barrier.pipes[tmp_path / "attempt"] = (
+        os.fdopen(read_fd, "rb", buffering=0),
+        os.fdopen(write_fd, "wb", buffering=0),
+    )
+    try:
+        assert len(barrier.open_fifos) == 2
+        with open(os.devnull, "rb") as unrelated:
+            barrier.close()
+            os.dup2(unrelated.fileno(), read_fd)
+            try:
+                barrier.close()
+                assert barrier.open_fifos == []
+                assert os.read(read_fd, 1) == b""
+            finally:
+                os.close(read_fd)
+    finally:
+        barrier.close()
+
+
+def test_cleanup_signals_live_wrapper_handles_and_records_unproven_pids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    killed: list[int] = []
+    live = SimpleNamespace(pid=101, returncode=None, kill=lambda: killed.append(101))
+    exited = SimpleNamespace(pid=102, returncode=0, kill=lambda: killed.append(102))
+
+    def reject_raw_pid_signal(*args: Any) -> None:
+        pytest.fail(f"signal by remembered pid: {args}")
+
+    monkeypatch.setattr(os, "kill", reject_raw_pid_signal)
+    supervision = Supervision.__new__(Supervision)
+    supervision.barrier = cast(RerunBarrier, SimpleNamespace(owned={101, 102, 103}))
+    supervision.skipped_signals = []
+    supervision.kill_wrappers(
+        [cast(asyncio.subprocess.Process, live), cast(asyncio.subprocess.Process, exited)]
+    )
+    assert killed == [101]
+    assert supervision.skipped_signals == [
+        {"pid": 102, "reason": "no live process handle"},
+        {"pid": 103, "reason": "no live process handle"},
+    ]
 
 
 def test_a_plan_job_the_oracle_starts_while_the_update_stops_waits_for_the_application(
