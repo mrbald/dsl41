@@ -25522,3 +25522,28 @@ relitigate an entry; append a new one.
   THE REASON. Code changes need rehearsal evidence before merging; concurrent isolated DST
   lanes reduce elapsed time without weakening assertions. This establishes no production
   qualification.
+
+- DL-442 Rebase the train tip with strict tested-base protection
+  (2026-11-02; owner ruling; docs/agents/coordination.md, docs/agent-workflow.md;
+  scripts/merge_train.py)
+  THE RULE. The train rebases a tip itself when conflict-free. Branches behind it wait
+  without rebasing. On a conflict, the train aborts and restores the old head; the implementer
+  who knows the change fetches, rebases with --autostash, resolves or escalates to the boss,
+  and pushes with --force-with-lease --force-if-includes. Rule 33 still limits the operator
+  to mechanical resolutions. Every conflict resolution receives integration-delta review.
+  The train accepts the reviewed, published head through --recover; no journal edit is needed.
+  A clean rebase carries acceptance only with proof for the whole accepted commit range,
+  in order, omitting nothing. Record original acceptance and old/new heads and bases;
+  rerun applicable gates and CI on the new candidate. Unproved equivalence requires
+  independent acceptance of that head. Main's strict up-to-date branch protection and
+  this procedure take effect together, with protection enforced for admins. The train verifies
+  both strict and enforce_admins through the API before merging; without proof it stops with
+  atomic-base-guard-unavailable.
+  A moved base repeats the tip's rebase, gates and CI, never those of waiting branches.
+  THE REASON. The implementer can judge its conflicts, and strict protection closes the
+  race between observing a tested base and GitHub accepting the merge.
+  THE BOUNDARY. This entry amends DL-415's branch-protection list to require strict up-to-date
+  checks and enforcement for admins. It replaces workflow rule 1's instruction to have the
+  operator rebase the next branch after the tip merges. It retires the train's automatic
+  decision-log tail-append and derived-index conflict resolution in production. No earlier
+  decision-log entry is superseded in full; DL-415's other requirements and rules 33-35 stand.

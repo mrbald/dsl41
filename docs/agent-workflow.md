@@ -34,9 +34,8 @@ Read the [approved operating model](agents/operating-model.md) for authority, ro
   The brief names each new document; before dispatch the operator creates it
   empty and marks it with `git add -N PATH`. Report any other new document; the operator
   marks it and renders the index again.
-- Send conflicts to the operator under
-  [the conflict procedure](agents/coordination.md#apply-a-settled-edit-or-conflict-resolution).
-  Return any resolution that needs implementation changes as a reviewed fix.
+- At the merge-train tip, follow the
+  [rebase and conflict procedure](agents/coordination.md#workflow-rules).
 
 Keep source files free of non-functional boilerplate, including license headers
 and attribution comments. Follow [LICENSING.md item 3](../LICENSING.md) for root

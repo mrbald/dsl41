@@ -179,10 +179,33 @@ budget for them, not for diff reads.
 
 ## Workflow rules
 
-1. Keep one open PR: the tip of the merge train. Other branches wait with
-   no PR. When the tip merges, fetch, rebase the next branch onto
-   `origin/main`, run its gates, open its PR. Announce parallel work before
-   it starts and list it in the train order.
+1. Run the merge train with `TRAIN_RECORDS=/absolute/outside/path python
+   scripts/merge_train.py`; keep `queue.json`, PR bodies and the write journal
+   outside every checkout. Keep one open PR: the tip. Other branches wait
+   without a PR or rebasing. When a branch reaches the tip, the train rebases
+   it if conflict-free (DL-442). It carries acceptance only with proof that
+   the whole accepted commit range is equivalent, then reruns gates and CI.
+   Unproved equivalence pauses for acceptance of the new head.
+   Main requires up-to-date branches: the tip must contain the current main
+   and pass gates and CI on that head and base before merging. If main moves,
+   repeat this procedure for the tip only. Announce parallel work before it
+   starts and list it in train order.
+   On `atomic-base-guard-unavailable`, restore strict required-status-check
+   protection and `enforce_admins` before restarting. On `rebase-conflict`,
+   send the recorded commands to the implementer under rule 7.
+   On `rebase-review-required`, obtain acceptance and copy the candidate head
+   and base from `state.json` into `queue.json`. On `integration-review-required`,
+   record the resolved worktree's reviewed head and base in `queue.json`, with
+   `integration_reviewed_commit` for that head, then restart with `--recover`.
+   `implementer-push-required` needs rule 5's publication first. Recovery accepts
+   only that reviewed remote head. `rebase-ancestry-unproven` requires correcting
+   the reviewed base or head and its review receipt before retrying.
+   To withdraw a pending conflict, remove its entry from `queue.json` while the
+   train is stopped; restart to clear its local journal state. If merely reordered,
+   `pending-conflict-not-tip` requires restoring it to the tip or withdrawing it.
+   Other refusals retain evidence in `state.json` and `log.jsonl`.
+   After an uncertain write, inspect remote state and use `--recover` only
+   when the recorded old ref, absent PR or still-open PR proves no delivery.
 2. One branch, one worktree, one writing agent per slice. Create worktrees
    with `scripts/worktree.sh BRANCH`. Edit the decision log and the todo on
    the tip only. Before dispatch, create an empty file for each new document the
@@ -197,16 +220,24 @@ budget for them, not for diff reads.
    as the pre-push hook. The gate agent runs the gates in
    `docs/agent-workflow.md` that no hook ran over the whole tree, under the
    session rules of [Verify a change](../agent-workflow.md#verify-a-change).
-5. Force-push only your own rebased branch, never main:
+5. The implementer publishes a conflict-resolved tip only with both lease flags:
    `git push --force-with-lease --force-if-includes origin BRANCH`. If only
    the forced update is blocked, push as `BRANCH-v2`, close the old PR, open
-   its replacement.
+   its replacement. The train pins its lease to the recorded remote head;
+   `remote-head-changed` requires inspection before resuming. Never force-push main.
 6. Remove worktrees with `wt remove --discard-ignored`. The deletes that need
    the owner's yes are in the shared contract's "Shared work safeguards".
-7. Resolve a conflict and inspect the files. In a later command, run
+7. On `rebase-conflict`, the train aborts and restores the old head. The implementer
+   who knows the change runs `git fetch`, then `git rebase --autostash origin/main`
+   in that worktree. It resolves and inspects each conflicting commit, or escalates
+   to the boss. The operator may apply only the mechanical
+   [conflict procedure](#apply-a-settled-edit-or-conflict-resolution), under
+   [rule 33](operating-model.md#limits-on-the-operator). In a later command, run
    `git diff --check` and, for Markdown, `uv run pytest -q
    tests/test_docs_hygiene.py`. Stage explicit paths after both pass. Run
-   `git diff --cached --check` before `--continue`.
+   `git diff --cached --check` before each `git rebase --continue`. After the
+   rebase finishes, publish under rule 5 and obtain integration-delta review
+   before resuming under rule 1. Never edit `state.json` to adopt a remote head.
 8. Read the failed CI step and retain its evidence. Send an unexplained failure
    to the boss. Rerun once only for a diagnosed infrastructure transient:
    `gh run rerun ID --failed`. Trace a reported pre-existing failure to its first
