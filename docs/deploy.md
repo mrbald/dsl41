@@ -9,6 +9,25 @@ A Packager uses the install steps as the reference implementation (DL-439).
 
 ## Install the package and unit
 
+For the Packager: the supported production interpreter is Python 3.12.x.
+Install the host's clock synchronization service and enable its waiter before
+starting the engine: `chrony-wait.service` with chrony (as on RHEL 8), or
+`systemd-time-wait-sync.service` with systemd-timesyncd.
+The engine unit orders after `time-sync.target`, but that target waits for
+real synchronization only when a waiter is enabled.
+The [chrony waiter](https://github.com/mlichvar/chrony/blob/4.2/examples/chrony-wait.service)
+sets `TimeoutStartSec=180`; if it times out, the engine can still start
+without synchronization.
+The upstream [timesyncd waiter](https://github.com/systemd/systemd/blob/main/units/systemd-time-wait-sync.service.in)
+sets `TimeoutStartSec=infinity`. With that default, engine startup waits
+until synchronization and can be delayed indefinitely if synchronization fails.
+Check the host's installed unit and overrides for its effective timeout.
+Without it, the engine can start with an unsynchronized clock.
+A clock set ahead stamps the store ahead; after the clock is corrected,
+the engine holds ticks until the wall clock catches up.
+On a backward gap, the engine reports `dsl41: WARNING:` with the wall reading,
+admission frontier and gap in seconds in the [engine's output](#read-the-engines-output).
+
 1. As root, create the release environment and install the selected version.
    Substitute a concrete version for `<version>` in every command and in
    the unit. The [package instructions](../README.md#install) describe extras.
@@ -100,8 +119,26 @@ A Packager uses the install steps as the reference implementation (DL-439).
    to the configured run root and every required input filesystem.
    Set `ExecStop`'s socket to that root's `control.sock`.
    Include the profile, worker and data filesystems in the mount dependencies.
-   Keep the unit's time-sync ordering so a boot-time clock correction happens
-   before engine timestamps. Verify the installed unit as root:
+   Keep the unit's time-sync ordering. As root, enable and verify the waiter
+   for the host's time service. With chrony:
+
+   ```sh
+   systemctl enable --now chrony-wait.service
+   systemctl is-enabled chrony-wait.service
+   systemctl status chrony-wait.service
+   ```
+
+   With systemd-timesyncd instead:
+
+   ```sh
+   systemctl enable --now systemd-time-wait-sync.service
+   systemctl is-enabled systemd-time-wait-sync.service
+   systemctl status systemd-time-wait-sync.service
+   ```
+
+   `is-enabled` must print `enabled`. Check `status` for a timeout or failure;
+   enabling the waiter alone does not prove synchronization succeeded.
+   Verify the installed engine unit as root:
 
    ```sh
    systemd-analyze verify /etc/systemd/system/dsl41-engine.service
@@ -153,7 +190,7 @@ Read the unit in these groups:
 | Lines | What they do for the operator |
 | --- | --- |
 | `[Unit]`, `Description`, `RequiresMountsFor` | Name the service and require the run root's filesystem before starting. An absent mount must not look like a fresh root. |
-| `Wants`, `After` | Order startup after `time-sync.target`; the host must provide clock synchronization. |
+| `Wants`, `After` | Order startup after `time-sync.target`; the host must enable the synchronization waiter described above. |
 | `StartLimitIntervalSec`, `StartLimitBurst` | Allow at most five starts in 300 seconds, then leave a repeated crash failed. |
 | `[Service]`, `Type`, `User`, `Group` | Run the engine directly as `dsl41:dsl41`. |
 | `ExecStart` | Read the main config. A root containing `engine.db` resumes its stored active catalog. |
@@ -237,6 +274,8 @@ Use prebuilt JIL when the deployment requires reproducible builds.
 
 ## Read the engine's output
 
+For the operator, read the engine's journal with:
+
 ```sh
 journalctl -u dsl41-engine.service
 ```
@@ -250,6 +289,16 @@ and [journalctl's unit filter](https://www.freedesktop.org/software/systemd/man/
 The foreground run prints the same shutdown record to its terminal.
 Output and refusal handling: [run CLI](../src/dsl41/cli_run.py) and
 [shared CLI](../src/dsl41/cli_common.py).
+
+Job output goes to each job's `std_out_file` and `std_err_file` when set.
+Each unset path falls back to `<run_root>/logs/<job>.<run>.{out,err}`.
+The engine appends job output, as AutoSys does.
+It does not archive or delete job output, or monitor disk space.
+The site's archiver may move only finished job output.
+It must leave everything else in the run root untouched, including `runs/`,
+`plans/`, the store (`engine.db` and its sidecars), `leader.lock`,
+`control.sock` and `engine.toml`.
+The host's monitoring must watch disk space.
 
 ## Watch the engine and jobs
 
@@ -332,6 +381,65 @@ interruption evidence. Use `dsl41 query status` and the exit status of
 `dsl41 engine stop` as the workaround. Status exposes the engine state and
 attempt evidence; it does not provide a drain deadline or a full stored-plan
 view. Once the engine exits, its socket cannot answer status.
+
+## Take a backup for restore
+
+Never copy `engine.db` and its sidecars from a running engine.
+Draining stops running commands with TERM, waits the configured grace, then
+sends KILL where needed. It cancels file watchers and records attempt outcomes.
+It does not wait for jobs to finish their work naturally.
+Choose a quiet window for a drained backup, or use an atomic snapshot.
+See [drain the engine](#drain-the-engine) for deadlines and shutdown records.
+
+For the operator, use one of these backup methods:
+
+- Drain the engine, then copy the whole run root while it remains stopped.
+- Take an atomic filesystem snapshot of the whole run root, even while the
+  engine runs. A restore from a live snapshot recovers as after a crash.
+
+Keep a copy of the main config (`/etc/dsl41/dsl41.toml` in this example)
+with the backup and record the installed release version.
+Retain that release so restore can use the same interpreter and package.
+A different release may refuse the captured estate bytes.
+
+For a drained backup of the systemd service:
+
+1. As root, stop the unit:
+
+   ```sh
+   systemctl stop dsl41-engine.service
+   ```
+
+   The unit drains through `dsl41 engine stop --wait`.
+   For a foreground engine, use the [direct drain command](#drain-the-engine)
+   instead. Keep the engine stopped until the copy finishes.
+
+2. As root, copy the whole run root to a fresh backup destination.
+   Choose a destination that does not exist:
+
+   ```sh
+   install -d -m 0700 /srv/backups
+   cp -a /srv/dsl41/runs/nightbank /srv/backups/nightbank-backup
+   cp -a /etc/dsl41/dsl41.toml /srv/backups/nightbank-backup.toml
+   ```
+
+   Keep `engine.db`, its sidecars and all other root contents together.
+   Copying only the database omits attempt records and captured plans needed
+   for recovery.
+
+3. As root, restart the service:
+
+   ```sh
+   systemctl start dsl41-engine.service
+   ```
+
+For an atomic snapshot, use the host filesystem's snapshot tools.
+The snapshot must capture the whole run root at one instant.
+Job output outside that root needs the site's separate backup policy.
+Restore the whole root together, with its main config and recorded release.
+If `engine.db` is missing, the engine starts fresh even when other runtime
+evidence survives. That loses recovery continuity; backing up and restoring
+the whole run root avoids this loss.
 
 ## Reload a changed estate
 
