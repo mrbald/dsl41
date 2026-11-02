@@ -323,6 +323,48 @@ def test_terminal_footer_requires_fresh_complete_focus_at_the_requested_geometry
     assert not table_focus_ready(complete + b"\x1b[36;1H esc clear ", len(footer), 36)
 
 
+@pytest.mark.parametrize(
+    "control",
+    [
+        b"\x1b]22;default\x07",
+        b"\x1b]22;pointer\x1b\\",
+        b"\x1b]0;title\x07",
+        b"\x1b]2;title\x1b\\",
+        b"\x1b[?25l",
+        b"\x1b[?25h",
+        b"\x1b[?1000h",
+        b"\x1b[?2004h",
+        b"\x1b[?2026l",
+    ],
+)
+def test_terminal_non_painting_controls_keep_observed_cells(control: bytes) -> None:
+    footer = b" s start  k kill  q detach "
+    painted = b"\x1b[36;1H" + footer + b"\x1b[2;5H"
+    assert table_focus_ready(painted + control, len(footer), 36)
+    assert selected_filter_ready(_FILTERED_SELECTION + control)
+    assert not table_focus_ready(control, len(footer), 36)
+    assert not table_focus_ready(painted[:-10] + control, len(footer), 36)
+
+
+@pytest.mark.parametrize(
+    "control",
+    [
+        b"\x1b]22;default",
+        b"\x1b]22;default\x1b",
+        b"\x1b]22;bad\rshape\x07",
+        b"\x1b]52;clipboard\x07",
+        b"\x1b[2J",
+        b"\x1b[?1049h",
+        b"\x1b[?1049l",
+        b"\x1b[?9999h",
+    ],
+)
+def test_terminal_unproven_or_painting_controls_invalidate_observed_cells(control: bytes) -> None:
+    footer = b" s start  k kill  q detach "
+    assert not table_focus_ready(b"\x1b[36;1H" + footer + control, len(footer), 36)
+    assert not selected_filter_ready(_FILTERED_SELECTION + control)
+
+
 async def _filter_and_hold(terminal: Terminal) -> int:
     await terminal.until(
         "initial table focus", lambda data: table_focus_ready(data, 150, 44), after=0

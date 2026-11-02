@@ -159,6 +159,7 @@ Found after an area was sealed as good enough. Addressed once the scope runs end
 - [ ] The workflow lane's session teardown raises the tag-removal error inside `finally`, so when
   setup and removal both fail pytest shows only the removal error; the setup failure stays in
   `session.json` (`examples/workflows/tests/conftest.py`; Opus, slice rehearsal-local-cache).
-- [ ] The TUI driver's terminal model clears the screen on any escape other than cursor position or
-  colour, so an OSC pointer-shape sequence after an awaited paint gives a 15 s timeout (never a false
-  pass) (`tests/tui_terminal.py`; Opus, slice tui-driver).
+- [ ] The TUI driver's terminal model still clears the screen on non-painting controls outside its
+  allow-list (autowrap `ESC[?7l`, kitty keyboard codes); Textual sends them only at start and exit, and
+  a later one makes a wait time out with its label, never pass (`tests/tui_terminal.py`; Opus, slice
+  tui-driver).
