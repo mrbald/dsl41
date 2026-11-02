@@ -139,6 +139,9 @@ The served-TUI browser lane runs on demand through the qualification procedure.
 The `audit`, `secrets` and `release` workflows have their own triggers. They are outside the local command list.
 The workflow examples lane is opt-in and needs a container engine (DL-236):
 `WORKFLOW_CONTEXT=<context> uv run pytest -q -o faulthandler_timeout=0 examples/workflows/tests`.
+For local Podman layer reuse and per-session image isolation, follow the [workflow lane](../examples/workflows/README.md#integration-lane).
+Use `env -u VIRTUAL_ENV` and a `UV_CACHE_DIR` under `/tmp` on the shared Mac.
+Never prune or reconfigure the shared VM for a rehearsal.
 `scripts/arch_check.py --spec-status` prints every specification with its spec
 review status (DL-225); it is advisory, and the `spec-review` skill runs one pass
 per document.

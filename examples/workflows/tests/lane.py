@@ -33,8 +33,9 @@ def docker() -> list[str]:
     return ["docker", "--context", context] if context else ["docker"]
 
 
-def compose(project: str) -> list[str]:
-    return [*docker(), "compose", "-p", project, "-f", COMPOSE_FILE]
+def compose(project: str, runner: str | None = None) -> list[str]:
+    prefix = ["env", f"WORKFLOW_RUNNER_IMAGE={runner}"] if runner else []
+    return [*prefix, *docker(), "compose", "-p", project, "-f", COMPOSE_FILE]
 
 
 @dataclass
@@ -145,14 +146,15 @@ def _force_remove(function: Any, path: str, _exc: BaseException) -> None:
 class Lane:
     """One compose project: its own database, network and run volume."""
 
-    def __init__(self, project: str, evidence: Path) -> None:
+    def __init__(self, project: str, evidence: Path, runner: str | None = None) -> None:
         self.project = project
+        self.runner = runner
         self.evidence = evidence
         self.commands: list[Result] = []
         evidence.mkdir(parents=True)
 
     def compose(self, *args: str, timeout: float = 120, stdout: Any = None) -> Result:
-        result = execute([*compose(self.project), *args], timeout, stdout)
+        result = execute([*compose(self.project, self.runner), *args], timeout, stdout)
         self.commands.append(result)
         return result
 
@@ -162,11 +164,13 @@ class Lane:
     def run(self, example: str, *args: str, timeout: float) -> Result:
         """Run one example's launcher in a disposable runner container."""
         command = ["python", f"examples/{example}/demo.py", *args]
-        return self.compose("run", "--rm", "-T", "runner", *command, timeout=timeout)
+        return self.compose(
+            "run", "--rm", "--pull", "never", "-T", "runner", *command, timeout=timeout
+        )
 
     def exec(self, *command: str, timeout: float = 120, stdout: Any = None) -> Result:
         """Run a one-off command in a runner container beside the run volume."""
-        args = ["run", "--rm", "--no-deps", "-T", "runner", *command]
+        args = ["run", "--rm", "--pull", "never", "--no-deps", "-T", "runner", *command]
         return self.compose(*args, timeout=timeout, stdout=stdout)
 
     def psql(self, sql: str) -> str:

@@ -4,6 +4,9 @@
 # checkout's files, owned by `runner`, a user with passwordless sudo; /delivery holds what
 # `deliver` copied in. The container has the network, so an install inside it can reach PyPI.
 # examples/nightbank/deploy/drill-local.sh runs the service drill on it.
+# WARGAME_REQUIREMENTS=PATH selects the service target and the -service image suffix.
+# That target builds /wheelhouse from exported runtime requirements. drill-steps.sh
+# install and upgrade need it; a plain host build has no wheelhouse.
 #
 #   scripts/wargame.sh [--base ubuntu|el8] build   [NAME]       build the image
 #   scripts/wargame.sh [--base ubuntu|el8] start   [NAME]       run (or restart) the container,
@@ -62,8 +65,13 @@ name=${1:-$(basename "$tree")-$base}
     exit 2
 }
 container=dsl41-wargame-$name
-# one image per checkout and base, which every container of that base runs
+# Checkout-owned images keep host and service builds separate.
 image=localhost/dsl41-wargame:$(basename "$tree")-$base
+target=host
+if [ -n "${WARGAME_REQUIREMENTS-}" ]; then
+    target=service
+    image=$image-service
+fi
 
 # PODMAN is the podman command, `podman` by default; CI sets `sudo podman` for a rootful engine
 podman() {
@@ -89,8 +97,17 @@ running() {
 
 case $verb in
     build)
-        podman build --tag "$image" --label "dsl41.wargame=$tree" --build-arg "BASE=$from" \
-            --build-arg "TARGET=$base" --file "$here/wargame.Containerfile" "$here"
+        context=$(mktemp -d "${TMPDIR:-/tmp}/dsl41-wargame-build.XXXXXX")
+        cp "$here/wargame.Containerfile" "$context/Containerfile"
+        if [ "$target" = service ]; then
+            cp "$WARGAME_REQUIREMENTS" "$context/requirements.txt"
+        fi
+        status=0
+        podman build --layers=true --target "$target" --tag "$image" \
+            --label "dsl41.wargame=$tree" --build-arg "BASE=$from" \
+            --build-arg "TARGET=$base" --file "$context/Containerfile" "$context" || status=$?
+        rm -r -f -- "$context"
+        exit "$status"
         ;;
     start)
         if podman container exists "$container"; then

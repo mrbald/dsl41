@@ -15,7 +15,8 @@ services:
       timeout: 3s
       retries: 30
   runner:
-    image: dsl41-workflow-examples:local
+    image: ${WORKFLOW_RUNNER_IMAGE:-dsl41-workflow-examples:local}
+    pull_policy: never
     build:
       context: ../..
       dockerfile: examples/workflows/Dockerfile

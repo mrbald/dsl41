@@ -43,6 +43,17 @@ platform's manifest, so the pins resolve on amd64 and arm64 alike.
 The root `.dockerignore` limits the build context. The workflow Dockerfile copies
 workflow support and the fulfilment and media sources into the image.
 Debian packages, including FFmpeg, resolve at build time.
+Podman caches base, OS/tool and third-party dependency layers.
+The Dockerfile installs dependencies before copying source. Changed source bytes
+invalidate the COPY layer and the project install. Warm reuse is not an OS update;
+refresh base pins or explicitly rebuild without cache when an update is intended.
+
+The lane builds a unique runner tag per session and uses pull-never execution.
+Build, inspect, run and tag removal all use the selected Docker CLI context.
+The lane keeps its tag in memory and removes it after teardown; `session.json`
+records the tag and image ID as evidence only.
+Manual Compose commands use `dsl41-workflow-examples:local` by default;
+`WORKFLOW_RUNNER_IMAGE` selects another tag.
 Record the resulting image ID and package versions when retaining evidence:
 
 ```sh
@@ -54,8 +65,8 @@ docker --context "$WORKFLOW_CONTEXT" compose -f examples/workflows/compose.yaml 
 Python's locked environment need not contain pip; the command above reports
 the image's system pip and uses uv to inspect the application environment.
 The integration lane records this command's output in its `session.json`.
-Exact replay needs the built image itself, retained separately; nothing here
-retains it.
+Exact replay needs the built image. The lane removes its session tag on exit.
+Manual images keep the documented default tag until you explicitly remove it.
 
 ## Run
 
@@ -148,7 +159,8 @@ WORKFLOW_CONTEXT=podman uv run pytest -q -o faulthandler_timeout=0 examples/work
 ```
 
 Leave `WORKFLOW_CONTEXT` unset to use the Docker CLI's current context.
-The lane builds the runner image once. Each test owns a Compose project named
+The lane builds its source image once through Compose on the selected context.
+Each test owns a Compose project named
 `dsl41-wf-<test>-<suffix>`. Teardown stops any runner container still running,
 dumps the database, kills the project's containers, copies the run volume out,
 and runs `down`. It deletes the volumes with `down --volumes` only when both the
@@ -166,7 +178,8 @@ and media's served file and an older rendition served with recomputed hashes.
 Evidence goes to `WORKFLOW_EVIDENCE`, or to pytest's temporary directory when
 that is unset. The summary prints the path. `session.json` records the context
 endpoint, Docker and Compose versions, the runner image ID, the PostgreSQL
-digest, and the versions inside the image. Each test directory holds
+digest, and the versions inside the image.
+Each test directory holds
 `command.json` with every command's exit code, duration, stdout, and stderr,
 `database.sql` from `pg_dump`, plus the run volume as numbered
 `runs-N.tar` archives and the extracted copy of the last one. The lane is

@@ -22,9 +22,15 @@ maintainer track is in the [README's documents](../../../README.md#documents).
    examples/nightbank/deploy/drill-local.sh --image el8 all
    ```
 
-Each run takes about two minutes once the image is built; the first build
-takes several more. The script prints `ok:` per check, a summary with each
-row's seconds, and exits 0 only when every row passed.
+Each run creates a fresh container and builds both current and `.post1` wheels.
+Podman reuses the host and dependency wheelhouse layers.
+Container Python 3.12 builds the wheelhouse from frozen exported runtime requirements.
+Install and upgrade each create a fresh release venv and run pip against that wheelhouse.
+No tested venv is cached. Warm reuse is not an OS update.
+`DRILL_EVIDENCE` selects the retained evidence directory; its default is a fresh
+`/tmp` directory holding build seconds, exit status and the build log.
+The script prints `ok:` per check, a summary with each row's seconds, and exits 0
+only when every row passed.
 
 | Option | Effect |
 | --- | --- |
@@ -89,7 +95,11 @@ failure.
 
 [`scripts/wargame.sh`](../../../scripts/wargame.sh) builds and runs the
 container from [`scripts/wargame.Containerfile`](../../../scripts/wargame.Containerfile).
-Use it by hand for a service exercise:
+The default host target has no dependency wheelhouse. For the service drill's
+install and upgrade rows, use `drill-local.sh`, which exports requirements and sets
+`WARGAME_REQUIREMENTS`. Setting that variable by hand selects the `service` target
+and the `-service` image suffix, which includes `/wheelhouse`.
+Use the ordinary host by hand for other exercises:
 
 ```sh
 scripts/wargame.sh --base el8 build
@@ -101,6 +111,8 @@ scripts/wargame.sh --base el8 join
 container's state; `dispose` removes the container. `start` copies the
 checkout to `/work`, owned by `runner`, a user with passwordless sudo. The
 image stays until you remove it with `podman image rm`.
+Stop/start preserves `/work` and installed state. After checkout edits, use a fresh
+named container to copy the current checkout; a restart keeps the retained copy.
 
 The drill does not cover a release, a supervisor, a seal, detached jobs or an
 offline install.

@@ -509,6 +509,10 @@ repo-only; it is not packaged.
 The service drill runs the engine unit in a podman container on Ubuntu 24.04 and
 Rocky 8: `examples/nightbank/deploy/drill-local.sh --image ubuntu|el8 all`
 ([DRILL.md](examples/nightbank/deploy/DRILL.md)).
+For local Podman layer reuse and per-session image isolation, follow the
+[workflow lane instructions](examples/workflows/README.md#integration-lane).
+Run the seven DST scenarios with `bash scripts/dst-drill-local.sh`
+([DST drill](examples/dst-drill/README.md#run-it)).
 
 [tests/test_nightbank_example.py](tests/test_nightbank_example.py) checks seeded
 interleavings of engine restart, a spawn decided and never acted on, and
