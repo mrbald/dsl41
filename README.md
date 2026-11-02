@@ -395,6 +395,10 @@ before you hand it over.
 
 ### Run an estate
 
+For the terminal TUI, positive exported `COLUMNS` and `LINES` values override
+its measured size ([Python's size rules](https://docs.python.org/3.12/library/shutil.html#shutil.get_terminal_size)).
+Unset both with `unset COLUMNS LINES` before starting the TUI to use automatic sizing.
+
 ```sh
 dsl41 run jobs.jil --run-root ./run1            # headless engine + control socket
 dsl41 run jobs.jil --run-root ./run1 --resume   # after a stop or a crash: replay, reconcile, go on

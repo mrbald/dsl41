@@ -163,3 +163,11 @@ Found after an area was sealed as good enough. Addressed once the scope runs end
   allow-list (autowrap `ESC[?7l`, kitty keyboard codes); Textual sends them only at start and exit, and
   a later one makes a wait time out with its label, never pass (`tests/tui_terminal.py`; Opus, slice
   tui-driver).
+- [ ] On CI's `test (3.12)` job a pytest worker carried `COLUMNS=80` and `LINES=24`; no setter was found in the tests, the
+  source, the scripts, the workflows or the installed packages. The TUI driver now drops both at the TUI's spawn, so the
+  test passes either way; a test found leaking them must restore the environment (boss ruling 2026-11-02; Opus analysis, slice
+  tui-driver).
+- [ ] In the Codex macOS sandbox both real-terminal TUI cases failed on engine state, with correct geometry: `recovery_other`
+  was held by "interrupted attempt held" (DL-424) instead of staying unheld. The cause is unexplained and the earlier driver was
+  not tried there; a reproduction in a supported environment goes back to the boss (boss ruling 2026-11-02; Sol, with Opus
+  analysis, slice tui-driver).
