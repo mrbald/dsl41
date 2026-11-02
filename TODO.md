@@ -29,6 +29,10 @@ disjoint files.
   Python 3.12) and could hang in unbounded teardown; it now uses portable acknowledgements, a
   persistent release, supervised waits and bounded cleanup, and six injected faults each end
   within their budget with diagnostics and no surviving process (boss ruling 2026-11-02; PR #293).
+- [x] Blocker for code merges: the real-terminal TUI driver missed ON_HOLD on main d8c6b03 (CI
+  41399896410): an `h` sent before Enter restored table focus became filter text; the driver now waits
+  for fresh filter, selection, focus and geometry acknowledgements, and barriers prove `h` stays unsent
+  until release (boss ruling 2026-11-02).
 - [x] 3. Terms sweep of `docs/control-protocol.md` and `docs/access-model.md`: replace
   retired terms (the journal where DL-428 replaced it with the store, the old supervisor
   model); no rule changes. Builds now.
@@ -155,3 +159,6 @@ Found after an area was sealed as good enough. Addressed once the scope runs end
 - [ ] The workflow lane's session teardown raises the tag-removal error inside `finally`, so when
   setup and removal both fail pytest shows only the removal error; the setup failure stays in
   `session.json` (`examples/workflows/tests/conftest.py`; Opus, slice rehearsal-local-cache).
+- [ ] The TUI driver's terminal model clears the screen on any escape other than cursor position or
+  colour, so an OSC pointer-shape sequence after an awaited paint gives a 15 s timeout (never a false
+  pass) (`tests/tui_terminal.py`; Opus, slice tui-driver).
