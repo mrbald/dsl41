@@ -35,6 +35,7 @@ from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
+from dsl41.runner_environment import inherited_environment, resolve_streams
 from typing import Any, Final, Protocol, get_args, runtime_checkable
 
 
@@ -88,6 +89,8 @@ class AdapterContext:
     #: the invocation environment the attempt's `dispatch` record holds; the wrapper spec
     #: carries it to the command (crash spec)
     env: dict[str, str] = field(default_factory=dict)
+    paths: dict[str, str | None] | None = None
+    startup_env: dict[str, str] | None = None
 
 
 class AttemptObserver(Protocol):
@@ -339,7 +342,16 @@ def _build_run_spec(
     fsync_dir(run_dir.parent)  # the run's and the runs dir are fsync'd at creation
     fsync_dir(run_dir.parent.parent)
     (ctx.run_root / "logs").mkdir(parents=True, exist_ok=True)
-    stdout_path, stderr_path = job_log_paths(job_ir, run_number, ctx.run_root)
+    inherited = inherited_environment(os.environ if ctx.startup_env is None else ctx.startup_env)
+    paths = ctx.paths
+    if paths is None:
+        out, err = default_log_paths(job_ir.name, run_number, ctx.run_root)
+        paths, _ = resolve_streams(
+            job_ir,
+            {**inherited, **ctx.env},
+            cwd=Path.cwd(),
+            defaults={"std_out_file": str(out), "std_err_file": str(err)},
+        )
     spec = {
         "version": SPOOL_VERSION,
         # the engine's mint when there is one (PR-36a); the local fallback covers only a caller
@@ -350,9 +362,9 @@ def _build_run_spec(
         "run_number": run_number,
         "command": command,
         "run_dir": str(run_dir),
-        "stdout_path": stdout_path,
-        "stderr_path": stderr_path,
-        "stdin_path": spec_ir.std_in_file,
+        "stdout_path": paths["std_out_file"],
+        "stderr_path": paths["std_err_file"],
+        "stdin_path": paths["std_in_file"],
         "grace_seconds": grace_seconds,
     }
     if ctx.env:
@@ -404,7 +416,12 @@ class LocalCommandAdapter:
                     str(_WRAPPER_PATH),
                     stdin=asyncio.subprocess.PIPE,
                     pass_fds=(lifeline_r,),
-                    env=None if cookie is None else {**os.environ, _procid.COOKIE_ENV: cookie},
+                    env={
+                        **inherited_environment(
+                            os.environ if ctx.startup_env is None else ctx.startup_env
+                        ),
+                        **({} if cookie is None else {_procid.COOKIE_ENV: cookie}),
+                    },
                 )
             except OSError as exc:
                 launch.observer.spawn_failed(f"wrapper spawn failed: {exc}")
@@ -607,9 +624,10 @@ def default_log_paths(job: str, run_number: int, run_root: Path) -> tuple[Path, 
 
 
 def job_log_paths(job_ir: JobIR, run_number: int, run_root: Path) -> tuple[str, str]:
-    """ss6 append targets for a CMD run: std_out_file/std_err_file when set (vendor appends), else
-    <run_root>/logs/<job>.<run_number>.{out,err}. One resolver serves the adapter's wrapper spec
-    and the ss10 status response, because the ss11 log tail reads what the wrapper writes."""
+    """Unexpanded explicit log names or the default convention.
+
+    Dispatch uses `resolve_streams`; status reads its durable paths (DL-447).
+    """
     out = err = None
     if isinstance(job_ir.exec_, ExecSpec):
         out, err = job_ir.exec_.std_out_file, job_ir.exec_.std_err_file

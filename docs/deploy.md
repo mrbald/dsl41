@@ -229,6 +229,29 @@ properties. Portable manifest fixtures select their environments with
 `--environment NAME` instead.
 
 Set `engine.run_root`, input patterns and properties in the main config.
+For job environment values, add a literal string map to that config:
+
+```toml
+[engine.job_env]
+AUTOSERV = "synthetic"
+LOG_DIR = "/var/log/dsl41"
+```
+
+Apply edits with `reread` and `update`; a restart uses the applied revision.
+An edit only to `job_env` advances the revision without stopping jobs,
+including while boxes run (DL-447). Later dispatches and replacements use
+the new map; attempts already running keep their recorded environment.
+`reread` needs the OPS catalog view and refuses a READ response.
+`AUTOSERV`, `AUTOSYS`, `AUTOUSER` and `AUTOROOT` are unset unless this map
+supplies them. Other names inherit the engine's startup environment.
+Set variables used by stream paths here; profiles run after those paths
+resolve. For example, `std_out_file: $LOG_DIR/${AUTO_JOB_NAME}.$AUTORUN.out`
+uses the job name and the runner's `S-N` attempt identity.
+Fresh roots and restored branches can repeat that identity; give them
+separate output namespaces. See
+[runner §6](runner-design.md#6-adapters) for the environment and path rules
+(DL-447).
+
 Input paths may be absolute or relative to that file; the run root must
 be absolute. Patterns support `*`, `?` and brackets; `**` is refused.
 The config is a regular file, never a symlink. For exception jobs, set

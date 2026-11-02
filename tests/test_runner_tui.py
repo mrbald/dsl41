@@ -40,6 +40,7 @@ from textual.binding import Binding
 from textual.widgets import DataTable, HelpPanel, Input, RichLog, Static
 
 from dsl41.ir import lower_source
+from dsl41.oracle_state import Event
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import RealClock
@@ -1513,7 +1514,7 @@ def test_pilot_details_popup_shows_needs_blocks_and_a_log_tail(short_root: Path)
     """DL-65 popup additions on top of DL-64's spec block: the `deps` verb's
     needs:/blocks: lines (upstream condition entities / referencing jobs)
     and a short local log tail of the job's resolved log_out -- an explicit
-    std_out_file resolves before any run, so the tail needs no adapter."""
+    std_out_file is read from the latest dispatch (DL-447)."""
     out_path = short_root / "dp_b.out"
     text = (
         "insert_job: dp_a\njob_type: c\ncommand: x\nmachine: m1\n\n"
@@ -1529,9 +1530,18 @@ def test_pilot_details_popup_shows_needs_blocks_and_a_log_tail(short_root: Path)
             short_root / "run", text, spec_texts={"dp_b": block}
         )
         try:
+            engine.inject(
+                Event(at=engine.clock.now(), kind="FORCE_STARTJOB", payload={"job": "dp_b"})
+            )
             app = RunnerApp(server.path)
             async with app.run_test(size=(120, 40)) as pilot:
-                await _wait_for_ui(pilot, lambda: len(app._rows) == 3)
+                await _wait_for_ui(
+                    pilot,
+                    lambda: (
+                        len(app._rows) == 3
+                        and app._log_paths.get("dp_b", (None, None))[0] == str(out_path)
+                    ),
+                )
                 table = app.query_one("#jobs", DataTable)
                 table.focus()
                 table.move_cursor(row=1)  # alpha-sorted: dp_a, dp_b, dp_c

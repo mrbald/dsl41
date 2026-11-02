@@ -117,6 +117,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta
 from enum import Enum, auto
 from pathlib import Path
+import os
 from typing import Any, Final
 
 from dsl41.engine_charts import QUARANTINED, UPDATE_STOP, AttemptOutcome, DrainRequest
@@ -132,6 +133,7 @@ from dsl41.runner_adapters import (
     Launch,
     ObservedAdapter,
     status_payload,
+    job_log_paths,
 )
 from dsl41.runner_attempts import (
     FEED_STATUS,
@@ -169,6 +171,11 @@ from dsl41.canon import CanonError, canonical_bytes
 from dsl41.runner_codes import Rejection
 from dsl41.runner_clock import Clock, EngineError, ZeroDelayCycleError
 from dsl41.idempotence import ENV_ATTEMPT, invocation_env
+from dsl41.runner_environment import (
+    RuntimeVariableError,
+    inherited_environment,
+    resolve_streams,
+)
 from dsl41.runner_config import (
     EngineSettings,
     OracleReading,
@@ -182,13 +189,14 @@ from dsl41.runner_journal import (
     ladder_done_record,
     outcome_end,
     dispatch_record,
+    check_dispatch,
     encode_snapshot,
     follow_up_done,
     pending_record,
 )
 from dsl41.runner_history import run_history
 from dsl41.runner_ledger import STATE_MACHINE_VERSION, Proof
-from dsl41.runner_procid import COOKIE_ENV, cookie
+from dsl41.runner_procid import COOKIE_ENV, cookie, current_boot_id, invocation_tag
 from dsl41.runner_store import Record, Store
 from dsl41.runner_scheduler import Scheduler
 from dsl41.runner_update import EngineUpdate, UpdateAnswer, UpdateRequest, now_of
@@ -481,6 +489,11 @@ class Engine:
         self.journal = journal
         self.run_root = run_root
         self.status_hooks: StatusHooks | None = None
+        self.startup_env = dict(os.environ)
+        self.startup_cwd = Path.cwd()
+        self.boot_id = None if clock.virtual else current_boot_id()
+        self.dispatches = journal.open.dispatches if journal is not None else {}
+        self._dispatch_seq = 0
         self.scheduler = scheduler
         self.hold_open = hold_open
         #: events not applied: step 6's gate rejections and resume's missed
@@ -2104,7 +2117,57 @@ class Engine:
         row = self.oracle.store.job.get(job)
         scheduled = row.status_at if row is not None and row.status_at is not None else now
         # the invocation the process is given is the one the record holds (crash spec)
-        invocation = dict(env) if env else invocation_env(job, run_number, scheduled, ordinal)
+        invocation = invocation_env(job, run_number, scheduled, ordinal)
+        if env is not None:
+            if "DSL41_SCHEDULED_AT" not in env:
+                raise EngineError("version-28 replacement env lacks DSL41_SCHEDULED_AT (DL-447)")
+            invocation["DSL41_SCHEDULED_AT"] = env["DSL41_SCHEDULED_AT"]
+        previous = self.dispatches.get(job, {})
+        if ordinal > 1 and previous:
+            check_dispatch(previous)
+        if ordinal > 1 and (
+            previous.get("run_number") != run_number or "first_dispatch_seq" not in previous
+        ):
+            raise EngineError("version-28 replacement lacks its first dispatch sequence (DL-447)")
+        first_seq = (
+            previous["first_dispatch_seq"]
+            if previous.get("run_number") == run_number and "first_dispatch_seq" in previous
+            else self.journal.next_seq()
+            if self.journal is not None
+            else self._dispatch_seq + 1
+        )
+        overlay = dict(self.profile.job_env if self.profile is not None else {})
+        invocation = {
+            **overlay,
+            **invocation,
+            "AUTO_JOB_NAME": job,
+            "AUTORUN": f"{first_seq}-{ordinal}",
+            "DSL41_RUN": invocation_tag(run_id, job, run_number, self.boot_id),
+        }
+        if isinstance(adapter, ObservedAdapter):
+            invocation[COOKIE_ENV] = cookie(self.root_id, run_id)
+        inherited = inherited_environment(self.startup_env)
+        defaults = {}
+        if self.run_root is not None:
+            out, err = job_log_paths(job_ir, run_number, self.run_root)
+            defaults = {
+                "std_out_file": out,
+                "std_err_file": err,
+            }
+        cwd = self.startup_cwd
+        try:
+            paths, referenced = (
+                ({}, set())
+                if self.clock.virtual
+                else resolve_streams(
+                    job_ir, {**inherited, **invocation}, cwd=cwd, defaults=defaults
+                )
+            )
+        except RuntimeVariableError as exc:
+            raise EngineError(f"preflight ERROR [runtime-variable]: {exc}") from exc
+        referenced_inherited = {
+            name: inherited[name] for name in referenced if name not in invocation
+        }
         held = self.evidence.get(job)
         if held is not None and held["run_number"] != run_number:
             del self.evidence[job]  # the evidence stays until the job's next start (spec-crash)
@@ -2133,11 +2196,23 @@ class Engine:
                     env=invocation,
                     discharges=discharges,
                     after=after,
+                    first_dispatch_seq=first_seq,
+                    inherited=referenced_inherited,
+                    paths=paths,
+                    cwd=str(cwd),
                 )
             ]
             if step is not None:
                 records.append(follow_up_done(step[0], step[1], self.journal.next_seq(), now))
             self.journal.append(*records)
+        else:
+            self._dispatch_seq += 1
+            self.dispatches[job] = {
+                "run_number": run_number,
+                "first_dispatch_seq": first_seq,
+                "env": invocation,
+                "paths": paths,
+            }
         self._launch(
             job_ir,
             run_number,
@@ -2175,6 +2250,8 @@ class Engine:
                 fence=self.fence,
                 spool=spool,
                 env=dict(env or {}),
+                paths=self.dispatches.get(job_ir.name, {}).get("paths"),
+                startup_env=self.startup_env,
             )
             task = loop.create_task(adapter.observe(job_ir, run_number, ctx, launch))
             self._observed_tasks[id(task)] = run_id

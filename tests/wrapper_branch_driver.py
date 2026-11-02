@@ -81,15 +81,18 @@ def full_self_pipe(event_path: str) -> None:
 
 def completion_beats_parent_loss(event_path: str) -> None:
     real_observe = runner_wrapper._observe_exit
+    saved = None
 
     def observe(child: Any) -> Any:
+        nonlocal saved
         _note(event_path)
-        with open(event_path, "rb") as f:
-            first = f.read().count(b"\n") == 1
-        if first:
-            os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOWAIT)
+        if saved is None:
+            while saved is None:
+                saved = real_observe(child)
+                if saved is None:
+                    time.sleep(0.001)
             return None
-        return real_observe(child)
+        return saved
 
     runner_wrapper._observe_exit = observe
 

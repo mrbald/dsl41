@@ -27,9 +27,8 @@ TUI surface (ss11; DL-46; runner_tui.py's docstring holds the TUI-side detail):
   views and any headless `query status` consumer. `pending_timers` holds (due,
   kind) pairs from Oracle.pending_timers(); its liveness filter mirrors the
   fire-time staleness rules, so a heap entry a fire would discard is not shown.
-  `log_out`/`log_err` are the ss6 append targets of the CURRENT run, resolved by
-  job_log_paths(), the resolver the adapter wrapper spec also uses. They are
-  CMD-only; a never-started job reports only explicit std files.
+  `log_out`/`log_err` are the stored ss6 append targets of the CURRENT run's latest
+  dispatched attempt (DL-447). They are CMD-only and null before dispatch.
 - The protocol has no TUI verb: the TUI is `status` + `trace --since` + `explain`
   + `sendevent` + `subscribe`-as-wake-up, the headless surface (DL-45).
 
@@ -80,7 +79,7 @@ from typing import Any, get_args
 
 from dsl41.canon import is_scalar_json, is_wire_int
 from dsl41.conditions import GlobalAtom, iter_atoms
-from dsl41.ir import ExecSpec, FwSpec, JobIR
+from dsl41.ir import FwSpec, JobIR
 from dsl41.runner_config import FW_DEFAULT_INTERVAL_S
 from dsl41.oracle_state import (
     INJECTABLE_STATUSES,
@@ -90,8 +89,8 @@ from dsl41.oracle_state import (
     JobStatus,
 )
 from dsl41.runner import Engine
-from dsl41.runner_access import AccessControl, peer_principal
-from dsl41.runner_adapters import LINE_LIMIT, job_log_paths
+from dsl41.runner_access import AccessControl, Tier, peer_principal
+from dsl41.runner_adapters import LINE_LIMIT
 from dsl41.runner_admission import (
     PROTOCOL_VERSION,
     AdmissionRefused,
@@ -461,6 +460,7 @@ class ControlServer:
                         ),
                     )
                     continue
+                authority = Tier.ADM
                 if self.access is not None and principal is not None:
                     # access-model ss5: one decision per request, before the
                     # cmd split -- the one place subscribe and _respond share
@@ -474,6 +474,9 @@ class ControlServer:
                         continue
                     # ss3: the authenticated spelling replaces the claim
                     request["claimed_actor"] = principal.spelling
+                    granted = self.access.policy.resolve(principal)
+                    assert granted is not None
+                    authority = granted
                 if request.get("cmd") == "subscribe":
                     if self.access is not None and principal is not None:
                         # ss7: reload revokes exactly the live streams that lost read, so
@@ -488,7 +491,7 @@ class ControlServer:
                         await self._subscribe(writer, request)
                     break  # a subscription owns its connection until hangup
                 try:
-                    response = await self._respond(request)
+                    response = await self._respond(request, authority=authority)
                 except StatechartError:
                     raise  # an assertion failure is not a query bug: below
                 except Exception as exc:  # noqa: BLE001 -- a query bug answers ok:false;
@@ -544,10 +547,12 @@ class ControlServer:
         writer.write(json.dumps(obj, sort_keys=True).encode("utf-8") + b"\n")
         await writer.drain()
 
-    async def _respond(self, request: dict[str, Any]) -> dict[str, Any]:
+    async def _respond(
+        self, request: dict[str, Any], *, authority: Tier = Tier.ADM
+    ) -> dict[str, Any]:
         """Route one already-versioned request and stamp the concurrency-model ss6 read
         header onto its answer."""
-        response = await self._dispatch(request)
+        response = await self._dispatch(request, authority=authority)
         # concurrency-model ss6: every read publishes where the log has reached and which
         # log it is, so a client can tell a revision it may name from one it may not. One
         # engine per run root answers, enforced by the `leader.lock` flock (DL-100).
@@ -556,7 +561,9 @@ class ControlServer:
             "applied_index": self.engine.frontiers.applied_index,
         }
 
-    async def _dispatch(self, request: dict[str, Any]) -> dict[str, Any]:
+    async def _dispatch(
+        self, request: dict[str, Any], *, authority: Tier = Tier.ADM
+    ) -> dict[str, Any]:
         cmd = request.get("cmd")
         if cmd == "sendevent":
             return await self._sendevent(request)
@@ -584,27 +591,33 @@ class ControlServer:
         if cmd == "engine_stop":
             return await self._engine_stop()
         if cmd == "catalog":
-            return self._catalog()
+            return self._catalog(authority=authority)
         if cmd == "update":
             return await self._update(request)
         return _failure("unknown_cmd", f"unknown cmd {cmd!r}", refused=True)
 
-    def _catalog(self) -> dict[str, Any]:
+    def _catalog(self, *, authority: Tier = Tier.ADM) -> dict[str, Any]:
         """`catalog`: what `reread` diffs a candidate against (spec-reload): the catalog the
         engine runs with its hash, the estate settings it runs it under, the configuration rev,
         each row's status and run number, and the flags each tombstone of a removed job kept."""
         live = self.engine.update.live()
-        return {
+        body: dict[str, Any] = {
             "ok": True,
             "catalog": catalog_payload(live.catalog),
             "catalog_hash": catalog_hash_v2(live.catalog),
             "settings": dict(live.settings),
+            "path_environment": dict(live.path_environment or {}),
             "revision": live.revision,
             "status": dict(live.status),
             "runs": dict(live.runs),
             "tombstones": {name: list(flags) for name, flags in live.tombstones.items()},
             "launch": dict(live.launch),
         }
+        body["environment_view"] = "ops" if authority >= Tier.OPS else "read"
+        if authority < Tier.OPS:
+            body["job_env_names"] = sorted(body["settings"].pop("job_env", {}))
+            del body["path_environment"]
+        return body
 
     async def _update(self, request: dict[str, Any]) -> dict[str, Any]:
         """`update`: apply the plan `reread` stored under TOKEN (spec-reload). The request
@@ -877,13 +890,10 @@ class ControlServer:
             rt = store.job.get(name) or JobRuntime()  # never insert from a query
             log_out = log_err = None
             job_ir = catalog.jobs.get(name)
-            if self.engine.run_root is not None and job_ir is not None and job_ir.job_type == "CMD":
-                if rt.run_number >= 1:
-                    log_out, log_err = job_log_paths(job_ir, rt.run_number, self.engine.run_root)
-                # lowering refuses a CMD job without a command, so `exec_` is an ExecSpec
-                elif isinstance(job_ir.exec_, ExecSpec):  # pragma: no branch
-                    # never ran: only explicit std files exist to tail
-                    log_out, log_err = job_ir.exec_.std_out_file, job_ir.exec_.std_err_file
+            dispatched = self.engine.dispatches.get(name, {})
+            if dispatched.get("run_number") == rt.run_number:
+                paths = dispatched.get("paths", {})
+                log_out, log_err = paths.get("std_out_file"), paths.get("std_err_file")
             jobs[name] = {
                 "status": rt.status,
                 "status_at": rt.status_at.isoformat() if rt.status_at else None,

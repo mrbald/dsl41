@@ -726,6 +726,8 @@ Runner:
   `non-idempotent.toml` in the manifest's directory names the jobs whose interrupted
   attempt waits for the operator, with its canonical bytes for the reload
   token, and the four `DSL41_*` variables each `dispatch` record carries.
+- `src/dsl41/runner_environment.py`: literal job environments and stream
+  paths resolved before profile execution (DL-447).
 - `src/dsl41/runner_ledger.py`: one engine per run root: the flock held
   for the process lifetime, its holder note, and the state-machine
   version a store and its snapshots carry.

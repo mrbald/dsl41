@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from dispatch_fixtures import dispatch_record
 from test_runner_control import (
     _sendevent,
     _serve,
@@ -45,7 +46,7 @@ from dsl41.runner_admission import (
     parse_envelope,
 )
 from dsl41.runner_clock import EngineError, VirtualClock
-from dsl41.runner_journal import Journal, dispatch_record, dispatched_runs, read_journal
+from dsl41.runner_journal import Journal, dispatched_runs, read_journal
 from dsl41.runner import Engine
 from dsl41.runner_startup import resume_run, start_run
 from dsl41.runner_store import MemoryStore

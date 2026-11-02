@@ -1071,7 +1071,11 @@ def test_owed_starts_stay_pending_until_each_dispatch_commits(tmp_path: Path) ->
         [left] = engine.journal.open.pending.values()
         engine.take_snapshot()
         await _close(engine)
-        snapshot = decode_snapshot(0, _latest_snapshot_data(run_root), where="t")
+        from dsl41.runner_journal import open_reader
+
+        with closing(open_reader(run_root)) as reader:
+            stored_snapshot = reader.latest_snapshot()
+            snapshot = decode_snapshot(stored_snapshot.seq, stored_snapshot.data, where="t")
         assert [p.job for p in snapshot.open.pending.values()] == [left.job]
 
     asyncio.run(crashed())

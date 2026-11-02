@@ -503,8 +503,12 @@ def test_an_attempt_and_its_replacement_keep_one_identity_through_the_store(
     replacement = _kinds(run_root, "dispatch")[1]
     assert (replacement["attempt"], replacement["ordinal"]) == (step["attempt"], 2)
     # the same invocation; each attempt's dispatch mints its own process cookie
-    cookies = {"DSL41_ATTEMPT", "DSL41_COOKIE"}
-    assert {k: v for k, v in replacement["env"].items() if k != "DSL41_COOKIE"} == step["env"]
+    cookies = {"DSL41_ATTEMPT", "DSL41_COOKIE", "AUTORUN", "DSL41_RUN"}
+    assert {
+        k: v
+        for k, v in replacement["env"].items()
+        if k not in {"DSL41_COOKIE", "DSL41_RUN", "AUTORUN"}
+    } == {k: v for k, v in step["env"].items() if k not in {"DSL41_RUN", "AUTORUN"}}
     assert {k: v for k, v in replacement["env"].items() if k not in cookies} == {
         k: v for k, v in dispatch["env"].items() if k not in cookies
     }

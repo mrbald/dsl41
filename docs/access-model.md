@@ -42,6 +42,14 @@ enum, not a flag matrix.
   "break-glass" tier and no per-verb deny overlay. Either would be a
   second policy axis and a sparse flag matrix. Break-glass is a receipt
   category (§6), not an authorization dimension.
+
+The `catalog` query has two environment projections (DL-447).
+READ gets `job_env` names only and no inherited names. OPS/ADM get the
+complete runtime environment view required by `reread`.
+The gate supplies authenticated authority to the response projection.
+Claimed actors and request fields supply no authority.
+Redaction removes values; it never substitutes empty strings.
+`reread` refuses a redacted response instead of using the client's environment.
 - **adm**: ops, plus `engine_stop` (DL-429) and `update` (DL-432).
   Configuration files and retention settings also require filesystem
   authority (§2). A socket tier does not grant filesystem access.

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from dispatch_fixtures import dispatch_record
 from store_surgery import rows
 from test_engine_stops_cookie import (
     OTHER_ID,
@@ -36,7 +37,7 @@ from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import VirtualClock
 from dsl41.runner_config import EngineSettings
-from dsl41.runner_journal import decode_snapshot, dispatch_record
+from dsl41.runner_journal import decode_snapshot
 from dsl41.runner_startup import start_run
 from dsl41.runner_stops import AttemptFacts
 from dsl41.runner_update import UpdateRequest
@@ -79,14 +80,31 @@ def _engine(tmp_path: Path, text: str, **adapter: Any) -> Engine:
 def _adopt(engine: Engine, job: str, attempt: str, pgid: int) -> None:
     """An observed attempt of `job`'s run 1, as the cookie tests adopt one, with its dispatch
     record, so the open table holds it."""
-    env = {"DSL41_COOKIE": runner_procid.cookie("inst", attempt)}
+    env = {**engine.dispatches[job]["env"], "DSL41_COOKIE": runner_procid.cookie("inst", attempt)}
     assert engine.journal is not None
     engine.journal.append(
         dispatch_record(
-            job, 1, attempt=attempt, spool="/nonexistent", started_at=T0, rev=1, ordinal=1, env=env
+            job,
+            1,
+            attempt=attempt,
+            spool="/nonexistent",
+            started_at=T0,
+            rev=1,
+            ordinal=1,
+            env=env,
+            first_dispatch_seq=engine.dispatches[job]["first_dispatch_seq"],
         )
     )
-    engine.adopt_attempt(AttemptFacts(attempt, job, 1, 1, Path("/nonexistent"), env))
+    engine.adopt_attempt(
+        AttemptFacts(
+            attempt,
+            job,
+            1,
+            1,
+            Path("/nonexistent"),
+            {"DSL41_SCHEDULED_AT": T0.isoformat(), **(env)},
+        )
+    )
     engine.stops.scan_available = True
     spawn = {**SPAWN, "run_id": attempt, "job": job, "command_pgid": pgid, "command_pid": pgid}
     engine.stops.note_boot(spawn)
@@ -465,7 +483,12 @@ def _crashed_update(
                 at, "outcome", None, None, {**ended.payload, "ladder": "running"}
             )
             # the crash cut the cleanup short after the outcome and its rerun plan were in
-            step = {"step": "dispatch", "attempt": OTHER_ID, "ordinal": 2, "env": {}}
+            step = {
+                "step": "dispatch",
+                "attempt": OTHER_ID,
+                "ordinal": 2,
+                "env": {"DSL41_SCHEDULED_AT": T0.isoformat()},
+            }
             step |= {"after": "wrapper_lost"}
             engine.journal.append(ended, plan_record(attempts["j"], "j", 1, "rerun", [step], at))
         changed = {"p": "y", "u": "x"} if idle else {}
@@ -1005,7 +1028,15 @@ def test_a_snapshot_or_a_history_with_a_run_and_no_rev_is_refused(tmp_path: Path
         with pytest.raises(EngineError, match="retained run a.1 records no rev"):
             decode_snapshot(seq, canonical_bytes(raw), where="t")
         engine.journal.append(
-            dispatch_record("a", 2, attempt=OTHER_ID, spool=None, started_at=T0, rev=9)
+            dispatch_record(
+                "a",
+                2,
+                attempt=OTHER_ID,
+                spool=None,
+                started_at=T0,
+                rev=9,
+                first_dispatch_seq=engine.journal.next_seq(),
+            )
         )
         await engine.shutdown()
         _close(engine)
