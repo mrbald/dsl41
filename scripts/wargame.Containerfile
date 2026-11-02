@@ -3,7 +3,7 @@
 # GitHub runner. scripts/wargame.sh builds it on one of two bases, Ubuntu 24.04 or Rocky
 # Linux 8 (systemd 239, the RHEL 8 family); TARGET names the package manager's family.
 ARG BASE
-FROM ${BASE}
+FROM ${BASE} AS host
 ARG TARGET
 RUN case "$TARGET" in \
         el8) dnf -y install systemd sudo python3.12 python3.12-pip jq procps-ng util-linux \
@@ -21,3 +21,11 @@ RUN case "$TARGET" in \
     && echo 'runner ALL=(ALL) NOPASSWD:ALL' >/etc/sudoers.d/runner \
     && chmod 0440 /etc/sudoers.d/runner
 CMD ["/sbin/init"]
+
+FROM host AS service
+COPY requirements.txt /rehearsal-requirements.txt
+RUN python3.12 -m venv /wheel-builder \
+    && /wheel-builder/bin/python -m pip wheel --wheel-dir /wheelhouse --requirement /rehearsal-requirements.txt \
+    && rm -rf /wheel-builder
+
+FROM host AS default

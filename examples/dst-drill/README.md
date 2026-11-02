@@ -38,7 +38,24 @@ time, a `term_run_time` kill and a condition job.
 
 ## Run it
 
-Build from the repository root and run with an init process:
+On a Mac with Podman, run from the repository root:
+
+```sh
+env -u VIRTUAL_ENV UV_CACHE_DIR=/tmp/dsl41-uv bash scripts/dst-drill-local.sh
+```
+
+The helper builds current source and runs all seven scenarios with `--init`
+as the image's ordinary user. It keeps sockets on container-local Linux storage,
+then copies evidence to the printed host path. `DST_EVIDENCE` selects a new directory;
+the helper refuses an existing directory. `PODMAN` selects the command and connection
+for every engine operation, including build and cleanup. The helper removes its
+container and image tag on exit.
+`build.json` records build seconds and exit status; `scenarios.json` records
+scenario seconds and exit status. Logs survive failure and cleanup.
+Podman reuses the Dockerfile's base, tool and dependency layers.
+Changed source bytes invalidate COPY. Warm reuse is not an OS update.
+
+With Docker, build from the repository root and run with an init process:
 
 ```sh
 docker build -f examples/dst-drill/Dockerfile -t dsl41-dst-drill .

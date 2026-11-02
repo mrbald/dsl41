@@ -61,6 +61,14 @@ Deferred to the next milestone, active/standby on HA Oracle and the 200-job esta
   on `main` they are `scripts/wargame.sh`, the service drill
   (`examples/nightbank/deploy/drill-*.sh`, `.github/workflows/service-drill.yml`) and the
   DST drill (`examples/dst-drill/`, `.github/workflows/dst-drill.yml`).
+  - [x] Local rehearsal images: each workflow-lane session runs its own image tag (no shared `:local`
+    race), the service drill installs dependencies from a wheelhouse layer, and
+    `scripts/dst-drill-local.sh` runs the DST drill on Podman. Podman's layer cache already reused
+    the image; the lane's time is the tests (owner 2026-11-02).
+  - [ ] CI: the workflow lane runs on code PRs through `classify` with an explicit docs-only pass, and
+    nightly on main; the service and DST drills run nightly and on their change paths; the DST drill
+    runs as three parallel lanes (about 8.5 minutes instead of 22); a DL entry supersedes DL-236's
+    dispatch-only rule and shared runner tag; nightly failures notify mrbald (owner 2026-11-01).
 
 # Next work
 
@@ -144,3 +152,6 @@ Found after an area was sealed as good enough. Addressed once the scope runs end
 - [ ] The update_wiring barrier cleanup's last-resort kill SIGKILLs a hung wrapper but not its
   command group, so the command is orphaned until it exits; kill the group through the live wrapper
   first (`tests/update_wiring_barrier.py` `kill_wrappers`; Opus, slice barrier-fix).
+- [ ] The workflow lane's session teardown raises the tag-removal error inside `finally`, so when
+  setup and removal both fail pytest shows only the removal error; the setup failure stays in
+  `session.json` (`examples/workflows/tests/conftest.py`; Opus, slice rehearsal-local-cache).

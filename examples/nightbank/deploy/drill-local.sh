@@ -39,7 +39,7 @@ for row in "${all[@]}"; do
     case " install start $* " in *" $row "* | *" all "*) rows+=("$row") ;; esac
 done
 [ "$#" != 0 ] || rows=("${all[@]}")
-name=drill-$base-$$
+name=drill-$base-$$-$(date +%s)-$RANDOM
 # PODMAN is the podman command, as in scripts/wargame.sh
 podman() {
     # shellcheck disable=SC2086  # PODMAN is a command and its arguments, split on purpose
@@ -48,6 +48,8 @@ podman() {
 wargame() { "$tree/scripts/wargame.sh" --base "$base" "$@"; }
 say() { printf 'drill-local: %s\n' "$*"; }
 
+evidence=${DRILL_EVIDENCE:-$(mktemp -d /tmp/dsl41-drill-evidence.XXXXXX)}
+mkdir -p "$evidence"
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/dsl41-drill.XXXXXX")
 # shellcheck disable=SC2329  # the EXIT trap invokes it
 cleanup() {
@@ -74,11 +76,17 @@ sed -e 's/^version = "\(.*\)"$/version = "\1.post1"/' "$tree/pyproject.toml" >"$
 grep -q '^version = ".*\.post1"$' "$newer/pyproject.toml" || { say "cannot bump the version"; exit 1; }
 (cd "$tree" && env -u VIRTUAL_ENV uv build --quiet --python 3.12 --wheel --out-dir "$dist")
 (cd "$newer" && env -u VIRTUAL_ENV uv build --quiet --python 3.12 --wheel --out-dir "$dist")
-(cd "$tree" && env -u VIRTUAL_ENV uv export --quiet --frozen --no-emit-project --no-hashes \
+(cd "$tree" && env -u VIRTUAL_ENV uv export --quiet --frozen --no-dev --no-header --no-emit-project --no-hashes \
     --python 3.12 -o "$dist/requirements.txt")
 
+export WARGAME_REQUIREMENTS="$dist/requirements.txt"
+say "evidence: $evidence"
 say "starting the $base host"
-wargame build "$name" >"$scratch/build.log" || { cat "$scratch/build.log"; exit 1; }
+build_start=$SECONDS
+build_status=0
+wargame build "$name" >"$evidence/build.log" 2>&1 || build_status=$?
+printf '{"duration_s": %s, "exit": %s}\n' "$((SECONDS - build_start))" "$build_status" >"$evidence/build.json"
+[ "$build_status" = 0 ] || { cat "$evidence/build.log"; exit "$build_status"; }
 wargame start "$name"
 wargame deliver "$dist" "$name"
 container=dsl41-wargame-$name
