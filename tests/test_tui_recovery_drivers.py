@@ -8,16 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import fcntl
 import json
 import os
-import pty
 import re
 import signal
 import socket
-import struct
 import sys
-import termios
 import time
 import unicodedata
 from collections.abc import Callable
@@ -28,6 +24,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from dsl41.runner_control import ControlClient, ControlClientError
+from tui_terminal import Terminal, selected_filter_ready, table_focus_ready
 
 _TEXT = (
     "insert_job: recovery_box\njob_type: b\n\n"
@@ -92,7 +89,9 @@ class _Estate:
         try:
             deadline = time.monotonic() + _TIMEOUT
             while time.monotonic() < deadline:
-                assert self.process.returncode is None, self.diagnostics
+                assert self.process.returncode is None, (
+                    f"engine exited with code {self.process.returncode}; see {self.diagnostics}"
+                )
                 try:
                     answer = await asyncio.wait_for(client.request({"cmd": "status"}), timeout=2)
                 except (ControlClientError, TimeoutError):
@@ -174,101 +173,268 @@ async def _wait_held(client: ControlClient) -> None:
     raise AssertionError("the filtered, selected child never received ON_HOLD")
 
 
+async def _wait_barrier(channel: socket.socket, driver: asyncio.Task[int]) -> bytes:
+    receive = asyncio.create_task(asyncio.get_running_loop().sock_recv(channel, 128))
+    try:
+        async with asyncio.timeout(_TIMEOUT):
+            done, _pending = await asyncio.wait(
+                (receive, driver), return_when=asyncio.FIRST_COMPLETED
+            )
+        if driver in done:
+            driver.result()
+            raise AssertionError("terminal driver finished before the barrier")
+        return receive.result()
+    finally:
+        receive.cancel()
+        await asyncio.gather(receive, return_exceptions=True)
+
+
+def test_engine_start_reports_an_early_exit_and_yields(
+    short_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gate = short_root / "startup-exit"
+    os.mkfifo(gate)
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_command",
+        lambda *_args: [
+            sys.executable,
+            "-c",
+            "import sys; open(sys.argv[1], 'rb', buffering=0).read(1); sys.exit(23)",
+            str(gate),
+        ],
+    )
+
+    async def scenario() -> None:
+        estate = _Estate(short_root, tmp_path)
+        gate_fd = os.open(gate, os.O_RDWR | os.O_NONBLOCK)
+        ticks = 0
+        finished = asyncio.Event()
+
+        async def tick() -> None:
+            nonlocal ticks
+            while not finished.is_set():
+                await asyncio.sleep(0.005)
+                ticks += 1
+                if ticks == 2:
+                    assert os.write(gate_fd, b"x") == 1
+
+        ticker = asyncio.create_task(tick())
+        try:
+            with pytest.raises(AssertionError, match="engine exited with code 23"):
+                await asyncio.wait_for(estate.start(), timeout=2)
+            assert estate.process is not None and estate.process.returncode == 23
+            assert ticks > 1
+            assert not estate.socket.exists()
+        finally:
+            finished.set()
+            await ticker
+            await estate.close()
+            os.close(gate_fd)
+
+    asyncio.run(scenario())
+
+
+def test_barrier_wait_preserves_the_drivers_early_error() -> None:
+    async def scenario() -> None:
+        parent, child = socket.socketpair()
+        parent.setblocking(False)
+        error = AssertionError("terminal did not acknowledge complete filter and selected child")
+
+        async def fail() -> int:
+            raise error
+
+        driver = asyncio.create_task(fail())
+        try:
+            with pytest.raises(AssertionError) as caught:
+                await asyncio.wait_for(_wait_barrier(parent, driver), timeout=2)
+            assert caught.value is error
+        finally:
+            driver.cancel()
+            await asyncio.gather(driver, return_exceptions=True)
+            parent.close()
+            child.close()
+
+    asyncio.run(scenario())
+
+
+_FILTERED_SELECTION = b"\x1b[2;91H explain: recovery_child \x1b[5;1H jobs 1/3 /recovery_child/ "
+
+
+def test_terminal_selection_requires_complete_filter_and_selected_child() -> None:
+    assert selected_filter_ready(_FILTERED_SELECTION)
+    assert selected_filter_ready(
+        _FILTERED_SELECTION.replace(b"recovery_child/", b"\x1b[3mrecovery_child/\x1b[0m")
+    )
+
+
+@pytest.mark.parametrize(
+    "rendered",
+    [
+        b"1/3 recovery_child",
+        _FILTERED_SELECTION.replace(b"recovery_child/", b"recovery_c/"),
+        _FILTERED_SELECTION.replace(b"recovery_child/", b"recovery_childh/"),
+        _FILTERED_SELECTION.replace(b"explain: recovery_child", b"explain: recovery_box"),
+        _FILTERED_SELECTION.replace(b"[5;1H", b"[25;1H"),
+        _FILTERED_SELECTION + b"\x1b[5;1H" + b" " * 30,
+        _FILTERED_SELECTION[:-2],
+    ],
+)
+def test_terminal_selection_rejects_partial_wrong_or_overwritten_rendering(rendered: bytes) -> None:
+    assert not selected_filter_ready(rendered)
+
+
+def test_terminal_freshness_excludes_history_and_waits_for_complete_bytes(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        terminal = Terminal(tmp_path, _TIMEOUT)
+        try:
+            terminal.raw.extend(_FILTERED_SELECTION)
+            mark = len(terminal.raw)
+            waiter = asyncio.create_task(
+                terminal.until("selected", selected_filter_ready, after=mark)
+            )
+            await asyncio.wait_for(
+                terminal.waiting.setdefault("selected", asyncio.Event()).wait(), _TIMEOUT
+            )
+            assert not waiter.done()
+            terminal.raw.extend(_FILTERED_SELECTION[:-2])
+            terminal.changed.set()
+            # DL-391: another observation must be consumed before asserting a partial repaint blocks.
+            terminal.waiting["selected"].clear()
+            await asyncio.wait_for(terminal.waiting["selected"].wait(), _TIMEOUT)
+            assert not waiter.done()
+            terminal.raw.extend(_FILTERED_SELECTION[-2:])
+            terminal.changed.set()
+            await asyncio.wait_for(waiter, _TIMEOUT)
+        finally:
+            terminal.close()
+
+    asyncio.run(scenario())
+
+
+def test_terminal_footer_requires_fresh_complete_focus_at_the_requested_geometry() -> None:
+    footer = b" s start  k kill  q detach "
+    complete = b"\x1b[36;1H" + footer
+    assert table_focus_ready(complete, len(footer), 36)
+    assert table_focus_ready(complete + b"\x1b[2;1Hother row\r\n", len(footer), 36)
+    assert not table_focus_ready(complete, len(footer), 44)
+    assert not table_focus_ready(complete, len(footer) + 1, 36)
+    assert not table_focus_ready(complete[:-1], len(footer), 36)
+    assert not table_focus_ready(complete + b"\x1b[36;1H esc clear ", len(footer), 36)
+
+
+async def _filter_and_hold(terminal: Terminal) -> int:
+    await terminal.until(
+        "initial table focus", lambda data: table_focus_ready(data, 150, 44), after=0
+    )
+    mark = terminal.send(b"/")
+    await terminal.until(
+        "filter focus", lambda data: _FILTER_OPEN.encode() in _sgr_free(data), after=mark
+    )
+    mark = terminal.send(b"recovery_child")
+    await terminal.until("complete filter and selected child", selected_filter_ready, after=mark)
+    mark = terminal.send(b"\r")
+    await terminal.until(
+        "submitted table focus", lambda data: table_focus_ready(data, 150, 44), after=mark
+    )
+    mark = terminal.resize()
+    await terminal.until(
+        "resized table focus", lambda data: table_focus_ready(data, 110, 36), after=mark
+    )
+    return terminal.send(b"h")
+
+
+@pytest.mark.parametrize("barriers", [False, True], ids=["cli", "withheld-acks"])
 def test_real_terminal_filter_selection_resize_confirm_cancel_and_detach(
-    short_root: Path, tmp_path: Path
+    short_root: Path, tmp_path: Path, barriers: bool
 ) -> None:
     async def scenario() -> None:
         estate = _Estate(short_root, tmp_path)
         await estate.start()
         client = ControlClient(estate.socket)
-        master, slave = pty.openpty()
-        raw = bytearray()
-        process: asyncio.subprocess.Process | None = None
-        reader_task: asyncio.Task[None] | None = None
+        terminal = Terminal(tmp_path, _TIMEOUT)
+        driver: asyncio.Task[int] | None = None
+        parent, child = socket.socketpair()
+        parent.setblocking(False)
         try:
-            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 44, 150, 0, 0))
-            os.set_blocking(master, False)
-            process = await asyncio.create_subprocess_exec(
-                *_command("ui", "--socket", str(estate.socket)),
-                stdin=slave,
-                stdout=slave,
-                stderr=slave,
-                start_new_session=True,
-                env={**_environment(), "TERM": "xterm-256color"},
-                cwd=tmp_path,
-            )
-            os.close(slave)
-            slave = -1
-
-            async def drain_terminal() -> None:
-                while True:
-                    try:
-                        data = os.read(master, 1024 * 1024)
-                    except BlockingIOError:
-                        await asyncio.sleep(0.01)
-                    except OSError:
-                        return
-                    else:
-                        if not data:
-                            return
-                        raw.extend(data)
-
-            reader_task = asyncio.create_task(drain_terminal())
-
-            async def until(text: str, *, after: int = 0) -> None:
-                deadline = time.monotonic() + _TIMEOUT
-                while time.monotonic() < deadline:
-                    if text.encode() in _sgr_free(raw[after:]):
-                        return
-                    assert process is not None and process.returncode is None, raw.decode(
-                        errors="replace"
-                    )
-                    await asyncio.sleep(0.02)
-                raise AssertionError(f"terminal did not render {text!r}; see {tmp_path}")
-
-            await until("recovery_box")
-            os.write(master, b"/")
-            await until("filter: substring")
-            for char in b"recovery_child":
-                os.write(master, bytes([char]))
-                await asyncio.sleep(0.02)
-            await until("1/3")
-            os.write(master, b"\r")
-            await asyncio.sleep(0.05)
-            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 36, 110, 0, 0))
-            os.kill(process.pid, signal.SIGWINCH)
-            mark = len(raw)
-            os.write(master, b"h")
+            if barriers:
+                await terminal.start(
+                    [
+                        sys.executable,
+                        str(Path(__file__).with_name("tui_submission_barrier.py")),
+                        str(estate.socket),
+                        str(child.fileno()),
+                    ],
+                    _environment(),
+                    pass_fds=(child.fileno(),),
+                )
+            else:
+                await terminal.start(_command("ui", "--socket", str(estate.socket)), _environment())
+            child.close()
+            driver = asyncio.create_task(_filter_and_hold(terminal))
+            if barriers:
+                loop = asyncio.get_running_loop()
+                assert await _wait_barrier(parent, driver) == b"submission-blocked\n"
+                await asyncio.wait_for(
+                    terminal.waiting.setdefault("submitted table focus", asyncio.Event()).wait(),
+                    _TIMEOUT,
+                )
+                assert not await _held(client)
+                assert b"h" not in terminal.sent and not driver.done()
+                await loop.sock_sendall(parent, b"s")
+                assert await _wait_barrier(parent, driver) == b"resize-blocked\n"
+                await asyncio.wait_for(
+                    terminal.waiting.setdefault("resized table focus", asyncio.Event()).wait(),
+                    _TIMEOUT,
+                )
+                assert not await _held(client)
+                assert b"h" not in terminal.sent and not driver.done()
+                await loop.sock_sendall(parent, b"r")
+            mark = await driver
             await _wait_held(client)
+
+            async def until(text: str, *, after: int) -> None:
+                await terminal.until(
+                    text, lambda data: text.encode() in _sgr_free(data), after=after
+                )
+
             await until("--claimed-actor", after=mark)
-            os.write(master, b"k")
-            await until("KILLJOB recovery_child")
-            mark = len(raw)
-            os.write(master, b"\x1b")
+            mark = terminal.send(b"k")
+            await until("KILLJOB recovery_child", after=mark)
+            mark = terminal.send(b"\x1b")
             await until("cancelled", after=mark)
-            mark = len(raw)
+            mark = len(terminal.raw)
             await estate.restart()
             await until("FAILURE", after=mark)
-            mark = len(raw)
-            os.write(master, b"/")
+            mark = terminal.send(b"/")
             await until(_FILTER_OPEN, after=mark)
-            os.write(master, b"\x1b")
+            mark = terminal.send(b"\x1b")
             await until(_UNFILTERED, after=mark)
-            os.write(master, b"q")
-            assert await asyncio.wait_for(process.wait(), timeout=5) == 0
+            terminal.send(b"q")
+            assert terminal.process is not None
+            assert await asyncio.wait_for(terminal.process.wait(), timeout=5) == 0
             assert await _held(client)
             assert estate.socket.exists()
         finally:
-            if process is not None:
-                await _stop(process)
-            if reader_task is not None:
-                reader_task.cancel()
+            if driver is not None and not driver.done():
+                driver.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
-                    await reader_task
-            os.close(master)
-            if slave >= 0:
-                os.close(slave)
-            (tmp_path / "terminal.raw").write_bytes(raw)
+                    await driver
+            if terminal.process is not None:
+                await _stop(terminal.process)
+            terminal.close()
+            parent.close()
+            child.close()
+            (tmp_path / "driver-evidence.json").write_text(
+                json.dumps(
+                    {
+                        "sent": [data.decode() for data in terminal.sent],
+                        "marks": terminal.marks,
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
             await client.close()
             await estate.close()
 
