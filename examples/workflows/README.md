@@ -183,15 +183,10 @@ Each test directory holds
 `command.json` with every command's exit code, duration, stdout, and stderr,
 `database.sql` from `pg_dump`, plus the run volume as numbered
 `runs-N.tar` archives and the extracted copy of the last one.
-The `workflow-examples` workflow runs on code PRs through CI's classifier,
-nightly on main at 01:17 UTC, and on manual dispatch (DL-441).
-It uploads evidence and JUnit even on failure. Docs-only PRs receive an explicit
-`workflow-examples-required` pass without starting containers.
-Classification errors fail that check. Required-check activation belongs to the operator.
-The operator checks all three nightly rehearsal results, including missing runs,
-before each merge train, triages failures and blocks affected merges until resolved.
-GitHub sends failure notifications to schedule actor `mrbald`; rollout must verify
-notification settings and receipt. No extra notifier runs.
+[Integration testing §3](../../docs/integration-testing.md#3-choose-the-lane-that-exercises-the-boundary)
+owns CI routing, required-check activation and evidence uploads.
+Its [failure procedure](../../docs/integration-testing.md#4-run-a-selected-scenario-and-keep-its-evidence)
+owns nightly triage and notification verification.
 
 ## Next regression slice
 

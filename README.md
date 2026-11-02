@@ -61,7 +61,7 @@ implementation. A site may adapt and repackage them for its Python runtime requi
 3. [docs/live-instance-runbook.md](docs/live-instance-runbook.md) - probe a live AutoSys instance to settle an open semantic question
 4. [docs/citation-index.md](docs/citation-index.md) - resolve reference tokens, including excluded namespaces, or register a namespace
 5. [Make a release](#make-a-release) - verify, build, rehearse and publish a package
-6. [examples/dst-drill/README.md](examples/dst-drill/README.md) - compare the real engine and rehearsal across clock changes; [Nightbank drill](examples/nightbank/deploy/DRILL.md) - the service drill procedure and its limits
+6. [Integration testing](docs/integration-testing.md) - select, run and extend v2 regression coverage and its assertion inventory; [DST drill](examples/dst-drill/README.md) - clock changes; [Nightbank drill](examples/nightbank/deploy/DRILL.md) - installed service checks and limits
 
 ### Architect references
 
@@ -1096,13 +1096,9 @@ summary. Its body states the compatibility facts in the template under
 
 Start from a clean working tree with `main` pushed. Run the
 [full local gates](docs/agent-workflow.md#verify-a-change).
-Container rehearsals run on code PRs and nightly on main (DL-441).
-The [workflow lane](examples/workflows/README.md#integration-lane) uses CI's classifier;
-docs-only PRs receive an explicit required-check pass.
-The [service drill](examples/nightbank/deploy/DRILL.md) and
-[DST drill](examples/dst-drill/README.md#run-it) run on relevant PR paths and nightly,
-and all three support manual dispatch. The operator checks nightly results before
-merging affected changes. Local commands and evidence limits are in those runbooks.
+[Integration testing §3](docs/integration-testing.md#3-choose-the-lane-that-exercises-the-boundary)
+owns rehearsal lane routing, required-check activation and nightly triage.
+Use its linked runbooks for local commands and evidence limits.
 
 The list follows CI, including format checking and the scoped 100% branch
 coverage requirement.
