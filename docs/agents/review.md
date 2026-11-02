@@ -3,6 +3,7 @@
 For the reviewer and maintainers arranging acceptance.
 Read the [shared contract](../../CLAUDE.md) and the task contracts.
 The boss chooses bindings. The operator dispatches the assigned reviewers.
+Read the [approved operating model](operating-model.md) for authority, role limits and owner escalations.
 
 ## Your task
 
