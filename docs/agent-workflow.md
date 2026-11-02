@@ -195,7 +195,17 @@ the docs gate on every change; `explore-page` runs the explore-page browser
 tests and the autorep viewer-import check on code changes.
 The served-TUI browser lane runs on demand through the qualification procedure.
 The `audit`, `secrets` and `release` workflows have their own triggers. They are outside the local command list.
-The workflow examples lane is opt-in and needs a container engine (DL-236):
+The workflow examples lane needs a container engine and remains outside default
+pytest collection (DL-236). CI runs it on code PRs through the existing classifier,
+nightly on main and on dispatch (DL-441). Docs-only PRs get an explicit
+`workflow-examples-required` pass; classification errors fail the check.
+The operator activates the required context after green code and docs-only PR evidence.
+Service and DST drills run nightly, on their relevant PR paths and on dispatch;
+the operator blocks affected merges on red. Before each merge train, the operator
+checks all nightly results, including missing runs, and records a fix and owner
+for failures. Schedule actor `mrbald` receives native GitHub failure notifications;
+the operator verifies notification settings and receipt at rollout.
+Run the workflow lane locally with:
 `WORKFLOW_CONTEXT=<context> uv run pytest -q -o faulthandler_timeout=0 examples/workflows/tests`.
 For local Podman layer reuse and per-session image isolation, follow the [workflow lane](../examples/workflows/README.md#integration-lane).
 Use `env -u VIRTUAL_ENV` and a `UV_CACHE_DIR` under `/tmp` on the shared Mac.
