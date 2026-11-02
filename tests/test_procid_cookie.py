@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import os
+import selectors
 import signal
 import subprocess
 import sys
@@ -258,33 +259,53 @@ def test_the_adapter_lists_the_groups_with_ps_elsewhere(monkeypatch: pytest.Monk
 
 @linux_only
 def test_the_scan_finds_a_real_process_and_its_children() -> None:
-    """A process started with a cookie and a child it forks are both found, with their real
-    start tokens; a process without the cookie is not."""
+    """O, DL-431: one scan finds both acknowledged cookies and excludes a stranger."""
     mine = procid.cookie("realscan", RUN_ID)
     env = {**os.environ, procid.COOKIE_ENV: mine}
+    child_code = (
+        "import os,signal;from pathlib import Path;"
+        "cookie=('DSL41_COOKIE='+os.environ['DSL41_COOKIE']).encode();"
+        "assert cookie in Path('/proc/self/environ').read_bytes().split(b'\\0');"
+        "print(os.getpid(),flush=True);signal.pause()"
+    )
     parent = subprocess.Popen(
         [
             sys.executable,
+            "-I",
             "-c",
-            "import subprocess;child=subprocess.Popen(['sleep','30']);"
-            "print(child.pid,flush=True);child.wait()",
+            "import subprocess,sys;"
+            f"child=subprocess.Popen([sys.executable,'-I','-c',{child_code!r}]);child.wait()",
         ],
         env=env,
         stdout=-1,
+        start_new_session=True,
     )
     stranger = subprocess.Popen(["sleep", "30"])
+    child = None
     try:
         assert parent.stdout is not None
+        # DL-431: a launched pid is not a published cookie; the child acknowledges its read.
+        deadline = time.monotonic() + 5
+        with selectors.DefaultSelector() as ready:
+            ready.register(parent.stdout, selectors.EVENT_READ)
+            assert ready.select(max(0, deadline - time.monotonic())), (
+                "child cookie not acknowledged"
+            )
         child = int(parent.stdout.readline())
         scan = procid.ours("realscan.")
-        assert scan is not None
+        assert scan is not None and scan.error is None
         assert set(scan.pids) == {parent.pid, child}
         assert scan.pids[child] == (RUN_ID, procid.proc_start_token(child))
     finally:
-        os.kill(child, signal.SIGKILL)
-        for proc in (parent, stranger):
-            proc.kill()
-            proc.wait()
+        if child is not None:
+            os.kill(child, signal.SIGKILL)
+        try:
+            parent.wait(5)
+        except subprocess.TimeoutExpired:
+            os.killpg(parent.pid, signal.SIGKILL)
+            parent.wait(5)
+        stranger.kill()
+        stranger.wait(5)
         assert parent.stdout is not None
         parent.stdout.close()
 

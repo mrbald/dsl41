@@ -1,8 +1,10 @@
-"""U twins of the installed S fault cells; Linux processes, never a mocked absence."""
+"""U twins of the installed S fault cells and their independent kernel witness checks."""
 
 from __future__ import annotations
 
 import contextlib
+import errno
+import io
 import os
 import signal
 import subprocess
@@ -18,10 +20,30 @@ from examples.nightbank.deploy.restart_faults import (
     until,
     witness_checks,
     cleanup_checks,
+    live,
 )
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="real /proc evidence")
 DRIVER = Path(__file__).resolve().parents[1] / "examples/nightbank/deploy/restart_faults.py"
+
+
+@pytest.mark.parametrize(
+    "number", [errno.ENOENT, errno.ESRCH, errno.EPERM, errno.EACCES, errno.EIO, errno.EMFILE]
+)
+def test_liveness_witness_accepts_only_disappearance(monkeypatch, number):
+    """O, DL-431: ENOENT/ESRCH during a stat read prove gone; other read errors propagate."""
+
+    class Reading(io.StringIO):
+        def read(self, *_args):
+            raise OSError(number, "synthetic stat read failure")
+
+    monkeypatch.setattr(Path, "open", lambda *_a, **_k: Reading())
+    if number in (errno.ENOENT, errno.ESRCH):
+        assert live(123) is False
+    else:
+        with pytest.raises(OSError) as failure:
+            live(123)
+        assert failure.value.errno == number
 
 
 def kill_driver(process: subprocess.Popen, root: Path) -> None:
