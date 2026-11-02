@@ -88,7 +88,8 @@ def test_a_refused_root_gains_no_file(tmp_path: Path, monkeypatch: pytest.Monkey
     (old / "journal.jsonl").write_text("")
     code = asyncio.run(_serve_run(catalog, old, False, [], profile=RuntimeProfile()))
     assert code == 2
-    assert sorted(path.name for path in old.iterdir()) == ["journal.jsonl", "leader.lock"]
+    # DL-445: legacy witnesses refuse before creating a lock file.
+    assert sorted(path.name for path in old.iterdir()) == ["journal.jsonl"]
 
     run_root = tmp_path / "run"
     assert _serve_until_built(run_root, False, monkeypatch)[1] == ["start"]

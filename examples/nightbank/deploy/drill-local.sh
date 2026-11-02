@@ -143,16 +143,29 @@ step() { # step NAME -- one drill-steps.sh entry in the container, as runner
     podman exec --user runner --workdir /work "$container" \
         bash examples/nightbank/deploy/drill-steps.sh "$1"
 }
+kernel_boot_id() { # underlying Linux kernel, outside the container's masked procfs
+    if [ "$(uname -s)" = Linux ]; then
+        cat /proc/sys/kernel/random/boot_id
+    else
+        podman machine ssh cat /proc/sys/kernel/random/boot_id
+    fi
+}
 run_row() { # run_row ROW
     case $1 in
         reboot)
             # each command returns on failure: a function called as an `if` condition runs
             # without set -e
             step reboot-before || return 1
+            step boot-identity-before || return 1
+            kernel_boot_id >"$evidence/kernel-boot-before" || return 1
             say "restarting the container: systemd shuts down and boots again"
             wargame stop "$name" || return 1
             wargame start "$name" || return 1
             step reboot-after || return 1
+            step boot-identity-after || return 1
+            kernel_boot_id >"$evidence/kernel-boot-after" || return 1
+            cmp -s "$evidence/kernel-boot-before" "$evidence/kernel-boot-after" || return 1
+            say "underlying kernel boot identity is unchanged; host reboot remains G-boot"
             ;;
         *) step "$1" || return 1 ;;
     esac

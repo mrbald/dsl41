@@ -25548,6 +25548,25 @@ relitigate an entry; append a new one.
   decision-log tail-append and derived-index conflict resolution in production. No earlier
   decision-log entry is superseded in full; DL-415's other requirements and rules 33-35 stand.
 
+- DL-443 Genesis requires absence of surviving runtime evidence
+  (2026-11-02; boss ruling on incomplete restore; G-restore; cli_run.py)
+  THE RULE. Without `engine.db`, both CLI run forms refuse with exit 2 when the root
+  contains attempt evidence under `runs/`, including incomplete attempt directories;
+  captured update material under `plans/`; a nonempty `leader.lock`, even malformed;
+  SQLite sidecars; or a control socket. An unreadable evidence location also refuses.
+  The message names the evidence. Detection precedes file creation, permission changes,
+  lock-note writes, estate Python evaluation and signals. Genesis eligibility is checked
+  again under exclusive ownership. Lock contention refuses.
+  Settings, main config and estate inputs alone permit genesis, as do empty `runs/`
+  and `plans/` and an empty unlocked lock file. These permit provisioned first starts
+  and retries after pre-store failure. There is no force-fresh switch. An intentional
+  new engine selects a distinct fresh root and preserves the damaged root.
+  THE BOUNDARY. This refines DL-428's automatic resume and DL-433's refusal-before-writes;
+  neither is reopened. Existing stores remain authoritative under DL-437. Settings-only
+  remnants cannot distinguish provisioning from total state loss: the rule detects
+  surviving runtime evidence, not its complete omission. Relocation is not decided here.
+  DL-59 concerns scheduler composition; it does not excuse lost durable state.
+
 - DL-444 Wrapper refusals and quarantine group cleanup
   (2026-11-02; boss ruling, gap-restart rework)
   THE WRAPPER. Readable JSON that is not an object is a spec refusal: exit 2,
@@ -25563,6 +25582,21 @@ relitigate an entry; append a new one.
   fallback after pidfd failure remain unchanged. An unreadable or mismatched spawn
   names no group; cookie cleanup remains available where supported. Quarantine's
   outcome and hold rule are unchanged. No schema, state version or chart changes.
+
+- DL-445 Root-local output, access receipts and legacy state also witness prior execution
+  (2026-11-02; boss ruling on genesis witnesses; G-restore)
+  CLARIFIES DL-443. Its five witness classes are not exhaustive. Any entry under `logs/`,
+  including an empty output file, and any `perimeter.jsonl` refuse genesis without
+  `engine.db`. Legacy `journal.jsonl` and `wal/` share the same pre-write refusal boundary.
+  Unreadable or malformed witness locations refuse. Empty `logs/` alone permits genesis.
+  Both CLI forms name the evidence and refuse repeatedly without mutation.
+  THE BOUNDARY. Configured output paths and client archives are not searched. Moving
+  output cannot authorize genesis while another witness survives. If every witness
+  disappears, prior execution remains indistinguishable from provisioning. Root-local
+  output need not establish recoverable state: its presence is enough to reject an
+  apparently fresh root. Arbitrary files are not witnesses merely because a job might
+  have written them. DL-443's exclusion, permitted provisioning and no-force-fresh rules
+  otherwise stand.
 
 - DL-446 The site status hook observes committed live transitions with bounded best-effort delivery
   (2026-11-02; owner item C; docs/runner-design.md §§4/12, docs/control-protocol.md, docs/deploy.md)

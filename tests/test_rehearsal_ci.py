@@ -181,6 +181,8 @@ def test_service_exports_before_cleanup_on_build_failure(tmp_path, failure, perm
         'if [ "$1:$2:$3" = "inspect:--format:{{.Id}}" ]; then echo recorded-container-id; '
         'elif [ "$1:$2" = "inspect:--format" ]; then echo "$PWD"; '
         'elif [ "$1" = cp ]; then mkdir -p "$3"; printf captured >"$3/captured"; '
+        'elif [ "$1" = rm ]; then '
+        '[ "$(cat "$DRILL_EVIDENCE/container.id")" = "$3" ] || exit 91; '
         "else echo evidence; fi",
         "chown": f'echo "chown $*" >> "$TEST_LOG"; exec {shutil.which("chown")} "$@"',
         "chmod": 'echo "chmod $*" >> "$TEST_LOG"; '
