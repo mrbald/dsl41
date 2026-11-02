@@ -32,12 +32,24 @@ def group_has_live_members(pgid: int):
     )
 
 
-def run_probe(argv: list[str], timeout_s: float = 120):
+def signal_group(pgid: int, signum: int):
+    try:
+        os.killpg(pgid, signum)
+    except ProcessLookupError:
+        pass
+    except PermissionError:
+        if group_has_live_members(pgid):
+            raise
+
+
+def run_probe(argv: list[str], timeout_s: float = 120, *, on_started=None):
     """Own a session; a deadline ends its whole group, including stopped children."""
     process = subprocess.Popen(
         argv, start_new_session=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     )
     try:
+        if on_started is not None:
+            on_started(process)
         stdout, stderr = process.communicate(timeout=timeout_s)
         return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
     except BaseException as error:
@@ -45,16 +57,11 @@ def run_probe(argv: list[str], timeout_s: float = 120):
         try:
             print(f"probe deadline/failure: ending process group {process.pid}", file=sys.stderr)
             for signum in (signal.SIGCONT, signal.SIGTERM):
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(process.pid, signum)
+                signal_group(process.pid, signum)
             # The unreaped leader pins the group id through the five-second cleanup grace.
             time.sleep(5)
             try:
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGKILL)
-            except PermissionError:
-                if group_has_live_members(process.pid):
-                    raise
+                signal_group(process.pid, signal.SIGKILL)
             finally:
                 stdout, stderr = process.communicate(timeout=5)
             if isinstance(error, subprocess.TimeoutExpired):

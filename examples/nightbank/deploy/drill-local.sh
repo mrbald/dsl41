@@ -51,24 +51,53 @@ say() { printf 'drill-local: %s\n' "$*"; }
 evidence=${DRILL_EVIDENCE:-$(mktemp -d /tmp/dsl41-drill-evidence.XXXXXX)}
 mkdir -p "$evidence"
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/dsl41-drill.XXXXXX")
+# shellcheck disable=SC2329  # the EXIT trap invokes it through cleanup
+readable_evidence() {
+    local owner copied
+    owner=$(id -u):$(id -g)
+    for copied in "$evidence/storage" "$evidence/storage-filesystem"; do
+        [ -d "$copied" ] || continue
+        if ! chown -Rh "$owner" "$copied" 2>/dev/null; then
+            sudo -n chown -Rh "$owner" "$copied" || return 1
+        fi
+        chmod -R u+rX "$copied" || return 1
+    done
+}
 # shellcheck disable=SC2329  # the EXIT trap invokes it
 cleanup() {
     status=$?
     trap - EXIT
     container=dsl41-wargame-$name
+    container_id=
     if podman container exists "$container"; then
-        podman inspect "$container" >"$evidence/container.json" 2>&1 || true
-        podman logs "$container" >"$evidence/container.log" 2>&1 || true
-        podman cp "$container:/var/lib/dsl41-drill/storage" "$evidence/storage" 2>/dev/null || true
-        podman cp "$container:/srv/dsl41-storage" "$evidence/storage-filesystem" 2>/dev/null || true
-        podman exec --user runner --workdir /work "$container" \
+        container_id=$(podman inspect --format '{{.Id}}' "$container")
+        owner=$(podman inspect --format '{{index .Config.Labels "dsl41.wargame"}}' "$container_id")
+        if [ "$owner" != "$tree" ]; then
+            say "foreign container: $container_id"
+            container_id=
+            [ "$status" != 0 ] || status=1
+        fi
+    fi
+    if [ -n "$container_id" ]; then
+        printf '%s\n' "$container_id" >"$evidence/container.id"
+        podman inspect "$container_id" >"$evidence/container.json" 2>&1 || true
+        podman logs "$container_id" >"$evidence/container.log" 2>&1 || true
+        podman cp "$container_id:/var/lib/dsl41-drill/storage" "$evidence/storage" 2>/dev/null || true
+        podman cp "$container_id:/srv/dsl41-storage" "$evidence/storage-filesystem" 2>/dev/null || true
+        podman exec --user runner --workdir /work "$container_id" \
             bash examples/nightbank/deploy/drill-steps.sh diagnostics \
             >"$evidence/diagnostics.log" 2>&1 || true
     fi
     if [ "${DRILL_KEEP-}" = 1 ]; then
         say "kept the container; scripts/wargame.sh --base $base join $name"
     else
-        wargame dispose "$name" 2>/dev/null || true
+        if [ -n "$container_id" ]; then
+            podman rm --force "$container_id" 2>/dev/null || true
+        fi
+    fi
+    if ! readable_evidence; then
+        say 'could not make captured evidence readable'
+        [ "$status" != 0 ] || status=1
     fi
     rm -r -f -- "$scratch"
     exit "$status"
