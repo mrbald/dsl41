@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import shlex
 import shutil
+import socket
 import sys
 import tempfile
 from pathlib import Path
@@ -29,15 +30,26 @@ from typer.testing import CliRunner
 from dsl41.cli import app
 
 cli_runner = CliRunner()
+pytestmark = pytest.mark.usefixtures("cli_env")
 
 
-def test_serve_missing_socket_exits_2(tmp_path, monkeypatch) -> None:
+@pytest.fixture
+def listening_socket(short_root: Path):
+    path = short_root / "run root with space" / "control.sock"
+    path.parent.mkdir()
+    with socket.socket(socket.AF_UNIX) as listener:
+        listener.bind(str(path))
+        listener.listen(1)
+        yield path
+
+
+def test_serve_missing_socket_exits_2(short_root, monkeypatch) -> None:
     # bypass the real textual-serve import so this test's outcome does not
     # depend on whether the [ui] extra happens to be installed (ss14)
     monkeypatch.setattr("dsl41.cli_control._import_textual_serve_or_exit_2", lambda: object)
-    result = cli_runner.invoke(app, ["serve", "--socket", str(tmp_path / "nope.sock")])
+    result = cli_runner.invoke(app, ["serve", "--socket", str(short_root / "nope.sock")])
     assert result.exit_code == 2
-    assert "no such file" in result.output
+    assert result.stderr == f"dsl41: no engine is running at {short_root / 'nope.sock'}\n"
 
 
 def test_serve_missing_extra_exits_2_with_pip_hint(tmp_path, monkeypatch) -> None:
@@ -50,13 +62,13 @@ def test_serve_missing_extra_exits_2_with_pip_hint(tmp_path, monkeypatch) -> Non
     assert "pip install 'dsl41[ui]'" in result.output
 
 
-def test_serve_constructs_the_ui_subprocess_command_quoting_a_space(tmp_path, monkeypatch) -> None:
+def test_serve_constructs_the_ui_subprocess_command_quoting_a_space(
+    listening_socket, monkeypatch
+) -> None:
     """The command textual-serve spawns per session must be exactly
     `<sys.executable> -m dsl41 ui --socket <path>`, properly quoted -- a
     socket path with a space is the fidelity probe."""
-    sock = tmp_path / "run root with space" / "control.sock"
-    sock.parent.mkdir()
-    sock.touch()
+    sock = listening_socket
     captured: dict = {}
 
     class FakeServer:
@@ -80,12 +92,11 @@ def test_serve_constructs_the_ui_subprocess_command_quoting_a_space(tmp_path, mo
     assert tokens == [sys.executable, "-m", "dsl41", "ui", "--socket", str(sock)]
 
 
-def test_serve_default_host_is_loopback(tmp_path, monkeypatch) -> None:
+def test_serve_default_host_is_loopback(listening_socket, monkeypatch) -> None:
     """E3 posture: textual-serve ships no auth, so loopback is the default
     bind, not 0.0.0.0 -- a proxy/tunnel is the documented path outward
     (README deployment notes)."""
-    sock = tmp_path / "control.sock"
-    sock.touch()
+    sock = listening_socket
     captured: dict = {}
 
     class FakeServer:
@@ -101,12 +112,11 @@ def test_serve_default_host_is_loopback(tmp_path, monkeypatch) -> None:
     assert captured["host"] == "127.0.0.1"
 
 
-def test_serve_bind_failure_exits_2(tmp_path, monkeypatch) -> None:
+def test_serve_bind_failure_exits_2(listening_socket, monkeypatch) -> None:
     """A bind failure (port in use, etc.) is "never started", same exit
     class as a missing socket or a missing extra (cli.py's exit-code
     contract comment)."""
-    sock = tmp_path / "control.sock"
-    sock.touch()
+    sock = listening_socket
 
     class FakeServer:
         def __init__(self, command, host="localhost", port=8000, **kwargs):
@@ -154,9 +164,8 @@ class _FakeTuiModule:
         self.RunnerApp = RunnerApp
 
 
-def test_ui_exits_with_the_tui_return_code_on_a_fatal_error(tmp_path, monkeypatch) -> None:
-    sock = tmp_path / "control.sock"
-    sock.touch()
+def test_ui_exits_with_the_tui_return_code_on_a_fatal_error(listening_socket, monkeypatch) -> None:
+    sock = listening_socket
     captured: dict = {}
     monkeypatch.setattr(
         "dsl41.cli_control.import_tui_or_exit_2", lambda: _FakeTuiModule(1, captured)
@@ -166,11 +175,10 @@ def test_ui_exits_with_the_tui_return_code_on_a_fatal_error(tmp_path, monkeypatc
     assert captured["kwargs"].get("owns_run") in (None, False)
 
 
-def test_ui_exits_0_when_the_tui_return_code_is_none(tmp_path, monkeypatch) -> None:
+def test_ui_exits_0_when_the_tui_return_code_is_none(listening_socket, monkeypatch) -> None:
     """The companion case: a TUI that quit cleanly (`return_code` stays
     `None`) is unaffected by the new check."""
-    sock = tmp_path / "control.sock"
-    sock.touch()
+    sock = listening_socket
     captured: dict = {}
     monkeypatch.setattr(
         "dsl41.cli_control.import_tui_or_exit_2", lambda: _FakeTuiModule(None, captured)

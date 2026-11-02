@@ -305,8 +305,9 @@ def test_cli_before_write_and_unknown_advice_include_the_original_actor(
         claimed_actor="operator ' one",
     )
 
-    def lose(_socket: Path, request: dict[str, Any]) -> dict[str, Any]:
+    def lose(_socket: Path, request: dict[str, Any], *, before_send) -> dict[str, Any]:
         assert request is envelope
+        before_send()
         before = capsys.readouterr().err
         assert shlex.split(before)[-2:] == ["--claimed-actor", "operator ' one"]
         raise ControlClientError("lost", delivered=True)

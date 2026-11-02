@@ -15,7 +15,9 @@ from typing import Any
 import typer
 
 from dsl41.cli_common import (
+    check_control_socket,
     command_outcome,
+    control_socket_error,
     import_tui_or_exit_2,
     read_header_of,
     refuse,
@@ -46,7 +48,7 @@ def _control_roundtrip(socket_path: Path, request: dict[str, Any]) -> dict[str, 
     try:
         return roundtrip(socket_path, request)
     except ControlClientError as exc:
-        raise typer.Exit(refuse(exc)) from exc
+        raise typer.Exit(refuse(control_socket_error(socket_path, exc))) from exc
 
 
 def _answer_or_exit(response: dict[str, Any]) -> None:
@@ -68,6 +70,7 @@ _SOCKET_OPT = typer.Option(
     ...,
     "--socket",
     "-S",
+    readable=False,
     help="The engine's control socket, <run-root>/control.sock.",
 )
 
@@ -297,8 +300,9 @@ def engine_stop(
     armed.
 
     Exit codes: 0 the engine took the stop (with --wait: and exited, or
-    no engine holds the run root); 2 the engine refused it or could not
-    be reached.
+    no engine holds the run root); 2 the engine refused it, could not
+    be reached, or the stop was delivered but --wait could not confirm
+    the exit.
     """
     # Design: spec-drain, docs/control-protocol.md ss2
     import json as json_mod
@@ -308,8 +312,8 @@ def engine_stop(
     try:
         response = roundtrip(socket_path, {"cmd": "engine_stop"})
     except ControlClientError as exc:
-        if not wait or exc.delivered:
-            raise typer.Exit(refuse(exc)) from exc
+        if not wait or exc.delivered or isinstance(exc.__cause__, PermissionError):
+            raise typer.Exit(refuse(control_socket_error(socket_path, exc, stop=True))) from exc
         retried = _stop_once_reachable(socket_path)
         if retried is None:
             typer.echo(f"engine not running: {exc}")
@@ -330,13 +334,18 @@ def _stop_once_reachable(socket_path: Path) -> dict[str, Any] | None:
 
     from dsl41.runner_control import ControlClientError, roundtrip
 
-    while _lock_held(socket_path.parent / "leader.lock"):
-        time.sleep(STOP_POLL_S)
-        try:
-            return roundtrip(socket_path, {"cmd": "engine_stop"})
-        except ControlClientError as exc:
-            if exc.delivered:
-                raise typer.Exit(refuse(exc)) from exc
+    try:
+        while _lock_held(socket_path.parent / "leader.lock"):
+            time.sleep(STOP_POLL_S)
+            try:
+                return roundtrip(socket_path, {"cmd": "engine_stop"})
+            except ControlClientError as exc:
+                if exc.delivered or isinstance(exc.__cause__, PermissionError):
+                    raise typer.Exit(
+                        refuse(control_socket_error(socket_path, exc, stop=True))
+                    ) from exc
+    except PermissionError as exc:
+        raise typer.Exit(refuse(control_socket_error(socket_path, exc))) from exc
     return None
 
 
@@ -345,10 +354,18 @@ def _wait_for_exit(socket_path: Path) -> None:
     then the run root's `leader.lock` is free. The engine releases the lock last."""
     import time
 
-    while _answers(socket_path):
-        time.sleep(STOP_POLL_S)
-    while _lock_held(socket_path.parent / "leader.lock"):
-        time.sleep(STOP_POLL_S)
+    try:
+        while _answers(socket_path):
+            time.sleep(STOP_POLL_S)
+        while _lock_held(socket_path.parent / "leader.lock"):
+            time.sleep(STOP_POLL_S)
+    except PermissionError as exc:
+        raise typer.Exit(
+            refuse(
+                "dsl41: the stop was delivered, but --wait cannot confirm the exit because "
+                f"{socket_path.parent / 'leader.lock'} is not readable to this user"
+            )
+        ) from exc
 
 
 def _answers(socket_path: Path) -> bool:
@@ -357,6 +374,8 @@ def _answers(socket_path: Path) -> bool:
     with socket_mod.socket(socket_mod.AF_UNIX) as probe:
         try:
             probe.connect(str(socket_path))
+        except (PermissionError, BlockingIOError) as exc:
+            raise typer.Exit(refuse(control_socket_error(socket_path, exc, stop=True))) from exc
         except OSError:
             return False
     return True
@@ -391,12 +410,11 @@ def ui(socket_path: Path = _SOCKET_OPT) -> None:
     run.
 
     Exit codes: 0 the viewer quit; 2 the ui extra is not installed or
-    the socket does not exist.
+    the socket cannot be reached.
     """
     # Design: ss11
     runner_tui = import_tui_or_exit_2()
-    if not socket_path.exists():
-        raise typer.Exit(refuse(f"control socket {socket_path}: no such file"))
+    check_control_socket(socket_path)
     app = runner_tui.RunnerApp(socket_path)
     app.run()
     if app.return_code:
@@ -434,8 +452,8 @@ def serve(
     Keep it on loopback, or put a proxy or tunnel in front; see the
     README's deployment notes.
 
-    Exit codes: 2 the ui extra is not installed, the socket does not
-    exist, or the address cannot be bound. Otherwise it serves until
+    Exit codes: 2 the ui extra is not installed, the socket cannot be
+    reached, or the address cannot be bound. Otherwise it serves until
     interrupted.
     """
     # Design: ss11
@@ -443,8 +461,7 @@ def serve(
     import sys
 
     server_cls = _import_textual_serve_or_exit_2()
-    if not socket_path.exists():
-        raise typer.Exit(refuse(f"control socket {socket_path}: no such file"))
+    check_control_socket(socket_path)
     command = f"{shlex.quote(sys.executable)} -m dsl41 ui --socket {shlex.quote(str(socket_path))}"
     try:
         server_cls(command, host=host, port=port).serve()
@@ -504,8 +521,12 @@ def _stream_subscribe(socket_path: Path, request: dict[str, Any]) -> None:
             raise typer.Exit(refuse(exc)) from exc
         raise typer.Exit(refuse(f"{exc} ({_resume_hint(cursor)})")) from exc
     except OSError as exc:
-        why = f"{exc} ({_resume_hint(cursor)})" if streaming else exc
-        raise typer.Exit(refuse(why, prefix=f"control socket {socket_path}")) from exc
+        why = (
+            f"control socket {socket_path}: {exc} ({_resume_hint(cursor)})"
+            if streaming
+            else control_socket_error(socket_path, exc)
+        )
+        raise typer.Exit(refuse(why)) from exc
     except KeyboardInterrupt:
         return
     raise typer.Exit(refuse(f"the engine closed the subscribe stream ({_resume_hint(cursor)})"))
