@@ -98,9 +98,10 @@ for the caps and escalation.
 ## Step 5: delivery and stamp
 
 One document per PR, on a branch named `spec/<stem>`. The PR body carries
-the reconciliation findings. Ask before merging. A pass that changes
-nothing has no PR: report the fact sheet's result and the reconciliation
-findings, and stamp once the boss accepts.
+the reconciliation findings. Merge through
+[coordination's Git workflow](../../../docs/agents/coordination.md#git-workflow).
+A pass that changes nothing has no PR: report the fact sheet's result and the
+reconciliation findings, and stamp once the boss accepts.
 
 After the boss accepts the pass, and the PR if there is one is merged,
 stamp `main`. Never stamp a branch commit: the gate measures drift from

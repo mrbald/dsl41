@@ -17,27 +17,53 @@ Read the [approved operating model](agents/operating-model.md) for authority, ro
   the operator; do not dispatch a reviewer or another model yourself.
 - Implement the brief and run the checks below. Report judgment calls, unmet
   requirements, changed paths, and exact check results to the operator.
+  Read the finished changed sections whole before handoff. Reconcile affected
+  README and documentation claims with behavior changes; use relative links
+  to repository files.
 - Identify the candidate by commit or file hash. The operator arranges review.
   Address all open findings in each rework round and return them to their raisers.
   Wait for the operator's go-ahead if a round limit or shape note is due.
 - Do not commit, stage or push. The operator commits once the gates pass and
-  review is accepted or not required, and owns publication and the merge train.
+  independent review is accepted, and owns publication and the merge train.
 - After rewriting a document, run `uv run python scripts/doc_deps.py`, inspect
   the matches, and fix affected consumers before the gates.
+  Run `uv run python scripts/render_decision_index.py` after citation changes;
+  the docs gate below checks the rendered index.
 - A new document must be visible to Git before `docs/decision-index.md` renders.
   The brief names each new document; before dispatch the operator creates it
   empty and marks it with `git add -N PATH`. Report any other new document; the operator
   marks it and renders the index again.
-- The operator rebases and resolves conflicts.
+- Send conflicts to the operator under
+  [the conflict procedure](agents/coordination.md#apply-a-settled-edit-or-conflict-resolution).
+  Return any resolution that needs implementation changes as a reviewed fix.
+
+Keep source files free of non-functional boilerplate, including license headers
+and attribution comments. Follow [LICENSING.md item 3](../LICENSING.md) for root
+license text and package metadata. Choose code structure for correctness and
+maintainability; do not duplicate code to fit a future licensing boundary.
 
 ## Setup
 
-1. Select a trusted checkout in the assigned worktree.
-2. Install the locked development environment:
+1. Select a trusted checkout in the assigned worktree. Check `git log -1 --oneline`
+   against the brief's base revision; report a mismatch before editing.
+2. Unset an inherited `VIRTUAL_ENV` and put `UV_CACHE_DIR` under `/tmp` before
+   setup and checks. Do not use `uv sync --active` or install into another
+   checkout's environment.
+3. Install the locked development environment:
 
    ```sh
    uv sync --frozen --extra dev
    ```
+
+4. Verify the import resolves inside the assigned worktree:
+
+   ```sh
+   uv run python -c "import dsl41; print(dsl41.__file__)"
+   ```
+
+Report an import outside the worktree. Leave another session's environment
+untouched. Before a probe mutates implementation files, preserve a recoverable
+copy; run reviewer probes in scratch copies of the read-only candidate.
 
 CI installs with `--locked`, which also checks the lock against `pyproject.toml`;
 a stale lock passes `--frozen` locally and fails in CI.
@@ -48,13 +74,33 @@ Verify any locally required guard and its source before relying on it.
 Public-repo hygiene still requires reading changed files line by line.
 Never use a guard's absence or a clean secret scan as evidence that estate-derived
 material is safe to publish.
+Apply that read to source comments, test docstrings, ignore files, docs and
+publication messages. Keep only sanitized technical facts and confidence markers;
+omit private identifiers, paths, access details and accounts of how evidence was
+obtained. Keep proprietary source caches and private checkers outside git.
+Commit attribution follows [Git workflow](agents/coordination.md#git-workflow).
 
 ## Verify a change
 
 The implementer owns the checks and records their commands and results.
 The reviewer checks that evidence and the diff against the contract.
-The operator routes disagreements to the boss and does not repeat the gates.
-Repeat a check after a relevant edit, a failure, or inadequate evidence.
+The operator follows [coordination](agents/coordination.md#route-a-ruling) for
+disagreements. Before an operator check, consult
+[rule 35](agents/operating-model.md#limits-on-the-operator) and record the
+assignment or invalidated result that calls for the run. Attach its output to
+the candidate's evidence for the reviewer. Repeat an affected check after a
+relevant edit.
+
+Inspect current CI at session start and before a completion or release claim.
+Match the run's full candidate identity and required jobs; report local and CI
+results separately. A cancelled job needs its log and timeout inspected before
+it can be diagnosed as infrastructure. Route unexplained failures through
+[coordination](agents/coordination.md#workflow-rules).
+
+For performance work, record the baseline measurement and go-or-stop decision
+before building (rule 23). For a concurrency fix, construct the failing ordering
+and prove the fix handles it (rule 24). Use a deterministic check for the defect
+class; consecutive green runs are not an acceptance gate.
 
 A docs-only change touches only `README.md`, `CLAUDE.md`, `docs/**/*.md`,
 `examples/**/*.md` or `.claude/skills/**/*.md` (DL-434). For that change, run
@@ -81,10 +127,21 @@ Run one pytest session per checkout at a time. Keep the coverage run alone from
 erase through report. For browser/UI work, exercise actual interactions such as
 right-click, keyboard and resize in Chromium and WebKit, and Firefox where relevant.
 
+Prefer local Linux cells for reproductions. A runner slice's brief includes
+Linux-cell coverage evidence and the required Python versions and architectures.
+Run Linux tests as a non-root user. Compare interpreter versions
+before attributing a difference to the OS. Use an isolated container venv so a
+Linux run cannot replace the host environment. Keep combined short test and
+integration runs within 80% of host CPU and memory. Shared-resource cleanup
+follows [coordination](agents/coordination.md#clean-up-a-run).
+
 A comment-only or docstring-only change adds one gate before the suite:
 `uv run python scripts/comment_equivalence.py <base-rev>` proves the diff
-changed no code and lost no citation token (DL-362). It replaces the logic
-review for that change, not the suite run.
+changed no code and lost no citation token (DL-362). For a proved comment-only
+change, give the independent reviewer the exact candidate, proof and full-suite
+evidence. The reviewer checks candidate identity, proof coverage, suite evidence
+and whether the edited prose preserves the rules, citations and held text.
+This pass is not a logic review of unchanged code (DL-362, DL-440).
 
 `uv run mypy` checks `src`, the file set `pyproject.toml` names.
 

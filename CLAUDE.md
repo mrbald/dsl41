@@ -110,7 +110,7 @@ Codex uses the same bodies through `.agents/skills/<name>` symlinks.
 - Honor the task's allowed paths, read-only limits and approval boundaries.
 - Never run `git pull`. Use `git fetch` then `git rebase`.
 - Stage explicit paths; never `git add -A`.
-- A commit requires green gates and accepted review where review is required.
+- A commit requires green gates and accepted review.
   Publication follows the coordination guide and the owner's instructions.
 - Ask before `git branch -D`, `git worktree remove --force`, `git push --delete`,
   or `gh pr merge --delete-branch`. Never force-push main.
