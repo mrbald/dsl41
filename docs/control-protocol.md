@@ -89,7 +89,7 @@ CLI's job.
   server writes, the §5 store records and the gap marker, carry no
   `ok`.
 - Routed responses carry the **read header**: `baseline_id` and
-  `applied_index` (`docs/concurrency-model.md` §6). `baseline_id` is the
+  `applied_index` (DL-148, §4). `baseline_id` is the
   identity stored at engine-store creation. It survives engine restarts
   and configuration updates (DL-424, DL-428). `applied_index` is the
   engine's applied admission index, not a configuration revision or the
@@ -107,7 +107,7 @@ CLI's job.
   "internal error: …"}` rather than leaving the request unanswered. A
   client must never see a bare timeout for a query bug. A statechart error
   is not a query bug: it gets no answer, the connection hangs up, and the
-  engine stops with exit 7 (`concurrency-model.md` §4).
+  engine stops with exit 7 (DL-353).
 - Consumers must ignore unknown fields (forward compatibility).
 
 **Socket lifecycle.** On start the server probes an existing socket file
@@ -117,7 +117,7 @@ crashed run's leftover file, which is unlinked and claimed. The probe is
 not the election, and neither is the bind: the bind replaces an existing
 socket file rather than failing on it. The `leader.lock` flock is what
 keeps two engines apart. It enforces one engine per run root
-(`docs/concurrency-model.md` §1, DL-100). The engine takes it before it
+(DL-100 as narrowed by DL-424). The engine takes it before it
 opens anything, so the probe runs after the lock is held. The probe
 cleans up a stale socket file and is a second refusal door: it refuses
 to start when a live engine answers it.
@@ -261,11 +261,11 @@ The client action says what a client does next:
 | `request_id_reused` | refused | the `request_id` was admitted for a different command | fix the request |
 | `engine_shutting_down` | refused | the engine shut down before the input was admitted | wait |
 | `decision_timeout` | unknown | no decision arrived within the window | re-read; retry a mutation only under the same request_id |
-| `apply_faulted` | refused | applying the command on a fork of the engine's state raised, so it was refused before it was logged (`docs/concurrency-model.md` §4, DL-292) | operator |
+| `apply_faulted` | refused | applying the command on a fork of the engine's state raised, so it was refused before it was logged (DL-292, DL-320) | operator |
 | `precondition_failed` | rejected | the addressed entity is not at the revision `expect` names | re-read then decide |
 | `clock_regressed` | engine invariant failure | a stamp below the admission frontier reached `Frontiers.admit`; real-domain admission floors stamps, so valid control requests cannot emit it; direct guard calls and backdated in-process virtual inputs can | engine bug |
 | `stale_completion` | rejected, stored only | the stale-completion gate rejected an engine-made completion; it is stored, and no client request is answered with it | none |
-| `engine_apply_faulted` | rejected | applying an input on a fork of the engine's state raised, and its time half applied alone, so the input was logged with this rejection and only its time half applied: it is quarantined (`docs/concurrency-model.md` §4). The live engine stores it for an engine-made input. Replay stores it for any input admitted with no decision whose apply raises the same way, a control input included. Like every stored code, an exact retry of that control input is answered with it | operator |
+| `engine_apply_faulted` | rejected | applying an input on a fork of the engine's state raised, and its time half applied alone, so the input was logged with this rejection and only its time half applied: it is quarantined (DL-320). The live engine stores it for an engine-made input. Replay stores it for any input admitted with no decision whose apply raises the same way, a control input included. Like every stored code, an exact retry of that control input is answered with it | operator |
 | `engine_error` | refused | an engine refusal whose raise site names no code | operator |
 | `engine_draining` | rejected | the mutation was admitted after `stop_requested` (a SIGTERM or `engine_stop`, below): it is logged with this rejection and only its time half applied; an exact retry is answered with it (spec-drain) | wait |
 | `stale_plan` | refused | the plan was diffed against another configuration rev or catalog than the engine runs (its revision or its catalog hash), `expect` names another rev, or the plan predates the engine (no estate directory) | re-read then decide |
@@ -328,7 +328,7 @@ revision the batch moved, the target's own timers included. A timer of
 the target's due at the DISARM's instant fires in the same batch and moves
 the target's revision whether or not the latch was set (DL-233).
 
-period-model §10.4's seal-time disarm resolves to DL-424.
+Seal-time disarm is outside the design (DL-424).
 
 `RELEASE_RESOURCE` (DL-256) is the vendor's `sendevent -E RELEASE_RESOURCE
 -J job`. It is a job verb and takes the job verbs' whole contract: the
@@ -347,7 +347,7 @@ is `RELEASE_RESOURCE`, and its reason names the outcome:
 `(no effect: <status>; …)` naming the live status, such as
 `(no effect: RUNNING; …)`.
 
-**`expect` is mandatory** (`docs/concurrency-model.md` §0). It names the
+**`expect` is mandatory** (DL-84, DL-90). It names the
 addressed entity, `job:<name>` for a job verb and `global:<name>` for
 `SET_GLOBAL`, and nothing else, at the revision the caller read from a §4
 query. `0` means the entity has no row yet; that is how a conditional
@@ -489,7 +489,7 @@ The engine re-proves it holds the run root before it applies an input
 or writes a snapshot (DL-99, DL-100).
 
 No `subscribe` line carries the read header (§2, DL-148). A subscription
-is not a `concurrency-model.md` §6 revision-bearing read.
+is not a revision-bearing read (§2, DL-148).
 
 Every query is a **pure projection** of (oracle, catalog, scheduler,
 spool paths). None changes protocol-visible engine state, and
@@ -678,7 +678,7 @@ a query refusal, not a run refusal.
 
 `{"ok": true, "globals": {<name>: {"present": bool, "value": <string>|null,
 "state_rev": int}}}`: the read a `SET_GLOBAL` precondition is composed
-from (`docs/concurrency-model.md` §6). Named entities only. An unset name
+from (§3). Named entities only. An unset name
 is **answered**, at revision `0`, rather than omitted: absence you cannot
 name is absence you cannot lock against, and `0` is exactly what a
 conditional create conditions on. Neither verb inserts a row.
@@ -854,7 +854,7 @@ backlog is empty is not removed by one admitted command whose records fit
 the budget, and one record larger than the budget delays a subscriber and
 does not remove it. A larger burst removes even a subscriber that was
 keeping up: the engine applies queued commands without yielding
-(`docs/concurrency-model.md` §4), so its handler cannot drain between
+([runner-design §4](runner-design.md#4-engine-loop--single-writer)), so its handler cannot drain between
 them. That client resumes from its cursor (§6) and loses nothing. A
 refused record removes the subscription:
 
@@ -954,8 +954,8 @@ each open item (`docs/decision-log.md` DL-78).
    entire access-control model. Any process running as the invoking user
    has full `sendevent` authority. That is why the envelope's actor field
    is named `claimed_actor`: the log records an assertion.
-   `docs/concurrency-model.md` §6's "the leader stamps the authenticated
-   principal" applies only where a leader can authenticate one.
+   The perimeter stamps the authenticated principal only on an estate
+   with an access map ([access-model §5](access-model.md#5-the-enforcement-point), DL-146).
    **An estate with an access map is outside this gap (DL-146).**
    `docs/access-model.md` gives it authorization and *local*
    authentication: kernel peer credentials, one principal→tier map, a

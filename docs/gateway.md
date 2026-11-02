@@ -1,15 +1,21 @@
-# Gateway — HTTP and WebSocket in front of the control socket
+# Gateway
 
-For the architect reading an unbuilt gateway proposal; continue through the [architect track](../README.md#documents).
+For the architect: the built browser interface is the
+[served TUI](runner-design.md#11-ui--one-textual-app-terminal-and-web-e3), with
+[web-tier access](access-model.md#9-the-web-tier). Follow the
+[architect track](../README.md#documents) for the present design.
 
-Status: **proposed.** Not normative until a decision-log entry accepts it.
-Nothing is built. The control error codes it maps (§3) are built (DL-272).
+## Proposal archive
+
+The HTTP and WebSocket proposal below is outside the present-design track.
+It is unbuilt and non-normative. Acceptance requires a decision-log entry.
+The control error codes it maps (§3) are built (DL-272).
 
 The gateway puts one engine behind a corporate proxy. It adds no meaning:
 [control-protocol](control-protocol.md) and [access-model](access-model.md)
 stay the contracts.
 
-## 1. Process model
+### 1. Process model
 
 - One gateway process per exposed tier, read and ops, each under its own
   OS service account (`svc-dsl41-gw-read`, `svc-dsl41-gw-ops`). The proposal
@@ -30,14 +36,15 @@ stay the contracts.
 - An optional extra, `dsl41[gateway]`; the core keeps its three runtime
   dependencies. Intended stack: FastAPI on Starlette, on uvicorn.
 
-## 2. Resources
+### 2. Resources
 
-One route per control `cmd`. The set is the `cmd` column of the verb table
+One route per control `cmd`. The set is the read- and ops-tier `cmd` entries of the verb table
 ([access-model §10](access-model.md#10-the-verb-table)). The gateway stamps
 `"v": 3` and `cmd` on every upstream request.
 
 | `cmd` | route | arguments |
 | --- | --- | --- |
+| `catalog` | `GET /api/v1/catalog` | none |
 | `status` | `GET /api/v1/status` | `job`, optional |
 | `trace` | `GET /api/v1/trace` | `since`, optional integer |
 | `explain`, `spec`, `deps` | `GET /api/v1/explain` (and `/spec`, `/deps`) | `job` |
@@ -80,7 +87,7 @@ speaks one control version; a newer engine answers `unsupported_version`
 until the gateway is upgraded. Acceptance adds a row to
 [protocol-evolution §1](protocol-evolution.md#1-the-matrix).
 
-## 3. Errors
+### 3. Errors
 
 Every `ok: false` answer becomes `application/problem+json`
 ([RFC 9457](https://www.rfc-editor.org/rfc/rfc9457)). `type` is
@@ -155,7 +162,7 @@ cause.
 A refused gateway problem carries `refused: true`. The unknown one carries
 no marker: a failure after a write attempt is `delivered` (control-protocol §2).
 
-## 4. Retries and isolation
+### 4. Retries and isolation
 
 - **`request_id` passes through**, created by the browser. The gateway
   never rewrites one and retries nothing: the retry policy is the browser's.
@@ -184,7 +191,7 @@ resolve to [DL-424](decision-log.md).
    says nothing about the original, which may have applied (DL-217).
 4. The seal-specific retry obligation resolves to [DL-424](decision-log.md).
 
-## 5. The stream
+### 5. The stream
 
 `GET /api/v1/subscribe` upgrades after §7's checks and limits, before the
 upstream connect: a browser hides handshake statuses from script. Each
@@ -224,7 +231,7 @@ browser socket gets its own upstream `subscribe`, with its `since`.
 | `1001`, `1006` | the gateway is shutting down; an abnormal close, observed by the browser and never sent | resume with `since` after a delay |
 | `1008` | the browser sent a data frame | fix the client; do not loop |
 
-## 6. Identity
+### 6. Identity
 
 With a map armed, the engine overwrites `claimed_actor` with the gateway's
 account ([access-model §3](access-model.md#3-local-authentication-kernel-peer-credentials)).
@@ -246,7 +253,7 @@ seam `web-session-principal-v2`
 - The engine cannot revoke one human inside a tier. The proxy stops
   routing the session, and the gateway closes its sockets (§7).
 
-## 7. Security acceptance criteria (requirements, not findings)
+### 7. Security acceptance criteria (requirements, not findings)
 
 1. **The proxy contract.** The proxy validates the browser's credential
    and sends three configured trusted headers, stripping browser copies:
@@ -285,14 +292,14 @@ seam `web-session-principal-v2`
     A missing socket is the same refusal, not a start
     failure. An unarmed or owner-run gateway would admit every verb.
 
-## 8. Out of scope
+### 8. Out of scope
 
 The web application, several engines per gateway, HA, and log file serving.
 The seal flow resolves to [DL-424](decision-log.md). Access-model §9 makes log visibility an explicit
 per-tier deployment grant to the web tier's service account, read by the
 TUI child; the gateway serves no log file.
 
-## 9. Acceptance tests
+### 9. Acceptance tests
 
 On real sockets and a real engine, behind a stub proxy; browser-driven
 WebSocket tests run in Chromium and WebKit. The reference client is a test

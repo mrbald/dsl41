@@ -2,23 +2,25 @@
 
 ## Purpose
 
-The [wrapper](../glossary.md#wrapper) is the direct parent of one run's command.
+The [wrapper](../glossary.md#wrapper) is the direct parent of one attempt's command.
 Unix gives one `wait()` observation of an exit, so the direct parent is the one process that cannot miss it.
 The wrapper writes that status durably, and it kills the command's group when its own parent dies.
 
 ## Fate
 
 The code and the contract carry over unchanged. It needs none of the storage capabilities.
-Reason: `runner_wrapper.py` imports only the standard library and `runner_procid.py`, and it writes two files in the run directory; it never touches the WAL or the ledger.
-It does need the run directory on a local filesystem (supervisor-protocol §3 (`supervisor-protocol.md`, retired in 2.0.0)), which is a filesystem property, not a row of the storage table.
+Reason: `runner_wrapper.py` imports only the standard library and `runner_procid.py`, and it writes two files in the attempt directory; it never touches the WAL or the ledger.
+It does need the run directory on a local filesystem ([wrapper-protocol §3](../wrapper-protocol.md#3-spool-format-frozen)), which is a filesystem property, not a row of the storage table.
 
 ## Interface
 
+Bare section numbers below refer to [wrapper-protocol](../wrapper-protocol.md).
+
 - Run as `sys.executable <path>/runner_wrapper.py`, never with `-m`.
-- Input: one JSON object on stdin, the frozen spec of supervisor-protocol §2 (`supervisor-protocol.md`, retired in 2.0.0). `lifeline_fd` is the read end of a pipe whose write end the spawner holds.
-- Output: `spawn.json`, then `status.json`, in `run_dir` (§3 (`supervisor-protocol.md`, retired in 2.0.0)). The outcome vocabulary is `WrapperOutcome`.
-- Exit code: a notification only, never the outcome (§4 (`supervisor-protocol.md`, retired in 2.0.0) step 6).
-- Spawners: `LocalCommandAdapter` in [tethered](../glossary.md#tethered) mode, where the engine holds the write end, and `Supervisor._spawn_wrapper` in [detached](../glossary.md#detached) mode. Both engine-side spec builders, in `LocalCommandAdapter` and `SupervisedCommandAdapter`, use `_build_run_spec`; the supervisor takes the spec off the wire and fills only `lifeline_fd`.
+- Input: one JSON object on stdin, the frozen spec of [wrapper-protocol §2](../wrapper-protocol.md#2-wrapper-input-spec-frozen). `lifeline_fd` is the read end of a pipe whose write end the spawner holds.
+- Output: `spawn.json`, then `status.json`, in `run_dir` ([wrapper-protocol §3](../wrapper-protocol.md#3-spool-format-frozen)). The outcome vocabulary is `WrapperOutcome`.
+- Exit code: a notification only, never the outcome ([wrapper-protocol §4](../wrapper-protocol.md#4-wrapper-behavior-frozen-semantics) step 6).
+- Spawner: `LocalCommandAdapter` holds the lifeline write end and builds the input with `_build_run_spec` in `runner_adapters.py`. Supervisor spawning and detached mode are outside the design (DL-424).
 - Readers: `load_json`, `spool_record` and `outcome_from_status` in `src/dsl41/runner_adapters.py`, and the attempt tier (`src/dsl41/runner_attempts.py`).
 - `DSL41_WRAPPER_TEST_PAUSE` names pause points for the kill-matrix tests. It is inert when unset.
 
@@ -46,23 +48,23 @@ flowchart TD
 
 ## Invariants
 
-- Stdlib-only, run by file path and parent-agnostic (supervisor-protocol §1 (`supervisor-protocol.md`, retired in 2.0.0); [runner-design §6a](../runner-design.md#6a-process-lifecycle-tiers-dl-41a); DL-42).
-- The command has its own process group, apart from the wrapper's, so a group kill never kills the recorder (DL-41a item 2; §3, spawn.json (`supervisor-protocol.md`, retired in 2.0.0)).
+- Stdlib-only, run by file path and parent-agnostic ([runner-design §6a](../runner-design.md#6a-process-lifecycle-tiers-dl-41a); DL-42).
+- The command has its own process group, apart from the wrapper's, so a group kill never kills the recorder (DL-41a item 2; [wrapper-protocol §3, spawn.json](../wrapper-protocol.md#spawnjson--written-by-the-wrapper-immediately-after-spawning)).
 - The lifeline's write end lives in exactly one process, the spawner. EOF means the parent died, `kill -9` included (DL-41a item 3; runner-design §6a, "Lifeline fd hygiene").
-- On every wakeup the exit check runs before the lifeline-EOF check (§4 (`supervisor-protocol.md`, retired in 2.0.0) step 3).
-- Record before reap, with one stated exception: the path where the `spawn.json` write failed (§3, status.json (`supervisor-protocol.md`, retired in 2.0.0); DL-229 item 1).
-- Every record uses the durability liturgy on a local filesystem (§3 (`supervisor-protocol.md`, retired in 2.0.0); DL-41a item 4).
-- `status.json` is the sole data channel and appears at most once. Its absence is the E7 case (§3, status.json).
+- On every wakeup the exit check runs before the lifeline-EOF check ([wrapper-protocol §4](../wrapper-protocol.md#4-wrapper-behavior-frozen-semantics) step 3).
+- Record before reap, with one stated exception: the path where the `spawn.json` write failed ([wrapper-protocol §3, status.json](../wrapper-protocol.md#statusjson--written-by-the-wrapper-before-reaping); DL-229 item 1).
+- Every record uses the durability liturgy on a local filesystem ([wrapper-protocol §3](../wrapper-protocol.md#3-spool-format-frozen); DL-41a item 4).
+- `status.json` is the sole data channel and appears at most once. Its absence gives an `unobservable` attempt outcome; the interruption rule chooses the follow-up (§3, status.json; DL-424, DL-426).
 - A pid whose start-time token does not match the record is never signalled (§3, spawn.json; DL-41a item 5).
-- The `DSL41_RUN` tag is forensics only, never identity (§3 (`supervisor-protocol.md`, retired in 2.0.0)).
+- The `DSL41_RUN` tag is forensics only, never identity ([wrapper-protocol §3](../wrapper-protocol.md#3-spool-format-frozen)).
 - The wrapper ignores a fixed set of signals, and the command restores their defaults before exec (§4 steps 1 and 2; DL-229 item 6).
 
 ## Failure and recovery
 
-- The parent dies, engine or supervisor: the wrapper kills the group and records `terminated` with cause `parent lost` (§4 step 5). In tethered mode, engine death therefore ends and records every job ([runner-design §6a](../runner-design.md#6a-process-lifecycle-tiers-dl-41a)).
-- The wrapper alone, or the whole tree, is killed with -9, and no `status.json` lands. The restart ends the attempt `unobservable{engine_death}` and its cleanup stops what is left of the command; it never waits for a wrapper, and a record a live wrapper writes after the restart's reading is read by nobody ([runner-design §7](../runner-design.md#7-journal-and-recovery-e1-prod-grade); §3, status.json; DL-41a item 6, DL-433).
+- The engine dies: the wrapper kills the group and records `terminated` with cause `parent lost` (§4 step 5). The engine derives `stopped{lifeline}` and applies the interruption rule (DL-426) ([runner-design §6a](../runner-design.md#6a-process-lifecycle-tiers-dl-41a)).
+- The wrapper alone, or the whole tree, is killed with -9, and no `status.json` lands. The restart ends the attempt `unobservable{engine_death}` and its cleanup stops what is left of the command; it never waits for a wrapper, and a record a live wrapper writes after the restart's reading is read by nobody ([runner-design §7](../runner-design.md#7-journal-and-recovery-e1-prod-grade); §3, status.json; DL-424, DL-433).
 - A reboot: a `boot_id` mismatch voids liveness checks and proves nothing survived (§3, spawn.json; DL-42 item 5).
-- A full disk: the record write fails and the wrapper exits 3. The missing record reads as E7 (§4 step 6).
+- A full disk: the record write fails and the wrapper exits 3. The missing record gives an `unobservable` attempt outcome (§3; §4 step 6; DL-426).
 - An oracle kill in tethered mode: the engine sends TERM to the group, waits the grace, then sends KILL, and the wrapper records the death ([runner-design §6](../runner-design.md#6-adapters)).
 - A command that escapes its group with `setsid` or a double fork is not contained. That is a stated limit (runner-design §6a, "Containment honesty").
 
@@ -70,7 +72,10 @@ flowchart TD
 
 - `src/dsl41/runner_wrapper.py`: the shim.
 - `src/dsl41/runner_procid.py`: the liturgy, the boot id, start-time tokens and the quiet group kill.
-- `src/dsl41/runner_adapters.py`: the tethered spawner, the spec builder, the outcome mapping and the stop ladder.
+- `src/dsl41/runner_adapters.py`: the spawner, the spec builder and the natural-outcome mapping.
+- `src/dsl41/engine_charts.py`: attempt-outcome derivation.
+- `src/dsl41/runner_attempts.py`: record observations and follow-up plans; it calls the stop ladder.
+- `src/dsl41/runner_adapters.py`: the stop ladder.
 
 ## Tests
 
@@ -85,7 +90,7 @@ flowchart TD
 ## Open findings
 
 See the row "Wrapper and command" in [the risk map](../risk-map.md).
-All three owning modules are in the 100% gate ([DL-294, DL-299](../risk-map.md#closed-by-dl-289dl-306)), and the row lists no open finding.
+`runner_wrapper.py`, `runner_procid.py` and `runner_adapters.py` are in the 100% gate ([DL-294, DL-299](../risk-map.md#closed-by-dl-289dl-306)), and the row lists no open finding.
 The wrapper runs as a subprocess, and a process a test ends with SIGKILL loses its coverage data, so its numbers are floors.
 
 ## Gaps found
