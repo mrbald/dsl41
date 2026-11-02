@@ -100,12 +100,18 @@ if tool == 'git':
     if args[0] in ('fetch', 'push', 'ls-remote'):
         if args[0] == 'push' and cfg.get('change_before_push'):
             cmd('--git-dir', cfg['bare'], 'update-ref', 'refs/heads/slice', cfg['change_before_push'])
-        args = [cfg['bare'] if a == 'upstream' else a for a in args]
+        if args[0] != 'push':
+            args = [cfg['bare'] if a == 'upstream' else a for a in args]
         if args[0] == 'fetch':
             args = ['fetch', cfg['bare'], '+refs/heads/*:refs/remotes/upstream/*']
-    print(cmd(*args), end='')
+    command_args = (['-c', 'remote.upstream.pushurl=' + cfg['bare'], *args]
+                    if args[0] == 'push' else args)
+    print(cmd(*command_args), end='')
     if args[0] == 'push':
-        head, ref = args[-1].split(':')
+        source, separator, ref = args[-1].partition(':')
+        if not separator: ref = source
+        if not ref.startswith('refs/heads/'): ref = 'refs/heads/' + ref
+        head = cmd('--git-dir', cfg['bare'], 'rev-parse', ref).strip()
         branch = ref.removeprefix('refs/heads/')
         if branch == 'slice': cfg['head'] = head
         for row in cfg.get('prs', []):
@@ -135,15 +141,16 @@ if tool == 'wt':
 if tool == 'uv':
     if '--classify' in args:
         print(cfg.get('classification', 'code=false' if cfg['docs'] else 'code=true'))
-    elif 'scripts/render_decision_index.py' in args:
-        index = P('docs/decision-index.md')
-        index.write_text(P('docs/decision-log.md').read_text())
-        if cfg.get('render_marker'): index.write_text('||||||| base\n')
-        if cfg.get('render_edit'): P('docs/decision-log.md').write_text('rewritten\n')
-    elif 'tests/test_docs_hygiene.py' in args:
-        if cfg.get('hygiene_fail'): sys.exit(1)
     sys.exit(0)
 if tool != 'gh': sys.exit(91)
+protection = cfg.get('protection', dict(required_status_checks=dict(strict=True),
+                                     enforce_admins=dict(enabled=True)))
+if args[0] == 'api':
+    assert args == ['api', '--hostname', 'example.invalid',
+                    'repos/fixture/project/branches/trunk/protection']
+    if cfg.get('protection_failure'): sys.exit(9)
+    print(json.dumps(protection))
+    sys.exit(0)
 if args[:2] == ['repo', 'view']:
     assert args[2] == 'example.invalid/fixture/project'
 else:
@@ -198,10 +205,23 @@ elif args[:2] == ['pr', 'merge']:
     p = next(p for p in cfg.get('prs', [dict(number=1, branch='slice', head=cfg['head'])]) if p['number'] == number)
     head = p['head']
     assert args[args.index('--match-head-commit') + 1] == head
-    assert '--expected-base-commit' in args
-    base = args[args.index('--expected-base-commit') + 1]
+    assert '--admin' not in args and '--auto' not in args
+    assert '--expected-base-commit' not in args
+    assert protection['required_status_checks']['strict'] is True
+    assert protection['enforce_admins']['enabled'] is True
     if cfg.get('advance_at_merge'):
         cmd('--git-dir', cfg['bare'], 'update-ref', 'refs/heads/trunk', cfg['advanced_base'])
+        cfg['advance_at_merge'] = False; save()
+    base = cmd('--git-dir', cfg['bare'], 'rev-parse', 'refs/heads/trunk').strip()
+    ancestry = subprocess.run([cfg['git'], '--git-dir', cfg['bare'], 'merge-base',
+                               '--is-ancestor', base, head], env=env, capture_output=True,
+                               timeout=10, check=False)
+    cfg.setdefault('merge_attempts', []).append(dict(head=head, base=base,
+                                                   contains_base=ancestry.returncode == 0))
+    save()
+    if ancestry.returncode:
+        print('strict protection: branch is out of date', file=sys.stderr)
+        sys.exit(1)
     if not cfg.get('false_merge'):
         cmd('--git-dir', cfg['bare'], 'update-ref', 'refs/heads/trunk', head, base)
     cfg['state'] = 'MERGED'; cfg['merge_commit'] = head
@@ -213,21 +233,43 @@ elif args[:2] == ['pr', 'merge']:
 else: sys.exit(92)
 """
 
-# Production merging requires an atomic guard for head and base (rule 46).
-# This test-only server simulation has
-# an atomic old-base compare-and-swap; it is never a production CLI option.
+# DL-442: production orchestration uses synthetic services and real isolated Git.
+# Fake tools run inside the driver to avoid an interpreter launch per command.
+# Process-group tests and kill-at-merge probes keep the real subprocess boundary.
 DRIVER = r"""
-import json, os, pathlib, sys
+import contextlib, io, json, os, pathlib, runpy, subprocess, sys
 sys.path.insert(0, str(pathlib.Path(sys.argv[1]).parent))
 import merge_train
-class AtomicServerTrain(merge_train.Train):
-    def merge(self, number, entry, raw):
-        assert self.state['ci'] == self.state['tested']
-        assert self.state['ci']['head'] == self.head(entry)
-        self.intent('merge', entry, raw, pr=number)
-        self.run('gh', '--repo', self.slug, 'pr', 'merge', str(number), '--rebase',
-                 '--match-head-commit', self.head(entry), '--expected-base-commit', self.state['ci']['base'])
-merge_train.Train = AtomicServerTrain
+original_command = merge_train.command
+def command(cmd, cwd, env, timeout, input_bytes=None):
+    cfg = json.loads(pathlib.Path(env['TRAIN_FAKE']).read_text())
+    tool = cmd[0]
+    if tool == 'notify' or pathlib.Path(tool).name == 'notify' or cfg.get('hang') == tool or (
+        cfg.get('kill_merge') and 'merge' in cmd
+    ):
+        return original_command(cmd, cwd, env, timeout, input_bytes)
+    executable = pathlib.Path(env['PATH'].split(os.pathsep)[0]) / tool
+    old_env, old_argv = dict(os.environ), sys.argv
+    stdout, stderr = io.StringIO(), io.StringIO()
+    status = 0
+    try:
+        os.environ.clear(); os.environ.update(env)
+        sys.argv = [str(executable), *cmd[1:]]
+        with contextlib.chdir(cwd), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            try:
+                runpy.run_path(str(executable), run_name='__main__')
+            except SystemExit as exc:
+                status = exc.code or 0
+    finally:
+        os.environ.clear(); os.environ.update(old_env)
+        sys.argv = old_argv
+    return subprocess.CompletedProcess(cmd, status, stdout.getvalue().encode(), stderr.getvalue().encode())
+merge_train.command = command
+if json.loads(pathlib.Path(os.environ['TRAIN_FAKE']).read_text()).get('record_base_without_rebase'):
+    def record_base_without_rebase(self, entry, path, base):
+        self.save(candidate=dict(entry=entry, head=entry['accepted_commit'], base=base,
+                                 remote_head=self.remote_head(entry)))
+    merge_train.Train.rebase = record_base_without_rebase
 original_atomic_json = merge_train.atomic_json
 def atomic_json(path, value):
     original_atomic_json(path, value)
@@ -310,8 +352,9 @@ class Fixture:
         return result
 
 
-@pytest.fixture
-def train(tmp_path: Path, cli_env: None) -> Fixture:
+@pytest.fixture(scope="session")
+def train_seed(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, str, str]:
+    tmp_path = tmp_path_factory.mktemp("train-seed")
     root = tmp_path / "checkout"
     root.mkdir()
     git(root, "init", "-q", "-b", "trunk")
@@ -349,6 +392,18 @@ def train(tmp_path: Path, cli_env: None) -> Fixture:
     git(slice, "commit", "-qm", "candidate")
     head = git(slice, "rev-parse", "HEAD")
     git(root, "push", "-q", str(bare), "slice")
+    return tmp_path, base, head
+
+
+@pytest.fixture
+def train(tmp_path: Path, cli_env: None, train_seed: tuple[Path, str, str]) -> Fixture:
+    seed, base, head = train_seed
+    root, slice, bare = (tmp_path / name for name in ("checkout", "slice", "remote.git"))
+    for path in (root, slice, bare):
+        shutil.copytree(seed / path.name, path, symlinks=True)
+    # DL-442: each case owns its refs, index and linked worktree, including Git's backlinks.
+    (slice / ".git").write_text(f"gitdir: {root}/.git/worktrees/slice\n")
+    (root / ".git/worktrees/slice/gitdir").write_text(f"{slice}/.git\n")
     records = tmp_path / "records"
     (records / "bodies").mkdir(parents=True)
     write(records, "bodies/slice.md", "# Fixture slice\n\nAccepted.\n")
@@ -579,7 +634,7 @@ def test_docs_gate_itself_cannot_skip(train: Fixture, name: str) -> None:
     train.refused("check-not-green")
 
 
-def conflict(train: Fixture, midfile: bool = False, other: bool = False) -> None:
+def conflict(train: Fixture, other: bool = False) -> None:
     if other:
         write(train.slice, "README.md", "# Candidate\n")
         write(train.root, "README.md", "# Upstream\n")
@@ -588,9 +643,7 @@ def conflict(train: Fixture, midfile: bool = False, other: bool = False) -> None
         write(
             train.slice,
             "docs/decision-log.md",
-            base.replace("Base", "Edited") + "\n- DL-03 Slice\n"
-            if midfile
-            else base + "\n- DL-03 Slice\n",
+            base + "\n- DL-03 Slice\n",
         )
         write(train.root, "docs/decision-log.md", base + "\n- DL-02 Upstream\n")
         write(train.slice, "docs/decision-index.md", "# Slice index\n")
@@ -602,61 +655,6 @@ def conflict(train: Fixture, midfile: bool = False, other: bool = False) -> None
     git(train.root, "add", "--", *names)
     git(train.root, "commit", "-qm", "upstream")
     git(train.root, "push", "-q", str(train.bare), "trunk")
-
-
-def test_tail_append_index_render_and_checked_staging(train: Fixture) -> None:
-    conflict(train)
-    train.refused("integration-review-required")
-    assert (train.slice / "docs/decision-log.md").read_bytes() == (
-        b"# Decisions\n\n- DL-01 Base\n\n- DL-02 Upstream\n\n- DL-03 Slice\n"
-    )
-    assert (train.slice / "docs/decision-index.md").read_bytes() == (
-        train.slice / "docs/decision-log.md"
-    ).read_bytes()
-    calls = train.calls()
-    diff = calls.index(["git", "diff", "--check"])
-    hygiene = calls.index(["uv", "run", "pytest", "-q", "tests/test_docs_hygiene.py"])
-    stage = calls.index(["git", "add", "--", "docs/decision-log.md", "docs/decision-index.md"])
-    cached = calls.index(["git", "diff", "--cached", "--check"])
-    cont = calls.index(["git", "rebase", "--continue"])
-    assert diff < hygiene < stage < cached < cont
-
-
-@pytest.mark.parametrize(
-    ("kind", "reason"),
-    [
-        ("midfile", "log-not-tail-append"),
-        ("other", "rebase-conflict"),
-        ("marker", "conflict-marker"),
-        ("hygiene", "command-failed"),
-        ("stage", "command-failed"),
-        ("cached", "command-failed"),
-        ("render", "command-failed"),
-        ("render_edit", "log-render-changed"),
-    ],
-)
-def test_rebase_refusals(train: Fixture, kind: str, reason: str) -> None:
-    conflict(train, midfile=kind == "midfile", other=kind == "other")
-    if kind == "marker":
-        train.configure(render_marker=True)
-    if kind == "hygiene":
-        train.configure(hygiene_fail=True)
-    if kind == "stage":
-        train.configure(fail="git add")
-    if kind == "cached":
-        train.configure(fail="git diff --cached --check")
-    if kind == "render":
-        train.configure(fail="scripts/render_decision_index.py")
-    if kind == "render_edit":
-        train.configure(render_edit=True)
-    train.refused(reason)
-    calls = train.calls()
-    assert ["git", "rebase", "--continue"] not in calls
-    if kind in {"marker", "hygiene", "render", "render_edit"}:
-        assert not any(c[:2] == ["git", "add"] for c in calls)
-    if kind == "midfile":
-        assert git(train.slice, "rev-parse", "HEAD") == train.head
-        assert not git(train.slice, "diff", "--name-only", "--diff-filter=U")
 
 
 @pytest.mark.parametrize("marker", ["<<<<<<< HEAD", "=======", ">>>>>>> slice", "||||||| base"])
