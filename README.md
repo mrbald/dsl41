@@ -62,6 +62,7 @@ implementation. A site may adapt and repackage them for its Python runtime requi
 4. [docs/citation-index.md](docs/citation-index.md) - resolve reference tokens, including excluded namespaces, or register a namespace
 5. [Make a release](#make-a-release) - verify, build, rehearse and publish a package
 6. [Integration testing](docs/integration-testing.md) - select, run and extend v2 regression coverage and its assertion inventory; [DST drill](examples/dst-drill/README.md) - clock changes; [Nightbank drill](examples/nightbank/deploy/DRILL.md) - installed service checks and limits
+7. [docs/job-selection.md](docs/job-selection.md) - wire the pure application/group selection, bulk request and TUI filter helpers
 
 ### Architect references
 
@@ -768,6 +769,14 @@ Runner:
 - `src/dsl41/runner_tui.py`: the Textual TUI, a thin client of the control
   socket. Every view comes from the idempotent queries; subscribe is only
   a wake-up signal.
+- `src/dsl41/job_selection.py`: pure effective labels, inheritance origins,
+  exact selectors and coherent selection snapshot values and codecs.
+- `src/dsl41/bulk_selection.py`: frozen bulk requests, JSON decoding,
+  fingerprints with an explicit actor, membership and revision checks, and byte budgets.
+- `src/dsl41/cli_selection.py`: pure query-selector validation and reusable
+  bulk request preparation before a transport writes.
+- `src/dsl41/tui_selection.py`: pure name, label and view filtering over
+  catalog jobs or status rows, including the ghost-row rule.
 
 Shared cores:
 
