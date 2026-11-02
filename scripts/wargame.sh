@@ -113,10 +113,15 @@ case $verb in
         if podman container exists "$container"; then
             podman start "$container" >/dev/null
         else
+            storage=()
+            if [ "$target" = service ]; then
+                storage=(--tmpfs /srv/dsl41-storage:size=32m,mode=1777)
+            fi
             # 2 CPUs and 3 GB leave room in a shared podman VM. SYS_PTRACE lets root read
             # /proc/PID/environ of another user's process, which rootless podman's root lacks.
             podman run --detach --name "$container" --label "dsl41.wargame=$tree" \
                 --systemd=always --cap-add SYS_PTRACE --cpus 2 --memory 3g \
+                ${storage[@]+"${storage[@]}"} \
                 "$image" >/dev/null
         fi
         state=

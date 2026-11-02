@@ -15,7 +15,7 @@ set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=drill-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/drill-lib.sh"
 
-ROWS=(install start restart reboot kill-engine drain reload leak refusal start-limit upgrade)
+ROWS=(install start storage restart reboot kill-engine drain reload leak refusal start-limit upgrade)
 
 step_install() { # the wheel, the nightbank estate, the drill's jobs, the unit and its user
     local wheel out version
@@ -427,6 +427,18 @@ step_diagnostics() { # what an operator reads after a failure; never fails
     sudo journalctl -u "$UNIT" -o short-precise --no-pager | tail -n 300 || true
     cli runs "$ROOT" || true
     status || true
+}
+
+step_storage() { # O: DL-99/DL-428, installed exclusion and real full-filesystem admission
+    sudo install -d -o dsl41 -g dsl41 -m 0700 "$STATE/storage"
+    as_dsl41 timeout -k 15 180 "$VENV/bin/python" -I "$REPO/examples/nightbank/deploy/storage_probe.py" \
+        unit --work "$STATE/storage/unit" --unit "$UNIT" --config "$CONFIG" --root "$ROOT"
+    as_dsl41 timeout -k 15 180 "$VENV/bin/python" -I "$REPO/examples/nightbank/deploy/storage_probe.py" \
+        leader --work "$STATE/storage/leader"
+    as_dsl41 timeout -k 15 180 "$VENV/bin/python" -I "$REPO/examples/nightbank/deploy/storage_probe.py" \
+        admission --work "$STATE/storage/admission" --bounded /srv/dsl41-storage
+    as_dsl41 cp -a /srv/dsl41-storage/admission "$STATE/storage/filesystem"
+    ok 'installed storage: frozen leader exclusion, UNKNOWN on ENOSPC and exact recovery'
 }
 
 case ${1-} in
