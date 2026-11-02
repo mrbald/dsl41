@@ -1,6 +1,7 @@
 # Review a candidate
 
 For the reviewer and maintainers arranging acceptance.
+Follow the maintainer track under [Documents](../../README.md#documents).
 Read the [shared contract](../../CLAUDE.md) and the task contracts.
 The boss chooses bindings. The operator dispatches the assigned reviewers.
 Read the [approved operating model](operating-model.md) for authority, role limits and owner escalations.
@@ -10,6 +11,9 @@ Read the [approved operating model](operating-model.md) for authority, role limi
 - Review the exact candidate named by commit or file hash. Start the first pass
   with fresh context; keep findings context for confirmation rounds.
 - Read the diff against the definition of done and the relevant contracts.
+  Read every cited decision whole, from its `- DL-` line to the next entry.
+  Check its closing limits and rejected options before calling a rule missing.
+  Verify load-bearing external citations against their sources.
   Check the implementer's evidence and its provenance. Use permitted targeted probes;
   request any needed probe your tools cannot run. Run the full suite only when the brief asks.
 - Keep the candidate read-only. Write findings to the assigned scratch file if permitted;
@@ -22,28 +26,32 @@ Read the [approved operating model](operating-model.md) for authority, role limi
 
 ## Required passes
 
-Run an adversarial review before committing a change in one of these
-classes (DL-262, DL-395). The operator supplies the reviewer assignment.
-An additional pass uses a reviewer-grade model from the other vendor than the primary reviewer,
-bound by the boss and subject to the fallback below.
+Arrange independent review before committing every change (DL-440, rules 9
+and 19). The operator supplies the reviewer assignments. Use the
+[coordination table](coordination.md#operating-model) for the primary binding;
+obtain any additional reviewer's binding from the boss.
+Apply these passes (DL-262, DL-395):
 
-- Semantic class, at any size: one reviewer from a different vendor than the
-  implementer, subject to the fallback below, and an additional pass when the
-  boss asks. It covers a change to what a compiled or run estate does: lowering,
-  the oracle, the runner, the scheduler, or calendars. It also covers any version
-  constant, any rule `docs/` freezes, and instruction policy. The frozen rules are the runner
+- Semantic class, at any size: the primary reviewer and one additional reviewer
+  from the other vendor. Both passes are required, whoever implemented the
+  change, subject to the fallback below. It covers a change to what a compiled
+  or run estate does: lowering, the oracle, the runner, the scheduler, or
+  calendars. It also covers any version constant, any rule `docs/` freezes,
+  and instruction policy. The frozen rules are the runner
   contracts listed in the [shared contract](../../CLAUDE.md#read-for-the-task)
   and the rules DL-225 names.
-- Any other multi-file change: one reviewer. Examples are a refactor that
-  keeps behavior, tests, docs, tooling, and the browser or TUI front ends.
-- In addition, slices built apart and integrated together get one additional
-  pass over what the integration changed. Each slice keeps its own review.
+- Every other change, including a single-file change: one primary reviewer.
+  Examples are a refactor that keeps behavior, tests, docs, tooling, and the
+  browser or TUI front ends.
+- In addition, assign the integration reviewer one pass over what integrating
+  separately built slices changed. Each slice keeps its own review.
 
 The operator applies the assigned stand-in when a reviewer is unavailable.
 For quota fallback, the vendor's quota must be exhausted and the work unable to
-wait for reset. Use a fresh reviewer from the other vendor. Semantic changes
-require two independent reviewers when acceptance uses only the implementer's
-vendor. Record the unavailability reason and stand-in in the PR or review record.
+wait for reset. Use a fresh reviewer from the other vendor. For semantic work,
+keep two independent reviewers when only one vendor is available, including
+when it is the implementer's vendor. Record the unavailability reason and
+stand-in in the PR or review record.
 The stand-in also confirms that reviewer's fixes. If no qualified reviewer is
 available, acceptance waits.
 
@@ -89,3 +97,6 @@ only if all these conditions hold:
 - The raiser agrees. The change's decision-log entry, or a new entry, records it.
 
 Each ruling names the finding's raiser.
+Send semantic disagreements and hard rulings to the boss through the operator;
+the boss may consult the advisor (DL-440). Follow
+[coordination](coordination.md#bring-an-item-to-the-owner) for owner hand-offs.

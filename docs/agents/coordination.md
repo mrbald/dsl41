@@ -2,8 +2,11 @@
 
 For the operator and boss, and maintainers running those roles.
 Read the [shared contract](../../CLAUDE.md) first.
+Follow the maintainer track under [Documents](../../README.md#documents).
 The operator dispatches and records work. The boss makes binding rulings.
-This guide owns role bindings, allocation, dispatch and the merge train.
+This guide owns authority routing, merge approval, escalation and bindings.
+Acceptance belongs to [review.md](review.md); environments and gates belong to
+[agent-workflow.md](../agent-workflow.md).
 
 ## Operating model
 
@@ -17,7 +20,7 @@ Execution records still name the actual selection and returned identity.
 
 | Role | Authority | Model and effort | Stand-in |
 | --- | --- | --- | --- |
-| boss | definition of done, scope, allocation, binding rulings, release decisions | Astra (`gpt-6-astra`), high; xhigh for one named hard question | owner appoints |
+| boss | definition of done, scope, allocation, binding rulings, release readiness | Astra (`gpt-6-astra`), high; xhigh for one named hard question | owner appoints |
 | advisor | one bounded hard question; recommendation only; read-only | Fable, xhigh | fresh Astra, xhigh |
 | operator | interactive session: briefs, dispatch, receipts, records, merge train, Linux-cell gate; applies rulings | Opus, medium | owner appoints |
 | builder | settled approach; routine details | Sol (`gpt-6.1-sol`), medium | boss appoints |
@@ -28,42 +31,100 @@ The implementer is either the builder or the engineer, working in the slice
 worktree. They are alternatives, never stages. The advisor is used rarely
 and has no acceptance authority.
 
-The operator takes definitions, exceptions, disagreements and release decisions
-to the boss and returns the ruling unchanged. The boss may consult the advisor.
-The implementer gives the candidate and evidence to the reviewer. The operator
-routes `rework` to that implementer, `accepted` to the merge train, and `blocked`
-to the boss. Keep one findings queue per change. Only the raiser or a named
-stand-in closes a finding.
+Read [required review passes](review.md#required-passes) when allocating a change.
+Obtain any additional reviewer's binding from the boss. Apply the
+[fallback procedure](review.md#required-passes) when a reviewer is unavailable.
+Judge bindings by accepted work, escaped defects, rework and elapsed time.
 
-A ruling that changes a spec, frozen contract, scope, policy or binding, a
-release decision, or a destructive or outward action gets one additional
-adversarial self-review turn by the deciding seat before the operator acts on it.
-Routine dispatch, rework routing and receipts do not. This extra turn is separate
-from independent acceptance.
+### Route a ruling
 
-The reviewer owns conformance to the spec. The operator reads the status,
-diffstat, implementer's judgment calls and unmet requirements, and hunks named
-by a ruling or finding. It neither reads the full diff nor repeats the gates.
-Hooks are deterministic checks, not reviews. For an area the owner declares
-sealed, log each late finding as one line under Known bugs in `TODO.md`, without
-rework.
+1. Send definitions, semantic disagreements, compatibility questions, exceptions
+   and changes of scope, policy or contract meaning to the boss (DL-440).
+2. Pass an advisor question only at the boss's request, through the operator.
+   Return the recommendation to the boss for its ruling.
+3. Record the deciding seat's adversarial self-review before acting on a ruling
+   covered by [rule 11](operating-model.md#who-decides).
+4. Return the ruling unchanged in the next brief. Quote it, name exactly what it
+   supersedes, and leave wording to the implementer unless the ruling fixes it.
+5. Check the ruling against owner decisions. Hold the affected action for the
+   owner if it reverses one; keep unaffected work moving.
+
+For a release, dispatch a reviewer pass on the release candidate against the
+project's definition of done. Send the exact candidate, review verdict and
+acceptance evidence to the boss for a readiness ruling. Bring that ruling to
+the owner for approval to tag or release.
+Accepted slices alone do not establish release readiness.
+
+### Check a handoff
+
+1. Read the status, diffstat, judgment calls, unmet requirements and cited hunks.
+   Check every participant's output against the rules, including the operator's
+   own output. Return a nonconforming handoff to its author.
+2. Send the exact candidate and evidence to the assigned reviewers. Route
+   `rework` to its implementer, `accepted` to the merge train, and `blocked` to
+   the boss. Keep one findings queue under [review.md](review.md#review-rounds).
+3. Report each rule breach to the owner with the evidence and corrective action.
+   Follow [Verify a change](../agent-workflow.md#verify-a-change) to decide
+   whether checks must run again. Check output is evidence, not acceptance.
+
+### Apply a settled edit or conflict resolution
+
+1. Record the exact edit named by the reviewer or ruling and check it against
+   [rules 28-30](operating-model.md#limits-on-the-operator). Send code, test or
+   contract-meaning edits to the implementer; send ambiguity to the boss.
+2. Apply only that permitted edit. Return it to the raiser for confirmation.
+   Render derived files and add accepted Known-bugs lines before final checks.
+3. For a merge conflict, compare both reviewed versions. Keep each text unchanged
+   in its intended place and regenerate derived files. If that cannot resolve
+   it, send the conflict to the implementer or boss.
+4. Send the resolved merge for its own review, then run the checks its resolution
+   invalidated. Follow the [workflow rules](#workflow-rules) for Git commands.
+
+For an area the owner declares sealed, log each late finding as one line under
+Known bugs in `TODO.md`, without rework. Include the raiser and round, behavior
+and area; keep private paths out.
 Escalate a finding that contradicts release acceptance to the owner.
 
-Use the table's stand-in when a seat is unavailable; never substitute silently.
-Record the reason and stand-in, including acceptance by the implementer's vendor when that occurs.
-A quota fallback requires exhausted quota and work that cannot wait for reset.
-If no qualified reviewer is available, acceptance waits; other work continues.
-A timeout is not a verdict. Judge bindings by accepted work, escaped defects,
-rework and elapsed time.
+### Handle an unavailable seat or broken tool
 
-The reviewer checks the release candidate against the project's definition of
-done. The boss makes the release decision; accepted slices alone do not finish
-the project. The target for Monday 2026-11-02 is one box: restart, reload and
-drain as built and tested. Active/standby on HA Oracle and the 200-job estate
-are the next milestone.
+Use [rules 42-46](operating-model.md#when-things-fail) for the limits on these
+steps and [rule 38](operating-model.md#limits-on-the-operator) for action authority.
 
-Read [required review passes](review.md#required-passes) when allocating a change.
-The reviewer owns the detailed round and finding rules.
+1. Attach the failed invocation, partial output and availability evidence to the
+   change's record. Record the named stand-in selected or the seat still waiting.
+2. Keep fact notes for a waiting seat under a separate heading with the operator
+   as author. Mark the ruling or acceptance that the seat still owes.
+3. Stop the broken invocation and save its diagnostics. Write a separate fix
+   brief and track its review and check receipts before returning the tool to
+   service. List already-authorized manual steps that can proceed meanwhile.
+4. For an uncertain write, query the remote candidate or operation identifier
+   and attach the observed state before preparing a retry.
+
+### Bring an item to the owner
+
+1. Check the [owner escalation list](operating-model.md#what-escalates-to-the-owner).
+   Settle checkable facts within the role's access; route semantic calls and
+   unexplained failures to the boss. For an unknown that needs a trial, propose
+   a bounded trial and a stop condition within the existing authority.
+2. Bring only the remaining owner decision, with facts and a recommendation.
+   Use chat, or an authorized notification when the owner is away. Keep the
+   operator on all traffic and record the owner's chat answer.
+3. If the operator and boss disagree on the rules, send both readings and the
+   recommendation to the owner. Keep breach reports explicit.
+
+### Clean up a run
+
+Use [rule 37](operating-model.md#limits-on-the-operator) and the
+[owner escalation list](operating-model.md#what-escalates-to-the-owner) to decide
+which resources and actions qualify.
+
+1. Make a resource inventory with run identity, ownership evidence, activity and
+   shared-resource status. Save the failure records the inventory points to.
+2. Check the inventory against those limits and the shared contract's delete
+   approvals. Record the permitted actions, skipped resources and any owner
+   decision still needed.
+3. Compare live resource identities with the inventory immediately before each
+   permitted deletion. Record the outcome and the evidence retained.
 
 ## Agent allocation
 
@@ -102,9 +163,15 @@ budget for them, not for diff reads.
 
 ## Git workflow
 
-- The operator commits a slice as soon as its gates are green and its required
-  review is accepted. Do not wait for permission to commit; only ask before
-  pushing to protected branches or merging PRs.
+- Subject to the brief's side-effect limits, the operator commits a slice once
+  its gates pass and its independent review is accepted.
+- Apply rule 27's standing owner approval: verify accepted review, CI green on
+  the exact candidate and no open blocking ruling, then rebase-merge without
+  asking and without deleting a branch. Take a merge outside those conditions
+  to the owner. Ask before pushing to a protected branch.
+- Follow the owner's commit-message wording. Add no trailers, including
+  co-author trailers.
+  AI attribution belongs in the single top-level README footer line.
 - Push after each logically complete slice rather than batching many commits.
 - The pull, staging, delete and command-timeout rules are in the shared
   contract's "Shared work safeguards". Untracked scratch here is often
@@ -140,8 +207,10 @@ budget for them, not for diff reads.
    `git diff --check` and, for Markdown, `uv run pytest -q
    tests/test_docs_hygiene.py`. Stage explicit paths after both pass. Run
    `git diff --cached --check` before `--continue`.
-8. Read the failed CI step. Rerun once for a diagnosed transient cause:
-   `gh run rerun ID --failed`. Investigate everything else. Split a test
+8. Read the failed CI step and retain its evidence. Send an unexplained failure
+   to the boss. Rerun once only for a diagnosed infrastructure transient:
+   `gh run rerun ID --failed`. Trace a reported pre-existing failure to its first
+   failing revision; neither a stamp nor a later green run closes it. Split a test
    file over five minutes on one worker when its tests can run apart.
 9. A document rewrite runs `scripts/doc_deps.py` as
    [Your task](../agent-workflow.md#your-task) says.
@@ -168,7 +237,9 @@ Follow [Review rounds](review.md#review-rounds) for rework and escalation.
 
 Keep scratch files outside the checkout when they may contain private context.
 Start each brief with `Role: <role>`. Name the task, role guide, evidence paths,
-exact artifact, allowed paths, side effects, required gates, and a short report limit.
+exact artifact, allowed paths, side effects, required platforms and gates, and a
+short report limit. Include the ruling and supersession identified in
+[Route a ruling](#route-a-ruling).
 Keep routine peer replies under 500 words unless a blocker needs more.
 Exchange issue identifiers and changed conclusions rather than repeating the plan.
 Group findings by root cause, not by each symptom.
@@ -247,6 +318,13 @@ Put stable requirements in the shared root and occasional procedures here or
 in a skill. A short useful document does not need another routing layer.
 Do not copy vendor system prompts or generate a repository map already available
 from the files. Keep audit reports and session history out of startup context.
+Keep operating rules in their owning git guide; memory holds pointers, private
+facts and evidence. Leave private tooling recipes to their own reviewed slices.
+
+Report outstanding work against the current goal, in severity order. Leave
+parked work out unless asked. Final handoffs use Result, Done, Running, Needs
+you and Next, omitting empty parts; answer a direct question first. Tag unresolved
+items as needs-owner, checkable or needs-trial before routing them.
 
 Treat tool-output filters such as RTK as optional local tooling.
 Check exit codes, warnings, collection counts, and skipped tests against raw output.
