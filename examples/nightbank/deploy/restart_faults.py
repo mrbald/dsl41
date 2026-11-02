@@ -61,7 +61,7 @@ def live(pid: int) -> bool:
     """Independent kernel witness: a zombie is dead; a read failure is never absence."""
     try:
         raw = Path(f"/proc/{pid}/stat").read_text()
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return False
     return raw.rsplit(")", 1)[1].split()[0] != "Z"
 
