@@ -33,7 +33,7 @@ step_install() { # the wheel, the nightbank estate, the drill's jobs, the unit a
     VENV=/opt/dsl41/releases/$version
     DSL41=$VENV/bin/dsl41
     sudo python3.12 -m venv "$VENV"
-    sudo "$VENV/bin/pip" install --quiet --disable-pip-version-check \
+    sudo "$VENV/bin/pip" install --quiet --disable-pip-version-check --no-index --find-links /wheelhouse \
         -r "$DELIVERY/requirements.txt"
     sudo "$VENV/bin/pip" install --quiet --disable-pip-version-check --no-deps "$wheel"
     installed_version | tee "$STATE/version-installed"
@@ -405,7 +405,7 @@ step_upgrade() { # select a compatible engine release independently of app input
     VENV=/opt/dsl41/releases/$version
     DSL41=$VENV/bin/dsl41
     sudo python3.12 -m venv "$VENV"
-    sudo "$VENV/bin/pip" install --quiet --disable-pip-version-check -r "$DELIVERY/requirements.txt"
+    sudo "$VENV/bin/pip" install --quiet --disable-pip-version-check --no-index --find-links /wheelhouse -r "$DELIVERY/requirements.txt"
     sudo "$VENV/bin/pip" install --quiet --disable-pip-version-check --no-deps "$wheel"
     after=$(installed_version)
     [ "$after" != "$before" ] || fail "the venv still has dsl41 $before"

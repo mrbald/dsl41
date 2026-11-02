@@ -9,10 +9,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends libfaketime pro
     && rm -rf /var/lib/apt/lists/*
 RUN python -m pip install --no-cache-dir uv==0.9.7
 WORKDIR /app
-COPY pyproject.toml uv.lock README.md LICENSE LICENSING.md COMMERCIAL.md THIRD_PARTY_LICENSES ./
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+COPY README.md LICENSE LICENSING.md COMMERCIAL.md THIRD_PARTY_LICENSES ./
 COPY src ./src
 COPY grammars ./grammars
-RUN uv sync --frozen --no-dev
+RUN uv sync --frozen --no-dev --inexact
 COPY examples/dst-drill ./examples/dst-drill
 # the runner and its jobs run as an ordinary user, as in production
 RUN useradd --create-home --uid 1001 drill
