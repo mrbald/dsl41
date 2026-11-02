@@ -618,6 +618,23 @@ preserves oracle timers and tombstones, and advances time for the owed scan.
 Stopped outcomes choose their plans under the applied catalog and marks.
 An unfinished stop keeps the update in STOPPING; this path has no cancel verb.
 
+Without `engine.db`, genesis is allowed only without surviving runtime
+evidence (DL-443, DL-445). Attempt entries under `runs/`, material under
+`plans/`, any entry under `logs/` (including empty output files), any
+`perimeter.jsonl`, legacy `journal.jsonl` or `wal/`, a nonempty `leader.lock`
+(including malformed contents), SQLite sidecars or a control socket refuse
+with exit 2 and a message naming the evidence.
+An unreadable evidence location also refuses. Detection precedes file
+creation, permission changes, lock-note writes, estate Python evaluation
+and signals. Eligibility is rechecked under exclusive ownership.
+Settings, config and inputs, empty `runs/`, `plans/` and `logs/`, and an empty
+unlocked lock permit genesis. Lock contention refuses. There is no
+force-fresh option; a new engine needs a distinct fresh root. Complete
+omission of runtime evidence cannot be distinguished from provisioning.
+Configured output paths and client archives are not searched. Moving output
+does not permit genesis while another witness survives. Arbitrary files do
+not become witnesses merely because a job might have written them.
+
 **Resume.** `dsl41 run` resumes an existing store automatically;
 `--resume` is accepted as a no-op (DL-428). Restart is the live engine
 starting with non-empty state (DL-433):

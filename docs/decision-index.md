@@ -453,5 +453,7 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-440 | The owner approves operating model v3, with explicit role limits and owner escalations | [docs/agent-workflow.md](agent-workflow.md), [docs/agents/coordination.md](agents/coordination.md), [docs/agents/operating-model.md](agents/operating-model.md), [docs/agents/review.md](agents/review.md) |
 | DL-441 | Rehearsals run on code PRs and nightly with isolated local lanes | [docs/integration-testing.md](integration-testing.md) |
 | DL-442 | Rebase the train tip with strict tested-base protection | [docs/agents/coordination.md](agents/coordination.md) |
+| DL-443 | Genesis requires absence of surviving runtime evidence | [docs/deploy.md](deploy.md), [docs/integration-testing-inventory.md](integration-testing-inventory.md), [docs/runner-design.md](runner-design.md) |
 | DL-444 | Wrapper refusals and quarantine group cleanup | [docs/runner-design.md](runner-design.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
+| DL-445 | Root-local output, access receipts and legacy state also witness prior execution | [docs/deploy.md](deploy.md), [docs/integration-testing-inventory.md](integration-testing-inventory.md), [docs/runner-design.md](runner-design.md) |
 | DL-446 | The site status hook observes committed live transitions with bounded best-effort delivery | [README.md](../README.md), [docs/control-protocol.md](control-protocol.md), [docs/deploy.md](deploy.md), [docs/runner-design.md](runner-design.md) |
