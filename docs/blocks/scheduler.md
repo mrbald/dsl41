@@ -4,23 +4,25 @@
 
 This block turns each scheduled job's calendar into STARTJOB inputs at its ticks.
 The oracle owns no calendar ([runner-design §5](../runner-design.md#5-scheduler--the-calendar-the-oracle-deliberately-lacks)).
-It also keeps the [scheduler frontier](../glossary.md#scheduler-frontier): the evidence of which ticks a segment already admitted or dropped.
-With it, a resume or a seal (retired in 2.0.0) neither fires a tick twice nor loses one without a record.
+It also keeps the [scheduler frontier](../glossary.md#scheduler-frontier): the evidence of which ticks the store already admitted or dropped.
+With it, a resume neither fires a tick twice nor loses one without a record.
 
 ## Fate
 
 `Scheduler` and `autocal.py` carry over unchanged and need none of the storage capabilities.
 They compute ticks from the catalog and an anchor and import no storage module.
-The frontier needs epoch-conditional append, the leader fence of concurrency-model §1 (`concurrency-model.md`, retired in 2.0.0).
+The frontier needs one writer, enforced by `leader.lock` ([DL-100](../decision-log.md), [DL-424](../decision-log.md)).
 Its guarantees of no double fire and no duplicate drop (DL-166, DL-174) assume that one writer adjudicates a store's ticks.
 Two engines that both ran the resume sweep in `runner_startup.py` would each append a `drop` for the same tick, or each admit it.
-The fence is enforced in `Journal.append` in `runner_journal.py`, which checks the leader lock before each append when a lock is wired.
+The engine holds the `leader.lock` flock for its lifetime.
+`Journal.append` in `runner_journal.py` re-proves the lock before each append; [the leadership policy](policies.md#leadership) states the fence.
+`SqliteStore` relies on that single writer ([DL-424](../decision-log.md)).
 `Position` in `runner_journal.py` reads the frontier off record kinds and stamps, in seq order, and a snapshot carries it.
 
 ## Interface
 
 - `Scheduler(catalog, start=, default_tz=, tz_aliases=, semantics=)` in `runner_scheduler.py`: `next_occurrence()`, `pop_due(upto)`, `reset(start)`, `upcoming()`. `pop_due` returns STARTJOB events stamped at their ticks.
-- Engine, in `runner.py`: the loop wakes at the earliest of the oracle's timers, the next tick, the clock's sleepers and the queue head ([runner-design §4](../runner-design.md#4-engine-loop--single-writer)). A due tick is enqueued with `source="scheduler"`. `Engine._cutoff(at)` admits every tick at or before a seal's cutoff.
+- Engine, in `runner.py`: the loop wakes at the earliest of the oracle's timers, the next tick, the clock's sleepers and the queue head ([runner-design §4](../runner-design.md#4-engine-loop--single-writer)). A due tick is enqueued with `source="scheduler"`.
 - Resume, in `runner_startup.py`: re-anchor at the frontier `Position` holds, sweep the ticks up to now, and record each missed one with `journal.drop` at startup step 8.
 - Clocks, in `runner_clock.py`: the `Clock` protocol, `RealClock` on naive UTC, and `VirtualClock` ([runner-design §9](../runner-design.md#9-time-domains-e2)).
 - Calendars: `compile_calendar`, `CompiledCalendar` and `standard_rows` from `autocal.py`. Start instants: `start_time_instants` and `start_mins_instants` from `timezones.py`.
@@ -40,7 +42,6 @@ flowchart TD
     next -->|"no eligible day left"| dormant(["dormant"])
     next -->|"the tick is due"| admit["journal its STARTJOB as an input"]
     admit --> next
-    next -->|"a seal cuts off"| cutoff(["the seal admits every tick up to its cutoff"])
 ```
 
 ## Invariants
@@ -48,8 +49,8 @@ flowchart TD
 - The scheduler fires at the tick without checking conditions; arm-and-wait and `run_window` stay in the oracle ([runner-design §5](../runner-design.md#5-scheduler--the-calendar-the-oracle-deliberately-lacks), [DL-45](../decision-log.md)).
 - A tick is an input: stamped at the tick and journaled before it is fed ([DL-45](../decision-log.md)).
 - A stalled live engine fires its backlog. Ticks missed across downtime are dropped and journaled, never fired late (E9 in [runner-design §15](../runner-design.md#15-open-questions-e-series)).
-- The resume anchor is inclusive. The sweep skips a tick this segment adjudicated or the previous cutoff owned ([DL-166](../decision-log.md), [DL-174](../decision-log.md)).
-- Which records count toward the frontier, and how ticks split at a seal: period-model §6 (`period-model.md`, retired in 2.0.0).
+- The resume anchor is inclusive. The sweep skips a tick the store already adjudicated ([DL-166](../decision-log.md), [DL-174](../decision-log.md)).
+- The store records and snapshot carry the frontier ([runner-design §7](../runner-design.md#7-journal-and-recovery-e1-prod-grade)).
 - Calendar days are read on the job's local day. An exhausted calendar makes the job dormant, not an error ([DL-56](../decision-log.md), [DL-57](../decision-log.md)).
 - A job without a `timezone` uses the base zone ([DL-155](../decision-log.md)). Start times on a DST change follow `dst-start-times`, and the engine refuses a scheduler on another value ([DL-260](../decision-log.md)).
 - Feeding timers through `advance` gives the same trace as feeding them through `feed` ([runner-design §3](../runner-design.md#3-architecture--functional-core-imperative-shell)).
@@ -59,14 +60,13 @@ flowchart TD
 - An unresolvable timezone or a calendar that cannot be read raises `EngineError` when the scheduler is built. Preflight refuses both before a run ([runner-design §8](../runner-design.md#8-preflight--refuse-loudly-run-honestly)).
 - An extended calendar the interpreter cannot read is refused loudly. Materializing it to a standard calendar is the workaround ([DL-57](../decision-log.md)).
 - After a crash, resume re-derives from the frontier and drops what it missed, once per tick ([DL-174](../decision-log.md)). A crash between two same-instant ticks leaves one unjournaled; the inclusive anchor finds it and drops it ([DL-45](../decision-log.md), [DL-166](../decision-log.md)).
-- During a seal, tick admission is frozen and the cutoff admits every tick through its instant (period-model §6 (`period-model.md`, retired in 2.0.0)).
-- A tick that hits `clock_regressed` in the seal's drain has no one to answer, so the seal [fail-stops](../glossary.md#fail-stop) the engine instead of refusing. Resume observes the tick again through the missed-tick policy (period-model §7 (`period-model.md`, retired in 2.0.0); [DL-274](../decision-log.md)).
+- Seal cutoff and drain rules are outside the design ([DL-424](../decision-log.md)); DL-274 defines the excluded drain-fault rule.
 - Open: whether the vendor fires or skips a tick missed during an outage (E9), and absent `days_of_week` read as every day (E10) ([runner-design §15](../runner-design.md#15-open-questions-e-series)).
 
 ## Owning modules
 
 - `src/dsl41/runner_scheduler.py`: schedule plans, ticks, dormancy.
-- `src/dsl41/runner.py`: tick admission in the engine loop, the cutoff.
+- `src/dsl41/runner.py`: tick admission in the engine loop.
 - `src/dsl41/runner_clock.py`: the real and virtual clocks.
 - `src/dsl41/runner_startup.py`: the resume sweep.
 - `src/dsl41/runner_journal.py`: `Position`, the scheduler frontier.

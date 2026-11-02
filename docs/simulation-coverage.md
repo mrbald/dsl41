@@ -610,20 +610,20 @@ nothing.
 
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| profile_field:as_machine | supported | period-model ss2.1, DL-52 | - |  |  |  | generic | the machine names this runner answers to, sorted and de-duplicated |
-| profile_field:default_tz | supported | period-model ss2.1, SEM-35 | - |  |  |  | generic | the zone a job with no timezone of its own is read in |
-| profile_field:fw_default_interval_us | supported | period-model ss2.1 | - |  |  |  | generic | the poll interval an FW job with no watch_interval uses |
-| profile_field:fw_default_interval_us#rounding | provisional | runner_startup.wire_from_profile, period-model ss2.1 | - |  |  |  | none | no shipped surface sets a value that is not whole seconds. A hand-pinned one is wired rounded half to even (at least 1 s), not at the pinned interval, and resume refuses it as profile drift. No label was opened for the conversion |
-| profile_field:machine_policy | supported | period-model ss2.1, DL-49 | - |  |  |  | generic | how the one ambiguous machine verdict resolves |
-| profile_field:semantics | supported | period-model ss2.1, runner-design ss8a, DL-252 | - |  |  |  | generic | explicit semantic-switch overrides only, an explicit default normalized away; written {} when there is none |
-| profile_field:tz_aliases | supported | period-model ss2.1, DL-62 | - |  |  |  | generic | the site-local zone-name table; a name only it resolves fails without it |
+| profile_field:as_machine | supported | DL-122, DL-52 | - |  |  |  | generic | the machine names this runner answers to, sorted and de-duplicated |
+| profile_field:default_tz | supported | DL-122, SEM-35 | - |  |  |  | generic | the zone a job with no timezone of its own is read in |
+| profile_field:fw_default_interval_us | supported | runner-design ss6, DL-122 | - |  |  |  | generic | the poll interval an FW job with no watch_interval uses |
+| profile_field:fw_default_interval_us#rounding | provisional | runner_startup.wire_from_profile, DL-122 | - |  |  |  | none | no shipped surface sets a value that is not whole seconds. A hand-pinned one is wired rounded half to even (at least 1 s), not at the pinned interval, and resume refuses it as profile drift. No label was opened for the conversion |
+| profile_field:machine_policy | supported | DL-122, DL-49 | - |  |  |  | generic | how the one ambiguous machine verdict resolves |
+| profile_field:semantics | supported | DL-122, runner-design ss8a, DL-252 | - |  |  |  | generic | explicit semantic-switch overrides only, an explicit default normalized away; written {} when there is none |
+| profile_field:tz_aliases | supported | DL-122, DL-62 | - |  |  |  | generic | the site-local zone-name table; a name only it resolves fails without it |
 
 ### profile_alt
 
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| profile_alt:machine_policy=local-eligible | supported | period-model ss2.1 | - |  |  |  | generic | only a MIXED pool runs here, with a warning that pool placement was ignored; a foreign or unreadable machine still refuses |
-| profile_alt:machine_policy=strict | supported | period-model ss2.1 | - |  |  |  | generic | a job whose machine does not resolve local is refused |
+| profile_alt:machine_policy=local-eligible | supported | runner-design ss8, DL-49 | - |  |  |  | generic | only a MIXED pool runs here, with a warning that pool placement was ignored; a foreign or unreadable machine still refuses |
+| profile_alt:machine_policy=strict | supported | runner-design ss8, DL-49 | - |  |  |  | generic | a job whose machine does not resolve local is refused |
 | profile_alt:semantics.box-start-all-members-out=complete | supported | runner-design ss8a, SEM-11 | - |  |  |  | generic | the default: a box whose start leaves no member in the run, every direct member on ice or no members, completes at its start through the completion door |
 | profile_alt:semantics.box-start-all-members-out=wait | supported | runner-design ss8a, SEM-11 | - |  |  |  | generic | a box whose start leaves no member in the run stays RUNNING until an operator acts |
 | profile_alt:semantics.box-terminator-on-terminated=false | supported | runner-design ss8a, SEM-14 | - |  |  |  | generic | only a box_terminator member that ends FAILURE terminates its running box; one that ends TERMINATED leaves it running |
@@ -667,11 +667,11 @@ nothing.
 
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| wrapper_outcome:exited | supported | runner-design ss6, supervisor-protocol ss3, SEM-09 | - |  |  |  | generic | the command ended on its own; the raw exit code goes to the oracle and SEM-09 decides the verdict |
+| wrapper_outcome:exited | supported | runner-design ss6, wrapper-protocol ss3, SEM-09 | - |  |  |  | generic | the command ended on its own; the raw exit code goes to the oracle and SEM-09 decides the verdict |
 | wrapper_outcome:exited#no-exit-code | refused | runner_adapters.outcome_from_status | - |  |  |  | none | an 'exited' record whose exit_code is not an integer is refused as a truthful FAILURE, never mapped to anything a success-dependent downstream could consume |
 | wrapper_outcome:signaled | supported | runner-design ss6, DL-41a | - |  |  |  | generic | the command was killed by a signal; the engine injects STATUS TERMINATED because a kill actually happened |
 | wrapper_outcome:spawn_failed | supported | runner-design ss6 | - |  |  |  | generic | /bin/sh could never be spawned; the engine injects STATUS FAILURE and the run never started |
-| wrapper_outcome:terminated | supported | runner-design ss6, DL-41a | - |  |  |  | generic | the wrapper killed the command when it lost its parent; the engine injects STATUS TERMINATED with the recorded cause |
+| wrapper_outcome:terminated | supported | wrapper-protocol ss3, DL-424, DL-429 | - |  |  |  | generic | the wrapper killed the command when it lost its parent; stopped{lifeline} follows the interruption rule: replace an idempotent attempt, hold a marked job or a run at its attempt limit, or preserve the oracle end |
 
 ### event_source
 
@@ -696,7 +696,7 @@ nothing.
 | trace_marker:ON_HOLD | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the job is held: it stays startable but no start goes through |
 | trace_marker:ON_ICE | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the job is iced: an ordinary downstream atom follows the vendor ON_ICE table (s/d/n true, f/t/exitcode false), a lookback-qualified atom reads satisfied regardless, and it never runs on a plain start (DL-243) |
 | trace_marker:ON_NOEXEC | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | the job is marked not-executing; it completes without running |
-| trace_marker:RELEASE_RESOURCE | supported | ir-design ss7, DL-256, oracle.Oracle._record | - |  |  |  | generic | the units the job still held go back to the pool: an operator release, or a removed job's units at a period opening; a recorded no-op when it holds nothing or is running |
+| trace_marker:RELEASE_RESOURCE | supported | ir-design ss7, DL-256, oracle.Oracle._record | - |  |  |  | generic | the operator returns the units the job still held to the pool; a recorded no-op when the job holds nothing or is running |
 | trace_marker:RUN_WINDOW_DEFER | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | a start outside the run_window, closer to the next opening, was queued for it |
 | trace_marker:RUN_WINDOW_SKIP | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | a start outside the run_window, closer to the previous close, was dropped; the job reads INACTIVE (DL-246) |
 | trace_marker:SCHED_ARM | supported | ir-design ss7, oracle.Oracle._record | - |  |  |  | generic | a schedule tick that could not start the job latched instead |

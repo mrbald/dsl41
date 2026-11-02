@@ -51,9 +51,8 @@ implementation. A site may adapt and repackage them for its Python runtime requi
 1. [docs/architecture.md](docs/architecture.md) - the v2 engine map and contract routes; [docs/glossary.md](docs/glossary.md) - the vocabulary; [block cards](docs/blocks/README.md) - component references
 2. [docs/runner-design.md](docs/runner-design.md) - execution, durability, recovery and the built served TUI (§11); [docs/ir-design.md](docs/ir-design.md) - AST, IR-F, IR-G, oracle and equivalence; [Implementation memo](#implementation-memo) - the compiler side and source map
 3. [docs/state-machines.md](docs/state-machines.md), [docs/job-chart-lifecycle.md](docs/job-chart-lifecycle.md) and [docs/chart-lifecycles.md](docs/chart-lifecycles.md) - the generated views of every declared chart
-4. [docs/gateway.md](docs/gateway.md) - the unbuilt HTTP and WebSocket proposal; the built served TUI follows runner design §11 and access model §9 in the references below
-5. [docs/decision-log.md](docs/decision-log.md) - the decision authority, indexed by [docs/decision-index.md](docs/decision-index.md); [docs/risk-map.md](docs/risk-map.md) - known limits and evidence pointers, without a current coverage measurement
-6. [Architect references](#architect-references) - semantic and protocol contracts; qualification evidence belongs to the maintainer track
+4. [docs/decision-log.md](docs/decision-log.md) - the decision authority, indexed by [docs/decision-index.md](docs/decision-index.md); [docs/risk-map.md](docs/risk-map.md) - known limits and evidence pointers, without a current coverage measurement
+5. [Architect references](#architect-references) - semantic and protocol contracts; qualification evidence belongs to the maintainer track
 
 **Maintainer**: contribute code or documents, or run an agent that does.
 

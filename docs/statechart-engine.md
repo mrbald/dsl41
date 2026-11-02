@@ -552,15 +552,15 @@ loss. Release runs inside the transaction of the input that moves the configurat
 released item as its own macrostep.
 
 The admission decision is final at the gate: `expect` and the preconditions run there, and
-release does not re-check them. That narrows concurrency-model §4 (`concurrency-model.md`, retired in 2.0.0) step 6 for a released control
-input; the entry that first makes a machine defer a control input amends concurrency-model §4 (`concurrency-model.md`, retired in 2.0.0) and
-control-protocol.md's meaning of `applied` for that input, and says so. A released event that no
+release does not re-check them. The entry that first makes a machine defer a control input
+amends the admission rule (DL-89) and [control-protocol §3](control-protocol.md#3-mutating-verb-sendevent)'s
+meaning of `applied` for that input, and says so. A released event that no
 longer fits takes its declared row.
 
 The representation of a deferred queue inside the oracle (its place in the store's inventory and
-projection, concurrency-model §3 (`concurrency-model.md`, retired in 2.0.0)), its dry apply, and the handling of a fault at
+projection, [runner-design §7](runner-design.md#7-journal-and-recovery-e1-prod-grade)), its dry apply, and the handling of a fault at
 release under DL-292 and DL-320 are ruled by the entry that first makes an oracle machine defer.
-That entry narrows concurrency-model §4 (`concurrency-model.md`, retired in 2.0.0), DL-292 and DL-320 and says so. DL-292's violation channel
+That entry narrows the admission rule (DL-89), DL-292 and DL-320 and says so. DL-292's violation channel
 is retired (DL-353). No oracle machine defers until that entry exists. A fork of the state owner
 carries its deferred queues into DL-320's dry apply, so an event the trial releases is released on
 the twin only (DL-339).
