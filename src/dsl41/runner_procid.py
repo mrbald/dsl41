@@ -17,6 +17,7 @@ The engine imports this module as ``dsl41.runner_procid``.
 from __future__ import annotations
 
 import errno
+import base64
 import fcntl
 import json
 import os
@@ -34,6 +35,16 @@ from typing import Any, Final, Literal
 #: (docs/wrapper-protocol.md). ONE integer, held in the one module both readers
 #: may import: the wrapper writes it, and the engine checks it (DL-152, DL-72).
 SPOOL_VERSION: Final[int] = 1
+
+
+def invocation_tag(run_id: str, job: str, run_number: int, boot_id: str | None) -> str:
+    """The command's forensic DSL41_RUN value, known before dispatch (DL-447)."""
+    return base64.urlsafe_b64encode(
+        json.dumps(
+            {"run_id": run_id, "job": job, "run_number": run_number, "boot_id": boot_id},
+            sort_keys=True,
+        ).encode("utf-8")
+    ).decode("ascii")
 
 
 def spool_version_supported(doc: Mapping[str, Any]) -> bool:

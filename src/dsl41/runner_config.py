@@ -34,6 +34,7 @@ from dsl41.canon import CanonError, canonical_bytes, decode, hash_over
 from dsl41.ir import CatalogIR
 from dsl41.reload_diff import catalog_hash_v2, catalog_payload
 from dsl41.runner_clock import EngineError
+from dsl41.runner_environment import JobEnvironment
 from dsl41.semantics import SemanticSwitches, check_overrides, resolve
 from dsl41.timezones import alias_table
 
@@ -95,6 +96,7 @@ class RuntimeProfile(BaseModel):
 
     default_tz: str = Field(default="UTC", min_length=1)
     tz_aliases: dict[str, str] = {}
+    job_env: JobEnvironment = Field(default_factory=dict, exclude_if=lambda value: not value)
     as_machine: tuple[str, ...] = ()
 
     @field_validator("as_machine", mode="before")
@@ -168,6 +170,7 @@ def runtime_profile_from_cli(
     machine_policy: str = "strict",
     fw_default_interval_s: float = FW_DEFAULT_INTERVAL_S,
     semantics: Mapping[str, str] | None = None,
+    job_env: Mapping[str, str] | None = None,
 ) -> RuntimeProfile:
     """The one CLI -> profile normalization (PR-15a).
 
@@ -180,6 +183,7 @@ def runtime_profile_from_cli(
         machine_policy=machine_policy,  # type: ignore[arg-type]  # the Literal validates it
         fw_default_interval_us=to_us(fw_default_interval_s),
         semantics=dict(semantics or {}),
+        job_env=dict(job_env or {}),
     )
 
 

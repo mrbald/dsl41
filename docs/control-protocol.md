@@ -183,6 +183,10 @@ fingerprint. Retry safety lasts while the store retains the admission
 `request_id`, `baseline_id`, `expect` or actor envelope (DL-429).
 
 `dsl41 reread` prepares the plan; it does not change the live engine.
+An edit only to `job_env` advances the configuration revision without
+changing job-definition hashes or stopping jobs, including while boxes run
+(DL-447). Running attempts keep their recorded environment. Later dispatches
+and replacements use the new map.
 With the main config, `/etc/dsl41/dsl41.toml` or an absolute `--config`
 selects the engine and its inputs (DL-437). `reread` compiles the selected
 inputs together and captures the config, source mapping and input bytes.
@@ -519,9 +523,10 @@ INACTIVE, but the next condition edge starts it, DL-54), `started_by` (the
 trace cause of the most recent start; null = never started, DL-68),
 `state_rev` (the revision an `expect` names for the job, DL-87), `held`
 (below), `pending_timers` (a list of `{due, kind}`), `log_out` / `log_err` (the runner-design §6
-append targets of the CURRENT run, resolved by the same `job_log_paths`
-the wrapper spec uses, so the tail and the writer can never diverge; CMD
-only), `job_type` and `box_name` (catalog placement, so a tree renders
+append targets stored by the CURRENT run's latest dispatched attempt,
+including after completion; null before dispatch; never re-expanded
+from the current catalog or environment (DL-447); CMD only), `job_type`
+and `box_name` (catalog placement, so a tree renders
 without a second query; null for ghosts).
 
 `held` (DL-94) keeps its place in the row and is always false: one engine
@@ -617,6 +622,22 @@ removed names that kept any. `launch` reports the main-config engine location
 and host settings (`run_root`, `as_machine`, `machine_policy`, `access_map`,
 `status_hook`, `status_hook_long_running_s`), or an empty object for a
 legacy engine (DL-437).
+
+For OPS/ADM, `environment_view: "ops"` accompanies the applied
+`settings.job_env` map (DL-447).
+The additive `path_environment` map reports inherited variable names:
+an empty string means empty, and `"set"` means nonempty. It discloses
+no inherited values. `reread` uses it for pre-profile path validation;
+update admission checks the candidate against the engine's captured
+startup values again. The four instance variables come only from
+the candidate's `job_env`.
+
+READ receives `environment_view: "read"` and `job_env_names`, a list of
+names. Both `settings.job_env` and `path_environment` are absent.
+The authenticated authority selects the view; request fields and actor
+claims cannot select it. With no access map, the owner keeps the full view.
+`reread` requires the OPS view and refuses a redacted or missing view.
+Redaction removes values; it never substitutes empty strings.
 
 ### `trace [since]`
 

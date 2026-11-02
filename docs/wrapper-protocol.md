@@ -56,6 +56,15 @@ same directory agree.
   wrapper's environment, the invocation the attempt's `dispatch` record
   holds. Any other value is the spec refusal.
 
+The adapter supplies absolute stream paths resolved before dispatch
+commit; the wrapper consumes them literally (DL-447). It performs no
+environment substitution in these paths. Relative job paths anchor at
+dispatch cwd. The adapter starts the wrapper with the engine's captured
+startup environment, excluding `AUTOSERV`, `AUTOSYS`, `AUTOUSER` and
+`AUTOROOT`. Only the explicit `env` overlay can supply those four names.
+That overlay also supplies `AUTO_JOB_NAME`, `AUTORUN=S-N` and the existing
+`DSL41_*` invocation values. The frozen input shape and version stay 1.
+
 Every key in the JSON example is required; the spawner fills
 `lifeline_fd` (DL-150). `env` is optional (DL-428). `version`, `run_number` and `lifeline_fd` are integers,
 never booleans. `run_id`, `job`, `command`, `run_dir`, `stdout_path` and

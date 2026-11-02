@@ -795,18 +795,18 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             surface="job_attr",
             member="std_out_file",
             klass=SUPPORTED,
-            cite="runner_adapters.job_log_paths",
+            cite="runner_environment.resolve_streams, DL-447",
             effect="the child's stdout appends here instead of the default run log; inert"
-            " on a BOX (SEM-10)",
+            " on a BOX (SEM-10); $VAR and ${VAR} resolve once before profile execution",
             trigger=_job(std_out_file="/tmp/out.log"),
         ),
         _row(
             surface="job_attr",
             member="std_err_file",
             klass=SUPPORTED,
-            cite="runner_adapters.job_log_paths",
+            cite="runner_environment.resolve_streams, DL-447",
             effect="the child's stderr appends here instead of the default run log; inert"
-            " on a BOX (SEM-10)",
+            " on a BOX (SEM-10); $VAR and ${VAR} resolve once before profile execution",
             trigger=_job(std_err_file="/tmp/err.log"),
         ),
         _row(
@@ -814,7 +814,8 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="std_in_file",
             klass=SUPPORTED,
             cite="runner_adapters._build_run_spec",
-            effect="the child reads stdin from here instead of /dev/null; inert on a BOX (SEM-10)",
+            effect="the child reads stdin from here instead of /dev/null; inert on a BOX (SEM-10);"
+            " $VAR and ${VAR} resolve once before profile execution (DL-447)",
             trigger=_job(std_in_file="/tmp/in.txt"),
         ),
         _row(
@@ -3083,6 +3084,13 @@ _PROFILE_FACETS: tuple[Row, ...] = (
 PROFILE_ROWS: tuple[Row, ...] = (
     (
         _profile_row(
+            "job_env",
+            '{"AUTOSERV": "synthetic"}',
+            "DL-447, runner_environment.validate_job_env",
+            "literal job environment overrides applied through configuration revisions;"
+            " instance variables come exclusively from this map",
+        ),
+        _profile_row(
             "default_tz",
             '"Europe/Berlin"',
             "DL-122, SEM-35",
@@ -3754,6 +3762,15 @@ FOREIGN_ESTATE = _placed("FAR", FOREIGN_MACHINE)
 #: is already its trigger, and a row's two fixtures must differ
 #: (DL-75 review 2026-09-19).
 PREFLIGHT_CODE_ROWS: tuple[Row, ...] = (
+    _row(
+        surface="preflight_code",
+        member="runtime-variable",
+        klass=REFUSED,
+        cite="runner_preflight.runtime_variable_preflight, DL-447",
+        effect="unavailable variables or unsupported dollar syntax in stream paths refuse"
+        " real execution; variable-bearing watch_file is refused",
+        trigger=_job(std_out_file="${}"),
+    ),
     _row(
         surface="preflight_code",
         member="resources",

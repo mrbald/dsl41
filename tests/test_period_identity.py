@@ -208,6 +208,7 @@ def test_the_profile_holds_only_what_the_engine_reads_under() -> None:
         "machine_policy",
         "fw_default_interval_us",
         "semantics",
+        "job_env",
     }
 
 
@@ -215,6 +216,7 @@ def test_the_profile_holds_only_what_the_engine_reads_under() -> None:
 #: `RuntimeProfile.model_fields` below, so a field added later fails loudly here instead of going
 #: quietly unhashed.
 _ALTERNATES: dict[str, Any] = {
+    "job_env": {"AUTOSERV": "synthetic"},
     "default_tz": "Europe/Zurich",
     "tz_aliases": {"CET": "Europe/Zurich"},
     "as_machine": ("alpha",),

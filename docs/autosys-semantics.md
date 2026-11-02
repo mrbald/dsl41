@@ -175,6 +175,26 @@ modeled universe.
   dsl41 does not implement the substitution: preflight refuses an unsubstituted `$$NAME`
   site on an exec field before real execution (DL-240).
 
+Runtime environment references use `$VAR` or `${VAR}` with names
+`[A-Za-z_][A-Za-z0-9_]*` (DL-447). The runner expands them literally once
+in `std_in_file`, `std_out_file` and `std_err_file`, before the profile
+runs. Missing variables, empty paths, NULs and other dollar syntax refuse
+real execution with preflight code `runtime-variable`. A `watch_file`
+containing dollar syntax is refused. Commands keep their shell expansion
+after profile sourcing. Profiles receive no runner substitution.
+
+Jobs receive `AUTO_JOB_NAME` as their exact name and `AUTORUN` as `S-N`.
+S is the logical run's first committed dispatch store sequence.
+N is the attempt ordinal, starting at 1. Replacements preserve S and
+scheduled identity and increment N. S is not a vendor run number.
+The values are unique within one continuous engine-root history;
+fresh roots and restored branches can repeat them.
+`engine.job_env` supplies literal overrides of the engine's startup
+environment. `AUTOSERV`, `AUTOSYS`, `AUTOUSER` and `AUTOROOT` come only
+from that map; absence removes inherited values.
+Generated invocation values take precedence.
+See [runner §6](runner-design.md#6-adapters) for dispatch durability.
+
 ### SEM-09 · max_exit_success shifts SUCCESS/FAILURE boundary **[V]**
 A job with `max_exit_success: 2` records SUCCESS for exit codes ≤ 2. Therefore `s(j)` on a
 consumer is only meaningful relative to the producer's `max_exit_success`. IR: the success

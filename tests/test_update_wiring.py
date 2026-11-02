@@ -1178,7 +1178,9 @@ def test_the_catalog_answer_maps_back_to_the_live_record() -> None:
     answer = {
         "ok": True,
         "catalog": json.loads(json.dumps(catalog.model_dump(mode="json"))),
-        "settings": {"timezone": "UTC"},
+        "settings": {"timezone": "UTC", "job_env": {}},
+        "path_environment": {},
+        "environment_view": "ops",
         "revision": 3,
         "status": {"a": "RUNNING"},
         "runs": {"a": 2},

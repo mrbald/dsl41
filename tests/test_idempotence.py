@@ -195,6 +195,11 @@ def test_scheduled_at_drops_the_fraction_and_reads_naive_as_utc() -> None:
     assert env[ENV_SCHEDULED_AT] == "2026-10-30T01:02:03Z"
 
 
+def test_scheduled_at_keeps_a_four_digit_year_on_every_platform() -> None:
+    env = invocation_env("j", 1, datetime.min.replace(tzinfo=UTC), 1)
+    assert env[ENV_SCHEDULED_AT] == "0001-01-01T00:00:00Z"
+
+
 def test_a_rerun_keeps_three_fields_and_changes_the_attempt() -> None:
     at = datetime(2026, 10, 30, 1, 0, tzinfo=UTC)
     first = invocation_env("j", 4, at, 1)

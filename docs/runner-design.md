@@ -333,6 +333,35 @@ observes the deaths and durably records the outcome like any other
 completion. A cancel before the spec is handed over SIGKILLs the
 wrapper, which has launched nothing.
 The detached-SPAWN cancellation rule is retired (DL-424; DL-359).
+Stream paths resolve before profile execution (DL-447). The resolver
+substitutes `$VAR` and `${VAR}` once and literally, with no recursive,
+shell, glob or tilde expansion. Relative paths anchor at dispatch cwd.
+Dispatch records and snapshots retain the first dispatch sequence S,
+the explicit environment overlay, referenced inherited values and the
+absolute stream paths before launch. Replay reads these values without
+expansion. Status and tail use the current run's latest dispatched
+attempt's stored paths, including after completion. Before dispatch,
+their paths are null.
+
+The job environment preserves `DSL41_*` invocation values and adds
+`AUTO_JOB_NAME` and `AUTORUN=S-N` under
+[SEM-08](autosys-semantics.md#sem-08--global-variables-v).
+`RuntimeProfile.job_env` captures the main config's `[engine.job_env]`
+literal string map, default empty. Names use `[A-Za-z_][A-Za-z0-9_]*`.
+NULs and overrides of `DSL41_*`, `AUTO_JOB_NAME` or `AUTORUN` refuse.
+The four instance variables listed in SEM-08 come exclusively from
+this map. Other variables inherit startup values, then the map and
+generated invocation values override them. Replacements use the current
+applied settings and resolve anew while preserving S and scheduled identity.
+An empty map is omitted from canonical profiles and hashes (DL-447).
+`job_env` is excluded from job-definition hashes but retained in the
+token-bound runtime revision. An environment-only update advances that
+revision while boxes run and stops nothing. Running attempts retain their
+recorded environment; later dispatches and replacements use the new map.
+The engine captures cwd once at start, so a later deleted cwd does not
+change path anchoring. Version-28 readers require valid dispatch data and S;
+missing or damaged data refuses before recovery effects.
+
 When `std_out_file` / `std_err_file` are set, stdout/stderr
 **append** to them (the vendor appends). Otherwise they append to
 `<run_root>/logs/<job>.<run_number>.{out,err}`. Whether the engine
@@ -601,8 +630,9 @@ A main-config restart uses the last applied revision. Source, lint and
 `engine.environment` edits stay pending. Host `as_machine`,
 `machine_policy` and access policy load from disk; invalid host or access
 settings refuse with exit 2. Legacy invocations retain their launch checks.
-The limits DL-437 records remain: restart recompiles captures without
-preflight, has no legacy-root conversion, ignores unknown `[engine]` keys
+Restart recompiles captures and checks placement and runtime variables
+(DL-437, DL-447). Other preflight rules remain unrun there.
+It has no legacy-root conversion, ignores unknown `[engine]` keys
 in host-only loading, and the pending-source scan blocks the loop.
 
 **Configuration.** A `configs` row holds the catalog, `RuntimeProfile` and
@@ -724,6 +754,12 @@ ERROR refuses the run. WARN prints, records in the store, and runs. Every rule s
 fixture pair.
 
 ERROR:
+- `runtime-variable`: a stream path references an unavailable variable,
+  uses unsupported dollar syntax, resolves empty or contains NUL; or a
+  `watch_file` contains dollar syntax (DL-447). Startup, reload candidates
+  and replacement dispatches use the same pre-profile resolver.
+  A variable set only by the profile is unavailable to a path.
+  Profile-only command variables remain legal.
 - `job_type` outside {CMD, BOX, FW}.
 - `machine` set and not local. This rule and the `owner` rule below apply
   to `run` only: rehearse spawns no process, so preflight skips both there.

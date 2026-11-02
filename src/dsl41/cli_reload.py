@@ -271,6 +271,15 @@ def live_of_answer(answer: Mapping[str, Any]) -> Live:
 
     if not answer.get("ok"):
         raise SendFailed(str(answer.get("error", "the engine refused the catalog read")))
+    if (
+        answer.get("environment_view") != "ops"
+        or not isinstance(answer.get("path_environment"), dict)
+        or not isinstance(answer.get("settings"), dict)
+        or not isinstance(answer.get("settings", {}).get("job_env"), dict)
+    ):
+        raise SendFailed(
+            "reread requires the ops catalog view; redacted or missing environment data"
+        )
     return Live(
         CatalogIR.model_validate(answer["catalog"]),
         dict(answer["settings"]),
@@ -279,6 +288,7 @@ def live_of_answer(answer: Mapping[str, Any]) -> Live:
         {name: tuple(flags) for name, flags in dict(answer.get("tombstones") or {}).items()},
         {name: int(run) for name, run in dict(answer.get("runs") or {}).items()},
         dict(answer.get("launch") or {}),
+        dict(answer["path_environment"]),
     )
 
 

@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from dispatch_fixtures import dispatch_record
 from store_surgery import rows
 
 from dsl41 import runner_adapters, runner_procid, runner_stops
@@ -41,7 +42,7 @@ from dsl41.runner_adapters import (
 from dsl41.runner_clock import EngineError, RealClock, VirtualClock
 from dsl41.runner_config import EngineSettings
 from dsl41.runner_control import attempt_note, status_label
-from dsl41.runner_journal import decode_snapshot, dispatch_record, open_reader
+from dsl41.runner_journal import decode_snapshot, open_reader
 from dsl41.runner_startup import resume_run, start_run
 from dsl41.runner_stops import COMMAND_SURVIVED, AttemptFacts
 
@@ -359,7 +360,31 @@ def _engine(tmp_path: Path, text: str = _JIL, **kwargs: Any) -> Engine:
 
 
 def _adopt(engine: Engine, job: str = "j", run: int = 1, attempt: str = RUN_ID) -> AttemptFacts:
-    facts = AttemptFacts(attempt, job, run, 1, Path("/nonexistent"), exited=True)
+    assert engine.journal is not None
+    if (
+        job in engine.oracle.catalog.jobs
+        and engine.dispatches.get(job, {}).get("run_number") != run
+    ):
+        engine.journal.append(
+            dispatch_record(
+                job,
+                run,
+                attempt=attempt,
+                spool="/nonexistent",
+                started_at=T0,
+                rev=1,
+                first_dispatch_seq=engine.journal.next_seq(),
+            )
+        )
+    facts = AttemptFacts(
+        attempt,
+        job,
+        run,
+        1,
+        Path("/nonexistent"),
+        exited=True,
+        env=dict(engine.dispatches.get(job, {}).get("env", {"DSL41_SCHEDULED_AT": T0.isoformat()})),
+    )
     engine.adopt_attempt(facts)
     return facts
 
@@ -370,7 +395,16 @@ def _held_closing(engine: Engine, attempt: str, job: str, pgid: int) -> None:
     from dsl41.engine_charts import AttemptOutcome
     from dsl41.runner_stops import COMMAND_SURVIVED
 
-    facts = AttemptFacts(attempt, job, 1, 1, Path("/nonexistent"), exited=True, closing=True)
+    facts = AttemptFacts(
+        attempt,
+        job,
+        1,
+        1,
+        Path("/nonexistent"),
+        exited=True,
+        closing=True,
+        env={"DSL41_SCHEDULED_AT": T0.isoformat()},
+    )
     engine.adopt_attempt(facts, AttemptOutcome("stopped"), plan_done=True)
     engine.stops.hold(attempt, COMMAND_SURVIVED)
     engine.hold_group(attempt, pgid)
@@ -557,7 +591,14 @@ def test_an_engine_with_no_store_runs_a_plan_from_memory() -> None:
             lower_source(_JIL), clock=VirtualClock(start=T0), adapters={"CMD": FakeAdapter()}
         )
         engine.lifecycle.replay_done()
-        facts = AttemptFacts(RUN_ID, "j", 1, 1, Path("/nonexistent"), {"DSL41_JOB": "j"})
+        facts = AttemptFacts(
+            RUN_ID,
+            "j",
+            1,
+            1,
+            Path("/nonexistent"),
+            {"DSL41_SCHEDULED_AT": T0.isoformat(), **({"DSL41_JOB": "j"})},
+        )
         engine.adopt_attempt(facts)
         engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "j"}))
         await engine.run_until_quiescent(T0)
@@ -770,7 +811,13 @@ def test_a_closing_attempt_s_cleanup_reads_its_spawn_record_alone(
         body = {"attempt": run_id, "job": "j", "run_number": 1, "status": {}}
         body |= {"at": T0.isoformat(), "outcome": "stopped", "cause": "engine_stop"}
         append(run_root, "outcome", {**body, "ladder": "running"}, at=T0)
-        step = {"step": "dispatch", "attempt": OTHER_ID, "ordinal": 2, "env": {}, "after": "x"}
+        step = {
+            "step": "dispatch",
+            "attempt": OTHER_ID,
+            "ordinal": 2,
+            "env": {"DSL41_SCHEDULED_AT": T0.isoformat()},
+            "after": "x",
+        }
         plan = {"event": "plan", "attempt": run_id, "job": "j", "run_number": 1, "plan": "rerun"}
         append(run_root, "follow_up", {**plan, "steps": [step]}, at=T0)
         _resume(run_root)
@@ -936,17 +983,33 @@ def test_engine_side_arcs(tmp_path: Path) -> None:
         facts.spool = tmp_path / "empty"
         facts.spool.mkdir()
         assert engine.stops.read_spool(OTHER_ID) == (None, None)
+        _write(
+            facts.spool,
+            "spawn.json",
+            {"attempt": OTHER_ID},
+            command_pgid=2**22 + 7,
+            command_start_time="t",
+            boot_id="spool-boot",
+        )
+        recorded, status = engine.stops.read_spool(OTHER_ID)
+        assert recorded is not None and status is None
+        assert engine.stops._boots[(2**22 + 7, "t")] == "spool-boot"
+        (facts.spool / "spawn.json").unlink()
         spawn = {"command_pgid": 2**22 + 7, "command_pid": 2**22 + 7, "command_start_time": "t"}
         Observer(engine.stops, OTHER_ID).wrapper_exited(spawn)
         third = "9d1f2e3c-4b5a-4c6d-8e7f-0a1b2c3d4e5f"
-        engine.adopt_attempt(AttemptFacts(third, "j", 1, 1, facts.spool))
+        engine.adopt_attempt(
+            AttemptFacts(third, "j", 1, 1, facts.spool, env={"DSL41_SCHEDULED_AT": T0.isoformat()})
+        )
         Observer(engine.stops, third).wrapper_exited(None)  # no spawn.json: nothing to note
         assert engine.attempts.state(third) == "ENDED"
         assert (
             engine.attempts.knows(OTHER_ID) is False or engine.attempts.state(OTHER_ID) == "ENDED"
         )
         # its wrapper still runs (`exited` false), so the ended attempt is not yet forgotten
-        engine.adopt_attempt(AttemptFacts(RUN_ID, "j", 1, 1, facts.spool))
+        engine.adopt_attempt(
+            AttemptFacts(RUN_ID, "j", 1, 1, facts.spool, env={"DSL41_SCHEDULED_AT": T0.isoformat()})
+        )
         engine.attempts.wrapper_exited(RUN_ID, None)
         done = asyncio.get_running_loop().create_future()
         done.set_result(None)
@@ -1276,8 +1339,8 @@ def test_a_store_of_another_state_version_refuses_by_name(tmp_path: Path) -> Non
     run_root, _dispatch = _open(tmp_path)
     with closing(sqlite3.connect(run_root / "engine.db", isolation_level=None)) as db:
         db.execute("UPDATE meta SET value = '24' WHERE key = 'state_version'")
-    assert STATE_MACHINE_VERSION == 27
-    with pytest.raises(EngineError, match="state version 24, this binary runs 27"):
+    assert STATE_MACHINE_VERSION == 28
+    with pytest.raises(EngineError, match="state version 24, this binary runs 28"):
         _resume(run_root)
 
 
@@ -1306,7 +1369,16 @@ def test_a_live_plan_cut_before_its_feed_is_stamped_at_the_recorded_end(
         await engine.run_until_quiescent(T0)
         [dispatch] = [b for _, k, b in rows(run_root) if k == "dispatch"]
         run_id = dispatch["attempt"]
-        engine.adopt_attempt(AttemptFacts(run_id, "x", 1, 1, Path(dispatch["spool"])))
+        engine.adopt_attempt(
+            AttemptFacts(
+                run_id,
+                "x",
+                1,
+                1,
+                Path(dispatch["spool"]),
+                env={"DSL41_SCHEDULED_AT": T0.isoformat()},
+            )
+        )
         monkeypatch.setattr(engine, "perform_plan", lambda _attempt: None)  # dies before it
         ended = (T0 + timedelta(minutes=2)).isoformat() + "+00:00"
         record = {"version": 1, "run_id": run_id, "job": "x", "run_number": 1}
@@ -1423,7 +1495,13 @@ def test_a_restart_finishes_the_ladder_of_a_closing_attempt(
         {**body, "outcome": "stopped", "cause": "engine_stop", "ladder": "running"},
         at=T0,
     )
-    replacement = {"step": "dispatch", "attempt": OTHER_ID, "ordinal": 2, "env": {}, "after": "x"}
+    replacement = {
+        "step": "dispatch",
+        "attempt": OTHER_ID,
+        "ordinal": 2,
+        "env": {"DSL41_SCHEDULED_AT": T0.isoformat()},
+        "after": "x",
+    }
     plan = {"event": "plan", "attempt": run_id, "job": "j", "run_number": 1, "plan": "rerun"}
     append(run_root, "follow_up", {**plan, "steps": [replacement]}, at=T0)
     try:
@@ -1495,7 +1573,9 @@ def test_a_held_group_keeps_its_job_s_starts_back_until_it_is_gone(
         engine.recovery = None
         engine._held_starts.append(owed)
         engine.hold_group(third, 2**22 + 7)
-        engine._facts[third] = AttemptFacts(third, "j", 1, 1, Path("/nonexistent"))
+        engine._facts[third] = AttemptFacts(
+            third, "j", 1, 1, Path("/nonexistent"), env={"DSL41_SCHEDULED_AT": T0.isoformat()}
+        )
         engine.lifecycle.stop_requested(DrainRequest(time.monotonic(), 0.1, 0.1))
         engine.held_groups.clear()
         engine._release("j")

@@ -77,7 +77,6 @@ status.json is the sole outcome channel.
 
 from __future__ import annotations
 
-import base64
 import json
 import math
 import os
@@ -108,6 +107,7 @@ if TYPE_CHECKING:
     from dsl41.runner_procid import (
         SPOOL_VERSION,
         current_boot_id,
+        invocation_tag,
         durable_write_json,
         killpg_quiet,
         proc_start_token,
@@ -117,6 +117,7 @@ else:
     from runner_procid import (  # noqa: E402
         SPOOL_VERSION,
         current_boot_id,
+        invocation_tag,
         durable_write_json,
         killpg_quiet,
         proc_start_token,
@@ -375,9 +376,7 @@ def main() -> int:
     # the invocation the engine recorded (DSL41_JOB, DSL41_RUN_NUMBER, DSL41_SCHEDULED_AT,
     # DSL41_ATTEMPT): a rerun gets the same values but the attempt (crash spec)
     env = {**os.environ, **spec.get("env", {})}
-    env["DSL41_RUN"] = base64.urlsafe_b64encode(
-        json.dumps({**identity, "boot_id": boot_id}, sort_keys=True).encode("utf-8")
-    ).decode("ascii")
+    env["DSL41_RUN"] = invocation_tag(spec["run_id"], spec["job"], spec["run_number"], boot_id)
 
     def _open_append_0600(path: str):
         # vendor APPENDS; 0600 at create, since job output may carry anything

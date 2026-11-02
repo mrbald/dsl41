@@ -136,7 +136,13 @@ class UpdateAnswer:
 def settings_of(profile: RuntimeProfile, catalog: CatalogIR) -> dict[str, object]:
     """The estate settings an engine runs `catalog` under with `profile`, spelled as `reread`
     spells a candidate's (`reload_plan.estate_settings`), so an unchanged estate diffs equal."""
-    return estate_settings(profile.default_tz, tz_aliases_of(profile), profile.semantics, catalog)
+    return estate_settings(
+        profile.default_tz,
+        tz_aliases_of(profile),
+        profile.semantics,
+        catalog,
+        job_env=profile.job_env,
+    )
 
 
 def profile_for(settings: Mapping[str, Any], base: RuntimeProfile) -> RuntimeProfile:
@@ -148,6 +154,7 @@ def profile_for(settings: Mapping[str, Any], base: RuntimeProfile) -> RuntimePro
             "default_tz": settings.get("timezone") or "UTC",
             "tz_aliases": dict(aliases or {}),
             "semantics": dict(settings.get("semantics") or {}),
+            "job_env": dict(settings.get("job_env") or {}),
         }
     )
 
@@ -321,8 +328,11 @@ class EngineUpdate:
         live = live_of(
             engine.oracle, settings_of(profile, engine.oracle.catalog), engine.config_rev
         )
+        from dataclasses import replace
+        from dsl41.runner_environment import path_environment
+
+        live = replace(live, path_environment=path_environment(engine.startup_env))
         if engine.source_capture:
-            from dataclasses import replace
             import base64
             from dsl41.canon import decode
             from dsl41.main_config import CAPTURE
@@ -372,6 +382,17 @@ class EngineUpdate:
             # catalog reread saw, checked before anything is written, so the application's own
             # check of them never meets a mismatch after the intent
             return self._decide(Refused(request.token, STALE_PLAN))
+        from dsl41.runner_preflight import runtime_variable_preflight
+
+        candidate_profile = profile_for(opened.estate.settings, engine.profile or RuntimeProfile())
+        problems = runtime_variable_preflight(
+            opened.estate.catalog, job_env=candidate_profile.job_env, startup_env=engine.startup_env
+        )
+        if problems:
+            return UpdateAnswer(
+                code="invalid_argument",
+                error=f"preflight ERROR [runtime-variable]: {problems[0].message}",
+            )
         decision = admission_check(
             opened.plan,
             live=self.live(),

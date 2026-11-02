@@ -689,6 +689,35 @@ def host_preflight(
     ]
 
 
+def runtime_variable_preflight(
+    catalog: CatalogIR,
+    *,
+    job_env: Mapping[str, str] | None = None,
+    startup_env: Mapping[str, str] | None = None,
+) -> list[PreflightItem]:
+    """Validate pre-profile paths with symbolic generated values (DL-447)."""
+    import os
+    from pathlib import Path
+    from dsl41.runner_environment import (
+        RuntimeVariableError,
+        inherited_environment,
+        resolve_streams,
+        symbolic_environment,
+    )
+
+    inherited = inherited_environment(os.environ if startup_env is None else startup_env)
+    items: list[PreflightItem] = []
+    for name, job in sorted(catalog.jobs.items()):
+        env = {**inherited, **(job_env or {}), **symbolic_environment(name)}
+        try:
+            resolve_streams(job, env, cwd=Path("/"))
+        except RuntimeVariableError as exc:
+            items.append(
+                PreflightItem(severity="ERROR", code="runtime-variable", job=name, message=str(exc))
+            )
+    return items
+
+
 def preflight(
     catalog: CatalogIR,
     *,
@@ -700,6 +729,8 @@ def preflight(
     tz_aliases: Mapping[str, str] | None = None,
     timezone_map_source: str = "timezone map",
     semantics: SemanticSwitches | None = None,
+    job_env: Mapping[str, str] | None = None,
+    startup_env: Mapping[str, str] | None = None,
 ) -> list[PreflightItem]:
     """ss8: refuse loudly, run honestly. `execution=False` (rehearse) skips the machine, owner
     and execution-input rules; calendars, timezones and construction still gate.
@@ -738,4 +769,6 @@ def preflight(
         items.extend(_resource_preflight(name, job, catalog))
     items.extend(_oracle_preflight(catalog, semantics))
     items.extend(_skeleton_cycle_preflight(catalog))
+    if execution:
+        items.extend(runtime_variable_preflight(catalog, job_env=job_env, startup_env=startup_env))
     return items

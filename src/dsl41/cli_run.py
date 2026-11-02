@@ -98,6 +98,7 @@ def _preflight_or_exit(
     timezone_map_source: str = "timezone map",
     semantics: "SemanticSwitches | None" = None,
     warns_to_stderr: bool = False,
+    job_env: "dict[str, str] | None" = None,
 ) -> "list[PreflightItem]":
     """Print ss8 findings; exit 2 on any ERROR; return the WARNs for the caller to journal.
 
@@ -121,6 +122,7 @@ def _preflight_or_exit(
         tz_aliases=tz_aliases,
         timezone_map_source=timezone_map_source,
         semantics=semantics,
+        job_env=job_env,
     )
     return _preflight_items_or_exit(items, warns_to_stderr=warns_to_stderr)
 
@@ -449,6 +451,7 @@ def _run_main_config_checked(path: Path, *, ui: bool, hooks: HookSettings, raw: 
                 tz_aliases=tz_aliases_of(profile),
                 timezone_map_source="estate.timezone_map",
                 semantics=resolve(profile.semantics),
+                job_env=profile.job_env,
             )
         if ui:
             import_tui_or_exit_2()
@@ -925,7 +928,7 @@ async def _serve_run(
                     catalog, profile = stored.catalog, stored.profile
                     assert main_launch is not None
                     from dsl41.runner_config import with_host_settings
-                    from dsl41.runner_preflight import host_preflight
+                    from dsl41.runner_preflight import host_preflight, runtime_variable_preflight
 
                     profile = with_host_settings(
                         profile,
@@ -938,6 +941,7 @@ async def _serve_run(
                             as_machine=frozenset(profile.as_machine),
                             machine_policy=profile.machine_policy,
                         )
+                        + runtime_variable_preflight(catalog, job_env=profile.job_env)
                     )
                 assert captured_estate is not None
                 spec_texts = _spec_texts(list(captured_estate.parsed), catalog)

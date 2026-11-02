@@ -131,6 +131,7 @@ def _derive_runtime_profile(
     from dsl41.runner_adapters import FileWatcherAdapter
 
     values: dict[str, object] = dict((base or RuntimeProfile()).model_dump())
+    values["job_env"] = dict((declared or base or RuntimeProfile()).job_env)
     if declared is not None:
         values["as_machine"] = declared.as_machine
         values["machine_policy"] = declared.machine_policy
@@ -255,6 +256,16 @@ def refuse_old_root(run_root: Path) -> None:
         )
 
 
+def _check_runtime_variables(catalog: CatalogIR, profile: RuntimeProfile, clock: Clock) -> None:
+    """Reject unavailable pre-profile paths before startup effects (DL-447)."""
+    from dsl41.runner_preflight import runtime_variable_preflight
+
+    if not clock.virtual:
+        items = runtime_variable_preflight(catalog, job_env=profile.job_env)
+        if items:
+            raise EngineError(f"preflight ERROR [runtime-variable]: {items[0].message}")
+
+
 def start_run(
     catalog: CatalogIR,
     run_root: Path | None,
@@ -340,6 +351,7 @@ def _genesis(
     _require_adapters(catalog, adapters, "genesis")
     _require_scheduler(catalog, scheduler, "genesis")
     profile = _derive_runtime_profile(scheduler, adapters, base=launched, declared=launched)
+    _check_runtime_variables(catalog, profile, clock)
     drift = [] if launched is None else profile_drift(profile, launched)
     if drift:
         # the record must describe the machine that runs: a launch profile the wiring
@@ -610,6 +622,15 @@ async def _resume_under_lock(
         )
         catalog = configuration.catalog
     _check_clock_domain(meta, clock)
+    _check_runtime_variables(configuration.catalog, profile, clock)
+    if opened_update is not None:
+        from dsl41.runner_update import profile_for
+
+        _check_runtime_variables(
+            opened_update.estate.catalog,
+            profile_for(opened_update.estate.settings, profile),
+            clock,
+        )
     _require_adapters(catalog, adapters, "resume")
     _require_scheduler(catalog, scheduler, "resume")
     last_at = journal.position.last_at

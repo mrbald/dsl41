@@ -3,9 +3,9 @@
 `diff` compares a live `CatalogIR` with a candidate by job name. A job is changed when its
 definition hash differs. The hash covers the job's normalized effective definition: the lowered
 `JobIR` without positions, plus the normalized definition of every calendar, cycle, machine and
-resource it references, plus the estate settings the caller passes (timezone, alias map,
-semantic switches, cross-instance types). A calendar edit therefore changes every job that
-references it, and the `Change` says so. A change in a setting changes every job.
+resource it references, plus the estate settings except `job_env` (DL-447). That map stays in
+the runtime revision. A calendar edit changes every referencing job, and `Change` says so.
+A change in any other estate setting changes every job.
 
 Positional fields dropped before hashing (they move with whitespace and comments, never with
 meaning):
@@ -160,15 +160,15 @@ def _references(job: JobIR, catalog: CatalogIR) -> dict[str, dict[str, Any] | No
 def definition_hash(job: JobIR, catalog: CatalogIR, estate_settings: Mapping[str, object]) -> str:
     """Digest of the job's normalized effective definition within `catalog`.
 
-    `estate_settings` is canonicalised into the hash input. The caller (reread) supplies the
-    values that shape a job's behaviour but live outside the catalog; this module only fixes
-    the shape: a mapping of setting name to a canonical-encodable value.
+    `estate_settings`, except `job_env`, is canonicalised into the hash input (DL-447).
+    The caller (reread) supplies the values that shape a job's behaviour outside the catalog;
+    this module fixes their shape as a mapping to canonical-encodable values.
     """
     return digest(
         {
             "job": _job_record(job),
             "refs": _references(job, catalog),
-            "settings": dict(estate_settings),
+            "settings": {key: value for key, value in estate_settings.items() if key != "job_env"},
         }
     )
 
@@ -202,6 +202,8 @@ def _reason(
             verb = "changed"
         reasons.append(f"{kind} {name} {verb}")
     for setting in sorted(live_settings.keys() | candidate_settings.keys()):
+        if setting == "job_env":
+            continue  # Invocation settings apply to later dispatches (DL-447).
         if live_settings.get(setting, _ABSENT) != candidate_settings.get(setting, _ABSENT):
             reasons.append(f"estate setting {setting} changed")
     return "; ".join(reasons)
@@ -224,7 +226,8 @@ def diff(
 ) -> Plan:
     """Compare by job name: added, removed, changed (hash differs), unchanged.
 
-    A difference between the two settings mappings changes every kept job. A job whose type
+    A difference between the two settings mappings, except `job_env`, changes every kept job
+    (DL-447). A job whose type
     changes (CMD, BOX, FW) is another job under the same name: it is in both removed and added,
     so the update retires the old row and admits a new one.
     """

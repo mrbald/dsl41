@@ -138,7 +138,16 @@ def _adopt(
     engine: Engine, attempt: str = RUN_ID, cookie: str | None = COOKIE, proven: bool = False
 ) -> None:
     env = {} if cookie is None else {"DSL41_COOKIE": cookie}
-    engine.adopt_attempt(AttemptFacts(attempt, "j", 1, 1, Path("/nonexistent"), env))
+    engine.adopt_attempt(
+        AttemptFacts(
+            attempt,
+            "j",
+            1,
+            1,
+            Path("/nonexistent"),
+            {"DSL41_SCHEDULED_AT": T0.isoformat(), **(env)},
+        )
+    )
     engine.stops.scan_available = True
     engine.stops.note_boot({**SPAWN, "run_id": attempt})
     if proven:
@@ -158,7 +167,16 @@ def _held(engine: Engine, tmp_path: Path, attempt: str, job: str) -> None:
     """A restart's closing attempt whose cleanup found its command outlived the KILL: restored
     ENDED and held, as the live survivor verdict holds one (spec-restart §5)."""
     env = {"DSL41_COOKIE": runner_procid.cookie("inst", attempt)}
-    facts = AttemptFacts(attempt, job, 1, 1, tmp_path / attempt, env, exited=True, closing=True)
+    facts = AttemptFacts(
+        attempt,
+        job,
+        1,
+        1,
+        tmp_path / attempt,
+        {"DSL41_SCHEDULED_AT": T0.isoformat(), **(env)},
+        exited=True,
+        closing=True,
+    )
     engine.adopt_attempt(facts, AttemptOutcome("stopped"), plan_done=True)
     engine.stops.scan_available = True
     engine.stops.note_boot({**SPAWN, "run_id": attempt})
@@ -641,7 +659,7 @@ async def _clean_up(engine: Engine, closing: OpenAttempt, *, failed_reading: boo
         closing.run_number,
         closing.ordinal,
         Path(closing.spool),
-        dict(closing.env),
+        {"DSL41_SCHEDULED_AT": T0.isoformat(), **(dict(closing.env))},
         exited=True,
         closing=True,
     )

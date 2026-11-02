@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+from dispatch_fixtures import dispatch_record
 from typer.testing import CliRunner
 
 from dsl41.cli import app
@@ -41,7 +42,6 @@ from dsl41.runner_journal import (
     OpenTable,
     Position,
     decode_snapshot,
-    dispatch_record,
     encode_snapshot,
     follow_up_done,
     read_backfill,
@@ -334,7 +334,12 @@ def test_the_open_table_follows_an_attempt_a_pending_start_and_a_plan() -> None:
             },
         ),
     )
-    table.note(5, dispatch_record("j1", 1, attempt=attempt, spool=None, started_at=T0, rev=1))
+    table.note(
+        5,
+        dispatch_record(
+            "j1", 1, attempt=attempt, spool=None, started_at=T0, rev=1, first_dispatch_seq=5
+        ),
+    )
     plan = {"event": "plan", "attempt": attempt, "job": "j1", "run_number": 1, "plan": "hold"}
     steps = [{"step": "feed", "payload": {}}, {"step": "hold", "payload": {}}]
     table.note(6, Record(T0, "follow_up", None, None, {**plan, "steps": steps}))
@@ -347,7 +352,17 @@ def test_the_open_table_follows_an_attempt_a_pending_start_and_a_plan() -> None:
     assert table.plans == {}
     other = "00000000-0000-4000-8000-000000000002"
     table.note(
-        10, dispatch_record("p", 1, attempt=other, spool=None, started_at=T0, rev=1, discharges=3)
+        10,
+        dispatch_record(
+            "p",
+            1,
+            attempt=other,
+            spool=None,
+            started_at=T0,
+            rev=1,
+            discharges=3,
+            first_dispatch_seq=10,
+        ),
     )
     assert table.pending == {} and table.floor() == 10
     # a plan with no steps is never open; a done mark for a closed plan changes nothing
