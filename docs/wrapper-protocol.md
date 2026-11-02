@@ -185,7 +185,11 @@ At restart, a missing record carries the first stop's cause or
 `engine_death`. A restart reads each open attempt once and waits for no
 previous wrapper (DL-433). Cleanup of found processes runs in the live engine loop.
 Mismatched or unreadable records cause quarantine with evidence; a missing
-record or failed process scan does not (DL-433).
+record or failed process scan does not (DL-433). A valid spawn retained during
+quarantine names only a candidate group. DL-431 identity proof governs Linux cookie
+cleanup; off Linux or without a cookie, the leader-token guard governs the group
+ladder (DL-444). The selected signalling primitive remains DL-436's, with no
+per-target fallback after a pidfd failure.
 
 ### DSL41_RUN env tag — forensics only
 
@@ -273,7 +277,8 @@ the process group decide.
    the integer 1 (`true` and `1.0` are refused), a present `lifeline_fd`
    that is not an integer, and a present `grace_seconds` that is not a
    finite number of zero or more. A boolean is not a number (DL-229).
-   A spec that is not readable JSON exits 1 before any record. So does a
+   Readable JSON that is not an object is a spec refusal and exits 2 before
+   any durable effect (DL-444). Malformed JSON exits 1 before any record. So does a
    spec that lacks a key the wrapper reads with no default: `run_id`,
    `job`, `run_number`, `command`, `run_dir`, `lifeline_fd`,
    `stdout_path`, `stderr_path` (DL-150). The wrapper has two defaults of

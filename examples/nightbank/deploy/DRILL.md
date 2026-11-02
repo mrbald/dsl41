@@ -46,8 +46,9 @@ owns nightly triage and merge blocking.
 
 ## What each row checks
 
-Every row reads what an operator reads: `systemctl`, `journalctl -u`,
-`dsl41 query status` and `dsl41 runs`. A wait polls with a deadline.
+The rows check the installed service through `systemctl`, `journalctl -u`,
+`dsl41 query status` and `dsl41 runs`. The `restart-faults` row also reads
+synthetic stores and wrapper spools. A wait polls with a deadline.
 
 | Row | What it does | What it checks |
 | --- | --- | --- |
@@ -59,9 +60,13 @@ Every row reads what an operator reads: `systemctl`, `journalctl -u`,
 | `drain` | `systemctl stop` with a job that ignores TERM | The stop waits the TERM grace, `ExecStop` exits 0, `clean_shutdown`; after the start the rerun follows `engine_stop` |
 | `reload` | `dsl41 reread`, then `dsl41 update` with a running job and a changed definition | Exit 1 from reread, a refusal without `--stop-running`, `config_rev` + 1, a rerun after `update_stop` on the new command |
 | `leak` | A job leaves a child in its own session | Both images require the engine's cookie-scan TERM at the job's exit and at restart; the startup log names the image's expected primitive (DL-431, DL-433, DL-436) |
+| `restart-faults` | Runs the [listed synthetic fault cases](restart_faults.py) under the installed interpreter in transient systemd units | Independent process witnesses, effect counts and record order pin interrupted attempts, quarantine, deadlines, holds and FW progress |
 | `refusal` | Restarts with pending source edits, then with an unsupported store version | Source edits stay pending at the same revision; the store mismatch exits 2 and stays failed; restoring the version recovers |
 | `start-limit` | SIGKILL of the engine until the unit gives up | Failed at the sixth kill, `repeated too quickly`; `reset-failed` and a start recover |
 | `upgrade` | Installs the same tree as version `X.post1` into a separate release venv, selects it in the unit and restarts | The engine runs from the new venv; the root, its revision and the holds are kept |
+
+The `restart-faults` cases print hash and environment receipts. The evidence
+directory retains their stores, spools and receipts together under `restart-faults/`.
 
 After a failed row the script prints the diagnostics: `systemctl status`, the
 unit's journal, `dsl41 runs` and `dsl41 query status`. It stops at the first

@@ -101,7 +101,7 @@ def spawn_wrapper(
     lifeline_r, lifeline_w = os.pipe()
     spec = {
         "version": runner_wrapper.SPOOL_VERSION,
-        "run_id": "test-run",
+        "run_id": "00000000-0000-4000-8000-000000000001",
         "job": run_dir.name.rsplit(".", 1)[0],
         "run_number": int(run_dir.name.rsplit(".", 1)[1]),
         "command": command,
@@ -369,7 +369,7 @@ def test_wrapper_refuses_mistyped_spec_field_before_spawning(
     lifeline_r, lifeline_w = os.pipe()
     spec = {
         "version": runner_wrapper.SPOOL_VERSION,
-        "run_id": "test-run",
+        "run_id": "00000000-0000-4000-8000-000000000001",
         "job": "j1",
         "run_number": 1,
         "command": f"echo ran > {marker}",
@@ -423,7 +423,7 @@ def test_wrapper_graceful_sigterm_reaches_command_on_parent_loss(tmp_path: Path)
     )
     spec = {
         "version": runner_wrapper.SPOOL_VERSION,
-        "run_id": "test-run",
+        "run_id": "00000000-0000-4000-8000-000000000001",
         "job": "j1",
         "run_number": 1,
         "command": "sleep 30",
@@ -483,7 +483,7 @@ def test_lifeline_write_end_leaks_nowhere(tmp_path: Path) -> None:
         json.dumps(
             {
                 "version": runner_wrapper.SPOOL_VERSION,
-                "run_id": f"test-{d.name}",
+                "run_id": "00000000-0000-4000-8000-000000000001",
                 "job": d.name.split(".")[0],
                 "run_number": 1,
                 "command": "sleep 60",

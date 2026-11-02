@@ -49,9 +49,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Literal
+from typing import TYPE_CHECKING, Any, Final
 
 from dsl41 import runner_procid as _procid
+from dsl41.runner_procid import NOTHING_LEFT, Left
 from dsl41.engine_charts import AttemptOutcome
 from dsl41.runner_adapters import Launch, group_has_live_member, spool_record, stop_ladder
 from dsl41.runner_attempts import NO_GROUP, command_group
@@ -118,26 +119,6 @@ class Observer:
         self.stops.engine.attempts.wrapper_exited(self.run_id, spawn)
 
 
-@dataclass(frozen=True)
-class Left:
-    """What is left of an attempt's command (`EngineStops.left`). `ours`: something is left;
-    `pids`, by pid with start tokens, are its processes where the cookie can be read (each may
-    be signalled by itself), empty where only the group and the leader's token can tell.
-    `unknown`: the scan failed (`reason`), so nothing is released; `pids` are the group's
-    members, still signalled. `none`: nothing is left."""
-
-    kind: Literal["ours", "unknown", "none"]
-    pids: Mapping[int, str] = field(default_factory=dict)
-    reason: str = ""
-
-    @property
-    def alive(self) -> bool:
-        return self.kind != "none"
-
-
-NOTHING_LEFT: Final = Left("none")
-
-
 def _pids(pids: Mapping[int, str]) -> str:
     return " ".join(str(pid) for pid in sorted(pids)) or "?"
 
@@ -167,6 +148,7 @@ class EngineStops:
         #: the recorded groups a reading proved the attempt's: every member is ours until a
         #: reading finds the group empty. `left` alone adds to it
         self._proven: set[tuple[int, str]] = set()
+        self._verdicts: dict[tuple[int, str], Left] = {}
         self._timers: dict[str, asyncio.TimerHandle] = {}
         #: the groups a ladder has signalled: one of them still existing outlived its stop
         self._laddered: set[int] = set()
@@ -232,8 +214,10 @@ class EngineStops:
             del self._runs[group]
             self._boots.pop(group, None)
             self._proven.discard(group)
+            self._verdicts.pop(group, None)
             self._laddered.discard(group[0])
         self._spawns.pop(attempt, None)
+        self._verdicts.pop((NO_GROUP, attempt), None)
 
     def scan(self) -> _procid.Ours | None:
         """One scan of every process of this uid carrying a cookie of this run root, None where
@@ -286,8 +270,8 @@ class EngineStops:
             return Left("unknown", pids, f"scan failed: {failed}")
         return Left("ours", pids, "processes") if pids else NOTHING_LEFT
 
-    def _members(self, pgid: int, start_token: str, attempt: str) -> Mapping[int, str]:
-        return self.left(pgid, start_token, attempt).pids
+    def _members(self, pgid: int, start_token: str, attempt: str) -> Left:
+        return self.left(pgid, start_token, attempt)
 
     def _attempt_of(self, pgid: int, start_token: str) -> str | None:
         return start_token if pgid == NO_GROUP else self._runs.get((pgid, start_token))
@@ -302,7 +286,9 @@ class EngineStops:
 
     def command_alive(self, pgid: int, start_token: str) -> bool:
         """Whether anything of the recorded command is left (`left`)."""
-        return self.left(pgid, start_token).alive
+        look = self.left(pgid, start_token)
+        self._verdicts[(pgid, start_token)] = look
+        return look.alive
 
     def unnamed_alive(self, attempt: str) -> bool:
         """Whether a process carrying the cookie of an attempt with no recorded group is left
@@ -403,7 +389,11 @@ class EngineStops:
         self._stuck(attempt, f"ladder failed: {error}")
 
     def command_survived(self, attempt: str) -> None:
-        self._stuck(attempt, COMMAND_SURVIVED)
+        pgid, token = self.engine.attempts.cleanup_group(attempt)
+        look = self._verdicts.pop((pgid, token), None)
+        if look is None:
+            look = self.left(pgid, token, attempt)
+        self._stuck(attempt, look.reason if look.kind == "unknown" else COMMAND_SURVIVED)
 
     def _stuck(self, attempt: str, note: str) -> None:
         """A stop that could not be carried out: the attempt stays unsettled, its job starts

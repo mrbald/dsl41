@@ -87,6 +87,12 @@ cleanup() {
         podman exec --user runner --workdir /work "$container_id" \
             bash examples/nightbank/deploy/drill-steps.sh diagnostics \
             >"$evidence/diagnostics.log" 2>&1 || true
+        # Keep the synthetic stores and spools together for the fault verdicts (DL-433).
+        if podman exec "$container_id" test -d /var/lib/dsl41-drill/restart-faults; then
+            podman cp "$container_id:/var/lib/dsl41-drill/restart-faults" \
+                "$evidence/restart-faults" >"$evidence/restart-faults-copy.log" 2>&1 || \
+                say "could not export restart-faults; see restart-faults-copy.log"
+        fi
     fi
     if [ "${DRILL_KEEP-}" = 1 ]; then
         say "kept the container; scripts/wargame.sh --base $base join $name"

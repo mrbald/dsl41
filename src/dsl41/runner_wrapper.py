@@ -66,11 +66,13 @@ The DL-42 "post-fork pre-exec" boundary is not portably hookable from Python;
 post_spawn_pre_record covers it, since both mean "command pid exists, spawn.json does
 not".
 
-Wrapper input: a JSON spec on stdin (docs/supervisor-protocol.md). The wrapper is
-parent-agnostic: the engine and the supervisor spawn it identically. Its own exit code is
-a notification only: 0 = a status record was written; 1 = an unreadable spec or a missing
-required key; 2 = the spec refusal (supervisor-protocol ss4 step 6, DL-229 item 8); 3 = a
-record write failed, e.g. ENOSPC. status.json is the sole data channel for the outcome.
+Wrapper input is frozen in docs/wrapper-protocol.md §2 and §4.6. Unknown keys,
+noncanonical run ids, invalid job components, mistyped values and NUL strings refuse
+before durable effects. Readable non-object JSON exits 2; malformed JSON or missing
+required keys exits 1 (DL-444). The wrapper defaults stdin and grace under §4.6.
+Exit 0 notifies a status record; exit 3 reports a failed record write (DL-229).
+status.json is the sole outcome channel.
+
 """
 
 from __future__ import annotations
@@ -79,6 +81,7 @@ import base64
 import json
 import math
 import os
+import re
 import select
 import signal
 import subprocess
@@ -246,21 +249,66 @@ def _is_wire_int(value: object) -> bool:
 
 
 def _spec_refusal(spec: dict[str, Any]) -> str | None:
-    """The ss4 step 6 refusal (exit 2, before anything spawns), or None.
+    """Frozen wrapper-protocol §2/§4.6 refusal: exit 2 before durable effects (DL-444).
 
-    `version` must be the integer 1 (`true` and `1.0` are refused). A present
+    Non-object JSON, unknown fields, noncanonical run ids, invalid job components,
+    mistyped fields and NUL strings refuse. Missing keys retain the §4.6 exit-1 path;
+    stdin and grace retain their defaults. `version` must be the integer 1 (`true` and `1.0` are refused). A present
     `lifeline_fd` must be an integer and a present `grace_seconds` a finite number of zero
     or more; a boolean is neither, and an integer too large for a float is out of range
     (DL-229). A mistyped value fails before `spawn.json` exists. An absent `lifeline_fd`
     stays the exit-1 missing key of ss4 step 6."""
+    if not isinstance(spec, dict):
+        return "spec is not an object"
+    allowed = {
+        "version",
+        "run_id",
+        "job",
+        "run_number",
+        "command",
+        "run_dir",
+        "lifeline_fd",
+        "stdout_path",
+        "stderr_path",
+        "stdin_path",
+        "grace_seconds",
+        "env",
+    }
+    unknown = spec.keys() - allowed
+    if unknown:
+        return f"unknown spec fields: {', '.join(sorted(unknown))}"
     version = spec.get("version")
     if not (_is_wire_int(version) and version == SPOOL_VERSION):
         return f"unsupported spec version {version!r}"
     if "lifeline_fd" in spec and not _is_wire_int(spec["lifeline_fd"]):
         return f"lifeline_fd is not an integer: {spec['lifeline_fd']!r}"
+    if "run_number" in spec and not _is_wire_int(spec["run_number"]):
+        return f"run_number is not an integer: {spec['run_number']!r}"
+    for name in ("run_id", "job", "command", "run_dir", "stdout_path", "stderr_path", "stdin_path"):
+        if name not in spec or (name == "stdin_path" and spec[name] is None):
+            continue
+        if not isinstance(spec[name], str) or "\0" in spec[name]:
+            return f"{name} is not a string without NUL: {spec[name]!r}"
+    if (
+        "run_id" in spec
+        and re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", spec["run_id"]
+        )
+        is None
+    ):
+        return f"run_id is not a canonical uuid4: {spec['run_id']!r}"
+    if "job" in spec and (
+        spec["job"] in ("", ".", "..")
+        or os.sep in spec["job"]
+        or (os.altsep is not None and os.altsep in spec["job"])
+    ):
+        return f"job is not one directory component: {spec['job']!r}"
     if "env" in spec and not (
         isinstance(spec["env"], dict)
-        and all(isinstance(k, str) and isinstance(v, str) for k, v in spec["env"].items())
+        and all(
+            isinstance(k, str) and isinstance(v, str) and "\0" not in k and "\0" not in v
+            for k, v in spec["env"].items()
+        )
     ):
         return f"env is not an object of strings: {spec['env']!r}"
     if "grace_seconds" in spec:

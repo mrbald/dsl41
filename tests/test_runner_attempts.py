@@ -1134,16 +1134,22 @@ def test_an_engine_death_with_the_command_alive_runs_the_ladder_as_cleanup() -> 
     asyncio.run(scenario())
 
 
-def test_a_quarantined_attempt_ends_with_its_reason_and_reads_nothing() -> None:
-    """spec-restart ss7: a quarantine gives the outcome itself; nothing is read or signalled,
-    whatever is alive."""
-    world = World(alive={7})
-    attempts, _ = _tiers(world, command_alive=lambda pgid, token: pytest.fail("a reading"))
-    job = _running(attempts, "j", 7)
-    attempts.restored_stop(job, UPDATE_STOP)
-    given = AttemptOutcome("unobservable", cause=QUARANTINED, note="status.json names run x")
-    attempts.engine_died(job, given)
-    assert attempts.outcome(job) == given and not attempts.ladder_running(job)
+def test_a_quarantined_attempt_keeps_its_outcome_and_cleans_its_valid_group() -> None:
+    """O, DL-431/433: an invalid status keeps its refusal; a proven live group gets cleanup."""
+
+    async def scenario() -> None:
+        world = World(alive={7}, ignores_term={7})
+        attempts, _ = _tiers(world)
+        job = _running(attempts, "j", 7)
+        attempts.restored_stop(job, UPDATE_STOP)
+        given = AttemptOutcome("unobservable", cause=QUARANTINED, note="status.json names run x")
+        attempts.engine_died(job, given)
+        assert attempts.outcome(job) == given and attempts.ladder_running(job)
+        await attempts.join()
+        assert ("TERM", 7) in world.log and ("KILL", 7) in world.log
+        assert world.alive == set() and not world.timers
+
+    asyncio.run(scenario())
 
 
 def test_a_closing_attempt_is_restored_ended_and_its_cleanup_reads_what_is_left() -> None:

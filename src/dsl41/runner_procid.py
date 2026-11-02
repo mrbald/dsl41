@@ -26,7 +26,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Final, Literal
 
@@ -538,19 +538,61 @@ def _read_at(directory: int, name: str) -> bytes:
         os.close(fd)
 
 
+@dataclass(frozen=True)
+class Left:
+    """What is left of an attempt's command (`EngineStops.left`). `ours`: something is left;
+    `pids`, by pid with start tokens, are its processes where the cookie can be read (each may
+    be signalled by itself), empty where only the group and the leader's token can tell.
+    `unknown`: the scan failed (`reason`), so nothing is released; `pids` are the group's
+    members, still signalled. `none`: nothing is left."""
+
+    kind: Literal["ours", "unknown", "none"]
+    pids: Mapping[int, str] = field(default_factory=dict)
+    reason: str = ""
+
+    @property
+    def alive(self) -> bool:
+        return self.kind != "none"
+
+
+NOTHING_LEFT: Final = Left("none")
+
+
 def pidfd_supported() -> bool:
     """Whether this Python and kernel can signal through a pidfd: `os.pidfd_open` and
-    `signal.pidfd_send_signal` exist, and opening a pidfd on this process works (a kernel
-    before 5.3 answers ENOSYS). The engine selects its signalling primitive once at start
+    `signal.pidfd_send_signal` exist, and opening and signalling this process with signal 0
+    work. An unavailable or refused primitive selects the token-checked fallback, including
+    descriptor exhaustion at the probe. The engine selects its primitive once at start
     (DL-436)."""
     pidfd_open = getattr(os, "pidfd_open", None)
-    if pidfd_open is None or getattr(signal, "pidfd_send_signal", None) is None:
+    send = getattr(signal, "pidfd_send_signal", None)
+    if pidfd_open is None or send is None:
         return False
     try:
-        os.close(pidfd_open(os.getpid()))
+        fd = pidfd_open(os.getpid())
+        try:
+            send(fd, 0)
+        finally:
+            os.close(fd)
     except OSError:
         return False
     return True
+
+
+def scanned_process_gone(pid: int, start_token: str) -> bool:
+    """Prove a scanned Linux target gone or replaced; unreadable is unknown (DL-431).
+
+    Only ENOENT/ESRCH proves absence. Other errors propagate so a failed KILL cannot
+    become a successful ladder. A successful stat read proves a token mismatch or zombie.
+    """
+    try:
+        with open(f"{_PROC}/{pid}/stat", "rb") as stream:
+            fields = _stat_fields(stream.read())
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ESRCH):
+            return True
+        raise
+    return f"ticks:{fields[19]}" != start_token or _linux_zombie(fields)
 
 
 def signal_ours(pid: int, start_token: str, sig: int, *, pidfd: bool | None = None) -> bool:

@@ -424,7 +424,7 @@ def test_the_ladder_without_members_is_the_group_ladder(monkeypatch: pytest.Monk
 def test_the_probe_selects_pidfd_or_token_checked_os_kill(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Missing APIs and ENOSYS select os.kill; a signal refused on an available pidfd
+    """O, DL-436: missing APIs and ENOSYS select os.kill; a refused selected pidfd
     never retries by pid (DL-436)."""
     sent: list[int] = []
     killed: list[tuple[int, int]] = []
@@ -440,14 +440,16 @@ def test_the_probe_selects_pidfd_or_token_checked_os_kill(
     monkeypatch.setattr(procid, "signal", fake_signal)
     monkeypatch.setattr(procid, "proc_start_token", lambda _pid: "t")
     assert procid.pidfd_supported()
-    assert procid.signal_ours(5, "t", 9) and sent == [9]
-    assert not procid.signal_ours(5, "other", 9)  # no longer the process the scan found
+    assert sent == [0]
+    sent.clear()
+    assert procid.signal_ours(5, "t", 9, pidfd=True) and sent == [9]
+    assert not procid.signal_ours(5, "other", 9, pidfd=True)  # no longer the process the scan found
 
     def refused(_fd: int, _sig: int) -> None:
         raise PermissionError(errno.EPERM, "setuid")
 
     fake_signal.pidfd_send_signal = refused
-    assert not procid.signal_ours(5, "t", 9)
+    assert not procid.signal_ours(5, "t", 9, pidfd=True)
     assert killed == []
 
     def no_pidfd(_pid: int) -> int:
@@ -470,6 +472,46 @@ def test_the_probe_selects_pidfd_or_token_checked_os_kill(
     assert killed == [(5, 9)] * 3
     fake_os.kill = refused
     assert not procid.signal_ours(5, "t", 9)
+
+
+@pytest.mark.parametrize("stage", ["open", "send"])
+@pytest.mark.parametrize("error", [errno.EPERM, errno.ENOSYS, errno.EMFILE])
+def test_probe_failure_selects_a_working_fallback(
+    monkeypatch: pytest.MonkeyPatch, stage: str, error: int
+) -> None:
+    """O, DL-436: either failed capability check selects token-checked kill; close every fd."""
+    closed: list[int] = []
+    sent: list[tuple[int, int]] = []
+
+    def refused(*_args: object) -> None:
+        raise OSError(error, "synthetic probe refusal")
+
+    fake_os = SimpleNamespace(
+        pidfd_open=refused if stage == "open" else lambda _pid: 7,
+        getpid=lambda: 42,
+        close=closed.append,
+        kill=lambda pid, sig: sent.append((pid, sig)),
+    )
+    monkeypatch.setattr(procid, "os", fake_os)
+    monkeypatch.setattr(procid, "signal", SimpleNamespace(pidfd_send_signal=refused))
+    monkeypatch.setattr(procid, "proc_start_token", lambda _pid: "ticks:123")
+    assert not procid.pidfd_supported()
+    assert procid.signal_ours(42, "ticks:123", signal.SIGTERM)
+    assert not procid.signal_ours(42, "ticks:124", signal.SIGKILL)
+    assert sent == [(42, signal.SIGTERM)]
+    assert closed == ([7, 7, 7] if stage == "send" else [])
+
+
+def test_unsent_kill_fails_the_ladder_instead_of_claiming_a_survivor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """O, DL-426/436: a live target with a refused KILL raises; a gone target does not."""
+    monkeypatch.setattr(procid, "signal_ours", lambda *_args, **_kw: False)
+    monkeypatch.setattr(procid, "scanned_process_gone", lambda *_args: False)
+    with pytest.raises(OSError, match="KILL not sent to pid 7"):
+        asyncio.run(runner_adapters.stop_ladder(7, "ticks:1", 0, members=lambda: {7: "ticks:1"}))
+    monkeypatch.setattr(procid, "scanned_process_gone", lambda *_args: True)
+    asyncio.run(runner_adapters.stop_ladder(7, "ticks:1", 0, members=lambda: {7: "ticks:1"}))
 
 
 @pytest.mark.parametrize("pidfd", [True, False], ids=["pidfd", "no-pidfd"])
@@ -541,3 +583,35 @@ def test_the_ladder_stops_a_setsid_escape_that_ignores_term(
         child.wait()
         assert child.stdout is not None
         child.stdout.close()
+
+
+@pytest.mark.parametrize("error", [errno.ENOENT, errno.ESRCH, errno.EIO, errno.EMFILE, errno.EPERM])
+def test_only_disappearance_errors_prove_a_scanned_pid_gone(
+    monkeypatch: pytest.MonkeyPatch, error: int
+) -> None:
+    """O, DL-431: unreadable stat is unknown; only ENOENT/ESRCH proves disappearance."""
+    import builtins
+
+    def refused(*_args: object, **_kw: object) -> None:
+        raise OSError(error, "synthetic stat failure")
+
+    monkeypatch.setattr(builtins, "open", refused)
+    if error in (errno.ENOENT, errno.ESRCH):
+        assert procid.scanned_process_gone(42, "ticks:1")
+    else:
+        with pytest.raises(OSError) as found:
+            procid.scanned_process_gone(42, "ticks:1")
+        assert found.value.errno == error
+
+
+@pytest.mark.parametrize(
+    ("state", "token", "gone"),
+    [("S", "ticks:99", False), ("S", "ticks:98", True), ("Z", "ticks:99", True)],
+)
+def test_successful_stat_proves_reuse_or_zombie_but_keeps_matching_live_pid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str, token: str, gone: bool
+) -> None:
+    """O, DL-431: a successful token/state reading can prove reuse or an exited target."""
+    _proc(tmp_path, 42, environ=b"", stat=_stat(42, state, 42, 99))
+    monkeypatch.setattr(procid, "_PROC", str(tmp_path))
+    assert procid.scanned_process_gone(42, token) is gone
