@@ -25563,3 +25563,44 @@ relitigate an entry; append a new one.
   fallback after pidfd failure remain unchanged. An unreadable or mismatched spawn
   names no group; cookie cleanup remains available where supported. Quarantine's
   outcome and hold rule are unchanged. No schema, state version or chart changes.
+
+- DL-446 The site status hook observes committed live transitions with bounded best-effort delivery
+  (2026-11-02; owner item C; docs/runner-design.md §§4/12, docs/control-protocol.md, docs/deploy.md)
+  THE RULE. Main TOML engine.status_hook is an absolute executable path, without arguments,
+  expansion or shell parsing. Omit to disable; wrong types, empty/relative paths and NUL exit 2.
+  Missing/nonexecutable targets are logged delivery failures, never startup blockers.
+  status_hook_long_running_s is a strict nonnegative integer, default 0 (disabled). Both are
+  host settings loaded on restart; reread requires restart after changes. Rehearsal never hooks.
+  Observe newly committed live transitions in order, including recovery and time-half effects.
+  Dry application, historical replay and deduplication never notify. job_failure observes
+  every actual transition into FAILURE from another status at OracleWriters._write, BOX and
+  injected statuses included. alarm observes SEM-34's emitted MUST_START_ALARM/MUST_COMPLETE_ALARM
+  at its timer transition, without reinterpreting alarm_if_*, notification or min/max_run_alarm
+  attributes. job_hold observes false-to-true on_hold at _flag, including auto/interruption hold;
+  Initial/restored flags and no-ops are silent. job_long_running observes status/status_at once
+  per RUNNING interval per engine invocation at admitted time minus status_at >= threshold;
+  check each second, recheck before enqueueing. Restart may notify again. Scheduling is unchanged.
+  engine_refused attempts delivery before startup exits 2 after valid hook settings were obtained;
+  engine_down observes failure-unit activation. One UTF-8 JSON object, newline and EOF carries
+  mandatory keys v=1, id=UUID4, event, at=UTC RFC3339, host=hostname, run_root=absolute path, job,
+  run_number, transition, exit_code, unit, threshold_s. Unavailable/inapplicable values are null.
+  run_number is the observed row's, including alarms; transition is its oracle marker, else null.
+  exit_code is the job_failure transition's code or engine_refused's 2; else null, never old code.
+  threshold_s is for long-running only. Ignore unknown fields; incompatible changes increment v.
+  One async worker, FIFO 64, max 16 KiB/event, drops newest on overflow/oversize; count and
+  rate-limit diagnostics. One process/event, at-most-once invocation per engine invocation;
+  no retry, spool, replay or durable delivery record. Crash/shutdown can lose queued events;
+  shutdown drops backlog. Spawn and I/O run off-loop; their monotonic deadline is five seconds.
+  After every invocation, even exit 0, TERM its group, allow 0.5 s, then KILL; use 0.5 s to verify
+  cleanup and reap. Hold the slot until cleanup completes; otherwise always log and disable.
+  Retain late-spawn ownership; no overlapping invocation. Hooks must not detach. Hook/logging
+  failures never propagate into admission/dispatch. Run as the engine account, argv=[path],
+  cwd /, umask 077, inherited descriptors closed, exactly PATH=/usr/bin:/bin and LANG=C,
+  no job environment/profile, stdout/stderr discarded. Same-UID hooks are trusted code.
+  OnFailure=dsl41-engine-down.service runs the installed oneshot helper with literal hook path,
+  root and engine-unit arguments, independently of TOML/store readability, with the same
+  payload/bounds/account/environment. Set Restart=no, TimeoutStartSec=7, KillMode=control-group,
+  no recursive OnFailure; match both installed hook paths. Max: one engine hook plus one helper.
+  THE REASON. Loss is intentional; MUST_COMPLETE is not runtime. OnFailure reports unit failure.
+  THE BOUNDARY. Amends §§4/12 with no new oracle event or durable delivery state. Mail/pager stays
+  site-owned; gates and independent review stand. The boundary cannot confine malicious hook code.

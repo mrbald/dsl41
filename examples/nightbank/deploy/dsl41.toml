@@ -2,6 +2,9 @@ format_version = 1
 
 [engine]
 run_root = "/srv/dsl41/runs/nightbank"
+# Install this site-owned executable at the same path as the failure unit (DL-446).
+status_hook = "/etc/dsl41/status-hook"
+status_hook_long_running_s = 0
 
 [estate]
 include = ["/opt/nightbank/cfg/*.jil"]

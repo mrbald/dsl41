@@ -51,7 +51,16 @@ ORACLE_FRESH = frozenset({"_trace", "_emitted"})
 #: same: the settlements owed inside a cascade (DL-340), whether the scan's
 #: last `readmit` moved its waiter, the instances a macrostep reached
 #: (DL-350), and the items and the root of the dispatch in flight (DL-351).
-ORACLE_IDLE = frozenset({"_late_settlements", "_readmitted", "_reached", "_items", "_rooted"})
+ORACLE_IDLE = frozenset(
+    {
+        "_late_settlements",
+        "_readmitted",
+        "_reached",
+        "_items",
+        "_rooted",
+        "status_observations",
+    }
+)
 #: Oracle attributes the fork shares: set by the constructor and replaced
 #: whole only by an update's `replace_catalog`, never edited; `_cap`, the item
 #: cap, follows the catalog's job count (DL-351), and `_members_of`, the
@@ -134,6 +143,12 @@ def state_bytes(oracle: Oracle, since: tuple[int, int] = (0, 0)) -> bytes:
         "emitted": [_event(ev) for ev in oracle._emitted[emitted:]],
         "queue": [_event(ev) for ev in oracle._queue],
         "now": _when(oracle._now),
+        "status_observations": None
+        if oracle.status_observations is None
+        else [
+            [row.event, _when(row.at), row.job, row.run_number, row.transition, row.exit_code]
+            for row in oracle.status_observations
+        ],
         "opening_release": list(oracle._opening_release),
         "flags": [oracle._scan_owed, oracle._wake_owed],
         "tz_cache": sorted(oracle._tz_cache),

@@ -15,7 +15,7 @@ set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=drill-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/drill-lib.sh"
 
-ROWS=(install start storage restart reboot kill-engine drain reload leak restart-faults refusal start-limit upgrade)
+ROWS=(install start storage restart reboot kill-engine drain reload leak restart-faults refusal start-limit malformed-toml upgrade)
 
 step_install() { # the wheel, the nightbank estate, the drill's jobs, the unit and its user
     local wheel out version
@@ -107,11 +107,19 @@ ENV
     # docs/deploy.md: the run root is the service user's; the engine creates what is inside
     sudo install -d -m 0755 /srv/dsl41/runs
     sudo install -d -o dsl41 -g dsl41 -m 0700 "$ROOT"
+    as_dsl41 touch "$HOOK_EVENTS"
+    sudo tee /etc/dsl41/status-hook >/dev/null <<'SH'
+#!/bin/sh
+exec /bin/cat >> /srv/dsl41/nightbank/night/status-hooks.jsonl
+SH
+    sudo chmod 0755 /etc/dsl41/status-hook
     # The main config's declared lint policy determines admission (DL-437).
     out=$(as_dsl41 "$DSL41" lint --config "$CONFIG") || fail "lint refused the estate: $out"
     [ -z "$out" ] || fail "the installed estate does not lint clean: $out"
     sed "s/<version>/$version/g" "$REPO/examples/nightbank/deploy/dsl41-engine.service" | \
         sudo tee "/etc/systemd/system/$UNIT" >/dev/null
+    sed "s/<version>/$version/g" "$REPO/examples/nightbank/deploy/dsl41-engine-down.service" | \
+        sudo tee /etc/systemd/system/dsl41-engine-down.service >/dev/null
     sudo systemd-analyze verify "/etc/systemd/system/$UNIT"
     sudo systemctl daemon-reload
     sudo systemctl enable "$UNIT"
@@ -194,7 +202,8 @@ step_kill_engine() { # SIGKILL of the engine: the unit restarts it and the run g
 }
 
 step_drain() { # systemctl stop with a live job: TERM, the grace, KILL, a clean shutdown
-    local mark t0 took after
+    local mark t0 took after down
+    down=$(hook_count engine_down)
     request FORCE_STARTJOB DRILL_STUBBORN_C
     wait_for 60 "DRILL_STUBBORN_C is running" attempt_is DRILL_STUBBORN_C 1 RUNNING
     mark=$(date +%s)
@@ -209,6 +218,8 @@ step_drain() { # systemctl stop with a live job: TERM, the grace, KILL, a clean 
         fail "ExecStop did not exit 0: $(prop ExecStop)"
     wait_for 10 "the drain was clean" journal_has "$mark" "engine stopped: clean_shutdown"
     gone "drill-job stubborn" || fail "the stubborn command outlived the drain"
+    sleep 2
+    hook_count_is engine_down "$down" || fail "normal stop activated OnFailure"
     ok "the drain took ${took}s, ExecStop exited 0 and the store says clean_shutdown"
     # the next start reads how the attempt ended: a rerun after engine_stop
     manual start
@@ -357,7 +368,7 @@ assert_stays_failed() { # assert_stays_failed CODE
 }
 
 step_refusal() { # pending source changes cannot deploy or refuse restart (DL-437)
-    local mark rev
+    local mark rev down refused
     # the estate the row found, restored afterwards whichever rows ran before it
     cp "$DRILL_JIL" "$STATE/drill.jil.before"
     rev=$(status | jq .config_rev)
@@ -372,6 +383,8 @@ step_refusal() { # pending source changes cannot deploy or refuse restart (DL-43
     sudo install -m 0644 "$STATE/drill.jil.before" "$DRILL_JIL"
     # A store version mismatch still refuses startup (DL-433, DL-437).
     sudo systemctl stop "$UNIT"
+    down=$(hook_count engine_down)
+    refused=$(hook_count engine_refused)
     sudo "$VENV/bin/python" - "$ROOT/engine.db" <<'PY'
 import sqlite3
 import sys
@@ -380,6 +393,8 @@ with sqlite3.connect(sys.argv[1]) as db:
 PY
     manual start
     assert_stays_failed 2
+    wait_for 10 "startup refusal delivered engine_refused" hook_count_is engine_refused "$((refused + 1))"
+    wait_for 10 "startup refusal activated OnFailure" hook_count_is engine_down "$((down + 1))"
     sudo "$VENV/bin/python" - "$ROOT/engine.db" <<'PY'
 import sqlite3
 import sys
@@ -393,7 +408,8 @@ PY
 }
 
 step_start_limit() { # five crashes in 300 s leave the unit failed; reset-failed recovers
-    local mark kills=0 pid
+    local mark kills=0 pid down
+    down=$(hook_count engine_down)
     sudo systemctl reset-failed "$UNIT"
     mark=$(date +%s)
     while ((kills < 10)) && ! is_state failed; do
@@ -407,10 +423,31 @@ step_start_limit() { # five crashes in 300 s leave the unit failed; reset-failed
     # reset-failed cleared the counter: five restarts fit StartLimitBurst, the sixth does not
     [ "$kills" = 6 ] || fail "the unit gave up after $kills kills, not 6"
     wait_for 10 "the journal names the start limit" journal_has "$mark" "repeated too quickly"
+    wait_for 10 "crash-loop exhaustion activated OnFailure" hook_count_at_least engine_down "$((down + 1))"
     ok "after $kills kills the unit stays failed (StartLimitBurst=5)"
     manual start
     wait_running
     ok "reset-failed and a start recovered the engine on $ROOT"
+}
+
+step_malformed_toml() { # OnFailure has no dependency on TOML readability (DL-446)
+    local down refused
+    sudo systemctl stop "$UNIT"
+    down=$(hook_count engine_down)
+    refused=$(hook_count engine_refused)
+    sudo cp "$CONFIG" "$STATE/config.before"
+    printf 'invalid = [\n' | sudo tee "$CONFIG" >/dev/null
+    manual start
+    assert_stays_failed 2
+    wait_for 10 "malformed TOML activated the independent helper" hook_count_is engine_down "$((down + 1))"
+    hook_count_is engine_refused "$refused" || fail "malformed TOML invoked the engine hook"
+    as_dsl41 cat "$HOOK_EVENTS" | jq -e -s --arg root "$ROOT" \
+        '[.[] | select(.event == "engine_down")] | all(.v == 1 and .unit == "dsl41-engine.service" and .run_root == $root and .job == null and .run_number == null and .transition == null and .threshold_s == null)' >/dev/null ||
+        fail "engine_down payload differs from its literal unit arguments"
+    sudo cp "$STATE/config.before" "$CONFIG"
+    manual start
+    wait_running
+    ok "malformed TOML leaves engine_refused silent and delivers engine_down"
 }
 
 step_upgrade() { # select a compatible engine release independently of app inputs (DL-437)
@@ -432,6 +469,8 @@ step_upgrade() { # select a compatible engine release independently of app input
     [ "$after" != "$before" ] || fail "the venv still has dsl41 $before"
     sed "s/<version>/$version/g" "$REPO/examples/nightbank/deploy/dsl41-engine.service" | \
         sudo tee "/etc/systemd/system/$UNIT" >/dev/null
+    sed "s/<version>/$version/g" "$REPO/examples/nightbank/deploy/dsl41-engine-down.service" | \
+        sudo tee /etc/systemd/system/dsl41-engine-down.service >/dev/null
     sudo systemctl daemon-reload
     installed_version >"$STATE/version-installed"
     manual start
@@ -451,9 +490,13 @@ step_diagnostics() { # what an operator reads after a failure; never fails
 }
 
 step_storage() { # O: DL-99/DL-428, installed exclusion and real full-filesystem admission
+    local refusals
+    refusals=$(hook_count engine_refused)
     sudo install -d -o dsl41 -g dsl41 -m 0700 "$STATE/storage"
     as_dsl41 timeout -k 15 180 "$VENV/bin/python" -I "$REPO/examples/nightbank/deploy/storage_probe.py" \
         unit --work "$STATE/storage/unit" --unit "$UNIT" --config "$CONFIG" --root "$ROOT"
+    wait_for 10 "both refused contenders delivered outside the run root" \
+        hook_count_is engine_refused "$((refusals + 2))"
     as_dsl41 timeout -k 15 180 "$VENV/bin/python" -I "$REPO/examples/nightbank/deploy/storage_probe.py" \
         leader --work "$STATE/storage/leader"
     as_dsl41 timeout -k 15 180 "$VENV/bin/python" -I "$REPO/examples/nightbank/deploy/storage_probe.py" \

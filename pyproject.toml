@@ -73,6 +73,7 @@ Issues = "https://github.com/mrbald/dsl41/issues"
 
 [project.scripts]
 dsl41 = "dsl41.cli:app"
+dsl41-status-hook = "dsl41.status_hook:main"
 
 [build-system]
 requires = ["hatchling>=1.27,<2", "hatch-fancy-pypi-readme>=25.1,<26"]

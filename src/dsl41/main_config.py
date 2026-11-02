@@ -26,6 +26,7 @@ from dsl41.reload_plan import Estate, RereadRefused, estate_settings
 from dsl41.runner_config import RuntimeProfile, runtime_profile_from_cli
 from dsl41.semantics import check_overrides
 from dsl41.timezones import parse_timezone_map, resolve_timezone
+from dsl41.status_hook import HookSettings
 
 DEFAULT_CONFIG = Path("/etc/dsl41/dsl41.toml")
 CAPTURE = "main-inputs.json"
@@ -42,7 +43,7 @@ class Environment(StrictModel):
     properties: list[str] = []
 
 
-class HostConfig(StrictModel):
+class HostConfig(HookSettings, StrictModel):
     run_root: str = Field(min_length=1)
     as_machine: list[str] = []
     machine_policy: Literal["strict", "local-eligible"] = "strict"
@@ -165,9 +166,9 @@ def load_run_root(path: Path) -> Path:
         raise RereadRefused([f"{path}: engine.run_root: {exc}"]) from exc
 
 
-def load_host(path: Path) -> HostConfig:
+def load_host(path: Path, raw: bytes | None = None) -> HostConfig:
     """Restart validates format and current host settings; environment stays pending (DL-437)."""
-    document = read_document(path)
+    document = read_document(path, raw)
     try:
         version = document.get("format_version")
         if type(version) is not int or version != 1:
@@ -175,7 +176,7 @@ def load_host(path: Path) -> HostConfig:
         engine = document.get("engine")
         if not isinstance(engine, dict):
             raise ValueError("engine must be a table")
-        names = ("run_root", "as_machine", "machine_policy", "access_map")
+        names = tuple(HostConfig.model_fields)
         host = HostConfig.model_validate({key: engine[key] for key in names if key in engine})
         if not Path(host.run_root).is_absolute():
             raise ValueError("engine.run_root must be absolute")
@@ -196,6 +197,8 @@ def launch_settings(config: MainConfig | HostConfig, path: Path) -> dict[str, ob
         "as_machine": sorted(set(host.as_machine)),
         "machine_policy": host.machine_policy,
         "access_map": None if host.access_map is None else joined(path, host.access_map),
+        "status_hook": host.status_hook,
+        "status_hook_long_running_s": host.status_hook_long_running_s,
     }
 
 
@@ -233,13 +236,13 @@ def input_bytes(path: str) -> bytes:
         raise RereadRefused([f"{path}: {exc}"]) from exc
 
 
-def prepare(path: Path) -> Estate:
+def prepare(path: Path, raw: bytes | None = None) -> Estate:
     """Capture, render Python, compile once and recheck files and membership (DL-437)."""
     from dsl41.cli_common import module_builder
 
     diagnostics: list[str] = []
     try:
-        raw = read_regular(path)
+        raw = read_regular(path) if raw is None else raw
         config = load_config(path, raw)
         sources = sorted(expand(path, config.estate.include, diagnostics))
         if not sources:
