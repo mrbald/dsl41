@@ -580,7 +580,7 @@ def _calendar_preflight(
 
 
 def _timezone_preflight(
-    name: str, job: JobIR, tz_aliases: Mapping[str, str] | None
+    name: str, job: JobIR, tz_aliases: Mapping[str, str] | None, timezone_map_source: str
 ) -> list[PreflightItem]:
     """ERROR/WARN: `timezone:` resolution (SEM-35/DL-62)."""
     items: list[PreflightItem] = []
@@ -597,23 +597,23 @@ def _timezone_preflight(
     tz_res = resolve_timezone(sched.timezone, tz_aliases)
     if tz_res is None:
         if tz_aliases is not None:
-            detail = "not a zoneinfo name and not in the supplied --timezone-map"
+            detail = f"not a zoneinfo name and not in the supplied {timezone_map_source}"
         elif len(candidates := city_candidates(sched.timezone)) > 1:
             detail = (
                 f"ambiguous city name ({', '.join(candidates)}); use the full"
-                " zone name or a --timezone-map"
+                f" zone name or a map via {timezone_map_source}"
             )
         else:
             detail = (
                 "not a zoneinfo name; the vendor resolves SEM-35 names through"
                 " the instance's ujo_timezones table -- feed its `autotimezone"
-                " -l` listing in via --timezone-map"
+                f" -l` listing in via {timezone_map_source}"
             )
         err(f"timezone {sched.timezone!r} is not resolvable: {detail}")
     elif tz_res.how == "city":
         warn(
             f"timezone {sched.timezone!r} assumed to be {tz_res.zone}"
-            " (unique zoneinfo city match, DL-62); pin it with --timezone-map"
+            f" (unique zoneinfo city match, DL-62); pin it with {timezone_map_source}"
             " (`autotimezone -l`) if the estate maps it differently"
         )
     elif tz_res.how == "posix" and tz_res.tz.utcoffset(None) != timedelta(0):
@@ -698,6 +698,7 @@ def preflight(
     start: datetime | None = None,
     default_tz: str | None = None,
     tz_aliases: Mapping[str, str] | None = None,
+    timezone_map_source: str = "timezone map",
     semantics: SemanticSwitches | None = None,
 ) -> list[PreflightItem]:
     """ss8: refuse loudly, run honestly. `execution=False` (rehearse) skips the machine, owner
@@ -706,9 +707,10 @@ def preflight(
     `start` (DL-56) is the run anchor (naive UTC) for the calendar exhaustion and dormancy
     probes; omitted, it is now (DL-213). `default_tz` (DL-212) is the run's base zone: the probes
     read the anchor in the job's zone, else this one, else UTC. `tz_aliases` (DL-62) is the
-    instance's ujo_timezones table (`--timezone-map`): a unique-city resolution WARNs, an
+    instance's ujo_timezones table: a unique-city resolution WARNs, an
     unresolvable name ERRORs. `semantics` are the run's switches, applied when compiling extended
-    calendars; None is the registry defaults.
+    calendars; None is the registry defaults. `timezone_map_source` names the input key or
+    option used in timezone findings (DL-62).
 
     `as_machine` (DL-52) is the declared identity: empty means the forward hostname, otherwise
     exactly those names plus localhost. `machine_policy` (DL-49) settles a virtual pool with
@@ -731,7 +733,7 @@ def preflight(
         items.extend(
             _calendar_preflight(name, job, catalog, start, tz_aliases, default_tz, semantics)
         )
-        items.extend(_timezone_preflight(name, job, tz_aliases))
+        items.extend(_timezone_preflight(name, job, tz_aliases, timezone_map_source))
         items.extend(_retry_preflight(name, job))
         items.extend(_resource_preflight(name, job, catalog))
     items.extend(_oracle_preflight(catalog, semantics))
