@@ -102,11 +102,18 @@ def painted_lines(rendered: bytes, columns: int, rows: int) -> list[str]:
     """Only positioned, observed cells count; unknown cells cannot complete a label."""
     cells = [["\ufffd"] * columns for _ in range(rows)]
     row, column = -1, -1
-    for token in re.findall(rb"\x1b\[[0-?]*[ -/]*[@-~]|[^\x1b]+|\x1b", rendered):
+    tokens = rb"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|[^\x1b]+|\x1b"
+    for token in re.findall(tokens, rendered):
         position = re.fullmatch(rb"\x1b\[(\d+);(\d+)H", token)
         if position:
             row, column = int(position[1]) - 1, int(position[2]) - 1
         elif re.fullmatch(rb"\x1b\[[\d;:]*m", token):
+            continue
+        elif re.fullmatch(
+            rb"\x1b\](?:0|2|22);[^\x00-\x1f\x7f]*(?:\x07|\x1b\\)", token
+        ) or re.fullmatch(rb"\x1b\[\?(?:25|1000|1003|1004|1006|1015|1016|2004|2026)[hl]", token):
+            # DL-391: titles, pointer shape, cursor visibility and input/reporting modes paint
+            # no cells. Unknown controls and buffer switches still invalidate the observed grid.
             continue
         elif token.startswith(b"\x1b"):
             cells = [["\ufffd"] * columns for _ in range(rows)]
