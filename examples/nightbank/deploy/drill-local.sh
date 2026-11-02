@@ -59,6 +59,8 @@ cleanup() {
     if podman container exists "$container"; then
         podman inspect "$container" >"$evidence/container.json" 2>&1 || true
         podman logs "$container" >"$evidence/container.log" 2>&1 || true
+        podman cp "$container:/var/lib/dsl41-drill/storage" "$evidence/storage" 2>/dev/null || true
+        podman cp "$container:/srv/dsl41-storage" "$evidence/storage-filesystem" 2>/dev/null || true
         podman exec --user runner --workdir /work "$container" \
             bash examples/nightbank/deploy/drill-steps.sh diagnostics \
             >"$evidence/diagnostics.log" 2>&1 || true
