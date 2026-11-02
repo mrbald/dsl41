@@ -778,6 +778,72 @@ def test_the_first_reading_terms_what_is_owed_and_reports_the_rest(
     assert "?.?: run id 00000000-0000-4000-8000-0000000000bb has no open attempt" in err
 
 
+def test_empty_command_and_file_watch_first_readings_signal_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """O, DL-433: an empty successful scan and an FW dispatch produce no signals or writes."""
+    run_root = tmp_path / "run"
+    text = _jil("j") + f"insert_job: w\njob_type: f\nwatch_file: {tmp_path / 'absent'}\n"
+    adapters = {"CMD": FakeAdapter(default=None), "FW": FakeAdapter(default=None)}
+
+    async def first() -> None:
+        engine = start_run(
+            lower_source(text), run_root, clock=VirtualClock(start=T0), adapters=adapters
+        )
+        for job in ("j", "w"):
+            engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": job}))
+        await engine.run_until_quiescent(T0)
+        await _close(engine)
+
+    asyncio.run(first())
+    _set_cookie(run_root)
+    before = rows(run_root)
+    sent: list[object] = []
+    monkeypatch.setattr(runner_stops, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(runner_procid, "ours", lambda *_: runner_procid.Ours({}))
+    monkeypatch.setattr(runner_procid, "signal_ours", lambda *args, **_kw: sent.append(args))
+
+    async def restart() -> None:
+        engine = await resume_run(
+            lower_source(text),
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters=adapters,
+        )
+        assert rows(run_root) == before and sent == []
+        await _close(engine)
+
+    asyncio.run(restart())
+
+
+def test_spool_read_retains_the_spawn_boot_before_any_liveness_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """O, wrapper-protocol §3: an earlier boot excludes a group even if its token looks live."""
+    run_root = tmp_path / "run"
+    text = _jil("j")
+    [dispatch] = _open(run_root, text, ["j"])
+    _write(
+        dispatch,
+        "spawn.json",
+        command_pid=7,
+        command_pgid=7,
+        command_start_time="ticks:7",
+        boot_id="synthetic-earlier-boot",
+    )
+    monkeypatch.setattr(runner_procid, "verify_alive", lambda *_: True)
+
+    async def read() -> None:
+        engine = await _resume(run_root, text)
+        engine.stops.forget(dispatch["attempt"])
+        spawn, status = engine.stops.read_spool(dispatch["attempt"])
+        assert spawn is not None and spawn["boot_id"] == "synthetic-earlier-boot" and status is None
+        assert engine.stops.left(7, "ticks:7").kind == "none"
+        await _close(engine)
+
+    asyncio.run(read())
+
+
 def test_grace_seconds_is_the_live_ladder_s_grace(tmp_path: Path) -> None:
     """`resume_run(grace_seconds=...)` is the TERM grace of this incarnation's ladders, over the
     settings' `grace_term_s`; there is no settle window (spec-restart §9)."""
@@ -1042,9 +1108,9 @@ def test_the_first_reading_proves_the_group_before_its_term(
 def test_a_quarantine_s_cookie_processes_get_grace_and_kill_at_its_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Opus round 1 R4 (spec-restart §7): records that cannot be trusted prove no group; what
-    is left of the quarantined attempt is the live cleanup through its cookie alone, so the
-    first reading's TERM gets its grace and KILL, and the note names the pids it found."""
+    """O, DL-431/433/444: without a valid spawn, quarantine reads its cookie alone.
+    The first TERM gets its grace and KILL; a valid spawn would retain its guarded group.
+    The note names the pids found by the first reading."""
     run_root = tmp_path / "run"
     text = _jil("j")
     [dispatch] = _open(run_root, text, ["j"])

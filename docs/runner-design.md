@@ -596,6 +596,10 @@ A mismatched or unreadable attempt record, or a split FW log, is quarantined
 with its reason and found pids (DL-433). Quarantine forces a hold wherever
 the interruption rule would rerun or hold; the oracle's own end still
 stands. Missing records and failed process scans are not quarantine.
+A valid spawn retained in quarantine names a candidate group. DL-431's proof
+checks govern Linux cookie cleanup; off Linux or without a cookie, the
+leader-token guard governs the group ladder (DL-444). DL-436's primitive
+selection and refusal of per-target fallback still apply.
 A failed scan holds cleanup as `scan failed` and is retried under both leak
 policies. A KILL survivor remains held and is KILLed again per poll.
 An FW resumes its progress from `watch.jsonl` without a second `start`;

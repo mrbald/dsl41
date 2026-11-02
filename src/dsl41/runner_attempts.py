@@ -42,7 +42,6 @@ from dsl41.engine_charts import (
     EXIT_PROCESS,
     EXIT_RECORDED,
     JOURNAL_DRAINING,
-    QUARANTINED,
     JOURNAL_SHUTDOWN_DURING_STARTUP,
     RECORD_CLEAN_SHUTDOWN,
     RECORD_OUTCOME,
@@ -758,12 +757,12 @@ class AttemptTier:
         run waits until a reading finds nothing left. Where only the leader can be told apart,
         `command_alive` is false once it exited, and nothing is done. With no recorded group,
         the processes carrying the attempt's cookie are what is left (`unnamed_alive`); a
-        quarantined attempt is read that way whatever its records say, since they prove no
-        group (spec-restart §7)."""
+        quarantined attempt with a valid spawn keeps the group a reading proved; an unreadable
+        spawn names no group (DL-431, spec-restart §7)."""
         known = self._attempts[attempt]
-        if self.ladder_running(attempt):
-            return
-        group = None if outcome.cause == QUARANTINED else command_group(known.spawn)
+        if self.ladder_running(attempt) or known.failed:
+            return  # a failed ladder stays held; a later record confirms no KILL (DL-431)
+        group = command_group(known.spawn)
         if group is None:
             # no recorded group: the processes carrying its cookie (spec-restart §4)
             if self.unnamed_alive is None or not self.unnamed_alive(attempt):

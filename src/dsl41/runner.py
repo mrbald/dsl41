@@ -658,7 +658,8 @@ class Engine:
         outcome whose cause is `quarantined` and whose note is the reason, committed or kept by
         an update in STOPPING as any outcome is; the interruption rule's plan holds the job
         wherever it would rerun or hold. What is left of it is the live cleanup through its
-        cookie alone. The engine runs on (spec-restart §7, DL-433)."""
+        cookie and any group a reading proved (DL-431). The engine runs on (spec-restart §7,
+        DL-433)."""
         facts = self._facts[run_id]
         outcome = AttemptOutcome("unobservable", cause=QUARANTINED, note=reason)
         best_effort_report(

@@ -15,7 +15,7 @@ set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=drill-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/drill-lib.sh"
 
-ROWS=(install start storage restart reboot kill-engine drain reload leak refusal start-limit upgrade)
+ROWS=(install start storage restart reboot kill-engine drain reload leak restart-faults refusal start-limit upgrade)
 
 step_install() { # the wheel, the nightbank estate, the drill's jobs, the unit and its user
     local wheel out version
@@ -219,6 +219,27 @@ step_drain() { # systemctl stop with a live job: TERM, the grace, KILL, a clean 
     ok "the drained attempt is recorded as stopped by engine_stop"
     request KILLJOB DRILL_STUBBORN_C
     wait_for 60 "DRILL_STUBBORN_C settled after KILLJOB" attempt_settled DRILL_STUBBORN_C
+}
+
+step_restart_faults() { # O: installed fault orderings, DL-431, DL-433, DL-436
+    local scenario unit
+    sudo systemctl stop "$UNIT"
+    sudo install -d -o dsl41 -g dsl41 -m 0700 "$STATE/restart-faults"
+    local scenarios
+    scenarios=$(as_dsl41 "$VENV/bin/python" -I "$REPO/examples/nightbank/deploy/restart_faults.py" list)
+    for scenario in $scenarios; do
+        unit=dsl41-restart-fault-$scenario
+        # The driver and its engines use the installed release under systemd. Keeping the
+        # driver alive across engine deaths preserves residue for recovery to prove (DL-433).
+        sudo systemd-run --wait --pipe --collect --unit "$unit" \
+            --property=User=dsl41 --property=Group=dsl41 \
+            --property=Type=oneshot --property=TimeoutStartSec=90 \
+            "$VENV/bin/python" -I "$REPO/examples/nightbank/deploy/restart_faults.py" \
+            "$scenario" "$STATE/restart-faults/$scenario"
+        ok "installed O restart fault: $scenario"
+    done
+    manual start
+    wait_running
 }
 
 step_reload() { # reread and update with a live job and a changed definition (DL-432)

@@ -58,6 +58,8 @@ from dsl41.runner_startup import resume_run, start_run
 from dsl41.engine_charts import AttemptOutcome
 from dsl41.runner_stops import COMMAND_SURVIVED, NOTHING_LEFT, AttemptFacts, Left
 
+_ACTUAL_SIGNAL_OURS = runner_procid.signal_ours
+
 linux_only = pytest.mark.skipif(
     not sys.platform.startswith("linux"), reason="the process cookie is read on Linux only"
 )
@@ -299,7 +301,7 @@ def test_a_failed_scan_with_a_live_group_child_is_stopped_and_never_released(
 ) -> None:
     """Astra B3, B2: the leader exits 0 while a child lives in its group and the scan fails.
     The attempt has leaked: under `terminate` the ladder TERMs and KILLs the group's member
-    by pid; it survives, so the attempt is held, and no look while the scan fails releases
+    by pid; its failed KILL reading holds the attempt, and no failed scan releases
     it. The first look that finds nothing releases it in one call, and the attempt closes.
     Under `leak` nothing is ever signalled, but a failed reading releases nothing either: the
     attempt is held until a reading succeeds (Astra round 1, M3)."""
@@ -315,7 +317,11 @@ def test_a_failed_scan_with_a_live_group_child_is_stopped_and_never_released(
         world.group, world.scans = {50: "ticks:50"}, [_found(error=errno.EMFILE)]
         engine.attempts.spawn_recorded(RUN_ID, SPAWN)
         engine.attempts.status_recorded(RUN_ID, {"version": 1, "outcome": "exited", "exit_code": 0})
-        await engine.attempts.join()
+        if policy == "terminate":
+            with pytest.raises(OSError, match="KILL not confirmed"):
+                await engine.attempts.join()
+        else:
+            await engine.attempts.join()
         notes = [str(engine.attempt_facts(RUN_ID).note)]
         held = RUN_ID in engine.held_groups
         if held:
@@ -333,7 +339,8 @@ def test_a_failed_scan_with_a_live_group_child_is_stopped_and_never_released(
     events = [b.get("event") for _, k, b in rows(tmp_path / "run") if k == "follow_up"]
     if policy == "terminate":
         assert held and world.sent[:2] == [(50, signal.SIGTERM), (50, signal.SIGKILL)]
-        assert notes == ["command survived its KILL", "scan failed: EMFILE"]
+        assert "scan failed: EMFILE" in notes[0] and "survived its KILL" not in notes[0]
+        assert notes[1] == "scan failed: EMFILE"
         assert "ladder_done" in events
     else:
         assert held and world.sent == [] and notes == ["scan failed: EMFILE"] * 2
@@ -603,6 +610,7 @@ def test_a_restart_cannot_fail_for_want_of_pidfd(
     monkeypatch.setattr(runner_stops, "sys", SimpleNamespace(platform="linux"))
     monkeypatch.setattr(runner_procid, "proc_start_token", lambda _pid: token)
     monkeypatch.setattr(runner_procid.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    monkeypatch.setattr(runner_procid, "linux_group_pids", lambda _pgid: {})
     found = runner_procid.Ours({me: (RUN_ID, token)})
     monkeypatch.setattr(runner_procid, "ours", lambda _prefix: found)
 
@@ -623,7 +631,7 @@ def test_a_restart_cannot_fail_for_want_of_pidfd(
 # ------------------------------------------------------------------- the restart
 
 
-async def _clean_up(engine: Engine, closing: OpenAttempt) -> None:
+async def _clean_up(engine: Engine, closing: OpenAttempt, *, failed_reading: bool = False) -> None:
     """The restart's cleanup of a closing attempt (spec-restart §5): restored ENDED with its
     committed outcome, one reading of what is left and the ladder on it, run to their end."""
     assert closing.spool is not None
@@ -640,7 +648,11 @@ async def _clean_up(engine: Engine, closing: OpenAttempt) -> None:
     outcome = AttemptOutcome(cast(Any, closing.outcome or "stopped"))
     engine.adopt_attempt(facts, outcome, plan_done=True)
     runner_startup._cleanup(engine, closing, None)
-    await engine.attempts.join()
+    if failed_reading:
+        with pytest.raises(OSError, match="KILL not confirmed"):
+            await engine.attempts.join()
+    else:
+        await engine.attempts.join()
     await asyncio.sleep(0)
 
 
@@ -664,10 +676,10 @@ def _closing_attempt(
 def test_a_restart_stops_what_it_finds_left_of_a_closing_attempt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, look: Left
 ) -> None:
-    """The restart's cleanup stops what it finds left as the live record path does
+    """O, DL-431/433: restart cleanup stops what it finds as the live record path does
     (spec-restart §5): nothing left closes the attempt; a survivor of the KILL holds it as
     `command survived its KILL` (Opus n2), KILLed at each look; a failed scan, which never
-    releases, holds it the same way."""
+    releases, holds it with its scan-failure reason."""
     world = _World(monkeypatch)
     world.scans = [
         _found()
@@ -680,7 +692,11 @@ def test_a_restart_stops_what_it_finds_left_of_a_closing_attempt(
     async def scenario() -> tuple[list[str], str | None, bool]:
         engine = _engine(tmp_path)
         engine.stops.scan_available = True
-        await _clean_up(engine, _closing_attempt(tmp_path, engine, SPAWN, outcome="stopped"))
+        await _clean_up(
+            engine,
+            _closing_attempt(tmp_path, engine, SPAWN, outcome="stopped"),
+            failed_reading=look.kind == "unknown",
+        )
         held = list(engine.held_groups)
         note = engine.attempt_facts(RUN_ID).note if held else None
         rekill = RUN_ID in engine.stops._holds
@@ -694,7 +710,12 @@ def test_a_restart_stops_what_it_finds_left_of_a_closing_attempt(
         assert (held, events) == ([], ["ladder_done"])
     else:
         assert held == [RUN_ID] and events == [] and rekill
-        assert note == COMMAND_SURVIVED
+        assert note is not None
+        assert (
+            (look.reason in note and "survived its KILL" not in note)
+            if look.kind == "unknown"
+            else note == COMMAND_SURVIVED
+        )
 
 
 @pytest.mark.parametrize("found", [True, False], ids=["leaked", "nothing"])
@@ -990,8 +1011,8 @@ def test_a_stop_whose_record_lands_after_its_ladder_takes_the_survivor_verdict(
     """F-B1: a stop is finished only by a reading that finds nothing left. The leader carries
     the cookie and ignores TERM; member 51 has no cookie and ignores TERM. When the record
     (`signaled 9`) lands after the ladder ended, a reading follows it: a child 77 the leader
-    forked after the KILL's reading, or 51 when the group reading failed at the KILL, is the
-    stop's survivor. The attempt is held, the next run blocked, the poll KILLs it, and the
+    forked after the KILL's reading is a survivor. A failed KILL reading instead retains
+    its ladder failure, including after a late record. The held poll KILLs leftovers, and the
     attempt settles only when a reading finds nothing. A record that lands while the ladder
     runs is unchanged: the ladder runs on, KILLs both, and nothing is held."""
     box = _Procs(monkeypatch, p4194311=(PGID, True, True), p51=(PGID, False, True))
@@ -1020,10 +1041,20 @@ def test_a_stop_whose_record_lands_after_its_ladder_takes_the_survivor_verdict(
             await engine.attempts.join()
             seen: list[object] = [RUN_ID in engine.held_groups, engine.blocked("j")]
         else:
-            await engine.attempts.join()
+            if case == "failed-group-reading-at-the-kill":
+                with pytest.raises(OSError, match="KILL not confirmed"):
+                    await engine.attempts.join()
+                assert "survived its KILL" not in (engine.attempt_facts(RUN_ID).note or "")
+            else:
+                await engine.attempts.join()
             engine.attempts.status_recorded(RUN_ID, record)
             seen = [engine.blocked("j")]  # the verdict runs: the next run waits
-            await engine.attempts.join()
+            if case == "failed-group-reading-at-the-kill":
+                with pytest.raises(OSError, match="KILL not confirmed"):
+                    await engine.attempts.join()
+                assert "KILL not confirmed" in (engine.attempt_facts(RUN_ID).note or "")
+            else:
+                await engine.attempts.join()
             seen += [RUN_ID in engine.held_groups, engine.blocked("j")]
             engine.stops._look()  # KILLs the survivor
             seen.append(RUN_ID in engine.held_groups)
@@ -1050,7 +1081,7 @@ def test_a_stat_reading_that_fails_holds_the_attempt_until_a_reading_decides(
 ) -> None:
     """Astra M4: an EIO on a member's stat makes the group reading failed, never empty, so
     `left` is `unknown` beside a live cookie-less member: the natural outcome leaks, the
-    ladder's survivor holds the attempt, and only the next successful reading releases it."""
+    failed ladder holds the attempt, and only the next successful reading releases it."""
     box = _Procs(monkeypatch, p51=(PGID, False, True))
     box.group_failed = True
 
@@ -1062,7 +1093,8 @@ def test_a_stat_reading_that_fails_holds_the_attempt_until_a_reading_decides(
         assert engine.stops.left(PGID, "t").kind == "unknown"
         engine.attempts.spawn_recorded(RUN_ID, SPAWN)
         engine.attempts.status_recorded(RUN_ID, {"version": 1, "outcome": "exited", "exit_code": 0})
-        await engine.attempts.join()
+        with pytest.raises(OSError, match="KILL not confirmed"):
+            await engine.attempts.join()
         seen = [RUN_ID in engine.held_groups]
         engine.stops._look()
         seen.append(RUN_ID in engine.held_groups)
@@ -1537,7 +1569,11 @@ def test_an_unknown_cleanup_reading_keeps_the_live_hold(
     async def scenario() -> tuple[list[str], list[str]]:
         engine = _engine(tmp_path)
         engine.stops.scan_available = True
-        await _clean_up(engine, _closing_attempt(tmp_path, engine, SPAWN, outcome=outcome))
+        await _clean_up(
+            engine,
+            _closing_attempt(tmp_path, engine, SPAWN, outcome=outcome),
+            failed_reading=not (policy == "leak" and outcome == "natural"),
+        )
         held = list(engine.held_groups)
         engine.stops._look()  # still failing: still held
         assert list(engine.held_groups) == held
@@ -1554,3 +1590,160 @@ def test_an_unknown_cleanup_reading_keeps_the_live_hold(
     assert events == ["ladder_done"]  # closed once, by the good reading
     if policy == "leak" and outcome == "natural":
         assert world.sent == []
+
+
+@pytest.mark.parametrize("failure", ["kill-scan", "pidfd-emfile"])
+def test_failed_kill_reading_never_becomes_survival_and_eventually_cleans(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    """O, DL-431/436: a KILL-only read failure holds truthfully, retries and releases."""
+    import builtins
+
+    world = _World(monkeypatch)
+    real_signal = runner_procid.signal_ours
+    real_open = builtins.open
+    failing = False
+    reads = 0
+
+    def exhausted(*_args: object, **_kw: object) -> int:
+        raise OSError(errno.EMFILE, "synthetic descriptor exhaustion")
+
+    def open_stat(path: object, *args: Any, **kwargs: Any) -> Any:
+        if failing and str(path) == "/proc/42/stat":
+            return exhausted()
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", open_stat)
+    monkeypatch.setattr(runner_procid.os, "pidfd_open", exhausted, raising=False)
+    monkeypatch.setattr(runner_procid.signal, "pidfd_send_signal", lambda *_: None, raising=False)
+
+    async def scenario() -> None:
+        nonlocal failing, reads
+        engine = _engine(tmp_path, kill_s=0.001)
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "j"}))
+        await engine.run_until_quiescent(T0)
+        _adopt(engine)
+        world.scans = [_found(42)]
+        original_members = engine.stops._members
+
+        def members(*args: Any) -> Left:
+            nonlocal failing, reads
+            reads += 1
+            if reads == 2:
+                if failure == "kill-scan":
+                    world.scans = [_found(error=errno.EIO)]
+                    try:
+                        return original_members(*args)
+                    finally:
+                        world.scans = [_found(42)]
+                failing = True
+            return original_members(*args)
+
+        def send(pid: int, token: str, sig: int, **kwargs: Any) -> bool:
+            if failing and sig == signal.SIGKILL:
+                # Invoke the actual selected path: pidfd_open fails before sending.
+                return actual_signal(pid, token, sig, pidfd=True)
+            return real_signal(pid, token, sig, **kwargs)
+
+        monkeypatch.setattr(engine.stops, "_members", members)
+        monkeypatch.setattr(runner_procid, "signal_ours", send)
+        engine.attempts.spawn_recorded(RUN_ID, SPAWN)
+        engine.attempts.status_recorded(RUN_ID, {"version": 1, "outcome": "exited", "exit_code": 0})
+        with pytest.raises(OSError, match="KILL not confirmed"):
+            await engine.attempts.join()
+        assert world.sent == [(42, signal.SIGTERM)]
+        note = engine.attempt_facts(RUN_ID).note or ""
+        assert "KILL not confirmed" in note and "survived its KILL" not in note
+        assert ("EIO" if failure == "kill-scan" else "descriptor exhaustion") in note
+        assert RUN_ID in engine.held_groups and engine.blocked("j") == RUN_ID
+        failing = False
+        engine.stops._look()
+        assert world.sent == [(42, signal.SIGTERM), (42, signal.SIGKILL)]
+        assert RUN_ID in engine.held_groups
+        world.scans = [_found()]
+        engine.stops._look()
+        assert RUN_ID not in engine.held_groups
+        await engine.shutdown()
+        _close(engine)
+
+    # _World's monkeypatch is only a witness; use the function from the module's source binding.
+    actual_signal = _ACTUAL_SIGNAL_OURS
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("next_kind", ["ours", "none"])
+def test_survivor_note_retains_unknown_verdict_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, next_kind: str
+) -> None:
+    """O, DL-433: unknown→ours/none never replaces the reading that caused the hold."""
+    _World(monkeypatch)
+
+    async def scenario() -> None:
+        engine = _engine(tmp_path)
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "j"}))
+        await engine.run_until_quiescent(T0)
+        _adopt(engine)
+        engine.attempts.spawn_recorded(RUN_ID, SPAWN)
+        looks: list[str] = []
+
+        def reading(*_args: Any, **_kw: Any) -> Left:
+            looks.append("read")
+            return (
+                Left("unknown", reason="scan failed: EIO")
+                if len(looks) == 1
+                else (Left("ours", {42: "ticks:42"}) if next_kind == "ours" else NOTHING_LEFT)
+            )
+
+        monkeypatch.setattr(engine.stops, "left", reading)
+        assert engine.stops.command_alive(PGID, "t")
+        engine.stops.command_survived(RUN_ID)
+        assert looks == ["read"]
+        assert engine.attempt_facts(RUN_ID).note == "scan failed: EIO"
+        engine.stops._look()
+        assert (RUN_ID in engine.held_groups) == (next_kind == "ours")
+        await engine.shutdown()
+        _close(engine)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+@pytest.mark.parametrize("matches", [True, False], ids=["same-token", "reused-pid"])
+def test_quarantine_group_fallback_obeys_leader_token_without_cookie(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str, matches: bool
+) -> None:
+    """O, DL-444: Darwin/no-cookie quarantine uses the guarded adapter ladder, never reuse."""
+    from types import SimpleNamespace
+
+    sent: list[tuple[int, int]] = []
+    alive = True
+    monkeypatch.setattr(runner_stops, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(
+        runner_procid, "verify_alive", lambda pid, token: alive and matches and token == "t"
+    )
+
+    def kill(group: int, sig: int) -> None:
+        nonlocal alive
+        sent.append((group, sig))
+        if sig == signal.SIGKILL:
+            alive = False
+
+    monkeypatch.setattr(runner_procid, "killpg_quiet", kill)
+
+    async def scenario() -> None:
+        engine = _engine(tmp_path)
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "j"}))
+        await engine.run_until_quiescent(T0)
+        # No cookie on either platform: only the valid spawn's leader token may authorize.
+        engine.adopt_attempt(AttemptFacts(RUN_ID, "j", 1, 1, tmp_path / "spool"))
+        engine.stops.note_boot(SPAWN)
+        engine.attempts.spawn_recorded(RUN_ID, SPAWN)
+        engine.quarantine(RUN_ID, "synthetic unreadable status")
+        await engine.attempts.join()
+        await engine.run_until_quiescent(T0)
+        assert sent == ([(PGID, signal.SIGTERM), (PGID, signal.SIGKILL)] if matches else [])
+        assert engine.oracle.store.job["j"].on_hold
+        await engine.shutdown()
+        _close(engine)
+
+    asyncio.run(scenario())
