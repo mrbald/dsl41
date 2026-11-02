@@ -10,7 +10,6 @@ import pty
 import re
 import signal
 import struct
-import sys
 import termios
 import unicodedata
 from collections.abc import Callable
@@ -19,7 +18,7 @@ from typing import Any
 
 
 class TerminalAcknowledgementError(AssertionError):
-    """A failed acknowledgement with the terminal and child observations attached."""
+    """A failed acknowledgement with the terminal and parent observations attached."""
 
 
 class Terminal:
@@ -33,8 +32,6 @@ class Terminal:
         self.waiting: dict[str, asyncio.Event] = {}
         self.eof = False
         self.columns, self.rows = 150, 44
-        self.observation_path = diagnostics / "tui-observations.jsonl"
-        self.recording = False
         self.parent_environment: dict[str, str | None] = {}
         self.pty_sizes: list[dict[str, Any]] = []
         self.process: asyncio.subprocess.Process | None = None
@@ -48,11 +45,11 @@ class Terminal:
         self.pty_sizes.append({"phase": "initial", "size": list(os.get_terminal_size(self.master))})
 
     async def start(self, command: list[str], env: dict[str, str], **kwargs: Any) -> None:
-        self.recording = command[0] == sys.executable
         self.parent_environment = {key: env.get(key) for key in ("COLUMNS", "LINES", "TERM")}
-        if self.recording:
-            wrapper = str(Path(__file__).with_name("tui_diagnostics.py"))
-            command = [command[0], wrapper, str(self.observation_path), *command[1:]]
+        child_env = dict(env)
+        child_env.pop("COLUMNS", None)
+        child_env.pop("LINES", None)
+        child_env["TERM"] = "xterm-256color"
         self.process = await asyncio.create_subprocess_exec(
             *command,
             stdin=self.slave,
@@ -60,7 +57,7 @@ class Terminal:
             stderr=self.slave,
             start_new_session=True,
             cwd=self.diagnostics,
-            env={**env, "TERM": "xterm-256color"},
+            env=child_env,
             **kwargs,
         )
         os.close(self.slave)
@@ -119,30 +116,6 @@ class Terminal:
                 f"{type(exc).__name__}: terminal did not acknowledge {label}", after=after
             ) from exc
 
-    def observation(self) -> dict[str, Any]:
-        records: list[dict[str, Any]] = []
-        errors: list[str] = []
-        if self.recording or self.observation_path.exists():
-            try:
-                lines = self.observation_path.read_text().splitlines()
-            except OSError as exc:
-                errors.append(str(exc))
-            else:
-                for number, line in enumerate(lines, 1):
-                    try:
-                        record = json.loads(line)
-                    except json.JSONDecodeError:
-                        errors.append(f"incomplete or invalid record at line {number}")
-                    else:
-                        records.append(record)
-        count = sum(record.get("kind") == "call" for record in records)
-        return {
-            "recorder": "source lane" if self.recording else "disabled for direct executable",
-            "records": records,
-            "call_status": f"{count} observed calls" if count else "no observed call",
-            "read_errors": errors,
-        }
-
     def failure(self, reason: str, *, after: int | None = None) -> TerminalAcknowledgementError:
         if after is None:
             after = next(reversed(self.marks.values()), 0)
@@ -166,8 +139,7 @@ class Terminal:
             f"observed_cursor_extent={extent!r}\n"
             f"last_reset_control={json.dumps(reset)}\n"
             f"parent_pty_sizes={json.dumps(self.pty_sizes)}; "
-            f"parent_environment={json.dumps(self.parent_environment)}\n"
-            f"tui={json.dumps(self.observation(), sort_keys=True)}"
+            f"parent_environment={json.dumps(self.parent_environment)}"
         )
 
     def close(self) -> None:

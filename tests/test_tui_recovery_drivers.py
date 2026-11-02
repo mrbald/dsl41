@@ -11,7 +11,6 @@ import contextlib
 import json
 import os
 import re
-import shutil
 import signal
 import socket
 import sys
@@ -25,7 +24,6 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from dsl41.runner_control import ControlClient, ControlClientError
-from tui_diagnostics import install_recorder
 from tui_terminal import (
     Terminal,
     TerminalAcknowledgementError,
@@ -266,27 +264,12 @@ def test_barrier_wait_preserves_the_drivers_early_error() -> None:
 
 
 @pytest.mark.parametrize("eof", [False, True])
-def test_failed_terminal_wait_reports_raw_model_and_child_observations(
+def test_failed_terminal_wait_reports_raw_model_and_parent_geometry(
     tmp_path: Path, eof: bool
 ) -> None:
     async def scenario() -> None:
         terminal = Terminal(tmp_path, 0.01)
-        terminal.recording = True
-        observation = {
-            "kind": "wrapper-start",
-            "COLUMNS": "150",
-            "LINES": "44",
-            "TERM": "xterm-256color",
-            "python_executable": "/test/python",
-            "python_version": "3.12.3 diagnostic",
-        }
-        calls = [
-            {"kind": "call", "sequence": 1, "result": [150, 44]},
-            {"kind": "call", "sequence": 2, "result": [110, 36]},
-        ]
-        terminal.observation_path.write_text(
-            "\n".join(json.dumps(record) for record in [observation, *calls]) + "\n"
-        )
+        terminal.parent_environment = {"COLUMNS": "80", "LINES": "24", "TERM": None}
         footer = b" s start  k kill  q detach ".ljust(150)
         terminal.raw.extend(b"excluded-prefix" + b"x" * 4096 + b"\x1b[44;1H" + footer)
         terminal.eof = eof
@@ -300,10 +283,8 @@ def test_failed_terminal_wait_reports_raw_model_and_child_observations(
             assert "parsed_screen_size=(150, 44)" in message
             assert f"parsed_footer={footer.decode()!r}" in message
             assert "observed_cursor_extent=(1, 44)" in message
-            for key, value in observation.items():
-                assert f'"{key}": {json.dumps(value)}' in message
-            for call in calls:
-                assert json.dumps(call, sort_keys=True) in message
+            assert 'parent_environment={"COLUMNS": "80", "LINES": "24", "TERM": null}' in message
+            assert 'parent_pty_sizes=[{"phase": "initial", "size": [150, 44]}]' in message
         finally:
             terminal.close()
 
@@ -319,57 +300,20 @@ def test_child_environment_retains_inherited_geometry(monkeypatch: pytest.Monkey
     assert "PYTHONPATH" not in _environment()
 
 
-def test_startup_only_record_says_no_observed_call_and_keeps_environment_values_private(
+def test_failure_does_not_dump_unrelated_environment_values(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     sentinel = "value-that-must-not-be-logged-482719"
     monkeypatch.setenv("TUI_PRIVATE_SENTINEL", sentinel)
-    monkeypatch.setattr(shutil, "get_terminal_size", shutil.get_terminal_size)
 
     async def scenario() -> None:
-        terminal = Terminal(tmp_path, 0.01)
-        terminal.recording = True
-        install_recorder(terminal.observation_path)
+        terminal = Terminal(tmp_path, _TIMEOUT)
         try:
-            message = str(terminal.failure("startup-only"))
-            assert "no observed call" in message
-            assert '"kind": "wrapper-start"' in message
-            assert "TUI_PRIVATE_SENTINEL" in message
-            assert sentinel not in message
-            assert len(terminal.observation()["records"]) == 1
+            assert sentinel not in str(terminal.failure("private environment"))
         finally:
             terminal.close()
 
     asyncio.run(scenario())
-
-
-def test_size_recorder_preserves_arguments_result_and_environment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    size = os.terminal_size((222, 33))
-    arguments: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
-
-    def original(*args: Any, **kwargs: Any) -> os.terminal_size:
-        arguments.append((args, kwargs))
-        return size
-
-    monkeypatch.setattr(shutil, "get_terminal_size", original)
-    monkeypatch.setenv("COLUMNS", "999")
-    monkeypatch.setenv("LINES", "888")
-    before = dict(os.environ)
-    path = tmp_path / "observations.jsonl"
-    install_recorder(path)
-    assert shutil.get_terminal_size((90, 20)) is size
-    assert shutil.get_terminal_size(fallback=(91, 21)) is size
-    assert arguments == [(((90, 20),), {}), ((), {"fallback": (91, 21)})]
-    assert dict(os.environ) == before
-    records = [json.loads(line) for line in path.read_text().splitlines()]
-    assert records[0]["kind"] == "wrapper-start" and "result" not in records[0]
-    assert records[0]["COLUMNS"] == "999" and records[0]["LINES"] == "888"
-    assert records[1:] == [
-        {"kind": "call", "sequence": 1, "result": [222, 33]},
-        {"kind": "call", "sequence": 2, "result": [222, 33]},
-    ]
 
 
 @pytest.mark.parametrize("override", ["DSL41_TUI_EXECUTABLE", "DSL41_INSTALLED_EXECUTABLE"])
@@ -383,9 +327,10 @@ def test_installed_terminal_command_is_launched_unchanged(
 
     async def spawn(*command: str, **kwargs: Any) -> None:
         invoked.append(command)
-        assert kwargs["env"]["COLUMNS"] == "999"
-        assert kwargs["env"]["LINES"] == "888"
+        assert "COLUMNS" not in kwargs["env"]
+        assert "LINES" not in kwargs["env"]
         assert kwargs["env"]["TERM"] == "xterm-256color"
+        assert kwargs["env"]["KEEP"] == "unchanged"
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
 
@@ -393,9 +338,11 @@ def test_installed_terminal_command_is_launched_unchanged(
         terminal = Terminal(tmp_path, _TIMEOUT)
         command = _command("ui", "--socket", "/test/control.sock")
         try:
-            await terminal.start(command, {"COLUMNS": "999", "LINES": "888"})
+            environment = {"COLUMNS": "80", "LINES": "24", "KEEP": "unchanged"}
+            before = dict(environment)
+            await terminal.start(command, environment)
             assert invoked == [tuple(command)]
-            assert not terminal.recording and not terminal.observation_path.exists()
+            assert environment == before
         finally:
             terminal.close()
 
@@ -546,8 +493,12 @@ async def _filter_and_hold(terminal: Terminal) -> int:
 
 @pytest.mark.parametrize("barriers", [False, True], ids=["cli", "withheld-acks"])
 def test_real_terminal_filter_selection_resize_confirm_cancel_and_detach(
-    short_root: Path, tmp_path: Path, barriers: bool, request: pytest.FixtureRequest
+    short_root: Path, tmp_path: Path, barriers: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("COLUMNS", "80")
+    monkeypatch.setenv("LINES", "24")
+    inherited_environment = dict(os.environ)
+
     async def scenario() -> None:
         estate = _Estate(short_root, tmp_path)
         await estate.start()
@@ -592,9 +543,12 @@ def test_real_terminal_filter_selection_resize_confirm_cancel_and_detach(
                 await loop.sock_sendall(parent, b"r")
             mark = await driver
             await _wait_held(client)
-            if terminal.recording:
-                records = terminal.observation()["records"]
-                assert records and records[0]["kind"] == "wrapper-start"
+            assert terminal.parent_environment["COLUMNS"] == "80"
+            assert terminal.parent_environment["LINES"] == "24"
+            assert terminal.pty_sizes == [
+                {"phase": "initial", "size": [150, 44]},
+                {"phase": "resize", "size": [110, 36]},
+            ]
 
             async def until(text: str, *, after: int) -> None:
                 await terminal.until(
@@ -635,9 +589,7 @@ def test_real_terminal_filter_selection_resize_confirm_cancel_and_detach(
             observations = {
                 "parent_pty_sizes": terminal.pty_sizes,
                 "parent_environment": terminal.parent_environment,
-                "tui": terminal.observation(),
             }
-            request.node.user_properties.append(("tui_observations", json.dumps(observations)))
             (tmp_path / "driver-evidence.json").write_text(
                 json.dumps(
                     {
@@ -652,7 +604,10 @@ def test_real_terminal_filter_selection_resize_confirm_cancel_and_detach(
             await client.close()
             await estate.close()
 
-    asyncio.run(scenario())
+    try:
+        asyncio.run(scenario())
+    finally:
+        assert dict(os.environ) == inherited_environment
 
 
 def _footer_ready(rendered: bytes, columns: int, rows: int) -> bool:
