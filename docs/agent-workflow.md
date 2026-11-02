@@ -6,6 +6,7 @@ the builder or engineer role. Follow the maintainer track under
 Read the [shared contract](../CLAUDE.md) and the task's design contracts.
 This page leaves document-writing rules to [writing.md](writing.md) and
 CLI/TUI evidence limits to [cli-tui-qualification.md](cli-tui-qualification.md).
+Use [integration testing](integration-testing.md) to select, run and extend v2 regression coverage.
 The builder follows a settled approach. The engineer chooses the method for
 settled behavior. Neither role changes scope or policy.
 Read the [approved operating model](agents/operating-model.md) for authority, role limits and owner escalations.
@@ -190,21 +191,13 @@ Under xdist the controller writes that file from every worker's hits.
 The golden replay runs the oracle over the whole harness sample, about a minute,
 and names the first run, entry and component that differ from
 `tests/oracle_goldens.txt`; CI runs it as its own `goldens` job (DL-351).
-Keep this list aligned with `.github/workflows/ci.yml`. Its `docs` job runs
-the docs gate on every change; `explore-page` runs the explore-page browser
-tests and the autorep viewer-import check on code changes.
-The served-TUI browser lane runs on demand through the qualification procedure.
-The `audit`, `secrets` and `release` workflows have their own triggers. They are outside the local command list.
-The workflow examples lane needs a container engine and remains outside default
-pytest collection (DL-236). CI runs it on code PRs through the existing classifier,
-nightly on main and on dispatch (DL-441). Docs-only PRs get an explicit
-`workflow-examples-required` pass; classification errors fail the check.
-The operator activates the required context after green code and docs-only PR evidence.
-Service and DST drills run nightly, on their relevant PR paths and on dispatch;
-the operator blocks affected merges on red. Before each merge train, the operator
-checks all nightly results, including missing runs, and records a fix and owner
-for failures. Schedule actor `mrbald` receives native GitHub failure notifications;
-the operator verifies notification settings and receipt at rollout.
+Keep this list aligned with `.github/workflows/ci.yml`.
+[Integration testing §3](integration-testing.md#3-choose-the-lane-that-exercises-the-boundary)
+owns lane routing, docs-only results, required-check activation and nightly triage.
+The served-TUI browser lane follows the qualification procedure.
+The `audit`, `secrets` and `release` workflows are outside the local command list.
+The workflow examples need a container engine and remain outside default
+pytest collection (DL-236).
 Run the workflow lane locally with:
 `WORKFLOW_CONTEXT=<context> uv run pytest -q -o faulthandler_timeout=0 examples/workflows/tests`.
 For local Podman layer reuse and per-session image isolation, follow the [workflow lane](../examples/workflows/README.md#integration-lane).
