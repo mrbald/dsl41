@@ -14874,6 +14874,7 @@ relitigate an entry; append a new one.
 - DL-236 The workflow examples get an opt-in integration lane at the
   operator's interfaces (2026-10-01; examples/workflows/tests,
   .github/workflows/workflow-examples.yml; examples/workflows/README.md)
+  SUPERSEDED BY DL-441: dispatch-only CI policy and shared runner tag only.
   THE LANE. The fulfilment, energy and media examples run through the
   public CLI inside the compose runner (examples/workflows/README.md).
   The lane is pytest under examples/workflows/tests, outside `testpaths`,
@@ -25501,3 +25502,23 @@ relitigate an entry; append a new one.
   the owner approves tagging or releasing. During the transition, the stricter of the model
   and the guides applies, standing owner instructions keep applying, and summarized guides
   and decisions retain their exact terms. A later slice reconciles the guides.
+
+- DL-441 Rehearsals run on code PRs and nightly with isolated local lanes
+  (2026-11-02; owner ruling; .github/workflows/ci.yml, workflow-examples.yml,
+  service-drill.yml, dst-drill.yml; examples/workflows/README.md)
+  Supersedes DL-236's dispatch-only CI rule and shared workflow runner tag.
+  THE RULE. The workflow lane runs on code PRs through the existing classifier and nightly
+  on main; docs-only PRs receive an explicit successful required check. Classification
+  errors fail that check. Required activation follows v2-config-order and green integrated
+  evidence. Service and DST drills run nightly and on their documented change paths.
+  Manual dispatch, evidence, isolation and fail-never-skip remain.
+  Local rehearsals reuse Podman's base and dependency layer cache without registry pushes
+  or custom cache keys. Each invocation rebuilds or freshly delivers tested source;
+  per-session runner tags prevent cross-run substitution. DST runs three isolated parallel
+  lanes: two falls; restart, London spring and midnight; clock-step and New York spring.
+  Every scenario, clock rate and tolerance stays unchanged. Every exit status and artifact
+  is collected even after a scenario fails. Operator owns nightly triage and blocks affected
+  merges until resolved. Schedule actor mrbald receives native failure notifications.
+  THE REASON. Code changes need rehearsal evidence before merging; concurrent isolated DST
+  lanes reduce elapsed time without weakening assertions. This establishes no production
+  qualification.

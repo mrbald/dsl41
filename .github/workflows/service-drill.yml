@@ -3,13 +3,25 @@
 # Rocky Linux 8, with every row of drill-steps.sh run against the one unit. The same
 # drill-local.sh runs it on a maintainer's machine.
 #
-# Manual only (workflow_dispatch). It is not part of the default gate. Dispatch it after a
-# change to the unit, the engine's start, stop or restart, or the drill.
+# DL-441: nightly and relevant PRs run both images; manual dispatch remains available.
 
 name: service-drill
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '37 1 * * *'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'grammars/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - 'scripts/wargame.*'
+      - 'examples/nightbank/**'
+      - '.github/workflows/service-drill.yml'
+
+      - '!examples/**/*.md'
 
 permissions:
   contents: read
@@ -27,6 +39,9 @@ jobs:
       matrix:
         image: [ubuntu, el8]
     steps:
+      - name: prepare service evidence
+        run: |
+          echo "DRILL_EVIDENCE=$RUNNER_TEMP/service-evidence" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -35,9 +50,18 @@ jobs:
         with:
           enable-cache: false
       - name: provision the container engine
-        run: sudo apt-get update -q && sudo apt-get install -y podman
+        run: |
+          mkdir -p "$DRILL_EVIDENCE"
+          { sudo apt-get update -q && sudo apt-get install -y podman; } 2>&1 | tee "$DRILL_EVIDENCE/setup.log"
       # a rootful engine sets up the systemd container's cgroup without a user session
       - name: the service drill on ${{ matrix.image }}
         env:
           PODMAN: sudo podman
-        run: bash examples/nightbank/deploy/drill-local.sh --image ${{ matrix.image }} all
+        run: |
+          bash examples/nightbank/deploy/drill-local.sh --image ${{ matrix.image }} all 2>&1 | tee "$DRILL_EVIDENCE/drill.log"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: service-evidence-${{ matrix.image }}
+          path: ${{ env.DRILL_EVIDENCE }}
+          if-no-files-found: warn

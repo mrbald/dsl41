@@ -53,12 +53,23 @@ mkdir -p "$evidence"
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/dsl41-drill.XXXXXX")
 # shellcheck disable=SC2329  # the EXIT trap invokes it
 cleanup() {
+    status=$?
+    trap - EXIT
+    container=dsl41-wargame-$name
+    if podman container exists "$container"; then
+        podman inspect "$container" >"$evidence/container.json" 2>&1 || true
+        podman logs "$container" >"$evidence/container.log" 2>&1 || true
+        podman exec --user runner --workdir /work "$container" \
+            bash examples/nightbank/deploy/drill-steps.sh diagnostics \
+            >"$evidence/diagnostics.log" 2>&1 || true
+    fi
     if [ "${DRILL_KEEP-}" = 1 ]; then
         say "kept the container; scripts/wargame.sh --base $base join $name"
     else
         wargame dispose "$name" 2>/dev/null || true
     fi
     rm -r -f -- "$scratch"
+    exit "$status"
 }
 trap cleanup EXIT
 

@@ -6,17 +6,29 @@
 # over the same window; a difference fails the step.
 #
 # Each run root, both traces and the lint output land in a mounted work
-# directory; when a step fails, the last step uploads them as an artifact.
+# directory; the last step always uploads them with the scenario exit statuses.
 #
-# Manual only (workflow_dispatch). It is not part of the default gate.
-# tests/test_dst_drill.py holds the comparator and checks that this file runs
-# every scenario. Dispatch it again after a change to the scheduler, the
-# timezone rules, L023, the restart, the engine's clock or the drill.
+# DL-441: nightly and relevant PRs run three isolated lanes, with unchanged clocks.
 
 name: dst-drill
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '17 2 * * *'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'grammars/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.dockerignore'
+      - 'examples/dst-drill/**'
+      - 'tests/test_dst_drill.py'
+      - 'scripts/dst-drill-local.sh'
+      - '.github/workflows/dst-drill.yml'
+
+      - '!examples/**/*.md'
 
 permissions:
   contents: read
@@ -29,43 +41,82 @@ jobs:
   drill:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: [falls, restart, clock]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: build the drill's image
         run: |
-          docker build -f examples/dst-drill/Dockerfile -t dsl41-dst-drill .
           # the image's user (uid 1001) writes the work directory
           mkdir -p "$RUNNER_TEMP/dst-drill" && chmod 777 "$RUNNER_TEMP/dst-drill"
-
-      - name: London, spring forward
-        run: docker run --rm --init -v "$RUNNER_TEMP/dst-drill:/tmp/dst-drill" dsl41-dst-drill python examples/dst-drill/drill.py london-spring
+          docker build -f examples/dst-drill/Dockerfile -t dsl41-dst-drill . 2>&1 | tee "$RUNNER_TEMP/dst-drill/build.log"
 
       - name: London, fall back
-        run: docker run --rm --init -v "$RUNNER_TEMP/dst-drill:/tmp/dst-drill" dsl41-dst-drill python examples/dst-drill/drill.py london-fall
-
-      - name: New York, spring forward
-        run: docker run --rm --init -v "$RUNNER_TEMP/dst-drill:/tmp/dst-drill" dsl41-dst-drill python examples/dst-drill/drill.py newyork-spring
+        if: ${{ !cancelled() && matrix.lane == 'falls' }}
+        run: |
+          status=0
+          docker run --rm --pull never --init -v "$RUNNER_TEMP/dst-drill:/tmp/dst-drill" dsl41-dst-drill python examples/dst-drill/drill.py london-fall || status=$?
+          echo "london-fall=$status" >> "$RUNNER_TEMP/dst-drill/exits.txt"
+          exit "$status"
 
       - name: New York, fall back
-        run: docker run --rm --init -v "$RUNNER_TEMP/dst-drill:/tmp/dst-drill" dsl41-dst-drill python examples/dst-drill/drill.py newyork-fall
-
-      - name: a local midnight
-        run: docker run --rm --init -v "$RUNNER_TEMP/dst-drill:/tmp/dst-drill" dsl41-dst-drill python examples/dst-drill/drill.py london-midnight
+        if: ${{ !cancelled() && matrix.lane == 'falls' }}
+        run: |
+          status=0
+          docker run --rm --pull never --init -v "$RUNNER_TEMP/dst-drill:/tmp/dst-drill" dsl41-dst-drill python examples/dst-drill/drill.py newyork-fall || status=$?
+          echo "newyork-fall=$status" >> "$RUNNER_TEMP/dst-drill/exits.txt"
+          exit "$status"
 
       - name: a clean stop before the fall change and a resume after it
-        run: docker run --rm --init -v "$RUNNER_TEMP/dst-drill:/tmp/dst-drill" dsl41-dst-drill python examples/dst-drill/drill.py london-fall-restart
+        if: ${{ !cancelled() && matrix.lane == 'restart' }}
+        run: |
+          status=0
+          docker run --rm --pull never --init -v "$RUNNER_TEMP/dst-drill:/tmp/dst-drill" dsl41-dst-drill python examples/dst-drill/drill.py london-fall-restart || status=$?
+          echo "london-fall-restart=$status" >> "$RUNNER_TEMP/dst-drill/exits.txt"
+          exit "$status"
+
+      - name: London, spring forward
+        if: ${{ !cancelled() && matrix.lane == 'restart' }}
+        run: |
+          status=0
+          docker run --rm --pull never --init -v "$RUNNER_TEMP/dst-drill:/tmp/dst-drill" dsl41-dst-drill python examples/dst-drill/drill.py london-spring || status=$?
+          echo "london-spring=$status" >> "$RUNNER_TEMP/dst-drill/exits.txt"
+          exit "$status"
+
+      - name: a local midnight
+        if: ${{ !cancelled() && matrix.lane == 'restart' }}
+        run: |
+          status=0
+          docker run --rm --pull never --init -v "$RUNNER_TEMP/dst-drill:/tmp/dst-drill" dsl41-dst-drill python examples/dst-drill/drill.py london-midnight || status=$?
+          echo "london-midnight=$status" >> "$RUNNER_TEMP/dst-drill/exits.txt"
+          exit "$status"
 
       - name: the wall clock steps back by 90 seconds
-        run: docker run --rm --init -v "$RUNNER_TEMP/dst-drill:/tmp/dst-drill" dsl41-dst-drill python examples/dst-drill/drill.py clock-step
+        if: ${{ !cancelled() && matrix.lane == 'clock' }}
+        run: |
+          status=0
+          docker run --rm --pull never --init -v "$RUNNER_TEMP/dst-drill:/tmp/dst-drill" dsl41-dst-drill python examples/dst-drill/drill.py clock-step || status=$?
+          echo "clock-step=$status" >> "$RUNNER_TEMP/dst-drill/exits.txt"
+          exit "$status"
 
-      - name: pack the work directories of a failed run
-        if: failure()
+      - name: New York, spring forward
+        if: ${{ !cancelled() && matrix.lane == 'clock' }}
+        run: |
+          status=0
+          docker run --rm --pull never --init -v "$RUNNER_TEMP/dst-drill:/tmp/dst-drill" dsl41-dst-drill python examples/dst-drill/drill.py newyork-spring || status=$?
+          echo "newyork-spring=$status" >> "$RUNNER_TEMP/dst-drill/exits.txt"
+          exit "$status"
+
+      - name: pack the work directories and scenario exit statuses
+        if: always()
         run: tar -C "$RUNNER_TEMP" --exclude='*.sock' -czf "$RUNNER_TEMP/dst-drill-evidence.tgz" dst-drill
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: failure()
+        if: always()
         with:
-          name: dst-drill-evidence
+          name: dst-drill-evidence-${{ matrix.lane }}
           path: ${{ runner.temp }}/dst-drill-evidence.tgz
           if-no-files-found: warn

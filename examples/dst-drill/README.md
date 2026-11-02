@@ -49,9 +49,16 @@ as the image's ordinary user. It keeps sockets on container-local Linux storage,
 then copies evidence to the printed host path. `DST_EVIDENCE` selects a new directory;
 the helper refuses an existing directory. `PODMAN` selects the command and connection
 for every engine operation, including build and cleanup. The helper removes its
-container and image tag on exit.
+containers and image tag on exit.
+Three lanes run concurrently: `falls` runs London and New York falls;
+`restart` runs London fall restart, London spring and London midnight;
+`clock` runs clock-step and New York spring (DL-441).
+Each scenario has its own container and shared-memory namespace.
+Every scenario runs even after another fails. Rates and tolerances stay unchanged.
 `build.json` records build seconds and exit status; `scenarios.json` records
-scenario seconds and exit status. Logs survive failure and cleanup.
+elapsed scenario-suite seconds and exit status. `falls.json`, `restart.json` and
+`clock.json` record each lane's seconds and exit status. Each scenario has a log
+and a directory with `scenario.json` and exported runs. Logs survive failure and cleanup.
 Podman reuses the Dockerfile's base, tool and dependency layers.
 Changed source bytes invalidate COPY. Warm reuse is not an OS update.
 
@@ -73,9 +80,13 @@ The mount must allow `chmod` on a socket: a macOS bind mount through a Linux VM 
 and the engine then fails to bind its control socket.
 Copy the directory out with `docker cp` instead.
 
-The workflow `.github/workflows/dst-drill.yml` runs each scenario as one step.
-It runs only when dispatched by hand.
-When a step fails, it uploads the work directories as the `dst-drill-evidence` artifact.
+The workflow `.github/workflows/dst-drill.yml` runs the same three lanes as isolated
+matrix jobs, with one step per scenario and fail-fast disabled.
+It runs nightly on main at 02:17 UTC, on relevant PR paths, and on manual dispatch.
+It uploads work directories, build logs and scenario exit statuses as
+`dst-drill-evidence-<lane>` artifacts even after failure.
+The drill is not a globally required check; the operator blocks affected merges on red.
+See the [nightly triage policy](../workflows/README.md#integration-lane).
 
 ## Scenarios
 

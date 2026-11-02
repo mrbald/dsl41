@@ -28,7 +28,8 @@ Container Python 3.12 builds the wheelhouse from frozen exported runtime require
 Install and upgrade each create a fresh release venv and run pip against that wheelhouse.
 No tested venv is cached. Warm reuse is not an OS update.
 `DRILL_EVIDENCE` selects the retained evidence directory; its default is a fresh
-`/tmp` directory holding build seconds, exit status and the build log.
+`/tmp` directory holding build seconds, exit status, the build log, container logs,
+inspection and service diagnostics exported before container cleanup.
 The script prints `ok:` per check, a summary with each row's seconds, and exits 0
 only when every row passed.
 
@@ -39,8 +40,11 @@ only when every row passed.
 | `PODMAN='sudo podman'` | Use a rootful engine. The workflow sets it. |
 
 The workflow [`service-drill.yml`](../../../.github/workflows/service-drill.yml)
-runs the same script for both images on a GitHub runner. Dispatch it by hand;
-it is not part of the default gate.
+runs the same script for both images on a GitHub runner, with fail-fast disabled.
+It runs nightly on main at 01:37 UTC, on relevant PR paths, and on manual dispatch
+(DL-441). Every leg uploads setup, drill and build logs and available diagnostics,
+including failed runs. It is not a globally required check; the operator blocks
+affected merges on red. See the [nightly triage policy](../../workflows/README.md#integration-lane).
 
 ## What each row checks
 
