@@ -1506,11 +1506,16 @@ class ControlClient:
 
 
 def roundtrip(
-    socket_path: Path, request: dict[str, Any], *, timeout: float = 10.0
+    socket_path: Path,
+    request: dict[str, Any],
+    *,
+    timeout: float = 10.0,
+    before_send: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """One-shot blocking request/response for callers with no event loop (the typer
     `sendevent`/`query` verbs). Raises ControlClientError on any transport or decode
     failure; exit-code mapping is the CLI's job, so this stays free of typer (DL-78).
+    `before_send` runs after connecting and before the first write, for recovery receipts.
 
     Everything before the write is UNDELIVERED and everything from the write on is
     DELIVERED, because the boundary is what the failure means, not where it happened. A
@@ -1526,6 +1531,9 @@ def roundtrip(
             conn.connect(str(socket_path))
         except OSError as exc:
             raise ControlClientError(f"control socket {socket_path}: {exc}") from exc
+        # Recovery pins precede every write (docs/control-protocol.md ss3).
+        if before_send is not None:
+            before_send()
         try:
             conn.sendall(encoded)
             buf = b""

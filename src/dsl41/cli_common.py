@@ -420,6 +420,46 @@ def refuse(exc: BaseException | str, *, prefix: str = "") -> int:
     return 2
 
 
+def control_socket_error(socket_path: Path, exc: BaseException, *, stop: bool = False) -> str:
+    """Name connect failures without changing delivered outcomes (control-protocol ss2)."""
+    import errno
+
+    from dsl41.runner_control import ControlClientError
+
+    error = exc.__cause__ if isinstance(exc, ControlClientError) else exc
+    if stop and isinstance(error, OSError) and error.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+        return (
+            f"dsl41: the engine at {socket_path} is busy; it may already have taken the stop; "
+            "check with dsl41 query before retrying"
+        )
+    if not isinstance(exc, ControlClientError) or not exc.delivered:
+        if isinstance(error, OSError):
+            if error.errno in (errno.EACCES, errno.EPERM):
+                return (
+                    f"dsl41: no permission to use the control socket {socket_path}; "
+                    "run as the engine's user or join its socket group"
+                )
+            if error.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                return f"dsl41: the engine at {socket_path} is busy; try again"
+            if error.errno in (errno.ENOENT, errno.ECONNREFUSED):
+                return f"dsl41: no engine is running at {socket_path}"
+    return (
+        str(exc) if isinstance(exc, ControlClientError) else f"control socket {socket_path}: {exc}"
+    )
+
+
+def check_control_socket(socket_path: Path) -> None:
+    """Check the initial connection before a viewer starts retrying."""
+    import socket
+
+    with socket.socket(socket.AF_UNIX) as probe:
+        probe.settimeout(2.0)
+        try:
+            probe.connect(str(socket_path))
+        except OSError as exc:
+            raise typer.Exit(refuse(control_socket_error(socket_path, exc))) from exc
+
+
 def read_header_of(response: dict[str, Any]) -> str | None:
     """The concurrency-model ss6 read header's `baseline_id` off one control answer, or None
     after printing the refusal (DL-137)."""
@@ -520,11 +560,12 @@ def command_outcome(
         roundtrip,
     )
 
-    _sending(request, retry_command)
     try:
-        response = roundtrip(socket_path, request)
+        response = roundtrip(
+            socket_path, request, before_send=lambda: _sending(request, retry_command)
+        )
     except ControlClientError as exc:
-        code = refuse(exc)
+        code = refuse(control_socket_error(socket_path, exc))
         if not exc.delivered:
             return code
         _no_decision(request, retry_command)

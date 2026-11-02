@@ -233,10 +233,10 @@ def test_subscribe_ends_quietly_at_the_operators_interrupt(
 # -------------------------------------------------------------------- ui, serve
 
 
-def test_ui_refuses_a_control_socket_that_does_not_exist(tmp_path: Path) -> None:
-    result = _run("ui", socket=tmp_path / "control.sock")
+def test_ui_refuses_a_control_socket_that_does_not_exist(short_root: Path) -> None:
+    result = _run("ui", socket=short_root / "control.sock")
     assert result.exit_code == 2
-    assert "no such file" in result.output
+    assert "no engine is running" in result.output
 
 
 def test_serve_gets_the_server_class_from_the_textual_serve_extra() -> None:

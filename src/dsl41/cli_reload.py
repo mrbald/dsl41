@@ -218,15 +218,21 @@ def socket_send(run_root: Path, *, request_id: str | None = None, timeout: float
     reads the read header's `baseline_id` first, sends the mutation envelope with `expect`
     naming the configuration rev the stored plan was diffed against, under `request_id` (a new
     one when None), and maps the answer to an `UpdateReply`. `timeout` bounds each round trip."""
+    from dsl41.cli_common import control_socket_error
     from dsl41.runner_control import ControlClientError, claimed_actor, roundtrip
 
     socket_path = run_root / "control.sock"
 
-    def ask(request: dict[str, Any], wait_s: float = timeout) -> dict[str, Any]:
+    def ask(
+        request: dict[str, Any],
+        wait_s: float = timeout,
+        *,
+        before_send: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
         try:
-            return roundtrip(socket_path, request, timeout=wait_s)
+            return roundtrip(socket_path, request, timeout=wait_s, before_send=before_send)
         except ControlClientError as exc:
-            raise SendFailed(str(exc)) from exc
+            raise SendFailed(control_socket_error(socket_path, exc)) from exc
 
     def send(verb: str, args: Mapping[str, object]) -> object:
         if verb == "catalog":
@@ -236,7 +242,6 @@ def socket_send(run_root: Path, *, request_id: str | None = None, timeout: float
         # the read header names the store; the engine says how long it waits for an application
         header = ask({"cmd": "status"})
         rid = request_id or str(uuid.uuid4())
-        typer.echo(f"request_id: {rid}", err=True)
         request = {
             "cmd": "update",
             "token": token,
@@ -248,7 +253,14 @@ def socket_send(run_root: Path, *, request_id: str | None = None, timeout: float
             "claimed_actor": claimed_actor(),
         }
         window = float(header.get("update_window_s") or 0) if args.get("wait") else 0.0
-        return update_reply_of(ask(request, timeout + window))
+        return update_reply_of(
+            ask(
+                request,
+                timeout + window,
+                # Recovery pins precede every write (docs/control-protocol.md ss3).
+                before_send=lambda: typer.echo(f"request_id: {rid}", err=True),
+            )
+        )
 
     return send
 

@@ -2503,6 +2503,7 @@ def test_the_cli_maps_every_mutation_outcome_including_the_two_transport_ones(
     for answer, code, names_the_id in cases:
 
         def fake_roundtrip(_path, _request, *, answer=answer, **_kw):
+            _kw["before_send"]()
             if isinstance(answer, Exception):
                 raise answer
             return answer
