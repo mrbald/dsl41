@@ -7,6 +7,8 @@ This guide owns role bindings, allocation, dispatch and the merge train.
 
 ## Operating model
 
+The [approved operating model](operating-model.md) sets authority, role limits and owner escalations.
+
 Owner's policy: 2026-11-01; review on 2026-11-08.
 The owner is the human project owner. Six agent roles have fixed authority
 and replaceable bindings. In maintained instructions, keep model names and
