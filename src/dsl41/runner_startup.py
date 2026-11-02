@@ -1092,6 +1092,12 @@ def _observe(engine: Engine, attempt: OpenAttempt, stop: str | None, scan: objec
     run_id = attempt.attempt
     records = _records(Path(attempt.spool), attempt)
     if isinstance(records, str):
+        # A valid spawn can name a group proved by the first reading even when another
+        # record refuses. Its cookie-less members remain cleanup's own (DL-431, DL-433).
+        spawn = _spawn_record(attempt)
+        if isinstance(spawn, dict):
+            engine.stops.note_boot(spawn)
+            engine.attempts.spawn_recorded(run_id, spawn)
         found = scan.pids if isinstance(scan, _procid.Ours) else {}
         pids = [pid for pid, (run, _start) in found.items() if run == run_id]
         engine.quarantine(run_id, f"{records} (pids {_pids(pids)})" if pids else records)

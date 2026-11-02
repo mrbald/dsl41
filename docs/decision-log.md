@@ -25547,3 +25547,19 @@ relitigate an entry; append a new one.
   operator rebase the next branch after the tip merges. It retires the train's automatic
   decision-log tail-append and derived-index conflict resolution in production. No earlier
   decision-log entry is superseded in full; DL-415's other requirements and rules 33-35 stand.
+
+- DL-444 Wrapper refusals and quarantine group cleanup
+  (2026-11-02; boss ruling, gap-restart rework)
+  THE WRAPPER. Readable JSON that is not an object is a spec refusal: exit 2,
+  before any durable effect. Malformed JSON remains exit 1. Missing required
+  keys and the stdin/grace defaults remain as wrapper-protocol §4.6 states them.
+  This clarifies the frozen wrapper input contract and its exit-code distinction.
+  THE QUARANTINE. Clarifies DL-433's "through the cookie" wording: an independently
+  valid spawn record names a candidate group even when another record causes
+  quarantine. A record alone authorizes no signal. On Linux with a cookie, DL-431's
+  reading proves the group and keeps its proof only while members remain. Off Linux,
+  or without a cookie, the legacy leader-token guard authorizes the group ladder;
+  a mismatched token sends nothing. DL-436's selected primitive and no per-target
+  fallback after pidfd failure remain unchanged. An unreadable or mismatched spawn
+  names no group; cookie cleanup remains available where supported. Quarantine's
+  outcome and hold rule are unchanged. No schema, state version or chart changes.

@@ -532,7 +532,7 @@ async def stop_ladder(
     pgid: int,
     start_token: str,
     grace_term_s: float,
-    members: Callable[[], Mapping[int, str]] | None = None,
+    members: Callable[[], Mapping[int, str] | _procid.Left] | None = None,
     *,
     term: bool = True,
     pidfd: bool | None = None,
@@ -556,7 +556,13 @@ async def stop_ladder(
     outlive it). A group that vanished gets nothing; a new leader taking that exact id inside
     the window is the ladder's stated hazard."""
     if members is not None:
-        termed = dict(members())
+
+        def reading() -> _procid.Left:
+            assert members is not None
+            found = members()
+            return found if isinstance(found, _procid.Left) else _procid.Left("ours", found)
+
+        termed = dict(reading().pids)
         for pid, start in termed.items() if term else ():
             _procid.signal_ours(pid, start, signal.SIGTERM, pidfd=pidfd)
         deadline = time.monotonic() + grace_term_s
@@ -564,8 +570,21 @@ async def stop_ladder(
             _procid.verify_alive(pid, start) for pid, start in termed.items()
         ):
             await asyncio.sleep(SPOOL_POLL_S)
-        for pid, start in members().items():
-            _procid.signal_ours(pid, start, signal.SIGKILL, pidfd=pidfd)
+        kill_reading = reading()
+        failures = []
+        for pid, start in kill_reading.pids.items():
+            if not _procid.signal_ours(pid, start, signal.SIGKILL, pidfd=pidfd):
+                try:
+                    gone = _procid.scanned_process_gone(pid, start)
+                except OSError as exc:
+                    failures.append(f"identity read failed: {exc}")
+                else:
+                    if not gone:
+                        failures.append(f"KILL not sent to pid {pid}")
+        if kill_reading.kind == "unknown":
+            failures.append(kill_reading.reason)
+        if failures:
+            raise OSError(f"KILL not confirmed: {'; '.join(failures)}")
         return
     if not _procid.verify_alive(pgid, start_token):
         return

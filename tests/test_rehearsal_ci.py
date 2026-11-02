@@ -154,6 +154,7 @@ def test_rehearsal_ci_wiring():
 @pytest.mark.parametrize("failure", [0, 43])
 @pytest.mark.parametrize("permission_failure", [False, True])
 def test_service_exports_before_cleanup_on_build_failure(tmp_path, failure, permission_failure):
+    """O, integration-testing §4: export first; remove only a recorded owned-container ID."""
     tree = tmp_path / "tree"
     deploy = tree / "examples/nightbank/deploy"
     deploy.mkdir(parents=True)
@@ -212,6 +213,7 @@ def test_service_exports_before_cleanup_on_build_failure(tmp_path, failure, perm
     )
     assert result.returncode == (failure or int(permission_failure)), result.stderr
     commands = log.read_text()
+    assert "wargame --base ubuntu dispose" not in commands
     removed = commands.index("podman rm --force recorded-container-id")
     assert commands.index("podman inspect") < removed
     assert commands.index("podman logs") < removed
