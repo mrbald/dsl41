@@ -246,6 +246,55 @@ def test_service_exports_before_cleanup_on_build_failure(tmp_path, failure, perm
         assert (evidence / filename).exists()
 
 
+@pytest.mark.parametrize("present", [False, True])
+def test_service_upload_can_read_only_its_exported_evidence(tmp_path, present):
+    """O, integration-testing §4: export is readable after teardown; other files keep mode."""
+    workflow = (REPO / ".github/workflows/service-drill.yml").read_text()
+    marker = "      - name: make restart evidence readable"
+    assert workflow.index("      - name: the service drill") < workflow.index(marker)
+    assert workflow.index(marker) < workflow.index("      - uses: actions/upload-artifact@")
+    assert workflow.split(marker, 1)[1].startswith("\n        if: always()\n")
+    evidence = tmp_path / "service-evidence"
+    evidence.mkdir()
+    exported = evidence / "restart-faults"
+    if present:
+        exported.mkdir(mode=0o700)
+        record = exported / "receipt.json"
+        record.write_text('{"result":"passed"}\n')
+        record.chmod(0o000)
+    other = evidence / "unrelated"
+    other.write_text("held")
+    other.chmod(0o000)
+    tools = tmp_path / "bin"
+    tools.mkdir()
+    sudo = tools / "sudo"
+    sudo.write_text('#!/bin/bash\nexec "$@"\n')
+    sudo.chmod(0o755)
+    try:
+        result = subprocess.run(
+            ["bash", "-e", "-c", _run_block(workflow, marker)],
+            env={
+                **os.environ,
+                "PATH": f"{tools}:{os.environ['PATH']}",
+                "DRILL_EVIDENCE": str(evidence),
+            },
+            capture_output=True,
+            timeout=5,
+        )
+        assert result.returncode == 0, result.stderr
+        if present:
+            assert record.read_text() == '{"result":"passed"}\n'
+            assert record.stat().st_mode & 0o400
+            assert exported.stat().st_mode & 0o500 == 0o500
+        else:
+            assert not exported.exists()
+        assert other.stat().st_mode & 0o777 == 0
+    finally:
+        other.chmod(0o600)
+        if present:
+            record.chmod(0o600)
+
+
 def test_upload_paths_have_no_relative_segments(tmp_path):
     service = (REPO / ".github/workflows/service-drill.yml").read_text()
     script = _run_block(service, "      - name: prepare service evidence")

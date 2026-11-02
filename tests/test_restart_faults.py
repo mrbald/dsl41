@@ -33,10 +33,10 @@ def kill_driver(process: subprocess.Popen, root: Path) -> None:
 
 
 @pytest.mark.parametrize("case", CASES)
-def test_restart_fault_ordering(tmp_path: Path, case: str) -> None:
+def test_restart_fault_ordering(short_root: Path, case: str) -> None:
     """O, runner §7/DL-431/433/436: fixed effects, record order, holds and bounded refusal."""
     with subprocess.Popen(
-        [sys.executable, str(DRIVER), case, str(tmp_path / case)],
+        [sys.executable, str(DRIVER), case, str(short_root / case)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -49,13 +49,13 @@ def test_restart_fault_ordering(tmp_path: Path, case: str) -> None:
             try:
                 stdout, stderr = process.communicate(timeout=10)
             except subprocess.TimeoutExpired:
-                kill_driver(process, tmp_path / case)
+                kill_driver(process, short_root / case)
                 stdout, stderr = process.communicate(timeout=5)
             pytest.fail(f"external deadline: {stdout}\n{stderr}")
     assert process.returncode == 0, (
         stdout
         + stderr
-        + "\n".join(path.read_text() for path in (tmp_path / case).glob("engine-*.log"))
+        + "\n".join(path.read_text() for path in (short_root / case).rglob("engine-*.log"))
     )
 
 
@@ -64,14 +64,14 @@ def test_witnesses_reject_duplicate_publish_and_unauthorized_term(tmp_path: Path
     witness_checks(tmp_path)
 
 
-def test_cleanup_ignores_malformed_evidence_and_unregistered_wrapper(tmp_path: Path) -> None:
+def test_cleanup_ignores_malformed_evidence_and_unregistered_wrapper(short_root: Path) -> None:
     """O, DL-433: cleanup preserves the barrier failure and stops all owned descendants."""
-    cleanup_checks(tmp_path)
+    cleanup_checks(short_root)
 
 
-def test_forced_timeout_stops_driver_group_and_detached_owned_processes(tmp_path: Path) -> None:
+def test_forced_timeout_stops_driver_group_and_detached_owned_processes(short_root: Path) -> None:
     """O, DL-433: the hard deadline kills the whole group and cookie/marker-owned escapees."""
-    root = tmp_path / "timeout"
+    root = short_root / "timeout"
     process = subprocess.Popen(
         [sys.executable, str(DRIVER), "hang", str(root)], start_new_session=True
     )
