@@ -56,6 +56,7 @@ synthetic stores and wrapper spools. A wait polls with a deadline.
 | `start` | `systemctl start` | `engine up` in the journal, `engine.db` exists, the scheduled jobs are held |
 | `restart` | `systemctl restart` | A new invocation, `engine stopped: clean_shutdown`, the holds are still there |
 | `reboot` | Restarts the container | The enabled unit starts at boot and resumes the same root |
+| `restore` | Drains an active writer, copies the complete root and required sidecars, inputs and settings, deletes originals and restores them | No service-account/cgroup writers; unchanged-tree refusal for a missing store; fresh history, holds, ice and globals; same-run continuation with exact business effects and distinct attempts |
 | `kill-engine` | SIGKILL of the engine with a job running | The unit restarts it; attempt 1 ended (`lifeline` or `engine_death`) and attempt 2 of the same run runs |
 | `drain` | `systemctl stop` with a job that ignores TERM | The stop waits the TERM grace, `ExecStop` exits 0, `clean_shutdown`, no `engine_down`; after the start the rerun follows `engine_stop` |
 | `reload` | `dsl41 reread`, then `dsl41 update` with a running job and a changed definition | Exit 1 from reread, a refusal without `--stop-running`, `config_rev` + 1, a rerun after `update_stop` on the new command |
@@ -100,8 +101,10 @@ failure.
   the row checks `cookie scan signalling: <primitive>` in the journal:
   `pidfd` on Ubuntu 24.04 and `os.kill (start-token check)` through `/proc`
   on Rocky Linux 8. Another image fails until it gets an expectation.
-- A container restart keeps the kernel's boot identity, so `reboot` does not
-  test a changed boot identity.
+- A container restart keeps the underlying Linux kernel's boot identity.
+  The driver compares that identity outside the container; on macOS it reads
+  the Podman VM. It records the container-visible IDs separately because
+  Podman may replace them. This does not qualify an actual host reboot.
 
 ## The wargame host
 

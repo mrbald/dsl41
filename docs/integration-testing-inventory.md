@@ -119,9 +119,9 @@ assertion-specific gap found in this inspection, not universal coverage.
 | S11 | `f873d7d:examples/nightbank/deploy/drill-steps.sh` L212 | O: an unadopted source edit cannot silently change resumed work | ported | [drill-steps.sh:359](../examples/nightbank/deploy/drill-steps.sh#L359) | U, S | G-config |
 | S12 | `f873d7d:examples/nightbank/deploy/drill-steps.sh` L212 | O: a configuration refusal stays failed without a restart loop | ported | [drill-steps.sh:359](../examples/nightbank/deploy/drill-steps.sh#L359) | S | — |
 | S13 | `f873d7d:examples/nightbank/deploy/drill-steps.sh` L222 | O: a sealed period stays stopped until an explicit open | retired | Charter excludes periods, seals and opening a successor | — | See S14 |
-| S14 | `f873d7d:examples/nightbank/deploy/drill-steps.sh` L246 | O: stop reaches a writer-free backup boundary | gap | Supervisor/seal recipe retires; one-unit drain needs an independent no-writer check | — | G-restore |
-| S15 | `f873d7d:examples/nightbank/deploy/drill-steps.sh` L257 | O: restored state preserves operator holds | gap | Restart tests do not delete and restore a complete stopped root | — | G-restore |
-| S16 | `f873d7d:examples/nightbank/deploy/drill-steps.sh` L285 | O: enabled service resumes the root at boot | ported | [drill-steps.sh:155](../examples/nightbank/deploy/drill-steps.sh#L155) | S | G-boot |
+| S14 | `f873d7d:examples/nightbank/deploy/drill-steps.sh` L246 | O: stop reaches a writer-free backup boundary | ported | [Installed restore] drains a writing command, proves no service-user processes or cgroup members, then independently takes the root lock before copying | U, S | — |
+| S15 | `f873d7d:examples/nightbank/deploy/drill-steps.sh` L257 | O: restored state preserves operator holds | ported | [Restore tests] and [installed restore] delete the originals, restore the complete copy and assert explicit hold flags from fresh processes | U, S | — |
+| S16 | `f873d7d:examples/nightbank/deploy/drill-steps.sh` L285 | O: enabled service resumes the root at boot | ported | [Service] reboot halves assert enabled-unit startup and retained holds; [drill-local.sh](../examples/nightbank/deploy/drill-local.sh) compares the underlying kernel boot ID outside the container and records container-visible IDs separately | S | G-boot: actual host reboot remains unqualified |
 | S17 | `f873d7d:examples/nightbank/deploy/drill-steps.sh` L310 | O: unit state exposes status and restart count | gap | [service] uses systemctl; no equivalent full monitoring row | — | G-access |
 | S18 | `f873d7d:examples/nightbank/deploy/drill-steps.sh` L310 | O: supervisor log and LIST expose completed wrappers | retired | Charter excludes supervisor monitoring; v2 attempt records use runs | — | — |
 | S19 | `f873d7d:examples/nightbank/deploy/drill-steps.sh` L310 | O: leader note identifies the current engine | ported | [test_runner_leadership.py:179](../tests/test_runner_leadership.py#L179) | U | G-access |
@@ -200,7 +200,7 @@ assertion-specific gap found in this inspection, not universal coverage.
 | O02 | `f873d7d:examples/nightbank/deploy/offline-scenarios.sh` L50 | O: maintenance refuses while engine holds authority | retired | Charter excludes maintenance admission | — | See O08 |
 | O03 | `f873d7d:examples/nightbank/deploy/offline-scenarios.sh` L50 | O: maintenance refuses live work without signalling it | retired | Charter excludes maintenance; explicit drain consent follows the engine contract | — | See S49 |
 | O04 | `f873d7d:examples/nightbank/deploy/offline-scenarios.sh` L50 | O: runtime flip leaves a detached command/attempt alive | retired | Charter requires old engine drain before binary selection | — | See U11 |
-| O05 | `f873d7d:examples/nightbank/deploy/offline-scenarios.sh` L50 | O: explicit termination leaves no writers | gap | [service] tests an individual command; no full offline no-writer acceptance | — | G-restore |
+| O05 | `f873d7d:examples/nightbank/deploy/offline-scenarios.sh` L50 | O: explicit termination leaves no writers | ported | [Installed restore] checks inactive systemd state, clean shutdown, no service-account processes, an empty or absent cgroup and exclusive root ownership | S | — |
 | O06 | `f873d7d:examples/nightbank/deploy/offline-scenarios.sh` L50 | O: interrupted work is reconciled without duplicate business effect | ported | [test_file_processing_runner.py:208](../tests/test_file_processing_runner.py#L208) retains independent handler/output witnesses. [restart_faults.py](../examples/nightbank/deploy/restart_faults.py) `spawn-lost` interrupts a synthetic claimed delivery twice and asserts one append-only publish-attempt record; a second publish fails the witness. | U, W, S | — |
 | O07 | `f873d7d:examples/nightbank/deploy/offline-scenarios.sh` L118 | O: concurrent installed startup refuses without replacing leader | ported | [storage unit] refuses `--config` contenders before and after CONT; MainPID, its start token and InvocationID stay fixed. [storage probe child] adds legacy-path coverage. | U, S | — |
 | O08 | `f873d7d:examples/nightbank/deploy/offline-scenarios.sh` L118 | O: refused startup changes no durable state | ported | [storage unit] compares the SQLite dump, durable file hashes, lock note and socket across each `--config` refusal. [storage probe child] adds legacy-path coverage. | U, S | — |
@@ -211,7 +211,7 @@ assertion-specific gap found in this inspection, not universal coverage.
 | O13 | `f873d7d:examples/nightbank/deploy/offline-scenarios.sh` L158 | O: uncertain supervisor retains engine exclusion until incident containment | retired | Charter excludes supervisor custody and maintenance uncertainty state | — | See O12 |
 | O14 | `f873d7d:examples/nightbank/deploy/offline-scenarios.sh` L230 | O: exact request retry produces one external file effect | gap | Admission retry and business idempotence are tested separately; exact control retry plus one external file effect lacks a matching integration assertion | — | G-update |
 | O15 | `f873d7d:examples/nightbank/deploy/offline-scenarios.sh` L230 | O: add/change/remove/revert produces the exact declared effect sequence | gap | Source reload tests and one service edit do not cover the full sequence | — | G-update |
-| O16 | `f873d7d:examples/nightbank/deploy/offline-scenarios.sh` L313 | O: restored root keeps state and holds after original files are removed | gap | No v2 copy/delete/restore drill | — | G-restore |
+| O16 | `f873d7d:examples/nightbank/deploy/offline-scenarios.sh` L313 | O: restored root keeps state and holds after original files are removed | ported | [Installed restore] copies root, sidecars, spools, inputs, config and profile, deletes originals and resumes through the unit with explicit state/hold/history assertions | U, S | — |
 | O17 | `f873d7d:examples/nightbank/deploy/offline-scenarios.sh` L335 | O: installed access policy enforces multi-account tiers | gap | [access tests] cover source behavior; service configure row absent | U | G-access |
 | O18 | `f873d7d:examples/nightbank/deploy/offline-scenarios.sh` L349 | O: bounded real ENOSPC before admission launches no command | ported | [storage admission] fills a dedicated 32 MiB tmpfs to real ENOSPC; the failed request adds no records, spool or external effect. | S | — |
 | O19 | `f873d7d:examples/nightbank/deploy/offline-scenarios.sh` L349 | O: failed durable admission remains UNKNOWN to the client | ported | [storage admission] pins CLI exit 4 and same-request retry advice after actual admission SQLITE_FULL. | S | — |
@@ -252,18 +252,18 @@ assertion-specific gap found in this inspection, not universal coverage.
 
 | ID | Old commit, path and line | Assertion | Disposition | V2 replacement or retirement reason | CI lane | Outstanding gap |
 | --- | --- | --- | --- | --- | --- | --- |
-| R01 | `f873d7d:tests/test_restore_drill.py` L124 | O: backup begins only after every writer stops | gap | Supervisor teardown retires; engine/store/spool writer exclusion still needs proof | — | G-restore |
-| R02 | `f873d7d:tests/test_restore_drill.py` L124 | O: fixture inputs are backed up with the durable state | gap | No complete v2 restore recipe under test | — | G-restore |
-| R03 | `f873d7d:tests/test_restore_drill.py` L124 | O: restore succeeds after all originals are deleted | gap | Restart on existing files does not cover this | — | G-restore |
+| R01 | `f873d7d:tests/test_restore_drill.py` L124 | O: backup begins only after every writer stops | ported | [Restore tests] prove engine exit, wrapper/command death and exclusive flock; [installed restore] also excludes all service-account and cgroup processes | U, S | — |
+| R02 | `f873d7d:tests/test_restore_drill.py` L124 | O: fixture inputs are backed up with the durable state | ported | [Restore tests] and [installed restore] compare the copied/restored complete input and root trees, including settings and present SQLite sidecars | U, S | — |
+| R03 | `f873d7d:tests/test_restore_drill.py` L124 | O: restore succeeds after all originals are deleted | ported | [Restore tests] and [installed restore] assert original roots and inputs absent before restoring at the same absolute paths | U, S | — |
 | R04 | `f873d7d:tests/test_restore_drill.py` L124 | O: missing anchor refuses audit | retired | Charter excludes anchors | — | See R05 |
-| R05 | `f873d7d:tests/test_restore_drill.py` L124 | O: incomplete required backup refuses without inventing state | gap | [store wiring] damaged-store refusals are partial coverage | U | G-restore |
-| R06 | `f873d7d:tests/test_restore_drill.py` L124 | O: relocated lineage refuses because registry paths disagree | retired | Charter excludes registry paths; v2 relocation needs a scoped ruling | — | G-restore |
-| R07 | `f873d7d:tests/test_restore_drill.py` L124 | O: refused restore/start mutates nothing | gap | Foreign-root startup checks that no engine.db is made; it does not compare the complete refused restore tree | — | G-restore |
-| R08 | `f873d7d:tests/test_restore_drill.py` L124 | O: fresh readers use only restored files | gap | No v2 destructive restore plus fresh CLI reader check | — | G-restore |
-| R09 | `f873d7d:tests/test_restore_drill.py` L124 | O: restoring scheduler state does not claim restoration of job side effects | gap | Separate synthetic business-store backup and scheduler restore acceptance | — | G-restore |
+| R05 | `f873d7d:tests/test_restore_drill.py` L124 | O: incomplete required backup refuses without inventing state | ported | [Genesis tests] cover each surviving-evidence class; [restore tests] cover missing/corrupt stores and identity; [installed restore] repeats missing-store refusal with unchanged trees (DL-443, DL-445) | U, S | — |
+| R06 | `f873d7d:tests/test_restore_drill.py` L124 | O: relocated lineage refuses because registry paths disagree | retired | Charter excludes registry paths; same-path restore makes no v2 relocation claim (DL-443) | — | Any v2 relocation needs a separate boss scope ruling |
+| R07 | `f873d7d:tests/test_restore_drill.py` L124 | O: refused restore/start mutates nothing | ported | [Genesis tests] compare names, modes and bytes through repeated store, snapshot, profile and plan refusals, with/without WAL/SHM or leader.lock, plus unreadable/malformed copy sources; [installed restore] checks missing stores and wrong-owner stores/WALs in both CLI forms | U, S | — |
+| R08 | `f873d7d:tests/test_restore_drill.py` L124 | O: fresh readers use only restored files | ported | [Restore tests] and [installed restore] use fresh CLI runs/journal readers and fresh engine processes after destructive restoration | U, S | — |
+| R09 | `f873d7d:tests/test_restore_drill.py` L124 | O: restoring scheduler state does not claim restoration of job side effects | ported | [Restore tests] and [installed restore] prove scheduler restoration leaves the synthetic business ledger absent, then restore its separate backup explicitly | U, S | — |
 | R10 | `f873d7d:tests/test_restore_drill.py` L124 | O: restored lineage retains derivation/attestation verification tiers | retired | Charter excludes lineage and attestation | — | — |
 | R11 | `f873d7d:tests/test_restore_drill.py` L124 | O: restoring archived WAL cannot reverse archive status | retired | Charter excludes period archive and its receipt | — | — |
-| R12 | `f873d7d:tests/test_restore_drill.py` L124 | O: restored state can continue processing once | gap | Replace successor-period open with one-root restart and an exact effect count | — | G-restore |
+| R12 | `f873d7d:tests/test_restore_drill.py` L124 | O: restored state can continue processing once | ported | [Restore tests] and [installed restore] assert same-run attempt 2 after engine_stop, stable invocation, distinct attempt IDs, exact ledger lines and no extra effect after another restart | U, S | — |
 
 ## Preserve capacity, long-run and shutdown assertions
 
@@ -386,9 +386,9 @@ assertion-specific gap found in this inspection, not universal coverage.
 
 | ID | Old commit, path and line | Assertion | Disposition | V2 replacement or retirement reason | CI lane | Outstanding gap |
 | --- | --- | --- | --- | --- | --- | --- |
-| N01 | `f873d7d:tests/test_nightbank_boundary.py` L262 | O: globals survive a durable restart boundary | ported | [test_runner_store.py:1067](../tests/test_runner_store.py#L1067) | U | G-restore |
+| N01 | `f873d7d:tests/test_nightbank_boundary.py` L262 | O: globals survive a durable restart boundary | ported | [Restore tests] and [installed restore] set an explicit durable global and read its pinned value after copy/delete/restore | U, S | — |
 | N02 | `f873d7d:tests/test_nightbank_boundary.py` L262 | O: completed job status and run count survive restart | ported | [test_store_wiring.py:581](../tests/test_store_wiring.py#L581) | U | G-history |
-| N03 | `f873d7d:tests/test_nightbank_boundary.py` L399 | O: ice flags survive recovery | gap | Snapshot equivalence is tested, but no explicit iced-row recovery witness identified in the cited test | — | G-restore |
+| N03 | `f873d7d:tests/test_nightbank_boundary.py` L399 | O: ice flags survive recovery | ported | [Restore tests] and [installed restore] put a named job on ice and assert its flag from fresh status readers after restoration | U, S | — |
 | N04 | `f873d7d:tests/test_nightbank_boundary.py` L262 | O: seal refuses inside the request retry horizon | retired | Charter excludes seals and their retry-horizon gate | — | — |
 | N05 | `f873d7d:tests/test_nightbank_boundary.py` L262 | O: forced seal binds actor, digest and override receipt | retired | Charter excludes seal/attestation records | — | — |
 | N06 | `f873d7d:tests/test_nightbank_boundary.py` L262 | O: spool deletion leaves retained run history readable | gap | New store retains history, but no end-to-end artifact-removal replacement is identified | — | G-history |
@@ -514,9 +514,9 @@ Measurement and untested-guard rows are included but do not claim a v1 verdict.
 | Disposition | Assertions |
 | --- | ---: |
 | kept | 52 |
-| ported | 91 |
+| ported | 104 |
 | retired | 62 |
-| gap | 139 |
+| gap | 126 |
 | Total | 344 |
 
 Use the [Known bugs](../TODO.md#known-bugs) register when selecting a gap.
@@ -532,7 +532,7 @@ evidence (Known bugs).
 | G-semantic | Independently enumerate expected instants/counts for each DST gap, overlap, midnight and restart window from SEM-32–35 and the cited vendor rule. Assert the fixture constants against both traces. Keep existing lag and end-window exclusions explicit. A runtime/rehearsal/L023 three-way agreement can still share a scheduler bug. |
 | G-soak | Port the seeded 200-job fixture and a bounded compressed multi-day run, then a real-clock run with declared RSS/CPU/fd/store/query/replay budgets. Keep maximum 20 concurrent jobs and per-day count/liveness checks. Measure SQLite journal/snapshot retention instead of periods/outbox. Known bugs: pruning-floor/history failure and unbounded backward gap. |
 | G-storage | Covered: [storage admission] pins UNKNOWN, no uncommitted launch or external attempt, exact retry and recovery after real bounded-tmpfs ENOSPC. [storage unit] pins the systemd engine's MainPID/start-token/InvocationID and no writes from `--config` contenders before and after CONT. [storage probe child] adds legacy-path and expired-note coverage. Implemented and scheduled in U/S as each row specifies; replay/durability remains G-history/G-restore/G-restart, and release qualification is separate. |
-| G-restore | Drain and prove no writers; copy the full store, SQLite sidecars when present, spools, inputs and settings; delete originals; restore; use fresh CLI/engine processes and assert holds, run/attempt identity and exact effects. Inject missing/corrupt required files and prove refusal without mutation. Ask the boss to scope relocation; do not inherit v1 anchor-path rules. Scheduler restoration does not restore a business database. |
+| G-restore | Implemented in U ([restore tests], [genesis tests]) and S ([installed restore], the service restore row): active-writer drain and independent writer exclusion; complete store, required WAL/SHM, spool, input and settings transfer; deleted originals; fresh readers and engine; pinned holds, ice, globals, history, invocation/attempt identity and exact effects. Missing/corrupt backup, unreadable copy sources and repeated unchanged-tree refusal are asserted under DL-443 and DL-445, including a missing leader.lock. Business effects require a separate backup. Same-path restoration only; R06 remains retired and any v2 relocation needs separate boss scope. Implementation and local execution do not establish release qualification. |
 | G-upgrade | Exercise real old/new binary and state/protocol pairs, drain before selection, refuse incompatible state without migration, retain an old reader and prove a compatible rollback. The service .post1 wheel uses one source tree and establishes mechanics only. Known bug: legacy-unit root to main-config unit has no documented resume path. |
 | G-package | Adapt real-wheel offline manufacture, fault and RPM cells to the reference package/config/unit under the charter and Packager contract. Preserve network-disabled base/UI and prefix matrix, native tuple, partial candidates, child lock inheritance, real ENOSPC, failed post, active selection and erase evidence. The RPM helper still expects a retired launcher asset after erase; no disconnected target driver runs in CI. Do not advertise helper presence as a v2 lane. |
 | G-artifact | Restore isolated real-wheel and sdist-rebuilt-wheel acceptance for base/UI, assets, typing/license metadata, stdout, wrapper provenance and optional UI refusal. Keep installed terminal/browser qualification separate. Known bugs: installed help expects a removed verb, TUI terminal-control coverage and unexplained sandbox interruption hold. |
@@ -541,7 +541,7 @@ evidence (Known bugs).
 | G-update | Run installed add/change/remove/revert with exact effect counts, properties/calendar-only edits and interrupted update replay. Known bugs: stopped-result attribution, decoded equality ignoring job order, barrier cleanup orphaning a command group. Assert the correct record/result even if today's implementation fails. |
 | G-history | Combine pruning with an open attempt, an old completed run and a removed/re-added job. Fresh runs/journal readers must report the contract's retained history. Known bug: missing opening revision can refuse the whole runs report. Reconcile the deleted journal tests' replay and crash-durability assertions with SQLite fault coverage; missing cells remain gaps here. |
 | G-access | Restore installed multi-account permissions, ancestor traversal, tier refusals, map receipts/reload and status/subscribe monitoring checks. Keep source policy tests, but run the filesystem boundary under the one-unit deployment. |
-| G-boot | A container restart keeps the kernel boot identity. Qualify an actual host reboot separately with the selected filesystem, unit and process-identity rules. |
+| G-boot | Open: the service reboot row proves enabled-unit startup and retained holds while the driver verifies the underlying Linux kernel boot ID stays unchanged. Podman may replace the container-visible boot ID; both values are recorded separately. Qualify an actual host reboot with the selected filesystem, unit and process-identity rules. No real host reboot is qualified here. |
 | G-retire | Disable/remove the one unit, prove no writers and no restart from a boot target or stray start, then read retained state with the matching binary. Keep uninstall and retained history distinct from obsolete anchor deletion. |
 | G-correction | Port a synthetic late-correction workload within one v2 root; pin initial/corrected results, idempotence, conflict/stale/timestamp refusals and checker damage sensitivity. Period transitions retire; data-correction safety remains. |
 | G-wargame | Restore stub-provider regression checks for ownership, exact lifecycle verbs, tracked-only provenance (v2 copies untracked files too), retained /work and delivery failure/partial-copy behavior. A manual shell script is implemented tooling, not an executed safety assertion. |
@@ -555,6 +555,9 @@ completion held behind the frontier from a correctly admitted one. Known
 bugs cover those limits. It does not qualify all clock movement.
 
 [service]: ../examples/nightbank/deploy/drill-steps.sh
+[restore tests]: ../tests/test_restore_drill.py
+[genesis tests]: ../tests/test_genesis_eligibility.py
+[installed restore]: ../examples/nightbank/deploy/restore-drill.py
 [restart tests]: ../tests/test_restart.py
 [attempt tests]: ../tests/test_runner_attempts.py
 [leadership tests]: ../tests/test_runner_leadership.py

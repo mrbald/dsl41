@@ -252,6 +252,12 @@ The engine prints `engine up; control socket: ...` when startup finishes.
 It keeps running and accepts commands from another terminal.
 It stores inputs in the root's `engine.db` and creates `engine.toml` with
 default settings on the first run. The same command resumes an existing root.
+First start requires a root without surviving runtime evidence (DL-443, DL-445).
+Settings and inputs may be provisioned first. A missing store beside attempt
+spools, update material, root-local logs or receipts, legacy state, a nonempty
+lock, SQLite sidecars or a control socket
+refuses with exit 2 before changing the root or evaluating estate Python.
+Unreadable evidence also refuses. See the [genesis and restart contract](runner-design.md#7-journal-and-recovery-e1-prod-grade).
 Keep stop graces, snapshot interval and retention in `RUN_ROOT/engine.toml`.
 With the default graces, the unit allows 45 seconds for a stop.
 Check that timeout before changing either grace.
@@ -550,6 +556,20 @@ Application inputs and reviewed updates are independent of that selection.
 ## Recover after the engine or box dies
 
 Keep the durable run root, including `engine.db`, `runs/` and `plans/`.
+For backup, stop the unit and independently prove no engine, wrapper or job
+writer remains. Copy the entire stopped root, including any SQLite sidecars,
+spools and settings, together with the main config and required inputs.
+Restore the complete copy at the same path before starting. A missing store
+with surviving runtime evidence refuses; preserve that damaged root and
+recover the missing backup material (DL-443). Scheduler restoration does not
+restore a business database or undo job effects. Back those up separately.
+Startup validation uses Python's temporary directory selection (`TMPDIR`
+when usable). Allow space for one complete
+copy of `engine.db` and its present `-wal`, `-shm` and `-journal` files,
+plus filesystem overhead. Validation can run more than once; copies are
+removed after each pass. An uncatchable kill can leave a private
+`dsl41-inspect-*` directory there. A copy or space failure refuses with
+exit 2 and names the source evidence; it leaves that evidence unchanged.
 For the service, run this step as root:
 
 1. Start the same unit on that root:
@@ -652,7 +672,7 @@ synthetic estate; they do not qualify a production workload.
 
 The scripts print a result for each row and stop on failure. They cover
 install, start, restart, container reboot, engine kill, drain, reload,
-process leaks, startup refusal, start limit, malformed TOML and executable upgrade.
+process leaks, destructive restore, startup refusal, start limit, malformed TOML and executable upgrade.
 The refusal row requires `engine_refused` and `engine_down`; crash-loop
 exhaustion requires `engine_down`; normal stop requires no `engine_down`.
 Malformed TOML requires the independent helper's `engine_down` and no
@@ -660,7 +680,9 @@ Malformed TOML requires the independent helper's `engine_down` and no
 The `refusal` row verifies that a pending source edit leaves the stored
 revision active after restart, then tests a foreign store version refusal.
 The `leak` row checks that a restart TERMs a job's leftover process through
-the cookie scan. A container reboot retains the kernel boot id.
+the cookie scan. A container reboot retains the underlying kernel boot ID;
+the runtime may replace the container-visible ID. The drill records both
+boundaries separately and does not qualify an actual host reboot.
 
 [DRILL.md](../examples/nightbank/deploy/DRILL.md) supplies maintainer setup
 and diagnostics; [drill-steps.sh](../examples/nightbank/deploy/drill-steps.sh)

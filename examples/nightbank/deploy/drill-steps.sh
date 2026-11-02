@@ -15,7 +15,7 @@ set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=drill-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/drill-lib.sh"
 
-ROWS=(install start storage restart reboot kill-engine drain reload leak restart-faults refusal start-limit malformed-toml upgrade)
+ROWS=(install start storage restart reboot restore kill-engine drain reload leak restart-faults refusal start-limit malformed-toml upgrade)
 
 step_install() { # the wheel, the nightbank estate, the drill's jobs, the unit and its user
     local wheel out version
@@ -167,6 +167,20 @@ step_reboot_after() { # after the host restarts: the enabled unit resumed the sa
         fail "the unit kept its invocation across the reboot"
     [ "$(job_field APAC_EOD_B .on_hold)" = true ] || fail "the hold did not survive the reboot"
     ok "the boot started $UNIT, which resumed $ROOT"
+}
+
+step_restore() { # O: installed backup and restore with independent pins (DL-443)
+    sudo "$VENV/bin/python" "$REPO/examples/nightbank/deploy/restore-drill.py" \
+        "$DSL41" "$ROOT" "$CONFIG" "$NIGHTBANK" "$NIGHT" "$STATE" "$UNIT"
+}
+
+step_boot_identity_before() { # O: record the container-visible identity (runner-design §6a)
+    cat /proc/sys/kernel/random/boot_id >"$STATE/kernel-boot-before"
+}
+
+step_boot_identity_after() { # O: a container is not a new kernel boot (runner-design §6a)
+    cat /proc/sys/kernel/random/boot_id >"$STATE/kernel-boot-after"
+    ok "container-visible boot IDs: $(cat "$STATE/kernel-boot-before") -> $(cat "$STATE/kernel-boot-after"); real host reboot remains G-boot"
 }
 
 step_kill_engine() { # SIGKILL of the engine: the unit restarts it and the run goes on
@@ -507,7 +521,7 @@ step_storage() { # O: DL-99/DL-428, installed exclusion and real full-filesystem
 
 case ${1-} in
     --list) printf '%s\n' "${ROWS[@]}" ;;
-    reboot-before | reboot-after | diagnostics) "step_${1//-/_}" ;;
+    reboot-before | reboot-after | boot-identity-before | boot-identity-after | diagnostics) "step_${1//-/_}" ;;
     *)
         for row in "${ROWS[@]}"; do
             if [ "$row" = "${1-}" ] && [ "$row" != reboot ]; then

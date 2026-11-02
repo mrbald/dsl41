@@ -46,11 +46,13 @@ snapshot.
 from __future__ import annotations
 
 import contextlib
+import shutil
+import tempfile
 import os
 import signal
 import uuid
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
@@ -489,6 +491,7 @@ async def resume_run(
     lock = lock or acquire_run_root(run_root)
     journals: list[Journal] = []
     engines: list[Engine] = []
+    inspections = contextlib.ExitStack()
     try:
         engine = await _resume_under_lock(
             catalog,
@@ -504,6 +507,7 @@ async def resume_run(
             machines=machines,
             settings=settings,
             stored_sources=stored_sources,
+            inspections=inspections,
         )
     except BaseException:
         for engine in engines:
@@ -518,13 +522,15 @@ async def resume_run(
                 journal.detach()
         lock.release()
         raise
+    finally:
+        inspections.close()
     return engine
 
 
 async def _resume_under_lock(
     catalog: CatalogIR,
     run_root: Path,
-    lock: LeaderLock,
+    lock: LeaderLock | None,
     *,
     clock: Clock,
     adapters: Mapping[str, JobAdapter],
@@ -535,9 +541,11 @@ async def _resume_under_lock(
     engines: list[Engine],
     machines: Executor | None,
     settings: EngineSettings | None,
+    inspections: contextlib.ExitStack,
     stored_sources: bool = False,
+    validate_only: bool = False,
 ) -> Engine:
-    """The refusals, the fold and the first reading, with the lock held (S6a)."""
+    """DL-433: validate a private copy; activate only under the canonical lock."""
     refuse_old_root(run_root)
     path = run_root / STORE_NAME
     if not path.exists():
@@ -545,7 +553,7 @@ async def _resume_under_lock(
             f"{run_root}: no {STORE_NAME} to resume: `dsl41 run` starts a new run in this root"
         )
     try:
-        store = SqliteStore(path)
+        store = inspections.enter_context(_inspect_store(path))
     except StoreError as exc:
         raise EngineError(f"{path}: {exc}") from exc
     meta = store.meta()
@@ -607,7 +615,6 @@ async def _resume_under_lock(
     last_at = journal.position.last_at
     # genesis appends the configuration before anything else, and a snapshot keeps the position
     assert last_at is not None
-    os.chmod(run_root, 0o700)
     engine = Engine(
         catalog,
         clock=clock,
@@ -635,6 +642,13 @@ async def _resume_under_lock(
             update={"at": max(engine.frontiers.at or last_at, last_at)}
         )
         engine.now_admitted()
+    if validate_only:
+        return engine
+    assert lock is not None
+    # DL-433: replay and every refusal precede the first write to the restored root.
+    journal.store = SqliteStore(path)
+    engine.decisions.fallback = _decision_lookup(journal.store)
+    os.chmod(run_root, 0o700)
     journal.writable = True  # every refusal has had its chance (spec-restart §1)
     lock.note(at=clock.now())
     for job, rt in engine.oracle.store.job.items():
@@ -657,21 +671,96 @@ async def _resume_under_lock(
     return engine
 
 
-def active_configuration(run_root: Path) -> Configuration:
+@contextlib.contextmanager
+def _inspect_store(path: Path) -> Iterator[SqliteStore]:
+    """DL-433: inspect a stopped store without SQLite writing its sidecars.
+
+    Immutable SQLite opens can omit WAL commits. A private copy keeps those
+    commits and confines reader-created WAL/SHM files to the inspection.
+    """
+    evidence = path
+    try:
+        with tempfile.TemporaryDirectory(prefix="dsl41-inspect-") as directory:
+            copied = Path(directory) / path.name
+            shutil.copyfile(path, copied)
+            for suffix in ("-wal", "-shm", "-journal"):
+                evidence = path.with_name(path.name + suffix)
+                try:
+                    shutil.copyfile(evidence, copied.with_name(copied.name + suffix))
+                except FileNotFoundError:
+                    if evidence.is_symlink():
+                        raise
+            evidence = path
+            with contextlib.closing(SqliteStore(copied, read_only=True)) as store:
+                yield store
+    except OSError as exc:
+        raise EngineError(f"{evidence}: cannot inspect stopped store: {exc}") from exc
+
+
+async def validate_resume(
+    catalog: CatalogIR,
+    run_root: Path,
+    *,
+    clock: Clock,
+    adapters: Mapping[str, JobAdapter],
+    scheduler: Scheduler | None,
+    declared: RuntimeProfile,
+    machines: Executor | None,
+    settings: EngineSettings,
+    stored_sources: bool,
+) -> None:
+    """DL-433: validate before creating an absent lock; publish nothing.
+
+    The caller repeats validation under the canonical lock before any effect.
+    A lock appearing during this optimistic read invalidates a failed reading.
+    """
+    journals: list[Journal] = []
+    engines: list[Engine] = []
+    with contextlib.ExitStack() as inspections:
+        try:
+            await _resume_under_lock(
+                catalog,
+                run_root,
+                None,
+                clock=clock,
+                adapters=adapters,
+                scheduler=scheduler,
+                hold_open=True,
+                declared=declared,
+                journals=journals,
+                engines=engines,
+                machines=machines,
+                settings=settings,
+                inspections=inspections,
+                stored_sources=stored_sources,
+                validate_only=True,
+            )
+        finally:
+            for engine in engines:
+                await engine.shutdown()
+            for journal in journals:
+                journal.detach()
+
+
+def active_configuration(run_root: Path, *, locked: bool = False) -> Configuration:
     """Read the last applied configuration, excluding an uncommitted row (DL-437)."""
     path = run_root / STORE_NAME
     try:
-        opened = SqliteStore(path, read_only=True)
+        opening = (
+            _inspect_store(path)
+            if locked
+            else contextlib.closing(SqliteStore(path, read_only=True))
+        )
+        with opening as store:
+            _check_state_version(store.meta(), path)
+            _check_root_id(store.meta(), path)
+            snapshot = _latest_snapshot(store, path)
+            first = snapshot.config_rev if snapshot is not None else first_rev(store)
+            after = snapshot.seq if snapshot is not None else 0
+            rev = _applied_rev(list(store.read_from(after)), first)
+            return load_configuration(store, rev, where=str(path))
     except StoreError as exc:
         raise EngineError(f"{path}: {exc}") from exc
-    with contextlib.closing(opened) as store:
-        _check_state_version(store.meta(), path)
-        _check_root_id(store.meta(), path)
-        snapshot = _latest_snapshot(store, path)
-        first = snapshot.config_rev if snapshot is not None else first_rev(store)
-        after = snapshot.seq if snapshot is not None else 0
-        rev = _applied_rev(list(store.read_from(after)), first)
-        return load_configuration(store, rev, where=str(path))
 
 
 def _check_state_version(meta: Mapping[str, str], path: Path) -> None:

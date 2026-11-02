@@ -306,6 +306,12 @@ def run(
         return
     if run_root is None:
         raise typer.Exit(refuse("legacy run requires --run-root"))
+    from dsl41.runner_clock import EngineError
+
+    try:
+        _check_genesis(run_root)
+    except (OSError, EngineError) as exc:
+        raise typer.Exit(refuse(exc)) from exc
     files, properties, timezone, timezone_map, semantics = estate_args(
         manifest, environment, files, properties, timezone, timezone_map, semantics
     )
@@ -423,6 +429,7 @@ def _run_main_config_checked(path: Path, *, ui: bool, hooks: HookSettings, raw: 
     try:
         host = main_config.load_host(path, raw)
         root = Path(host.run_root)
+        _check_genesis(root)
         estate = None if (root / "engine.db").exists() else main_config.prepare(path, raw)
         launch = main_config.launch_settings(host, path)
         if estate is not None and launch != estate.metadata["launch"]:
@@ -689,6 +696,137 @@ def _finish_run(
     return code
 
 
+def _check_genesis(run_root: Path, *, owned: bool = False) -> None:
+    """DL-443: surviving runtime evidence forbids genesis; inspect without mutation."""
+    import fcntl
+    import stat
+    import errno
+    import time
+
+    from dsl41.runner_clock import EngineError
+    from dsl41.runner_ledger import ACQUIRE_PATIENCE_S, ACQUIRE_RETRY_S
+    from dsl41.runner_startup import refuse_old_root
+
+    store = run_root / "engine.db"
+    try:
+        store.lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        store.stat()  # a dangling store link must not select genesis
+        return
+
+    refuse_old_root(run_root)
+
+    def refuse_evidence(path: Path) -> None:
+        raise EngineError(f"{path}: runtime evidence without engine.db; restore the complete root")
+
+    for name in ("runs", "plans", "logs"):
+        path = run_root / name
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        try:
+            first = next(path.iterdir(), None)
+        except OSError as exc:
+            raise EngineError(f"{path}: unreadable runtime evidence: {exc}") from exc
+        if first is not None:
+            refuse_evidence(first)
+    for name in (
+        "engine.db-wal",
+        "engine.db-shm",
+        "engine.db-journal",
+        "control.sock",
+        "perimeter.jsonl",
+        "journal.jsonl",
+        "wal",
+    ):
+        path = run_root / name
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            continue
+        refuse_evidence(path)
+    path = run_root / "leader.lock"
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(mode):
+        refuse_evidence(path)
+    try:
+        with path.open("rb") as stream:
+            if stream.read(1):
+                refuse_evidence(path)
+            if not owned:
+                deadline = time.monotonic() + ACQUIRE_PATIENCE_S
+                while True:
+                    try:
+                        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except OSError as exc:
+                        if (
+                            exc.errno not in (errno.EACCES, errno.EAGAIN)
+                            or time.monotonic() >= deadline
+                        ):
+                            raise
+                        time.sleep(ACQUIRE_RETRY_S)
+    except OSError as exc:
+        raise EngineError(f"{path}: unreadable or contended runtime evidence: {exc}") from exc
+
+
+async def _validate_before_lock(
+    run_root: Path,
+    catalog: CatalogIR,
+    profile: "RuntimeProfile",
+    *,
+    main_config_path: Path | None,
+    main_launch: dict[str, object] | None,
+    overrides: "dict[str, float | int | None] | None",
+) -> None:
+    """DL-433: an invalid existing store must not gain a missing leader.lock."""
+    from datetime import UTC, datetime
+    from dsl41 import main_config
+    from dsl41.runner_config import load_settings, with_host_settings
+    from dsl41.runner_clock import EngineError, RealClock
+    from dsl41.runner_preflight import host_preflight
+    from dsl41.runner_startup import active_configuration, validate_resume, wire_from_profile
+
+    if main_config_path is not None:
+        stored = active_configuration(run_root, locked=True)
+        if not stored.source_capture:
+            raise EngineError("main-config restart requires a stored main-config capture")
+        main_config.decoded_parts(stored.source_capture)
+        catalog, profile = stored.catalog, stored.profile
+        assert main_launch is not None
+        profile = with_host_settings(
+            profile, cast(list[str], main_launch["as_machine"]), str(main_launch["machine_policy"])
+        )
+        _preflight_items_or_exit(
+            host_preflight(
+                catalog,
+                as_machine=frozenset(profile.as_machine),
+                machine_policy=profile.machine_policy,
+            )
+        )
+    settings = load_settings(run_root, create=False).overridden(**(overrides or {}))
+    wiring = wire_from_profile(
+        catalog, profile, start=datetime.now(UTC).replace(tzinfo=None), settings=settings
+    )
+    await validate_resume(
+        catalog,
+        run_root,
+        clock=RealClock(),
+        adapters=wiring.adapters,
+        scheduler=wiring.scheduler,
+        declared=profile,
+        machines=wiring.machines,
+        settings=settings,
+        stored_sources=main_config_path is not None,
+    )
+
+
 async def _serve_run(
     catalog: CatalogIR,
     run_root: Path,
@@ -711,7 +849,7 @@ async def _serve_run(
 
     A run root that holds `engine.db` continues the run it records, whatever `resume` says, so
     a supervisor that reruns the same command line restarts the engine; one that does not
-    starts a new run, and a missing root is created.
+    starts a new run only when genesis is eligible (DL-443).
 
     The profile is REQUIRED and is the one source of every launch option read here (timezone,
     alias table, the FW window) (DL-137); `engine.toml` with `overrides` over it is the source
@@ -735,11 +873,25 @@ async def _serve_run(
         _preflight_launch(access_map)
     except (EngineError, AccessError) as exc:
         return refuse(exc)
-    # ACQUIRE first (S6a): everything after it reads, replays or launches in a root this process
-    # must lead
+    # DL-433: optimistic validation cannot authorize an effect; ownership revalidates it.
+    if (run_root / "engine.db").exists() and not (run_root / "leader.lock").exists():
+        try:
+            await _validate_before_lock(
+                run_root,
+                catalog,
+                profile,
+                main_config_path=main_config_path,
+                main_launch=main_launch,
+                overrides=overrides,
+            )
+        except (EngineError, OSError, ValueError, RereadRefused) as exc:
+            if not (run_root / "leader.lock").exists():
+                return refuse(exc)
+    # DL-433: the canonical lock precedes every effect and is never unlinked on refusal.
     try:
+        _check_genesis(run_root)
         lock = acquire_run_root(run_root)
-    except EngineError as exc:
+    except (OSError, EngineError) as exc:
         return refuse(exc)
     # ONE teardown, for every way out (DL-145). The leader lock is taken here and given back
     # here, after the store; `release` is idempotent, so the S6a close inside `journal.close`
@@ -747,6 +899,11 @@ async def _serve_run(
     from dsl41.runner_journal import STORE_NAME
 
     resume = (run_root / STORE_NAME).exists()
+    try:
+        _check_genesis(run_root, owned=True)
+    except (OSError, EngineError) as exc:
+        lock.release()
+        return refuse(exc)
     # every SIGTERM is the lifecycle's `stop_requested`: one that lands while the engine is
     # built is kept and handed to it as soon as it exists (spec-drain)
     early = _EarlyStops()
@@ -761,7 +918,7 @@ async def _serve_run(
 
             try:
                 if resume:
-                    stored = active_configuration(run_root)
+                    stored = active_configuration(run_root, locked=True)
                     if not stored.source_capture:
                         return refuse("main-config restart requires a stored main-config capture")
                     captured_estate = main_config.decoded_parts(stored.source_capture)
