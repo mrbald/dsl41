@@ -1,19 +1,25 @@
-"""Event-driven PTY observations for the DL-391 interaction checks."""
+"""Event-driven PTY observations for interaction checks."""
 
 from __future__ import annotations
 
 import asyncio
 import fcntl
+import json
 import os
 import pty
 import re
 import signal
 import struct
+import sys
 import termios
 import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+
+class TerminalAcknowledgementError(AssertionError):
+    """A failed acknowledgement with the terminal and child observations attached."""
 
 
 class Terminal:
@@ -26,11 +32,27 @@ class Terminal:
         self.changed = asyncio.Event()
         self.waiting: dict[str, asyncio.Event] = {}
         self.eof = False
+        self.columns, self.rows = 150, 44
+        self.observation_path = diagnostics / "tui-observations.jsonl"
+        self.recording = False
+        self.parent_environment: dict[str, str | None] = {}
+        self.pty_sizes: list[dict[str, Any]] = []
         self.process: asyncio.subprocess.Process | None = None
         os.set_blocking(self.master, False)
-        fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 44, 150, 0, 0))
+        fcntl.ioctl(
+            self.slave,
+            termios.TIOCSWINSZ,
+            struct.pack("HHHH", self.rows, self.columns, 0, 0),
+        )
+
+        self.pty_sizes.append({"phase": "initial", "size": list(os.get_terminal_size(self.master))})
 
     async def start(self, command: list[str], env: dict[str, str], **kwargs: Any) -> None:
+        self.recording = command[0] == sys.executable
+        self.parent_environment = {key: env.get(key) for key in ("COLUMNS", "LINES", "TERM")}
+        if self.recording:
+            wrapper = str(Path(__file__).with_name("tui_diagnostics.py"))
+            command = [command[0], wrapper, str(self.observation_path), *command[1:]]
         self.process = await asyncio.create_subprocess_exec(
             *command,
             stdin=self.slave,
@@ -67,7 +89,13 @@ class Terminal:
     def resize(self) -> int:
         assert self.process is not None
         mark = len(self.raw)
-        fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", 36, 110, 0, 0))
+        self.columns, self.rows = 110, 36
+        fcntl.ioctl(
+            self.master,
+            termios.TIOCSWINSZ,
+            struct.pack("HHHH", self.rows, self.columns, 0, 0),
+        )
+        self.pty_sizes.append({"phase": "resize", "size": list(os.get_terminal_size(self.master))})
         os.kill(self.process.pid, signal.SIGWINCH)
         return mark
 
@@ -79,16 +107,68 @@ class Terminal:
                 self.changed.clear()
                 if predicate(bytes(self.raw[after:])):
                     return
-                assert not self.eof, f"terminal exited waiting for {label}; see {self.diagnostics}"
+                if self.eof:
+                    raise self.failure(f"terminal exited waiting for {label}", after=after)
                 self.waiting.setdefault(label, asyncio.Event()).set()
                 await self.changed.wait()
 
         try:
             await asyncio.wait_for(observe(), self.timeout)
         except TimeoutError as exc:
-            raise AssertionError(
-                f"terminal did not acknowledge {label}; see {self.diagnostics}"
+            raise self.failure(
+                f"{type(exc).__name__}: terminal did not acknowledge {label}", after=after
             ) from exc
+
+    def observation(self) -> dict[str, Any]:
+        records: list[dict[str, Any]] = []
+        errors: list[str] = []
+        if self.recording or self.observation_path.exists():
+            try:
+                lines = self.observation_path.read_text().splitlines()
+            except OSError as exc:
+                errors.append(str(exc))
+            else:
+                for number, line in enumerate(lines, 1):
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        errors.append(f"incomplete or invalid record at line {number}")
+                    else:
+                        records.append(record)
+        count = sum(record.get("kind") == "call" for record in records)
+        return {
+            "recorder": "source lane" if self.recording else "disabled for direct executable",
+            "records": records,
+            "call_status": f"{count} observed calls" if count else "no observed call",
+            "read_errors": errors,
+        }
+
+    def failure(self, reason: str, *, after: int | None = None) -> TerminalAcknowledgementError:
+        if after is None:
+            after = next(reversed(self.marks.values()), 0)
+        rendered = bytes(self.raw[after:])
+        resets: list[tuple[int, bytes]] = []
+        footer = painted_lines(rendered, self.columns, self.rows, reset_controls=resets)[-1]
+        reset = (
+            {"offset": after + resets[-1][0], "token": repr(resets[-1][1][:128])}
+            if resets
+            else None
+        )
+        positions = re.findall(rb"\x1b\[(\d+);(\d+)H", rendered)
+        extent = (
+            max((int(column) for _row, column in positions), default=0),
+            max((int(row) for row, _column in positions), default=0),
+        )
+        return TerminalAcknowledgementError(
+            f"{reason}; see {self.diagnostics}\n"
+            f"raw_tail={bytes(self.raw[-4096:])!r}\n"
+            f"parsed_screen_size={(self.columns, self.rows)!r}; parsed_footer={footer!r}; "
+            f"observed_cursor_extent={extent!r}\n"
+            f"last_reset_control={json.dumps(reset)}\n"
+            f"parent_pty_sizes={json.dumps(self.pty_sizes)}; "
+            f"parent_environment={json.dumps(self.parent_environment)}\n"
+            f"tui={json.dumps(self.observation(), sort_keys=True)}"
+        )
 
     def close(self) -> None:
         asyncio.get_running_loop().remove_reader(self.master)
@@ -98,12 +178,19 @@ class Terminal:
         (self.diagnostics / "terminal.raw").write_bytes(self.raw)
 
 
-def painted_lines(rendered: bytes, columns: int, rows: int) -> list[str]:
+def painted_lines(
+    rendered: bytes,
+    columns: int,
+    rows: int,
+    *,
+    reset_controls: list[tuple[int, bytes]] | None = None,
+) -> list[str]:
     """Only positioned, observed cells count; unknown cells cannot complete a label."""
     cells = [["\ufffd"] * columns for _ in range(rows)]
     row, column = -1, -1
     tokens = rb"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|[^\x1b]+|\x1b"
-    for token in re.findall(tokens, rendered):
+    for match in re.finditer(tokens, rendered):
+        token = match.group()
         position = re.fullmatch(rb"\x1b\[(\d+);(\d+)H", token)
         if position:
             row, column = int(position[1]) - 1, int(position[2]) - 1
@@ -112,10 +199,12 @@ def painted_lines(rendered: bytes, columns: int, rows: int) -> list[str]:
         elif re.fullmatch(
             rb"\x1b\](?:0|2|22);[^\x00-\x1f\x7f]*(?:\x07|\x1b\\)", token
         ) or re.fullmatch(rb"\x1b\[\?(?:25|1000|1003|1004|1006|1015|1016|2004|2026)[hl]", token):
-            # DL-391: titles, pointer shape, cursor visibility and input/reporting modes paint
+            # Titles, pointer shape, cursor visibility and input/reporting modes paint
             # no cells. Unknown controls and buffer switches still invalidate the observed grid.
             continue
         elif token.startswith(b"\x1b"):
+            if reset_controls is not None:
+                reset_controls[:] = [(match.start(), token)]
             cells = [["\ufffd"] * columns for _ in range(rows)]
             row, column = -1, -1
         else:
