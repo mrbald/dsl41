@@ -87,6 +87,10 @@ cleanup() {
         podman exec --user runner --workdir /work "$container_id" \
             bash examples/nightbank/deploy/drill-steps.sh diagnostics \
             >"$evidence/diagnostics.log" 2>&1 || true
+        if podman exec "$container_id" test -d /var/lib/dsl41-drill/clock; then
+            podman cp "$container_id:/var/lib/dsl41-drill/clock" "$evidence/clock" \
+                >"$evidence/clock-copy.log" 2>&1 || say "could not export clock evidence"
+        fi
         # Keep the synthetic stores and spools together for the fault verdicts (DL-433).
         if podman exec "$container_id" test -d /var/lib/dsl41-drill/restart-faults; then
             podman cp "$container_id:/var/lib/dsl41-drill/restart-faults" \
