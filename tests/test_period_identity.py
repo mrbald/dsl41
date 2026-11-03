@@ -209,6 +209,11 @@ def test_the_profile_holds_only_what_the_engine_reads_under() -> None:
         "fw_default_interval_us",
         "semantics",
         "job_env",
+        "job_profile",
+        "job_shell",
+        "std_file_mode",
+        "kill_signals",
+        "set_job_attribute_environmentals",
     }
 
 
@@ -217,6 +222,11 @@ def test_the_profile_holds_only_what_the_engine_reads_under() -> None:
 #: quietly unhashed.
 _ALTERNATES: dict[str, Any] = {
     "job_env": {"AUTOSERV": "synthetic"},
+    "job_profile": "/tmp/synthetic-profile",
+    "job_shell": "/bin/sh",
+    "std_file_mode": "truncate",
+    "kill_signals": (15, 9),
+    "set_job_attribute_environmentals": False,
     "default_tz": "Europe/Zurich",
     "tz_aliases": {"CET": "Europe/Zurich"},
     "as_machine": ("alpha",),
@@ -248,10 +258,12 @@ def test_every_profile_field_is_wired_or_declared() -> None:
     import re
 
     from dsl41 import runner_startup
+    from dsl41.runtime_policy import POLICY_FIELDS
 
     source = inspect.getsource(runner_startup._derive_runtime_profile)
     assigned = set(re.findall(r'values\["(\w+)"\]\s*=', source))
-    assert assigned == set(RuntimeProfile.model_fields)
+    assert "policy_values(" in source
+    assert assigned | set(POLICY_FIELDS) == set(RuntimeProfile.model_fields)
 
 
 def test_the_profile_is_frozen_and_forbids_extras() -> None:

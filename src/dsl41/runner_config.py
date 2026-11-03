@@ -34,7 +34,7 @@ from dsl41.canon import CanonError, canonical_bytes, decode, hash_over
 from dsl41.ir import CatalogIR
 from dsl41.reload_diff import catalog_hash_v2, catalog_payload
 from dsl41.runner_clock import EngineError
-from dsl41.runner_environment import JobEnvironment
+from dsl41.runtime_policy import JobEnvironment, RuntimePolicySettings, policy_values
 from dsl41.semantics import SemanticSwitches, check_overrides, resolve
 from dsl41.timezones import alias_table
 
@@ -86,7 +86,7 @@ def job_fingerprints(catalog: CatalogIR) -> dict[str, str]:
 MachinePolicy = Literal["strict", "local-eligible"]
 
 
-class RuntimeProfile(BaseModel):
+class RuntimeProfile(RuntimePolicySettings):
     """ss2.1: the launch options that change interpretation or dispatch, as a typed frozen model.
 
     Durations are microseconds. The stop grace is not here: it is an engine setting
@@ -171,19 +171,23 @@ def runtime_profile_from_cli(
     fw_default_interval_s: float = FW_DEFAULT_INTERVAL_S,
     semantics: Mapping[str, str] | None = None,
     job_env: Mapping[str, str] | None = None,
+    runtime_policy: Mapping[str, object] | None = None,
 ) -> RuntimeProfile:
     """The one CLI -> profile normalization (PR-15a).
 
     Omitted options take the stated defaults; an absent `--timezone` is `UTC`; seconds become
     microseconds by `round`. The model refuses an out-of-bound value at construction."""
-    return RuntimeProfile(
-        default_tz=timezone or "UTC",
-        tz_aliases=dict(tz_aliases or {}),
-        as_machine=tuple(sorted(set(as_machine))),
-        machine_policy=machine_policy,  # type: ignore[arg-type]  # the Literal validates it
-        fw_default_interval_us=to_us(fw_default_interval_s),
-        semantics=dict(semantics or {}),
-        job_env=dict(job_env or {}),
+    return RuntimeProfile.model_validate(
+        {
+            "default_tz": timezone or "UTC",
+            "tz_aliases": dict(tz_aliases or {}),
+            "as_machine": tuple(sorted(set(as_machine))),
+            "machine_policy": machine_policy,
+            "fw_default_interval_us": to_us(fw_default_interval_s),
+            "semantics": dict(semantics or {}),
+            "job_env": dict(job_env or {}),
+            **policy_values(runtime_policy or {}),
+        }
     )
 
 
@@ -210,6 +214,10 @@ def with_host_settings(
 
 
 # ------------------------------------------------------------ configuration row
+
+
+class CapturedLoweringError(EngineError):
+    """A v2 capture cannot establish its stored catalog and job order."""
 
 
 class Configuration(BaseModel):
@@ -294,11 +302,13 @@ class Configuration(BaseModel):
                 try:
                     captured = decoded_parts(raw["source_capture"]).catalog
                 except (ValueError, RereadRefused) as exc:
-                    raise EngineError(
+                    raise CapturedLoweringError(
                         f"{where}: unreadable configuration source_capture: {exc}"
                     ) from exc
                 if catalog_hash_v2(captured) != catalog_hash_v2(catalog):
-                    raise EngineError(f"{where}: configuration source_capture catalog hash differs")
+                    raise CapturedLoweringError(
+                        f"{where}: configuration source_capture catalog hash differs"
+                    )
                 order = list(captured.jobs)
             catalog = catalog.model_copy(
                 update={"jobs": {name: catalog.jobs[name] for name in order}}

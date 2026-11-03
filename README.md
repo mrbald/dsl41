@@ -734,6 +734,7 @@ Runner:
 - `src/dsl41/runner_scheduler.py`: the calendar scheduler: standard day
   sets and windowed extended-calendar generators, turned into UTC instants
   through `timezones.py`.
+- `src/dsl41/runtime_policy.py`: revisioned execution settings, parsing and policy refusals.
 - `src/dsl41/runner_preflight.py`: the ERROR/WARN item model and its
   rules: job type, machine resolution, owner, calendars, timezones,
   resources, oracle construction, and the AND-success skeleton cycle that

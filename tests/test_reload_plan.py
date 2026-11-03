@@ -7,6 +7,8 @@ The nightbank small estate is the large case; a tiny estate written in the test 
 from __future__ import annotations
 
 import hashlib
+import os
+import pwd
 import re
 import shutil
 from datetime import datetime
@@ -43,7 +45,12 @@ def _nightbank(tmp_path: Path) -> Path:
     for path in SMALL.glob("*.jil"):
         shutil.copy(path, target)
     shutil.copy(SMALL / "estate.toml", target)
-    (tmp_path / "night.properties").write_text(PROPERTIES)
+    profile = tmp_path / "profile.env"
+    profile.write_text("export SYNTHETIC=1\n")
+    owner = pwd.getpwuid(os.geteuid()).pw_name
+    properties = PROPERTIES.replace("OWNER=tester", f"OWNER={owner}")
+    properties = properties.replace("NB_PROFILE=/var/nb/profile.env", f"NB_PROFILE={profile}")
+    (tmp_path / "night.properties").write_text(properties)
     return target
 
 
@@ -82,7 +89,7 @@ _BOX = "insert_job: BX\njob_type: b\n\n"
 def _member(name: str, box: str = "BX", command: str = "true") -> str:
     return (
         f"insert_job: {name}\njob_type: c\nbox_name: {box}\n"
-        f"command: {command}\nmachine: m1\nowner: tester\n\n"
+        f"command: {command}\nmachine: m1\nowner: {pwd.getpwuid(os.geteuid()).pw_name}\n\n"
     )
 
 
@@ -321,7 +328,7 @@ def test_a_lint_warning_refuses_under_strict(tmp_path: Path) -> None:
     live = _live(estate)
     (estate / "a.jil").write_text(
         (estate / "a.jil").read_text()
-        + "insert_job: LONE\njob_type: c\ncommand: true\nmachine: m1\nowner: tester\n"
+        + f"insert_job: LONE\njob_type: c\ncommand: true\nmachine: m1\nowner: {pwd.getpwuid(os.geteuid()).pw_name}\n"
     )
     with pytest.raises(RereadRefused) as refused:
         _reread(estate, live, tmp_path / "plans")
@@ -369,7 +376,8 @@ def test_the_site_layer_is_a_part_and_moves_the_token(tmp_path: Path) -> None:
     estate = _nightbank(tmp_path)
     live = _live(estate)
     one = _reread(estate, live, tmp_path / "plans")
-    (tmp_path / "night.properties").write_text(PROPERTIES.replace("/var/nb/logs", "/var/nb/log2"))
+    properties = tmp_path / "night.properties"
+    properties.write_text(properties.read_text().replace("/var/nb/logs", "/var/nb/log2"))
     two = _reread(estate, live, tmp_path / "plans")
     assert two.token != one.token
     assert len(two.plan.changed) > 0
@@ -385,7 +393,7 @@ def test_the_estate_without_its_site_layer_is_refused(tmp_path: Path) -> None:
 def test_a_calendar_only_change_puts_a_running_job_in_the_stop_set(tmp_path: Path) -> None:
     jil = (
         "calendar: HOL\n01/01/2026\n\n"
-        "insert_job: J1\njob_type: c\ncommand: true\nmachine: m1\nowner: tester\n"
+        f"insert_job: J1\njob_type: c\ncommand: true\nmachine: m1\nowner: {pwd.getpwuid(os.geteuid()).pw_name}\n"
         'date_conditions: 1\ndays_of_week: all\nexclude_calendar: HOL\nstart_times: "01:00"\n'
     )
     estate = _tiny(tmp_path, jil)
@@ -496,7 +504,7 @@ def test_a_preflight_error_refuses_the_plan(tmp_path: Path) -> None:
     (estate / "a.jil").write_text(
         text.replace("insert_job: BX", "insert_resource: R1\nres_type: R\n\ninsert_job: BX", 1)
         + "insert_job: FT\njob_type: c\nbox_name: BX\ncommand: true\nmachine: m1\n"
-        "owner: tester\nresources: (R1, QUANTITY=1)\n"
+        f"owner: {pwd.getpwuid(os.geteuid()).pw_name}\nresources: (R1, QUANTITY=1)\n"
     )
     with pytest.raises(RereadRefused) as refused:
         _reread(estate, live, tmp_path / "plans")
@@ -516,9 +524,15 @@ def test_a_preflight_warning_goes_into_plan_json(tmp_path: Path) -> None:
     result = _reread(estate, live, tmp_path / "plans")
     document = read_plan(tmp_path / "plans", result.token)
     assert document is not None
-    (warning,) = document["preflight_warnings"]
-    assert warning["code"] == "n-retrys"
-    assert warning["job"] == "M1"
+    from dsl41.runtime_policy import resolve_job_shell
+
+    warnings = document["preflight_warnings"]
+    retry_warnings = [item for item in warnings if item["code"] == "n-retrys"]
+    assert len(retry_warnings) == 1
+    assert retry_warnings[0]["job"] == "M1"
+    _, shell_warning = resolve_job_shell(None)
+    assert sum(item["code"] == "shell" for item in warnings) == (shell_warning is not None)
+    assert len(warnings) == 1 + (shell_warning is not None)
 
 
 def test_a_job_with_envvars_that_run_refuses_is_refused(tmp_path: Path) -> None:

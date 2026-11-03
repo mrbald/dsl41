@@ -62,8 +62,9 @@ class Jil:
         lines.append("owner: ~{$OWNER}~")
         if job_type == "c":
             lines.append("profile: ~{$NB_PROFILE}~")
-        lines.append(f"std_out_file: ~{{$NB_LOGS}}~/{name}.out")
-        lines.append(f"std_err_file: ~{{$NB_LOGS}}~/{name}.err")
+        if job_type != "f":
+            lines.append(f"std_out_file: ~{{$NB_LOGS}}~/{name}.out")
+            lines.append(f"std_err_file: ~{{$NB_LOGS}}~/{name}.err")
         lines.extend(extra)
         self.parts.append("\n".join(lines) + "\n")
 
@@ -519,13 +520,6 @@ def gen_global(acs: list[str]) -> Jil:
         condition="s(GLOBAL_RISK_B)",
         command=work("OPS_LEGACY_REPORT_C"),
         extra=["status: ON_ICE"],
-    )
-    jil.job(
-        "OPS_XINST_DEMO_C",
-        "c",
-        machine="ops_util",
-        condition="s(GROUP_TREASURY_EOD^PRD, 9999)",
-        command=work("OPS_XINST_DEMO_C"),
     )
     return jil
 

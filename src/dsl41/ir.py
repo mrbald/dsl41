@@ -99,6 +99,7 @@ PASSTHROUGH_ALLOWED = frozenset(
         "elevated",
         "interactive",
         "chk_files",
+        "shell",
     }
 )
 
@@ -920,6 +921,12 @@ class _Lowerer:
         attrs: dict[str, RawAttr] = {}
         ok = True
         for attr in stmt.attrs:
+            if attr.key.lower() == "ulimit" and "ulimit" in attrs:
+                previous = attrs["ulimit"]
+                attrs["ulimit"] = previous.model_copy(
+                    update={"raw_value": previous.raw_value.strip() + "," + attr.raw_value.strip()}
+                )
+                continue
             if not self._fresh_attr(attrs, attr):
                 ok = False
                 continue
@@ -1083,9 +1090,15 @@ class _Lowerer:
         if job_type is None:
             return
         box = self._box_linkage(attrs)
+        retry = attrs.get("n_retrys")
+        if retry is not None and re.fullmatch(r"[0-9]+", retry.raw_value.strip()) is None:
+            self.err(
+                f"[n-retrys] job {name}: n_retrys: expected an integer from 0 through 20; use 0 through 20 on CMD",
+                retry.span,
+            )
         sem = self._semantics(attrs)
         schedule = self._schedule(attrs)
-        exec_ = self._exec_spec(job_type, attrs)
+        exec_ = self._exec_spec(job_type, attrs, name)
         resources: list[ResourceRef] = []
         if (attr := attrs.pop("resources", None)) is not None:
             resources = self._parse_resources(attr)
@@ -1426,7 +1439,9 @@ class _Lowerer:
 
     # ----------------------------------------------------------------- exec specs
 
-    def _exec_spec(self, job_type: str, attrs: dict[str, RawAttr]) -> ExecSpec | FwSpec | None:
+    def _exec_spec(
+        self, job_type: str, attrs: dict[str, RawAttr], name: str
+    ) -> ExecSpec | FwSpec | None:
         command = attrs.pop("command", None)
         watch_file = attrs.pop("watch_file", None)
         watch_interval = attrs.pop("watch_interval", None)
@@ -1468,7 +1483,10 @@ class _Lowerer:
             self.err("command: not valid on an FW job", command.span)
         for cmd_only in ("std_in_file", "envvars"):  # DL-32: CMD-only exec attrs
             if (wrong := attrs.pop(cmd_only, None)) is not None:
-                self.err(f"{wrong.key}: not valid on an FW job", wrong.span)
+                self.err(
+                    f"[fw-execution] job {name}: {wrong.key}: not valid on an FW job without a shell execution environment; use a CMD job",
+                    wrong.span,
+                )
         if watch_file is None:
             self.err("FW job requires watch_file", None)
             return None

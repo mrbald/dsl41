@@ -359,8 +359,6 @@ job_type: f
 box_name: APAC_EOD_B
 machine: mkt_feed
 owner: ~{$OWNER}~
-std_out_file: ~{$NB_LOGS}~/APAC_MKT_FX_F.out
-std_err_file: ~{$NB_LOGS}~/APAC_MKT_FX_F.err
 watch_file: ~{$NB_DATA}~/incoming/apac_fx.csv
 watch_interval: 5
 
@@ -398,8 +396,6 @@ job_type: f
 box_name: APAC_MKT_EQ_B
 machine: mkt_feed
 owner: ~{$OWNER}~
-std_out_file: ~{$NB_LOGS}~/APAC_MKT_EQ_PX_F.out
-std_err_file: ~{$NB_LOGS}~/APAC_MKT_EQ_PX_F.err
 watch_file: ~{$NB_DATA}~/incoming/apac_eq_prices.csv
 watch_interval: 5
 
@@ -449,8 +445,6 @@ job_type: f
 box_name: APAC_MKT_GOV_B
 machine: mkt_feed
 owner: ~{$OWNER}~
-std_out_file: ~{$NB_LOGS}~/APAC_MKT_GOV_PX_F.out
-std_err_file: ~{$NB_LOGS}~/APAC_MKT_GOV_PX_F.err
 watch_file: ~{$NB_DATA}~/incoming/apac_gov_prices.csv
 watch_interval: 5
 
@@ -500,8 +494,6 @@ job_type: f
 box_name: APAC_MKT_CRP_B
 machine: mkt_feed
 owner: ~{$OWNER}~
-std_out_file: ~{$NB_LOGS}~/APAC_MKT_CRP_PX_F.out
-std_err_file: ~{$NB_LOGS}~/APAC_MKT_CRP_PX_F.err
 watch_file: ~{$NB_DATA}~/incoming/apac_crp_prices.csv
 watch_interval: 5
 
@@ -551,8 +543,6 @@ job_type: f
 box_name: APAC_MKT_MMK_B
 machine: mkt_feed
 owner: ~{$OWNER}~
-std_out_file: ~{$NB_LOGS}~/APAC_MKT_MMK_PX_F.out
-std_err_file: ~{$NB_LOGS}~/APAC_MKT_MMK_PX_F.err
 watch_file: ~{$NB_DATA}~/incoming/apac_mmk_prices.csv
 watch_interval: 5
 
@@ -602,8 +592,6 @@ job_type: f
 box_name: APAC_MKT_FXO_B
 machine: mkt_feed
 owner: ~{$OWNER}~
-std_out_file: ~{$NB_LOGS}~/APAC_MKT_FXO_PX_F.out
-std_err_file: ~{$NB_LOGS}~/APAC_MKT_FXO_PX_F.err
 watch_file: ~{$NB_DATA}~/incoming/apac_fxo_prices.csv
 watch_interval: 5
 
@@ -653,8 +641,6 @@ job_type: f
 box_name: APAC_MKT_CMD_B
 machine: mkt_feed
 owner: ~{$OWNER}~
-std_out_file: ~{$NB_LOGS}~/APAC_MKT_CMD_PX_F.out
-std_err_file: ~{$NB_LOGS}~/APAC_MKT_CMD_PX_F.err
 watch_file: ~{$NB_DATA}~/incoming/apac_cmd_prices.csv
 watch_interval: 5
 
@@ -704,8 +690,6 @@ job_type: f
 box_name: APAC_MKT_IRD_B
 machine: mkt_feed
 owner: ~{$OWNER}~
-std_out_file: ~{$NB_LOGS}~/APAC_MKT_IRD_PX_F.out
-std_err_file: ~{$NB_LOGS}~/APAC_MKT_IRD_PX_F.err
 watch_file: ~{$NB_DATA}~/incoming/apac_ird_prices.csv
 watch_interval: 5
 
@@ -755,8 +739,6 @@ job_type: f
 box_name: APAC_MKT_CNV_B
 machine: mkt_feed
 owner: ~{$OWNER}~
-std_out_file: ~{$NB_LOGS}~/APAC_MKT_CNV_PX_F.out
-std_err_file: ~{$NB_LOGS}~/APAC_MKT_CNV_PX_F.err
 watch_file: ~{$NB_DATA}~/incoming/apac_cnv_prices.csv
 watch_interval: 5
 
@@ -1726,8 +1708,6 @@ job_type: f
 box_name: APAC_REC_B
 machine: mkt_feed
 owner: ~{$OWNER}~
-std_out_file: ~{$NB_LOGS}~/APAC_REC_CUST_F.out
-std_err_file: ~{$NB_LOGS}~/APAC_REC_CUST_F.err
 watch_file: ~{$NB_DATA}~/incoming/apac_custody.csv
 watch_interval: 5
 

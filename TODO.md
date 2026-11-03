@@ -14,8 +14,8 @@ Items remain open until their evidence and independent acceptance are recorded.
 - [ ] JIL slice 1: config and checks, plus K1/K2 restart refusals.
 - [ ] JIL slice 2: process launch for P, Q, R, S, AA, AE and the AD signal list.
 - [ ] JIL slice 3: engine integration for U, V, W, X, Z, AC, AD `sendevent -k`, attribute environment, AF selection wiring and the corresponding DL entries.
-- [ ] Clock-sync drill check (E): exercise the documented waiter prerequisite and verify its bounded startup and clock behavior; record the drill evidence and exact qualified Python 3.12.x interpreter before release.
-- [ ] Train cutover: demonstrate an accepted synthetic run through `scripts/merge_train.py`; #309 and strict up-to-date/admin protection are complete.
+- [x] Clock-sync drill check (E, #321): native x86_64 Ubuntu Python 3.12.3 and EL8 Python 3.12.15 qualify the waiter prerequisite, bounded startup and clock behavior ([service-drill evidence](https://github.com/mrbald/dsl41/actions/runs/41597099395)).
+- [x] Train cutover (#320): the accepted synthetic run through `scripts/merge_train.py` verifies pinned-head merge, strict/admin protection, cleanup and an idle empty queue; #309 is complete.
 - [ ] Release (B): address every discussion item, record the owner's dispositions and the boss's candidate acceptance, then release under the owner's authority.
 
 # Known limits
@@ -37,6 +37,18 @@ Items remain open until their evidence and independent acceptance are recorded.
 # Known bugs
 
 Severity follows the accepted triage. In-flight targets remain open until accepted.
+
+- [ ] **Untriaged**: `test_socket_commands_report_plain_connect_errors[missing-serve]`
+  in `tests/test_cli_control_read_errors.py` exceeded its 5-second child timeout
+  without output (JIL1 full Python 3.12 gate, operator triage). Cause UNKNOWN;
+  the original failed source set was incompletely captured. Later passes do not
+  close this bug. The owner permits continuation; recurrence stops for diagnosis.
+- [ ] **Untriaged**: `test_stopped_command_kills_its_grandchild[timeout]`
+  in `tests/test_merge_train_rework.py` failed to observe its ready file within
+  15 seconds in the 1-second command-timeout case (JIL1 full Python 3.12 gate,
+  operator triage). Cause UNKNOWN; the original failed source set was incompletely
+  captured. Later passes do not close this bug. The owner permits continuation;
+  recurrence stops for diagnosis.
 
 - [ ] **Medium**: `runs` refuses the whole report when an older open attempt holds the journal's pruning
   floor over a completed run whose history the snapshot has expired by age; the leaf reader

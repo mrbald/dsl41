@@ -72,7 +72,7 @@ from dsl41.runner_startup import start_run
 
 T0 = datetime(2026, 7, 1, 8, 0)
 
-_SOLO_JIL = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
+_SOLO_JIL = "insert_job: j\njob_type: c\ncommand: x\nmachine: localhost\n"
 
 #: term_run_time 2 puts the deadline at exactly the instant the operator's
 #: command below is stamped -- the interleaving ss4 step 5 exists for.

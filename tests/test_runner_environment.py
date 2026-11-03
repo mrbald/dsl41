@@ -55,6 +55,33 @@ def test_path_dollar_syntax_refuses(text: str) -> None:
         expand_path("J0", "std_out_file", text, {"A": "value"})
 
 
+@pytest.mark.parametrize(
+    "name", ["__job_name", "__machine", "__run_machine", "__box_name", "__max_exit_success"]
+)
+@pytest.mark.parametrize("braced", [False, True])
+@pytest.mark.parametrize("supplied", [False, True])
+def test_reserved_attribute_paths_refuse_before_environment_lookup(name, braced, supplied):
+    class Guarded(dict):
+        def __contains__(self, key):
+            pytest.fail("reserved variable reached environment membership lookup")
+
+        def __getitem__(self, key):
+            pytest.fail("reserved variable reached environment value lookup")
+
+    env = Guarded({name: "PRIVATE_VALUE"} if supplied else {})
+    source = "${" + name + "}" if braced else "$" + name
+    with pytest.raises(RuntimeVariableError) as error:
+        expand_path("J0", "std_out_file", source, env)
+    assert "J0" in str(error.value) and "std_out_file" in str(error.value)
+    assert name in str(error.value) and "unavailable" in str(error.value)
+    assert "literal path" in str(error.value) and "PRIVATE_VALUE" not in str(error.value)
+
+
+def test_reserved_spelling_inside_supported_value_remains_literal():
+    value, names = expand_path("J0", "std_out_file", "$SUPPORTED", {"SUPPORTED": "${__job_name}"})
+    assert value == "${__job_name}" and names == {"SUPPORTED"}
+
+
 def test_substitution_is_literal_once_and_paths_anchor_to_dispatch_cwd(tmp_path: Path) -> None:
     text, names = expand_path(
         "J0", "std_out_file", "$A/${_b2}/$A", {"A": "${OTHER}", "_b2": "* ~ $(id)"}

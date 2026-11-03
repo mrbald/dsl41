@@ -24,7 +24,7 @@ from dsl41.lint import RULE_CODES, LintReport, lint_catalog, rule_l025
 from dsl41.placeholders import PlaceholderError, properties_from_bytes, substitute
 from dsl41.reload_plan import Estate, RereadRefused, estate_settings
 from dsl41.runner_config import RuntimeProfile, runtime_profile_from_cli
-from dsl41.runner_environment import JobEnvironment
+from dsl41.runtime_policy import JobEnvironment, RuntimePolicySettings, policy_values
 from dsl41.semantics import check_overrides
 from dsl41.timezones import parse_timezone_map, resolve_timezone
 from dsl41.status_hook import HookSettings
@@ -51,7 +51,7 @@ class HostConfig(HookSettings, StrictModel):
     access_map: str | None = None
 
 
-class EngineConfig(HostConfig):
+class EngineConfig(HostConfig, RuntimePolicySettings):
     environment: str | None = None
     job_env: JobEnvironment = {}
 
@@ -394,6 +394,7 @@ def from_parts(parts: Sequence[tuple[str, bytes]]) -> Estate:
                 config.estate.semantics,
                 catalog,
                 job_env=config.engine.job_env,
+                runtime_policy=config.engine.model_dump(),
             ),
             tuple(parts),
             config.engine.environment,
@@ -448,6 +449,7 @@ def profile_of(estate: Estate) -> RuntimeProfile:
         as_machine=launch["as_machine"],
         machine_policy=launch["machine_policy"],
         job_env=cast(dict[str, str], estate.settings.get("job_env", {})),
+        runtime_policy=policy_values(estate.settings),
     )
 
 

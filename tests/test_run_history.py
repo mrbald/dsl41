@@ -854,7 +854,9 @@ async def _run_then_late_completion(run_root: Path, source: str) -> None:
     gate reaches -- an `adapter` completion is stale-gated and REJECTED
     ("job already terminal"), a `control` CHANGE_STATUS is never gated and
     is APPLIED (SEM-01 parity, `runner_admission._gate`)."""
-    jil = parse("insert_job: j1\njob_type: c\ncommand: exit 1\nmachine: m1\n", file="estate.jil")
+    jil = parse(
+        "insert_job: j1\njob_type: c\ncommand: exit 1\nmachine: localhost\n", file="estate.jil"
+    )
     catalog = lower_catalog([jil], permit_unknown=False)
     clock = RealClock()
     engine = start_run(
@@ -1032,7 +1034,7 @@ def test_a_restart_refuses_a_store_that_lost_a_verdict(tmp_path: Path) -> None:
 
     async def resume() -> None:
         jil = parse(
-            "insert_job: j1\njob_type: c\ncommand: exit 1\nmachine: m1\n", file="estate.jil"
+            "insert_job: j1\njob_type: c\ncommand: exit 1\nmachine: localhost\n", file="estate.jil"
         )
         await resume_run(
             lower_catalog([jil], permit_unknown=False),

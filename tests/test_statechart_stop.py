@@ -30,7 +30,7 @@ from dsl41.state_machine import (
 )
 
 T0 = datetime(2026, 7, 1, 8, 0)
-_JIL = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
+_JIL = "insert_job: j\njob_type: c\ncommand: x\nmachine: localhost\n"
 
 
 def _error() -> UnhandledEvent:
