@@ -23,12 +23,14 @@ RUN case "$TARGET" in \
 CMD ["/sbin/init"]
 
 FROM host AS service
+ARG TARGET
 RUN case "$TARGET" in \
         el8) dnf -y install chrony && dnf clean all ;; \
         ubuntu) apt-get update -q \
              && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
                  systemd-timesyncd gcc libc6-dev \
              && rm -rf /var/lib/apt/lists/* ;; \
+        *) echo "TARGET must be ubuntu or el8, not '$TARGET'" >&2; exit 2 ;; \
     esac
 COPY requirements.txt /rehearsal-requirements.txt
 RUN python3.12 -m venv /wheel-builder \
