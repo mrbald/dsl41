@@ -37,36 +37,105 @@ pytestmark = pytest.mark.usefixtures("cli_env")
 @contextmanager
 def cli_engine(path: Path):
     root = main.load_run_root(path)
+    socket = root / "control.sock"
     log = root.parent / "cli-engine.log"
-    with (
-        log.open("w") as stream,
-        subprocess.Popen(
+    ready = stopped = False
+    with log.open("w") as stream:
+        child = subprocess.Popen(
             [sys.executable, "-m", "dsl41", "run", "--config", str(path)],
             stdout=stream,
             stderr=subprocess.STDOUT,
-        ) as child,
-    ):
+        )
         try:
             deadline = time.monotonic() + 30
             while "engine up; control socket:" not in log.read_text():
                 assert child.poll() is None, log.read_text()
                 assert time.monotonic() < deadline, log.read_text()
                 time.sleep(0.02)
+            ready = True
 
             def ask(command="catalog"):
-                return roundtrip(root / "control.sock", {"v": 3, "cmd": command}, timeout=3)
+                nonlocal stopped
+                answer = roundtrip(socket, {"v": 3, "cmd": command}, timeout=3)
+                stopped |= answer.get("engine") in ("DRAINING", "STOPPED")
+                return answer
 
             assert ask("status")["engine"] == "RUNNING"
             yield ask
         finally:
-            if child.poll() is None:
+            stopped |= ready and not socket.exists()
+            if child.poll() is None and not stopped:
                 child.terminate()
             try:
                 child.wait(timeout=15)
             except subprocess.TimeoutExpired:
                 child.kill()
                 child.wait(timeout=10)
+                assert not stopped, log.read_text()
             assert child.returncode == 0, log.read_text()
+
+
+@pytest.mark.parametrize("stop", ["socket", "reply"])
+@pytest.mark.parametrize("timeout", [False, True], ids=["delayed_exit", "exit_timeout"])
+def test_cli_engine_never_sends_term_after_protocol_stop(
+    short_root: Path, monkeypatch: pytest.MonkeyPatch, stop: str, timeout: bool
+) -> None:
+    path = estate_file(short_root)
+    socket = short_root / "run" / "control.sock"
+    socket.parent.mkdir()
+    socket.touch()
+    calls = []
+
+    class DelayedExit:
+        returncode = None
+        killed = False
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout):
+            calls.append(("wait", timeout))
+            if exit_timeout and not self.killed:
+                raise subprocess.TimeoutExpired("engine", timeout)
+            self.returncode = -9 if self.killed else 0
+            return self.returncode
+
+        def terminate(self):
+            pytest.fail("TERM after protocol stop")
+
+        def kill(self):
+            calls.append(("KILL",))
+            self.killed = True
+
+    child = DelayedExit()
+    exit_timeout = timeout
+
+    def popen(*args, stdout, **kwargs):
+        stdout.write("engine up; control socket: test\n")
+        stdout.flush()
+        return child
+
+    def answer(socket, request, **kwargs):
+        return {"ok": True, "engine": "STOPPED" if request["cmd"] == "engine_stop" else "RUNNING"}
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(f"{__name__}.roundtrip", answer)
+
+    def exercise():
+        with cli_engine(path) as ask:
+            if stop == "socket":
+                socket.unlink()
+            else:
+                assert ask("engine_stop")["ok"]
+            assert child.poll() is None
+
+    if timeout:
+        with pytest.raises(AssertionError, match="engine up; control socket: test"):
+            exercise()
+    else:
+        exercise()
+        assert child.returncode == 0
+    assert calls == ([("wait", 15), ("KILL",), ("wait", 10)] if timeout else [("wait", 15)])
 
 
 def read_config_row(root: Path, rev: int) -> bytes:
