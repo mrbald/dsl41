@@ -121,7 +121,7 @@ assertion-specific gap found in this inspection, not universal coverage.
 | S13 | `f873d7d:examples/nightbank/deploy/drill-steps.sh` L222 | O: a sealed period stays stopped until an explicit open | retired | Charter excludes periods, seals and opening a successor | — | See S14 |
 | S14 | `f873d7d:examples/nightbank/deploy/drill-steps.sh` L246 | O: stop reaches a writer-free backup boundary | ported | [Installed restore] drains a writing command, proves no service-user processes or cgroup members, then independently takes the root lock before copying | U, S | — |
 | S15 | `f873d7d:examples/nightbank/deploy/drill-steps.sh` L257 | O: restored state preserves operator holds | ported | [Restore tests] and [installed restore] delete the originals, restore the complete copy and assert explicit hold flags from fresh processes | U, S | — |
-| S16 | `f873d7d:examples/nightbank/deploy/drill-steps.sh` L285 | O: enabled service resumes the root at boot | ported | [Service] reboot halves assert enabled-unit startup and retained holds; [drill-local.sh](../examples/nightbank/deploy/drill-local.sh) compares the underlying kernel boot ID outside the container and records container-visible IDs separately | S | G-boot: actual host reboot remains unqualified |
+| S16 | `f873d7d:examples/nightbank/deploy/drill-steps.sh` L285 | O: enabled service resumes the root at boot | ported | [Service] reboot halves assert enabled-unit startup and retained holds; [drill-local.sh](../examples/nightbank/deploy/drill-local.sh#L168) verifies that the underlying kernel boot ID is unchanged, proving a same-boot restart only, and records container-visible boot IDs separately. [Boot-ID tests] inject changed identity and assert restart resolution, retained holds and run identity | U, S | G-boot covered for this release; K step 2 after shipping: real host reboot |
 | S17 | `f873d7d:examples/nightbank/deploy/drill-steps.sh` L310 | O: unit state exposes status and restart count | gap | [service] uses systemctl; no equivalent full monitoring row | — | G-access |
 | S18 | `f873d7d:examples/nightbank/deploy/drill-steps.sh` L310 | O: supervisor log and LIST expose completed wrappers | retired | Charter excludes supervisor monitoring; v2 attempt records use runs | — | — |
 | S19 | `f873d7d:examples/nightbank/deploy/drill-steps.sh` L310 | O: leader note identifies the current engine | ported | [test_runner_leadership.py:179](../tests/test_runner_leadership.py#L179) | U | G-access |
@@ -510,6 +510,8 @@ The source line identifies the test or shared assertion containing the rule.
 
 Counts describe scenario obligations, not test functions or successful runs.
 Measurement and untested-guard rows are included but do not claim a v1 verdict.
+The boot-ID coverage extends S16, whose disposition stays `ported`; the recount
+includes all 344 rows below the source inventory headings.
 
 | Disposition | Assertions |
 | --- | ---: |
@@ -541,7 +543,7 @@ evidence (Known bugs).
 | G-update | Run installed add/change/remove/revert with exact effect counts, properties/calendar-only edits and interrupted update replay. Known bugs: stopped-result attribution, decoded equality ignoring job order, barrier cleanup orphaning a command group. Assert the correct record/result even if today's implementation fails. |
 | G-history | Combine pruning with an open attempt, an old completed run and a removed/re-added job. Fresh runs/journal readers must report the contract's retained history. Known bug: missing opening revision can refuse the whole runs report. Reconcile the deleted journal tests' replay and crash-durability assertions with SQLite fault coverage; missing cells remain gaps here. |
 | G-access | Restore installed multi-account permissions, ancestor traversal, tier refusals, map receipts/reload and status/subscribe monitoring checks. Keep source policy tests, but run the filesystem boundary under the one-unit deployment. |
-| G-boot | Open: the service reboot row proves enabled-unit startup and retained holds while the driver verifies the underlying Linux kernel boot ID stays unchanged. Podman may replace the container-visible boot ID; both values are recorded separately. Qualify an actual host reboot with the selected filesystem, unit and process-identity rules. No real host reboot is qualified here. |
+| G-boot | Covered for this release by [boot-ID tests]: procfs-read injection covers same, changed and mixed boots, live reused and missing pids, no liveness check or signal for an earlier boot, restart plans, retained holds and run identity. Linux process cases run in U with both signalling primitives; macOS skips the `os-kill` cases because they require procfs, and the `pidfd` cases because they require procfs and pidfd. An unreadable boot-ID file tries `sysctl`; an unusable reply returns `unknown`, while failure to execute `sysctl` propagates. The service reboot row covers enabled-unit startup; [drill-local.sh:168](../examples/nightbank/deploy/drill-local.sh#L168) verifies that the underlying kernel boot ID is unchanged, proving a same-boot restart only. A real host reboot with the selected filesystem, unit and process-identity rules remains owner item K step 2, after shipping; it is unqualified here. |
 | G-retire | Disable/remove the one unit, prove no writers and no restart from a boot target or stray start, then read retained state with the matching binary. Keep uninstall and retained history distinct from obsolete anchor deletion. |
 | G-correction | Port a synthetic late-correction workload within one v2 root; pin initial/corrected results, idempotence, conflict/stale/timestamp refusals and checker damage sensitivity. Period transitions retire; data-correction safety remains. |
 | G-wargame | Restore stub-provider regression checks for ownership, exact lifecycle verbs, tracked-only provenance (v2 copies untracked files too), retained /work and delivery failure/partial-copy behavior. A manual shell script is implemented tooling, not an executed safety assertion. |
@@ -559,6 +561,7 @@ bugs cover those limits. It does not qualify all clock movement.
 [genesis tests]: ../tests/test_genesis_eligibility.py
 [installed restore]: ../examples/nightbank/deploy/restore-drill.py
 [restart tests]: ../tests/test_restart.py
+[boot-ID tests]: ../tests/test_boot_id.py
 [attempt tests]: ../tests/test_runner_attempts.py
 [leadership tests]: ../tests/test_runner_leadership.py
 [storage probe child]: ../examples/nightbank/deploy/storage_probe.py#L213
