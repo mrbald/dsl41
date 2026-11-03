@@ -81,11 +81,15 @@ import json
 import math
 import os
 import re
+import resource
 import select
+import shlex
 import signal
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 # DL-72: the shared process-identity helpers live in a sibling stdlib-only module.
@@ -157,6 +161,89 @@ _RECORDER_IGNORED = (
 #: WRITES these strings; `runner_adapters.outcome_from_status` reads the same name, so a
 #: fifth outcome cannot reach the engine unannounced (DL-209).
 WrapperOutcome = Literal["exited", "signaled", "terminated", "spawn_failed"]
+
+
+@dataclass(frozen=True)
+class ProcessStream:
+    path: str
+    mode: Literal["append", "truncate"]
+
+
+@dataclass(frozen=True)
+class ProcessInput:
+    """In-memory process input; it is not a wrapper wire format."""
+
+    shell: str
+    site_profile: str | None
+    job_profile: str | None
+    command: str
+    stdin_path: str | None
+    stdout: ProcessStream
+    stderr: ProcessStream
+    limits: tuple[tuple[int, int | None, int | None], ...] = ()
+
+
+@dataclass(frozen=True)
+class ProcessEvidence:
+    """A shell invocation's observed wait status, without stage attribution."""
+
+    returncode: int
+    stage: Literal["unknown"] = "unknown"
+    command_reached: bool | None = None
+
+
+def _process_script(spec: ProcessInput) -> str:
+    """Compose shell syntax with literal inputs while sourcing profiles in shell scope."""
+    lines = [
+        f". {shlex.quote(profile)} || exit $?"
+        for profile in (spec.site_profile, spec.job_profile)
+        if profile is not None
+    ]
+    for fd, stream in ((1, spec.stdout), (2, spec.stderr)):
+        operator = ">>" if stream.mode == "append" else ">|"
+        lines.append(f"exec {fd}{operator}{shlex.quote(stream.path)} || exit $?")
+    lines.append(f"exec 0<{shlex.quote(spec.stdin_path or os.devnull)} || exit $?")
+    lines.append(spec.command)
+    return "\n".join(lines)
+
+
+def _prepare_process_child(limits: tuple[tuple[int, int | None, int | None], ...]) -> None:
+    _restore_default_signals()
+    for number, soft, hard in limits:
+        resource.setrlimit(
+            number,
+            (
+                resource.RLIM_INFINITY if soft is None else soft,
+                resource.RLIM_INFINITY if hard is None else hard,
+            ),
+        )
+
+
+def spawn_prepared_process(
+    spec: ProcessInput,
+    *,
+    env: dict[str, str],
+    profile_stdin: int,
+    profile_stdout: int,
+    profile_stderr: int,
+    cwd: str | None = None,
+) -> subprocess.Popen[bytes]:
+    """Start the candidate child; the caller owns it and observes its wait status."""
+    return subprocess.Popen(
+        [spec.shell, "-c", _process_script(spec)],
+        cwd=cwd,
+        env=env,
+        stdin=profile_stdin,
+        stdout=profile_stdout,
+        stderr=profile_stderr,
+        process_group=0,
+        preexec_fn=partial(_prepare_process_child, spec.limits),
+    )
+
+
+def collect_process_evidence(child: subprocess.Popen[bytes]) -> ProcessEvidence:
+    """Observe the invocation's wait status without guessing what its shell reached."""
+    return ProcessEvidence(child.wait())
 
 
 def _test_pause(point: str) -> None:

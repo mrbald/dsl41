@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import glob
 import json
 import os
+import resource
 import signal
 import subprocess
 import sys
@@ -35,13 +37,14 @@ from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
-from dsl41.runner_environment import inherited_environment, resolve_streams
-from typing import Any, Final, Protocol, get_args, runtime_checkable
+from dsl41.runner_environment import expand_path, inherited_environment, resolve_streams
+from typing import Any, Final, Protocol, cast, get_args, runtime_checkable
 
 
 from dsl41 import runner_procid as _procid
 from dsl41 import runner_wrapper as _wrapper
-from dsl41.runner_wrapper import WrapperOutcome
+from dsl41.runner_wrapper import ProcessInput, ProcessStream, WrapperOutcome
+from dsl41.runtime_policy import LIMIT_RESOURCES, ResourceLimit, StreamMode, stream_target
 from dsl41.canon import (
     ARTIFACT_FORMAT_VERSION,
     CanonError,
@@ -307,6 +310,59 @@ def status_payload(result: AdapterResult, *, where: str) -> dict[str, object]:
         # raw exit code only: the SEM-09/DL-33 verdict stays oracle-side
         return {"exit_code": result}
     raise EngineError(f"{where} returned {result!r}")
+
+
+def prepare_process_input(
+    job_ir: JobIR,
+    *,
+    shell: str,
+    site_profile: str | None,
+    mode: StreamMode,
+    limits: tuple[ResourceLimit, ...],
+    env: Mapping[str, str],
+    cwd: Path,
+    defaults: Mapping[str, str],
+) -> tuple[ProcessInput, set[str]]:
+    """Prepare a process input from already admitted policy, before profiles run."""
+    spec = job_ir.exec_
+    if not isinstance(spec, ExecSpec):
+        raise EngineError(f"{job_ir.name!r}: CMD dispatch without an ExecSpec")
+    paths: dict[str, str | None] = {}
+    modes: dict[str, StreamMode | None] = {}
+    references: set[str] = set()
+    for name in ("std_in_file", "std_out_file", "std_err_file"):
+        text = getattr(spec, name)
+        if text is None:
+            paths[name] = defaults.get(name)
+            modes[name] = None if name == "std_in_file" else mode
+        else:
+            target, modes[name] = stream_target(job_ir.name, name, text, mode)
+            paths[name], names = expand_path(job_ir.name, name, target, env)
+            references.update(names)
+        path = paths[name]
+        if path is not None and not os.path.isabs(path):
+            paths[name] = os.path.join(str(cwd), path)
+    out, err = paths["std_out_file"], paths["std_err_file"]
+    out_mode, err_mode = modes["std_out_file"], modes["std_err_file"]
+    if out is None or err is None or out_mode is None or err_mode is None:
+        raise EngineError("command dispatch requires output paths and modes")
+    normalized_limits = tuple(
+        (getattr(resource, LIMIT_RESOURCES[item.resource][0]), item.soft, item.hard)
+        for item in limits
+    )
+    return (
+        ProcessInput(
+            shell=shell,
+            site_profile=site_profile,
+            job_profile=spec.profile,
+            command=spec.command,
+            stdin_path=paths["std_in_file"],
+            stdout=ProcessStream(out, out_mode),
+            stderr=ProcessStream(err, err_mode),
+            limits=normalized_limits,
+        ),
+        references,
+    )
 
 
 def _build_run_spec(
@@ -613,6 +669,76 @@ async def stop_ladder(
         _procid.killpg_quiet(pgid, signal.SIGKILL)
 
 
+async def selected_signal_ladder(
+    pgid: int,
+    start_token: str,
+    signals: tuple[int, ...],
+    members: Callable[[], _procid.Left] | None = None,
+    *,
+    pidfd: bool | None = None,
+) -> None:
+    """Send every selected step to freshly proved targets and retain failures."""
+    if not signals:
+        raise ValueError("signal ladder is empty")
+    group_proved = members is None and _procid.verify_alive(pgid, start_token)
+    if members is None and not group_proved:
+        return
+
+    def reading() -> _procid.Left:
+        if members is not None:
+            return members()
+        if group_proved and group_has_live_member(pgid):
+            return _procid.Left("ours")
+        return _procid.NOTHING_LEFT
+
+    failures: list[str] = []
+
+    def remember(message: str) -> None:
+        if message not in failures:
+            failures.append(message)
+
+    def finish() -> None:
+        if failures:
+            raise OSError("; ".join(failures))
+
+    for index, sig in enumerate(signals):  # pragma: no branch -- nonempty; last returns
+        found = reading()
+        if found.kind == "none":
+            finish()
+            return
+        if found.kind == "unknown":
+            remember(found.reason or "target reading unknown")
+        if members is None:
+            _procid.killpg_quiet(pgid, sig)
+        else:
+            for pid, token in found.pids.items():
+                if not _procid.signal_ours(pid, token, sig, pidfd=pidfd):
+                    try:
+                        gone = _procid.scanned_process_gone(pid, token)
+                    except OSError as exc:
+                        remember(f"identity read failed: {exc}")
+                    else:
+                        if not gone:
+                            remember(f"signal {sig} not sent to pid {pid}")
+            if found.kind == "ours" and not found.pids:
+                remember("verified group has no per-process targets")
+        if index == len(signals) - 1:
+            finish()
+            return
+        deadline = time.monotonic() + 5.0
+        while True:
+            left = reading()
+            if left.kind == "none":
+                finish()
+                return
+            if left.kind == "unknown":
+                remember(left.reason or "target reading unknown")
+            delay = deadline - time.monotonic()
+            if delay <= 0:
+                break
+            await asyncio.sleep(min(SPOOL_POLL_S, delay))
+
+
 def default_log_paths(job: str, run_number: int, run_root: Path) -> tuple[Path, Path]:
     """Where a CMD run's output goes when the job names no file of its own:
     `<run_root>/logs/<job>.<run_number>.{out,err}`.
@@ -841,6 +967,158 @@ def append_watch_line(path: Path, record: dict[str, Any]) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+@dataclass(frozen=True)
+class FileObservation:
+    path: str
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+
+
+@dataclass(frozen=True)
+class PatternWatchProgress:
+    previous: Mapping[str, FileObservation] = field(default_factory=dict)
+    stable: Mapping[str, int] = field(default_factory=dict)
+    polls: int = 0
+    complete: bool = False
+
+
+def observe_pattern(pattern: str, min_size: int) -> tuple[FileObservation, ...]:
+    """Observe the matches of an already validated final-component pattern."""
+    result: list[FileObservation] = []
+    for path in sorted(glob.iglob(pattern)):
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+        if stat.st_size >= min_size:
+            result.append(
+                FileObservation(
+                    path, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+                )
+            )
+    return tuple(result)
+
+
+def fold_pattern_poll(
+    previous: PatternWatchProgress,
+    observations: tuple[FileObservation, ...],
+    *,
+    immediate: bool,
+) -> PatternWatchProgress:
+    """Derive progress only from one complete durable observation."""
+    current = {entry.path: entry for entry in observations}
+    if len(current) != len(observations):
+        raise EngineError("duplicate watcher path")
+    stable = {
+        name: previous.stable.get(name, 0) + 1 if previous.previous.get(name) == entry else 1
+        for name, entry in current.items()
+    }
+    complete = (
+        previous.complete
+        or (immediate and previous.polls == 0 and bool(current))
+        or any(count >= FW_STABLE_POLLS for count in stable.values())
+    )
+    return PatternWatchProgress(current, stable, previous.polls + 1, complete)
+
+
+def pattern_poll_record(
+    run_id: str, at: datetime, observations: tuple[FileObservation, ...]
+) -> dict[str, Any]:
+    return {
+        "kind": "poll",
+        "run_id": run_id,
+        "at": at.isoformat(),
+        "files": [
+            {
+                "path": item.path,
+                "device": item.device,
+                "inode": item.inode,
+                "size": item.size,
+                "mtime_ns": item.mtime_ns,
+                "ctime_ns": item.ctime_ns,
+            }
+            for item in observations
+        ],
+    }
+
+
+def append_pattern_poll(
+    path: Path,
+    run_id: str,
+    at: datetime,
+    previous: PatternWatchProgress,
+    observations: tuple[FileObservation, ...],
+    *,
+    immediate: bool,
+    fence: Proof | None = None,
+) -> PatternWatchProgress:
+    """Write a candidate poll before exposing its derived progress."""
+    result = fold_pattern_poll(previous, observations, immediate=immediate)
+    if fence is not None:
+        fence.check()
+    append_watch_line(path, pattern_poll_record(run_id, at, observations))
+    return result
+
+
+def read_pattern_evidence(
+    path: Path, run_id: str, *, immediate: bool
+) -> PatternWatchProgress | None:
+    """Fold candidate observations, or return None if no start record is durable."""
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise EngineError(f"{path}: unreadable: {exc}") from exc
+    lines = raw.split(b"\n")
+    trailing = lines.pop() if lines and lines[-1] == b"" else None
+    progress = PatternWatchProgress()
+    started = False
+    for index, line in enumerate(lines):
+        if not line:
+            raise EngineError(f"{path}: empty interior line {index + 1}")
+        if index == len(lines) - 1 and trailing is None and not _is_json(line):
+            break
+        try:
+            record = decode(line)
+        except CanonError as exc:
+            raise EngineError(f"{path}: malformed line {index + 1}: {exc}") from exc
+        if not isinstance(record, dict) or record.get("run_id") != run_id:
+            raise EngineError(f"{path}: wrong observation identity on line {index + 1}")
+        try:
+            at = record["at"]
+            if not isinstance(at, str):
+                raise ValueError("not a timestamp")
+            datetime.fromisoformat(at)
+        except (KeyError, ValueError) as exc:
+            raise EngineError(f"{path}: bad observation timestamp on line {index + 1}") from exc
+        if not started:
+            if record.get("kind") != "start":
+                raise EngineError(f"{path}: first observation is not start")
+            started = True
+            continue
+        files = record.get("files")
+        if record.get("kind") != "poll" or not isinstance(files, list):
+            raise EngineError(f"{path}: invalid poll on line {index + 1}")
+        observations: list[FileObservation] = []
+        for item in files:
+            if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+                raise EngineError(f"{path}: invalid file observation on line {index + 1}")
+            values = [item.get(key) for key in ("device", "inode", "size", "mtime_ns", "ctime_ns")]
+            if any(not is_wire_int(value) for value in values) or any(
+                cast(int, value) < 0 for value in values[:3]
+            ):
+                raise EngineError(f"{path}: invalid file observation on line {index + 1}")
+            observations.append(
+                FileObservation(item["path"], *(cast(int, value) for value in values))
+            )
+        progress = fold_pattern_poll(progress, tuple(observations), immediate=immediate)
+    return progress if started else None
 
 
 class FileWatcherAdapter:
