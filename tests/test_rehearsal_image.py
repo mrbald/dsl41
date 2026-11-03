@@ -313,3 +313,118 @@ def test_sessions_sharing_evidence_keep_their_own_runner(tmp_path: Path, monkeyp
             "selected-context",
         ]
         assert args[-2:] == ["build", "runner"]
+
+
+@pytest.mark.parametrize("target", ["ubuntu", "el8", "", "unsupported"])
+def test_service_stage_installs_clock_packages_or_refuses(tmp_path: Path, target: str) -> None:
+    stage = (
+        (REPO / "scripts/wargame.Containerfile").read_text().split("FROM host AS service\n", 1)[1]
+    )
+    instructions = stage.split("\nFROM ", 1)[0].replace("\\\n", "").splitlines()
+    log = tmp_path / "commands.jsonl"
+    fake = tmp_path / "package-command"
+    fake.write_text(
+        "#!/usr/bin/env python3\nimport json, os, sys\n"
+        "from pathlib import Path\n"
+        "with open(os.environ['TEST_LOG'], 'a') as out:\n"
+        "    out.write(json.dumps([Path(sys.argv[0]).name, *sys.argv[1:]]) + '\\n')\n"
+    )
+    fake.chmod(0o755)
+    for command in ["apt-get", "dnf", "rm"]:
+        (tmp_path / command).symlink_to(fake)
+    env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "TEST_LOG": str(log)}
+    env.pop("TARGET", None)
+    for instruction in instructions:
+        if instruction.startswith("ARG "):
+            assert instruction == "ARG TARGET"
+            env["TARGET"] = target
+    install = next(line.removeprefix("RUN ") for line in instructions if line.startswith("RUN "))
+    result = subprocess.run(
+        ["sh", "-c", install], env=env, capture_output=True, text=True, timeout=10
+    )
+    commands = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+    if target in ["ubuntu", "el8"]:
+        assert result.returncode == 0, result.stderr
+        manager, packages = (
+            ("apt-get", ["systemd-timesyncd", "gcc", "libc6-dev"])
+            if target == "ubuntu"
+            else ("dnf", ["chrony"])
+        )
+        installs = [args for args in commands if args[0] == manager and "install" in args]
+        assert len(installs) == 1
+        assert set(packages) <= set(installs[0])
+    else:
+        assert result.returncode == 2, result.stderr
+        assert "TARGET must be ubuntu or el8" in result.stderr
+        assert commands == []
+
+
+@pytest.mark.parametrize("present", ["", "vendor", "all"])
+@pytest.mark.parametrize("failure", ["", "disable", "daemon-reload"])
+def test_clock_cleanup_handles_partial_setup(tmp_path: Path, present: str, failure: str) -> None:
+    deploy = tmp_path / "deploy"
+    deploy.mkdir()
+    (deploy / "clock-drill.sh").write_bytes(
+        (REPO / "examples/nightbank/deploy/clock-drill.sh").read_bytes()
+    )
+    (deploy / "drill-lib.sh").write_text(
+        f"STATE='{tmp_path}/state'\nUNIT=dsl41-engine.service\nok() {{ echo \"ok: $*\"; }}\n"
+    )
+    fake = tmp_path / "command"
+    fake.write_text(r"""#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+name = Path(sys.argv[0]).name
+args = sys.argv[1:]
+if name == 'sudo':
+    os.execvp(args[0], args)
+if name == 'timeout':
+    os.execvp(args[3], args[3:])
+if name == 'sed':
+    print('rocky')
+elif name == 'systemctl':
+    with open(os.environ['TEST_LOG'], 'a') as out:
+        out.write(json.dumps(args) + '\n')
+    present = os.environ['TEST_PRESENT']
+    unit = args[-1]
+    loaded = present == 'all' or (present == 'vendor' and unit != 'dsl41-drill-clock-source.service')
+    if args[0] == 'show':
+        print('loaded' if loaded else 'not-found')
+        sys.exit(0 if loaded else 1)
+    if args[0] == 'is-enabled':
+        if loaded:
+            print('disabled')
+        sys.exit(1)
+    if args[0] in ['disable', 'stop'] and not loaded:
+        sys.exit(5)
+    if args[0] == os.environ['TEST_FAILURE']:
+        sys.exit(7)
+""")
+    fake.chmod(0o755)
+    for command in ["sudo", "timeout", "sed", "systemctl", "journalctl", "rm"]:
+        (tmp_path / command).symlink_to(fake)
+    log = tmp_path / "commands.jsonl"
+    result = subprocess.run(
+        ["bash", str(deploy / "clock-drill.sh"), "--cleanup"],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "TEST_LOG": str(log),
+            "TEST_PRESENT": present,
+            "TEST_FAILURE": failure,
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    expected_failure = failure == "daemon-reload" or (failure == "disable" and bool(present))
+    assert result.returncode == int(expected_failure), result.stdout + result.stderr
+    commands = [json.loads(line) for line in log.read_text().splitlines()]
+    stops = [args[-1] for args in commands if args[0] == "stop"]
+    assert stops == (
+        []
+        if not present
+        else ["chronyd.service"]
+        if present == "vendor"
+        else ["chronyd.service", "dsl41-drill-clock-source.service"]
+    )

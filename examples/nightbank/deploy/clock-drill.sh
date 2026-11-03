@@ -38,12 +38,15 @@ capture() { # capture PHASE -- retain failures before the cleanup removes the fi
             tee "$work/$1-$unit.journal" >/dev/null
     done
 }
+unit_absent() {
+    [ "$(timeout -k 2 5 systemctl show -p LoadState --value "$1" 2>/dev/null || true)" = not-found ]
+}
 cleanup() {
     local rc=0 path enabled
-    sudo timeout -k 5 20 systemctl disable --now "$waiter" || rc=1
+    unit_absent "$waiter" || sudo timeout -k 5 20 systemctl disable --now "$waiter" || rc=1
     if [ "$waiter" = chrony-wait.service ]; then
-        sudo timeout -k 5 20 systemctl stop chronyd.service || rc=1
-        sudo timeout -k 5 20 systemctl stop "$source_unit" || rc=1
+        unit_absent chronyd.service || sudo timeout -k 5 20 systemctl stop chronyd.service || rc=1
+        unit_absent "$source_unit" || sudo timeout -k 5 20 systemctl stop "$source_unit" || rc=1
         sudo timeout -k 2 5 journalctl -u "$source_unit" --no-pager |
             tee "$work/source.journal" >/dev/null || true
         sudo rm -f "$daemon_drop_in" "$source_path"
@@ -56,8 +59,12 @@ cleanup() {
         [ ! -e "$path" ] || { echo "cleanup left $path" >&2; rc=1; }
     done
     enabled=$(timeout -k 2 5 systemctl is-enabled "$waiter" 2>/dev/null || true)
-    [ "$enabled" = disabled ] || { echo "cleanup left waiter $enabled" >&2; rc=1; }
-    [ "$rc" != 0 ] || ok 'clock cleanup: waiter disabled and drill overrides removed'
+    case $enabled in
+        disabled) ;;
+        ''|not-found) unit_absent "$waiter" || { echo 'cleanup cannot verify waiter' >&2; rc=1; } ;;
+        *) echo "cleanup left waiter $enabled" >&2; rc=1 ;;
+    esac
+    [ "$rc" != 0 ] || ok 'clock cleanup: waiter disabled or absent and drill overrides removed'
     exit "$rc"
 }
 case ${1-} in
