@@ -5,19 +5,34 @@ Items remain open until their evidence and independent acceptance are recorded.
 
 ## Release 2026-11-02: one box
 
-- [ ] Restart gaps (G-restart, Critical/High first): close the in-flight restart bugs and reviewer findings; independently accept installed fault evidence for status/spawn loss, residue, quarantine, deadlines and stable invocation, plus pidfd signalling and wrapper refusals.
-- [ ] Storage gaps (G-storage, #308): prove real admission ENOSPC preserves UNKNOWN with no uncommitted launch, recovery after space returns, and exclusive ownership while an installed engine is frozen and resumed; resolve red CI and obtain independent acceptance.
-- [ ] Restore gaps (G-restore, DL-443): restore the full store, sidecars when present, spools, inputs and settings after draining and proving no writers; verify holds, run/attempt identity and exact effects through fresh CLI/engine processes; prove repeated mutation-free refusals for all genesis witnesses, including the additional witnesses; obtain independent semantic acceptance; close only when G-boot is covered (with injected boot-id coverage if the owner confirms K) or explicitly deferred by the owner.
-- [ ] Train cutover: demonstrate an accepted synthetic run through `scripts/merge_train.py` in place of the private train; #309 and strict up-to-date/admin protection are complete.
-- [ ] Status hook (C): spec then build the owner-approved job-status listener command; settle delivery and failure semantics and accept the implemented integration before release.
-- [ ] `docs/deploy.md` prerequisites and boundaries (E/I/J/D): document the clock-sync waiter with enable and verify commands, production Python 3.12.x, and J step 1's drained, writer-free complete backup or consistent snapshot; document configured stdout/stderr and the fallback logs, that a site archiver may move job output, and that disk monitoring belongs to host telemetry; the engine does no job-output housekeeping or disk monitoring.
+- [x] Restart gaps (G-restart, #311, DL-444): installed fault evidence covers status/spawn loss, residue, quarantine, deadlines and stable invocation; pidfd signalling and standalone wrapper refusals are covered.
+- [x] Storage gaps (G-storage, #308, DL-99/DL-428): real admission ENOSPC preserves UNKNOWN without an uncommitted launch and recovers after space returns; a frozen and resumed installed engine retains exclusive ownership.
+- [x] Restore gaps (G-restore, #316, DL-443/DL-445): drained, writer-free full-root restore drills and fresh readers cover recovery identity and effects; all genesis witnesses refuse repeatedly without mutation; G-boot is covered by #318.
+- [x] Status hook (C, #315, DL-446): committed live transitions reach a bounded best-effort site command; delivery, cleanup and engine-down integration are covered.
+- [x] `docs/deploy.md` prerequisites and boundaries (E/I/J/D, #312, DL-439): clock-sync waiter enable/verify commands, production Python 3.12.x, drained full-root backup or consistent snapshot, output paths, site archiving and host disk monitoring are documented.
+- [x] Boot-ID coverage (G-boot, #318, DL-433/DL-436): injected changed-boot tests prove no liveness check or signal against old-boot attempts and preserve holds and run identity; a real host reboot stays after shipping (K2).
+- [ ] JIL slice 1: config and checks, plus K1/K2 restart refusals.
+- [ ] JIL slice 2: process launch for P, Q, R, S, AA, AE and the AD signal list.
+- [ ] JIL slice 3: engine integration for U, V, W, X, Z, AC, AD `sendevent -k`, attribute environment, AF selection wiring and the corresponding DL entries.
 - [ ] Clock-sync drill check (E): exercise the documented waiter prerequisite and verify its bounded startup and clock behavior; record the drill evidence and exact qualified Python 3.12.x interpreter before release.
+- [ ] Train cutover: demonstrate an accepted synthetic run through `scripts/merge_train.py`; #309 and strict up-to-date/admin protection are complete.
 - [ ] Release (B): address every discussion item, record the owner's dispositions and the boss's candidate acceptance, then release under the owner's authority.
 
 # Known limits
 
 - A: The standby starts empty. This is acceptable for the first system, whose jobs are all idempotent; improve state continuity later.
 - F: All jobs run under the engine's account. Per-job accounts are unsupported; improve this later.
+- Cross-instance conditions `s(JOB^INST)` are refused: this release schedules one instance and cannot resolve another instance's status.
+- `permission` is refused: per-job edit and run rights would be a second authorization model beside the control-socket roles ([access-model.md](docs/access-model.md)).
+- `auto_delete` is refused: deleting a job would make the engine edit the site's config-defined estate, and the next reload would restore it.
+- `job_class` is refused: class concurrency limits come from the AutoSys agent's configuration, not JIL, so there is no limit to apply; a site setting can come later.
+- `heartbeat_interval > 0` is refused: AutoSys documents no exact heartbeat producer or re-arm contract to copy, and process liveness is not a heartbeat.
+- `notification_template` and `notification_alarm_types` are refused: their lookup and filter grammar and defaults are not in the vendor documentation available; plain notifications are delivered as status-hook events.
+- `n_retrys` on BOX and FW jobs is refused: AutoSys does not document their restart and reset semantics; CMD jobs get retries.
+- Job shells other than `sh`, `dash`, `bash` and `ksh` are refused: their sourcing and fallback rules differ from the Bourne family.
+- `profile` and `std_*` files on FW jobs are refused: file watchers launch no job process to consume them.
+- No AutoSys-syntax command shim: jobs use dsl41 commands via `DSL41_SOCKET`; AutoSys command syntax is not implemented.
+- A real host reboot test is after shipping (K2): injected boot-ID coverage qualifies G-boot for this release, not host reboot behavior.
 
 # Known bugs
 
@@ -30,7 +45,7 @@ Severity follows the accepted triage. In-flight targets remain open until accept
   before the admission and that then reruns under the new definition; the record and
   `update --wait` are wrong, nothing runs that the earlier plan did not choose (Opus, slice 3b-b
   wiring round 5, R5-2; update, DL-432).
-- [ ] **Critical** (in flight: restart): A quarantine after the first reading proved and TERMed a recorded group reads the cookie
+- [x] **Critical** (closed: #311, DL-444): A quarantine after the first reading proved and TERMed a recorded group reads the cookie
   alone at its cleanup, so a cookie-less member that ignored the TERM is never KILLed and the
   attempt closes with the note naming the cookie pids only (Opus, slice restart round 2, N1;
   restart, DL-433).
@@ -49,7 +64,7 @@ Severity follows the accepted triage. In-flight targets remain open until accept
 - [ ] **Medium**: After a backward wall-clock step, `dispatch`, `outcome` and `engine` records carry the raw
   wall stamp, so they can sit below an earlier `input` in the store; DL-435 floors admission
   stamps only (W2 drill builder, clock-step scenario; clock, DL-435).
-- [ ] **High** (in flight: restart): The pidfd probe tests `pidfd_open` but never `pidfd_send_signal`: a seccomp profile that
+- [x] **High** (closed: #311, DL-444; `tests/test_procid_cookie.py`): The pidfd probe tests `pidfd_open` but never `pidfd_send_signal`: a seccomp profile that
   allows only the first, or an EMFILE from `pidfd_open`, sends no signal with no fallback; the
   attempt stays held, but its note says it survived a KILL that was never sent (Opus, slice
   proc-cookie round 1, F2; restart, DL-436).
@@ -71,7 +86,7 @@ Severity follows the accepted triage. In-flight targets remain open until accept
   main-config round 1, K5; DL-437).
 - [ ] **Medium**: Restart ignores unknown `[engine]` keys, so a typo such as `machine_polcy` silently runs the
   default until the next reread refuses it (Opus, slice main-config round 2, K7; DL-437).
-- [ ] **Medium** (in flight: restart): The standalone wrapper's spec validator (`runner_wrapper.py` `_spec_refusal`) checks the
+- [x] **Medium** (closed: #311, DL-444; `tests/test_wrapper_spec.py`): The standalone wrapper's spec validator (`runner_wrapper.py` `_spec_refusal`) checks the
   version, optional env, lifeline type and grace, but not frozen wrapper-protocol §2's unknown-field,
   run-id grammar, job-component and NUL refusals; a probe passed an unknown key, a non-uuid
   run_id, `job=../outside` and a NUL command. The engine's adapter supplies valid values, so this
@@ -101,7 +116,18 @@ Severity follows the accepted triage. In-flight targets remain open until accept
   was held by "interrupted attempt held" (DL-424) instead of staying unheld. The cause is unexplained and the earlier driver was
   not tried there; a reproduction in a supported environment goes back to the boss (boss ruling 2026-11-02; Sol, with Opus
   analysis, slice tui-driver).
-- [ ] **Critical** (in flight: restore/DL-443): A missing `engine.db` with surviving runtime evidence permits genesis and loses recovery continuity; refuse repeatedly with exit 2 and no mutation before any write, and revalidate under exclusive ownership, including the additional genesis witnesses (Sol, slice gap-restore; DL-443).
+- [x] **Critical** (closed: #316, DL-443/DL-445; `tests/test_genesis_eligibility.py`): A missing `engine.db` with surviving runtime evidence permits genesis and loses recovery continuity; refuse repeatedly with exit 2 and no mutation before any write, and revalidate under exclusive ownership, including the additional genesis witnesses (Sol, slice gap-restore; DL-443).
+
+- [ ] **Medium**: The engine prints `clean_shutdown` before process exit; a TERM in that window ends it with -15. `engine stop --wait` does not wait for process exit, exposing systemd ExecStop (boss ruling 2026-11-03; separate fix).
+- [ ] **Medium**: If `/proc/sys/kernel/random/boot_id` is unreadable on two boots, both read "unknown" and compare equal, leaving only the pid and start-tick match (Opus, slice boot-id; fix needs a boss ruling).
+- [ ] **Low**: The engine's process scan can miss a process during exec, such as setsid then exec; group members are still found (Opus, #311).
+- [ ] **Low**: A status hook that exits cleanly just before its 5 s deadline with a TERM-resistant child is logged as delivery failed; on macOS a full-length hook triggers about 500 ps runs (Opus, #315).
+- [ ] **Low**: Before a stop, `engine stop --wait` with an unreadable `leader.lock` prints the socket-permission line (Opus, #314 R3-1).
+- [ ] **Low**: Restart-faults evidence is made readable by a CI workflow step, not drill-local's `readable_evidence`; no test asserts the export runs before podman rm; the errno cases sit under a Linux-only module skip (Opus, #311).
+- [ ] **Low**: The restore drill row deletes the drill hook ledger without restoring it; a fake podman rm branch in `test_rehearsal_ci.py` cannot fail; a regular-file `wal` or dangling `journal.jsonl` link gets the generic genesis message (Opus, #316).
+- [ ] **Low**: Local Linux test containers need `--init` or three process-cleanup tests see zombies; two after-edit hook tests need a git checkout (Sol and Opus, #317).
+- [ ] **Low**: DL-447 has no blank separator because the line-ceiling test counts a trailing blank against DL-446 (Opus, #317).
+- [ ] **Low**: `dsl41 lint --timezone-map` with an empty file counts it as no map; no test covers it (Opus, #313).
 
 # After shipping
 
@@ -114,7 +140,7 @@ Severity follows the accepted triage. In-flight targets remain open until accept
 ## Qualification
 
 - [ ] Close G-artifact, G-access, G-recipes, G-retire and G-package gaps from the [integration test inventory](docs/integration-testing-inventory.md).
-- [ ] Real VM reboot test (K): test recovery across an actual reboot in a throwaway VM; the restore item closes only when G-boot is covered (with injected boot-id coverage if the owner confirms K) or explicitly deferred by the owner.
+- [ ] Real VM reboot test (K2): test recovery across an actual reboot in a throwaway VM; injected boot-ID coverage closes G-boot for this release (#318, DL-433/DL-436).
 
 ## Maintenance
 
