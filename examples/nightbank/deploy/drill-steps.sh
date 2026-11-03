@@ -15,7 +15,15 @@ set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=drill-lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/drill-lib.sh"
 
-ROWS=(install start storage restart reboot restore kill-engine drain reload leak restart-faults refusal start-limit malformed-toml upgrade)
+ROWS=(install start clock storage restart reboot restore kill-engine drain reload leak restart-faults refusal start-limit malformed-toml upgrade)
+
+step_clock() { # docs/deploy.md: installed waiters and the serving Python interpreter
+    local row_status=0
+    timeout -k 10 180 bash "$REPO/examples/nightbank/deploy/clock-drill.sh" || row_status=$?
+    timeout -k 5 120 bash "$REPO/examples/nightbank/deploy/clock-drill.sh" --cleanup ||
+        fail 'clock cleanup failed within its separate 120 s budget'
+    return "$row_status"
+}
 
 step_install() { # the wheel, the nightbank estate, the drill's jobs, the unit and its user
     local wheel out version
