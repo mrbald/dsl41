@@ -10,6 +10,8 @@ will, and records every other effect by name. Assertions are on order, never on 
 from __future__ import annotations
 
 import json
+import os
+import pwd
 import re
 import shutil
 from collections.abc import Mapping
@@ -386,7 +388,12 @@ def _world(tmp_path: Path, edit: Any = None) -> World:
     for path in SMALL.glob("*.jil"):
         shutil.copy(path, estate)
     shutil.copy(SMALL / "estate.toml", estate)
-    (tmp_path / "night.properties").write_text(PROPERTIES)
+    profile = tmp_path / "profile.env"
+    profile.write_text("export SYNTHETIC=1\n")
+    owner = pwd.getpwuid(os.geteuid()).pw_name
+    properties = PROPERTIES.replace("OWNER=tester", f"OWNER={owner}")
+    properties = properties.replace("NB_PROFILE=/var/nb/profile.env", f"NB_PROFILE={profile}")
+    (tmp_path / "night.properties").write_text(properties)
     if edit is not None:
         edit(estate)
     loaded = load_estate(estate, [tmp_path / "night.properties"], "sandbox")
@@ -1233,7 +1240,7 @@ def test_reread_prints_the_plan_and_exits_0_when_it_stops_nothing(
         "added: none",
         "changed: OPS_HEARTBEAT_C",
         "removed: OPS_FAIL_ALERT_C",
-        "unchanged: 80 jobs",
+        "unchanged: 79 jobs",
         "stops running: none",
     ]
     assert not any(line.startswith("marked") for line in out)

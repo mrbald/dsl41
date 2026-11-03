@@ -31,7 +31,9 @@ import re
 import textwrap
 from datetime import datetime, timedelta
 from functools import cache
+from types import SimpleNamespace
 from typing import Any, Literal, get_args, get_origin
+from unittest.mock import patch
 
 import pytest
 
@@ -486,18 +488,90 @@ def _trace_markers() -> set[str]:
     return out
 
 
-def _preflight_codes() -> set[str]:
-    """Every constant `code=` a `PreflightItem` is built with."""
-    tree = ast.parse((SRC / "runner_preflight.py").read_text(encoding="utf-8"))
+def _policy_refusal_codes(source: str) -> set[str]:
+    """Derive policy codes from refusal calls and fail on unknown dynamic expressions."""
+    tree = ast.parse(source)
+    attribute_codes: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.For) or not isinstance(node.target, ast.Tuple):
+            continue
+        targets = node.target.elts
+        if [target.id if isinstance(target, ast.Name) else "" for target in targets] != [
+            "attribute",
+            "reason",
+            "alternative",
+        ]:
+            continue
+        if not isinstance(node.iter, ast.Tuple):
+            raise AssertionError("policy refusal attribute table is not a literal tuple")
+        for entry in node.iter.elts:
+            if not isinstance(entry, ast.Tuple) or not entry.elts:
+                raise AssertionError("policy refusal attribute row is not a literal tuple")
+            first = entry.elts[0]
+            if not isinstance(first, ast.Constant) or not isinstance(first.value, str):
+                raise AssertionError("policy refusal attribute is not a literal string")
+            attribute_codes.add(first.value.replace("_", "-"))
     out: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            if node.func.id == "PreflightItem":
-                for kw in node.keywords:
-                    if kw.arg == "code" and isinstance(kw.value, ast.Constant):
-                        if isinstance(kw.value.value, str):
-                            out.add(kw.value.value)
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "refuse"
+        ):
+            continue
+        if len(node.args) < 3:
+            raise AssertionError("policy refusal has no positional code")
+        code = node.args[2]
+        if isinstance(code, ast.Constant) and isinstance(code.value, str):
+            out.add(code.value)
+        elif ast.unparse(code) == "attribute.replace('_', '-')" and attribute_codes:
+            out.update(attribute_codes)
+        else:
+            raise AssertionError(f"unrecognized dynamic policy refusal code at line {node.lineno}")
+    if not out:
+        raise AssertionError("no policy refusal codes found")
     return out
+
+
+def _preflight_codes() -> set[str]:
+    """Every literal preflight code plus every forwarded runtime-policy refusal."""
+    tree = ast.parse((SRC / "runner_preflight.py").read_text(encoding="utf-8"))
+    imports = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "dsl41.runtime_policy"
+        for alias in node.names
+    }
+    assert {"PolicyRefused", "job_policy", "stream_target"} <= imports
+    out: set[str] = set()
+    forwarded = False
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "PreflightItem"
+        ):
+            for kw in node.keywords:
+                if kw.arg != "code":
+                    continue
+                if isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
+                    out.add(kw.value.value)
+                elif ast.unparse(kw.value) == "finding.code":
+                    forwarded = True
+                else:
+                    raise AssertionError(
+                        f"unrecognized dynamic preflight code at line {node.lineno}"
+                    )
+    assert forwarded, "runtime policy refusal codes no longer forwarded"
+    return out | _policy_refusal_codes((SRC / "runtime_policy.py").read_text(encoding="utf-8"))
+
+
+def test_policy_refusal_scanner_discovers_new_codes_and_refuses_unknown_expressions() -> None:
+    assert _policy_refusal_codes('refuse("j", "a", "synthetic-code", "reason", "alternative")') == {
+        "synthetic-code"
+    }
+    with pytest.raises(AssertionError, match="unrecognized dynamic"):
+        _policy_refusal_codes('refuse("j", "a", get_code(), "reason", "alternative")')
 
 
 def _literal_alternatives() -> set[str]:
@@ -1042,6 +1116,14 @@ def _preflight_codes_of(catalog: ir.CatalogIR) -> set[str]:
 def _detect_lowered(surface: str, member: str, text: str) -> bool:
     catalog = ir.lower_source(text)
     if surface == "preflight_code":
+        if member == "shell":
+            # The JIL refusal detector needs a quiet supported account shell on every host.
+            with patch.object(
+                runner_preflight.pwd,
+                "getpwuid",
+                return_value=SimpleNamespace(pw_name="fixture", pw_shell="/bin/sh"),
+            ):
+                return member in _preflight_codes_of(catalog)
         return member in _preflight_codes_of(catalog)
     if surface == "demand_mode":
         return any(
@@ -1095,6 +1177,16 @@ def test_surface_domain_matches_the_code(surface: str) -> None:
     members = {row.member for row in rows_for(surface) if row.facet == ""}
     assert members - domain == set(), f"{surface}: stale rows {sorted(members - domain)}"
     assert domain - members == set(), f"{surface}: no row for {sorted(domain - members)}"
+
+
+def test_retry_warning_and_non_command_refusal_are_independent() -> None:
+    warning = by_id()["preflight_code:n-retrys"]
+    refusal = by_id()["preflight_code:n-retrys#non-command"]
+    for row, severity in ((warning, "WARN"), (refusal, "ERROR")):
+        items = _preflight_under(ir.lower_source(row.trigger), "strict")
+        assert any(item.code == "n-retrys" and item.severity == severity for item in items)
+        quiet = _preflight_under(ir.lower_source(quiet_of(row)), "strict")
+        assert not any(item.code == "n-retrys" and item.severity == severity for item in quiet)
 
 
 def test_every_surface_has_rows() -> None:
@@ -1362,6 +1454,7 @@ CITED_MODULES = (
     "runner_preflight",
     "runner_scheduler",
     "runner_startup",
+    "runtime_policy",
 )
 CODE_CITE_RE = re.compile(r"\b(" + "|".join(CITED_MODULES) + r")((?:\.\w+)+)")
 

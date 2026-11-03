@@ -10,7 +10,11 @@ substitution, chk_files; DL-240) guard real execution and are skipped for rehear
 
 from __future__ import annotations
 
-import getpass
+import os
+import pwd
+import resource
+import stat
+import sys
 import graphlib
 import socket as socket_mod
 
@@ -31,6 +35,13 @@ from dsl41.capacity import RES_TYPES, resource_type
 from dsl41.conditions import And, Cond, Paren, StatusAtom
 from dsl41.ir import CatalogIR, ExecSpec, JobIR, MachineIR, unquote_jil_value
 from dsl41.oracle import Oracle
+from dsl41.runtime_policy import (
+    LIMIT_RESOURCES,
+    PolicyRefused,
+    StreamMode,
+    job_policy,
+    stream_target,
+)
 from dsl41.runner_config import MachinePolicy as _MachinePolicy
 from dsl41.oracle_state import OracleError
 from dsl41.runner_scheduler import _DAY_CODES
@@ -406,8 +417,14 @@ def _owner_preflight(name: str, job: JobIR, user: str) -> list[PreflightItem]:
         items.append(PreflightItem(severity="ERROR", code="owner", job=name, message=message))
 
     spec = job.exec_
-    if spec is not None and spec.owner is not None and spec.owner != user:
-        err(f"owner {spec.owner!r} is not the invoking user {user!r} (no setuid in MVP, ss6)")
+    if spec is not None and spec.owner is not None:
+        owner, separator, host = spec.owner.partition("@")
+        if owner != user or (
+            separator and (not host or "@" in host or any(c.isspace() for c in host))
+        ):
+            err(
+                f"job {name}: owner: malformed or foreign execution account; use {user} or {user}@host"
+            )
     return items
 
 
@@ -425,11 +442,6 @@ def _execution_input_preflight(name: str, job: JobIR) -> list[PreflightItem]:
     def err_envvars(message: str) -> None:
         items.append(PreflightItem(severity="ERROR", code="envvars", job=name, message=message))
 
-    def err_global_sub(message: str) -> None:
-        items.append(
-            PreflightItem(severity="ERROR", code="global-substitution", job=name, message=message)
-        )
-
     def err_chk_files(message: str) -> None:
         items.append(PreflightItem(severity="ERROR", code="chk-files", job=name, message=message))
 
@@ -440,22 +452,6 @@ def _execution_input_preflight(name: str, job: JobIR) -> list[PreflightItem]:
             "envvars is carried but never applied to the child environment;"
             " real execution is refused (DL-240)"
         )
-
-    if spec is not None:
-        exec_attrs = set(type(spec).model_fields) - {"kind"}
-        seen: set[tuple[str, str]] = set()
-        for site in job.var_sites:
-            if site.attr not in exec_attrs:
-                continue
-            key = (site.attr, site.name)
-            if key in seen:
-                continue
-            seen.add(key)
-            err_global_sub(
-                f"{site.attr} references global $${site.name}; global substitution"
-                " is not implemented, so the literal text would be used; real"
-                " execution is refused (DL-240)"
-            )
 
     # passthrough is keyed by the raw attribute case (ir._lookup_ci, lint.py's
     # own TIME_CLUSTER scan), so CHK_FILES must match too -- case-insensitively
@@ -689,11 +685,168 @@ def host_preflight(
     ]
 
 
+def _finite_limit_max(
+    platform: str, implementation: str, version: tuple[int, int], infinity: int
+) -> int | None:
+    """Return the finite range supported by the execution resource binding."""
+    if implementation != "cpython" or version < (3, 12):
+        return None
+    binding_max = 2**63 - 1 if version < (3, 13) else 2**64 - 2
+    if platform == "darwin":
+        return min(binding_max, infinity - 1) if infinity > 0 else None
+    if platform == "linux":
+        return binding_max
+    return None
+
+
+def execution_policy_preflight(
+    catalog: CatalogIR,
+    *,
+    job_profile: str | None = None,
+    job_shell: str | None = None,
+    std_file_mode: StreamMode = "append",
+    hook_configured: bool = False,
+) -> list[PreflightItem]:
+    """One execution-policy boundary for startup, restart, admission and dispatch."""
+    items: list[PreflightItem] = []
+    try:
+        account = pwd.getpwuid(os.geteuid())
+    except KeyError:
+        return [
+            PreflightItem(
+                severity="ERROR",
+                code="owner",
+                job=name,
+                message=f"job {name}: owner: effective execution account is missing; provision the execution account",
+            )
+            for name in sorted(catalog.jobs)
+        ]
+    from dsl41.runtime_policy import resolve_job_shell
+
+    try:
+        _, warning = resolve_job_shell(job_shell, account.pw_shell)
+    except ValueError as exc:
+        items.append(PreflightItem(severity="ERROR", code="shell", message=str(exc)))
+    else:
+        if warning is not None:
+            items.append(PreflightItem(severity="WARN", code="shell", message=warning))
+    for name, job in sorted(catalog.jobs.items()):
+        try:
+            policy = job_policy(job, hook_configured=hook_configured)
+        except PolicyRefused as exc:
+            finding = exc.finding
+            if finding.code == "global-substitution":
+                items.append(
+                    PreflightItem(
+                        severity="ERROR",
+                        code="global-substitution",
+                        job=name,
+                        message=finding.message,
+                    )
+                )
+            else:
+                items.append(
+                    PreflightItem(
+                        severity="ERROR", code=finding.code, job=name, message=finding.message
+                    )
+                )
+            continue
+        items.extend(_owner_preflight(name, job, account.pw_name))
+        if job.job_type != "CMD":
+            continue
+        for attribute, path in (
+            ("engine.job_profile", job_profile),
+            ("profile", job.exec_.profile if job.exec_ else None),
+        ):
+            if path is None:
+                continue
+            if "$" in path or "\0" in path or not path:
+                reason = "profile names must be literal and nonempty"
+            else:
+                try:
+                    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+                    try:
+                        regular = stat.S_ISREG(os.fstat(fd).st_mode)
+                    finally:
+                        os.close(fd)
+                    reason = "" if regular else "profile is not a readable regular file"
+                except OSError:
+                    reason = "profile is not a readable regular file"
+            if reason:
+                items.append(
+                    PreflightItem(
+                        severity="ERROR",
+                        code="profile",
+                        job=name,
+                        message=f"job {name}: {attribute}: {reason}; use a readable literal profile path",
+                    )
+                )
+        if isinstance(job.exec_, ExecSpec):
+            for attribute in ("std_in_file", "std_out_file", "std_err_file"):
+                text = getattr(job.exec_, attribute)
+                if text is not None:
+                    try:
+                        stream_target(name, attribute, text, std_file_mode)
+                    except PolicyRefused as exc:
+                        finding = exc.finding
+                        items.append(
+                            PreflightItem(
+                                severity="ERROR",
+                                code=finding.code,
+                                job=name,
+                                message=finding.message,
+                            )
+                        )
+        for limit in policy.limits:
+            finite_max = _finite_limit_max(
+                sys.platform, sys.implementation.name, sys.version_info[:2], resource.RLIM_INFINITY
+            )
+            if any(
+                value is not None and (finite_max is None or value > finite_max)
+                for value in (limit.soft, limit.hard)
+            ):
+                items.append(
+                    PreflightItem(
+                        severity="ERROR",
+                        code="ulimit",
+                        job=name,
+                        message=(
+                            f"job {name}: ulimit: finite value is not representable by the "
+                            "execution resource binding; use a smaller representable finite "
+                            "value or explicit unlimited, subject to hard-limit permission"
+                        ),
+                    )
+                )
+                continue
+            resource_name, _ = LIMIT_RESOURCES[limit.resource]
+            resource_id = getattr(resource, resource_name, None)
+            hard = (
+                resource.RLIM_INFINITY
+                if resource_id is None
+                else resource.getrlimit(resource_id)[1]
+            )
+            if resource_id is None or (
+                os.geteuid() != 0
+                and hard != resource.RLIM_INFINITY
+                and (limit.hard is None or limit.hard > hard)
+            ):
+                items.append(
+                    PreflightItem(
+                        severity="ERROR",
+                        code="ulimit",
+                        job=name,
+                        message=f"job {name}: ulimit: unsupported resource or unattainable hard limit; use a supported resource and an attainable hard limit",
+                    )
+                )
+    return items
+
+
 def runtime_variable_preflight(
     catalog: CatalogIR,
     *,
     job_env: Mapping[str, str] | None = None,
     startup_env: Mapping[str, str] | None = None,
+    set_job_attribute_environmentals: bool = True,
 ) -> list[PreflightItem]:
     """Validate pre-profile paths with symbolic generated values (DL-447)."""
     import os
@@ -708,7 +861,9 @@ def runtime_variable_preflight(
     inherited = inherited_environment(os.environ if startup_env is None else startup_env)
     items: list[PreflightItem] = []
     for name, job in sorted(catalog.jobs.items()):
-        env = {**inherited, **(job_env or {}), **symbolic_environment(name)}
+        env = dict(inherited)
+        env.update(job_env or {})
+        env.update(symbolic_environment(name))
         try:
             resolve_streams(job, env, cwd=Path("/"))
         except RuntimeVariableError as exc:
@@ -731,6 +886,11 @@ def preflight(
     semantics: SemanticSwitches | None = None,
     job_env: Mapping[str, str] | None = None,
     startup_env: Mapping[str, str] | None = None,
+    job_profile: str | None = None,
+    job_shell: str | None = None,
+    std_file_mode: StreamMode = "append",
+    hook_configured: bool = False,
+    set_job_attribute_environmentals: bool = True,
 ) -> list[PreflightItem]:
     """ss8: refuse loudly, run honestly. `execution=False` (rehearse) skips the machine, owner
     and execution-input rules; calendars, timezones and construction still gate.
@@ -754,12 +914,10 @@ def preflight(
         start = datetime.now(UTC).replace(tzinfo=None)
     items: list[PreflightItem] = []
     local = _local_identity(as_machine)
-    user = getpass.getuser()
     for name, job in sorted(catalog.jobs.items()):
         items.extend(_job_type_preflight(name, job))
         if execution:
             items.extend(_machine_preflight(name, job, catalog, local, machine_policy))
-            items.extend(_owner_preflight(name, job, user))
             items.extend(_execution_input_preflight(name, job))
         items.extend(
             _calendar_preflight(name, job, catalog, start, tz_aliases, default_tz, semantics)
@@ -770,5 +928,21 @@ def preflight(
     items.extend(_oracle_preflight(catalog, semantics))
     items.extend(_skeleton_cycle_preflight(catalog))
     if execution:
-        items.extend(runtime_variable_preflight(catalog, job_env=job_env, startup_env=startup_env))
+        items.extend(
+            execution_policy_preflight(
+                catalog,
+                job_profile=job_profile,
+                job_shell=job_shell,
+                std_file_mode=std_file_mode,
+                hook_configured=hook_configured,
+            )
+        )
+        items.extend(
+            runtime_variable_preflight(
+                catalog,
+                job_env=job_env,
+                startup_env=startup_env,
+                set_job_attribute_environmentals=set_job_attribute_environmentals,
+            )
+        )
     return items

@@ -215,6 +215,17 @@ def test_dropped_attributes_do_not_reach_the_output() -> None:
     assert "/opt/acme" not in out
 
 
+def test_shell_path_is_dropped_without_leaking_and_structure_remains() -> None:
+    text = (
+        "insert_job: JOB_SYNTHETIC\njob_type: c\ncommand: echo demo\n"
+        "shell: /synthetic/private-shell-path\n"
+    )
+    out = minify_text(text)
+    assert classify("insert_job", "shell") == (Klass.DROP, "")
+    assert "shell:" not in out and "private-shell-path" not in out
+    assert "insert_job: j1\n" in out and "command: sleep 0\n" in out
+
+
 def test_comments_never_survive() -> None:
     text = "/* ACMECORP nightly */\ninsert_job: A\njob_type: c\nmachine: h\ncommand: /x\n"
     out = minify_text(text, verify=False)

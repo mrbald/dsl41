@@ -809,7 +809,7 @@ def test_resume_real_domain_missed_ticks_are_dropped_and_journaled(tmp_path: Pat
     ticks -- each dropped (never fired late) and journaled as a `drop`
     record, and reported on Engine.drops."""
     text = (
-        "insert_job: mts_job\njob_type: c\ncommand: x\nmachine: m1\n"
+        "insert_job: mts_job\njob_type: c\ncommand: x\nmachine: localhost\n"
         "date_conditions: 1\ndays_of_week: all\nstart_mins: 0,30\n"
     )
     catalog = lower_source(text)

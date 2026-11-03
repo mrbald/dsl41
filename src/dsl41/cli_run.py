@@ -99,6 +99,11 @@ def _preflight_or_exit(
     semantics: "SemanticSwitches | None" = None,
     warns_to_stderr: bool = False,
     job_env: "dict[str, str] | None" = None,
+    job_profile: str | None = None,
+    job_shell: str | None = None,
+    std_file_mode: str = "append",
+    hook_configured: bool = False,
+    set_job_attribute_environmentals: bool = True,
 ) -> "list[PreflightItem]":
     """Print ss8 findings; exit 2 on any ERROR; return the WARNs for the caller to journal.
 
@@ -123,6 +128,11 @@ def _preflight_or_exit(
         timezone_map_source=timezone_map_source,
         semantics=semantics,
         job_env=job_env,
+        job_profile=job_profile,
+        job_shell=job_shell,
+        std_file_mode=cast("Any", std_file_mode),
+        hook_configured=hook_configured,
+        set_job_attribute_environmentals=set_job_attribute_environmentals,
     )
     return _preflight_items_or_exit(items, warns_to_stderr=warns_to_stderr)
 
@@ -135,7 +145,7 @@ def _preflight_items_or_exit(
         target = f" {item.job}" if item.job else ""
         typer.echo(
             f"preflight {item.severity} [{item.code}]{target}: {item.message}",
-            err=warns_to_stderr or item.severity == "ERROR",
+            err=warns_to_stderr or item.severity == "ERROR" or item.code == "shell",
         )
     if any(item.severity == "ERROR" for item in items):
         raise typer.Exit(refuse("preflight: refusing to run (runner-design ss8)"))
@@ -452,6 +462,11 @@ def _run_main_config_checked(path: Path, *, ui: bool, hooks: HookSettings, raw: 
                 timezone_map_source="estate.timezone_map",
                 semantics=resolve(profile.semantics),
                 job_env=profile.job_env,
+                job_profile=profile.job_profile,
+                job_shell=profile.job_shell,
+                std_file_mode=profile.std_file_mode,
+                hook_configured=hooks.status_hook is not None,
+                set_job_attribute_environmentals=profile.set_job_attribute_environmentals,
             )
         if ui:
             import_tui_or_exit_2()
@@ -787,17 +802,17 @@ async def _validate_before_lock(
     main_config_path: Path | None,
     main_launch: dict[str, object] | None,
     overrides: "dict[str, float | int | None] | None",
+    hook_configured: bool = False,
 ) -> None:
     """DL-433: an invalid existing store must not gain a missing leader.lock."""
     from datetime import UTC, datetime
     from dsl41 import main_config
     from dsl41.runner_config import load_settings, with_host_settings
     from dsl41.runner_clock import EngineError, RealClock
-    from dsl41.runner_preflight import host_preflight
     from dsl41.runner_startup import active_configuration, validate_resume, wire_from_profile
 
     if main_config_path is not None:
-        stored = active_configuration(run_root, locked=True)
+        stored = active_configuration(run_root, locked=True, check_lowering=True)
         if not stored.source_capture:
             raise EngineError("main-config restart requires a stored main-config capture")
         main_config.decoded_parts(stored.source_capture)
@@ -806,13 +821,7 @@ async def _validate_before_lock(
         profile = with_host_settings(
             profile, cast(list[str], main_launch["as_machine"]), str(main_launch["machine_policy"])
         )
-        _preflight_items_or_exit(
-            host_preflight(
-                catalog,
-                as_machine=frozenset(profile.as_machine),
-                machine_policy=profile.machine_policy,
-            )
-        )
+
     settings = load_settings(run_root, create=False).overridden(**(overrides or {}))
     wiring = wire_from_profile(
         catalog, profile, start=datetime.now(UTC).replace(tzinfo=None), settings=settings
@@ -827,6 +836,7 @@ async def _validate_before_lock(
         machines=wiring.machines,
         settings=settings,
         stored_sources=main_config_path is not None,
+        hook_configured=hook_configured,
     )
 
 
@@ -886,6 +896,7 @@ async def _serve_run(
                 main_config_path=main_config_path,
                 main_launch=main_launch,
                 overrides=overrides,
+                hook_configured=hook_settings is not None and hook_settings.status_hook is not None,
             )
         except (EngineError, OSError, ValueError, RereadRefused) as exc:
             if not (run_root / "leader.lock").exists():
@@ -921,28 +932,20 @@ async def _serve_run(
 
             try:
                 if resume:
-                    stored = active_configuration(run_root, locked=True)
+                    stored = active_configuration(run_root, locked=True, check_lowering=True)
                     if not stored.source_capture:
                         return refuse("main-config restart requires a stored main-config capture")
                     captured_estate = main_config.decoded_parts(stored.source_capture)
                     catalog, profile = stored.catalog, stored.profile
                     assert main_launch is not None
                     from dsl41.runner_config import with_host_settings
-                    from dsl41.runner_preflight import host_preflight, runtime_variable_preflight
 
                     profile = with_host_settings(
                         profile,
                         cast(list[str], main_launch["as_machine"]),
                         str(main_launch["machine_policy"]),
                     )
-                    warns = _preflight_items_or_exit(
-                        host_preflight(
-                            catalog,
-                            as_machine=frozenset(profile.as_machine),
-                            machine_policy=profile.machine_policy,
-                        )
-                        + runtime_variable_preflight(catalog, job_env=profile.job_env)
-                    )
+
                 assert captured_estate is not None
                 spec_texts = _spec_texts(list(captured_estate.parsed), catalog)
                 estate_fingerprint = main_config.fingerprint(captured_estate)
@@ -964,6 +967,7 @@ async def _serve_run(
             return refuse(exc)
         try:
             if resume:
+                restart_warnings: list[PreflightItem] = []
                 engine = await _resume_run(
                     catalog,
                     run_root,
@@ -979,7 +983,19 @@ async def _serve_run(
                     machines=wiring.machines,
                     settings=settings,
                     stored_sources=main_config_path is not None,
+                    hook_configured=hook_settings is not None
+                    and hook_settings.status_hook is not None,
+                    preflight_warnings=restart_warnings,
                 )
+                printed = {(item.code, item.job, item.message) for item in warns}
+                _preflight_items_or_exit(
+                    [
+                        item
+                        for item in restart_warnings
+                        if (item.code, item.job, item.message) not in printed
+                    ]
+                )
+                warns = restart_warnings
             else:
                 engine = start_run(
                     catalog,
@@ -993,6 +1009,8 @@ async def _serve_run(
                     non_idempotent=non_idempotent,
                     machines=wiring.machines,
                     settings=settings,
+                    hook_configured=hook_settings is not None
+                    and hook_settings.status_hook is not None,
                     source_capture=(
                         None
                         if captured_estate is None

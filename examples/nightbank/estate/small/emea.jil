@@ -145,8 +145,6 @@ watch_file: ~{$NB_DATA}~/incoming/emea_prices.csv
 watch_interval: 5
 machine: mkt_feed
 owner: ~{$OWNER}~
-std_out_file: ~{$NB_LOGS}~/EMEA_MKT_PX_F.out
-std_err_file: ~{$NB_LOGS}~/EMEA_MKT_PX_F.err
 
 /* Refdata orders instrument definitions for the demanded universe only. */
 insert_job: EMEA_REF_INSTR_C
@@ -292,8 +290,6 @@ watch_file: ~{$NB_DATA}~/incoming/emea_custody.csv
 watch_interval: 5
 machine: mkt_feed
 owner: ~{$OWNER}~
-std_out_file: ~{$NB_LOGS}~/EMEA_REC_CUST_F.out
-std_err_file: ~{$NB_LOGS}~/EMEA_REC_CUST_F.err
 
 insert_job: EMEA_REC_TRADES_C
 job_type: c

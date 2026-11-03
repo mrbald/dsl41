@@ -15,12 +15,16 @@ A box's supplied state is separate from the observations supplied for its
 descendant leaf jobs.
 
 Each JSON sidecar contains only `nodes` and a string `state` for every entry.
-No source, timestamp, version or state vocabulary is required. IDs match the
-emitted graph exactly. Optional metadata is described in the viewer's Format
+No source, timestamp, version or state vocabulary is required. The viewer matches
+IDs exactly, including case and instance qualifiers. Optional metadata is described in the viewer's Format
 section. Replacement drops observations omitted from the new file.
 Invalid input keeps the previous snapshot.
 
 ## Nightbank
+
+[nightbank-external.jil](nightbank-external.jil) adds an external dependency to
+the visualization. Do not include it in engine inputs; the engine refuses its
+cross-instance condition.
 
 1. From the repository root, emit either profile:
 
@@ -28,12 +32,12 @@ Invalid input keeps the previous snapshot.
    uv run dsl41 viz --format explore \
      -p examples/snapshots/viewer.properties \
      -o /tmp/nightbank-small-explore.html \
-     examples/nightbank/estate/small/*.jil
+     examples/nightbank/estate/small/*.jil examples/snapshots/nightbank-external.jil
 
    uv run dsl41 viz --format explore \
      -p examples/snapshots/viewer.properties \
      -o /tmp/nightbank-bank-explore.html \
-     examples/nightbank/estate/bank/*.jil
+     examples/nightbank/estate/bank/*.jil examples/snapshots/nightbank-external.jil
    ```
 
 2. Open the generated HTML locally.

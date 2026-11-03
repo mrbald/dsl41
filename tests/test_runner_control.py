@@ -40,7 +40,7 @@ from dsl41.oracle_state import INJECTABLE_STATUSES, Event, EventKind, JobStatus
 from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_admission import PROTOCOL_VERSION, addressed_key
-from dsl41.runner_clock import EngineError, RealClock
+from dsl41.runner_clock import EngineError, RealClock, VirtualClock
 from dsl41.runner_control import (
     JOB_EVENT_VERBS,
     STATUSES,
@@ -218,6 +218,30 @@ async def _serve(
     await server.start()
     loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
     return engine, server, loop_task
+
+
+async def _serve_virtual_model(
+    run_root: Path, text: str
+) -> tuple[Engine, ControlServer, asyncio.Task]:
+    """Serve model/control behavior with a virtual clock and fake execution only."""
+    adapter = FakeAdapter()
+    engine = start_run(
+        lower_source(text),
+        run_root,
+        clock=VirtualClock(start=datetime(2026, 1, 1)),
+        adapters={"CMD": adapter, "FW": adapter},
+    )
+    server = ControlServer(engine, run_root / "control.sock")
+    await server.start()
+
+    async def pump() -> None:
+        while True:
+            await engine.run_until_quiescent(datetime.max)
+            engine._activity.clear()
+            if not engine._queue:
+                await engine._activity.wait()
+
+    return engine, server, asyncio.create_task(pump())
 
 
 async def _teardown(engine: Engine, server: ControlServer, loop_task: asyncio.Task) -> None:
@@ -1932,8 +1956,7 @@ def test_change_status_on_declared_xinst_ghost_satisfies_a_cross_instance_atom(
     )
 
     async def scenario() -> None:
-        adapter = FakeAdapter(default=(0.05, 0))
-        engine, server, loop_task = await _serve(short_root / "run", text, adapter=adapter)
+        engine, server, loop_task = await _serve_virtual_model(short_root / "run", text)
         try:
             refused = await _sendevent(
                 server.path,
@@ -2855,7 +2878,7 @@ def test_dl172_subscribe_lines_refuses_a_record_line_over_the_limit(
 # CHANGE_STATUS refuses a status the oracle cannot apply, and the
 # composition test proves every payload value framing accepts applies.
 
-_STATUS_JIL = "insert_job: st_job\njob_type: c\ncommand: x\nmachine: m1\n"
+_STATUS_JIL = "insert_job: st_job\njob_type: c\ncommand: x\nmachine: localhost\n"
 _XINST_JIL = "insert_xinst: PRD\nxtype: a\n\n" + _STATUS_JIL
 
 

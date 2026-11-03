@@ -174,6 +174,29 @@ def test_input_and_output_io_failures_publish_no_json(tmp_path: Path) -> None:
     assert list(tmp_path.iterdir()) == [directory]
 
 
+@pytest.mark.parametrize(("estate", "count"), [("small", 82), ("bank", 520)])
+def test_snapshot_graph_composes_the_documented_external_overlay(estate: str, count: int) -> None:
+    from dsl41.ast_jil import parse
+    from dsl41.derive import derive_graph
+    from dsl41.ir import lower_catalog
+    from dsl41.placeholders import load_properties, substitute
+
+    directory = ROOT / "examples" / "nightbank" / "estate" / estate
+    overlay = ROOT / "examples" / "snapshots" / "nightbank-external.jil"
+    props = ROOT / "examples" / "snapshots" / "viewer.properties"
+    bindings = load_properties([props])
+    paths = [*sorted(directory.glob("*.jil")), overlay]
+    parsed = []
+    for path in paths:
+        text, _ = substitute(path.read_text(), bindings, file=str(path))
+        parsed.append(parse(text, file=str(path)))
+    catalog = lower_catalog(parsed)
+    graph = derive_graph(catalog)
+    assert len(catalog.jobs) == count
+    assert "OPS_XINST_DEMO_C" in catalog.jobs
+    assert [ref.key for ref in graph.external_boundary] == ["GROUP_TREASURY_EOD^PRD"]
+
+
 @pytest.mark.skipif(os.environ.get("DSL41_BROWSER_TESTS") != "1", reason="opt-in browser proof")
 @pytest.mark.parametrize("engine", ["chromium", "webkit", "firefox"])
 def test_converted_fixture_native_viewer_import(tmp_path: Path, engine: str) -> None:
@@ -184,6 +207,7 @@ def test_converted_fixture_native_viewer_import(tmp_path: Path, engine: str) -> 
     assert converted.returncode == 0, converted.stderr
     assert converted.stdout == converted.stderr == b""
     html = tmp_path / "nightbank.html"
+    external_fixture = ROOT / "examples" / "snapshots" / "nightbank-external.jil"
     emitted = subprocess.run(
         [
             sys.executable,
@@ -197,6 +221,7 @@ def test_converted_fixture_native_viewer_import(tmp_path: Path, engine: str) -> 
             "-o",
             str(html),
             *map(str, sorted((ROOT / "examples/nightbank/estate/small").glob("*.jil"))),
+            str(external_fixture),
         ],
         cwd=ROOT,
         capture_output=True,

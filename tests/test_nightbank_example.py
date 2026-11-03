@@ -5,7 +5,7 @@ The last sentence here used to read "the live-engine path is exercised
 manually; these tests pin what CI can pin", and
 docs/concurrency-model.md quotes it as the gap the whole phase-12 programme
 closes. The virtual-clock half of it is closed: the sweep at the foot of
-this file drives the real 82-job night through seeded interleavings of
+this file drives the real 81-job night through seeded interleavings of
 leader failover, a spawn decided and never acted on, duplicated and stale
 completions, quarantine and drain, and checks CM-14 and CM-09 over every
 one. What is still manual is the REAL-PROCESS path -- actual subprocesses,
@@ -61,6 +61,39 @@ def test_estate_lints_clean(files: list[str], props_file: Path) -> None:
     result = cli("lint", *files, "-p", str(props_file), cwd=ROOT)
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.strip() == ""  # zero findings, not merely zero errors
+
+
+@pytest.mark.parametrize(("estate", "count"), [("small", 81), ("bank", 519)])
+def test_prepared_estate_passes_real_startup_admission(
+    estate: str, count: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    import pwd
+
+    from dsl41.runner_adapters import FakeAdapter
+    from dsl41.runner_clock import RealClock
+    from dsl41.runner_preflight import preflight
+    from dsl41.runner_scheduler import Scheduler
+    from dsl41.runner_startup import start_run
+
+    monkeypatch.setenv("USER", pwd.getpwuid(os.geteuid()).pw_name)
+    night = tmp_path / "night"
+    _launcher().prepare_night(night, estate, anchor_utc=datetime(2026, 1, 6, 0, 5, tzinfo=UTC))
+    catalog = load_estate(estate, night / "night.properties")
+    assert len(catalog.jobs) == count
+    assert "OPS_XINST_DEMO_C" not in catalog.jobs
+    assert not [item for item in preflight(catalog) if item.severity == "ERROR"]
+    clock = RealClock()
+    engine = start_run(
+        catalog,
+        tmp_path / "engine",
+        clock=clock,
+        adapters={"CMD": FakeAdapter(), "FW": FakeAdapter()},
+        scheduler=Scheduler(catalog, start=clock.now()),
+    )
+    assert engine.config_rev == 1
+    assert engine.journal is not None
+    engine.journal.close()
 
 
 def test_small_estate_full_night_rehearsal(props_file: Path, tmp_path: Path) -> None:

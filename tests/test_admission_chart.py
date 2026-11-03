@@ -578,7 +578,7 @@ def _report(err: str) -> list[str]:
     return [line for line in err.splitlines() if line.startswith(STATECHART_LOG_PREFIX)]
 
 
-_RUN_JIL = "insert_job: j\njob_type: c\ncommand: x\nmachine: m1\n"
+_RUN_JIL = "insert_job: j\njob_type: c\ncommand: x\nmachine: localhost\n"
 
 
 def _serve(run_root: Path, resume: bool) -> int:

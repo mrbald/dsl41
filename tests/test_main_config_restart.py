@@ -35,17 +35,23 @@ pytestmark = pytest.mark.usefixtures("cli_env")
 
 
 @contextmanager
-def cli_engine(path: Path):
+def cli_engine(path: Path, *, force_unsupported_shell: bool = False):
     root = main.load_run_root(path)
     socket = root / "control.sock"
     log = root.parent / "cli-engine.log"
     ready = stopped = False
     with log.open("w") as stream:
-        child = subprocess.Popen(
-            [sys.executable, "-m", "dsl41", "run", "--config", str(path)],
-            stdout=stream,
-            stderr=subprocess.STDOUT,
-        )
+        command = [sys.executable, "-m", "dsl41", "run", "--config", str(path)]
+        if force_unsupported_shell:
+            bootstrap = (
+                "import os,pwd,runpy,sys,types; "
+                "account=pwd.getpwuid(os.geteuid()); "
+                "pwd.getpwuid=lambda uid: types.SimpleNamespace(pw_name=account.pw_name,pw_shell='/bin/zsh'); "
+                "sys.argv=['dsl41','run','--config',sys.argv[1]]; "
+                "runpy.run_module('dsl41',run_name='__main__')"
+            )
+            command = [sys.executable, "-c", bootstrap, str(path)]
+        child = subprocess.Popen(command, stdout=stream, stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + 30
             while "engine up; control socket:" not in log.read_text():
@@ -610,3 +616,280 @@ def test_k6_update_reads_only_the_engine_location(
         assert result.exit_code == 0, result.output
         assert ask()["revision"] == 2
         assert ask()["catalog"]["jobs"]["A"]["exec_"]["command"] == "echo reviewed"
+
+
+@pytest.fixture
+def k_bourne_account(monkeypatch):
+    from types import SimpleNamespace
+    from dsl41 import runner_preflight
+
+    monkeypatch.setattr(
+        runner_preflight.pwd,
+        "getpwuid",
+        lambda uid: SimpleNamespace(pw_name="synthetic_user", pw_shell="/bin/sh"),
+    )
+
+
+def k_seed(path):
+    estate = main.prepare(path)
+    root = main.load_run_root(path)
+    engine = start_run(
+        estate.catalog,
+        root,
+        clock=RealClock(),
+        adapters={"CMD": FakeAdapter()},
+        launched=main.profile_of(estate),
+        source_capture=main.encoded_parts(estate),
+    )
+    engine.journal.close()
+    return root, estate
+
+
+def k_root_bytes(root):
+    return {
+        str(path.relative_to(root)): (
+            path.stat().st_mode,
+            path.read_bytes() if path.is_file() else None,
+        )
+        for path in root.rglob("*")
+    }
+
+
+@pytest.mark.usefixtures("k_bourne_account")
+@pytest.mark.parametrize("failure", ["lowering", "catalog", "order"])
+def test_k1_rejected_captured_lowering_preserves_root(short_root, monkeypatch, failure):
+    from dataclasses import replace
+    from dsl41.ir import lower_source
+    from dsl41.reload_plan import RereadRefused
+
+    path = estate_file(short_root)
+    (short_root / "a.jil").write_text(JOB + "\ninsert_job: B\njob_type: c\ncommand: true\n")
+    root, captured = k_seed(path)
+    stored = active_configuration(root)
+    before = k_root_bytes(root)
+    original = main.decoded_parts
+
+    def incompatible(parts):
+        if failure == "lowering":
+            raise RereadRefused(["synthetic.jil: job A: attribute rejected by newer lowering"])
+        estate = original(parts)
+        changed = (
+            lower_source(JOB.replace("true", "false"))
+            if failure == "catalog"
+            else estate.catalog.model_copy(
+                update={"jobs": dict(reversed(list(estate.catalog.jobs.items())))}
+            )
+        )
+        return replace(estate, catalog=changed)
+
+    monkeypatch.setattr(main, "decoded_parts", incompatible)
+    monkeypatch.setattr(
+        runner_startup,
+        "_first_reading",
+        lambda *args: pytest.fail("recovery effects on K1 refusal"),
+    )
+    for _ in range(2):
+        with pytest.raises(EngineError, match="restart-lowering: configuration revision 1"):
+            asyncio.run(
+                resume_run(
+                    stored.catalog,
+                    root,
+                    clock=RealClock(),
+                    adapters={"CMD": FakeAdapter()},
+                    declared=stored.profile,
+                    stored_sources=True,
+                )
+            )
+        assert k_root_bytes(root) == before
+    monkeypatch.setattr(main, "decoded_parts", original)
+    assert main.encoded_parts(captured) == stored.source_capture
+    assert runner_startup.check_captured_lowering(stored, 1).catalog == stored.catalog
+
+
+@pytest.mark.usefixtures("k_bourne_account")
+@pytest.mark.parametrize("failure", ["lowering", "catalog"])
+def test_k1_v2_capture_failure_names_revision_without_root_effects(
+    short_root, monkeypatch, failure
+):
+    import hashlib
+    import json
+    import sqlite3
+    from dataclasses import replace
+
+    from dsl41.canon import canonical_bytes
+    from dsl41.ir import lower_source
+    from dsl41.reload_plan import RereadRefused
+
+    path = estate_file(short_root)
+    root, _ = k_seed(path)
+    config = active_configuration(root)
+    payload = json.loads(config.to_bytes())
+    payload.pop("job_order")
+    payload["configuration_format_version"] = 2
+    legacy = canonical_bytes(payload)
+    with closing(sqlite3.connect(root / "engine.db", isolation_level=None)) as db:
+        db.execute(
+            "UPDATE configs SET data = ?, digest = ? WHERE rev = 1",
+            (legacy, "sha256:" + hashlib.sha256(legacy).hexdigest()),
+        )
+    # A valid v2 row still restores its capture-derived order, without rewriting the row.
+    valid = runner_startup.active_configuration(root, check_lowering=True)
+    assert list(valid.catalog.jobs) == list(config.catalog.jobs)
+    before = k_root_bytes(root)
+    original = main.decoded_parts
+
+    def incompatible(parts):
+        if failure == "lowering":
+            raise RereadRefused(["synthetic.jil: incompatible lowering"])
+        return replace(original(parts), catalog=lower_source(JOB.replace("true", "false")))
+
+    monkeypatch.setattr(main, "decoded_parts", incompatible)
+    monkeypatch.setattr(
+        runner_startup,
+        "_first_reading",
+        lambda *args: pytest.fail("recovery effects on K1 refusal"),
+    )
+    for _ in range(2):
+        with pytest.raises(EngineError, match="restart-lowering: configuration revision 1"):
+            asyncio.run(
+                resume_run(config.catalog, root, clock=RealClock(), adapters={"CMD": FakeAdapter()})
+            )
+        assert k_root_bytes(root) == before
+    with pytest.raises(
+        EngineError, match="unreadable configuration source_capture|source_capture catalog hash"
+    ) as error:
+        Configuration.from_bytes(legacy, where="offline")
+    assert "restart-lowering" not in str(error.value)
+
+
+def test_restart_prints_and_journals_authoritative_warnings_once(short_root: Path) -> None:
+    path = estate_file(short_root, engine='machine_policy = "local-eligible"\n')
+    (short_root / "a.jil").write_text(
+        "insert_machine: here\ntype: a\nnode_name: localhost\n\n"
+        "insert_machine: there\ntype: a\nnode_name: elsewhere.example.com\n\n"
+        "insert_machine: pool\ntype: v\nmachine: here\nmachine: there\n\n"
+        "insert_job: A\njob_type: c\ncommand: true\nmachine: pool\nauto_hold: 1\n"
+    )
+    root = main.load_run_root(path)
+    with cli_engine(path, force_unsupported_shell=True):
+        pass
+    first_log = (short_root / "cli-engine.log").read_text()
+    assert first_log.count("preflight WARN [shell]") == 1
+    assert first_log.count("preflight WARN [machine-mixed]") == 1
+    (root / "leader.lock").unlink()
+    with cli_engine(path, force_unsupported_shell=True):
+        pass
+    restart_log = (short_root / "cli-engine.log").read_text()
+    assert restart_log.count("preflight WARN [shell]") == 1
+    assert restart_log.count("preflight WARN [machine-mixed]") == 1
+    records = [body for _, kind, body in rows(root) if kind == "preflight"]
+    assert len(records) == 2
+    for record in records:
+        codes = [item["code"] for item in record["items"]]
+        assert codes.count("shell") == 1 and codes.count("machine-mixed") == 1
+
+
+@pytest.mark.usefixtures("k_bourne_account")
+def test_k2_cli_restart_uses_stored_profile_before_any_effect(short_root, monkeypatch):
+    profile = short_root / "stored.profile"
+    profile.write_text("export SYNTHETIC=applied\n")
+    path = estate_file(short_root, engine=f'job_profile = "{profile}"\n')
+    root, _ = k_seed(path)
+    profile.unlink()
+    config_file(
+        short_root, engine='job_profile = "/unused/disk-edit"\njob_env = {NEW = "pending"}\n'
+    )
+    before = k_root_bytes(root)
+    monkeypatch.setattr(
+        runner_startup,
+        "_first_reading",
+        lambda *args: pytest.fail("recovery effects on K2 refusal"),
+    )
+    for _ in range(2):
+        result = CliRunner().invoke(app, ["run", "--config", str(path)])
+        assert result.exit_code == 2, result.output
+        assert "restart-preflight" in result.output and "[profile]" in result.output
+        assert "engine.job_profile" in result.output and "job A" in result.output
+        assert k_root_bytes(root) == before
+
+
+@pytest.mark.usefixtures("k_bourne_account")
+def test_k2_pending_candidate_is_checked_before_update_recovery(short_root, monkeypatch):
+    path = estate_file(short_root)
+    applied = main.prepare(path)
+    root = main.load_run_root(path)
+    profile = short_root / "pending.profile"
+    profile.write_text("export SYNTHETIC=candidate\n")
+    engine = start_run(
+        applied.catalog,
+        root,
+        clock=RealClock(),
+        adapters={"CMD": FakeAdapter()},
+        launched=main.profile_of(applied),
+        source_capture=main.encoded_parts(applied),
+    )
+    try:
+        (short_root / "a.jil").write_text(JOB + f"profile: {profile}\n")
+        candidate = main.prepare(path)
+        result = reread(short_root, engine.update.live(), root / "plans", candidate=candidate)
+        request = UpdateRequest(result.token, True, 1, engine.baseline_id, "synthetic-pending")
+        engine.journal.append(
+            Record(
+                engine.clock.now(),
+                "config",
+                None,
+                request.request_id,
+                {
+                    "event": "intent",
+                    "token": result.token,
+                    "live_rev": 1,
+                    "stop": [],
+                    "filter": ["A"],
+                    "stop_running": True,
+                    "request_id": request.request_id,
+                    "fingerprint": request.fingerprint,
+                },
+            )
+        )
+    finally:
+        engine.journal.close()
+    profile.unlink()
+    before = k_root_bytes(root)
+    monkeypatch.setattr(
+        runner_startup,
+        "_first_reading",
+        lambda *args: pytest.fail("recovery effects before pending validation"),
+    )
+    for _ in range(2):
+        with pytest.raises(
+            EngineError, match="restart-preflight: configuration revision 2.*profile"
+        ):
+            asyncio.run(
+                resume_run(
+                    applied.catalog,
+                    root,
+                    clock=RealClock(),
+                    adapters={"CMD": FakeAdapter()},
+                    declared=main.profile_of(applied),
+                    stored_sources=True,
+                )
+            )
+        assert k_root_bytes(root) == before
+
+
+@pytest.mark.usefixtures("k_bourne_account")
+def test_k1_state_version_refuses_before_captured_lowering(short_root, monkeypatch):
+    import sqlite3
+
+    path = estate_file(short_root)
+    root, _ = k_seed(path)
+    with closing(sqlite3.connect(root / "engine.db", isolation_level=None)) as db:
+        db.execute("UPDATE meta SET value='-1' WHERE key='state_version'")
+    before = k_root_bytes(root)
+    monkeypatch.setattr(
+        main, "decoded_parts", lambda *args: pytest.fail("lowering preceded state-version gate")
+    )
+    result = CliRunner().invoke(app, ["run", "--config", str(path)])
+    assert result.exit_code == 2 and "state version" in result.output
+    assert "restart-lowering" not in result.output
+    assert k_root_bytes(root) == before
