@@ -72,6 +72,7 @@ from dsl41.placeholders import PlaceholderError, load_properties, substitute
 from dsl41.reload_diff import Plan, catalog_hash_v2, diff, plan_token, running_boxes
 from dsl41.runner_preflight import PreflightItem, preflight
 from dsl41.runner_config import MachinePolicy
+from dsl41.runtime_policy import policy_values
 from dsl41.runner_procid import durable_write, mkdir_durable
 from dsl41.semantics import check_overrides
 from dsl41.semantics import resolve as resolve_switches
@@ -153,6 +154,7 @@ def estate_settings(
     catalog: CatalogIR,
     *,
     job_env: Mapping[str, str] | None = None,
+    runtime_policy: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """The estate-wide settings `reload_diff.diff` compares (module docstring). Each value is
     spelled as the engine runs it, so the engine's own settings and an unchanged estate's
@@ -162,6 +164,7 @@ def estate_settings(
         "timezone_aliases": alias_table(tz_aliases),
         "semantics": check_overrides(semantics),
         "job_env": dict(job_env or {}),
+        **policy_values(runtime_policy or {}),
         "external_instances": {
             name: xinst.model_dump(mode="json", exclude={"span"})
             for name, xinst in catalog.external_instances.items()
@@ -305,6 +308,13 @@ def _preflight(
         semantics=resolve_switches(semantics),
         job_env=cast(dict[str, str], estate.settings.get("job_env", {})),
         startup_env=startup_env,
+        set_job_attribute_environmentals=cast(
+            bool, estate.settings.get("set_job_attribute_environmentals", True)
+        ),
+        job_profile=cast(str | None, estate.settings.get("job_profile")),
+        job_shell=cast(str | None, estate.settings.get("job_shell")),
+        std_file_mode=cast(Any, estate.settings.get("std_file_mode", "append")),
+        hook_configured=bool(estate.metadata.get("launch", {}).get("status_hook")),
         machine_policy=cast(
             MachinePolicy, estate.metadata.get("launch", {}).get("machine_policy", "strict")
         ),

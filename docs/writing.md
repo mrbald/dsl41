@@ -6,7 +6,7 @@ reader can complete a task. Follow the maintainer track under
 Implementation gates belong to [agent-workflow.md](agent-workflow.md);
 this page covers the document's reader, content and presentation.
 
-Status: binding for every human-facing document (DL-405, DL-406): the README, the
+Status: applies to every human-facing document (DL-405, DL-406, DL-448): the README, the
 pages under `docs/` that are not frozen contracts, the block cards, and the
 READMEs and runbooks under `examples/`. The `spec-review` procedure (DL-225)
 covers every page under `docs/` except the decision log, the citation
@@ -22,6 +22,15 @@ The rules below follow four principles: readers get what they need, can
 find it, can understand it, and can use it.
 
 An existing page meets a rule added by DL-406 at its next change.
+
+Under DL-448, reader-docs procedure and presentation defaults are SHOULD
+recommendations. This includes one reader or task per page, separate slices,
+brief and fact-sheet artifacts, their sequence, and checklist form. The
+responsible role may adapt them to the task and briefly record a material
+departure in the existing task or PR record; form alone needs no owner escalation.
+Binding contracts, truthful source evidence, public hygiene, citation and anchor
+integrity, generated state-machine views, required independent review and gates,
+and publication authority remain requirements.
 
 ## 1. One reader, one task
 
@@ -153,5 +162,7 @@ A chart with no generated view gets one before its document is written.
 
 Agents write and review documents through the `reader-docs` skill
 (`.claude/skills/reader-docs/SKILL.md`), which carries the checklist for
-this page, the audience brief, and the review order. A human author uses the
-same checklist.
+this page, the audience brief, and the review order as defaults under DL-448.
+A human author uses the same guidance. Scale the process to the change; a
+small correction can combine the brief and inspected source references in a
+short note. The required review and authority come from the project workflow.

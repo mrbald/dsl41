@@ -44,8 +44,8 @@ required verification or independent acceptance.
   (DL-59); reserve calendar errors for uninterpretable input.
 - A comment states the rule and cites its entry; it never states what changed
   (DL-362). `scripts/comment_equivalence.py <base>` proves a comment-only diff.
-- A human-facing document is written for one reader under `docs/writing.md`
-  (DL-405): plain language, visuals only for the structures it names, state
+- A human-facing document should normally be written for one primary reader under
+  `docs/writing.md` (DL-405, DL-448): plain language, visuals only for the structures it names, state
   machines only as generated views.
 - Append material decisions to `docs/decision-log.md`; never edit, renumber or
   delete an old entry, except a superseded-by mark and a compression tranche

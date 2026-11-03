@@ -70,3 +70,46 @@ def test_a_resume_under_another_profile_is_refused_naming_the_field(
     err = capsys.readouterr().err
     assert "runtime-profile mismatch on machine_policy" in err
     assert rows(run_root) == before
+
+
+@pytest.mark.parametrize("stored_sources", [False, True])
+def test_k2_restart_runs_full_preflight_for_held_jobs(tmp_path, monkeypatch, stored_sources):
+    from types import SimpleNamespace
+    from dsl41 import runner_preflight, runner_startup
+    from dsl41.runner_adapters import FakeAdapter
+    from dsl41.runner_clock import EngineError, RealClock
+
+    monkeypatch.setattr(
+        runner_preflight.pwd,
+        "getpwuid",
+        lambda uid: SimpleNamespace(pw_name="synthetic_user", pw_shell="/bin/sh"),
+    )
+    catalog = lower_source(
+        "insert_job: held\njob_type: c\ncommand: true\nstatus: ON_HOLD\nheartbeat_interval: 1\n"
+    )
+    root = tmp_path / "root"
+    with monkeypatch.context() as old_binary:
+        old_binary.setattr(runner_startup, "_check_runtime_variables", lambda *args, **kwargs: None)
+        engine = runner_startup.start_run(
+            catalog, root, clock=RealClock(), adapters={"CMD": FakeAdapter()}
+        )
+        engine.journal.close()
+    before = {
+        path: (path.stat().st_mode, path.read_bytes()) for path in root.rglob("*") if path.is_file()
+    }
+    for _ in range(2):
+        with pytest.raises(EngineError, match="restart-preflight.*heartbeat-unsupported.*held"):
+            asyncio.run(
+                runner_startup.resume_run(
+                    catalog,
+                    root,
+                    clock=RealClock(),
+                    adapters={"CMD": FakeAdapter()},
+                    stored_sources=stored_sources,
+                )
+            )
+        assert {
+            path: (path.stat().st_mode, path.read_bytes())
+            for path in root.rglob("*")
+            if path.is_file()
+        } == before

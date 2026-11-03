@@ -129,10 +129,10 @@ nothing.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | job_attr:FREE | supported | DL-50 | - |  |  |  | generic | overrides the resource's release default for this one request |
 | job_attr:QUANTITY | supported | DL-21, DL-50 | - |  |  |  | generic | the units one resources group demands; a group without it is refused |
-| job_attr:alarm_if_fail | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
-| job_attr:alarm_if_terminated | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
+| job_attr:alarm_if_fail | passthrough | runtime_policy.job_policy | - |  |  |  | generic | validated and carried; execution and delivery are not yet activated |
+| job_attr:alarm_if_terminated | passthrough | runtime_policy.job_policy | - |  |  |  | generic | validated and carried; execution and delivery are not yet activated |
 | job_attr:application | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | the application tag is carried; nothing schedules or reports by it |
-| job_attr:auto_delete | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | the definition is never deleted; the catalog is static for the run |
+| job_attr:auto_delete | refused | runtime_policy.job_policy | - |  |  |  | generic | automatic deletion is refused because it would mutate the configured estate |
 | job_attr:auto_hold | supported | dossier ss5 | - |  |  |  | generic | the member enters ON_HOLD when its box starts, instead of starting with it |
 | job_attr:avg_runtime | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | the statistics seed is carried; no runtime estimate is computed from it |
 | job_attr:box_failure | supported | SEM-12 | - |  |  |  | generic | overrides a box's failure verdict, evaluated on every member transition while the box is RUNNING; DECLARING it suppresses the matching default fold, so an override that never becomes true leaves the box RUNNING (SEM-12) |
@@ -154,9 +154,9 @@ nothing.
 | job_attr:exclude_calendar#two-year-probe | supported | DL-56, DL-57, runner_preflight._calendar_preflight | - |  |  | 732 dates inclusive, anchor through anchor+731 days | none | preflight WARNs when the exclusion covers every eligible day it probes -- 732 dates inclusive, anchor through anchor+731 days; absence is proven within that bound only, and the run is warned, not refused |
 | job_attr:fail_codes | supported | SEM-09, DL-33 | - |  |  |  | generic | the explicit failure set; present, it is the only verdict source (Q7, DL-58) |
 | job_attr:group | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | the group tag is carried; nothing schedules or reports by group |
-| job_attr:heartbeat_interval | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
+| job_attr:heartbeat_interval | refused | runtime_policy.job_policy | - |  |  |  | generic | positive intervals refuse: no qualified heartbeat contract |
 | job_attr:interactive | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | no interactive terminal is attached to the child process |
-| job_attr:job_class | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | job classes are not implemented; no class quota gates a start |
+| job_attr:job_class | refused | runtime_policy.job_policy | - |  |  |  | generic | job classes are refused because class capacity is unqualified |
 | job_attr:job_load | supported | DL-50, DL-247 | - |  |  |  | generic | the machine-load units a start holds against the machine's max_load; only a positive priority checks them, while an unset or zero priority and a forced start skip the check and still hold the units |
 | job_attr:job_load#absent | provisional | DL-50, ir.JobIR.job_load_units | Qr4 | yes |  |  | none | a job with no job_load demands zero machine-load units, so it never waits for load itself; with a positive priority it can still queue behind a higher-priority load waiter on its machine |
 | job_attr:job_terminator | supported | SEM-14 | - |  |  |  | generic | this member is terminated when its box fails |
@@ -164,8 +164,8 @@ nothing.
 | job_attr:machine | supported | DL-49, DL-52 | - |  |  |  | generic | names the machine the job runs on; the resolver refuses a foreign one; inert on a BOX (SEM-10) |
 | job_attr:machine_method | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | per-member placement method is not implemented; DL-49 resolves placement |
 | job_attr:max_exit_success | supported | SEM-09, DL-33 | - |  |  |  | generic | shifts the SUCCESS/FAILURE boundary: exit codes up to it are a success |
-| job_attr:max_run_alarm | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
-| job_attr:min_run_alarm | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
+| job_attr:max_run_alarm | passthrough | runtime_policy.job_policy | - |  |  |  | generic | validated and carried; execution and delivery are not yet activated |
+| job_attr:min_run_alarm | passthrough | runtime_policy.job_policy | - |  |  |  | generic | validated and carried; execution and delivery are not yet activated |
 | job_attr:must_complete_times | supported | SEM-34 | - |  |  |  | generic | the RELATIVE form arms an alarm: a missed completion raises MUST_COMPLETE_ALARM and changes no status |
 | job_attr:must_complete_times#absolute | supported | SEM-34, DL-253, oracle.Oracle._absolute_deadline | - |  |  | 00:00-71:59 | none | an ABSOLUTE must_complete_times, 00:00-71:59, arms MUST_COMPLETE_ALARM at the slot's must time on the tick's local day, hours 24-71 on the days after; 72:00 and above, a time below its own start time and a time not earlier than the next later start time of the same day are refused at lowering; the day's latest start time is not checked, its next run depending on the calendar |
 | job_attr:must_complete_times#before-tick | provisional | SEM-34, DL-253, DL-260, oracle.Oracle._absolute_deadline | - |  |  |  | none | an absolute must time that resolves before its tick is due at the tick: both values reach it -- fold0 ticks a start in a spring change's missing hour past the gap, after the vendor's first minute of the next hour; vendor reaches it too on a change shape dst_change does not name, such as Europe/London's spring change; lowering refuses a must time below its own start time, so no other input reaches the pin, and no label was opened for it |
@@ -179,16 +179,16 @@ nothing.
 | job_attr:must_start_times#start-mins | supported | SEM-34, DL-248, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - |  |  |  | none | a single relative offset counts against start_mins and broadcasts to every start_mins tick; the vendor refuses an absolute form there, a list of offsets there is not specified and stays open, and lowering refuses both |
 | job_attr:must_start_times#unmatched-slot | provisional | SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - |  |  |  | none | an instant matching no start time uses the first offset, and an absolute form arms nothing there; no label was opened for the corner |
 | job_attr:n_retrys | passthrough | DL-53 | - |  |  |  | generic | the job runs without retries; preflight WARNs that the attribute is unmodelled |
-| job_attr:notification_alarm_types | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
+| job_attr:notification_alarm_types | refused | runtime_policy.job_policy | - |  |  |  | generic | nonempty alarm filters refuse: grammar is unqualified |
 | job_attr:notification_emailaddress | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
 | job_attr:notification_emailaddress_on_alarm | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
 | job_attr:notification_emailaddress_on_failure | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
 | job_attr:notification_emailaddress_on_success | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
 | job_attr:notification_emailaddress_on_terminated | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
 | job_attr:notification_msg | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
-| job_attr:notification_template | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
+| job_attr:notification_template | refused | runtime_policy.job_policy | - |  |  |  | generic | nonempty templates refuse: lookup grammar is unqualified |
 | job_attr:owner | refused | runner_preflight._owner_preflight | - |  |  |  | generic | an owner other than the invoking user is refused at preflight: there is no setuid; inert on a BOX (SEM-10) |
-| job_attr:permission | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | job permissions are not enforced; the run uses the invoking user's own |
+| job_attr:permission | refused | runtime_policy.job_policy | - |  |  |  | generic | per-job permissions are refused; engine access policy applies |
 | job_attr:priority | supported | DL-50, DL-247, DL-255 | - |  |  |  | generic | orders the QUE_WAIT queue, lower number first; a positive priority makes a start check machine load, a job waiting for load blocks every lower positive priority on its machine, and a job past its load check that waits on a named resource blocks every lower positive priority naming any resource it names |
 | job_attr:priority#unset-order | provisional | DL-50, DL-247, capacity.CapacityPool.sorted_waiters | Qr2 | yes |  |  | none | a resource waiter with no priority is assumed to sort behind every declared priority, explicit 0 included, though the vendor default is 0 |
 | job_attr:profile | supported | runner_adapters._build_run_spec | - |  |  |  | generic | sourced before the command runs (`. <profile> && <command>`); inert on a BOX (SEM-10) |
@@ -203,7 +203,8 @@ nothing.
 | job_attr:run_window#dst-other-shape | provisional | SEM-33, DL-249, oracle.Oracle._window_side | - |  |  |  | none | a DST change of another shape (a half-hour change, a change at another hour) keeps the wall-time comparison: the vendor's endpoint rules are unverified there, and no label was opened for it |
 | job_attr:run_window#equal-endpoints | provisional | SEM-33, oracle.Oracle._window_side | - |  |  |  | none | a window whose endpoints are equal ADMITS that one instant -- `lo <= now <= hi` is inclusive at both ends, so the window is not empty and not all day; the pin is undocumented and no label was opened for it |
 | job_attr:run_window#midpoint-tie | provisional | SEM-33, oracle.Oracle._window_side | - |  |  |  | none | a start exactly halfway between the previous close and the next opening DEFERS to the opening rather than dropping; the tie is undocumented and no label was opened for it |
-| job_attr:send_notification | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
+| job_attr:send_notification | passthrough | runtime_policy.job_policy | - |  |  |  | generic | validated and carried; execution and delivery are not yet activated |
+| job_attr:shell | refused | runtime_policy.job_policy | - |  |  |  | generic | explicit JIL shell refuses; engine.job_shell is the configuration interface |
 | job_attr:start_mins | supported | SEM-32 | - |  |  |  | generic | the minutes past each hour a schedule tick fires at on an eligible day |
 | job_attr:start_times | supported | SEM-32 | - |  |  |  | generic | the wall-clock times a schedule tick fires at on an eligible day |
 | job_attr:status | supported | SEM-24 | - |  |  |  | generic | the definition-time status: only the out-of-band states are modelled, run states refuse |
@@ -215,7 +216,7 @@ nothing.
 | job_attr:timezone | supported | SEM-35 | - |  |  |  | generic | the zone every schedule time on this job is read in |
 | job_attr:timezone#dst-fold | supported | SEM-32, SEM-35, DL-260, timezones.start_time_instants | - |  |  |  | none | on a one-hour DST change at 02:00 local, start_times in the repeated hour fire once, in the second pass, and start_mins fire in both passes; a start time in the missing hour fires in the first minute of 03:00 with its minute as seconds (2:05 at 3:00:05), only the first such start time fires, and start_mins ticks in the missing hour do not exist. The dst-start-times=fold0 switch selects the fold=0 conversion instead |
 | job_attr:timezone#dst-other-shape | provisional | SEM-32, DL-260, timezones.start_time_instants | - |  |  |  | none | a DST change of another shape (a half-hour change, a change at another hour) keeps the fold=0 conversion of start_times and start_mins: the vendor's rules are unverified there, and no label was opened for it |
-| job_attr:ulimit | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | no resource limit is applied to the child process |
+| job_attr:ulimit | passthrough | runtime_policy.parse_limits | - |  |  |  | generic | resource pairs are validated; child limit application is not yet activated |
 | job_attr:watch_file | supported | runner-design ss6, ss8a, DL-258 | - |  |  |  | generic | the path an FW job polls; with no watch_file_min_size, the default (fw-existence=stable) still needs two consecutive polls agreeing on its size, while fw-existence=immediate completes on the run's first poll if the file already exists then; a minimum size always needs the two-poll rule, whatever the switch says |
 | job_attr:watch_file#stat-error | provisional | runner-design ss6, runner_adapters.FileWatcherAdapter | - |  |  |  | none | EVERY stat error reads as the file being absent -- a permission denial is not told apart from a missing file -- and the watch resets its stable count and keeps polling; no label was opened for it |
 | job_attr:watch_file_min_size | supported | runner-design ss6 | - |  |  |  | generic | the size the watched file must reach before the FW job completes |
@@ -615,8 +616,13 @@ nothing.
 | profile_field:fw_default_interval_us | supported | runner-design ss6, DL-122 | - |  |  |  | generic | the poll interval an FW job with no watch_interval uses |
 | profile_field:fw_default_interval_us#rounding | provisional | runner_startup.wire_from_profile, DL-122 | - |  |  |  | none | no shipped surface sets a value that is not whole seconds. A hand-pinned one is wired rounded half to even (at least 1 s), not at the pinned interval, and resume refuses it as profile drift. No label was opened for the conversion |
 | profile_field:job_env | supported | DL-447, runner_environment.validate_job_env | - |  |  |  | generic | literal job environment overrides applied through configuration revisions; instance variables come exclusively from this map |
+| profile_field:job_profile | passthrough | runtime_policy.RuntimePolicySettings | - |  |  |  | generic | validated revisioned setting; update and execution activation are pending |
+| profile_field:job_shell | passthrough | runtime_policy.RuntimePolicySettings | - |  |  |  | generic | validated revisioned setting; update and execution activation are pending |
+| profile_field:kill_signals | passthrough | runtime_policy.RuntimePolicySettings | - |  |  |  | generic | validated revisioned setting; update and execution activation are pending |
 | profile_field:machine_policy | supported | DL-122, DL-49 | - |  |  |  | generic | how the one ambiguous machine verdict resolves |
 | profile_field:semantics | supported | DL-122, runner-design ss8a, DL-252 | - |  |  |  | generic | explicit semantic-switch overrides only, an explicit default normalized away; written {} when there is none |
+| profile_field:set_job_attribute_environmentals | passthrough | runtime_policy.RuntimePolicySettings | - |  |  |  | generic | validated revisioned setting; update and execution activation are pending |
+| profile_field:std_file_mode | passthrough | runtime_policy.RuntimePolicySettings | - |  |  |  | generic | validated revisioned setting; update and execution activation are pending |
 | profile_field:tz_aliases | supported | DL-122, DL-62 | - |  |  |  | generic | the site-local zone-name table; a name only it resolves fails without it |
 
 ### profile_alt
@@ -648,6 +654,8 @@ nothing.
 | profile_alt:semantics.renewable-free=Y | supported | runner-design ss8a, DL-256 | - |  |  |  | generic | the default and the vendor's: a renewable request with no FREE frees on SUCCESS only and holds its units after FAILURE or TERMINATED |
 | profile_alt:semantics.wekr-first-week=first-full | supported | runner-design ss8a, SEM-37, DL-259 | - |  |  |  | generic | the default: a WEKR token's week 1 starts on the first anchor day on or after January 1, and the days before it are in no numbered week |
 | profile_alt:semantics.wekr-first-week=partial | supported | runner-design ss8a, SEM-37, DL-259 | - |  |  |  | generic | a WEKR token's week 1 runs from January 1 to the day before the first anchor day; unless January 1 is the anchor day, every week number is one higher |
+| profile_alt:std_file_mode=append | passthrough | runtime_policy.RuntimePolicySettings | - |  |  |  | generic | validated stream-mode setting; execution activation is pending |
+| profile_alt:std_file_mode=truncate | passthrough | runtime_policy.RuntimePolicySettings | - |  |  |  | generic | validated stream-mode setting; execution activation is pending |
 
 ### adapter_outcome
 
@@ -708,20 +716,35 @@ nothing.
 
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| preflight_code:auto-delete | refused | runner_preflight.execution_policy_preflight, runtime_policy.job_policy | - |  |  |  | generic | automatic deletion is refused |
 | preflight_code:calendar | refused | runner_preflight._calendar_preflight, DL-56 | - |  |  |  | generic | a calendar the scheduler cannot read or that can never fire refuses the run |
 | preflight_code:chk-files | refused | runner_preflight._execution_input_preflight, DL-240 | - |  |  |  | generic | chk_files on a non-BOX job is carried but the pre-start disk-space gate is never evaluated, so real execution refuses the run |
 | preflight_code:envvars | refused | runner_preflight._execution_input_preflight, DL-240 | - |  |  |  | generic | envvars on a CMD job's ExecSpec is carried but the adapter never applies it to the child environment, so real execution refuses the run |
+| preflight_code:external-instance | refused | runner_preflight.execution_policy_preflight, runtime_policy.job_policy | - |  |  |  | generic | cross-instance conditions are refused for real execution |
+| preflight_code:fw-execution | refused | runner_preflight.execution_policy_preflight, runtime_policy.job_policy | - |  |  |  | generic | file-watcher profiles and streams are refused |
 | preflight_code:global-substitution | refused | runner_preflight._execution_input_preflight, DL-240 | - |  |  |  | generic | a $$NAME site on an exec_ field is carried but never substituted, so the literal text would be used; real execution refuses the run |
+| preflight_code:heartbeat-unsupported | refused | runner_preflight.execution_policy_preflight, runtime_policy.job_policy | - |  |  |  | generic | positive heartbeat intervals are refused |
+| preflight_code:job-class | refused | runner_preflight.execution_policy_preflight, runtime_policy.job_policy | - |  |  |  | generic | unqualified job classes are refused |
 | preflight_code:job-type | refused | runner_preflight._job_type_preflight | - |  |  |  | unreachable | a job_type with no adapter refuses the run; no JIL reaches this gate, because lowering already refuses every type outside CMD/BOX/FW |
 | preflight_code:machine | refused | runner_preflight._machine_preflight, DL-49 | - |  |  |  | generic | a job whose machine does not resolve to this host refuses the run: there is no remote fabric |
 | preflight_code:machine-mixed | supported | runner_preflight._machine_preflight, DL-49 | - |  |  |  | generic | a pool with some members here and some elsewhere runs here under local-eligible, with a warning that pool placement was ignored |
-| preflight_code:n-retrys | supported | runner_preflight._retry_preflight, DL-53 | - |  |  |  | generic | the run is warned, not refused: n_retrys is carried and never applied, so the job runs exactly once |
+| preflight_code:n-retrys | supported | runner_preflight._retry_preflight, DL-53 | - |  |  |  | generic | a positive CMD retry count is carried but not yet applied; preflight warns |
+| preflight_code:n-retrys#non-command | refused | runtime_policy.job_policy | - |  |  |  | none | positive BOX and FW retry counts are refused because reset semantics are unqualified |
+| preflight_code:notification-hook | refused | runner_preflight.execution_policy_preflight, runtime_policy.job_policy | - |  |  |  | generic | enabled notifications require a configured hook |
+| preflight_code:notification-unsupported | refused | runner_preflight.execution_policy_preflight, runtime_policy.job_policy | - |  |  |  | generic | unqualified notification templates and filters are refused |
 | preflight_code:oracle | refused | runner_preflight._oracle_preflight | - |  |  |  | unreachable | an oracle that will not construct over this catalog refuses the run; no JIL reaches this gate, because lowering builds no such catalog |
 | preflight_code:owner | refused | runner_preflight._owner_preflight | - |  |  |  | generic | an owner other than the invoking user refuses the run: there is no setuid |
+| preflight_code:permission | refused | runner_preflight.execution_policy_preflight, runtime_policy.job_policy | - |  |  |  | generic | per-job permissions are refused |
+| preflight_code:profile | refused | runner_preflight.execution_policy_preflight | - |  |  |  | generic | an unreadable profile is refused |
 | preflight_code:resources | refused | runner_preflight._resource_preflight, DL-50 | - |  |  |  | generic | a resource the oracle cannot model faithfully refuses the run |
+| preflight_code:runtime-attribute | refused | runner_preflight.execution_policy_preflight, runtime_policy.job_policy | - |  |  |  | generic | out-of-range or malformed runtime attributes are refused |
 | preflight_code:runtime-variable | refused | runner_preflight.runtime_variable_preflight, DL-447 | - |  |  |  | generic | unavailable variables or unsupported dollar syntax in stream paths refuse real execution; variable-bearing watch_file is refused |
+| preflight_code:shell | refused | runner_preflight.execution_policy_preflight | - |  |  |  | generic | unsupported JIL shell is refused |
 | preflight_code:skeleton-cycle | supported | runner_preflight._skeleton_cycle_preflight, DL-13 | - |  |  |  | generic | a cycle in the AND-success skeleton is legal AutoSys; it warns and disables `plan` rather than refusing the run |
+| preflight_code:std-file | refused | runner_preflight.execution_policy_preflight, runtime_policy.job_policy | - |  |  |  | generic | invalid stream prefixes and targets are refused |
 | preflight_code:timezone | refused | runner_preflight._timezone_preflight, SEM-35 | - |  |  |  | generic | a timezone name the SEM-35 ladder cannot resolve refuses the run |
+| preflight_code:ulimit | refused | runner_preflight.execution_policy_preflight | - |  |  |  | generic | invalid resource limits are refused |
+| preflight_code:watch-pattern | refused | runner_preflight.execution_policy_preflight, runtime_policy.job_policy | - |  |  |  | generic | unsupported watcher patterns are refused |
 
 ### demand_mode
 

@@ -25678,3 +25678,24 @@ relitigate an entry; append a new one.
   Reread requires that OPS view and refuses redacted input; it never uses client fallback.
   State version 28 refuses foreign stores under DL-424's drain/fresh-root policy.
   Wrapper input v1 and control v3 remain; access/control contracts fix their projections.
+- DL-448 Reader-document procedures are SHOULD defaults (2026-11-03; owner ruling;
+  docs/writing.md, .claude/skills/reader-docs/SKILL.md)
+  THE RULE. The reader-docs procedure and presentation defaults are recommendations.
+  SHOULD means follow the default unless the responsible role has considered the purpose
+  and consequences and finds another approach more useful for the task. This covers one
+  document, reader or task per page or PR, docs/<stem> branch naming, separate drafting
+  runs, brief and fact-sheet artifacts, delegation, sequencing and checklist form.
+  Record a material departure briefly in the existing task or PR record. Form alone
+  needs no owner escalation or separate waiver. Small corrections may combine audience
+  and inspected source references in a short note. Related pages and behavior-coupled
+  corrections may share a PR. Independent review remains proportionate and required;
+  the boss retains voice rulings, and the operator retains dispatch and publication duties.
+  This supersedes DL-405 and DL-406 only where they make these procedural or presentation
+  defaults mandatory. Binding contracts, truthful source evidence, public hygiene,
+  citation and anchor integrity, generated state-machine views, required review passes,
+  gates and commit/merge authority remain requirements. No semantic rule may be changed
+  through reader-document discretion. No new stamp or approval process is introduced.
+  THE REASON. The owner asks for practical judgment rather than escalation over form.
+  Review should establish a useful, accurate document without unnecessary ceremony.
+  THE BOUNDARY. This is a standing reader-docs policy, not a waiver of runtime contracts
+  or a release authorization. Frozen-contract review keeps its separate requirements.

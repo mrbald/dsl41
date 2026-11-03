@@ -91,8 +91,6 @@ watch_file: ~{$NB_DATA}~/incoming/apac_prices.csv
 watch_interval: 5
 machine: mkt_feed
 owner: ~{$OWNER}~
-std_out_file: ~{$NB_LOGS}~/APAC_MKT_PX_F.out
-std_err_file: ~{$NB_LOGS}~/APAC_MKT_PX_F.err
 
 insert_job: APAC_MKT_MARKS_C
 job_type: c
@@ -163,8 +161,6 @@ watch_file: ~{$NB_DATA}~/incoming/apac_custody.csv
 watch_interval: 5
 machine: mkt_feed
 owner: ~{$OWNER}~
-std_out_file: ~{$NB_LOGS}~/APAC_REC_CUST_F.out
-std_err_file: ~{$NB_LOGS}~/APAC_REC_CUST_F.err
 
 /* Exit 1 = breaks within tolerance: max_exit_success turns it into SUCCESS. */
 insert_job: APAC_REC_TRADES_C

@@ -283,21 +283,13 @@ STATEMENT_ROWS: tuple[Row, ...] = (
 # ------------------------------------------------------------------ job_attr
 
 _ANNOTATION_ATTRS: tuple[str, ...] = (
-    "alarm_if_fail",
-    "alarm_if_terminated",
     "description",
-    "heartbeat_interval",
-    "max_run_alarm",
-    "min_run_alarm",
-    "notification_alarm_types",
     "notification_emailaddress",
     "notification_emailaddress_on_alarm",
     "notification_emailaddress_on_failure",
     "notification_emailaddress_on_success",
     "notification_emailaddress_on_terminated",
     "notification_msg",
-    "notification_template",
-    "send_notification",
 )
 
 _FW_JOB = {"job_type": "f", "command": None, "watch_file": "/tmp/watched"}
@@ -312,6 +304,55 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
         trigger=lambda m: _job(**{m: "x"}),
     )
     + (
+        *(
+            _row(
+                surface="job_attr",
+                member=name,
+                klass=PASSTHROUGH,
+                cite="runtime_policy.job_policy",
+                effect="validated and carried; execution and delivery are not yet activated",
+                trigger=_job(**{name: value}),
+            )
+            for name, value in (
+                ("alarm_if_fail", "y"),
+                ("alarm_if_terminated", "n"),
+                ("max_run_alarm", "1"),
+                ("min_run_alarm", "1"),
+                ("send_notification", "0"),
+            )
+        ),
+        *(
+            _row(
+                surface="job_attr",
+                member=name,
+                klass=REFUSED,
+                cite="runtime_policy.job_policy",
+                effect=effect,
+                trigger=_job(**{name: value}),
+            )
+            for name, value, effect in (
+                (
+                    "heartbeat_interval",
+                    "1",
+                    "positive intervals refuse: no qualified heartbeat contract",
+                ),
+                (
+                    "notification_template",
+                    "template",
+                    "nonempty templates refuse: lookup grammar is unqualified",
+                ),
+                (
+                    "notification_alarm_types",
+                    "MAXRUNALARM",
+                    "nonempty alarm filters refuse: grammar is unqualified",
+                ),
+                (
+                    "shell",
+                    "/bin/sh",
+                    "explicit JIL shell refuses; engine.job_shell is the configuration interface",
+                ),
+            )
+        ),
         _row(
             surface="job_attr",
             member="application",
@@ -323,9 +364,9 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
         _row(
             surface="job_attr",
             member="auto_delete",
-            klass=PASSTHROUGH,
-            cite="dossier ss5, DL-32",
-            effect="the definition is never deleted; the catalog is static for the run",
+            klass=REFUSED,
+            cite="runtime_policy.job_policy",
+            effect="automatic deletion is refused because it would mutate the configured estate",
             trigger=_job(auto_delete="1"),
         ),
         _row(
@@ -372,9 +413,9 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
         _row(
             surface="job_attr",
             member="job_class",
-            klass=PASSTHROUGH,
-            cite="dossier ss5, DL-32",
-            effect="job classes are not implemented; no class quota gates a start",
+            klass=REFUSED,
+            cite="runtime_policy.job_policy",
+            effect="job classes are refused because class capacity is unqualified",
             trigger=_job(job_class="1"),
         ),
         _row(
@@ -388,18 +429,18 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
         _row(
             surface="job_attr",
             member="permission",
-            klass=PASSTHROUGH,
-            cite="dossier ss5, DL-32",
-            effect="job permissions are not enforced; the run uses the invoking user's own",
+            klass=REFUSED,
+            cite="runtime_policy.job_policy",
+            effect="per-job permissions are refused; engine access policy applies",
             trigger=_job(permission="1"),
         ),
         _row(
             surface="job_attr",
             member="ulimit",
             klass=PASSTHROUGH,
-            cite="dossier ss5, DL-32",
-            effect="no resource limit is applied to the child process",
-            trigger=_job(ulimit="1"),
+            cite="runtime_policy.parse_limits",
+            effect="resource pairs are validated; child limit application is not yet activated",
+            trigger=_job(ulimit='n="1,2"'),
         ),
     )
     + (
@@ -789,7 +830,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             cite="runner_adapters._build_run_spec",
             effect="sourced before the command runs (`. <profile> && <command>`); inert on"
             " a BOX (SEM-10)",
-            trigger=_job(profile="/tmp/profile.sh"),
+            trigger=_job(profile="pyproject.toml"),
         ),
         _row(
             surface="job_attr",
@@ -841,7 +882,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
                 "runner_adapters._build_run_spec#1",
             ),
             effect="a profile that fails to source fails the job with sh's exit code",
-            trigger=_job(profile="/tmp/missing.sh"),
+            trigger=_job(profile="pyproject.toml"),
             quiet=_job(),
         ),
     )
@@ -3083,6 +3124,23 @@ _PROFILE_FACETS: tuple[Row, ...] = (
 
 PROFILE_ROWS: tuple[Row, ...] = (
     (
+        *(
+            _row(
+                surface="profile_field",
+                member=name,
+                klass=PASSTHROUGH,
+                cite="runtime_policy.RuntimePolicySettings",
+                effect="validated revisioned setting; update and execution activation are pending",
+                trigger='{"%s": %s}' % (name, value),
+            )
+            for name, value in (
+                ("job_profile", '"/tmp/synthetic-profile"'),
+                ("job_shell", '"/bin/sh"'),
+                ("std_file_mode", '"truncate"'),
+                ("kill_signals", "[15, 9]"),
+                ("set_job_attribute_environmentals", "false"),
+            )
+        ),
         _profile_row(
             "job_env",
             '{"AUTOSERV": "synthetic"}',
@@ -3129,6 +3187,17 @@ PROFILE_ROWS: tuple[Row, ...] = (
         ),
     )
     + (
+        *(
+            _row(
+                surface="profile_alt",
+                member=f"std_file_mode={mode}",
+                klass=PASSTHROUGH,
+                cite="runtime_policy.RuntimePolicySettings",
+                effect="validated stream-mode setting; execution activation is pending",
+                trigger='{"std_file_mode": "%s"}' % mode,
+            )
+            for mode in ("append", "truncate")
+        ),
         _row(
             surface="profile_alt",
             member="machine_policy=strict",
@@ -3762,6 +3831,80 @@ FOREIGN_ESTATE = _placed("FAR", FOREIGN_MACHINE)
 #: is already its trigger, and a row's two fixtures must differ
 #: (DL-75 review 2026-09-19).
 PREFLIGHT_CODE_ROWS: tuple[Row, ...] = (
+    *(
+        _row(
+            surface="preflight_code",
+            member=code,
+            klass=REFUSED,
+            cite="runner_preflight.execution_policy_preflight, runtime_policy.job_policy",
+            effect=effect,
+            trigger=trigger,
+        )
+        for code, effect, trigger in (
+            ("auto-delete", "automatic deletion is refused", _job(auto_delete="1")),
+            (
+                "external-instance",
+                "cross-instance conditions are refused for real execution",
+                _job("insert_xinst: PRD\nxtype: a", condition="s(REMOTE^PRD)"),
+            ),
+            (
+                "fw-execution",
+                "file-watcher profiles and streams are refused",
+                _job(**{**_FW_JOB, "std_out_file": "/tmp/synthetic"}),
+            ),
+            (
+                "heartbeat-unsupported",
+                "positive heartbeat intervals are refused",
+                _job(heartbeat_interval="1"),
+            ),
+            ("job-class", "unqualified job classes are refused", _job(job_class="synthetic")),
+            (
+                "notification-hook",
+                "enabled notifications require a configured hook",
+                _job(send_notification="1"),
+            ),
+            (
+                "notification-unsupported",
+                "unqualified notification templates and filters are refused",
+                _job(notification_template="synthetic"),
+            ),
+            ("permission", "per-job permissions are refused", _job(permission="gx")),
+            (
+                "runtime-attribute",
+                "out-of-range or malformed runtime attributes are refused",
+                _job(max_run_alarm="-1"),
+            ),
+            (
+                "std-file",
+                "invalid stream prefixes and targets are refused",
+                _job(std_out_file="> output"),
+            ),
+            (
+                "watch-pattern",
+                "unsupported watcher patterns are refused",
+                _job(**{**_FW_JOB, "watch_file": "/tmp/[ab]"}),
+            ),
+        )
+    ),
+    *(
+        _row(
+            surface="preflight_code",
+            member=code,
+            klass=REFUSED,
+            cite="runner_preflight.execution_policy_preflight",
+            effect=effect,
+            trigger=trigger,
+        )
+        for code, effect, trigger in (
+            (
+                "profile",
+                "an unreadable profile is refused",
+                _job(profile="/missing/synthetic-profile"),
+            ),
+            ("shell", "unsupported JIL shell is refused", _job(shell="/bin/sh")),
+            ("ulimit", "invalid resource limits are refused", _job(ulimit="invalid")),
+        )
+    ),
     _row(
         surface="preflight_code",
         member="runtime-variable",
@@ -3858,9 +4001,18 @@ PREFLIGHT_CODE_ROWS: tuple[Row, ...] = (
         member="n-retrys",
         klass=SUPPORTED,
         cite="runner_preflight._retry_preflight, DL-53",
-        effect="the run is warned, not refused: n_retrys is carried and never applied,"
-        " so the job runs exactly once",
+        effect="a positive CMD retry count is carried but not yet applied; preflight warns",
         trigger=_job(n_retrys="2"),
+    ),
+    _row(
+        surface="preflight_code",
+        member="n-retrys",
+        facet="non-command",
+        klass=REFUSED,
+        cite="runtime_policy.job_policy",
+        effect="positive BOX and FW retry counts are refused because reset semantics are unqualified",
+        trigger=_job(job_type="b", command=None, n_retrys="1"),
+        quiet=_job(n_retrys="0"),
     ),
     _row(
         surface="preflight_code",

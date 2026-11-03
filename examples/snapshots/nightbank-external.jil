@@ -1,0 +1,5 @@
+/* Visualization-only external dependency. The engine refuses this condition. */
+insert_job: OPS_XINST_DEMO_C
+job_type: c
+command: true
+condition: s(GROUP_TREASURY_EOD^PRD, 9999)

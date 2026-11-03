@@ -22,6 +22,9 @@ from dsl41.ir import ExecSpec, FwSpec, JobIR
 NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 REFERENCE = re.compile(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})")
 INSTANCE_NAMES = frozenset({"AUTOSERV", "AUTOSYS", "AUTOUSER", "AUTOROOT"})
+ATTRIBUTE_NAMES = frozenset(
+    {"__job_name", "__machine", "__run_machine", "__box_name", "__max_exit_success"}
+)
 STREAM_ATTRIBUTES = ("std_in_file", "std_out_file", "std_err_file")
 
 
@@ -100,6 +103,11 @@ def expand_path(
                 " $VAR and ${VAR}, with names [A-Za-z_][A-Za-z0-9_]*."
             )
         name = match.group(1) or match.group(2)
+        if name in ATTRIBUTE_NAMES:
+            raise RuntimeVariableError(
+                f"job {job}: {attribute} references reserved variable {name}, unavailable in paths;"
+                " use a literal path or a currently supported variable."
+            )
         if name not in env:
             if name.startswith("DSL41_") or name in GENERATED_NAMES:
                 raise RuntimeVariableError(

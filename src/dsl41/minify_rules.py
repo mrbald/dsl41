@@ -124,6 +124,7 @@ _DROP: frozenset[str] = frozenset(
         "group",
         "application",
         "profile",
+        "shell",
         "envvars",
         "std_in_file",
         "std_out_file",

@@ -368,16 +368,18 @@ def test_failing_profile_fails_the_job_with_shs_exit_code(tmp_path: Path) -> Non
     adapter composes -- the pin is "whatever sh says", not a number."""
 
     missing = tmp_path / "does-not-exist.sh"
+    profile = tmp_path / "failing-profile.sh"
+    profile.write_text(f". {missing}\n")
     text = (
         "insert_job: bpj\njob_type: c\ncommand: echo should-not-run\n"
-        f"machine: m1\nprofile: {missing}\n"
+        f"machine: m1\nprofile: {profile}\n"
     )
     expected = subprocess.run(
-        ["/bin/sh", "-c", f". {missing} && echo should-not-run"],
+        ["/bin/sh", "-c", f". {profile} && echo should-not-run"],
         capture_output=True,
         check=False,
     ).returncode
-    assert expected != 0  # sourcing a missing file must fail on any sane sh
+    assert expected != 0  # the readable profile fails while sourcing its missing dependency
     run_root = tmp_path / "run"
     engine = asyncio.run(_run_real(text, run_root, ["bpj"]))
     assert engine.oracle.store.job["bpj"].status == "FAILURE"

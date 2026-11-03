@@ -611,6 +611,7 @@ def test_ci_default_has_margin_for_the_slowest_job(train: Fixture) -> None:
 @pytest.mark.parametrize("fault", ["timeout", "signal"])
 def test_stopped_command_kills_its_grandchild(train: Fixture, fault: str) -> None:
     ready = train.root.parent / "ready.json"
+    missing_on_assert = False
     train.configure(hang="uv", ready=str(ready))
     env = {k: v for k, v in train.env.items() if k not in GIT_ROUTING}
     with subprocess.Popen(
@@ -621,9 +622,26 @@ def test_stopped_command_kills_its_grandchild(train: Fixture, fault: str) -> Non
         stderr=subprocess.PIPE,
     ) as process:
         try:
-            deadline = time.monotonic() + 15
+            started = time.monotonic()
+            deadline = started + 15
             while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
                 time.sleep(0.01)
+            missing_on_assert = not ready.exists()
+            if missing_on_assert:
+                try:
+                    group = os.getpgid(process.pid)
+                except OSError:
+                    group = None
+                try:
+                    state = repr(train.state())
+                except Exception as exc:
+                    state = f"unavailable: {exc!r}"
+                print(
+                    f"train not ready: elapsed={time.monotonic() - started:.3f} "
+                    f"pid={process.pid} pgid={group} "
+                    f"returncode={process.poll()} readiness={ready.exists()} state={state}",
+                    flush=True,
+                )
             assert ready.exists()
             ids = json.loads(ready.read_text())
             if fault == "signal":
@@ -639,7 +657,13 @@ def test_stopped_command_kills_its_grandchild(train: Fixture, fault: str) -> Non
                     pass
             if process.poll() is None:
                 process.kill()
-            process.communicate(timeout=5)
+            stdout, stderr = process.communicate(timeout=5)
+            if missing_on_assert:
+                print(
+                    f"train after teardown: returncode={process.returncode} "
+                    f"stdout={stdout!r} stderr={stderr!r}",
+                    flush=True,
+                )
     deadline = time.monotonic() + 3
     while time.monotonic() < deadline:
         try:

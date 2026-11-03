@@ -57,7 +57,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from functools import partial
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from dsl41 import runner_procid as _procid
 from dsl41.engine_charts import ENGINE_STOP, AttemptOutcome, ExitRecord
@@ -114,6 +114,10 @@ from dsl41.semantics import ADAPTER_SWITCHES, SCHEDULER_SWITCHES, check_override
 from dsl41.state_machine import Executor
 
 
+if TYPE_CHECKING:
+    from dsl41.runner_preflight import PreflightItem
+
+
 def _derive_runtime_profile(
     scheduler: Scheduler | None,
     adapters: Mapping[str, JobAdapter],
@@ -131,6 +135,9 @@ def _derive_runtime_profile(
     from dsl41.runner_adapters import FileWatcherAdapter
 
     values: dict[str, object] = dict((base or RuntimeProfile()).model_dump())
+    from dsl41.runtime_policy import policy_values
+
+    values.update(policy_values((declared or base or RuntimeProfile()).model_dump()))
     values["job_env"] = dict((declared or base or RuntimeProfile()).job_env)
     if declared is not None:
         values["as_machine"] = declared.as_machine
@@ -256,14 +263,93 @@ def refuse_old_root(run_root: Path) -> None:
         )
 
 
-def _check_runtime_variables(catalog: CatalogIR, profile: RuntimeProfile, clock: Clock) -> None:
+def _check_runtime_variables(
+    catalog: CatalogIR, profile: RuntimeProfile, clock: Clock, *, hook_configured: bool = False
+) -> None:
     """Reject unavailable pre-profile paths before startup effects (DL-447)."""
-    from dsl41.runner_preflight import runtime_variable_preflight
+    from dsl41.runner_preflight import execution_policy_preflight, runtime_variable_preflight
 
     if not clock.virtual:
-        items = runtime_variable_preflight(catalog, job_env=profile.job_env)
-        if items:
-            raise EngineError(f"preflight ERROR [runtime-variable]: {items[0].message}")
+        items = execution_policy_preflight(
+            catalog,
+            job_profile=profile.job_profile,
+            job_shell=profile.job_shell,
+            std_file_mode=profile.std_file_mode,
+            hook_configured=hook_configured,
+        ) + runtime_variable_preflight(
+            catalog,
+            job_env=profile.job_env,
+            set_job_attribute_environmentals=profile.set_job_attribute_environmentals,
+        )
+        errors = [item for item in items if item.severity == "ERROR"]
+        if errors:
+            raise EngineError(
+                "; ".join(f"preflight ERROR [{item.code}]: {item.message}" for item in errors)
+            )
+
+
+def _load_active_configuration(store: Store, revision: int, *, where: str) -> Configuration:
+    from dsl41.runner_config import CapturedLoweringError
+
+    try:
+        return load_configuration(store, revision, where=where)
+    except CapturedLoweringError as exc:
+        raise EngineError(f"restart-lowering: configuration revision {revision}: {exc}") from exc
+
+
+def check_captured_lowering(configuration: Configuration, revision: int) -> Any:
+    """Captured inputs are a compatibility check, never a replacement catalog."""
+    from dsl41.main_config import decoded_parts
+    from dsl41.reload_plan import RereadRefused
+
+    if not configuration.source_capture:
+        return None
+    try:
+        estate = decoded_parts(configuration.source_capture)
+        if catalog_hash_v2(estate.catalog) != configuration.catalog_hash:
+            raise ValueError("stored/captured catalog disagreement")
+        if list(estate.catalog.jobs) != list(configuration.catalog.jobs):
+            raise ValueError("stored/captured job order disagreement")
+        return estate
+    except (ValueError, RereadRefused) as exc:
+        raise EngineError(f"restart-lowering: configuration revision {revision}: {exc}") from exc
+
+
+def check_restart_preflight(
+    catalog: CatalogIR,
+    profile: RuntimeProfile,
+    clock: Clock,
+    *,
+    revision: int,
+    hook_configured: bool = False,
+) -> list[PreflightItem]:
+    """Validate execution of active and pending catalogs before recovery effects."""
+    from dsl41.runner_preflight import preflight
+
+    if clock.virtual:
+        return []
+    items = preflight(
+        catalog,
+        as_machine=frozenset(profile.as_machine),
+        machine_policy=profile.machine_policy,
+        start=clock.now(),
+        default_tz=profile.default_tz,
+        tz_aliases=tz_aliases_of(profile),
+        semantics=switches_of(profile),
+        job_env=profile.job_env,
+        job_profile=profile.job_profile,
+        job_shell=profile.job_shell,
+        std_file_mode=profile.std_file_mode,
+        hook_configured=hook_configured,
+        set_job_attribute_environmentals=profile.set_job_attribute_environmentals,
+    )
+    errors = [item for item in items if item.severity == "ERROR"]
+    if errors:
+        raise EngineError(
+            f"restart-preflight: configuration revision {revision}: "
+            + "; ".join(f"[{item.code}] job {item.job}: {item.message}" for item in errors)
+        )
+    return [item for item in items if item.severity == "WARN"]
 
 
 def start_run(
@@ -280,6 +366,7 @@ def start_run(
     machines: Executor | None = None,
     settings: EngineSettings | None = None,
     source_capture: Mapping[str, str] | None = None,
+    hook_configured: bool = False,
 ) -> Engine:
     """Genesis: a new store with configuration rev 1, and an Engine over it.
 
@@ -301,6 +388,7 @@ def start_run(
             machines=machines,
             settings=settings,
             source_capture=source_capture,
+            hook_configured=hook_configured,
         )
     lock = lock or acquire_run_root(run_root)
     try:
@@ -326,6 +414,7 @@ def start_run(
             machines=machines,
             settings=settings,
             source_capture=source_capture,
+            hook_configured=hook_configured,
         )
     except BaseException:
         lock.release()
@@ -346,12 +435,13 @@ def _genesis(
     machines: Executor | None,
     settings: EngineSettings | None,
     source_capture: Mapping[str, str] | None = None,
+    hook_configured: bool = False,
 ) -> Engine:
     at = clock.now()
     _require_adapters(catalog, adapters, "genesis")
     _require_scheduler(catalog, scheduler, "genesis")
     profile = _derive_runtime_profile(scheduler, adapters, base=launched, declared=launched)
-    _check_runtime_variables(catalog, profile, clock)
+    _check_runtime_variables(catalog, profile, clock, hook_configured=hook_configured)
     drift = [] if launched is None else profile_drift(profile, launched)
     if drift:
         # the record must describe the machine that runs: a launch profile the wiring
@@ -487,6 +577,8 @@ async def resume_run(
     machines: Executor | None = None,
     settings: EngineSettings | None = None,
     stored_sources: bool = False,
+    hook_configured: bool = False,
+    preflight_warnings: list[PreflightItem] | None = None,
 ) -> Engine:
     """Restart (module docstring). `grace_seconds`, when given, is the live ladder's TERM grace
     for this incarnation over the settings' `grace_term_s`. Returns an Engine with the catch-up's steps queued; the
@@ -519,6 +611,8 @@ async def resume_run(
             machines=machines,
             settings=settings,
             stored_sources=stored_sources,
+            hook_configured=hook_configured,
+            preflight_warnings=preflight_warnings,
             inspections=inspections,
         )
     except BaseException:
@@ -556,6 +650,8 @@ async def _resume_under_lock(
     inspections: contextlib.ExitStack,
     stored_sources: bool = False,
     validate_only: bool = False,
+    hook_configured: bool = False,
+    preflight_warnings: list[PreflightItem] | None = None,
 ) -> Engine:
     """DL-433: validate a private copy; activate only under the canonical lock."""
     refuse_old_root(run_root)
@@ -578,8 +674,14 @@ async def _resume_under_lock(
         after = snapshot.seq if snapshot is not None else 0
         tail = list(store.read_from(after))
         rev = _applied_rev(tail, first)
-        start = load_configuration(store, first, where=str(path))
-        configuration = start if rev == first else load_configuration(store, rev, where=str(path))
+        start = (
+            _load_active_configuration(store, first, where=str(path))
+            if first == rev
+            else load_configuration(store, first, where=str(path))
+        )
+        configuration = (
+            start if rev == first else _load_active_configuration(store, rev, where=str(path))
+        )
     except BaseException:
         store.close()
         raise
@@ -622,14 +724,31 @@ async def _resume_under_lock(
         )
         catalog = configuration.catalog
     _check_clock_domain(meta, clock)
-    _check_runtime_variables(configuration.catalog, profile, clock)
+    check_captured_lowering(configuration, rev)
+    active_warnings = check_restart_preflight(
+        configuration.catalog, profile, clock, revision=rev, hook_configured=hook_configured
+    )
+    if journal.open.update is not None and opened_update is None:
+        from dsl41.runner_update import reopen_plan
+
+        opened_update = reopen_plan(run_root, str(journal.open.update["token"]))
     if opened_update is not None:
         from dsl41.runner_update import profile_for
 
-        _check_runtime_variables(
+        from dsl41.runtime_policy import policy_values
+
+        candidate_profile = RuntimeProfile.model_validate(
+            {
+                **profile_for(opened_update.estate.settings, profile).model_dump(),
+                **policy_values(opened_update.estate.settings),
+            }
+        )
+        check_restart_preflight(
             opened_update.estate.catalog,
-            profile_for(opened_update.estate.settings, profile),
+            candidate_profile,
             clock,
+            revision=rev + 1,
+            hook_configured=hook_configured,
         )
     _require_adapters(catalog, adapters, "resume")
     _require_scheduler(catalog, scheduler, "resume")
@@ -665,6 +784,8 @@ async def _resume_under_lock(
         engine.now_admitted()
     if validate_only:
         return engine
+    if preflight_warnings is not None:
+        preflight_warnings.extend(active_warnings)
     assert lock is not None
     # DL-433: replay and every refusal precede the first write to the restored root.
     journal.store = SqliteStore(path)
@@ -729,6 +850,7 @@ async def validate_resume(
     machines: Executor | None,
     settings: EngineSettings,
     stored_sources: bool,
+    hook_configured: bool = False,
 ) -> None:
     """DL-433: validate before creating an absent lock; publish nothing.
 
@@ -755,6 +877,7 @@ async def validate_resume(
                 inspections=inspections,
                 stored_sources=stored_sources,
                 validate_only=True,
+                hook_configured=hook_configured,
             )
         finally:
             for engine in engines:
@@ -763,7 +886,9 @@ async def validate_resume(
                 journal.detach()
 
 
-def active_configuration(run_root: Path, *, locked: bool = False) -> Configuration:
+def active_configuration(
+    run_root: Path, *, locked: bool = False, check_lowering: bool = False
+) -> Configuration:
     """Read the last applied configuration, excluding an uncommitted row (DL-437)."""
     path = run_root / STORE_NAME
     try:
@@ -779,7 +904,14 @@ def active_configuration(run_root: Path, *, locked: bool = False) -> Configurati
             first = snapshot.config_rev if snapshot is not None else first_rev(store)
             after = snapshot.seq if snapshot is not None else 0
             rev = _applied_rev(list(store.read_from(after)), first)
-            return load_configuration(store, rev, where=str(path))
+            configuration = (
+                _load_active_configuration(store, rev, where=str(path))
+                if check_lowering
+                else load_configuration(store, rev, where=str(path))
+            )
+            if check_lowering:
+                check_captured_lowering(configuration, rev)
+            return configuration
     except StoreError as exc:
         raise EngineError(f"{path}: {exc}") from exc
 

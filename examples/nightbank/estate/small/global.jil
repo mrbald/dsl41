@@ -207,15 +207,3 @@ date_conditions: 1
 run_calendar: QTR_LAST_WORKDAY
 start_times: "06:30"
 timezone: Europe/Zurich
-
-/* Waits on a job in the production instance (never satisfied here):
-   exercise -- release it with CHANGE_STATUS, or explain why it waits. */
-insert_job: OPS_XINST_DEMO_C
-job_type: c
-condition: s(GROUP_TREASURY_EOD^PRD, 9999)
-command: fakework OPS_XINST_DEMO_C --sleep 5
-machine: ops_util
-owner: ~{$OWNER}~
-profile: ~{$NB_PROFILE}~
-std_out_file: ~{$NB_LOGS}~/OPS_XINST_DEMO_C.out
-std_err_file: ~{$NB_LOGS}~/OPS_XINST_DEMO_C.err

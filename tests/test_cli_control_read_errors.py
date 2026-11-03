@@ -8,6 +8,7 @@ import re
 import socket
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -37,12 +38,35 @@ COMMANDS = (
 def _assert_failure(command: tuple[str, ...], path: Path, diagnostic: str) -> None:
     args = [*command, "--socket", str(path)]
     if command in (("ui",), ("serve",)):
-        result = subprocess.run(
-            [sys.executable, "-m", "dsl41", *args],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        cmd = [sys.executable, "-m", "dsl41", *args]
+        if (
+            command == ("serve",)
+            and diagnostic == f"dsl41: no engine is running at {path}"
+            and not path.exists()
+        ):
+            started = time.monotonic()
+            with subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            ) as child:
+                try:
+                    stdout, stderr = child.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        group = os.getpgid(child.pid)
+                    except OSError:
+                        group = None
+                    elapsed = time.monotonic() - started
+                    child.kill()
+                    stdout, stderr = child.communicate()
+                    print(
+                        f"serve timeout: elapsed={elapsed:.3f} pid={child.pid} pgid={group} "
+                        f"returncode={child.returncode} stdout={stdout!r} stderr={stderr!r}",
+                        file=sys.stderr,
+                    )
+                    raise
+                result = subprocess.CompletedProcess(cmd, child.returncode, stdout, stderr)
+        else:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
         assert result.returncode == 2, result.stderr
     else:
         result = runner.invoke(app, args)

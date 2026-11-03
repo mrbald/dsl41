@@ -1,148 +1,90 @@
 ---
 name: reader-docs
-description: Write, split or restructure one human-facing document (README sections, unfrozen docs/ pages, block cards, example READMEs and runbooks) for one named reader, under docs/writing.md. Use when the user asks for a reader-facing document, a documentation track, or a rewrite for a packager, operator, job author, architect or maintainer. Takes the document path and the reader. Does not merge until the boss accepts the pass.
+description: Write, split or restructure human-facing documentation for its readers under docs/writing.md. Use for README sections, unfrozen docs pages, block cards, example READMEs and runbooks. Takes the document paths and intended readers. Review and merge authority follow the project workflow.
 ---
 
-# Reader-facing documents (DL-405)
+# Reader-facing documents (DL-405, DL-448)
 
-One document, one reader, one PR. The argument is the document path and the
-reader (`/reader-docs docs/site-package.md packager`). The rules are in
-[docs/writing.md](../../../docs/writing.md); this skill is the procedure
-that applies them. For a frozen contract, use `spec-review` instead; this
-skill never changes a rule's meaning. Where both procedures apply to a page
-under `docs/`, `spec-review`'s rules on section numbers, citation tokens
-and history govern (writing.md's status paragraph).
+Help the reader complete their task. Use [docs/writing.md](../../../docs/writing.md)
+for content and presentation, and scale this procedure to the change.
+One document, one primary reader and one PR SHOULD be the default. Related
+pages and behavior-coupled corrections can belong in the same change.
 
-## Step 0: the audience brief
+SHOULD means a recommendation: the responsible role may depart after considering
+its purpose and the consequences. Record a material departure and its reason
+briefly in the existing task or PR record. No separate waiver or owner escalation
+is needed solely for procedural form. The sequence, separate artifacts, delegated
+fact gathering, one-page drafting runs and branch naming below are defaults.
+A small correction may use a short combined note and direct source inspection.
 
-Before any reading, write the brief, under ten lines. It goes into the PR
-body, so it can be checked later:
+This discretion does not relax binding contracts, truthful source evidence,
+public hygiene, citation and anchor integrity, generated state-machine views,
+required independent review, gates or commit/merge authority. For a frozen
+contract, use `spec-review`; this skill cannot change its meaning. Where both
+procedures apply, `spec-review` governs section numbers, citation tokens and
+history. Role bindings and dispatch remain with the operator.
 
-- Reader: one of packager, operator, job author, architect, maintainer.
-- Task: what the reader comes to do, as a verb phrase.
-- Done: how the reader knows they have finished (a running service, an
-  accepted estate, a recovered engine).
-- Prior knowledge assumed, and the glossary terms the page may use without
-  defining.
-- Where the reader reads it: a terminal during an incident, or a desk; and
-  the existing page of the same kind whose section pattern it follows, or
-  "none" for the first page of a kind.
-- Sources: the contracts, code and examples the page draws on.
-- Out of scope: what the page links instead of covering.
+## Audience and facts
 
-The brief is the spec for the writer and the reviewer. A page with no brief
-is not written.
+The writer SHOULD start with a short audience brief: reader, task, what done
+looks like, assumed knowledge, reading context, sources and scope. Name an
+existing page's pattern when it helps. The brief can be in the task or PR body;
+use the reader and task already supplied instead of restating them for form.
 
-## Step 1: the fact sheet
+Before asserting a code fact, inspect its source. A separate read-only fact
+sheet SHOULD precede a substantial draft; delegate it when an independent
+inventory helps. Record relevant commands, options, behavior, limits and
+existing pages to link. For a small edit, source references beside the proposed
+change can be enough. Never substitute memory or invented evidence for inspection.
 
-Delegate a read-only fact sheet, as `spec-review` step 1 describes: per
-planned section, what the code says about every claim the section will
-make (verbs and options from `--help`, constants, module and function names,
-test names), plus every existing document that already covers the ground,
-with the section to link. For an existing page, the sheet also lists every
-place that cites it: search `src/`, `tests/`, `scripts/`, `docs/` and
-`examples/` for the page's stem, then for bare `ssN` and `§N` references in
-every file that names it. The writer works from the sheet, never from
-memory. For a packager or operator page, the sheet also lists the files
-under `examples/*/deploy/` and `scripts/` the page will name.
+When moving sections, splitting a page or changing anchors, find and update its
+citers. Search `src/`, `tests/`, `scripts/`, `docs/` and `examples/` for the page
+stem and section references. Preserve existing anchors when possible. A reorder
+SHOULD be a separate slice unless coupling it keeps the reader's task coherent.
 
-## Step 2: the draft
+## Draft and reconcile
 
-Write from the brief and the sheet. An existing page keeps its section
-numbers and anchors (writing.md §3); a reorder or a split is its own slice
-that updates every citer the sheet lists. Check the draft against this list, section by
-section, then as a whole:
+Write for the named reader from the verified facts. Use the checklist in
+writing.md: relevant content, findable steps, clear language and usable commands.
+Put warnings before the affected action, expose limits, and link the governing
+contract rather than copying its rule tables. Keep state-machine rows generated.
 
-Relevant (writing.md §2)
-- Every section serves the brief's task. A section that serves another
-  reader moves to that reader's page, with a link.
-- Commands before explanation where the brief says the page is read at a
-  terminal during an incident.
-- The page states, or links, every limit or gap the reader would hit,
-  where they would look.
-- History and rejected options are not told; the decision entry is cited.
-- No rule is restated from a frozen table; the section is linked.
+The engineer may draft reader documentation; one page per run SHOULD be the
+usual scope. The boss rules on voice and the reviewer checks the diff. Separate
+reader sections can serve a mixed audience when they make the task easier.
 
-Findable (§3)
-- The first paragraph names the reader, the task, and the track.
-- Headings are tasks or facts. A new page is in the reader's order.
-- Procedures are numbered, one action per step, commands complete.
-- A warning precedes the step it guards.
-- What belongs together is placed together; recipe blocks and tables of
-  one kind share one layout.
-- One concept has one home; the second mention links it.
+If code and documented rules disagree, trace the applicable decision and report
+the discrepancy with evidence. Follow `spec-review` reconciliation where it
+applies. Do not silently resolve a semantic disagreement by rewriting the page.
 
-Understandable (§4)
-- One idea per sentence; common words; glossary terms used as defined.
-- Active voice with a named actor.
-- An example precedes a non-obvious rule.
-- One topic per paragraph; the first sentence states it.
-- Numbers sit in a table or on their own line.
-- No metaphor, marketing or changelog sentence; no blame, no "simply",
-  "obviously" or "just" that makes a step sound easy.
-- The page follows the section pattern of the page the brief names.
+## Verify and review
 
-Usable (§5)
-- A reader of the brief's kind could do the task from the page alone.
-- Every code claim traces to a fact-sheet line.
-- The page says what it leaves out, with the link.
+Follow [agent-workflow.md](../../../docs/agent-workflow.md#verify-a-change)
+for applicable checks and repeat checks invalidated by the edit. The operator
+makes new documents visible to Git before rendering the decision index; its
+renderer selects tracked paths. Run document dependency checks after rewrites
+and regenerate affected outputs. Report commands and exit status.
 
-Visuals and state machines (§6, §7)
-- A visual appears only for one of the three structures §6 names; it is
-  text in git with one sentence under it.
-- A state machine is a generated view or a link to one: the renderer's
-  equation notation in prose, the generated diagram and table of
-  `state-machines.md` as a chart's reference. No hand-copied rows. A chart
-  without a view gets a renderer change first, as its own slice.
+The reviewer checks false or unsupported claims, missing facts needed for the
+task, conflicts with contracts, then usability and links. Read the changed page
+as its intended reader and say whether the task can be completed. Review depth
+should match the change; a small correction need not reconstruct an unchanged
+page's entire fact sheet.
 
-The engineer may draft a reader page from the brief and fact sheet, one page
-per run, with this checklist in its prompt (DL-405). The operator supplies the
-engineer's binding. The boss rules on the voice; the reviewer checks the diff.
+Instruction-policy changes and restatements of frozen-contract use are semantic
+class under [review.md](../../../docs/agents/review.md#required-passes).
+Its required passes, finding dispositions and round limits remain binding.
+This skill grants no exemption from independent review or boss voice acceptance.
 
-## Step 3: reconciliation
+## Deliver
 
-When the draft and the code disagree, the decision log decides, as
-`spec-review` step 3 says: a later entry rules for the code; no entry means
-the code is wrong, and the finding goes to the PR body as a fact, with file
-and line. The page changes neither a rule nor the code.
+A standalone documentation change SHOULD use `docs/<stem>` and one document per
+PR. The PR SHOULD carry or link the audience, source/reconciliation notes and
+review result in proportion to the change. Keep related README navigation and
+behavior-coupled documentation consistent in the same PR when useful.
 
-## Step 4: verification and review
-
-A new page must be visible to Git first: before dispatch the operator
-creates it empty and marks it with `git add -N PATH`. The decision index renderer and its test
-select tracked paths only, so a new untracked page leaves
-`docs/decision-index.md` stale and CI red. Then run the applicable local
-gates listed under "Verify a change" in `docs/agent-workflow.md`, starting
-with `scripts/arch_check.py` (test names in backticks, the source map,
-links) and `scripts/render_decision_index.py`. The tests most likely to trip on a
-rewritten page parse it: the decision index rendering, the operator recipes,
-the nightbank example and deploy tests, the architecture and block-card
-tests, the lifecycle view and the simulation register. Report each command
-with its exit status.
-
-Then the reviewer seat, read-only, writes its findings to a scratch
-file and reports a ranked table. Its hunt order: false claims against the
-code and the fact sheet; a fact the reader needs that is missing; a rule
-restated instead of linked; history that survived; then the checklist above,
-and last, broken links and anchors. The reviewer reads the page once more as
-the brief's reader and says whether they could do the task.
-
-A page that touches instruction policy, or restates how a frozen contract
-is used, is semantic class under `docs/agents/review.md` "Required passes".
-That section sets additional passes and fallbacks. Rule on every finding
-before commit; follow `docs/agents/review.md` "Review rounds" for the caps
-and escalation.
-
-## Step 5: delivery
-
-One document per PR, on a branch named `docs/<stem>`. The PR body carries
-the brief, the reconciliation findings, and the review table. Merge through
-[coordination's Git workflow](../../../docs/agents/coordination.md#git-workflow).
-This skill stamps nothing: a specification's `spec-review` stamp
-and its 800-line clock belong to that procedure, and a reader page, a card
-or a page under `examples/` has no stamp. The README "Documents" tracks are
-updated in the same PR as any page they list.
-
-After the merge, a question in the page's scope that a reader had to ask
-is a defect of the page. The maintainer fixes the page, as its own
-slice under this procedure.
+Merge through [coordination](../../../docs/agents/coordination.md#git-workflow).
+This skill grants no publication authority and adds no stamp: specification
+stamps belong to `spec-review`; other reader pages use their PR review.
+After delivery, treat reader confusion within the page's scope as evidence to
+improve it. Make the correction in an appropriate later change.

@@ -28,6 +28,7 @@ from test_runner_control import (
     _RawServer,
     _sendevent,
     _serve,
+    _serve_virtual_model,
     _teardown,
     _versioned,
     _wait_for_async,
@@ -384,7 +385,7 @@ def test_deps_names_a_cross_instance_atom_as_job_caret_instance(short_root: Path
     )
 
     async def scenario() -> None:
-        engine, server, loop_task = await _serve(short_root / "run", text)
+        engine, server, loop_task = await _serve_virtual_model(short_root / "run", text)
         try:
             deps = await _control_call(server.path, {"cmd": "deps", "job": "s6b_dep"})
             assert deps["ok"] is True
