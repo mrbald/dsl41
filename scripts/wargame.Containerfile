@@ -23,6 +23,13 @@ RUN case "$TARGET" in \
 CMD ["/sbin/init"]
 
 FROM host AS service
+RUN case "$TARGET" in \
+        el8) dnf -y install chrony && dnf clean all ;; \
+        ubuntu) apt-get update -q \
+             && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+                 systemd-timesyncd gcc libc6-dev \
+             && rm -rf /var/lib/apt/lists/* ;; \
+    esac
 COPY requirements.txt /rehearsal-requirements.txt
 RUN python3.12 -m venv /wheel-builder \
     && /wheel-builder/bin/python -m pip wheel --wheel-dir /wheelhouse --requirement /rehearsal-requirements.txt \

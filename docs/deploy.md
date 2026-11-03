@@ -10,11 +10,14 @@ A Packager uses the install steps as the reference implementation (DL-439).
 ## Install the package and unit
 
 For the Packager: the supported production interpreter is Python 3.12.x.
-Install the host's clock synchronization service and enable its waiter before
-starting the engine: `chrony-wait.service` with chrony (as on RHEL 8), or
+On a VM or host, install its clock synchronization service and enable its waiter
+before starting the engine: `chrony-wait.service` with chrony (as on RHEL 8), or
 `systemd-time-wait-sync.service` with systemd-timesyncd.
 The engine unit orders after `time-sync.target`, but that target waits for
-real synchronization only when a waiter is enabled.
+real synchronization only when an enabled waiter runs successfully.
+A container cannot synchronize its own clock. Its host or hypervisor must keep
+the clock synchronized. Before starting the engine in a container, run the
+host checks in step 7 on the host that supplies its clock.
 The [chrony waiter](https://github.com/mlichvar/chrony/blob/4.2/examples/chrony-wait.service)
 sets `TimeoutStartSec=180`; if it times out, the engine can still start
 without synchronization.
@@ -124,25 +127,39 @@ admission frontier and gap in seconds in the [engine's output](#read-the-engines
    to the configured run root and every required input filesystem.
    Set `ExecStop`'s socket to that root's `control.sock`.
    Include the profile, worker and data filesystems in the mount dependencies.
-   Keep the unit's time-sync ordering. As root, enable and verify the waiter
-   for the host's time service. With chrony:
+   Keep the unit's time-sync ordering. On a VM or host, run the following
+   checks there as root. For an engine in a container, run them on its host
+   before starting the engine. A waiter's `ConditionVirtualization=!container`
+   or `ConditionCapability=CAP_SYS_TIME` can skip it inside a container or
+   under a manager without that capability, even when `is-enabled` says
+   `enabled`. With chrony on RHEL 8:
 
    ```sh
+   systemctl enable --now chronyd.service
    systemctl enable --now chrony-wait.service
    systemctl is-enabled chrony-wait.service
    systemctl status chrony-wait.service
+   systemctl show -p ActiveState,Result,ConditionResult chrony-wait.service
+   chronyc tracking
    ```
 
    With systemd-timesyncd instead:
 
    ```sh
+   systemctl enable --now systemd-timesyncd.service
    systemctl enable --now systemd-time-wait-sync.service
    systemctl is-enabled systemd-time-wait-sync.service
    systemctl status systemd-time-wait-sync.service
+   systemctl show -p ActiveState,Result,ConditionResult systemd-time-wait-sync.service
+   timedatectl show -p NTPSynchronized
    ```
 
-   `is-enabled` must print `enabled`. Check `status` for a timeout or failure;
-   enabling the waiter alone does not prove synchronization succeeded.
+   `is-enabled` must print `enabled`. Require `ActiveState=active`,
+   `Result=success` and `ConditionResult=yes` from `show`: the waiter must be
+   active after exiting successfully, not skipped. Check `status` for a
+   timeout or failure. With chrony, require `Leap status` to be `Normal` in
+   `tracking`; with timesyncd, require `NTPSynchronized=yes`.
+   Enabling the waiter alone does not prove synchronization succeeded.
    Verify the installed engine unit as root:
 
    ```sh

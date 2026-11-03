@@ -54,6 +54,7 @@ synthetic stores and wrapper spools. A wait polls with a deadline.
 | --- | --- | --- |
 | `install` | Installs this tree's wheel into `/opt/dsl41/releases/<version>`, the small Nightbank estate, the drill's jobs, the `dsl41` user and the unit | The estate lints clean; the unit is enabled |
 | `start` | `systemctl start` | `engine up` in the journal, `engine.db` exists, the scheduled jobs are held |
+| `clock` | Runs the documented waiter enable and verify commands, queues an engine start behind an unsynchronized waiter, then supplies synchronization or lets a drill timeout expire | The vendor waiter orders before `time-sync.target` and the engine; synchronization releases startup; timeout releases it with waiter `Result=timeout`; the running engine's exact interpreter version is recorded and must be 3.12.x |
 | `restart` | `systemctl restart` | A new invocation, `engine stopped: clean_shutdown`, the holds are still there |
 | `reboot` | Restarts the container | The enabled unit starts at boot and resumes the same root |
 | `restore` | Drains an active writer, copies the complete root and required sidecars, inputs and settings, deletes originals and restores them | No service-account/cgroup writers; unchanged-tree refusal for a missing store; fresh history, holds, ice and globals; same-run continuation with exact business effects and distinct attempts |
@@ -70,12 +71,37 @@ synthetic stores and wrapper spools. A wait polls with a deadline.
 The `restart-faults` cases print hash and environment receipts. The evidence
 directory retains their stores, spools and receipts together under `restart-faults/`.
 
+The `clock/` evidence holds the vendor unit, drill drop-ins, status, journal,
+monotonic ordering timestamps and `python.txt` from the running engine's executable.
+The row checks the installed waiter's timeout before applying its test override.
+See the [deployment prerequisite](../../../docs/deploy.md#install-the-package-and-unit)
+for the operator commands and timeout consequences.
+
 After a failed row the script prints the diagnostics: `systemctl status`, the
 unit's journal, `dsl41 runs` and `dsl41 query status`. It stops at the first
 failure.
 
 ## Where the drill differs from a site
 
+- The `clock` row runs the vendor `chrony-wait.service` on EL8 and
+  `systemd-time-wait-sync.service` on Ubuntu. On EL8, a container-only drop-in
+  clears `chronyd.service`'s capability condition. On Ubuntu, a drop-in clears
+  the waiter's capability and virtualization conditions. EL8 runs a chronyd
+  client and a separate loopback chronyd source with `-x`. It starts the source
+  to supply synchronization; it stops the source and resets the client to
+  remove synchronization. Ubuntu preloads `clock-unsynced.c` into
+  the waiter to report an unsynchronized kernel, then creates timesyncd's
+  synchronization marker. These controlled inputs leave the shared VM clock
+  unchanged; they do not qualify an external time source. Both waiters and
+  the engine start in one transaction, as their enabled boot targets would
+  arrange. The timeout case uses a separate `/run` drop-in with
+  `TimeoutStartSec=8s`, shortening chrony's 180-second bound and Ubuntu's
+  infinite bound only for the drill. The row's work has a 180-second deadline
+  with a 10-second kill grace. After that process exits, cleanup has a separate
+  120-second budget with a 5-second kill grace, including after a work timeout.
+  Cleanup verifies that its overrides are absent and the waiter is disabled
+  before later rows. `chrony-yes.txt` records tracking after the waiter is
+  active, with `Result=success` and `ConditionResult=yes`.
 - The unit runs with `/etc/dsl41/dsl41.toml`. Its main config selects
   `/opt/nightbank/cfg/*.jil`, including `drill.jil`, and loads
   `night.properties`. It sets UTC and `lint.refuse = "none"`.
