@@ -11,7 +11,7 @@ Items remain open until their evidence and independent acceptance are recorded.
 - [x] Status hook (C, #315, DL-446): committed live transitions reach a bounded best-effort site command; delivery, cleanup and engine-down integration are covered.
 - [x] `docs/deploy.md` prerequisites and boundaries (E/I/J/D, #312, DL-439): clock-sync waiter enable/verify commands, production Python 3.12.x, drained full-root backup or consistent snapshot, output paths, site archiving and host disk monitoring are documented.
 - [x] Boot-ID coverage (G-boot, #318, DL-433/DL-436): injected changed-boot tests prove no liveness check or signal against old-boot attempts and preserve holds and run identity; a real host reboot stays after shipping (K2).
-- [ ] JIL slice 1: config and checks, plus K1/K2 restart refusals.
+- [x] JIL slice 1 (#322): config and checks, plus K1/K2 restart refusals.
 - [ ] JIL slice 2: process launch for P, Q, R, S, AA, AE and the AD signal list.
 - [ ] JIL slice 3: engine integration for U, V, W, X, Z, AC, AD `sendevent -k`, attribute environment, AF selection wiring and the corresponding DL entries.
 - [x] Clock-sync drill check (E, #321): native x86_64 Ubuntu Python 3.12.3 and EL8 Python 3.12.15 qualify the waiter prerequisite, bounded startup and clock behavior ([service-drill evidence](https://github.com/mrbald/dsl41/actions/runs/41597099395)).
@@ -37,6 +37,8 @@ Items remain open until their evidence and independent acceptance are recorded.
 # Known bugs
 
 Severity follows the accepted triage. In-flight targets remain open until accepted.
+
+- [ ] **Untriaged**: Production file watchers treat wildcard `watch_file` paths literally. A job watching `*.csv` can remain RUNNING when a matching file arrives after startup, in both stable and immediate modes. Exact-path controls complete. Pattern polling is prepared but production dispatch/recovery integration remains JIL3 work (R; synthetic Engine/FileWatcherAdapter reproduction).
 
 - [ ] **Untriaged**: `test_socket_commands_report_plain_connect_errors[missing-serve]`
   in `tests/test_cli_control_read_errors.py` exceeded its 5-second child timeout
