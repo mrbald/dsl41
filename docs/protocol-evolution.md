@@ -52,7 +52,7 @@ a row.
 | SQLite store | `SqliteStore` → store readers | `meta.schema_version = 1` | Each record's own schema; this is not a field-extension promise | Foreign or missing schema refuses | Retained root |
 | Engine state and snapshots | Engine → startup and replay | `meta.state_version`, snapshot `state_version`; `STATE_MACHINE_VERSION` | Each payload's schema | Foreign state refuses; no default or migration (DL-424, DL-433) | Retained store and snapshots |
 | Store journal records | `Journal` → replay and history | `Record.kind`; input event `kind` | As the record reader declares | No per-record version; unknown record and event kinds refuse by name | Snapshot and retention floor (DL-428) |
-| FW evidence | `FileWatcherAdapter` → `read_watch_log` | `artifact_format_version` on every `watch.jsonl` line | Ignored | Unsupported or absent refuses | Retained spool |
+| FW evidence | `FileWatcherAdapter` → `read_watch_log` | `artifact_format_version = 1` on every `watch.jsonl` line; `kind` is `start`, scalar `poll` or wildcard `sample` (DL-461) | Ignored | Unsupported or absent version, or unknown kind, refuses | Retained spool |
 | Wrapper-owned spool files | Wrapper → adapter and startup (`spool_version_supported`) | `version = 1` on `spawn.json`, `status.json` | Ignored | Unsupported refuses; absent passes (DL-227) | Retained attempt directory |
 | Wrapper input spec | Adapter → wrapper | `version = 1` | Refused by contract (§2 of wrapper protocol) | Unsupported refuses at the wrapper, exit 2; absent version also exits 2 | One launch |
 | Perimeter journal | Access perimeter → audit; sequence recovery reads `access_seq` | `rec`; no version | Ignored | Not applicable; no engine decision dispatches it (DL-147) | Retained root |
@@ -94,6 +94,19 @@ Startup refuses a store without it. Clock domain is also checked separately.
 A new binary version alone does not change the catalog or runtime hashes.
 
 ### Notes on the rows
+
+**FW evidence (DL-461).** One reader accepts scalar and sampled observations.
+The permitted sequence is one `start`, zero or more `poll` lines, then zero or
+more `sample` lines. Samples carry `files`: each entry has a nonempty plain `path`
+string and integer `device`, `inode`, `size`, `mtime_ns` and `ctime_ns` fields.
+Device, inode and size are nonnegative. Timestamps use canonical datetime encoding.
+A wildcard watch may retain a scalar prefix and append samples. The prefix keeps
+its poll count and deadline but contributes no pathname stability.
+A scalar line after a sample refuses. An exact-path adapter refuses sampled evidence
+before repairing or appending the log. Existing records are never rewritten.
+Scalar evidence remains readable without retirement. Older binaries refuse `sample`
+by kind and quarantine that evidence on startup; rollback cannot continue such a watch.
+Shared artifact canonicalization, journal, snapshot and state versions are unchanged.
 
 **Store and wire are different formats (DL-428).** Store kinds are
 `input`, `decision`, `dispatch`, `dispatch_pending`, `outcome`, `follow_up`,
