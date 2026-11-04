@@ -362,7 +362,7 @@ def test_main_config_captures_job_env_and_reload_revision(tmp_path: Path) -> Non
                 tmp_path, engine.update.live(), tmp_path / "root" / "plans", candidate=candidate
             )
             reply = engine.request_update(
-                UpdateRequest(plan.token, False, 1, engine.baseline_id, "env-update")
+                UpdateRequest(plan.token, 1, engine.baseline_id, "env-update")
             )
             await engine.run_until_quiescent(T0)
             assert reply.result().applied.result()["rev"] == 2

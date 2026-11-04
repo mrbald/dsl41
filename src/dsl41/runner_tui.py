@@ -143,6 +143,7 @@ from dsl41.runner_control import (
     ATTEMPT_NOTE_WIDTH,
     ControlClientError,
     attempt_note,
+    reread_note,
     claimed_actor,
     command,
     original_decision_text,
@@ -226,6 +227,7 @@ class _TableSync:
         rows: Sequence[Sequence[Any]],
         on_rebuild: Callable[[Sequence[Any], Any], Any | None] | None = None,
         default_to_first_row: bool = False,
+        column_widths: Mapping[str, int] | None = None,
     ) -> None:
         """On a membership or order change, `on_rebuild` runs once, after clear() and before any
         add_row, so a caller can arm its bounce guard first. It gets `(new_identity,
@@ -233,7 +235,13 @@ class _TableSync:
         before clear() resets `table.cursor_row` (DL-178v). It returns the identity to restore
         the cursor to, or None. `default_to_first_row` selects row 0 when nothing survived;
         otherwise the cursor stays where clear()/add_row left it."""
-        if list(identity) != self.identity:
+        resized = False
+        for column_info in table.ordered_columns:
+            width = (column_widths or {}).get(column_info.key.value or "")
+            if width is not None and column_info.width != width:
+                column_info.width = width
+                resized = True
+        if list(identity) != self.identity or resized:
             cursor = table.cursor_row
             old_selected = self.identity[cursor] if 0 <= cursor < len(self.identity) else None
             table.clear()
@@ -1638,6 +1646,11 @@ class RunnerApp(App[None]):
             rows=rows,
             on_rebuild=self._on_table_rebuild,
             default_to_first_row=True,  # highlight event resyncs _selected
+            column_widths={
+                "status": 44
+                if any(self._jobs_snapshot[name].get("reread") for name in order)
+                else 10
+            },
         )
         # a Text title, since border_title strings parse as rich markup
         title = Text(f"jobs {len(order)}/{len(self._jobs_snapshot)}")
@@ -1669,7 +1682,7 @@ class RunnerApp(App[None]):
         exit_code = row.get("exit_code")
         return [
             name,
-            Text(status, style=_STATUS_STYLE.get(status, "")),
+            Text(status + reread_note(row), style=_STATUS_STYLE.get(status, "")),
             attempt_note(row),  # DL-426: beside the status, empty for a first attempt running
             clock_of(at),
             str(row.get("run_number", "")),

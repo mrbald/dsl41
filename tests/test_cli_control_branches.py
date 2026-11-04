@@ -51,6 +51,8 @@ def _run(*args: str, socket: Path | None = None) -> Any:
 @pytest.fixture(
     params=[
         ("query", "status"),
+        ("reread",),
+        ("update",),
         ("sendevent", "ON_HOLD", "--job", "socket_job"),
         ("off-hold-all", "--dry-run"),
         ("engine", "stop"),
@@ -66,7 +68,7 @@ def socket_command(request: pytest.FixtureRequest) -> tuple[str, ...]:
 def socket_calls(monkeypatch: pytest.MonkeyPatch, cli_env: None) -> list[Path]:
     paths: list[Path] = []
 
-    def reached(socket_path: Path, *args: object) -> None:
+    def reached(socket_path: Path, *args: object, **kwargs: object) -> None:
         paths.append(socket_path)
         raise typer.Exit(0)
 
@@ -500,3 +502,33 @@ def test_sendevent_k_validation_and_version(monkeypatch, value, verb, valid):
         }
     else:
         assert requests == []
+
+
+@pytest.mark.parametrize("verb", ["reread", "update"])
+@pytest.mark.parametrize("code", ["unsupported_version", "unknown_cmd", "invalid_argument"])
+def test_reload_old_engine_has_no_fallback(monkeypatch, cli_env, verb, code):
+    from dsl41 import runner_control
+
+    calls = []
+
+    def reply(path, request, **kwargs):
+        calls.append(request)
+        if request["cmd"] == "status":
+            return {"ok": True, "baseline_id": "test"}
+        return {"ok": False, "refused": True, "code": code, "error": "old engine"}
+
+    monkeypatch.setattr(runner_control, "roundtrip", reply)
+    result = _run(verb)
+    assert result.exit_code == 2, result.output
+    assert "old engine" in result.output
+    assert len([r for r in calls if r["cmd"] == verb]) == 1
+    assert calls[-1]["v"] == 4
+
+
+def test_reload_help_has_no_legacy_route(cli_env):
+    for verb in ("reread", "update"):
+        output = ANSI.sub("", runner.invoke(app, [verb, "--help"]).output)
+        assert "--socket" in output and "DSL41_SOCKET" in output
+        for retired in ("--stop-running", "--run-root", "--config", "TOKEN", "ESTATE"):
+            assert retired not in output
+        assert runner.invoke(app, [verb, "legacy", "-S", "/none"]).exit_code == 2

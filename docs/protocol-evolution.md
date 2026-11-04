@@ -58,10 +58,10 @@ a row.
 | Perimeter journal | Access perimeter → audit; sequence recovery reads `access_seq` | `rec`; no version | Ignored | Not applicable; no engine decision dispatches it (DL-147) | Retained root |
 | Access role map | Operator → `runner_access` loader | `format_version` | Refused | Unsupported or absent refuses | Operator's retained map |
 | Stored configurations | Startup/update → `Configuration.from_bytes` | `configuration_format_version`, 1, 2 or 3 | Refused for all three | Unsupported refuses; absent selects supported version 1 (DL-437, DL-438) | Retained `configs` rows |
-| Reload plans | `reread` → `read_plan` and update | `plan_format_version`, 1 or 2; `artifact_format_version` (PR-08d) | Ignored | Unsupported plan version refuses by name; absent plan version selects supported version 1 (DL-437). Unsupported artifact version makes `read_plan` return no plan; absent artifact version passes | Retained plan; an interrupted update requires it |
+| Reload plans | update preparation → `read_plan` and update | `plan_format_version`, 1 or 2; `artifact_format_version` (PR-08d) | Ignored | Unsupported plan version refuses by name; absent plan version selects supported version 1 (DL-437). Unsupported artifact version makes `read_plan` return no plan; absent artifact version passes | Retained plan; an interrupted update requires it |
 | Main-config input mapping | `main_config.prepare` → `from_parts` | `format_version = 1` in `main-inputs.json` | Ignored | Unsupported or absent refuses (DL-437) | Retained plan or stored capture |
 | Main config | Site → `load_config` | `format_version = 1` | Refused; restart host loading has the limit below | Unsupported or absent refuses (DL-437) | Site's config file |
-| Control socket | Client → `ControlServer` | `v` on every request; dual-read 3 and 4 (DL-462) | Ignored; v3 ignores `kill_signals` | Unsupported or absent refuses, connection stays open; defaults write 3, additions write 4, no fallback | One request; `subscribe` lasts to hangup |
+| Control socket | Client → `ControlServer` | `v` on every request; dual-read 3 and 4 (DL-462) | Ignored except strict v4 reread/update envelopes; v3 ignores `kill_signals` | Unsupported or absent refuses, connection stays open; defaults write 3, additions write 4, no fallback | One request; `subscribe` lasts to hangup |
 
 A durable format can retire only when no retained instance needs its reader
 (§3). Wire retirement needs the door to refuse the old dialect. SQLite
@@ -135,12 +135,17 @@ revision, including one written by a version-1 or version-2 writer before
 `config applied`. A different row or an unexpected revision refuses before
 any write. Otherwise the update appends exactly the next revision (DL-438).
 
+DL-463 extends DL-462 with ADM reread and tokenless update. Status adds an optional
+memory-only reread annotation. Default framing and persisted formats stay unchanged.
+A v3 update is unknown_cmd after authorization: retiring its token form is the stated
+exception to DL-462. Older engines refuse without client fallback.
+
 Main-config plans use version 2;
 the unversioned legacy plan reads as version 1. `main-inputs.json` binds
 config bytes, environment, lint policy, source mapping, membership and part
 names. Each Python part retains its generated JIL. Every part has a SHA-256
-in `plan.json`, published last. Update validates the token and captured
-bytes and executes generated JIL; it never rereads sources or imports Python.
+in `plan.json`, published last. Update preparation rereads current sources in an
+isolated worker; application validates the internal artifact and executes its captured generated JIL (DL-463).
 Stored configuration rows retain the capture for replay and restart.
 
 The main config selects one engine through `/etc/dsl41/dsl41.toml` or an

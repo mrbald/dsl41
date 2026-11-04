@@ -276,24 +276,17 @@ step_restart_faults() { # O: installed fault orderings, DL-431, DL-433, DL-436
 }
 
 step_reload() { # reread and update with a live job and a changed definition (DL-432)
-    local rev out rc=0 token
+    local rev out rc=0
     request FORCE_STARTJOB DRILL_LONG_C
     wait_for 60 "DRILL_LONG_C is running" attempt_is DRILL_LONG_C 1 RUNNING
     rev=$(status | jq .config_rev)
     write_drill_jil v2
-    out=$(cli reread) || rc=$?
+    out=$(cli reread -S "$SOCK") || rc=$?
     printf '%s\n' "$out"
     [ "$rc" = 1 ] || fail "reread exited $rc, not 1 (a plan that stops a running job)"
     grep -qx 'changed: DRILL_LONG_C' <<<"$out" || fail "reread does not name DRILL_LONG_C changed"
     grep -qx 'stops running: DRILL_LONG_C' <<<"$out" || fail "reread does not stop DRILL_LONG_C"
-    token=$(sed -n 's/^token: //p' <<<"$out")
-    [ -n "$token" ] || fail "reread printed no token"
-    rc=0
-    out=$(cli update "$token" --wait) || rc=$?
-    printf '%s\n' "$out"
-    [ "$rc" = 2 ] || fail "update without consent exited $rc, not 2"
-    out=$(cli update "$token" --stop-running --wait) ||
-        fail "update --stop-running --wait failed: $out"
+    out=$(cli update -S "$SOCK" --wait) || fail "update --wait failed: $out"
     printf '%s\n' "$out"
     grep -q '^applied: catalog revision' <<<"$out" || fail "update printed no application"
     [ "$(status | jq .config_rev)" = $((rev + 1)) ] || fail "config_rev did not move past $rev"

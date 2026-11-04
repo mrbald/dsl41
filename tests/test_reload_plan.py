@@ -163,14 +163,13 @@ def test_a_removed_job_that_another_references_is_refused(tmp_path: Path) -> Non
     assert not (tmp_path / "plans").exists()
 
 
-def test_a_member_added_to_a_running_box_is_refused(tmp_path: Path) -> None:
+def test_a_member_added_to_a_running_box_is_prepared(tmp_path: Path) -> None:
     estate = _tiny(tmp_path, _BOX + _member("M1"))
     live = _live(estate, status={"BX": "RUNNING"})
     (estate / "a.jil").write_text((estate / "a.jil").read_text() + _member("M2"))
-    with pytest.raises(RereadRefused) as refused:
-        _reread(estate, live, tmp_path / "plans")
-    assert refused.value.findings == ("box_running BX",)
-    assert not (tmp_path / "plans").exists()
+    result = _reread(estate, live, tmp_path / "plans")
+    assert result.plan.added == ("M2",)
+    assert result.plan_json.exists()
 
 
 def test_a_member_added_to_an_idle_box_is_planned(tmp_path: Path) -> None:

@@ -29,8 +29,8 @@ as a step of the loop once its stops are finished. The recovered outcomes of job
 stop set are fed under the old catalog before it; no job of its plan dispatches and no outcome
 it keeps commits before it (spec-restart §6, ruling R1, DL-433).
 
-An exact retry of an admitted request, under its request id with the same token, consent and
-precondition, is answered from its `config intent` record and, once applied, from its
+An exact retry of an admitted request binds operation, baseline and actor (DL-463),
+and is answered from its `config intent` record and, once applied, from its
 `config applied` record. A refusal is not recorded, so a retry of one is admitted afresh.
 """
 
@@ -58,6 +58,8 @@ from dsl41.reload_plan import (
     estate_settings,
     load_estate,
     read_plan,
+    box_members,
+    restart_boxes,
 )
 from dsl41.reload_diff import catalog_hash_v2
 from dsl41.reload_update import (
@@ -71,6 +73,7 @@ from dsl41.reload_update import (
     apply_application,
     live_of,
     plan_application,
+    plan_of,
 )
 from dsl41.runner_attempts import UNSETTLED, FollowUp
 from dsl41.runner_clock import EngineError
@@ -93,12 +96,9 @@ APPLICATION_KEYS: Final = ("token", "added", "changed", "removed", "restored", "
 
 @dataclass(frozen=True)
 class UpdateRequest:
-    """One `update` request as the control socket admits it: the plan's token, the consent to
-    stop running jobs, the configuration rev the caller read (`expect`), the store it read it
-    from, its request id and the actor it claims."""
+    """An internal prepared candidate plus the socket request's identity (DL-463)."""
 
     token: str
-    stop_running: bool
     expect: int
     baseline_id: str
     request_id: str
@@ -110,9 +110,6 @@ class UpdateRequest:
         return digest(
             {
                 "cmd": "update",
-                "token": self.token,
-                "stop_running": self.stop_running,
-                "expect": self.expect,
                 "baseline_id": self.baseline_id,
                 "claimed_actor": self.claimed_actor,
             }
@@ -232,9 +229,9 @@ def open_plan(run_root: Path, token: str) -> OpenedPlan:
     plan_dir = plans / token
     try:
         if plan.get("plan_format_version") == 2:
-            from dsl41.main_config import from_parts
+            from dsl41.main_config import verified_from_parts
 
-            estate = from_parts(
+            estate = verified_from_parts(
                 [(p["name"], (plan_dir / p["name"]).read_bytes()) for p in plan["parts"]]
             )
             return OpenedPlan(plan, estate, Exceptions(estate.metadata["non_idempotent"]))
@@ -283,6 +280,8 @@ class EngineUpdate:
         #: each cancelled task is taken up again, by job (`_choose_follow_ups`)
         self._chosen: dict[str, FollowUp] = {}
         self._takes_up: dict[str, bool] = {}
+        self._box_roots: tuple[str, ...] = ()
+        self._box_members: set[str] = set()
         #: the jobs the dispatch filter held while the update stopped, released after it
         self._held: frozenset[str] = frozenset()
         #: set by an application inside a step, which the step finishes (`finish`)
@@ -380,7 +379,7 @@ class EngineUpdate:
             # account of the files on disk needs once it applies (`spec_drift`)
             return UpdateAnswer(
                 code="stale_plan",
-                error=f"plan {request.token} predates this engine: run reread again",
+                error=f"plan {request.token} predates this engine: run update again",
             )
         if request.expect != engine.config_rev or opened.plan.get("live_digest") != (
             catalog_hash_v2(engine.oracle.catalog)
@@ -404,15 +403,14 @@ class EngineUpdate:
             opened.plan,
             live=self.live(),
             candidate=opened.estate.catalog,
-            stop_running=request.stop_running,
             open_update=None,
         )
-        if isinstance(decision, Refused):
-            return self._decide(decision)
+        # The revision and in-progress gates above already passed (DL-463).
+        assert isinstance(decision, Admitted)
         self._begin(request, opened, decision)
         answer = self._answer = UpdateAnswer(decision)
         answer.applied = asyncio.get_running_loop().create_future()
-        self._post(lambda tier: tier.admit(decision))
+        self._post(lambda tier: tier.admit(decision, settle=False))
         return answer
 
     def _decide(self, refusal: Refused) -> UpdateAnswer:
@@ -432,8 +430,14 @@ class EngineUpdate:
         self._moved = frozenset(engine.marked ^ set(opened.marked.names))
         self._held = admitted.dispatch_filter
         self._admitted = admitted
+        self._set_box_scope(opened)
         self._attempts = {job: engine.attempt_of_run(job, run) for job, run in admitted.stop_runs}
         self.tier = UpdateTier(self, self._prepare)
+
+    def _set_box_scope(self, opened: OpenedPlan) -> None:
+        old, new = self.engine.oracle.catalog, opened.estate.catalog
+        self._box_roots = restart_boxes(plan_of(opened.plan, old), self.live(), new)
+        self._box_members = box_members(old, self._box_roots) | box_members(new, self._box_roots)
 
     def _post(self, post: Callable[[UpdateTier], object]) -> None:
         assert self.tier is not None
@@ -495,7 +499,6 @@ class EngineUpdate:
         opened = opened if opened is not None else reopen_plan(engine.run_root, admitted.token)
         self._request = UpdateRequest(
             admitted.token,
-            bool(intent.get("stop_running")),
             int(intent.get("live_rev", engine.config_rev)),
             engine.baseline_id,
             str(intent.get("request_id", "")),
@@ -505,6 +508,7 @@ class EngineUpdate:
         self._moved = frozenset(engine.marked ^ set(opened.marked.names))
         self._held = admitted.dispatch_filter
         self._admitted = admitted
+        self._set_box_scope(opened)
         self._attempts = {
             str(entry["job"]): entry.get("attempt") for entry in intent.get("stop") or ()
         }
@@ -568,10 +572,9 @@ class EngineUpdate:
         elif job is None:
             ended, self._ended_meanwhile = self._ended_meanwhile, []
             for one in ended:
-                self._post(partial(UpdateTier.exit_recorded, job=one))
-            self._post(lambda tier: tier.settle())
+                self._post(partial(UpdateTier.exit_recorded, job=one, settle=False))
         else:
-            self._post(lambda tier: tier.exit_recorded(job))
+            self._post(lambda tier: tier.exit_recorded(job, settle=False))
 
     # ---- UpdateIntents
 
@@ -600,7 +603,7 @@ class EngineUpdate:
                 for job in stop_set
             ],
             "filter": sorted(self._held),
-            "stop_running": request.stop_running,
+            "stop_running": True,
             "request_id": request.request_id,
             "fingerprint": request.fingerprint,
         }
@@ -632,7 +635,56 @@ class EngineUpdate:
             engine._reaping.append(live.task)
             self._cancelled.append((job, live.run_number, run_id))
         assert self.tier is not None
-        self.tier.exit_recorded(job)
+        self.tier.exit_recorded(job, settle=False)
+
+    def box_ends(self) -> list[str]:
+        """End old box runs before application can choose replacement attempts (DL-463)."""
+        assert self._opened is not None
+        old = self.engine.oracle.catalog.jobs
+        new = self._opened.estate.catalog
+        inside = box_members(new, self._box_roots)
+        names = set(self._box_roots) | self._box_members
+
+        def order(name: str) -> tuple[bool, int, str]:
+            depth, parent = 0, old[name].box.box_name
+            while parent is not None:
+                depth += 1
+                parent = old[parent].box.box_name
+            return old[name].job_type != "BOX", depth, name
+
+        return sorted(
+            (
+                name
+                for name in names
+                if name in old
+                and (name in self._box_roots or name in inside or name not in new.jobs)
+                and self.engine.oracle.store.job[name].status in {"RUNNING", "STARTING", "QUE_WAIT"}
+            ),
+            key=order,
+        )
+
+    def box_starts(self) -> list[tuple[Any, str]]:
+        """Hold every non-INACTIVE marked member before an outer box starts (DL-463)."""
+        engine = self.engine
+        members = (
+            self._box_members
+            | box_members(engine.oracle.catalog, self._box_roots)
+            | set(self._box_roots)
+        )
+        held = sorted(
+            name
+            for name in members & set(engine.marked)
+            if name in engine.oracle.store.job
+            and engine.oracle.store.job[name].status != "INACTIVE"
+        )
+        starts = [
+            box
+            for box in self._box_roots
+            if box in engine.oracle.catalog.jobs
+            and engine.oracle.catalog.jobs[box].job_type == "BOX"
+            and box not in engine.marked
+        ]
+        return [("ON_HOLD", name) for name in held] + [("FORCE_STARTJOB", box) for box in starts]
 
     def _prepare(self, admitted: Admitted) -> Application:
         """The application, computed from the oracle as the stops left it, under the settings
@@ -694,6 +746,7 @@ class EngineUpdate:
         )
         store_config(journal.store, configuration, rev)
         engine.source_capture = dict(configuration.source_capture)
+        engine.reread_marks = {}
         stopped = self._choose_follow_ups()
         at = engine.now_admitted()
         body = {

@@ -935,7 +935,7 @@ def test_catalog_order_survives_store_replay_restart_and_reload(tmp_path: Path, 
                     estate, engine.update.live(), root / "plans", candidate=candidate, start=T0
                 )
                 pending = engine.request_update(
-                    UpdateRequest(plan.token, False, 1, engine.baseline_id, "order-update")
+                    UpdateRequest(plan.token, 1, engine.baseline_id, "order-update")
                 )
                 await engine.run_until_quiescent(T0)
                 answer = pending.result()

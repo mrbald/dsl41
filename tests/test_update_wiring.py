@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import json
 import os
+import re
+import time
 import signal
 import subprocess
 import sys
@@ -41,7 +42,7 @@ from dsl41.canon import canonical_bytes, decode
 from dsl41.ir import CatalogIR, lower_source
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import CarriedRows, Event
-from dsl41.reload_plan import load_estate, reread, spec_texts
+from dsl41.reload_plan import load_estate, reread
 from dsl41.reload_update import Admitted, Refused
 from dsl41.runner import Engine
 from dsl41.runner_adapters import JobAdapter, LocalCommandAdapter
@@ -318,16 +319,16 @@ def _plan(engine: Engine, estate: Estate) -> str:
     return reread(estate.dir, engine.update.live(), engine.run_root / "plans").token
 
 
-def _request(engine: Engine, token: str, *, stop: bool = False, rid: str = "r1") -> UpdateRequest:
-    return UpdateRequest(token, stop, engine.config_rev, engine.baseline_id, rid)
+def _request(engine: Engine, token: str, *, rid: str = "r1") -> UpdateRequest:
+    return UpdateRequest(token, engine.config_rev, engine.baseline_id, rid)
 
 
 async def _update(
-    engine: Engine, token: str, *, stop: bool = False, rid: str = "r1", expect: int | None = None
+    engine: Engine, token: str, *, rid: str = "r1", expect: int | None = None
 ) -> UpdateAnswer:
-    request = _request(engine, token, stop=stop, rid=rid)
+    request = _request(engine, token, rid=rid)
     if expect is not None:
-        request = UpdateRequest(token, stop, expect, engine.baseline_id, rid)
+        request = UpdateRequest(token, expect, engine.baseline_id, rid)
     return await engine.request_update(request)
 
 
@@ -348,7 +349,7 @@ def _configs(run_root: Path) -> list[dict[str, Any]]:
 def test_two_running_jobs_are_stopped_and_eighteen_untouched_with_the_engine_running(
     tmp_path: Path,
 ) -> None:
-    """spec-reload: a plan that changes two running jobs is refused without consent; with it,
+    """spec-reload: a plan that changes two running jobs stops them;
     the two are stopped with cause `update_stop`, the eighteen others run on, the engine stays
     RUNNING throughout, and each stopped idempotent job reruns the same run under its new
     definition once the update applied."""
@@ -367,8 +368,7 @@ def test_two_running_jobs_are_stopped_and_eighteen_untouched_with_the_engine_run
         changed = dict(jobs, **{j: f"touch {marker}/{j}; exec sleep 30" for j in ("j03", "j07")})
         estate.write(_jil(changed))
         token = _plan(engine, estate)
-        refused = await _update(engine, token, rid="no-consent")
-        admitted = await _update(engine, token, stop=True)
+        admitted = await _update(engine, token)
         states.append(engine.lifecycle.state)
         body = await _applied(admitted)
         states.append(engine.lifecycle.state)
@@ -376,11 +376,9 @@ def test_two_running_jobs_are_stopped_and_eighteen_untouched_with_the_engine_run
             await _until((marker / job).exists)
         await _running(engine, "j03", "j07", ordinal=2)
         await _finish(engine, loop)
-        return refused, admitted, body, engine
+        return admitted, body, engine
 
-    refused, admitted, body, engine = asyncio.run(scenario())
-    assert isinstance(refused.decision, Refused)
-    assert (refused.decision.code, refused.decision.names) == ("would_stop_running", ("j03", "j07"))
+    admitted, body, engine = asyncio.run(scenario())
     assert isinstance(admitted.decision, Admitted)
     assert admitted.decision.stop_set == ("j03", "j07")
     assert states == ["RUNNING", "RUNNING"]
@@ -433,7 +431,7 @@ async def _barrier_scenario(
             await supervision.wait(barrier.initial_ready.wait(), "initial-spawn-records")
             estate.write(_jil(dict(jobs, **{j: "exec sleep 301" for j in updated})))
             answer = await supervision.wait(
-                _update(engine, _plan(engine, estate), stop=True), "update-admission"
+                _update(engine, _plan(engine, estate)), "update-admission"
             )
             assert isinstance(answer.decision, Admitted)
             assert answer.decision.stop_set == updated
@@ -687,7 +685,7 @@ def test_a_plan_job_the_oracle_starts_while_the_update_stops_waits_for_the_appli
         await _running(engine, "slow")
         estate.write(_jil({"slow": "sleep 31", "dep": f"touch {marker}; exec sleep 30"}))
         token = _plan(engine, estate)
-        answer = await _update(engine, token, stop=True)
+        answer = await _update(engine, token)
         seen.append(engine.update.view())
         # the decision is answered once the start it decided is dispatched or held
         decided = await engine.submit(
@@ -731,11 +729,11 @@ def test_a_stale_token_and_an_open_update_are_refused_and_a_retry_is_answered_on
         second = _plan(engine, estate)
         answers["first"] = await _update(engine, first, rid="one")
         await _applied(answers["first"])
-        # an exact retry repeats the request: the token, the consent and the rev it read
+        # An exact retry uses identity, independent of a later prepared candidate (DL-463).
         answers["retry"] = await _update(engine, first, rid="one", expect=1)
         answers["stale"] = await _update(engine, second, rid="two")
         answers["expect"] = await _update(engine, second, rid="three", expect=1)
-        answers["reused"] = await _update(engine, second, rid="one", stop=True)
+        answers["reused"] = await _update(engine, second, rid="one")
         answers["no_plan"] = await _update(engine, "0" * 64, rid="four")
         await _finish(engine, loop)
 
@@ -747,12 +745,12 @@ def test_a_stale_token_and_an_open_update_are_refused_and_a_retry_is_answered_on
     for name in ("stale", "expect"):
         decision = answers[name].decision
         assert isinstance(decision, Refused) and decision.code == "stale_plan"
-    assert answers["reused"].code == "request_id_reused"
+    assert answers["reused"].application == retry.application
     assert answers["no_plan"].code == "invalid_argument"
     assert [c["event"] for c in _configs(run_root)] == ["applied", "intent", "applied"]
 
 
-def test_a_box_that_started_since_reread_refuses_the_plan(tmp_path: Path) -> None:
+def test_a_box_that_started_since_preparation_is_restarted(tmp_path: Path) -> None:
     box = ANCHOR + "insert_job: bx\njob_type: b\ncondition: s(anchor)\n\n"
     member = "insert_job: m\njob_type: c\ncommand: sleep 30\nbox_name: bx\n\n"
     estate = Estate(tmp_path, box + member)
@@ -766,14 +764,12 @@ def test_a_box_that_started_since_reread_refuses_the_plan(tmp_path: Path) -> Non
         token = _plan(engine, estate)
         _start_jobs(engine, "bx")
         await _until(lambda: engine.oracle.store.job["bx"].status == "RUNNING")
-        answers.append(await _update(engine, token, stop=True))
+        answers.append(await _update(engine, token))
         await _finish(engine, loop)
 
     asyncio.run(scenario())
     [answer] = answers
-    assert isinstance(answer.decision, Refused)
-    assert (answer.decision.code, answer.decision.names) == ("box_running", ("bx",))
-    assert [c["event"] for c in _configs(run_root)] == ["applied"]
+    assert isinstance(answer.decision, Admitted)
 
 
 def test_a_changed_job_gets_a_rebuilt_tick_and_an_unchanged_one_keeps_its_own(
@@ -840,7 +836,7 @@ def test_a_crash_between_intent_and_application_resumes_to_applied_before_any_di
             _jil({"idem": "sleep 31", "held": "sleep 31", "other": slow, "newmark": slow}),
             {"held": "posts twice", "newmark": "posts twice"},
         )
-        answer = await _update(engine, _plan(engine, estate), stop=True)
+        answer = await _update(engine, _plan(engine, estate))
         assert isinstance(answer.decision, Admitted)
         await _crash(engine, loop)
 
@@ -956,7 +952,7 @@ def test_a_snapshot_taken_while_the_update_stops_carries_it(tmp_path: Path) -> N
         _start_jobs(engine, "slow")
         await _running(engine, "slow")
         estate.write(_jil({"slow": "sleep 31"}))
-        await _update(engine, _plan(engine, estate), stop=True)
+        await _update(engine, _plan(engine, estate))
         engine.take_snapshot()
         await _crash(engine, loop)
 
@@ -1076,87 +1072,107 @@ def test_an_input_naming_a_removed_job_is_refused_before_the_oracle(tmp_path: Pa
 # ---------------------------------------------------------------- the verbs over the socket
 
 
-def test_reread_and_update_over_the_control_socket(
-    short_root: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """The two verbs as an operator runs them: `reread` reads the engine's catalog through the
-    `catalog` verb and prints the plan; `update --wait` sends the mutation and prints the
-    application. A token with no plan, and a plan that would stop a running job without
-    consent, exit 2."""
-    from dsl41.cli_reload import reread_command, socket_send, update_command
-    from dsl41.runner_control import ControlServer
+def test_reread_and_update_over_the_control_socket(short_root: Path) -> None:
+    from typer.testing import CliRunner
+    from dsl41.cli import app
+    from dsl41.runner_control import roundtrip
+    from test_main_config import JOB, estate_file
+    from test_main_config_restart import cli_engine
 
-    estate = Estate(short_root, _jil({"a": "sleep 30", "b": "sleep 1"}))
-    run_root = short_root / "run"
-    external = short_root / "external.properties"  # a site layer outside the estate (`-p`)
-    external.write_text("SITE=one\n")
-    codes: list[int] = []
-    outputs: list[str] = []
-
-    jil = estate.dir / "jobs.jil"
-    specs: list[Any] = []
-
-    async def scenario() -> None:
-        engine = _start(run_root, estate)
-        loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
-        # the baseline `run` gives its server: the files it loaded, the JIL it serves
-        loaded = {str(jil): hashlib.sha256(jil.read_bytes()).hexdigest()}
-        texts = spec_texts(load_estate(estate.dir).parsed, engine.oracle.catalog)
-        server = ControlServer(
-            engine, run_root / "control.sock", spec_texts=texts, estate_fingerprint=loaded
+    path = estate_file(short_root, estate='non_idempotent = "non-idempotent.toml"\n')
+    (short_root / "non-idempotent.toml").write_text('[jobs]\nC = "synthetic finished effect"\n')
+    box = (
+        "insert_job: BX\njob_type: b\n"
+        + JOB.replace("A", "B").replace("true", "sleep 30")
+        + "box_name: BX\n"
+        + JOB.replace("A", "C")
+        + "box_name: BX\n"
+    )
+    source = short_root / "a.jil"
+    source.write_text(JOB.replace("true", "sleep 30") + box)
+    root = short_root / "run"
+    root.mkdir()
+    (root / "engine.toml").write_text("grace_term_s = 0.01\ngrace_kill_s = 0.01\n")
+    sock = root / "control.sock"
+    runner = CliRunner()
+    with cli_engine(path) as ask:
+        status = ask("status")
+        start = roundtrip(
+            sock,
+            {
+                "cmd": "sendevent",
+                "verb": "FORCE_STARTJOB",
+                "payload": {"job": "A"},
+                "baseline_id": status["baseline_id"],
+                "request_id": "start",
+                "expect": {"job:A": status["jobs"]["A"]["state_rev"]},
+            },
         )
-        await server.start()
-        try:
-            _start_jobs(engine, "a")
-            await _running(engine, "a")
-            estate.write(_jil({"a": "sleep 31", "b": "sleep 2"}))
-            specs.append((await asyncio.to_thread(_status, run_root))["spec_drift"])
-
-            def reread_now() -> int:
-                send = socket_send(run_root)
-                return reread_command(
-                    estate.dir, run_root=run_root, send=send, properties=[external]
-                )
-
-            codes.append(await asyncio.to_thread(reread_now))
-            out = capsys.readouterr().out
-            outputs.append(out)
-            token = out.strip().splitlines()[-1].removeprefix("token: ")
-
-            def update_now(stop: bool) -> int:
-                return update_command(
-                    token,
-                    run_root=run_root,
-                    send=socket_send(run_root),
-                    stop_running=stop,
-                    wait=True,
-                )
-
-            codes.append(await asyncio.to_thread(update_now, False))
-            codes.append(await asyncio.to_thread(update_now, True))
-            outputs.append(capsys.readouterr().out)
-            status = await asyncio.to_thread(_status, run_root)
-            outputs.append(json.dumps(status["config_rev"]))
-            specs.append(status["spec_drift"])
-            specs.append(await asyncio.to_thread(_spec, run_root, "a"))
-            # an edit of the original site layer, not of the plan's copy, is drift
-            server.DRIFT_CHECK_INTERVAL_S = 0  # type: ignore[misc]
-            external.write_text("SITE=two\n")
-            specs.append((await asyncio.to_thread(_status, run_root))["spec_drift"])
-        finally:
-            await server.close()
-            await _finish(engine, loop)
-
-    asyncio.run(scenario())
-    assert codes == [1, 2, 0]
-    plan, applied, rev = outputs
-    assert "changed: a, b" in plan and "stops running: a" in plan
-    assert "applied: catalog revision 2" in applied and "stopped a: rerun" in applied
-    assert rev == "2"
-    # the files on disk differ from the running catalog until the update applies them
-    before, after, spec, edited = specs
-    assert (before, after, edited) == (True, False, True)
-    assert "command: sleep 31" in spec["jil"]
+        assert start["ok"], start
+        deadline = time.monotonic() + 10
+        while ask("status")["jobs"]["A"]["status"] != "RUNNING":
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        source.write_text(JOB.replace("true", "sleep 31") + box)
+        preview = runner.invoke(app, ["reread", "-S", str(sock)])
+        assert preview.exit_code == 1, preview.output
+        assert "changed: A" in preview.output and "stops running: A" in preview.output
+        assert "token:" not in preview.output
+        source.write_text(JOB.replace("true", "sleep 32") + box)
+        result = runner.invoke(app, ["update", "-S", str(sock), "--wait"])
+        assert result.exit_code == 0, result.output
+        deadline = time.monotonic() + 10
+        while ask("status")["jobs"]["A"].get("attempt", {}).get("n") != 2:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        row = ask("status")["jobs"]["A"]
+        assert row["run_number"] == 1 and row["attempt"]["after"] == "update_stop"
+        assert "reread" not in row
+        assert ask()["catalog"]["jobs"]["A"]["exec_"]["command"] == "sleep 32"
+        rid = re.search(r"request_id: (\S+)", result.output).group(1)
+        status = ask("status")
+        assert roundtrip(
+            sock,
+            {
+                "cmd": "sendevent",
+                "verb": "FORCE_STARTJOB",
+                "payload": {"job": "BX"},
+                "baseline_id": status["baseline_id"],
+                "request_id": "start-box",
+                "expect": {"job:BX": status["jobs"]["BX"]["state_rev"]},
+            },
+        )["ok"]
+        deadline = time.monotonic() + 10
+        while not (
+            ask("status")["jobs"]["B"]["status"] == "RUNNING"
+            and ask("status")["jobs"]["C"]["status"] == "SUCCESS"
+        ):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        source.write_text(
+            JOB.replace("true", "sleep 32") + box + JOB.replace("A", "NEW") + "box_name: BX\n"
+        )
+        preview = runner.invoke(app, ["reread", "-S", str(sock)])
+        assert preview.exit_code == 1 and "update C: hold" in preview.output
+        assert ask("status")["jobs"]["BX"]["reread"]["action"] == "restart_box"
+        box_result = runner.invoke(app, ["update", "-S", str(sock), "--wait"])
+        assert box_result.exit_code == 0, box_result.output
+        deadline = time.monotonic() + 10
+        while (
+            ask("status")["jobs"]["B"].get("attempt", {}).get("n") != 1
+            or ask("status")["jobs"]["B"]["run_number"] != 2
+        ):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        jobs = ask("status")["jobs"]
+        assert jobs["BX"]["run_number"] == 2
+        assert jobs["C"]["on_hold"] and jobs["C"]["run_number"] == 1
+        assert jobs["B"]["attempt"]["after"] is None
+        source.unlink()
+        retry = runner.invoke(app, ["update", "-S", str(sock), "--request-id", rid, "--wait"])
+        assert retry.exit_code == 0, retry.output
+        assert "applied: catalog revision 2" in retry.output
+        assert ask()["revision"] == 3
 
 
 def _spec(run_root: Path, job: str) -> dict[str, Any]:
@@ -1229,14 +1245,14 @@ def test_while_an_update_stops_a_retry_waits_for_it_and_another_update_is_refuse
         first = _plan(engine, estate)
         estate.write(_jil({"slow": "sleep 32", "b": "sleep 1"}))
         second = _plan(engine, estate)
-        answers["first"] = await _update(engine, first, stop=True)
-        answers["retry"] = await _update(engine, first, stop=True)
-        answers["other"] = await _update(engine, second, stop=True, rid="r2")
-        answers["sent"] = await _update(engine, second, stop=True, rid="sent")
+        answers["first"] = await _update(engine, first)
+        answers["retry"] = await _update(engine, first)
+        answers["other"] = await _update(engine, second, rid="r2")
+        answers["sent"] = await _update(engine, second, rid="sent")
         bodies.append(await _applied(answers["retry"]))
         bodies.append(await _applied(answers["first"]))
         stop = engine.request_stop()
-        answers["draining"] = await _update(engine, second, stop=True, rid="r3")
+        answers["draining"] = await _update(engine, second, rid="r3")
         await stop
         await _finish(engine, loop)
 
@@ -1283,7 +1299,7 @@ def test_a_task_the_attempt_tier_does_not_run_is_cancelled_then_taken_up_or_clos
             'name = "t"\nfiles = ["jobs.jil"]\n[semantics]\nfw-existence = "immediate"\n'
         )
         estate.write(_jil({"a": "y", "c": "y"}))
-        answer = engine.request_update(_request(engine, _plan(engine, estate), stop=True))
+        answer = engine.request_update(_request(engine, _plan(engine, estate)))
         await engine.run_until_quiescent(clock.now())
         seen["answer"] = answer.result()
         seen["live"] = {job: run.attempt for job, run in engine._live.items()}
@@ -1362,107 +1378,90 @@ def test_refit_rebuilds_only_an_adapter_built_under_another_switch() -> None:
 def test_the_update_verb_refuses_a_malformed_request_and_answers_a_slow_application_pending(
     short_root: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The socket's `update`: a token that names no plan directory, a consent that is not a
-    boolean and a missing `expect` are refused before the engine sees them; a plan with no
-    directory is `invalid_argument`; `status` names the update while it stops; `--wait` past
-    the application window answers `pending`; and a loop that takes no step answers
-    `decision_timeout`."""
+    """Retired fields refuse; tokenless exact retries share the pending application."""
     from dsl41.cli_reload import socket_send, update_command
     from dsl41.runner_control import ControlServer, claimed_actor, roundtrip
+    from test_main_config import estate_file
+    from dsl41 import main_config as main
 
     slow = "trap '' TERM; sleep 30 & wait"
-    estate = Estate(short_root, _jil({"slow": slow}))
+    path = estate_file(short_root)
+    (short_root / "a.jil").write_text(_jil({"slow": slow}))
+    candidate = main.prepare(path)
     run_root = short_root / "run"
     slow_grace = EngineSettings(grace_term_s=3.0, grace_kill_s=1.0)
     answers: dict[str, dict[str, Any]] = {}
 
     def ask(**fields: Any) -> dict[str, Any]:
-        return roundtrip(run_root / "control.sock", {"cmd": "update", "v": 3, **fields})
+        return roundtrip(run_root / "control.sock", {"cmd": "update", "v": 4, **fields})
 
     async def scenario() -> None:
         engine = start_run(
-            estate.catalog,
+            candidate.catalog,
             run_root,
             clock=RealClock(),
             adapters=_adapters(slow_grace),
             hold_open=True,
             settings=slow_grace,
+            launched=main.profile_of(candidate),
+            source_capture=main.encoded_parts(candidate),
         )
+        engine.reread_source = str(path)
+        engine.launch_settings = dict(candidate.metadata["launch"])
         loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
         server = ControlServer(engine, run_root / "control.sock")
         await server.start()
         envelope = {
             "request_id": "u1",
             "baseline_id": engine.baseline_id,
-            "expect": {"config": 1},
             "claimed_actor": claimed_actor(),
         }
         try:
-            answers["token"] = await asyncio.to_thread(ask, token="../x", **envelope)
-            answers["consent"] = await asyncio.to_thread(
-                ask, token="0" * 64, stop_running="yes", **envelope
-            )
-            answers["expect"] = await asyncio.to_thread(
-                ask, token="0" * 64, request_id="u0", baseline_id=engine.baseline_id
-            )
-            answers["no_plan"] = await asyncio.to_thread(ask, token="0" * 64, **envelope)
+            for field, value in (
+                ("token", "../x"),
+                ("stop_running", True),
+                ("expect", {"config": 1}),
+                ("wait", "yes"),
+            ):
+                answers[field] = await asyncio.to_thread(ask, **{field: value}, **envelope)
+            answers["unknown"] = await asyncio.to_thread(ask, retry_only=True, **envelope)
             _start_jobs(engine, "slow")
             await _running(engine, "slow")
-            estate.write(_jil({"slow": "sleep 31"}))
-            token = _plan(engine, estate)
-            server._application_window = lambda: 0.2  # type: ignore[method-assign]
-            answers["pending"] = await asyncio.to_thread(
-                ask, token=token, stop_running=True, wait=True, **envelope
-            )
+            (short_root / "a.jil").write_text(_jil({"slow": "sleep 31"}))
+            server._application_window = lambda: 0.05
+            answers["pending"] = await asyncio.to_thread(ask, wait=True, **envelope)
             answers["status"] = await asyncio.to_thread(
-                roundtrip, run_root / "control.sock", {"cmd": "status", "v": 3}
+                roundtrip, run_root / "control.sock", {"cmd": "status"}
             )
-            # an exact retry without --wait is answered from the admission at once
-            answers["retry"] = await asyncio.to_thread(
-                ask, token=token, stop_running=True, **envelope
-            )
+            answers["other"] = await asyncio.to_thread(ask, **{**envelope, "request_id": "u2"})
+            answers["retry"] = await asyncio.to_thread(ask, retry_only=True, **envelope)
             capsys.readouterr()
 
             def cli_retry() -> int:
-                send = socket_send(run_root, request_id="u1")
                 return update_command(
-                    token, run_root=run_root, send=send, stop_running=True, wait=True
+                    send=socket_send(run_root / "control.sock", request_id="u1"), wait=True
                 )
 
             answers["cli"] = {"code": await asyncio.to_thread(cli_retry)}
             answers["cli"]["out"] = capsys.readouterr().out
-            loop.cancel()  # the loop takes no further step
-            await asyncio.gather(loop, return_exceptions=True)
-            server.DECISION_TIMEOUT_S = 0.1  # type: ignore[misc]
-            answers["timeout"] = await asyncio.to_thread(
-                ask, token=token, **{**envelope, "request_id": "u2"}
-            )
         finally:
+            await _finish(engine, loop)
             await server.close()
-            await engine.shutdown()
-            assert engine.journal is not None
-            engine.journal.close()
 
     asyncio.run(scenario())
-    assert (answers["token"]["code"], answers["consent"]["code"]) == (
-        "invalid_argument",
-        "invalid_argument",
-    )
-    assert answers["expect"]["code"] == "expect_required"
-    assert (answers["no_plan"]["code"], answers["no_plan"]["refused"]) == ("invalid_argument", True)
-    # every refusal names the token as sent and the names it concerns, none here
-    for name in ("token", "consent", "expect", "no_plan"):
-        assert answers[name]["names"] == [], name
-    assert (answers["token"]["token"], answers["no_plan"]["token"]) == ("../x", "0" * 64)
-    assert answers["status"]["update_window_s"] == 0.2
-    # `--wait` that ends with the update admitted and not applied exits 1, naming the token
-    assert answers["cli"]["code"] == 1 and "pending: " in answers["cli"]["out"]
-    pending = answers["pending"]
-    assert (pending["ok"], pending["stop"], pending["pending"]) == (True, ["slow"], True)
+    for field in ("token", "stop_running", "expect", "wait", "unknown"):
+        assert answers[field]["code"] == "invalid_argument", answers[field]
+        assert answers[field]["refused"]
+        assert "token" not in answers[field]
+    assert answers["status"]["update_window_s"] == 0.05
+    assert answers["cli"]["code"] == 1 and "pending: u1" in answers["cli"]["out"]
+    assert (
+        answers["pending"]["ok"],
+        answers["pending"]["stop"],
+        answers["pending"]["pending"],
+    ) == (True, ["slow"], True)
     assert answers["status"]["update"]["stopping"] == ["slow"]
     assert (answers["retry"]["ok"], answers["retry"]["application"]) == (True, None)
-    assert answers["timeout"]["code"] == "decision_timeout"
-    assert "refused" not in answers["timeout"]
 
 
 def test_an_engine_with_no_run_root_or_an_unreadable_plan_refuses_the_update(
@@ -1575,7 +1574,7 @@ def test_a_retry_while_a_resumed_update_still_stops_waits_for_its_application(
         assert engine.journal is not None
         estate.write(_jil({"a": "y", "b": "x"}))
         token = _plan(engine, estate)
-        request = _request(engine, token, stop=True)
+        request = _request(engine, token)
         attempt = engine._live["a"].attempt
         intent = {
             "event": "intent",
@@ -1602,11 +1601,9 @@ def test_a_retry_while_a_resumed_update_still_stops_waits_for_its_application(
         await engine.run_until_quiescent(clock.now())
         seen["body"] = await seen["retry"].applied
         ghost = {**intent, "token": "e" * 64, "request_id": "r2"}
-        ghost["fingerprint"] = UpdateRequest(
-            "e" * 64, True, 1, engine.baseline_id, "r2"
-        ).fingerprint
+        ghost["fingerprint"] = UpdateRequest("e" * 64, 1, engine.baseline_id, "r2").fingerprint
         engine.journal.append(Record(clock.now(), "config", None, "r2", ghost))
-        lone = engine.request_update(UpdateRequest("e" * 64, True, 1, engine.baseline_id, "r2"))
+        lone = engine.request_update(UpdateRequest("e" * 64, 1, engine.baseline_id, "r2"))
         await engine.run_until_quiescent(clock.now())
         seen["lone"] = lone.result()
         estate.write(_jil({"a": "z", "b": "x"}))

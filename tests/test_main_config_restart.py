@@ -198,8 +198,9 @@ def test_b4_updated_root_resumes_captured_inputs(short_root: Path, change: str) 
     root = short_root / "run"
     with cli_engine(path) as ask:
         (short_root / "a.jil").write_text(JOB.replace("true", "echo reviewed"))
-        token = plan_for(path, ask).token
-        result = CliRunner().invoke(app, ["update", token, "--config", str(path), "--wait"])
+        result = CliRunner().invoke(
+            app, ["update", "-S", str(short_root / "run" / "control.sock"), "--wait"]
+        )
         assert result.exit_code == 0, result.output
         assert ask()["revision"] == 2
     before = read_config_row(root, 2)
@@ -246,9 +247,7 @@ def seed_root(path: Path, *, stopping: bool, boundary: bool, snapshot: bool = Fa
             candidate = main.prepare(path)
             result = reread(path.parent, engine.update.live(), root / "plans", candidate=candidate)
             if stopping:
-                request = UpdateRequest(
-                    result.token, True, 1, engine.baseline_id, "review-recovery"
-                )
+                request = UpdateRequest(result.token, 1, engine.baseline_id, "review-recovery")
                 intent = {
                     "event": "intent",
                     "token": result.token,
@@ -582,26 +581,32 @@ def test_b2_changed_host_requires_restart_before_reread(short_root: Path) -> Non
         config_file(
             short_root, engine='as_machine = ["after"]\nmachine_policy = "local-eligible"\n'
         )
-        result = CliRunner().invoke(app, ["reread", "--config", str(path)])
+        result = CliRunner().invoke(app, ["reread", "-S", str(short_root / "run" / "control.sock")])
         assert (
-            result.exit_code == 2 and "as_machine" in result.output and "restart" in result.output
+            result.exit_code == 0
+            and "host launch settings" in result.output
+            and "restart" in result.output
         )
     row = read_config_row(short_root / "run", 1)
     with cli_engine(path) as ask:
         assert ask()["launch"]["as_machine"] == ["after"]
-        result = CliRunner().invoke(app, ["reread", "--config", str(path)])
+        result = CliRunner().invoke(app, ["reread", "-S", str(short_root / "run" / "control.sock")])
         assert result.exit_code == 0, result.output
     assert read_config_row(short_root / "run", 1) == row
 
 
 @pytest.mark.usefixtures("cli_env")
-def test_k6_update_reads_only_the_engine_location(
+def test_k6_socket_update_retry_does_not_reopen_sources(
     short_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = estate_file(short_root)
     with cli_engine(path) as ask:
         (short_root / "a.jil").write_text(JOB.replace("true", "echo reviewed"))
-        token = plan_for(path, ask).token
+        first = CliRunner().invoke(
+            app, ["update", "-S", str(short_root / "run" / "control.sock"), "--wait"]
+        )
+        assert first.exit_code == 0, first.output
+        rid = re.search(r"request_id: (\S+)", first.output).group(1)
         (short_root / "a.jil").unlink()
         path.write_text(
             f'format_version = 999\nrequires_dsl41 = false\nestate = false\nlint = []\n[engine]\nrun_root = "{short_root}/run"\nas_machine = 3\nmachine_policy = false\naccess_map = 7\nenvironment = []\n'
@@ -612,7 +617,17 @@ def test_k6_update_reads_only_the_engine_location(
         monkeypatch.setattr(
             main, "load_host", lambda *a, **k: pytest.fail("update read host settings")
         )
-        result = CliRunner().invoke(app, ["update", token, "--config", str(path), "--wait"])
+        result = CliRunner().invoke(
+            app,
+            [
+                "update",
+                "-S",
+                str(short_root / "run" / "control.sock"),
+                "--request-id",
+                rid,
+                "--wait",
+            ],
+        )
         assert result.exit_code == 0, result.output
         assert ask()["revision"] == 2
         assert ask()["catalog"]["jobs"]["A"]["exec_"]["command"] == "echo reviewed"
@@ -832,7 +847,7 @@ def test_k2_pending_candidate_is_checked_before_update_recovery(short_root, monk
         (short_root / "a.jil").write_text(JOB + f"profile: {profile}\n")
         candidate = main.prepare(path)
         result = reread(short_root, engine.update.live(), root / "plans", candidate=candidate)
-        request = UpdateRequest(result.token, True, 1, engine.baseline_id, "synthetic-pending")
+        request = UpdateRequest(result.token, 1, engine.baseline_id, "synthetic-pending")
         engine.journal.append(
             Record(
                 engine.clock.now(),
@@ -930,7 +945,7 @@ def test_restart_accepts_current_kill_signals(
                     short_root, engine.update.live(), root / "plans", candidate=main.prepare(path)
                 )
                 pending = engine.request_update(
-                    UpdateRequest(plan.token, False, 1, engine.baseline_id, "policy")
+                    UpdateRequest(plan.token, 1, engine.baseline_id, "policy")
                 )
                 await engine.run_until_quiescent(engine.clock.now())
                 answer = pending.result()
@@ -990,3 +1005,25 @@ def test_restart_accepts_current_kill_signals(
     result = CliRunner().invoke(app, ["run", "--config", str(path)])
     assert result.exit_code == 2 and "must end with KILL" in result.output
     assert (root / "engine.db").read_bytes() == before
+
+
+def test_reload_uses_latest_launch_config_but_drift_uses_applied_capture(short_root: Path):
+    path = estate_file(short_root)
+    socket = short_root / "run" / "control.sock"
+    with cli_engine(path):
+        pass
+    other = short_root / "other.toml"
+    other.write_text(path.read_text().replace('["*.jil"]', '["b.jil"]'))
+    (short_root / "b.jil").write_text(JOB.replace("true", "echo from-b"))
+    with cli_engine(other) as ask:
+        assert ask("status")["spec_drift"] is False
+        assert ask()["catalog"]["jobs"]["A"]["exec_"]["command"] == "true"
+        result = roundtrip(socket, {"v": 4, "cmd": "reread"})
+        assert result["ok"] and result["source"]["path"] == str(other)
+        assert result["preview"]["changed"] == [{"name": "A", "reason": None}]
+    path.write_text("broken original config")
+    with cli_engine(other) as ask:
+        status = ask("status")
+        assert status["spec_drift"] is True
+        assert "reread" not in status["jobs"]["A"]
+        assert roundtrip(socket, {"v": 4, "cmd": "reread"})["ok"]

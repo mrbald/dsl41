@@ -34,17 +34,15 @@ from dsl41.reload_plan import Live, RereadResult, load_estate, read_plan, reread
 from dsl41.reload_update import (
     ALL_STOPPED_OR_NONE,
     APPLY,
-    BOX_RUNNING,
     EXIT_RECORDED,
     JOURNAL_APPLIED,
     JOURNAL_INTENT,
-    STALE_PLAN,
     STOP_ATTEMPT,
     UPDATE,
     UPDATE_ADMITTED,
     UPDATE_IN_PROGRESS,
     UPDATE_STATES,
-    WOULD_STOP_RUNNING,
+    STALE_PLAN,
     Admitted,
     Application,
     Refused,
@@ -257,9 +255,9 @@ def test_an_admission_with_nothing_to_stop_applies_at_once() -> None:
 def test_a_refusal_ends_the_update_with_no_effect() -> None:
     effects = Effects()
     tier = UpdateTier(effects, _prepare)
-    tier.admit(Refused(TOKEN, WOULD_STOP_RUNNING, ("A",)))
+    tier.admit(Refused(TOKEN, STALE_PLAN, ("A",)))
     assert tier.state == "REFUSED"
-    assert tier.refusal == Refused(TOKEN, WOULD_STOP_RUNNING, ("A",))
+    assert tier.refusal == Refused(TOKEN, STALE_PLAN, ("A",))
     assert effects.log == [] and tier.application is None
 
 
@@ -342,14 +340,11 @@ class World:
         self.settings = application.settings
         self.rev = application.rev
 
-    def update(
-        self, document: dict[str, Any], candidate: CatalogIR, *, stop_running: bool = False
-    ) -> tuple[UpdateTier, Effects]:
+    def update(self, document: dict[str, Any], candidate: CatalogIR) -> tuple[UpdateTier, Effects]:
         decision = admission_check(
             document,
             live=self.live(),
             candidate=candidate,
-            stop_running=stop_running,
             open_update=self.open_update,
         )
         marked = load_exceptions(self.estate).names
@@ -440,9 +435,9 @@ def test_a_box_that_started_since_reread_refuses_the_plan(tmp_path: Path) -> Non
     assert result.plan.added == ("ZZ_NEW_C",)
     world.feed("FORCE_STARTJOB", job="OPS_B")
     assert world.row("OPS_B").status == "RUNNING"
-    tier, effects = world.update(document, candidate, stop_running=True)
-    assert tier.refusal == Refused(document["token"], BOX_RUNNING, ("OPS_B",))
-    assert effects.log == []
+    tier, effects = world.update(document, candidate)
+    assert tier.refusal is None
+    assert tier.state in {"STOPPING", "APPLIED"}
 
 
 def _twenty_running(world: World) -> list[str]:
@@ -454,18 +449,6 @@ def _twenty_running(world: World) -> list[str]:
     return running[:20]
 
 
-def test_a_plan_that_stops_running_jobs_is_refused_without_consent(tmp_path: Path) -> None:
-    world = _world(tmp_path)
-    running = _twenty_running(world)
-    for job in running[3:5]:
-        _command_change(world, job)
-    result, document, candidate = world.reread()
-    assert result.stop == tuple(sorted(running[3:5]))
-    tier, effects = world.update(document, candidate)
-    assert tier.refusal == Refused(document["token"], WOULD_STOP_RUNNING, result.stop)
-    assert effects.log == []
-
-
 def test_two_running_jobs_are_stopped_and_eighteen_untouched_with_consent(tmp_path: Path) -> None:
     world = _world(tmp_path)
     running = _twenty_running(world)
@@ -474,7 +457,7 @@ def test_two_running_jobs_are_stopped_and_eighteen_untouched_with_consent(tmp_pa
         _command_change(world, job)
     _, document, candidate = world.reread()
     before = {name: world.row(name) for name in world.oracle.store.job}
-    tier, effects = world.update(document, candidate, stop_running=True)
+    tier, effects = world.update(document, candidate)
     assert tier.state == "STOPPING"
     assert effects.log == [
         (JOURNAL_INTENT, document["token"], tuple(touched)),
@@ -514,7 +497,7 @@ def test_the_dispatch_filter_names_the_added_changed_and_removed_jobs_while_stop
             "machine: ops_util\nowner: ~{$OWNER}~\nstatus: ON_ICE\n"
         )
     _, document, candidate = world.reread()
-    tier, _ = world.update(document, candidate, stop_running=True)
+    tier, _ = world.update(document, candidate)
     assert tier.state == "STOPPING"
     assert tier.dispatch_filter == {"OPS_HEARTBEAT_C", "OPS_FAIL_ALERT_C", "ZZ_NEW_C"}
     assert "ZZ_NEW_C" not in world.oracle.store.job
@@ -596,15 +579,9 @@ def test_a_removed_jobs_tombstone_keeps_its_hold_and_shows_on_re_add(
     with (world.estate / "global.jil").open("a") as handle:
         handle.write("\n" + text)
     assert world.live().tombstones == {"OPS_FAIL_ALERT_C": ("ON_HOLD",)}
-    send = _send(world)
-    assert reread_command(world.estate, run_root=tmp_path, send=send, **world.site()) == 0
-    out = capsys.readouterr().out.splitlines()
-    assert out[1:3] == [
-        "added: OPS_FAIL_ALERT_C",
-        "re-added with its earlier flags: OPS_FAIL_ALERT_C (ON_HOLD)",
-    ]
     result, document, candidate = world.reread()
     assert result.plan.added == ("OPS_FAIL_ALERT_C",)
+    assert result.restored == (("OPS_FAIL_ALERT_C", ("ON_HOLD",)),)
     assert document["restored"] == [{"name": "OPS_FAIL_ALERT_C", "flags": ["ON_HOLD"]}]
     tier, _ = world.update(document, candidate)
     assert tier.application is not None
@@ -653,7 +630,7 @@ def test_a_removed_running_job_is_stopped_not_rerun_and_its_spent_units_stay_spe
     assert world.row("OPS_SPOOL_C").reservations
     world.remove("global.jil", "OPS_SPOOL_C")
     _, document, candidate = world.reread()
-    tier, effects = world.update(document, candidate, stop_running=True)
+    tier, effects = world.update(document, candidate)
     assert effects.log[1] == (STOP_ATTEMPT, "OPS_SPOOL_C", UPDATE_STOP)
     tier.exit_recorded("OPS_SPOOL_C")
     assert tier.application is not None
@@ -671,7 +648,7 @@ def test_a_marked_stopped_job_is_held_by_the_interruption_rule(tmp_path: Path) -
         '[jobs]\n"OPS_HEARTBEAT_C" = "pages the operator twice"\n'
     )
     _, document, candidate = world.reread()
-    tier, _ = world.update(document, candidate, stop_running=True)
+    tier, _ = world.update(document, candidate)
     tier.exit_recorded("OPS_HEARTBEAT_C")
     assert tier.application is not None
     assert tier.application.stopped == (("OPS_HEARTBEAT_C", "hold"),)
@@ -759,11 +736,11 @@ def test_one_update_is_in_flight_at_a_time(tmp_path: Path) -> None:
     world.feed("FORCE_STARTJOB", job="OPS_HEARTBEAT_C")
     _command_change(world, "OPS_HEARTBEAT_C")
     _, first_doc, first = world.reread()
-    tier, _ = world.update(first_doc, first, stop_running=True)
+    tier, _ = world.update(first_doc, first)
     assert world.open_update == first_doc["token"]
     _command_change(world, "OPS_SPOOL_C")
     _, second_doc, second = world.reread()
-    other, effects = world.update(second_doc, second, stop_running=True)
+    other, effects = world.update(second_doc, second)
     assert other.refusal == Refused(second_doc["token"], UPDATE_IN_PROGRESS, (first_doc["token"],))
     assert effects.log == []
     # the open tier answers a second admission the same way and keeps its filter
@@ -778,7 +755,7 @@ def test_a_stopped_job_the_oracle_ended_meanwhile_is_answered_none(tmp_path: Pat
         world.feed("FORCE_STARTJOB", job=job)
         _command_change(world, job)
     _, document, candidate = world.reread()
-    tier, _ = world.update(document, candidate, stop_running=True)
+    tier, _ = world.update(document, candidate)
     world.feed("STATUS", job="OPS_SPOOL_C", exit_code=0)  # a natural end beat the stop
     world.feed("FORCE_STARTJOB", job="OPS_FAIL_ALERT_C")  # not in the stop set
     tier.exit_recorded("OPS_SPOOL_C")
@@ -792,7 +769,7 @@ def test_a_stopped_run_the_oracle_replaced_meanwhile_is_answered_none(tmp_path: 
     world.feed("FORCE_STARTJOB", job="OPS_HEARTBEAT_C")
     _command_change(world, "OPS_HEARTBEAT_C")
     _, document, candidate = world.reread()
-    tier, _ = world.update(document, candidate, stop_running=True)
+    tier, _ = world.update(document, candidate)
     world.feed("KILLJOB", job="OPS_HEARTBEAT_C")
     world.feed("FORCE_STARTJOB", job="OPS_HEARTBEAT_C")
     row = world.row("OPS_HEARTBEAT_C")
@@ -810,7 +787,7 @@ def test_a_dropped_depletable_keeps_its_type_so_its_spent_units_stay_spent(
     world.edit("global.jil", "resources: (TOKENS, QUANTITY=2)\n", "")
     world.edit("infra.jil", "\ninsert_resource: TOKENS\nres_type: D\namount: 5\n", "")
     _, document, candidate = world.reread()
-    tier, _ = world.update(document, candidate, stop_running=True)
+    tier, _ = world.update(document, candidate)
     tier.exit_recorded("OPS_SPOOL_C")
     assert tier.state == "APPLIED"
     assert world.row("OPS_SPOOL_C").reservations  # the live run still holds its units
@@ -863,7 +840,7 @@ def test_a_running_job_whose_type_changes_is_stopped_retired_and_admitted(
     result, document, candidate = world.reread()
     assert result.plan.added == result.plan.removed == ("OPS_HEARTBEAT_C",)
     assert result.stop == ("OPS_HEARTBEAT_C",)
-    tier, effects = world.update(document, candidate, stop_running=True)
+    tier, effects = world.update(document, candidate)
     assert effects.log[1] == (STOP_ATTEMPT, "OPS_HEARTBEAT_C", UPDATE_STOP)
     tier.exit_recorded("OPS_HEARTBEAT_C")
     assert tier.application is not None
@@ -1222,77 +1199,6 @@ def _send(world: World, reply: UpdateReply | None = None) -> Any:
     return send
 
 
-def test_reread_prints_the_plan_and_exits_0_when_it_stops_nothing(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    world = _world(tmp_path)
-    world.edit("global.jil", "start_mins: 0, 15, 30, 45", "start_mins: 5, 35")
-    world.remove("global.jil", "OPS_FAIL_ALERT_C")
-    send = _send(world)
-    code = reread_command(world.estate, run_root=tmp_path, send=send, **world.site())
-    out = capsys.readouterr().out.splitlines()
-    assert code == 0
-    assert send.calls == [("catalog", {})]
-    token = out[-1].removeprefix("token: ")
-    assert read_plan(tmp_path / "plans", token) is not None
-    assert out[:6] == [
-        "plan against catalog revision 1",
-        "added: none",
-        "changed: OPS_HEARTBEAT_C",
-        "removed: OPS_FAIL_ALERT_C",
-        "unchanged: 79 jobs",
-        "stops running: none",
-    ]
-    assert not any(line.startswith("marked") for line in out)
-
-
-def test_reread_exits_1_when_the_plan_stops_running_jobs_and_names_the_marked_ones(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    world = _world(tmp_path)
-    world.feed("FORCE_STARTJOB", job="OPS_HEARTBEAT_C")
-    world.feed("FORCE_STARTJOB", job="OPS_SPOOL_C")
-    _command_change(world, "OPS_HEARTBEAT_C")
-    _command_change(world, "OPS_SPOOL_C")
-    world.edit("global.jil", "job_terminator: 1\n", "job_terminator: 1\nn_retrys: 2\n")
-    (world.estate / "non-idempotent.toml").write_text('[jobs]\n"OPS_SPOOL_C" = "spools twice"\n')
-    code = reread_command(world.estate, run_root=tmp_path, send=_send(world), **world.site())
-    out = capsys.readouterr().out.splitlines()
-    assert code == 1
-    assert "stops running: OPS_HEARTBEAT_C, OPS_SPOOL_C" in out
-    assert "marked non-idempotent among them: OPS_SPOOL_C (spools twice)" in out
-    assert any(line.startswith("preflight WARN [known-unsupported] OPS_SPOOL_C: ") for line in out)
-
-
-def test_known_unsupported_legacy_reread_warns_without_refusing(tmp_path: Path, capsys) -> None:
-    world = _world(tmp_path)
-    world.edit("global.jil", "job_terminator: 1\n", "job_terminator: 1\nn_retrys: 2\n")
-    assert reread_command(world.estate, run_root=tmp_path, send=_send(world), **world.site()) == 0
-    output = capsys.readouterr().out
-    token = output.split("token: ")[-1].strip()
-    document = read_plan(tmp_path / "plans", token)
-    assert "lint_findings" not in document
-    assert any(
-        item["code"] == "known-unsupported" and "n_retrys:" in item["message"]
-        for item in document["preflight_warnings"]
-    )
-
-
-def test_reread_exits_2_with_the_findings_when_refused(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    world = _world(tmp_path)
-    world.edit("global.jil", "condition: s(SOD_PREFLIGHT_C)", "condition: s(NO_SUCH_JOB_C)")
-    code = reread_command(world.estate, run_root=tmp_path, send=_send(world), **world.site())
-    captured = capsys.readouterr()
-    assert code == 2 and captured.out == ""
-    assert captured.err.startswith("reread: ")
-    (world.estate / "global.jil").write_text((SMALL / "global.jil").read_text())
-    (world.estate / "non-idempotent.toml").write_text("[jobs]\nOPS_SPOOL_C = 3\n")
-    assert reread_command(world.estate, run_root=tmp_path, send=_send(world), **world.site()) == 2
-    assert "must be a string" in capsys.readouterr().err
-
-
 def test_update_prints_the_decision_and_with_wait_the_application(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1301,14 +1207,12 @@ def test_update_prints_the_decision_and_with_wait_the_application(
     _command_change(world, "OPS_HEARTBEAT_C")
     _, document, candidate = world.reread()
     token = document["token"]
-    decision = admission_check(
-        document, live=world.live(), candidate=candidate, stop_running=True, open_update=None
-    )
+    decision = admission_check(document, live=world.live(), candidate=candidate, open_update=None)
     assert isinstance(decision, Admitted)
     send = _send(world, UpdateReply(decision))
-    assert update_command(token, run_root=tmp_path, send=send, stop_running=True) == 0
-    assert send.calls == [("update", {"token": token, "stop_running": True, "wait": False})]
-    assert capsys.readouterr().out == f"admitted: plan {token}; stopping: OPS_HEARTBEAT_C\n"
+    assert update_command(send=send) == 0
+    assert send.calls == [("update", {"wait": False})]
+    assert capsys.readouterr().out == "admitted: update; stopping: OPS_HEARTBEAT_C\n"
     application = Application(
         token,
         2,
@@ -1322,9 +1226,9 @@ def test_update_prints_the_decision_and_with_wait_the_application(
         (("OPS_HEARTBEAT_C", "rerun"),),
     )
     send = _send(world, UpdateReply(decision, application))
-    assert update_command(token, run_root=tmp_path, send=send, stop_running=True, wait=True) == 0
+    assert update_command(send=send, wait=True) == 0
     assert capsys.readouterr().out.splitlines() == [
-        f"admitted: plan {token}; stopping: OPS_HEARTBEAT_C",
+        "admitted: update; stopping: OPS_HEARTBEAT_C",
         f"applied: catalog revision 2 (sha256:{'0' * 64})",
         "added: ZZ_NEW_C",
         "changed: OPS_HEARTBEAT_C",
@@ -1334,44 +1238,14 @@ def test_update_prints_the_decision_and_with_wait_the_application(
     ]
 
 
-@pytest.mark.parametrize(
-    ("refusal", "line"),
-    [
-        (Refused(TOKEN, STALE_PLAN), "update: refused stale_plan"),
-        (Refused(TOKEN, BOX_RUNNING, ("OPS_B",)), "update: refused box_running: OPS_B"),
-        (
-            Refused(TOKEN, WOULD_STOP_RUNNING, ("A", "B")),
-            "update: refused would_stop_running: A, B; --stop-running consents to stopping them",
-        ),
-    ],
-    ids=["stale", "box", "would_stop"],
-)
-def test_update_exits_2_with_the_refusal(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], refusal: Refused, line: str
-) -> None:
-    world = _world(tmp_path)
-    _, document, _ = world.reread()
-    code = update_command(
-        document["token"], run_root=tmp_path, send=_send(world, UpdateReply(refusal))
-    )
-    captured = capsys.readouterr()
-    assert (code, captured.out, captured.err) == (2, "", line + "\n")
+def test_update_exits_2_with_the_refusal(tmp_path, capsys):
+    refusal = Refused(TOKEN, STALE_PLAN)
+    assert update_command(send=lambda *args: UpdateReply(refusal)) == 2
+    assert capsys.readouterr().err == "update: refused stale_plan\n"
 
 
-def test_update_exits_2_for_a_token_with_no_complete_plan(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    world = _world(tmp_path)
-    send = _send(world)
-    assert update_command(TOKEN, run_root=tmp_path, send=send) == 2
-    assert send.calls == []
-    assert capsys.readouterr().err.startswith(f"update: no complete plan {TOKEN}")
-
-
-def test_a_command_refuses_a_reply_of_the_wrong_shape(tmp_path: Path) -> None:
-    world = _world(tmp_path)
-    _, document, _ = world.reread()
-    with pytest.raises(TypeError, match="not Live"):
-        reread_command(world.estate, run_root=tmp_path, send=lambda verb, args: None)
-    with pytest.raises(TypeError, match="not UpdateReply"):
-        update_command(document["token"], run_root=tmp_path, send=lambda verb, args: None)
+def test_a_command_refuses_a_reply_of_the_wrong_shape():
+    with pytest.raises(TypeError):
+        reread_command(send=lambda *args: None)
+    with pytest.raises(TypeError):
+        update_command(send=lambda *args: None)

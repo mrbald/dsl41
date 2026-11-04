@@ -8,6 +8,8 @@ oracle, and run history folded out of one or more run roots.
 
 from __future__ import annotations
 
+import shlex
+
 from enum import Enum
 import os
 from pathlib import Path
@@ -1052,6 +1054,7 @@ async def _serve_run(
         # the first run writes the defaults out (spec-wiring 1b); the read above already
         # refused a file that does not read
         engine.launch_settings = dict(main_launch or {})
+        engine.reread_source = None if main_config_path is None else str(main_config_path)
         if hook_settings is not None and hook_settings.status_hook is not None:
             engine.status_hooks = StatusHooks(engine, hook_settings)
         load_settings(run_root)
@@ -1110,7 +1113,7 @@ async def _serve_run(
             from dsl41.main_config import pending_source_changes
 
             typer.echo(
-                f"{pending_source_changes(main_config.decoded_parts(engine.source_capture))} pending source changes; run dsl41 reread",
+                f"{pending_source_changes(main_config.decoded_parts(engine.source_capture))} pending source changes; run dsl41 reread -S {shlex.quote(str(server.path))}",
                 err=True,
             )
         end = await _await_run_end(engine, server, loop_task, ui)

@@ -65,8 +65,6 @@ Code = Literal[
     # a running box's membership, it stops running jobs without consent, or another update
     # is stopping
     "stale_plan",
-    "box_running",
-    "would_stop_running",
     "update_in_progress",
 ]
 

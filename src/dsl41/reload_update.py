@@ -1,7 +1,7 @@
-"""`update TOKEN` as a module: the admission, the declared `UPDATE` chart, its tier and the
+"""The internal update module: the admission, the declared `UPDATE` chart, its tier and the
 application (spec-reload "`dsl41 update`").
 
-An update applies exactly the plan `reread` stored, against the catalog revision `reread` saw.
+An update applies the captured candidate prepared for that request (DL-463).
 It is durable, so it is a declared machine (DL-424): a crash between the journaled intent and the
 application resumes it.
 
@@ -41,7 +41,7 @@ from dsl41.engine_charts import UPDATE_STOP, Intent
 from dsl41.ir import CatalogIR
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import JobRuntime
-from dsl41.reload_diff import Change, Plan, catalog_hash_v2, retyped_jobs, running_boxes
+from dsl41.reload_diff import Change, Plan, catalog_hash_v2, retyped_jobs
 from dsl41.reload_plan import STOPPABLE, Live, stop_set
 from dsl41.semantics import SemanticSwitches
 from dsl41.semantics import resolve as resolve_switches
@@ -86,8 +86,6 @@ JOURNAL_APPLIED: Final = "journal_applied"
 
 STALE_PLAN: Final = "stale_plan"
 UPDATE_IN_PROGRESS: Final = "update_in_progress"
-BOX_RUNNING: Final = "box_running"
-WOULD_STOP_RUNNING: Final = "would_stop_running"
 
 #: The states of the chart's one region.
 UPDATE_STATES: Final = ("IDLE", "STOPPING", "APPLIED", "REFUSED")
@@ -114,7 +112,7 @@ class Refused:
     the open update's token for `update_in_progress`)."""
 
     token: str
-    code: Literal["stale_plan", "box_running", "would_stop_running", "update_in_progress"]
+    code: Literal["stale_plan", "update_in_progress"]
     names: tuple[str, ...] = ()
 
 
@@ -147,31 +145,16 @@ def admission_check(
     *,
     live: Live,
     candidate: CatalogIR,
-    stop_running: bool,
     open_update: str | None,
 ) -> Admitted | Refused:
-    """Re-check what `reread` only previewed, against the engine's state now (spec-reload).
-
-    One update is in flight at a time: while the update with token `open_update` stops, any
-    other is `update_in_progress` naming it. `live` is the engine's catalog, revision and
-    statuses. A plan diffed against another
-    revision is `stale_plan`. A box the plan edits structurally that is RUNNING now is
-    `box_running` with the boxes. The stop set is found again from the statuses now; without
-    `stop_running` a non-empty one is `would_stop_running` with the names. Otherwise the plan is
-    admitted with that stop set, and `stop_running` is the consent to it.
-    """
+    """Admit one current prepared candidate and recompute its stop set (DL-463)."""
     token = str(plan_doc["token"])
     if open_update is not None:
         return Refused(token, UPDATE_IN_PROGRESS, (open_update,))
     if plan_doc["live_rev"] != live.revision:
         return Refused(token, STALE_PLAN)
     plan = plan_of(plan_doc, live.catalog)
-    boxes = running_boxes(plan, candidate, live.status)
-    if boxes:
-        return Refused(token, BOX_RUNNING, boxes)
-    stops = stop_set(plan, live)
-    if stops and not stop_running:
-        return Refused(token, WOULD_STOP_RUNNING, stops)
+    stops = stop_set(plan, live, candidate)
     runs = tuple((job, live.runs.get(job, 0)) for job in stops)
     return Admitted(token, stops, _touched(plan), runs)
 
@@ -490,7 +473,7 @@ class UpdateTier:
         update stops, none otherwise."""
         return self._filter if self.state == "STOPPING" else frozenset()
 
-    def admit(self, decision: Admitted | Refused) -> Admitted | Refused:
+    def admit(self, decision: Admitted | Refused, *, settle: bool = True) -> Admitted | Refused:
         """Post the admission's answer and answer it. A tier that already took one answers
         `update_in_progress` naming its own token instead, and changes nothing. The dispatch
         filter is installed once the chart is in STOPPING, before any stop is performed."""
@@ -501,7 +484,8 @@ class UpdateTier:
             self._admitted = decision
             self._filter = decision.dispatch_filter
         self._perform_all(outcomes)
-        self._settle()
+        if settle:
+            self._settle()
         return decision
 
     def resume(
@@ -524,12 +508,13 @@ class UpdateTier:
         """Apply once no job of the stop set is still open: `all_stopped_or_none`."""
         self._settle()
 
-    def exit_recorded(self, job: str) -> None:
+    def exit_recorded(self, job: str, *, settle: bool = True) -> None:
         """An attempt of `job` ended."""
         if self.state != "STOPPING" or job not in self._record.open:
             return
         self._send(EXIT_RECORDED, job)
-        self._settle()
+        if settle:
+            self._settle()
 
     def _settle(self) -> None:
         if self.state == "STOPPING" and not self._record.open:
@@ -561,7 +546,6 @@ class UpdateTier:
 __all__ = [
     "ALL_STOPPED_OR_NONE",
     "APPLY",
-    "BOX_RUNNING",
     "EXIT_RECORDED",
     "JOURNAL_APPLIED",
     "JOURNAL_INTENT",
@@ -572,7 +556,6 @@ __all__ = [
     "UPDATE_ADMITTED",
     "UPDATE_KEY",
     "UPDATE_STATES",
-    "WOULD_STOP_RUNNING",
     "Admitted",
     "Application",
     "OnStop",

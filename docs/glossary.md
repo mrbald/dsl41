@@ -132,9 +132,9 @@ See [the boundary](access-model.md#2-the-boundary),
 
 ### plan token
 
-The 64-hex-digit identity printed by `dsl41 reread` for its captured plan
-under `plans/<token>/`. `dsl41 update TOKEN` asks the engine to apply those
-captured bytes against the named configuration revision.
+The internal captured-update artifact identity under `plans/<token>/`.
+The reread/update commands neither print nor accept it. Socket update prepares
+current inputs itself (DL-463).
 See [control §2](control-protocol.md#2-transport-and-framing-frozen)
 and [DL-437](decision-log.md).
 

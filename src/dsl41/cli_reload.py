@@ -1,164 +1,95 @@
-"""The redeploy verbs `reread` and `update` (spec-reload).
-
-Each command reads what it needs from the engine through `send`, one function: `send("catalog",
-{})` answers the engine's `Live`, and `send("update", {"token", "stop_running", "wait"})`
-answers an `UpdateReply`. The registered verbs bind `send` to the run root's control socket
-(`socket_send`: the `catalog` read verb and the `update` mutation, docs/control-protocol.md);
-a test passes its own. A command prints its result and answers its exit code; the registered
-verb raises `typer.Exit` with it.
-
-`reread` exits 0 for a plan that stops nothing, 1 for a plan that stops at least one running job,
-and 2 for a refusal. `update` exits 0 when the plan is admitted, and applied with `--wait`; 1 when
-`--wait` ended with the plan admitted and not yet applied; and 2 for a refusal or a token with no
-complete plan. `--wait` waits on the socket as long as the engine's `status` says it waits for an
-application (`update_window_s`), plus the round trip's own timeout.
-"""
+"""Socket-only preview and update clients (DL-463)."""
 
 from __future__ import annotations
 
+import shlex
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import uuid
-
 import typer
 
-from dsl41.idempotence import IdempotenceError, load_exceptions
-from dsl41 import reload_plan
-from dsl41.reload_plan import Live, RereadRefused, read_plan
-from dsl41.reload_update import WOULD_STOP_RUNNING, Admitted, Application, Refused
-from dsl41.main_config import CONFIG_OPT, selected_config
+from dsl41.cli_control import SOCKET_OPT
+from dsl41.reload_plan import Live
+from dsl41.reload_update import Admitted, Application, Refused
 
-#: The engine as the commands reach it: a verb and its arguments in, the reply out.
-type Send = Callable[[str, Mapping[str, object]], object]
-
-#: The plans directory of a run root.
 PLANS = "plans"
+type Send = Callable[[str, Mapping[str, object]], object]
 
 
 @dataclass(frozen=True)
 class UpdateReply:
-    """The engine's answer to `update`: the admission's decision, and with `--wait` the
-    application once it is done."""
-
     decision: Admitted | Refused
     application: Application | None = None
-    #: admitted, and `--wait` ended before the application was done
     pending: bool = False
+    request_id: str = ""
+
+
+class SendFailed(Exception):
+    """A transport failure or refused request."""
 
 
 def _names(names: Sequence[str]) -> str:
     return ", ".join(names) if names else "none"
 
 
-def _live(send: Send) -> Live:
-    live = send("catalog", {})
-    if not isinstance(live, Live):
-        raise TypeError(f"the catalog verb answered {type(live).__name__}, not Live")
-    return live
-
-
-def reread_command(
-    estate_dir: Path,
-    *,
-    run_root: Path,
-    send: Send,
-    properties: Sequence[Path] = (),
-    environment: str | None = None,
-    config: Path | None = None,
-) -> int:
-    """Diff ESTATE_DIR against the engine's catalog and store the plan under RUN_ROOT/plans.
-
-    Prints the added jobs with the flags a re-added name gets back, the changed and removed jobs
-    with their names, the count of unchanged ones, the
-    running jobs the plan stops and the marked (non-idempotent) ones among them, the preflight
-    warnings, and the token. Nothing live changes.
-    """
-    live = _live(send)
-    plans = run_root / PLANS
-    try:
-        candidate = None
-        if config is not None:
-            from dsl41.main_config import prepare, emit_policy
-
-            candidate = prepare(config)
-            emit_policy(candidate, refuse=False)
-        result = reload_plan.reread(
-            estate_dir, live, plans, properties, environment, candidate=candidate
-        )
-        if candidate is None:
-            marked = load_exceptions(result.plan_dir)
-        else:
-            from dsl41.idempotence import Exceptions
-
-            marked = Exceptions(candidate.metadata["non_idempotent"])
-    except (RereadRefused, IdempotenceError) as exc:
-        findings = exc.findings if isinstance(exc, RereadRefused) else (str(exc),)
-        for finding in findings:
-            typer.echo(f"reread: {finding}", err=True)
-        return 2
-    document: dict[str, Any] = read_plan(plans, result.token) or {}
-    plan = result.plan
-    typer.echo(f"plan against catalog revision {live.revision}")
-    typer.echo(f"added: {_names(plan.added)}")
-    for name, flags in result.restored:
-        typer.echo(f"re-added with its earlier flags: {name} ({', '.join(flags)})")
-    changed = [
-        change.name if not change.reason else f"{change.name} ({change.reason})"
-        for change in plan.changed
+def reread_command(*, send: Send) -> int:
+    answer = send("reread", {})
+    if not isinstance(answer, Mapping):
+        raise TypeError("reread did not answer a preview")
+    if not answer.get("ok"):
+        raise SendFailed(f"reread: no diff available: {answer.get('error')}")
+    view = answer["preview"]
+    typer.echo(f"source: {answer['source']['path']}")
+    typer.echo(f"plan against catalog revision {answer['live_rev']}")
+    typer.echo(f"added: {_names(view['added'])}")
+    for item in view["restored"]:
+        typer.echo(f"re-added with its earlier flags: {item['name']} ({', '.join(item['flags'])})")
+    changes = [
+        item["name"] if not item.get("reason") else f"{item['name']} ({item['reason']})"
+        for item in view["changed"]
     ]
-    typer.echo(f"changed: {_names(changed)}")
-    typer.echo(f"removed: {_names(plan.removed)}")
-    if candidate is not None:
-        old = {
-            name: job.span.file for name, job in live.catalog.jobs.items() if job.span is not None
-        }
-        new = candidate.metadata["origins"]
-        for name in plan.added:
-            typer.echo(f"source added {name}: {new[name]}")
-        for name in plan.removed:
-            typer.echo(f"source removed {name}: {old.get(name, 'unknown')}")
-        for change in plan.changed:
-            prior, after = old.get(change.name, "unknown"), new[change.name]
-            typer.echo(
-                f"source changed {change.name}: {prior} -> {after}"
-                if prior != after
-                else f"source changed {change.name}: {after}"
-            )
-        for name in plan.unchanged:
-            if old.get(name) != new[name]:
-                typer.echo(f"source moved {name}: {old.get(name, 'unknown')} -> {new[name]}")
-        if live.settings != candidate.settings:
-            supporting = [
-                r["path"]
-                for r in candidate.metadata["records"]
-                if r["role"] in ("config", "timezone_map", "properties", "jil", "generated")
-            ]
-            typer.echo(f"shared settings sources: {', '.join(dict.fromkeys(supporting))}")
-    typer.echo(f"unchanged: {len(plan.unchanged)} jobs")
-    typer.echo(f"stops running: {_names(result.stop)}")
-    flagged = [job for job in result.stop if not marked.is_idempotent(job)]
-    if flagged:
-        typer.echo(
-            "marked non-idempotent among them: "
-            + ", ".join(f"{job} ({marked.reason(job)})" for job in flagged)
+    typer.echo(f"changed: {_names(changes)}")
+    typer.echo(f"removed: {_names(view['removed'])}")
+    changed = {item["name"] for item in view["changed"]}
+    for item in view["source_changes"]:
+        name, before, after = item["job"], item["before"], item["after"]
+        kind = (
+            "added"
+            if name in view["added"]
+            else "removed"
+            if name in view["removed"]
+            else "changed"
+            if name in changed
+            else "moved"
         )
-    for item in document.get("preflight_warnings", ()):
-        where = f" {item['job']}" if item["job"] else ""
-        typer.echo(f"preflight WARN [{item['code']}]{where}: {item['message']}")
-    typer.echo(f"token: {result.token}")
-    return 1 if result.stop else 0
+        origin = (
+            f"{before} -> {after}"
+            if before and after and before != after
+            else after or before or "unknown"
+        )
+        typer.echo(f"source {kind} {name}: {origin}")
+    if view["settings_sources"]:
+        typer.echo(f"shared settings sources: {', '.join(view['settings_sources'])}")
+    typer.echo(f"unchanged: {view['unchanged']} jobs")
+    typer.echo(f"stops running: {_names(view['stop'])}")
+    for effect in view["effects"]:
+        typer.echo(f"update {effect['job']}: {effect['action']}")
+    for item in view["non_idempotent"]:
+        typer.echo(f"marked non-idempotent: {item['job']} ({item['reason']})")
+    for message in [*view["lint_messages"], *view["diagnostics"]]:
+        typer.echo(message, err=True)
+    return 1 if view["stop"] else 0
 
 
 def _render_refusal(refusal: Refused) -> None:
-    line = f"update: refused {refusal.code}"
-    if refusal.names:
-        line += f": {', '.join(refusal.names)}"
-    if refusal.code == WOULD_STOP_RUNNING:
-        line += "; --stop-running consents to stopping them"
-    typer.echo(line, err=True)
+    typer.echo(
+        f"update: refused {refusal.code}"
+        + (f": {', '.join(refusal.names)}" if refusal.names else ""),
+        err=True,
+    )
 
 
 def _render_application(application: Application) -> None:
@@ -172,32 +103,16 @@ def _render_application(application: Application) -> None:
         typer.echo(f"stopped {job}: {choice}")
 
 
-def update_command(
-    token: str,
-    *,
-    run_root: Path,
-    send: Send,
-    stop_running: bool = False,
-    wait: bool = False,
-) -> int:
-    """Ask the engine to apply the plan TOKEN under RUN_ROOT/plans.
-
-    Prints the decision: admitted with the jobs it stops, or the refusal with its code and names.
-    With `--wait`, the reply comes after the application, which is printed too.
-    """
-    if read_plan(run_root / PLANS, token) is None:
-        typer.echo(f"update: no complete plan {token} under {run_root / PLANS}", err=True)
-        return 2
-    reply = send("update", {"token": token, "stop_running": stop_running, "wait": wait})
+def update_command(*, send: Send, wait: bool = False) -> int:
+    reply = send("update", {"wait": wait})
     if not isinstance(reply, UpdateReply):
-        raise TypeError(f"the update verb answered {type(reply).__name__}, not UpdateReply")
-    decision = reply.decision
-    if isinstance(decision, Refused):
-        _render_refusal(decision)
+        raise TypeError("update did not answer an UpdateReply")
+    if isinstance(reply.decision, Refused):
+        _render_refusal(reply.decision)
         return 2
-    typer.echo(f"admitted: plan {decision.token}; stopping: {_names(decision.stop_set)}")
+    typer.echo(f"admitted: update; stopping: {_names(reply.decision.stop_set)}")
     if reply.pending:
-        typer.echo(f"pending: {decision.token}")
+        typer.echo(f"pending: {reply.request_id}")
         typer.echo("update: admitted; its stops are not done yet", err=True)
         return 1
     if reply.application is not None:
@@ -205,23 +120,9 @@ def update_command(
     return 0
 
 
-# ---- the control socket
-
-
-class SendFailed(Exception):
-    """The engine could not be reached, or answered something other than the verb's answer:
-    the verb exits 2 with this text."""
-
-
-def socket_send(run_root: Path, *, request_id: str | None = None, timeout: float = 10.0) -> Send:
-    """`send` over RUN_ROOT's control socket. `catalog` reads the engine's `Live`; `update`
-    reads the read header's `baseline_id` first, sends the mutation envelope with `expect`
-    naming the configuration rev the stored plan was diffed against, under `request_id` (a new
-    one when None), and maps the answer to an `UpdateReply`. `timeout` bounds each round trip."""
+def socket_send(socket_path: Path, *, request_id: str | None = None, timeout: float = 10.0) -> Send:
     from dsl41.cli_common import control_socket_error
     from dsl41.runner_control import ControlClientError, claimed_actor, roundtrip
-
-    socket_path = run_root / "control.sock"
 
     def ask(
         request: dict[str, Any],
@@ -235,29 +136,26 @@ def socket_send(run_root: Path, *, request_id: str | None = None, timeout: float
             raise SendFailed(control_socket_error(socket_path, exc)) from exc
 
     def send(verb: str, args: Mapping[str, object]) -> object:
-        if verb == "catalog":
-            return live_of_answer(ask({"cmd": "catalog"}))
-        token = str(args["token"])
-        plan = read_plan(run_root / PLANS, token) or {}
-        # the read header names the store; the engine says how long it waits for an application
+        if verb == "reread":
+            return ask({"v": 4, "cmd": "reread", "claimed_actor": claimed_actor()}, timeout + 120)
         header = ask({"cmd": "status"})
+        if not header.get("ok") or not header.get("baseline_id"):
+            raise SendFailed(str(header.get("error", "status has no baseline_id")))
         rid = request_id or str(uuid.uuid4())
         request = {
+            "v": 4,
             "cmd": "update",
-            "token": token,
-            "stop_running": bool(args.get("stop_running")),
             "wait": bool(args.get("wait")),
+            "retry_only": request_id is not None,
             "request_id": rid,
-            "baseline_id": header.get("baseline_id"),
-            "expect": {"config": plan.get("live_rev")},
+            "baseline_id": header["baseline_id"],
             "claimed_actor": claimed_actor(),
         }
-        window = float(header.get("update_window_s") or 0) if args.get("wait") else 0.0
+        window = float(header.get("update_window_s") or 0) if args.get("wait") else 0
         return update_reply_of(
             ask(
                 request,
-                timeout + window,
-                # Recovery pins precede every write (docs/control-protocol.md ss3).
+                timeout + 125 + window,
                 before_send=lambda: typer.echo(f"request_id: {rid}", err=True),
             )
         )
@@ -312,7 +210,11 @@ def update_reply_of(answer: Mapping[str, Any]) -> UpdateReply:
     decision = Admitted(token, tuple(answer.get("stop") or ()), frozenset())
     body = answer.get("application")
     if body is None:
-        return UpdateReply(decision, pending=bool(answer.get("pending")))
+        return UpdateReply(
+            decision,
+            pending=bool(answer.get("pending")),
+            request_id=str(answer.get("request_id", "")),
+        )
     application = Application(
         token=token,
         rev=int(body["rev"]),
@@ -329,150 +231,35 @@ def update_reply_of(answer: Mapping[str, Any]) -> UpdateReply:
     return UpdateReply(decision, application)
 
 
-#: The refusals the `update` chart makes, which `update` prints as refusals.
-_CHART_CODES = frozenset({"stale_plan", "box_running", "would_stop_running", "update_in_progress"})
+_CHART_CODES = frozenset({"stale_plan", "update_in_progress"})
 
 
 def _run(command: Callable[[], int]) -> None:
     try:
         code = command()
-    except (SendFailed, RereadRefused) as exc:
+    except SendFailed as exc:
         typer.echo(str(exc), err=True)
         code = 2
     raise typer.Exit(code)
 
 
-_RUN_ROOT = typer.Option(None, "--run-root", help="The running engine's run root.")
+def reread(socket_path: Path = SOCKET_OPT) -> None:
+    """Report current launch-config and JIL changes without applying them."""
 
+    def command() -> int:
+        code = reread_command(send=socket_send(socket_path))
+        typer.echo(f"next: dsl41 update -S {shlex.quote(str(socket_path))}")
+        return code
 
-def reread(
-    ctx: typer.Context,
-    estate_dir: Path = typer.Argument(
-        None, help="The estate directory: estate.toml, its JIL files, non-idempotent.toml."
-    ),
-    run_root: Path = _RUN_ROOT,
-    properties: list[Path] = typer.Option(
-        None,
-        "--properties",
-        "-p",
-        help="Site properties files after the manifest's layers, as `run -p` takes them.",
-    ),
-    environment: str | None = typer.Option(
-        None, "--environment", metavar="NAME", help="The manifest's environment."
-    ),
-    config: str | None = CONFIG_OPT,
-) -> None:
-    """Diff the estate on disk against the running engine's catalog.
-
-    Prints the added, changed and removed jobs by name, the count of
-    unchanged ones, the running jobs the plan would stop and the
-    non-idempotent ones among them, the preflight warnings, and the
-    token `dsl41 update` takes. The plan is stored under RUN_ROOT/plans;
-    nothing live changes. Reads the engine through its control socket
-    (the `catalog` verb, read tier).
-
-    Exit codes: 0 a plan that stops nothing; 1 a plan that stops at
-    least one running job; 2 refused (a lint or preflight error, a
-    running box the plan edits, an unreachable engine).
-    """
-    # Design: spec-reload, docs/control-protocol.md ss4
-    from dsl41.main_config import load_config
-    from dsl41.cli_common import refuse
-
-    main_path = selected_config(ctx, config, estate_dir is not None, ("run_root",))
-    if main_path is not None:
-        try:
-            run_root = Path(load_config(main_path).engine.run_root)
-            estate_dir = main_path.parent
-        except RereadRefused as exc:
-            raise typer.Exit(refuse(exc)) from exc
-    elif run_root is None:
-        raise typer.Exit(refuse("legacy reread requires --run-root"))
-    _run(
-        lambda: reread_command(
-            estate_dir,
-            run_root=run_root,
-            send=socket_send(run_root),
-            properties=properties or (),
-            environment=environment,
-            config=main_path,
-        )
-    )
+    _run(command)
 
 
 def update(
-    ctx: typer.Context,
-    token: str = typer.Argument(..., help="The token `dsl41 reread` printed."),
-    run_root: Path = _RUN_ROOT,
-    stop_running: bool = typer.Option(
-        False,
-        "--stop-running",
-        help="Consent to stopping the running jobs the plan changes or removes"
-        " (TERM, then KILL after the grace).",
-    ),
-    wait: bool = typer.Option(
-        False, "--wait", help="Return once the update applied, and print the application."
-    ),
+    socket_path: Path = SOCKET_OPT,
+    wait: bool = typer.Option(False, "--wait", help="Wait for application."),
     request_id: str | None = typer.Option(
-        None,
-        "--request-id",
-        help="Retry an update whose outcome is unknown under the id it printed.",
+        None, "--request-id", help="Look up an update whose outcome is unknown."
     ),
-    config: str | None = CONFIG_OPT,
 ) -> None:
-    """Apply the plan TOKEN to the running engine.
-
-    The engine checks the plan again against its state now. It refuses
-    a plan diffed against another configuration (stale_plan), one that
-    edits the membership of a running box (box_running), one that would
-    stop running jobs without --stop-running (would_stop_running), and
-    one sent while another update stops its jobs (update_in_progress).
-    Otherwise it stops each running job the plan changes or removes,
-    starts no job of the plan meanwhile, then swaps the catalog: a
-    stopped job reruns under its new definition, or is held when it is
-    named in non-idempotent.toml. The engine keeps running throughout.
-    Needs the adm tier when an access map is armed.
-
-    Exit codes: 0 admitted (with --wait: and applied); 1 with --wait,
-    admitted and not yet applied when the engine's wait ended (the
-    token is printed on a `pending:` line); 2 refused, or the engine
-    could not be reached.
-    """
-    # Design: spec-reload, docs/control-protocol.md ss2
-    from dsl41.main_config import load_run_root
-    from dsl41.cli_common import refuse
-
-    if config is not None and run_root is not None:
-        raise typer.Exit(refuse("--config refuses --run-root"))
-    if config is not None or run_root is None:
-        from dsl41.main_config import DEFAULT_CONFIG, config_path
-
-        try:
-            selected = DEFAULT_CONFIG if config is None else config_path(config)
-            run_root = load_run_root(selected)
-        except RereadRefused as exc:
-            raise typer.Exit(refuse(exc)) from exc
-    _run(
-        lambda: update_command(
-            token,
-            run_root=run_root,
-            send=socket_send(run_root, request_id=request_id),
-            stop_running=stop_running,
-            wait=wait,
-        )
-    )
-
-
-__all__ = [
-    "PLANS",
-    "Send",
-    "SendFailed",
-    "UpdateReply",
-    "live_of_answer",
-    "reread",
-    "reread_command",
-    "socket_send",
-    "update",
-    "update_command",
-    "update_reply_of",
-]
+    """Reread current inputs and apply, stopping and restarting affected jobs."""
+    _run(lambda: update_command(send=socket_send(socket_path, request_id=request_id), wait=wait))

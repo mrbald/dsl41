@@ -89,8 +89,7 @@ Engine:
   backfill to its end.
 - [Attempts and the engine stop](attempts.md): one launch from its dispatch
   to its outcome, and the engine's drain.
-- [Update: reread and update](update.md): a stored plan applied to the
-  running engine.
+- [Update: reread and update](update.md): a passive preview and engine-owned direct update (DL-463).
 - Seal and lineage (`seal-and-lineage.md`, retired in 2.0.0): the anchor head, the period
   registry row and the engine's seal phases.
 

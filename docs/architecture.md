@@ -32,12 +32,16 @@ The web proxy supplies authentication; dsl41 supplies none.
 
 ## 2. Context
 
-`dsl41 run` and `dsl41 reread` default to the main config at
+`dsl41 run` defaults to the main config at
 `/etc/dsl41/dsl41.toml`; an absolute `--config` selects another file.
 It selects the run root, host settings, JIL or Python DSL inputs through
 include globs, properties, interpretation settings and lint policy.
 [Control §2](control-protocol.md#2-transport-and-framing-frozen) and
 [DL-437](decision-log.md) define this input selection.
+Socket reread/update use `-S` or `DSL41_SOCKET` (DL-463). Reread is passive; update
+prepares current main-config sources in an owned worker. Status annotations cache
+the last forecast only. JIL-only launches refuse this interface.
+
 The compiler loads a `CatalogIR`; the runner executes that catalog locally.
 IR-G is derived for analysis and visualization, not persisted engine state.
 
@@ -82,7 +86,7 @@ flowchart TB
     tui["TUI<br/>dsl41 ui"]
     web["browser backend<br/>dsl41 serve"]
     cli["headless clients<br/>dsl41 query, dsl41 sendevent, dsl41 update, dsl41 engine stop"]
-    read["plan writer<br/>dsl41 reread"]
+    read["preview client<br/>dsl41 reread"]
     off["offline readers<br/>dsl41 journal, dsl41 runs"]
     rr[("run root")]
   end
@@ -96,7 +100,7 @@ flowchart TB
   tui --> sock
   cli --> sock
   read -->|"read live configuration"| sock
-  read -->|"write plans/token"| rr
+  eng -->|"prepare current sources and internal plans"| rr
   sock -->|"served by"| eng
   eng -->|"one per command attempt"| wr
   wr -->|"spawn and observe"| cmd
@@ -122,7 +126,7 @@ journal. See [wrapper spool](wrapper-protocol.md#3-spool-format-frozen)
 and [DL-428](decision-log.md).
 The run root also holds `engine.toml`, `plans/`, logs and, with access
 control, `perimeter.jsonl`. [Deploy](deploy.md) owns the service and filesystem layout.
-`dsl41 reread` writes `plans/<token>/`; `dsl41 update` asks the engine to
+`dsl41 reread -S SOCK` reports current inputs; `dsl41 update -S SOCK` asks the engine to prepare and
 read and apply that captured plan.
 Period, segment-file, seal and lineage identities resolve to [DL-424](decision-log.md).
 
@@ -153,7 +157,7 @@ flowchart TB
   loop -->|"commit admission and effects"| jr
   loop -->|"launch and stop"| ad
   st -->|"lock, restore and catch up"| loop
-  plan -->|"captured plan written by reread client"| up
+  plan -->|"captured candidate prepared by engine"| up
   up -->|"stop affected attempts and apply configuration"| loop
 ```
 
@@ -166,7 +170,7 @@ This shows module responsibilities around the single writer; it leaves out indiv
 | Journal and store | Commit input and decision together; commit dispatch before launch | [DL-428](decision-log.md); [runner recovery](runner-design.md#7-journal-and-recovery-e1-prod-grade) |
 | Attempts and adapters | Observe CMD outcomes, apply interruption plans and poll FW evidence | [DL-433](decision-log.md); [wrapper](wrapper-protocol.md) |
 | Startup | Refuse incompatible roots, restore state, catch up through the loop | [DL-433](decision-log.md) |
-| Update | Apply a reread token against the configuration revision it names | [Control §2](control-protocol.md#2-transport-and-framing-frozen) |
+| Update | Prepare current inputs and apply them through the socket (DL-463) | [Control §2](control-protocol.md#2-transport-and-framing-frozen) |
 | Access perimeter | Authenticate socket peers, enforce tiers and record access receipts | [Access §5](access-model.md#5-the-enforcement-point) |
 
 [The machine registry](../src/dsl41/machines.py) names JOB, QUEUE_SCAN,

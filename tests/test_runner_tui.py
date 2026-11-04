@@ -2827,3 +2827,35 @@ def test_the_subtitle_names_the_configuration_rev_and_an_update_while_it_stops(
             await _teardown(engine, server, loop_task)
 
     asyncio.run(scenario())
+
+
+def test_pilot_reread_status_annotation(short_root: Path) -> None:
+    from dsl41.runner_control import status_label
+
+    async def scenario():
+        async with _trace_poll_app(short_root) as (app, pilot, replies):
+            table = app.query_one("#jobs", DataTable)
+            assert table.columns["status"].width == 10
+            original_width = table.virtual_size.width
+            row = replies.status["jobs"]["trace_job"]
+            row["reread"] = {"change": "changed", "action": "hold"}
+            await pilot.press("r")
+            table = app.query_one("#jobs", DataTable)
+            await _wait_for_ui(
+                pilot, lambda: "reread" in str(table.get_cell("trace_job", "status"))
+            )
+            assert str(table.get_cell("trace_job", "status")) == status_label(row)
+            assert table.columns["status"].width >= len(status_label(row))
+            await _wait_for_ui(pilot, lambda: table.virtual_size.width == original_width + 34)
+            del row["reread"]
+            await pilot.press("r")
+            await _wait_for_ui(
+                pilot,
+                lambda: (
+                    str(table.get_cell("trace_job", "status")) == "INACTIVE"
+                    and table.columns["status"].width == 10
+                    and table.virtual_size.width == original_width
+                ),
+            )
+
+    asyncio.run(scenario())

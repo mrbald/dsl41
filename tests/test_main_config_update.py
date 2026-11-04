@@ -62,7 +62,7 @@ def test_07_08_09_captured_update_retry_stale_and_drift(
             monkeypatch.setattr(
                 dsl41.cli_common, "module_builder", lambda *a, **k: pytest.fail("import at update")
             )
-            request = UpdateRequest(plan.token, False, 1, engine.baseline_id, "main-update")
+            request = UpdateRequest(plan.token, 1, engine.baseline_id, "main-update")
             pending = engine.request_update(request)
             await engine.run_until_quiescent(clock.now())
             answer = pending.result()
@@ -79,9 +79,7 @@ def test_07_08_09_captured_update_retry_stale_and_drift(
             retry = engine.request_update(request)
             await engine.run_until_quiescent(clock.now())
             assert retry.result().application["rev"] == 2
-            stale = engine.request_update(
-                UpdateRequest(plan.token, False, 1, engine.baseline_id, "stale")
-            )
+            stale = engine.request_update(UpdateRequest(plan.token, 1, engine.baseline_id, "stale"))
             await engine.run_until_quiescent(clock.now())
             assert (
                 isinstance(stale.result().decision, Refused)
@@ -97,7 +95,7 @@ def test_07_08_09_captured_update_retry_stale_and_drift(
             }
             engine.request_stop()
             refused = engine.request_update(
-                UpdateRequest(plan.token, True, 2, engine.baseline_id, "draining")
+                UpdateRequest(plan.token, 2, engine.baseline_id, "draining")
             )
             await engine.run_until_quiescent(clock.now())
             assert refused.result().code == "engine_draining"
@@ -136,12 +134,7 @@ def test_09_10_stopping_restart_keeps_admitted_policy_and_bytes(
                 tmp_path, engine.update.live(), root / "plans", candidate=candidate, start=T0
             )
             assert result.stop == ("A",)
-            unconsented = engine.request_update(
-                UpdateRequest(result.token, False, 1, engine.baseline_id, "no-consent")
-            )
-            await engine.run_until_quiescent(T0)
-            assert unconsented.result().decision.code == "would_stop_running"
-            request = UpdateRequest(result.token, True, 1, engine.baseline_id, "stopping")
+            request = UpdateRequest(result.token, 1, engine.baseline_id, "stopping")
             intent = {
                 "event": "intent",
                 "token": result.token,
@@ -192,7 +185,7 @@ def test_09_10_stopping_restart_keeps_admitted_policy_and_bytes(
     asyncio.run(restart())
 
 
-def test_09_running_box_is_refused_before_plan_publication(tmp_path: Path) -> None:
+def test_09_running_box_membership_is_prepared(tmp_path: Path) -> None:
     path = estate_file(tmp_path)
     (tmp_path / "a.jil").write_text("insert_job: BX\njob_type: b\n" + JOB + "box_name: BX\n")
     initial = main.prepare(path)
@@ -201,14 +194,14 @@ def test_09_running_box_is_refused_before_plan_publication(tmp_path: Path) -> No
     (tmp_path / "a.jil").write_text(
         (tmp_path / "a.jil").read_text() + JOB.replace("A", "B") + "box_name: BX\n"
     )
-    with pytest.raises(main.RereadRefused, match="box_running BX"):
-        reread(
-            tmp_path,
-            live_of(initial, {"BX": "RUNNING"}),
-            tmp_path / "plans",
-            candidate=main.prepare(path),
-        )
-    assert not (tmp_path / "plans").exists()
+    result = reread(
+        tmp_path,
+        live_of(initial, {"BX": "RUNNING"}),
+        tmp_path / "plans",
+        candidate=main.prepare(path),
+    )
+    assert result.plan.added == ("B",)
+    assert result.plan_json.exists()
 
 
 def test_09_capture_format_dispatch(tmp_path: Path) -> None:
@@ -325,9 +318,7 @@ def test_older_build_crash_after_config_row_resumes_without_another_row(
             with monkeypatch.context() as old:
                 old.setattr(runner_update, "store_config", old_writer)
                 old.setattr(engine.journal, "append", crash_before_applied)
-                engine.request_update(
-                    UpdateRequest(plan.token, False, 1, engine.baseline_id, "old-build")
-                )
+                engine.request_update(UpdateRequest(plan.token, 1, engine.baseline_id, "old-build"))
                 with pytest.raises(RuntimeError, match="crash before config applied"):
                     await engine.run_until_quiescent(T0)
             assert engine.journal.store.current_config_rev() == 2
@@ -517,7 +508,7 @@ def test_kill_signals_update_affects_later_kills_only(
             plan = reread(tmp_path, engine.update.live(), root / "plans", candidate=candidate)
             assert plan.plan.changed == () and plan.stop == ()
             answer = await engine.request_update(
-                UpdateRequest(plan.token, True, 1, engine.baseline_id, "policy")
+                UpdateRequest(plan.token, 1, engine.baseline_id, "policy")
             )
             assert isinstance(answer.decision, Admitted)
             await answer.applied
@@ -533,5 +524,463 @@ def test_kill_signals_update_affects_later_kills_only(
             assert json.loads((root / "runs/b.1/1/status.json").read_text())["signal"] == 9
         finally:
             await _finish(engine, loop)
+
+    asyncio.run(scenario())
+
+
+def test_socket_reload_preview_update_retry_and_marker(short_root: Path) -> None:
+    from datetime import datetime
+    from dsl41.runner_clock import RealClock
+    from dsl41.runner_control import ControlServer, roundtrip
+
+    path = estate_file(short_root)
+    initial = main.prepare(path)
+
+    async def scenario():
+        engine = start_run(
+            initial.catalog,
+            short_root / "run",
+            clock=RealClock(),
+            adapters={"CMD": FakeAdapter(default=None)},
+            hold_open=True,
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        engine.reread_source = str(path)
+        engine.launch_settings = initial.metadata["launch"]
+        server = ControlServer(engine, short_root / "control.sock")
+        await server.start()
+        task = asyncio.create_task(engine.run_until_quiescent(datetime.max))
+
+        async def ask(cmd, **fields):
+            return await asyncio.to_thread(
+                roundtrip, server.path, {"v": 4, "cmd": cmd, **fields}, timeout=10
+            )
+
+        try:
+            await engine.started.wait()
+            (short_root / "a.jil").write_text(JOB.replace("true", "echo new"))
+            result = await ask("reread")
+            assert result["ok"], result
+            assert result["preview"]["changed"] == [{"name": "A", "reason": None}]
+            assert not list((short_root / "run" / "plans").iterdir())
+            status = await ask("status")
+            assert status["jobs"]["A"]["reread"]["change"] == "changed"
+            rev = engine.config_rev
+            request = {
+                "baseline_id": engine.baseline_id,
+                "request_id": "socket-update",
+                "wait": True,
+            }
+            applied = await ask("update", **request)
+            assert applied["ok"] and applied["application"]["rev"] == rev + 1, applied
+            assert "token" not in applied and "token" not in applied["application"]
+            assert "reread" not in (await ask("status"))["jobs"]["A"]
+            path.write_text("broken = [")
+            reused = await ask("update", claimed_actor="different", **request)
+            assert reused["code"] == "request_id_reused"
+            assert (await ask("update", retry_only=True, **request))["application"] == applied[
+                "application"
+            ]
+            assert not (
+                await ask(
+                    "update", request_id="unknown", retry_only=True, baseline_id=engine.baseline_id
+                )
+            )["ok"]
+            assert not (await ask("reread"))["ok"]
+            assert engine.config_rev == rev + 1
+            assert (await ask("update", token="a" * 64))["code"] == "invalid_argument"
+        finally:
+            await server.close()
+            engine.request_stop()
+            await asyncio.wait_for(task, 10)
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("crash", [None, "before_kill", "after_apply"])
+def test_box_restart_commits_kills_and_holds_finished_marked_members(
+    short_root: Path, monkeypatch, crash
+) -> None:
+    from dsl41.runner_update import settings_of
+
+    path = config_file(short_root, estate='non_idempotent = "non-idempotent.toml"\n')
+    (short_root / "non-idempotent.toml").write_text(
+        '[jobs]\nDONE = "synthetic finished effect"\nHELD = "synthetic running effect"\n'
+    )
+    text = (
+        "insert_job: BX\njob_type: b\n"
+        + JOB.replace("A", "LIVE")
+        + "box_name: BX\n"
+        + JOB.replace("A", "HELD")
+        + "box_name: BX\n"
+        + JOB.replace("A", "DONE")
+        + "box_name: BX\n"
+    )
+    (short_root / "a.jil").write_text(text)
+    initial = main.prepare(path)
+
+    async def scenario():
+        clock = VirtualClock(start=T0)
+        engine = start_run(
+            initial.catalog,
+            short_root / "run",
+            clock=clock,
+            adapters={"CMD": FakeAdapter(default=None)},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        engine.launch_settings = initial.metadata["launch"]
+        try:
+            engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "BX"}))
+            await engine.run_until_quiescent(T0)
+            engine.inject(Event(at=T0, kind="STATUS", payload={"job": "DONE", "status": "SUCCESS"}))
+            await engine.run_until_quiescent(T0)
+            assert engine.oracle.store.job["DONE"].status == "SUCCESS"
+            old_run = engine.oracle.store.job["BX"].run_number
+            (short_root / "a.jil").write_text(text + JOB.replace("A", "NEW") + "box_name: BX\n")
+            candidate = main.prepare(path)
+            plan = reread(
+                short_root,
+                engine.update.live(),
+                short_root / "run" / "plans",
+                candidate=candidate,
+                start=T0,
+            )
+            answer = engine.request_update(
+                UpdateRequest(plan.token, engine.config_rev, engine.baseline_id, "box-update")
+            )
+            if crash:
+
+                def cut():
+                    raise EngineError("cut during box restart")
+
+                monkeypatch.setattr(
+                    engine.update, "box_ends" if crash == "before_kill" else "box_starts", cut
+                )
+                with pytest.raises(EngineError, match="cut during box restart"):
+                    await engine.run_until_quiescent(T0)
+                assert engine.config_rev == (1 if crash == "before_kill" else 2)
+                assert engine.oracle.store.job["BX"].status == (
+                    "RUNNING" if crash == "before_kill" else "TERMINATED"
+                )
+                assert not engine.oracle.store.job["DONE"].on_hold
+                await engine.shutdown()
+                engine.journal.close()
+                stored = active_configuration(short_root / "run")
+                engine = await resume_run(
+                    stored.catalog,
+                    short_root / "run",
+                    clock=clock,
+                    adapters={"CMD": FakeAdapter(default=None)},
+                    declared=stored.profile,
+                    stored_sources=True,
+                )
+                await engine.run_until_quiescent(T0)
+                if crash == "after_apply":
+                    assert engine.oracle.store.job["BX"].status == "TERMINATED"
+                    # Documented operator completion: hold marked members before force-start.
+                    for name in ("DONE", "HELD"):
+                        engine.inject(Event(at=T0, kind="ON_HOLD", payload={"job": name}))
+                    engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "BX"}))
+                    await engine.run_until_quiescent(T0)
+            else:
+                await engine.run_until_quiescent(T0)
+                assert answer.result().applied.done()
+            assert engine.oracle.store.job["BX"].run_number == old_run + 1
+            assert engine.oracle.store.job["HELD"].on_hold
+            assert engine.oracle.store.job["DONE"].on_hold
+            assert engine.oracle.store.job["DONE"].run_number == 1
+            assert engine.oracle.store.job["LIVE"].run_number == 2
+            records = list(engine.journal.store.read_from(0))
+            assert not [
+                record
+                for _, record in records
+                if record.kind == "dispatch"
+                and record.payload.get("job") in {"LIVE", "HELD", "DONE"}
+                and record.payload.get("after") == "update_stop"
+            ]
+            applied_seq = next(
+                seq
+                for seq, record in records
+                if record.kind == "config"
+                and record.payload.get("event") == "applied"
+                and record.payload.get("rev") == 2
+            )
+            killed = [
+                seq
+                for seq, record in records
+                if record.kind == "input" and record.payload.get("kind") == "KILLJOB"
+            ]
+            assert killed and max(killed) < applied_seq
+            assert settings_of(engine.profile, engine.oracle.catalog) == candidate.settings
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("remove", [False, True])
+def test_box_restart_is_outermost_and_removed_boxes_stay_stopped(short_root: Path, remove):
+    from dsl41.reread_worker import preview
+
+    text = (
+        "insert_job: BX\njob_type: b\ninsert_job: INNER\njob_type: b\nbox_name: BX\n"
+        + JOB.replace("A", "MEMBER")
+        + "box_name: INNER\n"
+        + JOB.replace("A", "OUTSIDE")
+    )
+    path = estate_file(short_root)
+    (short_root / "a.jil").write_text(text)
+    initial = main.prepare(path)
+
+    async def scenario():
+        engine = start_run(
+            initial.catalog,
+            short_root / "run",
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        engine.launch_settings = initial.metadata["launch"]
+        try:
+            engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "BX"}))
+            await engine.run_until_quiescent(T0)
+            replacement = (
+                JOB.replace("A", "OUTSIDE")
+                if remove
+                else text
+                + JOB.replace("A", "NEW_INNER")
+                + "box_name: INNER\n"
+                + JOB.replace("A", "NEW_OUTER")
+                + "box_name: BX\n"
+            )
+            (short_root / "a.jil").write_text(replacement)
+            candidate = main.prepare(path)
+            view = preview(candidate, engine.update.live())
+            assert {effect["job"]: effect["action"] for effect in view["effects"]}["BX"] == (
+                "remove" if remove else "restart_box"
+            )
+            if not remove:
+                assert len(view["added"]) + len(view["changed"]) + view["unchanged"] == len(
+                    candidate.catalog.jobs
+                )
+                assert {effect["job"]: effect["action"] for effect in view["effects"]}[
+                    "INNER"
+                ] == "restart_box"
+            plan = reread(
+                short_root,
+                engine.update.live(),
+                short_root / "run" / "plans",
+                candidate=candidate,
+                start=T0,
+            )
+            response = engine.request_update(
+                UpdateRequest(plan.token, 1, engine.baseline_id, "outermost")
+            )
+            await engine.run_until_quiescent(T0)
+            assert response.result().applied.done()
+            forced = [
+                record.payload["payload"]["job"]
+                for _, record in engine.journal.store.read_from(0)
+                if record.kind == "input" and record.payload.get("kind") == "FORCE_STARTJOB"
+            ]
+            assert forced == (["BX"] if remove else ["BX", "BX"])
+            if remove:
+                assert set(engine.oracle.catalog.jobs) == {"OUTSIDE"}
+                assert engine.oracle.store.tombstones["BX"].status == "TERMINATED"
+            else:
+                for name in ("BX", "INNER", "MEMBER"):
+                    assert engine.oracle.store.job[name].run_number == 2
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("case", ["retype", "move_out", "move_out_marked", "move_in"])
+def test_box_restart_preserves_replacement_run_ownership(short_root: Path, case):
+    from dsl41.runner_control import roundtrip
+    from test_main_config_restart import cli_engine
+    from test_runner_control import wait_for
+    from store_surgery import rows
+
+    box = "insert_job: BX\njob_type: b\n"
+    command = JOB.replace("true", "sleep 30")
+    stay = command.replace("A", "STAY") + "box_name: BX\n"
+    mover = command.replace("A", "MOVER")
+    inside = mover + "box_name: BX\n"
+    marked = case == "move_out_marked"
+    path = config_file(short_root, estate='non_idempotent = "non-idempotent.toml"\n')
+    (short_root / "non-idempotent.toml").write_text(
+        '[jobs]\nMOVER = "synthetic effect"\n' if marked else "[jobs]\n"
+    )
+    old = box + stay + (mover if case == "move_in" else inside if case != "retype" else "")
+    new = (
+        command.replace("A", "BX")
+        if case == "retype"
+        else box + stay + (inside if case == "move_in" else mover)
+    )
+    (short_root / "a.jil").write_text(old)
+    root = short_root / "run"
+    root.mkdir()
+    (root / "engine.toml").write_text("grace_term_s = 0.01\ngrace_kill_s = 0.01\n")
+    socket = root / "control.sock"
+    with cli_engine(path) as ask:
+
+        def force(name):
+            status = ask("status")
+            reply = roundtrip(
+                socket,
+                {
+                    "cmd": "sendevent",
+                    "verb": "FORCE_STARTJOB",
+                    "payload": {"job": name},
+                    "baseline_id": status["baseline_id"],
+                    "request_id": "start-" + name,
+                    "expect": {"job:" + name: status["jobs"][name]["state_rev"]},
+                },
+            )
+            assert reply["ok"], reply
+
+        force("BX")
+        if case == "move_in":
+            force("MOVER")
+        wait_for(lambda: ask("status")["jobs"]["STAY"]["status"] == "RUNNING")
+        if case != "retype":
+            wait_for(lambda: ask("status")["jobs"]["MOVER"]["status"] == "RUNNING")
+        (short_root / "a.jil").write_text(new)
+        view = roundtrip(socket, {"cmd": "reread", "v": 4})["preview"]
+        if case != "retype":
+            assert {item["job"]: item["action"] for item in view["effects"]}["MOVER"] == (
+                "hold" if marked else "rerun"
+            )
+            assert view["stop"] == ["BX", "MOVER", "STAY"]
+        applied = roundtrip(
+            socket,
+            {
+                "cmd": "update",
+                "v": 4,
+                "wait": True,
+                "request_id": "ownership",
+                "baseline_id": ask("status")["baseline_id"],
+            },
+        )
+        assert applied["ok"] and applied["application"], applied
+        if case == "retype":
+            assert ask("status")["jobs"]["BX"]["status"] == "INACTIVE"
+            assert not [
+                body for _, kind, body in rows(root) if kind == "dispatch" and body["job"] == "BX"
+            ]
+            forced = [
+                body
+                for _, kind, body in rows(root)
+                if kind == "input" and body.get("kind") == "FORCE_STARTJOB"
+            ]
+            assert len(forced) == 1
+        else:
+            if marked:
+                wait_for(lambda: ask("status")["jobs"]["MOVER"]["on_hold"])
+            else:
+                wait_for(
+                    lambda: (
+                        ask("status")["jobs"]["MOVER"].get("attempt", {}).get("n")
+                        == (1 if case == "move_in" else 2)
+                    )
+                )
+            wait_for(lambda: ask("status")["jobs"]["STAY"]["run_number"] == 2)
+            jobs = ask("status")["jobs"]
+            row = jobs["MOVER"]
+            assert row["run_number"] == (2 if case == "move_in" else 1)
+            if marked:
+                assert row["on_hold"] and row["status"] == "FAILURE"
+            else:
+                assert row["status"] == "RUNNING"
+                assert row["attempt"]["after"] == (None if case == "move_in" else "update_stop")
+            assert jobs["STAY"]["attempt"]["n"] == 1
+            assert jobs["STAY"]["attempt"]["after"] is None
+            assert not [
+                body
+                for _, kind, body in rows(root)
+                if kind == "dispatch"
+                and body["job"] == "STAY"
+                and body.get("after") == "update_stop"
+            ]
+
+
+def test_box_restart_ends_boxes_before_done_sibling_can_start(short_root: Path):
+    old = (
+        "insert_job: ZB\njob_type: b\ninsert_job: AB\njob_type: b\nbox_name: ZB\n"
+        + JOB.replace("A", "A1")
+        + "box_name: AB\n"
+        + JOB.replace("A", "B1")
+        + "box_name: AB\ncondition: d(A1)\n"
+    )
+    path = estate_file(short_root)
+    (short_root / "a.jil").write_text(old)
+    initial = main.prepare(path)
+
+    async def scenario():
+        engine = start_run(
+            initial.catalog,
+            short_root / "run",
+            clock=VirtualClock(start=T0),
+            adapters={"CMD": FakeAdapter(default=None)},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        try:
+            engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "ZB"}))
+            await engine.run_until_quiescent(T0)
+            assert engine.oracle.store.job["B1"].status == "INACTIVE"
+            (short_root / "a.jil").write_text(old + JOB.replace("A", "NEW") + "box_name: ZB\n")
+            candidate = main.prepare(path)
+            plan = reread(
+                short_root,
+                engine.update.live(),
+                short_root / "run" / "plans",
+                candidate=candidate,
+                start=T0,
+            )
+            engine.request_update(UpdateRequest(plan.token, 1, engine.baseline_id, "ordered"))
+            await engine.run_until_quiescent(T0)
+            assert engine.oracle.store.job["B1"].status == "INACTIVE"
+            records = list(engine.journal.store.read_from(0))
+            kills = [
+                record.payload["payload"]["job"]
+                for _, record in records
+                if record.kind == "input" and record.payload.get("kind") == "KILLJOB"
+            ]
+            assert kills[:2] == ["ZB", "AB"]
+            force = max(
+                seq
+                for seq, record in records
+                if record.kind == "input" and record.payload.get("kind") == "FORCE_STARTJOB"
+            )
+            assert not [
+                record
+                for seq, record in records
+                if seq < force and record.kind == "dispatch" and record.payload["job"] == "B1"
+            ]
+            engine.inject(Event(at=T0, kind="STATUS", payload={"job": "A1", "status": "SUCCESS"}))
+            await engine.run_until_quiescent(T0)
+            assert engine.oracle.store.job["ZB"].run_number == 2
+            assert engine.oracle.store.job["AB"].run_number == 2
+            assert engine.oracle.store.job["B1"].status == "RUNNING"
+            assert engine._live["B1"].run_number == 1
+            starts = [
+                seq
+                for seq, record in engine.journal.store.read_from(0)
+                if record.kind == "dispatch" and record.payload["job"] == "B1"
+            ]
+            assert len(starts) == 1 and starts[0] > force
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
 
     asyncio.run(scenario())

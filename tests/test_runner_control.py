@@ -3337,3 +3337,317 @@ def test_k_override_old_server_refuses_without_downgrade(short_root: Path) -> No
             await server.wait_closed()
 
     asyncio.run(scenario())
+
+
+def test_reload_access_versions_and_source_refusal(short_root: Path):
+    async def scenario():
+        engine, server, loop = await _serve(
+            short_root / "run", "insert_job: A\njob_type: c\ncommand: x\nmachine: localhost\n"
+        )
+        try:
+            for verb in ("reread", "update"):
+                old = await _control_call(server.path, {"v": 3, "cmd": verb})
+                assert old["code"] == "unknown_cmd"
+                fields = (
+                    {}
+                    if verb == "reread"
+                    else {"baseline_id": engine.baseline_id, "request_id": "no-source"}
+                )
+                answer = await _control_call(server.path, {"v": 4, "cmd": verb, **fields})
+                assert answer["refused"] and "fresh run root" in answer["error"]
+                assert "without a main config" in answer["error"]
+        finally:
+            await _teardown(engine, server, loop)
+
+    asyncio.run(scenario())
+
+
+def test_reload_worker_context_output_and_findings(short_root: Path, monkeypatch):
+    from test_main_config import estate_file, config_file
+    from dsl41 import main_config as main
+
+    path = estate_file(short_root)
+    initial = main.prepare(path)
+    (short_root / "json.py").write_text("raise AssertionError('startup shadow import')\n")
+    (short_root / "sibling.py").write_text("COMMAND = 'echo worker'\n")
+    (short_root / "author.py").write_text(
+        "import os, sys\nfrom pathlib import Path\nfrom sibling import COMMAND\n"
+        "from dsl41.dsl import CatalogBuilder\n"
+        "print('noise', flush=True)\nsys.stderr.write('noise\\n')\n"
+        "assert os.environ['DSL41_WORKER_TEST'] == 'startup'\n"
+        f"assert Path.cwd() == Path({str(short_root.resolve())!r})\n"
+        "def estate():\n c=CatalogBuilder()\n c.job('P',command=COMMAND,machine='localhost')\n return c\n"
+    )
+    config_file(short_root, include=["*.jil", "author.py"])
+
+    async def scenario():
+        engine, server, loop = await _serve(
+            short_root / "run", "insert_job: A\njob_type: c\ncommand: true\nmachine: localhost\n"
+        )
+        engine.launch_settings = dict(initial.metadata["launch"])
+        engine.source_capture = main.encoded_parts(initial)
+        engine.reread_source = str(path)
+        engine.startup_cwd = short_root
+        engine.startup_env["DSL41_WORKER_TEST"] = "startup"
+        try:
+            answer = await _control_call(server.path, {"v": 4, "cmd": "reread"})
+            assert answer["ok"], answer
+            assert answer["preview"]["added"] == ["P"]
+            assert not list((short_root / "run" / "plans").iterdir())
+            assert "noise" not in json.dumps(answer)
+            assert engine.config_rev == 1
+            config_file(short_root, lint='refuse = "warn"\n')
+            (short_root / "a.jil").write_text(
+                "insert_job: A\njob_type: c\ncommand: true\nmachine: localhost\ncondition: s(MISSING)\n"
+            )
+            report = await _control_call(server.path, {"v": 4, "cmd": "reread"})
+            assert report["ok"] and any(
+                "L001" in item for item in report["preview"]["lint_messages"]
+            )
+            marks = dict(engine.reread_marks)
+            refused = await _control_call(
+                server.path,
+                {"v": 4, "cmd": "update", "request_id": "lint", "baseline_id": engine.baseline_id},
+            )
+            assert not refused["ok"] and "L001" in refused["error"]
+            assert engine.reread_marks == marks and engine.config_rev == 1
+            (short_root / "a.jil").write_text("broken jil")
+            failed = await _control_call(server.path, {"v": 4, "cmd": "reread"})
+            assert not failed["ok"] and "error" in failed
+            assert engine.reread_marks == {}
+        finally:
+            await _teardown(engine, server, loop)
+
+    asyncio.run(scenario())
+
+
+def test_reload_worker_deadline_and_cancellation(short_root: Path, monkeypatch):
+    """A blocked result cannot block status; deadline and cancellation kill and reap."""
+    spawn, timeout = asyncio.create_subprocess_exec, asyncio.timeout
+    ready = asyncio.Queue()
+    deadlines = []
+
+    def controlled_timeout(delay):
+        deadline = timeout(None)
+        deadlines.append(deadline)
+        return deadline
+
+    async def blocked(*args, **kwargs):
+        assert args[:4] == (sys.executable, "-P", "-m", "dsl41.reread_worker")
+        child = await spawn(
+            sys.executable,
+            "-c",
+            "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready',flush=True); time.sleep(60)",
+            **kwargs,
+        )
+        assert await child.stdout.readline() == b"ready\n"
+        ready.put_nowait(child)
+        return child
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", blocked)
+    monkeypatch.setattr(asyncio, "timeout", controlled_timeout)
+
+    async def scenario():
+        engine, server, loop = await _serve(
+            short_root / "run", "insert_job: A\njob_type: c\ncommand: x\nmachine: localhost\n"
+        )
+        engine.reread_source = str(short_root / "dsl41.toml")
+        server.WORKER_GRACE_S = 0.02
+        try:
+            async with timeout(30):
+                task = asyncio.create_task(server._prepare_reload(update=False))
+                child = await ready.get()
+                while not child.stdin.is_closing():
+                    await asyncio.sleep(0)
+                # The result is blocked after readiness; expire the preparation deadline.
+                deadlines[0].reschedule(asyncio.get_running_loop().time())
+                result = await task
+                assert result["code"] == "engine_error" and "TimeoutError" in result["error"]
+                assert child.returncode == -signal.SIGKILL
+                task = asyncio.create_task(server._prepare_reload(update=False))
+                child = await ready.get()
+                while not child.stdin.is_closing():
+                    await asyncio.sleep(0)
+                assert (await _control_call(server.path, {"cmd": "status"}))["ok"]
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                assert child.returncode == -signal.SIGKILL
+        finally:
+            await _teardown(engine, server, loop)
+
+    asyncio.run(scenario())
+
+
+def test_update_preparation_has_one_slot_and_exact_retry(short_root: Path, monkeypatch):
+    from dsl41.runner_update import UpdateAnswer
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    preparations = []
+
+    async def scenario():
+        engine, server, loop = await _serve(
+            short_root / "run", "insert_job: A\njob_type: c\ncommand: x\nmachine: localhost\n"
+        )
+
+        async def prepare(*, update):
+            preparations.append(update)
+            entered.set()
+            await release.wait()
+            return {"ok": True, "token": "synthetic", "live_rev": 1}
+
+        async def submit(request):
+            return UpdateAnswer(Admitted(request.token, (), frozenset()), application={"rev": 2})
+
+        monkeypatch.setattr(server, "_prepare_reload", prepare)
+        monkeypatch.setattr(
+            engine, "request_update", lambda request: asyncio.create_task(submit(request))
+        )
+        request = {
+            "v": 4,
+            "cmd": "update",
+            "baseline_id": engine.baseline_id,
+            "request_id": "one",
+            "claimed_actor": "operator",
+        }
+        first = asyncio.create_task(server._update(request))
+        try:
+            await entered.wait()
+            retry = asyncio.create_task(server._update({**request, "retry_only": True}))
+            other = await server._update({**request, "request_id": "two"})
+            assert other["code"] == "update_in_progress"
+            reused = await server._update({**request, "claimed_actor": "another"})
+            assert reused["code"] == "request_id_reused"
+            release.set()
+            assert await first == await retry
+            assert preparations == [True]
+            assert server._preparing_update is None
+            invalid = await server._update({"v": 4, "cmd": "update"})
+            assert invalid["code"] == "baseline_mismatch"
+        finally:
+            release.set()
+            await first
+            await _teardown(engine, server, loop)
+
+    from dsl41.reload_update import Admitted
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("fault", ["exit", "shape", "spawn", "graceful", "creation_cancel"])
+def test_reload_worker_failures_are_framed_and_reaped(short_root: Path, monkeypatch, fault):
+    spawn = asyncio.create_subprocess_exec
+    children = []
+    created, release = asyncio.Event(), asyncio.Event()
+
+    async def replacement(*args, **kwargs):
+        if fault == "spawn":
+            raise OSError("synthetic worker spawn failure")
+        script = {"exit": "raise SystemExit(7)", "shape": "print('[]')"}.get(
+            fault, "import time; time.sleep(60)"
+        )
+        child = await spawn(sys.executable, "-c", script, **kwargs)
+        children.append(child)
+        created.set()
+        if fault == "creation_cancel":
+            await release.wait()
+        return child
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", replacement)
+
+    async def scenario():
+        engine, server, loop = await _serve(
+            short_root / "run", "insert_job: A\njob_type: c\ncommand: x\nmachine: localhost\n"
+        )
+        engine.reread_source = str(short_root / "dsl41.toml")
+        server.PREPARE_TIMEOUT_S = 0.15
+        try:
+            task = asyncio.create_task(server._prepare_reload(update=False))
+            if fault == "creation_cancel":
+                await created.wait()
+                task.cancel()
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            else:
+                answer = await task
+                assert answer["code"] == "engine_error" and answer["refused"]
+                detail = {
+                    "exit": "exited 7",
+                    "shape": "invalid preparation result",
+                    "spawn": "synthetic worker spawn failure",
+                    "graceful": "TimeoutError",
+                }[fault]
+                assert detail in answer["error"]
+            assert all(child.returncode is not None for child in children)
+        finally:
+            release.set()
+            await _teardown(engine, server, loop)
+
+    asyncio.run(scenario())
+
+
+def test_update_decision_timeout_and_preparation_cancellation(short_root: Path, monkeypatch):
+    from dsl41.reload_update import Admitted, Refused
+    from dsl41.runner_update import UpdateAnswer
+
+    async def scenario():
+        engine, server, loop = await _serve(
+            short_root / "run", "insert_job: A\njob_type: c\ncommand: x\nmachine: localhost\n"
+        )
+        pending = asyncio.get_running_loop().create_future()
+        request = {
+            "v": 4,
+            "cmd": "update",
+            "baseline_id": engine.baseline_id,
+            "request_id": "pending",
+        }
+
+        async def prepare(*, update):
+            return {"ok": True, "token": "internal", "live_rev": 1}
+
+        monkeypatch.setattr(server, "_prepare_reload", prepare)
+        monkeypatch.setattr(engine, "request_update", lambda request: pending)
+        server.DECISION_TIMEOUT_S = 0.01
+        try:
+            timed_out = await server._update(request)
+            assert timed_out["code"] == "decision_timeout" and "refused" not in timed_out
+            assert not pending.cancelled()
+            pending.set_result(
+                UpdateAnswer(Admitted("internal", (), frozenset()), application={"rev": 2})
+            )
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert server._preparing_update is None
+            for code in ("stale_plan", "update_in_progress"):
+                reply = await server._update_answer(
+                    UpdateAnswer(Refused("internal", code, ("internal",))), "x", False
+                )
+                assert reply["refused"] and reply["code"] == code and "token" not in reply
+                if code == "update_in_progress":
+                    assert reply["names"] == []
+                else:
+                    assert "run update again" in reply["error"]
+                    assert "reread" not in reply["error"]
+            gate = asyncio.Event()
+
+            async def blocked(*, update):
+                gate.set()
+                await asyncio.Future()
+
+            monkeypatch.setattr(server, "_prepare_reload", blocked)
+            task = asyncio.create_task(server._update({**request, "request_id": "cancel"}))
+            await gate.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await asyncio.sleep(0)
+            assert server._preparing_update is None
+            bad = await server._reread({"cmd": "reread", "source": "/client/path"})
+            assert bad["code"] == "invalid_argument"
+            bad = await server._reread({"cmd": "reread", "claimed_actor": 7})
+            assert bad["code"] == "invalid_argument"
+        finally:
+            await _teardown(engine, server, loop)
+
+    asyncio.run(scenario())
