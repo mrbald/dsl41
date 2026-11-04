@@ -507,6 +507,7 @@ def test_kill_signals_update_affects_later_kills_only(tmp_path: Path, monkeypatc
         try:
             _start_jobs(engine, "a", "b")
             await _until(lambda: ready_a.exists() and ready_b.exists())
+            await _until(lambda: engine.attempt_view("b")["state"] == "RUNNING")
             engine.inject(Event(at=engine.clock.now(), kind="KILLJOB", payload={"job": "a"}))
             await _until(log_a.exists)
             config_file(tmp_path, engine="kill_signals = [9]\n")
