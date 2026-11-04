@@ -28,6 +28,7 @@ import json
 import os
 import resource
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -428,12 +429,34 @@ def _build_run_spec(
     return run_dir, spec
 
 
+def _prepare_output_files(job_ir: JobIR, spec: Mapping[str, Any]) -> None:
+    """Truncate explicit > regular-file targets before each launch (DL-460)."""
+    for attribute, key in (("std_out_file", "stdout_path"), ("std_err_file", "stderr_path")):
+        text = getattr(job_ir.exec_, attribute)
+        if text is None or stream_target(job_ir.name, attribute, text, "append")[1] != "truncate":
+            continue
+        try:
+            fd = os.open(
+                spec[key],
+                os.O_WRONLY | os.O_CREAT | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC,
+                0o600,
+            )
+        except OSError:
+            continue
+        try:
+            if stat.S_ISREG(os.fstat(fd).st_mode):
+                os.ftruncate(fd, 0)
+        finally:
+            os.close(fd)
+
+
 class LocalCommandAdapter:
     """ss6 CMD adapter, an `ObservedAdapter`: spawn the ss6a Tier-0 wrapper, await it, report
     spawn.json and status.json, the sole outcome channel. No retries (n_retrys unmodeled, DL-53
     scope), no timeouts (term_run_time is the oracle's timer), no classification.
 
-    stdout/stderr APPEND to std_out_file/std_err_file when set (vendor appends), else to
+    stdout/stderr append unless the source path starts with >, which prepares a truncated
+    regular file before launch; >> explicitly appends (DL-460). Unset outputs append to
     <run_root>/logs/<job>.<run_number>.{out,err}; std_in_file when set, else /dev/null. `profile`
     sources first: ``. <profile> && <command>``, and a failing profile fails the job with sh's
     exit code (PENDING: E5). DL-39 [?] verbatim carry applies: the command string is passed to
@@ -459,6 +482,12 @@ class LocalCommandAdapter:
         Cancelled, the engine is leaving: the lifeline is closed, so the wrapper ends its
         command and records it as at engine death, and the wait for that is bounded."""
         run_dir, spec = _build_run_spec(job_ir, run_number, ctx, grace_seconds=self.grace_seconds)
+        if not launch.aborted:
+            try:
+                _prepare_output_files(job_ir, spec)
+            except OSError as exc:
+                launch.observer.spawn_failed(f"output preparation failed: {exc}")
+                return
         run_id = str(spec["run_id"])
         lifeline_r, launch.lifeline_w = os.pipe()
         try:

@@ -23,6 +23,7 @@ anything that surprised us or contradicted the design doc.
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import os
 import signal
@@ -38,7 +39,7 @@ from typing import Any
 import pytest
 from subprocess_harness import wait_for
 
-from dsl41 import runner_procid as _procid
+from dsl41 import runner_adapters, runner_procid as _procid
 from dsl41.ir import JobIR, lower_source
 from dsl41.oracle_state import Event
 from dsl41.runner import Engine
@@ -53,6 +54,7 @@ from dsl41.runner_adapters import (
     spool_names_run,
 )
 from dsl41.runner_clock import EngineError, RealClock, VirtualClock
+from dsl41.runner_journal import read_records
 from dsl41.runner_startup import start_run
 
 if not sys.platform.startswith(("linux", "darwin")):  # pragma: no cover
@@ -309,18 +311,140 @@ def test_max_exit_success_threshold_honored_oracle_side(tmp_path: Path) -> None:
     assert engine.oracle.store.job["mx"].exit_code == 2
 
 
-def test_std_out_file_append_semantics(tmp_path: Path) -> None:
-    """(runner-design ss6): std_out_file/std_err_file APPEND (vendor parity)
-    -- pre-seed the file and confirm the command's own output lands after
-    the pre-existing content, never overwriting it."""
-    out = tmp_path / "custom.out"
-    out.write_text("PRESEED\n")
+@pytest.mark.parametrize("prefixes", [("", ""), (">", ">"), (">>", ">>"), (">", ">>"), (">>", ">")])
+@pytest.mark.parametrize("shared", [False, True])
+@pytest.mark.parametrize("exists", [False, True])
+def test_std_out_file_append_semantics(tmp_path, prefixes, shared, exists):
+    """DL-460: source operators select each stream's preparation before a real launch."""
+    out, err = tmp_path / "custom.out", tmp_path / ("custom.out" if shared else "custom.err")
+    if exists:
+        for path in {out, err}:
+            path.write_text("PRESEED\n")
+            path.chmod(0o640)
     text = (
-        f"insert_job: apj\njob_type: c\ncommand: echo appended\nmachine: m1\nstd_out_file: {out}\n"
+        "insert_job: apj\njob_type: c\ncommand: echo stdout; echo stderr >&2\n"
+        f"std_out_file: {prefixes[0]}{out}\nstd_err_file: {prefixes[1]}{err}\n"
     )
     engine = asyncio.run(_run_real(text, tmp_path / "run", ["apj"]))
     assert engine.oracle.store.job["apj"].status == "SUCCESS"
-    assert out.read_text() == "PRESEED\nappended\n"
+    for path, prefix, output in ((out, prefixes[0], "stdout\n"), (err, prefixes[1], "stderr\n")):
+        truncated = ">" in prefixes if shared else prefix == ">"
+        assert path.read_text() == ("PRESEED\n" if exists and not truncated else "") + (
+            "stdout\nstderr\n" if shared else output
+        )
+        assert path.stat().st_mode & 0o777 == (0o640 if exists else 0o600)
+
+
+def test_truncation_precedes_wrapper_launch(tmp_path, monkeypatch):
+    out, root = tmp_path / "out", tmp_path / "run"
+    out.write_text("old\n")
+    specs = []
+    build, spawn = runner_adapters._build_run_spec, asyncio.create_subprocess_exec
+
+    def capture(*args, **kwargs):
+        directory, spec = build(*args, **kwargs)
+        specs.append(spec)
+        return directory, spec
+
+    async def checked_spawn(*args, **kwargs):
+        [dispatch] = [
+            record.payload for _, record in read_records(root) if record.kind == "dispatch"
+        ]
+        assert dispatch["paths"]["std_out_file"] == str(out)
+        assert out.read_bytes() == b""
+        assert set(specs[0]) == {
+            "version",
+            "run_id",
+            "job",
+            "run_number",
+            "command",
+            "run_dir",
+            "stdout_path",
+            "stderr_path",
+            "stdin_path",
+            "grace_seconds",
+            "env",
+            "lifeline_fd",
+        }
+        assert specs[0]["version"] == 1
+        return await spawn(*args, **kwargs)
+
+    monkeypatch.setattr(runner_adapters, "_build_run_spec", capture)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", checked_spawn)
+    asyncio.run(
+        _run_real(
+            f"insert_job: j\njob_type: c\ncommand: echo new\nstd_out_file: >{out}\n", root, ["j"]
+        )
+    )
+    assert len(specs) == 1 and out.read_text() == "new\n"
+
+
+@pytest.mark.parametrize("kind,expected", [("null", "SUCCESS"), ("directory", "FAILURE")])
+def test_nonregular_output_prefix_preserves_wrapper_behavior(tmp_path, kind, expected):
+    target = Path(os.devnull) if kind == "null" else tmp_path
+    results = []
+    for prefix, name in (("", "plain"), (">", "truncate")):
+        root = tmp_path / name
+        text = f"insert_job: j\njob_type: c\ncommand: echo output\nstd_out_file: {prefix}{target}\n"
+        engine = asyncio.run(_run_real(text, root, ["j"]))
+        status = json.loads((root / "runs" / "j.1" / "1" / "status.json").read_text())
+        results.append(
+            (
+                engine.oracle.store.job["j"].status,
+                status["outcome"],
+                status.get("exit_code"),
+                status.get("error"),
+            )
+        )
+    assert results[0] == results[1]
+    assert results[1][0] == expected
+
+
+def test_truncate_failure_prevents_launch(tmp_path, monkeypatch):
+    out, witness, root = tmp_path / "out", tmp_path / "witness", tmp_path / "run"
+    opened = os.open
+    truncated = os.ftruncate
+    descriptors = []
+
+    def capture_open(path, *args, **kwargs):
+        fd = opened(path, *args, **kwargs)
+        if path == str(out):
+            descriptors.append(fd)
+        return fd
+
+    def fail_truncate(fd, length):
+        if fd in descriptors:
+            raise OSError(errno.EIO, "synthetic output I/O failure")
+        return truncated(fd, length)
+
+    async def unexpected_spawn(*args, **kwargs):
+        pytest.fail("output preparation failure launched a wrapper")
+
+    monkeypatch.setattr(os, "open", capture_open)
+    monkeypatch.setattr(os, "ftruncate", fail_truncate)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", unexpected_spawn)
+    text = f"insert_job: j\njob_type: c\ncommand: touch {witness}\nstd_out_file: >{out}\n"
+    engine = asyncio.run(_run_real(text, root, ["j"]))
+    assert engine.oracle.store.job["j"].status == "FAILURE" and not witness.exists()
+    [outcome] = [record.payload for _, record in read_records(root) if record.kind == "outcome"]
+    assert outcome["outcome"] == "spawn_failed"
+    assert "output preparation failed" in outcome["status"]["error"]
+    for fd in descriptors:
+        with pytest.raises(OSError, match="Bad file descriptor"):
+            os.fstat(fd)
+
+
+@pytest.mark.parametrize("source", [">name", "./>name", "absolute", "$TARGET"])
+def test_literal_leading_greater_than_filename(tmp_path, monkeypatch, source):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TARGET", ">name")
+    literal, plain = tmp_path / ">name", tmp_path / "name"
+    literal.write_text("literal\n")
+    plain.write_text("plain\n")
+    text = f"insert_job: j\njob_type: c\ncommand: echo new\nstd_out_file: {literal if source == 'absolute' else source}\n"
+    asyncio.run(_run_real(text, tmp_path / "run", ["j"]))
+    assert literal.read_text() == "literal\n" + ("" if source == ">name" else "new\n")
+    assert plain.read_text() == ("new\n" if source == ">name" else "plain\n")
 
 
 def test_default_log_naming_under_run_root_logs(tmp_path: Path) -> None:
@@ -444,6 +568,25 @@ def _launch() -> Launch:
         def wrapper_exited(self, *_: Any) -> None: ...
 
     return Launch(_Ignored())
+
+
+def test_preaborted_launch_preserves_output(tmp_path):
+    out, witness = tmp_path / "out", tmp_path / "witness"
+    out.write_text("keep\n")
+    job = lower_source(
+        f"insert_job: j\njob_type: c\ncommand: touch {witness}\nstd_out_file: >{out}\n"
+    ).jobs["j"]
+    launch = _launch()
+    launch.aborted = True
+    asyncio.run(
+        LocalCommandAdapter().observe(
+            job, 1, AdapterContext(clock=RealClock(), run_root=tmp_path), launch
+        )
+    )
+    assert out.read_text() == "keep\n" and not witness.exists()
+    assert not (tmp_path / "runs" / "j.1" / "1" / "spawn.json").exists()
+    assert launch.proc is not None and launch.proc.returncode == -signal.SIGKILL
+    assert launch.lifeline_w is None
 
 
 def test_dl356_a_kill_before_the_adapter_first_runs_spawns_nothing(tmp_path: Path) -> None:

@@ -186,7 +186,11 @@ Job logs can hold credentials. Check their contents before sharing them.
    ```
 
 Default logs are `$RUN_ROOT/logs/<job>.<run>.out` and `.err`.
-The runner appends to `std_out_file` and `std_err_file` when the JIL sets them.
+Unprefixed `std_out_file` and `std_err_file` paths, and paths prefixed with
+`>>`, append. A leading `>` truncates a regular file before each launch,
+including a replacement attempt after restart (DL-460). Earlier-attempt
+output can therefore be absent. See [output preparation](runner-design.md#6-adapters)
+for interruption limits.
 The site rotates those external files between runs.
 
 The trace's `transition` and `cause` name what happened.

@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from dsl41 import main_config
+from dsl41 import main_config, runner
 from dsl41.ir import lower_source
 from dsl41.oracle_state import Event
 from dsl41.reload_plan import RereadRefused, reread
@@ -23,6 +23,7 @@ from dsl41.runner_journal import decode_snapshot, read_records, replay_store
 from dsl41.runner_preflight import preflight
 from dsl41.runner_startup import start_run
 from dsl41.runner_update import UpdateRequest
+from dsl41.runtime_policy import PolicyFinding, PolicyRefused
 
 T0 = datetime(2026, 7, 1)
 
@@ -95,6 +96,34 @@ def test_substitution_is_literal_once_and_paths_anchor_to_dispatch_cwd(tmp_path:
         "std_out_file": str(tmp_path / "relative file"),
         "std_err_file": None,
     }
+
+
+@pytest.mark.parametrize("attribute", ["std_out_file", "std_err_file"])
+@pytest.mark.parametrize("prefix", ["", ">", ">>"])
+@pytest.mark.parametrize("target", ["relative", "/absolute", ">literal"])
+def test_stream_prefixes_resolve_before_expansion(tmp_path, attribute, prefix, target):
+    paths, names = resolve_streams(
+        catalog(f"{attribute}: {prefix}${{TARGET}}").jobs["J0"],
+        {"TARGET": target},
+        cwd=tmp_path,
+    )
+    assert paths[attribute] == (target if target.startswith("/") else f"{tmp_path}/{target}")
+    assert names == {"TARGET"}
+
+
+def test_spawn_wraps_std_file_refusal(monkeypatch):
+    engine = runner.Engine(catalog(), clock=RealClock(), adapters={"CMD": FakeAdapter()})
+    engine.oracle.feed(Event(at=engine.clock.now(), kind="STARTJOB", payload={"job": "J0"}))
+
+    def refused(*args, **kwargs):
+        raise PolicyRefused(
+            PolicyFinding("std-file", "J0", "std_out_file", "bad target", "use a path")
+        )
+
+    monkeypatch.setattr(runner, "resolve_streams", refused)
+    with pytest.raises(EngineError, match=r"preflight ERROR \[std-file\]: job J0: std_out_file"):
+        engine.spawn("J0", 1)
+    assert engine.dispatches == {} and engine._live == {}
 
 
 @pytest.mark.parametrize("value", ["", "bad\0path"])
@@ -426,6 +455,51 @@ def test_pruned_snapshot_keeps_completed_paths_and_sequence_high_water(
             assert latest["paths"]["std_out_file"] == str(
                 tmp_path / "changed" / latest["env"]["AUTORUN"]
             )
+        finally:
+            await resumed.shutdown()
+            resumed.journal.close()
+
+    asyncio.run(scenario())
+
+
+def test_legacy_prefixed_dispatch_paths_survive_replay(tmp_path, monkeypatch):
+    from dsl41.runner_startup import resume_run
+
+    old = tmp_path / ">name"
+    old.write_text("old output\n")
+    ir = catalog("std_out_file: >name")
+    root = tmp_path / "root"
+
+    def legacy_paths(*args, **kwargs):
+        paths, names = resolve_streams(*args, **kwargs)
+        return {**paths, "std_out_file": str(old)}, names
+
+    async def scenario():
+        engine = start_run(ir, root, clock=RealClock(), adapters={"CMD": FakeAdapter()})
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(runner, "resolve_streams", legacy_paths)
+                engine.inject(Event(at=engine.clock.now(), kind="STARTJOB", payload={"job": "J0"}))
+                await engine.run_until_quiescent(datetime.max)
+            original = dict(engine.dispatches["J0"])
+            engine.take_snapshot()
+            snapshot = engine.journal.store.latest_snapshot()
+            restored = decode_snapshot(snapshot.seq, snapshot.data, where="test")
+            assert restored.open.dispatches["J0"] == original
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+        resumed = await resume_run(
+            ir, root, clock=RealClock(), adapters={"CMD": LocalCommandAdapter()}
+        )
+        try:
+            await resumed.run_until_quiescent(datetime.max)
+            assert resumed.dispatches["J0"] == original
+            assert ControlServer(resumed, tmp_path / "unused.sock")._status({})["jobs"]["J0"][
+                "log_out"
+            ] == str(old)
+            assert old.read_text() == "old output\n"
+            assert len([r for _, r in read_records(root) if r.kind == "dispatch"]) == 1
         finally:
             await resumed.shutdown()
             resumed.journal.close()

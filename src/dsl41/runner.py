@@ -176,6 +176,7 @@ from dsl41.runner_environment import (
     inherited_environment,
     resolve_streams,
 )
+from dsl41.runtime_policy import PolicyRefused
 from dsl41.runner_config import (
     EngineSettings,
     OracleReading,
@@ -2165,6 +2166,9 @@ class Engine:
             )
         except RuntimeVariableError as exc:
             raise EngineError(f"preflight ERROR [runtime-variable]: {exc}") from exc
+        except PolicyRefused as exc:
+            finding = exc.finding
+            raise EngineError(f"preflight ERROR [{finding.code}]: {finding.message}") from exc
         referenced_inherited = {
             name: inherited[name] for name in referenced if name not in invocation
         }

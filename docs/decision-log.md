@@ -25742,3 +25742,28 @@ relitigate an entry; append a new one.
   THE BOUNDARY. DL-457's rework counts and shape note are unchanged. Known-bugs lines and
   other maintenance work keep their existing rules. Merged preparation code stays and is
   wired item by item.
+- DL-460 Output redirection prefixes (2026-11-04; owner ruling; runner-design §6)
+  A leading > in std_out_file or std_err_file truncates the file and >> appends.
+  The engine uses stream_target on the source before literal variable expansion.
+  The path immediately follows the prefix; an output prefix on std_in_file refuses.
+  The dispatch keeps its existing resolved paths. Expanded values are never reparsed.
+  An unprefixed output and an unset output's default log retain append behavior.
+  This narrows DL-447's "defaults, append modes and permissions stay" only for a
+  leading > source prefix. Permissions and defaults retain their existing rules.
+  After dispatch commits, before wrapper launch, the engine prepares > output files
+  unless the launch is already aborted. It opens with WRONLY, CREAT, NONBLOCK, NOCTTY
+  and CLOEXEC, mode 0600, without TRUNC; fstat selects regular files for ftruncate(0).
+  It closes every opened descriptor. Every output-open OSError and every nonregular
+  target is left to the wrapper's ordinary open behavior, including /dev/null.
+  Preparation errors after a successful open report spawn failure and prevent launch.
+  Existing file modes stay. The wrapper can wait for a FIFO reader.
+  Nonblocking open does not bound regular filesystem I/O.
+  A restart replacement of the same run applies the prefix again. Replay alone leaves
+  stored paths and file bytes alone. No journal, snapshot, state version, wrapper input
+  or spool format changes. The wrapper still opens its supplied output paths for append.
+  A literal filename beginning with > uses ./ or an absolute path; a > introduced by
+  variable expansion is literal. Old stored paths and files are not migrated.
+  A stop during wrapper creation or a later launch failure may leave output truncated,
+  as a shell stopped after redirection can. Earlier preparation is not rolled back if
+  the other stream fails. No stopping path is added. std_file_mode activation, broader
+  process preparation, retries and alarms remain outside this item.
