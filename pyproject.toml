@@ -79,6 +79,9 @@ dsl41-status-hook = "dsl41.status_hook:main"
 requires = ["hatchling>=1.27,<2", "hatch-fancy-pypi-readme>=25.1,<26"]
 build-backend = "hatchling.build"
 
+[tool.uv]
+exclude-newer = "5 days"
+
 # README.md links to repo files by relative path, which GitHub resolves and
 # the PyPI project page does not. The readme is built from README.md at
 # package build time with each relative link rewritten to the file on main.

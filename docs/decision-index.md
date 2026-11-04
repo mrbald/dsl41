@@ -464,3 +464,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-459 | Job control socket environment | [docs/runner-design.md](runner-design.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
 | DL-460 | Output redirection prefixes | [docs/deploy.md](deploy.md), [docs/incident-triage.md](incident-triage.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
 | DL-461 | Wildcard file watchers use durable pathname samples | [docs/autosys-semantics.md](autosys-semantics.md), [docs/blocks/fw-observation.md](blocks/fw-observation.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-465 | Five-day dependency cooldown | [README.md](../README.md) |
