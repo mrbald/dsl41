@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -148,6 +151,62 @@ def short_root():
         yield Path(directory)
     finally:
         shutil.rmtree(directory, ignore_errors=True)
+
+
+def cleanup_owned_processes(root: Path, grace: float = 1.0) -> list[str]:
+    """Stop only processes named by this test's ownership files; return every survivor found."""
+    from dsl41.runner_procid import proc_start_token, signal_ours, verify_alive
+
+    owned: dict[tuple[int, str], Path] = {}
+    for path in root.rglob("spawn.json"):
+        record = json.loads(path.read_text())
+        for pid_key, token_key in (
+            ("wrapper_pid", "wrapper_start_time"),
+            ("command_pid", "command_start_time"),
+        ):
+            pid, token = record.get(pid_key), record.get(token_key)
+            if isinstance(pid, int) and isinstance(token, str):
+                owned[pid, token] = path
+    for path in (*root.rglob("*.ready"), *root.rglob("ready")):
+        pid = int(path.read_text())
+        command = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if not any(str(script) in command.stdout for script in path.parent.glob("*.py")):
+            continue
+        token = proc_start_token(pid)
+        if token is not None:
+            owned.setdefault((pid, token), path)
+    survivors = {identity: path for identity, path in owned.items() if verify_alive(*identity)}
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        for pid, token in survivors:
+            if verify_alive(pid, token):
+                signal_ours(pid, token, sig)
+        deadline = time.monotonic() + grace
+        while any(verify_alive(*identity) for identity in survivors):
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.01)
+    return [
+        f"pid={pid} token={token!r} ownership={path} alive={verify_alive(pid, token)}"
+        for (pid, token), path in survivors.items()
+    ]
+
+
+@pytest.fixture
+def owned_processes(request: pytest.FixtureRequest):
+    """Check ownership files before pytest deletes this test's root, including on call failure."""
+    root = request.getfixturevalue(
+        "short_root" if "short_root" in request.fixturenames else "tmp_path"
+    )
+    yield
+    survivors = cleanup_owned_processes(root)
+    if survivors:
+        pytest.fail("verified test-owned survivors:\n" + "\n".join(survivors), pytrace=False)
 
 
 def _configuration(state, phase):
