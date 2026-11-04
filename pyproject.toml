@@ -57,7 +57,7 @@ dev = [
     # config can live in pyproject with its reasoning beside it.
     "coverage[toml]>=7",
     "ruff>=0.6",
-    "mypy>=1.10",
+    "mypy>=2.4.1",
     "textual>=8",
     "textual-serve>=1.1",
     # DL-77: the explore page's cross-engine smoke test drives a real chromium/
