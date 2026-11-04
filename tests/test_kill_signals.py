@@ -39,14 +39,14 @@ def signal_command(directory: Path, name: str = "child", *, exits: tuple[int, ..
     ready = directory / f"{name}.ready"
     script = directory / f"{name}.py"
     script.write_text(
-        "import signal, time\nfrom pathlib import Path\n"
+        "import os, signal, time\nfrom pathlib import Path\n"
         "def received(number, frame):\n"
         f"    with Path({str(log)!r}).open('a') as stream:\n"
         "        stream.write(str(number) + '\\n')\n"
         f"    if number in {exits!r}: raise SystemExit(0)\n"
         "signal.signal(signal.SIGINT, received)\n"
         "signal.signal(signal.SIGTERM, received)\n"
-        f"Path({str(ready)!r}).touch()\n"
+        f"Path({str(ready)!r}).write_text(str(os.getpid()))\n"
         "while True: time.sleep(0.01)\n"
     )
     return f"exec {sys.executable} {script}", ready, log
@@ -245,7 +245,9 @@ def test_kill_provenance_is_transient_and_first_emission_wins():
 @pytest.mark.parametrize(
     "policy,override,first", [((2, 9), None, 2), ((15, 9), None, 15), ((2, 9), "9", 9)]
 )
-def test_cli_kill_signals_end_to_end(short_root, monkeypatch, policy, override, first):
+def test_cli_kill_signals_end_to_end(
+    short_root, monkeypatch, policy, override, first, owned_processes
+):
     command, ready, log = signal_command(short_root)
     sent = []
     for name in ("signal_ours", "killpg_quiet"):
@@ -299,15 +301,16 @@ def test_cli_kill_signals_end_to_end(short_root, monkeypatch, policy, override, 
             assert engine.profile.kill_signals == policy
             assert engine.oracle.store.job["j"].status == "TERMINATED"
         finally:
-            await server.close()
-            await engine.request_stop()
-            await _finish(engine, loop)
+            try:
+                await server.close()
+            finally:
+                await _finish(engine, loop)
 
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("stop", ["engine_stop", "drain", "parent_loss", "leftover", "status"])
-def test_non_killjob_stops_keep_term(short_root, stop):
+def test_non_killjob_stops_keep_term(short_root, stop, owned_processes):
     command, ready, log = signal_command(short_root, exits=(15,))
 
     async def scenario():
@@ -348,7 +351,6 @@ def test_non_killjob_stops_keep_term(short_root, stop):
             await _until(log.exists)
             assert log.read_text().splitlines() == ["15"]
         finally:
-            await engine.request_stop()
             await _finish(engine, loop)
 
     asyncio.run(scenario())

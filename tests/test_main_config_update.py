@@ -469,7 +469,9 @@ def test_v2_configuration_refuses_untrusted_capture_order(tmp_path: Path, damage
         Configuration.from_bytes(canonical_bytes(payload), where="untrusted")
 
 
-def test_kill_signals_update_affects_later_kills_only(tmp_path: Path, monkeypatch) -> None:
+def test_kill_signals_update_affects_later_kills_only(
+    tmp_path: Path, monkeypatch, owned_processes
+) -> None:
     from datetime import datetime
     from dsl41 import runner_stops
     from dsl41.runner_adapters import LocalCommandAdapter
@@ -530,7 +532,6 @@ def test_kill_signals_update_affects_later_kills_only(tmp_path: Path, monkeypatc
             assert json.loads((root / "runs/a.1/1/status.json").read_text())["signal"] == 9
             assert json.loads((root / "runs/b.1/1/status.json").read_text())["signal"] == 9
         finally:
-            await engine.request_stop()
             await _finish(engine, loop)
 
     asyncio.run(scenario())

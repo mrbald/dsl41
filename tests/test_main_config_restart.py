@@ -897,7 +897,9 @@ def test_k1_state_version_refuses_before_captured_lowering(short_root, monkeypat
 
 @pytest.mark.parametrize("updated", [False, True])
 @pytest.mark.parametrize("launch", ["cli", "legacy"])
-def test_restart_accepts_current_kill_signals(short_root: Path, updated: bool, launch: str) -> None:
+def test_restart_accepts_current_kill_signals(
+    short_root: Path, updated: bool, launch: str, owned_processes
+) -> None:
     import json
     from dsl41.runner_adapters import LocalCommandAdapter
     from dsl41.runner_config import RuntimeProfile
@@ -979,7 +981,6 @@ def test_restart_accepts_current_kill_signals(short_root: Path, updated: bool, l
                 engine.inject(Event(at=engine.clock.now(), kind="KILLJOB", payload={"job": "j"}))
                 await _until(status_file.exists)
             finally:
-                await engine.request_stop()
                 await _finish(engine, loop)
 
         asyncio.run(resume())
