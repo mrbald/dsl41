@@ -19,6 +19,7 @@ The `v2-jil-3` worktree is reference only; nothing merges from it wholesale.
 - [ ] A leading `>` in `std_out_file` or `std_err_file` truncates the file and `>>` appends.
 - [ ] Every JIL attribute that is parsed but has no effect gives a "known but unsupported" warning at startup and reread.
 - [ ] Manual: log-name placeholders `${AUTO_JOB_NAME}` and `${AUTORUN}`; the `dsl41` replacements for `sendevent`, `autorep` and `autostatus`; the unsupported attributes.
+- [ ] Our locked environment stays a few days behind the newest releases, and Dependabot is configured with the same delay (about 5 days).
 - [ ] Release 2.0.0: clean packages, release-workflow rehearsal, installed check, and the owner's approval of the tag.
 
 ## Release 2026-11-02: one box
