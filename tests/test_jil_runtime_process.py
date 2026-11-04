@@ -250,16 +250,18 @@ def test_file_observations_and_recovery(tmp_path: Path):
     a.write_text("1234")
     b.write_text("12")
     hidden.write_text("1234")
-    log = tmp_path / "candidate.log"
+    log = tmp_path / adapters.WATCH_LOG
     now = datetime(2026, 1, 1)
-    adapters.append_watch_line(log, {"kind": "start", "at": now.isoformat(), "run_id": "run"})
+    adapters.append_watch_line(
+        log, {"artifact_format_version": 1, "kind": "start", "at": now.isoformat(), "run_id": "run"}
+    )
     first = adapters.observe_pattern(str(tmp_path / "*.dat"), 4)
     assert [Path(item.path).name for item in first] == ["a.dat"]
     state = adapters.append_pattern_poll(
         log, "run", now, adapters.PatternWatchProgress(), first, immediate=False
     )
     assert not state.complete
-    saved = adapters.read_pattern_evidence(log, "run", immediate=False)
+    saved = adapters.read_watch_log(tmp_path).pattern
     assert saved == state
     replacement = tmp_path / "replacement"
     replacement.write_text("1234")
@@ -275,7 +277,7 @@ def test_file_observations_and_recovery(tmp_path: Path):
     obs = adapters.observe_pattern(str(tmp_path / "*.dat"), 4)
     state = adapters.append_pattern_poll(log, "run", now, state, obs, immediate=False)
     state = adapters.append_pattern_poll(log, "run", now, state, obs, immediate=False)
-    assert state.complete and adapters.read_pattern_evidence(log, "run", immediate=False) == state
+    assert state.complete and adapters.read_watch_log(tmp_path).pattern == state
     assert [
         Path(item.path).name for item in adapters.observe_pattern(str(tmp_path / ".*.dat"), 4)
     ] == [".hidden.dat"]
@@ -298,15 +300,21 @@ def test_watcher_first_poll_and_durable_before_progress(tmp_path: Path, monkeypa
 
 
 def test_watcher_bad_and_torn_evidence(tmp_path: Path):
-    log = tmp_path / "candidate"
-    start = {"kind": "start", "run_id": "r", "at": "2026-01-01T00:00:00"}
+    log = tmp_path / adapters.WATCH_LOG
+    start = {
+        "artifact_format_version": 1,
+        "kind": "start",
+        "run_id": "r",
+        "at": "2026-01-01T00:00:00",
+    }
     log.write_text(json.dumps(start) + '\n{"kind":')
-    assert adapters.read_pattern_evidence(log, "r", immediate=False).polls == 0
-    log.write_text(json.dumps(start) + "\n{}\n")
-    with pytest.raises(EngineError, match="identity"):
-        adapters.read_pattern_evidence(log, "r", immediate=False)
+    assert adapters.read_watch_log(tmp_path).watch_seq == 1
+    log.write_text(json.dumps(start) + '\n{"artifact_format_version":1,"run_id":"foreign"}\n')
+    with pytest.raises(EngineError, match="run_id"):
+        adapters.read_watch_log(tmp_path)
     bad = {
-        "kind": "poll",
+        "artifact_format_version": 1,
+        "kind": "sample",
         "run_id": "r",
         "at": start["at"],
         "files": [
@@ -315,7 +323,7 @@ def test_watcher_bad_and_torn_evidence(tmp_path: Path):
     }
     log.write_text(json.dumps(start) + "\n" + json.dumps(bad) + "\n")
     with pytest.raises(EngineError, match="observation"):
-        adapters.read_pattern_evidence(log, "r", immediate=False)
+        adapters.read_watch_log(tmp_path)
 
 
 def test_selected_ladder_real_target_and_spacing():
@@ -560,12 +568,17 @@ def test_pattern_observe_race_and_duplicate(tmp_path: Path, monkeypatch):
 @pytest.mark.parametrize(
     "record, error",
     [
-        ({"kind": "poll", "run_id": "r", "at": "bad", "files": []}, "timestamp"),
-        ({"kind": "wrong", "run_id": "r", "at": "2026-01-01", "files": []}, "invalid poll"),
-        ({"kind": "poll", "run_id": "r", "at": "2026-01-01", "files": [None]}, "invalid file"),
+        ({"kind": "sample", "run_id": "r", "at": "2026-01-01", "files": None}, "sample files"),
+        (
+            {"kind": "sample", "run_id": "r", "at": "2026-01-01", "files": [{"path": ""}]},
+            "invalid file",
+        ),
+        ({"kind": "sample", "run_id": "r", "at": "bad", "files": []}, "timestamp"),
+        ({"kind": "wrong", "run_id": "r", "at": "2026-01-01", "files": []}, "kind"),
+        ({"kind": "sample", "run_id": "r", "at": "2026-01-01", "files": [None]}, "invalid file"),
         (
             {
-                "kind": "poll",
+                "kind": "sample",
                 "run_id": "r",
                 "at": "2026-01-01",
                 "files": [
@@ -584,24 +597,36 @@ def test_pattern_observe_race_and_duplicate(tmp_path: Path, monkeypatch):
     ],
 )
 def test_pattern_rejects_malformed_candidate(tmp_path: Path, record: dict, error: str):
-    log = tmp_path / "candidate"
-    start = {"kind": "start", "run_id": "r", "at": "2026-01-01T00:00:00"}
+    log = tmp_path / adapters.WATCH_LOG
+    start = {
+        "artifact_format_version": 1,
+        "kind": "start",
+        "run_id": "r",
+        "at": "2026-01-01T00:00:00",
+    }
+    record = {"artifact_format_version": 1, **record}
     log.write_text(json.dumps(start) + "\n" + json.dumps(record) + "\n")
     with pytest.raises(EngineError, match=error):
-        adapters.read_pattern_evidence(log, "r", immediate=False)
+        adapters.read_watch_log(tmp_path)
 
 
 def test_pattern_rejects_unreadable_and_nonstart_logs(tmp_path: Path):
-    path = tmp_path / "missing"
-    assert adapters.read_pattern_evidence(path, "r", immediate=False) is None
+    path = tmp_path / adapters.WATCH_LOG
+    assert adapters.read_watch_log(tmp_path) is None
+    path.mkdir()
     with pytest.raises(EngineError, match="unreadable"):
-        adapters.read_pattern_evidence(tmp_path, "r", immediate=False)
-    path.write_text('{"kind":"poll","run_id":"r","at":"2026-01-01"}\n')
-    with pytest.raises(EngineError, match="first observation"):
-        adapters.read_pattern_evidence(path, "r", immediate=False)
-    path.write_text('{"kind":"start","run_id":"r","at":"2026-01-01"}\n\n')
+        adapters.read_watch_log(tmp_path)
+    path.rmdir()
+    path.write_text(
+        '{"artifact_format_version":1,"kind":"sample","run_id":"r","at":"2026-01-01"}\n'
+    )
+    with pytest.raises(EngineError, match="first line"):
+        adapters.read_watch_log(tmp_path)
+    path.write_text(
+        '{"artifact_format_version":1,"kind":"start","run_id":"r","at":"2026-01-01"}\n\n'
+    )
     with pytest.raises(EngineError, match="empty interior"):
-        adapters.read_pattern_evidence(path, "r", immediate=False)
+        adapters.read_watch_log(tmp_path)
 
 
 def test_prepare_requires_default_output_paths(tmp_path: Path):
@@ -618,14 +643,15 @@ def test_prepare_requires_default_output_paths(tmp_path: Path):
         )
 
 
-def test_pattern_fence_checked_before_write(tmp_path: Path):
+def test_pattern_fence_checked_before_write(tmp_path: Path, monkeypatch):
     calls = []
 
     class Fence:
         def check(self):
+            assert not log.exists()
             calls.append("checked")
 
-    log = tmp_path / "candidate"
+    log = tmp_path / adapters.WATCH_LOG
     state = adapters.append_pattern_poll(
         log,
         "r",
@@ -636,19 +662,32 @@ def test_pattern_fence_checked_before_write(tmp_path: Path):
         fence=Fence(),
     )
     assert calls == ["checked"] and state.polls == 1 and log.exists()
+    before = log.read_bytes()
+
+    def refuse():
+        raise EngineError("lost fence")
+
+    monkeypatch.setattr(Fence, "check", lambda self: refuse())
+    with pytest.raises(EngineError, match="lost fence"):
+        adapters.append_pattern_poll(
+            log, "r", datetime.now(), state, (), immediate=False, fence=Fence()
+        )
+    assert log.read_bytes() == before
 
 
 def test_pattern_bad_timestamp_empty_and_interior_corruption(tmp_path: Path):
-    path = tmp_path / "candidate"
+    path = tmp_path / adapters.WATCH_LOG
     path.write_bytes(b"")
-    assert adapters.read_pattern_evidence(path, "r", immediate=False) is None
-    start = {"kind": "start", "run_id": "r", "at": 4}
+    assert adapters.read_watch_log(tmp_path) is None
+    start = {"artifact_format_version": 1, "kind": "start", "run_id": "r", "at": 4}
     path.write_text(json.dumps(start) + "\n")
     with pytest.raises(EngineError, match="timestamp"):
-        adapters.read_pattern_evidence(path, "r", immediate=False)
-    path.write_text('{"kind":"start","run_id":"r","at":"2026-01-01"}\n{bad}\n')
-    with pytest.raises(EngineError, match="malformed"):
-        adapters.read_pattern_evidence(path, "r", immediate=False)
+        adapters.read_watch_log(tmp_path)
+    path.write_text(
+        '{"artifact_format_version":1,"kind":"start","run_id":"r","at":"2026-01-01"}\n{bad}\n'
+    )
+    with pytest.raises(EngineError, match="line"):
+        adapters.read_watch_log(tmp_path)
 
 
 def test_wait_status_does_not_invent_stage():
@@ -780,31 +819,37 @@ def test_sampled_watcher_independent_paths_and_immediate_first_poll():
 
 
 def test_sampled_watcher_restart_and_strict_replay(tmp_path: Path):
-    log = tmp_path / "candidate"
+    log = tmp_path / adapters.WATCH_LOG
     at = datetime(2026, 1, 1)
-    adapters.append_watch_line(log, {"kind": "start", "run_id": "r", "at": at.isoformat()})
+    adapters.append_watch_line(
+        log, {"artifact_format_version": 1, "kind": "start", "run_id": "r", "at": at.isoformat()}
+    )
     first = adapters.FileObservation("/watch", 1, 2, 8, -10, 100)
     state = adapters.append_pattern_poll(
         log, "r", at, adapters.PatternWatchProgress(), (first,), immediate=False
     )
-    restored = adapters.read_pattern_evidence(log, "r", immediate=False)
+    restored = adapters.read_watch_log(tmp_path).pattern
     assert restored == state
     assert adapters.fold_pattern_poll(restored, (first,), immediate=False).complete
     changed = adapters.FileObservation("/watch", 1, 2, 8, -10, 101)
     assert not adapters.fold_pattern_poll(restored, (changed,), immediate=False).complete
     row = json.loads(log.read_text().splitlines()[1])
+    assert row["at"] == "2026-01-01T00:00:00.000000"
+    assert row["kind"] == "sample" and row["artifact_format_version"] == 1
     assert row["files"] == [
         {"path": "/watch", "device": 1, "inode": 2, "size": 8, "mtime_ns": -10, "ctime_ns": 100}
     ]
     del row["files"][0]["ctime_ns"]
     log.write_text(
-        json.dumps({"kind": "start", "run_id": "r", "at": at.isoformat()})
+        json.dumps(
+            {"artifact_format_version": 1, "kind": "start", "run_id": "r", "at": at.isoformat()}
+        )
         + "\n"
         + json.dumps(row)
         + "\n"
     )
     with pytest.raises(EngineError, match="invalid file observation"):
-        adapters.read_pattern_evidence(log, "r", immediate=False)
+        adapters.read_watch_log(tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -979,17 +1024,17 @@ def test_noclobber_profile_preserves_explicit_stream_modes(tmp_path: Path, shell
 @pytest.mark.parametrize(
     "record",
     [
-        '{"kind":"start","run_id":"r","run_id":"r","at":"2026-01-01"}',
-        '{"kind":"poll","run_id":"r","at":"2026-01-01","files":[],"files":[{"path":"/a","device":1,"inode":2,"size":3,"mtime_ns":4,"ctime_ns":5}]}',
-        '{"kind":"poll","run_id":"r","at":"2026-01-01","files":[{"path":"/a","path":"/b","device":1,"inode":2,"size":3,"mtime_ns":4,"ctime_ns":5}]}',
+        '{"artifact_format_version":1,"kind":"start","run_id":"r","run_id":"r","at":"2026-01-01"}',
+        '{"artifact_format_version":1,"kind":"sample","run_id":"r","at":"2026-01-01","files":[],"files":[{"path":"/a","device":1,"inode":2,"size":3,"mtime_ns":4,"ctime_ns":5}]}',
+        '{"artifact_format_version":1,"kind":"sample","run_id":"r","at":"2026-01-01","files":[{"path":"/a","path":"/b","device":1,"inode":2,"size":3,"mtime_ns":4,"ctime_ns":5}]}',
     ],
 )
 def test_pattern_evidence_refuses_duplicate_keys_at_any_depth(tmp_path: Path, record: str):
-    log = tmp_path / "candidate"
-    start = '{"kind":"start","run_id":"r","at":"2026-01-01"}'
+    log = tmp_path / adapters.WATCH_LOG
+    start = '{"artifact_format_version":1,"kind":"start","run_id":"r","at":"2026-01-01"}'
     log.write_text(("" if '"kind":"start"' in record else start + "\n") + record + "\n")
     with pytest.raises(EngineError, match="duplicate object key"):
-        adapters.read_pattern_evidence(log, "r", immediate=False)
+        adapters.read_watch_log(tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -1042,21 +1087,14 @@ def test_profile_stream_setup_failure_does_not_launch_command(tmp_path: Path):
     assert result["returncode"] is None and not marker.exists()
 
 
-def test_pattern_no_start_matches_old_reader(tmp_path: Path):
-    log = tmp_path / "watch.jsonl"
-    assert adapters.read_watch_log(tmp_path) is None
-    assert adapters.read_pattern_evidence(log, "r", immediate=False) is None
-    log.write_bytes(b"")
-    assert adapters.read_watch_log(tmp_path) is None
-    assert adapters.read_pattern_evidence(log, "r", immediate=False) is None
-    log.write_bytes(b'{"kind":"sta')
-    assert adapters.read_watch_log(tmp_path) is None
-    assert adapters.read_pattern_evidence(log, "r", immediate=False) is None
-
-
 def test_pattern_torn_final_poll_keeps_durable_start(tmp_path: Path):
-    log = tmp_path / "candidate"
-    start = {"kind": "start", "run_id": "r", "at": "2026-01-01T00:00:00"}
+    log = tmp_path / adapters.WATCH_LOG
+    start = {
+        "artifact_format_version": 1,
+        "kind": "start",
+        "run_id": "r",
+        "at": "2026-01-01T00:00:00",
+    }
     adapters.append_watch_line(log, start)
     sample = adapters.FileObservation("/watch", 1, 2, 8, 100, 100)
     saved = adapters.append_pattern_poll(
@@ -1064,18 +1102,15 @@ def test_pattern_torn_final_poll_keeps_durable_start(tmp_path: Path):
     )
     with log.open("ab") as stream:
         stream.write(b'{"kind":"po')
-    progress = adapters.read_pattern_evidence(log, "r", immediate=False)
+    progress = adapters.read_watch_log(tmp_path).pattern
     assert progress == saved and progress.stable["/watch"] == 1
 
 
 def test_pattern_complete_bad_start_is_not_no_start(tmp_path: Path):
-    log = tmp_path / "candidate"
+    log = tmp_path / adapters.WATCH_LOG
     log.write_bytes(b"{bad}\n")
-    with pytest.raises(EngineError, match="malformed"):
-        adapters.read_pattern_evidence(log, "r", immediate=False)
-    log.write_text('{"kind":"start","run_id":"foreign","at":"2026-01-01"}\n')
-    with pytest.raises(EngineError, match="identity"):
-        adapters.read_pattern_evidence(log, "r", immediate=False)
+    with pytest.raises(EngineError, match="line"):
+        adapters.read_watch_log(tmp_path)
 
 
 def test_signal_ladder_sends_terminal_to_all_after_early_refusal(monkeypatch):
@@ -1231,12 +1266,12 @@ def test_profile_stream_descriptors_are_not_leaked_into_command(tmp_path: Path, 
 
 
 def test_pattern_corrupt_interior_record_does_not_redispatch(tmp_path: Path):
-    log = tmp_path / "candidate"
-    start = '{"kind":"start","run_id":"r","at":"2026-01-01"}'
-    poll = '{"kind":"poll","run_id":"r","at":"2026-01-01","files":[]}'
+    log = tmp_path / adapters.WATCH_LOG
+    start = '{"artifact_format_version":1,"kind":"start","run_id":"r","at":"2026-01-01"}'
+    poll = '{"artifact_format_version":1,"kind":"sample","run_id":"r","at":"2026-01-01","files":[]}'
     log.write_text(start + "\n{bad}\n" + poll + "\n")
-    with pytest.raises(EngineError, match="malformed"):
-        adapters.read_pattern_evidence(log, "r", immediate=False)
+    with pytest.raises(EngineError, match="line"):
+        adapters.read_watch_log(tmp_path)
 
 
 @pytest.mark.parametrize("where", ["site", "job"])

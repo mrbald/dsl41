@@ -25,6 +25,7 @@ import asyncio
 import contextlib
 import glob
 import json
+import logging
 import os
 import resource
 import signal
@@ -51,6 +52,7 @@ from dsl41.canon import (
     canonical_bytes,
     decode,
     is_scalar_json,
+    is_scalar_string,
     is_wire_int,
 )
 from dsl41.ir import ExecSpec, FwSpec, JobIR
@@ -764,9 +766,8 @@ def job_log_paths(job_ir: JobIR, run_number: int, run_root: Path) -> tuple[str, 
 #: the FW adapter's append-only spool, one line per poll (period-model ss3.5)
 WATCH_LOG = "watch.jsonl"
 
-#: ss6's steady-size rule as a number: two consecutive qualifying polls at the same size complete
-#: the watch (`fw-existence=stable`, DL-258). The spool records the count, so live and resume read
-#: the rule the same way.
+#: Two stable qualifying observations complete a watch: equal size for exact paths (DL-258),
+#: or equal five-field samples per wildcard pathname (DL-461). Replay derives the same count.
 FW_STABLE_POLLS = 2
 
 
@@ -788,12 +789,17 @@ class WatchLog:
     stable_polls: int
     #: the count of durable lines (period-model ss3.5's `watch_seq`)
     watch_seq: int
+    pattern: PatternWatchProgress | None = None
 
     @property
     def complete(self) -> bool:
         """The last durable line is a COMPLETING observation: the watch is over, whether or not the
         engine lived to say so (PR-34a)."""
-        return self.stable_polls >= FW_STABLE_POLLS
+        return (
+            self.pattern.complete
+            if self.pattern is not None
+            else self.stable_polls >= FW_STABLE_POLLS
+        )
 
     def next_poll_at(self, interval_s: int) -> datetime:
         """period-model ss3.5: after `start` and no poll line, `start.at` (the first poll is
@@ -859,17 +865,26 @@ def read_watch_log(run_dir: Path) -> WatchLog | None:
     last: dict[str, Any] | None = None
     derived_stable = 0
     previous_size: int | None = None
+    pattern: PatternWatchProgress | None = None
     for position, record in enumerate(records[1:], start=2):
         # every later line is a poll of THIS watch, in full: a line of an unknown kind, a foreign
         # run_id or a malformed field is evidence the fold cannot hold, and a poll naming another
         # run never completes this one (DL-118)
-        if record.get("kind") != "poll":
-            raise EngineError(f"{path}: line {position} kind {record.get('kind')!r}")
         if record.get("run_id") != run_id:
             raise EngineError(
                 f"{path}: line {position} names run_id {record.get('run_id')!r}"
                 f" but the start line named {run_id!r}"
             )
+        if record.get("kind") == "sample":
+            _watch_at(path, record)
+            # DL-461: scalar history closes the first-poll window but cannot supply samples.
+            if pattern is None:
+                pattern = PatternWatchProgress(polls=position - 2)
+            pattern = fold_pattern_poll(pattern, _watch_files(path, record), immediate=False)
+            last = record
+            continue
+        if record.get("kind") != "poll" or pattern is not None:
+            raise EngineError(f"{path}: line {position} kind {record.get('kind')!r}")
         size = record.get("size")
         if not (size is None or is_wire_int(size)):
             raise EngineError(f"{path}: line {position} size {size!r}")
@@ -906,10 +921,15 @@ def read_watch_log(run_dir: Path) -> WatchLog | None:
         run_id=run_id,
         start_at=_watch_at(path, start),
         last_at=_watch_at(path, last) if last is not None else None,
-        size=last.get("size") if last is not None else None,
-        qualifying=bool(last.get("qualifying")) if last is not None else False,
-        stable_polls=int(last.get("stable_polls", 0)) if last is not None else 0,
+        size=last.get("size") if last is not None and pattern is None else None,
+        qualifying=bool(pattern.previous)
+        if pattern is not None
+        else bool(last and last.get("qualifying")),
+        stable_polls=max(pattern.stable.values(), default=0)
+        if pattern is not None
+        else derived_stable,
         watch_seq=len(records),
+        pattern=pattern,
     )
 
 
@@ -930,7 +950,10 @@ def _watch_at(path: Path, record: dict[str, Any]) -> datetime:
     at = record.get("at")
     if not isinstance(at, str):
         raise EngineError(f"{path}: a {record.get('kind')!r} line has no timestamp")
-    return datetime.fromisoformat(at)
+    try:
+        return datetime.fromisoformat(at)
+    except ValueError as exc:
+        raise EngineError(f"{path}: bad observation timestamp {at!r}") from exc
 
 
 def repair_tail(path: Path) -> None:
@@ -987,10 +1010,19 @@ class PatternWatchProgress:
     complete: bool = False
 
 
-def observe_pattern(pattern: str, min_size: int) -> tuple[FileObservation, ...]:
+def observe_pattern(
+    pattern: str, min_size: int, *, warned_names: set[str] | None = None
+) -> tuple[FileObservation, ...]:
     """Observe the matches of an already validated final-component pattern."""
     result: list[FileObservation] = []
+    if warned_names is None:
+        warned_names = set()
     for path in sorted(glob.iglob(pattern)):
+        if not is_scalar_string(path):
+            if path not in warned_names:
+                logging.getLogger(__name__).warning("Ignoring non-UTF-8 watch match %r", path)
+                warned_names.add(path)
+            continue
         try:
             stat = os.stat(path)
         except OSError:
@@ -1027,12 +1059,13 @@ def fold_pattern_poll(
 
 
 def pattern_poll_record(
-    run_id: str, at: datetime, observations: tuple[FileObservation, ...]
+    run_id: str | None, at: datetime, observations: tuple[FileObservation, ...]
 ) -> dict[str, Any]:
     return {
-        "kind": "poll",
+        "artifact_format_version": ARTIFACT_FORMAT_VERSION,
+        "kind": "sample",
         "run_id": run_id,
-        "at": at.isoformat(),
+        "at": at,
         "files": [
             {
                 "path": item.path,
@@ -1049,7 +1082,7 @@ def pattern_poll_record(
 
 def append_pattern_poll(
     path: Path,
-    run_id: str,
+    run_id: str | None,
     at: datetime,
     previous: PatternWatchProgress,
     observations: tuple[FileObservation, ...],
@@ -1057,7 +1090,7 @@ def append_pattern_poll(
     immediate: bool,
     fence: Proof | None = None,
 ) -> PatternWatchProgress:
-    """Write a candidate poll before exposing its derived progress."""
+    """Write a sampled poll before exposing its derived progress (DL-461)."""
     result = fold_pattern_poll(previous, observations, immediate=immediate)
     if fence is not None:
         fence.check()
@@ -1065,70 +1098,34 @@ def append_pattern_poll(
     return result
 
 
-def read_pattern_evidence(
-    path: Path, run_id: str, *, immediate: bool
-) -> PatternWatchProgress | None:
-    """Fold candidate observations, or return None if no start record is durable."""
-    try:
-        raw = path.read_bytes()
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise EngineError(f"{path}: unreadable: {exc}") from exc
-    lines = raw.split(b"\n")
-    trailing = lines.pop() if lines and lines[-1] == b"" else None
-    progress = PatternWatchProgress()
-    started = False
-    for index, line in enumerate(lines):
-        if not line:
-            raise EngineError(f"{path}: empty interior line {index + 1}")
-        if index == len(lines) - 1 and trailing is None and not _is_json(line):
-            break
-        try:
-            record = decode(line)
-        except CanonError as exc:
-            raise EngineError(f"{path}: malformed line {index + 1}: {exc}") from exc
-        if not isinstance(record, dict) or record.get("run_id") != run_id:
-            raise EngineError(f"{path}: wrong observation identity on line {index + 1}")
-        try:
-            at = record["at"]
-            if not isinstance(at, str):
-                raise ValueError("not a timestamp")
-            datetime.fromisoformat(at)
-        except (KeyError, ValueError) as exc:
-            raise EngineError(f"{path}: bad observation timestamp on line {index + 1}") from exc
-        if not started:
-            if record.get("kind") != "start":
-                raise EngineError(f"{path}: first observation is not start")
-            started = True
-            continue
-        files = record.get("files")
-        if record.get("kind") != "poll" or not isinstance(files, list):
-            raise EngineError(f"{path}: invalid poll on line {index + 1}")
-        observations: list[FileObservation] = []
-        for item in files:
-            if not isinstance(item, dict) or not isinstance(item.get("path"), str):
-                raise EngineError(f"{path}: invalid file observation on line {index + 1}")
-            values = [item.get(key) for key in ("device", "inode", "size", "mtime_ns", "ctime_ns")]
-            if any(not is_wire_int(value) for value in values) or any(
-                cast(int, value) < 0 for value in values[:3]
-            ):
-                raise EngineError(f"{path}: invalid file observation on line {index + 1}")
-            observations.append(
-                FileObservation(item["path"], *(cast(int, value) for value in values))
-            )
-        progress = fold_pattern_poll(progress, tuple(observations), immediate=immediate)
-    return progress if started else None
+def _watch_files(path: Path, record: dict[str, Any]) -> tuple[FileObservation, ...]:
+    """Decode one sampled observation for the production evidence fold (DL-461)."""
+    files = record.get("files")
+    if not isinstance(files, list):
+        raise EngineError(f"{path}: invalid sample files")
+    observations: list[FileObservation] = []
+    for item in files:
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str) or not item["path"]:
+            raise EngineError(f"{path}: invalid file observation")
+        values = [item.get(key) for key in ("device", "inode", "size", "mtime_ns", "ctime_ns")]
+        if any(not is_wire_int(value) for value in values) or any(
+            cast(int, value) < 0 for value in values[:3]
+        ):
+            raise EngineError(f"{path}: invalid file observation")
+        observations.append(FileObservation(item["path"], *(cast(int, value) for value in values)))
+    return tuple(observations)
 
 
 class FileWatcherAdapter:
     """ss6 FW adapter: poll every watch_interval seconds (default 60 [?] PENDING: E6) until
     watch_file exists with size >= watch_file_min_size (unset -> 0) and the size is stable
     across two consecutive qualifying polls -- `fw-existence=stable`, the default and dsl41's
-    own choice (DL-258). With no minimum size, `fw-existence=immediate` completes only when
+    own choice (DL-258). Final-component * and ? patterns instead require an unchanged
+    device, inode, size, mtime_ns and ctime_ns per pathname (DL-461). With no positive minimum
+    size, `fw-existence=immediate` completes only when
     the run's FIRST poll finds the file -- the vendor reading; a file that appears later waits
-    for a steady size, as under `stable`. A job with a minimum size always needs the
-    steady-size rule, whatever the switch says. Completes with exit 0. Clock-driven
+    for stability, as under `stable`. A job with a positive minimum size always needs two
+    stable observations, whatever the switch says. Completes with exit 0. Clock-driven
     (ctx.clock.sleep_until), so the same code runs in both time domains; polling is an
     idempotent read, which is why resume may re-dispatch an incomplete watch.
 
@@ -1159,9 +1156,11 @@ class FileWatcherAdapter:
         # DL-258: with no minimum size, `immediate` completes when the RUN'S FIRST poll already
         # qualifies (the vendor's narrow carve-out: "the file already exists when the job
         # runs"). Once the first poll has passed without qualifying, the general rule applies
-        # even under `immediate`: the size must reach the minimum and stay steady, the
-        # FW_STABLE_POLLS rule `stable` uses. A job with a minimum size always needs that rule.
+        # even under `immediate`: two stable qualifying observations, using size for exact
+        # paths or five-field samples for wildcards (DL-461). A positive minimum always needs it.
         immediate = fw_existence_immediate(job_ir, self.existence)
+        pattern = PatternWatchProgress() if any(c in spec_ir.watch_file for c in "*?") else None
+        warned_names: set[str] = set()
         first_poll_pending = True
         previous: int | None = None
         stable = 0
@@ -1177,11 +1176,9 @@ class FileWatcherAdapter:
             run_dir.mkdir(parents=True, exist_ok=True)
             fsync_dir(run_dir.parent)
             log_path = run_dir / WATCH_LOG
-            # make the watch log end on a line boundary before anything appends
-            # (period-model ss3.5)
-            repair_tail(log_path)
             log = read_watch_log(run_dir)
             if log is None:
+                repair_tail(log_path)
                 if ctx.fence is not None:
                     ctx.fence.check()  # the dispatch line is an append too
                 append_watch_line(
@@ -1209,7 +1206,12 @@ class FileWatcherAdapter:
                         f" {log.run_id!r} but this run is {run_id!r} -- refusing to"
                         " adopt a stranger's watch (DL-118)"
                     )
+                if pattern is None and log.pattern is not None:
+                    raise EngineError(f"{log_path}: sampled evidence for an exact-path watch")
+                repair_tail(log_path)
                 run_id = log.run_id
+                if pattern is not None:
+                    pattern = log.pattern or PatternWatchProgress(polls=log.watch_seq - 1)
                 previous = log.size if log.qualifying else None
                 stable = log.stable_polls
                 next_at = log.next_poll_at(interval)
@@ -1227,6 +1229,26 @@ class FileWatcherAdapter:
         while True:
             await ctx.clock.sleep_until(next_at)
             at = ctx.clock.now()
+            if pattern is not None:
+                observations = observe_pattern(
+                    spec_ir.watch_file, min_size, warned_names=warned_names
+                )
+                if log_path is None:
+                    pattern = fold_pattern_poll(pattern, observations, immediate=immediate)
+                else:
+                    pattern = append_pattern_poll(
+                        log_path,
+                        run_id,
+                        at,
+                        pattern,
+                        observations,
+                        immediate=immediate,
+                        fence=ctx.fence,
+                    )
+                if pattern.complete:
+                    return 0
+                next_at = at + timedelta(seconds=interval)
+                continue
             try:
                 size: int | None = os.stat(spec_ir.watch_file).st_size
             except OSError:

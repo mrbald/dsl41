@@ -532,8 +532,10 @@ def _assert_killed_by_the_adapter(run_dir: Path) -> None:
 # --------------------------------------------- 3. FileWatcherAdapter (virtual)
 
 
+@pytest.mark.parametrize("pattern", ["watched.txt", "*.txt", "watche?.txt"])
 def test_fw_lifecycle_absence_below_min_growth_reset_then_two_stable_polls_succeed(
     tmp_path: Path,
+    pattern: str,
 ) -> None:
     """(runner-design ss6 FW adapter, ss15 E6 PENDING): the adapter checks
     immediately at dispatch, then every watch_interval seconds. Absence and
@@ -544,7 +546,7 @@ def test_fw_lifecycle_absence_below_min_growth_reset_then_two_stable_polls_succe
     wait (ss9), so this whole lifecycle runs with no real sleeping."""
     watch_file = tmp_path / "watched.txt"
     text = (
-        f"insert_job: fwj\njob_type: f\nwatch_file: {watch_file}\n"
+        f"insert_job: fwj\njob_type: f\nwatch_file: {tmp_path / pattern}\n"
         "watch_interval: 60\nwatch_file_min_size: 5\n"
     )
 
@@ -610,7 +612,10 @@ def test_fw_two_immediately_stable_polls_succeed(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("existence", ["stable", "immediate"])
-def test_fw_existence_with_the_file_already_present(tmp_path: Path, existence: str) -> None:
+@pytest.mark.parametrize("pattern", ["watched.txt", "*.txt", "watche?.txt"])
+def test_fw_existence_with_the_file_already_present(
+    tmp_path: Path, pattern: str, existence: str
+) -> None:
     """No watch_file_min_size. `stable` (default) still needs the
     dispatch-time check plus one watch_interval poll at the same size --
     test_fw_two_immediately_stable_polls_succeed's lifecycle with no minimum
@@ -618,7 +623,7 @@ def test_fw_existence_with_the_file_already_present(tmp_path: Path, existence: s
     check alone, watch_interval ignored."""
     watch_file = tmp_path / "watched.txt"
     watch_file.write_bytes(b"abcdef")
-    text = f"insert_job: fwp\njob_type: f\nwatch_file: {watch_file}\nwatch_interval: 60\n"
+    text = f"insert_job: fwp\njob_type: f\nwatch_file: {tmp_path / pattern}\nwatch_interval: 60\n"
 
     async def scenario() -> None:
         engine = Engine(
@@ -640,7 +645,10 @@ def test_fw_existence_with_the_file_already_present(tmp_path: Path, existence: s
 
 
 @pytest.mark.parametrize("existence", ["stable", "immediate"])
-def test_fw_existence_with_the_file_appearing_later(tmp_path: Path, existence: str) -> None:
+@pytest.mark.parametrize("pattern", ["watched.txt", "*.txt", "watche?.txt"])
+def test_fw_existence_with_the_file_appearing_later(
+    tmp_path: Path, pattern: str, existence: str
+) -> None:
     """DL-258 (corrected): the vendor's "completes immediately" carve-out is
     narrow -- "the file already exists when the job runs" -- so it only ever
     applies to the run's FIRST poll. Here the file is absent at that first
@@ -652,7 +660,7 @@ def test_fw_existence_with_the_file_appearing_later(tmp_path: Path, existence: s
     interval"). This pins the fix against the earlier over-extension, where
     `immediate` completed on ANY first qualifying poll, not just the run's."""
     watch_file = tmp_path / "watched.txt"
-    text = f"insert_job: fwl\njob_type: f\nwatch_file: {watch_file}\nwatch_interval: 60\n"
+    text = f"insert_job: fwl\njob_type: f\nwatch_file: {tmp_path / pattern}\nwatch_interval: 60\n"
 
     async def scenario() -> None:
         engine = Engine(
@@ -707,8 +715,9 @@ def test_fw_existence_with_a_still_growing_file(tmp_path: Path, existence: str) 
 
 
 @pytest.mark.parametrize("existence", ["stable", "immediate"])
+@pytest.mark.parametrize("pattern", ["watched.txt", "*.txt", "watche?.txt"])
 def test_fw_existence_does_not_change_a_job_with_a_minimum_size(
-    tmp_path: Path, existence: str
+    tmp_path: Path, pattern: str, existence: str
 ) -> None:
     """`fw-existence` only decides a no-minimum-size watch. A job with
     watch_file_min_size still needs two stable qualifying polls whatever the
@@ -717,7 +726,7 @@ def test_fw_existence_does_not_change_a_job_with_a_minimum_size(
     watch_file = tmp_path / "watched.txt"
     watch_file.write_bytes(b"abcdef")
     text = (
-        f"insert_job: fwmin\njob_type: f\nwatch_file: {watch_file}\n"
+        f"insert_job: fwmin\njob_type: f\nwatch_file: {tmp_path / pattern}\n"
         "watch_interval: 60\nwatch_file_min_size: 5\n"
     )
 
@@ -1044,3 +1053,102 @@ async def _until(predicate: Callable[[], bool], why: str, within_s: float = 10.0
     while not predicate():
         assert time.monotonic() < deadline, why
         await asyncio.sleep(0.005)
+
+
+def test_fw_glob_streaks_are_per_path_and_identity(tmp_path: Path) -> None:
+    a, b = tmp_path / "a.csv", tmp_path / "b.csv"
+    catalog = lower_source(
+        f"insert_job: w\njob_type: f\nwatch_file: {tmp_path}/*.csv\nwatch_interval: 60\n"
+    )
+
+    async def scenario():
+        engine = Engine(
+            catalog, clock=VirtualClock(start=T0), adapters={"FW": FileWatcherAdapter()}
+        )
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "w"}))
+        a.write_text("same")
+        await engine.run_until_quiescent(T0)
+        replacement = tmp_path / "replacement"
+        replacement.write_text("same")
+        replacement.replace(a)
+        b.write_text("same")
+        await engine.run_until_quiescent(T0 + timedelta(seconds=60))
+        assert engine.oracle.store.job["w"].status == "RUNNING"
+        a.unlink()
+        b.write_text("changed")
+        await engine.run_until_quiescent(T0 + timedelta(seconds=120))
+        assert engine.oracle.store.job["w"].status == "RUNNING"
+        a.write_text("same")
+        b.write_text("changed again")
+        await engine.run_until_quiescent(T0 + timedelta(seconds=180))
+        assert engine.oracle.store.job["w"].status == "RUNNING"
+        b.write_text("still changing")
+        await engine.run_until_quiescent(T0 + timedelta(seconds=240))
+        assert engine.oracle.store.job["w"].status == "SUCCESS"
+        await engine.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_fw_glob_question_mark_and_hidden_names(tmp_path: Path) -> None:
+    from dsl41.runner_adapters import observe_pattern
+
+    for name in ("a.csv", "ab.csv", ".a.csv"):
+        (tmp_path / name).touch()
+    assert [Path(o.path).name for o in observe_pattern(str(tmp_path / "?.csv"), 0)] == ["a.csv"]
+    assert [Path(o.path).name for o in observe_pattern(str(tmp_path / "*.csv"), 0)] == [
+        "a.csv",
+        "ab.csv",
+    ]
+    assert [Path(o.path).name for o in observe_pattern(str(tmp_path / ".*"), 0)] == [".a.csv"]
+
+
+def test_fw_glob_ignores_non_utf8_match(tmp_path: Path, monkeypatch, caplog) -> None:
+    from dsl41 import runner_adapters as adapters
+
+    valid = tmp_path / "valid.csv"
+    ignored = str(tmp_path / "bad\udcff.csv")
+    stat_source = tmp_path / "stat-source"
+    stat_source.write_text("data")
+    ignored_stat = stat_source.stat()
+    original_stat = adapters.os.stat
+    monkeypatch.setattr(
+        adapters.os,
+        "stat",
+        lambda path, *args, **kwargs: (
+            ignored_stat if path == ignored else original_stat(path, *args, **kwargs)
+        ),
+    )
+    monkeypatch.setattr(adapters.glob, "iglob", lambda pattern: iter([ignored, str(valid)]))
+    catalog = lower_source(
+        f"insert_job: w\njob_type: f\nwatch_file: {tmp_path}/*.csv\nwatch_interval: 60\n"
+    )
+    root = tmp_path / "run"
+
+    async def scenario():
+        engine = start_run(
+            catalog, root, clock=VirtualClock(start=T0), adapters={"FW": FileWatcherAdapter()}
+        )
+        try:
+            engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "w"}))
+            await engine.run_until_quiescent(T0 + timedelta(seconds=60))
+            assert engine.oracle.store.job["w"].status == "RUNNING"
+            valid.write_text("data")
+            await engine.run_until_quiescent(T0 + timedelta(seconds=120))
+            assert engine.oracle.store.job["w"].status == "RUNNING"
+            await engine.run_until_quiescent(T0 + timedelta(seconds=180))
+            assert engine.oracle.store.job["w"].status == "SUCCESS"
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(scenario())
+    records = [
+        json.loads(line) for line in (root / "runs/w.1/watch.jsonl").read_bytes().splitlines()
+    ]
+    assert [r["files"] for r in records[1:3]] == [[], []]
+    assert all(f["path"] == str(valid) for r in records[1:] for f in r["files"])
+    warnings = [
+        r for r in caplog.records if r.name == adapters.__name__ and "non-UTF-8" in r.message
+    ]
+    assert len(warnings) == 1

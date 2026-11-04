@@ -1225,11 +1225,10 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="watch_file",
             klass=SUPPORTED,
             cite="runner-design ss6, ss8a, DL-258",
-            effect="the path an FW job polls; with no watch_file_min_size, the default"
-            " (fw-existence=stable) still needs two consecutive polls agreeing on its"
-            " size, while fw-existence=immediate completes on the run's first poll if"
-            " the file already exists then; a minimum size always needs the two-poll"
-            " rule, whatever the switch says",
+            effect="the exact path or final-component * or ? pattern an FW job polls;"
+            " any one qualifying match can complete it under runner-design ss6:"
+            " exact paths use size-only stability, wildcards use five-field samples"
+            " per pathname and file identity (DL-461)",
             trigger=_job(**_FW_JOB),
         ),
         _row(
@@ -1257,7 +1256,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="watch_file_min_size",
             klass=SUPPORTED,
             cite="runner-design ss6",
-            effect="the size the watched file must reach before the FW job completes",
+            effect="the minimum size any one matching file must reach before the FW job completes",
             trigger=_job(watch_file_min_size="1024", **_FW_JOB),
         ),
         _row(
@@ -1268,8 +1267,9 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             cite="runner_adapters.FileWatcherAdapter",
             label="E6",
             sites=("runner_adapters.FileWatcherAdapter#1",),
-            effect="two consecutive qualifying polls must report the SAME size before the"
-            " watch completes; a file still growing resets the count",
+            effect="two qualifying polls must agree on size for an exact path, or on device,"
+            " inode, size, mtime_ns and ctime_ns per wildcard pathname; replacement or"
+            " disappearance resets that pathname's count (DL-461)",
             trigger=_job(watch_file_min_size="1024", **_FW_JOB),
             quiet=_job(**_FW_JOB),
         ),
@@ -3288,8 +3288,9 @@ PROFILE_ROWS: tuple[Row, ...] = (
             member="semantics.fw-existence=stable",
             klass=SUPPORTED,
             cite="runner-design ss6, ss8a, ss15 E6, DL-258",
-            effect="the default: an FW job with no watch_file_min_size waits for the size to"
-            " stay steady across two polls before completing, like a job with a minimum size",
+            effect="the default: two stable qualifying polls under runner-design ss6;"
+            " exact paths compare size, wildcards compare five metadata fields per pathname"
+            " (DL-461), like a job with a positive minimum size",
             trigger='{"semantics": {"fw-existence": "stable"}}',
         ),
         _row(
@@ -3297,8 +3298,9 @@ PROFILE_ROWS: tuple[Row, ...] = (
             member="semantics.fw-existence=immediate",
             klass=SUPPORTED,
             cite="runner-design ss6, ss8a, ss15 E6, DL-250, DL-258",
-            effect="the vendor reading: an FW job with no watch_file_min_size completes as soon"
-            " as the watched file exists, watch_interval ignored",
+            effect="the vendor reading: with no positive watch_file_min_size, a qualifying"
+            " original first poll completes immediately; later arrivals require two stable"
+            " polls under runner-design ss6",
             trigger='{"semantics": {"fw-existence": "immediate"}}',
         ),
         _row(

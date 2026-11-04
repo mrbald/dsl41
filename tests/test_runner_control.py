@@ -3023,3 +3023,101 @@ def test_dl264_everything_framing_accepts_applies_to_the_oracle(tmp_path: Path) 
     finally:
         assert engine.journal is not None
         engine.journal.close()
+
+
+def _cli_fw_late_arrival(root: Path, *, restart: bool) -> None:
+    import os
+
+    jil = root / "watch.jil"
+    pattern = "*.csv" if restart else "?.csv"
+    jil.write_text(f"insert_job: w\njob_type: f\nwatch_file: {root / pattern}\nwatch_interval: 3\n")
+    run_root = root / "run"
+    sock = run_root / "control.sock"
+    log = run_root / "runs/w.1/watch.jsonl"
+    command_line = [
+        sys.executable,
+        "-c",
+        "from dsl41.cli import app; app()",
+        "run",
+        str(jil),
+        "--run-root",
+        str(run_root),
+        "--semantics",
+        "fw-existence=stable" if restart else "fw-existence=immediate",
+    ]
+    children = []
+
+    def launch():
+        proc = subprocess.Popen(
+            command_line, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+        children.append(proc)
+        return proc
+
+    def samples():
+        if not log.exists():
+            return []
+        return [json.loads(line) for line in log.read_bytes().split(b"\n")[:-1]]
+
+    def status():
+        return _sync_control_call(sock, {"cmd": "status", "job": "w"})["jobs"]["w"]
+
+    proc = launch()
+    try:
+        wait_for(lambda: sock.exists(), timeout_s=10)
+        assert _sync_sendevent(sock, "STARTJOB", job="w")["ok"]
+        wait_for(lambda: len(samples()) >= 2, timeout_s=10)
+        assert samples()[1]["files"] == [] and status()["status"] == "RUNNING"
+        (root / "a.csv").write_text("data")
+        wait_for(lambda: any(r.get("files") for r in samples()), timeout_s=10)
+        prefix = b""
+        if restart:
+            proc.send_signal(signal.SIGSTOP)
+
+            def stopped():
+                pid, state = os.waitpid(proc.pid, os.WNOHANG | os.WUNTRACED)
+                return pid == proc.pid and os.WIFSTOPPED(state)
+
+            wait_for(stopped)
+            prefix = log.read_bytes()
+            assert len([r for r in samples() if r.get("files")]) == 1
+            proc.kill()
+            proc.wait(timeout=5)
+            proc = launch()
+
+        def succeeded():
+            try:
+                with socket_mod.socket(socket_mod.AF_UNIX, socket_mod.SOCK_STREAM) as probe:
+                    probe.connect(str(sock))
+                return status()["status"] == "SUCCESS"
+            except OSError:
+                return False
+
+        wait_for(succeeded, timeout_s=20)
+        result = status()
+        assert result["exit_code"] == 0 and "watching" not in result
+        assert proc.poll() is None
+        records = samples()
+        assert log.read_bytes().startswith(prefix)
+        assert sum(r["kind"] == "start" for r in records) == 1
+        qualified = [r for r in records if r.get("files")]
+        assert len(qualified) == 2 and qualified[0]["files"] == qualified[1]["files"]
+        assert qualified[0]["files"][0]["path"] == str(root / "a.csv")
+        assert len([r for r in read_journal(run_root) if r["rec"] == "dispatch"]) == 1
+        proc.terminate()
+        proc.wait(timeout=5)
+        assert proc.returncode == 0
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
+            close_pipes(child)
+
+
+def test_cli_fw_star_restart_after_sample(short_root: Path, cli_env) -> None:
+    _cli_fw_late_arrival(short_root, restart=True)
+
+
+def test_cli_fw_question_late_arrival_immediate(short_root: Path, cli_env) -> None:
+    _cli_fw_late_arrival(short_root, restart=False)
