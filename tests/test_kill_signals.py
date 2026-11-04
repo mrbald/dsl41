@@ -342,6 +342,7 @@ def test_non_killjob_stops_keep_term(short_root, stop):
                     )
                 )
             else:
+                await _until(lambda: engine.attempt_view("j")["state"] == "RUNNING")
                 spawn = json.loads((facts.spool / "spawn.json").read_text())
                 await engine.stops.ladder(spawn["command_pgid"], spawn["command_start_time"], 0.5)
             await _until(log.exists)
