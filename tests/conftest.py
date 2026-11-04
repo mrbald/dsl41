@@ -42,6 +42,12 @@ def _restore_recursion_limit():
         sys.setrecursionlimit(limit)
 
 
+@pytest.fixture(autouse=True)
+def clear_ambient_dsl41_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CLI tests select their own engine, including when run inside a job (DL-459)."""
+    monkeypatch.delenv("DSL41_SOCKET", raising=False)
+
+
 @pytest.fixture
 def cli_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """A plain terminal for a CLI test: no colour and 200 columns. The help text

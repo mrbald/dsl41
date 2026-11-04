@@ -70,6 +70,7 @@ _SOCKET_OPT = typer.Option(
     ...,
     "--socket",
     "-S",
+    envvar="DSL41_SOCKET",
     readable=False,
     help="The engine's control socket, <run-root>/control.sock.",
 )

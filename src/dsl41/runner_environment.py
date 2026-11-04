@@ -75,7 +75,7 @@ def inherited_environment(startup: Mapping[str, str]) -> dict[str, str]:
     return {
         name: value
         for name, value in startup.items()
-        if name not in INSTANCE_NAMES | GENERATED_NAMES
+        if name not in INSTANCE_NAMES | GENERATED_NAMES and name != "DSL41_SOCKET"
     }
 
 

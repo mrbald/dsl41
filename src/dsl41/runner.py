@@ -489,6 +489,7 @@ class Engine:
         self.adapters = dict(adapters)  # job_type -> adapter; no BOX row
         self.journal = journal
         self.run_root = run_root
+        self.control_socket: Path | None = None
         self.status_hooks: StatusHooks | None = None
         self.startup_env = dict(os.environ)
         self.startup_cwd = Path.cwd()
@@ -2145,6 +2146,8 @@ class Engine:
             "AUTORUN": f"{first_seq}-{ordinal}",
             "DSL41_RUN": invocation_tag(run_id, job, run_number, self.boot_id),
         }
+        if self.control_socket is not None:
+            invocation["DSL41_SOCKET"] = str(self.control_socket)
         if isinstance(adapter, ObservedAdapter):
             invocation[COOKIE_ENV] = cookie(self.root_id, run_id)
         inherited = inherited_environment(self.startup_env)

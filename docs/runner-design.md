@@ -350,7 +350,7 @@ The job environment preserves `DSL41_*` invocation values and adds
 literal string map, default empty. Names use `[A-Za-z_][A-Za-z0-9_]*`.
 NULs and overrides of `DSL41_*`, `AUTO_JOB_NAME` or `AUTORUN` refuse.
 The four instance variables listed in SEM-08 come exclusively from
-this map. Other variables inherit startup values, then the map and
+this map. Other variables except `DSL41_SOCKET` inherit startup values, then the map and
 generated invocation values override them. Replacements use the current
 applied settings and resolve anew while preserving S and scheduled identity.
 An empty map is omitted from canonical profiles and hashes (DL-447).
@@ -361,6 +361,13 @@ recorded environment; later dispatches and replacements use the new map.
 The engine captures cwd once at start, so a later deleted cwd does not
 change path anchoring. Version-28 readers require valid dispatch data and S;
 missing or damaged data refuses before recovery effects.
+
+`DSL41_SOCKET` is the absolute path of the engine's own control socket
+(DL-459). Rehearsals and engines without a socket omit it. An inherited
+value is removed; the `job_env` reservation above applies. Stream-path
+preflight has no symbolic socket value. A stream path referencing
+`$DSL41_SOCKET` or `${DSL41_SOCKET}` therefore refuses startup, resume,
+reread and update, even when an inherited value exists.
 
 When `std_out_file` / `std_err_file` are set, stdout/stderr append to
 them unless the source value starts with `>` (DL-460). A leading `>`
@@ -1038,6 +1045,12 @@ and clock-domain checks still apply.
 The control plane is a Unix domain socket in the run directory, mode 0600
 (0660 to a named `socket_group` when the DL-146 access perimeter is armed —
 `docs/access-model.md` §8), with a JSON-lines protocol.
+
+Every CLI command taking `--socket` uses `DSL41_SOCKET` when the option
+is omitted (DL-459). An explicit option wins; missing both is an argument
+error. The absolute socket path must fit the operating system's Unix-socket
+path limit. A relative bind beneath a deep cwd can succeed while the
+exported absolute path is too long for a client to connect.
 
 Mutations are `sendevent`, `engine_stop` and `update` (DL-429, DL-432).
 The socket also serves queries and streaming `subscribe`. `docs/control-protocol.md` is the

@@ -14,6 +14,7 @@ from dsl41 import main_config, runner
 from dsl41.ir import lower_source
 from dsl41.oracle_state import Event
 from dsl41.reload_plan import RereadRefused, reread
+from dsl41.runner import Engine
 from dsl41.runner_adapters import FakeAdapter, LocalCommandAdapter
 from dsl41.runner_clock import EngineError, RealClock, VirtualClock
 from dsl41.runner_config import RuntimeProfile, runtime_hash
@@ -33,7 +34,8 @@ def catalog(extra: str = "", command: str = "true"):
 
 
 @pytest.mark.parametrize(
-    "name", ["BAD-NAME", "1BAD", "", "A\0", "DSL41_CUSTOM", "AUTO_JOB_NAME", "AUTORUN"]
+    "name",
+    ["BAD-NAME", "1BAD", "", "A\0", "DSL41_CUSTOM", "DSL41_SOCKET", "AUTO_JOB_NAME", "AUTORUN"],
 )
 def test_job_env_refuses_invalid_and_reserved_names(name: str) -> None:
     with pytest.raises(ValidationError):
@@ -159,6 +161,13 @@ def test_preflight_uses_pre_profile_environment_and_retains_dl240_refusals() -> 
     }
     fw = lower_source("insert_job: W0\njob_type: f\nwatch_file: $AUTO_JOB_NAME\n")
     assert any(i.code == "runtime-variable" and "watch_file" in i.message for i in preflight(fw))
+    socket_items = preflight(
+        catalog("std_out_file: $DSL41_SOCKET"),
+        startup_env={"DSL41_SOCKET": "/inherited/control.sock"},
+    )
+    [item] = [item for item in socket_items if item.code == "runtime-variable"]
+    assert item.severity == "ERROR"
+    assert "unavailable generated variable DSL41_SOCKET" in item.message
 
 
 def test_instance_variables_are_exclusive_and_generated_names_are_symbolic() -> None:
@@ -176,10 +185,28 @@ def test_instance_variables_are_exclusive_and_generated_names_are_symbolic() -> 
     assert not [i for i in preflight(ir, startup_env={}) if i.code == "runtime-variable"]
 
 
+@pytest.mark.parametrize("virtual", [False, True])
+def test_socketless_dispatch_omits_socket(virtual: bool, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DSL41_SOCKET", "/inherited/control.sock")
+
+    async def scenario() -> None:
+        clock = VirtualClock(T0) if virtual else RealClock()
+        engine = Engine(catalog(), clock=clock, adapters={"CMD": FakeAdapter()})
+        try:
+            engine.inject(Event(at=clock.now(), kind="STARTJOB", payload={"job": "J0"}))
+            await engine.run_until_quiescent(datetime.max)
+            assert "DSL41_SOCKET" not in engine.dispatches["J0"]["env"]
+        finally:
+            await engine.shutdown()
+
+    asyncio.run(scenario())
+
+
 def test_real_command_environment_streams_and_completed_status(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("AUTOSYS", "must-be-unset")
+    monkeypatch.setenv("DSL41_SOCKET", "/inherited/control.sock")
     monkeypatch.setenv("LITERAL", "inherited")
     monkeypatch.setenv("LOG_DIR", str(tmp_path))
     (tmp_path / "J0.in").write_text("input\n")
@@ -189,7 +216,7 @@ def test_real_command_environment_streams_and_completed_status(
         f"profile: {profile}\nstd_in_file: $LOG_DIR/${{AUTO_JOB_NAME}}.in\n"
         "std_out_file: $LOG_DIR/${AUTO_JOB_NAME}.$AUTORUN.out\n"
         "std_err_file: $LOG_DIR/${AUTO_JOB_NAME}.$AUTORUN.err",
-        command='cat; printf \'%s|%s|%s|%s|%s|%s\' "$AUTO_JOB_NAME" "$AUTORUN" "$LITERAL" "${AUTOSYS-unset}" "$AUTOSERV" "$COMMAND_VALUE"; echo error >&2',
+        command='cat; printf \'%s|%s|%s|%s|%s|%s|%s\' "$AUTO_JOB_NAME" "$AUTORUN" "$LITERAL" "${AUTOSYS-unset}" "$AUTOSERV" "$COMMAND_VALUE" "${DSL41_SOCKET-unset}"; echo error >&2',
     )
 
     async def scenario() -> None:
@@ -224,7 +251,7 @@ def test_real_command_environment_streams_and_completed_status(
                 "DSL41_COOKIE",
             } <= dispatch["env"].keys()
             out = tmp_path / f"J0.{seq}-1.out"
-            assert out.read_text() == f"input\nJ0|{seq}-1|explicit $VALUE|unset|site|profile"
+            assert out.read_text() == f"input\nJ0|{seq}-1|explicit $VALUE|unset|site|profile|unset"
             assert (tmp_path / f"J0.{seq}-1.err").read_text() == "error\n"
             assert server._status({})["jobs"]["J0"]["log_out"] == str(out)
             engine.take_snapshot()
@@ -239,6 +266,7 @@ def test_cross_job_sequences_replacements_startup_capture_and_snapshots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("LOG_DIR", str(tmp_path / "first"))
+    monkeypatch.setenv("DSL41_SOCKET", "/inherited/control.sock")
     ir = lower_source(
         "\n".join(
             f"insert_job: {name}\njob_type: c\ncommand: true\nstd_out_file: $LOG_DIR/$AUTORUN\n"
@@ -249,6 +277,7 @@ def test_cross_job_sequences_replacements_startup_capture_and_snapshots(
     async def scenario() -> None:
         clock = RealClock()
         engine = start_run(ir, tmp_path / "root", clock=clock, adapters={"CMD": FakeAdapter()})
+        engine.control_socket = tmp_path / "first.sock"
         try:
             monkeypatch.setenv("LOG_DIR", str(tmp_path / "later"))
             for name in ir.jobs:
@@ -256,6 +285,8 @@ def test_cross_job_sequences_replacements_startup_capture_and_snapshots(
             await engine.run_until_quiescent(datetime.max)
             first = dict(engine.dispatches["J0"])
             other = engine.dispatches["J1"]
+            assert first["env"]["DSL41_SOCKET"] == str(tmp_path / "first.sock")
+            assert other["env"]["DSL41_SOCKET"] == str(tmp_path / "first.sock")
             assert first["env"]["AUTORUN"] != other["env"]["AUTORUN"]
             engine.inject(
                 Event(
@@ -267,9 +298,11 @@ def test_cross_job_sequences_replacements_startup_capture_and_snapshots(
             )
             await engine.run_until_quiescent(datetime.max)
             engine.profile = RuntimeProfile(job_env={"LOG_DIR": str(tmp_path / "applied")})
+            engine.control_socket = tmp_path / "current.sock"
             assert engine.spawn("J0", 1, ordinal=2, env=first["env"])
             await asyncio.sleep(0)
             second = engine.dispatches["J0"]
+            assert second["env"]["DSL41_SOCKET"] == str(tmp_path / "current.sock")
             assert second["first_dispatch_seq"] == first["first_dispatch_seq"]
             assert second["env"]["AUTORUN"] == f"{first['first_dispatch_seq']}-2"
             assert second["env"]["DSL41_SCHEDULED_AT"] == first["env"]["DSL41_SCHEDULED_AT"]

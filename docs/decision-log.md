@@ -25742,6 +25742,28 @@ relitigate an entry; append a new one.
   THE BOUNDARY. DL-457's rework counts and shape note are unchanged. Known-bugs lines and
   other maintenance work keep their existing rules. Merged preparation code stays and is
   wired item by item.
+- DL-459 Job control socket environment (2026-11-04; owner ruling;
+  runner.py, runner_environment.py, cli_run.py, cli_control.py, wrapper-protocol.md)
+  THE RULE. Every job receives DSL41_SOCKET as the absolute path of its engine's control
+  socket. An engine without a socket, including rehearsal and in-memory runs, omits it.
+  Remove an inherited value. The existing DSL41_* reservation prevents job_env overrides.
+  Set it with generated invocation values after job_env, and record it in dispatch env.
+  A replacement uses its current engine's socket, never a previous attempt's value.
+  Every CLI command taking --socket uses DSL41_SOCKET when the option is omitted.
+  An explicit --socket wins. Missing both remains an argument error.
+  THE BOUNDARY. This amends DL-447's inheritance clause for DSL41_SOCKET only.
+  Stream-path preflight supplies no symbolic socket value. A stream path referencing it
+  refuses startup, resume, reread and update, even if an inherited value was previously
+  usable. Existing roots with such paths also refuse resume. Socket interpolation in
+  stream paths is outside this item.
+  The authorized frozen paragraph correction in wrapper-protocol.md §2 excludes inherited
+  DSL41_SOCKET and supplies it through the overlay only when the engine has a socket.
+  Wrapper input shape and version 1, control v3 and state version 28 stay unchanged.
+  Existing dispatch and snapshot environment maps remain readable, including historical
+  inherited socket values. The live socket field is launch context, not persisted state.
+  An absolute socket path must fit the platform's Unix-socket path limit. A shorter
+  relative bind path does not establish that; this item adds no path-length handling.
+  THE REASON. Job scripts can address their engine through the CLI without a socket flag.
 - DL-460 Output redirection prefixes (2026-11-04; owner ruling; runner-design §6)
   A leading > in std_out_file or std_err_file truncates the file and >> appends.
   The engine uses stream_target on the source before literal variable expansion.

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 import dsl41.cli_control as cli_control
@@ -43,6 +44,57 @@ def _engine(monkeypatch: pytest.MonkeyPatch, **answers: dict[str, Any]) -> _Engi
 
 def _run(*args: str, socket: Path | None = None) -> Any:
     return runner.invoke(app, [*args, "--socket", str(socket or Path("/nowhere/control.sock"))])
+
+
+@pytest.fixture(
+    params=[
+        ("query", "status"),
+        ("sendevent", "ON_HOLD", "--job", "socket_job"),
+        ("off-hold-all", "--dry-run"),
+        ("engine", "stop"),
+        ("ui",),
+        ("serve",),
+    ]
+)
+def socket_command(request: pytest.FixtureRequest) -> tuple[str, ...]:
+    return request.param
+
+
+@pytest.fixture
+def socket_calls(monkeypatch: pytest.MonkeyPatch, cli_env: None) -> list[Path]:
+    paths: list[Path] = []
+
+    def reached(socket_path: Path, *args: object) -> None:
+        paths.append(socket_path)
+        raise typer.Exit(0)
+
+    monkeypatch.setattr(cli_control, "_control_roundtrip", reached)
+    monkeypatch.setattr("dsl41.runner_control.roundtrip", reached)
+    monkeypatch.setattr(cli_control, "check_control_socket", reached)
+    monkeypatch.setattr(cli_control, "import_tui_or_exit_2", lambda: object())
+    monkeypatch.setattr(cli_control, "_import_textual_serve_or_exit_2", lambda: object())
+    return paths
+
+
+def test_socket_option_uses_environment(socket_command, socket_calls, monkeypatch) -> None:
+    monkeypatch.setenv("DSL41_SOCKET", "/environment/control.sock")
+    result = runner.invoke(app, list(socket_command))
+    assert result.exit_code == 0, result.output
+    assert socket_calls == [Path("/environment/control.sock")]
+
+
+def test_explicit_socket_overrides_environment(socket_command, socket_calls, monkeypatch) -> None:
+    monkeypatch.setenv("DSL41_SOCKET", "/environment/control.sock")
+    result = runner.invoke(app, [*socket_command, "--socket", "/explicit/control.sock"])
+    assert result.exit_code == 0, result.output
+    assert socket_calls == [Path("/explicit/control.sock")]
+
+
+def test_socket_option_is_required_without_environment(socket_command, socket_calls) -> None:
+    result = runner.invoke(app, list(socket_command))
+    assert result.exit_code == 2
+    assert "Missing option" in result.output and "--socket" in result.output
+    assert socket_calls == []
 
 
 # ------------------------------------------------------------------ sendevent

@@ -18,6 +18,8 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import os
+import shlex
 import signal
 import socket as socket_mod
 import subprocess
@@ -1574,6 +1576,80 @@ def test_cli_run_subprocess_sendevent_and_query_end_to_end(short_root: Path) -> 
             proc.kill()
             proc.wait()
         close_pipes(proc)
+
+
+def test_cli_job_calls_its_engine_through_socket_environment(
+    short_root: Path, cli_env: None
+) -> None:
+    """A job reaches its engine without a socket flag, before and after restart (DL-459)."""
+    root = short_root.resolve()
+    script = root / "job.py"
+    script.write_text(
+        "import json, os, subprocess, sys\n"
+        "def cli(*args):\n"
+        "    result = subprocess.run([sys.executable, '-m', 'dsl41', *args],\n"
+        "                            capture_output=True, text=True, timeout=15)\n"
+        "    assert result.returncode == 0, result.stderr\n"
+        "    return json.loads(result.stdout)\n"
+        "print(json.dumps({\n"
+        "    'socket': os.environ['DSL41_SOCKET'],\n"
+        "    'status': cli('query', 'status'),\n"
+        "    'set': cli('sendevent', 'SET_GLOBAL', '--global',\n"
+        "               'SOCKET_PROBE=' + os.environ['DSL41_RUN_NUMBER'])\n"
+        "}))\n"
+    )
+    jil = root / "estate.jil"
+    jil.write_text(
+        "insert_job: socket_job\njob_type: c\ncommand: "
+        + shlex.join([sys.executable, str(script)])
+        + "\n"
+    )
+    sock = root / "run" / "control.sock"
+    child_env = {**os.environ, "DSL41_SOCKET": str(root / "wrong.sock")}
+    for run_number in (1, 2):
+        log = root / f"engine-{run_number}.log"
+        args = [sys.executable, "-m", "dsl41", "run", "estate.jil", "--run-root", "run"]
+        if run_number == 2:
+            args.append("--resume")
+        with log.open("w") as stream:
+            proc = subprocess.Popen(
+                args, cwd=root, env=child_env, stdout=stream, stderr=subprocess.STDOUT
+            )
+            try:
+
+                def ready() -> bool:
+                    assert proc.poll() is None, log.read_text()
+                    return "engine up; control socket:" in log.read_text()
+
+                wait_for(ready, timeout_s=20)
+                assert _sync_sendevent(sock, "STARTJOB", job="socket_job")["ok"] is True
+
+                def succeeded():
+                    assert proc.poll() is None, log.read_text()
+                    status = _sync_control_call(sock, {"cmd": "status", "job": "socket_job"})
+                    row = status["jobs"]["socket_job"]
+                    return (
+                        status
+                        if row["run_number"] == run_number and row["status"] == "SUCCESS"
+                        else None
+                    )
+
+                status = wait_for(succeeded, timeout_s=30)
+                report = json.loads(Path(status["jobs"]["socket_job"]["log_out"]).read_text())
+                assert report["socket"] == str(sock)
+                assert Path(report["socket"]).is_absolute()
+                assert report["status"]["ok"] is True
+                assert report["status"]["baseline_id"] == status["baseline_id"]
+                assert report["status"]["jobs"]["socket_job"]["run_number"] == run_number
+                answer = _sync_control_call(sock, {"cmd": "global", "name": "SOCKET_PROBE"})
+                assert answer["globals"]["SOCKET_PROBE"]["value"] == str(run_number)
+                proc.send_signal(signal.SIGTERM)
+                proc.wait(timeout=20)
+                assert proc.returncode == 0, log.read_text()
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=10)
 
 
 def _off_hold_all_cli(sock_path: Path, *args: str) -> subprocess.CompletedProcess:
