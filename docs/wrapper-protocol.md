@@ -51,7 +51,8 @@ same directory agree.
   for append, as AutoSys appends to std_out_file and std_err_file (vendor
   parity).
 - `grace_seconds`: the SIGTERM→SIGKILL escalation window for the
-  parent-loss kill. The spawner uses the same value for its own kills.
+  parent-loss kill. Ordinary spawner stops use their command grace; KILLJOB
+  uses the selected signal list at five-second intervals (DL-462).
 - `env`, optional: an object of strings the command gets on top of the
   wrapper's environment, the invocation the attempt's `dispatch` record
   holds. Any other value is the spec refusal.
@@ -248,8 +249,9 @@ failure never falls back to `os.kill`. Without it,
 the engine re-reads the start token (`proc_start_token`, `/proc/<pid>/stat`
 field 22) and calls `os.kill` only if it still matches the scanned token.
 The race between that check and the signal is accepted: the engine is an
-orchestrator, not a jail. The scan, TERM, grace and KILL are the same with
-either primitive. One log line per serving start with a run root names the
+orchestrator, not a jail. Both primitives use the same ownership scan and
+selected signals. Ordinary stops and cleanup use TERM, grace and KILL;
+KILLJOB uses its selected list (DL-462). One log line per serving start with a run root names the
 primitive; in-memory rehearsals print none.
 On other platforms, and for an attempt dispatched before the cookie, the (pid, start-time) tuple and
 the process group decide.

@@ -239,6 +239,54 @@ def test_launch_abort_branches(tmp_path: Path) -> None:
     unspooled.abort()
 
 
+@pytest.mark.parametrize("barrier", ["before_wrapper", "before_eof", "after_eof"])
+def test_selected_abort_across_spec_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, barrier: str
+) -> None:
+    """The selected stop cannot launch before EOF or become parent loss after EOF."""
+    seen = _Seen()
+    ctx = _ctx(tmp_path)
+    launch = Launch(seen, ctx.spool, wait_for_spawn=True)
+    proc = _Proc()
+    proc.returncode = None
+    written = []
+    watched = []
+
+    class Stdin:
+        def write(self, data):
+            written.append(data)
+
+        async def drain(self):
+            if barrier == "before_eof":
+                launch.abort()
+
+        def close(self):
+            if barrier == "after_eof":
+                # No task switch separates EOF and spec_sent in observe.
+                launch.aborted = True
+
+    async def spawn(*args, **kwargs):
+        if barrier == "before_wrapper":
+            launch.abort()
+        return proc
+
+    async def watch(self, run_dir, run_id, wrapper, pending):
+        watched.append(True)
+        assert pending.aborted and pending.wait_for_spawn
+        assert pending.lifeline_w is not None
+        os.fstat(pending.lifeline_w)
+        assert wrapper.killed == (barrier == "before_eof")
+
+    proc.stdin = Stdin()
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(LocalCommandAdapter, "_watch", watch)
+    asyncio.run(LocalCommandAdapter().observe(_job(), 1, ctx, launch))
+    assert bool(written) == (barrier != "before_wrapper")
+    assert bool(watched) == (barrier != "before_wrapper")
+    assert proc.killed == (barrier != "after_eof")
+    assert launch.lifeline_w is None
+
+
 def test_a_spool_record_naming_another_run_refuses(tmp_path: Path) -> None:
     (tmp_path / "spawn.json").write_text(json.dumps({"version": 1, "run_id": OTHER_ID}))
     with pytest.raises(EngineError, match="stranger's record .DL-118."):

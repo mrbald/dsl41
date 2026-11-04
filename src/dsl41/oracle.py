@@ -302,6 +302,8 @@ class InputBatch:
         self._at = at
         #: Events emitted across the whole batch, in order; set at commit.
         self.emitted: list[Event] = []
+        self.kill_emissions: frozenset[int] = frozenset()
+        self.command_start: int | None = None
         #: Entity key -> its revision after this input: the ss4 step-7 record of what the input
         #: moved, and the only place the changed set leaves the owner.
         self.revisions: dict[str, int] = {}
@@ -339,6 +341,8 @@ class InputBatch:
         if ev.at != self._at:
             raise OracleError(f"attempt stamped {ev.at} in a batch opened at {self._at}")
         self._oracle._queue.append(ev)
+        if self.command_start is None:
+            self.command_start = len(self._oracle._emitted) - self._emitted_start
         self._oracle._drain()
 
     def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
@@ -354,6 +358,11 @@ class InputBatch:
         changed = oracle.store.commit_input()
         self.revisions = {key: oracle.store.revision(key) for key in changed}
         self.emitted = oracle._emitted[self._emitted_start :]
+        self.kill_emissions = frozenset(
+            index - self._emitted_start
+            for index in oracle._kill_emissions
+            if index >= self._emitted_start
+        )
 
 
 #: The item cap (DL-351): a root dispatch takes fewer items than four times the square of the

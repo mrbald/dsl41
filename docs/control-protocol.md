@@ -4,7 +4,7 @@ For architects tracing control requests, replies and retry guarantees.
 The architect track under [Documents](../README.md#documents) supplies the wider design.
 Deployment procedures are in [deploy.md](deploy.md).
 
-Status: frozen at **v3** (DL-118). Entries that rule parts of it include
+Status: frozen at **v3** (DL-118), with additive **v4** extensions (DL-462). Entries that rule parts of it include
 DL-133, DL-135, DL-146, DL-147, DL-148, DL-150, DL-151, DL-158, DL-172,
 DL-189, DL-216, DL-217, DL-228, DL-233, DL-256, DL-264, DL-267, DL-272,
 DL-274, DL-292, DL-295, DL-297 and DL-353. This document is normative for
@@ -12,10 +12,19 @@ the control plane of `docs/runner-design.md` §10. A change to a frozen item
 requires a decision-log
 entry. Each entry is cited where it applies.
 
-**The engine accepts v3 only.** Every request names the protocol version
-(DL-90), and the engine accepts only v3 (DL-118). It answers a request
-that names no version or any other version, v1 and v2 included, with a
-refusal naming the version it speaks.
+Every request names its protocol version (DL-90). The version door in §2
+refuses an absent or unsupported version, v1 and v2 included.
+Every v3 command keeps its meaning at v4, including mutations and `subscribe`.
+
+**V4 adds:**
+
+- KILLJOB accepts optional `payload.kill_signals`, an ordered array of supported
+  positive integer signals ending in KILL (9). `sendevent -k 2,9` supplies it
+  for that command and its causal kills. V3 ignores the unknown field (DL-462).
+
+Clients default to v3. Requests using a v4 addition explicitly name v4.
+An older server refuses that request with `unsupported_version`; the client
+never falls back to v3. Responses and subscription records keep their shapes.
 
 The control protocol speaks in semantic terms (conditions, boxes,
 statuses, sendevent verbs), which runner-design §11's scope fence assigns
@@ -77,7 +86,8 @@ CLI's job.
   attempt on as an unknown outcome (`delivered`), never as "not sent".
   Only a failure before any write, such as a refused connect, is
   undelivered.
-- **Every request carries `"v": 3`**, including queries and `subscribe`.
+- **The engine accepts v3 and v4** (DL-462). Every request carries `v`,
+  including queries and `subscribe`.
   The check runs before the request is routed. So `subscribe`, which owns
   its connection and never reaches the response path, is not an
   unversioned door. A refusal does not close the connection: the next
@@ -122,7 +132,7 @@ opens anything, so the probe runs after the lock is held. The probe
 cleans up a stale socket file and is a second refusal door: it refuses
 to start when a live engine answers it.
 
-**The version handshake** is `"v": 3` on every request (DL-90, DL-118).
+**The version handshake** is the per-request version door above (DL-90, DL-462).
 
 **Stopping the engine** is `{"cmd": "engine_stop", "v": 3}`, the
 `dsl41 engine stop` verb, at the `adm` tier (`docs/access-model.md` §10).
@@ -186,7 +196,9 @@ fingerprint. Retry safety lasts while the store retains the admission
 An edit only to `job_env` advances the configuration revision without
 changing job-definition hashes or stopping jobs, including while boxes run
 (DL-447). Running attempts keep their recorded environment. Later dispatches
-and replacements use the new map.
+and replacements use the new map. A `kill_signals`-only update likewise
+changes no job definition and stops no job. Later KILLJOB effects take the new
+list; a ladder already started keeps its captured list (DL-462).
 With the main config, `/etc/dsl41/dsl41.toml` or an absolute `--config`
 selects the engine and its inputs (DL-437). `reread` compiles the selected
 inputs together and captures the config, source mapping and input bytes.
@@ -249,11 +261,11 @@ The client action says what a client does next:
 |---|---|---|---|
 | `peer_unauthenticated` | refused | access control is armed and the peer has no kernel credential | operator |
 | `malformed_request` | refused | the line is not a JSON object | fix the request |
-| `unsupported_version` | refused | `v` is absent or is not `3` | fix the request |
+| `unsupported_version` | refused | `v` is absent or is neither `3` nor `4` | fix the request |
 | `access_denied` | refused | the perimeter denies this principal the `cmd`; it classifies by `cmd` alone (`docs/access-model.md` §5, §10) | operator |
 | `internal_error` | unknown | a handler raised | re-read; retry a mutation only under the same request_id |
 | `unknown_cmd` | refused | `cmd` names no command | fix the request |
-| `invalid_argument` | refused, query or stream | a field is absent or has the wrong shape or type, or a `request_id` begins with the reserved prefix `engine:` (§3); `error` names the field | fix the request |
+| `invalid_argument` | refused, query or stream | a field is absent or has the wrong shape or type, a v4 `kill_signals` list is invalid or attached to another verb, or a `request_id` begins with the reserved prefix `engine:` (§3); `error` names the field | fix the request |
 | `plan_cycle` | query | the AND-success skeleton has a cycle, so `plan` is disabled | operator |
 | `unknown_job` | query, or refused on a mutation | the job is not in the catalog (for `status`: in neither the catalog nor the store) | fix the request |
 | `no_journal` | stream | the run has no store to stream | operator |
@@ -309,6 +321,7 @@ tier or higher writes a receipt there, best effort (DL-146).
 | verb | `payload` | notes |
 |---|---|---|
 | job verbs | `job` | `STARTJOB`, `FORCE_STARTJOB`, `KILLJOB`, `ON_ICE`, `OFF_ICE`, `ON_HOLD`, `OFF_HOLD`, `ON_NOEXEC`, `OFF_NOEXEC`, `DISARM` *(DL-158)*, `RELEASE_RESOURCE` *(DL-256)* |
+| `KILLJOB` at v4 | `job`, optional `kill_signals` array | The v4 addition above; without it the current engine policy applies (DL-462). |
 | `SET_GLOBAL` | `name` (a non-empty string), `value` (a string) | the empty string is a legal value: `v(G) = ""` is a legal condition, so an operator must be able to satisfy it |
 | `CHANGE_STATUS` | `job`, `status`, optional int `exit_code` | injected as `STATUS`, keeping overwrite parity |
 

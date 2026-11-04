@@ -25814,3 +25814,33 @@ relitigate an entry; append a new one.
   watch. No existing records, journal or snapshot formats, state version, shared
   canonicalization or engine stopping paths change. Large match sets increase poll
   and evidence volume; an indistinguishable five-field replacement cannot be detected.
+- DL-462 KILLJOB sends INT then KILL; one-command overrides use control v4 (2026-11-04;
+  runner_adapters.py, runner_admission.py, runner_stops.py, control-protocol.md)
+  THE RULE. Every committed KILLJOB effect, including term_run_time and terminator kills,
+  uses engine.kill_signals, default [2,9]. Supported positive signal numbers remain ordered;
+  repetitions matter and the final signal must be KILL. Rungs are five monotonic seconds
+  apart and stop when no verified target remains. An applied explicit KILLJOB's override
+  covers its causal command-half kills, never unrelated time-half effects. Source does not
+  restrict selection. The first stop captures its tuple; retries and replay add no effects.
+  Engine stop, drain, parent loss, leftover cleanup, CHANGE_STATUS terminal statuses,
+  update stops and the stop before a replacement after an injected INACTIVE retain TERM,
+  grace, KILL.
+  Selection stays transient; state version 28, records, snapshots and wrapper formats stay.
+  Restart uses ordinary cleanup, preserving the first stop cause and the existing follow-up rule.
+  Before spec delivery the wrapper abort launches nothing. Afterwards, selected kills retain
+  the lifeline and use existing spawn observation to start the ladder. The existing record
+  timeout rearms while that launch is pending; no new stopping route or chart transition exists.
+  A live wrapper that never records its launch is a broken-component limit; it can hold the
+  attempt until the ordinary drain deadline. Per-process sends recheck identity each rung;
+  the group fallback proves its leader initially, then relies on group liveness.
+  A kill_signals-only update changes no job-definition hash and stops no job. Later kills use
+  the new list. Restart accepts the currently supplied list, including on updated roots;
+  historical configurations are not rewritten and other launch checks remain.
+  Control v4 is introduced as an additive dialect. One supported-version set {3,4} and one
+  refusal text serve both version doors. Every v3 command keeps its meaning at v4, including
+  mutations and subscribe. Default clients stay at v3. V4 adds optional KILLJOB kill_signals;
+  sendevent -k writes v4 and never falls back. V3 continues ignoring this unknown field.
+  An older server refuses v4 before admission. This amends the ordinary-kill descriptions
+  in runner-design and wrapper-protocol, and the control-protocol and protocol-evolution doors.
+  THE REASON. Jobs can rely on AutoSys kill signals while engine lifecycle cleanup keeps its
+  existing policy. A versioned request prevents an older server silently dropping an override.

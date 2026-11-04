@@ -85,6 +85,14 @@ from dsl41.state_machine import Event as ChartEvent
 #: DL-118 dropped v2; a compatibility projection of the subscribe stream would be a second record
 #: shape for one fact.
 PROTOCOL_VERSION = 3
+SUPPORTED_PROTOCOL_VERSIONS = frozenset({3, 4})
+
+
+def unsupported_version(version: object) -> str:
+    """The shared wire door's refusal; default writers stay on v3 (DL-462)."""
+    versions = " and ".join(f"v{v}" for v in sorted(SUPPORTED_PROTOCOL_VERSIONS))
+    return f"protocol version {version!r}: this engine speaks {versions}"
+
 
 #: Sources whose events are engine-made completions and pass the stale gate. Externally injected
 #: STATUS keeps sendevent CHANGE_STATUS parity and is never gated: it may overwrite a terminal
@@ -192,10 +200,9 @@ def parse_envelope(request: Mapping[str, Any], *, addressed: str, baseline_id: s
     In-process callers holding the `Engine` are its own trust domain and do not come through
     here."""
     version = request.get("v")
-    if version != PROTOCOL_VERSION:
+    if version not in tuple(SUPPORTED_PROTOCOL_VERSIONS):
         raise EnvelopeError(
-            f"protocol version {version!r}: this engine speaks v{PROTOCOL_VERSION}"
-            f' -- name it as {{"v": {PROTOCOL_VERSION}}}',
+            unsupported_version(version),
             code="unsupported_version",
         )
     named_baseline = request.get("baseline_id")
@@ -796,6 +803,7 @@ def dispatch_plan(
     dispatched: Mapping[str, int],
     live: Mapping[str, int],
     dispatchable: frozenset[str],
+    origins: dict[tuple[DispatchKind, str, int], int] | None = None,
 ) -> list[tuple[DispatchKind, str, int]]:
     """The starts and kills one applied input implies, in emitted order: `(kind, job, run)`.
 
@@ -811,7 +819,7 @@ def dispatch_plan(
     kill. Whether a start is still wanted is `spawn_superseded`'s question, asked when it is
     dispatched."""
     plan: list[tuple[DispatchKind, str, int]] = []
-    for ev in emitted:
+    for index, ev in enumerate(emitted):
         if ev.kind != "STATUS":
             continue
         job = ev.job()
@@ -825,6 +833,8 @@ def dispatch_plan(
             item = ("KILL", job, live[job])
         if item is not None and item not in plan:
             plan.append(item)
+            if origins is not None:
+                origins[item] = index
     return plan
 
 
@@ -852,6 +862,8 @@ class Applied:
 
     result: ApplyResult
     emitted: list[Event] = field(default_factory=list)
+    kill_emissions: frozenset[int] = frozenset()
+    command_start: int | None = None
 
 
 def apply_attempt(
@@ -901,6 +913,8 @@ def apply_attempt(
             revisions=batch.revisions,
         ),
         emitted=batch.emitted,
+        kill_emissions=batch.kill_emissions,
+        command_start=batch.command_start,
     )
 
 
