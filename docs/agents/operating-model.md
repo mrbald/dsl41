@@ -9,7 +9,8 @@ Status: approved by the owner on 2026-11-02 (DL-440).
 
 The guides agree with this page. For the semantic class,
 [review.md](review.md#required-passes) keeps DL-395's stricter two-vendor passes
-and same-vendor fallback. DL-430's review-round terms remain whole. Standing
+and same-vendor fallback. The review-round terms in
+[review.md](review.md#review-rounds) remain whole (DL-430, DL-457). Standing
 owner instructions, including merge on green under rule 27, keep applying (DL-440).
 Where a rule summarizes a guide or a decision, that guide or decision keeps
 its exact terms.
@@ -22,7 +23,7 @@ its exact terms.
 
 ## Who decides
 5. The owner sets goals and priorities and decides anything that reverses an owner decision.
-6. The boss sets scope and the definition of done, rules on semantics, specs and unexplained failures, accepts spec, docs and policy passes, and rules on release readiness, which every release requires.
+6. The boss defines done within owner-approved scope, rules on semantics, specs and unexplained failures, accepts spec, docs and policy passes, and rules on release readiness, which every release requires. Only the owner may expand scope.
 7. The operator dispatches, sequences, applies settled rules and records every decision.
 8. The builder or engineer implements and runs the required checks.
 9. The reviewer checks every change independently before it lands; a semantic change gets a reviewer from the other vendor than its builder, or two independent reviewers when only the builder's vendor is available.
@@ -53,7 +54,7 @@ its exact terms.
 28. The operator may make an exact, non-semantic fix that a reviewer or a ruling named; the raiser confirms it.
 29. The operator also renders generated files and adds accepted Known-bugs lines to a candidate before its final checks.
 30. The operator never edits code, tests or the meaning of a contract.
-31. Any ambiguity, exception, compatibility change, or change to scope, policy or contract meaning goes to the boss.
+31. Any ambiguity, exception, compatibility change, or change to scope, policy or contract meaning goes to the boss; the boss sends any scope expansion to the owner.
 32. A boss ruling that would undo an owner decision waits for the owner; unaffected work goes on.
 33. The operator resolves a merge conflict only by keeping each reviewed text as it is, in its intended place, and regenerating derived files; anything else goes back to the builder or the boss.
 34. A resolved merge gets its own review.
@@ -73,9 +74,9 @@ its exact terms.
 44. While a seat waits, the operator may gather facts for it within its own access and says so; facts are not a ruling or an acceptance.
 45. A broken tool is stopped; its fix is reviewed and checked before the tool is used again, never patched in place; already-authorized manual steps go on meanwhile.
 46. Automation that publishes or merges fails closed on anything it cannot prove: it stops with a stated reason and a nonzero status, and checks remote state before retrying an uncertain write.
-47. Before a change's fourth rework round, or when one finding's fix has been found wrong twice, the boss writes a shape note; the change leaves the train and the owner reads the note before more rework.
+47. Rework includes repair passes after a failed required gate. Before a change's fourth rework round, or when the fix for one finding or failed-gate item has been found wrong twice, the boss writes a shape note; the change leaves the train and the owner reads the note before more rework.
 48. A material finding still open after a reviewer's third round goes to the owner, who approves more rounds one at a time.
-49. Review rounds, shape notes, the fresh final review and stated limits follow DL-430 as `review.md` states them; rules 47 and 48 are its owner hand-offs.
+49. Review rounds, repair-plan reviews, shape notes, the fresh final review and stated limits follow `review.md` (DL-430, DL-457); rules 47 and 48 are its owner hand-offs.
 
 ## What escalates to the owner
 Each item comes with the facts and a recommendation (rule 18).

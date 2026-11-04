@@ -142,6 +142,7 @@ Severity follows the accepted triage. In-flight targets remain open until accept
 - [ ] **Low**: Local Linux test containers need `--init` or three process-cleanup tests see zombies; two after-edit hook tests need a git checkout (Sol and Opus, #317).
 - [ ] **Low**: DL-447 has no blank separator because the line-ceiling test counts a trailing blank against DL-446 (Opus, #317).
 - [ ] **Low**: `dsl41 lint --timezone-map` with an empty file counts it as no map; no test covers it (Opus, #313).
+- [ ] **Low**: Two guide sentences need a decision entry to be understood: `review.md`'s semantic-review trigger cites "the rules DL-225 names", and `coordination.md` names a "reader-docs drafting exception" without its conditions; guides must read standalone (Astra, DL-457 review).
 
 # After shipping
 
