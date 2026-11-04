@@ -1109,6 +1109,15 @@ Use its linked runbooks for local commands and evidence limits.
 The list follows CI, including format checking and the scoped 100% branch
 coverage requirement.
 
+Dependency resolution admits registry artifacts at least five days old
+(`[tool.uv] exclude-newer`, DL-465). Dependabot version updates use the same
+five-day `cooldown.default-days`. Its monthly schedule can leave dependencies
+older than five days. uv also delays security fixes, even though Dependabot
+exempts security updates from its cooldown.
+For an urgent fix, commit a per-package `exclude-newer-package` exception under
+`[tool.uv]` in `pyproject.toml` with the regenerated `uv.lock`; a command-line-only
+override fails ordinary `--locked` validation.
+
 Set the new version in `pyproject.toml` and run `uv lock`, which writes the
 same version into `uv.lock`. `offline-installation.md` resolves to
 [package installation](docs/deploy.md#install-the-package-and-unit);

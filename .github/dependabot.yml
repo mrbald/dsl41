@@ -7,11 +7,15 @@ updates:
     directory: "/"
     schedule:
       interval: monthly
+    cooldown:
+      default-days: 5
     commit-message:
       prefix: "ci"
   - package-ecosystem: uv
     directory: "/"
     schedule:
       interval: monthly
+    cooldown:
+      default-days: 5
     commit-message:
       prefix: "deps"
