@@ -20,7 +20,7 @@ Execution records still name the actual selection and returned identity.
 
 | Role | Authority | Model and effort | Stand-in |
 | --- | --- | --- | --- |
-| boss | definition of done, scope, allocation, binding rulings, release readiness | Astra (`gpt-6-astra`), high; xhigh for one named hard question | owner appoints |
+| boss | definition of done, owner-approved scope, allocation, binding rulings, release readiness | Astra (`gpt-6-astra`), high; xhigh for one named hard question | owner appoints |
 | advisor | one bounded hard question; recommendation only; read-only | Fable, xhigh | fresh Astra, xhigh |
 | operator | interactive session: briefs, dispatch, receipts, records, merge train, Linux-cell gate; applies rulings | Opus, medium | owner appoints |
 | builder | settled approach; routine details | Sol (`gpt-6.1-sol`), medium | boss appoints |
@@ -40,6 +40,7 @@ Judge bindings by accepted work, escaped defects, rework and elapsed time.
 
 1. Send definitions, semantic disagreements, compatibility questions, exceptions
    and changes of scope, policy or contract meaning to the boss (DL-440).
+   The boss sends any scope expansion to the owner (DL-457).
 2. Pass an advisor question only at the boss's request, through the operator.
    Return the recommendation to the boss for its ruling.
 3. Record the deciding seat's adversarial self-review before acting on a ruling
