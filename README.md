@@ -422,6 +422,8 @@ with SIGINT or SIGTERM. `rehearse` drives the same engine under a virtual
 clock with scripted adapters, so a day of the estate plays in seconds.
 `sendevent` and `query` are clients of the control socket; every mutation
 carries a precondition, and a `sendevent` is answered with its decision.
+Every command that takes `--socket` uses `DSL41_SOCKET` when the option
+is omitted. An explicit `--socket` wins; one of the two is required.
 
 The TUI is the optional `[ui]` extra. It is a thin client of the control
 socket: a jobs table with pending timers and alarms, an explain pane with

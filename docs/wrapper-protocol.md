@@ -63,7 +63,9 @@ dispatch cwd. The adapter starts the wrapper with the engine's captured
 startup environment, excluding `AUTOSERV`, `AUTOSYS`, `AUTOUSER` and
 `AUTOROOT`. Only the explicit `env` overlay can supply those four names.
 That overlay also supplies `AUTO_JOB_NAME`, `AUTORUN=S-N` and the existing
-`DSL41_*` invocation values. The frozen input shape and version stay 1.
+`DSL41_*` invocation values. The startup environment also excludes inherited
+`DSL41_SOCKET`; the overlay supplies it only when the engine has a socket
+(DL-459). The frozen input shape and version stay 1.
 
 Every key in the JSON example is required; the spawner fills
 `lifeline_fd` (DL-150). `env` is optional (DL-428). `version`, `run_number` and `lifeline_fd` are integers,
