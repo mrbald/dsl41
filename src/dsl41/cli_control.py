@@ -66,7 +66,7 @@ def _mutate(socket_path: Path, request: dict[str, Any]) -> None:
     raise typer.Exit(command_outcome(socket_path, request))
 
 
-_SOCKET_OPT = typer.Option(
+SOCKET_OPT = typer.Option(
     ...,
     "--socket",
     "-S",
@@ -129,7 +129,7 @@ def sendevent(
         " does nothing else. RELEASE_RESOURCE frees the resource units a job"
         " still holds after its run ended.",
     ),
-    socket_path: Path = _SOCKET_OPT,
+    socket_path: Path = SOCKET_OPT,
     job: str = typer.Option(
         None, "--job", "-J", help="Target job. Needed by the job events and CHANGE_STATUS."
     ),
@@ -230,7 +230,7 @@ def sendevent(
 
 
 def off_hold_all(
-    socket_path: Path = _SOCKET_OPT,
+    socket_path: Path = SOCKET_OPT,
     dry_run: bool = typer.Option(False, "--dry-run", help="List the held jobs and send nothing."),
 ) -> None:
     """Take every held job off hold in one sweep.
@@ -307,7 +307,7 @@ engine_app = typer.Typer(
 
 @engine_app.command("stop")
 def engine_stop(
-    socket_path: Path = _SOCKET_OPT,
+    socket_path: Path = SOCKET_OPT,
     wait: bool = typer.Option(
         False,
         "--wait",
@@ -426,7 +426,7 @@ def _lock_held(path: Path) -> bool:
     return False
 
 
-def ui(socket_path: Path = _SOCKET_OPT) -> None:
+def ui(socket_path: Path = SOCKET_OPT) -> None:
     """Open the terminal UI against a running engine.
 
     The UI shows the jobs table, an explain pane with each condition
@@ -462,7 +462,7 @@ def _import_textual_serve_or_exit_2():
 
 
 def serve(
-    socket_path: Path = _SOCKET_OPT,
+    socket_path: Path = SOCKET_OPT,
     host: str = typer.Option(
         "127.0.0.1",
         "--host",
@@ -570,7 +570,7 @@ def query(
         metavar="WHAT",
         help="One of " + ", ".join([*_QUERY_VERBS, *_QUERY_PREDICATES]) + ".",
     ),
-    socket_path: Path = _SOCKET_OPT,
+    socket_path: Path = SOCKET_OPT,
     job: str = typer.Option(
         None,
         "--job",

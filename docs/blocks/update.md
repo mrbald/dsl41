@@ -2,8 +2,8 @@
 
 ## Purpose
 
-`dsl41 reread` diffs the estate on disk against the catalog the engine runs and stores a plan.
-`dsl41 update` applies that plan to the running engine: it stops the running jobs the plan changes or removes, swaps the catalog, the settings and the marked set, and keeps the engine running throughout ([DL-427](../decision-log.md)).
+`dsl41 reread` reports current launch-config sources against the engine catalog (DL-463).
+`dsl41 update` prepares and applies current sources to the running engine: it stops the running jobs the plan changes or removes, swaps the catalog, the settings and the marked set, and keeps the engine running throughout ([DL-427](../decision-log.md)).
 
 ## Fate
 
@@ -12,7 +12,7 @@ Its intent and its application are store records, so a crash between them resume
 
 ## Interface
 
-- `dsl41 reread ESTATE_DIR --run-root R` reads the engine through the socket's `catalog` verb (read tier) and writes `R/plans/<token>/`; `dsl41 update TOKEN --run-root R [--stop-running] [--wait]` sends the socket's `update` (adm tier) ([control protocol §2](../control-protocol.md#2-transport-and-framing-frozen)).
+- `dsl41 reread -S SOCK` previews; `dsl41 update -S SOCK [--wait]` prepares and applies current inputs. Both default to DSL41_SOCKET. They use v4 ADM requests; there is no token or consent handoff (DL-463).
 - `reload_plan.reread` computes and stores the plan; `reload_update.admission_check` re-checks it against the engine's state now; `reload_update.plan_application` and `apply_application` compute and apply the swap.
 - `runner_update.EngineUpdate` binds the update chart's tier to the engine: the admission as one step of the single writer, the stops through the attempt tier, the dispatch filter, the application and its records.
 - The store records `config intent` (the token, the stop set with the attempt each stop interrupts, the dispatch filter, the request's id and fingerprint) and `config applied` (the new rev, its segment fields and the job sets). A configuration row holds each rev's catalog, profile and marked set.
@@ -27,7 +27,7 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 ## Invariants
 
 - One update is in flight at a time; a second is refused with `update_in_progress` ([DL-427](../decision-log.md)).
-- The admission re-reads the stop set and the running boxes from the engine's state now; a plan diffed against another rev is `stale_plan`, a structural edit of a running box `box_running`, and a stop without consent `would_stop_running`. A refusal writes nothing.
+- Admission rechecks revision and current stops. Running boxes do not refuse; structural edits restart outermost affected boxes and their running members (DL-463).
 - The engine loads the candidate from the plan's own bytes, with the environment and the site layers `invocation.json` names, and runs it under the settings it read itself.
 - While the update stops, no job of the plan's added, changed and removed sets is dispatched: a start the oracle decides for one waits as `dispatch_pending` and goes after the application.
 - An attempt the update stops keeps its outcome back until the application, so its follow-up plan is chosen under the applied catalog and marked set, once, and the `config applied` record names it: a removed job gets none, a marked one is held, any other reruns the same run under its new definition ([DL-424](../decision-log.md)).
@@ -36,7 +36,7 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 - The intent records each attempt with the cause of its first stop: `update_stop`, or the cause of a stop it already takes, which a restart keeps.
 - The application is one `config applied` record and one configuration row; the oracle swaps its catalog between inputs, the scheduler rebuilds only the changed and added plans and drops the removed ones, and one time advance follows at once so the queue scan the swap owes runs first. The oracle's own timers (run windows, `term_run_time`) are untouched: a changed job's deadline keeps counting across the update.
 - A run's configuration rev is recorded on its run row when it opens: the rev in force where it opened in record order, which a snapshot's retained run history keeps as a required key (state version 26). `dsl41 runs` reads each run under that rev and nothing else: its catalog hash, its job fingerprint, its box and its exit-code verdict. A `dispatch` record's `rev` is that attempt's own (the definition it ran), never read as the run's. The `CONFIG` trace marker places each application between two inputs.
-- `spec` and the `spec_drift` baseline follow the applied plan, each file at the path `reread` read it from (site layers included), never the plan directory's copy.
+- `spec` and the `spec_drift` baseline follow the applied plan, each file at its applied capture path (site layers included), never the plan directory's copy.
 - A snapshot carries the tombstones, the owed scan, the ghost resources and the update in STOPPING; replay swaps the configuration where each `segment` stands.
 - A restart runs the store's last applied configuration; the estate it is launched with must equal it, or the open update's candidate, job by job.
 
@@ -45,7 +45,7 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 - A crash between `config intent` and `config applied` is resumed by the restart's fold, which restores the update in STOPPING with its dispatch filter holding; nothing waits for it. The catch-up observes its attempts like any open one, and what is left of each gets the live cleanup (the ladder, the reading after). The update applies as a step of the loop once its stops are finished, wherever the last one finishes: in the catch-up, at the first look the catch-up queues when every stop was finished before the crash, or later. The recovered outcomes of jobs outside its stop set are fed under the old catalog before it. No job of the plan is dispatched and no kept outcome is committed before the application (DL-433).
 - A plan an older `reread` wrote (no estate directory) is refused `stale_plan` before anything is written.
 - A plan directory removed while an update stops refuses the restart by name.
-- The admission checks the plan's revision and the catalog hash `reread` saw before it writes anything, so the application's own check of them cannot fail after the intent. Any other raise while applying is a crash, not a state: the engine dies, and the restart resumes the update; a raise the same input meets every time stops every restart, and the operator restores or removes the run root.
+- The admission checks the plan's revision and the catalog hash preparation saw before it writes anything, so the application's own check of them cannot fail after the intent. Any other raise while applying is a crash, not a state: the engine dies, and the restart resumes the update; a raise the same input meets every time stops every restart, and the operator restores or removes the run root.
 - An update whose stop cannot be carried out (a command that outlives its KILL) waits for it as a drain does, and a restart starts with the update still waiting; no verb cancels an update ([DL-427](../decision-log.md)).
 - An exact retry of an admitted request is answered from its records, also while the engine drains; a refused one is admitted afresh.
 
@@ -64,7 +64,7 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 - `test_a_client_that_gave_up_on_the_decision_leaves_the_loop_running`
 - `test_a_retry_while_a_resumed_update_still_stops_waits_for_its_application`
 - `test_a_stale_token_and_an_open_update_are_refused_and_a_retry_is_answered_once`
-- `test_a_box_that_started_since_reread_refuses_the_plan`
+- `test_a_box_that_started_since_preparation_is_restarted`
 - `test_a_changed_job_gets_a_rebuilt_tick_and_an_unchanged_one_keeps_its_own`
 - `test_the_update_applies_only_once_each_stop_is_finished`
 - `test_an_interruption_of_a_newly_marked_job_waits_for_the_applied_marked_set`
@@ -83,6 +83,16 @@ The [chart lifecycles](../chart-lifecycles.md) view lists each target state with
 - `test_a_snapshot_taken_while_the_update_stops_carries_it`
 - `test_reread_and_update_over_the_control_socket`
 - `test_every_coverage_item_of_the_chart_is_hit`
+
+DL-463 box orchestration commits KILLJOBs before application; otherwise kept member
+outcomes would choose old-run replacements. After the swap, ON_HOLD every marked
+non-INACTIVE member, even one that already finished, before FORCE_STARTJOB of retained
+outermost boxes. Removed boxes stay stopped. The new run and old end are visible to
+normal successors. A crash can leave a box stopped: hold its marked non-INACTIVE members
+before operator force-start. No additional automatic repair is promised.
+
+The CLI/TUI status annotation caches the last reread forecast in memory. New/failed
+reread replaces it; applied update and restart clear it. Update never consumes it.
 
 ## Open findings
 

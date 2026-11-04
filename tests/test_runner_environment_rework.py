@@ -338,7 +338,7 @@ def test_environment_only_revision_stops_nothing_while_a_box_runs(tmp_path):
             )
             assert plan.stop == () and plan.plan.changed == ()
             reply = engine.request_update(
-                UpdateRequest(plan.token, False, 1, engine.baseline_id, "env-only")
+                UpdateRequest(plan.token, 1, engine.baseline_id, "env-only")
             )
             await engine.run_until_quiescent(T0)
             assert reply.result().applied.result()["rev"] == 2
@@ -546,7 +546,7 @@ def test_update_rechecks_a_candidate_against_the_engine_environment(tmp_path, mo
             live = replace(engine.update.live(), path_environment={"PLAN_ONLY": "set"})
             plan = reread(tmp_path, live, engine.run_root / "plans", candidate=candidate, start=T0)
             reply = engine.request_update(
-                UpdateRequest(plan.token, False, 1, engine.baseline_id, "unknown-env")
+                UpdateRequest(plan.token, 1, engine.baseline_id, "unknown-env")
             )
             await engine.run_until_quiescent(T0)
             assert (

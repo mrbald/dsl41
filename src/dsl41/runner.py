@@ -535,6 +535,8 @@ class Engine:
         self.config_rev = 0
         self.source_capture: dict[str, str] = {}
         self.launch_settings: dict[str, object] = {}
+        self.reread_source: str | None = None
+        self.reread_marks: dict[str, dict[str, str | None]] = {}
         self.trace_rev: int | None = None
         #: the clock instant and journal seq of the last snapshot this engine took
         self._snapshot_at: datetime | None = None
@@ -799,8 +801,21 @@ class Engine:
                 update.ended(pending.update)
         finally:
             update.direct = False
+        if update.stopping and update.tier is not None and not update.tier.open:
+            # Box ends must commit before application chooses member follow-ups (DL-463).
+            for job in update.box_ends():
+                ev = Event(
+                    at=self.now_admitted(), kind="KILLJOB", payload={"job": job}, source="reconcile"
+                )
+                await self._admit_and_apply(_Pending(at=ev.at, request_id=None, ev=ev))
+            update.tier.settle()
         if update.applied:
             await self._admit_and_apply(_Pending(at=self.now_admitted(), request_id=None))
+            for kind, job in update.box_starts():
+                ev = Event(
+                    at=self.now_admitted(), kind=kind, payload={"job": job}, source="reconcile"
+                )
+                await self._admit_and_apply(_Pending(at=ev.at, request_id=None, ev=ev))
             update.finish()
 
     def refit_adapters(self) -> None:

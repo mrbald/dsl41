@@ -38,7 +38,7 @@ implementation. A site may adapt and repackage them for its Python runtime requi
 
 **Job author**: write an estate in JIL or the Python DSL, or bring an existing one in, and get it accepted.
 
-1. [docs/authoring.md](docs/authoring.md) - write or import JIL or Python estates, check the main-config inputs, hand over a reread/update candidate, and make jobs safe across interrupted attempts; estate.toml supports tests and rehearsal
+1. [docs/authoring.md](docs/authoring.md) - write or import JIL or Python estates, check the main-config inputs, preview and apply engine configuration, and make jobs safe across interrupted attempts; estate.toml supports tests and rehearsal
 2. [Lint a catalog](#lint-a-catalog) - the rules L001-L025 and `known-unsupported`, and `rehearse` and `viz` under [CLI](#cli)
 3. [DSL -> JIL (build)](#dsl---jil-build) - the Python DSL builders (`job`, `box`, `sequence`, `parallel`) and `to_jil()`; [examples/file_processing/estate.py](examples/file_processing/estate.py) is a worked Python estate
 4. [JIL -> DSL (decompile)](#jil---dsl-decompile) and [Prove two catalogs equivalent](#prove-two-catalogs-equivalent) - bring an existing estate in and check a rewrite
@@ -747,14 +747,14 @@ Runner:
 - `src/dsl41/reload_diff.py`: the redeploy diff as pure functions over two
   catalogs: a job's definition hash without source spans, the added,
   removed, changed and unchanged sets with the reason for an indirect
-  change, the running-box check, and the plan token.
-- `src/dsl41/reload_plan.py`: `reread` as a module: it loads the estate from disk, lints it under `--strict`, diffs it against
-  the live catalog the engine supplies, refuses a running box, and stores
+  change, structural-box analysis, and internal plan identity.
+- `src/dsl41/reload_plan.py`: `reread` as a module: it loads the estate from disk, lints it under its policy, diffs it against
+  the live catalog the engine supplies, and stores
   the candidate files and `plan.json` under `plans/<token>/`, the plan file
   last.
 - `src/dsl41/reload_update.py`: the 2.x update machine: the
   declared `UPDATE` statechart (IDLE, STOPPING, APPLIED, REFUSED), the
-  admission that re-checks the revision, the running boxes and the stop set,
+  admission that re-checks the revision and the stop set,
   the tier that records the intent in the store, stops each job and applies,
   and the application's per-job carry onto the oracle's state.
 - `src/dsl41/runner_update.py`: the engine's side of the update: the
@@ -811,9 +811,12 @@ CLI and scripts:
   options, the catalog loader, and the readings that turn an exception or a
   control answer into an exit code), `cli_compile.py`, `cli_run.py`,
   and `cli_control.py`.
+- `src/dsl41/reread_worker.py`: isolated engine-owned preparation and passive forecast (DL-463).
 - `src/dsl41/cli_reload.py`: the 2.x `reread` and `update` verbs: their
   rendering and exit codes, with the engine reached through one function
-  bound to the control socket's `catalog` and `update` verbs.
+  bound to the control socket's v4 `reread` and `update` verbs (DL-463).
+  Both use `-S` or `DSL41_SOCKET`. Reread is passive; update prepares current inputs.
+  JIL-only launches refuse reload. Status annotates the last reread forecast.
 - `src/dsl41/__main__.py`: `python -m dsl41`, which `serve` uses to spawn
   one `dsl41 ui` per browser session.
 - `src/dsl41/__init__.py`: the module map docstring. No exports.

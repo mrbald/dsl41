@@ -310,6 +310,7 @@ REQUIRED_TIER: dict[str, Tier] = {
     "catalog": Tier.READ,
     # applies a stored plan, stopping the running jobs it changes (spec-reload)
     "update": Tier.ADM,
+    "reread": Tier.ADM,
 }
 
 

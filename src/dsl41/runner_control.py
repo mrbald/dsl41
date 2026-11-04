@@ -60,13 +60,15 @@ text):
 from __future__ import annotations
 
 import asyncio
+import sys
+from dataclasses import asdict
+from contextlib import suppress
 import contextlib
 import getpass
 import graphlib
 import hashlib
 import json
 import os
-import re
 import socket as socket_mod
 import time
 import uuid
@@ -109,7 +111,7 @@ from dsl41.reload_diff import catalog_hash_v2, catalog_payload
 from dsl41.reload_update import Admitted, Refused
 from dsl41.runner_config import EngineSettings
 from dsl41.reload_plan import spec_texts
-from dsl41.runner_update import APPLICATION_KEYS, OpenedPlan, UpdateRequest
+from dsl41.runner_update import APPLICATION_KEYS, OpenedPlan, UpdateRequest, UpdateAnswer
 from dsl41.runner_store import Store
 from dsl41.runner_preflight import and_success_skeleton
 from dsl41.state_machine import StatechartError
@@ -188,13 +190,16 @@ def status_label(row: Mapping[str, Any]) -> str:
     "RUNNING (attempt 2, after update_stop)", "STOPPING (ladder failed: ...)" (DL-426)."""
     status = str(row.get("status", ""))
     note = attempt_note(row)
-    if not note or note.startswith("STOPPING"):
-        return note or status
-    return f"{status} ({note})"
+    label = note or status if not note or note.startswith("STOPPING") else f"{status} ({note})"
+    return label + reread_note(row)
 
 
-#: A plan token names a directory under `plans/`: a sha256 hex digest, nothing else.
-UPDATE_TOKEN = re.compile(r"[0-9a-f]{64}")
+def reread_note(row: Mapping[str, Any]) -> str:
+    mark = row.get("reread")
+    if not isinstance(mark, dict):
+        return ""
+    return f" [reread: {mark['change']}{'; ' + mark['action'] if mark.get('action') else ''}]"
+
 
 #: The key an update's `expect` names: the configuration rev the caller read.
 CONFIG_KEY = "config"
@@ -202,9 +207,7 @@ CONFIG_KEY = "config"
 
 #: The prose of each refusal the update chart makes (spec-reload), with the names it concerns.
 _REFUSALS = {
-    "stale_plan": "the plan was diffed against another configuration rev: run reread again",
-    "box_running": "the plan edits the membership of a running box: {names}",
-    "would_stop_running": "the plan stops running jobs: {names}; stop_running consents to it",
+    "stale_plan": "the plan was diffed against another configuration rev: run update again",
     "update_in_progress": "another update is stopping its jobs: {names}",
 }
 
@@ -214,18 +217,18 @@ def _refusal_text(refusal: Refused) -> str:
     return _REFUSALS[refusal.code].format(names=", ".join(refusal.names))
 
 
-def _update_refusal(
-    code: Code, error: str, token: object, names: Sequence[str] = ()
-) -> dict[str, Any]:
-    """An `update` refusal: it writes nothing and names the token and the jobs or boxes it
+def _update_refusal(code: Code, error: str, names: Sequence[str] = ()) -> dict[str, Any]:
+    """An `update` refusal: it writes nothing and names the jobs or boxes it
     concerns, none for a refusal about the request itself (control-protocol ss2)."""
-    return _failure(code, error, refused=True) | {"token": token, "names": list(names)}
+    return _failure(code, error, refused=True) | {"names": list(names)}
 
 
 def _applied(body: Mapping[str, Any]) -> dict[str, Any]:
     """What an update's answer says of its application: its `config applied` record's rev,
     catalog hash and job sets."""
-    return {key: body.get(key) for key in ("rev", "catalog_hash", *APPLICATION_KEYS)}
+    return {
+        key: body.get(key) for key in ("rev", "catalog_hash", *APPLICATION_KEYS) if key != "token"
+    }
 
 
 def _failure(code: Code, error: str, *, refused: bool = False) -> dict[str, Any]:
@@ -283,6 +286,8 @@ class ControlServer:
     #: single-writer loop is not running. It is below `roundtrip`'s client timeout so the
     #: caller gets this diagnosis, not a bare socket timeout.
     DECISION_TIMEOUT_S = 5.0
+    PREPARE_TIMEOUT_S = 120.0
+    WORKER_GRACE_S = 2.0
 
     #: ss5's grace at a hangup the server makes for any reason but an overflow or a
     #: revocation (DL-267): how long a closing connection may take to hand its unsent
@@ -315,6 +320,7 @@ class ControlServer:
         #: hangup grace; any other cancel is an overflow or revocation and ends the
         #: connection at once (ss5, DL-267)
         self._closing = False
+        self._preparing_update: tuple[str, str, asyncio.Future[UpdateAnswer]] | None = None
         #: each subscription's backlog budget (ss5); tests lower it
         self.subscriber_budget = SUBSCRIBER_BACKLOG_BYTES
         #: the first `StatechartError` a connection handler or a background task of the
@@ -593,8 +599,90 @@ class ControlServer:
         if cmd == "catalog":
             return self._catalog(authority=authority)
         if cmd == "update":
-            return await self._update(request)
+            if request.get("v") == 4:
+                return await self._update(request)
+        if cmd == "reread":
+            if request.get("v") == 4:
+                return await self._reread(request)
         return _failure("unknown_cmd", f"unknown cmd {cmd!r}", refused=True)
+
+    async def _prepare_reload(self, *, update: bool) -> dict[str, Any]:
+        """The handler owns the worker from creation through reap (DL-463)."""
+        source = self.engine.reread_source
+        if source is None:
+            return _failure(
+                "invalid_argument",
+                "This engine was started without a main config. Drain it and start on a fresh run root to change definitions.",
+                refused=True,
+            )
+        live = self.engine.update.live()
+        payload = {
+            "source": source,
+            "run_root": str(self.engine.run_root),
+            "update": update,
+            "live": {**asdict(live), "catalog": catalog_payload(live.catalog)},
+        }
+        creation = asyncio.create_task(
+            asyncio.create_subprocess_exec(
+                sys.executable,
+                "-P",
+                "-m",
+                "dsl41.reread_worker",
+                cwd=self.engine.startup_cwd,
+                env=dict(self.engine.startup_env),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                limit=LINE_LIMIT,
+            )
+        )
+        process = None
+        try:
+            async with asyncio.timeout(self.PREPARE_TIMEOUT_S):
+                process = await asyncio.shield(creation)
+                assert process.stdin is not None and process.stdout is not None
+                process.stdin.write(json.dumps(payload).encode() + b"\n")
+                await process.stdin.drain()
+                process.stdin.close()
+                raw = await process.stdout.readline()
+                code = await process.wait()
+                if code:
+                    return _failure(
+                        "engine_error", f"preparation worker exited {code}", refused=True
+                    )
+                answer = json.loads(raw)
+                if not isinstance(answer, dict) or "ok" not in answer:
+                    raise ValueError("invalid preparation result")
+                if not answer["ok"]:
+                    return _failure(answer["code"], answer["error"], refused=True)
+                return answer
+        except (OSError, ValueError, TimeoutError) as exc:
+            return _failure(
+                "engine_error", f"preparation failed: {type(exc).__name__}: {exc}", refused=True
+            )
+        finally:
+            if process is None:
+                with suppress(OSError):
+                    process = await creation
+            if process is not None and process.returncode is None:
+                with suppress(ProcessLookupError):
+                    process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), self.WORKER_GRACE_S)
+                except TimeoutError:
+                    with suppress(ProcessLookupError):
+                        process.kill()
+                    await process.wait()
+
+    async def _reread(self, request: dict[str, Any]) -> dict[str, Any]:
+        if set(request) - {"v", "cmd", "claimed_actor"} or (
+            request.get("claimed_actor") is not None
+            and not isinstance(request["claimed_actor"], str)
+        ):
+            return _failure("invalid_argument", "reread accepts only claimed_actor", refused=True)
+        answer = await self._prepare_reload(update=False)
+        self.engine.reread_marks = answer.get("preview", {}).pop("marks", {})
+        return answer
 
     def _catalog(self, *, authority: Tier = Tier.ADM) -> dict[str, Any]:
         """`catalog`: what `reread` diffs a candidate against (spec-reload): the catalog the
@@ -620,61 +708,101 @@ class ControlServer:
         return body
 
     async def _update(self, request: dict[str, Any]) -> dict[str, Any]:
-        """`update`: apply the plan `reread` stored under TOKEN (spec-reload). The request
-        carries the mutation envelope: `request_id`, `baseline_id` and `expect` naming the
-        configuration rev the caller read, as `{"config": N}`. The answer is the admission's
-        decision; with `wait`, it comes once the update applied, with the application."""
-        token, stop_running, wait = (
-            request.get("token"),
-            request.get("stop_running", False),
-            request.get("wait", False),
-        )
-        if not (isinstance(token, str) and UPDATE_TOKEN.fullmatch(token)):
+        """Prepare current launch inputs once per admitted identity (DL-463)."""
+        wait = request.get("wait", False)
+        if (
+            set(request)
+            - {"v", "cmd", "claimed_actor", "baseline_id", "request_id", "wait", "retry_only"}
+            or type(wait) is not bool
+            or type(request.get("retry_only", False)) is not bool
+        ):
             return _update_refusal(
-                "invalid_argument", f"token must be a plan token, got {token!r}", token
-            )
-        if not isinstance(stop_running, bool) or not isinstance(wait, bool):
-            return _update_refusal(
-                "invalid_argument", "stop_running and wait must be booleans", token
+                "invalid_argument", "update accepts identity, wait and retry_only only"
             )
         try:
             envelope = parse_envelope(
-                request, addressed=CONFIG_KEY, baseline_id=self.engine.baseline_id
+                {**request, "expect": {CONFIG_KEY: 0}},
+                addressed=CONFIG_KEY,
+                baseline_id=self.engine.baseline_id,
             )
         except EnvelopeError as exc:
-            return _update_refusal(exc.code, str(exc), token)
-        submitted = UpdateRequest(
-            token,
-            stop_running,
-            envelope.expect[CONFIG_KEY],
-            self.engine.baseline_id,
-            envelope.request_id,
-            envelope.claimed_actor,
+            return _update_refusal(exc.code, str(exc))
+        identity = UpdateRequest(
+            "", 0, self.engine.baseline_id, envelope.request_id, envelope.claimed_actor
         )
+        prior = (
+            self.engine.update._prior(identity, self.engine.journal)
+            if self.engine.journal is not None
+            else None
+        )
+        if prior is not None:
+            return await self._update_answer(prior, envelope.request_id, wait)
+        slot = self._preparing_update
+        if slot is not None:
+            if slot[:2] != (envelope.request_id, identity.fingerprint):
+                code: Code = (
+                    "request_id_reused" if slot[0] == envelope.request_id else "update_in_progress"
+                )
+                return _update_refusal(code, code)
+            future = slot[2]
+        else:
+            if request.get("retry_only"):
+                return _update_refusal(
+                    "invalid_argument", "request is not retained; no new update submitted"
+                )
+            if self.engine.update.stopping:
+                return _update_refusal("update_in_progress", "another update is stopping its jobs")
+            future = asyncio.get_running_loop().create_future()
+            self._preparing_update = (envelope.request_id, identity.fingerprint, future)
+
+            def clear_slot(done: asyncio.Future[UpdateAnswer]) -> None:
+                self._preparing_update = None
+
+            future.add_done_callback(clear_slot)
+            try:
+                prepared = await self._prepare_reload(update=True)
+                if not prepared["ok"]:
+                    future.set_result(UpdateAnswer(code=prepared["code"], error=prepared["error"]))
+                else:
+                    submitted = UpdateRequest(
+                        prepared["token"],
+                        prepared["live_rev"],
+                        self.engine.baseline_id,
+                        envelope.request_id,
+                        envelope.claimed_actor,
+                    )
+                    admission = self.engine.request_update(submitted)
+                    admission.add_done_callback(lambda done: future.set_result(done.result()))
+            except BaseException:
+                future.set_result(UpdateAnswer(code="engine_error", error="preparation cancelled"))
+                raise
         try:
-            answer = await asyncio.wait_for(
-                self.engine.request_update(submitted), self.DECISION_TIMEOUT_S
-            )
+            answer = await asyncio.wait_for(asyncio.shield(future), self.DECISION_TIMEOUT_S)
         except TimeoutError:
             return _failure(
                 "decision_timeout",
                 f"no decision within {self.DECISION_TIMEOUT_S}s: the engine loop is not"
-                " draining its queue. The update may still be admitted -- re-read before"
-                " retrying, under the same request_id.",
+                " draining its queue. Retry under the same request_id.",
             )
+        return await self._update_answer(answer, envelope.request_id, wait)
+
+    async def _update_answer(
+        self, answer: UpdateAnswer, request_id: str, wait: bool
+    ) -> dict[str, Any]:
         if answer.code is not None:
-            return _update_refusal(answer.code, answer.error or answer.code, token)
+            return _update_refusal(answer.code, answer.error or answer.code)
         decision = answer.decision
         if isinstance(decision, Refused):
             return _update_refusal(
-                decision.code, _refusal_text(decision), decision.token, decision.names
+                decision.code,
+                _refusal_text(decision),
+                () if decision.code == "update_in_progress" else decision.names,
             )
         assert isinstance(decision, Admitted)
         reply: dict[str, Any] = {
             "ok": True,
             "decision": "admitted",
-            "token": decision.token,
-            "request_id": envelope.request_id,
+            "request_id": request_id,
             "stop": list(decision.stop_set),
             "application": answer.application and _applied(answer.application),
         }
@@ -936,6 +1064,8 @@ class ControlServer:
                 "job_type": job_ir.job_type if job_ir is not None else None,
                 "box_name": job_ir.box.box_name if job_ir is not None else None,
             }
+            if name in self.engine.reread_marks:
+                jobs[name]["reread"] = self.engine.reread_marks[name]
             if job_ir is not None:
                 watching = self._fw_watching(job_ir)
                 if watching is not None:

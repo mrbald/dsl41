@@ -14,10 +14,12 @@ entry. Each entry is cited where it applies.
 
 Every request names its protocol version (DL-90). The version door in §2
 refuses an absent or unsupported version, v1 and v2 included.
-Every v3 command keeps its meaning at v4, including mutations and `subscribe`.
+Every retained v3 command keeps its meaning at v4, including mutations and `subscribe`.
+DL-463 retires the token-based v3 update in favor of the v4 request below.
 
 **V4 adds:**
 
+- ADM `reread`, tokenless ADM `update`, and an optional status reread annotation (DL-463).
 - KILLJOB accepts optional `payload.kill_signals`, an ordered array of supported
   positive integer signals ending in KILL (9). `sendevent -k 2,9` supplies it
   for that command and its causal kills. V3 ignores the unknown field (DL-462).
@@ -146,68 +148,61 @@ then records `clean_shutdown` or `unclean_shutdown` and exits 0; its
 socket goes with it. A stop the loop does not take within the decision
 window answers `decision_timeout`.
 
-**Applying a configuration plan** (DL-427, DL-432).
-Applying a stored plan is `{"cmd": "update", "v": 3, "token", "stop_running",
-"wait", "request_id", "baseline_id", "expect": {"config": N},
-"claimed_actor"}`, the `dsl41 update` verb, at the `adm` tier
-(`docs/access-model.md` §10). `token` is the 64-hex-digit plan token
-`dsl41 reread` printed; the plan is read from `<run_root>/plans/<token>/`.
-`expect` names the configuration rev the caller read (`status`'s
-`config_rev`, or the plan's own); `request_id`, `baseline_id` and
-`claimed_actor` are the mutation envelope of §3. The request is a step of
-the engine's single writer. A refusal writes nothing and answers
-`{"ok": false, "refused": true, "code", "error", "token", "names"}`, with
-`names` the jobs or boxes it concerns, empty for a refusal about the
-request itself (`invalid_argument`, an envelope code, `request_id_reused`,
-`engine_draining`). An admission is recorded in the store before it
-is answered: `{"ok": true, "decision": "admitted", "token", "request_id",
-"stop": [jobs], "application": null}`. With `"wait": true` the answer comes
-once the update applied, its `application` the applied record's `rev`,
-`catalog_hash`, `token`, `added`, `changed`, `removed`, `restored` (each
-re-added name with the flags its tombstone kept) and `stopped` (each job
-of the stop set with what follows its stop, chosen once at the
-application: the plan committed with its outcome, `complete`, `rerun`,
-`hold` or `none`; `rerun` for a file watch taken up again; `none` for a
-job with no attempt to stop, whose held start then goes under the new
-definition). The engine waits for the application `update_window_s`
-seconds, which `status` reports: both stop graces from `EngineSettings`
-in `runner_config.py`, a fixed margin in `runner_control.py`, and
-`ControlServer.DECISION_TIMEOUT_S` in `runner_control.py`.
-Clients read `update_window_s`;
-past it the answer is `"pending": true`, and a client waits on the socket
-at least that long. An exact retry under the same `request_id` with the
-same token, consent, `expect`, baseline and actor is answered from the
-first admission, and once applied with its application, also while a
-restart finishes it; the same id with another request is
-`request_id_reused`, as is an update under a `sendevent`'s id and the
-reverse. While the update stops, the engine stays `RUNNING`, every job of
-the plan's added, changed and removed sets that the oracle starts waits as
-`dispatch_pending`, and a second `update` is refused with
-`update_in_progress`. A new `update` while the engine drains is refused
-with `engine_draining`; an exact retry of one admitted before is answered
-from its admission.
+**Reread and update (DL-463, extending DL-462).**
 
-`wait` changes only when the reply is sent; it is outside the retry
-fingerprint. Retry safety lasts while the store retains the admission
-(§3, DL-428). Unlike `sendevent` and `update`, `engine_stop` carries no
-`request_id`, `baseline_id`, `expect` or actor envelope (DL-429).
+The ADM request `{"v":4,"cmd":"reread","claimed_actor":null}` reports current
+inputs from the config the engine was last started with. It runs preparation
+in an owned worker; it admits no engine mutation and publishes no retained plan.
+Runtime state never refuses a diff. Broken input returns `invalid_argument`
+with the reason no diff is available; worker failures return `engine_error`.
+Success adds `live_rev`, `source: {kind, path}` and `preview` to the read header.
+Preview has added/changed/removed names, unchanged count, stops, restored flags,
+source changes, diagnostics, lint findings and per-job effects (rerun, hold,
+remove or box restart). Readiness findings accompany a valid diff.
 
-`dsl41 reread` prepares the plan; it does not change the live engine.
+The ADM update request is `{"v":4,"cmd":"update","baseline_id":"...",
+"request_id":"...","claimed_actor":null,"wait":false,"retry_only":false}`.
+Only the listed fields are accepted. No token, source path, consent or `expect` is accepted. The engine prepares
+current inputs itself and checks the captured revision before effects.
+V3 `update` returns `unknown_cmd` after authorization; retirement of that
+command is the stated exception to DL-462's old-command compatibility rule.
+
+The fingerprint binds operation, baseline and actor, excluding source bytes,
+artifact identity, prepared revision, wait and retry_only. Lookup happens before
+source reads. A matching in-flight request joins one preparation; a retained
+request returns its original admission/application. `retry_only` with no known
+request returns `invalid_argument` without preparing or submitting new work.
+Request-ID reuse and retention follow §3. The CLI prints the ID before writing.
+
+Admission returns `decision: admitted`, `request_id`, `stop` and `application`.
+With wait, the existing `update_window_s` applies after preparation; timeout
+returns `pending: true`. Application has rev, catalog_hash, added, changed,
+removed, restored and stopped choices. Public replies contain no artifact key.
+Refusals include names and the existing stale/in-progress/draining codes.
+
+Ordinary stopped jobs rerun as another attempt of the same run, are held when
+marked, or get no follow-up when removed. Structural box updates stop running
+members through the ordinary TERM ladder. Their KILLJOB inputs commit before
+application so kept outcomes cannot dispatch old-run replacements. After the
+swap, marked non-INACTIVE members, including previously finished members, get
+ON_HOLD before outermost retained boxes get FORCE_STARTJOB. Removed boxes stay
+stopped. Normal box starts open new runs and successors can see old-run ends.
+A crash can leave a box stopped: before force-starting it, hold its marked
+non-INACTIVE members. No additional box-restart recovery is promised.
+
 An edit only to `job_env` advances the configuration revision without
 changing job-definition hashes or stopping jobs, including while boxes run
 (DL-447). Running attempts keep their recorded environment. Later dispatches
 and replacements use the new map. A `kill_signals`-only update likewise
 changes no job definition and stops no job. Later KILLJOB effects take the new
 list; a ladder already started keeps its captured list (DL-462).
-With the main config, `/etc/dsl41/dsl41.toml` or an absolute `--config`
-selects the engine and its inputs (DL-437). `reread` compiles the selected
-inputs together and captures the config, source mapping and input bytes.
-It prints changed jobs' sources. `update` applies those captured bytes
-without reading the sources or importing Python modules. Host settings
-(`as_machine`, `machine_policy`, `access_map`, `status_hook`,
-`status_hook_long_running_s`) take effect at restart (DL-446);
-`reread` refuses a candidate whose host settings differ from the running
-engine's. The [deployment guide](deploy.md) defines the commands and lint policy.
+
+Preparation uses the engine's startup cwd/environment and an isolated Python
+worker. The server deadline is 120 seconds; the client allows 130 seconds plus
+update decision/application time. Cancellation terminates, allows two seconds,
+then kills and reaps. OS process creation/reap has no unconditional deadline.
+Host-setting edits still require restart before update. A JIL-only launch
+refuses both commands; changing its definitions requires a fresh run root.
 
 **No controller lease,** by choice (DL-41a). `sendevent` is multi-writer
 by AutoSys nature, and the engine's single-writer loop serializes every
@@ -285,12 +280,10 @@ The client action says what a client does next:
 | `engine_apply_faulted` | rejected | applying an input on a fork of the engine's state raised, and its time half applied alone, so the input was logged with this rejection and only its time half applied: it is quarantined (DL-320). The live engine stores it for an engine-made input. Replay stores it for any input admitted with no decision whose apply raises the same way, a control input included. Like every stored code, an exact retry of that control input is answered with it | operator |
 | `engine_error` | refused | an engine refusal whose raise site names no code | operator |
 | `engine_draining` | rejected | the mutation was admitted after `stop_requested` (a SIGTERM or `engine_stop`, below): it is logged with this rejection and only its time half applied; an exact retry is answered with it (spec-drain) | wait |
-| `stale_plan` | refused | the plan was diffed against another configuration rev or catalog than the engine runs (its revision or its catalog hash), `expect` names another rev, or the plan predates the engine (no estate directory) | re-read then decide |
-| `box_running` | refused | the plan adds or removes a member of a box that is `RUNNING` now, or removes it | wait |
-| `would_stop_running` | refused | the plan changes or removes a job that is `RUNNING` or `STARTING`, and the request did not consent with `stop_running` | fix the request |
-| `update_in_progress` | refused | another update is stopping its jobs; `names` holds its token | wait |
+| `stale_plan` | refused | the plan was diffed against another configuration rev or catalog than the engine runs (its revision or its catalog hash), or the internal plan predates the engine (no estate directory) | run update again |
+| `update_in_progress` | refused | another update is preparing or stopping its jobs; `names` is empty | wait |
 
-The last four rows are `update`'s refusals (DL-432): each writes nothing, and the
+The update refusal rows are `update`'s refusals (DL-432): each writes nothing, and the
 answer's `names` lists the jobs or boxes it concerns. An `update` while the
 engine drains is refused with `engine_draining`, and nothing is logged.
 
@@ -526,6 +519,11 @@ DL-99).
 
 ### `status [job]`
 
+A row may add `reread: {change, action}` (DL-463). It is the cached forecast
+at the last reread, not a live plan. New or failed reread replaces it; applied
+update and engine restart clear it. It is absent for unmarked rows. CLI and TUI
+append an annotation; existing clients may ignore this additive answer field.
+
 `{"ok": true, "jobs": {<name>: {…}}, "spec_drift": bool|null}`. Omitting
 `job` returns every catalog job unioned with every store row, so
 `CHANGE_STATUS`-created ghosts appear.
@@ -621,7 +619,7 @@ unchanged.
 
 ### `catalog`
 
-This is the read `dsl41 reread` diffs a candidate against, at the `read`
+This is the catalog projection available to clients, at the `read`
 tier (DL-432):
 `{"ok": true, "catalog": {…}, "catalog_hash", "settings": {…},
 "revision": int, "status": {<job>: <status>}, "runs": {<job>: int},

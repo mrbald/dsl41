@@ -530,55 +530,59 @@ the whole run root avoids this loss.
 
 ## Reload a changed estate
 
-1. Prepare the changed estate on disk, then build a plan:
+Use the engine's socket. Every engine command takes `-S`/`--socket`, with
+`DSL41_SOCKET` as its default (DL-459, DL-463).
 
-   ```sh
-   sudo -u dsl41 /opt/dsl41/releases/<version>/bin/dsl41 reread
-   ```
+```sh
+dsl41 reread -S /path/to/control.sock
+dsl41 update -S /path/to/control.sock --wait
+```
 
-   The command prints added, changed and removed jobs, the unchanged count,
-   running jobs it would stop, non-idempotent jobs among them, warnings and
-   `token: ...`. It stores the plan under the run root's `plans/` directory.
-   It changes no live jobs. Exit 0 means no running job would stop; exit 1
-   means at least one would stop; exit 2 means refusal.
+Reread only reports current launch-config and glob inputs: added, changed,
+removed and unchanged jobs, findings, and what update would stop, rerun, hold
+or remove. A running box does not refuse a preview. Broken input explains why
+no diff is available. Exit 0 means no running stop, 1 means running stops,
+and 2 means no diff or failure to reach the engine.
 
-2. Review the printed stops and replace `TOKEN` below with the printed token:
+Status in the CLI and TUI annotates changed/removed jobs with this forecast.
+It describes reread time. Another reread replaces it; failed reread, applied
+update and engine restart clear it. It is held only in engine memory.
 
-   If the reviewed plan stops running jobs, add `--stop-running` to consent
-   before submitting.
+Update rereads the files itself. Edits made after preview are included.
+It prints a request ID before sending. Use `--request-id ID` only to look up
+that original work after an unknown outcome. An unknown or expired ID submits
+nothing. Do not blindly submit a fresh update after a lost reply.
+With `--wait`, exit 0 means applied and 1 means still pending. Exit 2 means
+refusal/failure. No token or stop-consent argument is used.
 
-   ```sh
-   sudo -u dsl41 /opt/dsl41/releases/<version>/bin/dsl41 update TOKEN --wait
-   ```
+Affected ordinary jobs stop through TERM, grace and KILL. A retained idempotent
+job gets another attempt of the same run under the new definition; a marked
+job is held; a removed job gets no replacement (DL-424, DL-432).
+A structural edit of a running box stops its running members, ends its old
+rows with KILLJOB, applies, and force-starts the retained outermost box.
+The KILLJOBs commit before application so members get no old-run replacement.
+Before FORCE_STARTJOB, every marked member whose row is not INACTIVE is put
+ON_HOLD, including members that had already finished in that box run (D11).
+Unmarked members run through normal box-start semantics. Removed boxes stay
+stopped. The new box start opens a new run, and normal successors and
+terminators can observe the old run's end (DL-463).
 
-   The engine checks the plan against its current state.
-   It can refuse a stale plan, changed running-box membership, unconsented
-   stops or another update in progress. Reread after a stale-plan refusal.
+A crash during box restart can leave the box stopped. Before operator
+force-start, put its marked non-INACTIVE members on hold, including members
+that finished earlier. Then force-start the retained unmarked box. There is
+no separate automatic completion protocol for this box restart.
 
-   The command prints `admitted: plan ...` and, when applied,
-   `applied: catalog revision ...` with the changed jobs and stop choices.
-   The engine keeps running. It stops affected commands before swapping the
-   catalog; interrupted jobs rerun under the new definition or remain held
-   when marked in `non-idempotent.toml`.
-
-   With `--wait`, exit 0 means admitted and applied; exit 1 means admitted
-   but still pending when the engine's wait ended (`pending: ...`).
-   Without `--wait`, exit 0 means admitted. Exit 2 means refusal or failure
-   to reach the engine. For an unknown outcome, use the printed request id
-   with `--request-id` rather than submit a new update blindly.
-
-3. Run the status command above to check `config_rev`, any pending `update`
-   and held interruption evidence.
-
-Both reload commands use `/etc/dsl41/dsl41.toml`; use `--config PATH` for a
-different host config. Reread prints job origins and retains findings with
-the plan. A source move alone keeps jobs running. Update uses only the
-reviewed plan's captured bytes and policy, even after sources are edited or
-removed. Update reads only `engine.run_root` from the selected TOML file.
-Changes to `as_machine`, `machine_policy`, access-map selection, `status_hook`
-or `status_hook_long_running_s` need restart (DL-446).
-Reread names any changed host settings and requests that restart first.
-Changing `engine.run_root` selects another root; it does not migrate an engine.
+Preparation runs under the engine account and startup cwd/environment, in a
+separate interpreter. Its deadline is 120 seconds; cancellation terminates,
+allows two seconds, then kills and reaps. The client allows preparation and
+update application time. Findings retain their actual source diagnostics.
+Artifacts stay under the engine's actual run root.
+Host-setting edits require restart before update. Restart restores the applied
+capture, but future reload uses the config of that latest engine start.
+The drift flag and startup pending count still compare against the applied
+capture's inputs, which may differ from that launch file.
+JIL-only engines refuse reload: drain and start a fresh run root to change
+those definitions; the old root's state is not migrated.
 
 ## Upgrade the engine
 
@@ -682,7 +686,7 @@ Restart checks machine placement against the stored catalog and current
 host settings. It does not repeat the general launch preflight or lint.
 The captured JIL is recompiled without opening the original sources or
 importing Python. After startup a synchronous source scan reports
-`N pending source changes; run dsl41 reread` once, including a zero count.
+`N pending source changes; run dsl41 reread -S SOCKET` once, including a zero count.
 Legacy file and manifest starts keep their matching-estate checks.
 See [runner recovery](runner-design.md#7-journal-and-recovery-e1-prod-grade)
 and DL-433 in the [decision log](decision-log.md) for the restart rule.

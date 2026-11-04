@@ -17,7 +17,6 @@ from typer.testing import CliRunner
 from dsl41 import main_config as main
 from dsl41.cli import app
 from dsl41.cli_reload import reread_command
-from dsl41.ir import CatalogIR
 from dsl41.lint import LintReport, Violation
 from dsl41.reload_plan import Live, RereadRefused, read_plan, reread
 from dsl41.runner_clock import EngineError
@@ -325,15 +324,8 @@ def test_06_change_during_preparation_never_publishes(
         return candidate
 
     monkeypatch.setattr(main, "from_parts", changing)
-    assert (
-        reread_command(
-            tmp_path,
-            run_root=tmp_path / "run",
-            send=lambda *_: Live(CatalogIR(), {}, 1, {}),
-            config=path,
-        )
-        == 2
-    )
+    with pytest.raises(RereadRefused):
+        main.prepare(path)
     assert not (tmp_path / "run" / "plans").exists()
 
 
@@ -373,25 +365,29 @@ def test_08_origins_moves_and_shared_settings(
     path = estate_file(tmp_path)
     active = main.prepare(path)
     (tmp_path / "a.jil").rename(tmp_path / "moved.jil")
-    root = tmp_path / "run"
-    assert (
-        reread_command(
-            tmp_path, run_root=root, send=lambda *_: live_of(active, {"A": "RUNNING"}), config=path
+
+    def report(live):
+        from dsl41.reread_worker import preview
+
+        candidate = main.prepare(path)
+        return reread_command(
+            send=lambda *args: {
+                "ok": True,
+                "live_rev": live.revision,
+                "source": {"path": str(path)},
+                "preview": preview(candidate, live),
+            }
         )
-        == 0
-    )
+
+    assert report(live_of(active, {"A": "RUNNING"})) == 0
     output = capsys.readouterr().out
     assert "source moved A:" in output and "a.jil" in output and "moved.jil" in output
     (tmp_path / "moved.jil").write_text(JOB.replace("A", "B"))
-    assert (
-        reread_command(tmp_path, run_root=root, send=lambda *_: live_of(active), config=path) == 0
-    )
+    assert report(live_of(active)) == 0
     output = capsys.readouterr().out
     assert "source added B:" in output and "source removed A:" in output
     config_file(tmp_path, estate='timezone = "Europe/Zurich"\n')
-    assert (
-        reread_command(tmp_path, run_root=root, send=lambda *_: live_of(active), config=path) == 0
-    )
+    assert report(live_of(active)) == 0
     assert "shared settings sources:" in capsys.readouterr().out
 
 
@@ -597,21 +593,34 @@ def test_known_unsupported_lint_policy(
     if entered:
         assert sum(item.code == "known-unsupported" for item in entered[0]) == warning_count
     assert not (tmp_path / "run").exists()
+    from dsl41.reread_worker import preview
+
     code = reread_command(
-        tmp_path, run_root=tmp_path / "run", send=lambda *_: live_of(candidate), config=path
+        send=lambda *_: {
+            "ok": True,
+            "live_rev": 1,
+            "source": {"path": str(path)},
+            "preview": preview(candidate, live_of(candidate)),
+        }
     )
     output = capsys.readouterr()
-    assert code == (2 if blocked else 0)
+    assert code == 0
     warnings = "\n".join(
         line for line in (output.out + output.err).splitlines() if not line.startswith("reread:")
     )
     assert warnings.count("known-unsupported warn:") == warning_count
     for attribute in expected:
         assert warnings.count(f"job A: {attribute}:") == int(not ignored)
+    assert not (tmp_path / "run").exists()
     if blocked:
+        with pytest.raises(RereadRefused, match="known-unsupported"):
+            reread(tmp_path, live_of(candidate), tmp_path / "run" / "plans", candidate=candidate)
         assert not (tmp_path / "run" / "plans").exists()
     else:
-        document = read_plan(tmp_path / "run" / "plans", output.out.split("token: ")[-1].strip())
+        result = reread(
+            tmp_path, live_of(candidate), tmp_path / "run" / "plans", candidate=candidate
+        )
+        document = read_plan(tmp_path / "run" / "plans", result.token)
         assert not any(
             item["code"] == "known-unsupported" for item in document["preflight_warnings"]
         )
@@ -621,19 +630,28 @@ def test_known_unsupported_lint_policy(
         )
 
 
-def test_known_unsupported_keeps_other_reread_refusal_lines(tmp_path, capsys):
+def test_known_unsupported_keeps_other_reread_findings(tmp_path, capsys):
+    from dsl41.reread_worker import preview
+
     path = estate_file(tmp_path, lint='refuse = "error"\n')
     active = main.prepare(path)
-    (tmp_path / "a.jil").write_text(JOB + "condition: s(MISSING)\n")
+    (tmp_path / "a.jil").write_text(JOB + "group: batch\ncondition: s(MISSING)\n")
     assert (
         reread_command(
-            tmp_path, run_root=tmp_path / "run", send=lambda *_: live_of(active), config=path
+            send=lambda *_: {
+                "ok": True,
+                "live_rev": 1,
+                "source": {"path": str(path)},
+                "preview": preview(main.prepare(path), live_of(active)),
+            }
         )
-        == 2
+        == 0
     )
-    lines = capsys.readouterr().err.splitlines()
-    assert sum("L001 error:" in line for line in lines) == 2
-    assert any(line.startswith("reread: ") and "L001 error:" in line for line in lines)
+    output = capsys.readouterr()
+    assert "changed: A" in output.out
+    assert output.err.count("L001 error:") == 1
+    assert output.err.count("known-unsupported warn:") == 1
+    assert not (tmp_path / "run").exists()
 
 
 @pytest.mark.parametrize(
@@ -696,17 +714,17 @@ def test_known_unsupported_restart_reports_without_refusal(short_root, ignored):
     assert active_configuration(root).catalog == captured.catalog
 
 
-def test_known_unsupported_startup_and_reread_process(short_root):
+def test_known_unsupported_startup_and_socket_reread_process(short_root):
     from store_surgery import rows
 
     path = estate_file(short_root, engine='job_shell = "/bin/sh"\n', lint='ignore = ["L011"]\n')
     (short_root / "a.jil").write_text(
         JOB.replace("machine: localhost", "machine: M")
-        + "group: batch\nelevated: yes\ninteractive: true\navg_runtime: +1\njob_load: +1\n"
+        + "n_retrys: 2\ngroup: batch\nelevated: yes\ninteractive: true\navg_runtime: +1\njob_load: +1\n"
         + "insert_machine: M\ntype: v\nmachine: localhost\n"
         + "insert_machine: localhost\ntype: a\nnode_name: localhost\n"
     )
-    expected = ["group", "elevated", "interactive", "avg_runtime", "job_load"]
+    expected = ["n_retrys", "group", "elevated", "interactive", "avg_runtime", "job_load"]
     root = short_root / "run"
     log = short_root / "process.log"
     with (
@@ -725,6 +743,8 @@ def test_known_unsupported_startup_and_reread_process(short_root):
             for attribute in expected:
                 assert log.read_text().count(f"job A: {attribute}:") == 1
             assert log.read_text().count("engine.job_shell:") == 1
+            jil = short_root / "a.jil"
+            jil.write_text(jil.read_text().replace("group: batch", "group: pending"))
             for policy, ignored in [("none", False), ("warn", False), ("warn", True)]:
                 config_file(
                     short_root,
@@ -738,30 +758,23 @@ def test_known_unsupported_startup_and_reread_process(short_root):
                         "-m",
                         "dsl41",
                         "reread",
-                        "--config",
-                        str(path),
+                        "-S",
+                        str(root / "control.sock"),
                     ],
                     capture_output=True,
                     text=True,
                     timeout=30,
                 )
-                assert result.returncode == (2 if policy == "warn" and not ignored else 0), (
-                    result.stdout + result.stderr
+                assert result.returncode == 0, result.stdout + result.stderr
+                assert "changed: A" in result.stdout
+                assert "token:" not in result.stdout
+                assert set((root / "plans").iterdir()) == before
+                assert result.stderr.count("known-unsupported warn:") == (len(expected) + 1) * int(
+                    not ignored
                 )
-                if result.returncode == 2:
-                    assert set((root / "plans").iterdir()) == before
-                else:
-                    for attribute in expected:
-                        assert (result.stdout + result.stderr).count(f"job A: {attribute}:") == int(
-                            not ignored
-                        )
-                    document = read_plan(root / "plans", result.stdout.split("token: ")[-1].strip())
-                    assert sum(
-                        v["code"] == "known-unsupported" for v in document["lint_findings"]
-                    ) == (len(expected) + 1) * int(not ignored)
-                    assert not any(
-                        v["code"] == "known-unsupported" for v in document["preflight_warnings"]
-                    )
+                for attribute in expected:
+                    assert result.stderr.count(f"job A: {attribute}:") == int(not ignored)
+                assert result.stderr.count("engine.job_shell:") == int(not ignored)
             assert active_configuration(root).catalog.jobs["A"].passthrough["group"] == "batch"
             with closing(SqliteStore(root / "engine.db", read_only=True)) as store:
                 assert store.current_config_rev() == 1
@@ -938,7 +951,27 @@ def test_reload_timezone_message_source(
         )
         estate = reload_plan.load_estate(tmp_path)
         map_source = "timezone_map"
-    items = [item for item in reload_plan._preflight(estate, T0) if item.code == "timezone"]
+    items = [item for item in reload_plan.preflight_items(estate, T0) if item.code == "timezone"]
     assert len(items) == 1
     assert f"{message} {map_source}" in items[0].message
     assert "--timezone-map" not in items[0].message
+
+
+@pytest.mark.parametrize("damage", ["relative", "path", "config", "membership"])
+def test_source_descriptor_requires_bound_launch_input(tmp_path: Path, damage):
+    from dsl41.canon import canonical_bytes
+
+    candidate = main.prepare(estate_file(tmp_path))
+    parts = list(candidate.parts)
+    metadata = json.loads(parts[-1][1])
+    if damage == "relative":
+        metadata["config_path"] = "relative.toml"
+    elif damage == "path":
+        metadata["records"][0]["path"] = str(tmp_path / "another.toml")
+    elif damage == "config":
+        metadata["config"]["lint"]["refuse"] = "error"
+    else:
+        parts[:-1] = reversed(parts[:-1])
+    parts[-1] = (parts[-1][0], canonical_bytes(metadata))
+    with pytest.raises(RereadRefused):
+        main.verified_from_parts(parts)

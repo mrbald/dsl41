@@ -25844,6 +25844,43 @@ relitigate an entry; append a new one.
   in runner-design and wrapper-protocol, and the control-protocol and protocol-evolution doors.
   THE REASON. Jobs can rely on AutoSys kill signals while engine lifecycle cleanup keeps its
   existing policy. A versioned request prevents an older server silently dropping an override.
+- DL-463 Socket-owned reread and update (2026-11-04; extends DL-462;
+  cli_reload.py, reread_worker.py, runner_control.py, runner_update.py)
+  THE RULE. Reread reports the current main launch config and its current glob matches through
+  the engine socket. Update independently prepares current inputs and applies them. Both use
+  the shared -S/--socket option and DSL41_SOCKET. There is no public token, config selector or
+  stop-consent argument. JIL-only engines refuse reload with a plain fresh-run-root instruction.
+  Reread never refuses for runtime state. Broken input explains why no diff is available;
+  readiness and lint findings accompany a valid diff. An owned isolated interpreter prepares
+  the candidate under startup cwd and environment; timeout and cancellation terminate and reap it.
+  The latest launch path stays fixed until restart; captured active state and applied-capture
+  drift keep their existing meanings. Preparation and artifacts belong to the actual run root.
+  V4 adds reread and tokenless update to DL-462. V3 update is unknown_cmd after authorization;
+  retiring that old token command is the stated exception to DL-462's command compatibility.
+  Exact update retries identify operation, baseline and actor, and are looked up before source
+  reads. retry_only never submits new work. One pending preparation joins matching requests.
+  Reread's changed/removed forecast is cached in memory and projected additively into status,
+  CLI and TUI. A new reread replaces it; failed reread, applied update and restart clear it.
+  It describes reread time, is never an application plan, and changes no revision or record.
+  THE BOX CASE. A structural edit of a running box stops its running descendants through the
+  existing TERM update ladder. Existing KILLJOB inputs then end the old box/member rows and
+  COMMIT BEFORE application: otherwise kept outcomes choose old-run replacement attempts while
+  the box is restarted. The update step awaits those admissions before settling the update.
+  After the swap, ON_HOLD is applied to every marked member whose row is not INACTIVE, including
+  members that finished earlier (D11=HOLD), before FORCE_STARTJOB of retained outermost boxes.
+  Marked roots are held; removed boxes stay stopped. Nested boxes use the normal parent start.
+  Ordinary jobs retain DL-424's same-run rerun/hold/none rule and DL-432's application order.
+  THE LIMITS. A restarted box opens a new run; normal successors and terminator rules observe
+  the old run's end. A crash mid-restart can leave it stopped. Before operator force-start,
+  put its marked non-INACTIVE members on hold, including members that finished earlier.
+  No extra command IDs, receipt recovery or automatic completion of the box restart is promised.
+  Plans 1-2, configurations 1-3, capture 1, state 28 and journal/snapshot formats stay unchanged.
+  THE REASON. The operator needs one socket to report and apply the engine's current sources.
+  NOTICED, NOT DOING. An unchanged member can start while the update stops because only the
+  existing added/changed/removed dispatch filter applies. Extending that filter to all box
+  descendants is a TODO candidate if demonstrated; this item does not close that window.
+  A reread that finishes while an update applies can store stale marks. This is a TODO
+  candidate; this item does not add revision fencing to the memory-only view.
 - DL-465 Five-day dependency cooldown (2026-11-04; owner ruling; README Release)
   uv excludes registry artifacts younger than five days through
   `[tool.uv] exclude-newer = "5 days"`. Both Dependabot ecosystems, uv and

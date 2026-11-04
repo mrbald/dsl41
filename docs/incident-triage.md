@@ -296,8 +296,11 @@ Escalate `dsl41: statechart error`, `dsl41: input quarantined`,
 A normal `engine stopped: clean_shutdown` is a stop record, not a fault.
 Keep statechart report lines whole. A job's own exit code and logs belong
 to the application. `SPEC DRIFT: estate files changed on disk` and
-`N pending source changes; run dsl41 reread` report pending sources;
+`N pending source changes; run dsl41 reread -S SOCKET` report pending sources;
 [review an update](deploy.md#reload-a-changed-estate) to adopt them.
+
+A crash during box update can leave the box stopped (DL-463). Before force-start,
+put all its marked non-INACTIVE members on hold, including previously finished ones.
 
 Evidence can contain credentials or private estate data. Check every file
 before sharing. Preserve the original run root; do not delete or edit its
