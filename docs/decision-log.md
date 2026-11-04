@@ -25699,3 +25699,29 @@ relitigate an entry; append a new one.
   Review should establish a useful, accurate document without unnecessary ceremony.
   THE BOUNDARY. This is a standing reader-docs policy, not a waiver of runtime contracts
   or a release authorization. Frozen-contract review keeps its separate requirements.
+- DL-457 Repairs after a failed gate count as rework; only the owner expands scope (2026-11-04;
+  owner ruling; docs/agents/operating-model.md, docs/agents/coordination.md, docs/agents/review.md)
+  THE GAP. A failed required gate was repaired in pass after pass outside DL-430's counts,
+  because a rework round counted only passes over review findings. No shape note fell due.
+  Independent review waited for green gates, so the repair plan had no challenge. A boss
+  allocation was read as enough authority to widen the work beyond the owner's priority.
+  THE RULE. A change is handed in when it is first submitted for review, integration or
+  qualification, even with failing gates. A rework round is the implementer's pass, after
+  hand-in, over every open finding or failed required gate. A fix is also found wrong when
+  the same gate fails again on the same test, statement or transition; the shape note falls
+  due when the fix for one finding or failed-gate item is found wrong twice. When a required
+  gate fails after hand-in, the change's assigned reviewer checks the repair plan before the
+  repair pass, unless the exact, non-semantic edit is already specified by a reviewer, a
+  ruling or a deterministic tool diagnostic, whose source is recorded; a coverage report
+  listing missing lines does not specify their repair. The plan states what will change and
+  why that closes the gate rather than an exclusion, a ruling or a scope question for the
+  owner. A plan review is a review round, but the fresh final review's exemption and vendor
+  choice count only reviews of the change's diff. A rejected plan goes to the boss. The boss defines
+  done within owner-approved scope; only the owner may expand scope, and the boss sends any
+  expansion to the owner.
+  THE REASON. Counting gate repairs makes DL-430's shape note and fresh final review fall
+  due on gate loops too. A plan review puts an independent reader on a repair before it grows.
+  THE BOUNDARY. This amends DL-430's terms and DL-440's statement that the boss sets scope.
+  DL-430's shape note, fresh final review, owner hand-offs and stated limits are otherwise
+  unchanged. Local edit-test loops before hand-in are not rework. No budget or dispatch
+  approval is added.

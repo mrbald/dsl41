@@ -65,25 +65,40 @@ assertions -- these are recurring defect classes in this codebase.
 
 ## Review rounds
 
-Track these counts in the change's review record (DL-430):
+Track these counts in the change's review record (DL-430, DL-457):
 
-- A review round is one reviewer's pass over the change or fixes to its findings.
-- A rework round is the implementer's pass over every open finding, whoever raised it.
-- A fix is found wrong when the raiser or its named stand-in reopens the finding.
+- A review round is one reviewer's pass over the change, fixes to its findings,
+  or a repair plan.
+- A change is handed in when it is first submitted for review, integration or
+  qualification, even with failing gates.
+- A rework round is the implementer's pass, after the change is first handed in,
+  over every open finding or failed required gate, whoever raised it.
+- A fix is found wrong when the raiser or its named stand-in reopens the finding,
+  or the same gate fails again on the same test, statement or transition.
 
 Each reviewer has three review rounds. Only the raiser or its named stand-in
 confirms a fix. A material finding still open after that reviewer's third round
 goes to the owner, who approves further rounds one at a time.
 
-Before the fourth rework round, or when one finding's fix has been found wrong
-twice, the boss writes a shape note. It states the rule the change implements,
+When a required gate fails after hand-in, the change's assigned reviewer checks
+the repair plan before the repair pass, unless the exact, non-semantic edit is
+already specified by a reviewer, a ruling or a deterministic tool diagnostic;
+record that source. A coverage report that lists missing lines does not specify
+their repair. The plan states what will change and why that closes the gate
+rather than an exclusion, a ruling or a scope question for the owner. A rejected
+plan goes to the boss (DL-457).
+
+Before the fourth rework round, or when the fix for one finding or failed-gate
+item has been found wrong twice, the boss writes a shape note. It states the rule the change implements,
 why cases keep appearing, and the single rule, split or redesign it suggests.
 The owner reads it before rework starts. The change leaves the merge train
 while it waits.
 
 After more than three rework rounds, the final diff gets a fresh review unless
 every reviewer's last round covered the current fixes. Use a new reviewer from
-the vendor whose last round is older, with its own three-round cap. Apply the
+the vendor whose last round is older, with its own three-round cap. For this
+exemption and the vendor choice, count only reviews of the change's diff, not
+plan-only reviews. Apply the
 [stand-in rule](#required-passes) if that vendor is out of budget. A material finding
 from this review gets one more owner-approved rework round.
 
