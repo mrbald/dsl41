@@ -461,3 +461,42 @@ def test_engine_stop_waits_for_an_engine_that_is_still_starting(
     result = _run("engine", "stop", "--wait", socket=tmp_path / "control.sock")
     assert (result.exit_code, len(sent)) == (code, sends), result.output
     assert waited == ([tmp_path / "control.sock"] if sends == 3 else [])
+
+
+@pytest.mark.usefixtures("cli_env")
+@pytest.mark.parametrize(
+    "value,verb,valid",
+    [
+        (None, "KILLJOB", True),
+        ("9", "KILLJOB", True),
+        ("15,2,2,9", "KILLJOB", True),
+        ("", "KILLJOB", False),
+        ("2", "KILLJOB", False),
+        ("0,9", "KILLJOB", False),
+        ("99999,9", "KILLJOB", False),
+        ("INT,9", "KILLJOB", False),
+        ("2,,9", "KILLJOB", False),
+        ("2, 9", "KILLJOB", False),
+        ("9", "STARTJOB", False),
+    ],
+)
+def test_sendevent_k_validation_and_version(monkeypatch, value, verb, valid):
+    from dsl41.runner_control import versioned
+
+    requests = []
+    monkeypatch.setattr(cli_control, "_pinned_read", lambda *a: ("b", 1))
+    monkeypatch.setattr(
+        cli_control, "_mutate", lambda path, request: requests.append(versioned(request))
+    )
+    args = ["sendevent", verb, "-J", "j"] + ([] if value is None else ["-k", value])
+    result = _run(*args)
+    assert result.exit_code == (0 if valid else 2), result.output
+    if valid:
+        [request] = requests
+        assert request["v"] == (3 if value is None else 4)
+        assert request["payload"] == {
+            "job": "j",
+            **({} if value is None else {"kill_signals": [int(v) for v in value.split(",")]}),
+        }
+    else:
+        assert requests == []

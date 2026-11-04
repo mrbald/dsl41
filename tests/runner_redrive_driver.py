@@ -53,7 +53,7 @@ async def main(run_root: str) -> None:
         adapters={"CMD": LocalCommandAdapter(grace_seconds=2.0)},
     )
 
-    def die(_emitted: object) -> None:
+    def die(_emitted: object, _selected: object = None) -> None:
         os._exit(CRASH_CODE)
 
     engine._dispatch = die  # type: ignore[method-assign]

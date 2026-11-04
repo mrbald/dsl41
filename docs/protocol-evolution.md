@@ -61,7 +61,7 @@ a row.
 | Reload plans | `reread` → `read_plan` and update | `plan_format_version`, 1 or 2; `artifact_format_version` (PR-08d) | Ignored | Unsupported plan version refuses by name; absent plan version selects supported version 1 (DL-437). Unsupported artifact version makes `read_plan` return no plan; absent artifact version passes | Retained plan; an interrupted update requires it |
 | Main-config input mapping | `main_config.prepare` → `from_parts` | `format_version = 1` in `main-inputs.json` | Ignored | Unsupported or absent refuses (DL-437) | Retained plan or stored capture |
 | Main config | Site → `load_config` | `format_version = 1` | Refused; restart host loading has the limit below | Unsupported or absent refuses (DL-437) | Site's config file |
-| Control socket | Client → `ControlServer` | `v` on every request | Ignored | Unsupported or absent refuses, connection stays open | One request; `subscribe` lasts to hangup |
+| Control socket | Client → `ControlServer` | `v` on every request; dual-read 3 and 4 (DL-462) | Ignored; v3 ignores `kill_signals` | Unsupported or absent refuses, connection stays open; defaults write 3, additions write 4, no fallback | One request; `subscribe` lasts to hangup |
 
 A durable format can retire only when no retained instance needs its reader
 (§3). Wire retirement needs the door to refuse the old dialect. SQLite
@@ -153,7 +153,10 @@ must neither equal nor contain the engine root, nor lie inside it.
 
 Main-config restart restores the last applied revision. Estate, lint and
 `engine.environment` edits stay pending. Disk host identity,
-`machine_policy` and the access map apply at launch; invalid values exit 2.
+`machine_policy`, the access map and the current `kill_signals` apply at launch;
+invalid values exit 2 (DL-462). The kill list changes later kills, not replay
+or ordinary leftover cleanup. It is excluded from job-definition hashes.
+Stored configuration and plan formats remain unchanged.
 A missing interrupted-update plan refuses before writes or signals.
 Restart recompiles captured bytes and checks placement and runtime
 variables (DL-437, DL-447). Other preflight rules remain unrun there.

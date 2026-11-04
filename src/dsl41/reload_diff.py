@@ -160,7 +160,7 @@ def _references(job: JobIR, catalog: CatalogIR) -> dict[str, dict[str, Any] | No
 def definition_hash(job: JobIR, catalog: CatalogIR, estate_settings: Mapping[str, object]) -> str:
     """Digest of the job's normalized effective definition within `catalog`.
 
-    `estate_settings`, except `job_env`, is canonicalised into the hash input (DL-447).
+    `estate_settings`, except `job_env` and `kill_signals`, enters the hash (DL-447, DL-462).
     The caller (reread) supplies the values that shape a job's behaviour outside the catalog;
     this module fixes their shape as a mapping to canonical-encodable values.
     """
@@ -168,7 +168,11 @@ def definition_hash(job: JobIR, catalog: CatalogIR, estate_settings: Mapping[str
         {
             "job": _job_record(job),
             "refs": _references(job, catalog),
-            "settings": {key: value for key, value in estate_settings.items() if key != "job_env"},
+            "settings": {
+                key: value
+                for key, value in estate_settings.items()
+                if key not in {"job_env", "kill_signals"}
+            },
         }
     )
 
@@ -202,8 +206,8 @@ def _reason(
             verb = "changed"
         reasons.append(f"{kind} {name} {verb}")
     for setting in sorted(live_settings.keys() | candidate_settings.keys()):
-        if setting == "job_env":
-            continue  # Invocation settings apply to later dispatches (DL-447).
+        if setting in {"job_env", "kill_signals"}:
+            continue  # Later invocations or kills take these policies (DL-447, DL-462).
         if live_settings.get(setting, _ABSENT) != candidate_settings.get(setting, _ABSENT):
             reasons.append(f"estate setting {setting} changed")
     return "; ".join(reasons)
@@ -226,8 +230,8 @@ def diff(
 ) -> Plan:
     """Compare by job name: added, removed, changed (hash differs), unchanged.
 
-    A difference between the two settings mappings, except `job_env`, changes every kept job
-    (DL-447). A job whose type
+    A settings difference, except `job_env` and `kill_signals`, changes every kept job
+    (DL-447, DL-462). A job whose type
     changes (CMD, BOX, FW) is another job under the same name: it is in both removed and added,
     so the update retires the old row and admits a new one.
     """
