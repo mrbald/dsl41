@@ -489,9 +489,9 @@ def test_a_deadline_and_a_status_ending_one_run_in_one_batch_record_one_kill(
     cancelled: list[str] = []
     real = Engine._dispatch
 
-    def counting(self: Engine, emitted: list[Event]) -> None:
+    def counting(self: Engine, emitted: list[Event], selected=None) -> None:
         before = dict(self._live)
-        real(self, emitted)
+        real(self, emitted, selected)
         cancelled.extend(job for job in before if job not in self._live)
 
     with pytest.MonkeyPatch.context() as patch:

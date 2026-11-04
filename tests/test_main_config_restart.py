@@ -893,3 +893,99 @@ def test_k1_state_version_refuses_before_captured_lowering(short_root, monkeypat
     assert result.exit_code == 2 and "state version" in result.output
     assert "restart-lowering" not in result.output
     assert k_root_bytes(root) == before
+
+
+@pytest.mark.parametrize("updated", [False, True])
+@pytest.mark.parametrize("launch", ["cli", "legacy"])
+def test_restart_accepts_current_kill_signals(short_root: Path, updated: bool, launch: str) -> None:
+    import json
+    from dsl41.runner_adapters import LocalCommandAdapter
+    from dsl41.runner_config import RuntimeProfile
+    from dsl41.runner_control import command, revision_in
+    from test_engine_stops import _finish, _jil, _start_jobs, _until
+    from test_kill_signals import signal_command
+
+    cmd, ready, signals = signal_command(short_root)
+    (short_root / "a.jil").write_text(_jil({"j": cmd}))
+    path = config_file(short_root)
+    estate = main.prepare(path)
+    root = short_root / "run"
+
+    async def seed():
+        engine = start_run(
+            estate.catalog,
+            root,
+            clock=RealClock(),
+            adapters={"CMD": FakeAdapter()},
+            launched=main.profile_of(estate),
+            source_capture=main.encoded_parts(estate),
+        )
+        try:
+            engine.launch_settings = estate.metadata["launch"]
+            if updated:
+                config_file(short_root, engine="kill_signals = [15,9]\n")
+                plan = reread(
+                    short_root, engine.update.live(), root / "plans", candidate=main.prepare(path)
+                )
+                pending = engine.request_update(
+                    UpdateRequest(plan.token, False, 1, engine.baseline_id, "policy")
+                )
+                await engine.run_until_quiescent(engine.clock.now())
+                answer = pending.result()
+                await answer.applied
+                assert engine.profile.kill_signals == (15, 9)
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(seed())
+    config_file(short_root, engine="kill_signals = [9]\n")
+    status_file = root / "runs/j.1/1/status.json"
+    if launch == "cli":
+        with cli_engine(path):
+            socket = root / "control.sock"
+            for verb in ("STARTJOB", "KILLJOB"):
+                read = roundtrip(socket, {"cmd": "status", "job": "j"})
+                request = command(
+                    verb,
+                    {"job": "j"},
+                    key="job:j",
+                    revision=revision_in(read, "job:j"),
+                    baseline_id=read["baseline_id"],
+                )
+                assert roundtrip(socket, request)["decision"] == "applied"
+                deadline = time.monotonic() + 30
+                marker = ready if verb == "STARTJOB" else status_file
+                while not marker.exists():
+                    assert time.monotonic() < deadline
+                    time.sleep(0.01)
+    else:
+
+        async def resume():
+            engine = await resume_run(
+                estate.catalog,
+                root,
+                clock=RealClock(),
+                adapters={"CMD": LocalCommandAdapter()},
+                declared=RuntimeProfile(kill_signals=(9,)),
+                hold_open=True,
+            )
+            loop = asyncio.create_task(engine.run_until_quiescent(datetime.max))
+            try:
+                await _until(engine.started.is_set)
+                assert engine.profile.kill_signals == (9,)
+                _start_jobs(engine, "j")
+                await _until(ready.exists)
+                engine.inject(Event(at=engine.clock.now(), kind="KILLJOB", payload={"job": "j"}))
+                await _until(status_file.exists)
+            finally:
+                await engine.request_stop()
+                await _finish(engine, loop)
+
+        asyncio.run(resume())
+    assert json.loads(status_file.read_text())["signal"] == 9 and not signals.exists()
+    before = (root / "engine.db").read_bytes()
+    config_file(short_root, engine="kill_signals = [2]\n")
+    result = CliRunner().invoke(app, ["run", "--config", str(path)])
+    assert result.exit_code == 2 and "must end with KILL" in result.output
+    assert (root / "engine.db").read_bytes() == before

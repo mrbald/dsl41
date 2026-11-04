@@ -350,3 +350,12 @@ def test_a_job_whose_type_changes_is_removed_and_added() -> None:
     assert plan.unchanged == ("keep",)
     assert plan.edited_boxes == ("bx",)
     assert running_boxes(plan, candidate, {"bx": "RUNNING"}) == ("bx",)
+
+
+def test_kill_signals_does_not_change_job_definitions() -> None:
+    catalog = _cat(_job("a"), _job("b"))
+    plan = _diff(catalog, catalog, {"kill_signals": (2, 9)}, {"kill_signals": (15, 9)})
+    assert plan.changed == () and plan.unchanged == ("a", "b")
+    edited = _cat(_job("a", command="other"), _job("b"))
+    [change] = _diff(catalog, edited, {"kill_signals": (2, 9)}, {"kill_signals": (9,)}).changed
+    assert change.name == "a" and change.reason is None

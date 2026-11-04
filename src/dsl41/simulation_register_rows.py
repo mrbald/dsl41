@@ -3146,9 +3146,14 @@ PROFILE_ROWS: tuple[Row, ...] = (
                 ("job_profile", '"/tmp/synthetic-profile"'),
                 ("job_shell", '"/bin/sh"'),
                 ("std_file_mode", '"truncate"'),
-                ("kill_signals", "[15, 9]"),
                 ("set_job_attribute_environmentals", "false"),
             )
+        ),
+        _profile_row(
+            "kill_signals",
+            "[15, 9]",
+            "DL-462, runner_adapters.selected_signal_ladder",
+            "ordered KILLJOB signals, five seconds apart; later kills take policy updates",
         ),
         _profile_row(
             "job_env",

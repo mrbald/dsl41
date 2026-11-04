@@ -439,8 +439,9 @@ class World:
         self.log.append(("leaked", attempt))
         return self.terminate_leaks
 
-    def kill_wrapper(self, attempt: str) -> None:
+    def kill_wrapper(self, attempt: str) -> bool:
         self.log.append(("kill_wrapper", attempt))
+        return False
 
     def arm_timer(self, key: str, generation: int, delay_s: float) -> None:
         self.timers[key] = (generation, delay_s)

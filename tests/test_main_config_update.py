@@ -467,3 +467,69 @@ def test_v2_configuration_refuses_untrusted_capture_order(tmp_path: Path, damage
         payload["source_capture"] = {"main-inputs.json": "e30="}
     with pytest.raises(EngineError, match="untrusted: .*source_capture"):
         Configuration.from_bytes(canonical_bytes(payload), where="untrusted")
+
+
+def test_kill_signals_update_affects_later_kills_only(tmp_path: Path, monkeypatch) -> None:
+    from datetime import datetime
+    from dsl41 import runner_stops
+    from dsl41.runner_adapters import LocalCommandAdapter
+    from dsl41.runner_clock import RealClock
+    from test_engine_stops import _finish, _jil, _start_jobs, _until
+    from test_kill_signals import signal_command
+
+    a, ready_a, log_a = signal_command(tmp_path, "a")
+    b, ready_b, log_b = signal_command(tmp_path, "b")
+    (tmp_path / "a.jil").write_text(_jil({"a": a, "b": b}))
+    path = config_file(tmp_path)
+    estate = main.prepare(path)
+    root = tmp_path / "run"
+    selections = []
+    original = runner_stops.selected_signal_ladder
+
+    async def selected(pgid, token, signals, *args, **kwargs):
+        selections.append(signals)
+        await original(pgid, token, signals, *args, **kwargs)
+
+    monkeypatch.setattr(runner_stops, "selected_signal_ladder", selected)
+
+    async def scenario():
+        engine = start_run(
+            estate.catalog,
+            root,
+            clock=RealClock(),
+            adapters={"CMD": LocalCommandAdapter()},
+            launched=main.profile_of(estate),
+            source_capture=main.encoded_parts(estate),
+            hold_open=True,
+        )
+        engine.launch_settings = estate.metadata["launch"]
+        loop = asyncio.create_task(engine.run_until_quiescent(datetime.max))
+        try:
+            _start_jobs(engine, "a", "b")
+            await _until(lambda: ready_a.exists() and ready_b.exists())
+            engine.inject(Event(at=engine.clock.now(), kind="KILLJOB", payload={"job": "a"}))
+            await _until(log_a.exists)
+            config_file(tmp_path, engine="kill_signals = [9]\n")
+            candidate = main.prepare(path)
+            plan = reread(tmp_path, engine.update.live(), root / "plans", candidate=candidate)
+            assert plan.plan.changed == () and plan.stop == ()
+            answer = await engine.request_update(
+                UpdateRequest(plan.token, True, 1, engine.baseline_id, "policy")
+            )
+            assert isinstance(answer.decision, Admitted)
+            await answer.applied
+            assert engine.profile.kill_signals == (9,)
+            assert engine.attempt_view("b")["state"] == "RUNNING"
+            assert selections == [(2, 9)]
+            engine.inject(Event(at=engine.clock.now(), kind="KILLJOB", payload={"job": "b"}))
+            await _until(lambda: (root / "runs/b.1/1/status.json").exists())
+            assert not log_b.exists()
+            await _until(lambda: (root / "runs/a.1/1/status.json").exists())
+            assert selections == [(2, 9), (9,)] and log_a.read_text().splitlines() == ["2"]
+            assert json.loads((root / "runs/a.1/1/status.json").read_text())["signal"] == 9
+            assert json.loads((root / "runs/b.1/1/status.json").read_text())["signal"] == 9
+        finally:
+            await engine.request_stop()
+            await _finish(engine, loop)
+
+    asyncio.run(scenario())

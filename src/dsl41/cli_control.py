@@ -106,6 +106,19 @@ def _pinned_read(
     return (header if baseline is None else baseline, current if expect is None else expect)
 
 
+def _kill_override(value: str) -> list[int]:
+    from dsl41.runtime_policy import RuntimePolicySettings
+
+    parts = value.split(",")
+    if any(not part.isascii() or not part.isdigit() for part in parts):
+        raise ValueError("-k requires a comma-separated numeric signal list ending in 9")
+    return list(
+        RuntimePolicySettings.model_validate(
+            {"kill_signals": [int(part) for part in parts]}
+        ).kill_signals
+    )
+
+
 def sendevent(
     event: str = typer.Argument(
         ...,
@@ -123,6 +136,9 @@ def sendevent(
     status: str = typer.Option(None, "--status", "-s", help="CHANGE_STATUS: the new status."),
     global_kv: str = typer.Option(None, "--global", "-G", help="SET_GLOBAL: NAME=value."),
     exit_code: int = typer.Option(None, "--exit-code", help="CHANGE_STATUS: exit code to record."),
+    kill_signals: str | None = typer.Option(
+        None, "-k", help="KILLJOB only: ordered numeric signals, comma-separated, ending in 9."
+    ),
     expect: int = typer.Option(
         None,
         "--expect",
@@ -176,6 +192,13 @@ def sendevent(
 
     verb = event.upper()
     payload: dict[str, Any] = {}
+    if kill_signals is not None:
+        if verb != "KILLJOB":
+            raise typer.Exit(refuse("-k is valid only for KILLJOB"))
+        try:
+            payload["kill_signals"] = _kill_override(kill_signals)
+        except ValueError as exc:
+            raise typer.Exit(refuse(exc)) from exc
     if job is not None:
         payload["job"] = job
     if status is not None:
@@ -201,6 +224,8 @@ def sendevent(
         request_id=request_id,
         claimed_actor=claimed_actor() if actor is None else actor,
     )
+    if kill_signals is not None:
+        request["v"] = 4
     _mutate(socket_path, request)
 
 

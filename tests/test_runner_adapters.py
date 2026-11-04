@@ -555,7 +555,7 @@ def test_killjob_mid_run_terminates_and_no_completion_overwrites_it(tmp_path: Pa
     assert engine.drops == []
     status = json.loads((run_root / "runs" / "kj.1" / "1" / "status.json").read_text())
     assert status["outcome"] == "signaled"
-    assert status["signal"] == signal.SIGTERM
+    assert status["signal"] == signal.SIGINT
 
 
 def _launch() -> Launch:

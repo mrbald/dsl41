@@ -14,6 +14,7 @@ import contextlib
 import json
 import os
 import signal
+import sys
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,7 +29,7 @@ from dsl41.runner import Engine
 from dsl41.runner_adapters import LocalCommandAdapter
 from dsl41.runner_admission import Envelope
 from dsl41.runner_clock import RealClock
-from dsl41.runner_config import EngineSettings
+from dsl41.runner_config import EngineSettings, RuntimeProfile
 from dsl41.runner_journal import is_valid_run_id
 from dsl41.runner_startup import resume_run, start_run
 
@@ -57,6 +58,7 @@ def _start(
     *,
     settings: EngineSettings = GRACE,
     marked: dict[str, str] | None = None,
+    signals: tuple[int, ...] = (2, 9),
 ) -> Engine:
     return start_run(
         lower_source(text),
@@ -66,6 +68,7 @@ def _start(
         hold_open=True,
         settings=settings,
         non_idempotent=marked,
+        launched=RuntimeProfile(kill_signals=signals),
     )
 
 
@@ -709,7 +712,7 @@ def test_records_after_the_record_timeout_are_evidence_only(
 ) -> None:
     """spec-drain: a record that arrives after `record_timeout` is kept as evidence and does
     not reopen the attempt. The wrapper is frozen after it launched the command and before
-    `spawn.json`; a KILLJOB stops the attempt, whose timeout ends it `unobservable` with plan
+    `spawn.json`; a terminal STATUS stops the attempt, whose timeout ends it `unobservable` with plan
     `none`. Continued, the wrapper then writes `spawn.json` and its record (ENDED +
     spawn_recorded, ENDED + exit_recorded): `parent lost`, or, where the cookie names the
     command with no `spawn.json`, the signal the cleanup's ladder sent; killed, it exits with
@@ -736,7 +739,11 @@ def test_records_after_the_record_timeout_are_evidence_only(
         await _until(lambda: launch.proc is not None and _wrapper_stopped(launch.proc.pid))
         assert launch.proc is not None
         wrapper = launch.proc.pid
-        engine.inject(Event(at=engine.clock.now(), kind="KILLJOB", payload={"job": "j"}))
+        engine.inject(
+            Event(
+                at=engine.clock.now(), kind="STATUS", payload={"job": "j", "status": "TERMINATED"}
+            )
+        )
         await _until(lambda: engine.attempts.state(run_id) == "ENDED")
         if then != "killed":
             # on to its second pause, post_record: spawn.json is written first
@@ -804,12 +811,16 @@ def test_an_oracle_kill_is_never_relaunched_by_a_status_put_back(tmp_path: Path)
     CHANGE_STATUS back to RUNNING inside the ladder's window does not make its plan a rerun.
     The plan is `none`, and the command is launched once."""
     run_root = tmp_path / "run"
-    command = _script(tmp_path, "slow", "trap 'sleep 1; exit 0' TERM\nsleep 30 &\nwait $!\n")
+    ready = tmp_path / "ready"
+    command = _script(
+        tmp_path, "slow", f"trap 'sleep 1; exit 0' TERM\ntouch {ready}\nsleep 30 &\nwait $!\n"
+    )
 
     async def scenario() -> Engine:
-        engine = _start(run_root, _jil({"j": command}))
+        engine = _start(run_root, _jil({"j": command}), signals=(15, 9))
         loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
         _start_jobs(engine, "j")
+        await _until(ready.exists)
         await _spawned(run_root, "j")
         await _until(lambda: engine.attempt_view("j") is not None)
         view = engine.attempt_view("j")
@@ -1112,8 +1123,21 @@ def test_a_group_that_survives_its_ladder_never_settles(
     assert record["unsettled"] == [run_id] and record["stops"] == {run_id: "engine_stop"}
 
 
+@pytest.mark.parametrize(
+    "selected",
+    [
+        (15, 9),
+        pytest.param(
+            (2, 9),
+            marks=pytest.mark.skipif(
+                not sys.platform.startswith("linux"),
+                reason="leaderless survivor requires cookie scan",
+            ),
+        ),
+    ],
+)
 def test_an_oracle_kill_stays_the_cause_across_a_drain_and_a_crash(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selected: tuple[int, ...]
 ) -> None:
     """Astra R2-M2 reopened: the first stop an attempt took is its cause. A KILLJOB stops `j`,
     an operator puts its row back to RUNNING, a drain begins and the engine dies before it sees
@@ -1121,13 +1145,16 @@ def test_an_oracle_kill_stays_the_cause_across_a_drain_and_a_crash(
     that stop: plan `none`, no attempt 2."""
     from dsl41.runner_stops import Observer
 
+    if selected == (2, 9):
+        _crash_after_int(tmp_path)
+        return
     run_root = tmp_path / "run"
     command = _script(tmp_path, "slow", "trap 'sleep 1; exit 0' TERM\nsleep 30 &\nwait $!\n")
     text = _jil({"j": command})
     slow = EngineSettings(grace_term_s=5.0, grace_kill_s=1.0)
 
     async def crash() -> None:
-        engine = _start(run_root, text, settings=slow)
+        engine = _start(run_root, text, settings=slow, signals=(15, 9))
         loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
         _start_jobs(engine, "j")
         await _spawned(run_root, "j")
@@ -1323,28 +1350,28 @@ def test_a_new_run_waits_while_its_job_s_group_survives(
     run_root = tmp_path / "run"
     children = tmp_path / "children"
     text = _jil({"j": _leader_and_stubborn_child(tmp_path, children)})
-    real_ladder = runner_stops.stop_ladder
+    real_ladder = runner_stops.selected_signal_ladder
 
     async def term_only(
-        pgid: int, token: str, grace: float, members: Any = None, **kwargs: Any
+        pgid: int, token: str, signals: tuple[int, ...], members: Any = None, **kwargs: Any
     ) -> None:
         os.killpg(pgid, signal.SIGTERM)  # the member ignores it; no KILL follows
         await _until(lambda: len(_kinds(run_root, "outcome")) == 1)
 
     async def scenario() -> tuple[str, list[int], list[int]]:
-        engine = _start(run_root, text)
+        engine = _start(run_root, text, signals=(15, 9))
         loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
         _start_jobs(engine, "j")
         await _spawned(run_root, "j")
         await _until(children.exists)
         await _until(lambda: engine.attempt_view("j") is not None)
         await asyncio.sleep(0.2)  # the child has trapped TERM
-        runner_stops.stop_ladder = term_only
+        runner_stops.selected_signal_ladder = term_only
         try:
             engine.inject(Event(at=engine.clock.now(), kind="KILLJOB", payload={"job": "j"}))
             await _until(lambda: bool(engine.held_groups))
         finally:
-            runner_stops.stop_ladder = real_ladder
+            runner_stops.selected_signal_ladder = real_ladder
         engine.inject(Event(at=engine.clock.now(), kind="STARTJOB", payload={"job": "j"}))
         await _until(lambda: engine.oracle.store.job["j"].run_number == 2)
         await asyncio.sleep(1.0)  # two looks at the group
@@ -1382,18 +1409,18 @@ def test_a_new_run_waits_for_the_stop_ladder_of_the_run_before(
     command = _script(tmp_path, "slow", "trap 'sleep 1; exit 0' TERM\nsleep 30 &\nwait $!\n")
     text = _jil({"j": command})
     slow = EngineSettings(grace_term_s=5.0, grace_kill_s=1.0)
-    real_ladder = runner_stops.stop_ladder
+    real_ladder = runner_stops.selected_signal_ladder
 
     async def ladder_outlasting_the_record(
-        pgid: int, token: str, grace: float, members: Any = None, **kwargs: Any
+        pgid: int, token: str, signals: tuple[int, ...], members: Any = None, **kwargs: Any
     ) -> None:
-        await real_ladder(pgid, token, grace, members, **kwargs)
+        await real_ladder(pgid, token, signals, members, **kwargs)
         await _until(lambda: len(_kinds(run_root, "outcome")) == 1)
 
-    monkeypatch.setattr(runner_stops, "stop_ladder", ladder_outlasting_the_record)
+    monkeypatch.setattr(runner_stops, "selected_signal_ladder", ladder_outlasting_the_record)
 
     async def scenario() -> tuple[str, list[int]]:
-        engine = _start(run_root, text, settings=slow)
+        engine = _start(run_root, text, settings=slow, signals=(15, 9))
         loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
         _start_jobs(engine, "j")
         await _spawned(run_root, "j")
@@ -1493,7 +1520,7 @@ def test_a_stop_before_the_spawn_is_observed_keeps_the_next_run_back(
 ) -> None:
     """Astra R5-M1: the wrapper has launched the command, but the adapter has not yet seen
     `spawn.json` when a KILLJOB (or an injected INACTIVE and the next start's stop) lands, so
-    the stop closes the lifeline and starts no ladder. Run 1's attempt is unsettled until its
+    the existing spawn observation starts the selected or ordinary ladder. Run 1's attempt is unsettled until its
     plan is done, so run 2 waits as `dispatch_pending` with `stop in progress`, and launches
     once run 1 has settled, its command gone."""
     from dsl41 import runner_stops
@@ -1534,6 +1561,8 @@ def test_a_stop_before_the_spawn_is_observed_keeps_the_next_run_back(
 
     label, waiting, gone, dispatched = asyncio.run(scenario())
     assert waiting == [1] and gone and dispatched == [1, 2]
+    status = json.loads((spool / "status.json").read_text())
+    assert status["signal"] == (signal.SIGINT if stop == "killjob" else signal.SIGTERM)
     assert label.endswith(f"(held: {runner_stops.STOP_IN_PROGRESS})")
     first = _kinds(run_root, "outcome")[0]
     assert (first["run_number"], first["cause"]) == (1, "oracle_kill")
@@ -1542,3 +1571,127 @@ def test_a_stop_before_the_spawn_is_observed_keeps_the_next_run_back(
     )
     second = next(seq for seq, k, b in rows(run_root) if k == "dispatch" and b["run_number"] == 2)
     assert settled < second
+
+
+def test_pre_spawn_killjob_waits_for_record_then_uses_selected_ladder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dsl41.engine_charts import RECORD_TIMEOUT
+    from dsl41.runner_wrapper import PAUSE_ENV
+    from test_kill_signals import signal_command
+
+    async def scenario(directory: Path, override: bool, scan: bool) -> None:
+        directory.mkdir()
+        command, ready, log = signal_command(directory, exits=(2,))
+        root = directory / "run"
+        with monkeypatch.context() as paused:
+            paused.setenv(PAUSE_ENV, "post_spawn_pre_record")
+            engine = _start(root, _jil({"j": command}))
+        engine.stops.scan_available &= scan
+        loop = asyncio.create_task(engine.run_until_quiescent(datetime.max))
+        wrapper = None
+        try:
+            _start_jobs(engine, "j")
+            await _until(ready.exists)
+            run_id = engine.attempt_view("j")["run_id"]
+            launch = engine.attempt_facts(run_id).launch
+            wrapper = launch.proc.pid
+            await _until(lambda: _wrapper_stopped(wrapper))
+            engine.startup_env.pop(PAUSE_ENV)
+            payload = {"job": "j", **({"kill_signals": [9]} if override else {})}
+            engine.inject(Event(at=engine.clock.now(), kind="KILLJOB", payload=payload))
+            await _until(lambda: engine.attempts.state(run_id) == "STOPPING")
+            generation = engine.machines.generation(engine.attempts.key(run_id), RECORD_TIMEOUT)
+            engine.attempts.record_timeout(run_id, generation)
+            assert engine.attempts.state(run_id) == "STOPPING"
+            assert launch.lifeline_w is not None
+            assert run_id in engine.stops._timers and not log.exists()
+            engine.inject(Event(at=engine.clock.now(), kind="STARTJOB", payload={"job": "j"}))
+            await _until(lambda: bool(_kinds(root, "dispatch_pending")))
+            assert len(_kinds(root, "dispatch")) == 1
+            os.kill(wrapper, signal.SIGCONT)
+            await _spawned(root, "j", run=2)
+            engine.attempts.record_timeout(run_id, generation)  # forgotten or stale
+            status = json.loads((root / "runs/j.1/1/status.json").read_text())
+            assert status["signal"] == 9 if override else status["exit_code"] == 0
+            assert (log.read_text().splitlines() if log.exists() else []) == (
+                [] if override else ["2"]
+            )
+        finally:
+            if wrapper is not None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(wrapper, signal.SIGCONT)
+            await engine.request_stop()
+            await _finish(engine, loop)
+
+    async def cases():
+        for override in (False, True):
+            for scan in (False, True):
+                await scenario(tmp_path / f"case-{override}-{scan}", override, scan)
+
+    asyncio.run(cases())
+
+
+def _crash_after_int(tmp_path: Path) -> None:
+    """DL-462: a closing selected ladder is ordinary leftover cleanup after restart."""
+    root = tmp_path / "run"
+    children = tmp_path / "children"
+    received = tmp_path / "signals"
+    ready = tmp_path / "ready"
+    program = tmp_path / "tree.py"
+    program.write_text(
+        "import os, signal, subprocess, sys, time\nfrom pathlib import Path\n"
+        "child = len(sys.argv) > 1\n"
+        "def handler(sig, frame):\n"
+        "    if not child: raise SystemExit(0)\n"
+        f"    with Path({str(received)!r}).open('a') as f: f.write(str(sig)+'\\n')\n"
+        "signal.signal(signal.SIGINT, handler)\n"
+        "signal.signal(signal.SIGTERM, handler)\n"
+        "if child:\n"
+        f"    Path({str(children)!r}).write_text(str(os.getpid())+'\\n')\n"
+        f"    Path({str(ready)!r}).touch()\n"
+        "else: subprocess.Popen([sys.executable, __file__, 'child'])\n"
+        "while True: time.sleep(0.01)\n"
+    )
+    text = _jil({"j": f"exec {sys.executable} {program}"})
+
+    async def scenario():
+        engine = _start(root, text)
+        loop = asyncio.create_task(engine.run_until_quiescent(datetime.max))
+        run_id = None
+        try:
+            _start_jobs(engine, "j")
+            await _until(ready.exists)
+            run_id = engine.attempt_view("j")["run_id"]
+            engine.inject(Event(at=engine.clock.now(), kind="KILLJOB", payload={"job": "j"}))
+            await _until(lambda: bool(_kinds(root, "outcome")) and received.exists())
+            assert received.read_text().splitlines() == ["2"]
+            assert _kinds(root, "outcome")[0]["ladder"] == "running"
+            await engine.request_stop()
+        finally:
+            # A crash interrupts the selected ladder; orderly shutdown would finish it.
+            tasks = [loop]
+            if run_id is not None and (ladder := engine.attempts.ladder_task(run_id)) is not None:
+                tasks.append(ladder)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await engine.shutdown()
+            engine.journal.close()
+        engine = await _resume(root, text)
+        loop = asyncio.create_task(engine.run_until_quiescent(datetime.max))
+        try:
+            await _until(lambda: "15" in received.read_text().splitlines())
+        finally:
+            await engine.request_stop()
+            await _finish(engine, loop)
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        _kill_all(children)
+    assert received.read_text().splitlines() == ["2", "15"]
+    [ended] = _kinds(root, "outcome")
+    assert (ended["outcome"], ended["cause"]) == ("stopped", "oracle_kill")
+    assert [p["plan"] for p in _plans(root)] == ["none"]
+    assert len(_kinds(root, "dispatch")) == 1

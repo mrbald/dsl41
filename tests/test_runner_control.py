@@ -3197,3 +3197,133 @@ def test_cli_fw_star_restart_after_sample(short_root: Path, cli_env) -> None:
 
 def test_cli_fw_question_late_arrival_immediate(short_root: Path, cli_env) -> None:
     _cli_fw_late_arrival(short_root, restart=False)
+
+
+@pytest.mark.parametrize("version", [3, 4])
+def test_kill_signals_wire_versions(short_root: Path, version: int) -> None:
+    async def scenario():
+        engine, server, loop = await _serve(
+            short_root / "run",
+            "insert_job: j\njob_type: c\ncommand: true\n",
+            adapter=FakeAdapter(default=None),
+        )
+        try:
+            read = await _control_call(server.path, {"cmd": "status", "v": version, "job": "j"})
+            assert read["ok"]
+            envelope = command(
+                "ON_HOLD",
+                {"job": "j"},
+                key="job:j",
+                revision=revision_in(read, "job:j"),
+                baseline_id=engine.baseline_id,
+            )
+            assert (await _control_call(server.path, {**envelope, "v": version}))[
+                "decision"
+            ] == "applied"
+            assert engine.oracle.store.job["j"].on_hold
+            wrong_verb = command(
+                "ON_HOLD",
+                {"job": "j", "kill_signals": [9]},
+                key="job:j",
+                revision=engine.oracle.store.revision("job:j"),
+                baseline_id=engine.baseline_id,
+            )
+            answer = await _control_call(server.path, {**wrong_verb, "v": version})
+            if version == 4:
+                assert answer["code"] == "invalid_argument" and answer["refused"]
+            else:
+                assert answer["decision"] == "applied"
+            for value in ("invalid", [True, 9], [], [2], [9]):
+                read = await _control_call(server.path, {"cmd": "status", "v": version, "job": "j"})
+                envelope = command(
+                    "KILLJOB",
+                    {"job": "j", "kill_signals": value},
+                    key="job:j",
+                    revision=revision_in(read, "job:j"),
+                    baseline_id=engine.baseline_id,
+                )
+                answer = await _control_call(server.path, {**envelope, "v": version})
+                if version == 4 and value != [9]:
+                    assert answer["code"] == "invalid_argument" and answer["refused"]
+                else:
+                    assert answer["decision"] == "applied"
+                    inputs = [r for r in read_journal(short_root / "run") if r["rec"] == "input"]
+                    assert inputs[-1]["payload"] == (
+                        {"job": "j"} if version == 3 else {"job": "j", "kill_signals": [9]}
+                    )
+            reader, writer = await asyncio.open_unix_connection(str(server.path))
+            try:
+                writer.write(
+                    json.dumps({"cmd": "subscribe", "v": version, "since": 0}).encode() + b"\n"
+                )
+                await writer.drain()
+                assert json.loads(await reader.readline())["ok"]
+                assert "rec" in json.loads(await reader.readline())
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        finally:
+            await _teardown(engine, server, loop)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.usefixtures("cli_env")
+def test_k_override_old_server_refuses_without_downgrade(short_root: Path) -> None:
+    async def scenario():
+        requests = []
+        socket = short_root / "old.sock"
+
+        async def answer(reader, writer):
+            request = json.loads(await reader.readline())
+            requests.append(request)
+            body = (
+                {
+                    "ok": False,
+                    "refused": True,
+                    "code": "unsupported_version",
+                    "error": "this engine speaks v3",
+                }
+                if request["v"] != 3
+                else {
+                    "ok": True,
+                    "baseline_id": "old",
+                    "applied_index": 0,
+                    "jobs": {"j": {"state_rev": 1}},
+                }
+            )
+            writer.write(json.dumps(body).encode() + b"\n")
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        server = await asyncio.start_unix_server(answer, path=str(socket))
+        try:
+            child = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "dsl41",
+                "sendevent",
+                "KILLJOB",
+                "-J",
+                "j",
+                "-k",
+                "9",
+                "--socket",
+                str(socket),
+                "--expect",
+                "1",
+                "--baseline",
+                "old",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            output, _ = await child.communicate()
+            assert child.returncode == 2 and b"this engine speaks v3" in output
+            mutations = [r for r in requests if r["cmd"] == "sendevent"]
+            assert len(mutations) == 1 and mutations[0]["v"] == 4
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(scenario())

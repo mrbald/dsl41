@@ -226,7 +226,8 @@ version check (DL-90). Nothing reaches `Engine.submit` unauthorized. The
 engine, the oracle and the store hold no authorization logic.
 
 Two doors precede the gate, in this order. The line must decode to a JSON
-object, and the request must name `v: 3` (control-protocol §2). A
+object, and the request must name one of the accepted versions in
+[control-protocol §2](control-protocol.md#2-transport-and-framing-frozen). A
 malformed or wrong-version request is answered before classification. It
 reaches neither the policy nor the perimeter journal.
 
