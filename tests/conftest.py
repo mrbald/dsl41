@@ -153,13 +153,20 @@ def short_root():
         shutil.rmtree(directory, ignore_errors=True)
 
 
-def cleanup_owned_processes(root: Path, grace: float = 1.0) -> list[str]:
-    """Stop only processes named by this test's ownership files; return every survivor found."""
-    from dsl41.runner_procid import proc_start_token, signal_ours, verify_alive
+def cleanup_owned_processes(
+    root: Path, grace: float = 1.0, *, evidence: list[str] | None = None
+) -> list[str]:
+    """Stop verified test-owned processes; report survivors and rejected live candidates."""
+    from dsl41.runner_procid import proc_is_zombie, proc_start_token, signal_ours, verify_alive
 
+    evidence = [] if evidence is None else evidence
+    reports = []
+    rejected: set[int] = set()
     owned: dict[tuple[int, str], Path] = {}
     for path in root.rglob("spawn.json"):
-        record = json.loads(path.read_text())
+        raw = path.read_text()
+        evidence.append(f"ownership={path} contents={raw!r}")
+        record = json.loads(raw)
         for pid_key, token_key in (
             ("wrapper_pid", "wrapper_start_time"),
             ("command_pid", "command_start_time"),
@@ -168,20 +175,47 @@ def cleanup_owned_processes(root: Path, grace: float = 1.0) -> list[str]:
             if isinstance(pid, int) and isinstance(token, str):
                 owned[pid, token] = path
     for path in (*root.rglob("*.ready"), *root.rglob("ready")):
-        pid = int(path.read_text())
+        raw = path.read_text()
+        try:
+            pid = int(raw)
+        except ValueError:
+            reports.append(f"invalid readiness ownership={path} contents={raw!r}")
+            continue
+        scripts = [str(script) for script in path.parent.glob("*.py")]
         command = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
+            ["ps", "-ww", "-p", str(pid), "-o", "command="],
             capture_output=True,
             text=True,
             timeout=5,
             check=False,
         )
-        if not any(str(script) in command.stdout for script in path.parent.glob("*.py")):
-            continue
         token = proc_start_token(pid)
-        if token is not None:
+        verified = token is not None and verify_alive(pid, token)
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            alive = False
+        except PermissionError:
+            alive = True
+        else:
+            alive = not proc_is_zombie(pid)
+        detail = (
+            f"pid={pid} ownership={path} contents={raw!r} scripts={scripts!r} "
+            f"ps={command.args!r} status={command.returncode} stdout={command.stdout!r} "
+            f"stderr={command.stderr!r} token={token!r} verified={verified} alive={alive}"
+        )
+        evidence.append(detail)
+        matches = command.returncode == 0 and any(script in command.stdout for script in scripts)
+        if alive and (not matches or not verified):
+            reports.append(f"unverified {detail}")
+            rejected.add(pid)
+        elif matches and verified:
             owned.setdefault((pid, token), path)
-    survivors = {identity: path for identity, path in owned.items() if verify_alive(*identity)}
+    survivors = {
+        identity: path
+        for identity, path in owned.items()
+        if identity[0] not in rejected and verify_alive(*identity)
+    }
     for sig in (signal.SIGTERM, signal.SIGKILL):
         for pid, token in survivors:
             if verify_alive(pid, token):
@@ -191,7 +225,7 @@ def cleanup_owned_processes(root: Path, grace: float = 1.0) -> list[str]:
             if time.monotonic() >= deadline:
                 break
             time.sleep(0.01)
-    return [
+    return reports + [
         f"pid={pid} token={token!r} ownership={path} alive={verify_alive(pid, token)}"
         for (pid, token), path in survivors.items()
     ]
@@ -204,9 +238,12 @@ def owned_processes(request: pytest.FixtureRequest):
         "short_root" if "short_root" in request.fixturenames else "tmp_path"
     )
     yield
-    survivors = cleanup_owned_processes(root)
+    evidence: list[str] = []
+    survivors = cleanup_owned_processes(root, evidence=evidence)
     if survivors:
-        pytest.fail("verified test-owned survivors:\n" + "\n".join(survivors), pytrace=False)
+        pytest.fail(
+            "test-owned process cleanup:\n" + "\n".join(survivors + evidence), pytrace=False
+        )
 
 
 def _configuration(state, phase):
