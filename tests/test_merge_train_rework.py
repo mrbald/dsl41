@@ -608,6 +608,18 @@ def test_ci_default_has_margin_for_the_slowest_job(train: Fixture) -> None:
     assert "accepted_commit and accepted_base in queue.json" in result.stdout
 
 
+def test_timeout_before_records_does_not_claim_a_log_exists() -> None:
+    module = runpy.run_path(str(SCRIPT))
+    instance = module["Train"](argparse.Namespace(command_timeout=0.1))
+    with pytest.raises(module["Stop"]) as exc:
+        instance.run(sys.executable, "-c", "import time; time.sleep(60)")
+    assert exc.value.reason == "command-failed"
+    assert exc.value.exit_status is None
+    assert "timed out" in exc.value.detail
+    assert "records unavailable" in exc.value.detail
+    assert "log.jsonl" not in exc.value.detail
+
+
 @pytest.mark.parametrize("fault", ["timeout", "signal"])
 def test_stopped_command_kills_its_grandchild(train: Fixture, fault: str) -> None:
     ready = train.root.parent / "ready.json"
@@ -648,6 +660,27 @@ def test_stopped_command_kills_its_grandchild(train: Fixture, fault: str) -> Non
                 process.send_signal(signal.SIGTERM)
             _, stderr = process.communicate(timeout=10)
             assert process.returncode != 0, stderr
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                try:
+                    os.killpg(ids["group"], 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.01)
+            else:
+                pytest.fail("command process group survived termination")
+            if fault == "timeout":
+                events = [
+                    json.loads(line)
+                    for line in (train.records / "log.jsonl").read_text().splitlines()
+                ]
+                commands = [event for event in events if event.get("command", [None])[0] == "uv"]
+                assert len(commands) == 1
+                assert commands[0]["status"] is None
+                assert commands[0]["stdout"] == "stdout before stop\n"
+                assert commands[0]["stderr"] == "stderr before stop\n"
+                assert "timed out" in train.state()["detail"]
+                assert str(train.records / "log.jsonl") in train.state()["detail"]
         finally:
             if ready.exists():
                 ids = json.loads(ready.read_text())
@@ -664,15 +697,6 @@ def test_stopped_command_kills_its_grandchild(train: Fixture, fault: str) -> Non
                     f"stdout={stdout!r} stderr={stderr!r}",
                     flush=True,
                 )
-    deadline = time.monotonic() + 3
-    while time.monotonic() < deadline:
-        try:
-            os.kill(ids["child"], 0)
-        except ProcessLookupError:
-            break
-        time.sleep(0.01)
-    else:
-        pytest.fail("grandchild survived process-group termination")
     assert train.state()["reason"] == ("command-failed" if fault == "timeout" else "interrupted")
 
 
