@@ -39,7 +39,7 @@ implementation. A site may adapt and repackage them for its Python runtime requi
 **Job author**: write an estate in JIL or the Python DSL, or bring an existing one in, and get it accepted.
 
 1. [docs/authoring.md](docs/authoring.md) - write or import JIL or Python estates, check the main-config inputs, hand over a reread/update candidate, and make jobs safe across interrupted attempts; estate.toml supports tests and rehearsal
-2. [Lint a catalog](#lint-a-catalog) - the rules L001-L025, and `rehearse` and `viz` under [CLI](#cli)
+2. [Lint a catalog](#lint-a-catalog) - the rules L001-L025 and `known-unsupported`, and `rehearse` and `viz` under [CLI](#cli)
 3. [DSL -> JIL (build)](#dsl---jil-build) - the Python DSL builders (`job`, `box`, `sequence`, `parallel`) and `to_jil()`; [examples/file_processing/estate.py](examples/file_processing/estate.py) is a worked Python estate
 4. [JIL -> DSL (decompile)](#jil---dsl-decompile) and [Prove two catalogs equivalent](#prove-two-catalogs-equivalent) - bring an existing estate in and check a rewrite
 5. [examples/README.md](examples/README.md) - choose a worked estate: file archival and processing, or fulfilment carrier reconciliation; [workflow setup](examples/workflows/README.md) is shared by fulfilment and [media publication](examples/media/README.md)
@@ -140,8 +140,11 @@ dsl41 lint --strict jobs.jil globals.jil   # warnings fail too
 dsl41 lint --timezone America/New_York jobs.jil   # base zone for L023
 ```
 
-The rules are L001-L025: IR-F rules, truth-table rules, graph rules over the
-derived graph, and dangling-name rules. `--strict` is the migration gate: an
+The rules are L001-L025 and `known-unsupported`: IR-F rules, truth-table rules, graph rules over the
+derived graph, dangling-name rules, and warnings for attributes with no runtime effect.
+`--strict` and `refuse = "warn"` fail on the `known-unsupported` warning; remove the attribute,
+or suppress the code with `--suppress known-unsupported` or `lint.ignore = ["known-unsupported"]`.
+`--strict` is the migration gate: an
 estate brought in under
 [authoring §5](docs/authoring.md#5-bring-an-existing-autosys-estate-in)
 always lints with it, and a site may require it for every estate.

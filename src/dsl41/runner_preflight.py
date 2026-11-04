@@ -1,7 +1,7 @@
 """Runner preflight (ss8): refuse loudly, run honestly (ss5, ss10; DL-45, DL-74).
 
 ERROR refuses the run (job-type, machine, owner, execution-input, calendar, timezone, oracle
-construction). WARN prints, journals and runs (n-retrys DL-53, resources, exhausted run_calendar
+construction). WARN prints, journals and runs (known-unsupported DL-466, exhausted run_calendar
 DL-56, AND-success skeleton cycle). A cycle is legal AutoSys (DL-13/L010) and only disables
 `plan`. The identity rules (machine, owner) and the execution-input rule (envvars, global
 substitution, chk_files; DL-240) guard real execution and are skipped for rehearse
@@ -214,9 +214,8 @@ def _resource_preflight(name: str, job: JobIR, catalog: CatalogIR) -> list[Prefl
       * a malformed job_load, priority or max_load;
       * a `job_load` above its machine's `max_load` at a positive priority: it never fits and
         blocks every lower priority on that machine (DL-247). Priority 0 or unset is exempt.
-    It WARNs on a job_load on a pool machine, where per-member load placement is unmodelled
-    (# PENDING: Qr3); resource semaphores still apply. Cross-machine locks need no refusal: the
-    DL-49 foreign-machine ERROR makes every runnable job local."""
+    Cross-machine locks need no refusal: the DL-49 foreign-machine ERROR makes every
+    runnable job local."""
     items: list[PreflightItem] = []
 
     def err(message: str) -> None:
@@ -253,17 +252,6 @@ def _resource_preflight(name: str, job: JobIR, catalog: CatalogIR) -> list[Prefl
                     f"job_load={load} exceeds machine {spec.machine!r} max_load={max_load}"
                     f" at priority={priority} -- can never fit, the job would hang in"
                     " QUE_WAIT forever and block every lower priority there (DL-247)"
-                )
-            if machine.members and load:
-                items.append(
-                    PreflightItem(
-                        severity="WARN",
-                        code="resources",
-                        job=name,
-                        message=f"job_load={load} on pool machine {spec.machine!r}:"
-                        " machine-load throttle unmodelled (PENDING Qr3);"
-                        " resource semaphores still apply",
-                    )
                 )
     seen: set[str] = set()
     for ref in job.resources:
@@ -624,21 +612,6 @@ def _timezone_preflight(
     return items
 
 
-def _retry_preflight(name: str, job: JobIR) -> list[PreflightItem]:
-    """WARN: `n_retrys > 0` runs without retries (DL-53)."""
-    items: list[PreflightItem] = []
-
-    def warn(message: str) -> None:
-        items.append(PreflightItem(severity="WARN", code="n-retrys", job=name, message=message))
-
-    if job.sem.n_retrys > 0:
-        warn(
-            f"n_retrys={job.sem.n_retrys}: runs WITHOUT retries (unmodeled v1,"
-            " DL-53 scope; a shell-side retry would fork semantics from the oracle)"
-        )
-    return items
-
-
 def _oracle_preflight(
     catalog: CatalogIR, semantics: SemanticSwitches | None
 ) -> list[PreflightItem]:
@@ -926,8 +899,20 @@ def preflight(
             _calendar_preflight(name, job, catalog, start, tz_aliases, default_tz, semantics)
         )
         items.extend(_timezone_preflight(name, job, tz_aliases, timezone_map_source))
-        items.extend(_retry_preflight(name, job))
         items.extend(_resource_preflight(name, job, catalog))
+    from dsl41.lint import rule_known_unsupported
+
+    items.extend(
+        PreflightItem(
+            severity="WARN",
+            code="known-unsupported",
+            job=finding.jobs[0] if finding.jobs else None,
+            message=finding.message,
+        )
+        for finding in rule_known_unsupported(
+            catalog, job_shell=job_shell, job_profile=job_profile, std_file_mode=std_file_mode
+        )
+    )
     items.extend(_oracle_preflight(catalog, semantics))
     items.extend(_skeleton_cycle_preflight(catalog))
     if execution:

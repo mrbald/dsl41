@@ -1261,7 +1261,21 @@ def test_reread_exits_1_when_the_plan_stops_running_jobs_and_names_the_marked_on
     assert code == 1
     assert "stops running: OPS_HEARTBEAT_C, OPS_SPOOL_C" in out
     assert "marked non-idempotent among them: OPS_SPOOL_C (spools twice)" in out
-    assert any(line.startswith("preflight WARN [n-retrys] OPS_SPOOL_C: ") for line in out)
+    assert any(line.startswith("preflight WARN [known-unsupported] OPS_SPOOL_C: ") for line in out)
+
+
+def test_known_unsupported_legacy_reread_warns_without_refusing(tmp_path: Path, capsys) -> None:
+    world = _world(tmp_path)
+    world.edit("global.jil", "job_terminator: 1\n", "job_terminator: 1\nn_retrys: 2\n")
+    assert reread_command(world.estate, run_root=tmp_path, send=_send(world), **world.site()) == 0
+    output = capsys.readouterr().out
+    token = output.split("token: ")[-1].strip()
+    document = read_plan(tmp_path / "plans", token)
+    assert "lint_findings" not in document
+    assert any(
+        item["code"] == "known-unsupported" and "n_retrys:" in item["message"]
+        for item in document["preflight_warnings"]
+    )
 
 
 def test_reread_exits_2_with_the_findings_when_refused(

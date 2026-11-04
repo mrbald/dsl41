@@ -309,7 +309,7 @@ def _raw(job: JobIR) -> dict[str, str]:
     }
 
 
-def _integer(job: str, attribute: str, text: str) -> int:
+def policy_integer(job: str, attribute: str, text: str) -> int:
     digits = text.lstrip("0") or "0"
     if re.fullmatch(r"[0-9]+", text) is None or len(digits) > 10 or int(digits) > 2147483647:
         refuse(
@@ -322,7 +322,7 @@ def _integer(job: str, attribute: str, text: str) -> int:
     return int(digits)
 
 
-def _boolean(job: str, attribute: str, text: str) -> bool:
+def policy_boolean(job: str, attribute: str, text: str) -> bool:
     if text.lower() not in {"y", "n", "1", "0"}:
         refuse(job, attribute, "runtime-attribute", "expected y/n/1/0", "use y, n, 1 or 0")
     return text.lower() in {"y", "1"}
@@ -430,7 +430,7 @@ def job_policy(job: JobIR, *, hook_configured: bool = False) -> JobRuntimePolicy
                 "template lookup and alarm filter grammar are unqualified",
                 "leave this field empty and use hook policy",
             )
-    heartbeat = _integer(name, "heartbeat_interval", raw.get("heartbeat_interval", "0"))
+    heartbeat = policy_integer(name, "heartbeat_interval", raw.get("heartbeat_interval", "0"))
     if heartbeat:
         refuse(
             name,
@@ -439,7 +439,7 @@ def job_policy(job: JobIR, *, hook_configured: bool = False) -> JobRuntimePolicy
             "no qualified heartbeat producer and interval/rearm contract; process liveness is not a heartbeat.",
             "use 0 or omit heartbeat_interval",
         )
-    enabled = _boolean(name, "send_notification", raw.get("send_notification", "0"))
+    enabled = policy_boolean(name, "send_notification", raw.get("send_notification", "0"))
     if enabled and not hook_configured:
         refuse(
             name,
@@ -463,12 +463,12 @@ def job_policy(job: JobIR, *, hook_configured: bool = False) -> JobRuntimePolicy
         n_retrys=job.sem.n_retrys,
         min_run_alarm=None
         if "min_run_alarm" not in raw
-        else _integer(name, "min_run_alarm", raw["min_run_alarm"]),
+        else policy_integer(name, "min_run_alarm", raw["min_run_alarm"]),
         max_run_alarm=None
         if "max_run_alarm" not in raw
-        else _integer(name, "max_run_alarm", raw["max_run_alarm"]),
-        alarm_if_fail=_boolean(name, "alarm_if_fail", raw.get("alarm_if_fail", "y")),
-        alarm_if_terminated=_boolean(
+        else policy_integer(name, "max_run_alarm", raw["max_run_alarm"]),
+        alarm_if_fail=policy_boolean(name, "alarm_if_fail", raw.get("alarm_if_fail", "y")),
+        alarm_if_terminated=policy_boolean(
             name, "alarm_if_terminated", raw.get("alarm_if_terminated", "y")
         ),
         send_notification=enabled,

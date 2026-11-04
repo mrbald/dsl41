@@ -1569,13 +1569,15 @@ def test_preflight_timezone_posix_offset_warns_about_the_sign() -> None:
 def test_preflight_n_retrys_warns() -> None:
     text = "insert_job: nr\njob_type: c\ncommand: x\nmachine: localhost\nn_retrys: 3\n"
     items = preflight(lower_source(text))
-    assert any(i.code == "n-retrys" and i.severity == "WARN" and i.job == "nr" for i in items)
+    assert any(
+        i.code == "known-unsupported" and i.severity == "WARN" and i.job == "nr" for i in items
+    )
 
 
 def test_preflight_n_retrys_clean_when_unset() -> None:
     text = "insert_job: nr0\njob_type: c\ncommand: x\nmachine: localhost\n"
     items = preflight(lower_source(text))
-    assert not any(i.code == "n-retrys" for i in items)
+    assert not any(i.code == "known-unsupported" for i in items)
 
 
 def test_preflight_resources_refuses_unsized_and_malformed(monkeypatch) -> None:

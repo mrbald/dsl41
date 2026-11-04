@@ -285,7 +285,12 @@ def _lint_findings(estate: Estate) -> list[str]:
     assert base_tz is None or isinstance(base_tz, str)
     assert aliases is None or isinstance(aliases, dict)
     report = lint_catalog(estate.catalog, base_tz=base_tz, tz_aliases=aliases)
-    return [v.render() for v in report.violations if v.severity != "info"]
+    # DL-466: legacy reread reports this warning through preflight, without a lint gate.
+    return [
+        v.render()
+        for v in report.violations
+        if v.severity != "info" and v.code != "known-unsupported"
+    ]
 
 
 def _preflight(
@@ -320,7 +325,9 @@ def _preflight(
         ),
         as_machine=frozenset(estate.metadata.get("launch", {}).get("as_machine", ())),
     )
-    return items if estate.metadata else [item for item in items if item.code not in _LAUNCH_CODES]
+    # DL-466: main-config plans own this diagnostic in lint_findings only.
+    dropped = {"known-unsupported"} if estate.metadata else _LAUNCH_CODES
+    return [item for item in items if item.code not in dropped]
 
 
 def _plan_document(

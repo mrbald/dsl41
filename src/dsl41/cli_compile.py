@@ -112,7 +112,10 @@ def lint(
         manifest, environment, files, properties, timezone, timezone_map
     )
     codes = {
-        code.strip().upper() for value in suppress for code in value.split(",") if code.strip()
+        "known-unsupported" if code.strip().lower() == "known-unsupported" else code.strip().upper()
+        for value in suppress
+        for code in value.split(",")
+        if code.strip()
     }
     unknown = sorted(codes - RULE_CODES)
     if unknown:

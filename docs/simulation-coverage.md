@@ -129,12 +129,12 @@ nothing.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | job_attr:FREE | supported | DL-50 | - |  |  |  | generic | overrides the resource's release default for this one request |
 | job_attr:QUANTITY | supported | DL-21, DL-50 | - |  |  |  | generic | the units one resources group demands; a group without it is refused |
-| job_attr:alarm_if_fail | passthrough | runtime_policy.job_policy | - |  |  |  | generic | validated and carried; execution and delivery are not yet activated |
-| job_attr:alarm_if_terminated | passthrough | runtime_policy.job_policy | - |  |  |  | generic | validated and carried; execution and delivery are not yet activated |
-| job_attr:application | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | the application tag is carried; nothing schedules or reports by it |
+| job_attr:alarm_if_fail | passthrough | runtime_policy.job_policy | - |  |  |  | generic | validated and carried; known-unsupported warns for active values (DL-466) |
+| job_attr:alarm_if_terminated | passthrough | runtime_policy.job_policy | - |  |  |  | generic | validated and carried; known-unsupported warns for active values (DL-466) |
+| job_attr:application | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | the application tag is carried; nothing schedules or reports by it; known-unsupported warns (DL-466) |
 | job_attr:auto_delete | refused | runtime_policy.job_policy | - |  |  |  | generic | automatic deletion is refused because it would mutate the configured estate |
 | job_attr:auto_hold | supported | dossier ss5 | - |  |  |  | generic | the member enters ON_HOLD when its box starts, instead of starting with it |
-| job_attr:avg_runtime | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | the statistics seed is carried; no runtime estimate is computed from it |
+| job_attr:avg_runtime | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | the statistics seed is carried; no runtime estimate is computed from it; known-unsupported warns (DL-466) |
 | job_attr:box_failure | supported | SEM-12 | - |  |  |  | generic | overrides a box's failure verdict, evaluated on every member transition while the box is RUNNING; DECLARING it suppresses the matching default fold, so an override that never becomes true leaves the box RUNNING (SEM-12) |
 | job_attr:box_name | supported | SEM-11 | - |  |  |  | generic | names the box this job is a member of; the box's start starts the member |
 | job_attr:box_success | supported | SEM-12 | - |  |  |  | generic | overrides a box's success verdict, evaluated on every member transition while the box is RUNNING, so an internal reference can finish the box early |
@@ -147,25 +147,25 @@ nothing.
 | job_attr:date_conditions | supported | SEM-30 | - |  |  |  | generic | the master switch: the time cluster is honoured only when it is truthy |
 | job_attr:days_of_week | supported | SEM-30, SEM-31 | - |  |  |  | generic | the days a schedule tick may fall on, as two-letter tokens or `all` |
 | job_attr:days_of_week#absent | provisional | SEM-30, runner_scheduler | E10 | yes |  |  | none | a schedule with no days_of_week is read as every day |
-| job_attr:description | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
-| job_attr:elevated | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | no privilege elevation happens; the child runs as the invoking user |
+| job_attr:description | passthrough | DL-466 | - |  |  |  | generic | descriptive metadata stays quiet on every record kind |
+| job_attr:elevated | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | no privilege elevation happens; the child runs as the invoking user; known-unsupported warns (DL-466) |
 | job_attr:envvars | refused | runner_preflight._execution_input_preflight, DL-240 | - |  |  |  | generic | carried verbatim; never applied; real execution refuses it at preflight; rehearse and compile are unaffected; inert on a BOX (SEM-10) |
 | job_attr:exclude_calendar | supported | SEM-30, DL-56 | - |  |  |  | generic | the named calendar whose days are subtracted from the schedule's day set |
 | job_attr:exclude_calendar#two-year-probe | supported | DL-56, DL-57, runner_preflight._calendar_preflight | - |  |  | 732 dates inclusive, anchor through anchor+731 days | none | preflight WARNs when the exclusion covers every eligible day it probes -- 732 dates inclusive, anchor through anchor+731 days; absence is proven within that bound only, and the run is warned, not refused |
 | job_attr:fail_codes | supported | SEM-09, DL-33 | - |  |  |  | generic | the explicit failure set; present, it is the only verdict source (Q7, DL-58) |
-| job_attr:group | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | the group tag is carried; nothing schedules or reports by group |
+| job_attr:group | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | the group tag is carried; nothing schedules or reports by group; known-unsupported warns (DL-466) |
 | job_attr:heartbeat_interval | refused | runtime_policy.job_policy | - |  |  |  | generic | positive intervals refuse: no qualified heartbeat contract |
-| job_attr:interactive | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | no interactive terminal is attached to the child process |
+| job_attr:interactive | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | no interactive terminal is attached to the child process; known-unsupported warns (DL-466) |
 | job_attr:job_class | refused | runtime_policy.job_policy | - |  |  |  | generic | job classes are refused because class capacity is unqualified |
 | job_attr:job_load | supported | DL-50, DL-247 | - |  |  |  | generic | the machine-load units a start holds against the machine's max_load; only a positive priority checks them, while an unset or zero priority and a forced start skip the check and still hold the units |
 | job_attr:job_load#absent | provisional | DL-50, ir.JobIR.job_load_units | Qr4 | yes |  |  | none | a job with no job_load demands zero machine-load units, so it never waits for load itself; with a positive priority it can still queue behind a higher-priority load waiter on its machine |
 | job_attr:job_terminator | supported | SEM-14 | - |  |  |  | generic | this member is terminated when its box fails |
 | job_attr:job_type | supported | SEM-10 | - |  |  |  | generic | selects the modelled job kind: CMD, BOX or FW |
 | job_attr:machine | supported | DL-49, DL-52 | - |  |  |  | generic | names the machine the job runs on; the resolver refuses a foreign one; inert on a BOX (SEM-10) |
-| job_attr:machine_method | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | per-member placement method is not implemented; DL-49 resolves placement |
+| job_attr:machine_method | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | per-member placement method is not implemented; DL-49 resolves placement; known-unsupported warns (DL-466) |
 | job_attr:max_exit_success | supported | SEM-09, DL-33 | - |  |  |  | generic | shifts the SUCCESS/FAILURE boundary: exit codes up to it are a success |
-| job_attr:max_run_alarm | passthrough | runtime_policy.job_policy | - |  |  |  | generic | validated and carried; execution and delivery are not yet activated |
-| job_attr:min_run_alarm | passthrough | runtime_policy.job_policy | - |  |  |  | generic | validated and carried; execution and delivery are not yet activated |
+| job_attr:max_run_alarm | passthrough | runtime_policy.job_policy | - |  |  |  | generic | validated and carried; known-unsupported warns for active values (DL-466) |
+| job_attr:min_run_alarm | passthrough | runtime_policy.job_policy | - |  |  |  | generic | validated and carried; known-unsupported warns for active values (DL-466) |
 | job_attr:must_complete_times | supported | SEM-34 | - |  |  |  | generic | the RELATIVE form arms an alarm: a missed completion raises MUST_COMPLETE_ALARM and changes no status |
 | job_attr:must_complete_times#absolute | supported | SEM-34, DL-253, oracle.Oracle._absolute_deadline | - |  |  | 00:00-71:59 | none | an ABSOLUTE must_complete_times, 00:00-71:59, arms MUST_COMPLETE_ALARM at the slot's must time on the tick's local day, hours 24-71 on the days after; 72:00 and above, a time below its own start time and a time not earlier than the next later start time of the same day are refused at lowering; the day's latest start time is not checked, its next run depending on the calendar |
 | job_attr:must_complete_times#before-tick | provisional | SEM-34, DL-253, DL-260, oracle.Oracle._absolute_deadline | - |  |  |  | none | an absolute must time that resolves before its tick is due at the tick: both values reach it -- fold0 ticks a start in a spring change's missing hour past the gap, after the vendor's first minute of the next hour; vendor reaches it too on a change shape dst_change does not name, such as Europe/London's spring change; lowering refuses a must time below its own start time, so no other input reaches the pin, and no label was opened for it |
@@ -178,14 +178,14 @@ nothing.
 | job_attr:must_start_times#dst | supported | SEM-34, DL-253, oracle_schedule._must_instant | - |  |  |  | none | an absolute must time in a spring change's missing hour is due in the first minute of the next hour (2:05 is 3:00:05); in a fall change's repeated hour it takes the first pass, or the second when the start is in that hour too; other change shapes keep the fold=0 conversion |
 | job_attr:must_start_times#start-mins | supported | SEM-34, DL-248, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - |  |  |  | none | a single relative offset counts against start_mins and broadcasts to every start_mins tick; the vendor refuses an absolute form there, a list of offsets there is not specified and stays open, and lowering refuses both |
 | job_attr:must_start_times#unmatched-slot | provisional | SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - |  |  |  | none | an instant matching no start time uses the first offset, and an absolute form arms nothing there; no label was opened for the corner |
-| job_attr:n_retrys | passthrough | DL-53 | - |  |  |  | generic | the job runs without retries; preflight WARNs that the attribute is unmodelled |
+| job_attr:n_retrys | passthrough | DL-53 | - |  |  |  | generic | the job runs without retries; known-unsupported warns for a positive count (DL-466) |
 | job_attr:notification_alarm_types | refused | runtime_policy.job_policy | - |  |  |  | generic | nonempty alarm filters refuse: grammar is unqualified |
-| job_attr:notification_emailaddress | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
-| job_attr:notification_emailaddress_on_alarm | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
-| job_attr:notification_emailaddress_on_failure | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
-| job_attr:notification_emailaddress_on_success | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
-| job_attr:notification_emailaddress_on_terminated | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
-| job_attr:notification_msg | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | observability only: no alarm, notification or heartbeat is raised |
+| job_attr:notification_emailaddress | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | notification text is carried; known-unsupported warns when nonempty (DL-466) |
+| job_attr:notification_emailaddress_on_alarm | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | notification text is carried; known-unsupported warns when nonempty (DL-466) |
+| job_attr:notification_emailaddress_on_failure | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | notification text is carried; known-unsupported warns when nonempty (DL-466) |
+| job_attr:notification_emailaddress_on_success | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | notification text is carried; known-unsupported warns when nonempty (DL-466) |
+| job_attr:notification_emailaddress_on_terminated | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | notification text is carried; known-unsupported warns when nonempty (DL-466) |
+| job_attr:notification_msg | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | notification text is carried; known-unsupported warns when nonempty (DL-466) |
 | job_attr:notification_template | refused | runtime_policy.job_policy | - |  |  |  | generic | nonempty templates refuse: lookup grammar is unqualified |
 | job_attr:owner | refused | runner_preflight._owner_preflight | - |  |  |  | generic | an owner other than the invoking user is refused at preflight: there is no setuid; inert on a BOX (SEM-10) |
 | job_attr:permission | refused | runtime_policy.job_policy | - |  |  |  | generic | per-job permissions are refused; engine access policy applies |
@@ -203,7 +203,7 @@ nothing.
 | job_attr:run_window#dst-other-shape | provisional | SEM-33, DL-249, oracle.Oracle._window_side | - |  |  |  | none | a DST change of another shape (a half-hour change, a change at another hour) keeps the wall-time comparison: the vendor's endpoint rules are unverified there, and no label was opened for it |
 | job_attr:run_window#equal-endpoints | provisional | SEM-33, oracle.Oracle._window_side | - |  |  |  | none | a window whose endpoints are equal ADMITS that one instant -- `lo <= now <= hi` is inclusive at both ends, so the window is not empty and not all day; the pin is undocumented and no label was opened for it |
 | job_attr:run_window#midpoint-tie | provisional | SEM-33, oracle.Oracle._window_side | - |  |  |  | none | a start exactly halfway between the previous close and the next opening DEFERS to the opening rather than dropping; the tie is undocumented and no label was opened for it |
-| job_attr:send_notification | passthrough | runtime_policy.job_policy | - |  |  |  | generic | validated and carried; execution and delivery are not yet activated |
+| job_attr:send_notification | passthrough | runtime_policy.job_policy | - |  |  |  | generic | validated and carried; known-unsupported warns for active values (DL-466) |
 | job_attr:shell | refused | runtime_policy.job_policy | - |  |  |  | generic | explicit JIL shell refuses; engine.job_shell is the configuration interface |
 | job_attr:start_mins | supported | SEM-32 | - |  |  |  | generic | the minutes past each hour a schedule tick fires at on an eligible day |
 | job_attr:start_times | supported | SEM-32 | - |  |  |  | generic | the wall-clock times a schedule tick fires at on an eligible day |
@@ -216,7 +216,7 @@ nothing.
 | job_attr:timezone | supported | SEM-35 | - |  |  |  | generic | the zone every schedule time on this job is read in |
 | job_attr:timezone#dst-fold | supported | SEM-32, SEM-35, DL-260, timezones.start_time_instants | - |  |  |  | none | on a one-hour DST change at 02:00 local, start_times in the repeated hour fire once, in the second pass, and start_mins fire in both passes; a start time in the missing hour fires in the first minute of 03:00 with its minute as seconds (2:05 at 3:00:05), only the first such start time fires, and start_mins ticks in the missing hour do not exist. The dst-start-times=fold0 switch selects the fold=0 conversion instead |
 | job_attr:timezone#dst-other-shape | provisional | SEM-32, DL-260, timezones.start_time_instants | - |  |  |  | none | a DST change of another shape (a half-hour change, a change at another hour) keeps the fold=0 conversion of start_times and start_mins: the vendor's rules are unverified there, and no label was opened for it |
-| job_attr:ulimit | passthrough | runtime_policy.parse_limits | - |  |  |  | generic | resource pairs are validated; child limit application is not yet activated |
+| job_attr:ulimit | passthrough | runtime_policy.parse_limits | - |  |  |  | generic | resource pairs are validated; child limit application is not yet activated; known-unsupported warns (DL-466) |
 | job_attr:watch_file | supported | runner-design ss6, ss8a, DL-258 | - |  |  |  | generic | the exact path or final-component * or ? pattern an FW job polls; any one qualifying match can complete it under runner-design ss6: exact paths use size-only stability, wildcards use five-field samples per pathname and file identity (DL-461) |
 | job_attr:watch_file#stat-error | provisional | runner-design ss6, runner_adapters.FileWatcherAdapter | - |  |  |  | none | EVERY stat error reads as the file being absent -- a permission denial is not told apart from a missing file -- and the watch resets its stable count and keeps polling; no label was opened for it |
 | job_attr:watch_file_min_size | supported | runner-design ss6 | - |  |  |  | generic | the minimum size any one matching file must reach before the FW job completes |
@@ -228,11 +228,11 @@ nothing.
 
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| machine_attr:* | passthrough | ir._Lowerer._lower_machine, DL-28 | - |  |  |  | generic | any other machine attribute is carried verbatim; its effect is not implemented |
-| machine_attr:factor | passthrough | DL-49 | - |  |  |  | generic | the per-member load factor is carried; per-member placement is unmodelled |
+| machine_attr:* | passthrough | ir._Lowerer._lower_machine, DL-28 | - |  |  |  | generic | other machine attributes are carried; known-unsupported warns unless empty or description (DL-466) |
+| machine_attr:factor | passthrough | DL-49 | - |  |  |  | generic | the per-member load factor is carried; known-unsupported warns (DL-466) |
 | machine_attr:machine | supported | DL-49 | - |  |  |  | generic | opens one pool member inside a virtual machine |
 | machine_attr:max_load | supported | DL-50 | - |  |  |  | generic | sizes the machine's load bucket; an absent one is AutoSys's unlimited default |
-| machine_attr:max_load#pool | provisional | DL-49, runner_preflight._resource_preflight | Qr3 | yes |  |  | none | a pool machine carries no load throttle; preflight WARNs and the job runs |
+| machine_attr:max_load#pool | provisional | DL-49, DL-466, lint.rule_known_unsupported | Qr3 | yes |  |  | none | a pool machine carries no load throttle; known-unsupported names max_load (DL-466) |
 | machine_attr:node_name | supported | DL-49, DL-52 | - |  |  |  | generic | the host an agent or real machine resolves to |
 | machine_attr:type | supported | DL-49 | - |  |  |  | generic | selects the resolver's machine kind: a, r, n or v |
 
@@ -240,7 +240,7 @@ nothing.
 
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| resource_attr:* | passthrough | ir._Lowerer._lower_resource, DL-28 | - |  |  |  | generic | any other resource attribute is carried verbatim; its effect is not implemented |
+| resource_attr:* | passthrough | ir._Lowerer._lower_resource, DL-28 | - |  |  |  | generic | other resource attributes are carried; known-unsupported warns unless empty or description (DL-466) |
 | resource_attr:amount | supported | DL-50 | - |  |  |  | generic | sizes the resource's semaphore bucket |
 | resource_attr:amount#absent | refused | runner_preflight._resource_preflight, DL-50 | - |  |  |  | none | an unsized resource a job requires refuses the run; the semaphore cannot be sized |
 | resource_attr:res_type | supported | DL-50 | - |  |  |  | generic | sets the resource's default release: R renewable, D depletable, T threshold |
@@ -251,7 +251,7 @@ nothing.
 
 | id | class | cite | label | marker | protocol | bound | detector | effect |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| xinst_attr:* | passthrough | ir._Lowerer._lower_xinst, DL-28 | - |  |  |  | generic | any other external-instance attribute is carried verbatim; its effect is not implemented |
+| xinst_attr:* | passthrough | ir._Lowerer._lower_xinst, DL-28 | - |  |  |  | generic | other external-instance attributes are carried; known-unsupported warns unless empty or description (DL-466) |
 | xinst_attr:xtype | supported | SEM-07, DL-28 | - |  |  |  | generic | the external instance's type; a definition without it is refused |
 
 ### global_attr
@@ -269,7 +269,7 @@ nothing.
 | calendar_attr:adjust#with-replacement | provisional | SEM-38, DL-59 | Q8b | yes | Q8b |  | none | disposition replaces first, then the blind adjust shifts every survivor |
 | calendar_attr:condition | supported | SEM-37, DL-57 | - |  |  |  | generic | one date-condition rule; the rules of a calendar union into its day set |
 | calendar_attr:cyccal | supported | SEM-36, SEM-39 | - |  |  |  | generic | names the cycle whose periods the cycle-scoped tokens count in |
-| calendar_attr:description | passthrough | SEM-36 | - |  |  |  | generic | carried on the calendar record; no rule reads it |
+| calendar_attr:description | passthrough | SEM-36 | - |  |  |  | generic | descriptive metadata stays quiet on every record kind (DL-466) |
 | calendar_attr:end_date | supported | SEM-39 | - |  |  |  | generic | closes the cycle period its preceding start_date opened |
 | calendar_attr:holcal | supported | SEM-36 | - |  |  |  | generic | names the standard calendar whose days are this calendar's holidays |
 | calendar_attr:holiday | supported | SEM-36, SEM-38 | - |  |  |  | generic | what happens to a generated day that is a holiday; it governs holcal dates outright |
@@ -726,9 +726,10 @@ nothing.
 | preflight_code:heartbeat-unsupported | refused | runner_preflight.execution_policy_preflight, runtime_policy.job_policy | - |  |  |  | generic | positive heartbeat intervals are refused |
 | preflight_code:job-class | refused | runner_preflight.execution_policy_preflight, runtime_policy.job_policy | - |  |  |  | generic | unqualified job classes are refused |
 | preflight_code:job-type | refused | runner_preflight._job_type_preflight | - |  |  |  | unreachable | a job_type with no adapter refuses the run; no JIL reaches this gate, because lowering already refuses every type outside CMD/BOX/FW |
+| preflight_code:known-unsupported | supported | lint.rule_known_unsupported, DL-53, DL-466 | - |  |  |  | generic | requested inert attributes warn once per record and attribute; neutral values stay quiet |
 | preflight_code:machine | refused | runner_preflight._machine_preflight, DL-49 | - |  |  |  | generic | a job whose machine does not resolve to this host refuses the run: there is no remote fabric |
 | preflight_code:machine-mixed | supported | runner_preflight._machine_preflight, DL-49 | - |  |  |  | generic | a pool with some members here and some elsewhere runs here under local-eligible, with a warning that pool placement was ignored |
-| preflight_code:n-retrys | supported | runner_preflight._retry_preflight, DL-53 | - |  |  |  | generic | a positive CMD retry count is carried but not yet applied; preflight warns |
+| preflight_code:n-retrys | refused | runtime_policy.job_policy | - |  |  |  | generic | retry counts outside 0 through 20 refuse (DL-466) |
 | preflight_code:n-retrys#non-command | refused | runtime_policy.job_policy | - |  |  |  | none | positive BOX and FW retry counts are refused because reset semantics are unqualified |
 | preflight_code:notification-hook | refused | runner_preflight.execution_policy_preflight, runtime_policy.job_policy | - |  |  |  | generic | enabled notifications require a configured hook |
 | preflight_code:notification-unsupported | refused | runner_preflight.execution_policy_preflight, runtime_policy.job_policy | - |  |  |  | generic | unqualified notification templates and filters are refused |
