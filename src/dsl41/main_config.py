@@ -423,6 +423,9 @@ def policy_report(estate: Estate) -> tuple[LintPolicy, LintReport]:
         base_tz=str(estate.settings["timezone"]),
         tz_aliases=estate.settings["timezone_aliases"],  # type: ignore[arg-type]
         exceptions=Exceptions(estate.metadata["non_idempotent"]),
+        job_shell=cast(str | None, estate.settings.get("job_shell")),
+        job_profile=cast(str | None, estate.settings.get("job_profile")),
+        std_file_mode=cast(str, estate.settings.get("std_file_mode", "append")),
     ).suppress(set(policy.ignore))
     return policy, report
 

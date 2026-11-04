@@ -527,7 +527,7 @@ def test_a_preflight_warning_goes_into_plan_json(tmp_path: Path) -> None:
     from dsl41.runtime_policy import resolve_job_shell
 
     warnings = document["preflight_warnings"]
-    retry_warnings = [item for item in warnings if item["code"] == "n-retrys"]
+    retry_warnings = [item for item in warnings if item["code"] == "known-unsupported"]
     assert len(retry_warnings) == 1
     assert retry_warnings[0]["job"] == "M1"
     _, shell_warning = resolve_job_shell(None)

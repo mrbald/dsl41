@@ -46,6 +46,7 @@ from dsl41.lint import (
     Severity,
     Violation,
     lint_catalog,
+    rule_known_unsupported,
     rule_l001,
     rule_l002,
     rule_l003,
@@ -589,6 +590,7 @@ def test_lint_catalog_whole_corpus_fires_only_reachable_rules() -> None:
         "L020",
         "L021",
         "L022",
+        "known-unsupported",
     }
 
 
@@ -643,6 +645,7 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
     counts = Counter(v.code for v in report.violations)
     assert counts == Counter(
         {
+            "known-unsupported": 14,  # DL-466: alarms/tags, retry, pool fields and xinst.
             "L001": 6,
             # +2 at DL-192: viz_locks.jil's lk_x3/lk_x4 hold a resource and
             # nothing else -- a requirement is not wiring
@@ -675,6 +678,139 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
 
 
 # --------------------------------------------------------------------- 8. CLI
+
+
+@pytest.mark.parametrize(
+    "attribute,active,neutral",
+    [
+        ("n_retrys", "2", "0"),
+        ("ulimit", 'c="0,0"', '""'),
+        ("min_run_alarm", "2", "0"),
+        ("max_run_alarm", "2", "0"),
+        ("alarm_if_fail", "y", "n"),
+        ("alarm_if_terminated", "1", "0"),
+        ("alarm_if_terminated", "y", "n"),
+        ("send_notification", "1", "0"),
+        ("elevated", "y", "n"),
+        ("elevated", "yes", "no"),
+        ("interactive", "1", "0"),
+        ("interactive", "true", "false"),
+        ("avg_runtime", "2", "0"),
+        ("avg_runtime", "+1", "+0"),
+        ("application", "0", '""'),
+        ("group", "x", '""'),
+        ("machine_method", "x", '""'),
+        ("notification_msg", "x", '""'),
+        ("notification_emailaddress", "x", '""'),
+        ("notification_emailaddress_on_alarm", "x", '""'),
+        ("notification_emailaddress_on_failure", "x", '""'),
+        ("notification_emailaddress_on_success", "x", '""'),
+        ("notification_emailaddress_on_terminated", "x", '""'),
+        ("job_load", "2", "0"),
+        ("job_load", "+1", "+0"),
+        ("job_load", "-1", "-0"),
+    ],
+)
+def test_known_unsupported_inventory(attribute: str, active: str, neutral: str) -> None:
+    source = "insert_job: A\njob_type: c\ncommand: true\nmachine: M\n"
+    pool = "insert_machine: M\ntype: v\nmachine: localhost\n"
+    for value, expected in ((active, True), (neutral, False)):
+        catalog = lower_source(source + f"{attribute.upper()}: {value}\n" + pool)
+        findings = rule_known_unsupported(catalog)
+        assert len(findings) == int(expected)
+        if expected:
+            finding = findings[0]
+            assert (finding.code, finding.severity, finding.jobs, finding.detail) == (
+                "known-unsupported",
+                "warn",
+                ["A"],
+                attribute,
+            )
+            assert (
+                finding.message
+                == f"job A: {attribute}: known but unsupported; it has no effect in this release"
+            )
+
+
+@pytest.mark.parametrize(
+    "kind,source,attribute",
+    [
+        ("machine", "insert_machine: M\ntype: a\n", "factor"),
+        ("machine", "insert_machine: M\ntype: a\n", "opsys"),
+        ("machine", "insert_machine: M\ntype: v\nmachine: localhost\n", "max_load"),
+        ("resource", "insert_resource: M\nres_type: R\namount: 1\n", "site_tag"),
+        *[
+            ("external-instance", "insert_xinst: M\nxtype: a\n", key)
+            for key in (
+                "xmachine",
+                "xport",
+                "xmanager",
+                "xcrypt_type",
+                "xkey_to_manager",
+                "site_tag",
+            )
+        ],
+    ],
+)
+def test_known_unsupported_supporting_records(kind: str, source: str, attribute: str) -> None:
+    for value, expected in [('"0"', True), ('""', False)]:
+        findings = rule_known_unsupported(lower_source(source + f"{attribute}: {value}\n"))
+        assert len(findings) == int(expected)
+        if expected:
+            assert findings[0].jobs == [] and findings[0].detail == attribute
+            assert (
+                findings[0].message
+                == f"{kind} M: {attribute}: known but unsupported; it has no effect in this release"
+            )
+
+
+def test_known_unsupported_dedup_and_engine_settings() -> None:
+    catalog = lower_source(
+        "insert_machine: M\ntype: v\nmax_load: 0\nfactor: 1\n"
+        "machine: a\nmax_load: 1\nfactor: 2\nmachine: b\nmax_load: 2\nfactor: 3\n"
+        + "".join(f"insert_job: J{i}\njob_type: c\ncommand: true\n" for i in range(200))
+    )
+    findings = rule_known_unsupported(
+        catalog, job_shell="/bin/sh", job_profile="/site.env", std_file_mode="truncate"
+    )
+    assert [v.detail for v in findings] == [
+        "factor",
+        "max_load",
+        "job_shell",
+        "job_profile",
+        "std_file_mode",
+    ]
+    assert all(v.jobs == [] for v in findings)
+    assert rule_known_unsupported(CatalogIR(), std_file_mode="append") == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'insert_job: A\njob_type: c\ncommand: true\ndescription: text\nheartbeat_interval: 0\nnotification_template: ""\nnotification_alarm_types: ""\n',
+        "insert_machine: M\ntype: a\nnode_name: localhost\nmax_load: 0\ndescription: text\n",
+        "insert_resource: R\nres_type: R\namount: 1\ndescription: text\n",
+        "insert_xinst: X\nxtype: a\ndescription: text\n",
+        "extended_calendar: C\ncondition: DAILY\ndescription: text\n",
+        "insert_job: A\njob_type: c\ncommand: true\nprofile: /site.env\nstd_out_file: > /tmp/out\nstd_err_file: >> /tmp/err\npriority: 1\n",
+        "insert_job: A\njob_type: f\nwatch_file: /tmp/*.ready\n",
+        "insert_job: A\njob_type: b\nn_retrys: 1\n",
+    ],
+)
+def test_known_unsupported_live_neutral_and_description_exclusions(source: str) -> None:
+    assert rule_known_unsupported(lower_source(source)) == []
+
+
+@pytest.mark.usefixtures("cli_env")
+def test_known_unsupported_cli_suppression(tmp_path: Path) -> None:
+    path = tmp_path / "jobs.jil"
+    path.write_text('insert_job: A\njob_type: c\ncommand: true\ngroup: "batch"\n')
+    args = ["lint", str(path), "--strict", "--suppress", "l011"]
+    result = CliRunner().invoke(app, args)
+    assert result.exit_code == 1 and result.output.count("known-unsupported") == 1
+    result = CliRunner().invoke(app, [*args, "--suppress", "KNOWN-UNSUPPORTED"])
+    assert result.exit_code == 0 and "known-unsupported" not in result.output
+
 
 runner = CliRunner()
 
@@ -1286,7 +1422,7 @@ L024_JIL = (
 
 
 def test_the_rule_codes_are_registered() -> None:
-    assert {"L024", "L025"} <= RULE_CODES
+    assert {"L024", "L025", "known-unsupported"} <= RULE_CODES
 
 
 def test_l024_reports_once_per_named_job_with_the_reason() -> None:

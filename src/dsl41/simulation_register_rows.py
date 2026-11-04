@@ -283,7 +283,6 @@ STATEMENT_ROWS: tuple[Row, ...] = (
 # ------------------------------------------------------------------ job_attr
 
 _ANNOTATION_ATTRS: tuple[str, ...] = (
-    "description",
     "notification_emailaddress",
     "notification_emailaddress_on_alarm",
     "notification_emailaddress_on_failure",
@@ -300,25 +299,33 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
         _ANNOTATION_ATTRS,
         klass=PASSTHROUGH,
         cite="dossier ss5, DL-32",
-        effect="observability only: no alarm, notification or heartbeat is raised",
+        effect="notification text is carried; known-unsupported warns when nonempty (DL-466)",
         trigger=lambda m: _job(**{m: "x"}),
     )
     + (
+        _row(
+            surface="job_attr",
+            member="description",
+            klass=PASSTHROUGH,
+            cite="DL-466",
+            effect="descriptive metadata stays quiet on every record kind",
+            trigger=_job(description="text"),
+        ),
         *(
             _row(
                 surface="job_attr",
                 member=name,
                 klass=PASSTHROUGH,
                 cite="runtime_policy.job_policy",
-                effect="validated and carried; execution and delivery are not yet activated",
+                effect="validated and carried; known-unsupported warns for active values (DL-466)",
                 trigger=_job(**{name: value}),
             )
             for name, value in (
                 ("alarm_if_fail", "y"),
-                ("alarm_if_terminated", "n"),
+                ("alarm_if_terminated", "y"),
                 ("max_run_alarm", "1"),
                 ("min_run_alarm", "1"),
-                ("send_notification", "0"),
+                ("send_notification", "1"),
             )
         ),
         *(
@@ -358,7 +365,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="application",
             klass=PASSTHROUGH,
             cite="dossier ss5, DL-32",
-            effect="the application tag is carried; nothing schedules or reports by it",
+            effect="the application tag is carried; nothing schedules or reports by it; known-unsupported warns (DL-466)",
             trigger=_job(application="1"),
         ),
         _row(
@@ -374,7 +381,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="avg_runtime",
             klass=PASSTHROUGH,
             cite="dossier ss5, DL-32",
-            effect="the statistics seed is carried; no runtime estimate is computed from it",
+            effect="the statistics seed is carried; no runtime estimate is computed from it; known-unsupported warns (DL-466)",
             trigger=_job(avg_runtime="1"),
         ),
         _row(
@@ -391,7 +398,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="elevated",
             klass=PASSTHROUGH,
             cite="dossier ss5, DL-32",
-            effect="no privilege elevation happens; the child runs as the invoking user",
+            effect="no privilege elevation happens; the child runs as the invoking user; known-unsupported warns (DL-466)",
             trigger=_job(elevated="1"),
         ),
         _row(
@@ -399,7 +406,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="group",
             klass=PASSTHROUGH,
             cite="dossier ss5, DL-32",
-            effect="the group tag is carried; nothing schedules or reports by group",
+            effect="the group tag is carried; nothing schedules or reports by group; known-unsupported warns (DL-466)",
             trigger=_job(group="1"),
         ),
         _row(
@@ -407,7 +414,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="interactive",
             klass=PASSTHROUGH,
             cite="dossier ss5, DL-32",
-            effect="no interactive terminal is attached to the child process",
+            effect="no interactive terminal is attached to the child process; known-unsupported warns (DL-466)",
             trigger=_job(interactive="1"),
         ),
         _row(
@@ -423,7 +430,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="machine_method",
             klass=PASSTHROUGH,
             cite="dossier ss5, DL-32",
-            effect="per-member placement method is not implemented; DL-49 resolves placement",
+            effect="per-member placement method is not implemented; DL-49 resolves placement; known-unsupported warns (DL-466)",
             trigger=_job(machine_method="1"),
         ),
         _row(
@@ -439,7 +446,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="ulimit",
             klass=PASSTHROUGH,
             cite="runtime_policy.parse_limits",
-            effect="resource pairs are validated; child limit application is not yet activated",
+            effect="resource pairs are validated; child limit application is not yet activated; known-unsupported warns (DL-466)",
             trigger=_job(ulimit='n="1,2"'),
         ),
     )
@@ -979,7 +986,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="n_retrys",
             klass=PASSTHROUGH,
             cite="DL-53",
-            effect="the job runs without retries; preflight WARNs that the attribute is unmodelled",
+            effect="the job runs without retries; known-unsupported warns for a positive count (DL-466)",
             trigger=_job("insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", n_retrys="2"),
         ),
         _row(
@@ -1316,7 +1323,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
 
 # --------------------------------------------- machine / resource / xinst / global
 
-_ANY_ATTR_EFFECT = "any other {kind} attribute is carried verbatim; its effect is not implemented"
+_ANY_ATTR_EFFECT = "other {kind} attributes are carried; known-unsupported warns unless empty or description (DL-466)"
 
 MACHINE_ATTR_ROWS: tuple[Row, ...] = (
     _row(
@@ -1365,10 +1372,10 @@ MACHINE_ATTR_ROWS: tuple[Row, ...] = (
         member="max_load",
         facet="pool",
         klass=PROVISIONAL,
-        cite="DL-49, runner_preflight._resource_preflight",
+        cite="DL-49, DL-466, lint.rule_known_unsupported",
         label="Qr3",
-        sites=("runner_preflight._resource_preflight#1",),
-        effect="a pool machine carries no load throttle; preflight WARNs and the job runs",
+        sites=("lint.rule_known_unsupported#1",),
+        effect="a pool machine carries no load throttle; known-unsupported names max_load (DL-466)",
         trigger=_estate(
             "insert_machine: M0\ntype: v\nmachine: A1\nmax_load: 5",
             "insert_machine: A1\ntype: a\nnode_name: localhost",
@@ -1383,7 +1390,7 @@ MACHINE_ATTR_ROWS: tuple[Row, ...] = (
         member="factor",
         klass=PASSTHROUGH,
         cite="DL-49",
-        effect="the per-member load factor is carried; per-member placement is unmodelled",
+        effect="the per-member load factor is carried; known-unsupported warns (DL-466)",
         trigger=_estate(
             "insert_machine: M0\ntype: v\nmachine: A1\nfactor: 1.0",
             "insert_machine: A1\ntype: a\nnode_name: localhost",
@@ -1455,7 +1462,7 @@ RESOURCE_ATTR_ROWS: tuple[Row, ...] = (
         klass=PASSTHROUGH,
         cite="ir._Lowerer._lower_resource, DL-28",
         effect=_ANY_ATTR_EFFECT.format(kind="resource"),
-        trigger=_stmt(RESOURCE_BLOCK + "\ndescription: spare"),
+        trigger=_stmt(RESOURCE_BLOCK + "\nsite_tag: spare"),
     ),
 )
 
@@ -1498,7 +1505,7 @@ CALENDAR_ATTR_ROWS: tuple[Row, ...] = (
         member="description",
         klass=PASSTHROUGH,
         cite="SEM-36",
-        effect="carried on the calendar record; no rule reads it",
+        effect="descriptive metadata stays quiet on every record kind (DL-466)",
         trigger=_cal("condition: DAILY", "description: quarter ends"),
     ),
     _row(
@@ -4002,11 +4009,20 @@ PREFLIGHT_CODE_ROWS: tuple[Row, ...] = (
     ),
     _row(
         surface="preflight_code",
-        member="n-retrys",
+        member="known-unsupported",
         klass=SUPPORTED,
-        cite="runner_preflight._retry_preflight, DL-53",
-        effect="a positive CMD retry count is carried but not yet applied; preflight warns",
+        cite="lint.rule_known_unsupported, DL-53, DL-466",
+        effect="requested inert attributes warn once per record and attribute; neutral values stay quiet",
         trigger=_job(n_retrys="2"),
+    ),
+    _row(
+        surface="preflight_code",
+        member="n-retrys",
+        klass=REFUSED,
+        cite="runtime_policy.job_policy",
+        effect="retry counts outside 0 through 20 refuse (DL-466)",
+        trigger=_job(n_retrys="21"),
+        quiet=_job(n_retrys="0"),
     ),
     _row(
         surface="preflight_code",

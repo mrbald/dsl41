@@ -550,6 +550,240 @@ def boot_and_stop(path: Path) -> str:
                 child.wait(timeout=10)
 
 
+@pytest.mark.parametrize("policy", ["none", "error", "warn"])
+@pytest.mark.parametrize("ignored", [False, True])
+@pytest.mark.parametrize(
+    "attributes,expected",
+    [
+        ("group: batch\n", ["group"]),
+        (
+            "elevated: yes\ninteractive: true\navg_runtime: +1\njob_load: +1\n",
+            ["elevated", "interactive", "avg_runtime", "job_load"],
+        ),
+        ("elevated: no\ninteractive: false\navg_runtime: +0\njob_load: +0\n", []),
+    ],
+)
+def test_known_unsupported_lint_policy(
+    tmp_path, monkeypatch, capsys, policy, ignored, attributes, expected
+):
+    from dsl41 import cli_run
+
+    ignore = ["L011", *(["known-unsupported"] if ignored else [])]
+    path = estate_file(tmp_path, lint=f'refuse = "{policy}"\nignore = {json.dumps(ignore)}\n')
+    (tmp_path / "a.jil").write_text(
+        JOB.replace("machine: localhost", "machine: M")
+        + attributes
+        + "insert_machine: M\ntype: v\nmachine: localhost\n"
+        + "insert_machine: localhost\ntype: a\nnode_name: localhost\n"
+    )
+    candidate = main.prepare(path)
+    blocked = policy == "warn" and not ignored and bool(expected)
+    warning_count = len(expected) * int(not ignored)
+    entered = []
+
+    async def serve(*args, **kwargs):
+        entered.append(args[3])
+        return 0
+
+    monkeypatch.setattr(cli_run, "_serve_run", serve)
+    runner = CliRunner()
+    for command, refusal in [("lint", 1), ("run", 2)]:
+        result = runner.invoke(app, [command, "--config", str(path)])
+        assert result.exit_code == (refusal if blocked else 0), result.output
+        assert result.output.count("known-unsupported warn:") == warning_count
+        for attribute in expected:
+            assert result.output.count(f"job A: {attribute}:") == int(not ignored)
+    assert bool(entered) is not blocked
+    if entered:
+        assert sum(item.code == "known-unsupported" for item in entered[0]) == warning_count
+    assert not (tmp_path / "run").exists()
+    code = reread_command(
+        tmp_path, run_root=tmp_path / "run", send=lambda *_: live_of(candidate), config=path
+    )
+    output = capsys.readouterr()
+    assert code == (2 if blocked else 0)
+    warnings = "\n".join(
+        line for line in (output.out + output.err).splitlines() if not line.startswith("reread:")
+    )
+    assert warnings.count("known-unsupported warn:") == warning_count
+    for attribute in expected:
+        assert warnings.count(f"job A: {attribute}:") == int(not ignored)
+    if blocked:
+        assert not (tmp_path / "run" / "plans").exists()
+    else:
+        document = read_plan(tmp_path / "run" / "plans", output.out.split("token: ")[-1].strip())
+        assert not any(
+            item["code"] == "known-unsupported" for item in document["preflight_warnings"]
+        )
+        assert (
+            sum(item["code"] == "known-unsupported" for item in document["lint_findings"])
+            == warning_count
+        )
+
+
+def test_known_unsupported_keeps_other_reread_refusal_lines(tmp_path, capsys):
+    path = estate_file(tmp_path, lint='refuse = "error"\n')
+    active = main.prepare(path)
+    (tmp_path / "a.jil").write_text(JOB + "condition: s(MISSING)\n")
+    assert (
+        reread_command(
+            tmp_path, run_root=tmp_path / "run", send=lambda *_: live_of(active), config=path
+        )
+        == 2
+    )
+    lines = capsys.readouterr().err.splitlines()
+    assert sum("L001 error:" in line for line in lines) == 2
+    assert any(line.startswith("reread: ") and "L001 error:" in line for line in lines)
+
+
+@pytest.mark.parametrize(
+    "configured,policy,ignored",
+    [(False, "none", False), (True, "none", False), (True, "warn", False), (True, "warn", True)],
+)
+def test_known_unsupported_rehearse_reports_once(tmp_path, configured, policy, ignored):
+    path = estate_file(
+        tmp_path,
+        engine="kill_signals = [2, 9]\n",
+        lint=f'refuse = "{policy}"\nignore = {json.dumps(["L011"] + (["known-unsupported"] if ignored else []))}\n',
+    )
+    (tmp_path / "a.jil").write_text(JOB + "group: batch\n")
+    selection = ["--config", str(path)] if configured else [str(tmp_path / "a.jil")]
+    result = CliRunner().invoke(app, ["rehearse", *selection, "--format", "json", "--hours", "1"])
+    assert result.exit_code == (2 if policy == "warn" and not ignored else 0), result.output
+    assert result.stderr.count("job A: group:") == int(not ignored)
+    if result.exit_code == 0:
+        json.loads(result.stdout)
+
+
+@pytest.mark.parametrize("ignored", [False, True])
+def test_known_unsupported_restart_reports_without_refusal(short_root, ignored):
+    from dsl41.runner_adapters import FakeAdapter
+    from dsl41.runner_clock import RealClock
+    from dsl41.runner_startup import start_run
+    from store_surgery import rows
+
+    path = estate_file(
+        short_root,
+        lint='refuse = "warn"\nignore = '
+        + json.dumps(["L011"] + (["known-unsupported"] if ignored else []))
+        + "\n",
+    )
+    (short_root / "a.jil").write_text(JOB + "group: captured\n")
+    captured = main.prepare(path)
+    root = short_root / "run"
+    engine = start_run(
+        captured.catalog,
+        root,
+        clock=RealClock(),
+        adapters={"CMD": FakeAdapter()},
+        launched=main.profile_of(captured),
+        source_capture=main.encoded_parts(captured),
+    )
+    engine.journal.close()
+    (short_root / "a.jil").write_text(JOB + "application: pending\n")
+    output = boot_and_stop(path)
+    assert "engine up; control socket:" in output
+    assert output.count("job A: group:") == int(not ignored)
+    assert "job A: application:" not in output
+    warnings = [
+        item
+        for _, kind, body in rows(root)
+        if kind == "preflight"
+        for item in body["items"]
+        if item["code"] == "known-unsupported"
+    ]
+    assert len(warnings) == int(not ignored)
+    assert active_configuration(root).catalog == captured.catalog
+
+
+def test_known_unsupported_startup_and_reread_process(short_root):
+    from store_surgery import rows
+
+    path = estate_file(short_root, engine='job_shell = "/bin/sh"\n', lint='ignore = ["L011"]\n')
+    (short_root / "a.jil").write_text(
+        JOB.replace("machine: localhost", "machine: M")
+        + "group: batch\nelevated: yes\ninteractive: true\navg_runtime: +1\njob_load: +1\n"
+        + "insert_machine: M\ntype: v\nmachine: localhost\n"
+        + "insert_machine: localhost\ntype: a\nnode_name: localhost\n"
+    )
+    expected = ["group", "elevated", "interactive", "avg_runtime", "job_load"]
+    root = short_root / "run"
+    log = short_root / "process.log"
+    with (
+        log.open("w") as output,
+        subprocess.Popen(
+            [sys.executable, "-m", "dsl41", "run", "--config", str(path)],
+            stdout=output,
+            stderr=subprocess.STDOUT,
+        ) as child,
+    ):
+        try:
+            deadline = time.monotonic() + 30
+            while "engine up; control socket:" not in log.read_text():
+                assert child.poll() is None and time.monotonic() < deadline, log.read_text()
+                time.sleep(0.05)
+            for attribute in expected:
+                assert log.read_text().count(f"job A: {attribute}:") == 1
+            assert log.read_text().count("engine.job_shell:") == 1
+            for policy, ignored in [("none", False), ("warn", False), ("warn", True)]:
+                config_file(
+                    short_root,
+                    engine='job_shell = "/bin/sh"\n',
+                    lint=f'refuse = "{policy}"\nignore = {json.dumps(["L011"] + (["known-unsupported"] if ignored else []))}\n',
+                )
+                before = set((root / "plans").iterdir())
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "dsl41",
+                        "reread",
+                        "--config",
+                        str(path),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                assert result.returncode == (2 if policy == "warn" and not ignored else 0), (
+                    result.stdout + result.stderr
+                )
+                if result.returncode == 2:
+                    assert set((root / "plans").iterdir()) == before
+                else:
+                    for attribute in expected:
+                        assert (result.stdout + result.stderr).count(f"job A: {attribute}:") == int(
+                            not ignored
+                        )
+                    document = read_plan(root / "plans", result.stdout.split("token: ")[-1].strip())
+                    assert sum(
+                        v["code"] == "known-unsupported" for v in document["lint_findings"]
+                    ) == (len(expected) + 1) * int(not ignored)
+                    assert not any(
+                        v["code"] == "known-unsupported" for v in document["preflight_warnings"]
+                    )
+            assert active_configuration(root).catalog.jobs["A"].passthrough["group"] == "batch"
+            with closing(SqliteStore(root / "engine.db", read_only=True)) as store:
+                assert store.current_config_rev() == 1
+        finally:
+            child.terminate()
+            try:
+                child.wait(timeout=30)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait(timeout=10)
+    assert child.returncode == 0, log.read_text()
+    warnings = [
+        item
+        for _, kind, body in rows(root)
+        if kind == "preflight"
+        for item in body["items"]
+        if item["code"] == "known-unsupported"
+    ]
+    assert len(warnings) == len(expected) + 1
+
+
 def test_10_restart_uses_stored_catalog_and_reports_pending(short_root: Path) -> None:
     tmp_path = short_root
     path = estate_file(tmp_path)

@@ -94,6 +94,27 @@ REFUSALS += [
 ]
 
 
+@pytest.mark.usefixtures("cli_env")
+@pytest.mark.parametrize("attributes,kind,code", REFUSALS[:19])
+def test_known_unsupported_ignore_preserves_refusals(tmp_path, attributes, kind, code):
+    from typer.testing import CliRunner
+    from dsl41.cli import app
+
+    path = estate_file(tmp_path, lint='ignore = ["known-unsupported"]\n')
+    execution = "command: true" if kind == "c" else "watch_file: /tmp/input" if kind == "f" else ""
+    (tmp_path / "a.jil").write_text(
+        f"insert_job: policy_job\njob_type: {kind}\n{execution}\n{attributes}\ngroup: x\n"
+    )
+    result = CliRunner().invoke(app, ["run", "--config", str(path)])
+    assert result.exit_code == 2 and f"[{code}]" in result.output, result.output
+    assert "group:" not in result.output
+    candidate = main_config.prepare(path)
+    live = Live(candidate.catalog, candidate.settings, 1, {}, launch=candidate.metadata["launch"])
+    with pytest.raises(RereadRefused, match=code) as caught:
+        reread(tmp_path, live, tmp_path / "plans", candidate=candidate)
+    assert "group:" not in str(caught.value)
+
+
 @pytest.mark.parametrize("attributes,kind,code", [row for row in REFUSALS if row[2] == "std-file"])
 def test_std_file_refusal_is_reported_once(attributes, kind, code):
     jobs = catalog(attributes, kind)

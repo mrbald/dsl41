@@ -264,7 +264,9 @@ Use the [unknown-attribute policy in §2](#2-check-which-constructs-dsl41-accept
 ### 4.1. Read lint findings
 
 `dsl41 lint` reports the rule, file and line for each finding.
-Use the [L001–L025 rule contract](ir-design.md#9-linter-architecture-findings-not-treatments) for meanings and severities.
+Use the [L001–L025 and `known-unsupported` rule contract](ir-design.md#9-linter-architecture-findings-not-treatments) for meanings and severities.
+`--strict` and `refuse = "warn"` fail on the `known-unsupported` warning; remove the attribute,
+or suppress the code with `--suppress known-unsupported` or `lint.ignore = ["known-unsupported"]`.
 
 | Lint exit | Meaning |
 | --- | --- |

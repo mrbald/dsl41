@@ -153,6 +153,16 @@ _HHMM_RE = re.compile(r"(\d{1,2}):(\d{2})")
 IR_VERSION: Literal["0.3"] = "0.3"
 
 
+def jil_boolean_value(text: str) -> bool | None:
+    """Shared parser/lint boolean spellings (DL-466); None means an invalid value."""
+    value = text.strip().lower()
+    if value in _TRUTHY:
+        return True
+    if value in _FALSY:
+        return False
+    return None
+
+
 def _parse_hhmm(text: str) -> tuple[int, int]:
     """Lexical HH:MM. A colon in an unquoted value may be escaped (`10\\:00`) instead of quoting
     the value (jil-statement-syntax rule 2); every `hh:mm` lane unescapes it (DL-251).
@@ -948,11 +958,9 @@ class _Lowerer:
             return None
 
     def _bool_attr(self, attr: RawAttr) -> bool | None:
-        v = attr.raw_value.strip().lower()
-        if v in _TRUTHY:
-            return True
-        if v in _FALSY:
-            return False
+        value = jil_boolean_value(attr.raw_value)
+        if value is not None:
+            return value
         self.err(
             f"{attr.key}: expected a boolean (0/1/n/y), got {attr.raw_value.strip()!r}", attr.span
         )

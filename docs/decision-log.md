@@ -25831,3 +25831,31 @@ relitigate an entry; append a new one.
   artifacts and hashes stay unchanged. The drill images' uv 0.9.7 pins can
   install the frozen lock but do not enforce the relative setting.
   No engine behavior, stopping path, runtime format or frozen contract changes.
+- DL-466 Known but unsupported input warnings (2026-11-04; owner ruling;
+  ir-design §9, runner-design §8)
+  One registered WARN lint code, `known-unsupported`, reports
+  attributes that request behavior this release does not apply. The message is
+  `job X: ATTR: known but unsupported; it has no effect in this release`.
+  Supporting records use their kind and name. Emit once per record and attribute.
+  Positive CMD retries, unapplied limits, alarm and notification
+  policy, labels, placement and execution metadata use the same check as inert
+  machine, resource and external-instance payloads. Pool load attributes warn.
+  `description` stays quiet on every record kind, including calendars.
+  Neutral values stay quiet according to the attribute's meaning. A zero limit
+  or capacity still requests a restriction; opaque text `0` is not a false flag.
+  Existing refusals remain errors. No runtime feature is activated.
+  Configured `job_shell` and `job_profile`, and
+  `std_file_mode = "truncate"`, warn once per setting. Defaults create no
+  warnings. Attribute-environment exports are outside this check.
+  Main-config lint, fresh start, rehearse and
+  reread use existing `lint.ignore` and `lint.refuse`. Preflight adapts the same
+  rule without severity promotion, including during rehearse. Fresh startup
+  prints the lint finding once and retains its preflight journal warning.
+  Main-config plans record it only in `lint_findings`; legacy reread excludes
+  it from its strict lint gate and records it in `preflight_warnings`.
+  Restart reports and journals active captured warnings, honors captured ignore,
+  and never applies lint refusal. Pending-revision warnings remain discarded.
+  No stored format, frozen contract or state version changes.
+  Old warning records remain readable. The `n-retrys` refusal code remains;
+  the previous retry and pool-job-load warnings use `known-unsupported`.
+  No stopping path is added.
