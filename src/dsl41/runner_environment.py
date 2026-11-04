@@ -156,7 +156,10 @@ def resolve_streams(
                         f"job {job.name}: {attribute} resolves to an empty path or contains NUL."
                     )
             else:
-                resolved, names = expand_path(job.name, attribute, text, env)
+                from dsl41.runtime_policy import stream_target
+
+                target, _mode = stream_target(job.name, attribute, text, "append")
+                resolved, names = expand_path(job.name, attribute, target, env)
             paths[attribute] = (
                 resolved if os.path.isabs(resolved) else os.path.join(str(cwd), resolved)
             )

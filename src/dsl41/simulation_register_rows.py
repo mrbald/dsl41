@@ -837,7 +837,8 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="std_out_file",
             klass=SUPPORTED,
             cite="runner_environment.resolve_streams, DL-447",
-            effect="the child's stdout appends here instead of the default run log; inert"
+            effect="the child's stdout appends here; a source > truncates before each launch,"
+            " >> appends (DL-460); inert"
             " on a BOX (SEM-10); $VAR and ${VAR} resolve once before profile execution",
             trigger=_job(std_out_file="/tmp/out.log"),
         ),
@@ -846,7 +847,8 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="std_err_file",
             klass=SUPPORTED,
             cite="runner_environment.resolve_streams, DL-447",
-            effect="the child's stderr appends here instead of the default run log; inert"
+            effect="the child's stderr appends here; a source > truncates before each launch,"
+            " >> appends (DL-460); inert"
             " on a BOX (SEM-10); $VAR and ${VAR} resolve once before profile execution",
             trigger=_job(std_err_file="/tmp/err.log"),
         ),
