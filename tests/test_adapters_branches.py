@@ -254,6 +254,11 @@ def test_fw_watch_without_a_fence_or_barrier_logs_every_poll(tmp_path: Path) -> 
     polls = [json.loads(line) for line in (run_dir / WATCH_LOG).read_text().splitlines()[1:]]
     assert [p["stable_polls"] for p in polls] == [1, 2]
     assert clock.slept == [T0, T0 + timedelta(seconds=30)]
+    assert (run_dir / WATCH_LOG).read_bytes() == (
+        b'{"artifact_format_version":1,"at":"2026-07-01T08:00:00.000000","kind":"start","run_id":"r1"}\n'
+        b'{"artifact_format_version":1,"at":"2026-07-01T08:00:00.000000","exists":true,"kind":"poll","qualifying":true,"run_id":"r1","size":4,"stable_polls":1}\n'
+        b'{"artifact_format_version":1,"at":"2026-07-01T08:00:30.000000","exists":true,"kind":"poll","qualifying":true,"run_id":"r1","size":4,"stable_polls":2}\n'
+    )
 
 
 def test_fw_resumed_complete_log_returns_success_without_polling(tmp_path: Path) -> None:
@@ -439,3 +444,28 @@ def test_load_json_reads_a_spool_version_it_does_not_implement_as_unreadable(
     assert load_json(path) == {"version": 1, "outcome": "exited", "exit_code": 0}
     path.write_text(json.dumps({"outcome": "exited", "exit_code": 0}))
     assert load_json(path) == {"outcome": "exited", "exit_code": 0}
+
+
+def test_fw_exact_route_refuses_sampled_log_before_append(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "w.1"
+    _write_log(
+        run_dir,
+        _start(),
+        {
+            "artifact_format_version": 1,
+            "at": T0.isoformat(),
+            "kind": "sample",
+            "run_id": "r1",
+            "files": [],
+        },
+    )
+    log = run_dir / WATCH_LOG
+    with log.open("ab") as stream:
+        stream.write(b'{"kind":')
+    before = log.read_bytes()
+    clock = _StepClock()
+    with pytest.raises(EngineError, match="sampled evidence for an exact-path watch"):
+        asyncio.run(
+            FileWatcherAdapter().run(_fw_job(tmp_path / "exact"), 1, _fw_ctx(tmp_path, clock))
+        )
+    assert log.read_bytes() == before and clock.slept == []

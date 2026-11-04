@@ -2,8 +2,13 @@
 
 ## Purpose
 
-The FW adapter watches one file for one run of an FW job.
-It completes the run with exit 0 once the file exists at its minimum size and its size is steady.
+The FW adapter watches an exact path or final-component `*` or `?` pattern for one run.
+It completes with exit 0 when any one matching file meets the minimum size and stability rule.
+Exact paths use size-only stability. Wildcards use unchanged device, inode, size,
+mtime_ns and ctime_ns per pathname and file identity (DL-461).
+Bourne hidden-file rules apply; `.` and `..` never match. Directory wildcards and recursion
+are unsupported. A non-UTF-8 match is ignored with one warning per name per watch run.
+The warning is given again after an engine restart resumes the watch.
 Its progress is evidence in an append-only log, so a restart, a seal (retired in 2.0.0) and an audit all read the same watch.
 An FW run is a watch inside the engine, not a process, in both lifecycle modes.
 Its contract is [runner-design §6](../runner-design.md#6-adapters) and PR-34 in period-model §13.6 (`period-model.md`, retired in 2.0.0), as the risk map says; its rules are split across those, period-model §2.1 and §3.5, and DL-258.
@@ -21,8 +26,8 @@ The completion reaches the ledger as an ordinary STATUS input through the engine
 - `FileWatcherAdapter(default_interval_s=..., existence=...)` and its `run(job_ir, run_number, ctx)`, which returns 0.
 - Job inputs: `watch_file`, `watch_interval` and `watch_file_min_size`. Estate inputs: the [runtime profile](../glossary.md#runtime-profile)'s `fw_default_interval_us` (period-model §2.1 (`period-model.md`, retired in 2.0.0)) and the `fw-existence` switch (DL-258). `wire_from_profile` in `src/dsl41/runner_startup.py` builds the adapter from both.
 - Context: `ctx.clock`, `ctx.run_root`, `ctx.run_id`, `ctx.fence` and `ctx.barrier`, filled by `Engine._run_adapter` in `src/dsl41/runner.py`.
-- Spool: `runs/<job>.<run_number>/watch.jsonl`, one `start` line, then `poll` lines (period-model §3.5 (`period-model.md`, retired in 2.0.0)).
-- Readers: `read_watch_log`, which folds the log or a prefix of it into a `WatchLog`; and `_resume_watch` in `runner_startup.py`.
+- Spool: `runs/<job>.<run_number>/watch.jsonl`, one `start` line, then scalar `poll` or wildcard `sample` lines with plain paths and five metadata fields (DL-461; period-model §3.5 (`period-model.md`, retired in 2.0.0)).
+- Readers: `read_watch_log`, the sole evidence reader, which folds scalar and sampled progress into a `WatchLog`; and `_resume_watch` in `runner_startup.py`.
 - Without a run root, as in the virtual-domain harness, the watch keeps no spool.
 
 ## States
@@ -42,8 +47,8 @@ flowchart TD
     sleep -->|"the seal barrier is set"| park["parked at a poll boundary"]
     park -->|"the barrier is released"| poll
     park -->|"the seal commits"| successor(["the successor resumes the watch"])
-    sleep -->|"next_poll_at reached"| poll["stat the file, fence check, append a poll line"]
-    poll --> complete{"steady size, or a qualifying first poll under immediate?"}
+    sleep -->|"next_poll_at reached"| poll["observe the exact path or matches, fence check, append evidence"]
+    poll --> complete{"stable qualifying file, or a qualifying original first poll under immediate?"}
     complete -->|"yes"| done
     complete -->|"no"| sleep
 ```
@@ -57,14 +62,15 @@ flowchart TD
 - A resumed watch appends no second `start`. A `start` line naming the effect's `run_id` resolves a pending FW SPAWN as applied (§3.5; DL-129).
 - When an effect bound a `run_id`, every line names it, and a log naming another run is refused (DL-129). A launch with no bound effect, as from a pre-DL-118 journal, writes a null `run_id`.
 - The seal barrier parks every FW task at a poll boundary before T. The seal's `fw_watch` entry is a fold of the first `watch_seq` lines (§3.5).
-- Completion: `stable`, the default, needs two steady qualifying polls. `immediate` completes on the run's first poll only, and only for a job with no minimum size (DL-258).
+- Completion: `stable`, the default, needs two qualifying observations with equal size for exact paths or equal five-field samples for wildcards. Wildcard streaks reset on replacement or disappearance. `immediate` completes on the original first poll only, and only with no positive minimum size (DL-258, DL-461).
 - The interval is the job's `watch_interval`, else the profile's `fw_default_interval_us` (§2.1). Adapters never retry and never time out (the module docstring of `runner_adapters.py`).
 - The wiring rounds the microsecond profile interval to whole seconds, at least one. No shipped surface sets a value that is not whole seconds; resume refuses a hand-pinned one as profile drift. `profile_field:fw_default_interval_us#rounding` in [simulation-coverage](../simulation-coverage.md#profile_field) keeps it provisional.
 
 ## Failure and recovery
 
+- An incomplete legacy wildcard log keeps its scalar prefix, deadline and original poll count, then starts fresh pathname streaks with `sample` lines (DL-461).
 - The engine dies after the `start` line. Resume relaunches the dispatched watch, which rebuilds its progress from the log and appends no second `start` line (PR-34a in period-model §13.6 (`period-model.md`, retired in 2.0.0)).
-- The engine dies after a completing poll and before the STATUS input is durable. `_resume_watch` injects the completion from the log (PR-34a).
+- The engine dies after a completing poll and before the STATUS input is durable. `_resume_watch` injects the completion from scalar or sampled evidence without observing the file again (PR-34a, DL-461).
 - A run directory exists with no `start` line. Resume dispatches the watch again under the bound `run_id`.
 - Leadership is lost. The fence check raises before the append, so no line lands (PR-03, cited in §3.5).
 - A seal aborts. The barrier is released and the parked poll proceeds (PR-28b).
@@ -84,6 +90,8 @@ flowchart TD
 - Identity: `test_pr34_a_poll_naming_another_run_never_completes_the_watch`, `test_pr34_a_recorded_count_the_observations_cannot_derive_refuses`, `test_pr34_the_adapter_refuses_to_adopt_a_strangers_watch`.
 - Resume: `test_pr34_a_start_line_resumes_the_watch_without_a_second_one`, `test_pr34_a_restart_between_the_two_qualifying_polls_completes_the_same_watch`, `test_pr34a_a_completing_poll_then_a_crash_injects_the_completion_from_the_log`, `test_dl258_an_immediate_qualifying_poll_then_a_crash_injects_from_the_log`, `test_pr34_a_run_directory_with_no_log_is_re_dispatched_under_the_bound_id`, `test_m4_resume_refuses_incomplete_fw_without_adapter`.
 - Completion rule: `test_fw_two_immediately_stable_polls_succeed`, `test_fw_existence_with_the_file_already_present`, `test_fw_existence_with_the_file_appearing_later`, `test_fw_existence_does_not_change_a_job_with_a_minimum_size`, `test_fw_existence_is_derived_from_the_wired_adapter_not_the_pin`.
+
+- Wildcards: `test_fw_glob_streaks_are_per_path_and_identity`, `test_fw_glob_question_mark_and_hidden_names`, `test_fw_glob_ignores_non_utf8_match`, `test_fw_glob_waiting_restart_preserves_progress`, `test_fw_legacy_glob_waiting_restart_uses_samples`, `test_cli_fw_star_restart_after_sample`, `test_cli_fw_question_late_arrival_immediate`.
 
 ## Open findings
 
