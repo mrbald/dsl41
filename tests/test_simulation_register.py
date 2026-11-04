@@ -1086,7 +1086,9 @@ AS_MACHINE = frozenset({"m0"})
 LOCAL_IDENTITY = frozenset({"localhost", "m0"})
 
 
-def _preflight_under(catalog: ir.CatalogIR, policy: str) -> list[runner_preflight.PreflightItem]:
+def _preflight_under(
+    catalog: ir.CatalogIR, policy: str, *, hook_configured: bool = False
+) -> list[runner_preflight.PreflightItem]:
     """Preflight under one machine policy -- a configuration an operator can
     actually run.
 
@@ -1098,6 +1100,7 @@ def _preflight_under(catalog: ir.CatalogIR, policy: str) -> list[runner_prefligh
         as_machine=AS_MACHINE,
         start=PREFLIGHT_START,
         machine_policy=policy,  # type: ignore[arg-type]
+        hook_configured=hook_configured,
     )
 
 
@@ -1180,13 +1183,13 @@ def test_surface_domain_matches_the_code(surface: str) -> None:
 
 
 def test_retry_warning_and_non_command_refusal_are_independent() -> None:
-    warning = by_id()["preflight_code:n-retrys"]
+    warning = by_id()["preflight_code:known-unsupported"]
     refusal = by_id()["preflight_code:n-retrys#non-command"]
     for row, severity in ((warning, "WARN"), (refusal, "ERROR")):
         items = _preflight_under(ir.lower_source(row.trigger), "strict")
-        assert any(item.code == "n-retrys" and item.severity == severity for item in items)
+        assert any(item.code == row.member and item.severity == severity for item in items)
         quiet = _preflight_under(ir.lower_source(quiet_of(row)), "strict")
-        assert not any(item.code == "n-retrys" and item.severity == severity for item in quiet)
+        assert not any(item.code == row.member and item.severity == severity for item in quiet)
 
 
 def test_every_surface_has_rows() -> None:
@@ -1603,7 +1606,7 @@ GEN_TO = datetime(2026, 12, 31).date()
 #: The rows whose fixture produces a preflight ERROR ON PURPOSE, because the
 #: ERROR is what the row exposes -- or, for the three placement rows, because
 #: no estate that shows the verdict can also pass the gate. Named one by one,
-#: not by surface: `preflight_code:n-retrys` and `:skeleton-cycle` are WARN
+#: not by surface: `preflight_code:known-unsupported` and `:skeleton-cycle` are WARN
 #: rules and stay under the gate.
 PREFLIGHT_EXEMPT = frozenset(
     {
@@ -1619,6 +1622,47 @@ PREFLIGHT_EXEMPT = frozenset(
 )
 
 JIL_ROWS = tuple(row for row in REGISTER if fixture_kind(row) == "jil")
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        row
+        for row in JIL_ROWS
+        if row.surface
+        in {"job_attr", "machine_attr", "resource_attr", "xinst_attr", "calendar_attr"}
+        and (
+            row.klass in {Klass.PASSTHROUGH, Klass.SUPPORTED}
+            or row.id == "machine_attr:max_load#pool"
+        )
+    ],
+    ids=lambda row: row.id,
+)
+def test_known_unsupported_register_coverage(row) -> None:
+    from dsl41.lint import rule_known_unsupported
+
+    kind = {
+        "job_attr": "job",
+        "machine_attr": "machine",
+        "resource_attr": "resource",
+        "xinst_attr": "external-instance",
+        "calendar_attr": "calendar",
+    }[row.surface]
+    attribute = {
+        "machine_attr:*": "opsys",
+        "resource_attr:*": "site_tag",
+        "xinst_attr:*": "xmachine",
+    }.get(row.id, row.member)
+    expected = (
+        row.klass is Klass.PASSTHROUGH or row.id == "machine_attr:max_load#pool"
+    ) and attribute != "description"
+    for source, warns in ((row.trigger, expected), (quiet_of(row), False)):
+        matching = [
+            v
+            for v in rule_known_unsupported(ir.lower_source(source))
+            if v.detail == attribute and v.message.startswith(kind + " ")
+        ]
+        assert bool(matching) is warns, (row.id, matching)
 
 
 @pytest.mark.parametrize("row_id", [row.id for row in JIL_ROWS])
@@ -1648,7 +1692,9 @@ def test_jil_fixtures_reach_the_engine(row_id: str) -> None:
                 refused_here.append(f"calendar: {exc}")
         refused_here += [
             f"preflight: {item.code}: {item.message}"
-            for item in _preflight_under(catalog, "strict")
+            for item in _preflight_under(
+                catalog, "strict", hook_configured=row.id == "job_attr:send_notification"
+            )
             if item.severity == "ERROR"
         ]
     if not row.reachable:

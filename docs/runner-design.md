@@ -881,12 +881,12 @@ WARN:
   prints the offset it resolved to. A zero offset has no sign to misread,
   so it passes silently. A unique zoneinfo city match WARNs on a different
   principle: the name was guessed, and the remedy is `--timezone-map`.
-- `n_retrys > 0` — the job runs WITHOUT retries (Q4, DL-53: retries are
-  unmodeled by scope decision).
-- `job_load` on a **pool** machine — the machine-load throttle is
-  unmodeled for pools (DL-50, PENDING Qr3). Resource semaphores on such a
-  job still apply. Pools stay outside both load rules below, so this WARN
-  fires for a pool job at priority 0 too.
+- `known-unsupported`: an attribute requests behavior this release does not apply
+  (DL-466; [lint codes](ir-design.md#9-linter-architecture-findings-not-treatments)).
+  This includes positive CMD retries (Q4, DL-53) and pool `job_load`/`max_load`
+  (DL-50, PENDING Qr3). Pool resource semaphores still apply.
+  The check also runs during rehearse. Restart reports active captured warnings
+  without lint refusal. Existing preflight errors remain hard.
 - Cycle in the AND-success skeleton (graphlib `CycleError`): cycles are
   *legal* AutoSys (edge-triggered re-runs, DL-13, L010's territory). Thus
   this rule warns and disables `plan`, and it does not refuse.

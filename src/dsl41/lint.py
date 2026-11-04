@@ -89,9 +89,13 @@ from dsl41.ir import (
     CatalogIR,
     ExecSpec,
     FwSpec,
+    ResourceIR,
     ScheduleBlock,
+    XinstIR,
+    jil_boolean_value,
     unquote_jil_value,
 )
+from dsl41.runtime_policy import PolicyRefused, policy_boolean, policy_integer
 from dsl41.semantics import DEFAULTS, iced_atom_truth
 from dsl41.timezones import (
     DstWindow,
@@ -117,7 +121,7 @@ _SEVERITY_RANK: dict[Severity, int] = {"error": 2, "warn": 1, "info": 0}
 
 
 class Violation(BaseModel):
-    code: str  # stable "Lnnn", never renumbered (ir-design ss9)
+    code: str  # stable registered code, never renamed (ir-design ss9, DL-466)
     severity: Severity
     message: str
     jobs: list[str] = []  # empty for catalog-level findings
@@ -1553,6 +1557,121 @@ def rule_l025(catalog: CatalogIR, exceptions: Exceptions | None = None) -> list[
     return out
 
 
+def rule_known_unsupported(
+    catalog: CatalogIR,
+    *,
+    job_shell: str | None = None,
+    job_profile: str | None = None,
+    std_file_mode: str = "append",
+) -> list[Violation]:
+    """DL-466: report requested, unapplied behavior; descriptions and neutral values are quiet."""
+    out: list[Violation] = []
+
+    def warn(kind: str, name: str, attribute: str, span: SourceSpan | None = None) -> None:
+        target = f"engine.{attribute}" if kind == "engine" else f"{kind} {name}: {attribute}"
+        out.append(
+            Violation(
+                code="known-unsupported",
+                severity="warn",
+                message=f"{target}: known but unsupported; it has no effect in this release",
+                jobs=[name] if kind == "job" else [],
+                detail=attribute,
+                span=span,
+            )
+        )
+
+    text_attrs = {
+        "application",
+        "group",
+        "machine_method",
+        "notification_msg",
+        "notification_emailaddress",
+        "notification_emailaddress_on_alarm",
+        "notification_emailaddress_on_failure",
+        "notification_emailaddress_on_success",
+        "notification_emailaddress_on_terminated",
+    }
+    policy_values = {
+        "alarm_if_fail": policy_boolean,
+        "alarm_if_terminated": policy_boolean,
+        "send_notification": policy_boolean,
+        "min_run_alarm": policy_integer,
+        "max_run_alarm": policy_integer,
+    }
+    for name, job in sorted(catalog.jobs.items()):
+        raw = {
+            key.lower(): unquote_jil_value(value)
+            for lane in (job.annotations, job.passthrough)
+            for key, value in lane.items()
+        }
+        attributes = {key for key in text_attrs if raw.get(key)}
+        attributes.update(
+            key for key in ("elevated", "interactive") if jil_boolean_value(raw.get(key, ""))
+        )
+        for key in policy_values.keys() & raw.keys():
+            try:
+                if policy_values[key](name, key, raw[key]):
+                    attributes.add(key)
+            except PolicyRefused:
+                pass  # Runtime preflight owns invalid-value refusals (DL-466).
+        try:
+            if int(raw.get("avg_runtime", "0")) > 0:
+                attributes.add("avg_runtime")
+        except ValueError:
+            pass
+        if job.job_type == "CMD":
+            if 0 < job.sem.n_retrys <= 20:
+                attributes.add("n_retrys")
+            if raw.get("ulimit"):
+                attributes.add("ulimit")
+        machine = catalog.machines.get(job.exec_.machine or "") if job.exec_ else None
+        if machine and machine.members:
+            try:
+                if job.job_load_units():
+                    attributes.add("job_load")
+            except ValueError:
+                pass  # Resource preflight owns invalid-value refusals (DL-466).
+        for attribute in sorted(attributes):
+            warn("job", name, attribute, job.span)
+
+    for name, machine in sorted(catalog.machines.items()):
+        live = {"description", "node_name"}
+        if not machine.members:
+            live.add("max_load")
+        # A member's zero factor or capacity still requests placement policy (DL-466, DL-49).
+        # PENDING: Qr3: pool load placement remains unmodelled.
+        attributes = {
+            key.lower()
+            for lane in (machine.attrs, *(member.attrs for member in machine.members))
+            for key, value in lane.items()
+            if key.lower() not in live and unquote_jil_value(value)
+        }
+        for attribute in sorted(attributes):
+            warn("machine", name, attribute, machine.span)
+    supporting: tuple[tuple[str, Mapping[str, ResourceIR | XinstIR], set[str]], ...] = (
+        ("resource", catalog.resources, {"amount", "description"}),
+        ("external-instance", catalog.external_instances, {"description"}),
+    )
+    for kind, records, live in supporting:
+        for name, record in sorted(records.items()):
+            for attribute in sorted(
+                {
+                    key.lower()
+                    for key, value in record.attrs.items()
+                    if key.lower() not in live and unquote_jil_value(value)
+                }
+            ):
+                warn(kind, name, attribute, record.span)
+    for attribute, requested in (
+        ("job_shell", job_shell is not None),
+        ("job_profile", job_profile is not None),
+        ("std_file_mode", std_file_mode == "truncate"),
+    ):
+        if requested:
+            warn("engine", "", attribute)
+    return out
+
+
 # ------------------------------------------------------------------------------ registry
 
 RuleFn = Callable[[CatalogIR], list[Violation]]
@@ -1576,6 +1695,7 @@ RULES: tuple[tuple[str, RuleFn], ...] = (
     ("L023", rule_l023),
     ("L024", rule_l024),
     ("L025", rule_l025),
+    ("known-unsupported", rule_known_unsupported),
 )
 
 GRAPH_RULES: tuple[tuple[str, GraphRuleFn], ...] = (
@@ -1605,13 +1725,17 @@ def lint_catalog(
     tz_aliases: Mapping[str, str] | None = None,
     today: date | None = None,
     exceptions: Exceptions | None = None,
+    job_shell: str | None = None,
+    job_profile: str | None = None,
+    std_file_mode: str = "append",
 ) -> LintReport:
     """Run every registered rule: IR-F rules first, then graph rules, each in code order.
 
     The derived graph is computed once unless the caller passes it. `base_tz`, `tz_aliases`
     and `today` reach L023 only: the zone for a schedule without `timezone` (UTC when None),
     the `--timezone-map` table, and the reference date. `exceptions` reaches L024 and L025 only;
-    with None both are inert.
+    with None both are inert. The shell, profile and stream-mode settings reach only
+    known-unsupported (DL-466).
     """
     if graph is None:
         graph = derive_graph(catalog)
@@ -1625,6 +1749,15 @@ def lint_catalog(
             violations.extend(rule_l024(catalog, exceptions))
         elif code == "L025":
             violations.extend(rule_l025(catalog, exceptions))
+        elif code == "known-unsupported":
+            violations.extend(
+                rule_known_unsupported(
+                    catalog,
+                    job_shell=job_shell,
+                    job_profile=job_profile,
+                    std_file_mode=std_file_mode,
+                )
+            )
         else:
             violations.extend(rule(catalog))
     for _code, graph_rule in GRAPH_RULES:

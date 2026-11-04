@@ -36,7 +36,7 @@ from dsl41.cli_common import (
     statechart_report,
 )
 from dsl41.ir import CatalogIR
-from dsl41.main_config import CONFIG_OPT, selected_config
+from dsl41.main_config import CONFIG_OPT, LintPolicy, selected_config
 from dsl41.runner_config import tz_aliases_of
 from dsl41.state_machine import EXIT_STATECHART_ERROR, STATECHART_LOG_PREFIX, StatechartError
 from dsl41.status_hook import HookSettings, StatusHooks, notify_once
@@ -104,6 +104,7 @@ def _preflight_or_exit(
     std_file_mode: str = "append",
     hook_configured: bool = False,
     set_job_attribute_environmentals: bool = True,
+    reported_policy: LintPolicy | None = None,
 ) -> "list[PreflightItem]":
     """Print ss8 findings; exit 2 on any ERROR; return the WARNs for the caller to journal.
 
@@ -134,14 +135,20 @@ def _preflight_or_exit(
         hook_configured=hook_configured,
         set_job_attribute_environmentals=set_job_attribute_environmentals,
     )
-    return _preflight_items_or_exit(items, warns_to_stderr=warns_to_stderr)
+    if reported_policy and "known-unsupported" in reported_policy.ignore:
+        items = [item for item in items if item.code != "known-unsupported"]
+    return _preflight_items_or_exit(
+        items, warns_to_stderr=warns_to_stderr, known_reported=reported_policy is not None
+    )
 
 
 def _preflight_items_or_exit(
-    items: "list[PreflightItem]", *, warns_to_stderr: bool = False
+    items: "list[PreflightItem]", *, warns_to_stderr: bool = False, known_reported: bool = False
 ) -> "list[PreflightItem]":
     """Report preflight and refuse ERRORs before acquiring runtime effects (DL-437, DL-41)."""
     for item in items:
+        if known_reported and item.code == "known-unsupported":
+            continue
         target = f" {item.job}" if item.job else ""
         typer.echo(
             f"preflight {item.severity} [{item.code}]{target}: {item.message}",
@@ -467,6 +474,7 @@ def _run_main_config_checked(path: Path, *, ui: bool, hooks: HookSettings, raw: 
                 std_file_mode=profile.std_file_mode,
                 hook_configured=hooks.status_hook is not None,
                 set_job_attribute_environmentals=profile.set_job_attribute_environmentals,
+                reported_policy=LintPolicy.model_validate(estate.metadata["config"]["lint"]),
             )
         if ui:
             import_tui_or_exit_2()
@@ -987,6 +995,14 @@ async def _serve_run(
                     and hook_settings.status_hook is not None,
                     preflight_warnings=restart_warnings,
                 )
+                # DL-466: restart reports active warnings without applying lint refusal policy.
+                if (
+                    captured_estate is not None
+                    and "known-unsupported" in captured_estate.metadata["config"]["lint"]["ignore"]
+                ):
+                    restart_warnings = [
+                        item for item in restart_warnings if item.code != "known-unsupported"
+                    ]
                 printed = {(item.code, item.job, item.message) for item in warns}
                 _preflight_items_or_exit(
                     [
@@ -1605,6 +1621,12 @@ def rehearse(
         timezone_map_source=timezone_map_source,
         semantics=switches,
         warns_to_stderr=output is RehearseFormat.json,
+        job_shell=profile.job_shell if main_path is not None else None,
+        job_profile=profile.job_profile if main_path is not None else None,
+        std_file_mode=profile.std_file_mode if main_path is not None else "append",
+        reported_policy=LintPolicy.model_validate(prepared.metadata["config"]["lint"])
+        if prepared is not None
+        else None,
     )
     try:
         adapter, events = _scenario_adapter(scenario)
