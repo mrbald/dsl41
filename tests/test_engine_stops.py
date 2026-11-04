@@ -14,6 +14,7 @@ import contextlib
 import json
 import os
 import signal
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -215,7 +216,8 @@ def test_failure_after_readiness_cleans_pre_record_child(
     from dsl41.runner_wrapper import PAUSE_ENV
     from test_kill_signals import signal_command
 
-    command, ready, _ = signal_command(tmp_path)
+    command, ready, _ = signal_command(tmp_path, name="child_" + "x" * 80, exits=(15,))
+    monkeypatch.setenv("COLUMNS", "40")
     monkeypatch.setenv(PAUSE_ENV, "post_spawn_pre_record")
 
     async def scenario():
@@ -224,7 +226,7 @@ def test_failure_after_readiness_cleans_pre_record_child(
         wrapper = None
         try:
             _start_jobs(engine, "j")
-            await _until(ready.exists)
+            await _until(lambda: ready.exists() and ready.read_text().strip().isdigit())
             launch = engine.attempt_facts(engine.attempt_view("j")["run_id"]).launch
             wrapper = launch.proc.pid
             wrapper_token = proc_start_token(wrapper)
@@ -232,13 +234,28 @@ def test_failure_after_readiness_cleans_pre_record_child(
             assert not (launch.spool / "spawn.json").exists()
             child = int(ready.read_text())
             child_token = proc_start_token(child)
+            full_command = subprocess.run(
+                ["ps", "-ww", "-p", str(child), "-o", "command="],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+            before = f"pid={child} token={child_token!r} ps={full_command!r}"
+            assert child_token is not None and verify_alive(child, child_token), before
+            assert full_command.returncode == 0 and str(ready.with_suffix(".py")) in (
+                full_command.stdout
+            ), before
+            print("before cleanup:", before)
             with pytest.raises(AssertionError, match="injected after readiness"):
                 try:
                     raise AssertionError("injected after readiness")
                 finally:
-                    survivors = cleanup_owned_processes(tmp_path, grace=0.1)
-            assert len(survivors) == 1 and str(ready) in survivors[0]
-            assert f"pid={child}" in survivors[0] and not verify_alive(child, child_token)
+                    survivors = cleanup_owned_processes(tmp_path)
+            print("cleanup report:", survivors)
+            assert len(survivors) == 1 and str(ready) in survivors[0], (before, survivors)
+            assert f"pid={child}" in survivors[0] and f"token={child_token!r}" in survivors[0]
+            assert not verify_alive(child, child_token), (before, survivors)
         finally:
             if wrapper is not None:
                 with contextlib.suppress(ProcessLookupError):
@@ -247,6 +264,78 @@ def test_failure_after_readiness_cleans_pre_record_child(
         assert not verify_alive(wrapper, wrapper_token)
 
     asyncio.run(scenario())
+
+
+def test_cleanup_owned_processes_reports_empty_ready(tmp_path: Path) -> None:
+    from conftest import cleanup_owned_processes
+    from dsl41.runner_procid import proc_start_token, verify_alive
+
+    (tmp_path / "empty.ready").touch()
+    script = tmp_path / "child.py"
+    script.write_text("import time\ntime.sleep(60)\n")
+    child = subprocess.Popen([sys.executable, str(script)])
+    try:
+        token = proc_start_token(child.pid)
+        assert token is not None and verify_alive(child.pid, token)
+        ready = tmp_path / "child.ready"
+        ready.write_text(str(child.pid))
+        evidence: list[str] = []
+        reports = cleanup_owned_processes(tmp_path, evidence=evidence)
+        assert len(reports) == 2, (reports, evidence)
+        assert any("invalid readiness" in report and "empty.ready" in report for report in reports)
+        assert any(f"pid={child.pid}" in report and str(ready) in report for report in reports)
+        assert not verify_alive(child.pid, token), (reports, evidence)
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
+
+
+@pytest.mark.parametrize("rejected", ["command", "ps", "token"])
+def test_cleanup_owned_processes_reports_unverified_without_signalling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rejected: str
+) -> None:
+    from conftest import cleanup_owned_processes
+    from dsl41 import runner_procid
+
+    script = tmp_path / "child.py"
+    started = tmp_path / "started"
+    script.write_text(
+        f"import time\nfrom pathlib import Path\nPath({str(started)!r}).touch()\ntime.sleep(60)\n"
+    )
+    child = subprocess.Popen([sys.executable, str(script)])
+    try:
+        asyncio.run(_until(started.exists))
+        (tmp_path / "child.ready").write_text(str(child.pid))
+        (tmp_path / "spawn.json").write_text(
+            json.dumps(
+                {
+                    "command_pid": child.pid,
+                    "command_start_time": runner_procid.proc_start_token(child.pid),
+                }
+            )
+        )
+        if rejected == "command":
+            script.unlink()
+        elif rejected == "ps":
+            run = subprocess.run
+
+            def failed_ps(args, **kwargs):
+                if args[:2] == ["ps", "-ww"]:
+                    return subprocess.CompletedProcess(args, 1, "", "injected ps failure")
+                return run(args, **kwargs)
+
+            monkeypatch.setattr(subprocess, "run", failed_ps)
+        else:
+            monkeypatch.setattr(runner_procid, "proc_start_token", lambda pid: None)
+        sent = []
+        monkeypatch.setattr(runner_procid, "signal_ours", lambda *args: sent.append(args))
+        reports = cleanup_owned_processes(tmp_path)
+        assert len(reports) == 1 and reports[0].startswith("unverified "), reports
+        assert "stdout=" in reports[0] and "token=" in reports[0] and "alive=True" in reports[0]
+        assert not sent and child.poll() is None
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
 
 
 def _kinds(run_root: Path, kind: str) -> list[dict[str, Any]]:
