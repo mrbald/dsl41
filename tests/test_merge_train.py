@@ -91,6 +91,8 @@ if cfg.get('fail') and cfg['fail'] in ' '.join([tool, *args]): sys.exit(9)
 if cfg.get('hang') == tool:
     child = subprocess.Popen([sys.executable, '-c',
         'import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(60)'], env=env)
+    print('stdout before stop', flush=True)
+    print('stderr before stop', file=sys.stderr, flush=True)
     P(cfg['ready']).write_text(json.dumps(dict(group=os.getpid(), child=child.pid)))
     time.sleep(60)
 if tool == 'notify':
