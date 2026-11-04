@@ -9,6 +9,7 @@ sent past the refusal. The socket protocol itself is tested elsewhere.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ import dsl41.cli_control as cli_control
 from dsl41.cli import app
 
 runner = CliRunner()
+ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 _HEADER = {"baseline_id": "b-1", "epoch": 3}
 
@@ -93,7 +95,8 @@ def test_explicit_socket_overrides_environment(socket_command, socket_calls, mon
 def test_socket_option_is_required_without_environment(socket_command, socket_calls) -> None:
     result = runner.invoke(app, list(socket_command))
     assert result.exit_code == 2
-    assert "Missing option" in result.output and "--socket" in result.output
+    output = ANSI.sub("", result.output)
+    assert "Missing option" in output and "--socket" in output
     assert socket_calls == []
 
 
