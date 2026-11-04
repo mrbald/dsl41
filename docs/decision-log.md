@@ -25814,3 +25814,20 @@ relitigate an entry; append a new one.
   watch. No existing records, journal or snapshot formats, state version, shared
   canonicalization or engine stopping paths change. Large match sets increase poll
   and evidence volume; an indistinguishable five-field replacement cannot be detected.
+- DL-465 Five-day dependency cooldown (2026-11-04; owner ruling; README Release)
+  uv excludes registry artifacts younger than five days through
+  `[tool.uv] exclude-newer = "5 days"`. Both Dependabot ecosystems, uv and
+  github-actions, use `cooldown.default-days: 5` for version updates.
+  Both schedules remain monthly, so dependencies can be older than five days.
+  The delay gives new releases time before the locked environment adopts them.
+  uv also delays security fixes, despite Dependabot's security-update exemption.
+  An urgent fix needs a per-package `exclude-newer-package` exception under
+  `[tool.uv]` in pyproject.toml, committed with the regenerated uv.lock.
+  A command-line-only override leaves the lock inconsistent with ordinary
+  `--locked` validation. No exception tooling is added.
+  uv 0.13.6 records the relative span as `exclude-newer-span = "P5D"` in lock
+  revision 5, with schema version 1. Its placeholder `exclude-newer` timestamp
+  is a compatibility sentinel, not an evaluated cutoff. Existing package pins,
+  artifacts and hashes stay unchanged. The drill images' uv 0.9.7 pins can
+  install the frozen lock but do not enforce the relative setting.
+  No engine behavior, stopping path, runtime format or frozen contract changes.
