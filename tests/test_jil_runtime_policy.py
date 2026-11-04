@@ -94,6 +94,18 @@ REFUSALS += [
 ]
 
 
+@pytest.mark.parametrize("attributes,kind,code", [row for row in REFUSALS if row[2] == "std-file"])
+def test_std_file_refusal_is_reported_once(attributes, kind, code):
+    jobs = catalog(attributes, kind)
+    findings = [item for item in runner_preflight.preflight(jobs) if item.code == code]
+    assert len(findings) == 1 and findings[0].severity == "ERROR"
+    assert runner_preflight.runtime_variable_preflight(jobs) == []
+    with pytest.raises(EngineError) as caught:
+        runner_startup.start_run(jobs, None, clock=RealClock(), adapters={"CMD": FakeAdapter()})
+    assert str(caught.value).count("preflight ERROR [std-file]") == 1
+    assert "runtime-variable" not in str(caught.value)
+
+
 @pytest.mark.parametrize("attributes,kind,code", REFUSALS)
 def test_shared_policy_refuses_start_restart_and_reload(
     tmp_path, monkeypatch, attributes, kind, code

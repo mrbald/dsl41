@@ -866,6 +866,9 @@ def runtime_variable_preflight(
         env.update(symbolic_environment(name))
         try:
             resolve_streams(job, env, cwd=Path("/"))
+        except PolicyRefused:
+            # Execution-policy preflight owns std-file findings (DL-460).
+            continue
         except RuntimeVariableError as exc:
             items.append(
                 PreflightItem(severity="ERROR", code="runtime-variable", job=name, message=str(exc))

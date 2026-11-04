@@ -22,7 +22,7 @@ import signal
 import sqlite3
 import subprocess
 import sys
-from contextlib import closing
+from contextlib import closing, suppress
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,8 +36,8 @@ from dsl41 import runner_procid, runner_startup, runner_stops
 from dsl41.ir import lower_source
 from dsl41.oracle_state import Event
 from dsl41.runner import Engine
-from dsl41.runner_adapters import FakeAdapter, JobAdapter
-from dsl41.runner_clock import EngineError, VirtualClock
+from dsl41.runner_adapters import FakeAdapter, JobAdapter, LocalCommandAdapter
+from dsl41.runner_clock import Clock, EngineError, RealClock, VirtualClock
 from dsl41.runner_config import EngineSettings
 from dsl41.runner_control import ControlServer
 from dsl41.runner_startup import resume_run, start_run
@@ -61,6 +61,7 @@ def _open(
     *,
     marked: dict[str, str] | None = None,
     at: datetime = T0,
+    clock: Clock | None = None,
 ) -> list[dict[str, Any]]:
     """A run root whose engine died with an attempt of each of `jobs` open (FakeAdapter parks
     them); answers their dispatch records in seq order."""
@@ -69,16 +70,27 @@ def _open(
         engine = start_run(
             lower_source(text),
             run_root,
-            clock=VirtualClock(start=T0),
+            clock=clock if clock is not None else VirtualClock(start=T0),
             adapters={"CMD": FakeAdapter(default=None)},
             non_idempotent=marked,
         )
         for job in jobs:
             engine.inject(Event(at=at, kind="STARTJOB", payload={"job": job}))
-        await engine.run_until_quiescent(at)
-        await engine.shutdown()
-        assert engine.journal is not None
-        engine.journal.close()  # the engine dies: no shutdown record
+        loop = asyncio.create_task(engine.run_until_quiescent(at))
+        try:
+            if engine.clock.virtual:
+                await loop
+            else:
+                async with asyncio.timeout(3):
+                    while not all(job in engine.dispatches for job in jobs):
+                        await asyncio.sleep(0)
+        finally:
+            loop.cancel()
+            with suppress(asyncio.CancelledError):
+                await loop
+            await engine.shutdown()
+            assert engine.journal is not None
+            engine.journal.close()  # the engine dies: no shutdown record
 
     asyncio.run(first())
     return [b for _, k, b in rows(run_root) if k == "dispatch"]
@@ -236,6 +248,42 @@ def test_parent_lost_is_stopped_lifeline_and_reruns_or_holds(tmp_path: Path, mar
         assert engine.evidence["j"]["cause"] == "lifeline"
     else:
         assert [b["ordinal"] for _, k, b in rows(run_root) if k == "dispatch"] == [1, 2]
+
+
+@pytest.mark.parametrize("prefix", [">", ">>"])
+def test_std_file_prefixes_on_restart_replacement(tmp_path, prefix):
+    out, err = tmp_path / "out", tmp_path / "err"
+    for path in (out, err):
+        path.write_text("first\n")
+    text = (
+        "insert_job: j\njob_type: c\ncommand: echo replacement; echo replacement >&2\n"
+        f"std_out_file: {prefix}{out}\nstd_err_file: {prefix}{err}\n"
+    )
+    root = tmp_path / "run"
+    clock = RealClock()
+    [first] = _open(root, text, ["j"], clock=clock, at=clock.now())
+    _write(first, "status.json", outcome="terminated", cause="parent lost")
+
+    async def scenario():
+        engine = await resume_run(
+            lower_source(text),
+            root,
+            clock=RealClock(),
+            adapters={"CMD": LocalCommandAdapter()},
+            settings=GRACE,
+        )
+        try:
+            await engine.run_until_quiescent(datetime.max)
+            assert engine.oracle.store.job["j"].status == "SUCCESS"
+        finally:
+            await _close(engine)
+
+    asyncio.run(scenario())
+    attempts = [body for _, kind, body in rows(root) if kind == "dispatch"]
+    assert [(body["run_number"], body["ordinal"]) for body in attempts] == [(1, 1), (1, 2)]
+    assert attempts[0]["paths"] == attempts[1]["paths"]
+    for path in (out, err):
+        assert path.read_text() == ("first\n" if prefix == ">>" else "") + "replacement\n"
 
 
 def test_a_closing_attempt_is_never_observed_again(tmp_path: Path) -> None:

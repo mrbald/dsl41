@@ -362,9 +362,32 @@ The engine captures cwd once at start, so a later deleted cwd does not
 change path anchoring. Version-28 readers require valid dispatch data and S;
 missing or damaged data refuses before recovery effects.
 
-When `std_out_file` / `std_err_file` are set, stdout/stderr
-**append** to them (the vendor appends). Otherwise they append to
-`<run_root>/logs/<job>.<run_number>.{out,err}`. Whether the engine
+When `std_out_file` / `std_err_file` are set, stdout/stderr append to
+them unless the source value starts with `>` (DL-460). A leading `>`
+truncates or creates a regular file before each launch; `>>` appends.
+The path must immediately follow the prefix. The engine strips the prefix
+before variable expansion and stores the resolved path in the dispatch.
+Expanded values remain literal. Use `./>name` or an absolute path to name
+a file whose name starts with `>` literally. Output prefixes on
+`std_in_file` refuse. Unset outputs append to
+`<run_root>/logs/<job>.<run_number>.{out,err}`.
+
+The engine prepares `>` outputs after dispatch commits and before wrapper
+launch. It uses a nonblocking open, truncates only regular files, and closes
+the descriptor. If opening fails, or the target is nonregular, the engine
+leaves it to the wrapper's ordinary open behavior. This includes `/dev/null`;
+a FIFO can still wait for a reader in the wrapper. Preparation errors after
+a successful open prevent launch and report spawn failure.
+New files use mode `0600` before umask; existing permissions stay.
+The wrapper input stays unchanged and the wrapper opens outputs for append.
+
+A replacement attempt of the same run applies `>` again. Replay alone
+does not touch output files or reinterpret stored paths. An already aborted
+launch skips preparation. A stop during wrapper creation or a later launch
+failure can leave the output truncated, as a shell stopped after redirection
+can. Preparation is not rolled back if the other stream fails.
+
+Whether the engine
 unescapes `\:` inside command/std_* values is the DL-39 [?]. Verbatim
 carry applies here too. There is no timeout logic (term_run_time is the
 oracle's timer). **No retry logic**: n_retrys is FAILURE-only (Q4,

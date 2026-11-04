@@ -343,7 +343,13 @@ Output and refusal handling: [run CLI](../src/dsl41/cli_run.py) and
 
 Job output goes to each job's `std_out_file` and `std_err_file` when set.
 Each unset path falls back to `<run_root>/logs/<job>.<run>.{out,err}`.
-The engine appends job output, as AutoSys does.
+An unprefixed path or `>>path` appends. `>path` truncates or creates a
+regular file before each launch, including a restart replacement of the
+same run (DL-460). Put the path immediately after the prefix. Use `./>name`
+or an absolute path for a literal filename beginning with `>`.
+Special files such as `/dev/null` retain the wrapper's ordinary open
+behavior. [Runner design §6](runner-design.md#6-adapters) defines
+preparation failures and interruption limits.
 It does not archive or delete job output, or monitor disk space.
 The site's archiver may move only finished job output.
 It must leave everything else in the run root untouched, including `runs/`,
