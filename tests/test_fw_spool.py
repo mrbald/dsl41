@@ -313,8 +313,10 @@ def test_pr34_a_start_line_resumes_the_watch_without_a_second_one(tmp_path: Path
     assert all(r["run_id"] == effect["run_id"] for r in lines)
 
 
+@pytest.mark.parametrize("wildcard", [False, True])
 def test_pr34a_a_completing_poll_then_a_crash_injects_the_completion_from_the_log(
     tmp_path: Path,
+    wildcard: bool,
 ) -> None:
     """PR-34a. The sibling window: a completing poll is appended and the
     engine dies before the STATUS input is durable. Resume meets a log whose
@@ -327,21 +329,25 @@ def test_pr34a_a_completing_poll_then_a_crash_injects_the_completion_from_the_lo
     run_root = tmp_path / "run"
 
     async def first() -> None:
-        engine = _start_engine(_catalog(watch_file), run_root, VirtualClock(start=T0))
+        engine = _start_engine(
+            _catalog(tmp_path / "watch*" if wildcard else watch_file),
+            run_root,
+            VirtualClock(start=T0),
+        )
         await engine.run_until_quiescent(T0 + timedelta(seconds=90))
         assert engine.oracle.store.job["w"].status == "SUCCESS"
         await _close(engine)
 
     asyncio.run(first())
     completed = _lines(run_root)
-    assert completed[-1]["stable_polls"] == 2
+    assert read_watch_log(_log_path(run_root).parent).complete
 
     _crash_before_the_completion(run_root)
     watch_file.unlink()  # the world moved on: a re-poll would never complete
 
     async def second():
         engine = await resume_run(
-            _catalog(watch_file),
+            _catalog(tmp_path / "watch*" if wildcard else watch_file),
             run_root,
             clock=VirtualClock(start=T0),
             adapters={"FW": FileWatcherAdapter()},
@@ -367,8 +373,10 @@ def _catalog_no_min_size(watch_file: Path, *, interval: int = 60):
     )
 
 
+@pytest.mark.parametrize("wildcard", [False, True])
 def test_dl258_an_immediate_qualifying_poll_then_a_crash_injects_from_the_log(
     tmp_path: Path,
+    wildcard: bool,
 ) -> None:
     """DL-258's resume ladder: `fw-existence=immediate` with no
     watch_file_min_size completes on the run's FIRST poll when the file
@@ -381,7 +389,7 @@ def test_dl258_an_immediate_qualifying_poll_then_a_crash_injects_from_the_log(
     watch_file = tmp_path / "watched"
     watch_file.write_bytes(b"abcdef")  # present before the job even starts
     run_root = tmp_path / "run"
-    catalog = _catalog_no_min_size(watch_file)
+    catalog = _catalog_no_min_size(tmp_path / "watch*" if wildcard else watch_file)
 
     async def first() -> None:
         engine = start_run(
@@ -397,8 +405,10 @@ def test_dl258_an_immediate_qualifying_poll_then_a_crash_injects_from_the_log(
 
     asyncio.run(first())
     completed = _lines(run_root)
-    assert completed[-1]["stable_polls"] == 1  # one poll, not FW_STABLE_POLLS's two
-    assert completed[-1]["qualifying"] is True
+    assert (
+        read_watch_log(_log_path(run_root).parent).stable_polls == 1
+    )  # one poll, not FW_STABLE_POLLS's two
+    assert read_watch_log(_log_path(run_root).parent).qualifying is True
 
     _crash_before_the_completion(run_root)
     watch_file.unlink()  # the world moved on: a re-poll would never complete
@@ -558,7 +568,8 @@ def test_pr34_a_recorded_count_the_observations_cannot_derive_refuses(tmp_path: 
         read_watch_log(run_dir)
 
 
-def test_pr34_the_adapter_refuses_to_adopt_a_strangers_watch(tmp_path: Path) -> None:
+@pytest.mark.parametrize("sampled", [False, True])
+def test_pr34_the_adapter_refuses_to_adopt_a_strangers_watch(tmp_path: Path, sampled: bool) -> None:
     """The window between the preflight and the adapter's own read: a log
     that appeared there naming another run must refuse at THIS read too --
     adopting it would poll a watch the WAL never dispatched."""
@@ -579,6 +590,15 @@ def test_pr34_the_adapter_refuses_to_adopt_a_strangers_watch(tmp_path: Path) -> 
         )
         + b"\n"
     )
+    if sampled:
+        from dsl41.runner_adapters import append_watch_line
+
+        append_watch_line(
+            run_dir / WATCH_LOG, _sample(run_id="00000000-0000-4000-8000-000000000bad")
+        )
+    with (run_dir / WATCH_LOG).open("ab") as stream:
+        stream.write(b'{"kind":')
+    before = (run_dir / WATCH_LOG).read_bytes()
     ctx = AdapterContext(
         clock=VirtualClock(start=datetime(2026, 7, 1, 8, 0)),
         run_root=tmp_path,
@@ -590,6 +610,8 @@ def test_pr34_the_adapter_refuses_to_adopt_a_strangers_watch(tmp_path: Path) -> 
             await FileWatcherAdapter().run(catalog.jobs["j"], 1, ctx)
 
     asyncio.run(scenario())
+
+    assert (run_dir / WATCH_LOG).read_bytes() == before
 
 
 def test_pr34_an_unversioned_line_is_unsupported_evidence(tmp_path: Path) -> None:
@@ -670,3 +692,221 @@ def test_a_watch_log_tail_is_repaired_before_the_next_append(tmp_path: Path) -> 
     log.write_bytes(b'{"a": 1}\n{"b": ')
     repair_tail(log)
     assert log.read_bytes() == b'{"a": 1}\n'
+
+
+def _sample(*, at=T0, files=None, run_id="r"):
+    return {
+        "artifact_format_version": 1,
+        "kind": "sample",
+        "run_id": run_id,
+        "at": at,
+        "files": files
+        if files is not None
+        else [
+            {"path": "/a.csv", "device": 1, "inode": 2, "size": 5, "mtime_ns": -10, "ctime_ns": 20}
+        ],
+    }
+
+
+def _sample_log(tmp_path, records):
+    start = {"artifact_format_version": 1, "kind": "start", "run_id": "r", "at": T0}
+    (tmp_path / WATCH_LOG).write_bytes(
+        b"".join(canonical_bytes(r) + b"\n" for r in [start, *records])
+    )
+    return read_watch_log(tmp_path)
+
+
+@pytest.mark.parametrize("prefix", ["none", "empty_sample", "scalar"])
+def test_watch_sample_mapping_and_legacy_prefix(tmp_path: Path, prefix: str) -> None:
+    records = []
+    if prefix == "empty_sample":
+        records.append(_sample(files=[]))
+    elif prefix == "scalar":
+        records.append(
+            {
+                "artifact_format_version": 1,
+                "kind": "poll",
+                "at": T0,
+                "run_id": "r",
+                "exists": True,
+                "size": 5,
+                "qualifying": True,
+                "stable_polls": 1,
+            }
+        )
+    last_at = T0 + timedelta(seconds=60 * len(records))
+    log = _sample_log(tmp_path, [*records, _sample(at=last_at)])
+    assert log.run_id == "r" and log.start_at == T0 and log.last_at == last_at
+    assert log.size is None and log.qualifying and not log.complete
+    assert log.stable_polls == 1 and log.watch_seq == len(records) + 2
+    assert log.pattern.polls == len(records) + 1 and log.pattern.stable == {"/a.csv": 1}
+    assert log.pattern.previous["/a.csv"].mtime_ns == -10
+    assert log.next_poll_at(60) == last_at + timedelta(seconds=60)
+    assert (log.watch_seq == 2 and log.qualifying) == (prefix == "none")
+    log = _sample_log(
+        tmp_path, [*records, _sample(at=last_at), _sample(at=last_at + timedelta(seconds=60))]
+    )
+    assert log.complete and log.pattern.complete and log.stable_polls == 2
+
+
+def test_watch_sample_unknown_fields_are_ignored(tmp_path: Path) -> None:
+    base = _sample_log(tmp_path, [_sample()])
+    sample = _sample()
+    sample["future"] = {"optional": True}
+    sample["files"][0]["future"] = 7
+    assert _sample_log(tmp_path, [sample]) == base
+
+
+def test_watch_scalar_poll_after_sample_refuses(tmp_path: Path) -> None:
+    _sample_log(tmp_path, [_sample()])
+    path = tmp_path / WATCH_LOG
+    with path.open("ab") as stream:
+        stream.write(
+            canonical_bytes({"artifact_format_version": 1, "kind": "poll", "run_id": "r", "at": T0})
+            + b"\n"
+        )
+    before = path.read_bytes()
+    with pytest.raises(EngineError, match="kind 'poll'"):
+        read_watch_log(tmp_path)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "existence, restart_at",
+    [
+        (existence, restart_at)
+        for existence in ("stable", "immediate")
+        for restart_at in ("empty", "sample", "replacement", "disappearance")
+    ]
+    + [("immediate", "start")],
+)
+def test_fw_glob_waiting_restart_preserves_progress(
+    tmp_path: Path, existence: str, restart_at: str
+) -> None:
+    watch = tmp_path / "a.csv"
+    root = tmp_path / "run"
+    catalog = _catalog(tmp_path / "*.csv", min_size=0)
+
+    async def scenario():
+        engine = start_run(
+            catalog,
+            root,
+            clock=VirtualClock(start=T0),
+            adapters={"FW": FileWatcherAdapter(existence=existence)},
+        )
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "w"}))
+        await engine.run_until_quiescent(T0)
+        stop_at = T0
+        if restart_at not in ("empty", "start"):
+            watch.write_text("data")
+            stop_at += timedelta(seconds=60)
+            await engine.run_until_quiescent(stop_at)
+        assert engine.oracle.store.job["w"].status == "RUNNING"
+        await _close(engine)
+        prefix = _log_path(root).read_bytes()
+        if restart_at == "start":
+            prefix = prefix.splitlines(keepends=True)[0]
+            _log_path(root).write_bytes(prefix)
+            assert read_watch_log(_log_path(root).parent).watch_seq == 1
+            watch.write_text("data")
+        elif restart_at == "replacement":
+            replacement = tmp_path / "replacement"
+            replacement.write_text("data")
+            replacement.replace(watch)
+        elif restart_at == "disappearance":
+            watch.unlink()
+        elif restart_at == "empty":
+            watch.write_text("data")
+        engine = await resume_run(
+            catalog,
+            root,
+            clock=VirtualClock(start=stop_at),
+            adapters={"FW": FileWatcherAdapter(existence=existence)},
+        )
+        if restart_at == "start":
+            await engine.run_until_quiescent(stop_at)
+            assert engine.oracle.store.job["w"].status == "SUCCESS"
+            assert engine.oracle.store.job["w"].exit_code == 0
+            assert [r["kind"] for r in _lines(root)] == ["start", "sample"]
+        else:
+            await engine.run_until_quiescent(stop_at + timedelta(seconds=59))
+            assert _log_path(root).read_bytes() == prefix
+            await engine.run_until_quiescent(stop_at + timedelta(seconds=60))
+            assert engine.oracle.store.job["w"].status == (
+                "SUCCESS" if restart_at == "sample" else "RUNNING"
+            )
+        if restart_at == "disappearance":
+            watch.write_text("data")
+            await engine.run_until_quiescent(stop_at + timedelta(seconds=120))
+            assert engine.oracle.store.job["w"].status == "RUNNING"
+        await engine.run_until_quiescent(stop_at + timedelta(seconds=180))
+        assert engine.oracle.store.job["w"].status == "SUCCESS"
+        await _close(engine)
+        assert _log_path(root).read_bytes().startswith(prefix)
+        lines = _lines(root)
+        assert sum(r["kind"] == "start" for r in lines) == 1
+        dispatches = [r for r in _journal_records(root) if r["rec"] == "dispatch"]
+        assert len(dispatches) == 1
+        assert {r["run_id"] for r in lines} == {dispatches[0]["run_id"]}
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("existence", ["stable", "immediate"])
+def test_fw_legacy_glob_waiting_restart_uses_samples(tmp_path: Path, existence: str) -> None:
+    root = tmp_path / "run"
+    catalog = _catalog(tmp_path / "*.csv", min_size=0)
+
+    async def scenario():
+        engine = start_run(
+            catalog,
+            root,
+            clock=VirtualClock(start=T0),
+            adapters={"FW": FileWatcherAdapter(existence=existence)},
+        )
+        engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "w"}))
+        await engine.run_until_quiescent(T0)
+        await _close(engine)
+        start = _lines(root)[0]
+        legacy = {
+            "artifact_format_version": 1,
+            "kind": "poll",
+            "at": T0,
+            "run_id": start["run_id"],
+            "exists": False,
+            "size": None,
+            "qualifying": False,
+            "stable_polls": 0,
+        }
+        prefix = canonical_bytes(start) + b"\n" + canonical_bytes(legacy) + b"\n"
+        _log_path(root).write_bytes(prefix)
+        (tmp_path / "a.csv").write_text("data")
+        engine = await resume_run(
+            catalog,
+            root,
+            clock=VirtualClock(start=T0),
+            adapters={"FW": FileWatcherAdapter(existence=existence)},
+        )
+        await engine.run_until_quiescent(T0 + timedelta(seconds=59))
+        assert _log_path(root).read_bytes() == prefix
+        await engine.run_until_quiescent(T0 + timedelta(seconds=60))
+        assert engine.oracle.store.job["w"].status == "RUNNING"
+        await engine.run_until_quiescent(T0 + timedelta(seconds=120))
+        assert engine.oracle.store.job["w"].status == "SUCCESS"
+        await _close(engine)
+        assert _log_path(root).read_bytes().startswith(prefix)
+        assert [r["kind"] for r in _lines(root)] == ["start", "poll", "sample", "sample"]
+        assert len([r for r in _journal_records(root) if r["rec"] == "dispatch"]) == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("version", [None, True, 2])
+def test_watch_sample_version_refuses(tmp_path: Path, version) -> None:
+    sample = _sample()
+    if version is None:
+        del sample["artifact_format_version"]
+    else:
+        sample["artifact_format_version"] = version
+    with pytest.raises(EngineError, match="artifact_format_version"):
+        _sample_log(tmp_path, [sample])

@@ -25789,3 +25789,28 @@ relitigate an entry; append a new one.
   as a shell stopped after redirection can. Earlier preparation is not rolled back if
   the other stream fails. No stopping path is added. std_file_mode activation, broader
   process preparation, retries and alarms remain outside this item.
+- DL-461 Wildcard file watchers use durable pathname samples (2026-11-04;
+  runner-design §6, protocol-evolution §1).
+  A final-component `*` or `?` watch completes when any one matching file meets
+  the existing minimum-size and existence rule. Bourne hidden-file rules apply;
+  `.` and `..` never match. Directory wildcards and recursion remain unsupported.
+  Wildcard stability requires unchanged device, inode, size, mtime_ns and ctime_ns
+  across two qualifying polls, independently per pathname and file identity.
+  Replacement or disappearance resets the pathname's streak. Exact paths retain
+  size-only stability. The immediate exception applies only to the run's original
+  first poll with no positive minimum size. A non-UTF-8 match is ignored with one
+  warning per name per watch run, and again after an engine restart resumes the
+  watch; sampled records use plain `path` strings.
+  `read_watch_log` is the single evidence reader. Every `watch.jsonl` line keeps
+  artifact_format_version 1. The local `kind` distinguishes `start`, scalar `poll`
+  and wildcard `sample`; samples carry the five metadata fields and canonical
+  timestamps. The permitted sequence is one start, scalar polls, then samples.
+  An incomplete scalar wildcard log keeps its prefix, deadline and poll count;
+  pathname streaks start empty. A scalar poll after sampling refuses. The exact-path
+  adapter refuses sampled evidence before repair or append. A completing observation
+  survives restart without another observation, even if the file has disappeared.
+  Scalar evidence remains readable without retirement. Older binaries refuse sampled
+  evidence by kind and quarantine it on startup, so rollback cannot continue that
+  watch. No existing records, journal or snapshot formats, state version, shared
+  canonicalization or engine stopping paths change. Large match sets increase poll
+  and evidence volume; an indistinguishable five-field replacement cannot be detected.
