@@ -38,7 +38,7 @@ settings and the token-bound runtime revision but excluded from job-definition h
 (DL-447). An environment-only update stops nothing and may apply while boxes run.
 
 Refusals, all as `RereadRefused`: a load error, a lint finding of error or warning severity
-(`--strict`), a preflight ERROR, and a running box the plan edits. The preflight is the
+(`--strict`), a preflight ERROR. Running boxes are restarted by update (DL-463). The preflight is the
 runner-design ss8 preflight minus the rules that need the launch profile: job type, the execution
 inputs (envvars, global substitution, check files), calendars, timezones, retry, resources, oracle
 construction and the skeleton cycle. Its WARNs go into `plan.json` as `preflight_warnings`.
@@ -293,7 +293,7 @@ def _lint_findings(estate: Estate) -> list[str]:
     ]
 
 
-def _preflight(
+def preflight_items(
     estate: Estate, start: datetime | None, startup_env: Mapping[str, str] | None = None
 ) -> list[PreflightItem]:
     """Main config checks its launch settings; legacy plans defer them (DL-437, DL-432)."""
@@ -395,15 +395,37 @@ def spec_texts(parsed: Sequence[JilFile], catalog: CatalogIR) -> dict[str, str]:
     return texts
 
 
-def stop_set(plan: Plan, live: Live) -> tuple[str, ...]:
+def box_members(catalog: CatalogIR, boxes: Sequence[str]) -> set[str]:
+    """All descendants of the named boxes (DL-463)."""
+    members = set(boxes)
+    while True:
+        more = {name for name, job in catalog.jobs.items() if job.box.box_name in members}
+        if more <= members:
+            return members - set(boxes)
+        members |= more
+
+
+def restart_boxes(plan: Plan, live: Live, candidate: CatalogIR) -> tuple[str, ...]:
+    """Only outermost structurally edited running boxes need a forced start (DL-463)."""
+    boxes = set(running_boxes(plan, candidate, live.status))
+    nested = set().union(*(box_members(live.catalog, (box,)) for box in boxes))
+    return tuple(sorted(boxes - nested))
+
+
+def stop_set(plan: Plan, live: Live, candidate: CatalogIR | None = None) -> tuple[str, ...]:
     """Changed or removed jobs with a process that is up, sorted. A box has none (spec-reload
     step 5). `reread` previews it and the update's admission finds it again."""
-    names = [change.name for change in plan.changed] + list(plan.removed)
+    names = {change.name for change in plan.changed} | set(plan.removed)
+    if candidate is not None:
+        roots = restart_boxes(plan, live, candidate)
+        names |= box_members(live.catalog, roots) | box_members(candidate, roots)
     return tuple(
         sorted(
             name
             for name in names
-            if live.status.get(name) in STOPPABLE and live.catalog.jobs[name].job_type != "BOX"
+            if name in live.catalog.jobs
+            and live.status.get(name) in STOPPABLE
+            and live.catalog.jobs[name].job_type != "BOX"
         )
     )
 
@@ -442,7 +464,7 @@ def reread(
         findings = _lint_findings(estate)
     if findings:
         raise RereadRefused(findings)
-    items = _preflight(estate, start, live.path_environment)
+    items = preflight_items(estate, start, live.path_environment)
     errors = [item for item in items if item.severity == "ERROR"]
     if errors:
         raise RereadRefused(
@@ -452,10 +474,7 @@ def reread(
             ]
         )
     plan = diff(live.catalog, estate.catalog, live.settings, estate.settings)
-    boxes = running_boxes(plan, estate.catalog, live.status)
-    if boxes:
-        raise RereadRefused([f"box_running {box}" for box in boxes])
-    stop = stop_set(plan, live)
+    stop = stop_set(plan, live, estate.catalog)
     restored = tuple(
         (name, tuple(live.tombstones[name])) for name in plan.added if live.tombstones.get(name)
     )

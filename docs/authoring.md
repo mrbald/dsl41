@@ -527,7 +527,8 @@ A condition may refer to a job in another selected input.
 Select each JIL or Python definition once; do not include a module and its generated JIL together.
 
 Selecting Python executes trusted authoring code during preparation.
-Preparation captures the generated JIL for the plan; update does not import Python.
+The engine prepares in an isolated worker under its startup cwd/environment.
+Update captures current generated JIL before applying it (DL-463).
 Imported dependencies are not fully tracked.
 Use prebuilt JIL from [§1](#1-write-jil-or-use-the-python-dsl) when the handoff needs a reproducible build.
 
@@ -554,7 +555,7 @@ The main config's lint policy defaults to `refuse = "none"` and `ignore = []`.
 `error` blocks unignored errors; `warn` blocks warnings too; info never blocks.
 Under `none`, exit 0 can include findings.
 Lint exits 1 for blocking findings and 2 for refused inputs.
-Blocking findings make `rehearse --config` and `reread` refuse with exit 2.
+Blocking findings refuse rehearsal/application. Passive reread reports them beside a diff when compilation succeeds (DL-463).
 For an estate brought in under [§5](#5-bring-an-existing-autosys-estate-in),
 set `refuse = "warn"` to apply the `--strict` migration gate in [§4.4](#44-run-the-checks-in-order).
 Input, lowering, exception and preflight errors cannot be suppressed by this policy.
@@ -563,13 +564,14 @@ Compare the rehearsal's trace, counts and statuses with the intended runs before
 
 The operator follows [Reload a changed estate](deploy.md#reload-a-changed-estate).
 The operator owns engine restarts and host settings.
-Reread captures a plan and prints the changed jobs, their sources, and running jobs it would stop.
-Update applies the captured bytes against the revision reread saw, even if source files change.
-A later source edit needs another reread and reviewed update.
-
-The operator must consent with `--stop-running` when the update would stop running jobs.
-Without that consent, the engine refuses the update (DL-427, DL-432).
-Unchanged jobs keep running.
+Reread only reports current inputs and findings. Update rereads and applies them through
+the same engine socket, using -S or DSL41_SOCKET (DL-463). No token or consent is required.
+Ordinary stopped jobs rerun as the same run or hold under the existing interruption rule.
+A restarted box opens a new run; normal successors see the old run's end. Before its
+FORCE_STARTJOB, every marked member whose row is not INACTIVE is put ON_HOLD, including
+members that finished earlier. After a mid-restart crash, do that hold step before
+operator force-start; automatic completion of the box restart is not promised (DL-463).
+Outside a restarted box, unchanged jobs keep running.
 An edit to `estate.timezone`, `estate.timezone_map`, `[estate.semantics]` or
 `insert_xinst` records marks every job changed and can stop every running job.
 Affected jobs wait while the engine stops their attempts and applies the plan.

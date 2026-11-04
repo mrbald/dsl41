@@ -687,15 +687,14 @@ in host-only loading, and the pending-source scan blocks the loop.
 
 **Configuration.** A `configs` row holds the catalog, `RuntimeProfile` and
 non-idempotent marks. Main-config rows also hold captured source bytes and
-mapping (DL-437). `reread` captures a candidate and returns a token;
-`update TOKEN` applies exactly those bytes against the revision it read
-(DL-432). It stops only changed or removed jobs. Touched jobs wait behind
-its dispatch filter. A structural edit of a RUNNING box refuses; a changed
-box with the same members swaps in place. The engine commits `config intent`,
-stops its set through the attempt tier, then swaps the catalog, settings and
-marks in one loop step with `config applied`. It replaces scheduler entries,
-preserves oracle timers and tombstones, and advances time for the owed scan.
-Stopped outcomes choose their plans under the applied catalog and marks.
+mapping (DL-437). `reread -S SOCKET` passively reports current launch-config inputs. `update -S SOCKET`
+prepares current inputs itself (DL-463). Ordinary jobs keep the interruption rule:
+stop, swap, then choose rerun/hold/none under the new catalog. Structural running-box
+changes stop members, commit KILLJOBs before application to prevent old-run replacement,
+then hold every marked non-INACTIVE member (including finished members) before a new
+outermost box run. A crash can leave that box stopped; hold marked non-INACTIVE members
+before operator force-start. Successors observe the old run's end. Artifacts keep their
+existing formats, and there is no extra box-restart recovery protocol (DL-463).
 An unfinished stop keeps the update in STOPPING; this path has no cancel verb.
 
 Without `engine.db`, genesis is allowed only without surviving runtime
@@ -725,7 +724,7 @@ starting with non-empty state (DL-433):
 
    For a legacy launch: on a root no update touched, a catalog-hash mismatch
    refuses, so semantics never drift silently; a changed estate needs a fresh
-   run root, or `dsl41 reread` then `dsl41 update`. On a root an update touched, compare the launch's estate
+   run root. Socket reread/update refuse JIL-only launches (DL-463). On a root an update touched, compare the launch's estate
    job by job with the applied configuration, or the open update's
    candidate, ignoring paths (DL-432). A runtime-profile mismatch refuses
    by name, except that the currently supplied `kill_signals` list is accepted
@@ -1104,7 +1103,9 @@ frozen inventory; what follows is what each is for.
   for a live FW run, a `watching {file, interval, min_size}`
   object (DL-68), and a `spec_drift` flag — a lazy fingerprint re-check of the
   loaded input files; the flag tells the operator the running catalog
-  differs from disk. `reread` and `update` adopt disk changes (DL-432). The CLI adds
+  differs from disk. `reread` reports disk changes; `update` adopts them (DL-463). The optional
+  per-job reread annotation is the last preview, cleared by failed/new reread,
+  applied update and restart. Drift still compares against the applied capture. The CLI adds
   scriptable predicates `is-success`/`is-failed` (print status, exit
   0/1) over the status verb.
 - **subscribe** — stream the store's wire records from a seq (the UI feed;
@@ -1125,7 +1126,7 @@ dependencies.
 The app is a **client of the control socket only** — never in-process with
 the engine. This split is forced, not stylistic. textual-serve spawns one
 app instance per browser session, so an in-process engine hands every
-viewer a private universe. Views: jobs table (status, run_number, pending
+viewer a private universe. Views: jobs table (status with a cached reread annotation (DL-463), run_number, pending
 timers/alarms), explain pane ("waiting on: s(A) ∧ ¬f(B)" with live truth),
 log tail (the §6 std files), event console (sendevent verbs), job-details
 popup (the `spec` block + `deps` needs/blocks lines + a short log tail),

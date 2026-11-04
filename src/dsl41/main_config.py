@@ -295,7 +295,8 @@ def prepare(path: Path, raw: bytes | None = None) -> Estate:
                     data.decode("utf-8")
                     generated = module_builder(module, source=data).to_jil().encode("utf-8")
                 except (Exception, SystemExit) as exc:
-                    raise RereadRefused([f"{module}: Python preparation failed: {exc}"]) from exc
+                    detail = exc.__cause__ or exc
+                    raise RereadRefused([f"{module}: Python preparation failed: {detail}"]) from exc
                 add(str(module), "generated", generated)
         metadata: dict[str, Any] = {
             "format_version": 1,
@@ -425,6 +426,30 @@ def from_parts(parts: Sequence[tuple[str, bytes]]) -> Estate:
         StopIteration,
     ) as exc:
         raise RereadRefused([str(exc)]) from exc
+
+
+def verified_from_parts(parts: Sequence[tuple[str, bytes]]) -> Estate:
+    """Bind prepared source metadata to its captured config bytes (DL-463)."""
+    estate = from_parts(parts)
+    try:
+        records = estate.metadata["records"]
+        configs = [record for record in records if record["role"] == "config"]
+        if len(configs) != 1 or [name for name, _ in parts] != [
+            record["name"] for record in records
+        ] + [CAPTURE]:
+            raise ValueError("capture membership or config record differs")
+        path = Path(estate.metadata["config_path"])
+        if not path.is_absolute() or configs[0]["path"] != str(path):
+            raise ValueError("capture config path differs")
+        config = load_config(path, dict(parts)[configs[0]["name"]])
+        if (
+            config.model_dump(mode="json") != estate.metadata["config"]
+            or launch_settings(config, path) != estate.metadata["launch"]
+        ):
+            raise ValueError("capture config bytes and metadata differ")
+    except (ValueError, KeyError, TypeError) as exc:
+        raise RereadRefused([str(exc)]) from exc
+    return estate
 
 
 def policy_report(estate: Estate) -> tuple[LintPolicy, LintReport]:

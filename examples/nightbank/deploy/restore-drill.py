@@ -111,11 +111,8 @@ def drill(dsl41: str, root: Path, config: Path, inputs: Path, night: Path, state
         "insert_job: DRILL_RESTORE_ICE_C\njob_type: c\ncommand: true\n"
         "machine: bank_core\ncondition: v(DRILL_GATE) = OPEN\n"
     )
-    plan = cli("reread", "--config", str(config))
-    token = next(
-        line.removeprefix("token: ") for line in plan.splitlines() if line.startswith("token: ")
-    )
-    cli("update", token, "--config", str(config), "--wait")
+    cli("reread", "-S", socket)
+    cli("update", "-S", socket, "--wait")
     revision = status()["config_rev"]
     event("ON_HOLD", "DRILL_RESTORE_HOLD_C")
     event("ON_ICE", "DRILL_RESTORE_ICE_C")

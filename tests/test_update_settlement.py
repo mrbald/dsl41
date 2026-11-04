@@ -112,7 +112,7 @@ def _adopt(engine: Engine, job: str, attempt: str, pgid: int) -> None:
 
 
 async def _request(engine: Engine, token: str) -> Any:
-    answer = engine.request_update(UpdateRequest(token, True, 1, engine.baseline_id, "u1"))
+    answer = engine.request_update(UpdateRequest(token, 1, engine.baseline_id, "u1"))
     await engine.run_until_quiescent(engine.clock.now())
     return answer.result()
 
@@ -304,12 +304,12 @@ def test_a_retry_is_answered_from_its_admission_while_the_engine_drains(
         jobs = {"j": "sleep 31"} if when == "stopping" else {"j": "sleep 30", "k": "y"}
         _estate(tmp_path, _jil(jobs))
         token = _plan(engine, tmp_path)
-        request = UpdateRequest(token, True, 1, engine.baseline_id, "u1")
+        request = UpdateRequest(token, 1, engine.baseline_id, "u1")
         first = engine.request_update(request)
         await engine.run_until_quiescent(engine.clock.now())
         stop = engine.request_stop()
         retry = engine.request_update(request)
-        fresh = engine.request_update(UpdateRequest(token, True, 1, engine.baseline_id, "u2"))
+        fresh = engine.request_update(UpdateRequest(token, 1, engine.baseline_id, "u2"))
         await engine.run_until_quiescent(engine.clock.now())
         seen.extend([first.result(), retry.result(), fresh.result(), stop.result()])
         engine.stops.cancel_all()
@@ -495,7 +495,7 @@ def _crashed_update(
         marked = {"b": "posts twice"} if mark_b else None
         _estate(tmp_path, _jil({"j": "sleep 31", "b": "sleep 30", **changed}), marked)
         token = _plan(engine, tmp_path)
-        fingerprint = UpdateRequest(token, True, 1, engine.baseline_id, "u1").fingerprint
+        fingerprint = UpdateRequest(token, 1, engine.baseline_id, "u1").fingerprint
         intent = {
             "event": "intent",
             "at": engine.clock.now().isoformat(),

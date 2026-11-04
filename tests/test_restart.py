@@ -1335,7 +1335,7 @@ def test_a_completed_watch_a_resumed_update_touches_is_fed_before_the_applicatio
         ids = {a.job: a.attempt for a in table.values()}
         _estate(tmp_path, jil("y", "/tmp/dsl41-two"))
         token = reread(tmp_path / "estate", engine.update.live(), run_root / "plans").token
-        fingerprint = UpdateRequest(token, True, 1, engine.baseline_id, "u1").fingerprint
+        fingerprint = UpdateRequest(token, 1, engine.baseline_id, "u1").fingerprint
         intent = {
             "event": "intent",
             "at": T0.isoformat(),

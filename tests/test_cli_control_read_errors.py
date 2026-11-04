@@ -167,7 +167,7 @@ def test_reload_socket_commands_use_the_same_diagnostics(
 
     monkeypatch.setattr(socket.socket, "connect", fail)
     with pytest.raises(SendFailed) as raised:
-        socket_send(short_root)(verb, {"token": "0" * 64})
+        socket_send(path)(verb, {})
     expected = (
         _permission_message(path)
         if error in (errno.EACCES, errno.EPERM)
@@ -181,18 +181,15 @@ def test_reload_socket_commands_use_the_same_diagnostics(
 def test_reload_cli_reports_plain_connect_errors(
     command: str, error: int, monkeypatch: pytest.MonkeyPatch, short_root: Path
 ) -> None:
-    from dsl41 import cli_reload
 
     path = short_root / "control.sock"
-    monkeypatch.setattr(cli_reload, "read_plan", lambda *_args: {"live_rev": 1})
 
     def fail(_socket: socket.socket, address: str) -> None:
         assert address == str(path)
         raise OSError(error, os.strerror(error))
 
     monkeypatch.setattr(socket.socket, "connect", fail)
-    argument = str(short_root) if command == "reread" else "0" * 64
-    result = runner.invoke(app, [command, argument, "--run-root", str(short_root)])
+    result = runner.invoke(app, [command, "-S", str(path)])
     expected = (
         _permission_message(path)
         if error in (errno.EACCES, errno.EPERM)
@@ -206,10 +203,8 @@ def test_reload_cli_reports_plain_connect_errors(
 def test_update_connect_failure_after_the_header_prints_no_recovery_receipt(
     monkeypatch: pytest.MonkeyPatch, short_root: Path
 ) -> None:
-    from dsl41 import cli_reload
 
     path = short_root / "control.sock"
-    monkeypatch.setattr(cli_reload, "read_plan", lambda *_args: {"live_rev": 1})
     calls: list[str] = []
     real_roundtrip = runner_control.roundtrip
 
@@ -220,7 +215,7 @@ def test_update_connect_failure_after_the_header_prints_no_recovery_receipt(
         return real_roundtrip(socket_path, request, **kwargs)
 
     monkeypatch.setattr(runner_control, "roundtrip", answer_header)
-    result = runner.invoke(app, ["update", "0" * 64, "--run-root", str(short_root)])
+    result = runner.invoke(app, ["update", "-S", str(path)])
     assert calls == ["status", "update"]
     assert result.exit_code == 2, result.output
     assert result.stderr == f"dsl41: no engine is running at {path}\n"
@@ -364,18 +359,15 @@ def test_socket_commands_report_a_busy_engine(
 def test_reload_cli_reports_a_busy_engine(
     verb: str, error: int, monkeypatch: pytest.MonkeyPatch, short_root: Path
 ) -> None:
-    from dsl41 import cli_reload
 
     path = short_root / "control.sock"
-    monkeypatch.setattr(cli_reload, "read_plan", lambda *_args: {"live_rev": 1})
 
     def busy(_socket: socket.socket, address: str) -> None:
         assert address == str(path)
         raise OSError(error, os.strerror(error))
 
     monkeypatch.setattr(socket.socket, "connect", busy)
-    argument = str(short_root) if verb == "reread" else "0" * 64
-    result = runner.invoke(app, [verb, argument, "--run-root", str(short_root)])
+    result = runner.invoke(app, [verb, "-S", str(path)])
     assert result.exit_code == 2, result.output
     assert result.stderr == f"dsl41: the engine at {path} is busy; try again\n"
     assert result.stdout == ""

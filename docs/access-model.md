@@ -31,7 +31,7 @@ operate and administer.
 There are three tiers, strictly nested: **read < ops < adm**. They are one
 enum, not a flag matrix.
 
-- **read**: every query verb, the store stream (DL-428) and the observer TUI.
+- **read**: ordinary query verbs, the store stream (DL-428) and the observer TUI.
   Read discloses data; it is not harmless. `spec` shows job commands,
   `globals` shows runtime values, `subscribe` streams the store's wire
   records (control-protocol §5), and job logs can hold credentials. Grant it
@@ -42,17 +42,17 @@ enum, not a flag matrix.
   "break-glass" tier and no per-verb deny overlay. Either would be a
   second policy axis and a sparse flag matrix. Break-glass is a receipt
   category (§6), not an authorization dimension.
+- **adm**: ops, plus `engine_stop` (DL-429), `reread` and `update` (DL-463).
+  Configuration files and retention settings also require filesystem
+  authority (§2). A socket tier does not grant filesystem access.
 
 The `catalog` query has two environment projections (DL-447).
 READ gets `job_env` names only and no inherited names. OPS/ADM get the
-complete runtime environment view required by `reread`.
+complete runtime environment view. Engine-owned reread does not fetch it from a client (DL-463).
 The gate supplies authenticated authority to the response projection.
 Claimed actors and request fields supply no authority.
 Redaction removes values; it never substitutes empty strings.
-`reread` refuses a redacted response instead of using the client's environment.
-- **adm**: ops, plus `engine_stop` (DL-429) and `update` (DL-432).
-  Configuration files and retention settings also require filesystem
-  authority (§2). A socket tier does not grant filesystem access.
+ADM `reread` compiles the configured inputs under the engine identity (DL-463).
 
 DL-427 defines update admission; DL-424 rules the excluded anchor, prune and reclaim surfaces.
 
@@ -406,9 +406,9 @@ action, which stops the process.
 `SIGHUP` reloads the armed access map's contents only. It does not reread
 the main config or apply estate changes. Main-config host settings,
 including the access-map path, apply at restart (DL-437).
-`dsl41 reread` and `dsl41 update` adopt job configuration through the
+`dsl41 reread` previews and `dsl41 update` adopts job configuration through the
 [control protocol §2](control-protocol.md#2-transport-and-framing-frozen)
-(DL-432).
+(DL-463).
 
 Install is receipt-gated, in this order: validate the complete candidate,
 sync the `policy_loaded` receipt, then install the snapshot. A policy
@@ -544,8 +544,8 @@ for the tier it falls under. It is not a second classification axis.
 | `status`, `trace`, `explain`, `spec`, `deps`, `timers`, `plan`, `global`, `globals`, `subscribe` | — | read |
 | `sendevent` | the externally injectable verbs (control-protocol §3): `STARTJOB`, `FORCE_STARTJOB`, `KILLJOB`, `ON_ICE`/`OFF_ICE`, `ON_HOLD`/`OFF_HOLD`, `ON_NOEXEC`/`OFF_NOEXEC`, `DISARM` (DL-158), `RELEASE_RESOURCE` (DL-256), `SET_GLOBAL`, `CHANGE_STATUS`. The internal EventKinds (`STATUS`, `TIMER`, the alarms) have no wire door: the dispatcher refuses them like any unknown verb | ops |
 | `engine_stop` (`dsl41 engine stop`: drains the engine and ends its process) | — | adm |
-| `catalog` (`dsl41 reread`: the running catalog, settings, rev, statuses and host settings; DL-437) | — | read |
-| `update` (`dsl41 update`: applies a stored plan, stopping the running jobs it changes or removes) | — | adm |
+| `catalog` (the running catalog, settings, rev, statuses and host settings; DL-437) | — | read |
+| `reread`, `update` (engine-owned preview and direct application; DL-463) | — | adm |
 
 CLI semantic tiers (the only enforcement is filesystem access, and these
 tiers enforce nothing, §2):
@@ -557,8 +557,7 @@ tiers enforce nothing, §2):
 - Ops: `sendevent`, `off-hold-all` (a sweep of `sendevent
   OFF_HOLD` requests, so ops by composition; DL-311, DL-423).
 - Adm: `run`, `engine stop` (the socket's `engine_stop`, the systemd unit's
-  `ExecStop`), `reread` (it writes the plan under the run root's `plans/`;
-  its socket verb is the read-tier `catalog`), `update` (the socket's
+  `ExecStop`), `reread` (the ADM preparation request; DL-463), `update` (the socket's
   `update`, DL-432), and `serve` (it exposes the web service).
 
 DL-421, DL-422 and DL-423's release/estate tier rules resolve to DL-424.
