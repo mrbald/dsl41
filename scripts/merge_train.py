@@ -156,12 +156,14 @@ def command(
     ) as process:
         try:
             stdout, stderr = process.communicate(input_bytes, timeout=timeout)
-        except BaseException:
+        except BaseException as exc:
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            process.communicate()
+            stdout, stderr = process.communicate()
+            if isinstance(exc, subprocess.TimeoutExpired):
+                exc.stdout, exc.stderr = stdout, stderr
             raise
         return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
 
@@ -199,7 +201,20 @@ class Train:
     def run(self, *cmd: str, cwd: Path | None = None, ok: tuple[int, ...] = (0,)) -> bytes:
         try:
             result = command(cmd, cwd or self.root, self.env, self.args.command_timeout)
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except subprocess.TimeoutExpired as exc:
+            self.event(
+                command=cmd,
+                status=None,
+                stdout=(exc.stdout or b"").decode(errors="replace"),
+                stderr=(exc.stderr or b"").decode(errors="replace"),
+            )
+            output = (
+                f"output: {self.records / 'log.jsonl'}" if self.records else "records unavailable"
+            )
+            raise Stop(
+                "command-failed", f"{cmd}: timed out after {exc.timeout}s; {output}"
+            ) from exc
+        except OSError as exc:
             raise Stop("command-failed", f"{cmd[0]}: {exc}") from exc
         self.event(
             command=cmd,
