@@ -102,11 +102,151 @@ async def _until(predicate: Any) -> None:
 
 
 async def _finish(engine: Engine, loop: asyncio.Future[Any]) -> None:
-    async with asyncio.timeout(TIMEOUT_S):
-        await loop
-    await engine.shutdown()
-    assert engine.journal is not None
-    engine.journal.close()
+    original = sys.exception()
+    try:
+        async with asyncio.timeout(TIMEOUT_S):
+            if loop.done():
+                await loop
+            if not engine.draining:
+                stop = engine.request_stop()
+                done, _ = await asyncio.wait({stop, loop}, return_when=asyncio.FIRST_COMPLETED)
+                if loop in done:
+                    await loop
+                if stop.done():
+                    stop.result()
+                else:
+                    stop.cancel()
+            await loop
+    except BaseException as exc:
+        if original is None:
+            original = exc
+            raise
+        if exc is not original:
+            original.add_note("loop cleanup: " + repr(exc))
+    finally:
+        try:
+            async with asyncio.timeout(TIMEOUT_S):
+                await engine.shutdown()
+        except BaseException as exc:
+            if original is None:
+                original = exc
+                raise
+            original.add_note("shutdown cleanup: " + repr(exc))
+        finally:
+            try:
+                assert engine.journal is not None
+                engine.journal.close()
+            except BaseException as exc:
+                if original is None:
+                    raise
+                original.add_note("journal cleanup: " + repr(exc))
+
+
+def test_finish_after_completed_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def scenario():
+        engine = _start(tmp_path / "run", _jil({"j": "true"}))
+        closed = []
+        close = engine.journal.close
+
+        def closing():
+            close()
+            closed.append(True)
+
+        monkeypatch.setattr(engine.journal, "close", closing)
+        loop = asyncio.create_task(engine.run_until_quiescent(datetime.max))
+        async with asyncio.timeout(5):
+            await engine.request_stop()
+            await loop
+            stop = engine.request_stop()
+            assert loop.done() and not stop.done()
+            await _finish(engine, loop)
+        assert stop.done() and closed == [True]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("body_failed", [False, True])
+@pytest.mark.parametrize("shutdown", ["raises", "timeout"])
+def test_finish_preserves_failure_through_cleanup(
+    monkeypatch: pytest.MonkeyPatch, body_failed: bool, shutdown: str
+) -> None:
+    monkeypatch.setattr(sys.modules[__name__], "TIMEOUT_S", 0.05)
+    primary = AssertionError("body failed" if body_failed else "loop failed")
+    closed = []
+
+    async def failed():
+        raise primary if not body_failed else RuntimeError("loop failed too")
+
+    async def shutdown_engine():
+        if shutdown == "timeout":
+            await asyncio.Event().wait()
+        raise OSError("shutdown failed")
+
+    def close():
+        closed.append(True)
+        raise OSError("journal close failed")
+
+    async def scenario():
+        loop = asyncio.create_task(failed())
+        await asyncio.gather(loop, return_exceptions=True)
+        engine = SimpleNamespace(
+            draining=True, shutdown=shutdown_engine, journal=SimpleNamespace(close=close)
+        )
+        with pytest.raises(AssertionError) as caught:
+            if body_failed:
+                try:
+                    raise primary
+                finally:
+                    await _finish(engine, loop)
+            else:
+                await _finish(engine, loop)
+        assert caught.value is primary and closed == [True]
+        assert any("shutdown cleanup" in note for note in primary.__notes__)
+        assert any("journal cleanup" in note for note in primary.__notes__)
+
+    asyncio.run(scenario())
+
+
+def test_failure_after_readiness_cleans_pre_record_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from conftest import cleanup_owned_processes
+    from dsl41.runner_procid import proc_start_token, verify_alive
+    from dsl41.runner_wrapper import PAUSE_ENV
+    from test_kill_signals import signal_command
+
+    command, ready, _ = signal_command(tmp_path)
+    monkeypatch.setenv(PAUSE_ENV, "post_spawn_pre_record")
+
+    async def scenario():
+        engine = _start(tmp_path / "run", _jil({"j": command}))
+        loop = asyncio.create_task(engine.run_until_quiescent(datetime.max))
+        wrapper = None
+        try:
+            _start_jobs(engine, "j")
+            await _until(ready.exists)
+            launch = engine.attempt_facts(engine.attempt_view("j")["run_id"]).launch
+            wrapper = launch.proc.pid
+            wrapper_token = proc_start_token(wrapper)
+            await _until(lambda: _wrapper_stopped(wrapper))
+            assert not (launch.spool / "spawn.json").exists()
+            child = int(ready.read_text())
+            child_token = proc_start_token(child)
+            with pytest.raises(AssertionError, match="injected after readiness"):
+                try:
+                    raise AssertionError("injected after readiness")
+                finally:
+                    survivors = cleanup_owned_processes(tmp_path, grace=0.1)
+            assert len(survivors) == 1 and str(ready) in survivors[0]
+            assert f"pid={child}" in survivors[0] and not verify_alive(child, child_token)
+        finally:
+            if wrapper is not None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(wrapper, signal.SIGCONT)
+            await _finish(engine, loop)
+        assert not verify_alive(wrapper, wrapper_token)
+
+    asyncio.run(scenario())
 
 
 def _kinds(run_root: Path, kind: str) -> list[dict[str, Any]]:
@@ -1137,7 +1277,7 @@ def test_a_group_that_survives_its_ladder_never_settles(
     ],
 )
 def test_an_oracle_kill_stays_the_cause_across_a_drain_and_a_crash(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selected: tuple[int, ...]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, selected: tuple[int, ...], owned_processes
 ) -> None:
     """Astra R2-M2 reopened: the first stop an attempt took is its cause. A KILLJOB stops `j`,
     an operator puts its row back to RUNNING, a drain begins and the engine dies before it sees
@@ -1574,7 +1714,7 @@ def test_a_stop_before_the_spawn_is_observed_keeps_the_next_run_back(
 
 
 def test_pre_spawn_killjob_waits_for_record_then_uses_selected_ladder(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, owned_processes
 ) -> None:
     from dsl41.engine_charts import RECORD_TIMEOUT
     from dsl41.runner_wrapper import PAUSE_ENV
@@ -1621,7 +1761,6 @@ def test_pre_spawn_killjob_waits_for_record_then_uses_selected_ladder(
             if wrapper is not None:
                 with contextlib.suppress(ProcessLookupError):
                     os.kill(wrapper, signal.SIGCONT)
-            await engine.request_stop()
             await _finish(engine, loop)
 
     async def cases():
@@ -1649,7 +1788,7 @@ def _crash_after_int(tmp_path: Path) -> None:
         "signal.signal(signal.SIGTERM, handler)\n"
         "if child:\n"
         f"    Path({str(children)!r}).write_text(str(os.getpid())+'\\n')\n"
-        f"    Path({str(ready)!r}).touch()\n"
+        f"    Path({str(ready)!r}).write_text(str(os.getpid()))\n"
         "else: subprocess.Popen([sys.executable, __file__, 'child'])\n"
         "while True: time.sleep(0.01)\n"
     )
@@ -1683,11 +1822,11 @@ def _crash_after_int(tmp_path: Path) -> None:
         try:
             await _until(lambda: "15" in received.read_text().splitlines())
         finally:
-            await engine.request_stop()
             await _finish(engine, loop)
 
     try:
         asyncio.run(scenario())
+        assert _survivor_gone(int(children.read_text()))
     finally:
         _kill_all(children)
     assert received.read_text().splitlines() == ["2", "15"]
