@@ -1068,6 +1068,7 @@ async def _serve_run(
             # restart started stop before the store closes and the lock is released below
             await engine.shutdown()
             return refuse(exc)
+        engine.control_socket = server.path.absolute()
         loop_task = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
         # a control handler's StatechartError stops the run as one from the loop does
         # (statechart-engine ss5): the handler cancels the loop at once and the run wakes on

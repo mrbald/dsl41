@@ -28,6 +28,19 @@ def valid_dispatch():
     return dict(dispatch_record("J0", 1, attempt=RUN, spool=None, started_at=T0, rev=1).payload)
 
 
+@pytest.mark.parametrize("location", [None, "env", "inherited"])
+def test_socket_environment_keeps_version_28_dispatches_readable(location: str | None) -> None:
+    record = dispatch_record("J0", 1, attempt=RUN, spool=None, started_at=T0, rev=1)
+    if location is not None:
+        record.payload[location]["DSL41_SOCKET"] = "/recorded/control.sock"
+    check_dispatch(record.payload)
+    table = OpenTable()
+    table.note(1, record)
+    payload = table.to_payload()
+    restored = OpenTable.from_payload(decode(canonical_bytes(payload)))
+    assert restored.to_payload() == payload
+
+
 @pytest.mark.parametrize("key", ["first_dispatch_seq", "env", "inherited", "paths", "cwd"])
 def test_required_dispatch_data_refuses_when_absent(key: str) -> None:
     data = valid_dispatch()

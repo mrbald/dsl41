@@ -461,4 +461,5 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-448 | Reader-document procedures are SHOULD defaults | [docs/writing.md](writing.md) |
 | DL-457 | Repairs after a failed gate count as rework; only the owner expands scope | [docs/agents/coordination.md](agents/coordination.md), [docs/agents/operating-model.md](agents/operating-model.md), [docs/agents/review.md](agents/review.md) |
 | DL-458 | Release work follows owner items one by one; release items are planned first | [docs/agent-workflow.md](agent-workflow.md), [docs/agents/coordination.md](agents/coordination.md), [docs/agents/operating-model.md](agents/operating-model.md), [docs/agents/review.md](agents/review.md) |
+| DL-459 | Job control socket environment | [docs/runner-design.md](runner-design.md), [docs/wrapper-protocol.md](wrapper-protocol.md) |
 | DL-460 | Output redirection prefixes | [docs/deploy.md](deploy.md), [docs/incident-triage.md](incident-triage.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
