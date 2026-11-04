@@ -142,12 +142,18 @@ def settings_of(profile: RuntimeProfile, catalog: CatalogIR) -> dict[str, object
         profile.semantics,
         catalog,
         job_env=profile.job_env,
+        runtime_policy={"kill_signals": profile.kill_signals},
     )
 
 
 def profile_for(settings: Mapping[str, Any], base: RuntimeProfile) -> RuntimeProfile:
     """`base` running the estate settings `settings`: the base zone, the timezone map and the
     semantic switches follow the candidate; the machine identity and the FW window stay."""
+    from dsl41.runtime_policy import RuntimePolicySettings
+
+    policy = RuntimePolicySettings.model_validate(
+        {"kill_signals": settings.get("kill_signals", (2, 9))}
+    )
     aliases = settings.get("timezone_aliases")
     return base.model_copy(
         update={
@@ -155,6 +161,7 @@ def profile_for(settings: Mapping[str, Any], base: RuntimeProfile) -> RuntimePro
             "tz_aliases": dict(aliases or {}),
             "semantics": dict(settings.get("semantics") or {}),
             "job_env": dict(settings.get("job_env") or {}),
+            "kill_signals": policy.kill_signals,
         }
     )
 

@@ -178,7 +178,7 @@ def test_a_request_id_is_required() -> None:
 
 
 def test_an_unversioned_or_wrongly_versioned_request_is_refused() -> None:
-    for bad in (None, 1, 2, "3", 4):
+    for bad in (None, 1, 2, "3", 5):
         request = _request(v=bad)
         if bad is None:
             del request["v"]
@@ -466,9 +466,9 @@ def test_a_late_status_after_a_deadline_records_one_kill_and_replays(tmp_path: P
     kills: list[tuple[str, datetime | None]] = []
     real_dispatch = engine._dispatch
 
-    def recording(emitted: list[Event]) -> None:
+    def recording(emitted: list[Event], selected=None) -> None:
         before = set(engine._live)
-        real_dispatch(emitted)
+        real_dispatch(emitted, selected)
         kills.extend((job, engine.frontiers.at) for job in sorted(before - set(engine._live)))
 
     engine._dispatch = recording  # type: ignore[method-assign]
@@ -787,6 +787,7 @@ def test_every_door_refuses_an_unversioned_caller(short_root: Path) -> None:
                 {"cmd": "subscribe", "since": 0},
                 {"cmd": "status", "v": 1},
                 {"cmd": "status", "v": 2},  # gone, not deprecated (DL-118)
+                {"cmd": "status", "v": 5},
             ):
                 answer = await _call(server.path, request)
                 assert answer["ok"] is False

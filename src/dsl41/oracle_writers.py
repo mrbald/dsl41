@@ -131,6 +131,8 @@ class OracleWriters(OracleCascade):
         old = self._runtime(job).status
         self.store.transition(job, new, self._now, line.code, clear_exit_code=line.clear)
         self._record(job, f"{old}->{new}", line.cause)
+        if line.kill:
+            self._kill_emissions.append(len(self._emitted))
         self._emit("STATUS", job=job, status=new)
         if new == "FAILURE" and old != new:
             self._observe_status("job_failure", job, f"{old}->{new}", line.code)
@@ -354,7 +356,7 @@ class OracleWriters(OracleCascade):
         (DL-50, DL-54)."""
         self.store.dequeue_waiter(job)
         self.store.move_flag(job, "arm_off")
-        return StatusLine("KILLJOB (dequeued from QUE_WAIT, DL-50)")
+        return StatusLine("KILLJOB (dequeued from QUE_WAIT, DL-50)", kill=True)
 
     def _w_iced_waiter(self, job: str, outcome: Outcome) -> StatusLine:
         self.store.dequeue_waiter(job)
@@ -374,7 +376,7 @@ class OracleWriters(OracleCascade):
         return StatusLine("ON_NOEXEC on a box: CHANGE_STATUS INACTIVE (DL-254)", clear=True)
 
     def _w_kill(self, job: str, outcome: Outcome) -> StatusLine:
-        return StatusLine("KILLJOB")
+        return StatusLine("KILLJOB", kill=True)
 
     def _w_kill_ignored(self, job: str, outcome: Outcome) -> None:
         status = self._runtime(job).status
@@ -385,11 +387,11 @@ class OracleWriters(OracleCascade):
         )
 
     def _w_term_run_time(self, job: str, outcome: Outcome) -> StatusLine:
-        return StatusLine("term_run_time exceeded (dossier ss5)")
+        return StatusLine("term_run_time exceeded (dossier ss5)", kill=True)
 
     def _w_job_terminator(self, job: str, outcome: Outcome) -> StatusLine:
         box = cast(Rule, outcome.event.payload).box
-        return StatusLine(f"job_terminator: box {box!r} ended")
+        return StatusLine(f"job_terminator: box {box!r} ended", kill=True)
 
     def _w_injected(self, job: str, outcome: Outcome) -> StatusLine:
         return StatusLine("injected STATUS", code=cast(StatusInput, outcome.event.payload).code)
@@ -439,7 +441,9 @@ class OracleWriters(OracleCascade):
 
     def _w_box_terminator(self, job: str, outcome: Outcome) -> StatusLine:
         end = cast(MemberEnd, outcome.event.payload)
-        return StatusLine(f"box_terminator member {end.member!r} ended {end.new} (SEM-14)")
+        return StatusLine(
+            f"box_terminator member {end.member!r} ended {end.new} (SEM-14)", kill=True
+        )
 
     def _w_recompute(self, job: str, outcome: Outcome) -> StatusLine:
         facts = cast(RecomputeFacts, outcome.event.payload)

@@ -1205,7 +1205,7 @@ def test_a_quarantine_of_a_run_the_oracle_ended_has_no_plan_and_keeps_its_eviden
         )
         engine.inject(Event(at=T0, kind="STARTJOB", payload={"job": "j"}))
         await engine.run_until_quiescent(T0)
-        engine._dispatch = lambda emitted: None  # type: ignore[method-assign]
+        engine._dispatch = lambda emitted, selected=None: None  # type: ignore[method-assign]
         at = T0 + timedelta(minutes=1)
         engine.inject(Event(at=at, kind="STATUS", payload={"job": "j", "status": "SUCCESS"}))
         await engine.run_until_quiescent(at)  # the oracle ended the run; its attempt is open

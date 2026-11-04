@@ -54,7 +54,13 @@ from typing import TYPE_CHECKING, Any, Final
 from dsl41 import runner_procid as _procid
 from dsl41.runner_procid import NOTHING_LEFT, Left
 from dsl41.engine_charts import AttemptOutcome
-from dsl41.runner_adapters import Launch, group_has_live_member, spool_record, stop_ladder
+from dsl41.runner_adapters import (
+    Launch,
+    group_has_live_member,
+    spool_record,
+    stop_ladder,
+    selected_signal_ladder,
+)
 from dsl41.runner_attempts import NO_GROUP, command_group
 from dsl41.runner_journal import best_effort_report
 
@@ -93,6 +99,7 @@ class AttemptFacts:
     finished: bool = False
     #: its outcome was committed while its ladder ran: the ladder's end is recorded too
     closing: bool = False
+    kill_signals: tuple[int, ...] | None = None
 
 
 class Observer:
@@ -316,7 +323,13 @@ class EngineStops:
         self.note_laddered(pgid)
         members = self._ladder_members(pgid, start_token)
         attempt = self._attempt_of(pgid, start_token)
-        if attempt in self.termed:
+        facts = None if attempt is None else self.engine.attempt_facts(attempt)
+        selected = None if facts is None else facts.kill_signals
+        if facts is not None:
+            facts.kill_signals = None
+        if selected is not None:
+            await selected_signal_ladder(pgid, start_token, selected, members, pidfd=self.pidfd)
+        elif attempt in self.termed:
             self.termed.discard(attempt)
             await stop_ladder(
                 pgid, start_token, grace_term_s, members=members, term=False, pidfd=self.pidfd
@@ -348,10 +361,13 @@ class EngineStops:
         )
         return terminate
 
-    def kill_wrapper(self, attempt: str) -> None:
-        launch = self.engine.attempt_facts(attempt).launch
+    def kill_wrapper(self, attempt: str) -> bool:
+        facts = self.engine.attempt_facts(attempt)
+        launch = facts.launch
         if launch is not None:  # a restart's attempt has no wrapper of this engine's
-            launch.abort()
+            launch.wait_for_spawn = facts.kill_signals is not None
+            return launch.abort()
+        return False
 
     def arm_timer(self, key: str, generation: int, delay_s: float) -> None:
         self.cancel_timer(key)

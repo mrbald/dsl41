@@ -55,6 +55,7 @@ class StatusLine:
     cause: str
     code: int | None = None
     clear: bool = False
+    kill: bool = False  # DL-462: emission provenance only, never stored event data.
 
 
 class Move:

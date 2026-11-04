@@ -384,11 +384,11 @@ class Processes(Protocol):
     """What the attempt tier asks of the world. Each call returns at once except `ladder`."""
 
     async def ladder(self, pgid: int, start_token: str, grace_term_s: float) -> None:
-        """TERM the group, wait up to `grace_term_s` for it to go, KILL it if it lives. Each
-        signal goes only to a group whose leader still matches `start_token`."""
+        """Run selected KILLJOB signals, otherwise TERM, grace, KILL (DL-462).
+        Ownership uses the existing cookie or group proof (docs/wrapper-protocol.md)."""
 
-    def kill_wrapper(self, attempt: str) -> None:
-        """Kill the attempt's wrapper, which has not yet recorded a launch (DL-359)."""
+    def kill_wrapper(self, attempt: str) -> bool:
+        """Abort an unrecorded launch; True while a selected kill awaits its spawn (DL-462)."""
 
     def arm_timer(self, key: str, generation: int, delay_s: float) -> None:
         """Call `AttemptTier.record_timeout(key, generation)` after `delay_s`; replaces any
@@ -437,6 +437,8 @@ class _Attempt:
     failed: bool = False
     #: a restart is posting the stop the previous engine took: no ladder starts (`restored_stop`)
     quiet: bool = False
+    #: a selected stop is waiting for its live wrapper's spawn record (DL-462)
+    awaiting_spawn: bool = False
 
 
 class AttemptTier:
@@ -692,6 +694,13 @@ class AttemptTier:
             if launched or status is not None:
                 return
             group = command_group(known.spawn)
+            if (
+                known.awaiting_spawn
+                and known.spawn is None
+                and self.processes.kill_wrapper(attempt)
+            ):
+                self.processes.arm_timer(attempt, generation, self.grace_kill_s)
+                return
             if group is not None and self.command_alive(*group):
                 known.survived = True
                 self.processes.command_survived(attempt)
@@ -799,7 +808,7 @@ class AttemptTier:
         if known.quiet:
             return  # a restart's recorded stop: the cleanup runs the ladder (`restored_stop`)
         if known.spawn is None:
-            self.processes.kill_wrapper(attempt)
+            known.awaiting_spawn = self.processes.kill_wrapper(attempt)
         else:
             group = command_group(known.spawn)
             if group is not None:

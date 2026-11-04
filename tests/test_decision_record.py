@@ -440,8 +440,11 @@ def test_v2_request_is_refused_naming_v3() -> None:
     }
     with pytest.raises(EnvelopeError, match="this engine speaks v3"):
         parse_envelope(request, addressed="job:j", baseline_id="the-log")
-    parsed = parse_envelope({**request, "v": 3}, addressed="job:j", baseline_id="the-log")
-    assert parsed.request_id == "r1"
+    for version in (3, 4):
+        parsed = parse_envelope({**request, "v": version}, addressed="job:j", baseline_id="the-log")
+        assert parsed.request_id == "r1"
+    with pytest.raises(EnvelopeError, match="this engine speaks v3 and v4"):
+        parse_envelope({**request, "v": 5}, addressed="job:j", baseline_id="the-log")
 
 
 def test_an_unknown_field_on_a_control_request_is_ignored() -> None:

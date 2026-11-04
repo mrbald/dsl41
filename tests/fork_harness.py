@@ -46,7 +46,7 @@ ORACLE_COPIED = frozenset(
 )
 #: Oracle attributes the fork starts empty: the append-only history, which
 #: an apply reads only by slicing from a length it saved itself.
-ORACLE_FRESH = frozenset({"_trace", "_emitted"})
+ORACLE_FRESH = frozenset({"_trace", "_emitted", "_kill_emissions"})
 #: Oracle attributes false or empty between inputs, so a fork starts with the
 #: same: the settlements owed inside a cascade (DL-340), whether the scan's
 #: last `readmit` moved its waiter, the instances a macrostep reached
@@ -141,6 +141,7 @@ def state_bytes(oracle: Oracle, since: tuple[int, int] = (0, 0)) -> bytes:
         "tombstones": {name: row.model_dump(mode="json") for name, row in store.tombstones.items()},
         "trace": [entry.model_dump(mode="json") for entry in oracle._trace[traced:]],
         "emitted": [_event(ev) for ev in oracle._emitted[emitted:]],
+        "kill_emissions": [index - emitted for index in oracle._kill_emissions if index >= emitted],
         "queue": [_event(ev) for ev in oracle._queue],
         "now": _when(oracle._now),
         "status_observations": None

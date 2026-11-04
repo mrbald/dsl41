@@ -255,6 +255,7 @@ LOG_DIR = "/var/log/dsl41"
 ```
 
 Apply edits with `reread` and `update`; a restart uses the applied revision.
+A restart reads `engine.kill_signals` from the current configuration on disk.
 An edit only to `job_env` advances the revision without stopping jobs,
 including while boxes run (DL-447). Later dispatches and replacements use
 the new map; attempts already running keep their recorded environment.

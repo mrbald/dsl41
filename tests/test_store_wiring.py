@@ -507,7 +507,7 @@ def test_a_pending_dispatch_is_discharged_while_its_run_is_starting(tmp_path: Pa
             clock=VirtualClock(start=T0),
             adapters={"CMD": FakeAdapter(default=None)},
         )
-        engine._dispatch = lambda emitted: None  # type: ignore[method-assign]
+        engine._dispatch = lambda emitted, selected=None: None  # type: ignore[method-assign]
         engine.inject(_ev("STARTJOB", 0, job="j"))
         engine.inject(_ev("STARTJOB", 0, job="k"))
         engine.inject(_ev("KILLJOB", 0.5, job="k"))
@@ -1040,7 +1040,7 @@ def test_owed_starts_stay_pending_until_each_dispatch_commits(tmp_path: Path) ->
             clock=VirtualClock(start=T0),
             adapters={"CMD": FakeAdapter(default=None)},
         )
-        engine._dispatch = lambda emitted: None  # type: ignore[method-assign]
+        engine._dispatch = lambda emitted, selected=None: None  # type: ignore[method-assign]
         engine.inject(_ev("STARTJOB", 0, job="j"))
         engine.inject(_ev("STARTJOB", 0, job="k"))
         await engine.run_until_quiescent(T0 + timedelta(minutes=1))

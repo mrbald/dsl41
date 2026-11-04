@@ -327,11 +327,19 @@ Thus a failing profile fails the job with sh's exit code ([?] unverified
 vendor corner, pinned here — E5). The command runs in its own pgid
 *separate from the wrapper's* (§6a). The wrapper's `status.json` is the
 **sole data channel** for the outcome. The wrapper's exit only tells the
-engine to read it. Cancel (the oracle said terminal, §4): the engine
-signals the command pgid SIGTERM, grace, then SIGKILL. The wrapper
+engine to read it. KILLJOB, including `term_run_time` and terminator kills,
+uses `engine.kill_signals`, default `[2,9]` (INT, KILL), five monotonic seconds
+between rungs (DL-462). The list must end in KILL; escalation ends early when
+no verified target remains. `dsl41 sendevent KILLJOB -J job -k 9 --socket PATH`
+overrides one command and its causal kills, never unrelated time-half kills.
+Other stops use TERM, the command grace, then KILL. The wrapper
 observes the deaths and durably records the outcome like any other
 completion. A cancel before the spec is handed over SIGKILLs the
-wrapper, which has launched nothing.
+wrapper, which has launched nothing. After spec delivery, a selected kill
+keeps the lifeline open until the existing spawn observation starts its ladder.
+The attempt stays unsettled while that launch is pending. A broken wrapper
+that stays alive without writing its spawn record can hold the attempt; the
+ordinary drain deadline still bounds engine exit (DL-462).
 The detached-SPAWN cancellation rule is retired (DL-424; DL-359).
 Stream paths resolve before profile execution (DL-447). The resolver
 substitutes `$VAR` and `${VAR}` once and literally, with no recursive,
@@ -358,6 +366,11 @@ An empty map is omitted from canonical profiles and hashes (DL-447).
 token-bound runtime revision. An environment-only update advances that
 revision while boxes run and stops nothing. Running attempts retain their
 recorded environment; later dispatches and replacements use the new map.
+`kill_signals` is also excluded from job-definition hashes. A policy-only
+update stops nothing, including while boxes run. Later kill effects take
+the new list; an active ladder keeps the tuple captured at its first stop.
+The provenance and selection stay in memory, outside events and snapshots.
+Restart cleanup uses TERM and does not resume selected rungs (DL-462).
 The engine captures cwd once at start, so a later deleted cwd does not
 change path anchoring. Version-28 readers require valid dispatch data and S;
 missing or damaged data refuses before recovery effects.
@@ -664,8 +677,9 @@ roots cannot equal or contain each other.
 
 A main-config restart uses the last applied revision. Source, lint and
 `engine.environment` edits stay pending. Host `as_machine`,
-`machine_policy` and access policy load from disk; invalid host or access
-settings refuse with exit 2. Legacy invocations retain their launch checks.
+`machine_policy`, access policy and `engine.kill_signals` load from disk;
+invalid values refuse with exit 2. The kill list affects later kills, including
+on updated roots. Other legacy launch checks remain in force (DL-462).
 Restart recompiles captures and checks placement and runtime variables
 (DL-437, DL-447). Other preflight rules remain unrun there.
 It has no legacy-root conversion, ignores unknown `[engine]` keys
@@ -714,7 +728,8 @@ starting with non-empty state (DL-433):
    run root, or `dsl41 reread` then `dsl41 update`. On a root an update touched, compare the launch's estate
    job by job with the applied configuration, or the open update's
    candidate, ignoring paths (DL-432). A runtime-profile mismatch refuses
-   by name. A resume with different switches is refused, the same as a changed
+   by name, except that the currently supplied `kill_signals` list is accepted
+   for later kills (DL-462). A resume with different switches is refused, the same as a changed
    `--timezone` (§8a). A main-config restart skips the launch
    estate check and uses the stored revision (DL-437).
 2. Restore snapshot plus tail. Instantiate every open command attempt
@@ -1066,7 +1081,8 @@ frozen inventory; what follows is what each is for.
 - **sendevent parity** (maps 1:1 onto oracle EventKind): STARTJOB,
   FORCE_STARTJOB, KILLJOB, ON_ICE/OFF_ICE, ON_HOLD/OFF_HOLD,
   ON_NOEXEC/OFF_NOEXEC, DISARM (DL-158), RELEASE_RESOURCE (DL-256),
-  SET_GLOBAL, CHANGE_STATUS (inject STATUS).
+  SET_GLOBAL, CHANGE_STATUS (inject STATUS). KILLJOB accepts `-k LIST` through
+  control v4; an older server refuses it without a downgrade (DL-462).
 - **Queries**: `status [job]`, `trace [--since seq]`, `explain <job>` — the
   job's condition shown with per-atom truth over the current store (the
   Cond IR makes this nearly free), `spec <job>` — the preserve-rendered

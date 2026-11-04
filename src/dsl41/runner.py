@@ -154,6 +154,7 @@ from dsl41.runner_admission import (
     ApplyResult,
     Attempt,
     DecisionIndex,
+    DispatchKind,
     Envelope,
     Frontiers,
     RequestCollision,
@@ -1826,7 +1827,22 @@ class Engine:
         # the answer follows the durable decision and does not wait on its dispatch: a dispatch
         # that fails stops the engine with its own error, and never leaves the request unanswered
         self._answer(pending, applied.result)
-        self._dispatch(applied.emitted)
+        # DL-462: time-half kills use the policy; only this command's cascade gets its override.
+        default_signals = (self.profile or RuntimeProfile()).kill_signals
+        override = default_signals
+        if attempt.kind == "KILLJOB" and applied.result.decision == "applied":
+            from dsl41.runtime_policy import RuntimePolicySettings
+
+            override = RuntimePolicySettings.model_validate(
+                {"kill_signals": attempt.payload.get("kill_signals", default_signals)}
+            ).kill_signals
+        selected = {
+            index: override
+            if applied.command_start is not None and index >= applied.command_start
+            else default_signals
+            for index in applied.kill_emissions
+        }
+        self._dispatch(applied.emitted, selected)
         # every start the input decided has its `dispatch` or its `dispatch_pending` now
         self._applying = False
         if pending.step is not None:
@@ -1919,19 +1935,23 @@ class Engine:
             claimed_actor=envelope.claimed_actor if envelope is not None else None,
         )
 
-    def _dispatch(self, emitted: list[Event]) -> None:
+    def _dispatch(
+        self, emitted: list[Event], selected: Mapping[int, tuple[int, ...]] | None = None
+    ) -> None:
         """Carry out what one decided input implies, in the order its events were emitted
         (`dispatch_plan`, ss4). This is the only place a decided start or kill is acted on.
 
         A planned start counts as dispatched for the ghost-run gate whether or not it launches
         (DL-234), so a STARTING overwrite at the same run number plans no second one. A kill
         cancels the live task of the run it names, and nothing if that run is gone."""
+        origins: dict[tuple[DispatchKind, str, int], int] = {}
         plan = dispatch_plan(
             emitted,
             runs={job: rt.run_number for job, rt in self.oracle.store.job.items()},
             dispatched=self._dispatched,
             live={job: run.run_number for job, run in self._live.items()},
             dispatchable=self._dispatchable(),
+            origins=origins,
         )
         for kind, job, run_number in plan:
             if kind == "SPAWN":
@@ -1951,9 +1971,9 @@ class Engine:
             live = self._live.get(job)
             if live is not None and live.run_number == run_number:
                 del self._live[job]
-                self._kill(live)
+                self._kill(live, (selected or {}).get(origins[(kind, job, run_number)]))
 
-    def _kill(self, live: _LiveRun) -> None:
+    def _kill(self, live: _LiveRun, signals: tuple[int, ...] | None = None) -> None:
         """Stop a live attempt the oracle ended. An observed attempt gets `stop` with cause
         `oracle_kill` (one ended already gets nothing), and its task is reaped once the wrapper
         has recorded the end. Any other task is cancelled through its adapter's ladder, and once
@@ -1961,6 +1981,8 @@ class Engine:
         decided the run's end (spec-wiring 2b's interruption rule, step 3)."""
         self._reaping.append(live.task)
         if live.attempt in self._facts:
+            if self.attempts.state(live.attempt) in {"SPAWNING", "RUNNING"}:
+                self._facts[live.attempt].kill_signals = signals
             if self.attempts.state(live.attempt) in UNSETTLED:
                 self.attempts.stop(live.attempt, ORACLE_KILL)
             return

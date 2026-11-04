@@ -950,6 +950,8 @@ async def _killed_run_then_late_completion(run_root: Path) -> None:
     killer = asyncio.create_task(_kill_once_spawned(engine, clock, run_root, "j1", 1))
     await engine.run_until_quiescent(datetime.max)
     await killer  # a spawn that never came surfaces here, not as a silent no-kill
+    status = json.loads((run_root / "runs/j1.1/1/status.json").read_text())
+    assert status["signal"] == 2
     engine.inject(
         Event(
             at=clock.now(),

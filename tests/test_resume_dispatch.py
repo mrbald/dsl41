@@ -148,7 +148,7 @@ async def _start_a_watch(run_root: Path, *, takeover: bool) -> str | None:
     dispatch record bound, None when there is none."""
     engine = _genesis_engine(run_root, _WATCH_JIL, "FW")
     if takeover:
-        engine._dispatch = lambda emitted: None  # type: ignore[method-assign]
+        engine._dispatch = lambda emitted, selected=None: None  # type: ignore[method-assign]
     engine.inject(_ev("STARTJOB", 0, job="w"))
     await engine.run_until_quiescent(T0 + timedelta(minutes=1))
     assert engine.oracle.store.job["w"].status == "RUNNING"
@@ -459,7 +459,7 @@ def test_an_overdue_deadline_applies_before_a_recovered_start_dispatches(
     async def scenario() -> None:
         run_root = short_root / "run"
         engine = _genesis_engine(run_root, jil, "CMD")
-        engine._dispatch = lambda emitted: None  # type: ignore[method-assign]
+        engine._dispatch = lambda emitted, selected=None: None  # type: ignore[method-assign]
         engine.inject(_ev("STARTJOB", 0, job="j"))
         await engine.run_until_quiescent(T0 + timedelta(seconds=30))
         await _close_engine(engine)
@@ -554,7 +554,7 @@ def test_a_recovered_start_dispatches_in_the_call_that_holds_a_deadline_at_now(
     async def scenario() -> None:
         run_root = short_root / "run"
         engine = _genesis_engine(run_root, jil, "CMD")
-        engine._dispatch = lambda emitted: None  # type: ignore[method-assign]
+        engine._dispatch = lambda emitted, selected=None: None  # type: ignore[method-assign]
         engine.inject(_ev("STARTJOB", 1, job="j"))
         await engine.run_until_quiescent(T0 + timedelta(minutes=1))
         await _close_engine(engine)

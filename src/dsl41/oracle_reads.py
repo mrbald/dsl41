@@ -106,6 +106,7 @@ class OracleReads:
             self.store.seed_period(carried.period_id)
         self._trace: list[TraceEntry] = []
         self._emitted: list[Event] = []
+        self._kill_emissions: list[int] = []
         self.status_observations: list[StatusObservation] | None = None
         #: ss3.3: feed times are non-decreasing across the boundary, so an opened interpreter
         #: starts from the instant the seal was taken.
@@ -172,6 +173,7 @@ class OracleReads:
         twin.store = self.store.fork()
         twin._trace = []
         twin._emitted = []
+        twin._kill_emissions = []
         twin.status_observations = None
         twin._tz_cache = dict(self._tz_cache)
         twin._calendars = dict(self._calendars)

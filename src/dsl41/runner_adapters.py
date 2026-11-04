@@ -126,25 +126,30 @@ class Launch:
     #: the lifeline's write end while this process holds it
     lifeline_w: int | None = None
     aborted: bool = False
+    wait_for_spawn: bool = False
 
-    def abort(self) -> None:
+    def abort(self) -> bool:
         """Stop the wrapper before the tier has seen `spawn.json` (the tier's `kill_wrapper`).
         Before the spec is sent the wrapper has launched nothing and is killed (DL-359). After
         it, a `spawn.json` already written names the command, and the adapter's next poll
         posts it, so the tier's ladder stops it; with none, the wrapper may be launching, so
         the lifeline is closed: the wrapper then ends what it launched and records it, as at
-        engine death. A wrapper not yet spawned is stopped by the adapter as soon as it
-        exists."""
+        engine death. A selected KILLJOB instead keeps the lifeline until spawn observation
+        starts its ladder (DL-462). True means that launch is still pending. A wrapper not
+        yet spawned is stopped by the adapter as soon as it exists."""
         self.aborted = True
         if self.proc is None:
-            return
+            return False
         if not self.spec_sent:
             with contextlib.suppress(ProcessLookupError):
                 self.proc.kill()
-            return
+            return False
+        if self.wait_for_spawn:
+            return self.proc.returncode is None
         if self.spool is not None and (self.spool / "spawn.json").exists():
-            return
+            return False
         self.close_lifeline()
+        return False
 
     def close_lifeline(self) -> None:
         if self.lifeline_w is not None:
@@ -708,7 +713,8 @@ async def selected_signal_ladder(
     *,
     pidfd: bool | None = None,
 ) -> None:
-    """Send every selected step to freshly proved targets and retain failures."""
+    """Use fresh cookie proofs at each step, or the initially proved group's continuity.
+    Retain signal failures, as the ordinary stop ladder does (DL-462)."""
     if not signals:
         raise ValueError("signal ladder is empty")
     group_proved = members is None and _procid.verify_alive(pgid, start_token)
