@@ -975,6 +975,8 @@ def _check_configuration(
             " start a fresh run root (no silent semantic drift, ss7)"
         )
     expected = configuration.profile
+    if declared is not None:
+        expected = expected.model_copy(update={"kill_signals": declared.kill_signals})
     if host_settings and declared is not None:
         expected = with_host_settings(expected, declared.as_machine, declared.machine_policy)
     derived = _derive_runtime_profile(scheduler, adapters, base=expected, declared=declared)
@@ -1023,6 +1025,8 @@ def _check_updated(
     from dsl41.runner_update import profile_for, reopen_plan, settings_of
 
     profile = configuration.profile
+    if declared is not None:
+        profile = profile.model_copy(update={"kill_signals": declared.kill_signals})
     target, target_settings = configuration.catalog, settings_of(profile, configuration.catalog)
     if intent is not None:
         estate = reopen_plan(run_root, str(intent["token"])).estate
@@ -1036,6 +1040,7 @@ def _check_updated(
             " with the estate it runs (no silent semantic drift, ss7)"
         )
     expected = profile_for(target_settings, profile)
+    expected = expected.model_copy(update={"kill_signals": profile.kill_signals})
     derived = _derive_runtime_profile(scheduler, adapters, base=expected, declared=declared)
     drift = profile_drift(derived, expected)
     if drift:

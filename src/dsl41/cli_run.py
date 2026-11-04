@@ -446,7 +446,11 @@ def _run_main_config_checked(path: Path, *, ui: bool, hooks: HookSettings, raw: 
         launch = main_config.launch_settings(host, path)
         if estate is not None and launch != estate.metadata["launch"]:
             raise RereadRefused([f"{path}: changed during preparation"])
-        profile = RuntimeProfile() if estate is None else main_config.profile_of(estate)
+        profile = (
+            RuntimeProfile(kill_signals=main_config.load_kill_signals(path, raw))
+            if estate is None
+            else main_config.profile_of(estate)
+        )
         catalog = CatalogIR() if estate is None else estate.catalog
         warns = []
         if estate is not None:
@@ -816,7 +820,10 @@ async def _validate_before_lock(
         if not stored.source_capture:
             raise EngineError("main-config restart requires a stored main-config capture")
         main_config.decoded_parts(stored.source_capture)
-        catalog, profile = stored.catalog, stored.profile
+        catalog, profile = (
+            stored.catalog,
+            stored.profile.model_copy(update={"kill_signals": profile.kill_signals}),
+        )
         assert main_launch is not None
         profile = with_host_settings(
             profile, cast(list[str], main_launch["as_machine"]), str(main_launch["machine_policy"])
@@ -936,7 +943,10 @@ async def _serve_run(
                     if not stored.source_capture:
                         return refuse("main-config restart requires a stored main-config capture")
                     captured_estate = main_config.decoded_parts(stored.source_capture)
-                    catalog, profile = stored.catalog, stored.profile
+                    catalog, profile = (
+                        stored.catalog,
+                        stored.profile.model_copy(update={"kill_signals": profile.kill_signals}),
+                    )
                     assert main_launch is not None
                     from dsl41.runner_config import with_host_settings
 

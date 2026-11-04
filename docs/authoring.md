@@ -698,9 +698,18 @@ KILLJOB, `term_run_time`, terminator cascades and CHANGE_STATUS use the oracle's
 they do not request an automatic replacement (DL-429).
 [SEM-14](autosys-semantics.md#sem-14--box_terminator--job_terminator-vc) defines terminator cascades.
 
-The engine asks a command to stop with TERM, then KILL after the command grace.
-Your SIGTERM cleanup must finish within that grace.
-A stop already recorded remains an interruption even if the command catches TERM and exits 0.
+KILLJOB, `term_run_time` and terminator kills send INT, then KILL five seconds
+later if a verified target remains (DL-462). The operator can set the ordered
+`engine.kill_signals` list; it must end in KILL.
+`dsl41 sendevent KILLJOB -J job -k 9 --socket PATH` overrides one command and its causal kills.
+Engine stop, drain, parent loss, leftover cleanup, CHANGE_STATUS terminal statuses,
+update stops and the stop before a replacement after an injected INACTIVE keep TERM, grace, KILL.
+Your signal cleanup must finish before the next rung.
+A kill before launch starts no command. Once the wrapper has its spec,
+KILLJOB waits for its spawn record and uses the selected ladder. A broken
+wrapper that never records its launch can hold the attempt until the drain
+deadline; see [the attempt limits](blocks/attempts.md#gaps-found).
+A stop already recorded remains an interruption even if the command catches a signal and exits 0.
 It does not become a successful completion that releases successors.
 A command that ended naturally before the stop follows its real outcome through
 [SEM-09](autosys-semantics.md#sem-09--max_exit_success-shifts-successfailure-boundary-v).
@@ -729,7 +738,8 @@ The [status response](control-protocol.md#status-job) shows `attempt` and `inter
 
 | Bound | Default | Where the operator sets it |
 | --- | --- | --- |
-| TERM to KILL | 10 s | `grace_term_s` in the run root's `engine.toml`. |
+| KILLJOB signal interval | 5 s | Fixed; `engine.kill_signals` or `sendevent -k` selects the signals. |
+| Ordinary stop TERM to KILL | 10 s | `grace_term_s` in the run root's `engine.toml`. |
 | Confirmation after KILL | 5 s | `grace_kill_s` in the run root's `engine.toml`. |
 | Attempts per run | 5 | Engine limit; an interruption on attempt 5 holds the job. |
 

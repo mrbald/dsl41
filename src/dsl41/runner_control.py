@@ -93,12 +93,14 @@ from dsl41.runner_access import AccessControl, Tier, peer_principal
 from dsl41.runner_adapters import LINE_LIMIT
 from dsl41.runner_admission import (
     PROTOCOL_VERSION,
+    SUPPORTED_PROTOCOL_VERSIONS,
     AdmissionRefused,
     ApplyResult,
     EnvelopeError,
     RequestCollision,
     addressed_key,
     parse_envelope,
+    unsupported_version,
 )
 from dsl41.runner_clock import EngineError
 from dsl41.runner_codes import UNKNOWN_OUTCOME_CODES, Code
@@ -443,7 +445,7 @@ class ControlServer:
                         writer, _failure("malformed_request", f"bad request: {exc}", refused=True)
                     )
                     continue
-                if request.get("v") != PROTOCOL_VERSION:
+                if request.get("v") not in tuple(SUPPORTED_PROTOCOL_VERSIONS):
                     # control-protocol ss2 refuses a request naming no version or another
                     # (DL-90, DL-118), checked HERE so subscribe, which never reaches
                     # _respond, is not an unversioned door (DL-90). It carries `refused`
@@ -453,9 +455,7 @@ class ControlServer:
                         writer,
                         _failure(
                             "unsupported_version",
-                            f"protocol version {request.get('v')!r}: this engine"
-                            f' speaks v{PROTOCOL_VERSION} -- name it as {{"v":'
-                            f" {PROTOCOL_VERSION}}}",
+                            unsupported_version(request.get("v")),
                             refused=True,
                         ),
                     )
@@ -796,12 +796,26 @@ class ControlServer:
         payload = request.get("payload")
         if not isinstance(payload, dict):
             return _failure("invalid_argument", f"payload must be an object, got {payload!r}")
+        signals: tuple[int, ...] | None = None
+        if request.get("v") == 4 and "kill_signals" in payload:
+            from dsl41.runtime_policy import RuntimePolicySettings
+
+            if verb != "KILLJOB" or not isinstance(payload["kill_signals"], list):
+                return _failure("invalid_argument", "kill_signals requires a KILLJOB signal array")
+            try:
+                signals = RuntimePolicySettings.model_validate(
+                    {"kill_signals": payload["kill_signals"]}
+                ).kill_signals
+            except ValueError as exc:
+                return _failure("invalid_argument", f"invalid kill_signals: {exc}")
         at = self.engine.clock.now()
         if isinstance(verb, str) and verb in JOB_EVENT_VERBS:
             job = payload.get("job")
             if (error := self._check_job(job)) is not None:
                 return error
             ev = Event(at=at, kind=verb, payload={"job": job})
+            if signals is not None:
+                ev.payload["kill_signals"] = list(signals)
         elif verb == "SET_GLOBAL":
             name, value = payload.get("name"), payload.get("value")
             if not (isinstance(name, str) and name):

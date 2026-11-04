@@ -192,6 +192,17 @@ def load_host(path: Path, raw: bytes | None = None) -> HostConfig:
         raise RereadRefused([f"{path}: engine: {exc}"]) from exc
 
 
+def load_kill_signals(path: Path, raw: bytes) -> tuple[int, ...]:
+    """Read only the current kill policy at restart; other estate edits stay pending (DL-462)."""
+    document = read_document(path, raw)
+    try:
+        return RuntimePolicySettings.model_validate(
+            {"kill_signals": document["engine"].get("kill_signals", (2, 9))}
+        ).kill_signals
+    except ValueError as exc:
+        raise RereadRefused([f"{path}: engine.kill_signals: {exc}"]) from exc
+
+
 def launch_settings(config: MainConfig | HostConfig, path: Path) -> dict[str, object]:
     host = config.engine if isinstance(config, MainConfig) else config
     return {
