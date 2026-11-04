@@ -16,6 +16,10 @@ Read the [approved operating model](agents/operating-model.md) for authority, ro
 - Work in the assigned branch and worktree, within the brief's allowed paths.
   One writer owns each slice. Report missing requirements or needed rulings to
   the operator; do not dispatch a reviewer or another model yourself.
+- For a release item, plan first: before editing, return a plan of what changes
+  where, the tests and any contract or format change; build only after the
+  reviewer accepts it. Do only the one release item the brief quotes; report
+  anything else you notice instead of doing it (DL-458).
 - Implement the brief and run the checks below. Report judgment calls, unmet
   requirements, changed paths, and exact check results to the operator.
   Read the finished changed sections whole before handoff. Reconcile affected
