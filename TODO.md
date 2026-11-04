@@ -3,6 +3,24 @@
 For maintainers tracking the one-box release and its acceptance (owner 2026-11-02).
 Items remain open until their evidence and independent acceptance are recorded.
 
+## Release 2.0.0: pilot fixes (owner 2026-11-04)
+
+One item = one branch = one PR to main; the owner pilots main after each merge.
+Item text is the owner's request. Only the owner adds, splits, merges or renames items.
+Each item is planned, the plan is reviewed, then it is built and reviewed.
+The `v2-jil-3` worktree is reference only; nothing merges from it wholesale.
+
+- [ ] File watcher with `*` or `?` completes when a matching file arrives (pilot blocker).
+- [ ] KILLJOB sends INT, then KILL, as AutoSys does; `sendevent -k` overrides it; engine stop keeps TERM.
+- [ ] Reread works when `who am i` and `whoami` differ (check the JIL1 fix first; fix only if still broken).
+- [ ] Jobs get `DSL41_SOCKET`, and the `dsl41` CLI uses it by default, so job scripts can call their engine.
+- [ ] `dsl41 reread` takes only the socket path; the engine re-reads its launch config and every JIL file its globs match.
+- [ ] Select and act on jobs by `application` and `group` in the CLI and the TUI.
+- [ ] A leading `>` in `std_out_file` or `std_err_file` truncates the file and `>>` appends.
+- [ ] Every JIL attribute that is parsed but has no effect gives a "known but unsupported" warning at startup and reread.
+- [ ] Manual: log-name placeholders `${AUTO_JOB_NAME}` and `${AUTORUN}`; the `dsl41` replacements for `sendevent`, `autorep` and `autostatus`; the unsupported attributes.
+- [ ] Release 2.0.0: clean packages, release-workflow rehearsal, installed check, and the owner's approval of the tag.
+
 ## Release 2026-11-02: one box
 
 - [x] Restart gaps (G-restart, #311, DL-444): installed fault evidence covers status/spawn loss, residue, quarantine, deadlines and stable invocation; pidfd signalling and standalone wrapper refusals are covered.
@@ -12,11 +30,9 @@ Items remain open until their evidence and independent acceptance are recorded.
 - [x] `docs/deploy.md` prerequisites and boundaries (E/I/J/D, #312, DL-439): clock-sync waiter enable/verify commands, production Python 3.12.x, drained full-root backup or consistent snapshot, output paths, site archiving and host disk monitoring are documented.
 - [x] Boot-ID coverage (G-boot, #318, DL-433/DL-436): injected changed-boot tests prove no liveness check or signal against old-boot attempts and preserve holds and run identity; a real host reboot stays after shipping (K2).
 - [x] JIL slice 1 (#322): config and checks, plus K1/K2 restart refusals.
-- [ ] JIL slice 2: process launch for P, Q, R, S, AA, AE and the AD signal list.
-- [ ] JIL slice 3: engine integration for U, V, W, X, Z, AC, AD `sendevent -k`, attribute environment, AF selection wiring and the corresponding DL entries.
+- [x] JIL slice 2 (#323): process launch preparation for P, Q, R, S, AA, AE and the AD signal list; not yet wired into dispatch.
 - [x] Clock-sync drill check (E, #321): native x86_64 Ubuntu Python 3.12.3 and EL8 Python 3.12.15 qualify the waiter prerequisite, bounded startup and clock behavior ([service-drill evidence](https://github.com/mrbald/dsl41/actions/runs/41597099395)).
 - [x] Train cutover (#320): the accepted synthetic run through `scripts/merge_train.py` verifies pinned-head merge, strict/admin protection, cleanup and an idle empty queue; #309 is complete.
-- [ ] Release (B): address every discussion item, record the owner's dispositions and the boss's candidate acceptance, then release under the owner's authority.
 
 # Known limits
 
@@ -27,18 +43,18 @@ Items remain open until their evidence and independent acceptance are recorded.
 - `auto_delete` is refused: deleting a job would make the engine edit the site's config-defined estate, and the next reload would restore it.
 - `job_class` is refused: class concurrency limits come from the AutoSys agent's configuration, not JIL, so there is no limit to apply; a site setting can come later.
 - `heartbeat_interval > 0` is refused: AutoSys documents no exact heartbeat producer or re-arm contract to copy, and process liveness is not a heartbeat.
-- `notification_template` and `notification_alarm_types` are refused: their lookup and filter grammar and defaults are not in the vendor documentation available; plain notifications are delivered as status-hook events.
-- `n_retrys` on BOX and FW jobs is refused: AutoSys does not document their restart and reset semantics; CMD jobs get retries.
-- Job shells other than `sh`, `dash`, `bash` and `ksh` are refused: their sourcing and fallback rules differ from the Bourne family.
+- `notification_template` and `notification_alarm_types` are refused: their lookup and filter grammar and defaults are not in the vendor documentation available; `send_notification` adds no per-job delivery in this release.
+- `n_retrys` on CMD jobs has no effect in this release: a failed job stays failed, and startup warns. A nonzero `n_retrys` on BOX and FW jobs is refused.
+- Jobs run under `/bin/sh` in this release. `engine.job_shell` is validated (it must name `sh`, `dash`, `bash` or `ksh`) but not yet used, and a JIL `shell` attribute is refused.
 - `profile` and `std_*` files on FW jobs are refused: file watchers launch no job process to consume them.
-- No AutoSys-syntax command shim: jobs use dsl41 commands via `DSL41_SOCKET`; AutoSys command syntax is not implemented.
+- No AutoSys-syntax command shim: job scripts call `dsl41` commands; AutoSys command syntax is not implemented.
 - A real host reboot test is after shipping (K2): injected boot-ID coverage qualifies G-boot for this release, not host reboot behavior.
 
 # Known bugs
 
 Severity follows the accepted triage. In-flight targets remain open until accepted.
 
-- [ ] **Untriaged**: Production file watchers treat wildcard `watch_file` paths literally. A job watching `*.csv` can remain RUNNING when a matching file arrives after startup, in both stable and immediate modes. Exact-path controls complete. Pattern polling is prepared but production dispatch/recovery integration remains JIL3 work (R; synthetic Engine/FileWatcherAdapter reproduction).
+- [ ] **Untriaged**: Production file watchers treat wildcard `watch_file` paths literally. A job watching `*.csv` can remain RUNNING when a matching file arrives after startup, in both stable and immediate modes. Exact-path controls complete. Fix: release item "File watcher with `*` or `?` completes when a matching file arrives".
 
 - [ ] **Untriaged**: `test_socket_commands_report_plain_connect_errors[missing-serve]`
   in `tests/test_cli_control_read_errors.py` exceeded its 5-second child timeout
