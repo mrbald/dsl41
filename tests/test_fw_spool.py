@@ -240,6 +240,51 @@ def test_pr34_a_restart_between_the_two_qualifying_polls_completes_the_same_watc
     assert after[-1]["at"] == (T0 + timedelta(seconds=60)).isoformat(timespec="microseconds")
 
 
+def test_fw_exact_path_appearing_while_the_engine_is_down_completes_on_resume(
+    tmp_path: Path,
+) -> None:
+    """DL-129: an exact-path watch resumes polling a file that arrived during downtime."""
+    watch_file = tmp_path / "watched"
+    run_root = tmp_path / "run"
+    catalog = _catalog_no_min_size(watch_file)
+
+    async def scenario() -> None:
+        engine = _start_engine(catalog, run_root, VirtualClock(start=T0))
+        await engine.run_until_quiescent(T0)
+        assert engine.oracle.store.job["w"].status == "RUNNING"
+        assert _lines(run_root)[-1]["exists"] is False
+        await _close(engine)
+        before = _log_path(run_root).read_bytes()
+        watch_file.write_bytes(b"abcdef")
+
+        engine = await resume_run(
+            catalog,
+            run_root,
+            clock=VirtualClock(start=T0),
+            adapters={"FW": FileWatcherAdapter()},
+        )
+        await engine.run_until_quiescent(T0 + timedelta(seconds=60))
+        assert engine.oracle.store.job["w"].status == "RUNNING"
+        assert _lines(run_root)[-1]["stable_polls"] == 1
+        await engine.run_until_quiescent(T0 + timedelta(seconds=120))
+        assert engine.oracle.store.job["w"].status == "SUCCESS"
+        assert engine.oracle.store.job["w"].exit_code == 0
+        await _close(engine)
+
+        assert _log_path(run_root).read_bytes().startswith(before)
+        lines = _lines(run_root)
+        assert [r["kind"] for r in lines].count("start") == 1
+        assert lines[-1]["stable_polls"] == 2
+        assert lines[-1]["at"] == (T0 + timedelta(seconds=120)).isoformat(timespec="microseconds")
+        dispatches = [
+            r for r in _journal_records(run_root) if r["rec"] == "dispatch" and r["job"] == "w"
+        ]
+        assert len(dispatches) == 1
+        assert all(r["run_id"] == dispatches[0]["run_id"] for r in lines)
+
+    asyncio.run(scenario())
+
+
 def test_pr34_a_torn_final_line_truncates_on_open(tmp_path: Path) -> None:
     """The WAL's rule, applied to the spool: a crash mid-append leaves a
     prefix, the reader drops it, and the bytes must agree with that reading
