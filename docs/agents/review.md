@@ -88,6 +88,11 @@ their repair. The plan states what will change and why that closes the gate
 rather than an exclusion, a ruling or a scope question for the owner. A rejected
 plan goes to the boss (DL-457).
 
+For a release item, the primary reviewer checks the implementer's plan
+before the build. The plan covers only the item the brief quotes and states
+what changes where, the tests, and any contract or format change. The plan
+review is a review round; a rejected plan goes to the boss (DL-458).
+
 Before the fourth rework round, or when the fix for one finding or failed-gate
 item has been found wrong twice, the boss writes a shape note. It states the rule the change implements,
 why cases keep appearing, and the single rule, split or redesign it suggests.

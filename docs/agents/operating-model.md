@@ -78,6 +78,13 @@ its exact terms.
 48. A material finding still open after a reviewer's third round goes to the owner, who approves more rounds one at a time.
 49. Review rounds, repair-plan reviews, shape notes, the fresh final review and stated limits follow `review.md` (DL-430, DL-457); rules 47 and 48 are its owner hand-offs.
 
+## Release work
+50. Release items in `TODO.md` are the owner's requests in the owner's words. No seat replaces them with codes, renames, splits, merges or regroups them; only the owner does. Known-bugs lines follow rule 29 (DL-458).
+51. One release item is one branch and one PR that lands the item complete; for code, that means working behavior. No slice merges unwired preparation code, and no work is sliced by layer (DL-458).
+52. A release brief names exactly one release item and quotes its line; anything else noticed is reported, not done (DL-458).
+53. For a release item, the builder or engineer returns a plan first; the primary reviewer checks it, and only then is it built. A plan review is a review round, and a rejected plan goes to the boss, as `review.md` states (DL-457, DL-458).
+54. A boss spec maps one-to-one onto release items and never bundles them (DL-458).
+
 ## What escalates to the owner
 Each item comes with the facts and a recommendation (rule 18).
 1. A boss ruling that would undo an owner decision (rule 32).

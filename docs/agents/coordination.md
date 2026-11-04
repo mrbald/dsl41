@@ -58,6 +58,10 @@ Accepted slices alone do not establish release readiness.
 
 ### Check a handoff
 
+For a release item, the first handoff is a plan. Send it to the primary
+reviewer; dispatch the build only after the reviewer accepts it, and send a
+rejected plan to the boss ([review.md](review.md#review-rounds), DL-458).
+
 1. Read the status, diffstat, judgment calls, unmet requirements and cited hunks.
    Check every participant's output against the rules, including the operator's
    own output. Return a nonconforming handoff to its author.

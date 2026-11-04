@@ -25725,3 +25725,20 @@ relitigate an entry; append a new one.
   DL-430's shape note, fresh final review, owner hand-offs and stated limits are otherwise
   unchanged. Local edit-test loops before hand-in are not rework. No budget or dispatch
   approval is added.
+- DL-458 Release work follows owner items one by one; release items are planned first
+  (2026-11-04; owner ruling; docs/agents/operating-model.md, docs/agents/coordination.md,
+  docs/agents/review.md, docs/agent-workflow.md, TODO.md)
+  THE GAP. Owner requests were recoded and regrouped by layer, so preparation merged unwired
+  and one change carried many requests that could not be reviewed or piloted one at a time.
+  THE RULE. Release items in TODO.md are the owner's requests in the owner's words; only the
+  owner adds, splits, merges or renames them. One release item is one branch and one PR that
+  lands the item complete; no slice merges unwired preparation code, and no work is sliced by
+  layer. A release brief names one item and quotes its line; anything else noticed is
+  reported, not done. The builder or engineer returns a plan first; the primary reviewer
+  checks it before the build. A plan review is a review round, and a rejected plan goes to
+  the boss. A boss spec maps one-to-one onto release items.
+  THE REASON. Small vertical changes reach the owner's pilot one at a time and can be
+  reviewed whole. A reviewed plan stops scope growth before code exists.
+  THE BOUNDARY. DL-457's rework counts and shape note are unchanged. Known-bugs lines and
+  other maintenance work keep their existing rules. Merged preparation code stays and is
+  wired item by item.
