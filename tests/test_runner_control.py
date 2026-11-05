@@ -75,6 +75,17 @@ def wait_for(predicate, timeout_s: float = 5.0, interval_s: float = 0.02):
     raise AssertionError(f"timed out after {timeout_s}s waiting for {predicate}")
 
 
+def _socket_accepting(path: Path) -> bool:
+    """The control socket is ready once a connection succeeds."""
+    with socket_mod.socket(socket_mod.AF_UNIX) as probe:
+        probe.settimeout(0.2)
+        try:
+            probe.connect(str(path))
+        except (ConnectionRefusedError, FileNotFoundError):
+            return False
+    return True
+
+
 def _versioned(request: dict) -> dict:
     """Stamp the protocol version unless the caller named one itself -- the
     same rule the shipped clients follow, so a test that DOES name one can
@@ -85,18 +96,17 @@ def _versioned(request: dict) -> dict:
 def _sync_control_call(sock_path: Path, request: dict, timeout: float = 5.0) -> dict:
     """Blocking control-socket round trip -- ONLY for the subprocess test,
     where the engine lives in a different process/loop."""
-    conn = socket_mod.socket(socket_mod.AF_UNIX)
-    conn.settimeout(timeout)
-    conn.connect(str(sock_path))
-    conn.sendall(json.dumps(_versioned(request)).encode("utf-8") + b"\n")
-    buf = b""
-    while not buf.endswith(b"\n"):
-        chunk = conn.recv(65536)
-        if not chunk:
-            break
-        buf += chunk
-    conn.close()
-    return json.loads(buf)
+    with socket_mod.socket(socket_mod.AF_UNIX) as conn:
+        conn.settimeout(timeout)
+        conn.connect(str(sock_path))
+        conn.sendall(json.dumps(_versioned(request)).encode("utf-8") + b"\n")
+        buf = b""
+        while not buf.endswith(b"\n"):
+            chunk = conn.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+        return json.loads(buf)
 
 
 async def _control_call(sock_path: Path, request: dict) -> dict:
@@ -1522,7 +1532,7 @@ def test_cli_run_subprocess_sendevent_and_query_end_to_end(short_root: Path) -> 
     )
     try:
         sock_path = run_root / "control.sock"
-        wait_for(lambda: sock_path.exists(), timeout_s=5.0)
+        wait_for(lambda: _socket_accepting(sock_path), timeout_s=5.0)
 
         resp = wait_for(
             lambda: _sync_sendevent(sock_path, "STARTJOB", job="proc_job"),
@@ -1697,7 +1707,7 @@ def test_cli_off_hold_all_sweeps_every_held_job(short_root: Path) -> None:
     )
     try:
         sock_path = run_root / "control.sock"
-        wait_for(lambda: sock_path.exists(), timeout_s=5.0)
+        wait_for(lambda: _socket_accepting(sock_path), timeout_s=5.0)
         for job in ("held_one", "held_two"):
             resp = wait_for(
                 lambda j=job: _sync_sendevent(sock_path, "ON_HOLD", job=j), timeout_s=5.0
@@ -3140,7 +3150,7 @@ def _cli_fw_late_arrival(root: Path, *, restart: bool) -> None:
 
     proc = launch()
     try:
-        wait_for(lambda: sock.exists(), timeout_s=10)
+        wait_for(lambda: _socket_accepting(sock), timeout_s=10)
         assert _sync_sendevent(sock, "STARTJOB", job="w")["ok"]
         wait_for(lambda: len(samples()) >= 2, timeout_s=10)
         assert samples()[1]["files"] == [] and status()["status"] == "RUNNING"
