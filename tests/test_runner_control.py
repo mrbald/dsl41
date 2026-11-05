@@ -3560,7 +3560,8 @@ def test_reload_worker_failures_are_framed_and_reaped(short_root: Path, monkeypa
             short_root / "run", "insert_job: A\njob_type: c\ncommand: x\nmachine: localhost\n"
         )
         engine.reread_source = str(short_root / "dsl41.toml")
-        server.PREPARE_TIMEOUT_S = 0.15
+        if fault == "graceful":
+            server.PREPARE_TIMEOUT_S = 0.15
         try:
             task = asyncio.create_task(server._prepare_reload(update=False))
             if fault == "creation_cancel":
