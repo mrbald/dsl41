@@ -261,14 +261,26 @@ including while boxes run (DL-447). Later dispatches and replacements use
 the new map; attempts already running keep their recorded environment.
 `reread` needs the OPS catalog view and refuses a READ response.
 `AUTOSERV`, `AUTOSYS`, `AUTOUSER` and `AUTOROOT` are unset unless this map
-supplies them. Other names inherit the engine's startup environment.
-Set variables used by stream paths here; profiles run after those paths
-resolve. For example, `std_out_file: $LOG_DIR/${AUTO_JOB_NAME}.$AUTORUN.out`
-uses the job name and the runner's `S-N` attempt identity.
-Fresh roots and restored branches can repeat that identity; give them
-separate output namespaces. See
-[runner §6](runner-design.md#6-adapters) for the environment and path rules
-(DL-447).
+supplies them. Other names inherit the engine's startup environment, except
+generated invocation values and `DSL41_SOCKET` (DL-447, DL-459).
+Map values are literal strings. Names use `[A-Za-z_][A-Za-z0-9_]*`.
+NULs and overrides of `DSL41_*`, `AUTO_JOB_NAME` or `AUTORUN` refuse.
+Set path variables here; the author follows [Set stream paths](authoring.md#set-stream-paths).
+
+These accepted engine settings request behavior this release does not apply
+and produce one `known-unsupported` warning per setting (DL-466):
+
+| Setting | Warns when |
+| --- | --- |
+| `engine.job_shell` | Configured. |
+| `engine.job_profile` | Configured. |
+| `engine.std_file_mode` | Set to `"truncate"`. |
+
+Omitting these settings, or using the default `std_file_mode = "append"`,
+creates no warning. JIL stream prefixes remain effective independently of
+`std_file_mode`. See the author's [unsupported JIL inventory](authoring.md#2-check-which-constructs-dsl41-accepts)
+for record attributes. Both use the configured `lint.ignore` and `lint.refuse`
+policy; ignoring a warning does not activate the setting.
 
 Input paths may be absolute or relative to that file; the run root must
 be absolute. Patterns support `*`, `?` and brackets; `**` is refused.
@@ -344,14 +356,8 @@ Output and refusal handling: [run CLI](../src/dsl41/cli_run.py) and
 
 Job output goes to each job's `std_out_file` and `std_err_file` when set.
 Each unset path falls back to `<run_root>/logs/<job>.<run>.{out,err}`.
-An unprefixed path or `>>path` appends. `>path` truncates or creates a
-regular file before each launch, including a restart replacement of the
-same run (DL-460). Put the path immediately after the prefix. Use `./>name`
-or an absolute path for a literal filename beginning with `>`.
-Special files such as `/dev/null` retain the wrapper's ordinary open
-behavior. [Runner design §6](runner-design.md#6-adapters) defines
-preparation failures and interruption limits.
-It does not archive or delete job output, or monitor disk space.
+For stream placeholders, output prefixes and their limits, see [Set stream paths](authoring.md#set-stream-paths).
+The engine does not archive or delete job output, or monitor disk space.
 The site's archiver may move only finished job output.
 It must leave everything else in the run root untouched, including `runs/`,
 `plans/`, the store (`engine.db` and its sidecars), `leader.lock`,
@@ -407,6 +413,7 @@ Exit 2 means refusal or failure to reach the engine.
 Run socket commands as the service user with this unit's owner-only socket.
 For a configured access map, follow the [access model](access-model.md);
 stop and update require its `adm` tier.
+For AutoSys task equivalents, use the [operator command table](incident-triage.md#read-the-jobs-state).
 
 ## Drain the engine
 

@@ -23,6 +23,8 @@ S="$RUN_ROOT/control.sock"
 ```
 
 Replace `<version>` with the installed version before running commands.
+Socket commands use `DSL41_SOCKET` when `-S`/`--socket` is omitted; an explicit
+flag wins, and missing both is an argument error (DL-459).
 These paths match the [single-engine installation](deploy.md#install-the-package-and-unit).
 Run the commands below as the service account for its owner-only socket and
 run-root files. Use root or the site's journal-reading account for systemd
@@ -93,9 +95,37 @@ Hold, ice and noexec are modes; a job on hold or on ice keeps its status, except
 | --- | --- |
 | `autorep -J job` (the default `-s` summary) | `"$DSL41" query status --brief --job NAME -S "$S"` |
 | `autorep -J job -d` | `"$DSL41" query status --job NAME -S "$S"` |
+| `autostatus -J job` | `"$DSL41" query status --brief --job NAME -S "$S"` |
+| Test job success from a script | `"$DSL41" query is-success --job NAME -S "$S"` |
+| Test job failure from a script | `"$DSL41" query is-failed --job NAME -S "$S"` |
+| `autostatus -G` / `autorep -G` | `"$DSL41" query global -N GLOBAL -S "$S"` |
+| `autorep -q` | `"$DSL41" query spec --job NAME -S "$S"` |
+| Run history (`autorep -r`) | `"$DSL41" runs "$RUN_ROOT" --job NAME` |
 | `job_depends -c` | `"$DSL41" query deps --job NAME -S "$S"`; `"$DSL41" query explain --job NAME -S "$S"` |
 | `autosyslog` | `"$DSL41" query trace -S "$S"`; `"$DSL41" journal "$RUN_ROOT"` as the service account |
 | `sendevent -E X -J job` | `"$DSL41" sendevent EVENT -J NAME -S "$S"` |
+| `sendevent -E SET_GLOBAL` | `"$DSL41" sendevent SET_GLOBAL -G NAME=value -S "$S"` |
+| `sendevent -E CHANGE_STATUS` | `"$DSL41" sendevent CHANGE_STATUS -J NAME --status STATUS --exit-code CODE -S "$S"` |
+
+These are task equivalents, not interchangeable flags. `sendevent` takes its
+event as a positional argument. The supported events are listed in
+[the sendevent contract](control-protocol.md#3-mutating-verb-sendevent). Use
+`sendevent --help` for their options. CHANGE_STATUS's `--exit-code` is optional; `CODE` is an integer
+exit code. In SET_GLOBAL, `NAME` names the global to set.
+For KILLJOB, `-k LIST` selects an ordered list of numeric signals ending in 9.
+
+`query status` prints JSON; `--brief` prints one line per job. Exit 0 means
+an answer, not job success. The predicates print the current status and exit
+0 on a match or 1 otherwise. `is-failed` matches FAILURE or TERMINATED.
+Queries exit 2 on an error. `runs` reads run-root files only; it needs no
+socket or running engine and exits 0 on success or 2 on a read error.
+The [intervention procedure](#send-the-intervention) explains sendevent's
+0/2/3/4 outcomes and recovery after an unknown result.
+
+To preview or apply edited definitions, follow [Reload a changed estate](deploy.md#reload-a-changed-estate):
+`"$DSL41" reread -S "$S"` reports current launch-config and glob inputs;
+`"$DSL41" update -S "$S" --wait` rereads and applies them (DL-463).
+No config selector, token or stop-consent argument is used.
 
 ## The job has not started
 
