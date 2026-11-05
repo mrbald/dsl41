@@ -43,11 +43,12 @@ The `v2-jil-3` worktree is reference only; nothing merges from it wholesale.
 - `job_class` is refused: class concurrency limits come from the AutoSys agent's configuration, not JIL, so there is no limit to apply; a site setting can come later.
 - `heartbeat_interval > 0` is refused: AutoSys documents no exact heartbeat producer or re-arm contract to copy, and process liveness is not a heartbeat.
 - `notification_template` and `notification_alarm_types` are refused: their lookup and filter grammar and defaults are not in the vendor documentation available; `send_notification` adds no per-job delivery in this release.
-- `n_retrys` on CMD jobs has no effect in this release: a failed job stays failed, and startup warns. A nonzero `n_retrys` on BOX and FW jobs is refused.
+- `n_retrys` has no effect on CMD, BOX or FW jobs in this release: a failed job stays failed. A count from 1 through 20 gives a known-unsupported warning at startup and reread, zero is quiet, and any other value is refused (DL-469).
 - CMD jobs use `engine.job_shell`, or a supported shell from the effective account's passwd entry; an unsupported or unavailable passwd shell falls back to `/bin/sh` with a warning. A per-job JIL `shell` attribute is refused (`src/dsl41/runtime_policy.py:120`; `src/dsl41/runner_adapters.py:363`).
 - `profile` and `std_*` files on FW jobs are refused: file watchers launch no job process to consume them.
 - No AutoSys-syntax command shim: job scripts call `dsl41` commands; AutoSys command syntax is not implemented.
 - Real host reboot recovery remains unqualified; see [Qualification](#qualification).
+- A run root updated by a binary from before f115ec7 with a changed `job_shell`, `job_profile`, `std_file_mode` or `set_job_attribute_environmentals` keeps the old value in its stored profile and refuses restart. No code change follows (Opus plan review F2, 2026-11-05).
 
 # Known bugs
 
@@ -60,16 +61,15 @@ Severity follows the accepted triage. In-flight targets remain open until accept
   close this bug. The test reports elapsed time and process group on timeout.
   It stays open; the owner permits continuation; recurrence stops for diagnosis
   (owner 2026-11-05).
-- [ ] **Low**: `test_stopped_command_kills_its_grandchild[timeout]`
-  in `tests/test_merge_train_rework.py` failed to observe its ready file within
-  15 seconds in the 1-second command-timeout case (JIL1 full Python 3.12 gate,
-  operator triage). Cause UNKNOWN; the original failed source set was incompletely
-  captured. Later passes do not close this bug. The owner permits continuation;
-  recurrence stops for diagnosis. This is a test race with a likely mechanism:
-  the train runs every command with `--command-timeout 1`, so an earlier slow
-  command or the fake uv's own start can end the train before the ready file exists.
-  The wait loop exits when the train process does (`tests/test_merge_train_rework.py:639`).
-  Fix after shipping (owner 2026-11-05).
+- [ ] **Low**: Merge-train tests with `production=True` run setup commands as real subprocesses
+  under `--command-timeout 5`. A slow setup command can stop the train early
+  (`tests/test_merge_train_rework.py:66,271,567`). Line 567 asserts only a nonzero exit,
+  so a timeout there passes silently (Opus, 2026-11-06, grandchild-fix plan review L3).
+- [ ] **Low**: A SIGTERM or SIGINT that lands after the train creates a command's process but
+  before it enters the `try` at `scripts/merge_train.py:157` skips the timeout and the group kill.
+  `Popen.__exit__` then waits for the command with no timeout, so the train waits until the
+  command ends on its own. In the test's signal case, the driver would wait out the fake's
+  300 s lifetime (Opus, 2026-11-06, grandchild-fix diff review L4).
 
 - [ ] **Medium**: `runs` refuses the whole report when an older open attempt holds the journal's pruning
   floor over a completed run whose history the snapshot has expired by age; the leaf reader
@@ -146,11 +146,19 @@ Severity follows the accepted triage. In-flight targets remain open until accept
   revision is refused; `src/dsl41/runner_update.py:867` is the only guard, because
   catalog_hash_v2 sorts keys (`src/dsl41/canon.py:91`)
   (Opus, 2026-11-05, TODO plan review).
+- [ ] **Low**: The clock drill measures the waiter timeout from the unit's assert check, so the span
+  includes about 4 ms before the process starts, and `timeout.txt` still labels it `actual_us`
+  (`examples/nightbank/deploy/clock-drill.sh:236`; Opus, 2026-11-05, 392064a diff review O1).
 
 - [ ] **Medium**: Wrapper and process tests can leave stopped wrappers or children after teardown.
   Prove and fix owned-process cleanup in `tests/test_wrapper_branches.py:546`,
   `tests/test_engine_stops.py` (`child.py`) and `src/dsl41/runner_wrapper.py`
   (operator, wrapper/process tests 2026-11-05; tests).
+- [ ] **Low**: Full-suite pytest runs left orphaned processes running after they ended.
+  On 2026-11-05, one worktree's run left 22 and another left 9, plus a few from older
+  worktrees: Python children under pytest temporary directories and one `runner_wrapper.py`.
+  The leaking test is not yet identified; it may share the cause of the Medium wrapper and
+  process cleanup bug above (operator, full-suite runs 2026-11-05; tests).
 - [ ] **Low**: DST drill failures on PR heads have unresolved causes:
   [41924127515](https://github.com/mrbald/dsl41/actions/runs/41924127515), clock lane,
   `newyork-spring` raises `KeyError: 'ended_at'`;
@@ -184,9 +192,6 @@ Severity follows the accepted triage. In-flight targets remain open until accept
 - [ ] **Medium**: Qualify bounds on the live oracle's `_emitted` and `_kill_emissions` histories
   and their per-input scan cost (architecture review 2026-11-05, section 4;
   `src/dsl41/oracle_writers.py:135`, `src/dsl41/oracle.py:361-365`).
-- [ ] **Low**: Document that a routine box update emits TERMINATED transitions and can trigger
-  status-hook alerts (architecture review 2026-11-05, section 4;
-  `src/dsl41/runner.py:803-818`).
 - [ ] **Low**: Document known-unsupported warning volume, `lint.ignore` and `lint.refuse` effects
   in pilot guidance (architecture review 2026-11-05, section 4;
   `src/dsl41/lint.py` `rule_known_unsupported`, `src/dsl41/runner_preflight.py:903-915`).
