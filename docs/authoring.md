@@ -908,7 +908,8 @@ the job environment map. An explicit `-S`/`--socket` takes precedence;
 without either a flag or `DSL41_SOCKET`, a socket command fails argument
 validation. The absolute path must fit the host's Unix-socket path limit.
 `DSL41_SOCKET` is unavailable in stream-path preflight: using it in any stream
-path refuses startup, resume, reread and update, even if inherited (DL-459).
+path refuses startup, resume and update, even if inherited; reread reports
+the error beside a diff (DL-459, DL-463).
 
 ## 7. Follow the other tracks for engine work
 
