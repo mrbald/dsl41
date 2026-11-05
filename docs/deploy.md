@@ -259,7 +259,7 @@ A restart reads `engine.kill_signals` from the current configuration on disk.
 An edit only to `job_env` advances the revision without stopping jobs,
 including while boxes run (DL-447). Later dispatches and replacements use
 the new map; attempts already running keep their recorded environment.
-`reread` needs the OPS catalog view and refuses a READ response.
+`reread` and `update` require ADM and prepare inputs under the engine identity (DL-463).
 `AUTOSERV`, `AUTOSYS`, `AUTOUSER` and `AUTOROOT` are unset unless this map
 supplies them. Other names inherit the engine's startup environment, except
 generated invocation values and `DSL41_SOCKET` (DL-447, DL-459).
@@ -412,7 +412,7 @@ Exit 0 means the engine answered, even if a job failed.
 Exit 2 means refusal or failure to reach the engine.
 Run socket commands as the service user with this unit's owner-only socket.
 For a configured access map, follow the [access model](access-model.md);
-stop and update require its `adm` tier.
+stop, reread and update require its `adm` tier.
 For AutoSys task equivalents, use the [operator command table](incident-triage.md#read-the-jobs-state).
 
 ## Drain the engine

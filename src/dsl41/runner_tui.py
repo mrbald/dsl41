@@ -1188,7 +1188,7 @@ class _ExplainPane(VerticalScroll):
 
 def config_line(status: Mapping[str, Any]) -> str:
     """What the subtitle says of the configuration (spec-reload): `rev N`, and while an update
-    stops its jobs, `update TOKEN stopping: JOB, ...` with the token's first twelve hex digits.
+    stops its jobs, the internal plan token's first twelve hex digits and the jobs still stopping.
     Empty for an engine that names no rev."""
     rev = status.get("config_rev")
     if not isinstance(rev, int):

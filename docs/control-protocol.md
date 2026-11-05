@@ -591,8 +591,8 @@ the run number.
 `spec_drift` is a lazy re-hash of the input files the engine loaded, at most
 every 15 s. `null` means the server holds no fingerprint (DL-65).
 An unreadable or deleted captured path counts as drift. It does not
-adopt disk changes. `dsl41 reread` and `dsl41 update` apply a captured
-candidate while the engine runs (DL-432, DL-437).
+adopt disk changes. `dsl41 reread` reports current inputs; `dsl41 update`
+independently prepares and applies them (DL-432, DL-437, DL-463).
 
 A main-config restart resumes the last applied revision from the store;
 estate, lint and `engine.environment` edits stay pending (DL-437).
@@ -643,7 +643,8 @@ For OPS/ADM, `environment_view: "ops"` accompanies the applied
 `settings.job_env` map (DL-447).
 The additive `path_environment` map reports inherited variable names:
 an empty string means empty, and `"set"` means nonempty. It discloses
-no inherited values. `reread` uses it for pre-profile path validation;
+no inherited values. Engine-owned `reread` validates pre-profile paths
+against the engine's own state, not this answer (DL-463);
 update admission checks the candidate against the engine's captured
 startup values again. The four instance variables come only from
 the candidate's `job_env`.
@@ -652,7 +653,7 @@ READ receives `environment_view: "read"` and `job_env_names`, a list of
 names. Both `settings.job_env` and `path_environment` are absent.
 The authenticated authority selects the view; request fields and actor
 claims cannot select it. With no access map, the owner keeps the full view.
-`reread` requires the OPS view and refuses a redacted or missing view.
+`reread` requires ADM and prepares inputs under the engine identity (DL-463).
 Redaction removes values; it never substitutes empty strings.
 
 ### `trace [since]`

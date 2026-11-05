@@ -168,8 +168,9 @@ executable path. Omission disables it. No arguments, expansion or shell parsing
 are accepted. Wrong types, empty or relative paths and NUL refuse with exit 2.
 A missing or nonexecutable target is a logged delivery failure, never a startup
 blocker. `status_hook_long_running_s` is a strict nonnegative integer, default
-`0` (disabled). Both are host settings loaded on restart; `reread` requires a
-restart when either changes. Rehearsal never executes hooks.
+`0` (disabled). Both are host settings loaded on restart.
+Reread reports a change; update refuses until a restart loads them (DL-463).
+Rehearsal never executes hooks.
 One selected TOML byte sequence supplies the hook, host and reported launch
 settings. A fresh capture refuses if that file changes during preparation.
 
@@ -380,7 +381,8 @@ missing or damaged data refuses before recovery effects.
 value is removed; the `job_env` reservation above applies. Stream-path
 preflight has no symbolic socket value. A stream path referencing
 `$DSL41_SOCKET` or `${DSL41_SOCKET}` therefore refuses startup, resume,
-reread and update, even when an inherited value exists.
+and update, even when an inherited value exists; reread reports the error
+beside a diff (DL-463).
 
 When `std_out_file` / `std_err_file` are set, stdout/stderr append to
 them unless the source value starts with `>` (DL-460). A leading `>`
