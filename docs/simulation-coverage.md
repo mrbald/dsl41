@@ -616,13 +616,13 @@ nothing.
 | profile_field:fw_default_interval_us | supported | runner-design ss6, DL-122 | - |  |  |  | generic | the poll interval an FW job with no watch_interval uses |
 | profile_field:fw_default_interval_us#rounding | provisional | runner_startup.wire_from_profile, DL-122 | - |  |  |  | none | no shipped surface sets a value that is not whole seconds. A hand-pinned one is wired rounded half to even (at least 1 s), not at the pinned interval, and resume refuses it as profile drift. No label was opened for the conversion |
 | profile_field:job_env | supported | DL-447, runner_environment.validate_job_env | - |  |  |  | generic | literal job environment overrides applied through configuration revisions; instance variables come exclusively from this map |
-| profile_field:job_profile | passthrough | runtime_policy.RuntimePolicySettings | - |  |  |  | generic | validated revisioned setting; update and execution activation are pending |
-| profile_field:job_shell | passthrough | runtime_policy.RuntimePolicySettings | - |  |  |  | generic | validated revisioned setting; update and execution activation are pending |
+| profile_field:job_profile | passthrough | runtime_policy.RuntimePolicySettings | - |  |  |  | generic | validated revisioned setting; execution activation is pending |
+| profile_field:job_shell | passthrough | runtime_policy.RuntimePolicySettings | - |  |  |  | generic | validated revisioned setting; execution activation is pending |
 | profile_field:kill_signals | supported | DL-462, runner_adapters.selected_signal_ladder | - |  |  |  | generic | ordered KILLJOB signals, five seconds apart; later kills take policy updates |
 | profile_field:machine_policy | supported | DL-122, DL-49 | - |  |  |  | generic | how the one ambiguous machine verdict resolves |
 | profile_field:semantics | supported | DL-122, runner-design ss8a, DL-252 | - |  |  |  | generic | explicit semantic-switch overrides only, an explicit default normalized away; written {} when there is none |
-| profile_field:set_job_attribute_environmentals | passthrough | runtime_policy.RuntimePolicySettings | - |  |  |  | generic | validated revisioned setting; update and execution activation are pending |
-| profile_field:std_file_mode | passthrough | runtime_policy.RuntimePolicySettings | - |  |  |  | generic | validated revisioned setting; update and execution activation are pending |
+| profile_field:set_job_attribute_environmentals | passthrough | runtime_policy.RuntimePolicySettings | - |  |  |  | generic | validated revisioned setting; execution activation is pending |
+| profile_field:std_file_mode | passthrough | runtime_policy.RuntimePolicySettings | - |  |  |  | generic | validated revisioned setting; execution activation is pending |
 | profile_field:tz_aliases | supported | DL-122, DL-62 | - |  |  |  | generic | the site-local zone-name table; a name only it resolves fails without it |
 
 ### profile_alt

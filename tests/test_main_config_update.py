@@ -14,6 +14,7 @@ import pytest
 from dsl41 import main_config as main, runner_update
 from dsl41.canon import canonical_bytes
 from dsl41.oracle_state import Event
+from dsl41.reload_diff import definition_hash
 from dsl41.reload_plan import reread
 from dsl41.reload_update import Admitted, Refused
 from dsl41.runner_adapters import FakeAdapter
@@ -24,6 +25,151 @@ from dsl41.runner_startup import active_configuration, resume_run, start_run
 from dsl41.runner_store import MemoryStore, Record, SqliteStore
 from dsl41.runner_update import UpdateRequest
 from test_main_config import JOB, PYTHON, T0, config_file, estate_file
+
+
+def test_runtime_policy_update_reread_and_restart(tmp_path: Path) -> None:
+    path = estate_file(tmp_path)
+    initial = main.prepare(path)
+    root = tmp_path / "run"
+    profile_path = tmp_path / "site.profile"
+    profile_path.write_text("export SYNTHETIC_POLICY=site\n")
+    config_file(
+        tmp_path,
+        engine=(
+            f'job_profile = "{profile_path}"\n'
+            'job_shell = "/bin/bash"\n'
+            'std_file_mode = "truncate"\n'
+            "set_job_attribute_environmentals = false\n"
+        ),
+    )
+    candidate = main.prepare(path)
+    expected = main.profile_of(candidate)
+
+    def unchanged(engine):
+        live = engine.update.live()
+        plan = reread(tmp_path, live, root / "plans", candidate=candidate, start=T0)
+        assert not plan.plan.changed and plan.plan.unchanged == ("A",)
+        assert plan.stop == ()
+        assert definition_hash(live.catalog.jobs["A"], live.catalog, live.settings) == (
+            definition_hash(candidate.catalog.jobs["A"], candidate.catalog, candidate.settings)
+        )
+
+    async def scenario() -> None:
+        clock = VirtualClock(start=T0)
+        engine = start_run(
+            initial.catalog,
+            root,
+            clock=clock,
+            adapters={"CMD": FakeAdapter(default=None)},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        try:
+            plan = reread(
+                tmp_path, engine.update.live(), root / "plans", candidate=candidate, start=T0
+            )
+            answer = engine.request_update(
+                UpdateRequest(plan.token, 1, engine.baseline_id, "policy")
+            )
+            await engine.run_until_quiescent(T0)
+            assert answer.result().applied.result()["rev"] == 2
+            assert engine.profile == expected
+            assert active_configuration(root).profile == expected
+            engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "A"}))
+            await engine.run_until_quiescent(T0)
+            assert engine.oracle.store.job["A"].status == "RUNNING"
+            unchanged(engine)
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+        clock = VirtualClock(start=T0 + timedelta(seconds=1))
+        resumed = await resume_run(
+            candidate.catalog,
+            root,
+            clock=clock,
+            adapters={"CMD": FakeAdapter()},
+            declared=expected,
+        )
+        try:
+            await resumed.run_until_quiescent(clock.now())
+            assert resumed.config_rev == 2 and resumed.profile == expected
+            unchanged(resumed)
+        finally:
+            await resumed.shutdown()
+            resumed.journal.close()
+
+        edited = expected.model_copy(update={"job_shell": "/bin/sh"})
+        with pytest.raises(EngineError, match="catalog hash mismatch:.*reread and update"):
+            await resume_run(
+                candidate.catalog,
+                root,
+                clock=clock,
+                adapters={"CMD": FakeAdapter()},
+                declared=edited,
+            )
+
+    asyncio.run(scenario())
+
+
+def test_stopping_job_shell_update_resumes_with_candidate_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = estate_file(tmp_path)
+    initial = main.prepare(path)
+    root = tmp_path / "run"
+
+    async def scenario() -> None:
+        clock = VirtualClock(start=T0)
+        engine = start_run(
+            initial.catalog,
+            root,
+            clock=clock,
+            adapters={"CMD": FakeAdapter(default=None)},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        try:
+            engine.inject(Event(at=T0, kind="FORCE_STARTJOB", payload={"job": "A"}))
+            await engine.run_until_quiescent(T0)
+            config_file(tmp_path, engine='job_shell = "/bin/bash"\n')
+            candidate = main.prepare(path)
+            plan = reread(
+                tmp_path, engine.update.live(), root / "plans", candidate=candidate, start=T0
+            )
+            assert plan.stop == ("A",)
+            with monkeypatch.context() as held:
+                held.setattr(engine.update, "stop_attempt", lambda job, cause: None)
+                answer = engine.request_update(
+                    UpdateRequest(plan.token, 1, engine.baseline_id, "shell-stopping")
+                )
+                await engine.run_until_quiescent(T0)
+                assert isinstance(answer.result().decision, Admitted)
+                assert not answer.result().applied.done()
+                assert engine.update.view() == {"token": plan.token, "stopping": ["A"]}
+                assert engine.config_rev == 1
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+        clock = VirtualClock(start=T0 + timedelta(seconds=1))
+        resumed = await resume_run(
+            candidate.catalog,
+            root,
+            clock=clock,
+            adapters={"CMD": FakeAdapter()},
+            declared=main.profile_of(candidate),
+        )
+        try:
+            await resumed.run_until_quiescent(clock.now())
+            assert resumed.config_rev == 2 and not resumed.update.stopping
+            assert resumed.profile.job_shell == "/bin/bash"
+            assert active_configuration(root).profile.job_shell == "/bin/bash"
+        finally:
+            await resumed.shutdown()
+            resumed.journal.close()
+
+    asyncio.run(scenario())
 
 
 def test_07_08_09_captured_update_retry_stale_and_drift(

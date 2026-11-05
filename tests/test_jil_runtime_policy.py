@@ -10,10 +10,12 @@ from pydantic import ValidationError
 
 from dsl41 import cli_run, main_config, runner_preflight, runner_startup
 from dsl41.ir import LoweringError, lower_source
+from dsl41.reload_diff import definition_hash
 from dsl41.reload_plan import Estate, Live, RereadRefused, estate_settings, reread
 from dsl41.runner_adapters import FakeAdapter
 from dsl41.runner_clock import EngineError, RealClock
 from dsl41.runner_config import Configuration, RuntimeProfile, runtime_hash
+from dsl41.runner_update import profile_for, settings_of
 from dsl41.runtime_policy import (
     ATTRIBUTE_NAMES,
     JobRuntimePolicy,
@@ -26,7 +28,7 @@ from dsl41.runtime_policy import (
     stream_target,
 )
 from store_surgery import rows
-from test_main_config import estate_file
+from test_main_config import JOB, estate_file
 
 
 @pytest.fixture(autouse=True)
@@ -326,6 +328,45 @@ def test_forged_reserved_path_refuses_actual_replacement_dispatch(tmp_path, monk
     from datetime import datetime
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("job_shell", "/bin/bash"),
+        ("job_profile", "/tmp/synthetic-profile"),
+        ("std_file_mode", "truncate"),
+        ("set_job_attribute_environmentals", False),
+    ],
+)
+def test_runtime_policy_settings_profile_round_trip(field, value):
+    jobs = catalog()
+    profile = RuntimeProfile.model_validate({field: value})
+    settings = estate_settings(None, None, {}, jobs, runtime_policy={field: value})
+    assert settings_of(profile, jobs) == settings
+    assert profile_for(settings, RuntimeProfile()) == profile
+    assert profile_for(estate_settings(None, None, {}, jobs), profile) == RuntimeProfile()
+
+
+def test_default_policy_definition_hash_matches_main():
+    jobs = lower_source(JOB)
+    settings = settings_of(RuntimeProfile(), jobs)
+    assert set(settings) == {
+        "timezone",
+        "timezone_aliases",
+        "semantics",
+        "job_env",
+        "job_profile",
+        "job_shell",
+        "std_file_mode",
+        "kill_signals",
+        "set_job_attribute_environmentals",
+        "external_instances",
+    }
+    assert settings == estate_settings(None, None, {}, jobs)
+    assert definition_hash(jobs.jobs["A"], jobs, settings) == (
+        "sha256:7f82dc011e94799affe01f5e8cba3362525b56923ecbd71e02974349a1ab162a"
+    )
 
 
 def test_settings_capture_defaults_hashes_and_pass_through(tmp_path):
