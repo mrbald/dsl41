@@ -20,9 +20,18 @@ The `v2-jil-3` worktree is reference only; nothing merges from it wholesale.
 - [x] Manual: log-name placeholders `${AUTO_JOB_NAME}` and `${AUTORUN}`; the `dsl41` replacements for `sendevent`, `autorep` and `autostatus`; the unsupported attributes. Done: main 1bad3a7, 399f38b.
   - [x] Before the tag: the manual says reread and update need ADM, not OPS, and drops the retired plan-token wording (owner 2026-11-05). Done: main ddadee1 (manual and contracts), 472e47e (update refusal text; owner MSG=NOW).
 - [x] Our locked environment stays a few days behind the newest releases, and Dependabot is configured with the same delay (about 5 days). Done: main 81cf8f1.
-- [ ] Release 2.0.0: clean packages, release-workflow rehearsal, installed check, and the owner's approval of the tag.
+- [ ] Release 2.0.0: clean packages, release-workflow rehearsal, installed check, and the owner's approval of the tag. On hold (owner 2026-11-05 "ok to reorder 10 hold off").
 - [x] RC-1: a waiting wildcard file watcher changed to an exact path and taken up by update (or restart after it) must not stop the engine. Done: main 071c312, 601906d (owner 2026-11-05 RC1=FIX).
 - [x] A patch release must not stop the engine from restarting: restart accepts the main config captured by an earlier 2.0.x binary (owner 2026-11-05 "add"; operator summary, the owner may reword). Done: main b120807 (DL-468; closes DL-437 K1, architecture section 2 finding 8 and retained-configuration job-order equality).
+
+# Next, in priority order (owner 2026-11-05)
+
+1. [ ] Select and act on jobs by `application` and `group` in the CLI and the TUI.
+2. [ ] "we plan to spec and implement the clean (QUEUE)": a running affected job finishes on its
+   old definition; the new one applies at its next start (owner D9, 2026-11-04).
+3. [ ] `dsl41 backup` (J step 2): provide an online backup command that captures the store and open attempts' records consistently; accept restoration evidence.
+4. [ ] `update NAME...` partial apply (owner passive-reread ruling, 2026-11-04).
+5. [ ] The High backward-gap bug (DL-435 N2), "Nothing bounds a backward gap", under [Known bugs](#known-bugs).
 
 # Known limits
 
@@ -184,18 +193,10 @@ Severity follows the accepted triage. In-flight targets remain open until accept
 
 # After shipping
 
-## Job selection and update
-
-- [ ] Select and act on jobs by `application` and `group` in the CLI and the TUI.
-- [ ] "we plan to spec and implement the clean (QUEUE)": a running affected job finishes on its
-  old definition; the new one applies at its next start (owner D9, 2026-11-04).
-- [ ] `update NAME...` partial apply (owner passive-reread ruling, 2026-11-04).
-
 ## Reliability
 
 - [ ] Close the remaining High and Medium known bugs.
 - [ ] Close G-config, G-semantic/clock, G-update, G-soak, G-history and G-upgrade gaps from the [integration test inventory](docs/integration-testing-inventory.md).
-- [ ] `dsl41 backup` (J step 2): provide an online backup command that captures the store and open attempts' records consistently; accept restoration evidence.
 
 ## Qualification
 
