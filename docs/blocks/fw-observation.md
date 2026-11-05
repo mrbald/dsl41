@@ -4,8 +4,9 @@
 
 The FW adapter watches an exact path or final-component `*` or `?` pattern for one run.
 It completes with exit 0 when any one matching file meets the minimum size and stability rule.
-Exact paths use size-only stability. Wildcards use unchanged device, inode, size,
-mtime_ns and ctime_ns per pathname and file identity (DL-461).
+Exact paths use size-only stability unless the run has sampled evidence (DL-467).
+Wildcards and sampled runs use unchanged device, inode, size, mtime_ns and ctime_ns
+per pathname and file identity (DL-461, DL-467).
 Bourne hidden-file rules apply; `.` and `..` never match. Directory wildcards and recursion
 are unsupported. A non-UTF-8 match is ignored with one warning per name per watch run.
 The warning is given again after an engine restart resumes the watch.
@@ -27,6 +28,7 @@ The completion reaches the ledger as an ordinary STATUS input through the engine
 - Job inputs: `watch_file`, `watch_interval` and `watch_file_min_size`. Estate inputs: the [runtime profile](../glossary.md#runtime-profile)'s `fw_default_interval_us` (period-model §2.1 (`period-model.md`, retired in 2.0.0)) and the `fw-existence` switch (DL-258). `wire_from_profile` in `src/dsl41/runner_startup.py` builds the adapter from both.
 - Context: `ctx.clock`, `ctx.run_root`, `ctx.run_id`, `ctx.fence` and `ctx.barrier`, filled by `Engine._run_adapter` in `src/dsl41/runner.py`.
 - Spool: `runs/<job>.<run_number>/watch.jsonl`, one `start` line, then scalar `poll` or wildcard `sample` lines with plain paths and five metadata fields (DL-461; period-model §3.5 (`period-model.md`, retired in 2.0.0)).
+  A run with samples keeps sampling for the rest of that run, including exact targets (DL-467).
 - Readers: `read_watch_log`, the sole evidence reader, which folds scalar and sampled progress into a `WatchLog`; and `_resume_watch` in `runner_startup.py`.
 - Without a run root, as in the virtual-domain harness, the watch keeps no spool.
 
@@ -62,7 +64,7 @@ flowchart TD
 - A resumed watch appends no second `start`. A `start` line naming the effect's `run_id` resolves a pending FW SPAWN as applied (§3.5; DL-129).
 - When an effect bound a `run_id`, every line names it, and a log naming another run is refused (DL-129). A launch with no bound effect, as from a pre-DL-118 journal, writes a null `run_id`.
 - The seal barrier parks every FW task at a poll boundary before T. The seal's `fw_watch` entry is a fold of the first `watch_seq` lines (§3.5).
-- Completion: `stable`, the default, needs two qualifying observations with equal size for exact paths or equal five-field samples for wildcards. Wildcard streaks reset on replacement or disappearance. `immediate` completes on the original first poll only, and only with no positive minimum size (DL-258, DL-461).
+- Completion: `stable`, the default, needs two qualifying observations with equal size for exact paths without sampled history or equal five-field samples for wildcards and sampled runs. Sampled streaks reset on replacement or disappearance. `immediate` completes on the original first poll only, and only with no positive minimum size (DL-258, DL-461, DL-467).
 - The interval is the job's `watch_interval`, else the profile's `fw_default_interval_us` (§2.1). Adapters never retry and never time out (the module docstring of `runner_adapters.py`).
 - The wiring rounds the microsecond profile interval to whole seconds, at least one. No shipped surface sets a value that is not whole seconds; resume refuses a hand-pinned one as profile drift. `profile_field:fw_default_interval_us#rounding` in [simulation-coverage](../simulation-coverage.md#profile_field) keeps it provisional.
 
