@@ -913,6 +913,73 @@ def test_box_restart_preserves_replacement_run_ownership(short_root: Path, case)
             ]
 
 
+@pytest.mark.parametrize(
+    "case,change,action",
+    [
+        ("nested", "unchanged", "restart"),
+        ("held", "unchanged", "hold"),
+        ("finished", "unchanged", "restart"),
+        ("finished_held", "unchanged", "hold"),
+        ("move_out", "changed", "rerun"),
+        ("move_out_held", "changed", "hold"),
+        ("retype", "removed", "remove"),
+    ],
+)
+def test_box_restart_marks_unchanged_members(short_root: Path, case, change, action):
+    from dsl41.runner_control import roundtrip
+    from test_main_config_restart import cli_engine
+    from test_runner_control import _sync_sendevent, wait_for
+
+    path = config_file(short_root, estate='non_idempotent = "marked.toml"\n')
+    marked = "MEMBER" if "held" in case else None
+    (short_root / "marked.toml").write_text(
+        "[jobs]\n" + (f'{marked} = "synthetic effect"\n' if marked else "")
+    )
+    boxes = "insert_job: BX\njob_type: b\ninsert_job: INNER\njob_type: b\nbox_name: BX\n"
+    command = JOB.replace("true", "sleep 30")
+    member = (JOB if case.startswith("finished") else command).replace("A", "MEMBER")
+    text = boxes + member + "box_name: INNER\n" + command.replace("A", "KEEP") + "box_name: BX\n"
+    jil = short_root / "a.jil"
+    jil.write_text(text)
+    socket = short_root / "run" / "control.sock"
+    with cli_engine(path) as ask:
+        assert _sync_sendevent(socket, "FORCE_STARTJOB", job="BX")["ok"]
+        wait_for(
+            lambda: (
+                ask("status")["jobs"]["MEMBER"]["status"]
+                == ("SUCCESS" if case.startswith("finished") else "RUNNING")
+            )
+        )
+        replacement = text + JOB.replace("A", "NEW") + "box_name: INNER\n"
+        replacement += JOB.replace("A", "OUTER") + "box_name: BX\n"
+        if case.startswith("move_out"):
+            replacement = replacement.replace(member + "box_name: INNER\n", member)
+        elif case == "retype":
+            replacement = JOB.replace("A", "BX")
+        jil.write_text(replacement)
+        answer = roundtrip(socket, {"v": 4, "cmd": "reread"})
+        assert answer["ok"], answer
+        view = answer["preview"]
+        effects = {item["job"]: item["action"] for item in view["effects"]}
+        jobs = ask("status")["jobs"]
+        assert jobs["MEMBER"]["reread"] == {"change": change, "action": action}
+        assert effects["MEMBER"] == action
+        if change == "unchanged":
+            assert "MEMBER" not in {item["name"] for item in view["changed"]}
+        applied = roundtrip(
+            socket,
+            {
+                "v": 4,
+                "cmd": "update",
+                "wait": True,
+                "request_id": "restart-marks",
+                "baseline_id": ask("status")["baseline_id"],
+            },
+        )
+        assert applied["ok"] and applied["application"], applied
+        assert not any(row.get("reread") for row in ask("status")["jobs"].values())
+
+
 def test_box_restart_ends_boxes_before_done_sibling_can_start(short_root: Path):
     old = (
         "insert_job: ZB\njob_type: b\ninsert_job: AB\njob_type: b\nbox_name: ZB\n"
