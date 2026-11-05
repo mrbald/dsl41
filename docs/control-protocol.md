@@ -685,7 +685,8 @@ never from a second evaluator.
 `{"ok": true, "job", "job_type", "box_name", "jil": <text>|null}`: the
 preserve-rendered, post-placeholder JIL block **this run loaded**, not
 the template on disk (DL-64). `jil: null` when the server was started
-without source texts (embedders).
+without source texts (embedders), or when the restart's scanner cannot read
+the captured JIL (DL-468). The latter does not stop the stored estate.
 
 ### `deps <job>`
 

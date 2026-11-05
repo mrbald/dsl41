@@ -829,7 +829,7 @@ async def _validate_before_lock(
         stored = active_configuration(run_root, locked=True, check_lowering=True)
         if not stored.source_capture:
             raise EngineError("main-config restart requires a stored main-config capture")
-        main_config.decoded_parts(stored.source_capture)
+        main_config.decoded_parts(stored.source_capture, applied=stored)
         catalog, profile = (
             stored.catalog,
             stored.profile.model_copy(update={"kill_signals": profile.kill_signals}),
@@ -952,7 +952,9 @@ async def _serve_run(
                     stored = active_configuration(run_root, locked=True, check_lowering=True)
                     if not stored.source_capture:
                         return refuse("main-config restart requires a stored main-config capture")
-                    captured_estate = main_config.decoded_parts(stored.source_capture)
+                    captured_estate = main_config.decoded_parts(
+                        stored.source_capture, applied=stored
+                    )
                     catalog, profile = (
                         stored.catalog,
                         stored.profile.model_copy(update={"kill_signals": profile.kill_signals}),
@@ -1111,9 +1113,15 @@ async def _serve_run(
         typer.echo(f"engine up; control socket: {server.path}")
         if resume and captured_estate is not None:
             from dsl41.main_config import pending_source_changes
+            from dsl41.runner_config import Configuration
 
+            applied = Configuration(
+                catalog=engine.oracle.catalog,
+                profile=engine.profile or profile,
+                source_capture=engine.source_capture,
+            )
             typer.echo(
-                f"{pending_source_changes(main_config.decoded_parts(engine.source_capture))} pending source changes; run dsl41 reread -S {shlex.quote(str(server.path))}",
+                f"{pending_source_changes(main_config.decoded_parts(applied.source_capture, applied=applied))} pending source changes; run dsl41 reread -S {shlex.quote(str(server.path))}",
                 err=True,
             )
         end = await _await_run_end(engine, server, loop_task, ui)

@@ -681,8 +681,8 @@ version and identity, clock domain and any pending update's captured plan.
 A missing or unreadable interrupted-update plan refuses before a journal
 write or process signal.
 
-Main-config restart restores the last applied estate interpretation from
-captured bytes. Estate and lint edits remain pending, including invalid
+Main-config restart restores the last applied catalog, profile and job order
+from the store. Estate and lint edits remain pending, including invalid
 `engine.environment` selections. Restart still reads the selected config
 as TOML and requires its supported format. It applies current `as_machine`,
 `machine_policy`, access-map and status-hook settings; invalid host settings refuse with
@@ -690,11 +690,23 @@ exit 2. An omitted access map selects owner-only access. These settings stay
 effective while an interrupted update applies its captured plan.
 Other runtime-profile fields retain their stored values and checks (DL-437).
 
-Restart checks machine placement against the stored catalog and current
-host settings. It does not repeat the general launch preflight or lint.
-The captured JIL is recompiled without opening the original sources or
-importing Python. After startup a synchronous source scan reports
+Restart runs launch preflight against the stored catalog and current host
+settings without applying lint refusal. It does not lower the applied v3
+capture or import Python. Captured JIL is parsed only for `spec` views; if the
+scanner rejects it, those views return `jil: null` and the engine still runs.
+After startup a synchronous source scan reports
 `N pending source changes; run dsl41 reread -S SOCKET` once, including a zero count.
+That count measures source drift, not compiler behavior. After a compiler
+fix, restart keeps the applied IR. The next `reread` lists jobs whose lowered
+definitions change, even if their sources did not change. `update` applies those
+definitions, stopping and rerunning affected running jobs; non-idempotent jobs
+follow the existing hold rule (DL-468). An interrupted update still uses its
+captured plan; if the new binary rejects that candidate or changes its recorded
+job diff, restart refuses before writes or signals. The drift refusal says:
+"Finish the update using the binary that began it, then upgrade."
+Patch compatibility requires the same state and format versions. Preserving
+earlier behavior for absent settings is a release obligation. Recovery cannot
+verify it from the retained record.
 Legacy file and manifest starts keep their matching-estate checks.
 See [runner recovery](runner-design.md#7-journal-and-recovery-e1-prod-grade)
 and DL-433 in the [decision log](decision-log.md) for the restart rule.

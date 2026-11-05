@@ -332,7 +332,7 @@ def test_b2_b4_stopping_cli_restart_applies_host_and_captured_plan(
     assert (root / "perimeter.jsonl").is_file()
 
 
-@pytest.mark.parametrize("damage", ["missing", "corrupt"])
+@pytest.mark.parametrize("damage", ["missing", "corrupt", "incompatible", "settings"])
 def test_b3_plan_refusal_precedes_engine_journal_and_signals(
     short_root: Path, monkeypatch: pytest.MonkeyPatch, damage: str
 ) -> None:
@@ -342,8 +342,20 @@ def test_b3_plan_refusal_precedes_engine_journal_and_signals(
     before = rows(root)
     if damage == "missing":
         shutil.rmtree(plan.plan_dir)
-    else:
+    elif damage == "corrupt":
         plan.plan_json.write_bytes(b"invalid JSON")
+    elif damage == "settings":
+        import json
+
+        document = json.loads(plan.plan_json.read_bytes())
+        document["settings"] = []
+        plan.plan_json.write_text(json.dumps(document))
+    else:
+
+        def rejected(*args, **kwargs):
+            raise main.RereadRefused(["synthetic.jil: attribute rejected by newer lowering"])
+
+        monkeypatch.setattr(main, "lower_catalog", rejected)
     effects = []
 
     def forbidden(*args, **kwargs):
@@ -356,7 +368,7 @@ def test_b3_plan_refusal_precedes_engine_journal_and_signals(
 
     monkeypatch.setattr(dsl41.runner_procid, "signal_ours", forbidden)
     stored = active_configuration(root)
-    with pytest.raises(EngineError, match="plan cannot be read"):
+    with pytest.raises(EngineError, match="plan cannot be read") as error:
         asyncio.run(
             resume_run(
                 stored.catalog,
@@ -367,7 +379,396 @@ def test_b3_plan_refusal_precedes_engine_journal_and_signals(
                 stored_sources=True,
             )
         )
+    if damage == "incompatible":
+        assert "attribute rejected by newer lowering" in str(error.value)
+        assert "use a compatible binary" in str(error.value)
     assert effects == [] and rows(root) == before
+
+
+@pytest.mark.parametrize("missing", ["config", "launch"])
+@pytest.mark.parametrize("boundary", [False, True])
+def test_restart_interrupted_update_with_earlier_default_shape(short_root, missing, boundary):
+    import base64
+    import hashlib
+    import json
+    import sqlite3
+
+    from dsl41.canon import canonical_bytes
+    from dsl41.reload_diff import plan_token
+    from dsl41.reload_plan import read_plan
+    from dsl41.runner_update import open_plan
+    from store_surgery import update
+
+    path = estate_file(short_root)
+    root = short_root / "run"
+    _, plan = seed_root(path, stopping=True, boundary=boundary)
+    document = json.loads(plan.plan_json.read_bytes())
+    capture_path = plan.plan_dir / main.CAPTURE
+    metadata = json.loads(capture_path.read_bytes())
+    if missing == "config":
+        assert metadata["config"]["engine"].pop("environment") is None
+    else:
+        assert metadata["launch"].pop("status_hook_long_running_s") == 0
+    capture_path.write_bytes(canonical_bytes(metadata))
+    parts = [
+        (part["name"], (plan.plan_dir / part["name"]).read_bytes()) for part in document["parts"]
+    ]
+    for part, (_, data) in zip(document["parts"], parts, strict=True):
+        part["sha256"] = hashlib.sha256(data).hexdigest()
+    token = plan_token(parts, document["live_rev"])
+    document["token"] = token
+    plan.plan_json.write_bytes(canonical_bytes(document))
+    directory = plan.plan_dir.with_name(token)
+    plan.plan_dir.rename(directory)
+    for seq, kind, body in rows(root):
+        if kind == "config" and body.get("event") == "intent":
+            update(root, seq, {**body, "token": token})
+    if boundary:
+        payload = json.loads(read_config_row(root, 2))
+        payload["source_capture"] = {
+            name: base64.b64encode(data).decode("ascii") for name, data in parts
+        }
+        data = canonical_bytes(payload)
+        with closing(sqlite3.connect(root / "engine.db", isolation_level=None)) as db:
+            db.execute(
+                "UPDATE configs SET data = ?, digest = ? WHERE rev = 2",
+                (data, "sha256:" + hashlib.sha256(data).hexdigest()),
+            )
+    assert read_plan(root / "plans", token) is not None
+    before = {p.name: p.read_bytes() for p in directory.rglob("*") if p.is_file()}
+    row1 = read_config_row(root, 1)
+    row2 = read_config_row(root, 2) if boundary else None
+    (short_root / "a.jil").unlink()
+    with cli_engine(path) as ask:
+        assert ask()["revision"] == 2
+        assert ask()["catalog"]["jobs"]["A"]["exec_"]["command"] == "echo captured"
+        assert ask("status").get("update") is None
+    opened = open_plan(root, token).estate
+    assert opened.metadata["config"]["engine"]["environment"] is None
+    assert opened.metadata["launch"]["status_hook_long_running_s"] == 0
+    assert read_config_row(root, 1) == row1
+    if boundary:
+        assert read_config_row(root, 2) == row2
+    assert {p.name: p.read_bytes() for p in directory.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("damage", ["unknown", "value", "config", "launch"])
+def test_capture_normalization_keeps_strict_binding(short_root, damage):
+    import json
+
+    from dsl41.canon import canonical_bytes
+
+    candidate = main.prepare(estate_file(short_root))
+    parts = dict(candidate.parts)
+    metadata = json.loads(parts[main.CAPTURE])
+    if damage == "unknown":
+        metadata["config"]["engine"]["unknown_setting"] = True
+    elif damage == "value":
+        metadata["config"]["engine"]["environment"] = 42
+    elif damage == "config":
+        metadata["config"]["engine"]["job_env"] = {"SYNTHETIC": "different"}
+    else:
+        metadata["launch"]["machine_policy"] = "local-eligible"
+    parts[main.CAPTURE] = canonical_bytes(metadata)
+    with pytest.raises(main.RereadRefused):
+        main.verified_from_parts(list(parts.items()))
+
+
+@pytest.mark.parametrize(
+    "section,damage", [(s, d) for s in ("config", "launch") for d in ("unknown", "value")]
+)
+def test_cli_restart_rejects_invalid_capture_before_effects(
+    short_root, monkeypatch, section, damage
+):
+    import base64
+    import hashlib
+    import json
+    import sqlite3
+
+    from dsl41.canon import canonical_bytes
+    import dsl41.runner_procid
+
+    path = estate_file(short_root)
+    root, _ = k_seed(path)
+    payload = json.loads(read_config_row(root, 1))
+    metadata = json.loads(base64.b64decode(payload["source_capture"][main.CAPTURE]))
+    target = metadata["config"]["engine"] if section == "config" else metadata["launch"]
+    field = "unknown_setting" if damage == "unknown" else "machine_policy"
+    target[field] = True if damage == "unknown" else "invalid"
+    payload["source_capture"][main.CAPTURE] = base64.b64encode(canonical_bytes(metadata)).decode()
+    data = canonical_bytes(payload)
+    with closing(sqlite3.connect(root / "engine.db", isolation_level=None)) as db:
+        db.execute(
+            "UPDATE configs SET data = ?, digest = ? WHERE rev = 1",
+            (data, "sha256:" + hashlib.sha256(data).hexdigest()),
+        )
+    (root / "leader.lock").unlink()
+    before = k_root_bytes(root)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("runtime effect before captured config refusal")
+
+    monkeypatch.setattr(runner_startup, "Engine", forbidden)
+    monkeypatch.setattr(runner_startup, "_first_reading", forbidden)
+    monkeypatch.setattr(dsl41.runner_procid, "signal_ours", forbidden)
+    result = CliRunner().invoke(app, ["run", "--config", str(path)])
+    assert result.exit_code == 2, result.output
+    assert field in result.output
+    assert k_root_bytes(root) == before
+
+
+@pytest.mark.usefixtures("k_bourne_account")
+@pytest.mark.parametrize("old_runtime_shape", [False, True])
+def test_interrupted_update_survives_distribution_version_change(
+    short_root, monkeypatch, old_runtime_shape
+):
+    import json
+    from dataclasses import replace
+
+    from dsl41 import runner_update
+    from dsl41.canon import canonical_bytes
+    from dsl41.ir import tool_version
+    from dsl41.reload_diff import definition_hash
+    from dsl41.runner_config import RuntimeProfile
+    from dsl41.runner_update import open_plan
+
+    packages = short_root / "packages"
+    distribution = packages / "dsl41-2.0.0.dist-info"
+    distribution.mkdir(parents=True)
+    version_file = distribution / "METADATA"
+    version_file.write_text("Name: dsl41\nVersion: 2.0.0\n")
+    monkeypatch.syspath_prepend(str(packages))
+    assert tool_version() == "2.0.0"
+    path = estate_file(short_root)
+    root = short_root / "run"
+    initial, plan = seed_root(path, stopping=True, boundary=True)
+    row1 = read_config_row(root, 1)
+    retained = read_config_row(root, 2)
+    assert json.loads(retained)["catalog"]["meta"]["tool_version"] == "2.0.0"
+    if old_runtime_shape:
+        document = json.loads(plan.plan_json.read_bytes())
+        assert document["settings"].pop("set_job_attribute_environmentals") is True
+        old_settings = runner_update.settings_of(main.profile_of(initial), initial.catalog)
+        old_settings.pop("set_job_attribute_environmentals")
+        recorded = Configuration.from_bytes(retained, where="recorded candidate")
+        for change in document["changed"]:
+            name = change["name"]
+            change["old_hash"] = definition_hash(
+                initial.catalog.jobs[name], initial.catalog, old_settings
+            )
+            change["new_hash"] = definition_hash(
+                recorded.catalog.jobs[name], recorded.catalog, document["settings"]
+            )
+        plan.plan_json.write_bytes(canonical_bytes(document))
+        assert document["changed"][0]["new_hash"] != definition_hash(
+            recorded.catalog.jobs["A"], recorded.catalog, main.prepare(path).settings
+        )
+    plan_bytes = {
+        str(p.relative_to(plan.plan_dir)): p.read_bytes()
+        for p in plan.plan_dir.rglob("*")
+        if p.is_file()
+    }
+    version_file.write_text("Name: dsl41\nVersion: 2.0.1\n")
+    assert tool_version() == "2.0.1"
+    candidate = open_plan(root, plan.token).estate
+    assert candidate.catalog.meta.tool_version == "2.0.1"
+    configuration = Configuration(
+        catalog=candidate.catalog,
+        profile=main.profile_of(candidate),
+        source_capture=main.encoded_parts(candidate),
+    )
+    stored = active_configuration(root)
+
+    async def restart():
+        engine = await resume_run(
+            stored.catalog,
+            root,
+            clock=RealClock(),
+            adapters={"CMD": FakeAdapter()},
+            declared=stored.profile,
+            stored_sources=True,
+            hold_open=True,
+        )
+        loop = asyncio.create_task(engine.run_until_quiescent(datetime.max))
+        try:
+            async with asyncio.timeout(10):
+                while not engine.started.is_set() or engine.config_rev != 2:
+                    if loop.done():
+                        await loop
+                    await asyncio.sleep(0.01)
+            assert not engine.update.stopping
+            assert engine.oracle.catalog.meta.tool_version == "2.0.1"
+            assert engine.profile.set_job_attribute_environmentals is True
+        finally:
+            loop.cancel()
+            await asyncio.gather(loop, return_exceptions=True)
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(restart())
+    assert read_config_row(root, 1) == row1
+    assert read_config_row(root, 2) == retained
+    assert {
+        str(p.relative_to(plan.plan_dir)): p.read_bytes()
+        for p in plan.plan_dir.rglob("*")
+        if p.is_file()
+    } == plan_bytes
+    if old_runtime_shape:
+        opened = open_plan(root, plan.token)
+        nondefault = replace(
+            opened,
+            estate=replace(
+                opened.estate,
+                settings={**opened.estate.settings, "set_job_attribute_environmentals": False},
+            ),
+        )
+        with monkeypatch.context() as changed:
+            changed.setattr(runner_update, "open_plan", lambda *args: nondefault)
+            with pytest.raises(
+                EngineError, match="Finish the update using the binary that began it"
+            ):
+                runner_update.reopen_plan(root, plan.token, configuration=stored)
+    job = candidate.catalog.jobs["A"]
+    changed_job = job.model_copy(
+        update={"exec_": job.exec_.model_copy(update={"command": "false"})}
+    )
+    changed_catalog = candidate.catalog.model_copy(update={"jobs": {"A": changed_job}})
+    with closing(SqliteStore(root / "engine.db", read_only=True)) as store:
+        for change in (
+            {"catalog": changed_catalog},
+            {"profile": RuntimeProfile(default_tz="Europe/Zurich")},
+            {"non_idempotent": {"A": "synthetic mark"}},
+            {"source_capture": {"different": "Ynl0ZXM="}},
+        ):
+            with pytest.raises(EngineError, match="configuration rev"):
+                store_config(store, configuration.model_copy(update=change), 2)
+        assert store.current_config_rev() == 2 and store.get_config(2) == retained
+
+
+@pytest.mark.usefixtures("k_bourne_account")
+@pytest.mark.parametrize("drift_job", ["A", "B"])
+def test_interrupted_update_refuses_compiler_definition_drift(short_root, monkeypatch, drift_job):
+    from dsl41 import main_config
+    from dsl41.ir import tool_version
+
+    applied_version, writer_version, recovering_version = "2.0.0", "2.0.1", "2.0.2"
+    packages = short_root / "packages"
+    distribution = packages / "dsl41-2.0.0.dist-info"
+    distribution.mkdir(parents=True)
+    version_file = distribution / "METADATA"
+    version_file.write_text(f"Name: dsl41\nVersion: {applied_version}\n")
+    monkeypatch.syspath_prepend(str(packages))
+    assert tool_version() == applied_version
+
+    path = estate_file(short_root)
+    jobs = JOB + "\ninsert_job: B\njob_type: c\ncommand: true\n"
+    (short_root / "a.jil").write_text(jobs)
+    initial = main.prepare(path)
+    assert initial.catalog.meta.tool_version == applied_version
+    root = short_root / "run"
+
+    async def crash():
+        clock = RealClock()
+        engine = start_run(
+            initial.catalog,
+            root,
+            clock=clock,
+            adapters={"CMD": FakeAdapter(default=None)},
+            launched=main.profile_of(initial),
+            source_capture=main.encoded_parts(initial),
+        )
+        try:
+            for job in ("A", "B"):
+                engine.inject(Event(at=clock.now(), kind="FORCE_STARTJOB", payload={"job": job}))
+            loop = asyncio.create_task(engine.run_until_quiescent(datetime.max))
+            try:
+                async with asyncio.timeout(5):
+                    while not {"A", "B"} <= engine._live.keys():
+                        await asyncio.sleep(0.01)
+            finally:
+                loop.cancel()
+                await asyncio.gather(loop, return_exceptions=True)
+            (short_root / "a.jil").write_text(
+                jobs.replace("command: true", "command: echo captured", 1)
+            )
+            version_file.write_text(f"Name: dsl41\nVersion: {writer_version}\n")
+            assert tool_version() == writer_version
+            candidate = main.prepare(path)
+            assert candidate.catalog.meta.tool_version == writer_version
+            plan = reread(short_root, engine.update.live(), root / "plans", candidate=candidate)
+            assert plan.plan.unchanged == ("B",) and plan.stop == ("A",)
+            request = UpdateRequest(plan.token, 1, engine.baseline_id, "compiler-drift")
+            engine.journal.append(
+                Record(
+                    clock.now(),
+                    "config",
+                    None,
+                    request.request_id,
+                    {
+                        "event": "intent",
+                        "token": plan.token,
+                        "live_rev": 1,
+                        "stop": [
+                            {"job": "A", "run_number": 1, "attempt": engine._live["A"].attempt}
+                        ],
+                        "filter": ["A"],
+                        "stop_running": True,
+                        "request_id": request.request_id,
+                        "fingerprint": request.fingerprint,
+                    },
+                )
+            )
+        finally:
+            await engine.shutdown()
+            engine.journal.close()
+
+    asyncio.run(crash())
+    version_file.write_text(f"Name: dsl41\nVersion: {recovering_version}\n")
+    assert tool_version() == recovering_version
+    stored = active_configuration(root)
+    assert stored.catalog.meta.tool_version == applied_version
+    before = k_root_bytes(root)
+    lower = main_config.lower_catalog
+    recovered_versions = []
+
+    def drift(*args, **kwargs):
+        catalog = lower(*args, **kwargs)
+        recovered_versions.append(catalog.meta.tool_version)
+        job = catalog.jobs[drift_job]
+        changed = job.model_copy(
+            update={"exec_": job.exec_.model_copy(update={"command": "echo drift"})}
+        )
+        return catalog.model_copy(update={"jobs": {**catalog.jobs, drift_job: changed}})
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("recovery effects before compiler drift refusal")
+
+    monkeypatch.setattr(main_config, "lower_catalog", drift)
+    monkeypatch.setattr(runner_startup, "Engine", forbidden)
+    monkeypatch.setattr(runner_startup, "_first_reading", forbidden)
+    monkeypatch.setattr("dsl41.runner_procid.signal_ours", forbidden)
+    with pytest.raises(
+        EngineError, match="compiled job diff differs from the recorded plan"
+    ) as error:
+        asyncio.run(
+            resume_run(
+                stored.catalog,
+                root,
+                clock=RealClock(),
+                adapters={"CMD": FakeAdapter()},
+                declared=stored.profile,
+                stored_sources=True,
+            )
+        )
+    assert recovered_versions == [recovering_version]
+    assert "Finish the update using the binary that began it, then upgrade." in str(error.value)
+    assert all(
+        version not in str(error.value)
+        for version in (applied_version, writer_version, recovering_version)
+    )
+    assert "recorded under" not in str(error.value)
+    assert "cannot be read" not in str(error.value)
+    assert k_root_bytes(root) == before
 
 
 def test_b2_stopping_recovery_keeps_current_profile(short_root: Path) -> None:
@@ -671,9 +1072,13 @@ def k_root_bytes(root):
 
 
 @pytest.mark.usefixtures("k_bourne_account")
-@pytest.mark.parametrize("failure", ["lowering", "catalog", "order"])
-def test_k1_rejected_captured_lowering_preserves_root(short_root, monkeypatch, failure):
-    from dataclasses import replace
+@pytest.mark.parametrize("failure", ["lowering", "catalog", "order", "scanner"])
+@pytest.mark.parametrize("missing_lock", [False, True])
+def test_k1_captured_compiler_changes_keep_applied_ir(
+    short_root, monkeypatch, failure, missing_lock
+):
+    from dsl41 import cli_run
+    from dsl41.ast_jil import JilParseError
     from dsl41.ir import lower_source
     from dsl41.reload_plan import RereadRefused
 
@@ -681,44 +1086,57 @@ def test_k1_rejected_captured_lowering_preserves_root(short_root, monkeypatch, f
     (short_root / "a.jil").write_text(JOB + "\ninsert_job: B\njob_type: c\ncommand: true\n")
     root, captured = k_seed(path)
     stored = active_configuration(root)
-    before = k_root_bytes(root)
-    original = main.decoded_parts
+    before = read_config_row(root, 1)
+    if missing_lock:
+        (root / "leader.lock").unlink()
 
-    def incompatible(parts):
+    def incompatible(value, **kwargs):
+        if failure == "scanner":
+            raise JilParseError("rejected by newer scanner", kwargs["file"], 1)
         if failure == "lowering":
             raise RereadRefused(["synthetic.jil: job A: attribute rejected by newer lowering"])
-        estate = original(parts)
-        changed = (
+        return (
             lower_source(JOB.replace("true", "false"))
             if failure == "catalog"
-            else estate.catalog.model_copy(
-                update={"jobs": dict(reversed(list(estate.catalog.jobs.items())))}
+            else stored.catalog.model_copy(
+                update={"jobs": dict(reversed(list(stored.catalog.jobs.items())))}
             )
         )
-        return replace(estate, catalog=changed)
 
-    monkeypatch.setattr(main, "decoded_parts", incompatible)
-    monkeypatch.setattr(
-        runner_startup,
-        "_first_reading",
-        lambda *args: pytest.fail("recovery effects on K1 refusal"),
-    )
-    for _ in range(2):
-        with pytest.raises(EngineError, match="restart-lowering: configuration revision 1"):
-            asyncio.run(
-                resume_run(
-                    stored.catalog,
-                    root,
-                    clock=RealClock(),
-                    adapters={"CMD": FakeAdapter()},
-                    declared=stored.profile,
-                    stored_sources=True,
-                )
-            )
-        assert k_root_bytes(root) == before
-    monkeypatch.setattr(main, "decoded_parts", original)
+    real_end = cli_run._await_run_end
+    real_started = cli_run._await_started
+    real_inspect = runner_startup._inspect_store
+    serving = False
+    seen = []
+
+    async def await_started(engine, loop_task):
+        nonlocal serving
+        serving = await real_started(engine, loop_task)
+        return serving
+
+    def inspect(*args, **kwargs):
+        assert not serving, "store inspected after engine up"
+        return real_inspect(*args, **kwargs)
+
+    async def running(engine, server, loop_task, ui):
+        assert engine.started.is_set()
+        assert engine.oracle.catalog == stored.catalog
+        assert list(engine.oracle.catalog.jobs) == ["A", "B"]
+        spec = server._spec({"job": "A"})
+        assert spec["ok"] and (spec["jil"] is None) == (failure == "scanner")
+        seen.append(engine.config_rev)
+        engine.request_stop()
+        return await real_end(engine, server, loop_task, ui)
+
+    monkeypatch.setattr(main, "parse" if failure == "scanner" else "lower_catalog", incompatible)
+    monkeypatch.setattr(cli_run, "_await_started", await_started)
+    monkeypatch.setattr(runner_startup, "_inspect_store", inspect)
+    monkeypatch.setattr(cli_run, "_await_run_end", running)
+    result = CliRunner().invoke(app, ["run", "--config", str(path)])
+    assert result.exit_code == 0, result.output
+    assert seen == [1] and "engine up; control socket:" in result.output
+    assert read_config_row(root, 1) == before
     assert main.encoded_parts(captured) == stored.source_capture
-    assert runner_startup.check_captured_lowering(stored, 1).catalog == stored.catalog
 
 
 @pytest.mark.usefixtures("k_bourne_account")
