@@ -457,7 +457,7 @@ def reread(
                 [
                     "engine host launch settings changed: "
                     + ", ".join(changed)
-                    + "; restart the selected engine to apply them before reread"
+                    + "; restart the engine to apply them before update"
                 ]
             )
     else:

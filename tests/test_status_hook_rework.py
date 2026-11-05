@@ -317,7 +317,7 @@ def test_config_edit_between_selection_and_host_load_never_mixes_settings(
     else:
         assert result.exit_code == 2 and "changed during preparation" in result.output
         assert served == [] and refused == [("/old-hook", "engine_refused")]
-    with pytest.raises(RereadRefused, match="restart the selected engine"):
+    with pytest.raises(RereadRefused, match="restart the engine to apply them before update"):
         reread(tmp_path, live_of(initial), tmp_path / "plans", candidate=main_config.prepare(path))
 
 
