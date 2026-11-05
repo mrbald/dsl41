@@ -544,7 +544,8 @@ or remove. A running box does not refuse a preview. Broken input explains why
 no diff is available. Exit 0 means no running stop, 1 means running stops,
 and 2 means no diff or failure to reach the engine.
 
-Status in the CLI and TUI annotates changed/removed jobs with this forecast.
+Status in the CLI and TUI annotates changed/removed jobs and unchanged members
+of boxes update would restart with this forecast.
 It describes reread time. Another reread replaces it; failed reread, applied
 update and engine restart clear it. It is held only in engine memory.
 

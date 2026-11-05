@@ -65,11 +65,28 @@ def preview(candidate: Any, live: Live) -> dict[str, Any]:
         if name not in stops and live.status.get(name) not in (None, "INACTIVE")
     ]
     actions = {item["job"]: item["action"] for item in effects}
+    restarting = [
+        box
+        for box in roots
+        if box in candidate.catalog.jobs
+        and candidate.catalog.jobs[box].job_type == "BOX"
+        and box not in marked
+    ]
+    unchanged = box_members(candidate.catalog, restarting) & set(plan.unchanged) - {
+        item["name"] for item in changed
+    }
+    for name in sorted(unchanged):
+        if actions.get(name) != "hold":
+            actions[name] = "restart"
+    effects = [{"job": name, "action": action} for name, action in actions.items()]
     marks = {
         item["name"]: {"change": "changed", "action": actions.get(item["name"])} for item in changed
     }
     marks.update(
         {name: {"change": "removed", "action": actions.get(name)} for name in plan.removed}
+    )
+    marks.update(
+        {name: {"change": "unchanged", "action": actions[name]} for name in sorted(unchanged)}
     )
     messages: list[str] = []
     if candidate.metadata:

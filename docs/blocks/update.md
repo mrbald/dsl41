@@ -93,6 +93,8 @@ before operator force-start. No additional automatic repair is promised.
 
 The CLI/TUI status annotation caches the last reread forecast in memory. New/failed
 reread replaces it; applied update and restart clear it. Update never consumes it.
+Unchanged members restarted with a running box carry an `unchanged; restart` marker.
+Members put on hold retain `hold` (DL-463, D12=MARK).
 
 ## Open findings
 

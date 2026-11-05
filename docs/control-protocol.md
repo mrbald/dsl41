@@ -158,7 +158,8 @@ with the reason no diff is available; worker failures return `engine_error`.
 Success adds `live_rev`, `source: {kind, path}` and `preview` to the read header.
 Preview has added/changed/removed names, unchanged count, stops, restored flags,
 source changes, diagnostics, lint findings and per-job effects (rerun, hold,
-remove or box restart). Readiness findings accompany a valid diff.
+remove, box restart or restart for an unchanged member restarted with its box).
+Readiness findings accompany a valid diff.
 
 The ADM update request is `{"v":4,"cmd":"update","baseline_id":"...",
 "request_id":"...","claimed_actor":null,"wait":false,"retry_only":false}`.
@@ -519,7 +520,11 @@ DL-99).
 
 ### `status [job]`
 
-A row may add `reread: {change, action}` (DL-463). It is the cached forecast
+A row may add `reread: {change, action}` (DL-463).
+`change` is `changed`, `removed` or `unchanged`.
+`action` is `rerun`, `hold`, `remove`, `restart_box` or `restart`, the same values
+as the preview's effects, or `null` when update will not touch the job.
+It is the cached forecast
 at the last reread, not a live plan. New or failed reread replaces it; applied
 update and engine restart clear it. It is absent for unmarked rows. CLI and TUI
 append an annotation; existing clients may ignore this additive answer field.
