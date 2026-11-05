@@ -224,8 +224,12 @@ arm
 assert_blocked
 wait_for 20 'the unsynchronized waiter fails with Result=timeout' waiter_timed_out
 wait_running
-start=$(waiter_prop ExecMainStartTimestampMonotonic)
+# systemd arms the start timer after the assert check and before forking the process.
+start=$(waiter_prop AssertTimestampMonotonic)
+main_start=$(waiter_prop ExecMainStartTimestampMonotonic)
 end=$(waiter_prop StateChangeTimestampMonotonic)
+(( start > 0 && start <= main_start )) ||
+    fail "waiter timestamp order: assert=$start process=$main_start"
 (( end - start >= 8000000 && end - start < 20000000 )) ||
     fail "8 s waiter bound took $((end - start)) microseconds"
 assert_order "$end" | tee "$work/timeout-order.txt"
