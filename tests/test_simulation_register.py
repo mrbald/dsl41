@@ -1665,6 +1665,97 @@ def test_known_unsupported_register_coverage(row) -> None:
         assert bool(matching) is warns, (row.id, matching)
 
 
+def test_manual_known_unsupported_inventory() -> None:
+    """The manual's known-unsupported tables in authoring.md and deploy.md name exactly
+    what `rule_known_unsupported` reports (DL-466).
+
+    Check names, not conditions. A new condition on a supported attribute
+    that no fixture reaches is missed.
+    """
+    from dsl41.lint import rule_known_unsupported
+
+    def table(filename: str, header: str) -> list[list[str]]:
+        text = (REPO / "docs" / filename).read_text(encoding="utf-8")
+        assert text.splitlines().count(header) == 1, filename
+        block = text.split(header + "\n", 1)[1].split("\n\n", 1)[0]
+        return [[cell.strip() for cell in line.split("|")[1:-1]] for line in block.splitlines()[1:]]
+
+    labels = {
+        "Machine": "machine",
+        "Pool machine or member": "pool",
+        "Resource": "resource",
+        "External instance": "external-instance",
+    }
+    jobs, payloads = set(), {}
+    for label, attribute, condition in table("authoring.md", "| Record | Attribute | Warns when |"):
+        if label == "Job":
+            jobs.add(attribute.strip("`"))
+        else:
+            assert attribute == "Other payload attributes", attribute
+            payloads[labels[label]] = set(re.findall(r"`([^`]+)`", condition.split(".", 1)[0]))
+    catalogs = [
+        ir.lower_source(
+            "insert_job: J\njob_type: c\ncommand: true\ndescription: text\n"
+            "insert_machine: P\ntype: v\ndescription: text\nmachine: M\n"
+            "node_name: localhost\n"
+            "insert_machine: M\ntype: a\nnode_name: localhost\ndescription: text\n"
+            "insert_resource: R\nres_type: R\namount: 1\ndescription: text\n"
+            "insert_xinst: X\nxtype: a\ndescription: text\n"
+            "extended_calendar: C\ncondition: DAILY\ndescription: text\n"
+        )
+    ]
+    assert not rule_known_unsupported(catalogs[0])
+    for row in JIL_ROWS:
+        for source in (row.trigger, quiet_of(row)):
+            try:
+                catalogs.append(ir.lower_source(source))
+            except ir.LoweringError:
+                pass
+    emitted, visited = set(), set()
+    for catalog in catalogs:
+        findings = rule_known_unsupported(catalog)
+        emitted.update(item.detail for item in findings if item.jobs)
+        for kind, records in (
+            ("machine", catalog.machines),
+            ("resource", catalog.resources),
+            ("external-instance", catalog.external_instances),
+        ):
+            for name, record in records.items():
+                members = record.members if isinstance(record, ir.MachineIR) else []
+                key = "pool" if members else kind
+                lanes = [record.attrs, *(member.attrs for member in members)]
+                attributes = {attribute.lower() for lane in lanes for attribute in lane}
+                active = {
+                    attribute.lower()
+                    for lane in lanes
+                    for attribute, value in lane.items()
+                    if ir.unquote_jil_value(value)
+                }
+                for attribute in attributes:
+                    visited.add(key)
+                    warns = any(
+                        item.detail == attribute and item.message.startswith(f"{kind} {name}:")
+                        for item in findings
+                    )
+                    assert warns == (attribute in active - payloads[key]), (key, name, attribute)
+    assert emitted == jobs
+    assert visited == set(payloads) == set(labels.values())
+    settings = {
+        name.strip("`").removeprefix("engine.")
+        for name, _ in table("deploy.md", "| Setting | Warns when |")
+    }
+    assert {
+        name
+        for name, param in inspect.signature(rule_known_unsupported).parameters.items()
+        if param.kind == inspect.Parameter.KEYWORD_ONLY
+    } == settings
+    findings = rule_known_unsupported(
+        ir.CatalogIR(), job_shell="/bin/sh", job_profile="/tmp/profile", std_file_mode="truncate"
+    )
+    assert len(findings) == 3 and {item.detail for item in findings} == settings
+    assert not rule_known_unsupported(ir.CatalogIR())
+
+
 @pytest.mark.parametrize("row_id", [row.id for row in JIL_ROWS])
 def test_jil_fixtures_reach_the_engine(row_id: str) -> None:
     """Breaks when a fixture parses and lowers but the engine will not read
