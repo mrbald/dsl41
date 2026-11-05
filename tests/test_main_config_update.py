@@ -528,6 +528,82 @@ def test_kill_signals_update_affects_later_kills_only(
     asyncio.run(scenario())
 
 
+@pytest.mark.usefixtures("cli_env")
+def test_fw_wildcard_to_exact_survives_update_and_restart(short_root: Path) -> None:
+    """DL-467: update and restart keep one sampled FW run and its pathname streak."""
+    from typer.testing import CliRunner
+
+    from dsl41.cli import app
+    from dsl41.runner_adapters import read_watch_log
+    from dsl41.runner_control import roundtrip
+    from test_main_config_restart import cli_engine
+    from test_runner_control import wait_for
+
+    watched = short_root / "watched.txt"
+    watched.write_text("data")
+    path = config_file(short_root)
+    source = short_root / "a.jil"
+
+    def definition(target: str) -> str:
+        return f"insert_job: W\njob_type: f\nwatch_file: {target}\nwatch_interval: 30\n"
+
+    source.write_text(definition(str(short_root / "*.txt")))
+    root = short_root / "run"
+    run_dir = root / "runs" / "W.1"
+    log = run_dir / "watch.jsonl"
+
+    def check_waiting(ask) -> None:
+        status = ask("status")
+        assert status["engine"] == "RUNNING"
+        assert (status["jobs"]["W"]["status"], status["jobs"]["W"]["run_number"]) == (
+            "RUNNING",
+            1,
+        )
+        assert ask()["catalog"]["jobs"]["W"]["exec_"]["watch_file"] == exact
+        assert log.read_bytes() == prefix
+        assert read_watch_log(run_dir).pattern.stable == {exact: 1}
+
+    with cli_engine(path) as ask:
+        status = ask("status")
+        started = roundtrip(
+            root / "control.sock",
+            {
+                "cmd": "sendevent",
+                "verb": "STARTJOB",
+                "payload": {"job": "W"},
+                "baseline_id": status["baseline_id"],
+                "request_id": "start-watch",
+                "expect": {"job:W": status["jobs"]["W"]["state_rev"]},
+            },
+        )
+        assert started["ok"], started
+        wait_for(lambda: log.exists() and len(log.read_bytes().splitlines()) == 2)
+        prefix = log.read_bytes()
+        before = [json.loads(line) for line in prefix.splitlines()]
+        assert [line["kind"] for line in before] == ["start", "sample"]
+        [observed] = before[1]["files"]
+        exact = observed["path"]
+        assert read_watch_log(run_dir).pattern.stable == {exact: 1}
+        source.write_text(definition(exact))
+        applied = CliRunner().invoke(app, ["update", "-S", str(root / "control.sock"), "--wait"])
+        assert applied.exit_code == 0, applied.output
+        check_waiting(ask)
+
+    with cli_engine(path) as ask:
+        check_waiting(ask)
+        wait_for(lambda: ask("status")["jobs"]["W"]["status"] == "SUCCESS", timeout_s=40)
+        assert ask("status")["jobs"]["W"]["run_number"] == 1
+
+    after = log.read_bytes()
+    assert after.startswith(prefix)
+    lines = [json.loads(line) for line in after.splitlines()]
+    assert [line["kind"] for line in lines] == ["start", "sample", "sample"]
+    assert {line["run_id"] for line in lines} == {before[0]["run_id"]}
+    assert lines[-1]["files"] == [observed]
+    assert read_watch_log(run_dir).pattern.stable == {exact: 2}
+    assert sorted(item.name for item in (root / "runs").iterdir()) == ["W.1"]
+
+
 def test_socket_reload_preview_update_retry_and_marker(short_root: Path) -> None:
     from datetime import datetime
     from dsl41.runner_clock import RealClock

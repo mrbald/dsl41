@@ -1236,8 +1236,8 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             cite="runner-design ss6, ss8a, DL-258",
             effect="the exact path or final-component * or ? pattern an FW job polls;"
             " any one qualifying match can complete it under runner-design ss6:"
-            " exact paths use size-only stability, wildcards use five-field samples"
-            " per pathname and file identity (DL-461)",
+            " exact paths without sampled history use size-only stability, wildcards and"
+            " sampled runs use five-field samples per pathname and file identity (DL-461, DL-467)",
             trigger=_job(**_FW_JOB),
         ),
         _row(
@@ -1276,9 +1276,9 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             cite="runner_adapters.FileWatcherAdapter",
             label="E6",
             sites=("runner_adapters.FileWatcherAdapter#1",),
-            effect="two qualifying polls must agree on size for an exact path, or on device,"
-            " inode, size, mtime_ns and ctime_ns per wildcard pathname; replacement or"
-            " disappearance resets that pathname's count (DL-461)",
+            effect="two qualifying polls must agree on size for an exact path without sampled history,"
+            " or on device, inode, size, mtime_ns and ctime_ns per pathname for wildcards and sampled"
+            " runs; replacement or disappearance resets that pathname's count (DL-461, DL-467)",
             trigger=_job(watch_file_min_size="1024", **_FW_JOB),
             quiet=_job(**_FW_JOB),
         ),
@@ -3303,8 +3303,9 @@ PROFILE_ROWS: tuple[Row, ...] = (
             klass=SUPPORTED,
             cite="runner-design ss6, ss8a, ss15 E6, DL-258",
             effect="the default: two stable qualifying polls under runner-design ss6;"
-            " exact paths compare size, wildcards compare five metadata fields per pathname"
-            " (DL-461), like a job with a positive minimum size",
+            " exact paths without sampled history compare size, wildcards and sampled runs compare"
+            " five metadata fields per pathname (DL-461, DL-467), like a job with a positive"
+            " minimum size",
             trigger='{"semantics": {"fw-existence": "stable"}}',
         ),
         _row(
