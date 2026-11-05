@@ -3139,7 +3139,7 @@ PROFILE_ROWS: tuple[Row, ...] = (
                 member=name,
                 klass=PASSTHROUGH,
                 cite="runtime_policy.RuntimePolicySettings",
-                effect="validated revisioned setting; update and execution activation are pending",
+                effect="validated revisioned setting; execution activation is pending",
                 trigger='{"%s": %s}' % (name, value),
             )
             for name, value in (
