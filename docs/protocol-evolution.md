@@ -87,7 +87,7 @@ Version-28 dispatches and snapshots require valid invocation data and S.
 Missing or damaged data refuses before recovery effects; S is never inferred.
 The catalog's environment view depends on authenticated authority:
 READ receives names only and no inherited names; OPS/ADM keep the full
-view. The client rejects redacted input for `reread`.
+view. Engine-owned `reread` uses live engine state (DL-463).
 
 `root_id` is mandatory store identity, not a format version (DL-433).
 Startup refuses a store without it. Clock domain is also checked separately.

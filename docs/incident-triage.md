@@ -385,7 +385,7 @@ store, plans or spool to bypass a refusal.
 
 8. Attach the selected `/etc/dsl41/dsl41.toml`, `engine.toml`, relevant
    `plans/` and attempt spool records after checking their contents.
-   Record the `config_rev`, plan token and request envelope when available.
+   Record `config_rev`, `request_id` and the request envelope when available.
 9. Attach the job's `log_out` and `log_err` after checking for credentials.
 
 ## What this page does not cover
