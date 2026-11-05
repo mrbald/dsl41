@@ -1266,7 +1266,7 @@ def test_a_record_during_the_ladder_never_cancels_the_closing_kill(tmp_path: Pat
         loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
         _start_jobs(engine, "j")
         await _spawned(run_root, "j")
-        await _until(childfile.exists)
+        await _until(lambda: childfile.exists() and childfile.read_text().endswith("\n"))
         await _until(lambda: engine.attempt_view("j") is not None)
         await asyncio.sleep(0.2)  # the child has trapped TERM
         await engine.request_stop()
@@ -1455,7 +1455,7 @@ def test_a_crash_between_the_outcome_and_the_closing_kill_never_overlaps_a_rerun
         asyncio.ensure_future(engine.run_until_quiescent(datetime.max))  # cancelled below
         _start_jobs(engine, "j")
         await _spawned(run_root, "j")
-        await _until(children.exists)
+        await _until(lambda: children.exists() and children.read_text().endswith("\n"))
         await _until(lambda: engine.attempt_view("j") is not None)
         await asyncio.sleep(0.2)  # the child has trapped TERM
         with monkeypatch.context() as hung:
@@ -1592,7 +1592,7 @@ def test_a_new_run_waits_while_its_job_s_group_survives(
         loop = asyncio.ensure_future(engine.run_until_quiescent(datetime.max))
         _start_jobs(engine, "j")
         await _spawned(run_root, "j")
-        await _until(children.exists)
+        await _until(lambda: children.exists() and children.read_text().endswith("\n"))
         await _until(lambda: engine.attempt_view("j") is not None)
         await asyncio.sleep(0.2)  # the child has trapped TERM
         runner_stops.selected_signal_ladder = term_only

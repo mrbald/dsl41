@@ -508,7 +508,7 @@ def test_broken_logging_and_shutdown_drop_backlog(tmp_path, monkeypatch):
         delivery.enqueue("job_failure")
         delivery.enqueue("job_hold")
         deadline = time.monotonic() + 5
-        while not marker.exists():
+        while not (marker.exists() and marker.read_text() == "started"):
             assert time.monotonic() < deadline
             await asyncio.sleep(0.01)
         start = time.monotonic()
