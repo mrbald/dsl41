@@ -56,6 +56,8 @@ class StatusObservation:
     run_number: int
     transition: str
     exit_code: int | None
+    alarm_if_fail: bool | None = None
+    alarm_if_terminated: bool | None = None
 
 
 class OracleError(ValueError):

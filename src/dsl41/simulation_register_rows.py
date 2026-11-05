@@ -321,12 +321,42 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
                 trigger=_job(**{name: value}),
             )
             for name, value in (
-                ("alarm_if_fail", "y"),
-                ("alarm_if_terminated", "y"),
-                ("max_run_alarm", "1"),
                 ("min_run_alarm", "1"),
                 ("send_notification", "1"),
             )
+        ),
+        *(
+            _row(
+                surface="job_attr",
+                member=name,
+                klass=SUPPORTED,
+                cite="runner-design ss4, DL-469",
+                effect=effect,
+                trigger=_job(**{name: value}),
+            )
+            for name, value, effect in (
+                ("alarm_if_fail", "y", "resolved Boolean on job_failure; site hooks decide alerts"),
+                (
+                    "alarm_if_terminated",
+                    "y",
+                    "explicit Boolean on job_terminated; site hooks decide alerts",
+                ),
+                (
+                    "max_run_alarm",
+                    "1",
+                    "positive minutes override the hook's global long-running threshold; zero keeps it",
+                ),
+            )
+        ),
+        _row(
+            surface="job_attr",
+            member="alarm_if_terminated",
+            facet="default",
+            klass=PROVISIONAL,
+            cite="runner-design ss4, DL-469",
+            effect="omission resolves true; the AutoSys default is unverified; no label was opened",
+            trigger=_job(),
+            quiet=_job(alarm_if_terminated="n"),
         ),
         *(
             _row(
@@ -975,7 +1005,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             member="term_run_time",
             klass=SUPPORTED,
             cite="dossier ss5, oracle.Oracle._arm_term_run_time",
-            effect="arms a timer that TERMINATEs the run after n minutes"
+            effect="new source accepts 0..527040 minutes (DL-469); arms a timer that TERMINATEs the run after n minutes"
             "; zero means no limit and arms no timer (DL-241)",
             trigger=_job(
                 "insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", term_run_time="10"
@@ -988,6 +1018,22 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             cite="DL-53",
             effect="the job runs without retries; known-unsupported warns for a positive count (DL-466)",
             trigger=_job("insert_job: J1\njob_type: c\ncommand: true\nmachine: M0", n_retrys="2"),
+        ),
+        *(
+            _row(
+                surface="job_attr",
+                member="n_retrys",
+                facet=kind,
+                klass=PASSTHROUGH,
+                cite="DL-469",
+                effect="counts 1..20 warn without retrying; zero stays quiet",
+                trigger=_job(n_retrys="1", **execution),
+                quiet=_job(n_retrys="0", **execution),
+            )
+            for kind, execution in (
+                ("box", {"job_type": "b", "command": None}),
+                ("fw", _FW_JOB),
+            )
         ),
         _row(
             surface="job_attr",
@@ -1256,7 +1302,7 @@ JOB_ATTR_ROWS: tuple[Row, ...] = (
             cite="runner_adapters.FileWatcherAdapter",
             label="E6",
             sites=("runner_adapters.FileWatcherAdapter.__init__#1",),
-            effect="an FW job with no watch_interval polls at the profile's default interval",
+            effect="an FW job with no watch_interval uses engine.fw_default_interval_s, default 60; an in-flight watch retains its interval until restart (DL-469)",
             trigger=_job(**_FW_JOB),
             quiet=_job(watch_interval="30", **_FW_JOB),
         ),
@@ -4028,16 +4074,6 @@ PREFLIGHT_CODE_ROWS: tuple[Row, ...] = (
         cite="runtime_policy.job_policy",
         effect="retry counts outside 0 through 20 refuse (DL-466)",
         trigger=_job(n_retrys="21"),
-        quiet=_job(n_retrys="0"),
-    ),
-    _row(
-        surface="preflight_code",
-        member="n-retrys",
-        facet="non-command",
-        klass=REFUSED,
-        cite="runtime_policy.job_policy",
-        effect="positive BOX and FW retry counts are refused because reset semantics are unqualified",
-        trigger=_job(job_type="b", command=None, n_retrys="1"),
         quiet=_job(n_retrys="0"),
     ),
     _row(

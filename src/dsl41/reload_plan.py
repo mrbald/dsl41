@@ -155,6 +155,7 @@ def estate_settings(
     *,
     job_env: Mapping[str, str] | None = None,
     runtime_policy: Mapping[str, object] | None = None,
+    fw_default_interval_s: int = 60,
 ) -> dict[str, object]:
     """The estate-wide settings `reload_diff.diff` compares (module docstring). Each value is
     spelled as the engine runs it, so the engine's own settings and an unchanged estate's
@@ -165,6 +166,7 @@ def estate_settings(
         "semantics": check_overrides(semantics),
         "job_env": dict(job_env or {}),
         **policy_values(runtime_policy or {}),
+        **({"fw_default_interval_s": fw_default_interval_s} if fw_default_interval_s != 60 else {}),
         "external_instances": {
             name: xinst.model_dump(mode="json", exclude={"span"})
             for name, xinst in catalog.external_instances.items()

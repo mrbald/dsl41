@@ -328,6 +328,29 @@ def policy_boolean(job: str, attribute: str, text: str) -> bool:
     return text.lower() in {"y", "1"}
 
 
+def hook_alarm_flag(job: JobIR | None, attribute: str) -> bool:
+    """DL-469: hook observations use defaults for missing or invalid annotations."""
+    if job is None:
+        return True
+    try:
+        return policy_boolean(job.name, attribute, _raw(job).get(attribute, "y"))
+    except PolicyRefused:
+        return True
+
+
+def hook_max_run_alarm(job: JobIR | None) -> int | None:
+    """DL-469: an unusable hook threshold leaves the global policy in force."""
+    if job is None:
+        return None
+    raw = _raw(job)
+    if "max_run_alarm" not in raw:
+        return None
+    try:
+        return policy_integer(job.name, "max_run_alarm", raw["max_run_alarm"])
+    except PolicyRefused:
+        return None
+
+
 @dataclass(frozen=True)
 class JobRuntimePolicy:
     n_retrys: int = 0
@@ -398,15 +421,7 @@ def job_policy(job: JobIR, *, hook_configured: bool = False) -> JobRuntimePolicy
             "n_retrys",
             "n-retrys",
             "expected an integer from 0 through 20",
-            "use 0 through 20 on CMD",
-        )
-    if job.sem.n_retrys and job.job_type != "CMD":
-        refuse(
-            name,
-            "n_retrys",
-            "n-retrys",
-            "BOX/FW retry reset semantics are unqualified",
-            "use 0 on BOX/FW",
+            "use 0 through 20",
         )
     fields = execution_fields(job)
     if job.job_type == "FW":

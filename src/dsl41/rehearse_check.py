@@ -386,7 +386,7 @@ def run_fail_sweep(
         if producer in parked or producer in adapter.park:
             cases.append(SweepCase(producer=producer, outcome="skipped_parked"))
             continue
-        if job.sem.n_retrys > 0:
+        if job.job_type == "CMD" and job.sem.n_retrys > 0:
             cases.append(SweepCase(producer=producer, outcome="inconclusive_retries"))
             continue
         fail_code = failure_exit(job)

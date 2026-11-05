@@ -1217,9 +1217,10 @@ class ControlServer:
         }
 
     def _fw_watching(self, job_ir: JobIR) -> dict[str, Any] | None:
-        """{file, interval, min_size} for a live FW run (DL-68). A watch is an in-flight
-        adapter task with no registry or status field, so the facts come from the spec;
-        interval resolves through the FW adapter's default, the number the poll sleeps."""
+        """{file, interval, min_size} from the live spec and captured launch interval.
+
+        A default edit retains an in-flight interval until restart (DL-68, DL-469).
+        """
         if not isinstance(job_ir.exec_, FwSpec) or job_ir.name not in self.engine.live_jobs():
             return None
         spec = job_ir.exec_
@@ -1228,7 +1229,9 @@ class ControlServer:
         default = getattr(self.engine.adapters.get("FW"), "default_interval_s", fallback)
         return {
             "file": spec.watch_file,
-            "interval": spec.watch_interval or default,
+            "interval": self.engine.watching_interval(job_ir.name)
+            or spec.watch_interval
+            or default,
             "min_size": spec.watch_file_min_size,
         }
 

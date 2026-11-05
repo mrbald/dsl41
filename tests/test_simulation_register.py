@@ -1182,9 +1182,9 @@ def test_surface_domain_matches_the_code(surface: str) -> None:
     assert domain - members == set(), f"{surface}: no row for {sorted(domain - members)}"
 
 
-def test_retry_warning_and_non_command_refusal_are_independent() -> None:
+def test_retry_warning_and_range_refusal_are_independent() -> None:
     warning = by_id()["preflight_code:known-unsupported"]
-    refusal = by_id()["preflight_code:n-retrys#non-command"]
+    refusal = by_id()["preflight_code:n-retrys"]
     for row, severity in ((warning, "WARN"), (refusal, "ERROR")):
         items = _preflight_under(ir.lower_source(row.trigger), "strict")
         assert any(item.code == row.member and item.severity == severity for item in items)
