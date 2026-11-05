@@ -3,8 +3,9 @@
 `diff` compares a live `CatalogIR` with a candidate by job name. A job is changed when its
 definition hash differs. The hash covers the job's normalized effective definition: the lowered
 `JobIR` without positions, plus the normalized definition of every calendar, cycle, machine and
-resource it references, plus the estate settings except `job_env` (DL-447). That map stays in
-the runtime revision. A calendar edit changes every referencing job, and `Change` says so.
+resource it references, plus the estate settings except `job_env`, `kill_signals` and
+`fw_default_interval_s` (DL-447, DL-462, DL-469). These remain in the runtime revision.
+A calendar edit changes every referencing job, and `Change` says so.
 A change in any other estate setting changes every job.
 
 Positional fields dropped before hashing (they move with whitespace and comments, never with
@@ -160,7 +161,8 @@ def _references(job: JobIR, catalog: CatalogIR) -> dict[str, dict[str, Any] | No
 def definition_hash(job: JobIR, catalog: CatalogIR, estate_settings: Mapping[str, object]) -> str:
     """Digest of the job's normalized effective definition within `catalog`.
 
-    `estate_settings`, except `job_env` and `kill_signals`, enters the hash (DL-447, DL-462).
+    `estate_settings`, except `job_env`, `kill_signals` and `fw_default_interval_s`, enters
+    the hash (DL-447, DL-462, DL-469).
     The caller (reread) supplies the values that shape a job's behaviour outside the catalog;
     this module fixes their shape as a mapping to canonical-encodable values.
     """
@@ -171,7 +173,7 @@ def definition_hash(job: JobIR, catalog: CatalogIR, estate_settings: Mapping[str
             "settings": {
                 key: value
                 for key, value in estate_settings.items()
-                if key not in {"job_env", "kill_signals"}
+                if key not in {"job_env", "kill_signals", "fw_default_interval_s"}
             },
         }
     )
@@ -206,8 +208,8 @@ def _reason(
             verb = "changed"
         reasons.append(f"{kind} {name} {verb}")
     for setting in sorted(live_settings.keys() | candidate_settings.keys()):
-        if setting in {"job_env", "kill_signals"}:
-            continue  # Later invocations or kills take these policies (DL-447, DL-462).
+        if setting in {"job_env", "kill_signals", "fw_default_interval_s"}:
+            continue  # Later starts or kills take these policies (DL-447, DL-462, DL-469).
         if live_settings.get(setting, _ABSENT) != candidate_settings.get(setting, _ABSENT):
             reasons.append(f"estate setting {setting} changed")
     return "; ".join(reasons)
@@ -230,8 +232,8 @@ def diff(
 ) -> Plan:
     """Compare by job name: added, removed, changed (hash differs), unchanged.
 
-    A settings difference, except `job_env` and `kill_signals`, changes every kept job
-    (DL-447, DL-462). A job whose type
+    A settings difference, except `job_env`, `kill_signals` and `fw_default_interval_s`, changes
+    every kept job (DL-447, DL-462, DL-469). A job whose type
     changes (CMD, BOX, FW) is another job under the same name: it is in both removed and added,
     so the update retires the old row and admits a new one.
     """

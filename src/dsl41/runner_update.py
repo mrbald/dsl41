@@ -141,13 +141,14 @@ def settings_of(profile: RuntimeProfile, catalog: CatalogIR) -> dict[str, object
         catalog,
         job_env=profile.job_env,
         runtime_policy=profile.model_dump(),
+        fw_default_interval_s=round(profile.fw_default_interval_us / 1_000_000),
     )
 
 
 def profile_for(settings: Mapping[str, Any], base: RuntimeProfile) -> RuntimeProfile:
     """`base` running the estate settings `settings`: the base zone, the timezone map, the
     semantic switches, the job environment and the runtime policy follow the candidate; the
-    machine identity and the FW window stay."""
+    machine identity stays (DL-469)."""
     aliases = settings.get("timezone_aliases")
     return base.model_copy(
         update={
@@ -156,6 +157,7 @@ def profile_for(settings: Mapping[str, Any], base: RuntimeProfile) -> RuntimePro
             "semantics": dict(settings.get("semantics") or {}),
             "job_env": dict(settings.get("job_env") or {}),
             **policy_values(settings),
+            "fw_default_interval_us": settings.get("fw_default_interval_s", 60) * 1_000_000,
         }
     )
 

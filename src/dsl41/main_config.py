@@ -54,6 +54,7 @@ class HostConfig(HookSettings, StrictModel):
 class EngineConfig(HostConfig, RuntimePolicySettings):
     environment: str | None = None
     job_env: JobEnvironment = {}
+    fw_default_interval_s: int = Field(default=60, gt=0)
 
 
 class EstateConfig(StrictModel):
@@ -399,6 +400,7 @@ def from_parts(
                     applied.catalog,
                     job_env=profile.job_env,
                     runtime_policy=profile.model_dump(),
+                    fw_default_interval_s=round(profile.fw_default_interval_us / 1_000_000),
                 ),
                 tuple(parts),
                 config.engine.environment,
@@ -440,6 +442,7 @@ def from_parts(
                 catalog,
                 job_env=config.engine.job_env,
                 runtime_policy=config.engine.model_dump(),
+                fw_default_interval_s=config.engine.fw_default_interval_s,
             ),
             tuple(parts),
             config.engine.environment,
@@ -522,6 +525,7 @@ def profile_of(estate: Estate) -> RuntimeProfile:
         machine_policy=launch["machine_policy"],
         job_env=cast(dict[str, str], estate.settings.get("job_env", {})),
         runtime_policy=policy_values(estate.settings),
+        fw_default_interval_s=cast(int, estate.settings.get("fw_default_interval_s", 60)),
     )
 
 

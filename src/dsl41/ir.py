@@ -1101,7 +1101,7 @@ class _Lowerer:
         retry = attrs.get("n_retrys")
         if retry is not None and re.fullmatch(r"[0-9]+", retry.raw_value.strip()) is None:
             self.err(
-                f"[n-retrys] job {name}: n_retrys: expected an integer from 0 through 20; use 0 through 20 on CMD",
+                f"[n-retrys] job {name}: n_retrys: expected an integer from 0 through 20; use 0 through 20",
                 retry.span,
             )
         sem = self._semantics(attrs)
@@ -1218,6 +1218,8 @@ class _Lowerer:
             sem.fail_codes = self._code_set_attr(attr)
         if (attr := attrs.pop("term_run_time", None)) is not None:
             sem.term_run_time_min = self._int_attr(attr)
+            if sem.term_run_time_min is not None and not 0 <= sem.term_run_time_min <= 527040:
+                self.err("term_run_time: expected an integer from 0 through 527040", attr.span)
         if (attr := attrs.pop("n_retrys", None)) is not None:
             sem.n_retrys = self._int_attr(attr) or 0
         if (attr := attrs.pop("auto_hold", None)) is not None:

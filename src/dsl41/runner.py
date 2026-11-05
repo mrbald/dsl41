@@ -121,7 +121,7 @@ import os
 from typing import Any, Final
 
 from dsl41.engine_charts import QUARANTINED, UPDATE_STOP, AttemptOutcome, DrainRequest
-from dsl41.ir import CatalogIR, JobIR
+from dsl41.ir import CatalogIR, FwSpec, JobIR
 from dsl41.oracle import Oracle
 from dsl41.oracle_state import Event, EventSource, JobRuntime, StatusObservation
 from dsl41.status_hook import StatusHooks
@@ -227,6 +227,7 @@ class _LiveRun:
     task: asyncio.Task[None]
     #: the attempt's id, the `run_id` its `dispatch` record bound; None with no journal
     attempt: str | None = None
+    watch_interval_s: int | None = None
 
 
 @dataclass(frozen=True)
@@ -379,15 +380,26 @@ def adapter_switch(adapters: Mapping[str, JobAdapter], name: str) -> str | None:
 
 
 def refit_adapters(
-    adapters: Mapping[str, JobAdapter], switches: SemanticSwitches
+    adapters: Mapping[str, JobAdapter],
+    switches: SemanticSwitches,
+    *,
+    fw_default_interval_s: int | None = None,
 ) -> dict[str, JobAdapter]:
-    """`adapters` with each one that reads a switch rebuilt under `switches` when it was built
-    under another value (DL-258): the FW adapter's `fw-existence`. The rest are kept."""
+    """Refit FW switches and the default for later launches (DL-258, DL-469).
+
+    An in-flight task keeps its adapter and interval until restart.
+    """
     refit = dict(adapters)
     fw = refit.get("FW")
-    if isinstance(fw, FileWatcherAdapter) and fw.existence != switches.fw_existence:
+    if isinstance(fw, FileWatcherAdapter) and (
+        fw.existence != switches.fw_existence
+        or (fw_default_interval_s is not None and fw.default_interval_s != fw_default_interval_s)
+    ):
         refit["FW"] = FileWatcherAdapter(
-            default_interval_s=fw.default_interval_s, existence=switches.fw_existence
+            default_interval_s=fw.default_interval_s
+            if fw_default_interval_s is None
+            else fw_default_interval_s,
+            existence=switches.fw_existence,
         )
     return refit
 
@@ -819,10 +831,15 @@ class Engine:
             update.finish()
 
     def refit_adapters(self) -> None:
-        """After an update swapped the switches: a wired adapter built under another value of a
-        switch it reads is rebuilt under the new one, then the switches are checked as at
-        construction (runner-design ss8a)."""
-        self.adapters = refit_adapters(self.adapters, self.oracle.semantics)
+        """Refit future FW launches to the applied profile, then check its switches
+        (runner-design ss8a, DL-469)."""
+        self.adapters = refit_adapters(
+            self.adapters,
+            self.oracle.semantics,
+            fw_default_interval_s=None
+            if self.profile is None
+            else max(1, round(self.profile.fw_default_interval_us / 1_000_000)),
+        )
         _engine_switches(self.profile, None, self.scheduler, self.adapters)
 
     def takes_up(self, job: str, run_number: int) -> bool:
@@ -1394,6 +1411,11 @@ class Engine:
         """Jobs with an in-flight adapter task; a filewatch is ONLY an in-flight task, so the ss10
         read model needs it (DL-78)."""
         return frozenset(self._live)
+
+    def watching_interval(self, job: str) -> int | None:
+        """The in-flight watch keeps its launch interval until restart (DL-469)."""
+        live = self._live.get(job)
+        return None if live is None else live.watch_interval_s
 
     def inject(
         self, ev: Event, *, source: EventSource | None = "control", request_id: str | None = None
@@ -2304,7 +2326,12 @@ class Engine:
                 self._run_adapter(job_ir, run_number, adapter, run_id, spool, dict(env or {}))
             )
         task.add_done_callback(lambda _t: self._activity.set())
-        self._live[job_ir.name] = _LiveRun(run_number=run_number, task=task, attempt=run_id)
+        interval = None
+        if isinstance(adapter, FileWatcherAdapter) and isinstance(job_ir.exec_, FwSpec):
+            interval = job_ir.exec_.watch_interval or adapter.default_interval_s
+        self._live[job_ir.name] = _LiveRun(
+            run_number=run_number, task=task, attempt=run_id, watch_interval_s=interval
+        )
 
     async def shutdown(self) -> None:
         """Cancel every live adapter task and collect the cancellations, re-raising anything a

@@ -129,8 +129,9 @@ nothing.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | job_attr:FREE | supported | DL-50 | - |  |  |  | generic | overrides the resource's release default for this one request |
 | job_attr:QUANTITY | supported | DL-21, DL-50 | - |  |  |  | generic | the units one resources group demands; a group without it is refused |
-| job_attr:alarm_if_fail | passthrough | runtime_policy.job_policy | - |  |  |  | generic | validated and carried; known-unsupported warns for active values (DL-466) |
-| job_attr:alarm_if_terminated | passthrough | runtime_policy.job_policy | - |  |  |  | generic | validated and carried; known-unsupported warns for active values (DL-466) |
+| job_attr:alarm_if_fail | supported | runner-design ss4, DL-469 | - |  |  |  | generic | resolved Boolean on job_failure; site hooks decide alerts |
+| job_attr:alarm_if_terminated | supported | runner-design ss4, DL-469 | - |  |  |  | generic | explicit Boolean on job_terminated; site hooks decide alerts |
+| job_attr:alarm_if_terminated#default | provisional | runner-design ss4, DL-469 | - |  |  |  | none | omission resolves true; the AutoSys default is unverified; no label was opened |
 | job_attr:application | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | the application tag is carried; nothing schedules or reports by it; known-unsupported warns (DL-466) |
 | job_attr:auto_delete | refused | runtime_policy.job_policy | - |  |  |  | generic | automatic deletion is refused because it would mutate the configured estate |
 | job_attr:auto_hold | supported | dossier ss5 | - |  |  |  | generic | the member enters ON_HOLD when its box starts, instead of starting with it |
@@ -164,7 +165,7 @@ nothing.
 | job_attr:machine | supported | DL-49, DL-52 | - |  |  |  | generic | names the machine the job runs on; the resolver refuses a foreign one; inert on a BOX (SEM-10) |
 | job_attr:machine_method | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | per-member placement method is not implemented; DL-49 resolves placement; known-unsupported warns (DL-466) |
 | job_attr:max_exit_success | supported | SEM-09, DL-33 | - |  |  |  | generic | shifts the SUCCESS/FAILURE boundary: exit codes up to it are a success |
-| job_attr:max_run_alarm | passthrough | runtime_policy.job_policy | - |  |  |  | generic | validated and carried; known-unsupported warns for active values (DL-466) |
+| job_attr:max_run_alarm | supported | runner-design ss4, DL-469 | - |  |  |  | generic | positive minutes override the hook's global long-running threshold; zero keeps it |
 | job_attr:min_run_alarm | passthrough | runtime_policy.job_policy | - |  |  |  | generic | validated and carried; known-unsupported warns for active values (DL-466) |
 | job_attr:must_complete_times | supported | SEM-34 | - |  |  |  | generic | the RELATIVE form arms an alarm: a missed completion raises MUST_COMPLETE_ALARM and changes no status |
 | job_attr:must_complete_times#absolute | supported | SEM-34, DL-253, oracle.Oracle._absolute_deadline | - |  |  | 00:00-71:59 | none | an ABSOLUTE must_complete_times, 00:00-71:59, arms MUST_COMPLETE_ALARM at the slot's must time on the tick's local day, hours 24-71 on the days after; 72:00 and above, a time below its own start time and a time not earlier than the next later start time of the same day are refused at lowering; the day's latest start time is not checked, its next run depending on the calendar |
@@ -179,6 +180,8 @@ nothing.
 | job_attr:must_start_times#start-mins | supported | SEM-34, DL-248, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - |  |  |  | none | a single relative offset counts against start_mins and broadcasts to every start_mins tick; the vendor refuses an absolute form there, a list of offsets there is not specified and stays open, and lowering refuses both |
 | job_attr:must_start_times#unmatched-slot | provisional | SEM-34, ir._Lowerer._sla_attr, oracle.Oracle._sla_offset | - |  |  |  | none | an instant matching no start time uses the first offset, and an absolute form arms nothing there; no label was opened for the corner |
 | job_attr:n_retrys | passthrough | DL-53 | - |  |  |  | generic | the job runs without retries; known-unsupported warns for a positive count (DL-466) |
+| job_attr:n_retrys#box | passthrough | DL-469 | - |  |  |  | none | counts 1..20 warn without retrying; zero stays quiet |
+| job_attr:n_retrys#fw | passthrough | DL-469 | - |  |  |  | none | counts 1..20 warn without retrying; zero stays quiet |
 | job_attr:notification_alarm_types | refused | runtime_policy.job_policy | - |  |  |  | generic | nonempty alarm filters refuse: grammar is unqualified |
 | job_attr:notification_emailaddress | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | notification text is carried; known-unsupported warns when nonempty (DL-466) |
 | job_attr:notification_emailaddress_on_alarm | passthrough | dossier ss5, DL-32 | - |  |  |  | generic | notification text is carried; known-unsupported warns when nonempty (DL-466) |
@@ -212,7 +215,7 @@ nothing.
 | job_attr:std_in_file | supported | runner_adapters._build_run_spec | - |  |  |  | generic | the child reads stdin from here instead of /dev/null; inert on a BOX (SEM-10); $VAR and ${VAR} resolve once before profile execution (DL-447) |
 | job_attr:std_out_file | supported | runner_environment.resolve_streams, DL-447 | - |  |  |  | generic | the child's stdout appends here; a source > truncates before each launch, >> appends (DL-460); inert on a BOX (SEM-10); $VAR and ${VAR} resolve once before profile execution |
 | job_attr:success_codes | supported | SEM-09, DL-33 | - |  |  |  | generic | the explicit success set; with no fail_codes beside it, it alone decides the verdict |
-| job_attr:term_run_time | supported | dossier ss5, oracle.Oracle._arm_term_run_time | - |  |  |  | generic | arms a timer that TERMINATEs the run after n minutes; zero means no limit and arms no timer (DL-241) |
+| job_attr:term_run_time | supported | dossier ss5, oracle.Oracle._arm_term_run_time | - |  |  |  | generic | new source accepts 0..527040 minutes (DL-469); arms a timer that TERMINATEs the run after n minutes; zero means no limit and arms no timer (DL-241) |
 | job_attr:timezone | supported | SEM-35 | - |  |  |  | generic | the zone every schedule time on this job is read in |
 | job_attr:timezone#dst-fold | supported | SEM-32, SEM-35, DL-260, timezones.start_time_instants | - |  |  |  | none | on a one-hour DST change at 02:00 local, start_times in the repeated hour fire once, in the second pass, and start_mins fire in both passes; a start time in the missing hour fires in the first minute of 03:00 with its minute as seconds (2:05 at 3:00:05), only the first such start time fires, and start_mins ticks in the missing hour do not exist. The dst-start-times=fold0 switch selects the fold=0 conversion instead |
 | job_attr:timezone#dst-other-shape | provisional | SEM-32, DL-260, timezones.start_time_instants | - |  |  |  | none | a DST change of another shape (a half-hour change, a change at another hour) keeps the fold=0 conversion of start_times and start_mins: the vendor's rules are unverified there, and no label was opened for it |
@@ -222,7 +225,7 @@ nothing.
 | job_attr:watch_file_min_size | supported | runner-design ss6 | - |  |  |  | generic | the minimum size any one matching file must reach before the FW job completes |
 | job_attr:watch_file_min_size#steady-size | provisional | runner_adapters.FileWatcherAdapter | E6 | yes |  |  | none | two qualifying polls must agree on size for an exact path without sampled history, or on device, inode, size, mtime_ns and ctime_ns per pathname for wildcards and sampled runs; replacement or disappearance resets that pathname's count (DL-461, DL-467) |
 | job_attr:watch_interval | supported | runner-design ss6 | - |  |  |  | generic | the poll interval of an FW job, in seconds |
-| job_attr:watch_interval#default | provisional | runner_adapters.FileWatcherAdapter | E6 | yes |  |  | none | an FW job with no watch_interval polls at the profile's default interval |
+| job_attr:watch_interval#default | provisional | runner_adapters.FileWatcherAdapter | E6 | yes |  |  | none | an FW job with no watch_interval uses engine.fw_default_interval_s, default 60; an in-flight watch retains its interval until restart (DL-469) |
 
 ### machine_attr
 
@@ -730,7 +733,6 @@ nothing.
 | preflight_code:machine | refused | runner_preflight._machine_preflight, DL-49 | - |  |  |  | generic | a job whose machine does not resolve to this host refuses the run: there is no remote fabric |
 | preflight_code:machine-mixed | supported | runner_preflight._machine_preflight, DL-49 | - |  |  |  | generic | a pool with some members here and some elsewhere runs here under local-eligible, with a warning that pool placement was ignored |
 | preflight_code:n-retrys | refused | runtime_policy.job_policy | - |  |  |  | generic | retry counts outside 0 through 20 refuse (DL-466) |
-| preflight_code:n-retrys#non-command | refused | runtime_policy.job_policy | - |  |  |  | none | positive BOX and FW retry counts are refused because reset semantics are unqualified |
 | preflight_code:notification-hook | refused | runner_preflight.execution_policy_preflight, runtime_policy.job_policy | - |  |  |  | generic | enabled notifications require a configured hook |
 | preflight_code:notification-unsupported | refused | runner_preflight.execution_policy_preflight, runtime_policy.job_policy | - |  |  |  | generic | unqualified notification templates and filters are refused |
 | preflight_code:oracle | refused | runner_preflight._oracle_preflight | - |  |  |  | unreachable | an oracle that will not construct over this catalog refuses the run; no JIL reaches this gate, because lowering builds no such catalog |

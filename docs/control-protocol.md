@@ -549,7 +549,9 @@ without a second query; null for ghosts).
 dispatches every start it decides, so no start is held.
 
 `watching` (`{file, interval, min_size}`) is present **only** for a live
-FW run. The absence of the key is itself the "not watching" signal
+FW run. Its interval is the in-flight launch interval, retained until the watch ends
+or the engine restarts; a resumed watch uses the applied default (DL-469).
+The absence of the key is itself the "not watching" signal
 (DL-68).
 
 `attempt` (`{run_id, n, state, after, cause, note}`) is present **only**
@@ -631,7 +633,7 @@ tier (DL-432):
 "tombstones": {<job>: [flags]}, "launch": {…}}`. `catalog` is the running catalog's
 canonical JSON value, `catalog_hash` its hash, `settings` the estate
 settings it runs under (`timezone`, `timezone_aliases`, `semantics`,
-`external_instances`), `revision` the configuration rev, `status` and
+`external_instances`, and nondefault `fw_default_interval_s` under DL-469), `revision` the configuration rev, `status` and
 `runs` each row's status and run number, and `tombstones` the flags each
 removed job's tombstone kept (`ON_HOLD`, `ON_ICE`, `ON_NOEXEC`), for the
 removed names that kept any. `launch` reports the main-config engine location

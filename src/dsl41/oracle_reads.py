@@ -31,6 +31,7 @@ from dsl41.conditions import (
     compare_value,
 )
 from dsl41.ir import CatalogIR, JobIR
+from dsl41.runtime_policy import hook_alarm_flag
 from dsl41.job_chart import noexec_own_reason
 from dsl41.job_chart_rows import row_configuration
 from dsl41.oracle_state import (
@@ -223,6 +224,12 @@ class OracleReads:
                     row.run_number,
                     transition,
                     exit_code,
+                    hook_alarm_flag(self.catalog.jobs.get(job), "alarm_if_fail")
+                    if event == "job_failure"
+                    else None,
+                    hook_alarm_flag(self.catalog.jobs.get(job), "alarm_if_terminated")
+                    if event == "job_terminated"
+                    else None,
                 )
             )
 

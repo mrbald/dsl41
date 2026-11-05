@@ -750,6 +750,13 @@ a non-running box does not fire: the schedule and the box gate compose with AND.
 10,20,30` gives minutes past *every* hour. Each firing inserts a STARTJOB event. Time and
 condition compose as AND.
 
+**Edits near a start (DL-427, DL-469).** When a change lands, a start already passed
+is not run. Starts at or after that instant use the new table. There is no next-day
+guard or check for whether the job already ran today. AutoSys 12.1's `start_times`
+reference says an 11:59 edit for a 12:00 job takes effect the following day.
+This is a deliberate difference. The owner's ST=KEEP ruling is the DL-252 exception;
+no behaviour fix follows.
+
 Colons inside an unquoted value need an escape (DL-251). JIL syntax rule 6 (TechDocs 24.2,
 condition-attribute page): "you must use escape characters (a backslash) or must enclose the
 value in quotation marks with any colons that are used in the value of an attribute statement.
@@ -1377,7 +1384,7 @@ the materialization horizon does not exist for it. Only cycle-bound calendars tr
 | `box_name`, `box_success`, `box_failure`, `box_terminator`, `job_terminator` | container semantics (§2) |
 | `date_conditions` + time cluster | scheduling (§4) |
 | `max_exit_success`, `success_codes`, `fail_codes` | success-boundary shift (SEM-09); `fail_codes` decides alone, else `success_codes` replaces the rule, else the threshold |
-| `term_run_time` | auto-terminate after n minutes → TERMINATED **[V]**: 0 means no limit, the vendor default (DL-241) |
+| `term_run_time` | auto-terminate after n minutes → TERMINATED **[V]**: 0 means no limit, the vendor default (DL-241). New source input accepts 0..527040; stored catalogs remain readable, while reread refuses out-of-range sources until edited (DL-469). |
 | `n_retrys` | auto-restart on FAILURE only, for application failures (the vendor's examples: "cannot find a file or a command, permissions are not properly set"). A TERMINATED job "does not restart". "It does not apply to system or network failures" (TechDocs 12.0.01 n_retrys); those restart under the scheduler's `MaxRestartTrys` config parameter instead (12.1 MaxRestartTrys page: "governs retries due to system or network problems ... different from the n_retrys job definition attribute") **[V]** (Q4, DL-53). Neither the oracle nor the runner models retries; preflight WARNs on `n_retrys > 0` |
 | `auto_hold` | box member enters ON_HOLD automatically when box starts **[C/?]** |
 | `auto_delete` | definition lifecycle, not runtime; carried in IR-F `JobIR.passthrough` |

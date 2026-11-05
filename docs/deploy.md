@@ -255,6 +255,11 @@ LOG_DIR = "/var/log/dsl41"
 ```
 
 Apply edits with `reread` and `update`; a restart uses the applied revision.
+`engine.fw_default_interval_s` sets the default poll interval for FW jobs that omit
+`watch_interval`. Use a positive whole number of seconds; omission means 60 (DL-469).
+The setting is revisioned and excluded from job-definition hashes. Its update stops no
+watch: an in-flight watch keeps its interval until it ends or the engine restarts.
+A resumed or new watch uses the applied default. Explicit job intervals take precedence.
 A restart reads `engine.kill_signals` from the current configuration on disk.
 An edit only to `job_env` advances the revision without stopping jobs,
 including while boxes run (DL-447). Later dispatches and replacements use
@@ -366,8 +371,8 @@ The host's monitoring must watch disk space.
 
 ## Watch the engine and jobs
 
-The site's optional status hook receives JSON on stdin for job failure, hold,
-SEM-34 deadline alarms and configured long-running intervals. Startup refusal
+The site's optional status hook receives JSON on stdin for job failure, termination,
+hold, SEM-34 deadline alarms and configured long-running intervals (DL-469). Startup refusal
 attempts delivery after valid hook settings load. The failure unit reports unit
 failure even when TOML or the store cannot be read. A normal systemd stop does
 not activate it. A crash may restart without a failure-unit activation;
@@ -375,9 +380,14 @@ the service drills check refusal and restart exhaustion on both supported system
 
 Omitting `[engine] status_hook` disables engine notifications. If the site
 disables notifications altogether, also remove the engine unit's `OnFailure`
-setting. `status_hook_long_running_s = 0` disables runtime-length notifications;
-a positive integer sets their threshold in seconds. These are host settings:
-restart after editing them. Rehearsal never invokes the hook.
+setting. `status_hook_long_running_s` sets the global runtime-length threshold in seconds,
+default 0. The hook path and global threshold are host settings; restart after editing
+them. Positive job `max_run_alarm` overrides the global threshold in minutes × 60; zero or absence
+keeps the global threshold. An effective zero disables that job's length notifications.
+Failure and termination events carry resolved `alarm_if_fail` and `alarm_if_terminated`
+Booleans. Both default to true; the termination default is unverified against AutoSys.
+False retains the event; the site hook decides whether to alert. Rehearsal never invokes
+the hook.
 
 Delivery is best effort: one worker, 64 queued events, 16 KiB per payload,
 no retry or spool. New events are dropped on overflow or oversize. Shutdown
@@ -393,7 +403,9 @@ The hook runs as `dsl41` from `/` with
 umask 077, closed inherited descriptors, only `PATH=/usr/bin:/bin` and
 `LANG=C`, and discarded stdout/stderr. It is trusted code with the service
 account's permissions. See the [payload and event contract](runner-design.md#4-engine-loop--single-writer)
-before writing a consumer; consumers must ignore unknown fields (DL-446).
+before writing a consumer; consumers must ignore unknown fields and unknown events (DL-446, DL-469).
+The hook protocol is `v=1`. Every key appears in every payload, null where it does not
+apply, including both alarm flags.
 
 ```sh
 /opt/dsl41/releases/<version>/bin/dsl41 query status \

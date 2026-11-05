@@ -58,8 +58,6 @@ REFUSALS = [
     ("notification_template: template", "c", "notification-unsupported"),
     ("notification_alarm_types: MAXRUNALARM", "c", "notification-unsupported"),
     ("send_notification: 1", "c", "notification-hook"),
-    ("n_retrys: 1", "b", "n-retrys"),
-    ("n_retrys: 1", "f", "n-retrys"),
     ("n_retrys: 21", "c", "n-retrys"),
     ("profile: /tmp/policy-profile", "f", "fw-execution"),
     ("std_out_file: /tmp/policy-out", "f", "fw-execution"),
@@ -97,7 +95,7 @@ REFUSALS += [
 
 
 @pytest.mark.usefixtures("cli_env")
-@pytest.mark.parametrize("attributes,kind,code", REFUSALS[:19])
+@pytest.mark.parametrize("attributes,kind,code", REFUSALS[:17])
 def test_known_unsupported_ignore_preserves_refusals(tmp_path, attributes, kind, code):
     from typer.testing import CliRunner
     from dsl41.cli import app

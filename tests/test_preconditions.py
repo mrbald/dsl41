@@ -500,7 +500,11 @@ def test_a_late_status_after_a_deadline_records_one_kill_and_replays(tmp_path: P
 
 
 #: a negative term_run_time arms a deadline already past due at the start
-_PAST_DUE_JIL = "insert_job: x\njob_type: c\ncommand: sleep 300\nterm_run_time: -1\n"
+def _past_due_catalog():
+    """DL-469: stored catalogs retain past-due runtime limits."""
+    catalog = lower_source("insert_job: x\njob_type: c\ncommand: sleep 300\n")
+    catalog.jobs["x"].sem.term_run_time_min = -1
+    return catalog
 
 
 def test_a_timer_due_before_the_last_admitted_instant_is_stamped_at_that_instant(
@@ -514,7 +518,7 @@ def test_a_timer_due_before_the_last_admitted_instant_is_stamped_at_that_instant
     # and this one would otherwise wait on an instant that has already passed
     clock = _SteppedClock(T0 + timedelta(seconds=1))
     engine = start_run(
-        lower_source(_PAST_DUE_JIL),
+        _past_due_catalog(),
         tmp_path / "run",
         clock=clock,
         adapters={"CMD": FakeAdapter(default=None)},

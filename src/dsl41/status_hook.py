@@ -19,6 +19,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from dsl41.runtime_policy import hook_max_run_alarm
+
 if TYPE_CHECKING:
     from dsl41.oracle_state import StatusObservation
     from dsl41.runner import Engine
@@ -65,6 +67,8 @@ def payload(
         "exit_code": None,
         "unit": None,
         "threshold_s": None,
+        "alarm_if_fail": True if event == "job_failure" else None,
+        "alarm_if_terminated": True if event == "job_terminated" else None,
     }
     row.update(values)
     return (json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
@@ -259,6 +263,8 @@ class HookDelivery:
                 run_number=row.run_number,
                 transition=row.transition,
                 exit_code=row.exit_code,
+                alarm_if_fail=row.alarm_if_fail,
+                alarm_if_terminated=row.alarm_if_terminated,
             )
 
     async def _run(self, invocation: _Invocation) -> None:
@@ -328,7 +334,7 @@ class StatusHooks:
         self.delivery = HookDelivery(settings.status_hook, engine.run_root or Path.cwd())
         self.threshold = settings.status_hook_long_running_s
         self._seen: dict[str, tuple[int, datetime | None]] = {}
-        self.monitor = asyncio.create_task(self._monitor()) if self.threshold else None
+        self.monitor = asyncio.create_task(self._monitor())
 
     def check_long_running(self) -> None:
         try:
@@ -342,7 +348,9 @@ class StatusHooks:
                     continue
                 if row.status_at is None or self._seen.get(job) == interval:
                     continue
-                if (now - row.status_at).total_seconds() < self.threshold:
+                minutes = hook_max_run_alarm(self.engine.oracle.catalog.jobs.get(job))
+                threshold = minutes * 60 if minutes else self.threshold
+                if not threshold or (now - row.status_at).total_seconds() < threshold:
                     continue
                 current = self.engine.oracle.store.runtime(job)
                 if (
@@ -356,7 +364,7 @@ class StatusHooks:
                     at=now,
                     job=job,
                     run_number=current.run_number,
-                    threshold_s=self.threshold,
+                    threshold_s=threshold,
                 )
         except Exception:
             self.delivery.diagnostic("long-running check failed")

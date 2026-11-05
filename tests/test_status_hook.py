@@ -414,6 +414,8 @@ with open({str(out)!r}, 'a') as output:
         "exit_code": 8,
         "unit": None,
         "threshold_s": None,
+        "alarm_if_fail": True,
+        "alarm_if_terminated": None,
     }
     assert UUID(row["id"]).version == 4 and row["host"]
     assert data.endswith("\n") and data.count("\n") == 1

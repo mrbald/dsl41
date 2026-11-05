@@ -136,6 +136,8 @@ class OracleWriters(OracleCascade):
         self._emit("STATUS", job=job, status=new)
         if new == "FAILURE" and old != new:
             self._observe_status("job_failure", job, f"{old}->{new}", line.code)
+        if new == "TERMINATED" and old != new:
+            self._observe_status("job_terminated", job, f"{old}->{new}")
 
     def _status_reached(self, job: str) -> JobStatus:
         """The status the job's instance is in."""

@@ -25982,3 +25982,33 @@ relitigate an entry; append a new one.
   PREFLIGHT. DL-437's NOT BUILT restart-preflight claim (K2) is stale; `check_restart_preflight`
   runs full preflight against the stored catalog and profile. TODO.md has closed K2.
   This item adds no preflight rule.
+- DL-469 Apply bounded attribute policy (2026-11-05; owner, boss and operator rulings;
+  runner-design §§4/6/8, control-protocol §4, autosys-semantics SEM-32/§5, deploy)
+  Amends DL-466: CMD/BOX/FW n_retrys 1..20 warn without retries; zero is quiet;
+  invalid counts refuse. Only CMD retries make a failure sweep inconclusive.
+  alarm_if_fail, alarm_if_terminated and max_run_alarm stop warning.
+  Amends DL-446: hooks stay at v=1 by the operator's decision under the owner's delegation
+  (2026-11-05, "decide whatever you want"), overriding the boss's v=2 ruling.
+  v=1 includes job_terminated; consumers ignore unknown events.
+  Every key, including both alarm flags, appears in every payload, null if inapplicable.
+  Every job_failure carries resolved Boolean alarm_if_fail, default true. Every entry
+  into TERMINATED emits job_terminated with resolved Boolean alarm_if_terminated,
+  default true, unverified against AutoSys. False suppresses neither event. An update
+  that restarts a box kills it and emits job_terminated. Hook annotation readers cannot raise.
+  Positive max_run_alarm overrides the global threshold in minutes × 60; zero/absence
+  keeps it. Effective zero disables that job's long-running notifications. Each-second,
+  once-per-RUNNING-interval checks, post-commit delivery, replay silence, delivery bounds
+  and possible repetition after restart remain. SEM-34 alarms retain their meaning.
+  Amends DL-250: engine.fw_default_interval_s is revisioned, a positive integer, default 60,
+  excluded from definition hashes. An in-flight watch retains its interval until it ends
+  or the engine restarts. A resumed or new watch uses the applied default. Explicit job
+  intervals win. E6 remains open; no interval is added to persisted watch evidence.
+  Amends DL-241: new source term_run_time must be 0..527040 minutes; zero arms no timer.
+  Stored catalogs keep running/restarting; reread refuses unchanged out-of-range sources
+  until edited. Interrupted-update recovery may refuse under DL-468.
+  Clarifies DL-427: a start already passed when a change lands is not run; a start at or
+  after that moment runs on the new table. No next-day guard or already-ran-today check.
+  AutoSys documents next-day effect in its near-start example. Keeping main's rule is a
+  deliberate difference under the owner's ST=KEEP ruling, the DL-252 exception. No fix follows.
+  Existing annotations and profile fields avoid new persisted IR and hash churn.
+  IR/state/stored-format versions, unchanged-input hashes and DL-468 recovery checks remain.

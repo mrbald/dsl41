@@ -645,7 +645,7 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
     counts = Counter(v.code for v in report.violations)
     assert counts == Counter(
         {
-            "known-unsupported": 14,  # DL-466: alarms/tags, retry, pool fields and xinst.
+            "known-unsupported": 9,  # DL-469: tags, retry, pool fields and xinst.
             "L001": 6,
             # +2 at DL-192: viz_locks.jil's lk_x3/lk_x4 hold a resource and
             # nothing else -- a requirement is not wiring
@@ -686,10 +686,6 @@ def test_lint_catalog_whole_corpus_exact_per_code_counts() -> None:
         ("n_retrys", "2", "0"),
         ("ulimit", 'c="0,0"', '""'),
         ("min_run_alarm", "2", "0"),
-        ("max_run_alarm", "2", "0"),
-        ("alarm_if_fail", "y", "n"),
-        ("alarm_if_terminated", "1", "0"),
-        ("alarm_if_terminated", "y", "n"),
         ("send_notification", "1", "0"),
         ("elevated", "y", "n"),
         ("elevated", "yes", "no"),
@@ -794,7 +790,6 @@ def test_known_unsupported_dedup_and_engine_settings() -> None:
         "extended_calendar: C\ncondition: DAILY\ndescription: text\n",
         "insert_job: A\njob_type: c\ncommand: true\nprofile: /site.env\nstd_out_file: > /tmp/out\nstd_err_file: >> /tmp/err\npriority: 1\n",
         "insert_job: A\njob_type: f\nwatch_file: /tmp/*.ready\n",
-        "insert_job: A\njob_type: b\nn_retrys: 1\n",
     ],
 )
 def test_known_unsupported_live_neutral_and_description_exclusions(source: str) -> None:

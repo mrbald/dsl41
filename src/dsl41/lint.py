@@ -1592,11 +1592,8 @@ def rule_known_unsupported(
         "notification_emailaddress_on_terminated",
     }
     policy_values = {
-        "alarm_if_fail": policy_boolean,
-        "alarm_if_terminated": policy_boolean,
         "send_notification": policy_boolean,
         "min_run_alarm": policy_integer,
-        "max_run_alarm": policy_integer,
     }
     for name, job in sorted(catalog.jobs.items()):
         raw = {
@@ -1619,9 +1616,9 @@ def rule_known_unsupported(
                 attributes.add("avg_runtime")
         except ValueError:
             pass
+        if 0 < job.sem.n_retrys <= 20:
+            attributes.add("n_retrys")
         if job.job_type == "CMD":
-            if 0 < job.sem.n_retrys <= 20:
-                attributes.add("n_retrys")
             if raw.get("ulimit"):
                 attributes.add("ulimit")
         machine = catalog.machines.get(job.exec_.machine or "") if job.exec_ else None

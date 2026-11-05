@@ -168,7 +168,9 @@ executable path. Omission disables it. No arguments, expansion or shell parsing
 are accepted. Wrong types, empty or relative paths and NUL refuse with exit 2.
 A missing or nonexecutable target is a logged delivery failure, never a startup
 blocker. `status_hook_long_running_s` is a strict nonnegative integer, default
-`0` (disabled). Both are host settings loaded on restart.
+`0` (global threshold disabled). A positive job `max_run_alarm` overrides it in minutes
+× 60; zero or absence keeps the global threshold. An effective zero disables that job's
+long-running notifications (DL-469). Both host settings load on restart.
 Reread reports a change; update refuses until a restart loads them (DL-463).
 Rehearsal never executes hooks.
 One selected TOML byte sequence supplies the hook, host and reported launch
@@ -181,26 +183,30 @@ produce no notifications. Initial and restored flags and no-op writes are silent
 
 | Event | Observation |
 | --- | --- |
-| `job_failure` | Every actual transition from another status into FAILURE at `OracleWriters._write`, including BOX and injected statuses. |
-| `alarm` | A SEM-34 timer emits `MUST_START_ALARM` or `MUST_COMPLETE_ALARM`. No reinterpretation of `alarm_if_*`, notification attributes or `min/max_run_alarm`. |
+| `job_failure` | Every actual transition from another status into FAILURE at `OracleWriters._write`, including BOX and injected statuses. Carries resolved Boolean `alarm_if_fail`, default true (DL-469). |
+| `job_terminated` | Every actual transition from another status into TERMINATED, including update box-restart kills. Carries resolved Boolean `alarm_if_terminated`, default true; that default is unverified against AutoSys (DL-469). |
+| `alarm` | A SEM-34 timer emits `MUST_START_ALARM` or `MUST_COMPLETE_ALARM`. These deadline alarms are independent of hook flags, notification attributes and runtime thresholds (DL-469). |
 | `job_hold` | A false→true `on_hold` write at `OracleWriters._flag`, including auto-hold and interruption hold. |
-| `job_long_running` | Once per RUNNING interval per engine invocation when admitted time minus its `status_at` reaches the configured threshold. Check once per second and recheck the row before enqueueing. Restart may notify again. Scheduling is unchanged. |
+| `job_long_running` | Once per RUNNING interval per engine invocation when admitted time minus its `status_at` reaches its effective per-job or global threshold. Check once per second and recheck the row before enqueueing. Restart may notify again. Scheduling is unchanged. |
 | `engine_refused` | Startup reaches exit 2 after valid hook settings were obtained; attempt delivery before exit. |
 | `engine_down` | The systemd failure unit activates. It observes unit failure, not every engine crash. |
 
 Each invocation receives one UTF-8 JSON object and newline on stdin, then EOF:
 
 ```json
-{"v":1,"id":"UUID4","event":"job_failure","at":"UTC RFC3339","host":"hostname","run_root":"/absolute/path","job":"name","run_number":1,"transition":"RUNNING->FAILURE","exit_code":1,"unit":null,"threshold_s":null}
+{"v":1,"id":"UUID4","event":"job_failure","at":"UTC RFC3339","host":"hostname","run_root":"/absolute/path","job":"name","run_number":1,"transition":"RUNNING->FAILURE","exit_code":1,"unit":null,"threshold_s":null,"alarm_if_fail":true,"alarm_if_terminated":null}
 ```
 
-Every key is mandatory. Unavailable or inapplicable values are null.
+Every key is present in every payload, including both alarm flags; unavailable or
+inapplicable values are null (DL-469). False flags do not suppress events; site hooks
+choose whether to alert. Hook annotation readers use defaults on missing jobs or invalid
+values and cannot interrupt admission or another job's long-running check.
 `run_number` describes the observed row, including alarms. `transition` is the
 oracle transition or marker, otherwise null. `threshold_s` applies only to
 long-running notifications. `exit_code` is the code supplied by a `job_failure`
 transition, or the literal `2` for `engine_refused`; otherwise it is null.
-An old code retained in the row is never used. Consumers ignore unknown fields. Incompatible
-changes increment `v`.
+An old code retained in the row is never used. Consumers ignore unknown fields and
+unknown events (DL-469). Incompatible changes increment `v`. The hook protocol is `v=1`.
 
 One asynchronous worker consumes a FIFO of 64 events, at most 16 KiB per event.
 Overflow and oversize drop the newest event. Diagnostics count failures and
@@ -418,8 +424,13 @@ recorded scope decision, not an open question. A shell-side
 retry forks semantics from the oracle and breaks bisimulation. Preflight
 warns instead (§8).
 
-**FileWatcherAdapter** (FW): polls every `watch_interval` seconds (default
-60 [?]) until a file meets `watch_file_min_size` (unset or zero means existence).
+**FileWatcherAdapter** (FW): polls every `watch_interval` seconds until a file meets
+`watch_file_min_size` (unset or zero means existence). An omitted interval uses revisioned
+`engine.fw_default_interval_s`, a positive integer defaulting to 60 [?] (DL-469).
+A default-only update changes no job-definition hash and stops no watch. An in-flight
+watch keeps its interval until it ends or the engine restarts. A resumed or new watch
+uses the applied default. Explicit job intervals take precedence. No interval is added
+to persisted watch evidence.
 An exact path needs two consecutive qualifying polls at the same size.
 A final-component `*` or `?` pattern needs any one matching pathname to have
 unchanged device, inode, size, mtime_ns and ctime_ns across two polls (DL-461).
@@ -904,7 +915,7 @@ WARN:
   principle: the name was guessed, and the remedy is `--timezone-map`.
 - `known-unsupported`: an attribute requests behavior this release does not apply
   (DL-466; [lint codes](ir-design.md#9-linter-architecture-findings-not-treatments)).
-  This includes positive CMD retries (Q4, DL-53) and pool `job_load`/`max_load`
+  This includes positive CMD, BOX and FW retries (Q4, DL-53, DL-469) and pool `job_load`/`max_load`
   (DL-50, PENDING Qr3). Pool resource semaphores still apply.
   The check also runs during rehearse. Restart reports active captured warnings
   without lint refusal. Existing preflight errors remain hard.
@@ -1304,8 +1315,8 @@ its rule, with the entry or section that holds it.
   `watch_interval` stays open [?]: the "watch_interval Attribute" page
   (AutoSys 24.2) gives "Default: 60", but on an agent, "Define a File
   Watcher Job" says a job with no watch_interval checks the file every 30
-  seconds. The adapter's 60 s default stays pinned until a decision
-  resolves that disagreement (DL-250).
+  seconds. The configurable default stays 60 s until a decision
+  resolves that disagreement (DL-250, DL-469).
 - **E7** — an interrupted attempt follows §7, including a missing record
   (DL-424, DL-433). Only an unobserved exit outside that rule uses FAILURE
   with cause `exit_status_unobservable`. TERMINATED is reserved for kills
