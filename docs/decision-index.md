@@ -469,3 +469,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-465 | Five-day dependency cooldown | [README.md](../README.md) |
 | DL-466 | Known but unsupported input warnings | [docs/authoring.md](authoring.md), [docs/deploy.md](deploy.md), [docs/ir-design.md](ir-design.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
 | DL-467 | Sampled file watchers keep sampling across target edits | [docs/blocks/fw-observation.md](blocks/fw-observation.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
+| DL-468 | Restart keeps applied IR across compatible patch releases | [docs/control-protocol.md](control-protocol.md), [docs/deploy.md](deploy.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |

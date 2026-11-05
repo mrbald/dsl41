@@ -25942,3 +25942,43 @@ relitigate an entry; append a new one.
   first-poll rule remains; target changes do not reopen its immediate exception.
   Run numbering, run identity, line kinds, fields and persisted formats stay unchanged.
   THE REASON. A valid target edit must not stop the engine or make its restart fail.
+- DL-468 Restart keeps applied IR across compatible patch releases (2026-11-05;
+  owner 2026-11-05 release ruling point 3; runner-design §7, protocol-evolution §1,
+  control-protocol §4, deploy)
+  THE RULE. With the same state and format versions, restart restores the applied v3 catalog,
+  runtime profile, job order and non-idempotent marks from the store, without lowering captures
+  or comparing newly lowered IR to the stored catalog. Captures remain the source-display and drift
+  baseline; only those views parse captured JIL. Scanner refusal nulls `spec` JIL; the estate runs.
+  Captured config and launch metadata are normalized through current models; missing settings take
+  defaults. Preserving absent settings' earlier behavior is a release obligation recovery cannot
+  verify from the retained record. Retained capture and configuration bytes are not rewritten.
+  APPLYING A COMPILER FIX. Restart keeps applied IR; next reread lists jobs whose lowering
+  changes, even with unchanged sources and zero pending-source count. Update applies new IR,
+  stops and reruns affected running jobs under the ordinary interruption rule; marked jobs hold.
+  THE LIMIT. Interrupted updates compile captured candidates. Both refusals precede any write or
+  signal. A rejected candidate names the incompatibility and a compatible binary. A job diff that
+  differs from the recorded plan refuses with "Finish the update using the binary that began it,
+  then upgrade." Missing or damaged plans require restoration.
+  Recovery compares recorded added, removed, changed and unchanged sets and changed jobs' old/new
+  definition hashes, recomputing applied/candidate hashes under the current binary. Missing
+  runtime-policy keys are omitted from both inputs only if both values equal their current
+  defaults, which must preserve earlier behavior. Kill signals stay excluded (DL-462);
+  stored hashes stay unchanged. This keeps strict definition checks without comparing different
+  setting shapes or rebuilding a stop set mid-update. Drift in changed or unchanged jobs refuses;
+  definitions cannot take effect under a stale stop set. The same job diff governs admitted
+  interruption handling without extending the plan format. Compiler version metadata alone
+  changes no definition. A retained configuration row is kept if catalog hash, job order,
+  profile, marks and captured bytes match; compiler version differences never rewrite it.
+  Applied v3 capture/catalog agreement relies on the writer; restart detects neither writer bugs
+  nor tampering that made them disagree. Versions 1 and 2 retain their readers, including v2's
+  captured-order reconstruction. Unsupported state or format versions, unreadable stored models
+  and ordinary launch preflight errors still refuse. Store schema, state version 28,
+  configuration and plan formats, hashes and wire dialects stay unchanged. This narrows
+  DL-437's K1 limit without changing its stored-revision rule.
+  SOURCE VIEW LIMITS. PlaceholderError from captured properties or substitution and invalid
+  UTF-8 in captured JIL still refuse restart; only JilParseError degrades source views.
+  The pending-source banner uses engine memory after startup, never the live store.
+  The refusal infers no writer version; the applied catalog's compiler version cannot identify it.
+  PREFLIGHT. DL-437's NOT BUILT restart-preflight claim (K2) is stale; `check_restart_preflight`
+  runs full preflight against the stored catalog and profile. TODO.md has closed K2.
+  This item adds no preflight rule.

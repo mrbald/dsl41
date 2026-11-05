@@ -61,7 +61,7 @@ from dsl41.reload_plan import (
     box_members,
     restart_boxes,
 )
-from dsl41.reload_diff import catalog_hash_v2
+from dsl41.reload_diff import catalog_hash_v2, diff
 from dsl41.reload_update import (
     STALE_PLAN,
     UPDATE_IN_PROGRESS,
@@ -82,6 +82,7 @@ from dsl41.runner_config import Configuration, RuntimeProfile, tz_aliases_of, wi
 from dsl41.runner_journal import CONFIG_MARKER, config_marker
 from dsl41.runner_ledger import STATE_MACHINE_VERSION
 from dsl41.runner_store import Record, Store
+from dsl41.runtime_policy import policy_values
 
 if TYPE_CHECKING:  # annotation only: the engine imports this module
     from dsl41.runner import Engine
@@ -496,7 +497,14 @@ class EngineUpdate:
         engine = self.engine
         assert engine.journal is not None and engine.run_root is not None
         admitted = admitted_of(intent)
-        opened = opened if opened is not None else reopen_plan(engine.run_root, admitted.token)
+        if opened is None:
+            opened = reopen_plan(
+                engine.run_root,
+                admitted.token,
+                configuration=Configuration(
+                    catalog=engine.oracle.catalog, profile=engine.profile or RuntimeProfile()
+                ),
+            )
         self._request = UpdateRequest(
             admitted.token,
             int(intent.get("live_rev", engine.config_rev)),
@@ -843,10 +851,10 @@ def _source_capture(estate: Estate) -> dict[str, str]:
 
 
 def store_config(store: Store, configuration: Configuration, rev: int) -> None:
-    """Append the next rev, or keep an equal decoded row already at it (DL-438).
+    """Append the next rev, or retain equal definitions, order and inputs (DL-438, DL-468).
 
-    A row written before `config applied` survives a format change. Every refusal precedes
-    a write, so retrying a mismatched revision cannot grow the configuration history.
+    Compiler version metadata is provenance, not a definition. Every refusal precedes a
+    write, so retrying a mismatched revision cannot grow the configuration history.
     """
     current = store.current_config_rev()
     if current == rev - 1:
@@ -854,21 +862,62 @@ def store_config(store: Store, configuration: Configuration, rev: int) -> None:
         return
     if current == rev and rev > 0:
         existing = Configuration.from_bytes(store.get_config(rev), where=f"configuration rev {rev}")
-        if existing == configuration:
+        if (
+            existing.catalog_hash == configuration.catalog_hash
+            and list(existing.catalog.jobs) == list(configuration.catalog.jobs)
+            and existing.profile == configuration.profile
+            and existing.non_idempotent == configuration.non_idempotent
+            and existing.source_capture == configuration.source_capture
+        ):
             return
     raise EngineError(
         f"the store's configuration rev {current} does not match the update's configuration rev {rev}"
     )
 
 
-def reopen_plan(run_root: Path, token: str) -> OpenedPlan:
+def reopen_plan(run_root: Path, token: str, *, configuration: Configuration) -> OpenedPlan:
     """The plan of an update a restart found stopping (`open_plan`), refused as a restart is."""
     try:
-        return open_plan(run_root, token)
-    except PlanUnreadable as exc:
+        opened = open_plan(run_root, token)
+        catalog = configuration.catalog
+        recorded_settings = opened.plan["settings"]
+        if not isinstance(recorded_settings, dict):
+            raise PlanUnreadable("plan settings must be an object")
+        defaults = policy_values({})
+        omitted = defaults.keys() - recorded_settings.keys() - {"kill_signals"}
+        old_settings = settings_of(configuration.profile, catalog)
+        new_settings = opened.estate.settings
+        # Missing definition settings use earlier-behaviour defaults; kills are host policy
+        # (DL-468, DL-462).
+        compiled = diff(
+            catalog,
+            opened.estate.catalog,
+            {key: value for key, value in old_settings.items() if key not in omitted},
+            {key: value for key, value in new_settings.items() if key not in omitted},
+        )
+        recorded = plan_of(opened.plan, catalog)
+        if (
+            any(
+                side[key] != defaults[key]
+                for side in (old_settings, new_settings)
+                for key in omitted
+            )
+            or opened.plan["live_digest"] != configuration.catalog_hash
+            or compiled.added != recorded.added
+            or compiled.removed != recorded.removed
+            or compiled.unchanged != recorded.unchanged
+            or [(c.name, c.old_hash, c.new_hash) for c in compiled.changed]
+            != [(c.name, c.old_hash, c.new_hash) for c in recorded.changed]
+        ):
+            raise EngineError(
+                f"update {token} recovery refused: compiled job diff differs from the recorded plan."
+                " Finish the update using the binary that began it, then upgrade. (DL-468)"
+            )
+        return opened
+    except (PlanUnreadable, KeyError, TypeError) as exc:
         raise EngineError(
             f"the update {token} was stopping and its plan cannot be read: {exc}; restore"
-            f" {run_root / PLANS / token} to finish it"
+            f" {run_root / PLANS / token} if missing or damaged, or use a compatible binary"
         ) from exc
 
 
