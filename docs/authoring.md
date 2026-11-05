@@ -183,6 +183,46 @@ Write whole job definitions rather than `update_job`, `delete_job` or `override_
 Hand over changed definitions through [§6](#6-hand-over-for-rollout).
 The operational boundary for `deployment-runbook.md` is [DL-424](decision-log.md).
 
+The following accepted JIL inputs request behavior that this release does not
+apply (DL-466). Each active attribute produces one `known-unsupported` warning
+per record at startup and reread. Defaults and neutral values stay quiet.
+The operator's [unsupported engine settings](deploy.md#what-the-main-config-selects)
+are separate from these JIL inputs.
+
+| Record | Attribute | Warns when |
+| --- | --- | --- |
+| Job | `application` | Nonempty text. |
+| Job | `group` | Nonempty text. |
+| Job | `machine_method` | Nonempty text. |
+| Job | `notification_msg` | Nonempty text. |
+| Job | `notification_emailaddress` | Nonempty text. |
+| Job | `notification_emailaddress_on_alarm` | Nonempty text. |
+| Job | `notification_emailaddress_on_failure` | Nonempty text. |
+| Job | `notification_emailaddress_on_success` | Nonempty text. |
+| Job | `notification_emailaddress_on_terminated` | Nonempty text. |
+| Job | `alarm_if_fail` | Explicit true value (`y` or `1`). |
+| Job | `alarm_if_terminated` | Explicit true value (`y` or `1`). |
+| Job | `send_notification` | Explicit true value (`y` or `1`). |
+| Job | `min_run_alarm` | Positive integer. |
+| Job | `max_run_alarm` | Positive integer. |
+| Job | `elevated` | True value. |
+| Job | `interactive` | True value. |
+| Job | `avg_runtime` | Positive integer. |
+| Job | `n_retrys` | CMD job with a count from 1 through 20. |
+| Job | `ulimit` | CMD job with nonempty limits, including zero limits. |
+| Job | `job_load` | Nonzero load on a job assigned to a pool machine. |
+| Machine | Other payload attributes | Nonempty values, except `description`, `node_name` and non-pool `max_load`. |
+| Pool machine or member | Other payload attributes | Nonempty values, except `description` and `node_name`. Includes `max_load` and `factor`, even zero. |
+| Resource | Other payload attributes | Nonempty values, except `amount` and `description`. |
+| External instance | Other payload attributes | Nonempty values, except `description`. |
+
+The payload rows are open-ended rules, not closed lists of attribute names.
+Text `0` is nonempty; it does not disable a text attribute or a capacity limit.
+Descriptions stay quiet on every record kind, including calendars.
+Invalid values and unsupported constructs classified as `refused` in the
+[coverage register](simulation-coverage.md) retain their existing errors.
+Suppressing a warning does not activate the requested behavior.
+
 Use these SEM entries for a construct's meaning:
 
 | Construct | Contract |
@@ -265,6 +305,8 @@ Use the [unknown-attribute policy in §2](#2-check-which-constructs-dsl41-accept
 
 `dsl41 lint` reports the rule, file and line for each finding.
 Use the [L001–L025 and `known-unsupported` rule contract](ir-design.md#9-linter-architecture-findings-not-treatments) for meanings and severities.
+The [accepted-input inventory in §2](#2-check-which-constructs-dsl41-accepts)
+lists the JIL attributes that produce `known-unsupported` warnings.
 `--strict` and `refuse = "warn"` fail on the `known-unsupported` warning; remove the attribute,
 or suppress the code with `--suppress known-unsupported` or `lint.ignore = ["known-unsupported"]`.
 
@@ -679,7 +721,7 @@ A replacement can append rows already written by the interrupted attempt.
 Use a durable invocation key to prevent duplicate database writes, messages and other side effects.
 A checkpoint is sufficient only if resuming it also prevents duplicate effects.
 
-Every command gets these variables:
+Commands receive these generated variables; `DSL41_SOCKET` requires an engine socket:
 
 | Variable | Meaning across attempts of one run |
 | --- | --- |
@@ -687,9 +729,14 @@ Every command gets these variables:
 | `DSL41_RUN_NUMBER` | Run number; unchanged. |
 | `DSL41_SCHEDULED_AT` | Invocation instant in ISO-8601 UTC with `Z`, truncated to seconds; unchanged. |
 | `DSL41_ATTEMPT` | Attempt ordinal; changes for each replacement. |
+| `AUTO_JOB_NAME` | Exact job name; unchanged. |
+| `AUTORUN` | `S-N`: first committed dispatch sequence and current attempt ordinal; changes for each replacement. |
+| `DSL41_SOCKET` | Absolute path of the current engine's control socket; omitted without a socket, including rehearsal (DL-459). See the [AutoSys command equivalents](incident-triage.md#read-the-jobs-state). |
+
+For input and output paths, use [Set stream paths](#set-stream-paths).
 
 Use the first three as the stable invocation key.
-Do not use `DSL41_ATTEMPT` to deduplicate the run's work.
+Do not use `DSL41_ATTEMPT` or `AUTORUN` to deduplicate the run's work.
 Each attempt also has a distinct `run_id` and evidence directory
 `runs/<job>.<run_number>/<attempt>/` (DL-429).
 
@@ -807,6 +854,61 @@ The same ruling covers `--deadman`, `--force=terminate`, `DSL41_DRAIN_S`,
 Runner E4, E7, E8 and E9 resolve through [§15](runner-design.md#15-open-questions-e-series),
 with interruption governed by DL-424 and DL-433.
 The process-group limit in DL-403 is governed by DL-431 and DL-436 on Linux.
+
+### Set stream paths
+
+All three command-job stream paths accept `$NAME` and `${NAME}` placeholders
+(DL-447). For example:
+
+```jil
+std_in_file: $LOG_DIR/${AUTO_JOB_NAME}.in
+std_out_file: >$LOG_DIR/${AUTO_JOB_NAME}.${AUTORUN}.out
+std_err_file: >>$LOG_DIR/${AUTO_JOB_NAME}.${AUTORUN}.err
+```
+
+Prepare the input file before starting the job. Both `AUTO_JOB_NAME` and
+`AUTORUN` also work in stdin paths; the resolved input must exist before launch.
+`AUTO_JOB_NAME` is the exact job name. `AUTORUN=S-N` uses the logical run's first
+committed dispatch sequence `S` and attempt ordinal `N`, starting at 1.
+A replacement keeps `S` and increments `N`. `S` is not an AutoSys run number. These identities are unique
+within one continuous engine-root history. Fresh roots and restored branches
+can repeat them; use separate output namespaces for those roots.
+
+The engine expands each source reference once, literally, before the job's
+profile runs. A profile cannot supply a path variable. Ask the operator to
+configure path variables through the [job environment map](deploy.md#what-the-main-config-selects).
+Relative paths start at the engine's captured startup directory.
+There is no recursive, shell, glob or tilde expansion. Commands retain their
+shell expansion after profile sourcing; profiles receive no path substitution.
+This syntax is separate from the properties placeholders in [§4](#4-check-the-estate).
+
+Missing variables, an empty resolved path, NULs and other dollar syntax refuse
+real execution. The reserved attribute variables `__job_name`, `__machine`,
+`__run_machine`, `__box_name` and `__max_exit_success` are unavailable in paths.
+`watch_file` does not accept dollar syntax.
+
+An output source beginning with `>` truncates or creates a regular file before
+each launch; `>>` appends (DL-460). Unprefixed outputs also append. Put the path
+immediately after the prefix, with no intervening space. `std_in_file` accepts
+placeholders but refuses either output prefix. The engine recognizes prefixes
+before variable expansion. A `>` introduced by expansion is literal. Use
+`./>name` or an absolute path for a literal filename beginning with `>`.
+
+A replacement applies `>` again; replay alone leaves file bytes alone.
+A later launch failure or interruption can leave output truncated. Special
+files such as `/dev/null` retain the wrapper's ordinary open behavior.
+See [runner §6](runner-design.md#6-adapters) for preparation failures,
+permissions and interruption limits, and [deploy](deploy.md#read-the-engines-output)
+for default log locations and output housekeeping.
+
+Job scripts can call their engine through the CLI without a socket flag.
+The engine supplies its own absolute `DSL41_SOCKET`, removes an inherited
+value, and omits it when no socket exists. It cannot be overridden through
+the job environment map. An explicit `-S`/`--socket` takes precedence;
+without either a flag or `DSL41_SOCKET`, a socket command fails argument
+validation. The absolute path must fit the host's Unix-socket path limit.
+`DSL41_SOCKET` is unavailable in stream-path preflight: using it in any stream
+path refuses startup, resume, reread and update, even if inherited (DL-459).
 
 ## 7. Follow the other tracks for engine work
 
