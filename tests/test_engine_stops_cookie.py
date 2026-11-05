@@ -1375,6 +1375,7 @@ def test_a_lost_wrapper_beside_a_leader_whose_main_thread_exited_is_wrapper_lost
         assert view is not None
         launch = engine.attempt_facts(str(view["run_id"])).launch
         assert launch is not None and launch.proc is not None
+        await _spawned(run_root, "j")
         os.kill(launch.proc.pid, signal.SIGKILL)
         await _until(lambda: len(_kinds(run_root, "outcome")) >= 1)
         await _until(lambda: not _live(leader))
@@ -1556,6 +1557,7 @@ def test_a_drain_stops_a_setsid_child_by_its_cookie(tmp_path: Path) -> None:
         _start_jobs(engine, "j")
         child = await _written(childfile)
         await _until(lambda: engine.attempt_view("j") is not None)
+        await _spawned(run_root, "j")
         await engine.request_stop()
         await _finish(engine, loop)
         return engine, child
