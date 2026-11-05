@@ -18,12 +18,11 @@ The `v2-jil-3` worktree is reference only; nothing merges from it wholesale.
 - [x] A leading `>` in `std_out_file` or `std_err_file` truncates the file and `>>` appends. Done: main b37694e.
 - [x] Every JIL attribute that is parsed but has no effect gives a "known but unsupported" warning at startup and reread. Done: main bef56e7.
 - [x] Manual: log-name placeholders `${AUTO_JOB_NAME}` and `${AUTORUN}`; the `dsl41` replacements for `sendevent`, `autorep` and `autostatus`; the unsupported attributes. Done: main 1bad3a7, 399f38b.
-  - [ ] Before the tag: the manual says reread and update need ADM, not OPS, and drops the retired plan-token wording (owner 2026-11-05).
+  - [x] Before the tag: the manual says reread and update need ADM, not OPS, and drops the retired plan-token wording (owner 2026-11-05). Done: main ddadee1 (manual and contracts), 472e47e (update refusal text; owner MSG=NOW).
 - [x] Our locked environment stays a few days behind the newest releases, and Dependabot is configured with the same delay (about 5 days). Done: main 81cf8f1.
 - [ ] Release 2.0.0: clean packages, release-workflow rehearsal, installed check, and the owner's approval of the tag.
-- [x] RC-1: a waiting wildcard file watcher changed to an exact path and taken up by update (or restart after it) must not stop the engine. Done: main 071c312 (owner 2026-11-05 RC1=FIX).
-- [ ] A patch release must not stop the engine from restarting: restart accepts the main config captured by an earlier 2.0.x binary (owner 2026-11-05 "add"; operator summary, the owner may reword).
-  See [DL-437 K1 and architecture section 2 finding 8](#restart-config-compatibility).
+- [x] RC-1: a waiting wildcard file watcher changed to an exact path and taken up by update (or restart after it) must not stop the engine. Done: main 071c312, 601906d (owner 2026-11-05 RC1=FIX).
+- [x] A patch release must not stop the engine from restarting: restart accepts the main config captured by an earlier 2.0.x binary (owner 2026-11-05 "add"; operator summary, the owner may reword). Done: main b120807 (DL-468; closes DL-437 K1, architecture section 2 finding 8 and retained-configuration job-order equality).
 
 # Known limits
 
@@ -93,15 +92,6 @@ Severity follows the accepted triage. In-flight targets remain open until accept
   round 1, Low 2; wrapper, DL-431).
 - [ ] **Low**: The Darwin EPERM tests fake both killpg and `ps`; no test reads real `ps` output on a real
   zombie group (Opus, slice killpg-eperm round 1, Low 3; test gap, DL-431).
-<a id="restart-config-compatibility"></a>
-
-- [ ] **High**: Main-config restart recompiles the captured bytes and refuses when the current binary
-  rejects them (Opus, slice main-config round 1, K1; DL-437). In flight for this release
-  (owner 2026-11-05).
-- [ ] **High**: Captured config metadata must equal the current model, so adding a defaulted setting
-  can invalidate older interrupted-update plans (architecture review 2026-11-05, section 2 finding 8;
-  `src/dsl41/main_config.py:431-451`). Fix before the first 2.0.x setting change. In flight for
-  this release (owner 2026-11-05).
 - [ ] **Medium**: A root started with the legacy unit cannot resume under the main-config unit, and nothing
   documents a path (Opus, slice main-config round 1, K4; DL-437).
 - [ ] **Medium**: The pending-source scan at restart runs synchronously on the engine loop (Opus, slice
@@ -111,10 +101,6 @@ Severity follows the accepted triage. In-flight targets remain open until accept
 - [ ] **Low**: The opt-in installed-CLI help test (`tests/test_installed_cli.py`) still expects the retired
   `host` command and omits `nav`, `reread`, `update` and `engine stop`; align it with `cli.py` and
   run it on installed core-only and ui-extra candidates (docs batch 2F, Opus).
-- [ ] **Low**: An interrupted update keeps an equal decoded configuration row at its revision, but the
-  equality ignores job order, so a row with a different `job_order` would be kept and replay
-  would diverge; the engine's captured plan cannot produce one today (`runner_update.py` `store_config`;
-  Opus, slice config-order; DL-438).
 - [ ] **Medium**: The update_wiring barrier cleanup's last-resort kill SIGKILLs a hung wrapper but not its
   command group, so the command is orphaned until it exits; kill the group through the live wrapper
   first (`tests/update_wiring_barrier.py` `kill_wrappers`; Opus, slice barrier-fix).
@@ -145,6 +131,12 @@ Severity follows the accepted triage. In-flight targets remain open until accept
 - [ ] **Low**: DL-447 has no blank separator because the line-ceiling test counts a trailing blank against DL-446 (Opus, #317).
 - [ ] **Low**: `dsl41 lint --timezone-map` with an empty file counts it as no map; no test covers it (Opus, #313).
 - [ ] **Low**: Two guide sentences need a decision entry to be understood: `review.md`'s semantic-review trigger cites "the rules DL-225 names", and `coordination.md` names a "reader-docs drafting exception" without its conditions; guides must read standalone (Astra, DL-457 review).
+- [ ] **Low**: tests/test_engine_stops.py keeps a sleep(0.2) TERM-trap readiness assumption in the pid-file tests; the child should ignore TERM before it writes its pid (Opus, 2026-11-05, manual-fix branch reviews).
+- [ ] **Low**: tests/test_main_config_restart.py's test_b2_changed_host_requires_restart_before_reread is misnamed: reread only reports, and update refuses (Opus, 2026-11-05, manual-fix branch reviews).
+- [ ] **Low**: No store_config test shows that a retained row whose jobs are reordered at the same
+  revision is refused; `src/dsl41/runner_update.py:867` is the only guard, because
+  catalog_hash_v2 sorts keys (`src/dsl41/canon.py:91`)
+  (Opus, 2026-11-05, TODO plan review).
 
 - [ ] **Medium**: Wrapper and process tests can leave stopped wrappers or children after teardown.
   Prove and fix owned-process cleanup in `tests/test_wrapper_branches.py:546`,
@@ -157,16 +149,10 @@ Severity follows the accepted triage. In-flight targets remain open until accept
   `london-spring` DD_KILL at +8.8 s falls outside rehearse's +0..6 s.
   Subsequent main runs are green (Opus, TODO plan review round 1; hosted results,
   `.github/workflows/dst-drill.yml`).
-- [ ] **Medium**: Record full restart preflight with a DL entry superseding DL-437 NOT BUILT K2.
-  Reconcile `docs/protocol-evolution.md:167-168`, `docs/runner-design.md:686-687` and
-  `docs/integration-testing-inventory.md:542` with `src/dsl41/runner_startup.py:318,728,746`.
-  Require semantic-class review (Opus, TODO plan review round 1; owner 2026-11-04
-  restart-equals-start principle).
-- [ ] **Medium**: Correct the pilot guide's OPS claim: socket reread requires ADM.
-  Correct retired public token terms. In flight for this release as item 9's manual follow-up
-  (owner 2026-11-05; architecture review 2026-11-05, section 2 finding 6;
-  `docs/deploy.md:262`, `docs/glossary.md:133`, `docs/incident-triage.md:388`,
-  `src/dsl41/runner_tui.py:1191`).
+- [ ] **Medium**: Remove the stale captured-byte recompilation refusal and main-config restart
+  preflight difference claims from `docs/integration-testing-inventory.md:542` and the decoded
+  equality ignoring job order claim at :543 (DL-468; Opus, TODO plan review round 1;
+  owner 2026-11-04 restart-equals-start principle).
 - [ ] **Medium**, unproved race: A reread finishing during update can store stale status marks
   (architecture review 2026-11-05, section 4; Opus, item 5 round 1;
   `src/dsl41/runner_control.py:683-684`).
@@ -278,7 +264,7 @@ Severity follows the accepted triage. In-flight targets remain open until accept
 - [x] Status hook (C, #315, DL-446): committed live transitions reach a bounded best-effort site command; delivery, cleanup and engine-down integration are covered.
 - [x] `docs/deploy.md` prerequisites and boundaries (E/I/J/D, #312, DL-439): clock-sync waiter enable/verify commands, production Python 3.12.x, drained full-root backup or consistent snapshot, output paths, site archiving and host disk monitoring are documented.
 - [x] Boot-ID coverage (G-boot, #318, DL-433/DL-436): injected changed-boot tests prove no liveness check or signal against old-boot attempts and preserve holds and run identity; a real host reboot stays after shipping (K2).
-- [x] JIL slice 1 (#322): config and checks, plus K1/K2 restart refusals. Done: DL-437 K2; main 0e7832d. K1 open under [Known bugs](#known-bugs).
+- [x] JIL slice 1 (#322): config and checks, plus K1/K2 restart refusals. Done: DL-437 K2; main 0e7832d. K1 closed: main b120807 (DL-468).
 - [x] JIL slice 2 (#323): process launch preparation for P, Q, R, S, AA, AE and the AD signal list; not yet wired into dispatch.
 - [x] Clock-sync drill check (E, #321): native x86_64 Ubuntu Python 3.12.3 and EL8 Python 3.12.15 qualify the waiter prerequisite, bounded startup and clock behavior ([service-drill evidence](https://github.com/mrbald/dsl41/actions/runs/41597099395)).
 - [x] Train cutover (#320): the accepted synthetic run through `scripts/merge_train.py` verifies pinned-head merge, strict/admin protection, cleanup and an idle empty queue; #309 is complete.
