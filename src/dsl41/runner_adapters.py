@@ -802,7 +802,8 @@ def job_log_paths(job_ir: JobIR, run_number: int, run_root: Path) -> tuple[str, 
 WATCH_LOG = "watch.jsonl"
 
 #: Two stable qualifying observations complete a watch: equal size for exact paths (DL-258),
-#: or equal five-field samples per wildcard pathname (DL-461). Replay derives the same count.
+#: or equal five-field samples per pathname in sampled runs (DL-461, DL-467).
+#: Replay derives the same count.
 FW_STABLE_POLLS = 2
 
 
@@ -1156,8 +1157,9 @@ class FileWatcherAdapter:
     watch_file exists with size >= watch_file_min_size (unset -> 0) and the size is stable
     across two consecutive qualifying polls -- `fw-existence=stable`, the default and dsl41's
     own choice (DL-258). Final-component * and ? patterns instead require an unchanged
-    device, inode, size, mtime_ns and ctime_ns per pathname (DL-461). With no positive minimum
-    size, `fw-existence=immediate` completes only when
+    device, inode, size, mtime_ns and ctime_ns per pathname (DL-461). A sampled run keeps
+    five-field stability for exact targets too (DL-467). With no positive minimum size,
+    `fw-existence=immediate` completes only when
     the run's FIRST poll finds the file -- the vendor reading; a file that appears later waits
     for stability, as under `stable`. A job with a positive minimum size always needs two
     stable observations, whatever the switch says. Completes with exit 0. Clock-driven
@@ -1192,9 +1194,11 @@ class FileWatcherAdapter:
         # qualifies (the vendor's narrow carve-out: "the file already exists when the job
         # runs"). Once the first poll has passed without qualifying, the general rule applies
         # even under `immediate`: two stable qualifying observations, using size for exact
-        # paths or five-field samples for wildcards (DL-461). A positive minimum always needs it.
+        # paths or five-field samples for wildcards and sampled runs (DL-461, DL-467).
+        # A positive minimum always needs it.
         immediate = fw_existence_immediate(job_ir, self.existence)
         pattern = PatternWatchProgress() if any(c in spec_ir.watch_file for c in "*?") else None
+        sample_path = spec_ir.watch_file if pattern is not None else glob.escape(spec_ir.watch_file)
         warned_names: set[str] = set()
         first_poll_pending = True
         previous: int | None = None
@@ -1242,7 +1246,7 @@ class FileWatcherAdapter:
                         " adopt a stranger's watch (DL-118)"
                     )
                 if pattern is None and log.pattern is not None:
-                    raise EngineError(f"{log_path}: sampled evidence for an exact-path watch")
+                    pattern = log.pattern
                 repair_tail(log_path)
                 run_id = log.run_id
                 if pattern is not None:
@@ -1265,9 +1269,7 @@ class FileWatcherAdapter:
             await ctx.clock.sleep_until(next_at)
             at = ctx.clock.now()
             if pattern is not None:
-                observations = observe_pattern(
-                    spec_ir.watch_file, min_size, warned_names=warned_names
-                )
+                observations = observe_pattern(sample_path, min_size, warned_names=warned_names)
                 if log_path is None:
                     pattern = fold_pattern_poll(pattern, observations, immediate=immediate)
                 else:

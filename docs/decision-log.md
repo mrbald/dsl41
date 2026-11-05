@@ -25928,3 +25928,17 @@ relitigate an entry; append a new one.
   Old warning records remain readable. The `n-retrys` refusal code remains;
   the previous retry and pool-job-load warnings use `known-unsupported`.
   No stopping path is added.
+- DL-467 Sampled file watchers keep sampling across target edits (2026-11-05;
+  owner 2026-11-05 RC1=FIX; runner-design §6, protocol-evolution §1)
+  THE GAP. Update takes up a waiting FW under the same run directory. An exact
+  target can therefore meet samples recorded by an earlier wildcard target.
+  THE RULE. Narrowing DL-461's exact-path refusal and size-only rule, the adapter
+  keeps sampling for the rest of a run once its log holds sampled evidence.
+  Update and restart restore the sampled progress. The current target selects
+  each new observation. An exact target is matched as a literal path, `[` included.
+  Unchanged matching files retain their five-field streaks. Paths excluded by the
+  current target drop at the next sample; new or replaced files start at one.
+  UNCHANGED. Line order remains one start, scalar polls, then samples. The original
+  first-poll rule remains; target changes do not reopen its immediate exception.
+  Run numbering, run identity, line kinds, fields and persisted formats stay unchanged.
+  THE REASON. A valid target edit must not stop the engine or make its restart fail.

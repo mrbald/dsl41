@@ -446,7 +446,10 @@ def test_load_json_reads_a_spool_version_it_does_not_implement_as_unreadable(
     assert load_json(path) == {"outcome": "exited", "exit_code": 0}
 
 
-def test_fw_exact_route_refuses_sampled_log_before_append(tmp_path: Path) -> None:
+def test_fw_exact_route_continues_sampled_log_with_a_literal_path(tmp_path: Path) -> None:
+    watched = tmp_path / "a[1].txt"
+    watched.write_text("literal")
+    (tmp_path / "a1.txt").write_text("decoy")
     run_dir = tmp_path / "runs" / "w.1"
     _write_log(
         run_dir,
@@ -460,12 +463,23 @@ def test_fw_exact_route_refuses_sampled_log_before_append(tmp_path: Path) -> Non
         },
     )
     log = run_dir / WATCH_LOG
+    before = log.read_bytes()
     with log.open("ab") as stream:
         stream.write(b'{"kind":')
-    before = log.read_bytes()
     clock = _StepClock()
-    with pytest.raises(EngineError, match="sampled evidence for an exact-path watch"):
-        asyncio.run(
-            FileWatcherAdapter().run(_fw_job(tmp_path / "exact"), 1, _fw_ctx(tmp_path, clock))
-        )
-    assert log.read_bytes() == before and clock.slept == []
+    result = asyncio.run(
+        FileWatcherAdapter(existence="immediate").run(_fw_job(watched), 1, _fw_ctx(tmp_path, clock))
+    )
+    assert result == 0
+    after = log.read_bytes()
+    assert after.startswith(before) and b'{"kind":' not in after, "repair the torn tail"
+    lines = [json.loads(line) for line in after.splitlines()]
+    assert [line["kind"] for line in lines] == ["start", "sample", "sample", "sample"]
+    assert {line["run_id"] for line in lines} == {"r1"}
+    assert [[item["path"] for item in line["files"]] for line in lines[2:]] == [
+        [str(watched)],
+        [str(watched)],
+    ]
+    assert clock.slept == [T0 + timedelta(seconds=30), T0 + timedelta(seconds=60)]
+    progress = read_watch_log(run_dir).pattern
+    assert progress.polls == 3 and progress.stable == {str(watched): 2}

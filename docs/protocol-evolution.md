@@ -102,8 +102,9 @@ string and integer `device`, `inode`, `size`, `mtime_ns` and `ctime_ns` fields.
 Device, inode and size are nonnegative. Timestamps use canonical datetime encoding.
 A wildcard watch may retain a scalar prefix and append samples. The prefix keeps
 its poll count and deadline but contributes no pathname stability.
-A scalar line after a sample refuses. An exact-path adapter refuses sampled evidence
-before repairing or appending the log. Existing records are never rewritten.
+A scalar line after a sample refuses. A run with sampled evidence keeps sampling for
+the rest of that run, including after a change to an exact target. That target is
+matched as a literal path, `[` included (DL-467). Existing records are never rewritten.
 Scalar evidence remains readable without retirement. Older binaries refuse `sample`
 by kind and quarantine that evidence on startup; rollback cannot continue such a watch.
 Shared artifact canonicalization, journal, snapshot and state versions are unchanged.
