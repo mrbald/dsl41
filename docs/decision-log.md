@@ -25862,6 +25862,8 @@ relitigate an entry; append a new one.
   Reread's changed/removed forecast is cached in memory and projected additively into status,
   CLI and TUI. A new reread replaces it; failed reread, applied update and restart clear it.
   It describes reread time, is never an application plan, and changes no revision or record.
+  D12=MARK includes unchanged descendants of boxes update would restart, with action restart.
+  Marked members retain hold; status and reread effects use the same forecast.
   THE BOX CASE. A structural edit of a running box stops its running descendants through the
   existing TERM update ladder. Existing KILLJOB inputs then end the old box/member rows and
   COMMIT BEFORE application: otherwise kept outcomes choose old-run replacement attempts while
