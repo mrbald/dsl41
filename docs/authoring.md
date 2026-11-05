@@ -177,6 +177,10 @@ Lowering refuses unknown attributes outside the inert allow-list under DL-07.
 In Python, `build(permit_unknown=True)` selects that permission.
 The [entity contract](ir-design.md#4-ir-f-entities) defines the passthrough routes.
 Lowering also refuses duplicate job names.
+New input accepts `term_run_time` from 0 through 527040 minutes; zero means no limit
+(DL-469). A main-config engine's stored catalog with an out-of-range value keeps running
+and restarting.
+Reread refuses that source until its value is corrected.
 At definition time, `status:` accepts only INACTIVE, ON_HOLD, ON_ICE and ON_NOEXEC.
 Lowering refuses resource groups using `QUANTITY=ALL` or `VALUEOP`/`VALUE`.
 Write whole job definitions rather than `update_job`, `delete_job` or `override_job`.
@@ -200,15 +204,12 @@ are separate from these JIL inputs.
 | Job | `notification_emailaddress_on_failure` | Nonempty text. |
 | Job | `notification_emailaddress_on_success` | Nonempty text. |
 | Job | `notification_emailaddress_on_terminated` | Nonempty text. |
-| Job | `alarm_if_fail` | Explicit true value (`y` or `1`). |
-| Job | `alarm_if_terminated` | Explicit true value (`y` or `1`). |
 | Job | `send_notification` | Explicit true value (`y` or `1`). |
 | Job | `min_run_alarm` | Positive integer. |
-| Job | `max_run_alarm` | Positive integer. |
 | Job | `elevated` | True value. |
 | Job | `interactive` | True value. |
 | Job | `avg_runtime` | Positive integer. |
-| Job | `n_retrys` | CMD job with a count from 1 through 20. |
+| Job | `n_retrys` | CMD, BOX or FW job with a count from 1 through 20 (DL-469). |
 | Job | `ulimit` | CMD job with nonempty limits, including zero limits. |
 | Job | `job_load` | Nonzero load on a job assigned to a pool machine. |
 | Machine | Other payload attributes | Nonempty values, except `description`, `node_name` and non-pool `max_load`. |
@@ -222,6 +223,10 @@ Descriptions stay quiet on every record kind, including calendars.
 Invalid values and unsupported constructs classified as `refused` in the
 [coverage register](simulation-coverage.md) retain their existing errors.
 Suppressing a warning does not activate the requested behavior.
+
+`alarm_if_fail`, `alarm_if_terminated` and positive `max_run_alarm` feed the optional
+[site status hook](runner-design.md#4-engine-loop--single-writer) (DL-469).
+The site hook decides whether to alert; false flags retain the events.
 
 Use these SEM entries for a construct's meaning:
 

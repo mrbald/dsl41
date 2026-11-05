@@ -462,7 +462,11 @@ def test_a_completion_on_an_inactive_row_is_rejected_and_its_decision_is_never_l
 #: frontier rule fires inside the next input's batch, back-dated to its due
 #: instant: two terminal transitions of one live run, at two instants, in one
 #: batch
-_PAST_DUE_JIL = "insert_job: x\njob_type: c\ncommand: sleep 300\nterm_run_time: -1\n"
+def _past_due_catalog():
+    """DL-469: stored catalogs retain past-due runtime limits."""
+    catalog = lower_source("insert_job: x\njob_type: c\ncommand: sleep 300\n")
+    catalog.jobs["x"].sem.term_run_time_min = -1
+    return catalog
 
 
 def test_a_deadline_and_a_status_ending_one_run_in_one_batch_record_one_kill(
@@ -470,7 +474,7 @@ def test_a_deadline_and_a_status_ending_one_run_in_one_batch_record_one_kill(
 ) -> None:
     """DL-232: a deadline and a status that end one live run in one batch
     plan one kill, which cancels the run once, and the log replays."""
-    catalog = lower_source(_PAST_DUE_JIL)
+    catalog = _past_due_catalog()
     engine = start_run(
         catalog,
         tmp_path / "run",

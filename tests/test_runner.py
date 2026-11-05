@@ -903,7 +903,7 @@ def test_injected_status_starting_launches_no_ghost_run() -> None:
 
 
 def test_negative_term_run_time_matches_oracle_direct_instead_of_crashing() -> None:
-    """Lowering accepts a negative term_run_time, arming a
+    """DL-469: a stored negative term_run_time arms a
     timer already in the past; oracle-direct tolerates it (feed back-dates
     the firing) but the engine crashed calling advance() backwards. The
     frontier rule now clamps: the past-due timer fires once time moves past
@@ -911,7 +911,9 @@ def test_negative_term_run_time_matches_oracle_direct_instead_of_crashing() -> N
     oracle-direct trace."""
     text = "insert_job: neg\njob_type: c\ncommand: x\nmachine: m1\nterm_run_time: -5\n"
 
-    harness = EngineHarness(lower_source(text))
+    catalog = lower_source(text.replace("term_run_time: -5", "term_run_time: 0"))
+    catalog.jobs["neg"].sem.term_run_time_min = -5
+    harness = EngineHarness(catalog)
     try:
         harness.feed(ev("STARTJOB", 0, job="neg"))
         assert harness.store.job["neg"].status == "RUNNING"  # lazy, like the oracle
@@ -920,7 +922,7 @@ def test_negative_term_run_time_matches_oracle_direct_instead_of_crashing() -> N
     finally:
         harness.close()
 
-    o = Oracle(lower_source(text))
+    o = Oracle(catalog)
     o.feed(ev("STARTJOB", 0, job="neg"))
     assert o.store.job["neg"].status == "RUNNING"
     o.feed(ev("STATUS", 5, job="tick_undef", status="SUCCESS"))
