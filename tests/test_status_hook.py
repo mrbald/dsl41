@@ -555,7 +555,7 @@ def test_reread_requires_restart_for_hook_host_settings(tmp_path, setting):
     path = estate_file(tmp_path)
     original = main.prepare(path)
     config_file(tmp_path, engine=setting + "\n")
-    with pytest.raises(RereadRefused, match="restart the selected engine"):
+    with pytest.raises(RereadRefused, match="restart the engine to apply them before update"):
         reread(tmp_path, live_of(original), tmp_path / "plans", candidate=main.prepare(path))
     host = main.load_host(path)
     assert main.launch_settings(host, path)[setting.split()[0]] == (
