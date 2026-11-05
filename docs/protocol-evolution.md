@@ -164,8 +164,18 @@ invalid values exit 2 (DL-462). The kill list changes later kills, not replay
 or ordinary leftover cleanup. It is excluded from job-definition hashes.
 Stored configuration and plan formats remain unchanged.
 A missing interrupted-update plan refuses before writes or signals.
-Restart recompiles captured bytes and checks placement and runtime
-variables (DL-437, DL-447). Other preflight rules remain unrun there.
+With the same state and format versions, restart restores the applied v3 IR,
+profile and job order without recompiling captures (DL-468). Missing settings
+take current defaults, which must preserve the earlier behavior. Captured config
+and launch metadata are compared through the current models, without rewriting
+retained bytes. A scanner refusal only makes `spec` source views unavailable.
+An interrupted update still compiles its captured candidate; a candidate the
+new binary rejects, or whose job diff differs from the recorded plan, refuses
+restart before writes or signals (DL-468). Compiler version metadata alone does
+not invalidate an otherwise matching retained configuration row. Missing runtime-policy
+keys are omitted from recomputed definition hashes only at their earlier-behavior
+defaults. Drift still refuses for a job already listed as changed. Placement and
+runtime-variable checks still apply (DL-437, DL-447).
 It offers no legacy-root conversion and ignores
 unknown `[engine]` keys in its host-only load; the pending scan blocks the
 loop. These are limits, not permission to change the rules in this pass.

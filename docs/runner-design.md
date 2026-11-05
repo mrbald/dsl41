@@ -685,8 +685,10 @@ A main-config restart uses the last applied revision. Source, lint and
 `machine_policy`, access policy and `engine.kill_signals` load from disk;
 invalid values refuse with exit 2. The kill list affects later kills, including
 on updated roots. Other legacy launch checks remain in force (DL-462).
-Restart recompiles captures and checks placement and runtime variables
-(DL-437, DL-447). Other preflight rules remain unrun there.
+Restart restores the applied v3 catalog, profile and job order without lowering
+captured sources (DL-468). Captured JIL is parsed only for `spec` views; a scanner
+refusal leaves those views unavailable and the stored estate running.
+Placement and runtime-variable checks still apply (DL-437, DL-447).
 It has no legacy-root conversion, ignores unknown `[engine]` keys
 in host-only loading, and the pending-source scan blocks the loop.
 

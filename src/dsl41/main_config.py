@@ -23,7 +23,7 @@ from dsl41.ir import LoweringError, lower_catalog, tool_version
 from dsl41.lint import RULE_CODES, LintReport, lint_catalog, rule_l025
 from dsl41.placeholders import PlaceholderError, properties_from_bytes, substitute
 from dsl41.reload_plan import Estate, RereadRefused, estate_settings
-from dsl41.runner_config import RuntimeProfile, runtime_profile_from_cli
+from dsl41.runner_config import Configuration, RuntimeProfile, runtime_profile_from_cli
 from dsl41.runtime_policy import JobEnvironment, RuntimePolicySettings, policy_values
 from dsl41.semantics import check_overrides
 from dsl41.timezones import parse_timezone_map, resolve_timezone
@@ -336,8 +336,10 @@ def prepare(path: Path, raw: bytes | None = None) -> Estate:
         raise RereadRefused([f"{path}: {exc}"]) from exc
 
 
-def from_parts(parts: Sequence[tuple[str, bytes]]) -> Estate:
-    """Compile captured JIL, never import Python or open an original path (DL-437)."""
+def from_parts(
+    parts: Sequence[tuple[str, bytes]], *, applied: Configuration | None = None
+) -> Estate:
+    """Compile a candidate or restore applied IR; parse only its source views (DL-437, DL-468)."""
     try:
         values = dict(parts)
         metadata: Any = decode(values[CAPTURE])
@@ -348,6 +350,13 @@ def from_parts(parts: Sequence[tuple[str, bytes]]) -> Estate:
                 f"unsupported main-inputs format_version {metadata.get('format_version')!r}"
             )
         config = MainConfig.model_validate(metadata["config"])
+        metadata = {
+            **metadata,
+            "config": config.model_dump(mode="json"),
+            "launch": launch_settings(
+                HostConfig.model_validate(metadata["launch"]), Path(metadata["config_path"])
+            ),
+        }
         records = metadata["records"]
 
         def text_of(record: dict[str, str]) -> str:
@@ -372,8 +381,32 @@ def from_parts(parts: Sequence[tuple[str, bytes]]) -> Estate:
             text = text_of(record)
             if any(r["role"] == "properties" for r in records):
                 text, _ = substitute(text, bindings, file=original)
-            jil = parse(text, file=original)
-            parsed.append(jil)
+            try:
+                parsed.append(parse(text, file=original))
+            except JilParseError:
+                if applied is None:
+                    raise
+                parsed.clear()
+                break
+        if applied is not None:
+            profile = applied.profile
+            return Estate(
+                applied.catalog,
+                estate_settings(
+                    profile.default_tz,
+                    profile.tz_aliases,
+                    profile.semantics,
+                    applied.catalog,
+                    job_env=profile.job_env,
+                    runtime_policy=profile.model_dump(),
+                ),
+                tuple(parts),
+                config.engine.environment,
+                tuple(r["path"] for r in records if r["role"] == "properties"),
+                tuple(parsed),
+                str(Path(metadata["config_path"]).parent),
+                {**metadata, "non_idempotent": dict(applied.non_idempotent)},
+            )
         catalog = lower_catalog(parsed, permit_unknown=False)
         origins = {
             name: job.span.file for name, job in catalog.jobs.items() if job.span is not None
@@ -496,9 +529,10 @@ def encoded_parts(estate: Estate) -> dict[str, str]:
     return {name: base64.b64encode(data).decode("ascii") for name, data in estate.parts}
 
 
-def decoded_parts(capture: Mapping[str, str]) -> Estate:
+def decoded_parts(capture: Mapping[str, str], *, applied: Configuration | None = None) -> Estate:
     return from_parts(
-        [(name, base64.b64decode(data, validate=True)) for name, data in capture.items()]
+        [(name, base64.b64decode(data, validate=True)) for name, data in capture.items()],
+        applied=applied,
     )
 
 

@@ -297,24 +297,6 @@ def _load_active_configuration(store: Store, revision: int, *, where: str) -> Co
         raise EngineError(f"restart-lowering: configuration revision {revision}: {exc}") from exc
 
 
-def check_captured_lowering(configuration: Configuration, revision: int) -> Any:
-    """Captured inputs are a compatibility check, never a replacement catalog."""
-    from dsl41.main_config import decoded_parts
-    from dsl41.reload_plan import RereadRefused
-
-    if not configuration.source_capture:
-        return None
-    try:
-        estate = decoded_parts(configuration.source_capture)
-        if catalog_hash_v2(estate.catalog) != configuration.catalog_hash:
-            raise ValueError("stored/captured catalog disagreement")
-        if list(estate.catalog.jobs) != list(configuration.catalog.jobs):
-            raise ValueError("stored/captured job order disagreement")
-        return estate
-    except (ValueError, RereadRefused) as exc:
-        raise EngineError(f"restart-lowering: configuration revision {revision}: {exc}") from exc
-
-
 def check_restart_preflight(
     catalog: CatalogIR,
     profile: RuntimeProfile,
@@ -702,7 +684,9 @@ async def _resume_under_lock(
         if journal.open.update is not None:
             from dsl41.runner_update import reopen_plan
 
-            opened_update = reopen_plan(run_root, str(journal.open.update["token"]))
+            opened_update = reopen_plan(
+                run_root, str(journal.open.update["token"]), configuration=configuration
+            )
         profile = _check_configuration(
             configuration, catalog, scheduler, adapters, declared, host_settings=True
         )
@@ -724,14 +708,15 @@ async def _resume_under_lock(
         )
         catalog = configuration.catalog
     _check_clock_domain(meta, clock)
-    check_captured_lowering(configuration, rev)
     active_warnings = check_restart_preflight(
         configuration.catalog, profile, clock, revision=rev, hook_configured=hook_configured
     )
     if journal.open.update is not None and opened_update is None:
         from dsl41.runner_update import reopen_plan
 
-        opened_update = reopen_plan(run_root, str(journal.open.update["token"]))
+        opened_update = reopen_plan(
+            run_root, str(journal.open.update["token"]), configuration=configuration
+        )
     if opened_update is not None:
         from dsl41.runner_update import profile_for
 
@@ -909,8 +894,6 @@ def active_configuration(
                 if check_lowering
                 else load_configuration(store, rev, where=str(path))
             )
-            if check_lowering:
-                check_captured_lowering(configuration, rev)
             return configuration
     except StoreError as exc:
         raise EngineError(f"{path}: {exc}") from exc
@@ -1029,7 +1012,7 @@ def _check_updated(
         profile = profile.model_copy(update={"kill_signals": declared.kill_signals})
     target, target_settings = configuration.catalog, settings_of(profile, configuration.catalog)
     if intent is not None:
-        estate = reopen_plan(run_root, str(intent["token"])).estate
+        estate = reopen_plan(run_root, str(intent["token"]), configuration=configuration).estate
         target, target_settings = estate.catalog, dict(estate.settings)
     given = target_settings if declared is None else settings_of(declared, launched)
     moved = diff(target, launched, target_settings, given)
