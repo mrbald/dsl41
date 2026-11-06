@@ -624,10 +624,16 @@ def test_timeout_before_records_does_not_claim_a_log_exists() -> None:
 def test_stopped_command_kills_its_grandchild(train: Fixture, fault: str) -> None:
     ready = train.root.parent / "ready.json"
     missing_on_assert = False
-    train.configure(hang="uv", ready=str(ready))
+    train.configure(hang="uv", ready=str(ready), stop_fault=fault)
     env = {k: v for k, v in train.env.items() if k not in GIT_ROUTING}
     with subprocess.Popen(
-        [sys.executable, str(SCRIPT), "--command-timeout", "1"],
+        [
+            sys.executable,
+            str(train.config.parent / "driver.py"),
+            str(SCRIPT),
+            "--command-timeout",
+            "1",
+        ],
         cwd=train.root,
         env=env,
         stdout=subprocess.PIPE,
@@ -679,7 +685,7 @@ def test_stopped_command_kills_its_grandchild(train: Fixture, fault: str) -> Non
                 assert commands[0]["status"] is None
                 assert commands[0]["stdout"] == "stdout before stop\n"
                 assert commands[0]["stderr"] == "stderr before stop\n"
-                assert "timed out" in train.state()["detail"]
+                assert "timed out after 1.0s" in train.state()["detail"]
                 assert str(train.records / "log.jsonl") in train.state()["detail"]
         finally:
             if ready.exists():
