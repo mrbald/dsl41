@@ -90,11 +90,14 @@ if cfg.get('queue_change') == tool:
 if cfg.get('fail') and cfg['fail'] in ' '.join([tool, *args]): sys.exit(9)
 if cfg.get('hang') == tool:
     child = subprocess.Popen([sys.executable, '-c',
-        'import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(60)'], env=env)
+        'import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(300)'], env=env)
     print('stdout before stop', flush=True)
     print('stderr before stop', file=sys.stderr, flush=True)
-    P(cfg['ready']).write_text(json.dumps(dict(group=os.getpid(), child=child.pid)))
-    time.sleep(60)
+    ready = P(cfg['ready'])
+    pending = ready.with_suffix('.tmp')
+    pending.write_text(json.dumps(dict(group=os.getpid(), child=child.pid)))
+    pending.replace(ready)
+    time.sleep(300)
 if tool == 'notify':
     with P(cfg['notifications']).open('a') as f: f.write(sys.stdin.read())
     sys.exit(9)
@@ -239,13 +242,39 @@ else: sys.exit(92)
 # Fake tools run inside the driver to avoid an interpreter launch per command.
 # Process-group tests and kill-at-merge probes keep the real subprocess boundary.
 DRIVER = r"""
-import contextlib, io, json, os, pathlib, runpy, subprocess, sys
+import contextlib, io, json, os, pathlib, runpy, subprocess, sys, time
 sys.path.insert(0, str(pathlib.Path(sys.argv[1]).parent))
 import merge_train
 original_command = merge_train.command
 def command(cmd, cwd, env, timeout, input_bytes=None):
     cfg = json.loads(pathlib.Path(env['TRAIN_FAKE']).read_text())
     tool = cmd[0]
+    if cfg.get('hang') == tool and cfg.get('stop_fault'):
+        original_popen = subprocess.Popen
+        def popen(*args, **kwargs):
+            process = original_popen(*args, **kwargs)
+            native_communicate = process.communicate
+            def communicate(input=None, timeout=None):
+                process.communicate = native_communicate
+                try:
+                    ready = pathlib.Path(cfg['ready'])
+                    while not ready.exists() and process.poll() is None:
+                        time.sleep(0.01)
+                    if not ready.exists():
+                        raise RuntimeError('hung command exited before readiness')
+                    if cfg['stop_fault'] == 'timeout':
+                        assert timeout == 1.0, f'expected timeout=1.0, received {timeout!r}'
+                        return native_communicate(input, timeout=timeout)
+                    return native_communicate(input)
+                finally:
+                    process.communicate = native_communicate
+            process.communicate = communicate
+            return process
+        subprocess.Popen = popen
+        try:
+            return original_command(cmd, cwd, env, timeout, input_bytes)
+        finally:
+            subprocess.Popen = original_popen
     if tool == 'notify' or pathlib.Path(tool).name == 'notify' or cfg.get('hang') == tool or (
         cfg.get('kill_merge') and 'merge' in cmd
     ):
