@@ -44,7 +44,7 @@ its exact terms.
 20. A brief names the platforms the change must pass on.
 21. A brief quotes the ruling it applies, says exactly what that ruling supersedes, and leaves the wording to the builder unless the ruling dictates it.
 22. The reviewer reads every cited decision in full.
-23. Performance work measures first and decides go or stop before building.
+23. Performance work measures first and decides go or stop before building. When asking the owner to choose a defect remedy, include checking the diagnosis first unless reproduction or direct evidence already establishes it (DL-470).
 24. Concurrency fixes prove the bad ordering is handled, not just that runs come up green.
 25. A local green run is not CI green; CI is the gate.
 26. A stamp or a later green run never closes an open failure.

@@ -26012,3 +26012,17 @@ relitigate an entry; append a new one.
   deliberate difference under the owner's ST=KEEP ruling, the DL-252 exception. No fix follows.
   Existing annotations and profile fields avoid new persisted IR and hash churn.
   IR/state/stored-format versions, unchanged-input hashes and DL-468 recovery checks remain.
+- DL-470 Check the diagnosis when offering a defect remedy
+  (2026-11-07; owner ruling; docs/agents/operating-model.md)
+  Owner: "LESSON - love it, approved".
+  THE RULE. Rule 23 makes diagnosis verification an option in owner remedy choices,
+  unless reproduction or direct evidence has already established the diagnosis.
+  THE GAP. A remedy was chosen on a correlation of process start times.
+  A cheap diagnosis check ran only after the build and found no leak in main's normal
+  or interrupted suites. An occasional leak was not disproved; production leaks remained open.
+  Correlation does not establish cause.
+  REJECTED. A gate on every defect claim: investigation is itself work, and the gate
+  would create busy work. Recording process evidence before every signal: it fires
+  on routine shutdowns, and capture belongs in a hook.
+  A mandatory fresh-peer consult before a shape note: it adds a stage without
+  checking the diagnosis.
