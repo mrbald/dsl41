@@ -91,9 +91,6 @@ STORE_COPIED = frozenset(
         "_tombstones",
     }
 )
-#: RuntimeState attributes no tier writes: the dormant routing table
-#: (oracle_state). The fork shares it, empty.
-STORE_DORMANT = frozenset({"_hosts"})
 #: RuntimeState attributes the fork gives its own value rather than a
 #: shallow copy: the store's executor, copied by `Executor.fork`
 #: (statechart-engine ss11, DL-339).

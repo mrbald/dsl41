@@ -29,10 +29,8 @@ from dsl41.runner_clock import EngineError
 
 #: The version of the state machine that derives oracle state from inputs, the half
 #: `catalog_hash` does not cover. The store's `meta.state_version` and every snapshot carry it,
-#: and a restart requires an exact match (DL-424),
-#: because mixed builds derive different revisions from identical inputs and nothing
-#: downstream detects it: a SPAWN spec is a resolved literal command and the supervisor holds
-#: no job definitions.
+#: and a restart requires an exact match (DL-424): mixed builds can derive different
+#: revisions from identical inputs.
 #:
 #: Bump it when a change makes this build derive different state from an identical log:
 #: oracle transitions, condition evaluation, timer ordering, the ss3 projection. A change a

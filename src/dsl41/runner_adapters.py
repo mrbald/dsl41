@@ -269,7 +269,7 @@ def load_json(path: Path) -> dict[str, Any] | None:
 
 
 def outcome_from_status(status: dict[str, Any]) -> AdapterResult:
-    """Map a wrapper status.json record (docs/supervisor-protocol.md ss3) to an adapter result.
+    """Map a wrapper status.json record (docs/wrapper-protocol.md ss3) to an adapter result.
     Shared by the live adapter path and reconciliation, so live and resumed runs agree on the same
     record. A malformed record maps to FAILURE with a truthful cause, never to anything that could
     satisfy a success-dependent downstream."""
@@ -1167,7 +1167,7 @@ class FileWatcherAdapter:
     idempotent read, which is why resume may re-dispatch an incomplete watch.
 
     Its progress is EVIDENCE, not memory (period-model ss3.5, DL-129). The first durable record
-    on dispatch is a `start` line in `runs/<job>.<run_number>/watch.jsonl`, then one fsynced line
+    on dispatch is a `start` line in the spool's `watch.jsonl`, then one fsynced line
     per poll, INCLUDING polls that changed nothing. Each line is appended before progress is
     updated or completion is emitted, so an audit sees every observation that moved the watch. A
     resumed watch reconstructs from the log and appends no second `start`. The run directory is
@@ -1182,7 +1182,7 @@ class FileWatcherAdapter:
         existence: FwExistence = "stable",
     ) -> None:
         self.default_interval_s = default_interval_s  # PENDING: E6
-        self.existence = existence  # DL-258: the `fw-existence` switch, pinned per period
+        self.existence = existence  # DL-258: `fw-existence` from the applied runtime profile
 
     async def run(self, job_ir: JobIR, run_number: int, ctx: AdapterContext) -> AdapterResult:
         spec_ir = job_ir.exec_
@@ -1231,15 +1231,14 @@ class FileWatcherAdapter:
                 )
                 fsync_dir(run_dir)  # the log's own directory entry is a record
             else:
-                # RESUMED: the log is the watch. Its `start` line is the dispatch (ss11's ladder
-                # resolves the SPAWN by it), so no second one is appended and the run keeps the
-                # identity it was dispatched under, which must BE this launch's (DL-118): a log
-                # that appeared since the preflight and names another run is a stranger's, and
-                # adopting it would poll a watch the WAL never dispatched.
+                # RESUMED: the log's `start` line binds its evidence to the dispatched identity
+                # (ss11). No second start line is appended. Its identity must match this launch
+                # (DL-118). A log that appeared since preflight and names another run is a
+                # stranger's; adopting it would poll a watch the journal never dispatched.
                 if run_id is not None and log.run_id != run_id:
                     # exact, None included: a bound launch met a log, so the log was written
                     # under this protocol and must name the run; an idless one is foreign and
-                    # adopting it consumes a fate the WAL never dispatched
+                    # adopting it would poll a watch the journal never dispatched
                     raise EngineError(
                         f"{job_ir.name}.{run_number}: watch.jsonl names run_id"
                         f" {log.run_id!r} but this run is {run_id!r} -- refusing to"

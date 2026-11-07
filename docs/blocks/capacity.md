@@ -12,7 +12,7 @@ No contract section is dedicated to it; the sources are cited below.
 The code and its contract carry over unchanged if the storage under the runner changes.
 It needs none of the storage capabilities.
 Reason: `CapacityPool` in `src/dsl41/capacity.py` holds no state. It is a pure function of the catalog, the rows and `consumed` ([DL-120](../decision-log.md)).
-Reservations and waiter ranks ride on the job rows in the in-memory `RuntimeState`, so a seal carries them with the rows (period-model §5 (`period-model.md`, retired in 2.0.0)).
+Reservations and waiter ranks ride on the job rows in `RuntimeState`; snapshots carry them with the rows ([runner-design §7](../runner-design.md#7-journal-and-recovery-e1-prod-grade), [DL-428](../decision-log.md)).
 
 ## Interface
 
@@ -56,8 +56,8 @@ A threshold request is checked at admission and never reserved.
 - The oracle sizes only buckets it can read. Preflight refuses an unsized resource, an unknown `res_type`, `FREE=Y` or `FREE=A` on a depletable ([DL-287](../decision-log.md)) and a demand that can never fit ([runner-design §8](../runner-design.md#8-preflight--refuse-loudly-run-honestly), [DL-50](../decision-log.md), [DL-247](../decision-log.md)).
 - KILLJOB on a queued job dequeues and terminates it. ON_ICE dequeues it to INACTIVE ([DL-50](../decision-log.md)).
 - A waiter that can never fit at runtime, such as one on a spent depletable, blocks lower priorities that name that resource. Preflight cannot see it ([DL-255](../decision-log.md)).
-- Held units cross a seal on the row. A holder that the next catalog removes gives its units back at the opening (period-model §5 (`period-model.md`, retired in 2.0.0), [DL-256](../decision-log.md)).
-- Recovery is replay of the inputs. The seal loader refuses capacity state that breaks the rules of period-model §5 (`period-model.md`, retired in 2.0.0).
+- Snapshots carry held units on their rows. A carried holder absent from the catalog gives its units back at the first input (`Oracle._release_removed_holders`; [DL-256](../decision-log.md)).
+- Recovery restores the snapshot and replays the retained inputs ([runner-design §7](../runner-design.md#7-journal-and-recovery-e1-prod-grade), [DL-428](../decision-log.md)).
 
 ## Owning modules
 

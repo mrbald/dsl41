@@ -1,11 +1,11 @@
 """Per-run wrapper shim: the Tier-0 process-lifecycle recorder.
 
-Spec: docs/runner-design.md ss6a (DL-41a), docs/supervisor-protocol.md (the spool format
+Spec: docs/runner-design.md ss6a (DL-41a), docs/wrapper-protocol.md (the spool format
 this module writes is the tier's frozen public contract, DL-42). STDLIB ONLY: it imports
 nothing from dsl41 and nothing third-party. Its dumbness is a correctness property and
 the extraction boundary (DL-42; import-graph test in tests/test_runner_lifecycle.py).
 Its one non-stdlib import is the sibling stdlib-only ``runner_procid``, which holds the
-durability and identity helpers the supervisor shares (DL-72). The engine runs it BY FILE
+durability and identity helpers the engine shares (DL-72). The engine runs it BY FILE
 PATH (``sys.executable <this file>``), never ``-m dsl41.runner_wrapper``, which would
 import the dsl41 package __init__ and its third-party imports.
 
@@ -41,7 +41,7 @@ Duties, in order (ss6a Tier 0):
    ``status.json`` outcome=terminated cause="parent lost", exit. Engine death thus
    terminates AND records the jobs with no polling and no Linux-only mechanism.
 
-status.json outcomes (frozen in docs/supervisor-protocol.md):
+status.json outcomes (frozen in docs/wrapper-protocol.md):
   exited(exit_code) | signaled(signal) -- how the command itself ended;
   terminated(cause="parent lost")      -- the wrapper killed it on EOF;
   spawn_failed(error)                  -- the command's stdin, stdout or stderr could
@@ -134,14 +134,14 @@ if _PROCID_DIR_ADDED:
 #: how a spawn or a durable record write may fail (DL-151). An embedded NUL in a
 #: path or the command makes `os.open`, `subprocess.Popen` and `os.path` raise
 #: ValueError, not OSError; either must still leave a `status.json`, because the
-#: E7 absence is what this module exists never to produce. The supervisor refuses
-#: a NUL at the ss2 gate; this is the recorder's own guard.
+#: E7 absence is what this module exists never to produce. The input validator refuses
+#: a NUL at the wrapper-protocol ss2 gate; this is the recorder's I/O guard.
 _IO_FAILURE = (OSError, ValueError)
 
 #: pause-point env var (test scaffolding, inert in production)
 PAUSE_ENV = "DSL41_WRAPPER_TEST_PAUSE"
 
-#: the signals the recorder ignores (supervisor-protocol ss4 duty 2, DL-229):
+#: the signals the recorder ignores (wrapper-protocol ss4 duty 2, DL-229):
 #: the ones an operator or a tool sends by hand. The command child restores
 #: each to its default before exec.
 _RECORDER_IGNORED = (
@@ -157,7 +157,7 @@ _RECORDER_IGNORED = (
 # ------------------------------------------------------------------- the shim
 
 
-#: the `status.json` `outcome` vocabulary (docs/supervisor-protocol.md ss3). This process
+#: the `status.json` `outcome` vocabulary (docs/wrapper-protocol.md ss3). This process
 #: WRITES these strings; `runner_adapters.outcome_from_status` reads the same name, so a
 #: fifth outcome cannot reach the engine unannounced (DL-209).
 WrapperOutcome = Literal["exited", "signaled", "terminated", "spawn_failed"]

@@ -9,21 +9,19 @@ There is no second durable feed.
 
 ## Fate
 
-The code and its contract carry over if the storage under the runner changes.
-It needs none of the five storage capabilities.
-It reads the log in order from a cursor and fans out each record after its append.
-A store that keeps records in index order and can be read from a cursor serves it.
-`Subscription` and the fan-out in `Journal` are in memory, and the backfill reads the retained segments under `wal/`, which a new store would replace.
-Before every response it re-proves the lineage fence, as every revision-bearing read does (period-model §1.3 (`period-model.md`, retired in 2.0.0); PR-03 in §13.1 (`period-model.md`, retired in 2.0.0)).
+`Subscription` and the fan-out in `Journal` are in memory.
+Backfill reads retained store records in store-sequence order, up to the seam captured when the feed joins.
+The cursor is an admission index, not a store sequence ([DL-428](../decision-log.md); [control-protocol §5](../control-protocol.md#5-streaming-verb-subscribe)).
+The feed needs ordered reads and publication after commit. PR-03's lineage fence resolves to [DL-424](../decision-log.md).
 
 ## Interface
 
 - Wire: the `subscribe` verb with an optional cursor, on a connection of its own. The request and ack shapes are [control-protocol §5](../control-protocol.md#5-streaming-verb-subscribe)'s.
-- Refusals: `no_journal` comes before the ack. `backfill_refused` and a displaced leader's refusal come on the stream after it. A cursor below what the root retains gets a gap marker line first.
+- Refusals: `no_journal` comes before the ack. `backfill_refused` comes on the stream after it. A cursor below what the store retains gets a gap marker line first.
 - Server: `ControlServer._subscribe` in `runner_control.py` sends the ack, the backfill and the live records, and drops a seq'd record the backfill already sent.
 - Journal: `Journal.subscribe(machines, on_overflow, budget=...)` returns a `Subscription`; `machines` is the engine's executor. `Journal.unsubscribe` leaves the fan-out. Each append offers the record to every feed (`Journal._publish`).
 - `Subscription`: `offer`, `get`, `go_live`, `close`, `tell_owner`, `backlog_bytes` and `state`. It is the record and the key of one instance of the feed's chart. `offer`, `go_live` and `close` post its events, and `state` is the instance's active leaf.
-- Backfill: `read_backfill(path, since=...)` returns a `Backfill`, with `gap_from` and the retained records after the cursor.
+- Backfill: `read_backfill(store, since=..., upto=...)` returns a `Backfill`, with `gap_from` and the retained wire records after the cursor, up to the captured store sequence.
 - Budget: `SUBSCRIBER_BACKLOG_BYTES`, sized in [control-protocol §5](../control-protocol.md#5-streaming-verb-subscribe).
 - Clients: `ControlClient.subscribe` and the CLI's `subscribe_lines`. A stream line past the budget raises `StreamLineTooLong`.
 
@@ -39,21 +37,20 @@ An unsubscribe of a removed feed finds nothing to leave and posts nothing.
 - The delivery guarantees, exactly once for seq'd records and at least once for the rest across the backfill seam, are [control-protocol §5](../control-protocol.md#5-streaming-verb-subscribe)'s. This card does not restate them.
 - The seam is sampled before the ack is written ([DL-45](../decision-log.md); [control-protocol §5](../control-protocol.md#5-streaming-verb-subscribe)).
 - The ack names the cursor, so a client that reads no seq'd record can still resume ([DL-267](../decision-log.md)).
-- The backfill spans segments and is bounded by the segment holding the cursor ([DL-135](../decision-log.md)).
+- The backfill spans the retained store; pruning of records above the cursor is reported as a gap ([DL-135](../decision-log.md), [DL-428](../decision-log.md)).
 - The stream carries `decision` records, keyed by `index` and not `seq` ([DL-89](../decision-log.md); [DL-118](../decision-log.md)).
 - A feed's backlog is bounded by the budget or one record, whichever is larger, and an overflow removes the feed ([DL-267](../decision-log.md)).
 - Nothing a removal does reaches the append, the engine loop or another feed ([DL-267](../decision-log.md)); a statechart error is the one exception (exit 7).
-- A `seal` record reaches the feeds only after its fsync, so no subscriber hears of a boundary that recovery may discard ([DL-133](../decision-log.md)).
+- Records reach the feeds only after the store transaction commits. The `segment` wire record projects an applied configuration; seal publication under [DL-133](../decision-log.md) resolves to [DL-424](../decision-log.md) ([control-protocol §5](../control-protocol.md#5-streaming-verb-subscribe)).
 - A gap in the feed's chart is a statechart error, and the engine exits 7 ([statechart-engine §5](../statechart-engine.md#5-the-step-and-the-worklist)).
 
 ## Failure and recovery
 
 - A slow reader overflows: the journal drops its backlog, the server aborts the connection, and the client resumes from its cursor ([control-protocol §6](../control-protocol.md#6-client-obligations)).
-- The backfill meets a foreign file or a broken segment chain: it refuses on the stream after the ack, never skipping records ([DL-135](../decision-log.md)).
-- The engine loses its lineage: the next response is the refusal, and the stream ends (PR-03).
+- The backfill meets an unreadable store record: it refuses on the stream after the ack, never skipping records ([DL-135](../decision-log.md); [control-protocol §5](../control-protocol.md#5-streaming-verb-subscribe)).
 - An operator revokes the peer's access: the stream ends at once ([access-model §7](../access-model.md#7-reload-and-revocation)).
 - A shutdown gives a reading client its queued bytes for up to `HANGUP_GRACE_S`, and a stalled one does not hold the shutdown ([DL-267](../decision-log.md)).
-- After a roll, the new root holds none of the closing period's WAL, so an old cursor gets the gap marker (period-model §1.3 (`period-model.md`, retired in 2.0.0)).
+- Retention prunes the store behind a snapshot. A cursor below what remains gets the gap marker ([DL-428](../decision-log.md)).
 
 ## Owning modules
 

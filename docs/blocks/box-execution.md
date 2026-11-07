@@ -11,7 +11,7 @@ It lives inside the oracle; the engine dispatches nothing for a box ([runner-des
 The code and its contract carry over unchanged if the storage under the runner changes.
 It needs none of the storage capabilities.
 Reason: a box's run state is three fields on its own `JobRuntime` row, `ran_members`, `window_skipped_members` and `iced_out_members`, held in the same in-memory `RuntimeState` as every other row.
-A live box has no effect and no execution entry (period-model §3.5 (`period-model.md`, retired in 2.0.0)).
+A box has no adapter task or dispatch record ([runner-design §4](../runner-design.md#4-engine-loop--single-writer)).
 
 ## Interface
 
@@ -52,7 +52,7 @@ The idle re-derivation rows follow the vendor table in [SEM-15](../autosys-seman
 - A hung box is modeled behavior, not a fault. It stays RUNNING until an operator resolves the member, forces it or kills the box ([SEM-11](../autosys-semantics.md#sem-11--box-runningcompletion-v), [SEM-12](../autosys-semantics.md#sem-12--box_success--box_failure-override--with-evaluation-gating-v)).
 - A queued member keeps the box RUNNING until it is admitted. A member queued in a box that stopped running is cancelled later ([DL-50](../decision-log.md), [DL-247](../decision-log.md)).
 - A live member cascaded to INACTIVE gets no kill, and its later exit is rejected ([DL-235](../decision-log.md), [DL-242](../decision-log.md)).
-- Box state replays with the rest of the oracle. A seal carries a live box on its row (period-model §3.5 (`period-model.md`, retired in 2.0.0)).
+- A snapshot carries the box's row; recovery replays the tail with the rest of the oracle ([runner-design §7](../runner-design.md#7-journal-and-recovery-e1-prod-grade), [DL-428](../decision-log.md)).
 
 ## Owning modules
 

@@ -198,7 +198,7 @@ def definition_change(previous: RunRow, row: RunRow) -> Literal["definition", "c
 
 def _parse_timestamp(value: str) -> datetime:
     """Normalize a spool/manifest timestamp to the journal's naive-UTC basis (canon.naive_utc,
-    DL-178j). Spool times may carry a UTC offset (supervisor-protocol ss3); the journal's never
+    DL-178j). Spool times may carry a UTC offset (wrapper-protocol ss3); the journal's never
     do (RealClock strips tzinfo)."""
     return naive_utc(datetime.fromisoformat(value))
 
@@ -830,11 +830,11 @@ def fold_run_rows(
 def read_spool(
     run_dir: Path, job: str, run_number: int, bound_run_id: str | None = None
 ) -> SpoolRead | None:
-    """One run's spool, validated against (job, run_number) (supervisor-protocol ss3's frozen
+    """One run's spool, validated against (job, run_number) (wrapper-protocol ss3's frozen
     spawn.json/status.json shapes). None when spawn.json is missing, unparseable, or names a
     different run (the rule the restart's observation applies, `runner_startup._records`).
 
-    `bound_run_id` is the identity the run's durable SPAWN minted (DL-118): a spool record
+    `bound_run_id` is the attempt identity in its durable dispatch (DL-118): a spool record
     naming a different `run_id` is a stranger's and reads as absent, not refused, so one corrupt
     directory costs one row's timings."""
     spawn = load_json(run_dir / "spawn.json")

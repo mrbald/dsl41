@@ -231,9 +231,9 @@ sequenceDiagram
     Eng->>Adm: deduplicate and dry-apply
     Adm->>Orc: time observation and gated event
     Eng->>Jr: commit input and decision together
+    Eng-->>Ctl: release decision answer
     Eng->>Jr: commit dispatch before launch, if a start is owed
     Eng->>Ad: launch command attempt, if eligible
-    Eng-->>Ctl: decision
     Ctl-->>Op: decision answer
     Ad->>Wr: start wrapper by file path
     Wr->>Cmd: spawn

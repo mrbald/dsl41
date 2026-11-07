@@ -391,14 +391,10 @@ def private_cross_module_imports(paths: Iterable[Path], allowed: Iterable[str]) 
 #: is worse than no gate. Still stdlib-only: this reads the source, it does not
 #: import dsl41 (that would make a ~1s check depend on the tree it checks).
 #:
-#: DL-94 widened it from one model to the owner's whole set, for the same
-#: reason: a second frozen row arrived (`HostRuntime`, the ss8 routing table)
-#: and a gate that protected only the first would have been narrower the day
-#: after it was written. DL-120 adds `CapacityReservation`, which rides on a
-#: `JobRuntime` and is authoritative for what a live run holds (PR-52).
-#: `GlobalRuntime` was missing from that "whole set" although it is a frozen
-#: row with its own `state_rev` (concurrency-model ss2) -- added DL-151.
-_STATE_MODELS = ("JobRuntime", "HostRuntime", "CapacityReservation", "GlobalRuntime")
+#: The gate covers the owner's frozen rows (DL-94, DL-151), including each
+#: global's `state_rev` (concurrency-model ss2). `CapacityReservation` rides on
+#: `JobRuntime` and is authoritative for what a live run holds (DL-120, PR-52).
+_STATE_MODELS = ("JobRuntime", "CapacityReservation", "GlobalRuntime")
 _STATE_OWNER = "RuntimeState"
 #: The module that defines the owner and the key of its assembly instance.
 _STATE_OWNER_MODULE = "oracle_state.py"
@@ -424,7 +420,6 @@ _STATE_MAPS = (
     "_jobs",
     "_globals",
     "_timers",
-    "_hosts",
     "_consumed",
     "_enqueue_counter",
     "_timer_seq",
@@ -432,7 +427,6 @@ _STATE_MAPS = (
     "machines",
     "job",
     "globals_",
-    "hosts",
     "consumed",
     "enqueue_counter",
     "timer_seq",
