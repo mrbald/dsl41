@@ -10,24 +10,23 @@ per pathname and file identity (DL-461, DL-467).
 Bourne hidden-file rules apply; `.` and `..` never match. Directory wildcards and recursion
 are unsupported. A non-UTF-8 match is ignored with one warning per name per watch run.
 The warning is given again after an engine restart resumes the watch.
-Its progress is evidence in an append-only log, so a restart, a seal (retired in 2.0.0) and an audit all read the same watch.
-An FW run is a watch inside the engine, not a process, in both lifecycle modes.
-Its contract is [runner-design §6](../runner-design.md#6-adapters) and PR-34 in period-model §13.6 (`period-model.md`, retired in 2.0.0), as the risk map says; its rules are split across those, period-model §2.1 and §3.5, and DL-258.
+Its progress is evidence in an append-only log that restart and offline readers share.
+An FW run is a watch inside the engine, not a process.
+Its contract is [runner-design §6](../runner-design.md#6-adapters), with the PR-34 evidence rules retained by [DL-129](../decision-log.md) and [DL-424](../decision-log.md), and the completion rule in DL-258.
 
 ## Fate
 
-The adapter code and its rules carry over; the watch log is a run-directory file, not the ledger.
-It needs two capabilities.
-The leader fence, which the storage table lists as epoch-conditional append: `FileWatcherAdapter.run` calls `ctx.fence.check()` before every `watch.jsonl` line, so a deposed leader stops at its next line. The check and the append are two steps, not one conditional write.
-Atomic multi-record commit, on the engine half: resume resolves a pending FW SPAWN by the `start` line that carries the effect's `run_id`, and that `run_id` is minted in the same `decision` record as the effect (period-model §2.3 (`period-model.md`, retired in 2.0.0)), as for SPAWN idempotency (`spawn-idempotency.md`, retired in 2.0.0).
-The completion reaches the ledger as an ordinary STATUS input through the engine, not through this block.
+The watch log is a run-directory file, separate from the store.
+`FileWatcherAdapter.run` re-proves the run root's lock before every `watch.jsonl` append; the check and append are separate steps.
+The engine commits a `dispatch` binding the watch's `run_id` before launching it ([DL-425](../decision-log.md)).
+The completion reaches the store through the engine's outcome and admission paths ([runner-design §7](../runner-design.md#7-journal-and-recovery-e1-prod-grade)).
 
 ## Interface
 
 - `FileWatcherAdapter(default_interval_s=..., existence=...)` and its `run(job_ir, run_number, ctx)`, which returns 0.
-- Job inputs: `watch_file`, `watch_interval` and `watch_file_min_size`. Estate inputs: the [runtime profile](../glossary.md#runtime-profile)'s `fw_default_interval_us` (period-model §2.1 (`period-model.md`, retired in 2.0.0)) and the `fw-existence` switch (DL-258). `wire_from_profile` in `src/dsl41/runner_startup.py` builds the adapter from both.
-- Context: `ctx.clock`, `ctx.run_root`, `ctx.run_id`, `ctx.fence` and `ctx.barrier`, filled by `Engine._run_adapter` in `src/dsl41/runner.py`.
-- Spool: `runs/<job>.<run_number>/watch.jsonl`, one `start` line, then scalar `poll` or wildcard `sample` lines with plain paths and five metadata fields (DL-461; period-model §3.5 (`period-model.md`, retired in 2.0.0)).
+- Job inputs: `watch_file`, `watch_interval` and `watch_file_min_size`. Estate inputs: the [runtime profile](../glossary.md#runtime-profile)'s `fw_default_interval_us` and the `fw-existence` switch (DL-258). `wire_from_profile` in `src/dsl41/runner_startup.py` builds the adapter from both.
+- Context: `ctx.clock`, `ctx.run_root`, `ctx.run_id`, `ctx.spool` and `ctx.fence`, filled by `Engine._run_adapter` in `src/dsl41/runner.py`.
+- Spool: `runs/<job>.<run_number>/watch.jsonl`, one `start` line, then scalar `poll` or wildcard `sample` lines with plain paths and five metadata fields (DL-129, DL-461).
   A run with samples keeps sampling for the rest of that run, including exact targets (DL-467).
 - Readers: `read_watch_log`, the sole evidence reader, which folds scalar and sampled progress into a `WatchLog`; and `_resume_watch` in `runner_startup.py`.
 - Without a run root, as in the virtual-domain harness, the watch keeps no spool.
@@ -35,7 +34,7 @@ The completion reaches the ledger as an ordinary STATUS input through the engine
 ## States
 
 No machine is declared for the watch.
-Its progress is a fold of `watch.jsonl`, and its parking is the seal's frozen phase in seal_boundary (retired in 2.0.0), not a step of the watch.
+Its progress is a fold of `watch.jsonl`.
 The flowchart shows one watch:
 
 ```mermaid
@@ -46,44 +45,41 @@ flowchart TD
     folded -->|"yes"| done(["return exit 0"])
     folded -->|"no: progress rebuilt from the log"| sleep
     start --> sleep["sleep until next_poll_at"]
-    sleep -->|"the seal barrier is set"| park["parked at a poll boundary"]
-    park -->|"the barrier is released"| poll
-    park -->|"the seal commits"| successor(["the successor resumes the watch"])
     sleep -->|"next_poll_at reached"| poll["observe the exact path or matches, fence check, append evidence"]
     poll --> complete{"stable qualifying file, or a qualifying original first poll under immediate?"}
     complete -->|"yes"| done
     complete -->|"no"| sleep
 ```
 
+This shows log recovery and polling; it leaves out engine outcome settlement.
+
 ## Invariants
 
-- Progress is evidence, not memory. The first line is `start`; then one fsynced line per poll, including polls that changed nothing ([runner-design §6](../runner-design.md#6-adapters); period-model §3.5 (`period-model.md`, retired in 2.0.0); DL-129).
-- Write-ahead per poll, under the fence: observe, re-check the fence, append and fsync, and only then move progress or complete (§3.5).
-- `next_poll_at` is `start.at` after the start line and `poll.at + interval` after a poll line (runner-design §6; §3.5).
-- A torn final line truncates on open (§3.5). A complete line that cannot be read refuses loudly (PR-08d in period-model §13.2 (`period-model.md`, retired in 2.0.0); `read_watch_log`).
-- A resumed watch appends no second `start`. A `start` line naming the effect's `run_id` resolves a pending FW SPAWN as applied (§3.5; DL-129).
-- When an effect bound a `run_id`, every line names it, and a log naming another run is refused (DL-129). A launch with no bound effect, as from a pre-DL-118 journal, writes a null `run_id`.
-- The seal barrier parks every FW task at a poll boundary before T. The seal's `fw_watch` entry is a fold of the first `watch_seq` lines (§3.5).
+- Progress is evidence, not memory. The first line is `start`; then one fsynced line per poll, including polls that changed nothing ([runner-design §6](../runner-design.md#6-adapters); DL-129).
+- Write-ahead per poll: observe, re-check the lock, append and fsync, and only then complete (DL-129).
+- `next_poll_at` is `start.at` after the start line and `poll.at + interval` after a poll line ([runner-design §6](../runner-design.md#6-adapters)).
+- A torn final line truncates on open. A complete line that cannot be read refuses loudly (PR-08d; `read_watch_log`; DL-129).
+- A resumed watch appends no second `start`. Every line of a bound watch names its dispatch's `run_id`, and a log naming another run is refused (DL-118, DL-129). A caller with no journal may leave `run_id` null.
+- Seal rules PR-28b, PR-28d and [DL-274](../decision-log.md) resolve to [DL-424](../decision-log.md).
 - Completion: `stable`, the default, needs two qualifying observations with equal size for exact paths without sampled history or equal five-field samples for wildcards and sampled runs. Sampled streaks reset on replacement or disappearance. `immediate` completes on the original first poll only, and only with no positive minimum size (DL-258, DL-461, DL-467).
-- The interval is the job's `watch_interval`, else the profile's `fw_default_interval_us` (§2.1). Adapters never retry and never time out (the module docstring of `runner_adapters.py`).
+- The interval is the job's `watch_interval`, else the profile's `fw_default_interval_us` ([runner-design §6](../runner-design.md#6-adapters)). Adapters never retry an application failure or impose a timeout (the module docstring of `runner_adapters.py`).
+- `engine.fw_default_interval_s` is a positive integer, default 60 [?], captured as microseconds in the profile. A default-only update stops no watch; a live watch keeps its interval until completion or restart ([runner-design §6](../runner-design.md#6-adapters), DL-469).
 - The wiring rounds the microsecond profile interval to whole seconds, at least one. No shipped surface sets a value that is not whole seconds; resume refuses a hand-pinned one as profile drift. `profile_field:fw_default_interval_us#rounding` in [simulation-coverage](../simulation-coverage.md#profile_field) keeps it provisional.
 
 ## Failure and recovery
 
 - An incomplete legacy wildcard log keeps its scalar prefix, deadline and original poll count, then starts fresh pathname streaks with `sample` lines (DL-461).
-- The engine dies after the `start` line. Resume relaunches the dispatched watch, which rebuilds its progress from the log and appends no second `start` line (PR-34a in period-model §13.6 (`period-model.md`, retired in 2.0.0)).
+- The engine dies after the `start` line. Resume relaunches an incomplete watch while its oracle run remains live; it rebuilds progress from the log and appends no second `start` line (PR-34a; DL-129, DL-425).
 - The engine dies after a completing poll and before the STATUS input is durable. `_resume_watch` injects the completion from scalar or sampled evidence without observing the file again (PR-34a, DL-461).
 - A run directory exists with no `start` line. Resume dispatches the watch again under the bound `run_id`.
-- Leadership is lost. The fence check raises before the append, so no line lands (PR-03, cited in §3.5).
-- A seal aborts. The barrier is released and the parked poll proceeds (PR-28b).
-- A seal [fail-stops](../glossary.md#fail-stop). No abort runs, so the barrier is not released, and the engine stops. After a fence loss or one of [DL-274](../decision-log.md)'s cases, resume rebuilds from the WAL with the period still open. After a failure at or after the `seal` append, the outcome is unknown and recovery decides (period-model §7 (`period-model.md`, retired in 2.0.0), PR-28d).
+- The run root's lock proof fails. The check raises before the append, so no line lands (PR-03, narrowed by DL-424).
 - A log that cannot be read, or that names another run, stops the engine with an error. It is never read as "not dispatched".
 - A resume whose catalog has an FW run and no FW adapter wired refuses.
 
 ## Owning modules
 
-- `src/dsl41/runner_adapters.py`: `FileWatcherAdapter`, `WatchLog`, `read_watch_log`, `append_watch_line`, `SealBarrier` and `AdapterContext`.
-- `src/dsl41/runner.py`: the context it passes, the barrier park and release, and the default interval for the seal's executions.
+- `src/dsl41/runner_adapters.py`: `FileWatcherAdapter`, `WatchLog`, `read_watch_log`, `append_watch_line` and `AdapterContext`.
+- `src/dsl41/runner.py`: the dispatch, adapter context and watch spool path.
 - `src/dsl41/runner_startup.py`: adapter wiring from the profile, profile derivation from the wired adapter, and `_resume_watch`.
 
 ## Tests
@@ -98,7 +94,7 @@ flowchart TD
 ## Open findings
 
 See the row "FW observation" in [the risk map](../risk-map.md).
-All four owning modules are in the 100% gate ([DL-299](../risk-map.md#closed-by-dl-289dl-306)), and the row lists no open finding.
+The row lists no open finding; [DL-299](../risk-map.md#closed-by-dl-289dl-306) records its coverage closure.
 
 ## Gaps found
 

@@ -29,7 +29,6 @@ from fork_harness import (
     ORACLE_IDLE,
     ORACLE_SHARED,
     STORE_COPIED,
-    STORE_DORMANT,
     STORE_REBUILT,
     STORE_SHARED,
     state_bytes,
@@ -119,13 +118,13 @@ def _attempt(index: int, *, kind: str | None, **fields: Any) -> Attempt:
 def test_the_fork_copies_every_mutable_attribute_and_shares_only_fixed_ones() -> None:
     """The attribute sets are pinned: a new field on either class fails here
     until `fork` and `fork_harness.state_bytes` both name it. The history
-    starts empty on the fork, so a fork costs nothing in the period's
-    length; the cascade's bookkeeping is false or empty between inputs, on
+    starts empty on the fork, so its cost does not grow with the input
+    history; the cascade's bookkeeping is false or empty between inputs, on
     the oracle and its fork (DL-350); and the fork's `job_instance` is
     rebound to the fork."""
     oracle = Oracle(lower_source(_JIL))
     assert set(vars(oracle)) == ORACLE_COPIED | ORACLE_FRESH | ORACLE_IDLE | ORACLE_SHARED
-    assert set(vars(oracle.store)) == STORE_COPIED | STORE_DORMANT | STORE_REBUILT | STORE_SHARED
+    assert set(vars(oracle.store)) == STORE_COPIED | STORE_REBUILT | STORE_SHARED
     oracle.feed(_start())
     assert oracle._trace and oracle._emitted  # history to leave behind
     oracle._window_starts = [("b", 1, "cause")]  # set only inside a box start
@@ -149,8 +148,6 @@ def test_the_fork_copies_every_mutable_attribute_and_shares_only_fixed_ones() ->
         assert getattr(twin.store, name) == value, name
         if not isinstance(value, (bool, int, str)):
             assert getattr(twin.store, name) is not value, name
-    for name in STORE_DORMANT:
-        assert getattr(twin.store, name) == {} == getattr(oracle.store, name), name
     for name in STORE_REBUILT:  # the twin's own executor
         assert getattr(twin.store, name) is not getattr(oracle.store, name), name
     for name in STORE_SHARED:

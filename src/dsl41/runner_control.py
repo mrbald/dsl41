@@ -2,8 +2,8 @@
 
 This is the OUTER contract: what operators, the ss11 TUI, the headless
 `query`/`sendevent` CLI and any non-local controller speak to a running engine.
-docs/control-protocol.md freezes it, as docs/supervisor-protocol.md freezes the
-ss6a lifecycle tier's INNER contract. Server and clients live together so the wire
+docs/control-protocol.md freezes it, as docs/wrapper-protocol.md freezes the
+ss6a wrapper's INNER contract. Server and clients live together so the wire
 vocabulary has one definition.
 
 Control plane (ss10; DL-45):
@@ -323,8 +323,8 @@ class ControlServer:
         self._preparing_update: tuple[str, str, asyncio.Future[UpdateAnswer]] | None = None
         #: each subscription's backlog budget (ss5); tests lower it
         self.subscriber_budget = SUBSCRIBER_BACKLOG_BYTES
-        #: the first `StatechartError` a connection handler or a background task of the
-        #: run's supervisor client met (`stop_on`), and the event `_serve_run` waits on.
+        #: the first `StatechartError` a connection handler met (`stop_on`), and the event
+        #: `_serve_run` waits on.
         #: It stops the engine with exit 7 (statechart-engine ss5): an assertion failure,
         #: never answered, never contained
         self.statechart_error: StatechartError | None = None
@@ -419,7 +419,7 @@ class ControlServer:
             principal = None
             if self.access is not None:
                 # access-model ss3: the principal is fixed at accept; no resolvable
-                # credential refuses (the supervisor's permissive None is not copied)
+                # credential refuses the connection
                 sock = writer.get_extra_info("socket")
                 principal = peer_principal(sock) if sock is not None else None
                 if principal is None:
@@ -521,8 +521,7 @@ class ControlServer:
 
     def stop_on(self, error: StatechartError) -> None:
         """Hand a handler's `StatechartError` to the run, which stops the engine and reports
-        the first one (statechart-engine ss5). The supervisor client's background tasks
-        hand theirs here too."""
+        the first one (statechart-engine ss5)."""
         self.statechart_error = self.statechart_error or error
         if self.on_statechart_error is not None:
             self.on_statechart_error()

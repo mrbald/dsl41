@@ -1,7 +1,7 @@
 """The statechart executor of docs/statechart-engine.md, and its hit recording.
 
-Standard library only; it imports nothing from this package, because the supervisor tier
-loads it by path (DL-42, DL-72; tests/test_state_machine.py pins that).
+Standard library only; it imports nothing from this package (DL-42, DL-72;
+tests/test_state_machine.py pins that boundary).
 
 A `Statechart` is plain data: states with regions, rows, choices, deferrals, time events and
 a registry of named guards and actions. An `Executor` runs instances on one worklist. It reads
@@ -145,7 +145,7 @@ class StatechartError(Exception):
     """An assertion failure of a statechart: a bug, never a fault to contain.
 
     Every tier lets it through to a stop before any further durable write of its own (DL-320);
-    the engine and the supervisor exit with `EXIT_STATECHART_ERROR`. An executor fills `facts`
+    the engine exits with `EXIT_STATECHART_ERROR`. An executor fills `facts`
     when the error leaves a run; `str()` renders the message, then one fact per line.
     """
 
@@ -346,8 +346,8 @@ class Statechart:
     the size of each instance's deferred queue, and its `overflow` policy.
     """
 
-    #: What `is_statechart` reads. The supervisor loads this module by path, so
-    #: its charts are instances of another module object's class.
+    #: What `is_statechart` reads: a declaration marker that also works when a module loaded
+    #: by path gives its charts another module object's class (DL-72).
     STATECHART: ClassVar[bool] = True
 
     name: str

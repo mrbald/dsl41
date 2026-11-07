@@ -14,12 +14,10 @@ Every card has these sections, in this order:
 1. **Purpose.** What the block is for, in two or three sentences.
 2. **Fate.** Whether the block's code and contract would carry over if the
    storage under the runner changed, and which storage capabilities it
-   needs. The capabilities are the rows of
-   concurrency-model §1 (`concurrency-model.md`, retired in 2.0.0)'s
-   storage contract: epoch-conditional append, monotone epoch allocation,
-   decision lookup by `request_id`, atomic multi-record commit, and
-   linearizable read of the leader record. A block that needs none says
-   "none".
+   needs: ordered reads, atomic record commits, retained decision lookup
+   or the run root's lock proof, as applicable ([runner-design §7](../runner-design.md#7-journal-and-recovery-e1-prod-grade)).
+   A block that needs none says "none". Epoch and leader-record
+   capabilities resolve to [DL-424](../decision-log.md).
 3. **Interface.** What the block takes and gives, as module functions,
    records, verbs or files.
 4. **States.** A block whose states are a declared machine links that

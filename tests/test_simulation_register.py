@@ -338,8 +338,8 @@ def _outcome_templates() -> set[str]:
 
 
 #: Literals a dedicated surface already owns, and protocol vocabularies the
-#: register deliberately does not cover (the frozen concurrency and
-#: supervisor contracts close those with their own obligations, DL-209).
+#: register deliberately does not cover (the frozen control and wrapper
+#: protocols close those with their own obligations, DL-209).
 #: Anything else of that shape belongs to `literal_alt`.
 LITERAL_ALT_EXCLUDED = frozenset(
     {
@@ -350,7 +350,6 @@ LITERAL_ALT_EXCLUDED = frozenset(
         "ir.InitialStatus",  # initial_status
         "ir.ResourceRef.free",  # free_code
         "oracle_state.EventKind",  # event
-        "oracle_state.HostState",  # a host-protocol vocabulary
         "oracle_state.JobStatus",  # status
         "oracle_state.ReleasePolicy",  # release_policy
         "runner_preflight.MachineVerdict",  # machine_verdict

@@ -295,7 +295,7 @@ def proc_start_token(pid: int) -> str | None:
 def proc_is_zombie(pid: int) -> bool:
     """Whether `pid` is a zombie: exited, unreaped, holding no descriptors or locks. A
     zombie keeps a /proc entry and a `ps` row, so the start-token guard would read it as
-    the live recorded owner; the supervisor's reclaim treats it as absent (DL-210). Linux:
+    live; process cleanup treats it as absent (DL-210). Linux:
     state `Z` with one task left (`_linux_zombie`). macOS: `ps -o stat=` starts with Z; a
     live process whose main thread exited does not show Z there."""
     if sys.platform.startswith("linux"):
@@ -366,10 +366,9 @@ def verify_alive(pid: int, recorded_token: str) -> bool:
     the recorded token. Never signal a pid that fails this.
 
     A zombie is not alive: its token still matches until its parent reaps it, so without
-    this check an exited command read as live wherever no init reaped it. The
-    supervisor's owner check uses the same zombie test (DL-210). The token and the state
-    come from one look (`_proc_look`), so a reap between two reads cannot pass a gone pid
-    as alive."""
+    this check an exited command read as live wherever no init reaped it (DL-210). The token
+    and the state come from one look (`_proc_look`), so a reap between two reads cannot pass
+    a gone pid as alive."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

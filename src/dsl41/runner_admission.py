@@ -1,15 +1,16 @@
 """Admission: the frozen order every input takes, and the record it leaves.
 
-Normative spec (S2): docs/concurrency-model.md ss4 (admission and application), ss2 (identity), ss6
-(the envelope). Bare `ssN` elsewhere in the runner means docs/runner-design.md; references in
-this module name their document.
+Normative spec (S2): docs/runner-design.md ss7 and docs/control-protocol.md ss3. The
+concurrency-model ss4 (admission), ss2 (identity) and ss6 (envelope) references resolve through
+DL-424 and DL-428. Bare `ssN` elsewhere in the runner means docs/runner-design.md; references
+in this module name their document.
 
 One admission rule covers every input (concurrency-model ss4): scheduler ticks, adapter
 completions, reconciliation injections and standalone time observations take the path operator
 commands take:
 
-    dedup -> stamp -> append the batch -> apply the time half
-          -> decide -> feed or reject -> record the result
+    dedup -> stamp -> dry-check -> apply the time half
+          -> decide -> feed or reject -> commit input and decision -> dispatch
 
 - Dedup precedes admission. A retry that already has a decision is answered from the index and
   consumes no index, leader timestamp or time observation, so a retry storm cannot walk the
@@ -23,15 +24,14 @@ commands take:
   halves in one record, so a crash cannot tear it (DL-111).
 
 The decision index (`request_id` -> `ApplyResult`) makes a retry idempotent and replay two-pass.
-`ApplyResult` is appended after the attempt, so pass one builds the index and pass two applies.
-An attempt with no result is applied, because admission is the commit point, and it goes through
-the gate because its decision did not survive. A durable decision is authoritative and never
-recomputed: a build whose gate has changed reproduces the log's history.
+The input and its result commit in one store transaction (DL-428). Replay first builds the
+index, then applies each input under its durable decision, without recomputing the gate.
+An input with no decision is an inconsistent store and is refused.
 
 Preconditions are mandatory (concurrency-model ss0). An externally requested mutation names the
 revision its author read, or it is refused; there is no opt-out and no `"any"`. `parse_envelope`
-is the one place that refuses it, so every transport reaches the same verdict (ss10 socket, S5
-relay).
+is the one place that refuses it, so every transport reaches the same verdict (ss10 socket).
+The S5 relay is outside the engine contract (DL-424).
 
 An input fails in one of two ways, recorded differently:
 
@@ -44,8 +44,7 @@ An input fails in one of two ways, recorded differently:
 An engine-made input has nobody to hear a refusal. If its dry apply raises and the time half
 alone applies, the input is logged with a rejected decision under `engine_apply_faulted` and only
 its time half applies. If the time half raises too, the engine stops before logging
-(`TimeHalfStop`). It asks `classify_fault`; an attempt and its decision are one store
-transaction, so replay meets no undecided attempt.
+(`TimeHalfStop`). `classify_fault` chooses between these fault paths.
 
 One engine holds a run root (`leader.lock`, DL-99), so admission checks no leader term.
 """
@@ -476,8 +475,9 @@ def report_quarantine(result: ApplyResult) -> None:
 # ---- one request id's in-flight window as a statechart (concurrency-model ss4)
 #
 # `ADMISSION` is the declaration (docs/statechart-engine.md). The decision index holds one
-# instance per request id whose attempt line is durable and whose decision is not, keyed by
-# `(index, request_id)`, on the engine's executor or its own when read offline. `note` starts the
+# instance per request id between `note` and `record`, keyed by `(index, request_id)`, on the
+# engine's executor or its own when read offline. In live admission both precede the input/decision
+# transaction; replay reconstructs them from committed records (DL-428). `note` starts the
 # instance in `admitted`; `record` posts the decision and forgets the now-final instance in the
 # same call. Dedup and the refusals before admission (a dry apply that refuses) post nothing.
 #
@@ -526,8 +526,8 @@ def _other(ctx: Context) -> bool:
     return not _same(ctx)
 
 
-#: One request id from its durable attempt to its durable decision
-#: (concurrency-model ss4), one instance per id in flight.
+#: One request id from `note` to `record` (concurrency-model ss4, DL-428),
+#: one instance per id in flight.
 ADMISSION: Final = Statechart(
     name="admission",
     root=State(
@@ -600,7 +600,7 @@ class DecisionIndex:
     """`request_id` -> the decision that request got, plus the fingerprint it was admitted under
     (concurrency-model ss4 step 2).
 
-    An id with a durable attempt and no decision is an `ADMISSION` instance in `machines`, keyed
+    An id noted and not yet recorded is an `ADMISSION` instance in `machines`, keyed
     by `key(request_id)`; once decided, the stored `ApplyResult` is the memory and the instance is
     gone. An engine's index runs on the engine's executor (statechart-engine ss11); an offline
     index makes its own. Two indexes on one executor never share a key."""
@@ -636,7 +636,7 @@ class DecisionIndex:
         return leaf
 
     def note(self, attempt: Attempt) -> None:
-        """Step 4 is durable: the id's instance starts in `admitted`, with the attempt as data.
+        """The id's instance starts in `admitted`, with the attempt as data (DL-428).
 
         An id that already has an attempt is refused before any start, because the log
         disagrees with itself. The fingerprint is stored before the entry runs, so a failed

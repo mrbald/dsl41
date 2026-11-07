@@ -789,12 +789,12 @@ def trace_digest(entries: list[TraceEntry]) -> str:
 
 
 def sealed_state(oracle: Oracle, at: datetime) -> SealedState:
-    """The oracle's rows as the seal's `state` section holds them (the engine's `_snapshot`)."""
+    """The oracle's rows in the store test's canonical snapshot (DL-351)."""
     store = oracle.store
     return SealedState(
         jobs=dict(store.job),
         globals=dict(store.globals_),
-        hosts={},  # the host table is dormant and empty after slice 0b (DL-425)
+        hosts={},  # empty compatibility slot, not a runtime table (DL-425)
         routes={},
         timers=tuple(store.timers()),
         timer_seq=store.timer_seq,

@@ -15,18 +15,13 @@ inputs and digest these renderings after every input:
 - `pending_timers`: `Oracle.pending_timers()`, in its order;
 - `next_timer_due`: the engine's wake-up read.
 
-The store is written as the seal writes its rows: sets sorted, keys sorted,
-reservations by bucket, rows by name. Equal stores render the same, so an
-order the seal ignores never parts two runs.
+The store's canonical rendering sorts sets and keys, reservations by bucket,
+and rows by name. Equal stores render the same regardless of insertion order.
 
-At every `SealPoint` in a script, and once at the end, the seal digest is
-the one over the seal's `state` section: the `SealedState` that
-`Engine._snapshot` builds from the store, serialized as `Seal.to_payload`
-serializes it. Its route table is left empty: the engine projects it from
-its own executor id, and the oracle holds none. The other sections of a seal
-are the engine's or derive from the rows and the pending timers, which are
-digested on their own. `test_oracle_inputs` pins this serialization against
-a real `close_runtime` seal.
+At every `SealPoint` in a script, and once at the end, `seal_digest` hashes
+the test-only `SealedState` from `sealed_state.py`. Empty host and route
+slots preserve the golden payload (DL-351, DL-424). This is distinct from
+the engine's SQLite snapshot, which stores `CarriedRows`.
 
 The inputs: every lowerable corpus file and the whole corpus, with tier
 (c)'s scripts and the estate generator's (`corpus_jobs`); the directed
@@ -138,7 +133,7 @@ class _Rows:
 
 
 def seal_state_payload(state: SealedState) -> dict[str, Any]:
-    """The `state` section exactly as `Seal.to_payload` writes it."""
+    """The golden snapshot's canonical payload (DL-351)."""
     payload = state.model_dump(by_alias=True)
     payload["jobs"] = {
         name: {**row, "reservations": sorted(row["reservations"], key=lambda h: h["bucket"])}
@@ -150,12 +145,12 @@ def seal_state_payload(state: SealedState) -> dict[str, Any]:
 
 
 def sealed_state(oracle: Oracle, at: datetime) -> SealedState:
-    """The `SealedState` `Engine._snapshot` builds from this store at `at`."""
+    """The golden harness snapshot of this store at `at` (DL-351)."""
     store = oracle.store
     return SealedState(
         jobs=dict(store.job),
         globals=dict(store.globals_),
-        # the routing table is dormant: no tier writes a host row (oracle_state)
+        # Empty slots preserve the golden payload (DL-351, DL-424).
         hosts={},
         routes={},
         timers=tuple(store.timers()),

@@ -94,7 +94,7 @@ that `feed`-only and `advance`+`feed` schedules produce identical traces.
 
 The engine uses more of the oracle than these two methods. `fork` and
 `batch` (`InputBatch`) serve admission (§7, DL-428).
-The host table stays empty: there is no remote routing (DL-425). `trace_since` serves the
+There is no remote routing (DL-425). `trace_since` serves the
 control `trace` verb (DL-310). The cascade's bound is §4's item cap
 (DL-351). Constructing an oracle raises the process's recursion limit to
 the fixed `RECURSION_LIMIT` and never lowers it (DL-351, DL-352).
@@ -110,12 +110,13 @@ steps:
    clock.next_sleeper_due(), first queued event)`.
 2. The clock waits (§9). A real clock sleeps until `next_wake` and wakes
    early when the queue gains an event. A virtual clock jumps.
-3. Dry-apply the input on a fork through `feed()` / `advance()`,
-   then commit its input and decision together (§7, DL-428). The oracle runs a cascade of instant
+3. Check the input before admission, using a fork for dry application,
+   then apply it to the live oracle through `feed()` / `advance()` and
+   commit its input and decision together (§7, DL-428). The oracle runs a cascade of instant
    starts on its executor's worklist, iteratively, and stops a cascade that
    does not end at an item cap set by the estate's job count (DL-351).
-4. Publish the admitted state after that transaction commits
-   (§7, DL-428).
+4. Release the decision answer after that transaction commits
+   (§7, DL-425, DL-428).
 5. Dispatch what the decision implies, in emitted order
    (`runner_admission.dispatch_plan`, `Engine._dispatch`): each start
    appends its `dispatch` record and then launches; each kill cancels the
@@ -604,9 +605,9 @@ wire shapes. The store sequence and admission index are different counters.
 An unknown store kind refuses by name. The event alphabet is also strict
 (DL-158); an unknown event cannot disappear from replay.
 
-**Commit before effect.** The engine applies an input on a fork, commits
-input and decision, then publishes the resulting state and answers the
-request. Each launch has its own durable `dispatch` before its task exists
+**Commit before effect.** The engine validates on a fork, applies to the live
+oracle, then commits input and decision before answering or dispatching effects.
+Each launch has its own durable `dispatch` before its task exists
 (DL-425, DL-428). A decided start remains `dispatch_pending` until represented
 by a dispatch or its discharge. Snapshots cannot lose that start.
 An outcome commits with its follow-up plan. A plan step commits its done

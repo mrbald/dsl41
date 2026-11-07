@@ -265,8 +265,7 @@ def load_policy(path: Path, *, generation: int) -> Policy:
 
 def peer_principal(sock: socket_mod.socket) -> Principal | None:
     """The kernel-authenticated peer as a Principal, or None where the credential is absent or
-    has no passwd entry; the caller refuses the connection on None (ss3). The supervisor's
-    permissive fallback is not copied."""
+    has no passwd entry; the caller refuses the connection on None (ss3)."""
     try:
         uid = peer_uid(sock)
     except OSError:

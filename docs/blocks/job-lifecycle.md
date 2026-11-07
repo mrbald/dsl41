@@ -12,7 +12,7 @@ The code and its contract carry over unchanged if the storage under the runner c
 It needs none of the storage capabilities.
 Reason: `src/dsl41/oracle.py` and `src/dsl41/oracle_state.py` import no journal or store module.
 `RuntimeState` keeps the rows in private in-memory maps, and replaying the inputs rebuilds them.
-Its per-input [state_rev](../glossary.md#state_rev) is what a store's conditional write would read (concurrency-model §3 (`concurrency-model.md`, retired in 2.0.0)).
+Admission checks the per-input [state_rev](../glossary.md#state_rev) against the caller's `expect` ([control-protocol §3](../control-protocol.md#3-mutating-verb-sendevent)).
 
 ## Interface
 
@@ -41,7 +41,7 @@ Each anchor holds the generated diagram and transition table.
 - A job starts only when all its start gates hold ([autosys-semantics §0](../autosys-semantics.md#0-execution-model-the-frame-everything-else-hangs-on)). FORCE_STARTJOB bypasses a named subset ([SEM-23](../autosys-semantics.md#sem-23--force_startjob-vs-startjob-c), [DL-13](../decision-log.md)), and clears ON_ICE or ON_HOLD on a job that is not live first ([DL-243](../decision-log.md)).
 - Conditions are latching predicates, re-evaluated on edges ([SEM-01](../autosys-semantics.md#sem-01--conditions-are-latching-state-predicates-not-edges-v), [DL-13](../decision-log.md)).
 - The oracle classifies an exit code; an adapter never does ([SEM-09](../autosys-semantics.md#sem-09--max_exit_success-shifts-successfailure-boundary-v), [runner-design §3](../runner-design.md#3-architecture--functional-core-imperative-shell)).
-- A scheduled tick blocked at a releasable gate arms the job; an actual start consumes the arm ([SEM-32](../autosys-semantics.md#sem-32--start_times--start_mins-v), [DL-54](../decision-log.md)). An arm crosses a seal (period-model §10.4 (`period-model.md`, retired in 2.0.0)).
+- A scheduled tick blocked at a releasable gate arms the job; an actual start consumes the arm ([SEM-32](../autosys-semantics.md#sem-32--start_times--start_mins-v), [DL-54](../decision-log.md)). A snapshot carries the arm on the job's row ([runner-design §7](../runner-design.md#7-journal-and-recovery-e1-prod-grade), [DL-428](../decision-log.md)).
 - ON_ICE, ON_HOLD and ON_NOEXEC are ignored where the vendor says so, with one `EVENT_IGNORED` trace line ([DL-254](../decision-log.md)).
 - KILLJOB on a job that is not running or queued kills nothing and writes one `EVENT_IGNORED` trace line.
 - ON_NOEXEC on a FAILURE or TERMINATED job is a stored move to INACTIVE ([SEM-22](../autosys-semantics.md#sem-22--on_noexec-v), [DL-243](../decision-log.md)).
