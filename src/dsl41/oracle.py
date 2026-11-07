@@ -378,11 +378,10 @@ ITEMS_PER_JOB_SQUARED: Final = 4
 #: The cap of an estate under 159 jobs: a loop there stops in a few seconds.
 ITEM_FLOOR: Final = 100_000
 
-#: The ceiling's rule: the largest round count of items whose DL-348 loop stops within half the
-#: lease lapse (the TTL less the renewal interval, 40 s, so 20 s) at every measured size up to
-#: 1,000 jobs on the reference host (4.5 s at 200 jobs, 14.6 s at 400, 17.0 s at 1,000). The dry
-#: apply runs on the engine's loop, so a longer cascade stops the lease's renewal and the
-#: supervisor's deadman ends the host's running jobs. The loop's cost per item grows with the
+#: The ceiling's measurement budget is 20 s (DL-351): the largest round count of items whose
+#: DL-348 cascade loop stays within that budget at every measured size up to 1,000 jobs on the reference host
+#: (4.5 s at 200 jobs, 14.6 s at 400, 17.0 s at 1,000). Dry apply runs on the engine's loop,
+#: so each cascade must stay bounded. The loop's cost per item grows with the
 #: job's owed settlements and the catalog's size (`settlement_owed`, `_members`), so the ceiling
 #: is re-derived from a new measurement whenever that cost changes, never raised by hand.
 ITEM_CEILING: Final = 400_000

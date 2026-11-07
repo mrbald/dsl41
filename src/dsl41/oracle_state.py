@@ -5,8 +5,7 @@
 - The vocabulary: `JobStatus`, `TERMINAL`, `EventKind`, `Event`, `TraceEntry`. `Event` is the
   oracle's input alphabet and, with `source`, its provenance (DL-68).
 - The rows: `JobRuntime` and `GlobalRuntime`, both frozen (DL-86), and the semantic projection
-  that decides when a revision moves. `HostRuntime` is the dormant routing row: the store keeps
-  an empty table of it (`RuntimeState._hosts`) and no tier writes or reads one.
+  that decides when a revision moves.
 - The owner: `RuntimeState` holds private maps, typed verbs, the timer heap with its ordering
   token, and the input transaction that gives one committed input one revision per changed
   entity (concurrency-model ss3).
@@ -295,38 +294,6 @@ class GlobalRuntime(BaseModel):
     state_rev: int = 0
 
 
-#: concurrency-model ss8's four routing states. `quarantined` is the leader's own, set on
-#: unreachability (ss7); the other three are the operator's.
-HostState = Literal["active", "passive", "quarantined", "evicted"]
-
-
-class HostRuntime(BaseModel):
-    """One execution host's routing row (concurrency-model ss8), dormant: one engine runs every
-    job on its own host, so the store's table of these stays empty and no tier reads it. The
-    oracle never reads this row (DL-93)."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    state: HostState = "active"
-    #: ss8's eviction fence. Eviction bumps it; a returning relay presenting a stale one is
-    #: refused registration and must self-fence first (CM-12, stage S5d).
-    generation: int = 0
-    #: ss8's deadman interval, in seconds, opt-in per run root so that a supervisor can tolerate
-    #: an absent controller (DL-79). None means no deadman: the host is reroutable only by force.
-    deadman_s: float | None = None
-    #: When the leader last had positive contact with this host: stamped at registration and
-    #: kept fresh by the S5b deadman's traffic. It is the only clock in ss8's eviction bound.
-    last_contact: datetime | None = None
-    #: Non-null iff the current `evicted` state was reached by `--force`; carries the actor.
-    #: ss8 requires such a reroute to be loud, durable and attributable.
-    forced_by: str | None = None
-    #: What quarantine interrupted, so that clearing it restores the operator's intent (DL-97):
-    #: a drained host stays drained. Non-null only while `state` is `quarantined`.
-    state_before_quarantine: HostState | None = None
-    #: DL-94: this entity's revision, on the same rule as the rows above.
-    state_rev: int = 0
-
-
 #: The fields whose change moves an entity's revision: every model field except these, so a
 #: field added later is projected by default (concurrency-model ss3, DL-83).
 #:
@@ -345,15 +312,11 @@ def _timer_order(entry: tuple[datetime, int, Event] | tuple[datetime, int]) -> t
 
 
 class CarriedRows(BaseModel):
-    """What a seal carries into the next period, as this module's own types
-    (period-model ss3.3, ss7 phase 3 step 3).
+    """The oracle state carried by a snapshot (runner-design ss7, DL-428).
 
-    `seal.py` holds the ARTIFACT; this is the same facts in the shapes the
-    owner can install. It is a separate model rather than the seal's
-    `SealedState` because the artifact tier imports the classifier, the
-    classifier imports the interpreter, and the interpreter importing the
-    artifact would close that ring -- so the boundary translates once, at
-    the seam, and the owner never learns what a sidecar is."""
+    `runner_journal.oracle_rows` captures it and `restore_oracle` passes it to a fresh Oracle
+    for assembly. The state owner installs these rows without knowing the storage format.
+    The carried-row rules originate in period-model ss3.3 and ss7 phase 3 step 3."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -372,9 +335,9 @@ class CarriedRows(BaseModel):
     #: the definitions of the resources an update dropped while a run holds their units or
     #: `consumed` has a bucket of them (`Oracle.ghost_resources`): the pool keeps their type
     ghosts: dict[str, ResourceIR] = {}
+    #: Retained snapshot field; engine roots use 1 (DL-424).
     period_id: int = 1
-    #: T, the instant the seal was taken at. Feed times are non-decreasing across the boundary,
-    #: so the opened interpreter starts from T.
+    #: The snapshot's oracle time. Feed times remain non-decreasing after restoration.
     now: datetime | None = None
 
 
@@ -766,9 +729,6 @@ class RuntimeState:
     def __init__(self) -> None:
         self._jobs: dict[str, JobRuntime] = {}
         self._globals: dict[str, GlobalRuntime] = {}
-        #: DL-94's routing table, dormant: one engine runs every job on its own host, so the
-        #: table stays empty and no tier writes or reads it.
-        self._hosts: dict[str, HostRuntime] = {}
         #: The state owner's executor (statechart-engine ss11): the `RUNTIME_ASSEMBLY` instance.
         #: A fork copies it (DL-339); an install, `restore_instances` and `keep_job_instances`
         #: rebuild it (`rebuild_machines`). The engine's executor is separate.
@@ -783,7 +743,7 @@ class RuntimeState:
         self._timer_seq = 0
         #: The period this state runs in (period-model ss3.5, DL-132). Set only by
         #: `seed_period`, 1 until then, and stamped onto every row's `start_period` at its
-        #: actual start. A period opens in a new state over the carried rows (`Oracle`).
+        #: actual start. Restoration seeds a new state over the carried rows (`Oracle`).
         self._period_id: int = 1
         #: DL-120: bucket key -> units permanently spent (SEM-16 depletion, and `never` or
         #: unmet-`success` holds a terminal transition kept). It belongs to no row. Keys survive

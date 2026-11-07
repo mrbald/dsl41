@@ -4,7 +4,8 @@ holds, with the load invariants a snapshot must satisfy.
 The golden harness (`oracle_inputs.py`) digests this snapshot at every `SealPoint` of a script and
 at its end, so two oracles that agree on every row and every timer agree on the digest, and a
 store a snapshot cannot hold is named rather than digested. Sets sort by value and datetimes are
-naive UTC (ss3.2). A host row drops `last_contact` and carries `deadman_us` null (ss3.3).
+naive UTC (ss3.2). The retired host and route slots stay empty to preserve golden digests
+(DL-351, DL-424).
 """
 
 from __future__ import annotations
@@ -19,8 +20,6 @@ from dsl41.oracle_state import (
     LIVE,
     Event,
     GlobalRuntime,
-    HostRuntime,
-    HostState,
     JobRuntime,
     may_outlive_run,
 )
@@ -43,80 +42,16 @@ def _naive_utc(value: datetime) -> datetime:
 NaiveUtc = Annotated[datetime, AfterValidator(_naive_utc)]
 
 
-class RouteRuntime(BaseModel):
-    """ss3.3's fourth row: which executor a logical role resolves to.
-
-    A route names an executor and nothing else. It carries no generation: effect birth takes
-    `generation` from the host row's current value, so a stale route cannot exist, and an evicted
-    host's work is the concurrency model's ss8 case (DL-189)."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    executor_id: str = Field(min_length=1)
-    state_rev: int = Field(default=0, ge=0)
-
-
-class SealedHost(BaseModel):
-    """A host row as a seal carries it: ss3.3's row minus `last_contact`, with `deadman_us` null.
-
-    Both exclusions are in the shape. A carried `last_contact` lets the new period conclude a
-    quarantined host's deadman expired, and a carried deadman lets C2 restart the supervisor at
-    120s while the row says 60s, permitting eviction before the real kill bound. A host with a
-    null deadman is not evictable except by force, the safe direction; the deadman stays null
-    until the host re-registers (PR-24a).
-
-    `deadman_us`, not `deadman_s`: ss3.2 has no floats at any depth. The field is always present
-    and null, since ss3.2 requires a typed field to be present."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    state: HostState = "active"
-    generation: int = Field(default=0, ge=0)
-    deadman_us: None = None
-    forced_by: str | None = None
-    state_before_quarantine: HostState | None = None
-    state_rev: int = Field(default=0, ge=0)
-
-    @classmethod
-    def of(cls, row: HostRuntime | SealedHost) -> SealedHost:
-        """Project a live host row. Every carried field is named, so a field added to
-        `HostRuntime` lands here or the ss3.3 exclusion test reds."""
-        if isinstance(row, SealedHost):
-            return row
-        return cls(
-            state=row.state,
-            generation=row.generation,
-            forced_by=row.forced_by,
-            state_before_quarantine=row.state_before_quarantine,
-            state_rev=row.state_rev,
-        )
-
-    def to_row(self) -> HostRuntime:
-        """The `HostRuntime` an opening engine seeds: the carried fields, with the two exclusions
-        null until the host re-registers."""
-        return HostRuntime(
-            state=self.state,
-            generation=self.generation,
-            deadman_s=None,
-            last_contact=None,
-            forced_by=self.forced_by,
-            state_before_quarantine=self.state_before_quarantine,
-            state_rev=self.state_rev,
-        )
-
-
 class SealedState(BaseModel):
-    """ss3.1's `state`: every authoritative row plus the three scalars no row holds.
-
-    The rows are the live models, since a second spelling of a carried row would be a second
-    authority. Only `hosts` is projected, because ss3.3 excludes two of its fields."""
+    """The golden harness state: live row models and the scalars no row holds (ss3.1)."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     jobs: dict[str, JobRuntime] = {}
     globals: dict[str, GlobalRuntime] = {}
-    hosts: dict[str, SealedHost] = {}
-    routes: dict[str, RouteRuntime] = {}
+    #: Empty compatibility slots in the golden payload, not runtime state (DL-351, DL-424).
+    hosts: dict[str, object] = Field(default={}, max_length=0)
+    routes: dict[str, object] = Field(default={}, max_length=0)
     #: ss3.2's order: `(due, token)`, never heap-array layout. The token carries the cross-job
     #: firing order of equal-time timers, which decides resource release, box cascades and who
     #: starts
@@ -128,19 +63,6 @@ class SealedState(BaseModel):
     enqueue_counter: int = Field(default=0, ge=0)
     now: NaiveUtc
 
-    @model_validator(mode="before")
-    @classmethod
-    def _project_hosts(cls, data: Any) -> Any:
-        """Accept live `HostRuntime` rows and project them (ss3.3), so no caller has to remember
-        the two exclusions."""
-        if isinstance(data, Mapping) and isinstance(data.get("hosts"), Mapping):
-            hosts = {
-                host_id: SealedHost.of(row) if isinstance(row, (HostRuntime, SealedHost)) else row
-                for host_id, row in data["hosts"].items()
-            }
-            data = {**data, "hosts": hosts}
-        return data
-
     @model_validator(mode="after")
     def _load_invariants(self) -> SealedState:
         _check_timers(self.timers, self.timer_seq)
@@ -151,12 +73,6 @@ class SealedState(BaseModel):
                 raise ValueError(
                     f"consumed[{bucket!r}] is {units}: a seal that opened with invented"
                     " capacity is worse than one that refuses (ss5)"
-                )
-        for role, route in sorted(self.routes.items()):
-            if route.executor_id not in self.hosts:
-                raise ValueError(
-                    f"route {role!r} names executor {route.executor_id!r}, which has no"
-                    " host row: an effect born for it could never dispatch (ss7)"
                 )
         return self
 
