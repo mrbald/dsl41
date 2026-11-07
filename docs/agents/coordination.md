@@ -216,8 +216,8 @@ budget for them, not for diff reads.
    the tip only. Before dispatch, create an empty file for each new document the
    brief names and mark it with `git add -N PATH`. Before a branch's final gates and after each rebase: stage
    new documents, render the decision index, stage it.
-3. CI runs the suite only for a change outside `README.md`, `CLAUDE.md`,
-   `docs/**/*.md`, `examples/**/*.md` and `.claude/skills/**/*.md` (DL-434); a docs-only PR merges on its docs job. Locally a
+3. CI runs the suite only for a change outside `README.md`, `CLAUDE.md`, `TODO.md`,
+   `docs/**/*.md`, `examples/**/*.md` and `.claude/skills/**/*.md` (DL-434, DL-471); a docs-only PR merges on its docs job. Locally a
    docs-only change runs `scripts/prepush_checks.py --docs` instead of the
    suite. Other gates and reviews stand.
 4. Hooks run ruff, ruff format and mypy on each edited Python file and the

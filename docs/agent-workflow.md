@@ -106,8 +106,8 @@ before building (rule 23). For a concurrency fix, construct the failing ordering
 and prove the fix handles it (rule 24). Use a deterministic check for the defect
 class; consecutive green runs are not an acceptance gate.
 
-A docs-only change touches only `README.md`, `CLAUDE.md`, `docs/**/*.md`,
-`examples/**/*.md` or `.claude/skills/**/*.md` (DL-434). For that change, run
+A docs-only change touches only `README.md`, `CLAUDE.md`, `TODO.md`, `docs/**/*.md`,
+`examples/**/*.md` or `.claude/skills/**/*.md` (DL-434, DL-471). For that change, run
 `uv run python scripts/prepush_checks.py --docs` instead of the suite.
 Also run the lint, format and type checks listed below. Review requirements still apply.
 

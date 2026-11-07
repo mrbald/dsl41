@@ -620,6 +620,7 @@ def test_check_refusals(train: Fixture, rows: list[dict], reason: str) -> None:
     [
         "README.md",
         "CLAUDE.md",
+        "TODO.md",
         "docs/guide.md",
         "examples/demo/README.md",
         ".claude/skills/example/SKILL.md",
@@ -677,6 +678,17 @@ def test_workflow_examples_skip_requires_docs_only(train: Fixture, docs: bool) -
         assert result.returncode == 0, result.stderr
     else:
         train.refused("check-not-green")
+
+
+def test_todo_mixed_with_code_cannot_explain_a_skip(train: Fixture) -> None:
+    write(train.slice, "TODO.md", "# Tasks\n")
+    write(train.slice, "src/code.py", "changed\n")
+    git(train.slice, "add", "--", "TODO.md", "src/code.py")
+    git(train.slice, "commit", "-qm", "todo and code")
+    accept(train)
+    train.configure(docs=False, checks=checks(conclusion="SKIPPED"))
+    train.refused("check-not-green")
+    assert any(c[:3] == ["uv", "run", "pytest"] and "-n" in c for c in train.calls())
 
 
 @pytest.mark.parametrize("name", ["classify", "docs"])
