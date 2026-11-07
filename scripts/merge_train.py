@@ -130,7 +130,7 @@ def atomic_json(path: Path, value: Any) -> None:
 def docs_only(paths: list[str]) -> bool:
     # DL-434: both sides of a rename count; an empty diff proves nothing.
     return bool(paths) and all(
-        p in {"README.md", "CLAUDE.md"}
+        p in {"README.md", "CLAUDE.md", "TODO.md"}
         or p.endswith(".md")
         and p.startswith(("docs/", "examples/", ".claude/skills/"))
         for p in paths

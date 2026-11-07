@@ -195,6 +195,11 @@ def test_instruction_files_are_docs_and_settings_are_code() -> None:
     assert prepush.is_docs_only(["AGENTS.md"]) is False
 
 
+def test_root_todo_is_docs_unless_mixed_with_code() -> None:
+    assert prepush.is_docs_only(["TODO.md"]) is True
+    assert prepush.is_docs_only(["TODO.md", "src/code.py"]) is False
+
+
 def test_an_empty_change_set_is_code(repo: Path) -> None:
     assert prepush.is_docs_only([]) is False
     assert _run(repo, "--classify").stdout.strip() == "code=true"

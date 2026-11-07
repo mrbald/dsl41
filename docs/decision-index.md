@@ -472,3 +472,4 @@ This file is generated from the decision log; regenerate it with `uv run python 
 | DL-468 | Restart keeps applied IR across compatible patch releases | [docs/control-protocol.md](control-protocol.md), [docs/deploy.md](deploy.md), [docs/protocol-evolution.md](protocol-evolution.md), [docs/runner-design.md](runner-design.md) |
 | DL-469 | Apply bounded attribute policy | [docs/authoring.md](authoring.md), [docs/autosys-semantics.md](autosys-semantics.md), [docs/control-protocol.md](control-protocol.md), [docs/deploy.md](deploy.md), [docs/runner-design.md](runner-design.md), [docs/simulation-coverage.md](simulation-coverage.md) |
 | DL-470 | Check the diagnosis when offering a defect remedy | [docs/agents/operating-model.md](agents/operating-model.md) |
+| DL-471 | Root `TODO.md` counts as docs; superseded PR CI runs are cancelled | [docs/agent-workflow.md](agent-workflow.md), [docs/agents/coordination.md](agents/coordination.md) |
