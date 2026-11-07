@@ -33,6 +33,12 @@ The `v2-jil-3` worktree is reference only; nothing merges from it wholesale.
 4. [ ] `update NAME...` partial apply (owner passive-reread ruling, 2026-11-04).
 5. [ ] The High backward-gap bug (DL-435 N2), "Nothing bounds a backward gap", under [Known bugs](#known-bugs).
 
+Unranked; not approved until its plan is accepted (owner 2026-11-07 "add linux investigation in todo, not approved until we have a plan"):
+
+- [ ] Linux investigation: when the engine or a wrapper dies on Linux, are job processes lost or left behind?
+  Main measured clean on macOS on 2026-11-07, in a normal suite and in suites killed at 3, 20 and 45 s.
+  Linux was not measured.
+
 # Known limits
 
 - A: The standby starts empty. This is acceptable for the first system, whose jobs are all idempotent; improve state continuity later.
