@@ -657,6 +657,28 @@ def test_code_cannot_explain_a_skip(train: Fixture, path: str) -> None:
     assert any(c[:3] == ["uv", "run", "pytest"] and "-n" in c for c in train.calls())
 
 
+@pytest.mark.parametrize("docs", [True, False])
+def test_workflow_examples_skip_requires_docs_only(train: Fixture, docs: bool) -> None:
+    path = "docs/guide.md" if docs else "src/code.py"
+    write(train.slice, path, "changed\n")
+    git(train.slice, "add", "--", path)
+    git(train.slice, "commit", "-qm", "candidate")
+    accept(train)
+    rows = checks() + [
+        dict(__typename="CheckRun", name=name, status="COMPLETED", conclusion=conclusion)
+        for name, conclusion in [
+            ("workflow-examples", "SKIPPED"),
+            ("workflow-examples-required", "SUCCESS"),
+        ]
+    ]
+    train.configure(docs=docs, checks=rows)
+    if docs:
+        result = train.run()
+        assert result.returncode == 0, result.stderr
+    else:
+        train.refused("check-not-green")
+
+
 @pytest.mark.parametrize("name", ["classify", "docs"])
 def test_docs_gate_itself_cannot_skip(train: Fixture, name: str) -> None:
     rows = checks()
