@@ -26026,3 +26026,26 @@ relitigate an entry; append a new one.
   on routine shutdowns, and capture belongs in a hook.
   A mandatory fresh-peer consult before a shape note: it adds a stage without
   checking the diagnosis.
+
+- DL-471 Root `TODO.md` counts as docs; superseded PR CI runs are cancelled
+  (2026-11-07; owner ruling; scripts/prepush_checks.py, scripts/merge_train.py,
+  .github/workflows/ci.yml, docs/agents/coordination.md, docs/agent-workflow.md)
+  Owner: "stop CI on a single text file, it is a waste of gihub resources, unless it is code too"
+  and 'Add TODO to the list of "documents"'.
+  THE RULE. DL-434's docs paths include the root `TODO.md`. A change to `TODO.md`
+  alone is docs-only: CI and the merge train skip the test suite for it, and every
+  other gate still runs, including the train's ruff and mypy. A tag push, a manual
+  run and a call from `release.yml` still count as code (DL-415). A change that mixes
+  `TODO.md` with code counts as code. DL-434 otherwise stands: `AGENTS.md`, `.agents/`
+  and `.claude/settings.json` count as code. CI and the merge train must agree.
+  THE REASON. No code reads `TODO.md`. `src/`, `tests/`, `scripts/` and `.github/`
+  had no references to it before this classification rule and its tests.
+  Owner: "CANCEl-OLD" approves cancelling a PR's older in-progress CI run when
+  a new commit arrives. The `tests` workflow shares a concurrency group only for
+  runs of the same pull request, with `cancel-in-progress` true only for PR events.
+  Every other event uses its run ID for a unique group: main pushes, manual runs
+  and calls from `release.yml` neither cancel nor queue behind one another.
+  A literal `ci.yml`-specific prefix separates its group from a caller's group.
+  GitHub's reusable-workflow rule gives the called workflow the caller's `github`
+  context, including `github.workflow`; matching caller/callee groups can cancel
+  the caller. The group therefore does not use `github.workflow` as its namespace.

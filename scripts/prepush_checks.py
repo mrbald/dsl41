@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Local pre-push checks, and the docs gate CI runs for every change.
 
-A change is docs-only when every changed path is `README.md`, `CLAUDE.md`, or
-a Markdown file under `docs/`, `examples/` or `.claude/skills/` (DL-434). The
+A change is docs-only when every changed path is `README.md`, `CLAUDE.md`, `TODO.md`, or
+a Markdown file under `docs/`, `examples/` or `.claude/skills/` (DL-434, DL-471). The
 changed paths are `git diff BASE...HEAD` plus the working tree: staged, unstaged and
 untracked files that `git status` lists.
 
@@ -110,7 +110,8 @@ def changed_paths(root: Path, base: str) -> list[str]:
 
 def is_docs_path(path: str) -> bool:
     # DL-434: no code reads CLAUDE.md or a skill body; the docs gate's tests do.
-    if path in ("README.md", "CLAUDE.md"):
+    # DL-471: root TODO.md is documentation.
+    if path in ("README.md", "CLAUDE.md", "TODO.md"):
         return True
     return path.endswith(".md") and path.startswith(("docs/", "examples/", ".claude/skills/"))
 

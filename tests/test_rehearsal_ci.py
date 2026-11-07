@@ -107,6 +107,19 @@ def test_classifier_failures(tmp_path, diff_exit, script_exit, output, changed, 
     }
 
 
+def test_ci_cancels_only_superseded_pr_runs():
+    ci = (REPO / ".github/workflows/ci.yml").read_text()
+    concurrency = ci.split("\nconcurrency:\n", 1)[1].split("\npermissions:", 1)[0]
+    group, cancel = concurrency.split("  cancel-in-progress: ", 1)
+    # DL-471: PR numbers share a group; all other events use a unique run ID.
+    assert " ".join(group.split()) == (
+        "group: >- dsl41-tests-ci-${{ github.event_name == 'pull_request' "
+        "&& format('pr-{0}', github.event.pull_request.number) "
+        "|| format('run-{0}', github.run_id) }}"
+    )
+    assert cancel.strip() == "${{ github.event_name == 'pull_request' }}"
+
+
 def test_rehearsal_ci_wiring():
     ci = (REPO / ".github/workflows/ci.yml").read_text()
     call = ci.split("  workflow-examples:\n", 1)[1].split("  workflow-examples-required:", 1)[0]
