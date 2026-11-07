@@ -81,7 +81,7 @@ from urllib.parse import quote
 
 MARKER = re.compile(rb"^(?:<{7}|>{7}|\|{7}|={7})(?:\s|$)", re.MULTILINE)
 REQUIRED = {"classify", "docs", "test (3.12)", "test (3.13)", "goldens", "coverage", "explore-page"}
-DOC_SKIPS = REQUIRED - {"classify", "docs"}
+DOC_SKIPS = (REQUIRED - {"classify", "docs"}) | {"workflow-examples"}
 GIT_ENV = (
     "GIT_DIR",
     "GIT_WORK_TREE",

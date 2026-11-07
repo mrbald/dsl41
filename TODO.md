@@ -150,15 +150,6 @@ Severity follows the accepted triage. In-flight targets remain open until accept
   includes about 4 ms before the process starts, and `timeout.txt` still labels it `actual_us`
   (`examples/nightbank/deploy/clock-drill.sh:236`; Opus, 2026-11-05, 392064a diff review O1).
 
-- [ ] **Medium**: Wrapper and process tests can leave stopped wrappers or children after teardown.
-  Prove and fix owned-process cleanup in `tests/test_wrapper_branches.py:546`,
-  `tests/test_engine_stops.py` (`child.py`) and `src/dsl41/runner_wrapper.py`
-  (operator, wrapper/process tests 2026-11-05; tests).
-- [ ] **Low**: Full-suite pytest runs left orphaned processes running after they ended.
-  On 2026-11-05, one worktree's run left 22 and another left 9, plus a few from older
-  worktrees: Python children under pytest temporary directories and one `runner_wrapper.py`.
-  The leaking test is not yet identified; it may share the cause of the Medium wrapper and
-  process cleanup bug above (operator, full-suite runs 2026-11-05; tests).
 - [ ] **Low**: DST drill failures on PR heads have unresolved causes:
   [41924127515](https://github.com/mrbald/dsl41/actions/runs/41924127515), clock lane,
   `newyork-spring` raises `KeyError: 'ended_at'`;
