@@ -176,7 +176,7 @@ removes exit receipts. Unexpected diagnostics, missing tools, tracing restrictio
 output or residue stop the run, even if `make` exits zero.
 
 Changes beneath this directory match the DST drill CI trigger. Its qualification and open
-[BUG-45](../../../TODO.md#low) remain separate; these instructions authorize no CI dispatch.
+[BUG-45](../../../TODO.md#medium) remain separate; these instructions authorize no CI dispatch.
 
 ## Provenance and licenses
 
