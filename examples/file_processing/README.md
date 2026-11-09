@@ -5,8 +5,7 @@ with a local POSIX filesystem. Follow the [job author track](../../README.md#doc
 and [authoring guide](../../docs/authoring.md). The named operator sections
 cover local inspection, storage repair and the runner exercise. Engine service
 installation is covered by [deploy](../../docs/deploy.md).
-The library contract is [CONTRACT.md](CONTRACT.md); [HANDOVER.md](HANDOVER.md)
-records the prototype scope. The authoring API is
+The library contract is [CONTRACT.md](CONTRACT.md). The authoring API is
 `add_file_processing_jobs` and the worker command
 `python -m dsl41.file_processing_worker`; the job author's guide shows both
 ([authoring §1.1](../../docs/authoring.md#11-add-file-processing-to-an-estate)).

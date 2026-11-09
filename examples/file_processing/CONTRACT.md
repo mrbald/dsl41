@@ -1,9 +1,10 @@
 # File processing: slice 1 contract
 
-Slice 1 of [HANDOVER.md](HANDOVER.md) confirms the contract that slices 2 to 6
-implement. The rulings below are the owner's where marked, otherwise Fable's,
-with Astra as co-advisor. Nothing here changes the prototype code. A ruling
-that later proves wrong is superseded here, not edited away.
+For the job author composing archival and recoverable processing.
+[README.md](README.md) covers usage, limits and the runner exercise.
+The rulings below are the owner's where marked, otherwise Fable's,
+with Astra as co-advisor.
+A ruling that later proves wrong is superseded here, not edited away.
 
 ## Rulings
 

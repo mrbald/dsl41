@@ -62,6 +62,7 @@ implementation. A site may adapt and repackage them for its Python runtime requi
 4. [docs/citation-index.md](docs/citation-index.md) - resolve reference tokens, including excluded namespaces, or register a namespace
 5. [Make a release](#make-a-release) - verify, build, rehearse and publish a package
 6. [Integration testing](docs/integration-testing.md) - select, run and extend v2 regression coverage and its assertion inventory; [DST drill](examples/dst-drill/README.md) - clock changes; [Nightbank drill](examples/nightbank/deploy/DRILL.md) - installed service checks and limits
+7. [Architecture follow-ups](TODO.md#maintenance) - proposed work under FEAT-12; acceptance remains open
 
 ### Architect references
 

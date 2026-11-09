@@ -26049,3 +26049,17 @@ relitigate an entry; append a new one.
   GitHub's reusable-workflow rule gives the called workflow the caller's `github`
   context, including `github.workflow`; matching caller/callee groups can cancel
   the caller. The group therefore does not use `github.workflow` as its namespace.
+
+- DL-472 Reuse document owners and keep transient reports outside checkouts
+  (2026-11-09; owner ruling; docs/writing.md, TODO.md)
+  THE RULE. Update the existing page that owns the reader's task. Put actions in
+  TODO.md and adopted rules and rationale in this log. Keep transient review,
+  assessment and handoff reports outside checkouts. Create a page only for a
+  distinct reader or task that no existing page serves; give the reason in the
+  task or PR record and add a navigation link. Existing review and authority apply.
+  This reuse and placement rule is binding; DL-448’s form discretion does not apply.
+  THE REASON. Useful rules and actions need one findable owner, not another report.
+  THE DISPOSITION. TODO.md retains actionable architecture candidates. The existing
+  file-processing README and CONTRACT retain the worker rules and runner exercise.
+  Standalone architecture reports and the historical file-processing handover stay
+  outside the checkout. Old decisions stand.

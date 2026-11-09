@@ -1,0 +1,13 @@
+--- a/src/libfaketime.c
++++ b/src/libfaketime.c
+@@ -1121,5 +1121,10 @@
+ /* Contributed by Philipp Hachtmann in version 0.6 */
+ int __fxstat64 (int ver, int fildes, struct stat64 *buf)
+ {
++  /* Suppressed internal stat calls bypass initialization (upstream issue #521). */
++  if (dont_fake && real_fxstat64 != NULL)
++  {
++    return real_fxstat64(ver, fildes, buf);
++  }
+   STAT64_HANDLER(fxstat64, buf, ver, fildes, buf);
+ }
