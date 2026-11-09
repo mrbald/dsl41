@@ -1,0 +1,34 @@
+insert_machine: fixture_node
+type: a
+
+insert_job: file_pipeline
+job_type: b
+
+insert_job: receive
+job_type: f
+box_name: file_pipeline
+machine: fixture_node
+watch_file: /synthetic/inbox/sample.ready
+watch_interval: 7
+watch_file_min_size: 1
+
+insert_job: process_left
+job_type: c
+box_name: file_pipeline
+machine: fixture_node
+command: ":"
+condition: s(receive)
+
+insert_job: process_right
+job_type: c
+box_name: file_pipeline
+machine: fixture_node
+command: ":"
+condition: s(receive)
+
+insert_job: db_load
+job_type: c
+box_name: file_pipeline
+machine: fixture_node
+command: ":"
+condition: s(process_left) & s(process_right)

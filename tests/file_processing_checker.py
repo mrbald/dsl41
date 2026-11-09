@@ -1,4 +1,4 @@
-"""Independent side-effect checker for the sample CountsHandler (HANDOVER.md plan row 3).
+"""Independent side-effect checker for the sample CountsHandler.
 
 It reads only the ledger, objects/ and the output directory. It recomputes each
 expected output from the archived object with its own counting code, so a defect

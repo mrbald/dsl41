@@ -9,7 +9,7 @@ and recovery are covered by the [operator guide](../docs/deploy.md).
 - [Fulfilment](fulfilment/README.md): stock reservation, cancellation, and carrier reconciliation.
 - [Media](media/README.md): FFmpeg processing and immutable publication.
 - [File processing](file_processing/README.md): experimental Python-authored archival,
-  TODO handover and recoverable processing. [Design handover](file_processing/HANDOVER.md).
+  TODO handover and recoverable processing. [Worker contract](file_processing/CONTRACT.md).
 - The soak example is not in this tree. DL-317 in the [decision log](../docs/decision-log.md)
   records its 200-job measurements; DL-424 sets the engine's ceiling, which these
   examples do not qualify.

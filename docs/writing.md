@@ -16,7 +16,8 @@ rules on section numbers, citation tokens and history govern, and this page
 adds to them. The block cards keep the shape `docs/blocks/README.md` fixes
 (its headings, their order, and the link to the chart's generated reference);
 §1 and §3 below do not bind a card, the other sections do. Replies and
-reports by agents follow the core style contract, not this page.
+reports by agents follow the core style contract, not this page's presentation rules.
+The reuse and storage rule in §1 covers repository documents and transient reports.
 
 The rules below follow four principles: readers get what they need, can
 find it, can understand it, and can use it.
@@ -54,6 +55,13 @@ named section per reader. The README's "Documents" section keeps one reading
 track per reader. Every page under `docs/` that is not a frozen contract, and
 every example's README, is in a track, itself or through an index page the track names; a page
 inside an example's directory is reached from that README.
+
+For repository documents, reuse the existing page that owns the reader's task (DL-472).
+Put action items in `TODO.md`. Put adopted rules and rationale in the decision log.
+Keep transient review, assessment and handoff reports outside checkouts.
+Create a page only for a distinct reader or task that no existing page serves.
+Give the reason in the task or PR record and add a navigation link.
+This reuse and placement rule is binding; DL-448’s form discretion does not apply.
 
 ## 2. The reader gets what they need
 
