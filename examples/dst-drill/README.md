@@ -7,6 +7,8 @@ It crosses the DST changes of Europe/London and America/New_York, and a local mi
 One scenario steps the wall clock backward on a clock that runs at the real rate (DL-435).
 `dsl41 run` starts its engine, wrappers and real commands, as in production.
 The clock comes from libfaketime in a Linux container.
+The optional [pinned-source dependency repair](libfaketime/README.md) covers a separate
+Rocky Linux 8/aarch64 target; the drill image keeps its Debian package recipe.
 The verdict compares each run with `dsl41 rehearse` over the same window.
 The rehearsal plays the same estate on a virtual clock and is the reference.
 
@@ -30,6 +32,7 @@ so the container needs no TZ. `dsl41 rehearse` alone cannot test these parts:
 | `drill.py` | The driver. It runs each scenario and prints a short table. |
 | `compare.py` | The verdict: pure functions over traces, journals and lint output. |
 | `Dockerfile` | dsl41, libfaketime and the drill on Python 3.12. |
+| `libfaketime/` | Optional pinned-target repair/reproduction package, included as unused source content; it does not select the default library. |
 
 The estate has start_times inside and around both zones' change hours, two
 start_mins jobs with a run_window each, one start_mins job without one, a must
