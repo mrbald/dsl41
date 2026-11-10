@@ -10,6 +10,10 @@ A Packager uses the install steps as the reference implementation (DL-439).
 ## Install the package and unit
 
 For the Packager: the supported production interpreter is Python 3.12.x.
+
+On Debian 13, Ubuntu 24.04 and later, install `tzdata-legacy` if the estate uses legacy zone
+names such as `US/Eastern` (DL-477). Older releases include these names in `tzdata` itself.
+
 On a VM or host, install its clock synchronization service and enable its waiter
 before starting the engine: `chrony-wait.service` with chrony (as on RHEL 8), or
 `systemd-time-wait-sync.service` with systemd-timesyncd.
