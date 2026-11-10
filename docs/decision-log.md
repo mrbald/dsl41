@@ -26211,3 +26211,22 @@ relitigate an entry; append a new one.
   name that is missing from it; falling back to the city would schedule a job the vendor
   refuses. The old text was one sentence for two situations and false for a broken entry.
   THE LIMIT. The refusal for the estate's own default timezone keeps its shorter text.
+
+- DL-480 The terminal UI prints a repeated scheduler refusal once and counts the rest
+  (2026-11-10; owner BLK-4 ruling, terminal-UI part; runner_tui.py, runner-design §11)
+  THE RULE. The console prints the first scheduler-origin `START_REFUSED` for a job and
+  cause. Identical ones that follow are counted, not printed. Before that job's next
+  different entry, or at a trace-cursor reset, the console prints one dim line,
+  `JOB START_REFUSED repeated N more times, last T`. A refusal of an operator's own start
+  and a refusal of unrecognised origin print every time (DL-64). The counts are state of
+  one UI session.
+  The origin is read from the cause text the oracle writes, `(STARTJOB event
+  (scheduler))`, in one function, until the oracle stamps a structured origin.
+  The engine's rule, the stored trace, `query trace` and rehearsal output do not change:
+  they still list every refusal.
+  THE REASON. A box whose schedule fires while its last run is still going wrote one
+  yellow line per tick, thousands a day, and hid the lines an operator needs.
+  THE LIMIT. This is the terminal-UI part of BLK-4, which stays open. A job with no later
+  entry never shows its count, and quitting the UI loses pending counts. Still owed: the
+  structured origin, the count in the job's details, and the rehearsal list of jobs whose
+  schedule fired while they were running.

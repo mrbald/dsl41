@@ -1131,6 +1131,326 @@ def _line_style(line: Any) -> str:
     return " ".join(str(segment.style) for segment in line if segment.style is not None)
 
 
+_SCHEDULER_REFUSAL = "already RUNNING -- concurrent or repeated start request, no effect (STARTJOB event (scheduler))"
+
+
+def _start_refusal(seq: int, job: str = "trace_job", cause: str = _SCHEDULER_REFUSAL) -> dict:
+    return {
+        "seq": seq,
+        "at": f"2026-07-01T23:30:{seq:02}",
+        "job": job,
+        "transition": "START_REFUSED",
+        "cause": cause,
+    }
+
+
+def _console_text(console: RichLog) -> str:
+    return re.sub(r"\s+", "", "".join(line.text for line in console.lines))
+
+
+@pytest.mark.parametrize("width", [80, 240])
+@pytest.mark.parametrize("last_seq, count_text", [(4, "1 more time"), (5, "2 more times")])
+def test_pilot_scheduler_refusals_summarise_before_the_next_job_entry(
+    short_root: Path, local_timezone, width: int, last_seq: int, count_text: str
+) -> None:
+    async def scenario() -> None:
+        async with _trace_poll_app(short_root, size=(width, 40)) as (app, pilot, replies):
+            console = app.query_one("#console", RichLog)
+            replies.trace.update(
+                last_seq=last_seq, entries=[_start_refusal(seq) for seq in range(3, last_seq + 1)]
+            )
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: app._trace_seq == last_seq)
+            await pilot.pause()
+            first = f"2026-07-02T01:30:03 trace_job START_REFUSED [{_SCHEDULER_REFUSAL}]"
+            assert re.sub(r"\s+", "", first) in _console_text(console)
+            assert _console_text(console).count("START_REFUSED") == 1
+            assert "yellow" in _line_style(
+                next(line for line in console.lines if "START_REFUSED" in line.text)
+            )
+            replies.trace.update(
+                last_seq=last_seq + 1,
+                entries=[
+                    *replies.trace["entries"],
+                    {
+                        "seq": last_seq + 1,
+                        "at": f"2026-07-01T23:30:{last_seq + 1:02}",
+                        "job": "trace_job",
+                        "transition": "RUNNING->SUCCESS",
+                        "cause": "exit 0",
+                    },
+                ],
+            )
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: app._trace_seq == last_seq + 1)
+            await pilot.pause()
+            summary = (
+                f"2026-07-02T01:30:{last_seq + 1:02} trace_job START_REFUSED repeated {count_text},"
+                f" last 2026-07-02T01:30:{last_seq:02}"
+            )
+            following = f"2026-07-02T01:30:{last_seq + 1:02} trace_job RUNNING->SUCCESS [exit 0]"
+            assert re.sub(r"\s+", "", summary + following) in _console_text(console)
+            assert "dim" in _line_style(
+                next(line for line in console.lines if "more time" in line.text)
+            )
+            assert app._refusal_runs == {}
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("stale_seq", [3, 4], ids=["lower", "duplicate"])
+def test_pilot_stale_trace_entries_do_not_change_a_refusal_count(
+    short_root: Path, local_timezone, stale_seq: int
+) -> None:
+    async def scenario() -> None:
+        async with _trace_poll_app(short_root) as (app, pilot, _):
+            console = app.query_one("#console", RichLog)
+            app._consume_trace(
+                [
+                    _start_refusal(3),
+                    _start_refusal(4),
+                    _start_refusal(stale_seq),
+                    _start_refusal(5),
+                    {
+                        "seq": 6,
+                        "at": "2026-07-01T23:30:06",
+                        "job": "trace_job",
+                        "transition": "RUNNING->SUCCESS",
+                        "cause": "exit 0",
+                    },
+                ]
+            )
+            await pilot.pause()
+            rendered = _console_text(console)
+            summary = (
+                "2026-07-02T01:30:06 trace_job START_REFUSED repeated 2 more times,"
+                " last 2026-07-02T01:30:05"
+            )
+            assert rendered.count(re.sub(r"\s+", "", summary)) == 1
+            assert rendered.count("START_REFUSED") == 2
+            assert app._trace_seq == 6 and app._refusal_runs == {}
+
+    asyncio.run(scenario())
+
+
+def test_pilot_identical_refusal_after_a_different_entry_prints_a_new_first_line(
+    short_root: Path, local_timezone
+) -> None:
+    async def scenario() -> None:
+        async with _trace_poll_app(short_root) as (app, pilot, _):
+            console = app.query_one("#console", RichLog)
+            app._consume_trace(
+                [
+                    _start_refusal(3),
+                    _start_refusal(4),
+                    {
+                        "seq": 5,
+                        "at": "2026-07-01T23:30:05",
+                        "job": "trace_job",
+                        "transition": "MUST_COMPLETE_ALARM",
+                        "cause": "deadline",
+                    },
+                    _start_refusal(6),
+                ]
+            )
+            await pilot.pause()
+            summary = (
+                "2026-07-02T01:30:05 trace_job START_REFUSED repeated 1 more time,"
+                " last 2026-07-02T01:30:04"
+            )
+            alarm = "2026-07-02T01:30:05 trace_job MUST_COMPLETE_ALARM [deadline]"
+            new_first = f"2026-07-02T01:30:06 trace_job START_REFUSED [{_SCHEDULER_REFUSAL}]"
+            rendered = _console_text(console)
+            assert re.sub(r"\s+", "", summary + alarm + new_first) in rendered
+            assert rendered.count(re.sub(r"\s+", "", f"[{_SCHEDULER_REFUSAL}]")) == 2
+            assert app._refusal_runs["trace_job"].repeats == 0
+
+    asyncio.run(scenario())
+
+
+def test_pilot_interleaved_jobs_keep_separate_refusal_runs(
+    short_root: Path, local_timezone
+) -> None:
+    async def scenario() -> None:
+        async with _trace_poll_app(short_root) as (app, pilot, replies):
+            console = app.query_one("#console", RichLog)
+            changed_cause = _SCHEDULER_REFUSAL.replace("RUNNING", "QUE_WAIT")
+            replies.trace.update(
+                last_seq=10,
+                entries=[
+                    _start_refusal(3, "job_a"),
+                    _start_refusal(4, "job_b"),
+                    _start_refusal(5, "job_a"),
+                    _start_refusal(6, "job_b"),
+                    _start_refusal(7, "job_b"),
+                    _start_refusal(8, "job_a", changed_cause),
+                    _start_refusal(9, "job_b", changed_cause),
+                    _start_refusal(10, "job_a", changed_cause),
+                ],
+            )
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: app._trace_seq == 10)
+            await pilot.pause()
+            rendered = _console_text(console)
+            for job, count_text, at, last in (
+                ("job_a", "1 more time", "08", "05"),
+                ("job_b", "2 more times", "09", "07"),
+            ):
+                summary = (
+                    f"2026-07-02T01:30:{at} {job} START_REFUSED repeated {count_text},"
+                    f" last 2026-07-02T01:30:{last}"
+                )
+                following = f"2026-07-02T01:30:{at} {job} START_REFUSED [{changed_cause}]"
+                assert re.sub(r"\s+", "", summary + following) in rendered
+            assert rendered.count("START_REFUSED") == 6
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "cause",
+    [
+        _SCHEDULER_REFUSAL.replace("scheduler", "control"),
+        "unknown refusal origin",
+        _SCHEDULER_REFUSAL + " extra text",
+    ],
+    ids=["operator", "unknown", "unrecognised-suffix"],
+)
+def test_pilot_operator_and_unknown_refusals_print_every_time(
+    short_root: Path, local_timezone, cause: str
+) -> None:
+    async def scenario() -> None:
+        async with _trace_poll_app(short_root) as (app, pilot, replies):
+            console = app.query_one("#console", RichLog)
+            replies.trace.update(
+                last_seq=6,
+                entries=[
+                    _start_refusal(3),
+                    _start_refusal(4),
+                    _start_refusal(5, cause=cause),
+                    _start_refusal(6, cause=cause),
+                ],
+            )
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: app._trace_seq == 6)
+            await pilot.pause()
+            rendered = _console_text(console)
+            summary = (
+                "2026-07-02T01:30:05 trace_job START_REFUSED repeated 1 more time,"
+                " last 2026-07-02T01:30:04"
+            )
+            first_operator = f"2026-07-02T01:30:05 trace_job START_REFUSED [{cause}]"
+            assert re.sub(r"\s+", "", summary + first_operator) in rendered
+            assert rendered.count(re.sub(r"\s+", "", f"[{cause}]")) == 2
+            assert rendered.count("repeated1moretime,") == 1
+            assert app._refusal_runs == {}
+
+    asyncio.run(scenario())
+
+
+def test_pilot_reconnect_preserves_refusal_summary_without_recounting(
+    short_root: Path, local_timezone
+) -> None:
+    async def scenario() -> None:
+        async with _trace_poll_app(short_root) as (app, pilot, replies):
+            console = app.query_one("#console", RichLog)
+            entries = [_start_refusal(seq) for seq in (3, 4, 5)]
+            replies.trace.update(last_seq=5, entries=entries)
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: app._trace_seq == 5)
+            replies.disconnected = True
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: app._connected is False)
+            replies.disconnected = False
+            # A new cause flushes the run; the already consumed prefix is still present.
+            replies.trace.update(
+                last_seq=6, entries=[*entries, _start_refusal(6, cause="operator")]
+            )
+            replies.requests.clear()
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: app._trace_seq == 6)
+            await pilot.press("r")
+            await pilot.pause()
+            assert [r["since"] for r in replies.requests if r["cmd"] == "trace"] == [5, 6]
+            rendered = _console_text(console)
+            assert rendered.count("repeated2moretimes") == 1
+            assert rendered.count("START_REFUSED") == 3
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("reset", ["restart", "baseline", "mixed-baselines"])
+def test_pilot_trace_reset_flushes_old_refusals_and_starts_fresh_counts(
+    short_root: Path, local_timezone, reset: str
+) -> None:
+    async def scenario() -> None:
+        async with _trace_poll_app(short_root) as (app, pilot, replies):
+            console = app.query_one("#console", RichLog)
+            replies.trace.update(last_seq=5, entries=[_start_refusal(seq) for seq in (3, 4, 5)])
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: app._trace_seq == 5)
+            replies.requests.clear()
+            new_entries = [
+                {
+                    "seq": 1,
+                    "at": "2026-07-01T23:31:01",
+                    "transition": "RESTART",
+                    "cause": "trace since the snapshot",
+                },
+                *[{**_start_refusal(seq), "at": f"2026-07-01T23:31:{seq:02}"} for seq in (2, 3)],
+            ]
+            if reset != "restart":
+                replies.status["baseline_id"] = "period-b"
+                if reset == "baseline":
+                    replies.trace["baseline_id"] = "period-b"
+            replies.trace.update(last_seq=3, entries=new_entries)
+            await pilot.press("r")
+            if reset != "restart":
+                await _wait_for_ui(pilot, lambda: app._trace_seq == 0)
+                assert app._refusal_runs == {} and app._alarms == {}
+                replies.trace["baseline_id"] = "period-b"
+                await pilot.press("r")
+                if reset == "mixed-baselines":
+                    await pilot.pause()
+                    await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: app._trace_seq == 3)
+            replies.trace.update(
+                last_seq=4,
+                entries=[
+                    *new_entries,
+                    {
+                        "seq": 4,
+                        "at": "2026-07-01T23:31:04",
+                        "job": "trace_job",
+                        "transition": "RUNNING->SUCCESS",
+                        "cause": "exit 0",
+                    },
+                ],
+            )
+            await pilot.press("r")
+            await _wait_for_ui(pilot, lambda: app._trace_seq == 4)
+            await pilot.pause()
+            assert [r["since"] for r in replies.requests if r["cmd"] == "trace"] == (
+                [5, 0, 0, 3] if reset == "mixed-baselines" else [5, 0, 3]
+            )
+            rendered = _console_text(console)
+            old_summary = (
+                "2026-07-02T01:30:05 trace_job START_REFUSED repeated 2 more times,"
+                " last 2026-07-02T01:30:05"
+            )
+            new_summary = (
+                "2026-07-02T01:31:04 trace_job START_REFUSED repeated 1 more time,"
+                " last 2026-07-02T01:31:03"
+            )
+            assert rendered.count(re.sub(r"\s+", "", old_summary)) == 1
+            assert rendered.count(re.sub(r"\s+", "", new_summary)) == 1
+            assert rendered.index("repeated2moretimes") < rendered.index("RESTART")
+            assert "repeated3moretimes" not in rendered
+            assert app._refusal_runs == {} and app._alarms == {}
+
+    asyncio.run(scenario())
+
+
 def test_a_transition_violation_line_is_an_alert_and_a_host_subject_is_no_job(
     short_root: Path,
 ) -> None:
